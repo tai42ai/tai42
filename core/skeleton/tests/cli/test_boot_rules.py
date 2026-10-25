@@ -485,7 +485,7 @@ class _Lifecycle(TaiMCPLifecycleMixin):
         self.started_with: object | None = None
         self._building = ServingCore(cast("object", self), args=(), auth=None, kwargs={"name": "boot-rules"})  # type: ignore[arg-type]
 
-    def _mcp_tools(self, config, tools):  # abstract in the mixin
+    def _mcp_tools(self, config, tools, preset_names):  # abstract in the mixin
         pass
 
     def start(self, manifest):

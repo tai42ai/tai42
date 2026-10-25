@@ -43,6 +43,7 @@ class _NullExtensions:
         requires_body_locality: bool = False,
         pauses: bool = False,
         declares_output_schema: bool = False,
+        config_schema: dict[str, Any] | None = None,
     ) -> Any:
         if callable(f):
             return f

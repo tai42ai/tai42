@@ -43,6 +43,9 @@ class _StubPresetManager:
     async def reconcile_bases(self, affected_bases: set[str]) -> None:
         self.reconciled.append(set(affected_bases))
 
+    async def stored_preset_names(self) -> frozenset[str]:
+        return frozenset()
+
 
 class _Mixin(TaiMCPLifecycleMixin):
     """A concrete-enough mixin: ``_mcp_tools`` records bound tool names without a
@@ -60,7 +63,7 @@ class _Mixin(TaiMCPLifecycleMixin):
     def _build_serving_core(self) -> ServingCore:
         return ServingCore(cast("Any", self), args=(), auth=None, kwargs={"name": "mixin-under-test"})
 
-    def _mcp_tools(self, config, tools):
+    def _mcp_tools(self, config, tools, preset_names):
         self._mcp_bound_tools[config.title] = {f"{config.title}_t"}
 
 

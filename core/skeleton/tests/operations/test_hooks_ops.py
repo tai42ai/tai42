@@ -18,6 +18,7 @@ from tai42_contract.states import StateAttach, StateBinding
 from tai42_contract.states.errors import StateNotFoundError, StatesError, StatesNotConfiguredError
 from tai42_contract.template import TemplatedText
 
+from tai42_skeleton.access_control import management
 from tai42_skeleton.access_control.policy import policy_is_empty
 from tai42_skeleton.access_control.settings import AccessControlSettings
 from tai42_skeleton.authz import execution
@@ -47,6 +48,12 @@ def bind_gate_off(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(execution, "access_control_settings", lambda: AccessControlSettings(enable=False))
 
 
+@pytest.fixture(autouse=True)
+def _hook_tools_served(serve_tools) -> None:
+    """The tools these hooks fire are served, so a register passes the reference check."""
+    serve_tools("forward", "noop")
+
+
 # A condition-free ``"*"`` policy that is not an owned key: the admin discriminator.
 _ADMIN_POLICY = AccessPolicy(scopes=["*"])
 
@@ -56,9 +63,12 @@ def _gate_on(
     *,
     caller_id: str | None,
     policies: dict[str, AccessPolicy],
+    accounts: frozenset[str] = frozenset(),
 ) -> None:
     """Turn the gate ON over a canned policy store; an absent id resolves to the empty
-    policy an unknown key has. Every half of the gate reads that one store."""
+    policy an unknown key has. Every half of the gate reads that one store. The ids in
+    ``accounts`` are accounts: their policy rows stay unstamped and the principal store
+    answers a row for each."""
     monkeypatch.setattr(authority, "access_control_settings", lambda: AccessControlSettings(enable=True))
     monkeypatch.setattr(execution, "access_control_settings", lambda: AccessControlSettings(enable=True))
     monkeypatch.setattr(authority, "get_current_user_id", lambda: caller_id)
@@ -68,7 +78,7 @@ def _gate_on(
     stamped = {
         uid: (
             pol
-            if policy_is_empty(pol) or KEY_FINGERPRINT_CLAIM in (pol.policy_data or {})
+            if uid in accounts or policy_is_empty(pol) or KEY_FINGERPRINT_CLAIM in (pol.policy_data or {})
             else pol.model_copy(update={"policy_data": {**(pol.policy_data or {}), KEY_FINGERPRINT_CLAIM: "fp"}})
         )
         for uid, pol in policies.items()
@@ -89,6 +99,11 @@ def _gate_on(
 
     monkeypatch.setattr(authority, "policy_enforcer", _Enforcer)
     monkeypatch.setattr(execution, "policy_enforcer", _Enforcer)
+
+    async def _get_principal(user_id: str) -> dict | None:
+        return {"user_id": user_id, "kind": "human"} if user_id in accounts else None
+
+    monkeypatch.setattr(management, "get_principal", _get_principal)
 
 
 def _owned_by(owner: str, *, condition: str | None = None) -> AccessPolicy:
@@ -548,6 +563,44 @@ async def test_register_hook_non_admin_binding_an_unknown_key_is_the_same_refusa
     with pytest.raises(ForbiddenError, match="only bind your own identity or an execution key you own"):
         await hooks_ops.register_hook(name="h", topic="t", tool="noop", execution_key="ghost")
     assert (await hooks_ops.list_hooks())["items"] == []
+
+
+_ACCOUNT_LINE = (
+    "execution key 'alice' is an account, not an api key; a route, hook, trigger link or schedule runs as an "
+    "api key, so bind an api key instead"
+)
+
+
+async def test_register_hook_binding_an_account_is_a_400_and_stores_nothing(
+    monkeypatch: pytest.MonkeyPatch, manager: InMemoryHooksManager
+) -> None:
+    _gate_on(
+        monkeypatch,
+        caller_id="alice",
+        policies={"alice": AccessPolicy(scopes=["hooks"])},
+        accounts=frozenset({"alice"}),
+    )
+    with pytest.raises(BadRequestError) as refused:
+        await hooks_ops.register_hook(name="h", topic="t", tool="noop", execution_key="alice")
+    assert str(refused.value) == _ACCOUNT_LINE
+    assert (await hooks_ops.list_hooks())["items"] == []
+
+
+async def test_create_trigger_link_binding_an_account_is_a_400_and_stores_nothing(
+    monkeypatch: pytest.MonkeyPatch, capture_create
+) -> None:
+    _gate_on(
+        monkeypatch,
+        caller_id="alice",
+        policies={"alice": AccessPolicy(scopes=["hooks"])},
+        accounts=frozenset({"alice"}),
+    )
+    with pytest.raises(BadRequestError) as refused:
+        await hooks_ops.create_trigger_link(
+            topic="t", execution_key="alice", name="n", ttl_seconds=None, tool_kwargs=None
+        )
+    assert str(refused.value) == _ACCOUNT_LINE
+    assert capture_create == {}
 
 
 async def test_register_hook_admin_binds_a_key_it_does_not_own(

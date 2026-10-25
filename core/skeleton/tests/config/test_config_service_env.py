@@ -12,6 +12,7 @@ lock serializing a concurrent secret-marks append; the stickiness tests assert a
 from __future__ import annotations
 
 import asyncio
+import copy
 import logging
 from typing import TYPE_CHECKING, Any
 
@@ -20,14 +21,18 @@ import pytest
 # Imported for its registration side effect: the env doors classify a change by the live
 # registry, and the backend group's ``BACKEND_MANIFEST_KEY`` is recycle-class.
 import tai42_skeleton.backend.settings  # noqa: F401
+from tai42_skeleton.app import instance
 from tai42_skeleton.app.bus import WorkerIdentity, WorkerKind
 from tai42_skeleton.app.bus.ops import FleetOp
 from tai42_skeleton.app.recycle import RECYCLED, TIMED_OUT, RecycleError, RecycleReport, RecycleRow, RecycleStop
 from tai42_skeleton.config.service import OrphanEnvWriteError
 
 from .._fakes.bus import FakeBus
+from .._fakes.combo_check_app import booted_check_app, clean_server
 from .fake_pipeline import (
+    ComboChecks,
     FakeConfigStore,
+    FakeReloadAdmin,
     RetryingConfigStore,
     _no_bus,
     _none_descriptor,
@@ -60,6 +65,47 @@ async def test_apply_env_change_writes_reloads_broadcasts(monkeypatch: pytest.Mo
     # An env change touches no manifest document.
     assert result.document is None
     assert result.local == {"status": "ok", "env_keys": 0}
+
+
+async def test_a_derived_env_change_derives_from_a_write_that_landed_while_it_waited(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The combined op holds the write exclusion across its yielding prepare; the derived
+    # change queued behind it derives its marks from the env that op wrote, so both stand.
+    _no_bus(monkeypatch)
+    store = FakeConfigStore(manifest={"mcp": []}, env={})
+    service_a, _admin_a, _bus_a = _service(store)
+    service_b, admin_b, _bus_b = _service(store)
+
+    def _append_key_b(stored: dict[str, str]) -> dict[str, str]:
+        marks = [mark for mark in stored.get("TAI_ENV_SECRET_KEYS", "").split(",") if mark]
+        return {"TAI_ENV_SECRET_KEYS": ",".join([*marks, "KEY_B"])}
+
+    await asyncio.wait_for(
+        asyncio.gather(
+            service_a.apply_env_and_change(_marks_appending_prepare("KEY_A")),
+            service_b.apply_derived_env_change(_append_key_b),
+        ),
+        10,
+    )
+
+    assert store.env["TAI_ENV_SECRET_KEYS"] == "KEY_A,KEY_B"
+    assert admin_b.calls == 1
+
+
+async def test_a_derived_env_change_whose_derive_raises_writes_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    _no_bus(monkeypatch)
+    store = FakeConfigStore(manifest={"mcp": []}, env={"EXISTING": "1"})
+    service, admin, _bus = _service(store)
+
+    def _refuse(_stored: dict[str, str]) -> dict[str, str]:
+        raise RuntimeError("cannot derive")
+
+    with pytest.raises(RuntimeError, match="cannot derive"):
+        await service.apply_derived_env_change(_refuse)
+
+    assert store.env_writes == []
+    assert admin.calls == 0
 
 
 async def test_apply_env_change_refuses_a_recycle_class_key_on_a_bare_deployment(
@@ -133,12 +179,12 @@ async def test_apply_env_change_carries_an_unchanged_recycle_class_key_on_a_bare
     assert admin.calls == 1
 
 
-class _OrderedAdmin:
+class _OrderedAdmin(FakeReloadAdmin):
     """A reload admin that records when the local reload ran, beside the bus's census reads."""
 
     def __init__(self, events: list[str]) -> None:
+        super().__init__()
         self._events = events
-        self.calls = 0
 
     def reload_config(self) -> dict[str, Any]:
         self.calls += 1
@@ -410,7 +456,7 @@ def _counting(
     return counted, calls
 
 
-async def test_a_replace_that_continues_a_converged_change_carries_its_roll_and_rolls_nothing(
+async def test_a_reapply_that_continues_a_converged_change_carries_its_roll_and_rolls_nothing(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     _supervised(monkeypatch)
@@ -423,7 +469,7 @@ async def test_a_replace_that_continues_a_converged_change_carries_its_roll_and_
     census_after_change = bus.census_reads
 
     with caplog.at_level(logging.ERROR):
-        result = await service.apply_replace({"mcp": []}, continues=prior)
+        result = await service.reapply_manifest(continues=prior)
 
     assert rolls == [1]
     assert bus.census_reads == census_after_change
@@ -434,7 +480,7 @@ async def test_a_replace_that_continues_a_converged_change_carries_its_roll_and_
     assert [r for r in caplog.records if r.levelno == logging.ERROR] == []
 
 
-async def test_a_replace_that_continues_a_stopped_change_names_the_unreached_and_the_writer(
+async def test_a_reapply_that_continues_a_stopped_change_names_the_unreached_and_the_writer(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     _supervised(monkeypatch)
@@ -450,7 +496,7 @@ async def test_a_replace_that_continues_a_stopped_change_names_the_unreached_and
     caplog.clear()
 
     with caplog.at_level(logging.ERROR):
-        result = await service.apply_replace({"mcp": []}, continues=prior)
+        result = await service.reapply_manifest(continues=prior)
 
     assert result.recycle is partial
     assert result.self_exit_armed is False
@@ -458,7 +504,7 @@ async def test_a_replace_that_continues_a_stopped_change_names_the_unreached_and
     assert len([r for r in caplog.records if "awaiting a respawn" in r.getMessage()]) == 1
 
 
-async def test_a_replace_given_both_a_continued_change_and_keys_of_its_own_is_refused(
+async def test_a_reapply_given_both_a_continued_change_and_keys_of_its_own_is_refused(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _supervised(monkeypatch)
@@ -468,7 +514,7 @@ async def test_a_replace_given_both_a_continued_change_and_keys_of_its_own_is_re
     prior = await service.apply_env_change({"BACKEND_MANIFEST_KEY": "NEW"})
 
     with pytest.raises(ValueError, match="rolls no recycle keys of its own"):
-        await service.apply_replace({"mcp": []}, continues=prior, recycle_keys=["BACKEND_MANIFEST_KEY"])
+        await service.reapply_manifest(continues=prior, recycle_keys=["BACKEND_MANIFEST_KEY"])
 
 
 async def test_a_local_reload_failure_carries_the_change_s_unrolled_recycle_keys(
@@ -493,13 +539,13 @@ async def test_a_local_reload_failure_carries_the_change_s_unrolled_recycle_keys
     assert seen == {}
 
 
-async def test_a_replace_handed_a_change_s_unrolled_keys_rolls_their_recycle(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_a_reapply_handed_a_change_s_unrolled_keys_rolls_their_recycle(monkeypatch: pytest.MonkeyPatch) -> None:
     _supervised(monkeypatch)
     store = FakeConfigStore(manifest={"mcp": []}, env={"BACKEND_MANIFEST_KEY": "NEW"})
     orch, seen = _orchestrate_spy()
     service, _admin, _bus = _service(store, bus=FakeBus(origin="serve-writer", remotes=["serve-b"]), orchestrate=orch)
 
-    result = await service.apply_replace({"mcp": []}, recycle_keys=["BACKEND_MANIFEST_KEY"])
+    result = await service.reapply_manifest(recycle_keys=["BACKEND_MANIFEST_KEY"])
 
     assert seen["excluded_name"] == "serve-writer"
     assert result.recycle is not None
@@ -664,7 +710,7 @@ def _marks_appending_prepare(
 ) -> Callable[[dict[str, str]], Awaitable[tuple[dict[str, str], Callable[[dict[str, Any]], None]]]]:
     """A ``prepare`` that mirrors the read→append→write hazard: it reads the stored marks,
     YIELDS (``await asyncio.sleep(0)``) to force a concurrent op to try to interleave, THEN
-    appends its own key. Under the env-write lock the yield cannot let the other op read stale
+    appends its own key. Under the config-write lock the yield cannot let the other op read stale
     marks; without it, both would read the same marks and the second write would lose the first."""
 
     async def _p(stored: dict[str, str]) -> tuple[dict[str, str], Callable[[dict[str, Any]], None]]:
@@ -683,7 +729,7 @@ async def test_apply_env_and_change_lock_serializes_concurrent_marks_append(
     # Two concurrent combined ops each APPEND their secret mark. Each prepare reads the
     # stored marks, YIELDS to force interleave, then appends — so without serialization both
     # read the same marks and the second write clobbers the first (a lost append). The
-    # process-wide (CLASS-level) env-write lock must serialize the read→write span so BOTH
+    # process-wide (CLASS-level) config-write lock must serialize the read→write span so BOTH
     # marks survive. Two separate ConfigService instances (as ``from_app`` builds per call)
     # over ONE shared store prove the lock is shared across instances, not per-instance.
     _no_bus(monkeypatch)
@@ -865,3 +911,90 @@ def test_profile_replace_omitting_a_stored_unknown_owned_name_passes() -> None:
     service, _admin, _bus = _service(store)
 
     service._validate_replace({"INTERACTIONS_KEY_PREFIX": "k:"})
+
+
+# ---------------------------------------------------------------------------
+# Extension combos — an env change re-checks every combo with its settings resolved anew
+# ---------------------------------------------------------------------------
+
+_MARKED_COMBO: dict[str, Any] = {
+    "tools": [
+        {
+            "title": "a",
+            "module": "tests.app._fixtures.tools_check",
+            "include": ["echo"],
+            "extensions": {"echo": [[{"name": "refusing", "config": {"label": "!ENV ${EXT_L}"}}]]},
+        }
+    ]
+}
+
+_REFUSED_PATH = "tools[a].extensions[echo][0]: extension 'refusing' on tool 'echo' cannot bind"
+
+
+def _attach_marked(document: dict[str, Any]) -> None:
+    document["tools"] = copy.deepcopy(_MARKED_COMBO["tools"])
+
+
+async def test_apply_env_change_refuses_a_marker_turning_a_setting_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    _with_bus(monkeypatch)
+    store = FakeConfigStore(manifest=copy.deepcopy(_MARKED_COMBO), env={"EXT_L": "ok"})
+    service, admin, bus = _service(store, combo_check=ComboChecks(refuse="x"))
+
+    with pytest.raises(ValueError, match=r"^tools\[a\]\.extensions\[echo\]\[0\]: extension 'refusing'"):
+        await service.apply_env_change({"EXT_L": "x"})
+
+    assert store.env == {"EXT_L": "ok"}
+    assert store.env_writes == []
+    assert admin.calls == 0
+    assert bus.publish_calls == []
+
+
+async def test_apply_env_and_change_refuses_a_combo_the_check_refuses(monkeypatch: pytest.MonkeyPatch) -> None:
+    _with_bus(monkeypatch)
+    store = FakeConfigStore(manifest={}, env={})
+    service, admin, bus = _service(store, combo_check=ComboChecks(refuse="x"))
+
+    with pytest.raises(ValueError, match=r"^tools\[a\]\.extensions\[echo\]\[0\]: extension 'refusing'"):
+        await service.apply_env_and_change(_prepare({"EXT_L": "x"}, _attach_marked))
+
+    assert store.env_writes == []
+    assert store.persisted == []
+    assert admin.calls == 0
+    assert bus.publish_calls == []
+
+
+async def test_apply_replace_env_refuses_a_combo_the_check_refuses(monkeypatch: pytest.MonkeyPatch) -> None:
+    _with_bus(monkeypatch)
+    store = FakeConfigStore(manifest=copy.deepcopy(_MARKED_COMBO), env={"EXT_L": "ok"})
+    service, admin, bus = _service(store, combo_check=ComboChecks(refuse="x"))
+    snapshots: list[dict[str, str]] = []
+
+    async def save_previous(stored: dict[str, str]) -> None:
+        snapshots.append(stored)
+
+    async def build_and_swap(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("a refused profile builds nothing")
+
+    with pytest.raises(ValueError, match=r"^tools\[a\]\.extensions\[echo\]\[0\]: extension 'refusing'"):
+        await service.apply_replace_env({"EXT_L": "x"}, save_previous=save_previous, build_and_swap=build_and_swap)
+
+    assert snapshots == []
+    assert store.env == {"EXT_L": "ok"}
+    assert store.env_writes == []
+    assert admin.calls == 0
+    assert bus.publish_calls == []
+
+
+@pytest.mark.usefixtures(clean_server.__name__)
+async def test_the_live_check_refuses_an_env_change_its_factory_refuses(monkeypatch: pytest.MonkeyPatch) -> None:
+    _with_bus(monkeypatch)
+    async with booted_check_app():
+        store = FakeConfigStore(manifest=copy.deepcopy(_MARKED_COMBO), env={"EXT_L": "ok"})
+        service, admin, _bus = _service(store, combo_check=instance.app.extensions.check_combo)
+
+        with pytest.raises(ValueError, match="bad label") as caught:
+            await service.apply_env_change({"EXT_L": "x"})
+
+        assert str(caught.value) == f"{_REFUSED_PATH}: bad label"
+        assert store.env == {"EXT_L": "ok"}
+        assert admin.calls == 0

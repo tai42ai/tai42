@@ -173,3 +173,15 @@ class InMemoryOtelReader:
     ) -> list[MonitoringTraceSummary]:
         """Not supported."""
         raise MonitoringReadNotSupportedError(_NOT_SUPPORTED)
+
+    async def export_traces(
+        self,
+        *,
+        from_timestamp: datetime | None = None,
+        to_timestamp: datetime | None = None,
+        max_rows: int,
+        filter_: MonitoringFilter | None = None,
+        order_by: OrderBy | None = None,
+    ) -> list[MonitoringTraceSummary]:
+        """Not supported."""
+        raise MonitoringReadNotSupportedError(_NOT_SUPPORTED)

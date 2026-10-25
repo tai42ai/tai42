@@ -61,9 +61,9 @@ def test_available_extensions_exposes_kind():
     # would not.
     available = reg.available_extensions()
     assert available == [
-        {"name": "async_task", "kind": "backend", "multiple": False},
-        {"name": "chain", "kind": "transformer", "multiple": True},
-        {"name": "monitor", "kind": "wrapper", "multiple": True},
+        {"name": "async_task", "kind": "backend", "multiple": False, "config_schema": None},
+        {"name": "chain", "kind": "transformer", "multiple": True, "config_schema": None},
+        {"name": "monitor", "kind": "wrapper", "multiple": True, "config_schema": None},
     ]
     # Every serialized kind reconstructs the original ExtensionKind.
     assert [ExtensionKind(entry["kind"]) for entry in available] == [

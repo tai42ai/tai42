@@ -255,8 +255,8 @@ def test_github_real_variant_sets_only_coordinates(monkeypatch: pytest.MonkeyPat
     assert env["STORAGE_GITHUB_USERNAME"] == "tai42-machine"
     assert env["STORAGE_GITHUB_REPO"] == "e2e-store"
     assert env["STORAGE_GITHUB_TOKEN"] == "github_pat_xxx"
-    # no RAW/CONTENTS/TREES overrides — the plugin defaults address real GitHub
-    assert not any(key.endswith(("RAW_BASE_URL", "CONTENTS_API_URL", "TREES_API_URL")) for key in env)
+    # no RAW/REF/CONTENTS/TREES overrides — the plugin defaults address real GitHub
+    assert not any(key.endswith(("RAW_BASE_URL", "REF_API_URL", "CONTENTS_API_URL", "TREES_API_URL")) for key in env)
 
 
 # ---- marketplace runner ingest sources (independent toggles) ------------

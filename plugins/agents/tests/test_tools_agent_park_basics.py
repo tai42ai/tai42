@@ -7,14 +7,17 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, cast
 
+import orjson
 import pytest
 from fakeredis import aioredis
 from langchain_core.messages import AIMessage
 from langgraph.checkpoint.memory import InMemorySaver
+from tai42_contract.app import tai42_app
 from tai42_contract.interactions import (
     EXPIRY_ANSWER,
+    AskAnswer,
     ChainedResume,
     RunTerminalFailed,
     SuspendedInteraction,
@@ -23,8 +26,11 @@ from tai42_contract.interactions import (
     set_chained_resume,
     set_park_completion,
 )
+from tai42_contract.monitoring import RUN_ATTRIBUTION_TRACE_NAME
 from tai42_contract.template import TemplatedText
 from tai42_kit.llm.settings import llm_provider_settings
+from tai42_kit.monitoring import encode_payload
+from tai42_kit.monitoring.testing import span_to_observation
 
 from tai42_agents._internal import base_tool_agent as base_mod
 from tai42_agents._internal.park import agent_resume
@@ -38,7 +44,7 @@ from ._tools_agent_park_support import (
     _AskStandIn,
     _wire_tools_build,
 )
-from .conftest import APP, bind_park_index
+from .conftest import APP, RecordingMonitoringWriter, bind_park_index
 
 
 @pytest.fixture
@@ -181,6 +187,45 @@ def test_tools_agent_park_bound_keeps_the_redelivery_horizon_inside_the_checkpoi
         assert late <= expires
 
     asyncio.run(go())
+
+
+def test_a_parked_run_and_its_resume_each_record_their_input_and_output_on_their_run_root(
+    fake_park_redis: Any, monkeypatch: pytest.MonkeyPatch, app_tools: Any
+) -> None:
+    # The parked run's root records the turn and the suspended receipt; the resume opens its own root
+    # recording the answers it resumed with and the run's answer.
+    saver = InMemorySaver()
+    ask = _AskStandIn("i1")
+    model = ScriptedChatModel([_ask_call(), AIMessage(content="all done")])
+    _wire_tools_build(monkeypatch, model, saver)
+    app_tools.client_tools["ask"] = ask.tool()
+    writer = cast(RecordingMonitoringWriter, tai42_app.monitoring.active.writer)
+    writer.clear()
+
+    agent = _agent()
+
+    async def go() -> tuple[SuspendedInteraction, dict[str, Any]]:
+        receipt = await agent.run(
+            tool_names=["ask"],
+            checkpoint_provider="redis",
+            user_message=TemplatedText(content="go"),
+            thread_id="t-roots",
+        )
+        entry = await agents_park_index().read_entry("i1")
+        assert entry is not None
+        assert await agent_resume("i1", "the answer") == "all done"
+        return receipt, {entry["interrupt_id"]: {"i1": "the answer"}}
+
+    receipt, resume_map = asyncio.run(go())
+
+    roots = [span_to_observation(s) for s in writer.spans() if s.parent is None]
+    assert [r.name for r in roots] == [RUN_ATTRIBUTION_TRACE_NAME, RUN_ATTRIBUTION_TRACE_NAME]
+    parked, resumed = sorted(roots, key=lambda r: r.start or datetime.min.replace(tzinfo=UTC))
+    assert parked.input == {"user_message": ["go"]}
+    assert parked.output is not None
+    assert parked.output["suspended"] == orjson.loads(encode_payload(receipt))
+    assert resumed.input == {"resume": resume_map}
+    assert resumed.output == "all done"
 
 
 def test_tools_agent_redrive_after_a_clean_terminal_reproduces_the_answer(
@@ -392,7 +437,8 @@ def test_tools_agent_park_then_expiry_feeds_the_expiry_marker(
             thread_id="t-expiry",
         )
         assert receipt.expiry_at == deadline
-        result = await agent_resume("i1", EXPIRY_ANSWER)
+        expired = AskAnswer(answer=EXPIRY_ANSWER, reply_to=None, params=None).model_dump(mode="json")
+        result = await agent_resume("i1", expired)
         assert result == "expired path"
         # A clean drive finalizes the park entry to a resolved tombstone (not an absent key).
         entry = await agents_park_index().read_entry("i1")

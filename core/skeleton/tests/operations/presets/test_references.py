@@ -1,5 +1,5 @@
-"""Oracles for the preset reference graph — the builtin ``tool_names`` walk, the
-uses / used_by cross-reference maps, and the declared ``tool_refs`` extractor union."""
+"""Oracles for the preset reference graph — the uses / used_by cross-reference maps over
+an agent's ``tool_names`` and a base tool's declared ``tool_refs`` extractor."""
 
 from __future__ import annotations
 
@@ -10,17 +10,11 @@ import pytest
 from tai42_contract.presets import PresetBody
 
 from tai42_skeleton.app import instance
-from tai42_skeleton.operations import ConflictError
+from tai42_skeleton.operations import ConflictError, OperationFailedError
 from tai42_skeleton.operations import presets as preset_ops
+from tai42_skeleton.operations.reference_graph import STORED_PRESET_UNREADABLE
 
 from .conftest import _create, _manifest
-
-
-def test_referenced_tool_names_builtin_walk() -> None:
-    assert preset_ops._referenced_tool_names({"tool_names": ["other"]}) == {"other"}
-    assert preset_ops._referenced_tool_names({"subagents": [{"tool_names": ["x"]}]}) == {"x"}
-    assert preset_ops._referenced_tool_names({"tool_names": ["other"]}) & {"target"} == set()
-
 
 # -- uses / used_by cross-references -----------------------------------------
 
@@ -37,7 +31,7 @@ def test_uses_used_by_reference_chain(pg) -> None:
     async def run() -> None:
         async with instance.app.app_context(_manifest()):
             await _seed_body("leaf", "weather", {"units": "v"})
-            await _seed_body("composer", "echo", {"tool_names": ["leaf"]})
+            await _seed_body("composer", "authorable_agent", {"tool_names": ["leaf"]})
             await _seed_body("lonely", "weather", {"units": "x"})
 
             rows = {r["name"]: r for r in await preset_ops.list_presets()}
@@ -55,7 +49,7 @@ def test_presets_facet_used_by_seam(pg) -> None:
     async def run() -> None:
         async with instance.app.app_context(_manifest()):
             await _seed_body("leaf", "weather", {"units": "v"})
-            await _seed_body("composer", "echo", {"tool_names": ["leaf"]})
+            await _seed_body("composer", "authorable_agent", {"tool_names": ["leaf"]})
 
             assert await instance.app.presets.used_by("leaf") == ["composer"]
             assert await instance.app.presets.used_by("composer") == []
@@ -91,7 +85,7 @@ def test_uses_excludes_self_and_non_preset_base_tools(pg) -> None:
             # ``selfref`` names itself and the base tool ``weather`` (a registered
             # non-preset tool). Self is never listed and a non-preset tool is not in
             # the population, so ``uses`` is empty.
-            await _seed_body("selfref", "echo", {"tool_names": ["selfref", "weather"]})
+            await _seed_body("selfref", "authorable_agent", {"tool_names": ["selfref", "weather"]})
 
             rows = {r["name"]: r for r in await preset_ops.list_presets()}
             assert rows["selfref"]["uses"] == []
@@ -104,7 +98,7 @@ def test_get_row_carries_same_references_as_list_row(pg) -> None:
     async def run() -> None:
         async with instance.app.app_context(_manifest()):
             await _seed_body("leaf", "weather", {"units": "v"})
-            await _seed_body("composer", "echo", {"tool_names": ["leaf"]})
+            await _seed_body("composer", "authorable_agent", {"tool_names": ["leaf"]})
 
             list_row = next(r for r in await preset_ops.list_presets() if r["name"] == "composer")
             get_row = await preset_ops.get_preset(name="composer")
@@ -118,22 +112,21 @@ def test_used_by_matches_referees_op(pg) -> None:
     async def run() -> None:
         async with instance.app.app_context(_manifest()):
             await _seed_body("leaf", "weather", {"units": "v"})
-            await _seed_body("composer", "echo", {"tool_names": ["leaf"]})
+            await _seed_body("composer", "authorable_agent", {"tool_names": ["leaf"]})
 
             leaf_row = next(r for r in await preset_ops.list_presets() if r["name"] == "leaf")
-            referees = (await preset_ops.preset_referees(name="leaf"))["referees"]
-            assert leaf_row["used_by"] == referees == ["composer"]
+            holders = (await preset_ops.preset_referees(name="leaf", action="rename"))["holders"]
+            assert leaf_row["used_by"] == [holder["name"] for holder in holders] == ["composer"]
 
     asyncio.run(run())
 
 
 # -- declared tool references (a base tool's tool_refs extractor) -------------
 
-# A base tool declares a ``tool_refs`` extractor at registration; the reference
-# collector unions the names it reads out of a preset's ``fixed_kwargs`` with the
-# builtin ``tool_names`` walk, so a DECLARED reference counts in uses/used_by,
-# referees and the rename guard. The fixture ``plan_tool`` reads ``plan.refs``; a
-# base tool WITHOUT a declaration keeps exactly the builtin walk.
+# A base tool declares a ``tool_refs`` extractor at registration; the reference walk
+# reads the names it returns out of a preset's ``fixed_kwargs``, so a DECLARED reference
+# counts in uses/used_by, referees and the rename guard. The fixture ``plan_tool`` reads
+# ``plan.refs``.
 
 
 def test_declared_refs_feed_uses_and_used_by(pg) -> None:
@@ -164,8 +157,8 @@ def test_declared_referee_blocks_rename_and_lists_in_referees(pg) -> None:
                 output_schema=None,
             )
 
-            referees = (await preset_ops.preset_referees(name="leaf"))["referees"]
-            assert referees == ["comp"]
+            holders = (await preset_ops.preset_referees(name="leaf", action="rename"))["holders"]
+            assert holders == [{"kind": "preset", "name": "comp", "locator": {}, "summary": "preset 'comp'"}]
             # The rename guard now sees the declared reference too.
             with pytest.raises(ConflictError, match="cannot be renamed"):
                 await preset_ops.rename_preset(name="leaf", new_name="leaf2")
@@ -194,8 +187,7 @@ def test_create_response_carries_declared_refs(pg) -> None:
 def test_no_declaration_ignores_nested_config(pg) -> None:
     async def run() -> None:
         async with instance.app.app_context(_manifest()):
-            # ``weather`` declares no extractor, so its nested config is NOT read — only
-            # the builtin ``tool_names`` walk applies (empty here), unchanged behavior.
+            # ``weather`` is a plain tool that declares no extractor, so its config is not read.
             await _seed_body("leaf", "weather", {"units": "v"})
             await _seed_body("plainish", "weather", {"plan": {"refs": ["leaf"]}, "units": "z"})
 
@@ -206,23 +198,29 @@ def test_no_declaration_ignores_nested_config(pg) -> None:
     asyncio.run(run())
 
 
-def test_declared_refs_extractor_raising_propagates(pg) -> None:
+def test_declared_refs_extractor_raising_is_a_stored_preset_500(pg) -> None:
     async def run() -> None:
         async with instance.app.app_context(_manifest()):
             await _seed_body("boom", "boom_tool", {})
-            # The extractor raises; the op surfaces it loudly, never an empty-list fallback.
-            with pytest.raises(RuntimeError, match="refs extractor kaput"):
+            # The extractor raises; the listing refuses loudly, naming the stored preset.
+            with pytest.raises(OperationFailedError) as caught:
                 await preset_ops.list_presets()
+            assert caught.value.message == (
+                "stored preset 'boom': tool_refs extractor of base tool 'boom_tool' raised RuntimeError"
+            )
+            assert caught.value.extra == {"code": STORED_PRESET_UNREADABLE, "preset": "boom"}
 
     asyncio.run(run())
 
 
-def test_declared_refs_non_string_entry_raises(pg) -> None:
+def test_declared_refs_non_string_entry_is_a_stored_preset_500(pg) -> None:
     async def run() -> None:
         async with instance.app.app_context(_manifest()):
             await _seed_body("comp", "plan_tool", {"plan": {"refs": [123]}})
-            # A declaration returning garbage is a plugin bug, raised loudly.
-            with pytest.raises(TypeError, match="non-string reference"):
+            # A body the extractor refuses is unreadable, raised loudly naming the stored preset.
+            with pytest.raises(OperationFailedError) as caught:
                 await preset_ops.list_presets()
+            assert caught.value.message == "stored preset 'comp': plan.refs entries must be strings"
+            assert caught.value.extra == {"code": STORED_PRESET_UNREADABLE, "preset": "comp"}
 
     asyncio.run(run())

@@ -1,11 +1,13 @@
 """Shared fakes and helpers for the :class:`~tai42_skeleton.config.service.ConfigService`
 pipeline oracles — an in-memory config store (the transactional seams), a fake reload admin,
-a recording worker bus, the service wiring helper, the env-toggle helpers, and the oauth /
-none connector descriptors the stickiness tests drive."""
+a recording worker bus, a recording extension combo check, the service wiring helper, the
+env-toggle helpers, and the oauth / none connector descriptors the stickiness tests drive."""
 
 from __future__ import annotations
 
 import copy
+import threading
+from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
@@ -15,11 +17,34 @@ from tai42_skeleton.app.bus import FleetResult, LocalApplyResult, OpOutcome, Wor
 from tai42_skeleton.app.bus.ops import FleetOp, fleet_op_wire
 from tai42_skeleton.app.recycle import RECYCLED, FreshLife, RecycleError, RecycleReport, RecycleRow, orchestrate_recycle
 from tai42_skeleton.config.service import ConfigService
+from tai42_skeleton.tools.binding.errors import ExtensionComboRefusedError
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Iterator
+    from collections.abc import Awaitable, Callable, Iterator, Sequence
+
+    from tai42_contract.manifest import ExtensionElement
 
     from tai42_skeleton.config.file_manager import FileConfigManager
+
+
+class ComboChecks:
+    """A recording ``combo_check``: keeps every ``(tool, combo)`` it is handed.
+
+    With ``refuse`` set, a combo carrying that value anywhere in an element's settings is
+    refused with :class:`ExtensionComboRefusedError` naming the extension and the tool.
+    """
+
+    def __init__(self, *, refuse: object = None) -> None:
+        self.refuse = refuse
+        self.calls: list[tuple[str, list[ExtensionElement]]] = []
+
+    def __call__(self, tool: str, combo: Sequence[ExtensionElement]) -> None:
+        self.calls.append((tool, copy.deepcopy(list(combo))))
+        if self.refuse is None:
+            return
+        for element in combo:
+            if isinstance(element, dict) and self.refuse in element["config"].values():
+                raise ExtensionComboRefusedError(f"extension '{element['name']}' on tool '{tool}' cannot bind: refused")
 
 
 class FakeConfigStore:
@@ -28,39 +53,79 @@ class FakeConfigStore:
     ``mutate_manifest`` runs the mutator on a fresh copy of the stored PRESERVED
     document and persists it only if the mutator returns without raising — so an
     aborting mutator leaves the store untouched, exactly like the real transaction.
+
+    ``exclusive_write`` is a conforming span: it holds ``span_lock`` from entry through exit,
+    so no two spans over the store are held at once, whichever thread enters or exits; a test
+    holds ``span_lock`` itself to stand for another process holding the span. ``events``
+    records, in order, each read, each persist, and each entry to and exit from the span. With
+    ``refuse_exclusive`` set, entering the span raises it. With ``fail_exit`` set, the span's
+    release raises it after ``span_lock`` is released, whether the body completed or raised, as
+    a provider whose release cannot complete raises from the exit.
     """
 
-    def __init__(self, *, manifest: dict[str, Any] | None = None, env: dict[str, str] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        manifest: dict[str, Any] | None = None,
+        env: dict[str, str] | None = None,
+        refuse_exclusive: Exception | None = None,
+        fail_exit: Exception | None = None,
+    ) -> None:
         self.manifest: dict[str, Any] = manifest if manifest is not None else {}
         self.env: dict[str, str] = env if env is not None else {}
         self.persisted: list[dict[str, Any]] = []
         self.env_writes: list[dict[str, str]] = []
+        self.events: list[str] = []
+        self.span_lock = threading.Lock()
+        self._refuse_exclusive = refuse_exclusive
+        self.fail_exit = fail_exit
+
+    @contextmanager
+    def exclusive_write(self) -> Iterator[None]:
+        if self._refuse_exclusive is not None:
+            raise self._refuse_exclusive
+        try:
+            with self.span_lock:
+                self.events.append("exclusive_write:enter")
+                try:
+                    yield
+                finally:
+                    self.events.append("exclusive_write:exit")
+        finally:
+            if self.fail_exit is not None:
+                raise self.fail_exit
 
     def mutate_manifest(self, mutator: Callable[[dict[str, Any]], None]) -> dict[str, Any]:
         document = copy.deepcopy(self.manifest)
         mutator(document)  # a raise here propagates before any persist
         self.manifest = document
         self.persisted.append(copy.deepcopy(document))
+        self.events.append("mutate_manifest")
         return document
 
     def replace_manifest(self, document: dict[str, Any]) -> dict[str, Any]:
         self.manifest = copy.deepcopy(document)
         self.persisted.append(copy.deepcopy(document))
+        self.events.append("replace_manifest")
         return self.manifest
 
     def write_env(self, config: dict[str, str]) -> None:
         self.env_writes.append(dict(config))
         self.env = {**self.env, **config}
+        self.events.append("write_env")
 
     def replace_env(self, config: dict[str, str]) -> None:
         # Whole-map replace: a key absent from ``config`` is deleted; empties filtered.
         self.env_writes.append(dict(config))
         self.env = {key: value for key, value in config.items() if value != ""}
+        self.events.append("replace_env")
 
     def read_env(self) -> dict[str, str]:
+        self.events.append("read_env")
         return dict(self.env)
 
     def read_manifest_preserved(self) -> dict[str, Any]:
+        self.events.append("read_manifest_preserved")
         return copy.deepcopy(self.manifest)
 
 
@@ -85,11 +150,16 @@ class FakeReloadAdmin:
         result: dict[str, Any] | None = None,
         raise_reload: Exception | None = None,
         during_reload: Callable[[], None] | None = None,
+        served: dict[str, list[str]] | None = None,
+        raise_listing: Exception | None = None,
     ) -> None:
         self._result = result if result is not None else {"status": "ok", "env_keys": 0}
         self._raise = raise_reload
         self._during_reload = during_reload
+        self._served = served if served is not None else {}
+        self._raise_listing = raise_listing
         self.calls = 0
+        self.listed: list[str] = []
 
     def reload_config(self) -> dict[str, Any]:
         self.calls += 1
@@ -98,6 +168,13 @@ class FakeReloadAdmin:
         if self._raise is not None:
             raise self._raise
         return self._result
+
+    async def served_mcp_names(self, config: Any) -> list[str]:
+        """The scripted served names of ``config.title``'s server; ``raise_listing`` fails the listing."""
+        self.listed.append(config.title)
+        if self._raise_listing is not None:
+            raise self._raise_listing
+        return list(self._served.get(config.title, []))
 
 
 class RecordingBus:
@@ -173,10 +250,17 @@ def _service(
     admin: Any = None,
     bus: Any = None,
     orchestrate: Callable[..., Awaitable[RecycleReport]] = orchestrate_recycle,
+    combo_check: Callable[[str, Sequence[ExtensionElement]], None] | None = None,
 ) -> tuple[ConfigService, Any, Any]:
     admin = admin or FakeReloadAdmin()
     bus = bus or RecordingBus()
-    service = ConfigService(config_manager=store, admin=admin, bus=cast("Any", bus), orchestrate=orchestrate)
+    service = ConfigService(
+        config_manager=store,
+        admin=admin,
+        bus=cast("Any", bus),
+        combo_check=combo_check or ComboChecks(),
+        orchestrate=orchestrate,
+    )
     return service, admin, bus
 
 

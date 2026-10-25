@@ -14,17 +14,31 @@ by ``tests/presets/test_run_index_chokepoint.py`` through the real ``run_tool``.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Iterator
+from contextlib import contextmanager
 
 import pytest
 from tai42_contract.interactions import ResumeBuffered, SuspendedInteraction
-from tai42_contract.monitoring import RunAttribution, get_ambient_trace_context
+from tai42_contract.monitoring import (
+    MonitoringLevel,
+    RunAttribution,
+    SpanKind,
+    TraceContext,
+    ambient_trace_context,
+    get_ambient_trace_context,
+)
+from tai42_contract.secrets import SECRET_PLACEHOLDER, SecretValue
+from tai42_kit.monitoring import RunTraceRoot
 
 import tai42_skeleton.runs.chokepoint as chokepoint
 from tai42_skeleton.monitoring import init_monitoring, reset_monitoring
 from tai42_skeleton.runs.chokepoint import record_outermost_preset_run, resume_origin
 from tai42_skeleton.tools.attribution import run_attribution
+from tai42_skeleton.tools.reveal_gate import note_secret_reveal
 
-from .._fakes.recording_monitoring import RecordingMonitoring
+from .._fakes.recording_monitoring import RecordingMonitoring, monitoring_app
+
+_PARENT = "b" * 16
 
 
 class _SpyStore:
@@ -71,13 +85,31 @@ class _SpyStore:
             raise ConnectionError("db down at terminal write")
 
 
+@pytest.fixture(autouse=True)
+def _bound_monitoring() -> Iterator[None]:
+    with monitoring_app():
+        yield
+
+
+def _stub_lineage(monkeypatch, trace_id: str | None) -> None:
+    """Steer the run's START lineage: the opener yields ``(trace_id, _PARENT)``, or ``None`` with no trace."""
+
+    @contextmanager
+    def _opener(*, input_: object) -> Iterator[RunTraceRoot]:
+        context = None if trace_id is None else TraceContext(trace_id=trace_id, parent_span_id=_PARENT)
+        yield RunTraceRoot(context, None, None)
+
+    monkeypatch.setattr(chokepoint, "open_run_trace", _opener)
+
+
 @pytest.fixture
 def wire(monkeypatch):
-    """Install a spy store + a chosen trace-id sample, with the store forced ON."""
+    """Install a spy store + a chosen run lineage, with the store forced ON."""
 
     def _install(*, store: _SpyStore, trace_id: str | None = None, configured: bool = True):
         monkeypatch.setattr(chokepoint, "component_store_configured", lambda _c: configured)
         monkeypatch.setattr(chokepoint, "get_run_index_store", lambda: store)
+        _stub_lineage(monkeypatch, trace_id)
         monkeypatch.setattr(chokepoint, "_safe_trace_id", lambda: trace_id)
         return store
 
@@ -86,7 +118,7 @@ def wire(monkeypatch):
 
 async def test_success_records_start_and_terminal(wire):
     store = wire(store=_SpyStore(), trace_id="trace-1")
-    async with record_outermost_preset_run("weather", 4) as run:
+    async with record_outermost_preset_run("weather", 4, arguments={}) as run:
         run.observe("a plain result")
     assert len(store.starts) == 1
     assert store.starts[0]["preset_name"] == "weather"
@@ -100,7 +132,7 @@ async def test_success_records_start_and_terminal(wire):
 async def test_attribution_identity_is_captured(wire):
     store = wire(store=_SpyStore())
     with run_attribution(RunAttribution(user_id="person-7", session_id="thread-3")):
-        async with record_outermost_preset_run("wx", 1) as run:
+        async with record_outermost_preset_run("wx", 1, arguments={}) as run:
             run.observe("ok")
     assert store.starts[0]["user_id"] == "person-7"
     assert store.starts[0]["session_id"] == "thread-3"
@@ -109,7 +141,7 @@ async def test_attribution_identity_is_captured(wire):
 async def test_parked_result_records_parked(wire):
     store = wire(store=_SpyStore())
     parked = SuspendedInteraction(interaction_id="i1", expiry_at=None)
-    async with record_outermost_preset_run("wx", 1) as run:
+    async with record_outermost_preset_run("wx", 1, arguments={}) as run:
         run.observe(parked)
     assert store.terminals[0]["outcome"] == "parked"
 
@@ -118,7 +150,7 @@ async def test_resume_buffered_result_records_parked_with_no_interaction_id(wire
     # A resume that answered one ask and left its siblings open: the run stays parked, and the
     # still-open ids are not a park this dispatch raised, so the terminal write carries no id.
     store = wire(store=_SpyStore())
-    async with record_outermost_preset_run("wx", 1) as run:
+    async with record_outermost_preset_run("wx", 1, arguments={}) as run:
         run.observe(ResumeBuffered(remaining_ids=["r1", "r2"]))
     assert store.terminals[0]["outcome"] == "parked"
     assert store.terminals[0]["interaction_id"] is None
@@ -127,7 +159,7 @@ async def test_resume_buffered_result_records_parked_with_no_interaction_id(wire
 async def test_exception_records_error_and_propagates(wire):
     store = wire(store=_SpyStore())
     with pytest.raises(ValueError, match="boom"):
-        async with record_outermost_preset_run("wx", 1):
+        async with record_outermost_preset_run("wx", 1, arguments={}):
             raise ValueError("boom")
     assert store.terminals[0]["outcome"] == "error"
 
@@ -137,7 +169,7 @@ async def test_cancellation_records_aborted_and_propagates(wire):
     # distinct terminal ``aborted`` — and the cancellation still propagates untouched.
     store = wire(store=_SpyStore())
     with pytest.raises(asyncio.CancelledError):
-        async with record_outermost_preset_run("wx", 1):
+        async with record_outermost_preset_run("wx", 1, arguments={}):
             raise asyncio.CancelledError()
     assert store.terminals[0]["outcome"] == "aborted"
 
@@ -149,7 +181,7 @@ async def test_real_task_cancellation_records_aborted_then_cancels(wire):
     store = wire(store=_SpyStore())
 
     async def body() -> None:
-        async with record_outermost_preset_run("wx", 1):
+        async with record_outermost_preset_run("wx", 1, arguments={}):
             await asyncio.sleep(60)
 
     task = asyncio.create_task(body())
@@ -164,7 +196,7 @@ async def test_parked_terminal_write_carries_the_interaction_id(wire):
     # The park's ``SuspendedInteraction`` sentinel carries the lifecycle key: the
     # parked row's terminal write records it so the later resume row is joinable.
     store = wire(store=_SpyStore())
-    async with record_outermost_preset_run("wx", 1) as run:
+    async with record_outermost_preset_run("wx", 1, arguments={}) as run:
         run.observe(SuspendedInteraction(interaction_id="i-park", expiry_at=None))
     assert store.terminals[0]["outcome"] == "parked"
     assert store.terminals[0]["interaction_id"] == "i-park"
@@ -176,7 +208,7 @@ async def test_resume_origin_is_recorded_at_start(wire):
     # link back to the lifecycle it continues.
     store = wire(store=_SpyStore())
     with resume_origin("i-origin"):
-        async with record_outermost_preset_run("wx", 1) as run:
+        async with record_outermost_preset_run("wx", 1, arguments={}) as run:
             run.observe("ok")
     assert store.starts[0]["interaction_id"] == "i-origin"
 
@@ -186,7 +218,7 @@ async def test_resume_buffered_continuation_keeps_its_resume_origin_at_start(wir
     # ``parked`` with no id of its own at the terminal, so the store keeps the origin.
     store = wire(store=_SpyStore())
     with resume_origin("i-origin"):
-        async with record_outermost_preset_run("wx", 1) as run:
+        async with record_outermost_preset_run("wx", 1, arguments={}) as run:
             run.observe(ResumeBuffered(remaining_ids=["r1"]))
     assert store.starts[0]["interaction_id"] == "i-origin"
     assert store.terminals[0]["outcome"] == "parked"
@@ -197,7 +229,7 @@ async def test_no_correlation_available_is_null_never_an_error(wire):
     # Fail-safe: a plain dispatch (no park, no resume origin) carries NULL on both
     # writes — absence of a correlation is never an error.
     store = wire(store=_SpyStore())
-    async with record_outermost_preset_run("wx", 1) as run:
+    async with record_outermost_preset_run("wx", 1, arguments={}) as run:
         run.observe("ok")
     assert store.starts[0]["interaction_id"] is None
     assert store.terminals[0]["interaction_id"] is None
@@ -206,11 +238,11 @@ async def test_no_correlation_available_is_null_never_an_error(wire):
 async def test_trace_id_backfilled_when_absent_at_start(wire, monkeypatch):
     # No trace at start, a trace at the terminal write: the id is backfilled.
     store = _SpyStore()
-    samples = iter([None, "trace-late"])
     monkeypatch.setattr(chokepoint, "component_store_configured", lambda _c: True)
     monkeypatch.setattr(chokepoint, "get_run_index_store", lambda: store)
-    monkeypatch.setattr(chokepoint, "_safe_trace_id", lambda: next(samples))
-    async with record_outermost_preset_run("wx", 1) as run:
+    _stub_lineage(monkeypatch, None)
+    monkeypatch.setattr(chokepoint, "_safe_trace_id", lambda: "trace-late")
+    async with record_outermost_preset_run("wx", 1, arguments={}) as run:
         run.observe("ok")
     assert store.starts[0]["trace_id"] is None
     assert store.terminals[0]["trace_id"] == "trace-late"
@@ -218,7 +250,7 @@ async def test_trace_id_backfilled_when_absent_at_start(wire, monkeypatch):
 
 async def test_store_off_is_a_clean_no_op(wire):
     store = wire(store=_SpyStore(), configured=False)
-    async with record_outermost_preset_run("wx", 1) as run:
+    async with record_outermost_preset_run("wx", 1, arguments={}) as run:
         run.observe("ok")
     assert store.starts == []
     assert store.terminals == []
@@ -229,7 +261,7 @@ async def test_start_failure_never_breaks_the_run(wire):
     # and no terminal write is attempted for a run that was never recorded.
     store = wire(store=_SpyStore(start_error=True))
     ran = False
-    async with record_outermost_preset_run("wx", 1) as run:
+    async with record_outermost_preset_run("wx", 1, arguments={}) as run:
         ran = True
         run.observe("ok")
     assert ran is True
@@ -242,7 +274,7 @@ async def test_start_failure_does_not_pollute_a_dispatch_error_context(wire):
     # secret-redaction invariants depend on it.
     wire(store=_SpyStore(start_error=True))
     with pytest.raises(ValueError, match="body boom") as exc_info:
-        async with record_outermost_preset_run("wx", 1):
+        async with record_outermost_preset_run("wx", 1, arguments={}):
             raise ValueError("body boom")
     assert exc_info.value.__context__ is None
 
@@ -252,7 +284,7 @@ async def test_terminal_write_failure_never_breaks_a_successful_run(wire):
     # cleanly and the caller still gets the body's result — enumeration never breaks a run.
     store = wire(store=_SpyStore(terminal_error=True))
     result = None
-    async with record_outermost_preset_run("wx", 1) as run:
+    async with record_outermost_preset_run("wx", 1, arguments={}) as run:
         run.observe("the body result")
         result = "the body result"
     # No exception escaped the CM; the terminal write was attempted (and swallowed).
@@ -266,13 +298,13 @@ async def test_terminal_write_failure_does_not_mask_a_body_error(wire):
     # its ``__context__`` (the secret-redaction invariants depend on a clean error).
     wire(store=_SpyStore(terminal_error=True))
     with pytest.raises(ValueError, match="body boom") as exc_info:
-        async with record_outermost_preset_run("wx", 1):
+        async with record_outermost_preset_run("wx", 1, arguments={}):
             raise ValueError("body boom")
     assert type(exc_info.value) is ValueError
     assert exc_info.value.__context__ is None
 
 
-# -- trace ROOT opened where none is ambient ----------------------------------
+# -- the run's lineage through the kit opener ---------------------------------
 
 
 @pytest.fixture
@@ -300,10 +332,11 @@ async def test_direct_registration_opens_a_root_and_stores_its_trace_id(recordin
     # gets a trace + deep link, and stores the opened trace's id.
     store = _SpyStore()
     _store_on(monkeypatch, store)
-    async with record_outermost_preset_run("wx", 1) as run:
+    async with record_outermost_preset_run("wx", 1, arguments={}) as run:
         run.observe("ok")
     assert [s["name"] for s in recording_backend.writer.spans] == ["run"]
-    assert recording_backend.writer.spans[0]["kind"].value == "CHAIN"
+    assert recording_backend.writer.spans[0]["kind"] is SpanKind.CHAIN
+    assert recording_backend.writer.spans[0]["trace_context"] is None
     assert store.starts[0]["trace_id"] == "trace-root"
 
 
@@ -313,7 +346,7 @@ async def test_direct_registration_deposits_the_ambient_carrier(recording_backen
     # minting a fresh, orphaned trace. Read the carrier from INSIDE the dispatch body.
     _store_on(monkeypatch, _SpyStore())
     seen = {}
-    async with record_outermost_preset_run("wx", 1) as run:
+    async with record_outermost_preset_run("wx", 1, arguments={}) as run:
         ctx = get_ambient_trace_context()
         seen["trace_id"] = ctx.trace_id if ctx is not None else None
         seen["parent_span_id"] = ctx.parent_span_id if ctx is not None else None
@@ -325,15 +358,51 @@ async def test_direct_registration_deposits_the_ambient_carrier(recording_backen
 
 
 async def test_ambient_root_present_nests_without_opening_a_second_root(recording_backend, monkeypatch):
-    # A root already exists (a hook/flow/agent parent opened it): the chokepoint NESTS,
-    # opening NO second root and stamping the row with the ambient trace id.
-    recording_backend.writer.active_trace_id = "trace-ambient"
+    # A live span with no deposit (a hook's span): the chokepoint opens one ``run`` span as
+    # its child, no second root, and stamps the row with the live trace id.
+    writer = recording_backend.writer
+    writer.active_trace_id = "trace-ambient"
     store = _SpyStore()
     _store_on(monkeypatch, store)
-    async with record_outermost_preset_run("wx", 1) as run:
-        run.observe("ok")
-    assert recording_backend.writer.spans == []
+    with writer.start_span(name="caller", kind=SpanKind.TOOL):
+        async with record_outermost_preset_run("wx", 1, arguments={}) as run:
+            run.observe("ok")
+    assert [(s["name"], s["trace_context"]) for s in writer.spans] == [("caller", None), ("run", None)]
     assert store.starts[0]["trace_id"] == "trace-ambient"
+
+
+async def test_an_ambient_deposit_with_no_live_span_is_kept_and_opens_no_span(recording_backend, monkeypatch):
+    store = _SpyStore()
+    _store_on(monkeypatch, store)
+    lineage = TraceContext(trace_id="a" * 32, parent_span_id=_PARENT)
+    seen = {}
+    with ambient_trace_context(lineage):
+        async with record_outermost_preset_run("wx", 1, arguments={}) as run:
+            seen["ambient"] = get_ambient_trace_context()
+            run.observe("ok")
+    assert recording_backend.writer.spans == []
+    assert seen["ambient"] == lineage
+    assert store.starts[0]["trace_id"] == "a" * 32
+
+
+async def test_a_dispatch_that_raises_leaves_the_run_span_at_error(recording_backend, monkeypatch):
+    _store_on(monkeypatch, _SpyStore())
+    with pytest.raises(ValueError, match="body boom"):
+        async with record_outermost_preset_run("wx", 1, arguments={}):
+            raise ValueError("body boom")
+    (span,) = recording_backend.writer.spans
+    assert [(u["level"], u["status_message"]) for u in span["span"].updates] == [(MonitoringLevel.ERROR, "body boom")]
+    assert span["span"].ended
+
+
+async def test_a_cancelled_dispatch_records_no_level_on_the_run_span(recording_backend, monkeypatch):
+    _store_on(monkeypatch, _SpyStore())
+    with pytest.raises(asyncio.CancelledError):
+        async with record_outermost_preset_run("wx", 1, arguments={}):
+            raise asyncio.CancelledError
+    (span,) = recording_backend.writer.spans
+    assert span["span"].updates == []
+    assert span["span"].ended
 
 
 async def test_noop_backend_leaves_trace_id_null(monkeypatch):
@@ -342,7 +411,7 @@ async def test_noop_backend_leaves_trace_id_null(monkeypatch):
     reset_monitoring()
     store = _SpyStore()
     _store_on(monkeypatch, store)
-    async with record_outermost_preset_run("wx", 1) as run:
+    async with record_outermost_preset_run("wx", 1, arguments={}) as run:
         run.observe("ok")
     assert store.starts[0]["trace_id"] is None
 
@@ -351,7 +420,7 @@ async def test_terminal_write_carries_the_collected_resumed_interactions(wire):
     # A visit under the run's span notes each id it resumed/took through the ambient
     # collector armed by the record; the terminal write persists that list on the row.
     store = wire(store=_SpyStore())
-    async with record_outermost_preset_run("wx", 1) as run:
+    async with record_outermost_preset_run("wx", 1, arguments={}) as run:
         chokepoint.note_resumed_interaction("i-a")
         chokepoint.note_resumed_interaction("i-b")
         run.observe("ok")
@@ -362,7 +431,7 @@ async def test_nested_visit_ids_roll_up_to_the_outermost_row(wire):
     # A nested sub-preset dispatch opens NO row of its own (only the outermost calls the
     # chokepoint), so a note taken during it appends to the outermost run's collector.
     store = wire(store=_SpyStore())
-    async with record_outermost_preset_run("outer", 1) as run:
+    async with record_outermost_preset_run("outer", 1, arguments={}) as run:
         chokepoint.note_resumed_interaction("i-outer")
 
         async def _nested_dispatch() -> None:
@@ -377,7 +446,7 @@ async def test_nested_visit_ids_roll_up_to_the_outermost_row(wire):
 
 async def test_a_run_that_resumes_nothing_records_an_empty_list(wire):
     store = wire(store=_SpyStore())
-    async with record_outermost_preset_run("wx", 1) as run:
+    async with record_outermost_preset_run("wx", 1, arguments={}) as run:
         run.observe("ok")
     assert store.terminals[0]["resumed_interactions"] == []
 
@@ -392,7 +461,93 @@ async def test_mcp_wire_park_records_parked(wire):
     # The MCP edge recognizes a park from the SERIALIZED wire marker (no sentinel type
     # in hand) and records it as ``parked`` with the marker's interaction id.
     store = wire(store=_SpyStore())
-    async with record_outermost_preset_run("wx", 1) as run:
-        run.observe_park("i-wire")
+    async with record_outermost_preset_run("wx", 1, arguments={}) as run:
+        run.observe_park("i-wire", output={"park": {"interaction_id": "i-wire"}})
     assert store.terminals[0]["outcome"] == "parked"
     assert store.terminals[0]["interaction_id"] == "i-wire"
+
+
+# -- the run's input and output on its root ----------------------------------
+
+
+def _outputs(span: dict) -> list:
+    return [u["output"] for u in span["span"].updates if u["output"] is not None]
+
+
+async def test_the_run_root_records_the_arguments_and_the_result(recording_backend, monkeypatch):
+    _store_on(monkeypatch, _SpyStore())
+    async with record_outermost_preset_run("wx", 1, arguments={"city": "x"}) as run:
+        run.observe({"temp": 3})
+    (span,) = recording_backend.writer.spans
+    assert span["input"] == {"city": "x"}
+    assert _outputs(span) == [{"temp": 3}]
+
+
+async def test_an_in_process_park_records_the_park_as_the_output(recording_backend, monkeypatch):
+    _store_on(monkeypatch, _SpyStore())
+    parked = SuspendedInteraction(interaction_id="i1", expiry_at=None)
+    async with record_outermost_preset_run("wx", 1, arguments={"q": 1}) as run:
+        run.observe(parked)
+    (span,) = recording_backend.writer.spans
+    assert _outputs(span) == [parked]
+
+
+async def test_a_wire_park_records_the_wire_marker_as_the_output(recording_backend, monkeypatch):
+    _store_on(monkeypatch, _SpyStore())
+    marker = {"park": {"interaction_id": "i-wire"}}
+    async with record_outermost_preset_run("wx", 1, arguments={"q": 1}) as run:
+        run.observe_park("i-wire", output=marker)
+    (span,) = recording_backend.writer.spans
+    assert _outputs(span) == [marker]
+
+
+async def test_a_dispatch_that_raises_after_observing_records_no_output(recording_backend, monkeypatch):
+    _store_on(monkeypatch, _SpyStore())
+
+    async def _observe_then_raise() -> None:
+        async with record_outermost_preset_run("wx", 1, arguments={"q": 1}) as run:
+            run.observe("ok")
+            raise ValueError("late")
+
+    with pytest.raises(ValueError, match="late"):
+        await _observe_then_raise()
+    (span,) = recording_backend.writer.spans
+    assert span["input"] == {"q": 1}
+    assert _outputs(span) == []
+    assert [u["level"] for u in span["span"].updates] == [MonitoringLevel.ERROR]
+
+
+async def test_a_run_left_unrecorded_by_a_failed_start_still_records_its_output(recording_backend, monkeypatch):
+    _store_on(monkeypatch, _SpyStore(start_error=True))
+    async with record_outermost_preset_run("wx", 1, arguments={"q": 1}) as run:
+        run.observe("ok")
+    (span,) = recording_backend.writer.spans
+    assert _outputs(span) == ["ok"]
+
+
+async def test_a_result_revealed_at_the_mcp_edge_is_recorded_as_the_secret_placeholder(recording_backend, monkeypatch):
+    # The MCP edge observes the result after the reveal, so a secret in it is plaintext: the
+    # whole output is recorded as the placeholder, never the value.
+    _store_on(monkeypatch, _SpyStore())
+    async with record_outermost_preset_run("wx", 1, arguments={"q": 1}) as run:
+        note_secret_reveal()
+        run.observe({"token": "plain-text-secret"})
+    (span,) = recording_backend.writer.spans
+    assert _outputs(span) == [SECRET_PLACEHOLDER]
+
+
+async def test_an_in_process_result_keeps_its_secret_wrapper_for_the_writer_to_mask(recording_backend, monkeypatch):
+    _store_on(monkeypatch, _SpyStore())
+    wrapped = {"token": SecretValue("s3cr3t")}
+    async with record_outermost_preset_run("wx", 1, arguments={"q": 1}) as run:
+        run.observe(wrapped)
+    (span,) = recording_backend.writer.spans
+    assert _outputs(span) == [wrapped]
+
+
+async def test_a_kept_deposit_records_no_input_or_output(recording_backend, monkeypatch):
+    _store_on(monkeypatch, _SpyStore())
+    with ambient_trace_context(TraceContext(trace_id="a" * 32, parent_span_id=_PARENT)):
+        async with record_outermost_preset_run("wx", 1, arguments={"q": 1}) as run:
+            run.observe("ok")
+    assert recording_backend.writer.spans == []

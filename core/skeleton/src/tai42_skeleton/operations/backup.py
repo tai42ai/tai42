@@ -46,7 +46,7 @@ _DOCUMENT_VERSION = 1
 # The restore section whose store the compiled-template cache shadows. A restore of it
 # rewrites keys on THIS worker only, so the fleet's compiled caches (and any forking
 # backend's prefork children) go stale until the eviction below fans out.
-_TEMPLATES_SECTION = "templates"
+_STORAGE_SECTION = "storage"
 
 
 class BackupImport(BaseModel):
@@ -74,7 +74,7 @@ def _import_order(requested: list[str]) -> list[str]:
     """Return ``requested`` replayed in REGISTRATION order, unknown names appended so each still gets a report.
 
     The list is a SET, and registration order is a declared DEPENDENCY order (e.g.
-    ``access_control`` and ``templates`` before ``webhooks``, whose importer decides records
+    ``storage`` and ``access_control`` before ``webhooks``, whose importer decides records
     against both live stores). Replaying in the caller's order would make one document
     produce different stored state depending only on how the name list was typed.
     """
@@ -145,8 +145,8 @@ async def import_backup(document: dict[str, Any], sections: list[str], mode: Bac
                 ok = False
                 continue
             reports[name] = report
-            if name == _TEMPLATES_SECTION and (report.created or report.updated):
-                # The templates importer wrote the store on THIS worker with a local-only
+            if name == _STORAGE_SECTION and (report.created or report.updated):
+                # The storage importer wrote the store on THIS worker with a local-only
                 # evict; a restore rewriting many keys drops every worker's compiled cache
                 # in one broadcast rather than per key (cheaper, and on a forking backend
                 # it turns the prefork pool over once — matching reload semantics). The

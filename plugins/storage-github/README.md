@@ -5,7 +5,8 @@
 A GitHub-backed `Storage` provider for the TAI ecosystem. It stores content as
 files in a GitHub repository and serves the full `tai42_contract.storage.Storage`
 surface — the text methods (`load` / `list` / `upload` / `delete` / `delete_dir`)
-plus the binary/media methods (`load_bytes` / `upload_bytes` / `stat`).
+plus the metadata read `stat`, the bounded read `load_range` and the binary
+methods (`load_bytes` / `upload_bytes`).
 
 ## The TAI ecosystem
 
@@ -71,19 +72,31 @@ a log line, repr, or error message.
 
 ## Reads and writes
 
-- **Reads** (`load`, `load_bytes`) go through the raw endpoint
-  (`raw.githubusercontent.com`), which serves files of any size. The Contents API
-  is deliberately **not** used for reads: it silently returns an empty body for a
-  file over 1 MiB, so a large object would read as empty bytes. The raw endpoint
-  is CDN-cached, so a read shortly after a write may return the previous content
-  for up to ~5 minutes.
+- **Reads** (`load`, `load_bytes`) are one Contents API call each at the
+  configured branch, asking for the raw form
+  (`Accept: application/vnd.github.raw+json`), which serves every byte of a file
+  of any size. A directory answers its JSON listing and reads as
+  `FileNotFoundError`.
+- **Ranged reads** (`load_range`) resolve the branch's head commit through the
+  Git refs API, then read `raw.githubusercontent.com` at that commit with a
+  `Range` header and `Accept-Encoding: identity` (the raw host compresses, and a
+  compressed answer ranges over the encoded bytes): two calls, one of them REST.
+  Reading at the commit, never at the branch name, means a ranged read answers the
+  branch's current bytes, not a cached copy. An answer that ignores the range or
+  is still encoded raises; there is no whole-object read in its place. A
+  zero-length range sends no request.
+- **Rate limit**: GitHub allows 60 REST calls an hour without a token and 5000
+  with one; `stat`, `load` and `load_bytes` cost one REST call each and
+  `load_range` one.
 - **Writes** (`upload`, `upload_bytes`) go through the Contents API (base64) and
   are capped conservatively at 1 MiB. A larger payload raises `ValueError` before
   the request rather than truncating; the API's own `422` is the backstop.
 - **Listing** uses the recursive Git Trees API (one request) and raises loudly on
   a `truncated` response rather than acting on a partial listing.
-- **`stat`** infers `content_type` from the path suffix — GitHub stores no
-  per-object content-type.
+- **`stat`** is one Contents API call asking for the object form
+  (`Accept: application/vnd.github.object+json`): it answers the file's `size`,
+  and infers `content_type` from the path suffix — GitHub stores no per-object
+  content-type. A missing path and a directory raise `FileNotFoundError`.
 
 ## Development
 

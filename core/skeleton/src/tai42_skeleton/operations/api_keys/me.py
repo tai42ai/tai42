@@ -29,10 +29,11 @@ async def get_me(
     supply those identity params itself and read ANY principal's projection, so the HTTP
     route (``/api/auth/me``, whose extractor derives them from ``request.user``) is the
     only surface. With the gate OFF there is no identity to project (the edge passes
-    ``user_id=None``), so a synthetic TOTAL projection is returned; otherwise the
-    projection is built through the REAL enforcer so it can never advertise a door the
-    gate would deny. Any infrastructure error propagates per the projection's failure
-    doctrine.
+    ``user_id=None``), so a synthetic TOTAL projection is returned with
+    ``access_control_enabled`` false; otherwise the projection is built through the REAL
+    enforcer so it can never advertise a door the gate would deny, with
+    ``access_control_enabled`` true. Any infrastructure error propagates per the
+    projection's failure doctrine.
     """
     if user_id is None:
         return synthetic_full_projection()

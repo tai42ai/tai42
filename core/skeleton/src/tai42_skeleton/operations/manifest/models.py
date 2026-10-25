@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import re
+from typing import Self
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from tai42_skeleton.manifest import AgentsConfig, TaiMCPConfig, ToolsConfig
 
@@ -54,6 +55,28 @@ class AgentsEntriesAdd(BaseModel):
 
     entries: list[AgentsConfig]
     replace: bool = False
+
+
+class McpToolFilterUpdate(BaseModel):
+    """An MCP entry's whole tool selection: its ``include`` and ``exclude`` lists.
+
+    Each name is non-empty and unique within its list; at most one list is non-empty (a
+    non-empty ``include`` ignores ``exclude``). Both empty selects every tool.
+    """
+
+    include: list[str] = Field(default_factory=list)
+    exclude: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _one_well_formed_list(self) -> Self:
+        for field, names in (("include", self.include), ("exclude", self.exclude)):
+            if any(not name for name in names):
+                raise ValueError(f"{field} names must be non-empty")
+            if len(set(names)) != len(names):
+                raise ValueError(f"{field} names must not repeat")
+        if self.include and self.exclude:
+            raise ValueError("set include or exclude, not both: a non-empty include ignores exclude")
+        return self
 
 
 class ApiToolsListsUpdate(BaseModel):

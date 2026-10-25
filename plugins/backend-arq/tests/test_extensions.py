@@ -15,6 +15,8 @@ from tai42_backend_arq import extensions, scheduler
 from tai42_backend_arq.settings import TaskFailedError
 from tai42_backend_arq.tasks import ARQ_SCHEDULE_OPTS, ARQ_TASK_OPTS
 
+from .conftest import handle_of
+
 
 async def sample_tool(text: str, count: int = 1) -> str:
     """Repeat ``text`` ``count`` times."""
@@ -63,7 +65,13 @@ async def test_sync_task_runs_and_returns_result(bind_pool) -> None:
     assert out == {"ok": True}
     ((args, kwargs),) = fake.calls
     assert args == ("tool_execution",)
-    assert kwargs == {"text": "hi", "count": 2, "backend_tool_name": "sample_tool", "backend_secret_capability": False}
+    assert kwargs == {
+        "_queue_name": "arq:queue",
+        "text": "hi",
+        "count": 2,
+        "backend_tool_name": "sample_tool",
+        "backend_secret_capability": False,
+    }
 
 
 async def test_sync_task_timeout_raises_clear_error(bind_pool) -> None:
@@ -168,7 +176,7 @@ async def test_schedule_task_writes_interval_schedule(fake_redis, monkeypatch, b
         async def abort(self, **kwargs: Any) -> bool:
             return True
 
-    monkeypatch.setattr(scheduler, "Job", _NoJob)
+    monkeypatch.setattr(scheduler, "job_handle", handle_of(_NoJob))
     branch = extensions.schedule_task(sample_tool, "sample_tool", "doc")
     assert branch.__name__ == "sample_tool_schedule_task"
     params = inspect.signature(branch).parameters
@@ -216,7 +224,7 @@ async def test_schedule_task_carries_the_create_stamped_keys(fake_redis, monkeyp
         async def abort(self, **kwargs: Any) -> bool:
             return True
 
-    monkeypatch.setattr(scheduler, "Job", _NoJob)
+    monkeypatch.setattr(scheduler, "job_handle", handle_of(_NoJob))
     branch = extensions.schedule_task(sample_tool, "sample_tool", "doc")
     params = inspect.signature(branch).parameters
     for opt in SCHEDULE_STAMPED_DOOR_OPTS:
@@ -278,7 +286,7 @@ async def test_schedule_task_writes_crontab_schedule(fake_redis, monkeypatch, bi
         async def abort(self, **kwargs: Any) -> bool:
             return True
 
-    monkeypatch.setattr(scheduler, "Job", _NoJob)
+    monkeypatch.setattr(scheduler, "job_handle", handle_of(_NoJob))
     branch = extensions.schedule_task(sample_tool, "sample_tool", "doc")
 
     with schedule_create_fire():

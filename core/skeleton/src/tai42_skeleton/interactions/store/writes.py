@@ -229,7 +229,8 @@ class _StoreWrites(_StoreWritesBase):
         of any park of the run reaches every other.
         ``deferred_binding`` (the door's merged binding, JSON), ``run_input`` (the input it saw,
         JSON) and ``door_id`` are copied the same way, so the reaper's redelivery applies the
-        deferred UPDATES at the run's real terminal.
+        deferred UPDATES at the run's real terminal, and ``deferred_output_stages`` (JSON) so it
+        applies the captured preset output stages.
         """
         if to != "user":
             state_mapping["to"] = to
@@ -241,16 +242,19 @@ class _StoreWrites(_StoreWritesBase):
             state_mapping["asked_by"] = json.dumps(request.asked_by)
         if request.chain_keys:
             state_mapping["chain_keys"] = json.dumps(request.chain_keys)
-        if delivery is not None:
-            state_mapping["delivery"] = delivery.model_dump_json()
-        if run_delivery_id is not None:
-            state_mapping["run_delivery_id"] = run_delivery_id
-        if request.deferred_binding is not None:
-            state_mapping["deferred_binding"] = request.deferred_binding.model_dump_json()
-        if request.run_input is not None:
-            state_mapping["run_input"] = json.dumps(request.run_input)
-        if request.door_id is not None:
-            state_mapping["door_id"] = request.door_id
+        optional = {
+            "delivery": delivery.model_dump_json() if delivery is not None else None,
+            "run_delivery_id": run_delivery_id,
+            "deferred_binding": (
+                request.deferred_binding.model_dump_json() if request.deferred_binding is not None else None
+            ),
+            "run_input": json.dumps(request.run_input) if request.run_input is not None else None,
+            "door_id": request.door_id,
+            "deferred_output_stages": (
+                request.deferred_output_stages.model_dump_json() if request.deferred_output_stages is not None else None
+            ),
+        }
+        state_mapping.update({field: value for field, value in optional.items() if value is not None})
 
     def _queue_record_writes(
         self,

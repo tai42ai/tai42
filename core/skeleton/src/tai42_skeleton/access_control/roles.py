@@ -65,6 +65,10 @@ from tai42_skeleton.access_control import management
 from tai42_skeleton.access_control.policy_store import ac_policy_store
 from tai42_skeleton.access_control.store import access_control_store
 from tai42_skeleton.access_control.user import is_admin_policy
+from tai42_skeleton.routers.paths import AUTH_API_PREFIX
+from tai42_skeleton.template.references import assert_templates_stored
+from tai42_skeleton.template.stored_refs import condition_template_refs
+from tai42_skeleton.versioning.restore_checks import register_restore_check
 
 _KIND = "role"
 
@@ -81,12 +85,13 @@ RESERVED_ADMIN_ROLE = "admin"
 ROLE_POINTER_KEY = "role"
 
 # The platform-owned control-plane ceiling clause: everything OUTSIDE ``/api/auth`` (the
-# control-plane boundary the seed fences, not a route). Every caller self-service surface
+# control-plane boundary the seed fences, not a route; the one prefix
+# :func:`~tai42_skeleton.access_control.role_gate.role_reach` reads too). Every caller self-service surface
 # under it is carved back in from its route's ``self_service`` declaration (see
 # :func:`_self_service_route_clauses`), so the platform names no route here — its own or a
 # provider's. The admin-only mutation fence is the route action-class (enforced in code), not
 # composed here.
-_EDITOR_FIXED_CARVE = '((.request.path | startswith("/api/auth")) | not)'
+_EDITOR_FIXED_CARVE = f"((.request.path | startswith({json.dumps(AUTH_API_PREFIX)})) | not)"
 
 # The methods a viewer's read-only ceiling admits on any surface.
 _READ_METHODS = ("GET", "HEAD", "OPTIONS")
@@ -179,16 +184,18 @@ def viewer_jq() -> str:
 
 
 def grantable_feature_tags() -> set[str]:
-    """Every feature-group tag carrying at least one GRANTABLE gated route — the tags a level can open.
+    """Every feature-group tag carrying at least one route a role's per-tag level opens — the tags a level can open.
 
-    A GRANTABLE route is ``read``/``write`` and non-fenced. A tag whose routes are ALL
-    fenced/secret is admin-only and never appears here (a level can never open it).
+    A tag whose routes are all admin-only (fenced/secret, or control-plane routes the base
+    tier reserves) or self-service (every role keeps them without a level) or public
+    (answered without a login) never appears here.
     """
+    from tai42_skeleton.access_control.role_gate import role_reach
     from tai42_skeleton.app.route_registry import load_all_routes
 
     tags: set[str] = set()
     for meta in load_all_routes():
-        if meta.authed and meta.action in ("read", "write"):
+        if role_reach(meta) == "level":
             tags.update(meta.tags)
     return tags
 
@@ -333,6 +340,14 @@ def role_store() -> RoleStoreView:
     from tai42_skeleton.versioning import versioned_store
 
     return RoleStoreView(versioned_store())
+
+
+async def _role_restore_check(name: str, body: dict[str, Any]) -> None:
+    """The role kind's restore check: the stored template id the active body's ``condition`` names must exist."""
+    await assert_templates_stored(condition_template_refs(body.get("condition")), ValueError)
+
+
+register_restore_check(_KIND, _role_restore_check)
 
 
 @asynccontextmanager

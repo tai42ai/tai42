@@ -175,9 +175,9 @@ def market_installer() -> Iterator[MarketInstaller]:
 
 @pytest.fixture(scope="session")
 def fixture_artifacts(tmp_path_factory: pytest.TempPathFactory) -> FixtureArtifacts:
-    """Forge the six wheels (alpha 0.1.0/0.2.0, beta 0.1.0, gamma 0.1.0, epsilon
-    0.1.0, eta 0.1.0) and the two delta source tarballs (0.1.0/0.2.0) once per
-    session — the artifacts are immutable and shared across modules."""
+    """Forge every fixture artifact (:class:`FixtureArtifacts`: the pypi-sourced wheels and
+    the two delta source tarballs) once per session — the artifacts are immutable and
+    shared across modules."""
     return forge_fixture_artifacts(tmp_path_factory.mktemp("artifacts"))
 
 

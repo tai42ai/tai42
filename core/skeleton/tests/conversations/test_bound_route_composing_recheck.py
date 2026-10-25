@@ -5,12 +5,14 @@ re-check."""
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 import pytest
 from fastmcp.tools import Tool
 from tai42_contract.conversations import ApiConversationRoute, ConversationRoute
 from tai42_contract.presets import PresetBody
+from tai42_contract.tools import ComposedToolRef
 from tai42_contract.versioning.errors import DocumentNotFoundError
 
 from tai42_skeleton.app.conversations_facet import ConversationsFacet
@@ -51,6 +53,12 @@ class _FakeAgents:
         return {}
 
 
+class _FakePresetManager:
+    def is_registered(self, name: str) -> bool:
+        # No preset is a live tool here: every body settles on its own base.
+        return False
+
+
 class _FakeTools:
     def __init__(self, tools: dict[str, Tool]) -> None:
         self._tools = tools
@@ -63,8 +71,18 @@ class _FakeTools:
             raise UnknownToolError(key)
         return tool
 
-    def tool_refs_extractor(self, base_tool: str) -> None:
+    def tool_refs_extractor(self, base_tool: str) -> Callable[[dict[str, Any]], list[ComposedToolRef]] | None:
+        # The ``composer`` base declares the tools its ``tool_names`` config composes.
+        if base_tool != "composer":
+            return None
+        return lambda kwargs: [ComposedToolRef(name=name) for name in kwargs.get("tool_names", [])]
+
+    def template_refs_extractor(self, base_tool: str) -> None:
         return None
+
+    def base_of(self, name: str) -> str:
+        # No extension branches are bound in this fake: every name is its own base.
+        return name
 
 
 class _FakeManager:
@@ -79,6 +97,7 @@ class _FakeApp:
     def __init__(self, bodies: dict[str, PresetBody], tools: dict[str, Tool]) -> None:
         self.presets = _FakePresets(bodies)
         self.agents = _FakeAgents()
+        self.preset_manager = _FakePresetManager()
         self.tools = _FakeTools(tools)
         self._target_validator_registry = TargetBindValidatorRegistry()
         self.conversations = ConversationsFacet(self)  # pyright: ignore[reportArgumentType]
@@ -140,7 +159,7 @@ def wired_composing(monkeypatch):
 
 
 async def test_a_save_breaking_a_composing_route_is_refused_naming_it(wired_composing):
-    from tai42_skeleton.operations.presets.references import _assert_bound_routes_still_bind
+    from tai42_skeleton.operations.reference_graph import _assert_bound_routes_still_bind
 
     broken_p = PresetBody(base_tool="composer", description="d", fixed_kwargs={"broken": True})
     with pytest.raises(ConflictError, match=r"'rq'.*composes broken preset 'p'"):
@@ -148,7 +167,7 @@ async def test_a_save_breaking_a_composing_route_is_refused_naming_it(wired_comp
 
 
 async def test_a_save_keeping_a_composing_route_valid_passes(wired_composing):
-    from tai42_skeleton.operations.presets.references import _assert_bound_routes_still_bind
+    from tai42_skeleton.operations.reference_graph import _assert_bound_routes_still_bind
 
     good_p = PresetBody(base_tool="composer", description="d", fixed_kwargs={"note": "fine"})
     await _assert_bound_routes_still_bind("p", good_p)
@@ -156,7 +175,7 @@ async def test_a_save_keeping_a_composing_route_valid_passes(wired_composing):
 
 async def test_the_candidate_does_not_leak_after_the_recheck(wired_composing):
     from tai42_skeleton.app import instance
-    from tai42_skeleton.operations.presets.references import _assert_bound_routes_still_bind
+    from tai42_skeleton.operations.reference_graph import _assert_bound_routes_still_bind
 
     broken_p = PresetBody(base_tool="composer", description="d", fixed_kwargs={"broken": True})
     with pytest.raises(ConflictError):

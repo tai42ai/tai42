@@ -12,8 +12,12 @@ from tai42_agents.claude_code.skills_sync import _dest_path as dest_path
 
 from ._claude_app import build_local_app
 
-_TEMPLATES = {
+# A PNG signature: the 0x89 lead byte is not valid UTF-8.
+_PNG = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
+
+_TEMPLATES: dict[str, str | bytes] = {
     "skills/jq/SKILL.md": "# jq skill",
+    "skills/jq/assets/logo.png": _PNG,
     "skills/jq/references/guide.md": "reference body",
     "skills/jq/scripts/run.sh": "echo hi",
     "skills/other/SKILL.md": "# other skill",
@@ -41,6 +45,8 @@ def test_copies_the_whole_skill_tree_including_scripts_and_references() -> None:
     assert files["project/.claude/skills/jq/SKILL.md"] == b"# jq skill"
     assert files["project/.claude/skills/jq/references/guide.md"] == b"reference body"
     assert files["project/.claude/skills/jq/scripts/run.sh"] == b"echo hi"
+    # A bundled binary asset lands byte-for-byte, never read as text.
+    assert files["project/.claude/skills/jq/assets/logo.png"] == _PNG
     # A non-requested skill is never copied.
     assert not any("other" in path for path in files)
 

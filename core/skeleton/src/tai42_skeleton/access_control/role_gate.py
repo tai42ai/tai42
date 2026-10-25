@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import re
 from enum import Enum
+from typing import Literal
 
 from tai42_kit.settings import register_settings_reset
 
@@ -28,6 +29,7 @@ from tai42_skeleton.app.route_registry import (
     route_registry,
 )
 from tai42_skeleton.middleware.audit_log import UNMATCHED_ROUTE
+from tai42_skeleton.routers.paths import AUTH_API_PREFIX
 
 # A role's editable grant map: feature-group TAG name → its access level. An absent tag
 # is treated as ``none`` (deny) — the default-deny posture the whole gate rests on.
@@ -37,6 +39,9 @@ RoleGrants = dict[str, str]
 # satisfies read+write, ``read`` satisfies read, ``none`` satisfies nothing.
 _LEVEL_RANK: dict[str, int] = {"none": 0, "read": 1, "write": 2}
 _ACTION_RANK: dict[str, int] = {"read": 1, "write": 2}
+
+# What opens a route for a non-admin role (see :func:`role_reach`).
+RoleReach = Literal["level", "self_service", "admin_only", "public"]
 
 
 class DenialCause(Enum):
@@ -79,6 +84,27 @@ def grant_map_admits(meta: RouteMetadata, method: str, grants: RoleGrants) -> tu
         if level_satisfies(grants.get(tag, "none"), derived):
             return True, None
     return False, DenialCause.LEVEL_MISS
+
+
+def role_reach(meta: RouteMetadata) -> RoleReach:
+    """A route's role reach: what opens it for a non-admin role.
+
+    ``public`` when the route is not authenticated (it answers everyone without a login);
+    ``level`` when a role's per-tag level opens it; ``self_service`` when every non-admin
+    role keeps it without a level (the base-tier jq carves it in from the same
+    declaration); ``admin_only`` when a ``fenced``/``secret`` action class reserves it, or
+    when it is a control-plane route the base-tier ceiling reserves (a path under the
+    ``/api/auth`` prefix the base-tier jq refuses every non-self-service request on).
+    """
+    if not meta.authed:
+        return "public"
+    if meta.action in ("fenced", "secret"):
+        return "admin_only"
+    if meta.self_service:
+        return "self_service"
+    if canonicalize_path(meta.path).startswith(AUTH_API_PREFIX):
+        return "admin_only"
+    return "level"
 
 
 # -- concrete (path, method) → registered route resolution -------------------

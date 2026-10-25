@@ -1,54 +1,41 @@
-"""Firing the generic resume continuation of an async ``ask`` park.
+"""Driving the generic resume continuation of an async ``ask`` park and delivering its terminal.
 
 An async park stores a generic ``continuation_tool`` and the ``continuation_identity``
 to run it as. When the park resolves — a human/callback ANSWER, or the expiry
-reaper — the continuation fires EXACTLY ONCE, bound to the stored identity (never
-the answerer's), carrying only ``{interaction_id, answer, reply_to, params}``. The seam is
-flow-blind: it runs a registered tool name under a rebound execution identity and
-knows nothing of the driver's resume state.
+reaper — the continuation runs bound to the stored identity (never the answerer's),
+carrying only ``{interaction_id, ask_result}``. The seam is flow-blind: it runs
+a registered tool name under a rebound execution identity and knows nothing of the
+driver's resume state. Firing the drive once per resolving claim, and redelivering it
+from the durable continuation-due record, lives in
+:mod:`tai42_skeleton.interactions.continuation_dispatch`.
 
-The single-fire guarantee is the atomic answer claim (``record_answer``): both
-answer doors and the reaper resolve a park through it, and only the one caller
-whose claim commits fires the continuation.
-
-Delivery is DURABLE and AT-LEAST-ONCE, via a transactional outbox. Firing is a
-detached task, so a worker crash after the claim but before ``run_tool`` returns
-would otherwise lose the resume forever. To close that with ZERO window, the
-durable, self-contained, FLOW-BLIND continuation-due record (tool NAME + the answer, the
-quoted message's medium id and the params + stored identity + fingerprint) is enqueued in the
-SAME atomic MULTI as the resolving claim (``InteractionStore.record_answer``) —
-so a claimed answer can never exist without its due-record. Every resolution door
-(authenticated answer, callback answer, expiry reaper) funnels through that claim,
-so all three are covered by construction. ``dispatch_continuation`` then only spawns
-the detached drive-and-deliver task; the drive resumes the run, DELIVERS its terminal
-through the one platform ladder (``drive_and_deliver`` → ``_deliver_terminal``: fire the
-run's out-of-band address, else park a waiting outcome on its subject, else drop), and
-clears the record only after the terminal is delivered. A record still present past a
-healthy drive's window is the reaper's signal to redeliver. Delivery is at-least-once —
-a redelivery (or a slow-but-healthy drive the reaper laps) may re-drive the same run — so
-every ladder rung is IDEMPOTENT, keyed by the run's per-run ``completion_id``: an address
-fire dedupes, a waiting outcome writes once, and re-driving is harmless.
+The drive resumes the run, DELIVERS its terminal through the one platform ladder
+(``drive_and_deliver`` → ``_deliver_terminal``: fire the run's out-of-band address, else
+park a waiting outcome on its subject, else drop), and clears the continuation-due record
+only after the terminal is delivered. A record still present past a healthy drive's window
+is the reaper's signal to redeliver. Delivery is at-least-once — a redelivery (or a
+slow-but-healthy drive the reaper laps) may re-drive the same run — so every ladder rung is
+IDEMPOTENT, keyed by the run's per-run ``completion_id``: an address fire dedupes, a waiting
+outcome writes once, and re-driving is harmless.
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import AbstractContextManager, asynccontextmanager, nullcontext
-from datetime import UTC, datetime
-from typing import Any, Final
+from typing import Any
 
 from tai42_contract.app import tai42_app
+from tai42_contract.errors import ErrorKind
 from tai42_contract.interactions import (
     EXPIRY_ANSWER,
     PARK_COMPLETION_FAILED,
     PARK_COMPLETION_SUCCEEDED,
     PARK_COMPLETION_WITHDRAWN,
+    AskAnswer,
     CallerAskLanding,
     DeliveryAddress,
-    InteractionRequest,
-    InteractionResponse,
     ParkRunTakenDownError,
     ResumeBuffered,
     RunFailed,
@@ -56,20 +43,23 @@ from tai42_contract.interactions import (
     SuspendedInteraction,
     declare_caller_ask_landing,
 )
+from tai42_contract.presets import PresetParkStages, preset_output_failed_outcome
 from tai42_contract.states import StateBinding, StateContext, SubjectCandidates
 from tai42_contract.tools import RunDelivery, run_delivery
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.redis import RedisClient
+from tai42_kit.interactions.park_giveup import ParkGiveUpFailure, fire_park_giveup
+from tai42_kit.presets import PresetOutputError, run_output_stages
 from tai42_kit.utils.detached_util import mark_detached_run, reset_detached_run
 
-from tai42_skeleton.app.root_task import spawn_root_task
 from tai42_skeleton.authz.execution import bind_execution_identity
 from tai42_skeleton.conversations.reply_to import resolve_ask_reply_to
 from tai42_skeleton.interactions.run_completion import apply_deferred_binding, run_completion_id
-from tai42_skeleton.interactions.settings import InteractionsSettings, interactions_settings
-from tai42_skeleton.interactions.store import ContinuationDue, InteractionStore
+from tai42_skeleton.interactions.settings import interactions_settings
+from tai42_skeleton.interactions.store import InteractionStore
 from tai42_skeleton.runs.chokepoint import delivery_fire, resume_lineage, resume_origin
 from tai42_skeleton.states.context import current_state_context, state_context
+from tai42_skeleton.tools.stage_frames import current_drive_output_stages, drive_output_stages
 
 # The out-of-band delivery address the platform captured on a resumed interaction: the door that
 # started the run, or ``None`` for a receiver-less run.
@@ -77,42 +67,7 @@ _Delivery = DeliveryAddress | None
 
 logger = logging.getLogger(__name__)
 
-# The skeleton-side surface both answer doors and the reaper resolve a park through.
-# ``EXPIRY_ANSWER`` is re-exported from the contract so callers reach the fire seam
-# and the expiry marker from one place.
-__all__ = [
-    "EXPIRY_ANSWER",
-    "EXPIRY_ANSWERED_BY",
-    "continuation_due_timing",
-    "dispatch_continuation",
-    "drive_and_deliver",
-    "fire_continuation_after_claim",
-    "redeliver_continuation",
-]
-
-# Recorded as the answerer when the reaper resolves a park by expiry — a namespaced
-# system sentinel that cannot collide with a looked-up user id.
-EXPIRY_ANSWERED_BY: Final[str] = "system:expiry"
-
-# Strong references to in-flight detached continuation tasks. The event loop holds
-# only a WEAK reference to a bare ``create_task`` result, so without this a
-# continuation could be garbage-collected mid-flight and its resume silently
-# dropped. Each task removes itself in its done-callback.
-_CONTINUATION_TASKS: set[asyncio.Task[Any]] = set()
-
-
-def _log_continuation_done(task: asyncio.Task[Any], tool: str, interaction_id: str) -> None:
-    """Surface a detached continuation's outcome loudly.
-
-    A cancellation (shutdown) is a WARNING; any other failure — including a refused rebind of a since-disabled
-    key — is an ERROR: the park resolved but its driver never resumed, which must never be swallowed.
-    """
-    if task.cancelled():
-        logger.warning("interaction %s continuation %r was cancelled before completing", interaction_id, tool)
-        return
-    exc = task.exception()
-    if exc is not None:
-        logger.error("interaction %s continuation %r failed", interaction_id, tool, exc_info=exc)
+__all__ = ["drive_and_deliver"]
 
 
 def _is_nonterminal(result: Any) -> bool:
@@ -204,10 +159,12 @@ async def _run_continuation(
     params: dict[str, str] | None,
     mark_detached: bool = True,
 ) -> Any:
-    """Run ``tool`` with ``{interaction_id, answer, reply_to, params}`` in the park's continuation frame.
+    """Run ``tool`` with ``{interaction_id, ask_result}`` in the park's continuation frame.
 
-    ``reply_to`` is the message the answering reply quoted, resolved here from the ask's thread (so
-    a redelivery reads the record as it is then), as its JSON; ``None`` when the reply quoted none.
+    ``ask_result`` is the value the parked call reads in place of the ask, always the
+    :class:`~tai42_contract.interactions.AskAnswer` JSON a synchronous ask returns, its ``reply_to``
+    resolved here from the ask's thread (so a redelivery reads the record as it is then). On an
+    expiry its ``answer`` is the expiry marker and ``reply_to`` and ``params`` are null.
 
     The frame (:func:`_continuation_scope`) binds ``resume_origin(interaction_id)`` UNCONDITIONALLY
     (the origin names the interaction being resumed regardless of who receives the outcome); the
@@ -217,18 +174,78 @@ async def _run_continuation(
     An inline resume under a live caller passes ``mark_detached=False`` to run under that caller's
     budget. The run-DELIVERY context settle (re-establishing the stored context, or leaving the
     resumer's own in place) is the caller's — :func:`drive_and_deliver` binds it around this drive
-    by ``receives_outcome``.
+    by ``receives_outcome``, with the park's captured output stages.
+
+    Inside the frame, before the continuation runs, the park's answer stages map the AskAnswer JSON,
+    as a preset's live output stage maps what its asking base returns; they do not run on an expiry
+    or a failure. A refusal ends the park through its driver's give-up handlers in this same
+    frame (:func:`_give_up_on_answer_stage`); the continuation never runs.
     """
     async with _continuation_scope(
         identity, fingerprint, interaction_id, park_context, caller_ask_landing, chain_keys, mark_detached=mark_detached
     ):
-        reply_to = (
-            None
-            if reply_to_medium_message_id is None
-            else (await resolve_ask_reply_to(interaction_id, reply_to_medium_message_id)).model_dump(mode="json")
-        )
-        arguments = {"interaction_id": interaction_id, "answer": answer, "reply_to": reply_to, "params": params}
+        ask_result = await _ask_answer_json(interaction_id, answer, reply_to_medium_message_id, params)
+        stages = current_drive_output_stages()
+        if stages is not None and stages.answer and not _is_expiry_or_failure(answer):
+            refusal: PresetOutputError | None = None
+            try:
+                ask_result = await run_output_stages(stages.answer, ask_result)
+            except PresetOutputError as exc:
+                refusal = exc
+            if refusal is not None:
+                return await _give_up_on_answer_stage(interaction_id, refusal)
+        arguments = {"interaction_id": interaction_id, "ask_result": ask_result}
         return await tai42_app.tools.run_tool(tool, arguments, continues_chain=park_asked_by)
+
+
+def _is_expiry_or_failure(answer: Any) -> bool:
+    """Whether ``answer`` is the expiry marker or a failure, which the answer stages do not map."""
+    return answer == EXPIRY_ANSWER or isinstance(answer, RunFailed)
+
+
+async def _ask_answer_json(
+    interaction_id: str, answer: Any, reply_to_medium_message_id: str | None, params: dict[str, str] | None
+) -> dict[str, Any]:
+    """The ``AskAnswer`` JSON a synchronous ask returns for ``answer``, its quoted message resolved."""
+    reply_to = (
+        None
+        if reply_to_medium_message_id is None
+        else await resolve_ask_reply_to(interaction_id, reply_to_medium_message_id)
+    )
+    return AskAnswer(answer=answer, reply_to=reply_to, params=params).model_dump(mode="json")
+
+
+async def _give_up_on_answer_stage(interaction_id: str, refusal: PresetOutputError) -> Any:
+    """End a park whose answer stage refused the answer, through its driver's give-up handlers.
+
+    Each handler is handed the refusal as a :class:`ParkGiveUpFailure` (an upstream error, no
+    transport). A handler's returned ``RunFailed`` is the run's failed terminal, raised as
+    :class:`RunTerminalFailed` with its ``reply``; any other return is the drive's result. With
+    no handler owning the park the run fails with the preset's FAILED outcome and no ``reply``.
+    """
+    text = str(refusal)
+    outcome = preset_output_failed_outcome(refusal.preset, text)
+    handled = await fire_park_giveup(
+        interaction_id, ParkGiveUpFailure(outcome, text, "PresetOutputError", ErrorKind.UPSTREAM_ERROR, False)
+    )
+    if handled is None:
+        raise RunTerminalFailed(outcome)
+    if isinstance(handled.result, RunFailed):
+        raise RunTerminalFailed(handled.result.outcome, reply=handled.result.reply)
+    return handled.result
+
+
+async def apply_terminal_stages(stages: PresetParkStages | None, result: Any) -> Any:
+    """``result`` with the park's terminal stages applied; a refusal raises the run's :class:`RunTerminalFailed`.
+
+    A ``RunFailed`` and a re-park (:func:`_is_nonterminal`) pass through untouched.
+    """
+    if stages is None or not stages.terminal or _is_nonterminal(result):
+        return result
+    try:
+        return await run_output_stages(stages.terminal, result)
+    except PresetOutputError as exc:
+        raise RunTerminalFailed(preset_output_failed_outcome(exc.preset, str(exc))) from exc
 
 
 async def _deliver_terminal(
@@ -398,6 +415,7 @@ async def drive_and_deliver(
     deferred_binding: StateBinding | None = None,
     run_input: Mapping[str, Any] | None = None,
     door_id: str | None = None,
+    output_stages: PresetParkStages | None = None,
 ) -> Any:
     """The ONE delivery chokepoint every continuation runs through — drive, then deliver its terminal.
 
@@ -436,6 +454,13 @@ async def drive_and_deliver(
     refuses because its run was taken down (``ParkRunTakenDownError``) propagates to a live
     receiver and, receiver-less, delivers nothing and is logged at INFO.
 
+    ``output_stages`` are the preset output stages the park captured, bound around the drive
+    (:func:`~tai42_skeleton.tools.stage_frames.drive_output_stages`): the answer stages map the
+    ``AskAnswer`` JSON before the continuation receives it as its ``ask_result``, the chained
+    stages settle a chained run's terminal fired inside the drive, and the terminal stages map a
+    terminal success before the deferred binding reads it and before it is delivered; a terminal
+    stage's refusal is a ``RunTerminalFailed`` handled as above.
+
     The due record is cleared only AFTER a terminal is delivered, so a transient delivery failure
     leaves it for the reaper. Returns the inline receiver's outcome (or the non-terminal value); a
     receiver-less drive returns ``None``.
@@ -459,7 +484,7 @@ async def drive_and_deliver(
     )
     park_failed: RunTerminalFailed | None = None
     try:
-        with run_delivery_ctx, deferred_ctx:
+        with run_delivery_ctx, deferred_ctx, drive_output_stages(output_stages):
             result = await _run_continuation(
                 identity,
                 fingerprint,
@@ -474,6 +499,7 @@ async def drive_and_deliver(
                 params=params,
                 mark_detached=not receives_outcome,
             )
+            result = await apply_terminal_stages(output_stages, result)
     except RunTerminalFailed as exc:
         if receives_outcome:
             # A live receiver owns the failure: clear the record and propagate it to the resumer.
@@ -590,172 +616,6 @@ async def _deliver_run_outcome(
         run_delivery_id=run_delivery_id,
         candidates=candidates,
     )
-
-
-def _spawn_detached_delivery(
-    store: InteractionStore,
-    *,
-    identity: str,
-    fingerprint: str | None,
-    tool: str,
-    interaction_id: str,
-    answer: Any,
-    reply_to_medium_message_id: str | None,
-    params: dict[str, str] | None,
-    park_context: StateContext | None,
-    park_asked_by: Sequence[str],
-    caller_ask_landing: CallerAskLanding | None,
-    chain_keys: Sequence[str],
-    delivery: _Delivery,
-    run_delivery_id: str | None,
-    candidates: SubjectCandidates | None,
-    deferred_binding: StateBinding | None = None,
-    run_input: Mapping[str, Any] | None = None,
-    door_id: str | None = None,
-) -> None:
-    """Spawn the detached drive-and-deliver task, holding a strong reference until it ends.
-
-    The loop's own reference is weak, so an untracked task can be GC'd mid-flight and lose the
-    resume; the done-callback drops the reference and surfaces the outcome loudly. Detached
-    (``receives_outcome=False``): no live caller, so the ladder fires the address / subject-tracks
-    / drops the terminal.
-    """
-    task = spawn_root_task(
-        drive_and_deliver(
-            store,
-            identity=identity,
-            fingerprint=fingerprint,
-            tool=tool,
-            interaction_id=interaction_id,
-            answer=answer,
-            reply_to_medium_message_id=reply_to_medium_message_id,
-            params=params,
-            park_context=park_context,
-            park_asked_by=park_asked_by,
-            caller_ask_landing=caller_ask_landing,
-            chain_keys=chain_keys,
-            delivery=delivery,
-            run_delivery_id=run_delivery_id,
-            candidates=candidates,
-            receives_outcome=False,
-            deferred_binding=deferred_binding,
-            run_input=run_input,
-            door_id=door_id,
-        ),
-        name=f"interaction-continuation-{interaction_id}",
-    )
-    _CONTINUATION_TASKS.add(task)
-
-    def _on_done(t: asyncio.Task[Any]) -> None:
-        _CONTINUATION_TASKS.discard(t)
-        _log_continuation_done(t, tool, interaction_id)
-
-    task.add_done_callback(_on_done)
-
-
-def continuation_due_timing(settings: InteractionsSettings) -> tuple[int, int]:
-    """``(record TTL, first-attempt time in ms)`` for a durable continuation-due record, computed at call time.
-
-    TTL = the idle retention horizon; the first
-    redelivery attempt is seeded one reaper interval out, so a healthy fire clears the
-    record before the reaper would ever redeliver it. Callers pass these to
-    ``record_answer`` so the outbox enqueue commits in the SAME transaction as the
-    claim; the caller supplies its own ``settings`` (the store holds none).
-    """
-    now_ms = int(datetime.now(UTC).timestamp() * 1000)
-    return settings.idle_ttl_seconds, now_ms + int(settings.expiry_reaper_interval_seconds * 1000)
-
-
-def dispatch_continuation(
-    store: InteractionStore, request: InteractionRequest, fingerprint: str | None, response: InteractionResponse
-) -> None:
-    """Fire ``request``'s stored continuation ONCE with ``response``, as its stored identity.
-
-    A no-op for a sync question.
-
-    Call only after a TRUE claim, which has ALREADY enqueued the
-    durable continuation-due record ATOMICALLY (see ``InteractionStore.record_answer``);
-    this only spawns the detached run-and-clear task. Detached so neither a slow resume
-    nor a rebind refusal blocks (or 500s) the door that committed the answer; the task
-    clears the durable record when ``run_tool`` returns.
-    """
-    if request.mode != "async" or request.continuation_tool is None:
-        return
-    # The model's async validator guarantees the identity is set alongside the tool.
-    if request.continuation_identity is None:
-        raise AssertionError
-    candidates = (
-        request.continuation_state_context.candidates if request.continuation_state_context is not None else None
-    )
-    _spawn_detached_delivery(
-        store,
-        identity=request.continuation_identity,
-        fingerprint=fingerprint,
-        tool=request.continuation_tool,
-        interaction_id=request.interaction_id,
-        answer=response.answer,
-        reply_to_medium_message_id=response.reply_to_medium_message_id,
-        params=response.params,
-        park_context=request.continuation_state_context,
-        park_asked_by=request.asked_by,
-        caller_ask_landing=request.caller_ask_landing,
-        chain_keys=request.chain_keys,
-        delivery=request.delivery,
-        run_delivery_id=request.run_delivery_id,
-        candidates=candidates,
-        deferred_binding=request.deferred_binding,
-        run_input=request.run_input,
-        door_id=request.door_id,
-    )
-
-
-def redeliver_continuation(store: InteractionStore, due: ContinuationDue) -> None:
-    """The reaper's redelivery path: re-fire an already-persisted continuation-due record WITHOUT re-persisting.
-
-    The retry-claim already rescheduled its next attempt. A healthy fire delivers the run's terminal
-    and clears the record; a raised ``run_tool`` (or a raised delivery) leaves it for the next
-    backoff window. At-least-once — the ladder's per-run ``completion_id`` dedup covers a redelivery
-    that races the original fire to completion. The stored ``delivery`` address and
-    ``run_delivery_id`` are re-established off the due record, and its ``chain_keys`` deposited as
-    the drive's resume lineage, so this detached redelivery binds the run's address, delivery
-    identity and chain lineage without re-reading the request.
-    """
-    candidates = due.state_context.candidates if due.state_context is not None else None
-    _spawn_detached_delivery(
-        store,
-        identity=due.identity,
-        fingerprint=due.fingerprint,
-        tool=due.tool,
-        interaction_id=due.interaction_id,
-        answer=due.answer,
-        reply_to_medium_message_id=due.reply_to_medium_message_id,
-        params=due.params,
-        park_context=due.state_context,
-        park_asked_by=due.asked_by,
-        caller_ask_landing=due.caller_ask_landing,
-        chain_keys=due.chain_keys,
-        delivery=due.delivery,
-        run_delivery_id=due.run_delivery_id,
-        candidates=candidates,
-        deferred_binding=due.deferred_binding,
-        run_input=due.run_input,
-        door_id=due.door_id,
-    )
-
-
-async def fire_continuation_after_claim(
-    r: Any, store: InteractionStore, request: InteractionRequest, response: InteractionResponse
-) -> None:
-    """The shared post-claim seam both answer doors call after a TRUE claim of ``response``.
-
-    Reads the stashed fire fingerprint and fires the stored continuation. A sync question is a
-    no-op; an async park fires its continuation (the claim already made this the sole
-    resolver AND atomically enqueued the durable due-record).
-    """
-    if request.mode != "async" or request.continuation_tool is None:
-        return
-    fingerprint = await store.continuation_fingerprint(r, request.interaction_id)
-    dispatch_continuation(store, request, fingerprint, response)
 
 
 def _current_state_context_for_park() -> StateContext | None:

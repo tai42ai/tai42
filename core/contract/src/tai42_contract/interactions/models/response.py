@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from tai42_contract.entry_params import validate_entry_params
 from tai42_contract.interactions.models.request import InteractionRequest
 from tai42_contract.interactions.reply_text import ReplyText
+from tai42_contract.preset_stages import PresetOutputStage
 from tai42_contract.reply_to import ReplyTo
 
 #: The MCP ``_meta`` key under which the platform's elicitation bridge hands an elicitation asker
@@ -36,8 +37,9 @@ class InteractionResponse(BaseModel):
     channel encodes it as string entries here. The SAME transport vocabulary
     (:func:`~tai42_contract.entry_params.validate_entry_params`) bounds it as every params seam;
     the platform attaches no meaning and NO TRUST. ``None`` means no enrichment — a plain answer.
-    The asker receives it as is, beside ``answer`` (:class:`AskAnswer` and the continuation
-    payload).
+    The asker receives it as is, beside ``answer``, in the :class:`AskAnswer` a synchronous ask
+    returns and, as JSON, in a continuation's ``ask_result`` (as a preset's output stage maps it,
+    when the park sits under one).
 
     ``medium_message_id`` is the id the medium gave the participant's reply message, the one a
     later quote names; ``None`` when the answer did not arrive as a message on a medium (an
@@ -67,6 +69,9 @@ class InteractionResponse(BaseModel):
 
 class AskAnswer(BaseModel):
     """The one value a synchronous asker receives: the answer, the message it quoted, and its params.
+
+    A parked ask's continuation is handed the same value as JSON, its ``ask_result``; on expiry its
+    ``answer`` is the expiry marker and ``reply_to`` and ``params`` are ``None``.
 
     ``answer`` is the answer value exactly as the answering party gave it; on a sensitive ask it is
     the :class:`~tai42_contract.secrets.SecretValue` wrapping it, held by reference, so dumping this
@@ -132,6 +137,10 @@ class SuspendedInteraction(BaseModel):
     # The subset of ``interaction_ids`` addressed to the CALLER (``to="caller"``). Empty for
     # a park of only user asks; a driver merges the per-ask subsets when it surfaces a step.
     caller_interaction_ids: list[str] = Field(default_factory=list)
+    # The stages of the preset dispatches this park passed through that the adopting driver applies
+    # when the nested run's result reaches it, innermost first. Excluded from every dump, so it
+    # never rides the marker, a log or a stored record; it exists only on the in-process object.
+    output_stages: list[PresetOutputStage] = Field(default_factory=list[PresetOutputStage], exclude=True)
 
     @model_validator(mode="after")
     def _default_interaction_ids(self) -> SuspendedInteraction:

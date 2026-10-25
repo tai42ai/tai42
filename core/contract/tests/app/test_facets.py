@@ -6,6 +6,7 @@ from __future__ import annotations
 import dataclasses
 import inspect
 import typing
+from contextlib import AbstractContextManager, nullcontext
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -29,14 +30,14 @@ def protocol_members(proto: type) -> set[str]:
     return {m for m in members if m not in _PROTOCOL_SCAFFOLDING and not m.startswith("__")}
 
 
-# The frozen facade surface: the 163 (sub-protocol, member) pairs over 159
+# The frozen facade surface: the 174 (sub-protocol, member) pairs over 170
 # distinct flat names. This is the
 # contract's own source of truth — no external lookup needed. Two leaf names
 # are shared: ``store`` (versioning + presets + tool_meta) and ``register``/``get``
 # (webhook_verifiers + channels), so the distinct-name union is four
 # fewer than the pair count.
 EXPECTED_FACADE = {
-    # tools (21)
+    # tools (25)
     "tool",
     "surface_generation",
     "toolkit",
@@ -51,8 +52,12 @@ EXPECTED_FACADE = {
     "unregister_tool_base",
     "register_rename_referee",
     "register_delete_referee",
+    "register_delete_cascade",
+    "delete_cascades",
     "register_detach_referee",
     "tool_refs_extractor",
+    "template_refs_extractor",
+    "kwargs_template_refs",
     "register_tier",
     "tier",
     "extras",
@@ -70,12 +75,17 @@ EXPECTED_FACADE = {
     "sandbox",
     "require_sandbox",
     "sandbox_policy",
-    # storage (5)
+    # storage (10)
     "register_storage",
     "resource_manager",
     "resolve_image",
     "on_template_evicted",
     "template_reads",
+    "mark_not_backed_up",
+    "not_backed_up_prefixes",
+    "mark_unlisted",
+    "unlisted_prefixes",
+    "register_template_delete_referee",
     # connectors (3)
     "register_connector",
     "token_store",
@@ -129,6 +139,7 @@ EXPECTED_FACADE = {
     "assert_delivery_authorized",
     "redelivery_horizon_seconds",
     "callback_url_prefix",
+    "settle_chained_terminal",
     # extensions (2)
     "extension",
     "available_extensions",
@@ -148,7 +159,7 @@ EXPECTED_FACADE = {
     "on_post_swap",
     "on_fleet_op_applied",
     "wait_until_ready",
-    # admin (10)
+    # admin (11)
     "reload_mcp",
     "deregister_mcp",
     "reload_config",
@@ -156,6 +167,7 @@ EXPECTED_FACADE = {
     "run_tool_reload",
     "reload_failed_mcps",
     "reprobe_failed_mcps",
+    "advertised_mcp_tools",
     "list_failed_mcps",
     "live_mcp_status",
     "live_manifest",
@@ -353,11 +365,11 @@ def test_facade_partition_against_frozen_surface():
     assert union == EXPECTED_FACADE, (
         f"only-facade={sorted(union - EXPECTED_FACADE)} only-frozen={sorted(EXPECTED_FACADE - union)}"
     )
-    # 163 (sub-protocol, member) pairs over 159 distinct names — ``store`` is exposed
+    # 174 (sub-protocol, member) pairs over 170 distinct names — ``store`` is exposed
     # by AppVersioning, AppPresets and AppToolMeta (two duplicate pairs), and
     # ``register``/``get`` by both AppWebhookVerifiers and AppChannels (one each).
-    assert len(union) == 159, f"union={len(union)}"
-    assert total == 163 == len(union) + 4, f"partition broken: sum={total} union={len(union)}"
+    assert len(union) == 170, f"union={len(union)}"
+    assert total == 174 == len(union) + 4, f"partition broken: sum={total} union={len(union)}"
 
 
 def test_taiapp_exposes_twenty_five_namespaces():
@@ -415,12 +427,20 @@ def test_config_manager_both_transaction_seams_required():
     # absent from the new document.
     from tai42_contract.config import ConfigManager
 
-    assert {"mutate_manifest", "replace_manifest", "replace_env"} <= ConfigManager.__abstractmethods__
+    assert {
+        "exclusive_write",
+        "mutate_manifest",
+        "replace_manifest",
+        "replace_env",
+    } <= ConfigManager.__abstractmethods__
 
     class FakeConfigManager(ConfigManager):
         def __init__(self) -> None:
             self._manifest: dict[str, Any] = {"a": 1, "b": 2}
             self._env: dict[str, str] = {}
+
+        def exclusive_write(self) -> AbstractContextManager[None]:
+            return nullcontext()
 
         def read_env(self) -> dict[str, str]:
             return dict(self._env)
@@ -634,6 +654,16 @@ def test_extension_registration_carries_declares_output_schema():
     assert param.default is False
 
 
+def test_extension_registration_carries_config_schema():
+    # An extension whose factory takes settings declares their JSON Schema at registration:
+    # keyword-only, defaulting to None.
+    from tai42_contract.app import AppExtensions
+
+    param = inspect.signature(AppExtensions.extension).parameters["config_schema"]
+    assert param.kind is inspect.Parameter.KEYWORD_ONLY
+    assert param.default is None
+
+
 def test_get_client_tools_returns_framework_neutral_handles():
     from tai42_contract.tools import AppTools
 
@@ -772,3 +802,112 @@ def test_accounts_facet_exposes_the_authenticated_credential():
     assert protocol_members(AppAccounts) == {"active_provider", "authenticated_credential"}
     signature = inspect.signature(AppAccounts.authenticated_credential)
     assert list(signature.parameters) == ["self", "request"]
+
+
+def test_kwargs_template_refs_is_an_async_reader_documenting_its_answer_and_raises():
+    from tai42_contract.app import AppTools
+
+    assert inspect.iscoroutinefunction(AppTools.kwargs_template_refs)
+    assert list(inspect.signature(AppTools.kwargs_template_refs).parameters) == ["self", "tool", "kwargs"]
+    doc = inspect.getdoc(AppTools.kwargs_template_refs) or ""
+    for phrase in ("one ``TemplateRef`` per id", "``site`` is the place inside", "``[]``", "``ValueError``"):
+        assert phrase in doc, phrase
+    assert "does not serve" in doc
+    assert "``RuntimeError``" in doc
+    assert "``tool_refs``" in doc
+    assert "``template_refs``" in doc
+
+
+def test_tool_decorator_takes_a_template_refs_extractor_beside_tool_refs():
+    from tai42_contract.app import AppTools
+
+    # A protocol's overloads have no runtime implementation to introspect, so the
+    # declared signature is read from the class source.
+    source = inspect.getsource(AppTools)
+    assert (
+        "        tool_refs: ToolRefsExtractor | None = None,\n"
+        "        template_refs: TemplateRefsExtractor | None = None,\n"
+    ) in source
+
+
+def test_storage_prefix_marks_and_template_delete_referee_signatures():
+    from tai42_contract.app import AppStorage
+
+    for name in ("mark_not_backed_up", "mark_unlisted"):
+        assert list(inspect.signature(getattr(AppStorage, name)).parameters) == ["self", "prefix"]
+    for name in ("not_backed_up_prefixes", "unlisted_prefixes"):
+        assert list(inspect.signature(getattr(AppStorage, name)).parameters) == ["self"]
+    assert list(inspect.signature(AppStorage.register_template_delete_referee).parameters) == ["self", "referee"]
+    assert "``ValueError``" in (inspect.getdoc(AppStorage.mark_not_backed_up) or "")
+
+
+def test_template_ref_is_frozen_and_refuses_an_empty_id_or_site_and_extra_fields():
+    from pydantic import ValidationError
+
+    from tai42_contract.tools import TemplateRef
+
+    ref = TemplateRef(id="prompts/a.j2", site="system_prompt")
+    assert (ref.id, ref.site) == ("prompts/a.j2", "system_prompt")
+    with pytest.raises(ValidationError):
+        TemplateRef(id="", site="system_prompt")
+    with pytest.raises(ValidationError):
+        TemplateRef(id="prompts/a.j2", site="")
+    with pytest.raises(ValidationError):
+        TemplateRef.model_validate({"id": "prompts/a.j2", "site": "s", "extra": 1})
+    with pytest.raises(ValidationError):
+        ref.id = "other"  # type: ignore[misc]
+
+
+def test_template_reference_types_are_exported():
+    import tai42_contract.tools as tools
+
+    for name in ("TemplateRef", "TemplateRefsExtractor", "TemplateDeleteReferee"):
+        assert name in tools.__all__
+        assert hasattr(tools, name)
+
+
+def test_binding_template_refs_answers_each_stored_id_at_its_site_in_field_order():
+    from tai42_contract.states import StateBinding, binding_template_refs
+
+    binding = StateBinding.model_validate(
+        {
+            "states": [
+                {
+                    "state": "counter",
+                    "subject_expr": {"id": "jq/subject.jq"},
+                    "scope_expr": {"content": "true"},
+                    "input_injections": [
+                        {"template_jq": "seed", "into": "a"},
+                        {"jq": {"id": "jq/inject.jq"}, "into": "b"},
+                    ],
+                    "updates": [
+                        {"template_jq": "bump", "adapter": {"id": "jq/adapter.jq"}, "op_id": {"id": "jq/op.jq"}},
+                        {"jq": {"id": "jq/custom.jq"}},
+                    ],
+                },
+                {
+                    "state": "other",
+                    "subject_expr": {"content": ".key"},
+                    "scope_expr": {"id": "jq/scope.jq"},
+                },
+            ]
+        }
+    )
+    refs = binding_template_refs(binding)
+    assert [(r.id, r.site) for r in refs] == [
+        ("jq/subject.jq", "states[0].subject_expr"),
+        ("jq/inject.jq", "states[0].input_injections[1].jq"),
+        ("jq/adapter.jq", "states[0].updates[0].adapter"),
+        ("jq/op.jq", "states[0].updates[0].op_id"),
+        ("jq/custom.jq", "states[0].updates[1].jq"),
+        ("jq/scope.jq", "states[1].scope_expr"),
+    ]
+
+
+def test_binding_template_refs_answers_nothing_for_inline_content():
+    from tai42_contract.states import StateBinding, binding_template_refs
+
+    binding = StateBinding.model_validate(
+        {"states": [{"state": "counter", "subject_expr": {"content": ".key"}, "updates": [{"jq": {"content": "[]"}}]}]}
+    )
+    assert binding_template_refs(binding) == []

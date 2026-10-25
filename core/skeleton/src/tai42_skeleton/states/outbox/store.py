@@ -21,8 +21,8 @@ from tai42_skeleton.states.store.person_gate import PersonAdmission, lock_person
 from .models import OutboxCall, OutboxItem, OutboxRow, OutboxSubject
 
 _COLUMNS = (
-    "id, status, record_keys, subject_keys, targets, states, run_id, trace_id, records, subjects, calls, "
-    "calls_done, attempts, next_attempt_at, claimed_by, lease_until, last_error, failed_phase, created_at, "
+    "id, status, record_keys, subject_keys, targets, states, run_id, trace_id, parent_span_id, records, subjects, "
+    "calls, calls_done, attempts, next_attempt_at, claimed_by, lease_until, last_error, failed_phase, created_at, "
     "records_applied_at, failed_at"
 )
 
@@ -44,6 +44,7 @@ def outbox_row(row: dict[str, Any]) -> OutboxRow:
         states=list(row["states"]),
         run_id=row["run_id"],
         trace_id=row["trace_id"],
+        parent_span_id=row["parent_span_id"],
         records=[OutboxItem.model_validate(item) for item in row["records"]],
         subjects=[OutboxSubject.model_validate(item) for item in row["subjects"]],
         calls=[OutboxCall.model_validate(item) for item in row["calls"]],
@@ -73,6 +74,7 @@ class _OutboxStore(_StoreBase):
         states: Sequence[str],
         run_id: str | None,
         trace_id: str | None,
+        parent_span_id: str | None,
         records: Sequence[OutboxItem],
         subjects: Sequence[OutboxSubject],
         calls: Sequence[OutboxCall],
@@ -91,8 +93,8 @@ class _OutboxStore(_StoreBase):
             await admit_persons_in_txn(await lock_person_gates_shared(cur, staged))
             await cur.execute(
                 "INSERT INTO state_outbox (status, records_applied_at, record_keys, subject_keys, targets, states, "  # noqa: S608 constant column list and status predicates, no input
-                f"run_id, trace_id, records, subjects, calls) VALUES ({status_sql}, "
-                "%s, %s, %s, %s, %s, %s, %s, %s, %s) "
+                f"run_id, trace_id, parent_span_id, records, subjects, calls) VALUES ({status_sql}, "
+                "%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
                 "RETURNING id",
                 (
                     list(record_keys),
@@ -101,6 +103,7 @@ class _OutboxStore(_StoreBase):
                     list(states),
                     run_id,
                     trace_id,
+                    parent_span_id,
                     Jsonb([item.model_dump(mode="json") for item in records]),
                     Jsonb([item.model_dump(mode="json") for item in subjects]),
                     Jsonb([call.model_dump(mode="json") for call in calls]),

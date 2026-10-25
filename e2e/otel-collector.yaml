@@ -50,6 +50,8 @@ exporters:
     endpoint: ${env:LANGFUSE_HOST}/api/public/otel
     headers:
       Authorization: Basic ${env:OTEL_COLLECTOR_LANGFUSE_AUTH}
+      # Without it Langfuse delays new data on its v2 reads by up to 15 minutes.
+      x-langfuse-ingestion-version: "4"
     sending_queue:
       enabled: true
       storage: file_storage

@@ -4,10 +4,12 @@
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import pytest
 from tai42_contract.access_control.identity import ApiKeyIdentityProvider, AuthIdentity, IdentityProvider
+from tai42_contract.access_control.models import AccessPolicy
 from tai42_contract.accounts import AccountsAdminServices
 from tai42_contract.template import TemplatedText
 from tai42_kit.access_control import registry
@@ -15,17 +17,22 @@ from tai42_kit.settings import reset_all_settings
 from tai42_kit.utils.data import run_jq_first
 
 import tai42_skeleton.versioning as versioning_module
+import tai42_skeleton.versioning.backup as versioning_backup
 from tai42_skeleton.access_control import management
 from tai42_skeleton.access_control.roles import (
     SkeletonAccountsAdminServices,
     apply_role,
     editor_jq,
+    grantable_feature_tags,
     role_store,
     seed_default_roles,
     viewer_jq,
 )
 from tai42_skeleton.access_control.store import access_control_store
+from tai42_skeleton.versioning.backup import import_versioned_documents
 
+from .._fakes.recording_storage import MappedStorage
+from ..versioning.test_backup import _FakeVersioningBackupPg
 from .conftest import FakeAccessControlPg, FakeRedis, make_client_ctx
 from .test_policy_store import _MemStore
 
@@ -356,6 +363,8 @@ _GRANTABLE_WRITE_DOORS = [
     ("/api/sub-mcp/weather", "DELETE"),
     ("/api/schedules", "POST"),
     ("/api/mcp-status/gh/reload", "POST"),
+    ("/api/mcp-status/acme/advertised-tools", "POST"),
+    ("/api/mcp-config/entries/acme/tool-filter", "PUT"),
     ("/api/tools/shout/extensions", "POST"),
     ("/api/tool-meta/tools/shout", "PATCH"),
     ("/api/hooks", "POST"),
@@ -376,6 +385,21 @@ async def test_unfenced_write_doors_are_grantable_to_editor(mem: _MemStore, path
     assert meta.action == "write"  # no fence — a grantable write
     allowed, _cause = await _level_allows("editor", path, method)
     assert allowed is True, f"{method} {path} should be grantable to a seeded editor"
+
+
+@pytest.mark.parametrize(
+    ("path", "method"),
+    [("/api/mcp-status/acme/advertised-tools", "POST"), ("/api/mcp-config/entries/acme/tool-filter", "PUT")],
+)
+async def test_the_mcp_tool_pick_doors_are_refused_to_a_viewer(mem: _MemStore, path, method):
+    from tai42_skeleton.access_control import role_grants as role_grants_module
+    from tai42_skeleton.access_control.role_gate import reset_route_index
+
+    role_grants_module.reset_role_grants_cache()
+    reset_route_index()
+    await seed_default_roles()
+    allowed, _cause = await _level_allows("viewer", path, method)
+    assert allowed is False, f"{method} {path} must be refused to a viewer"
 
 
 async def test_supply_chain_read_routes_stay_grantable(mem: _MemStore):
@@ -607,3 +631,107 @@ async def test_wildcard_scope_writes_cleanly_via_apply(mem, pg: FakeAccessContro
     await seed_default_roles()
     await apply_role("first-owner", "admin")
     assert pg.policy_body("first-owner")["scopes"] == ["*"]
+
+
+# -- a stored template id a role's condition names ---------------------------
+
+_ACL_LINE = "stored id 'jq/acl' at condition is not a stored template"
+
+
+@pytest.fixture
+def acl_store(monkeypatch) -> MappedStorage:
+    from tai42_skeleton.app import instance
+
+    storage = MappedStorage({})
+    monkeypatch.setattr(instance.app._storage_registry, "_provider", storage)
+    return storage
+
+
+@pytest.fixture
+def backup_pg(monkeypatch) -> _FakeVersioningBackupPg:
+    fake = _FakeVersioningBackupPg()
+
+    @asynccontextmanager
+    async def fake_client_ctx(client_cls, settings=None, **kwargs):
+        yield fake
+
+    monkeypatch.setattr(versioning_backup, "client_ctx", fake_client_ctx)
+    return fake
+
+
+def _role_row(doc_id: int, name: str, condition: dict) -> tuple[dict, dict]:
+    body = {
+        "name": name,
+        "description": "",
+        "base_tier": "viewer",
+        "scopes": ["*"],
+        "grants": {},
+        "condition": condition,
+    }
+    document = {
+        "id": doc_id,
+        "kind": "role",
+        "name": name,
+        "active_version": 1,
+        "is_active": True,
+        "created_at": "2024-01-01T00:00:00+00:00",
+    }
+    version = {
+        "id": doc_id,
+        "document_id": doc_id,
+        "version": 1,
+        "body": body,
+        "tags": [],
+        "created_at": "2024-01-01T00:00:00+00:00",
+    }
+    return document, version
+
+
+async def test_a_restored_role_naming_an_id_the_store_lacks_is_skipped_and_reported(
+    backup_pg: _FakeVersioningBackupPg, acl_store: MappedStorage
+) -> None:
+    bad_doc, bad_version = _role_row(1, "gated", {"id": "jq/acl"})
+    good_doc, good_version = _role_row(2, "inline", {"content": "true"})
+    report = await import_versioned_documents(
+        {"documents": [bad_doc, good_doc], "versions": [bad_version, good_version]}
+    )
+    assert report.errors == [f"role 'gated': {_ACL_LINE}"]
+    assert report.skipped == 1
+    assert [d["name"] for d in backup_pg.documents] == ["inline"]
+
+    acl_store.items["jq/acl"] = ".context.ok"
+    backup_pg.documents.clear()
+    backup_pg.versions.clear()
+    report = await import_versioned_documents({"documents": [bad_doc], "versions": [bad_version]})
+    assert report.errors == []
+    assert [d["name"] for d in backup_pg.documents] == ["gated"]
+
+
+async def test_rollback_to_a_version_naming_an_id_the_store_lacks_is_refused(
+    mem: _MemStore, pg: FakeAccessControlPg, redis_mgmt, monkeypatch, acl_store: MappedStorage
+) -> None:
+    import tai42_skeleton.operations.roles as roles_ops
+    from tai42_skeleton.operations._authority import Caller
+    from tai42_skeleton.operations.errors import BadRequestError
+
+    caller = Caller(caller_id="root", policy=AccessPolicy(scopes=["*"]), is_admin=True, owner_claim=None)
+
+    async def _resolve():
+        return caller
+
+    monkeypatch.setattr(roles_ops, "resolve_caller", _resolve)
+    await seed_default_roles()
+    tag = sorted(grantable_feature_tags())[0]
+    await roles_ops.create_role("ops", "x", "editor", {tag: "read"})  # v1
+    v1 = await role_store().get_active_body("ops")
+    await mem.save_version("role", "ops", {**v1, "condition": {"id": "jq/acl"}})  # v2
+    await roles_ops.update_role("ops", {tag: "write"}, None)  # v3
+
+    with pytest.raises(BadRequestError) as excinfo:
+        await roles_ops.rollback_role("ops", 2)
+    assert str(excinfo.value) == _ACL_LINE
+    assert mem.docs[("role", "ops")]["active"] == 3
+
+    acl_store.items["jq/acl"] = ".context.ok"
+    rolled = await roles_ops.rollback_role("ops", 2)
+    assert rolled["condition"] == {"id": "jq/acl"}

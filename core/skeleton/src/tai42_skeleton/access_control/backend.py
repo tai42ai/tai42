@@ -357,9 +357,10 @@ class AccessControlAuthBackend(AuthenticationBackend):
     ) -> None:
         # 5b. The per-tag LEVEL pass — Layer 2 of the (resource-x-action) model,
         # INTERSECTED with the base-tier jq above (fail-closed AND). Skipped for an admin
-        # governing role; a fenced/secret route is admin-only; a grantable route needs
-        # the governing role's per-tag level (the OWNER's role for an owned key — keys
-        # inherit the owner). A resolution/infra fault fails closed as a clean deny.
+        # governing role; a fenced/secret route is admin-only; a self-service route needs
+        # no level; any other grantable route needs the governing role's per-tag level
+        # (the OWNER's role for an owned key — keys inherit the owner). A
+        # resolution/infra fault fails closed as a clean deny.
         try:
             allowed, cause = await role_level_decision(
                 standing.policy, standing.owner_policy, canonical_path, method, version

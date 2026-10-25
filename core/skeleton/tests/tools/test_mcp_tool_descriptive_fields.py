@@ -64,7 +64,7 @@ def test_bound_tool_and_its_branch_reserve_title_annotations_icons_but_not_meta_
             bound_manifest.exclude_title_mcp_tools_map["svc"] = frozenset()
             app._tool_binding.register_tool_info("svc_listing", [["passw"]])
 
-            app._tool_binding.mcp_tools(_cfg(), [_advertised()])
+            app._tool_binding.mcp_tools(_cfg(), [_advertised()], frozenset())
 
             served = {tool.name: tool.to_mcp_tool() for tool in await app._fast_mcp.list_tools()}
             assert {"svc_listing", "svc_listing_passw"} <= served.keys()
@@ -91,7 +91,7 @@ def test_a_preset_and_its_branch_serve_the_connected_tools_hints_without_its_tit
             bound_manifest = app._tool_binding._require_manifest()
             bound_manifest.include_title_mcp_tools_map["svc"] = frozenset()
             bound_manifest.exclude_title_mcp_tools_map["svc"] = frozenset()
-            app._tool_binding.mcp_tools(_cfg(), [_advertised()])
+            app._tool_binding.mcp_tools(_cfg(), [_advertised()], frozenset())
 
             await app.preset_manager.register("listing_preset", "svc_listing", {}, [["passw"]], description="A preset.")
 

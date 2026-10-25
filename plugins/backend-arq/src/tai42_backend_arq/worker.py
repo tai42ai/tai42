@@ -28,6 +28,7 @@ from tai42_contract.backend.runtime import CONSUMING_RUNTIME, BackendRuntime, Ex
 from tai42_kit.clients.impl.redis import async_redis_from_url, redis_from_url_kwargs
 
 from tai42_backend_arq.pool import arq_redis_over, enqueue_client_kwargs
+from tai42_backend_arq.queues import check_queue_label, derived_queue
 from tai42_backend_arq.scheduler import recover_stalled_schedules, task_scheduler
 from tai42_backend_arq.settings import arq_settings, job_deserializer, job_serializer
 from tai42_backend_arq.tasks import callback_job, tool_execution
@@ -80,14 +81,14 @@ class ArqWorkerRuntime(BackendRuntime):
         """Construct the arq ``Worker`` from settings and the parsed options."""
         settings = arq_settings()
         options = self._options
+        queue_name = derived_queue(options["queue"])
         self._worker = Worker(
             job_serializer=job_serializer,
             job_deserializer=job_deserializer,
             functions=[func(task_scheduler), func(callback_job), func(tool_execution)],
-            # An unset ``--queue-name`` falls to the setting (``ARQ_QUEUE_NAME``), so the
-            # consume target tracks the enqueue pool's default without a CLI flag; an
-            # explicit flag still wins for a direct-CLI operator.
-            queue_name=options["queue_name"] or settings.queue_name,
+            # No ``--queue`` label consumes the settings queue (``ARQ_QUEUE_NAME``); a
+            # label consumes ``<ARQ_QUEUE_NAME>.<label>``, the queue tasks sent with it land on.
+            queue_name=queue_name,
             # A ready pool from the kit seam, so the connect and every command carry the
             # kit's logged connection retry (``ARQ_RETRY_ATTEMPTS``) and the socket timeouts;
             # arq runs no connect loop of its own over it. The pool is the worker's own and
@@ -98,7 +99,7 @@ class ArqWorkerRuntime(BackendRuntime):
                         {**enqueue_client_kwargs(), "url": options["redis_url"] or settings.redis.redis_url}
                     )
                 ),
-                queue_name=options["queue_name"] or settings.queue_name,
+                queue_name=queue_name,
             ),
             burst=options["burst"],
             keep_result=options["keep_result"],
@@ -186,11 +187,25 @@ async def _run_standalone(options: Mapping[str, Any]) -> None:
         await runtime.aclose()
 
 
+def _queue_label_option(ctx: click.Context, param: click.Parameter, value: str | None) -> str | None:
+    if value is None:
+        return None
+    try:
+        return check_queue_label(value)
+    except ValueError as exc:
+        raise click.BadParameter(str(exc), ctx=ctx, param=param) from exc
+
+
 @click.command("tai42-backend-arq")
 @click.option("--redis-url", default=None, help="Redis URL (defaults to ARQ_REDIS_URL)")
 @click.option("--burst", is_flag=True, help="Run in burst mode")
 @click.option("--keep-result", type=int, default=3600, help="Keep result seconds")
-@click.option("--queue-name", default=None, help="Queue name (defaults to ARQ_QUEUE_NAME)")
+@click.option(
+    "--queue",
+    default=None,
+    callback=_queue_label_option,
+    help="Queue label: consume <ARQ_QUEUE_NAME>.<label> instead of ARQ_QUEUE_NAME",
+)
 @click.option("--max-jobs", type=int, default=10, help="Max concurrent jobs")
 @click.option("--job-timeout", type=int, default=None, help="Job timeout seconds (defaults to ARQ_TASK_TIMEOUT)")
 @click.option("--poll-delay", type=float, default=0.5, help="Poll delay seconds")

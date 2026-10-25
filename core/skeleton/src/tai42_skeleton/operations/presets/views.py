@@ -5,7 +5,7 @@ The row / response dicts every preset door returns, built once so no two doors d
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from tai42_contract.manifest import ExtensionElement
 from tai42_contract.presets import PresetBody
@@ -14,7 +14,14 @@ from tai42_contract.template import TemplatedText
 from tai42_skeleton.app import instance
 from tai42_skeleton.app.bus import FleetResult
 from tai42_skeleton.operations._broadcast import fleet_fanout
-from tai42_skeleton.operations.presets.references import _reference_maps
+
+if TYPE_CHECKING:
+    from tai42_skeleton.operations.presets.create import CreateCrossReferences
+
+
+def _wire_body_field(value: Any) -> Any:
+    """A body field as the record row carries it: a stored-body reference as its JSON object, else as is."""
+    return value.model_dump(mode="json") if isinstance(value, TemplatedText) else value
 
 
 def _store_record_view(
@@ -40,8 +47,10 @@ def _store_record_view(
         "description": body.description,
         "active_version": active_version,
         "extensions": [list(combo) for combo in body.extensions],
-        "output_schema": body.output_schema,
-        "input_schema": body.input_schema,
+        "output_schema": _wire_body_field(body.output_schema),
+        "input_schema": _wire_body_field(body.input_schema),
+        "input_map": _wire_body_field(body.input_map),
+        "output_map": _wire_body_field(body.output_map),
         "conflicted": mgr.is_quarantined(name),
         "conflicted_reason": mgr.quarantine_reason(name),
         "uses": uses,
@@ -57,6 +66,8 @@ def _new_record_view(
     output_schema: TemplatedText | dict[str, Any] | None,
     input_schema: TemplatedText | dict[str, Any] | None,
     *,
+    input_map: TemplatedText | str | None,
+    output_map: TemplatedText | str | None,
     active_version: int,
     uses: list[str],
     used_by: list[str],
@@ -74,8 +85,10 @@ def _new_record_view(
         "description": description,
         "active_version": active_version,
         "extensions": [list(combo) for combo in extensions],
-        "output_schema": output_schema,
-        "input_schema": input_schema,
+        "output_schema": _wire_body_field(output_schema),
+        "input_schema": _wire_body_field(input_schema),
+        "input_map": _wire_body_field(input_map),
+        "output_map": _wire_body_field(output_map),
         "conflicted": False,
         "conflicted_reason": None,
         "uses": uses,
@@ -93,7 +106,7 @@ async def _wire_snapshot(name: str) -> dict[str, Any] | None:
     return None if tool is None else tool.to_mcp_tool().model_dump()
 
 
-async def _create_response(
+def _create_response(
     name: str,
     base_tool: str,
     description: str,
@@ -101,22 +114,22 @@ async def _create_response(
     output_schema: TemplatedText | dict[str, Any] | None,
     input_schema: TemplatedText | dict[str, Any] | None,
     *,
+    input_map: TemplatedText | str | None,
+    output_map: TemplatedText | str | None,
     active_version: int,
     report: FleetResult,
+    cross: CreateCrossReferences,
 ) -> dict[str, Any]:
     """The create response every create door returns, built once so no two doors drift.
 
-    The fresh record view plus its post-write ``uses`` / ``used_by`` cross-references, with the per-worker
-    rebind fan-out report embedded under ``fanout``.
-    Cross-references come from the post-write population — the new body may already
-    compose other presets (``uses``), and a sibling authored against this name is picked
-    up too (``used_by``); one source of truth with the list / get rows. The ``fanout``
-    (the same shape the template writers return) is the read-your-writes barrier signal —
-    proof the new binding propagated to every serving worker, not only the one that
-    applied this call.
+    The fresh record view plus its ``uses`` / ``used_by``, with the per-worker rebind fan-out
+    report embedded under ``fanout``. The cross-references are the population read just
+    before the commit plus the new body, so a create that commits answers its record view;
+    a write to another preset landing between that read and the response is not in it (the
+    list and get rows read fresh). The ``fanout`` (the same shape the template writers
+    return) is the read-your-writes barrier signal — proof the new binding propagated to
+    every serving worker, not only the one that applied this call.
     """
-    bodies = await instance.app.presets.list_active_bodies()
-    uses_map, used_by_map = _reference_maps(bodies)
     view = _new_record_view(
         name,
         base_tool,
@@ -124,9 +137,11 @@ async def _create_response(
         extensions,
         output_schema,
         input_schema,
+        input_map=input_map,
+        output_map=output_map,
         active_version=active_version,
-        uses=uses_map.get(name, []),
-        used_by=used_by_map.get(name, []),
+        uses=cross.uses,
+        used_by=cross.used_by,
     )
     view["fanout"] = fleet_fanout(report)
     return view

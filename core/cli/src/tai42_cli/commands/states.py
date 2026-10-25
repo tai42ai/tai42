@@ -21,6 +21,7 @@ import typer
 from tai42_cli.commands._common import (
     app_context,
     covers,
+    emit_records,
     emit_result,
     parse_json_object,
     parse_json_value,
@@ -137,6 +138,20 @@ def get_state_attachment(
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
         emit_result(ctx_obj, client.get(f"/api/states/{seg(name)}/attachments/{seg(template)}"))
+
+
+@app.command("attachment-referees")
+@covers(("GET", "/api/states/{name}/attachments/{template}/referees"))
+def state_attachment_referees(
+    ctx: typer.Context,
+    name: Annotated[str, typer.Argument(help="The state name.")],
+    template: Annotated[str, typer.Argument(help="The template name.")],
+) -> None:
+    """List what still binds a template on a state: everything a detach would strand, one per row."""
+    ctx_obj = app_context(ctx)
+    with ctx_obj.client() as client:
+        data = client.get(f"/api/states/{seg(name)}/attachments/{seg(template)}/referees")
+    emit_records(ctx_obj, data, route=("GET", "/api/states/{name}/attachments/{template}/referees"))
 
 
 @app.command("attach")

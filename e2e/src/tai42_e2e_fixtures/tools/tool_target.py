@@ -9,10 +9,9 @@ import os
 from typing import Any
 
 from tai42_contract.app import tai42_app
-from tai42_contract.conversations import ReplyTo
 from tai42_contract.tools import TOOL_META_PAUSES
 
-from tai42_e2e_fixtures.tools.ask_results import parked
+from tai42_e2e_fixtures.tools.ask_results import parked, resumed_with
 from tai42_e2e_fixtures.tools.basic import _E2eProbeRedisSettings
 from tai42_e2e_fixtures.tools.driving import driving_as
 from tai42_e2e_fixtures.tools.park import _on_expiry_policy
@@ -112,12 +111,10 @@ async def e2e_tool_target_park(
 
 
 @tai42_app.tools.tool(tags={"e2e"})
-async def e2e_tool_target_deliver(
-    interaction_id: str, answer: object, reply_to: ReplyTo | None, params: dict[str, str] | None
-) -> dict:
+async def e2e_tool_target_deliver(interaction_id: str, ask_result: Any) -> dict:
     """The stored resume continuation the tool-target park fires ONCE out of band.
 
-    The platform's continuation seam fires it with ``{interaction_id, answer, reply_to, params}``
+    The platform's continuation seam fires it with ``{interaction_id, ask_result}``
     under the park's stored (route execution-key) identity, on whichever worker resolves the park. It RETURNS the
     resumed run's TERMINAL; the platform's delivery ladder then fires the door's bound
     ``deliver_tool_completion`` under its own delivery-fire context and maps the terminal through
@@ -149,14 +146,16 @@ async def e2e_tool_target_deliver(
     from tai42_kit.clients import client_ctx
     from tai42_kit.clients.impl.redis import RedisClient
 
+    resumed = resumed_with(ask_result)
+    answer = resumed.answer
     non_success = answer in (EXPIRY_ANSWER, _TOOL_TARGET_ABORT_ANSWER, _TOOL_TARGET_ABORT_REPLY_ANSWER)
     status = PARK_COMPLETION_FAILED if non_success else PARK_COMPLETION_SUCCEEDED
     record = json.dumps(
         {
             "status": status,
             "answer": answer,
-            "reply_to": None if reply_to is None else reply_to.model_dump(mode="json"),
-            "params": params,
+            "reply_to": None if resumed.reply_to is None else resumed.reply_to.model_dump(mode="json"),
+            "params": resumed.params,
             "pid": os.getpid(),
         }
     )

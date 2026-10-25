@@ -14,9 +14,11 @@ false`` / ``conflicted_reason: null`` on the create + list surfaces."""
 from __future__ import annotations
 
 from collections.abc import Callable
+from typing import Any
 
 import pytest
 
+from tai42_e2e import wait_for_async
 from tai42_e2e.stack import TaiStack
 
 
@@ -51,8 +53,8 @@ async def test_referees_lists_composing_presets(agents_stack: TaiStack, uniq: Ca
     await _create_echo_preset(agents_stack, base, uniq("payload"))
 
     # No preset composes it yet.
-    referees = await api.get(f"/api/presets/{base}/referees")
-    assert referees == {"name": base, "referees": []}
+    preview = await api.get(f"/api/presets/{base}/referees?action=rename")
+    assert preview == {"action": "rename", "holders": []}
 
     # An authored-agent preset that names ``base`` in its tool_names is a referee.
     composer = uniq("composer")
@@ -65,8 +67,11 @@ async def test_referees_lists_composing_presets(agents_stack: TaiStack, uniq: Ca
             "fixed_kwargs": {"tool_names": [base]},
         },
     )
-    referees = await api.get(f"/api/presets/{base}/referees")
-    assert referees == {"name": base, "referees": [composer]}
+    preview = await api.get(f"/api/presets/{base}/referees?action=rename")
+    assert preview == {
+        "action": "rename",
+        "holders": [{"kind": "preset", "name": composer, "locator": {}, "summary": f"preset {composer!r}"}],
+    }
 
     # A rename of the referenced preset is blocked, naming the referee.
     blocked = await api.request_raw("POST", f"/api/presets/{base}/rename", json={"new_name": uniq("renamed")})
@@ -76,7 +81,7 @@ async def test_referees_lists_composing_presets(agents_stack: TaiStack, uniq: Ca
 
 @pytest.mark.needs
 async def test_referees_unknown_preset_404(agents_stack: TaiStack, uniq: Callable[[str], str]) -> None:
-    resp = await agents_stack.api().request_raw("GET", f"/api/presets/{uniq('ghost')}/referees")
+    resp = await agents_stack.api().request_raw("GET", f"/api/presets/{uniq('ghost')}/referees?action=rename")
     assert resp.status_code == 404, resp.text
 
 
@@ -153,3 +158,54 @@ async def test_version_tags_door(agents_stack: TaiStack, uniq: Callable[[str], s
     # An unknown version is a clean 404.
     missing = await api.request_raw("PUT", f"/api/presets/{name}/versions/99/tags", json={"tags": ["x"]})
     assert missing.status_code == 404, missing.text
+
+
+@pytest.mark.needs("kind:versioning", "probe-tools", "mutable")
+async def test_a_mapped_preset_runs_its_input_and_output_maps_on_the_http_and_mcp_doors(
+    agents_stack: TaiStack, uniq: Callable[[str], str]
+) -> None:
+    api = agents_stack.api()
+    name = uniq("mapped")
+    await api.post(
+        "/api/presets",
+        json={
+            "name": name,
+            "base_tool": "e2e_echo",
+            "description": "echo of text and an optional suffix, wrapped",
+            "input_schema": {
+                "type": "object",
+                "properties": {"text": {"type": "string"}, "suffix": {"type": "string"}},
+                "required": ["text"],
+                "additionalProperties": False,
+            },
+            "input_map": '{payload: (.text + ":" + (.suffix // "none"))}',
+            "output_map": "{echoed: .}",
+            "output_schema": {
+                "type": "object",
+                "properties": {"echoed": {"type": "string"}},
+                "required": ["echoed"],
+            },
+        },
+    )
+
+    marker = uniq("http")
+    submitted = await api.post(
+        "/api/tool-runs",
+        json={"tool_name": name, "arguments": {"text": marker, "suffix": "s"}},
+        expect=202,
+        retry_on_reloading=True,
+    )
+    run_id = submitted["run_id"]
+
+    async def succeeded() -> dict[str, Any] | None:
+        view = await api.get(f"/api/tool-runs/{run_id}")
+        assert view["status"] != "failed", view
+        return view if view["status"] == "succeeded" else None
+
+    view = await wait_for_async(succeeded, deadline=20.0, message=f"run {run_id} never succeeded")
+    assert view["result"] == {"echoed": f"{marker}:s"}, view
+
+    marker = uniq("mcp")
+    async with agents_stack.mcp() as mcp:
+        result = await mcp.call_tool(name, {"text": marker})
+    assert result.structured_content == {"echoed": f"{marker}:none"}, result

@@ -84,7 +84,8 @@ class Epoch:
     supervisor: SubAppLifespan | None = None
     # The work engaged with the reload gate on behalf of this generation (see
     # :func:`gate_party`): the requests and tool-run supervisors that drive a gated body
-    # (until they finish) and those waiting to acquire the gate. A retire never counts them
+    # (until they finish) and those waiting to acquire the gate or another lock whose holder
+    # may drive this generation's retire (:func:`hold_recorded`). A retire never counts them
     # against the drain budget and never closes this generation's transports under them.
     # A request or task can wait more than once at a time (two calls of one SSE session share
     # the session stream's record; two child tasks of one supervised run share the run), so
@@ -96,9 +97,12 @@ class Epoch:
     _surface: weakref.ref[object] | None = None
     _in_flight: int = 0
     _idle: asyncio.Event = field(default_factory=asyncio.Event)
-    # Set whenever work of this generation starts waiting on the reload gate, so a
+    # Set whenever work of this generation starts waiting on a recorded lock, so a
     # synchronous drain stops waiting and the retire defers instead.
     _engagement: asyncio.Event = field(default_factory=asyncio.Event)
+    # Set whenever a wait of work of this generation on a recorded lock ends, so the deferred
+    # retire tail waits for the generation's waiters without holding the loop.
+    _wait_ended: asyncio.Event = field(default_factory=asyncio.Event)
     _periodic_cancels: list[Callable[[], Awaitable[None]]] = field(default_factory=list)
     # Sub-app lifespans that served this generation and were dropped from the sub-MCP cache
     # while it was live (see :meth:`adopt_transport`); closed with ``supervisor``.
@@ -188,28 +192,44 @@ class Epoch:
 
     @property
     def engaged(self) -> bool:
-        """Whether any work of this generation drives or waits on the reload gate."""
+        """Whether any work of this generation drives the reload gate or waits on a recorded lock."""
         return bool(self.driving or self.waiting or self.driving_tasks or self.waiting_tasks)
 
     @property
     def gate_waiters(self) -> bool:
-        """Whether a request or tool-run supervisor of this generation is waiting to acquire the reload gate."""
+        """Whether a request or tool-run supervisor of this generation is waiting to acquire a recorded lock."""
         return bool(self.waiting or self.waiting_tasks)
 
     def note_gate_wait(self) -> None:
-        """Signal that work of this generation started waiting on the reload gate (see :meth:`_drain_in_flight`)."""
+        """Signal that work of this generation started waiting on a recorded lock (see :meth:`_drain_in_flight`)."""
         self._engagement.set()
 
     def begin_task_wait(self, task: asyncio.Task[Any]) -> None:
-        """Record one wait of the tool-run supervisor ``task`` on the reload gate."""
+        """Record one wait of the tool-run supervisor ``task`` on a recorded lock."""
         self.waiting_tasks[task] += 1
         self.note_gate_wait()
 
     def end_task_wait(self, task: asyncio.Task[Any]) -> None:
-        """Record that one wait of ``task`` on the reload gate ended."""
+        """Record that one wait of ``task`` on a recorded lock ended."""
         self.waiting_tasks[task] -= 1
         if self.waiting_tasks[task] <= 0:
             del self.waiting_tasks[task]
+            self.note_wait_ended()
+
+    def note_wait_ended(self) -> None:
+        """Signal that a wait of work of this generation on a recorded lock ended (see :meth:`_wait_gate_waiters`)."""
+        self._wait_ended.set()
+
+    async def _wait_gate_waiters(self) -> None:
+        """Wait until no request or tool-run supervisor of this generation waits on a recorded lock.
+
+        Unbounded here by design, as :meth:`_wait_driving` is: a waiter moves once the lock's
+        holder releases it, and the holder's own bounds bound that. Suspends on each wait's
+        end, so the loop keeps running the holder meanwhile.
+        """
+        while self.gate_waiters:
+            self._wait_ended.clear()
+            await self._wait_ended.wait()
 
     async def _wait_driving(self) -> None:
         """Wait for every request and tool-run supervisor driving a gated body of this generation to finish.
@@ -248,10 +268,10 @@ class Epoch:
 
         Counts only the work that can finish on its own: a request driving a gated body has
         released its slot (:func:`gate_party`), as has a drain-exempt stream, and a request
-        waiting on the gate is not counted while it waits. A request still in flight past the
-        budget is logged loudly and the retire proceeds (the fresh epoch already serves new
+        waiting on a recorded lock is not counted while it waits. A request still in flight past
+        the budget is logged loudly and the retire proceeds (the fresh epoch already serves new
         traffic). With ``until_gate_wait`` the wait also ends, unreported, as soon as work of
-        this generation starts waiting on the gate, and the call returns ``True``: the drain
+        this generation starts waiting on a recorded lock, and the call returns ``True``: the drain
         is not finished, and its caller either hands it to the deferred tail or resumes it.
         Returns ``False`` once the generation is idle or the budget is spent.
         """

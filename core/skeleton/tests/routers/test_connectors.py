@@ -212,7 +212,12 @@ async def test_connect_doors_pass_an_omitted_return_url_through_unresolved(wirin
 
 async def test_start_connect_no_auth(wiring, monkeypatch):
     async def _start(**kw):
-        return NoAuthConnectResult(connection_id="c9", added_manifest_entries=["e"], fanout=_FANOUT)
+        return NoAuthConnectResult(
+            connection_id="c9",
+            added_manifest_entries=["e"],
+            fanout=_FANOUT,
+            span_release_error="OSError: releasing the span failed",
+        )
 
     monkeypatch.setattr(router.connection_service, "start_connect", _start)
     resp = await router.start_connect(_req({"provider_id": "p", "alias": "a", "enabled_sub_services": ["s"]}))
@@ -220,6 +225,7 @@ async def test_start_connect_no_auth(wiring, monkeypatch):
     assert body["connection_id"] == "c9"
     # The awaited fleet report of the manifest broadcast rides the no-auth response.
     assert body["fanout"] == _FANOUT
+    assert body["span_release_error"] == "OSError: releasing the span failed"
 
 
 async def test_start_connect_validation_400(wiring):
@@ -304,6 +310,7 @@ async def test_patch_inline_carries_fanout(wiring, monkeypatch):
             added_manifest_entries=["github_issues_work"],
             removed_manifest_entries=[],
             fanout=_FANOUT,
+            span_release_error="OSError: releasing the span failed",
         )
 
     monkeypatch.setattr(router.connection_service, "patch_sub_services", _patch)
@@ -312,6 +319,7 @@ async def test_patch_inline_carries_fanout(wiring, monkeypatch):
     assert body["consent_required"] is False
     # The inline toggle mutated the manifest, so its fleet report rides the response.
     assert body["fanout"] == _FANOUT
+    assert body["span_release_error"] == "OSError: releasing the span failed"
 
 
 async def test_patch_consent_only_carries_no_fanout(wiring, monkeypatch):
@@ -395,6 +403,7 @@ async def test_disconnect(wiring, monkeypatch):
             upstream_revoke_status=200,
             removed_manifest_entries=[],
             fanout=_FANOUT,
+            span_release_error="OSError: releasing the span failed",
         )
 
     monkeypatch.setattr(router.connection_service, "disconnect", _disc)
@@ -403,6 +412,7 @@ async def test_disconnect(wiring, monkeypatch):
     assert body["upstream_revoke_outcome"] == "success"
     # The awaited fleet report of the manifest broadcast rides the disconnect response.
     assert body["fanout"] == _FANOUT
+    assert body["span_release_error"] == "OSError: releasing the span failed"
 
 
 async def test_disconnect_404(wiring, monkeypatch):
@@ -600,6 +610,7 @@ async def test_oauth_complete_success(wiring, monkeypatch):
             added_manifest_entries=[],
             removed_manifest_entries=[],
             fanout=_FANOUT,
+            span_release_error="OSError: releasing the span failed",
         )
 
     monkeypatch.setattr(router.connection_service, "complete_connect", _complete)
@@ -611,6 +622,7 @@ async def test_oauth_complete_success(wiring, monkeypatch):
         "connection_id": "c1",
         "return_url": "/connectors",
         "fanout": _FANOUT,
+        "span_release_error": "OSError: releasing the span failed",
     }
 
 

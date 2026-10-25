@@ -50,6 +50,7 @@ from tai42_skeleton.authz.execution_identity import reset_execution_identity, se
 from tai42_skeleton.authz.identity import CallerIdentity
 from tai42_skeleton.interactions import InteractionStore
 from tai42_skeleton.interactions import continuation as continuation_module
+from tai42_skeleton.interactions import continuation_dispatch as continuation_dispatch_module
 from tai42_skeleton.interactions import helper as helper_module
 from tai42_skeleton.interactions import kill as kill_module
 from tai42_skeleton.interactions.settings import InteractionsSettings
@@ -208,7 +209,7 @@ async def _drain() -> None:
     # Let the detached continuation drive(s) run to completion: wait for the module's in-flight
     # task set to empty (bounded), then settle any trailing callbacks.
     for _ in range(50):
-        tasks = {t for t in continuation_module._CONTINUATION_TASKS if not t.done()}
+        tasks = {t for t in continuation_dispatch_module._CONTINUATION_TASKS if not t.done()}
         if not tasks:
             break
         await asyncio.wait(tasks, timeout=0.1)
@@ -425,7 +426,7 @@ async def test_reaper_redelivery_applies_the_deferred_binding(monkeypatch, fake_
                 door_id="pp",
             )
             await _seed_ticket(wired, "rd1")
-            continuation_module.redeliver_continuation(wired.store, due)
+            continuation_dispatch_module.redeliver_continuation(wired.store, due)
             await _drain()
             assert ("__custom__", [{"op": "set", "path": ["last"], "value": 9}]) in fake_states.applies
 
@@ -457,7 +458,7 @@ async def test_failed_terminal_applies_no_deferred_updates(monkeypatch, fake_red
                 run_input={"x": 5, "n": 4},
                 door_id="pp",
             )
-            continuation_module.redeliver_continuation(wired.store, due)
+            continuation_dispatch_module.redeliver_continuation(wired.store, due)
             await _drain()
             assert fake_states.applies == []
 

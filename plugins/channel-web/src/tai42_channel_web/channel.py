@@ -350,6 +350,10 @@ class WebChannel:
     # The web chat page has no medium length cap; a large split bound keeps an agent answer whole
     # while the delivery machine's chunk cap still bounds a runaway fan-out (operator-overridable).
     max_message_chars: ClassVar[int] = 8000
+    # The address a conversation route on this channel names as its ``our_identity``.
+    identity_hint: ClassVar[str] = (
+        "Any name you choose, without ':'; visitors chat at /api/channels/web/chat/<that name>."
+    )
 
     def resolve_address(self, recipient: str | None, sender_identity: str | None) -> ChannelAddress:
         """The web route identity and the visitor id a send goes to, from either addressing.

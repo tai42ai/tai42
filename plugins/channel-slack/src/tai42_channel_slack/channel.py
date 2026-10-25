@@ -596,6 +596,10 @@ class SlackChannel:
     # Slack accepts a large message body; the conversation-delivery machine splits a long answer
     # against this generous cap (an operator may override it per deployment).
     max_message_chars: ClassVar[int] = 40000
+    # The address a conversation route on this channel names as its ``our_identity``.
+    identity_hint: ClassVar[str] = (
+        "The bot's Slack user id (it starts with U), the same value as CHANNEL_SLACK_BOT_USER_ID."
+    )
 
     def validate_form_schema(self, schema: dict[str, Any], question: str) -> None:
         """Enforce this channel's ask-time-knowable Block Kit caps at ask-time, before any state is written.

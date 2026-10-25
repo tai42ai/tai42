@@ -147,6 +147,6 @@ def test_referees_store_less_404(monkeypatch) -> None:
     async def run() -> None:
         async with instance.app.app_context(_manifest()):
             with pytest.raises(NotFoundError, match="not found"):
-                await preset_ops.preset_referees(name="nope")
+                await preset_ops.preset_referees(name="nope", action="rename")
 
     asyncio.run(run())

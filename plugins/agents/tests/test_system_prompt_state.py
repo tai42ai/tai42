@@ -40,7 +40,7 @@ from tai42_agents._internal.stream_events import _structured_tool_names
 from tai42_agents._internal.structured import structured_output_stack
 
 from ._graph_support import build_agent_and_input, invoke_tools_agent, stream_tools_agent_events
-from .conftest import fake_run_trace
+from .conftest import fake_init_langgraph_config
 
 
 def _tool_strategy(response_format: object) -> object:
@@ -114,7 +114,9 @@ def _seams(monkeypatch: pytest.MonkeyPatch, model: BaseChatModel, saver: InMemor
     monkeypatch.setattr(
         bta,
         "init_langgraph_config",
-        lambda config: fake_run_trace({"configurable": {"thread_id": config["configurable"]["thread_id"]}}),
+        lambda config, _context: fake_init_langgraph_config(
+            {"configurable": {"thread_id": config["configurable"]["thread_id"]}}
+        ),
     )
 
 

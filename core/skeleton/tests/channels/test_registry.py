@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 from tai42_contract.channels import SendOutcome
 
-from tai42_skeleton.channels.registry import ChannelRegistry
+from tai42_skeleton.channels.registry import ChannelRegistry, declared_identity_hint
 
 from .._helpers import DeliverOnlyChannel
 
@@ -65,3 +65,29 @@ def test_facet_registers_and_resolves_through_app() -> None:
         assert tai42_app.channels.names() == ["facet-prov"]
     finally:
         app._channel_registry.reset()
+
+
+class _HintedChan(_Chan):
+    identity_hint = "The bot's numeric id."
+
+
+@pytest.mark.parametrize("bad", [3, "  ", ""])
+def test_register_refuses_a_malformed_identity_hint(bad: object) -> None:
+    class _BadChan(_Chan):
+        identity_hint = bad
+
+    reg = ChannelRegistry()
+    with pytest.raises(ValueError, match=r"channel 'prov' declares identity_hint .*; it must be a non-blank string"):
+        reg.register("prov", _BadChan())
+    assert reg.names() == []
+
+
+def test_declared_identity_hint_is_none_when_absent() -> None:
+    assert declared_identity_hint("prov", _Chan()) is None
+
+
+def test_declared_identity_hint_returns_the_declared_value() -> None:
+    reg = ChannelRegistry()
+    chan = _HintedChan()
+    reg.register("prov", chan)
+    assert declared_identity_hint("prov", reg.get("prov")) == "The bot's numeric id."

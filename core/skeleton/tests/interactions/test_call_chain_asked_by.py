@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     from tai42_skeleton.app.server import TaiMCP
 
 from tai42_skeleton.interactions import continuation as continuation_module
+from tai42_skeleton.interactions import continuation_dispatch as continuation_dispatch_module
 from tai42_skeleton.interactions.ask.park import AsyncParkBinding
 from tai42_skeleton.interactions.ask.persist import build_request
 from tai42_skeleton.interactions.ask.timing import DeadlineWindow
@@ -186,7 +187,7 @@ async def test_dispatch_continuation_forwards_request_asked_by(wired, captured):
         expiry_at=now + timedelta(seconds=60),
         asked_by=["main", "sub"],
     )
-    continuation_module.dispatch_continuation(
+    continuation_dispatch_module.dispatch_continuation(
         wired.store,
         request,
         "fp-1",
@@ -210,7 +211,7 @@ async def test_redeliver_continuation_forwards_due_asked_by(wired, captured):
         attempts=1,
         asked_by=["main", "sub"],
     )
-    continuation_module.redeliver_continuation(wired.store, due)
+    continuation_dispatch_module.redeliver_continuation(wired.store, due)
     await drain()
     assert len(captured) == 1
     assert captured[0]["park_asked_by"] == ["main", "sub"]
@@ -235,7 +236,7 @@ async def test_dispatch_continuation_forwards_request_caller_ask_landing(wired, 
         expiry_at=now + timedelta(seconds=60),
         caller_ask_landing=CallerAskLanding(can_land=True, label="chat"),
     )
-    continuation_module.dispatch_continuation(
+    continuation_dispatch_module.dispatch_continuation(
         wired.store,
         request,
         "fp-1",
@@ -259,7 +260,7 @@ async def test_redeliver_continuation_forwards_due_caller_ask_landing(wired, cap
         attempts=1,
         caller_ask_landing=CallerAskLanding(can_land=True, label="chat"),
     )
-    continuation_module.redeliver_continuation(wired.store, due)
+    continuation_dispatch_module.redeliver_continuation(wired.store, due)
     await drain()
     assert len(captured) == 1
     assert captured[0]["caller_ask_landing"] == CallerAskLanding(can_land=True, label="chat")

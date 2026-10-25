@@ -14,11 +14,21 @@ from tai42_skeleton.operations._broadcast import fleet_fanout
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from contextlib import AbstractContextManager
 
     from tai42_contract.app.responses import AwaitingWorker
+    from tai42_contract.manifest import TaiMCPConfig
 
     from tai42_skeleton.app.bus import FleetResult, LocalApplyResult, WorkerIdentity
     from tai42_skeleton.app.recycle import RecycleReport
+
+
+def joined_span_release_errors(*errors: str | None) -> str | None:
+    """The failed span releases of one change's writes, joined with ``"; "`` in write order.
+
+    ``None`` when none of them failed.
+    """
+    return "; ".join(error for error in errors if error is not None) or None
 
 
 class OrphanEnvWriteError(RuntimeError):
@@ -37,9 +47,11 @@ class OrphanEnvWriteError(RuntimeError):
 class _ManifestStore(Protocol):
     """The config-manager surface the pipeline drives.
 
-    The transactional seams plus the reads the env-change validation needs. The concrete provider is the
-    active :class:`~tai42_contract.config.manager.ConfigManager`.
+    The store's exclusive write span, the transactional seams, and the reads the env-change validation
+    needs. The concrete provider is the active :class:`~tai42_contract.config.manager.ConfigManager`.
     """
+
+    def exclusive_write(self) -> AbstractContextManager[None]: ...
 
     def mutate_manifest(self, mutator: Callable[[dict[str, Any]], None]) -> dict[str, Any]: ...
 
@@ -58,6 +70,8 @@ class _ReloadAdmin(Protocol):
     """The reload seam the pipeline drives on the local worker after a persist."""
 
     def reload_config(self) -> dict[str, Any]: ...
+
+    async def served_mcp_names(self, config: TaiMCPConfig) -> list[str]: ...
 
 
 class _FleetPublisher(Protocol):
@@ -84,8 +98,9 @@ class ApplyResult:
     """The structured outcome of one pipeline run.
 
     ``document`` is the persisted PRESERVED-view manifest (``!ENV`` markers intact)
-    for :meth:`ConfigService.apply_change` / :meth:`ConfigService.apply_replace`, and
-    ``None`` for :meth:`ConfigService.apply_env_change` (no manifest document changed).
+    for :meth:`ConfigService.apply_change` / :meth:`ConfigService.reapply_manifest` /
+    :meth:`ConfigService.apply_replace`, and ``None`` for :meth:`ConfigService.apply_env_change`
+    (no manifest document changed).
     ``local`` is this worker's local reload result. ``fleet`` is the awaited per-worker
     broadcast report, which carries the two honest failure shapes itself — a reachable
     bus with an unconfirmed worker named in ``fleet.results`` (``fleet.ok`` is then
@@ -97,6 +112,9 @@ class ApplyResult:
     whether the change carries recycle-class keys (every one is taken as affecting the
     writer's own serve surface). ``awaiting_respawn`` is the operation's verdict after the roll:
     the workers still awaiting a respawn (``operations._broadcast.awaiting_respawn_after``).
+    ``span_release_error`` is the store's error when its exclusive write span failed to release
+    after the persist (``<ErrorType>: <message>``), ``None`` when it released — the change stands
+    and the reload, broadcast and roll above still ran.
     """
 
     fleet: FleetResult
@@ -106,6 +124,7 @@ class ApplyResult:
     self_identity: WorkerIdentity | None = None
     serve_affecting: bool = False
     awaiting_respawn: list[AwaitingWorker] = field(default_factory=list)
+    span_release_error: str | None = None
 
     @property
     def self_exit_armed(self) -> bool:
@@ -139,7 +158,9 @@ class ProfileApplyOutcome:
     ``generation_before``. ``serve_affecting`` is whether the diff carries recycle keys
     that affect the applier's own serve surface. ``fleet`` is the reload broadcast report.
     ``awaiting_respawn`` is the operation's verdict after the roll: the workers still awaiting a
-    respawn.
+    respawn. ``span_release_error`` is the store's error when its exclusive write span failed to
+    release after the env persisted (``<ErrorType>: <message>``), ``None`` when it released — the
+    change stands and the broadcast and roll above still ran.
     """
 
     hot: list[str]
@@ -148,6 +169,7 @@ class ProfileApplyOutcome:
     serve_affecting: bool
     fleet: FleetResult
     awaiting_respawn: list[AwaitingWorker] = field(default_factory=list)
+    span_release_error: str | None = None
 
     @property
     def self_exit_armed(self) -> bool:

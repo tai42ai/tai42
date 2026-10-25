@@ -66,6 +66,8 @@ from tai42_skeleton.operations import (
     ValidationRejectedError,
     operation,
 )
+from tai42_skeleton.operations.holders import detach_holders, holders_refusal
+from tai42_skeleton.operations.response_models_group_a import HoldersPreview
 from tai42_skeleton.operations.response_models_group_states import (
     AttachAck,
     AttachUpdateAck,
@@ -317,18 +319,29 @@ async def update_state_attachment(
     return {"updated": True, "state": name, "template": template, "held": [h.model_dump(mode="json") for h in held]}
 
 
-async def _detach_referees(state: str, template: str) -> list[str]:
-    """Every live door binding a detach of ``template`` from ``state`` would strand.
+async def _require_attachment(name: str, template: str) -> None:
+    """Raise the 404 for a template not attached on ``name`` (an unknown state attaches none)."""
+    with _states_door():
+        attached = await _states().list_attachments(name, template=template)
+    if not attached:
+        raise NotFoundError(f"template {template!r} is not attached on state {name!r}")
 
-    The union the detach gate blocks on. Each registered detach referee (the
-    platform-internal preset/conversation/hook/schedule holders + any plugin provider) is
-    asked for the ``(state, template)``; a referee RAISING propagates loudly — a detach never
-    proceeds past an unreadable holder store (no silent bypass).
+
+@operation(
+    summary="List live holders of a state's template attachment",
+    tags=["states"],
+    errors=[NotSupportedError, NotFoundError],
+    response_model=HoldersPreview,
+)
+async def state_template_referees(name: str, template: str) -> dict[str, Any]:
+    """Every live door binding a detach of ``template`` from ``name`` would be refused on — the gate's own gather.
+
+    404 for an unknown state or an unattached template; a referee raising propagates loudly,
+    exactly as at the gate.
     """
-    holders: list[str] = []
-    for referee in instance.app.tools.detach_referees():
-        holders.extend(await referee(state, template))
-    return holders
+    await _require_attachment(name, template)
+    holders = await detach_holders(name, template)
+    return {"action": "detach", "holders": [holder.model_dump() for holder in holders]}
 
 
 @operation(
@@ -341,15 +354,15 @@ async def _detach_referees(state: str, template: str) -> list[str]:
 async def detach_state_template(name: str, template: str) -> dict[str, Any]:
     """Remove a template's attachment and recompose the effective schema — nothing else.
 
-    Consults the detach referees FIRST: a template still named by a live door binding (a
-    preset version, a conversation config, a hook, a schedule) is a 409 that detaches nothing
-    and lists the referencing bindings — the attach-at-save contract's referee, so a binding
-    never faults at run time on a template detached out from under it.
+    A template still named by a live door binding (a preset version, a conversation config, a
+    hook, a schedule, a plugin's binding) is a 409 that detaches nothing and lists those
+    holders, so a binding never faults at run time on a template detached out from under it.
     """
-    referenced = await _detach_referees(name, template)
-    if referenced:
-        raise ConflictError(
-            f"template {template!r} on state {name!r} cannot be detached — referenced by: {'; '.join(referenced)}"
+    await _require_attachment(name, template)
+    holders = await detach_holders(name, template)
+    if holders:
+        raise holders_refusal(
+            f"template {template!r} on state {name!r} cannot be detached", holders, "change those bindings first"
         )
     with _states_door():
         await _states().detach(name, template)

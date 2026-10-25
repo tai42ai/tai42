@@ -3,7 +3,7 @@
 ``tool_execution`` is the generic job body every backend extension queues.
 ``callback_job`` chains a follow-up tool after a finished job (enqueued
 ``depends_on`` the primary job). ``enqueue_task`` maps the backend task options
-(``eta`` / ``countdown`` / ``expires`` / ``callback_kwargs``) onto RQ's enqueue API.
+(``eta`` / ``countdown`` / ``expires`` / ``callback_kwargs`` / ``queue``) onto RQ's enqueue API.
 """
 
 from __future__ import annotations
@@ -21,6 +21,7 @@ from tai42_kit.utils.detached_util import mark_detached_run, reset_detached_run
 from tai42_kit.utils.worker_secret_capability import WORKER_SECRET_CAPABILITY_ARG, bind_worker_secret_capability
 
 from tai42_backend_rq.queue import TaskBudgetQueue
+from tai42_backend_rq.queues import derived_queue
 from tai42_backend_rq.settings import rq_client_kwargs, rq_settings
 
 # Task options every backend extension appends to its branch tool's signature.
@@ -29,6 +30,7 @@ RQ_TASK_OPTS: dict[str, Any] = {
     "expires": str | float | None,  # Maps to the job ttl (in seconds).
     "eta": str | None,  # ISO-format datetime string.
     "callback_kwargs": CallbackSchema | None,
+    "queue": str | None,  # Worker queue label; None = the settings queue.
 }
 
 # Schedule options the schedule_task extension appends.
@@ -101,14 +103,18 @@ async def enqueue_task(*args: Any, **kwargs: Any) -> Job:
     """Enqueue a ``tool_execution`` job, honoring the backend task options.
 
     ``eta`` (ISO datetime) schedules via ``enqueue_at``, ``countdown`` (seconds)
-    via ``enqueue_in``, ``expires`` maps to the job ``ttl``, and ``callback_kwargs``
-    chains a ``callback_job`` dependent on the primary job. Returns the primary job.
+    via ``enqueue_in``, ``expires`` maps to the job ``ttl``, ``callback_kwargs``
+    chains a ``callback_job`` dependent on the primary job, and ``queue`` (a label)
+    sends both to ``<RQ_QUEUE_NAME>.<label>``. A label outside ``[A-Za-z0-9_-]+``
+    raises ``ValueError`` before anything is written. Returns the primary job.
     """
-    async with client_ctx(SyncRedisClient, **rq_client_kwargs()) as r:
-        queue = TaskBudgetQueue(rq_settings().queue_name, connection=r)
+    task_kwargs = {k: kwargs.pop(k) for k in RQ_TASK_OPTS if k in kwargs}
+    enqueue_opts = {k: v for k, v in task_kwargs.items() if v is not None}
+    queue_name = derived_queue(enqueue_opts.pop("queue", None))
 
-        task_kwargs = {k: kwargs.pop(k) for k in RQ_TASK_OPTS if k in kwargs}
-        enqueue_opts = {k: v for k, v in task_kwargs.items() if v is not None}
+    async with client_ctx(SyncRedisClient, **rq_client_kwargs()) as r:
+        queue = TaskBudgetQueue(queue_name, connection=r)
+
         callback: CallbackSchema | None = enqueue_opts.pop("callback_kwargs", None)
         if callback is not None:
             carry_forwarded_fire(callback, kwargs)

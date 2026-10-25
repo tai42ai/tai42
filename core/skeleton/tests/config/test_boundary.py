@@ -60,7 +60,7 @@ from tai42_skeleton.config.boundary import (
 from tai42_skeleton.config.recycle_policy import X_CLASSIFIED_DEPLOYMENT_BARE_READS
 from tai42_skeleton.config.service import ConfigService
 
-from .fake_pipeline import FakeConfigStore, FakeReloadAdmin, RecordingBus, _oauth_descriptor
+from .fake_pipeline import ComboChecks, FakeConfigStore, FakeReloadAdmin, RecordingBus, _oauth_descriptor
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -75,7 +75,7 @@ def _reset_settings_after() -> Iterator[None]:
 def _service(store: FakeConfigStore) -> tuple[ConfigService, FakeReloadAdmin, RecordingBus]:
     admin = FakeReloadAdmin()
     bus = RecordingBus()
-    service = ConfigService(config_manager=store, admin=admin, bus=cast("Any", bus))
+    service = ConfigService(config_manager=store, admin=admin, bus=cast("Any", bus), combo_check=ComboChecks())
     return service, admin, bus
 
 

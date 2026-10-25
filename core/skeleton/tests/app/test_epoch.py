@@ -39,7 +39,7 @@ from tai42_skeleton.app.epoch import (
 )
 from tai42_skeleton.app.instance import build_app
 from tai42_skeleton.app.lifecycle import TaiMCPLifecycleMixin
-from tai42_skeleton.app.reload_gate import reload_gate
+from tai42_skeleton.app.reload_gate import hold_recorded, reload_gate
 
 from ._served_app import RELOAD_SWAP_BOUND_S
 
@@ -765,6 +765,42 @@ async def test_a_request_waiting_on_the_gate_is_never_severed() -> None:
     async with asyncio.timeout(2.0):
         await asyncio.gather(*epoch_retire_mod._deferred_retire_tasks)
     assert log == ["waiter ran its gated body", "waiter answered", "closed"]
+
+
+async def test_a_request_waiting_on_a_recorded_lock_held_outside_the_generation_is_never_severed() -> None:
+    """A request of the retiring generation waits on a recorded lock whose holder is no request
+    of that generation, so nothing of the generation is in flight or driving once the gate turns
+    over: the deferred tail waits for that wait to end, without holding the loop, and closes only
+    after the waiter answered."""
+    _install_boot("boot-app")
+    boot = current_epoch()
+    log: list[str] = []
+    boot.supervisor = _ClosingSupervisor(log)  # type: ignore[assignment]
+    lock = asyncio.Lock()
+
+    async def _waiter() -> None:
+        async with hold_recorded(lock):
+            log.append("waiter held the lock")
+        log.append("waiter answered")
+
+    await lock.acquire()  # held by work that is no request of the boot generation
+    try:
+        async with reload_gate.synchronized():  # the bus-delivered reload, no request of its own
+            request = _served_request(boot, _waiter)
+            while not boot.waiting:
+                await asyncio.sleep(0)
+            await build_and_swap_epoch(
+                {}, rebuild=lambda: None, build_serving_app=_serve("new-app"), drain_deadline=0.05
+            )
+        for _ in range(20):
+            await asyncio.sleep(0)
+        assert log == [], "the retire closed (or let run) before the lock was released"
+    finally:
+        lock.release()
+    async with asyncio.timeout(2.0):
+        await request
+        await asyncio.gather(*epoch_retire_mod._deferred_retire_tasks)
+    assert log == ["waiter held the lock", "waiter answered", "closed"]
 
 
 @pytest.mark.parametrize("held_past_budget", [False, True], ids=["within-budget", "past-budget"])

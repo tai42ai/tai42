@@ -2,10 +2,11 @@
 
 A holder of door bindings that name templates (a plugin's per-node state bindings, or the
 platform's own preset/route/hook/schedule bindings) registers an async referee that, given
-the ``(state name, template name)`` about to be detached, returns human-readable
-descriptions of the live bindings that still name that template on that state (empty = no
-objection). The detach gate consults EVERY registered referee and blocks the detach when
-any answer is non-empty; a referee raising fails the detach loudly (never a silent bypass).
+the ``(state name, template name)`` about to be detached, answers one ``ReferenceHolder`` per
+live binding that still names that template on that state (empty = no objection), and changes
+nothing (the detach preview calls it too). The detach gate consults EVERY registered referee
+and blocks the detach when any answer is non-empty; a referee raising fails the detach loudly
+(never a silent bypass).
 
 Reset on every ``start()`` (like the rename/delete-referee registries) so a reload
 re-imports the tool modules and re-registers cleanly, and the platform-internal referees

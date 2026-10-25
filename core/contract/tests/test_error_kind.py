@@ -44,6 +44,7 @@ from tai42_contract.interactions.models.media_errors import (
 )
 from tai42_contract.monitoring.errors import (
     MonitoringError,
+    MonitoringReadNotServedError,
     MonitoringReadNotSupportedError,
     MonitoringReadTooBroadError,
     TraceNotFoundError,
@@ -156,6 +157,7 @@ _STAMPED_CONTRACT_ERRORS: list[tuple[BaseException, ErrorKind]] = [
     (TraceNotFoundError("m"), ErrorKind.NOT_FOUND),
     (MonitoringReadNotSupportedError("m"), ErrorKind.UNAVAILABLE),
     (MonitoringReadTooBroadError("m"), ErrorKind.BAD_INPUT),
+    (MonitoringReadNotServedError("m"), ErrorKind.BAD_INPUT),
     # connectors family
     (ConnectorError("c"), ErrorKind.UPSTREAM_ERROR),
     (OperatorMisconfiguredError("ENV_VAR", "provider"), ErrorKind.UNAVAILABLE),

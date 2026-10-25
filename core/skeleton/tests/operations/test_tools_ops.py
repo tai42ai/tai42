@@ -29,6 +29,7 @@ from tai42_skeleton.app.bus import LocalApplyResult, OpOutcome
 from tai42_skeleton.operations import (
     BadRequestError,
     NotFoundError,
+    NotSupportedError,
     OperationFailedError,
     OperationRegistry,
     operation_metadata_of,
@@ -230,6 +231,37 @@ async def test_run_tool_of_a_secret_preset_reveals_to_the_live_caller() -> None:
     assert result == RunResultAnswer(result={"account": "acme", "token": "tok-acme"})
 
 
+async def test_run_tool_of_a_preset_over_a_failed_connector_answers_the_error_envelope() -> None:
+    # A connector's failed call keeps its error flag through a preset over it: the sync door
+    # answers the same error envelope for the preset as for the connector itself, and a preset
+    # with an output schema answers the connector's failure, not a schema mismatch.
+    from tai42_skeleton.app.instance import app
+    from tai42_skeleton.manifest import Manifest
+
+    manifest = Manifest.model_validate(
+        {"tools": [{"title": "fx", "module": "tests.presets._fixtures", "include": ["failing_connector"]}]}
+    )
+    schema = {"type": "object", "properties": {"rows": {"type": "array"}}, "required": ["rows"]}
+    async with app.app_context(manifest):
+        await app.preset_manager.register("fc", "failing_connector", {"query": "q"}, [], "A preset")
+        await app.preset_manager.register(
+            "fc_schema", "failing_connector", {"query": "q"}, [], "A preset", output_schema=schema
+        )
+        try:
+            direct = await tools_ops.run_tool("failing_connector", {"query": "q"})
+            preset = await tools_ops.run_tool("fc", {})
+            preset_schema = await tools_ops.run_tool("fc_schema", {})
+        finally:
+            await app.preset_manager.remove("fc")
+            await app.preset_manager.remove("fc_schema")
+
+    assert isinstance(direct, RunResultAnswer)
+    assert direct.result["isError"] is True
+    assert direct.result["content"][0]["text"] == "hub-err:upstream down for q"
+    assert preset == direct
+    assert preset_schema == direct
+
+
 async def test_run_tool_unencodable_result_is_a_502_bad_tool_output(monkeypatch: pytest.MonkeyPatch, caplog) -> None:
     # A tool whose reduced result cannot be JSON-encoded (a lone surrogate) is refused at the
     # dispatch seam with a named ``ToolResultEncodingError``; the sync door maps it to a 502
@@ -328,6 +360,16 @@ async def test_run_tool_raise_during_execution_is_500(monkeypatch: pytest.Monkey
         await tools_ops.run_tool("calc", {})
     assert caught.value.message == "kaboom at 10.0.0.7:6379"
     _assert_logged_server_side(caplog, "kaboom at 10.0.0.7:6379")
+
+
+async def test_run_tool_passes_a_501_from_the_tool_through_unchanged(monkeypatch: pytest.MonkeyPatch, caplog) -> None:
+    refusal = NotSupportedError("needs the files extra", extra={"code": "files-not-configured"})
+    _install(monkeypatch, tools=_Tools({"file_loader"}, run_exc=refusal))
+    with caplog.at_level(logging.DEBUG, logger=tools_ops.logger.name), pytest.raises(NotSupportedError) as caught:
+        await tools_ops.run_tool("file_loader", {"source": "a.txt"})
+    assert caught.value is refusal
+    assert caught.value.status == 501
+    _assert_nothing_logged_server_side(caplog)
 
 
 async def test_run_tool_failed_terminal_delivers_the_outcome_whole_as_data(

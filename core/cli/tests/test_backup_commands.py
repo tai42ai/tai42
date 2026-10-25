@@ -24,6 +24,29 @@ def test_backup_export_streams_raw_document(monkeypatch: pytest.MonkeyPatch) -> 
     assert json.loads(result.output) == document
 
 
+def test_backup_export_section_errors_reach_stderr_and_exit_nonzero(monkeypatch: pytest.MonkeyPatch) -> None:
+    document = {
+        "version": 1,
+        "created_at": "t",
+        "sections": {"access_control": {}},
+        "errors": {"templates": "Template 'logo.png' is not a text template: binary content"},
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=document, headers={"content-disposition": 'attachment; filename="b.json"'})
+
+    result = run_cli(
+        monkeypatch, handler, ["backup", "export", "--section", "access_control", "--section", "templates"]
+    )
+    assert result.exit_code == 1
+    # The document still reaches stdout, so a redirect keeps the sections that did export.
+    assert json.loads(result.stdout) == document
+    assert (
+        "backup section 'templates' failed to export: Template 'logo.png' is not a text template: binary content"
+        in result.stderr
+    )
+
+
 def test_backup_export_error_surfaces(monkeypatch: pytest.MonkeyPatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return error_response("unknown section(s): bogus", 400)

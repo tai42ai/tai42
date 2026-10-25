@@ -172,7 +172,7 @@ class _TemplateJqMixin(_StatesServiceBase):
     async def _render_template_jq(self, template: StateTemplate, version: int, program_name: str) -> tuple[str, str]:
         """``program_name``'s rendered body and the sibling input-program prelude, from the rendered-template cache.
 
-        A by-id body that cannot be fetched raises loudly.
+        A body that cannot be fetched or rendered raises loudly.
         """
         rendered = await self._rendered(template, version)
         return rendered.bodies[program_name], rendered.sibling_prelude

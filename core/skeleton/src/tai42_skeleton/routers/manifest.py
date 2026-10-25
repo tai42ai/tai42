@@ -1,16 +1,17 @@
-"""Manifest + MCP HTTP surface for the Studio manifest feature.
+"""Manifest + MCP HTTP surface.
 
 AUTHED thin adapters over operations in ``tai42_skeleton.operations.manifest`` (the
 live manifest can embed connector tokens in MCP headers/env, so this whole surface
 stays behind the credential):
 
 - ``GET  /api/manifest``                     — the PRESERVED manifest MCP section + user tools (markers intact).
-- ``GET  /api/manifest/preserved``           — the PRESERVED manifest view the McpTab editor reads.
+- ``GET  /api/manifest/preserved``           — the PRESERVED manifest view an MCP config editor reads.
 - ``GET  /api/manifest/mcp-env-refs``         — the MCP section's !ENV marker refs (names + set/unset only).
 - ``POST /api/manifest/replace``             — replace the WHOLE persisted manifest, fleet-wide (tier-2).
 - ``POST /api/mcp-config``                   — replace the MCP section (persist + reload).
 - ``POST /api/mcp-config/entries``           — add/replace MCP entries by title (persist + reload).
 - ``DELETE /api/mcp-config/entries/{title}`` — remove one MCP entry by title (persist + reload).
+- ``PUT /api/mcp-config/entries/{title}/tool-filter`` — set one MCP entry's include/exclude by title (persist + reload).
 - ``POST /api/tools-config/entries``         — add/replace tools entries by title (persist + reload).
 - ``DELETE /api/tools-config/entries/{title}``— remove one tools entry by title (persist + reload).
 - ``POST /api/agents-config/entries``        — add/replace agents entries by title (persist + reload).
@@ -22,10 +23,12 @@ stays behind the credential):
 - ``GET  /api/mcp-status/failed``            — the MCP servers skipped by the viability check.
 - ``POST /api/mcp-status/reload-failed``     — re-probe every failed MCP server.
 - ``POST /api/mcp-status/{title}/reload``    — reload a single MCP server by title.
+- ``POST /api/mcp-status/{title}/advertised-tools`` — probe one live MCP server by title for every tool
+  it advertises, before the selection.
 - ``POST /api/mcp-status/{title}/deregister``— detach a single MCP server's tools by title.
 
-There is no ``probe-mcp`` route: the skeleton has no MCP-probe primitive, only the
-connectors sub-service probe.
+``POST /api/mcp-status/{title}/advertised-tools`` probes one live server by title for
+its tools before the selection; there is no probe of an arbitrary address.
 
 Success bodies are ``{"data": ...}``; failures are ``{"error": "<message>"}``.
 """
@@ -50,6 +53,7 @@ from tai42_skeleton.operations.manifest import get_mcp_config_schema as _get_mcp
 from tai42_skeleton.operations.manifest import get_mcp_env_refs as _get_mcp_env_refs_op
 from tai42_skeleton.operations.manifest import get_mcp_status as _get_mcp_status_op
 from tai42_skeleton.operations.manifest import list_failed_mcps as _list_failed_mcps_op
+from tai42_skeleton.operations.manifest import list_mcp_advertised_tools as _list_mcp_advertised_tools_op
 from tai42_skeleton.operations.manifest import reload_failed_mcps as _reload_failed_mcps_op
 from tai42_skeleton.operations.manifest import reload_mcp as _reload_mcp_op
 from tai42_skeleton.operations.manifest import remove_agents_entry as _remove_agents_entry_op
@@ -57,6 +61,7 @@ from tai42_skeleton.operations.manifest import remove_mcp_entry as _remove_mcp_e
 from tai42_skeleton.operations.manifest import remove_tools_entry as _remove_tools_entry_op
 from tai42_skeleton.operations.manifest import set_mcp_config as _set_mcp_config_op
 from tai42_skeleton.operations.manifest import set_mcp_secret_env as _set_mcp_secret_env_op
+from tai42_skeleton.operations.manifest import set_mcp_tool_filter as _set_mcp_tool_filter_op
 from tai42_skeleton.operations.manifest import update_api_tools as _update_api_tools_op
 from tai42_skeleton.operations.manifest import update_manifest as _update_manifest_op
 
@@ -236,6 +241,14 @@ remove_mcp_entry = register_operation_route(
     action="write",
 )
 
+set_mcp_tool_filter = register_operation_route(
+    tai42_app,
+    operation_metadata_of(_set_mcp_tool_filter_op),
+    path="/api/mcp-config/entries/{title}/tool-filter",
+    method="PUT",
+    action="write",
+)
+
 add_tools_entries = register_operation_route(
     tai42_app,
     operation_metadata_of(_add_tools_entries_op),
@@ -336,6 +349,14 @@ reload_mcp = register_operation_route(
     path="/api/mcp-status/{title}/reload",
     method="POST",
     context_extractor=_extract_targets,
+    action="write",
+)
+
+list_mcp_advertised_tools = register_operation_route(
+    tai42_app,
+    operation_metadata_of(_list_mcp_advertised_tools_op),
+    path="/api/mcp-status/{title}/advertised-tools",
+    method="POST",
     action="write",
 )
 

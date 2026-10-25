@@ -646,6 +646,15 @@ class _PgCursor:
             # filter is what the fake exercises.
             scopes, public = params
             self._all = [(r["scope_id"],) for r in pg.routes if r["scope_id"] in scopes and r["scope_id"] != public]
+        elif norm.startswith(
+            "SELECT user_id, scopes, policy_data, condition FROM access_control_policies "
+            "WHERE condition ->> 'id' IS NOT NULL"
+        ):
+            matched = sorted(
+                (p for p in pg.policies if (p.get("condition") or {}).get("id") is not None),
+                key=lambda p: p["user_id"],
+            )
+            self._all = [(p["user_id"], list(p["scopes"]), p["policy_data"], p["condition"]) for p in matched]
         elif norm.startswith("SELECT user_id, scopes, policy_data, condition FROM access_control_policies"):
             # Mirror ``policy_data ->> key IS NOT NULL``: a row matches when its
             # ``policy_data`` carries the given top-level key with a NON-NULL value (a

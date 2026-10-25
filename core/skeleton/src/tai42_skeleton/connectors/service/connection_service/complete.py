@@ -175,6 +175,7 @@ async def complete_connect(
         added_manifest_entries=added,
         removed_manifest_entries=[],
         fanout=applied.fanout,
+        span_release_error=applied.span_release_error,
     )
 
 
@@ -345,9 +346,7 @@ async def _complete_reconnect_or_toggle(
             alias=record.alias,
             connection_id=cid,
         )
-        fanout: dict[str, Any] | None = None
-        if to_remove or pending:
-            fanout = (await config_service.apply_change(reconcile)).fanout
+        applied = await config_service.apply_change(reconcile) if to_remove or pending else None
 
     titles = [manifest_writer.managed_title(descriptor.id, sub_service, record.alias) for sub_service in new_enabled]
     await _svc.broadcast(
@@ -363,7 +362,8 @@ async def _complete_reconnect_or_toggle(
         operation=flow_state.operation,
         added_manifest_entries=added,
         removed_manifest_entries=removed,
-        fanout=fanout,
+        fanout=None if applied is None else applied.fanout,
+        span_release_error=None if applied is None else applied.span_release_error,
     )
 
 

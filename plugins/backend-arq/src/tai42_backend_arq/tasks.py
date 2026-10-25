@@ -2,8 +2,8 @@
 
 ``tool_execution`` runs one tool by name and, when a callback schema rode along,
 chains a ``callback_job`` over this job's result. ``enqueue_task`` maps the
-backend task options (``eta`` / ``countdown`` / ``expires`` / ``callback_kwargs``)
-onto arq's enqueue API.
+backend task options (``eta`` / ``countdown`` / ``expires`` / ``callback_kwargs`` /
+``queue``) onto arq's enqueue API; ``queue`` is a worker queue label.
 """
 
 from __future__ import annotations
@@ -14,14 +14,16 @@ from datetime import datetime
 from typing import Any
 
 from arq.connections import ArqRedis
-from arq.jobs import Job, JobStatus
+from arq.jobs import JobStatus
 from tai42_contract.backend import SCHEDULE_CADENCE_KEY, SCHEDULE_NAME_KEY
 from tai42_kit.backend import CallbackSchema, backend_fire, callback_execution, carry_forwarded_fire
 from tai42_kit.utils.detached_util import mark_detached_run, reset_detached_run
 from tai42_kit.utils.worker_secret_capability import WORKER_SECRET_CAPABILITY_ARG, bind_worker_secret_capability
 
+from tai42_backend_arq.jobs import job_handle, register_queue
+from tai42_backend_arq.queues import derived_queue
 from tai42_backend_arq.scheduler import wait_job_result
-from tai42_backend_arq.settings import TaskFailedError, arq_settings, job_deserializer
+from tai42_backend_arq.settings import TaskFailedError, arq_settings
 
 # Task options every backend extension appends to its branch tool's signature.
 ARQ_TASK_OPTS: dict[str, Any] = {
@@ -29,6 +31,7 @@ ARQ_TASK_OPTS: dict[str, Any] = {
     "expires": str | float | None,  # Seconds the queued job stays runnable.
     "eta": str | None,  # ISO-format datetime string.
     "callback_kwargs": CallbackSchema | None,
+    "queue": str | None,  # Worker queue label; None = the settings queue.
 }
 
 ARQ_SCHEDULE_OPTS: dict[str, Any] = {
@@ -51,7 +54,7 @@ async def callback_job(
     # The schema crosses the queue as JSON, so it arrives as a plain mapping.
     if not isinstance(callback, CallbackSchema):
         callback = CallbackSchema.model_validate(callback)
-    job = Job(previous_job_id, ctx["redis"], _queue_name=arq_settings().queue_name, _deserializer=job_deserializer)
+    job = await job_handle(ctx["redis"], previous_job_id)
     timeout = arq_settings().callback_timeout
     start_time = time.time()
 
@@ -111,6 +114,7 @@ async def tool_execution(ctx: dict[str, Any], *args: Any, **kwargs: Any) -> Any:
             reset_detached_run(detached_token)
     finally:
         if callback:
+            # The worker pool's default queue is this worker's queue: the job's own.
             await ctx["redis"].enqueue_job("callback_job", ctx["job_id"], callback)
 
 
@@ -119,10 +123,13 @@ async def enqueue_task(arq_redis: ArqRedis, *args: Any, **kwargs: Any) -> Any:
 
     ``eta`` (ISO datetime) defers until that moment, ``countdown`` (seconds)
     defers by that long, ``expires`` (seconds) bounds how long the job stays
-    runnable, ``callback_kwargs`` stays a job kwarg. ``None`` options are dropped.
+    runnable, ``callback_kwargs`` stays a job kwarg, ``queue`` (a label) sends the job
+    to ``<ARQ_QUEUE_NAME>.<label>``. ``None`` options are dropped. A label outside
+    ``[A-Za-z0-9_-]+`` raises ``ValueError`` before anything is written.
     """
     task_kwargs = {k: kwargs.pop(k) for k in ARQ_TASK_OPTS if k in kwargs}
     opts = {k: v for k, v in task_kwargs.items() if v is not None}
+    target = derived_queue(opts.pop("queue", None))
 
     callback = opts.pop("callback_kwargs", None)
     if callback is not None:
@@ -140,4 +147,6 @@ async def enqueue_task(arq_redis: ArqRedis, *args: Any, **kwargs: Any) -> Any:
     if expires is not None:
         enqueue_opts["_expires"] = int(float(expires))
 
-    return await arq_redis.enqueue_job("tool_execution", *args, **kwargs, **enqueue_opts)
+    # Registered before the enqueue, so a by-id lookup never misses a sent job.
+    await register_queue(arq_redis, target)
+    return await arq_redis.enqueue_job("tool_execution", *args, _queue_name=target, **kwargs, **enqueue_opts)

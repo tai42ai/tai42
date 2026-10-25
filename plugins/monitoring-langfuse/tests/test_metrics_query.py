@@ -1,107 +1,141 @@
-"""MetricsQueryRunner: neutral-vocabulary mapping, typed-row parsing, and source scoping."""
+"""``query_metrics`` on Metrics v2: run measures over the roots, usage measures over every observation."""
 
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
-from types import SimpleNamespace
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from tai42_contract.monitoring import (
     Dimension,
     Measure,
-    MetricsCapability,
     MetricsQuery,
-    MonitoringReadNotSupportedError,
+    MonitoringError,
+    MonitoringReadNotServedError,
 )
 
-import tai42_monitoring_langfuse.metrics_query as metrics_query
-from tai42_monitoring_langfuse.reader import LangfuseReader
+T0 = datetime(2026, 1, 1, 10, tzinfo=UTC)
+_ENV = {"column": "environment", "operator": "any of", "value": ["tai"], "type": "stringOptions"}
+_ROOT = {"column": "isRootObservation", "operator": "=", "value": True, "type": "boolean"}
 
-_NOW = datetime(2026, 1, 1, tzinfo=UTC)
+
+def _query(**kw):
+    return MetricsQuery(from_timestamp=T0, to_timestamp=T0 + timedelta(hours=2), **kw)
 
 
-async def test_query_metrics_maps_measures_and_parses_typed_rows(manager, mock_client):
-    mock_client.api.legacy.metrics_v1.metrics.return_value = SimpleNamespace(
-        data=[{"time_dimension": "2026-01-01", "count": 3, "totalCost": 0.5}]
-    )
-    reader = LangfuseReader(manager)
+def _sent(fake):
+    return [json.loads(kw["query"]) for kw in fake.calls_of("metrics")]
 
+
+def _runs(fake):
+    fake.run("a", T0 + timedelta(minutes=5), seconds=1, children=2, child_cost=0.5, child_tokens=10, child_model="m-1")
+    fake.run("b", T0 + timedelta(minutes=10), seconds=3, children=1, child_cost=0.25, child_tokens=4, child_model="m-2")
+    fake.run("c", T0 + timedelta(minutes=70), seconds=2)
+    fake.run("foreign", T0 + timedelta(minutes=5), environment="other", children=1, child_cost=9.0)
+
+
+async def test_ungrouped_measures_merge_two_queries_on_the_bucket(fake, reader):
+    _runs(fake)
     result = await reader.query_metrics(
-        MetricsQuery(
-            measures=[Measure.COUNT, Measure.COST],
-            from_timestamp=_NOW,
-            to_timestamp=_NOW,
-            granularity="day",
-        )
+        _query(measures=[Measure.COUNT, Measure.LATENCY, Measure.COST, Measure.TOKENS], granularity="hour")
+    )
+    assert [(r.bucket, r.measures) for r in result.rows] == [
+        (
+            "2026-01-01T10:00:00Z",
+            {Measure.COUNT: 2.0, Measure.LATENCY: 2000.0, Measure.COST: 1.25, Measure.TOKENS: 24.0},
+        ),
+        (
+            "2026-01-01T11:00:00Z",
+            {Measure.COUNT: 1.0, Measure.LATENCY: 2000.0, Measure.COST: None, Measure.TOKENS: 0.0},
+        ),
+    ]
+    runs, usage = _sent(fake)
+    assert runs["view"] == usage["view"] == "observations"
+    assert runs["filters"] == [_ENV, _ROOT]
+    assert runs["metrics"] == [
+        {"measure": "count", "aggregation": "count"},
+        {"measure": "latency", "aggregation": "avg"},
+    ]
+    assert usage["filters"] == [_ENV]
+    assert usage["metrics"] == [
+        {"measure": "totalCost", "aggregation": "sum"},
+        {"measure": "totalTokens", "aggregation": "sum"},
+    ]
+    assert runs["timeDimension"] == {"granularity": "hour"}
+    assert runs["fromTimestamp"] == T0.isoformat()
+
+
+async def test_only_the_query_a_measure_needs_runs(fake, reader):
+    _runs(fake)
+    result = await reader.query_metrics(_query(measures=[Measure.COST]))
+    assert [(r.bucket, r.measures) for r in result.rows] == [(None, {Measure.COST: 1.25})]
+    assert len(_sent(fake)) == 1
+
+
+async def test_a_bucket_one_query_lacks_reads_none_for_its_measures(fake, reader, monkeypatch):
+    answers = iter(
+        [
+            [{"time_dimension": "2026-01-01T10:00:00Z", "count_count": 2}],
+            [{"time_dimension": "2026-01-01T11:00:00Z", "sum_totalCost": 0.5}],
+        ]
     )
 
-    query = json.loads(mock_client.api.legacy.metrics_v1.metrics.call_args.kwargs["query"])
-    assert query["view"] == "traces"
-    assert {"measure": "count", "aggregation": "count"} in query["metrics"]
-    assert {"measure": "totalCost", "aggregation": "sum"} in query["metrics"]
-    assert query["dimensions"] == []
-    assert query["timeDimension"] == {"granularity": "day"}
+    async def _metrics(client, query):
+        return next(answers)
 
-    assert len(result.rows) == 1
-    row = result.rows[0]
-    assert row.measures == {Measure.COUNT: 3.0, Measure.COST: 0.5}
-    assert row.dimensions == {}
-    assert row.bucket == "2026-01-01"
+    monkeypatch.setattr(reader._metrics, "_metrics", _metrics)
+    result = await reader.query_metrics(_query(measures=[Measure.COUNT, Measure.COST], granularity="hour"))
+    assert [r.measures for r in result.rows] == [
+        {Measure.COUNT: 2.0, Measure.COST: None},
+        {Measure.COST: 0.5, Measure.COUNT: None},
+    ]
 
 
-async def test_query_metrics_model_dimension_reads_observations_view(manager, mock_client):
-    mock_client.api.legacy.metrics_v1.metrics.return_value = SimpleNamespace(
-        data=[{"providedModelName": "gpt-4o", "count": 7}]
-    )
-    result = await LangfuseReader(manager).query_metrics(
-        MetricsQuery(measures=[Measure.COUNT], from_timestamp=_NOW, to_timestamp=_NOW, dimensions=[Dimension.MODEL])
-    )
-    query = json.loads(mock_client.api.legacy.metrics_v1.metrics.call_args.kwargs["query"])
-    assert query["view"] == "observations"
+async def test_model_grouping_reads_one_query_over_every_observation(fake, reader):
+    _runs(fake)
+    result = await reader.query_metrics(_query(measures=[Measure.COST], dimensions=[Dimension.MODEL]))
+    by_model = {r.dimensions[Dimension.MODEL]: r.measures[Measure.COST] for r in result.rows}
+    assert by_model == {"m-1": 1.0, "m-2": 0.25, None: None}
+    [query] = _sent(fake)
     assert query["dimensions"] == [{"field": "providedModelName"}]
-
-    row = result.rows[0]
-    assert row.dimensions == {Dimension.MODEL: "gpt-4o"}
-    assert row.measures == {Measure.COUNT: 7.0}
-    assert row.bucket is None
+    assert query["filters"] == [_ENV]
 
 
-async def test_query_metrics_adds_environment_clause(manager, mock_client):
-    mock_client.api.legacy.metrics_v1.metrics.return_value = SimpleNamespace(data=[])
-    await LangfuseReader(manager).query_metrics(
-        MetricsQuery(measures=[Measure.COUNT], from_timestamp=_NOW, to_timestamp=_NOW)
-    )
-    query = json.loads(mock_client.api.legacy.metrics_v1.metrics.call_args.kwargs["query"])
-    assert {"column": "environment", "operator": "=", "value": "tai", "type": "string"} in query["filters"]
+def test_metrics_capability_declares_the_neutral_set(reader):
+    capability = reader.metrics_capability()
+    assert capability.measures == frozenset(Measure)
+    assert capability.dimensions == frozenset({Dimension.MODEL})
 
 
-def test_metrics_capability_declares_the_neutral_set(manager):
-    capability = LangfuseReader(manager).metrics_capability()
-    assert capability == MetricsCapability(
-        measures=frozenset({Measure.COUNT, Measure.COST, Measure.TOKENS, Measure.LATENCY}),
-        dimensions=frozenset({Dimension.MODEL}),
-    )
+async def test_an_unserved_measure_is_refused_before_any_request(fake, reader, monkeypatch):
+    from tai42_monitoring_langfuse import metrics_query
+
+    monkeypatch.delitem(metrics_query._MEASURE_TO_LANGFUSE, Measure.LATENCY)
+    with pytest.raises(MonitoringReadNotServedError, match="latency"):
+        await reader.query_metrics(_query(measures=[Measure.LATENCY]))
+    assert fake.calls == []
 
 
-async def test_query_metrics_raises_on_unserved_measure(manager, mock_client, monkeypatch):
-    # A measure the backend has not mapped is refused loudly before any request —
-    # never a silent zero. Simulated by dropping a measure from the mapping.
-    patched = {m: v for m, v in metrics_query._MEASURE_TO_LANGFUSE.items() if m is not Measure.COST}
-    monkeypatch.setattr(metrics_query, "_MEASURE_TO_LANGFUSE", patched)
+@pytest.mark.parametrize(
+    ("row", "missing"),
+    [
+        ({"time_dimension": "2026-01-01T10:00:00Z"}, "sum_totalCost"),
+        ({"sum_totalCost": 1.0}, "time_dimension"),
+    ],
+)
+async def test_a_row_without_a_requested_column_fails_loudly(fake, reader, monkeypatch, row, missing):
+    async def _metrics(client, query):
+        return [row]
 
-    with pytest.raises(MonitoringReadNotSupportedError, match="cost"):
-        await LangfuseReader(manager).query_metrics(
-            MetricsQuery(measures=[Measure.COST], from_timestamp=_NOW, to_timestamp=_NOW)
-        )
-    mock_client.api.legacy.metrics_v1.metrics.assert_not_called()
+    monkeypatch.setattr(reader._metrics, "_metrics", _metrics)
+    with pytest.raises(MonitoringError, match=missing):
+        await reader.query_metrics(_query(measures=[Measure.COST], granularity="hour"))
 
 
-async def test_query_metrics_missing_measure_column_raises(manager, mock_client):
-    # A response row that carries no column for a requested measure cannot be served
-    # as a silent zero — it raises.
-    mock_client.api.legacy.metrics_v1.metrics.return_value = SimpleNamespace(data=[{"totalCost": 0.5}])
-    with pytest.raises(MonitoringReadNotSupportedError, match="count"):
-        await LangfuseReader(manager).query_metrics(
-            MetricsQuery(measures=[Measure.COUNT], from_timestamp=_NOW, to_timestamp=_NOW)
-        )
+async def test_a_grouped_row_without_its_dimension_fails_loudly(fake, reader, monkeypatch):
+    async def _metrics(client, query):
+        return [{"sum_totalCost": 1.0}]
+
+    monkeypatch.setattr(reader._metrics, "_metrics", _metrics)
+    with pytest.raises(MonitoringError, match="providedModelName"):
+        await reader.query_metrics(_query(measures=[Measure.COST], dimensions=[Dimension.MODEL]))

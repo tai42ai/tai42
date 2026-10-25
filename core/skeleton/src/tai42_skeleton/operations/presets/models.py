@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel
 from tai42_contract.manifest import ExtensionElement
@@ -16,7 +16,11 @@ class PresetCreate(BaseModel):
     ``description`` is the bound tool's LLM-facing docstring — REQUIRED non-empty on every
     create. ``extensions`` is the list of extension combos (each element an extension name or a
     ``{"name", "config"}`` mapping binding author config). ``output_schema`` is the optional
-    author-set OUTPUT JSON Schema (an object schema).
+    author-set OUTPUT JSON Schema (an object schema). ``input_map`` is an optional jq program
+    turning the caller's input (described by ``input_schema``, which it needs) into the base
+    tool's arguments, with ``$fixed`` holding ``fixed_kwargs``; ``output_map`` is an optional jq
+    program reshaping the base tool's result before ``output_schema`` is checked. Each map is the
+    program text or a stored-body reference.
     """
 
     name: str
@@ -26,6 +30,8 @@ class PresetCreate(BaseModel):
     extensions: list[list[ExtensionElement]] = []
     output_schema: TemplatedText | dict[str, Any] | None = None
     input_schema: TemplatedText | dict[str, Any] | None = None
+    input_map: TemplatedText | str | None = None
+    output_map: TemplatedText | str | None = None
     state_binding: StateBinding | None = None
 
 
@@ -35,7 +41,8 @@ class PresetVersionSave(BaseModel):
     At least one field must be present; an omitted field carries forward, an explicit ``[]``
     clears (the store sentinel rule). ``output_schema`` carries forward when omitted, clears on
     an explicit ``null``, and wins on an explicit object schema; ``input_schema`` follows the
-    SAME carry-forward rule (omitted carries, ``null`` clears, an object schema wins).
+    SAME carry-forward rule (omitted carries, ``null`` clears, an object schema wins), and so do
+    ``input_map`` and ``output_map`` (omitted carries, ``null`` clears, a program wins).
     ``description`` carries forward when omitted and is SET by an explicit non-empty string (an
     explicit ``""`` is rejected — the resulting description is validated non-empty on every save).
     """
@@ -44,6 +51,8 @@ class PresetVersionSave(BaseModel):
     extensions: list[list[ExtensionElement]] | None = None
     output_schema: TemplatedText | dict[str, Any] | None = None
     input_schema: TemplatedText | dict[str, Any] | None = None
+    input_map: TemplatedText | str | None = None
+    output_map: TemplatedText | str | None = None
     description: str | None = None
     #: Omitted carries the active binding forward; an explicit ``null`` clears it; a
     #: binding sets it — the presence flag (``state_binding_provided``) tells absent from
@@ -79,6 +88,8 @@ class PresetValidate(BaseModel):
     extensions: list[list[ExtensionElement]] | None = None
     output_schema: TemplatedText | dict[str, Any] | None = None
     input_schema: TemplatedText | dict[str, Any] | None = None
+    input_map: TemplatedText | str | None = None
+    output_map: TemplatedText | str | None = None
     state_binding: StateBinding | None = None
 
 
@@ -89,3 +100,9 @@ class PresetVersionTags(BaseModel):
     """
 
     tags: list[str]
+
+
+class PresetRefereesQuery(BaseModel):
+    """The holders preview's ``?action=`` query: which gate's gather to answer. Required."""
+
+    action: Literal["rename", "delete"]

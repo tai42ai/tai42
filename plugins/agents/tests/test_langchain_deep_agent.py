@@ -38,7 +38,7 @@ from ._deep_agent_fakes import (
     _scripted_chunks,
 )
 from ._delivery_scope import assert_delivery_scoped, probe_tool
-from .conftest import fake_run_trace
+from .conftest import fake_init_langgraph_config
 
 # ===========================================================================
 # DeepAgent build path
@@ -80,7 +80,7 @@ def _patch_build(monkeypatch: pytest.MonkeyPatch, captured: dict[str, Any]) -> N
     monkeypatch.setattr(agent_mod, "store_registry", _FakeRegistry)
     monkeypatch.setattr(agent_mod, "llm_provider_settings", _FakeProviderSettings)
     monkeypatch.setattr(agent_mod, "llm_settings", _FakeLlmSettings)
-    monkeypatch.setattr(run_thread_mod, "init_langgraph_config", lambda config=None: fake_run_trace(config))
+    monkeypatch.setattr(run_thread_mod, "init_langgraph_config", fake_init_langgraph_config)
 
 
 def _build_kwargs(**overrides: Any) -> dict[str, Any]:
@@ -99,6 +99,9 @@ def _build_kwargs(**overrides: Any) -> dict[str, Any]:
         "store_provider": None,
         "llm_kwargs": None,
         "recursion_limit": None,
+        "langgraph_config": None,
+        "session": None,
+        "context": None,
     }
     base.update(overrides)
     return base
@@ -533,7 +536,7 @@ def test_run_config_pins_thread_and_checkpoint(ledger_book: Any) -> None:
     """start_run_config overlays an explicit thread_id / resume_checkpoint_id /
     recursion_limit onto a caller-supplied langgraph_config base; the caller's thread is
     not minted."""
-    config, minted = asyncio.run(start_run_config({"configurable": {"extra": 1}}, "t", "cp-7", 99, None))
+    config, minted = asyncio.run(start_run_config({"configurable": {"extra": 1}}, "t", "cp-7", 99, None, None))
     assert minted is None
     assert config["configurable"]["thread_id"] == "t"
     assert config["configurable"]["checkpoint_id"] == "cp-7"
@@ -588,8 +591,8 @@ def test_astream_explicit_thread_id_wins_over_langgraph_config(monkeypatch: pyte
 def test_run_config_mints_fresh_thread_when_keyless() -> None:
     """With no thread pinned, each run gets a fresh isolated thread_id (never a
     shared/None key that would collide runs on one checkpoint thread)."""
-    first, minted_first = asyncio.run(start_run_config(None, None, None, None, None))
-    second, minted_second = asyncio.run(start_run_config(None, None, None, None, None))
+    first, minted_first = asyncio.run(start_run_config(None, None, None, None, None, None))
+    second, minted_second = asyncio.run(start_run_config(None, None, None, None, None, None))
     t1 = first["configurable"]["thread_id"]
     t2 = second["configurable"]["thread_id"]
     assert t1

@@ -19,10 +19,9 @@ from ._manager_fixtures import FakeVersioningPg
 
 # ``sandbox_exec`` is declared under ``from __future__ import annotations`` and returns the
 # custom ``ExecResult`` model, so its function annotations are STRING forward-refs. Authoring
-# ANY preset over it drives the full register/branch-bind path (``_baked_partial`` →
-# ``_derive_output_schema``), which must resolve those forward-refs against the base function's
-# own module globals — never leave ``"ExecResult"`` an unresolvable string that pydantic's
-# schema parse would raise ``NameError`` on. The base binds with no provider (no session is
+# ANY preset over it drives the full register/bind path, which must resolve those forward-refs
+# against the base function's own module globals — never leave ``"ExecResult"`` an unresolvable
+# string that pydantic's schema parse would raise ``NameError`` on. The base binds with no provider (no session is
 # created here); only a RUN would need one.
 _SANDBOX_MANIFEST = {
     "tools": [{"title": "sbx", "module": "tai42_skeleton.tools.builtin.sandbox_exec", "include": ["sandbox_exec"]}],
@@ -48,8 +47,7 @@ def test_plain_preset_over_sandbox_exec_authors(pg: FakeVersioningPg):
         async with app.app_context(_sandbox_manifest()):
             mgr = app.preset_manager
             # A plain preset bakes the required ``argv``/``image`` as fixed constants. Authoring
-            # must SUCCEED through the branch-bind output-schema derivation, which resolves
-            # ``ExecResult`` in scope.
+            # must SUCCEED with ``ExecResult`` resolved in scope.
             await mgr.register("sbx_plain", "sandbox_exec", _SANDBOX_FIXED_KWARGS, [], "run a fixed command")
             assert "sbx_plain" in await app.tools.get_tools()
             # The preset inherits the base tool's ``ExecResult`` output schema.

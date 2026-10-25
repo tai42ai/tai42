@@ -2,6 +2,7 @@
 
 import asyncio
 import inspect
+import sys
 from datetime import UTC, datetime
 from typing import Any
 
@@ -40,6 +41,21 @@ def test_batches_a_branch_over_a_postponed_annotation_tool():
     item_model = inspect.signature(batch(branch, "keep_cache", "desc")).parameters["params"].annotation.__args__[0]
 
     assert item_model.model_fields["payload"].annotation == dict[str, Any]
+
+
+def test_a_second_call_on_the_same_base_leaves_an_identical_input_model():
+    # The server calls a factory again to check a write before storing it; the input model
+    # it sets on the base's module must stay the same model each time.
+    batch(_tool, "tool", "desc")
+    first = _tool_module().ToolInput.model_json_schema()
+
+    batch(_tool, "tool", "desc")
+
+    assert _tool_module().ToolInput.model_json_schema() == first
+
+
+def _tool_module():
+    return sys.modules[_tool.__module__]
 
 
 def test_composed_signature_is_concrete():

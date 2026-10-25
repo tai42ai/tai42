@@ -1102,3 +1102,93 @@ def test_any_authenticated_operation_admits_a_scoped_key_at_both_edges(ac_env, b
     )
     with pytest.raises(PermissionDeniedError):
         asyncio.run(check(CallerIdentity(user_id="fenced1", effective_scopes=("things",)), meta, {}, settings=settings))
+
+
+# -- the MCP tool-pick read: a write-level door with a per-server fence ---------------------
+
+
+def _advertised_tools_meta():
+    from tai42_skeleton.operations import operation_metadata_of
+    from tai42_skeleton.operations.manifest import list_mcp_advertised_tools
+
+    meta = operation_metadata_of(list_mcp_advertised_tools)
+    assert meta.route_template == "/api/mcp-status/{title}/advertised-tools"
+    return meta
+
+
+@pytest.mark.parametrize(("level", "allowed"), [("read", False), ("write", True)])
+def test_the_advertised_tools_read_needs_a_write_level_grant(ac_env, bound_app, monkeypatch, level, allowed):
+    settings = AccessControlSettings()
+    meta = _advertised_tools_meta()
+
+    async def _grants(role_name: str, version: int):
+        return dict.fromkeys(grantable_feature_tags(), level)
+
+    monkeypatch.setattr(role_grants_module, "resolve_role_grants", _grants)
+    ac_env.add_policy("u1", scopes=["*"], policy_data={ROLE_POINTER_KEY: "editor"}, condition={"content": "true"})
+    identity = CallerIdentity(user_id="u1")
+
+    if allowed:
+        asyncio.run(check(identity, meta, {"title": "acme"}, settings=settings))
+    else:
+        with pytest.raises(PermissionDeniedError):
+            asyncio.run(check(identity, meta, {"title": "acme"}, settings=settings))
+
+
+def test_a_condition_admitting_one_server_fences_the_advertised_tools_read_at_both_edges(
+    ac_env, bound_app, monkeypatch
+):
+    settings = AccessControlSettings()
+    meta = _advertised_tools_meta()
+
+    async def _grants(role_name: str, version: int):
+        return dict.fromkeys(grantable_feature_tags(), "write")
+
+    monkeypatch.setattr(role_grants_module, "resolve_role_grants", _grants)
+    ac_env.add_policy(
+        "u1",
+        scopes=["*"],
+        policy_data={ROLE_POINTER_KEY: "editor"},
+        condition={"content": '.request.path == "/api/mcp-status/acme/advertised-tools"'},
+    )
+    identity = CallerIdentity(user_id="u1")
+    verifier = _ClaimsVerifier("u1", {"sub": "u1"})
+
+    asyncio.run(check(identity, meta, {"title": "acme"}, settings=settings))
+    with pytest.raises(PermissionDeniedError, match="policy condition rejected"):
+        asyncio.run(check(identity, meta, {"title": "other"}, settings=settings))
+
+    async def reaches(path: str) -> bool:
+        return await _http_reaches(verifier, {"X-Api-Key": "tok-u1"}, path, settings, method="POST")
+
+    assert asyncio.run(reaches("/api/mcp-status/acme/advertised-tools")) is True
+    assert asyncio.run(reaches("/api/mcp-status/other/advertised-tools")) is False
+
+
+# -- self-service operations at the tool edge: no level needed ------------------------------
+
+
+def test_a_self_service_operation_needs_no_level_at_the_tool_edge(ac_env, bound_app, monkeypatch):
+    # The tool edge runs the same per-tag decision as the HTTP gate: a role whose grant map
+    # holds no tag still dispatches a self-service operation (minting its own key), while a
+    # non-self-service write under the same prefix stays denied for want of a level.
+    from tai42_skeleton.operations import operation_metadata_of
+    from tai42_skeleton.operations.api_keys import add_scope_url, create_api_key
+
+    settings = AccessControlSettings()
+
+    async def _grants(role_name: str, version: int):
+        return {}
+
+    monkeypatch.setattr(role_grants_module, "resolve_role_grants", _grants)
+    ac_env.add_policy("u1", scopes=["*"], policy_data={ROLE_POINTER_KEY: "viewer"}, condition={"content": "true"})
+    identity = CallerIdentity(user_id="u1")
+
+    mint = operation_metadata_of(create_api_key)
+    mint_route = resolve_route_meta(mint.route_template or "", "POST")
+    assert mint_route is not None
+    assert mint_route.self_service is True
+    asyncio.run(check(identity, mint, {}, settings=settings))
+
+    with pytest.raises(PermissionDeniedError, match="is not permitted"):
+        asyncio.run(check(identity, operation_metadata_of(add_scope_url), {}, settings=settings))

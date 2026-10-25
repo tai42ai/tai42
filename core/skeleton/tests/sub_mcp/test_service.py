@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 from tai42_contract.app import tai42_app
 
+from tai42_skeleton.app import instance as instance_mod
 from tai42_skeleton.sub_mcp import service
 from tai42_skeleton.sub_mcp import store as store_mod
 from tai42_skeleton.sub_mcp.store import InMemorySubMcpStore
@@ -22,7 +23,7 @@ class _FakeRouter:
         self.unregistered: list[str] = []
         self._register_error = register_error
 
-    async def register_sub_mcp_app(self, slug, tools, transport="http"):
+    async def bind_route(self, slug, tools, transport="http"):
         if self._register_error is not None:
             raise self._register_error
         self.registered.append((slug, tools, transport))
@@ -56,12 +57,14 @@ class _CountingListener:
 
 @pytest.fixture
 def wired(monkeypatch):
-    """Install a fresh in-memory store + a fake router behind ``tai42_app``."""
+    """Install a fresh in-memory store + a fake router behind ``tai42_app`` and ``build_app``."""
 
     def _wire(router: _FakeRouter) -> InMemorySubMcpStore:
         fresh = InMemorySubMcpStore()
         monkeypatch.setattr(store_mod, "_IN_MEMORY_STORE", fresh)
-        monkeypatch.setattr(tai42_app, "_impl", SimpleNamespace(sub_app=SimpleNamespace(mcp_sub_app_router=router)))
+        app = SimpleNamespace(sub_app=SimpleNamespace(mcp_sub_app_router=router))
+        monkeypatch.setattr(tai42_app, "_impl", app)
+        monkeypatch.setattr(instance_mod, "build_app", lambda: app)
         return fresh
 
     return _wire

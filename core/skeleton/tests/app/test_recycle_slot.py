@@ -197,7 +197,9 @@ class _Mixin(TaiMCPLifecycleMixin):
         super().__init__(*args, **kwargs)
         self.preset_manager = cast("Any", SimpleNamespace(reconcile_bases=AsyncMock()))
 
-    def _mcp_tools(self, config: Any, tools: Any) -> None:  # pragma: no cover - unused here
+    def _mcp_tools(  # pragma: no cover - unused here
+        self, config: Any, tools: Any, preset_names: frozenset[str]
+    ) -> None:
         self._mcp_bound_tools[config.title] = {f"{config.title}_t"}
 
 

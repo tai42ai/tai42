@@ -122,14 +122,41 @@ async def test_root_prefix_and_routes_properties():
     r = _router()
     assert r.root_prefix == ROOT_PREFIX
     assert r.routes == {}
-    await r.register_sub_mcp_app("svc", ["t1"], transport="http")
+    await r.bind_route("svc", ["t1"], transport="http")
     assert r.routes["svc"] == RouteConfig(tools=["t1"], transport="http")
+
+
+_ECHO_MANIFEST = {"tools": [{"title": "fx", "module": "tests.presets._fixtures", "include": ["echo"]}]}
+
+
+async def test_router_register_refuses_unknown_tool():
+    from tai42_skeleton.app.instance import app
+    from tai42_skeleton.manifest import Manifest
+    from tai42_skeleton.operations.errors import BadRequestError
+
+    async with app.app_context(Manifest.model_validate(_ECHO_MANIFEST)):
+        router = cast(SubMcpAppRouter, app.sub_app.mcp_sub_app_router)
+        with pytest.raises(BadRequestError) as refused:
+            await router.register_sub_mcp_app("ops", ["echo", "ghost", "phantom"])
+        assert refused.value.message == (
+            "served tool 'ghost' is not a registered tool\nserved tool 'phantom' is not a registered tool"
+        )
+        assert "ops" not in router.routes
+
+        await router.register_sub_mcp_app("ops", ["echo"])
+        assert router.routes["ops"] == RouteConfig(tools=["echo"], transport="http")
+
+
+async def test_bind_route_binds_a_tool_no_registry_serves():
+    r = _router()
+    await r.bind_route("ops", ["ghost"])
+    assert r.routes["ops"] == RouteConfig(tools=["ghost"], transport="http")
 
 
 async def test_register_existing_slug_reloads():
     r = _router()
-    await r.register_sub_mcp_app("svc", ["a"])
-    await r.register_sub_mcp_app("svc", ["b"])  # reload path -> unregister first
+    await r.bind_route("svc", ["a"])
+    await r.bind_route("svc", ["b"])  # reload path -> unregister first
     assert r.routes["svc"].tools == ["b"]
 
 
@@ -251,7 +278,7 @@ async def test_a_mount_session_driving_a_reload_keeps_its_lifespan_until_it_answ
     monkeypatch.setattr(epoch_mod, "_current", boot)
     monkeypatch.setattr(epoch_mod, "_serving_slot", {})
     r = _router()
-    await r.register_sub_mcp_app("svc", ["reload_config"])
+    await r.bind_route("svc", ["reload_config"])
     order: list[str] = []
 
     async def _mount_closed() -> None:
@@ -667,14 +694,14 @@ async def test_replace_during_build_serves_newest_and_closes_stale(monkeypatch):
     r._owner_loop = asyncio.get_running_loop()
     r._app.tools = _gated_tools(gate, "old")
 
-    await r.register_sub_mcp_app("svc", ["old"], transport="http")
+    await r.bind_route("svc", ["old"], transport="http")
     build_task = asyncio.create_task(r._get_or_build_app("svc"))
     # Let the build reach the parked get_tool("old").
     for _ in range(5):
         await asyncio.sleep(0)
 
     # REPLACE the live slug while the build is parked.
-    await r.register_sub_mcp_app("svc", ["new"], transport="http")
+    await r.bind_route("svc", ["new"], transport="http")
     gate.set()
     built = await build_task
 
@@ -703,7 +730,7 @@ async def test_unregister_during_build_returns_none_and_closes_orphan(monkeypatc
     r._owner_loop = asyncio.get_running_loop()
     r._app.tools = _gated_tools(gate, "old")
 
-    await r.register_sub_mcp_app("svc", ["old"], transport="http")
+    await r.bind_route("svc", ["old"], transport="http")
     build_task = asyncio.create_task(r._get_or_build_app("svc"))
     for _ in range(5):
         await asyncio.sleep(0)
@@ -727,13 +754,13 @@ async def test_reset_then_reregister_during_build_does_not_cache_stale(monkeypat
     r._owner_loop = asyncio.get_running_loop()
     r._app.tools = _gated_tools(gate, "old")
 
-    await r.register_sub_mcp_app("svc", ["old"], transport="http")
+    await r.bind_route("svc", ["old"], transport="http")
     build_task = asyncio.create_task(r._get_or_build_app("svc"))
     for _ in range(5):
         await asyncio.sleep(0)
 
     r.reset()
-    await r.register_sub_mcp_app("svc", ["new"], transport="http")
+    await r.bind_route("svc", ["new"], transport="http")
     gate.set()
     built = await build_task
 
@@ -761,7 +788,7 @@ async def test_known_slug_fast_path_never_touches_the_store(monkeypatch):
     counting = _CountingStore()
     monkeypatch.setattr(sub_mcp_app_module, "get_sub_mcp_store", lambda: counting)
 
-    await r.register_sub_mcp_app("svc", ["t"], transport="http")
+    await r.bind_route("svc", ["t"], transport="http")
     built = await r._get_or_build_app("svc")  # build + cache
     assert built is not None
     assert await r._get_or_build_app("svc") is built  # cached fetch
@@ -812,7 +839,7 @@ async def test_concurrent_build_waiter_returns_the_cached_app(monkeypatch):
     r._owner_loop = asyncio.get_running_loop()
     r._app.tools = _gated_tools(gate, "t")
 
-    await r.register_sub_mcp_app("svc", ["t"], transport="http")
+    await r.bind_route("svc", ["t"], transport="http")
     first = asyncio.create_task(r._get_or_build_app("svc"))
     for _ in range(5):
         await asyncio.sleep(0)
@@ -835,7 +862,7 @@ async def test_build_lock_waiter_returns_none_when_slug_unregistered(monkeypatch
     r._owner_loop = asyncio.get_running_loop()
     r._app.tools = _gated_tools(gate, "t")
 
-    await r.register_sub_mcp_app("svc", ["t"], transport="http")
+    await r.bind_route("svc", ["t"], transport="http")
     first = asyncio.create_task(r._get_or_build_app("svc"))
     for _ in range(5):
         await asyncio.sleep(0)
@@ -880,7 +907,7 @@ async def test_build_propagates_a_lifespan_enter_failure(monkeypatch):
     r._owner_loop = asyncio.get_running_loop()
     r._app.tools = SimpleNamespace(get_tool=_passthrough_get_tool)
 
-    await r.register_sub_mcp_app("svc", ["t"], transport="http")
+    await r.bind_route("svc", ["t"], transport="http")
     with pytest.raises(RuntimeError, match="lifespan boom"):
         await r._get_or_build_app("svc")
 
@@ -896,7 +923,7 @@ async def test_every_built_sub_mcp_server_carries_the_dispatch_scope_middleware(
     r._owner_loop = asyncio.get_running_loop()
     r._app.tools = SimpleNamespace(get_tool=_passthrough_get_tool)
 
-    await r.register_sub_mcp_app("svc", ["t"], transport="http")
+    await r.bind_route("svc", ["t"], transport="http")
     await r._get_or_build_app("svc")
 
     assert [type(m) for m in built_apps[0].server_middleware if isinstance(m, DispatchScopeMiddleware)] == [

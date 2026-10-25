@@ -73,6 +73,7 @@ from tai42_skeleton.marketplace.errors import (
     LocalStateError,
     MalformedRefError,
     ManifestCollisionError,
+    ManifestRefusedError,
     MarketplaceError,
     OperationInProgressError,
     PipFailedError,
@@ -197,8 +198,12 @@ def _install_state_error(exc: MarketplaceError) -> OperationError:
 # none is the terminal ``OperationFailedError`` below.
 _ERROR_RULES: tuple[tuple[Callable[[MarketplaceError], bool], Callable[[MarketplaceError], OperationError]], ...] = (
     # The caller's own author error — a malformed ref, an mcp-server install missing a
-    # required !ENV value, or a route_mounts override naming a non-route item / bad base.
-    (lambda e: isinstance(e, MalformedRefError | InstallEnvError | RouteMountError), lambda e: BadRequestError(str(e))),
+    # required !ENV value, a composed manifest the config pipeline refuses, or a
+    # route_mounts override naming a non-route item / bad base.
+    (
+        lambda e: isinstance(e, MalformedRefError | InstallEnvError | ManifestRefusedError | RouteMountError),
+        lambda e: BadRequestError(str(e)),
+    ),
     (lambda e: isinstance(e, PublicRoutesNotAcceptedError), _public_routes_error),
     (lambda e: isinstance(e, RouteCollisionError), _route_collision_error),
     (lambda e: isinstance(e, ReservedRoutePrefixError), _reserved_prefix_error),
@@ -660,7 +665,7 @@ async def marketplace_install_preview(
     destructive=True,
     reload_gated=True,
     authority_changing=True,
-    errors=[NotFoundError, NotSupportedError, UnavailableError, OperationFailedError],
+    errors=[BadRequestError, NotFoundError, NotSupportedError, UnavailableError, OperationFailedError],
     request_model=MarketplaceUninstall,
     response_model=UninstallResult,
 )
@@ -749,7 +754,10 @@ async def marketplace_update(
 async def marketplace_upgrade_all() -> dict[str, Any]:
     """Move every installed plugin onto its latest COMPATIBLE version in one lock-held batch.
 
-    Answers ``{"results": [{ref, outcome, detail}, ...]}``.
+    Answers ``{"results": [{ref, outcome, detail, span_release_error}, ...]}``; a row's
+    ``span_release_error`` names the failed config-store span releases of the config writes its ref
+    landed — an upgrade's write, or a failed upgrade's forward and restore writes — joined in write
+    order (``null`` when each released or the ref wrote nothing).
 
     Per-ref failures (including a ref with NO compatible version) are report
     entries, never a batch abort — the ONE operation-level failure is the

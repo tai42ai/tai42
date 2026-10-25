@@ -25,6 +25,7 @@ from tai42_kit.monitoring.otel import OtelWriter
 from tai42_kit.monitoring.testing import InMemoryOtelReader
 
 _TRACE = "0af7651916cd43dd8448eb211c80319c"
+_PARENT = "b7ad6b7169203331"
 
 
 @pytest.fixture
@@ -38,7 +39,7 @@ async def test_every_kind_round_trips(writer: OtelWriter, reader: InMemoryOtelRe
         span = writer.open_span(
             name="r",
             kind=kind,
-            trace_context=TraceContext(trace_id=_TRACE),
+            trace_context=TraceContext(trace_id=_TRACE, parent_span_id=_PARENT),
             input_={"in": [1, 2]},
             model="req",
             metadata={"k": "v", STEP_ROLE_METADATA_KEY: StepRole.SUB_STEP, TIMING_METADATA_KEY: "absent"},
@@ -56,7 +57,7 @@ async def test_every_kind_round_trips(writer: OtelWriter, reader: InMemoryOtelRe
     assert obs.kind is kind
     assert obs.name == "r"
     assert obs.trace_id == _TRACE
-    assert obs.parent_id is None
+    assert obs.parent_id == _PARENT
     assert obs.input == {"in": [1, 2]}
     assert obs.output == {"out": True}
     assert obs.metadata == {"k": "v", "tai42.step_role": "sub_step", "tai42.timing": "absent"}
@@ -74,7 +75,7 @@ async def test_error_status_round_trips(writer: OtelWriter, reader: InMemoryOtel
         kind=SpanKind.TOOL,
         start=datetime(2026, 1, 1, tzinfo=UTC),
         end=datetime(2026, 1, 1, 0, 0, 1, tzinfo=UTC),
-        trace_context=TraceContext(trace_id=_TRACE),
+        trace_context=TraceContext(trace_id=_TRACE, parent_span_id=_PARENT),
         level=MonitoringLevel.ERROR,
         status_message="broke",
     )
@@ -86,7 +87,10 @@ async def test_error_status_round_trips(writer: OtelWriter, reader: InMemoryOtel
 
 async def test_trace_and_parentage(writer: OtelWriter, reader: InMemoryOtelReader):
     with writer.start_span(
-        name="root", kind=SpanKind.CHAIN, trace_context=TraceContext(trace_id=_TRACE), input_="q"
+        name="root",
+        kind=SpanKind.CHAIN,
+        trace_context=TraceContext(trace_id=_TRACE, parent_span_id=_PARENT),
+        input_="q",
     ) as root:
         writer.open_span(name="child", kind=SpanKind.TOOL).end()
         writer.update_current_span(output="a")
@@ -101,7 +105,9 @@ async def test_trace_and_parentage(writer: OtelWriter, reader: InMemoryOtelReade
 async def test_absent_trace_and_observation(writer: OtelWriter, reader: InMemoryOtelReader):
     with pytest.raises(TraceNotFoundError):
         await reader.get_trace(_TRACE)
-    writer.open_span(name="r", kind=SpanKind.CHAIN, trace_context=TraceContext(trace_id=_TRACE)).end()
+    writer.open_span(
+        name="r", kind=SpanKind.CHAIN, trace_context=TraceContext(trace_id=_TRACE, parent_span_id=_PARENT)
+    ).end()
     writer.flush()
     with pytest.raises(ObservationNotFoundError):
         await reader.get_observation(_TRACE, "0" * 16)
@@ -116,6 +122,8 @@ async def test_list_and_aggregate_reads_are_not_supported(reader: InMemoryOtelRe
     assert reader.max_page_size() >= 1
     with pytest.raises(MonitoringReadNotSupportedError):
         await reader.list_traces()
+    with pytest.raises(MonitoringReadNotSupportedError):
+        await reader.export_traces(max_rows=10)
     with pytest.raises(MonitoringReadNotSupportedError):
         await reader.list_spans_in_window(now, now)
     with pytest.raises(MonitoringReadNotSupportedError):

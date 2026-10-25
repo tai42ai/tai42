@@ -94,8 +94,9 @@ an outermost run's address receives a failed outcome, and a run nested under ano
 flow holding the agent, an agent calling it) reaches that caller as a **failure**, so the
 caller's own error handling runs (a flow holder's `on_error`). The same holds when the
 platform gives up on a park whose resume could not be driven at all within the redelivery
-horizon: the caller the parked run was nested under is told it failed rather than waiting
-out its own deadline.
+horizon, or when a preset's output map refuses the answer the parked run resumes with: the
+caller the parked run was nested under is told it failed rather than waiting out its own
+deadline.
 
 An async ask may address the run's own **caller** (`ask(to="caller")`) instead of a human
 (`to="user"`): the run parks the same way and resumes when the caller answers, so an agent
@@ -251,6 +252,11 @@ while a thread paused on a real interrupt is left untouched.
 Runs a deep agent with planning, one level of nested subagents, skills,
 human-in-the-loop interrupts (resumed with a LangGraph `Command`), and a per-thread
 scratch filesystem.
+
+The agent sees each skill's whole `skills/<name>/` tree under `/skills/`: text files
+read as text, and binary assets (images, PDFs) reach the model as file attachments when
+the model accepts them, otherwise as a one-line notice, so a bundle's assets never stop
+the run.
 
 ### Sandbox requirement
 

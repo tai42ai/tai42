@@ -586,8 +586,9 @@ class TaiStack:
 
     def _restart_baseline(self, name: str, handle: ProcessHandle) -> tuple[dict[str, int], set[str]]:
         """The pre-restart ``{name: generation}`` of the restarted process's census kind and
-        the slot names the process itself holds. The backend worker is the only backend-kind
-        process; a serve/embed process holds the serve lives whose pid belongs to its session
+        the slot names the process itself holds. Every backend-kind row counts as the
+        restarted backend worker's, which holds only on a stack with no queue workers; a
+        serve/embed process holds the serve lives whose pid belongs to its session
         (the spawned master is a session leader and its uvicorn workers inherit the session),
         so another replica's worker is never taken for one of its lives."""
         kind = self._restart_census_kind(name)

@@ -64,6 +64,8 @@ class CapturingExtensions:
         self.pauses: dict[str, bool] = {}
         # Each registered extension's ``declares_output_schema`` flag, by name.
         self.declares_output_schema: dict[str, bool] = {}
+        # Each registered extension's declared settings schema, by name.
+        self.config_schemas: dict[str, dict[str, Any] | None] = {}
 
     def extension(
         self,
@@ -74,11 +76,13 @@ class CapturingExtensions:
         requires_body_locality: bool = False,
         pauses: bool = False,
         declares_output_schema: bool = False,
+        config_schema: dict[str, Any] | None = None,
     ) -> Any:
         def decorate(fn: Callable[..., Any]) -> Callable[..., Any]:
             self.registered.append((name or fn.__name__, kind, requires_body_locality))
             self.pauses[name or fn.__name__] = pauses
             self.declares_output_schema[name or fn.__name__] = declares_output_schema
+            self.config_schemas[name or fn.__name__] = config_schema
             return fn
 
         if callable(f):

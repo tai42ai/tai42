@@ -14,7 +14,7 @@ from arq.jobs import JobStatus
 from tai42_backend_arq import scheduler, tools
 from tai42_backend_arq.settings import TaskFailedError
 
-from .conftest import DeleteOnLockRedis
+from .conftest import SETTINGS_QUEUE, DeleteOnLockRedis, handle_of
 
 
 def _job_type(**results: Any) -> type:
@@ -200,7 +200,7 @@ async def test_request_job_abort_unconfirmed_false_with_live_job_stays_false(cap
 
 
 async def test_transition_replaces_pending_job_and_writes_mapping(fake_redis, monkeypatch) -> None:
-    monkeypatch.setattr(scheduler, "Job", _job_type())
+    monkeypatch.setattr(scheduler, "job_handle", handle_of(_job_type()))
     key = _seed(fake_redis, "s1")
 
     job = await scheduler.safe_schedule_transition(
@@ -216,7 +216,7 @@ async def test_transition_replaces_pending_job_and_writes_mapping(fake_redis, mo
 
 
 async def test_transition_skipped_when_preempted(fake_redis, monkeypatch) -> None:
-    monkeypatch.setattr(scheduler, "Job", _job_type())
+    monkeypatch.setattr(scheduler, "job_handle", handle_of(_job_type()))
     key = _seed(fake_redis, "s1", job_id=b"pending-1")
 
     result = await scheduler.safe_schedule_transition(
@@ -234,12 +234,14 @@ async def test_transition_over_finished_pending_job_proceeds(fake_redis, monkeyp
     and the old job's stored failure must not resurface as a transition error."""
     monkeypatch.setattr(
         scheduler,
-        "Job",
-        _job_type(
-            **{
-                "status:pending-1": JobStatus.complete,
-                "abort:pending-1": RuntimeError("stored outcome must not be replayed"),
-            }
+        "job_handle",
+        handle_of(
+            _job_type(
+                **{
+                    "status:pending-1": JobStatus.complete,
+                    "abort:pending-1": RuntimeError("stored outcome must not be replayed"),
+                }
+            )
         ),
     )
     key = _seed(fake_redis, "s1")
@@ -255,7 +257,7 @@ async def test_transition_never_resurrects_deleted_schedule(fake_redis, monkeypa
     update/recovery paths) that finds the hash gone lost a race with a delete:
     it must skip -- writing anyway would recreate the schedule as a partial
     hash with no target or schedule, unrunnable and unexportable."""
-    monkeypatch.setattr(scheduler, "Job", _job_type())
+    monkeypatch.setattr(scheduler, "job_handle", handle_of(_job_type()))
 
     result = await scheduler.safe_schedule_transition(
         fake_redis, "gone", defer_by=60, last_scheduled_ts=123.0, mapping_updates={"enabled": "true"}
@@ -269,7 +271,7 @@ async def test_transition_never_resurrects_deleted_schedule(fake_redis, monkeypa
 async def test_transition_with_full_definition_creates_missing_schedule(fake_redis, monkeypatch) -> None:
     """The create/import paths carry the full durable definition, so they may
     (and must) write a hash that does not exist yet."""
-    monkeypatch.setattr(scheduler, "Job", _job_type())
+    monkeypatch.setattr(scheduler, "job_handle", handle_of(_job_type()))
     mapping = {
         "target": "tool_execution",
         "args": orjson.dumps([]),
@@ -289,7 +291,9 @@ async def test_transition_with_full_definition_creates_missing_schedule(fake_red
 
 
 async def test_transition_abort_failure_stops_before_enqueue(fake_redis, monkeypatch) -> None:
-    monkeypatch.setattr(scheduler, "Job", _job_type(**{"abort:pending-1": RuntimeError("abort failed")}))
+    monkeypatch.setattr(
+        scheduler, "job_handle", handle_of(_job_type(**{"abort:pending-1": RuntimeError("abort failed")}))
+    )
     key = _seed(fake_redis, "s1")
 
     with pytest.raises(RuntimeError, match="abort failed"):
@@ -304,7 +308,7 @@ async def test_transition_abort_failure_stops_before_enqueue(fake_redis, monkeyp
 
 async def test_abort_schedule_task_marks_and_requests_abort(fake_redis, monkeypatch, bind_pool) -> None:
     bind_pool(fake_redis)
-    monkeypatch.setattr(scheduler, "Job", _job_type())
+    monkeypatch.setattr(scheduler, "job_handle", handle_of(_job_type()))
     key = _seed(fake_redis, "s1")
 
     await scheduler.abort_schedule_task(key)
@@ -314,7 +318,9 @@ async def test_abort_schedule_task_marks_and_requests_abort(fake_redis, monkeypa
 
 async def test_abort_schedule_task_noop_without_job_or_key(fake_redis, monkeypatch, bind_pool) -> None:
     bind_pool(fake_redis)
-    monkeypatch.setattr(scheduler, "Job", _job_type(**{"abort:pending-1": RuntimeError("must not be called")}))
+    monkeypatch.setattr(
+        scheduler, "job_handle", handle_of(_job_type(**{"abort:pending-1": RuntimeError("must not be called")}))
+    )
 
     # Missing key: nothing happens.
     await scheduler.abort_schedule_task("arq:schedule:absent")
@@ -327,7 +333,9 @@ async def test_abort_schedule_task_noop_without_job_or_key(fake_redis, monkeypat
 
 async def test_abort_schedule_task_error_propagates(fake_redis, monkeypatch, bind_pool) -> None:
     bind_pool(fake_redis)
-    monkeypatch.setattr(scheduler, "Job", _job_type(**{"abort:pending-1": ConnectionError("redis gone")}))
+    monkeypatch.setattr(
+        scheduler, "job_handle", handle_of(_job_type(**{"abort:pending-1": ConnectionError("redis gone")}))
+    )
     key = _seed(fake_redis, "s1")
 
     with pytest.raises(ConnectionError, match="redis gone"):
@@ -367,14 +375,14 @@ class _EnqueueRecordingRedis:
 
 
 async def test_task_scheduler_runs_target_and_reschedules(fake_redis, monkeypatch) -> None:
-    monkeypatch.setattr(scheduler, "Job", _job_type())
+    monkeypatch.setattr(scheduler, "job_handle", handle_of(_job_type()))
     key = _seed(fake_redis, "s1")
     redis = _EnqueueRecordingRedis(fake_redis)
 
     out = await scheduler.task_scheduler({"redis": redis, "job_id": "pending-1"}, "s1")
 
     assert out == "ran"
-    assert redis.targets == [("tool_execution", ("a",), {"backend_tool_name": "t"})]
+    assert redis.targets == [("tool_execution", ("a",), {"_queue_name": "arq:queue", "backend_tool_name": "t"})]
     # Rescheduled: the hash now points at the replacement scheduler job.
     assert fake_redis._store[key][b"job_id"] != b"pending-1"
     assert float(fake_redis._store[key][b"last_scheduled_ts"]) > datetime.now(UTC).timestamp() - 5
@@ -385,7 +393,7 @@ async def test_task_scheduler_aborted_target_records_failure_and_reschedules(fak
     ``CancelledError``. It surfaces as ``TaskFailedError`` (a raw
     CancelledError would read to the worker as a cancellation of the scheduler
     job and trigger a retry) and the schedule still reschedules itself."""
-    monkeypatch.setattr(scheduler, "Job", _job_type())
+    monkeypatch.setattr(scheduler, "job_handle", handle_of(_job_type()))
     key = _seed(fake_redis, "s1")
     redis = _EnqueueRecordingRedis(fake_redis, result=asyncio.CancelledError("CancelledError()"))
 
@@ -396,7 +404,7 @@ async def test_task_scheduler_aborted_target_records_failure_and_reschedules(fak
 
 
 async def test_task_scheduler_disabled_skips_target_but_reschedules(fake_redis, monkeypatch) -> None:
-    monkeypatch.setattr(scheduler, "Job", _job_type())
+    monkeypatch.setattr(scheduler, "job_handle", handle_of(_job_type()))
     key = _seed(fake_redis, "s1", enabled=b"false")
     redis = _EnqueueRecordingRedis(fake_redis)
 
@@ -417,7 +425,7 @@ async def test_task_scheduler_stale_job_skips_without_duplicate_run(fake_redis, 
     """A task_scheduler job that is no longer the schedule's recorded pending
     job (an arq retry after its own transition, or a replaced job whose abort
     was never processed) must not fire the target again."""
-    monkeypatch.setattr(scheduler, "Job", _job_type())
+    monkeypatch.setattr(scheduler, "job_handle", handle_of(_job_type()))
     key = _seed(fake_redis, "s1", job_id=b"replacement-2")
     redis = _EnqueueRecordingRedis(fake_redis)
 
@@ -430,7 +438,7 @@ async def test_task_scheduler_stale_job_skips_without_duplicate_run(fake_redis, 
 
 
 async def test_task_scheduler_aborted_marker_stops_run(fake_redis, monkeypatch) -> None:
-    monkeypatch.setattr(scheduler, "Job", _job_type())
+    monkeypatch.setattr(scheduler, "job_handle", handle_of(_job_type()))
     _seed(fake_redis, "s1", aborted=b"pending-1")
     redis = _EnqueueRecordingRedis(fake_redis)
 
@@ -442,7 +450,7 @@ async def test_task_scheduler_aborted_marker_stops_run(fake_redis, monkeypatch) 
 
 
 async def test_task_scheduler_crontab_realigns_past_slot(fake_redis, monkeypatch) -> None:
-    monkeypatch.setattr(scheduler, "Job", _job_type())
+    monkeypatch.setattr(scheduler, "job_handle", handle_of(_job_type()))
     key = _seed(
         fake_redis,
         "s1",
@@ -457,7 +465,7 @@ async def test_task_scheduler_crontab_realigns_past_slot(fake_redis, monkeypatch
 
 
 async def test_task_scheduler_interval_realigns_when_far_behind(fake_redis, monkeypatch) -> None:
-    monkeypatch.setattr(scheduler, "Job", _job_type())
+    monkeypatch.setattr(scheduler, "job_handle", handle_of(_job_type()))
     behind = datetime.now(UTC).timestamp() - 3600
     key = _seed(fake_redis, "s1", last_scheduled_ts=str(behind).encode())
     redis = _EnqueueRecordingRedis(fake_redis)
@@ -469,7 +477,7 @@ async def test_task_scheduler_interval_realigns_when_far_behind(fake_redis, monk
 
 
 async def test_task_scheduler_bad_last_scheduled_ts_treated_as_unset(fake_redis, monkeypatch) -> None:
-    monkeypatch.setattr(scheduler, "Job", _job_type())
+    monkeypatch.setattr(scheduler, "job_handle", handle_of(_job_type()))
     key = _seed(fake_redis, "s1", last_scheduled_ts=b"not-a-number")
     redis = _EnqueueRecordingRedis(fake_redis)
 
@@ -484,13 +492,15 @@ async def test_task_scheduler_bad_last_scheduled_ts_treated_as_unset(fake_redis,
 async def test_watchdog_restarts_lost_and_completed_jobs(fake_redis, monkeypatch) -> None:
     monkeypatch.setattr(
         scheduler,
-        "Job",
-        _job_type(
-            **{
-                "status:lost": JobStatus.not_found,
-                "status:done": JobStatus.complete,
-                "status:live": JobStatus.deferred,
-            }
+        "job_handle",
+        handle_of(
+            _job_type(
+                **{
+                    "status:lost": JobStatus.not_found,
+                    "status:done": JobStatus.complete,
+                    "status:live": JobStatus.deferred,
+                }
+            )
         ),
     )
     lost = _seed(fake_redis, "lost", job_id=b"lost")
@@ -509,7 +519,7 @@ async def test_watchdog_restarts_lost_and_completed_jobs(fake_redis, monkeypatch
 
 
 async def test_watchdog_recovery_lock_prevents_double_restart(fake_redis, monkeypatch) -> None:
-    monkeypatch.setattr(scheduler, "Job", _job_type(**{"status:lost": JobStatus.not_found}))
+    monkeypatch.setattr(scheduler, "job_handle", handle_of(_job_type(**{"status:lost": JobStatus.not_found})))
     key = _seed(fake_redis, "lost", job_id=b"lost")
 
     await scheduler.recover_stalled_schedules({"redis": fake_redis})
@@ -523,7 +533,7 @@ async def test_watchdog_recovery_lock_prevents_double_restart(fake_redis, monkey
 async def test_watchdog_does_not_resurrect_schedule_deleted_mid_recovery(fake_redis, monkeypatch) -> None:
     """A schedule deleted between the watchdog's stall check and its transition
     must stay deleted -- restarting it would recreate a partial hash."""
-    monkeypatch.setattr(scheduler, "Job", _job_type(**{"status:lost": JobStatus.not_found}))
+    monkeypatch.setattr(scheduler, "job_handle", handle_of(_job_type(**{"status:lost": JobStatus.not_found})))
     key = _seed(fake_redis, "lost", job_id=b"lost")
     redis = DeleteOnLockRedis(fake_redis, key)
 
@@ -537,7 +547,9 @@ async def test_watchdog_error_write_does_not_resurrect_deleted_schedule(fake_red
     """A schedule deleted before the watchdog records its recovery error (a concurrent
     delete winning the per-schedule lock) must not be resurrected as a two-field zombie
     hash -- the existence check and the error write share that lock."""
-    monkeypatch.setattr(scheduler, "Job", _job_type(**{"status:boom": ConnectionError("probe failed")}))
+    monkeypatch.setattr(
+        scheduler, "job_handle", handle_of(_job_type(**{"status:boom": ConnectionError("probe failed")}))
+    )
     key = _seed(fake_redis, "boom", job_id=b"boom")
     redis = DeleteOnLockRedis(fake_redis, key)
 
@@ -549,8 +561,8 @@ async def test_watchdog_error_write_does_not_resurrect_deleted_schedule(fake_red
 async def test_watchdog_error_on_one_schedule_does_not_stop_others(fake_redis, monkeypatch, caplog) -> None:
     monkeypatch.setattr(
         scheduler,
-        "Job",
-        _job_type(**{"status:boom": ConnectionError("probe failed"), "status:lost": JobStatus.not_found}),
+        "job_handle",
+        handle_of(_job_type(**{"status:boom": ConnectionError("probe failed"), "status:lost": JobStatus.not_found})),
     )
     broken = _seed(fake_redis, "a_broken", job_id=b"boom")
     lost = _seed(fake_redis, "z_lost", job_id=b"lost")
@@ -567,8 +579,8 @@ async def test_watchdog_records_unrecoverable_schedule(fake_redis, monkeypatch, 
     bind_pool(fake_redis)
     monkeypatch.setattr(
         scheduler,
-        "Job",
-        _job_type(**{"status:boom": ConnectionError("probe failed"), "status:lost": JobStatus.not_found}),
+        "job_handle",
+        handle_of(_job_type(**{"status:boom": ConnectionError("probe failed"), "status:lost": JobStatus.not_found})),
     )
     broken = _seed(fake_redis, "a_broken", job_id=b"boom")
     _seed(fake_redis, "z_lost", job_id=b"lost")
@@ -587,7 +599,7 @@ async def test_watchdog_records_unrecoverable_schedule(fake_redis, monkeypatch, 
 
 async def test_watchdog_clears_error_on_recovery(fake_redis, monkeypatch, bind_pool) -> None:
     bind_pool(fake_redis)
-    monkeypatch.setattr(scheduler, "Job", _job_type(**{"status:lost": JobStatus.not_found}))
+    monkeypatch.setattr(scheduler, "job_handle", handle_of(_job_type(**{"status:lost": JobStatus.not_found})))
     key = _seed(
         fake_redis,
         "lost",
@@ -609,8 +621,8 @@ async def test_watchdog_clears_error_on_a_healthy_tick(fake_redis, monkeypatch) 
     healthy on a later tick has both fields cleared without any restart."""
     monkeypatch.setattr(
         scheduler,
-        "Job",
-        _job_type(**{"status:pending-1": [ConnectionError("transient probe fault"), JobStatus.deferred]}),
+        "job_handle",
+        handle_of(_job_type(**{"status:pending-1": [ConnectionError("transient probe fault"), JobStatus.deferred]})),
     )
     key = _seed(fake_redis, "s1")
 
@@ -630,8 +642,8 @@ async def test_backend_get_schedule_surfaces_recovery_error(fake_redis, monkeypa
     bind_pool(fake_redis)
     monkeypatch.setattr(
         scheduler,
-        "Job",
-        _job_type(**{"status:boom": [ConnectionError("probe failed"), JobStatus.not_found]}),
+        "job_handle",
+        handle_of(_job_type(**{"status:boom": [ConnectionError("probe failed"), JobStatus.not_found]})),
     )
     _seed(fake_redis, "s1", job_id=b"boom")
 
@@ -647,3 +659,43 @@ async def test_backend_get_schedule_surfaces_recovery_error(fake_redis, monkeypa
     recovered = await tools.backend_get_schedule("s1")
     assert recovered["recovery_error"] is None
     assert recovered["recovery_failed_at"] is None
+
+
+# -- every scheduler enqueue names the settings queue ----------------------------------
+
+
+def _definition() -> dict[str, Any]:
+    return {
+        "target": "tool_execution",
+        "args": orjson.dumps(["a"]),
+        "kwargs": orjson.dumps({"backend_tool_name": "t"}),
+        "schedule": orjson.dumps({"kind": "interval", "every": 60.0, "relative": False}),
+        "cron_or_interval": "60",
+        "enabled": "true",
+    }
+
+
+async def test_a_transition_on_a_labelled_workers_pool_enqueues_on_the_settings_queue(arq_redis) -> None:
+    """A worker's pool defaults to that worker's own queue; the schedule's control job stays on the settings queue."""
+    arq_redis.default_queue_name = f"{SETTINGS_QUEUE}.gpu"
+
+    job = await scheduler.safe_schedule_transition(
+        arq_redis, "s1", defer_by=60, last_scheduled_ts=0.0, mapping_updates=_definition()
+    )
+
+    assert await arq_redis.zscore(SETTINGS_QUEUE, job.job_id) is not None
+    assert await arq_redis.zscore(f"{SETTINGS_QUEUE}.gpu", job.job_id) is None
+
+
+async def test_a_schedule_fire_enqueues_its_target_on_the_settings_queue(
+    settings_queue, fake_redis, monkeypatch
+) -> None:
+    monkeypatch.setattr(scheduler, "job_handle", handle_of(_job_type()))
+    _seed(fake_redis, "s1")
+    redis = _EnqueueRecordingRedis(fake_redis)
+
+    await scheduler.task_scheduler({"redis": redis, "job_id": "pending-1"}, "s1")
+
+    [(_function, _args, kwargs)] = redis.targets
+    assert kwargs["_queue_name"] == settings_queue
+    assert [opts["_queue_name"] for opts in fake_redis.enqueued_opts] == [settings_queue]

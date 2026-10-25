@@ -57,6 +57,12 @@ the lock cannot move, so it leaves the in-flight count while it waits:
   the lock (a tool lookup that missed mid-rebuild, a re-probe pass). It is recorded as
   waiting while it waits and is ordinary in-flight work again once it holds the lock.
 
+Both acquire through :func:`hold_recorded`, as does any other lock whose holder may drive a
+retire (the config-write lock a settings-profile apply holds across its build), so every such
+waiter is recorded the same way. A blocking span taken off the loop (the config store's
+exclusive write span) is entered through :func:`hold_recorded_blocking`, which records its
+waiter the same way.
+
 A call of an SSE session acts for its own admission record, not the session stream's
 (:func:`~tai42_skeleton.app.admission.admit_session_call`), so it is recorded exactly as a
 request is and its record finishes once its reply is handed to the transport.
@@ -65,8 +71,11 @@ request is and its record finishes once its reply is handed to the transport.
 from __future__ import annotations
 
 import asyncio
+import contextvars
+import logging
+import threading
 from collections.abc import AsyncIterator, Callable
-from contextlib import asynccontextmanager
+from contextlib import AbstractContextManager, ExitStack, asynccontextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, TypeVar
 
@@ -78,6 +87,8 @@ if TYPE_CHECKING:
     from tai42_skeleton.app.epoch import Epoch
 
 T = TypeVar("T")
+
+logger = logging.getLogger(__name__)
 
 # The single retriable-rejection message, shared by the HTTP 503 body and the
 # FastMCP session-tool rejection so a client sees one consistent surface.
@@ -111,9 +122,10 @@ FORK_QUIESCE_SECONDS = 30.0
 
 @dataclass(eq=False)
 class GateParty:
-    """The work that is about to wait on, then hold, the reload gate, as the generation records it.
+    """The work that is about to wait on, then hold, a lock whose holder may drive its generation's retire.
 
-    ``request`` is the admission record of the request it acts for (``None`` off a served
+    The generation records it: the reload gate's parties, and those of every lock acquired
+    through :func:`hold_recorded`. ``request`` is the admission record of the request it acts for (``None`` off a served
     request); ``task`` is the tool-run supervisor whose run it belongs to (its own task, or
     a child task of it such as an agent's tool call) and ``task_epoch`` the generation that
     admitted that run (both ``None`` outside a run of the live generation). A party with
@@ -125,14 +137,14 @@ class GateParty:
     task_epoch: Epoch | None
 
     def wait(self) -> None:
-        """Record the party as waiting on the gate; its request leaves the in-flight count while it waits."""
+        """Record the party as waiting on the lock; its request leaves the in-flight count while it waits."""
         if self.request is not None:
             self.request.begin_wait()
         if self.task is not None and self.task_epoch is not None:
             self.task_epoch.begin_task_wait(self.task)
 
     def stop_waiting(self) -> None:
-        """Record that the party no longer waits (it acquired the gate, or gave up)."""
+        """Record that the party no longer waits (it acquired the lock, or gave up)."""
         if self.request is not None:
             self.request.end_wait()
         if self.task is not None and self.task_epoch is not None:
@@ -155,7 +167,7 @@ class GateParty:
 
 
 def gate_party() -> GateParty:
-    """The current request and tool-run supervisor, for the reload gate to record on their generation."""
+    """The current request and tool-run supervisor, for a recorded lock wait to record on their generation."""
     from tai42_skeleton.app.admission import current_request_admission
     from tai42_skeleton.app.epoch import current_epoch_or_none
     from tai42_skeleton.operations.tool_runs.supervisor import running_supervisor
@@ -168,6 +180,140 @@ def gate_party() -> GateParty:
         if live is not None and live.number == supervisor[1]:
             task, task_epoch = supervisor[0], live
     return GateParty(request=current_request_admission(), task=task, task_epoch=task_epoch)
+
+
+@asynccontextmanager
+async def hold_recorded(lock: asyncio.Lock, party: GateParty | None = None) -> AsyncIterator[GateParty]:
+    """Hold ``lock``, with ``party`` (the current one by default) recorded as waiting while it waits.
+
+    For a lock whose holder may drive a retire of the waiter's generation: a waiter cannot move
+    before the holder releases, so the retire never counts it against the drain budget and never
+    severs it. Yields the party, released on exit.
+    """
+    party = gate_party() if party is None else party
+    party.wait()
+    try:
+        await lock.acquire()
+    finally:
+        party.stop_waiting()
+    try:
+        yield party
+    finally:
+        lock.release()
+
+
+class _ThreadEntry:
+    """A blocking sync span entered on a worker thread, closed by the thread itself once abandoned.
+
+    The awaiting task can be cancelled while the thread still blocks on entry. The thread then
+    finishes entering with no one left to exit the span, so :meth:`enter` exits it at once when
+    :meth:`abandon` came first; when the entry finished first, :meth:`abandon` reports it and the
+    caller exits. An entry that fails after :meth:`abandon` is logged, as no awaiter is left to
+    receive it; one that fails first is kept in :attr:`error` for the caller, whose cancellation
+    may have cancelled the future that carried it.
+    """
+
+    def __init__(self, span: AbstractContextManager[None]) -> None:
+        self._span = span
+        self.stack = ExitStack()
+        self._guard = threading.Lock()
+        self._entered = False
+        self._abandoned = False
+        self.error: BaseException | None = None
+
+    def enter(self) -> None:
+        try:
+            self.stack.enter_context(self._span)
+        except BaseException as error:
+            with self._guard:
+                abandoned = self._abandoned
+                if not abandoned:
+                    self.error = error
+            if abandoned:
+                # The awaiting task is gone, so nothing can receive this error but the log.
+                logger.exception("entering a blocking span failed after its waiter was cancelled")
+            raise
+        with self._guard:
+            if not self._abandoned:
+                self._entered = True
+                return
+        try:
+            self.stack.close()
+        except BaseException:
+            # The awaiting task is gone, so nothing can receive this error but the log.
+            logger.exception("exiting a blocking span entered after its waiter was cancelled failed")
+            raise
+
+    def abandon(self) -> bool:
+        """Mark the entry abandoned; return whether the span was already entered (the caller exits it).
+
+        From here on :attr:`error` no longer changes: it holds the entry's error if the entry
+        failed first, else ``None``.
+        """
+        with self._guard:
+            self._abandoned = True
+            return self._entered
+
+
+async def _exit_on_thread(entry: _ThreadEntry) -> None:
+    """Exit the entered span on a worker thread, returning only once the exit has completed.
+
+    A cancellation that lands meanwhile is held until the exit is done and then re-raised; an
+    error from the exit propagates instead, with the held cancellation as its ``__context__``.
+    """
+    # A plain executor future rather than a task: a loop teardown cancels every task, which would
+    # leave the exit running unawaited and lose its error.
+    exiting = asyncio.get_running_loop().run_in_executor(None, contextvars.copy_context().run, entry.stack.close)
+    cancelled: asyncio.CancelledError | None = None
+    while not exiting.done():
+        try:
+            # ``wait`` neither cancels the exit nor raises its error: it only returns once it is done.
+            await asyncio.wait((exiting,))
+        except asyncio.CancelledError as exc:
+            if cancelled is None:
+                cancelled = exc
+    try:
+        exiting.result()
+    except BaseException as error:
+        if cancelled is not None:
+            error.__context__ = cancelled
+        raise
+    if cancelled is not None:
+        raise cancelled
+
+
+@asynccontextmanager
+async def hold_recorded_blocking(span: AbstractContextManager[None], party: GateParty) -> AsyncIterator[None]:
+    """Hold the blocking sync ``span`` on a worker thread, with ``party`` recorded as waiting while it blocks.
+
+    The off-loop counterpart of :func:`hold_recorded`, for a span whose entry blocks the thread
+    until another holder, possibly in another process, leaves it. The serving loop keeps running
+    while it blocks, and the party is recorded as waiting exactly as a :func:`hold_recorded`
+    waiter is. A waiter abandoned before its entry completed returns at once and leaves the entry
+    to its thread, which exits the span as soon as entry completes; a waiter whose cancellation
+    lands as its entry completes exits the span itself before it returns. The span must therefore
+    exclude on its own and tolerate being entered and exited on different threads. The exit always
+    completes before the holder returns: a cancellation during it is re-raised afterwards, and an
+    error entering or exiting the span propagates; an entry that fails after its waiter returned
+    is logged, as no one is left to receive it.
+    """
+    entry = _ThreadEntry(span)
+    party.wait()
+    try:
+        await asyncio.to_thread(entry.enter)
+    except BaseException as stopped:
+        if entry.abandon():
+            await _exit_on_thread(entry)
+        elif entry.error is not None and entry.error is not stopped:
+            # The entry failed, but the cancellation reached the waiter instead of the error.
+            raise entry.error from stopped
+        raise
+    finally:
+        party.stop_waiting()
+    try:
+        yield
+    finally:
+        await _exit_on_thread(entry)
 
 
 class ReloadGate:
@@ -207,16 +353,6 @@ class ReloadGate:
         """
         self._serving_lock()
 
-    async def _acquire(self, party: GateParty) -> asyncio.Lock:
-        """Acquire the serving-loop lock with ``party`` recorded as waiting while it waits."""
-        lock = self._serving_lock()
-        party.wait()
-        try:
-            await lock.acquire()
-        finally:
-            party.stop_waiting()
-        return lock
-
     @asynccontextmanager
     async def driving(self) -> AsyncIterator[None]:
         """Hold the gate to run a gated body, the current request or supervisor recorded as its driver.
@@ -224,13 +360,9 @@ class ReloadGate:
         Use ``async with reload_gate.driving(): ...`` around a body that rebuilds or swaps the
         serving generation outside :meth:`run` (the profile apply).
         """
-        party = gate_party()
-        lock = await self._acquire(party)
-        try:
+        async with hold_recorded(self._serving_lock()) as party:
             party.drive()
             yield
-        finally:
-            lock.release()
 
     @asynccontextmanager
     async def synchronized(self) -> AsyncIterator[None]:
@@ -238,11 +370,8 @@ class ReloadGate:
 
         Use ``async with reload_gate.synchronized(): ...``.
         """
-        lock = await self._acquire(gate_party())
-        try:
+        async with hold_recorded(self._serving_lock()):
             yield
-        finally:
-            lock.release()
 
     @property
     def locked(self) -> bool:

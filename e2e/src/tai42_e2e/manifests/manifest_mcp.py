@@ -219,3 +219,51 @@ def build_misbehaving_mcp_stack(res: StackResources, variants: Variants) -> Stac
         run_metrics=False,
         auth=False,
     )
+
+
+# The manifest title the replicas pair mounts the managed server under; its tools bind as
+# ``acme_<tool>`` on both replicas' MCP surfaces.
+REPLICAS_MCP_TITLE = "acme"
+
+
+def replicas_mcp_tool_name(name: str) -> str:
+    """The name a managed-server tool binds under on the replicas pair (``acme_<tool>``)."""
+    return f"{REPLICAS_MCP_TITLE}_{name}"
+
+
+def build_replicas_mcp_stack(res: StackResources, variants: Variants, *, mcp_url: str) -> StackConfig:
+    """REPLICAS (two ``--workers 1`` masters over one Postgres and one bus), no backend or
+    metrics, auth off — the managed MCP server mounted over streamable-http on both replicas.
+
+    The single ``mcp`` entry points at ``mcp_url`` (the test-owned ``ManagedHttpMcpServer``),
+    so each replica binds its tools (``ping`` / ``echo`` / ``reflect_env``) under the ``acme``
+    title prefix. The probe tools entry carries ``e2e_echo``, the base a stored preset is
+    built over. A config write on one replica is broadcast to the other over the bus, so a
+    test reads the same selection and presets from both ports."""
+    manifest = {
+        "default_routers": "none",
+        "routers_modules": _CORE_ROUTERS,
+        "extensions_modules": _EXTENSION_MODULES,
+        "storage_module": variants.storage.module,
+        "tools": [
+            _probe_tools_entry(with_backend_branches=False),
+            *_builtin_entries(),
+        ],
+        "mcp": [
+            {
+                "title": REPLICAS_MCP_TITLE,
+                "config": {"type": "http", "url": mcp_url},
+            }
+        ],
+        "api_tools": _PROJECTED_API_TOOLS,
+        "user_tools": ["ask", "reload_config"],
+    }
+    return StackConfig(
+        name="replicas-mcp",
+        topology=Topology.REPLICAS,
+        manifest=manifest,
+        env=_base_env(res, variants),
+        run_backend=False,
+        run_metrics=False,
+        auth=False,
+    )

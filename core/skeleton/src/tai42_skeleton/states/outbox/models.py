@@ -81,6 +81,7 @@ class OutboxRow:
     states: list[str]
     run_id: str | None
     trace_id: str | None
+    parent_span_id: str | None
     records: list[OutboxItem]
     subjects: list[OutboxSubject]
     calls: list[OutboxCall]

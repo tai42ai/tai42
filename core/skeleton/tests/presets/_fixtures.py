@@ -11,9 +11,13 @@ from __future__ import annotations
 
 from typing import Any
 
+from fastmcp.server.context import Context
+from mcp.types import CallToolResult, TextContent
 from pydantic import SecretStr
 from tai42_contract.app import tai42_app
+from tai42_contract.presets import PresetInputSchemaSupport
 from tai42_contract.secrets import SecretValue
+from tai42_contract.tools import ComposedToolRef
 
 
 @tai42_app.tools.tool
@@ -45,6 +49,12 @@ def echo(text: str) -> str:
 
 
 @tai42_app.tools.tool
+def failing_connector(query: str) -> CallToolResult:
+    """A connector whose upstream call failed: an error result, flag set."""
+    return CallToolResult(content=[TextContent(type="text", text=f"hub-err:upstream down for {query}")], isError=True)
+
+
+@tai42_app.tools.tool
 def payload_tool(payload: dict, tag: str = "t") -> dict:
     """A base tool with a structured ``payload`` argument.
 
@@ -54,12 +64,42 @@ def payload_tool(payload: dict, tag: str = "t") -> dict:
     return {"payload": payload, "tag": tag}
 
 
-def _plan_refs(fixed_kwargs: dict[str, Any]) -> list[str]:
-    """Read the composed tool names out of a ``plan_tool`` preset's nested ``plan``
-    config — the extractor a base tool declares so the platform never learns its
-    config shape. Entries stay verbatim; a non-string entry is a caller bug the
-    reference collector raises on."""
-    return fixed_kwargs.get("plan", {}).get("refs", [])
+@tai42_app.tools.tool
+async def ctx_echo(q: str, tone: str, ctx: Context) -> str:
+    """Echo the query and tone, and whether a context was injected."""
+    return f"{q}:{tone}:{ctx is not None}"
+
+
+@tai42_app.tools.tool
+async def payload_echo(payload: dict, tag: str) -> str:
+    """Echo the payload's ``where`` and ``n`` and the tag."""
+    return f"{payload['where']}:{payload.get('n')}:{tag}"
+
+
+tai42_app.presets.register_input_schema_support("payload_echo", PresetInputSchemaSupport(payload_arg="payload"))
+
+
+def _plan_refs(fixed_kwargs: dict[str, Any]) -> list[ComposedToolRef]:
+    """The tools a ``plan_tool`` blob composes: ``plan.refs`` names (no site) and one entry
+    per ``plan.steps`` item, sited ``step '<id>'`` and carrying the step's ``tool_kwargs``."""
+    plan = fixed_kwargs.get("plan")
+    if plan is None:
+        return []
+    if not isinstance(plan, dict):
+        raise ValueError(f"plan must be an object; got {type(plan).__name__}")
+    refs: list[ComposedToolRef] = []
+    for entry in plan.get("refs", []):
+        if not isinstance(entry, str):
+            raise ValueError("plan.refs entries must be strings")
+        refs.append(ComposedToolRef(name=entry))
+    steps = plan.get("steps", [])
+    if not isinstance(steps, list):
+        raise ValueError(f"plan.steps must be a list; got {type(steps).__name__}")
+    for step in steps:
+        refs.append(
+            ComposedToolRef(name=step["tool"], site=f"step '{step['id']}'", tool_kwargs=step.get("tool_kwargs"))
+        )
+    return refs
 
 
 @tai42_app.tools.tool(tool_refs=_plan_refs, extras_keys=frozenset({"warm_start"}))
@@ -68,7 +108,16 @@ def plan_tool(text: str, plan: dict | None = None) -> str:
     return text
 
 
-def _boom_refs(fixed_kwargs: dict[str, Any]) -> list[str]:
+@tai42_app.tools.tool(tool_refs=_plan_refs)
+def plan_payload_tool(payload: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    """A ``plan_tool``-shaped extractor over a base whose presets may author an input."""
+    return payload
+
+
+tai42_app.presets.register_input_schema_support("plan_payload_tool", PresetInputSchemaSupport(payload_arg="payload"))
+
+
+def _boom_refs(fixed_kwargs: dict[str, Any]) -> list[ComposedToolRef]:
     raise RuntimeError("refs extractor kaput")
 
 

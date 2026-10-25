@@ -37,12 +37,6 @@ def _run_id(items: list[OutboxItem], calls: list[OutboxCall]) -> str | None:
     return None
 
 
-def _trace_id() -> str | None:
-    from tai42_skeleton.monitoring import get_monitoring
-
-    return get_monitoring().writer.current_trace_id()
-
-
 async def insert_pending_save(
     service: _StatesServiceBase,
     items: list[OutboxItem],
@@ -65,13 +59,17 @@ async def insert_pending_save(
     ctx = current_state_context()
     if ctx is not None:
         subject_keys.update(subject_keys_of(ctx.candidates))
+    from tai42_skeleton.monitoring import current_trace_parent
+
+    parent = current_trace_parent()
     row_id = await service._store.outbox_insert(
         record_keys=sorted(record_keys),
         subject_keys=sorted(subject_keys),
         targets=sorted({target_of_key(key) for key in record_keys | subject_keys}),
         states=sorted({staged.state for staged in subjects}),
         run_id=_run_id(items, calls),
-        trace_id=_trace_id(),
+        trace_id=parent.trace_id if parent is not None else None,
+        parent_span_id=parent.parent_span_id if parent is not None else None,
         records=items,
         subjects=subjects,
         calls=calls,

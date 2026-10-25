@@ -1,20 +1,23 @@
 """GitHub-backed :class:`~tai42_contract.storage.Storage` provider.
 
-Reads use the RAW endpoint (``raw.githubusercontent.com``): the Contents API
-returns empty content for files over 1 MiB. The raw endpoint is CDN-cached, so a
-read shortly after a write may serve stale content for up to ~5 minutes. Writes
-use the Contents API (base64) and are capped below the API limit, raising before
-the request rather than truncating.
+``stat``, ``load`` and ``load_bytes`` are one Contents API call each at the
+configured branch: the object form answers the size, the raw form every byte of
+the file. ``load_range`` resolves the branch's head commit through the Git refs API
+and reads the raw host at that commit with a ``Range`` header, so a ranged read
+answers the branch's current bytes. Writes use the Contents API (base64) and are
+capped below the API limit, raising before the request rather than truncating.
 """
 
 from __future__ import annotations
 
 import base64
 import logging
+import mimetypes
+from typing import Final
 
 import httpx
 from tai42_contract.app import tai42_app
-from tai42_contract.storage import Storage, StoragePathConflictError, assert_not_root
+from tai42_contract.storage import ObjectStat, Storage, StoragePathConflictError, assert_not_root
 
 from tai42_storage_github.client import GithubHttpxClient
 from tai42_storage_github.settings import GithubStorageSettings, github_storage_settings
@@ -22,8 +25,14 @@ from tai42_storage_github.settings import GithubStorageSettings, github_storage_
 logger = logging.getLogger(__name__)
 
 # Conservative upload cap below GitHub's Contents API limit; an oversize file
-# raises before the request. Reads are uncapped (raw endpoint).
+# raises before the request. Reads are uncapped (the raw form serves every byte).
 MAX_UPLOAD_BYTES = 1024 * 1024
+
+# The Contents API answer forms: the object form carries ``type`` and ``size``; the
+# raw form is the file's bytes, and a directory answers its JSON listing instead.
+_OBJECT_FORM: Final = "application/vnd.github.object+json"
+_RAW_FORM: Final = "application/vnd.github.raw+json"
+_JSON: Final = "application/json"
 
 
 def _join(base: str, path: str) -> str:
@@ -41,9 +50,9 @@ def _join(base: str, path: str) -> str:
     return f"{base}/{joined}" if joined else base
 
 
-def _raw_url(settings: GithubStorageSettings, path: str) -> str:
-    """The RAW-endpoint URL for ``path``, from the configured raw base-URL template."""
-    base = settings.raw_base_url.format(username=settings.username, repo=settings.repo, branch=settings.branch)
+def _raw_url(settings: GithubStorageSettings, commit: str, path: str) -> str:
+    """The raw-host URL for ``path`` at ``commit``, from the configured raw base-URL template."""
+    base = settings.raw_base_url.format(username=settings.username, repo=settings.repo, commit=commit)
     return _join(base, path)
 
 
@@ -79,12 +88,17 @@ def _auth_headers(settings: GithubStorageSettings) -> dict[str, str]:
     return {"Authorization": f"Bearer {settings.token.get_secret_value()}"}
 
 
-def _api_headers(settings: GithubStorageSettings) -> dict[str, str]:
+def _api_headers(settings: GithubStorageSettings, accept: str = "application/vnd.github+json") -> dict[str, str]:
     return {
         **_auth_headers(settings),
-        "Accept": "application/vnd.github+json",
+        "Accept": accept,
         "X-GitHub-Api-Version": "2022-11-28",
     }
+
+
+def _media_type(resp: httpx.Response) -> str:
+    """The ``Content-Type`` media type, without its parameters (``; charset=utf-8``)."""
+    return resp.headers.get("content-type", "").split(";", 1)[0].strip().lower()
 
 
 def _raise_for_status(resp: httpx.Response, action: str, path: str, url: str) -> None:
@@ -98,35 +112,125 @@ def _raise_for_status(resp: httpx.Response, action: str, path: str, url: str) ->
         raise
 
 
+def _raise_unless_ok(resp: httpx.Response, expected: int, action: str, path: str, url: str) -> None:
+    """Raise on any status other than ``expected``: an HTTP error loudly, an unexpected success as a fault."""
+    if resp.status_code == expected:
+        return
+    _raise_for_status(resp, action, path, url)
+    raise RuntimeError(f"GitHub answered {resp.status_code} {action} {path!r} at {url}; expected {expected}.")
+
+
 # Importing this module registers GithubStorage as the active storage provider.
 @tai42_app.storage.register_storage
 class GithubStorage(Storage):
-    """GitHub-backed storage: reads via the raw CDN endpoint, writes via the Contents API."""
+    """GitHub-backed storage: reads and writes via the Contents API at the branch, ranged reads via the raw host."""
 
     async def load(self, path: str) -> str:
-        """Read ``path`` as text via the raw endpoint; a missing object raises ``FileNotFoundError``."""
-        settings = _configured_settings()
-        url = _raw_url(settings, path)
-        async with tai42_app.clients.client_ctx(GithubHttpxClient) as client:
-            resp = await client.get(url, headers=_auth_headers(settings))
-            self._guard_read(resp, path, url)
-            return resp.text
+        """Read ``path`` as UTF-8 text; a missing object raises ``FileNotFoundError``.
+
+        The raw bytes are strictly decoded, so an object that is not UTF-8 text raises
+        ``UnicodeDecodeError`` rather than reading back with substituted characters.
+        """
+        return (await self.load_bytes(path)).decode("utf-8")
 
     async def load_bytes(self, path: str) -> bytes:
-        """Read ``path`` as bytes via the raw endpoint (uncapped); a missing object raises ``FileNotFoundError``."""
+        """Read every byte of ``path`` through the Contents API raw form; a missing object raises ``FileNotFoundError``.
+
+        A directory answers its JSON listing instead of the raw form, and is not an object.
+        """
         settings = _configured_settings()
-        url = _raw_url(settings, path)
+        url = _contents_url(settings, path)
         async with tai42_app.clients.client_ctx(GithubHttpxClient) as client:
-            resp = await client.get(url, headers=_auth_headers(settings))
-            self._guard_read(resp, path, url)
-            # Raw endpoint has no size cap, unlike the Contents API.
-            return resp.content
+            resp = await client.get(url, headers=_api_headers(settings, _RAW_FORM), params={"ref": settings.branch})
+            if resp.status_code == 404:
+                raise FileNotFoundError(f"Object not found: {path}")
+            _raise_unless_ok(resp, 200, "loading", path, url)
+            media_type = _media_type(resp)
+            if media_type == _RAW_FORM:
+                return resp.content
+            if media_type == _JSON:
+                raise FileNotFoundError(f"Object not found: {path}")
+            raise RuntimeError(f"GitHub answered an unexpected Content-Type {media_type!r} loading {path!r} at {url}.")
+
+    async def stat(self, path: str) -> ObjectStat:
+        """The byte size from the Contents API object form and the path-inferred content type.
+
+        GitHub stores no content type. A missing object, and a directory (not an object),
+        raise ``FileNotFoundError``; a file answer without an integer size raises ``RuntimeError``.
+        """
+        settings = _configured_settings()
+        url = _contents_url(settings, path)
+        async with tai42_app.clients.client_ctx(GithubHttpxClient) as client:
+            resp = await client.get(url, headers=_api_headers(settings, _OBJECT_FORM), params={"ref": settings.branch})
+            if resp.status_code == 404:
+                raise FileNotFoundError(f"Object not found: {path}")
+            _raise_unless_ok(resp, 200, "reading the size of", path, url)
+            data = resp.json()
+        if not isinstance(data, dict) or data.get("type") != "file":
+            raise FileNotFoundError(f"Object not found: {path}")
+        size = data.get("size")
+        if type(size) is not int:
+            raise RuntimeError(f"GitHub Contents API answered a file without an integer size at {url}.")
+        content_type, _ = mimetypes.guess_type(path)
+        return ObjectStat(content_type=content_type, size=size)
+
+    async def load_range(self, path: str, start: int, length: int) -> bytes:
+        """At most ``length`` bytes of ``path`` from ``start``, read at the branch's current head commit.
+
+        Resolves the head commit, then reads the raw host at that commit with a ``Range``
+        header and the identity encoding, since a compressed answer ranges over the encoded
+        bytes. ``b""`` for ``length == 0`` (no request) and for a start at or past the end
+        (416); ``FileNotFoundError`` for a missing object or a directory (404). An answer
+        that ignores the range (200), is still encoded, or runs longer than ``length``
+        raises ``RuntimeError``.
+        """
+        if length == 0:
+            return b""
+        settings = _configured_settings()
+        async with tai42_app.clients.client_ctx(GithubHttpxClient) as client:
+            commit = await self._head_commit(client, settings, path)
+            url = _raw_url(settings, commit, path)
+            headers = {
+                **_auth_headers(settings),
+                "Accept-Encoding": "identity",
+                "Range": f"bytes={start}-{start + length - 1}",
+            }
+            async with client.stream("GET", url, headers=headers) as resp:
+                if resp.status_code == 404:
+                    raise FileNotFoundError(f"Object not found: {path}")
+                if resp.status_code == 416:
+                    return b""
+                if resp.status_code == 200:
+                    raise RuntimeError(f"GitHub answered 200, the whole object, to a ranged read of {url}.")
+                if resp.status_code != 206:
+                    await resp.aread()
+                    _raise_unless_ok(resp, 206, "loading a range of", path, url)
+                encoding = resp.headers.get("content-encoding", "identity").strip().lower()
+                if encoding != "identity":
+                    raise RuntimeError(
+                        f"GitHub answered a {encoding}-encoded range of {url}; the identity encoding was asked."
+                    )
+                chunks: list[bytes] = []
+                received = 0
+                async for chunk in resp.aiter_bytes():
+                    received += len(chunk)
+                    if received > length:
+                        raise RuntimeError(f"GitHub answered more than the {length} bytes asked of {url}.")
+                    chunks.append(chunk)
+                return b"".join(chunks)
 
     @staticmethod
-    def _guard_read(resp: httpx.Response, path: str, url: str) -> None:
-        if resp.status_code == 404:
-            raise FileNotFoundError(f"Object not found: {path}")
-        _raise_for_status(resp, "loading", path, url)
+    async def _head_commit(client: httpx.AsyncClient, settings: GithubStorageSettings, path: str) -> str:
+        """The branch's current head commit sha, from the Git refs API."""
+        url = settings.ref_api_url.format(username=settings.username, repo=settings.repo, branch=settings.branch)
+        resp = await client.get(url, headers=_api_headers(settings))
+        _raise_unless_ok(resp, 200, "resolving the branch head for", path, url)
+        data = resp.json()
+        target = data.get("object") if isinstance(data, dict) else None
+        sha = target.get("sha") if isinstance(target, dict) else None
+        if not isinstance(sha, str) or not sha:
+            raise RuntimeError(f"GitHub answered no head commit sha for the branch at {url}.")
+        return sha
 
     async def list(self) -> list[str]:
         """Every blob path in the repo."""

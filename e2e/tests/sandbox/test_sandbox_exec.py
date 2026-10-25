@@ -106,6 +106,55 @@ async def test_input_schema_preset_validates_the_caller_and_routes_payload(
         assert extra.is_error, extra
 
 
+@pytest.mark.needs(
+    "kind:versioning",
+    "mutable",
+    "setting:tai42_e2e_fixtures.sandbox_provider",
+    "setting:tool:sandbox_exec",
+    "setting:extension:prometheus_metrics",
+)
+async def test_an_extension_branch_of_an_input_schema_preset_presents_the_schema_and_runs_the_preset(
+    sandbox_stack: TaiStack, uniq: Callable[[str], str]
+) -> None:
+    api = sandbox_stack.api()
+    name = uniq("echo_branch")
+    body = {
+        "name": name,
+        "base_tool": "sandbox_exec",
+        "description": "echo the validated payload",
+        "fixed_kwargs": {
+            "argv": ["python", "-c", "import sys; sys.stdout.write(sys.stdin.read())"],
+            "image": _IMAGE,
+        },
+        "input_schema": _INPUT_SCHEMA,
+        "extensions": [["prometheus_metrics"]],
+    }
+    created = await api.request_raw("POST", "/api/presets", json=body)
+    assert created.status_code == 200, created.text
+
+    branch = f"{name}_prometheus_metrics"
+    marker = uniq("payload")
+    async with sandbox_stack.mcp() as mcp:
+        listed = {tool.name: tool for tool in await mcp.list_tools()}
+        schema = listed[branch].inputSchema
+        assert "msg" in schema["properties"], schema
+        assert schema["required"] == ["msg"], schema
+        assert schema["additionalProperties"] is False, schema
+
+        result = await mcp.call_tool(branch, {"msg": marker})
+    assert marker in result.data.stdout, result.data
+
+    open_schema = {key: value for key, value in _INPUT_SCHEMA.items() if key != "additionalProperties"}
+    refused = await api.request_raw(
+        "POST", "/api/presets", json={**body, "name": uniq("open_branch"), "input_schema": open_schema}
+    )
+    assert refused.status_code == 400, refused.text
+    assert refused.json()["error"] == (
+        "input_schema cannot be presented to the preset's extensions: "
+        'the schema must set "additionalProperties": false'
+    ), refused.text
+
+
 @pytest.mark.needs("probe-tools")
 async def test_input_schema_over_an_unsupported_base_is_a_loud_authoring_error(
     sandbox_stack: TaiStack, uniq: Callable[[str], str]

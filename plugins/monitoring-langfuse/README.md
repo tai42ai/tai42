@@ -8,7 +8,7 @@ exported OTLP/HTTP to an OpenTelemetry collector, which maps the platform's
 attribute names onto Langfuse's and sends them to Langfuse's OTLP endpoint. Its
 **reader** (metrics totals, the runtime span window, complete-trace and
 single-observation reads) queries a Langfuse server — cloud or self-hosted —
-through the Langfuse SDK's API client, with the SDK's own tracing turned off.
+over its public REST API (Observations v2 and Metrics v2) with its own HTTP client.
 
 ## The TAI ecosystem
 
@@ -27,8 +27,8 @@ documentation site covers the platform-level story:
 Its only tai-* dependencies are `tai42-contract` (the `Monitoring` /
 `MonitoringWriter` / `MonitoringReader` protocols, the neutral data models, and
 the `tai42_app` handle) and `tai42-kit[monitoring]` (the OpenTelemetry writer,
-`TaiBaseSettings` and the settings cache). Beyond those it depends on the
-`langfuse` SDK (read API only), `orjson`, and `pydantic` / `pydantic-settings`.
+`TaiBaseSettings` and the settings cache). Beyond those it depends on `httpx`,
+`orjson`, and `pydantic` / `pydantic-settings`.
 
 ## Install
 
@@ -137,37 +137,55 @@ govern. Two operator responsibilities:
 - **Writer**: see `tai42_kit.monitoring.otel` — fail-safe emits counted in
   `export_health()`, every `SecretValue` recorded as `[secret]`, values never
   truncated, a forked child counting from zero and rebuilding its own pipeline.
-- **Reader**: `async` per the contract; the synchronous Langfuse API client is
-  dispatched off the event loop. `list_traces` returns row SUMMARIES, never
-  trace bodies. For the native (timestamp) sort a page costs one trace-list call
-  for the row attributes and the trace input/output, one metrics query for the page's token
-  totals, and one bounded error-observations query for the page's error status —
-  no per-trace body fetch. A metric sort (cost/latency/tokens) adds one ranking
-  metrics query and a bounded trace-list walk in place of that single list call.
+- **Reader**: `async` per the contract; each request on the synchronous `httpx`
+  client, and the decoding of its answer, run off the event loop. Every read goes
+  through Langfuse's Observations v2 and Metrics v2 REST endpoints
+  (`GET /api/public/v2/observations`, `GET /api/public/v2/metrics`) with the key
+  pair as HTTP Basic auth. A 408, 429 or 5xx answer is retried up to twice, after
+  its `Retry-After` (at most 60 s) or a 1 s / 2 s backoff, each retry logged; any
+  other failure — another status, the retries spent, a transport error or
+  timeout, an answer that does not decode — raises `MonitoringError` naming the
+  request, chained from its cause. A run is one trace with one root
+  observation: the run's start is its root's start and its latency is its
+  root's duration. `list_traces` returns row SUMMARIES, never trace bodies.
   `get_trace` is the only trace body door; it returns the trace or raises
-  `TraceNotFoundError`, and a transient failure (e.g. a timeout) propagates
-  as-is — it is never mapped to "not found". `get_observation` reads one
-  observation (`ObservationNotFoundError` when absent or in another trace); an
+  `TraceNotFoundError`, and a failed read (e.g. a timeout) raises
+  `MonitoringError` — it is never mapped to "not found". `get_observation` reads one
+  observation (`TraceNotFoundError` when the trace is absent,
+  `ObservationNotFoundError` when the trace holds no such observation); an
   observation's `metadata` is the producer metadata the writer recorded (the
   decoded `tai42.metadata` attribute plus the promoted `tai42.step_role` /
-  `tai42.timing`). Each observation's `kind` maps the Langfuse type:
-  `GENERATION` / `EMBEDDING` → `LLM`, `TOOL` / `RETRIEVER` → `TOOL`, `EVENT` →
-  `EVENT`, every other type → `CHAIN`; its token counts come from the usage keys
-  `input` / `output` / `total`.
+  `tai42.timing`), read whole however long. Each observation's `kind` maps the
+  Langfuse type: `GENERATION` / `EMBEDDING` → `LLM`, `TOOL` / `RETRIEVER` →
+  `TOOL`, `EVENT` → `EVENT`, every other type → `CHAIN`; its token counts come
+  from the usage keys `input` / `output` / `total`.
+- **The runs list**: every sort combines with every filter, within these bounds:
+  1. Newest first (`timestamp` desc) with only run-level filters (name, user,
+     session, version, tags, metadata, the latency range): Langfuse filters and
+     orders the runs; paged up to run 5,000.
+  2. Cost or tokens, highest first, with only the name and tags filters:
+     Langfuse ranks the runs over the whole time range; paged up to run 1,000.
+  3. Every other read is ranked by the plugin over the runs whose root started
+     in the time range: served when the range holds at most 2,000 matching
+     runs, and at most 50,000 observations when a cost, token, status, level or
+     model filter or a cost or tokens sort needs every observation of every
+     candidate run.
+
+  A read past a bound raises `MonitoringReadTooBroadError` naming the bound;
+  bounds 2 and 3 need `from_timestamp`. `export_traces` reads the same list,
+  up to its `max_rows`, without the paging bounds of 1 and 2.
 - **Step window**: `list_spans_in_window` selects one item per step by the
   producers' `tai42.step_role` marker (a `grouping` or `sub_step` record is never
   an item) and by type (generations, embeddings and events never are).
+- **Metrics**: the run count and run latency are read over the runs' roots,
+  cost and tokens over every observation, merged on the time bucket; the model
+  dimension reads every observation.
 - **Declarations**: `max_page_size()` is 100 (a larger `limit` raises
   `ValueError`); `list_capability()` serves the sorts `timestamp`, `name`, `id`,
-  `total_cost`, `latency` and `total_tokens`, and declares that each metric sort
-  cannot combine with `level`, `model`, `version` or a cost / token / latency range.
-- **Metric sorts**: `list_traces` ordered by `total_cost` / `latency` /
-  `total_tokens` ranks globally through the Langfuse metrics API (trace.list
-  cannot sort on aggregates) and requires `from_timestamp` + `limit`;
-  unsupported filter clauses on that path raise `MonitoringReadNotSupportedError`
-  naming the offending clauses.
-- **SDK surface**: only the public API client of the pinned `langfuse~=4.0.6`
-  is used.
+  `total_cost`, `latency` and `total_tokens`. A sort, measure or dimension
+  outside the declarations raises `MonitoringReadNotServedError`.
+- **Server**: the Observations v2 and Metrics v2 endpoints need a Langfuse
+  server 4.59.0 or newer (cloud, or self-hosted 4.x).
 
 ## Development
 

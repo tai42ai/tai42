@@ -18,6 +18,7 @@ from tai42_kit.monitoring.otel import OtelWriter
 from tai42_kit.monitoring.testing import span_to_observation
 
 _TRACE = "0af7651916cd43dd8448eb211c80319c"
+_PARENT = "b7ad6b7169203331"
 
 
 @pytest.fixture
@@ -35,7 +36,7 @@ def writer(monkeypatch: pytest.MonkeyPatch, exporter: InMemorySpanExporter) -> I
 
 @pytest.fixture
 def handler(writer: OtelWriter) -> MonitoringCallbackHandler:
-    return MonitoringCallbackHandler(writer, TraceContext(trace_id=_TRACE))
+    return MonitoringCallbackHandler(writer, TraceContext(trace_id=_TRACE, parent_span_id=_PARENT))
 
 
 def _records(writer: OtelWriter, exporter: InMemorySpanExporter) -> dict[str, Any]:

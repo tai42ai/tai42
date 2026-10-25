@@ -95,6 +95,7 @@ from tai42_e2e.manifests.core import (
     build_core_stack,
     build_embed_stack,
     build_minimal_stack,
+    build_queue_choice_stack,
     build_recycle_stack,
     build_replicas_stack,
 )
@@ -107,12 +108,15 @@ from tai42_e2e.manifests.manifest_mcp import (
     POSTGRES_MCP_PROBE_SCHEMA,
     POSTGRES_MCP_PROBE_TABLE,
     POSTGRES_MCP_TITLE,
+    REPLICAS_MCP_TITLE,
     RESILIENCE_MCP_TITLE,
     build_misbehaving_mcp_stack,
     build_postgres_mcp_stack,
+    build_replicas_mcp_stack,
     build_resilience_mcp_stack,
     misbehaving_mcp_tool_name,
     postgres_mcp_tool_name,
+    replicas_mcp_tool_name,
     resilience_mcp_tool_name,
 )
 from tai42_e2e.manifests.marketplace import (
@@ -186,6 +190,7 @@ __all__ = [
     "POSTGRES_MCP_PROBE_TABLE",
     "POSTGRES_MCP_TITLE",
     "PROBE_TOOLS_TITLE",
+    "REPLICAS_MCP_TITLE",
     "RESILIENCE_MCP_TITLE",
     "SHIPPED_CONNECTOR_ISSUERS",
     "SLACK_ALLOWED_RECIPIENTS",
@@ -268,7 +273,9 @@ __all__ = [
     "build_postgres_mcp_stack",
     "build_projection_authz_stack",
     "build_projection_stack",
+    "build_queue_choice_stack",
     "build_recycle_stack",
+    "build_replicas_mcp_stack",
     "build_replicas_stack",
     "build_resilience_mcp_stack",
     "build_router_merge_stack",
@@ -294,5 +301,6 @@ __all__ = [
     "discovered_candidate_descriptor",
     "misbehaving_mcp_tool_name",
     "postgres_mcp_tool_name",
+    "replicas_mcp_tool_name",
     "resilience_mcp_tool_name",
 ]

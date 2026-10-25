@@ -11,32 +11,11 @@
  * button is not rendered (a read-only note stands in its place) — yet the viewer still
  * reads the unfenced census. Two sessions prove both sides of the gate.
  */
-import { expect, type APIRequestContext } from '@playwright/test';
-import { awaitMutation, createMemberInvite, seedCredential, uniq } from './helpers';
+import { expect } from '@playwright/test';
+import { awaitMutation, createMemberSession, seedCredential } from './helpers';
 import { needs, test } from './needs';
 
 needs('kind:identity', 'kind:accounts', 'mutable', 'topology:multiworker');
-
-/** A password comfortably over the accounts provider's minimum length. */
-const VIEWER_PASSWORD = 'e2e-viewer-password-000';
-
-/**
- * Create a viewer account through the accounts plugin (admin mints the invite, the
- * public accept sets a password + returns a `tai-sess-` session token) and return
- * that session token. The viewer's seeded jq role condition denies the admin-fenced
- * `POST /api/fleet/reload-config` while leaving the read-only census reachable — the
- * same role-creation pattern the accounts suite uses. The session token authenticates
- * as `x-api-key` (the gate reads `tai-sess-` from either auth header).
- */
-async function createViewerSession(request: APIRequestContext): Promise<string> {
-  const inviteToken = await createMemberInvite(request, { email: `${uniq('viewer')}@e2e.test`, role: 'viewer' });
-
-  const accepted = await request.post('/api/login/invite/accept', {
-    data: { invite_token: inviteToken, password: VIEWER_PASSWORD, password_confirm: VIEWER_PASSWORD },
-  });
-  expect(accepted.status(), await accepted.text()).toBe(200);
-  return ((await accepted.json()) as { data: { token: string } }).data.token;
-}
 
 test('system (admin): worker census + enabled fleet-reload → reload-framed convergence', async ({
   page,
@@ -87,7 +66,7 @@ test('system (non-admin viewer): census visible, fleet-reload button gated out',
   page,
   request,
 }) => {
-  const viewerToken = await createViewerSession(request);
+  const viewerToken = await createMemberSession(request, 'viewer');
   await seedCredential(page, viewerToken);
   await page.goto('/system');
 

@@ -64,7 +64,9 @@ from tai42_skeleton.hooks.trigger_links import TriggerLinkError
 from tai42_skeleton.operations import BadRequestError, NotFoundError, ValidationRejectedError, operation
 from tai42_skeleton.operations._authority import assert_execution_key_bindable, resolve_caller
 from tai42_skeleton.operations.definition_door import definition_door
-from tai42_skeleton.operations.errors import ConflictError, ForbiddenError, NotSupportedError
+from tai42_skeleton.operations.errors import ConflictError, ForbiddenError, NotSupportedError, OperationFailedError
+from tai42_skeleton.operations.reference_check import RegistryReference
+from tai42_skeleton.operations.reference_graph import assert_blob_references_resolve
 from tai42_skeleton.operations.response_models_group_b import (
     HookListView,
     HookRegisterResult,
@@ -281,7 +283,7 @@ _HOOK_EXTRAS_EXPR_PARAM = Annotated[
     tags=["hooks"],
     destructive=True,
     authority_changing=True,
-    errors=[BadRequestError, ConflictError, ForbiddenError, NotFoundError],
+    errors=[BadRequestError, ConflictError, ForbiddenError, NotFoundError, OperationFailedError],
     request_model=HookRegister,
     response_model=HookRegisterResult,
 )
@@ -310,9 +312,11 @@ async def register_hook(
     to delegate it and its usability by a tokenless fire are decided BEFORE the upsert, so
     a refusal stores nothing and leaves any existing hook of that name untouched. Returns
     ``{"registered", "name"}``; ``registered`` is ``True`` for a create and a replace
-    alike.
+    alike. The hook tool and every name its ``tool_kwargs`` compose must be served (a 400);
+    what ``start_expr`` builds at fire is judged at fire.
     """
     execution_key_fingerprint = await assert_execution_key_bindable(await resolve_caller(), execution_key)
+    await assert_blob_references_resolve(RegistryReference("hook tool", tool), tool, tool_kwargs or {}, "tool_kwargs")
     # The model parse and the write service both run inside the definition mapping: a field the
     # model refuses, a jq that does not compile and a binding the states store refuses are each a
     # 4xx that stores no hook; a store or transport failure stays unmapped (a 500).

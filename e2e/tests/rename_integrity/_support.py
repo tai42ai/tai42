@@ -70,9 +70,10 @@ async def delete_hook(stack: TaiStack, hook_name: str) -> None:
 
 
 async def referees(stack: TaiStack, preset: str) -> list[str]:
-    """The referees union door's holder list for ``preset``."""
-    body = await stack.api().get(f"/api/presets/{preset}/referees", retry_on_reloading=True)
-    return body["referees"]
+    """The rename preview door's holder summaries for ``preset``."""
+    body = await stack.api().get(f"/api/presets/{preset}/referees?action=rename", retry_on_reloading=True)
+    assert body["action"] == "rename"
+    return [holder["summary"] for holder in body["holders"]]
 
 
 async def rename_raw(stack: TaiStack, preset: str, new_name: str):

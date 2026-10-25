@@ -186,7 +186,7 @@ _DESCRIPTOR_TOKEN_RE = re.compile(r"\{\{([A-Z_]+)\}\}")
 class FixtureArtifacts:
     """The forged fixture artifacts a marketplace-area run needs: the pypi-sourced
     wheels (alpha 0.1.0/0.2.0, beta 0.1.0, gamma 0.1.0, epsilon 0.1.0/0.2.0,
-    theta 0.1.0, eta 0.1.0, lambda 0.1.0) and the github-sourced delta source tarballs
+    theta 0.1.0, eta 0.1.0/0.2.0, lambda 0.1.0) and the github-sourced delta source tarballs
     (0.1.0/0.2.0).
     Immutable and shareable across modules — forging is pure and the built files never
     change. ``epsilon_v2`` is the same distribution as ``epsilon_v1`` at a bumped
@@ -201,6 +201,7 @@ class FixtureArtifacts:
     epsilon_v2: BuiltWheel
     theta_v1: BuiltWheel
     eta_v1: BuiltWheel
+    eta_v2: BuiltWheel
     lambda_v1: BuiltWheel
     delta_v1: BuiltTarball
     delta_v2: BuiltTarball
@@ -274,7 +275,7 @@ def contract_facet_probe_versions() -> tuple[str, str]:
 
 
 def forge_fixture_artifacts(out_dir: Path, fixtures_dir: Path | None = None) -> FixtureArtifacts:
-    """Forge every fixture artifact into ``out_dir``: the nine wheels and the two
+    """Forge every fixture artifact into ``out_dir``: the ten wheels and the two
     delta source tarballs (delta is the github-sourced listing and gets no
     wheel). Reads the fixture-plugin sources from ``fixtures_dir`` (or
     ``TAI_E2E_MARKETPLACE_FIXTURES``); each build stamps its version into a copy of
@@ -298,6 +299,7 @@ def forge_fixture_artifacts(out_dir: Path, fixtures_dir: Path | None = None) -> 
         epsilon_v2=build_fixture_wheel(src / "epsilon_v2", EPSILON_V2_VERSION, out_dir, contract_range=contract_range),
         theta_v1=build_fixture_wheel(src / "theta", "0.1.0", out_dir, contract_range=contract_range),
         eta_v1=build_fixture_wheel(src / "eta", "0.1.0", out_dir),
+        eta_v2=build_fixture_wheel(src / "eta", "0.2.0", out_dir),
         lambda_v1=build_fixture_wheel(src / "lambda", "0.1.0", out_dir, contract_range=contract_range),
         delta_v1=build_fixture_source_tarball(src / "delta", "0.1.0", out_dir, contract_range=contract_range),
         delta_v2=build_fixture_source_tarball(src / "delta", "0.2.0", out_dir, contract_range=contract_range),

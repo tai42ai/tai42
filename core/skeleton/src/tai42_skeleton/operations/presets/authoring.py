@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import sys
 from collections.abc import Sequence
-from typing import Annotated, Any
+from typing import Any
 
 from pydantic import TypeAdapter, ValidationError
 from tai42_contract.manifest import ExtensionElement
@@ -20,10 +20,16 @@ from tai42_skeleton.exceptions.exceptions import TaiValidationError
 from tai42_skeleton.operations import BadRequestError
 from tai42_skeleton.operations._authority import require_admin
 from tai42_skeleton.operations.definition_door import definition_door
-from tai42_skeleton.operations.presets.references import _spec_reference_error
-from tai42_skeleton.presets.definition import PresetDefinitionError, check_preset_body, output_schema_body_error
-from tai42_skeleton.presets.manager import output_schema_extension_clash
+from tai42_skeleton.presets.definition import (
+    PresetDefinitionError,
+    check_preset_body,
+    output_schema_body_error,
+    preset_maps_body_error,
+)
+from tai42_skeleton.presets.manager import branch_input_schema_error, output_schema_extension_clash
+from tai42_skeleton.tools.binding.errors import ExtensionComboRefusedError
 from tai42_skeleton.tools.state_binding import is_binding_refusal
+from tai42_skeleton.tools.template_slots import tool_input_annotations
 
 # This submodule's own package generation, captured at import time (a reload builds a
 # fresh package + submodules together, so each generation's submodule reads its OWN
@@ -48,36 +54,29 @@ async def _agent_authoring_error(base_tool: str, fixed_kwargs: dict[str, Any]) -
         return None
 
     # ``fixed_kwargs`` bakes a PARTIAL spec (only the composable fields), so it is
-    # validated field-by-field against the agent's ``ToolInput`` — a full-model
+    # validated field-by-field against the agent's ``ToolInput`` annotations — a full-model
     # construction would spuriously fail on the run-time-only required fields the
-    # author deliberately leaves unbaked. The bakeable set is every ``ToolInput``
+    # author deliberately leaves unbaked. Each annotation carries its field's pydantic
+    # constraints (``Field(gt=..., min_length=..., pattern=...)``), so a baked value that
+    # violates a declared constraint is refused. The bakeable set is every ``ToolInput``
     # field for a ``spec_runnable`` agent, else exactly the declared honored fields.
-    model_fields = agent.ToolInput.model_fields
-    bakeable = set(model_fields) if agent.spec_runnable else set(agent.preset_bakeable_fields)
+    annotations = await tool_input_annotations(base_tool)
+    if annotations is None:
+        raise RuntimeError(f"agent {base_tool!r} has no input annotations to read")
+    bakeable = set(annotations) if agent.spec_runnable else set(agent.preset_bakeable_fields)
     for key, value in fixed_kwargs.items():
-        field = model_fields.get(key)
-        if field is None:
+        if key not in annotations:
             return f"fixed_kwargs field {key!r} is not a field of agent {base_tool!r}'s input"
         if key not in bakeable:
             return (
                 f"fixed_kwargs field {key!r} is not preset-bakeable for agent {base_tool!r}: "
                 "the agent is not spec_runnable and does not declare it in preset_bakeable_fields"
             )
-        # Validate against the full annotation INCLUDING the field's pydantic
-        # constraints (``Field(gt=..., min_length=..., pattern=...)``), which live in
-        # ``field.metadata`` — validating the bare annotation alone would let a baked
-        # value that violates a declared constraint pass author-time validation.
-        annotation: Any = field.annotation
-        for meta in field.metadata:
-            annotation = Annotated[annotation, meta]
         try:
-            TypeAdapter(annotation).validate_python(value)
+            TypeAdapter(annotations[key]).validate_python(value)
         except ValidationError as exc:
             return f"fixed_kwargs field {key!r} is invalid for agent {base_tool!r}: {exc}"
-
-    tools = set(await instance.app.tools.get_tools())
-    preset_names = instance.app.preset_manager.registered_names()
-    return _spec_reference_error(fixed_kwargs, tools, preset_names, "fixed_kwargs")
+    return None
 
 
 def _combo_registry_error(extensions: Sequence[Sequence[ExtensionElement]]) -> str | None:
@@ -124,6 +123,25 @@ async def _output_schema_error(
     return None
 
 
+async def _input_output_rules_error(
+    name: str,
+    *,
+    extensions: Sequence[Sequence[ExtensionElement]],
+    input_schema: TemplatedText | dict[str, Any] | None,
+    input_map: TemplatedText | str | None,
+    output_map: TemplatedText | str | None,
+) -> str | None:
+    """The first violation of the body's map rules or of its extensions presenting its input schema.
+
+    Shared by create/save-version/rollback/validate, run before the dry-run bake so a refused body
+    reads the rule's own text and never reaches the bind kernel.
+    """
+    maps_error = await preset_maps_body_error(name, input_map, output_map, has_input_schema=input_schema is not None)
+    if maps_error is not None:
+        return maps_error
+    return await branch_input_schema_error(name, extensions, input_schema)
+
+
 async def _dry_run_bind_error(
     base_tool: str,
     fixed_kwargs: dict[str, Any],
@@ -132,26 +150,77 @@ async def _dry_run_bind_error(
     description: str,
     output_schema: TemplatedText | dict[str, Any] | None = None,
     input_schema: TemplatedText | dict[str, Any] | None = None,
+    input_map: TemplatedText | str | None = None,
+    output_map: TemplatedText | str | None = None,
+    extensions: Sequence[Sequence[ExtensionElement]],
 ) -> str | None:
     """Bake the body through the kernel WITHOUT registering, returning a 400 message or ``None`` if it binds.
 
     Returns a 400 message if the bake raises (unknown base tool, a ``fixed_kwargs`` key
     that is not an argument of the base, an ``output_schema`` the base cannot carry, an
-    ``input_schema`` over a base tool with no support). The dry run never touches the live
-    registry, so a rejected edit leaves both the store and the bindings untouched.
+    ``input_schema`` over a base tool with no support). Then dry-run binds each of
+    ``extensions`` in order on the baked preset: every element's settings are checked against
+    its declared schema and every factory runs once on the baked tool, its branch discarded. A
+    refusal is returned as its own text, ``extension '<ext>' on tool '<name>' cannot bind:
+    <reason>``. The dry run never touches the live registry, so a rejected edit leaves both the
+    store and the bindings untouched.
     """
     try:
-        await instance.app.presets.bind(
+        baked = await instance.app.presets.bind(
             base_tool,
             fixed_kwargs,
             name=name,
             description=description,
             output_schema=output_schema,
             input_schema=input_schema,
+            input_map=input_map,
+            output_map=output_map,
         )
     except Exception as exc:
         return f"preset {name!r} cannot bind: {exc}"
+    for combo in extensions:
+        try:
+            instance.app.extensions.check_combo(name, combo, base=baked)
+        except ExtensionComboRefusedError as exc:
+            return str(exc)
     return None
+
+
+async def _assert_body_binds(body: PresetBody, *, name: str) -> None:
+    """Raise the mapped 400 unless ``body`` stored under ``name`` can bind against the live registry.
+
+    In order: the extension combos are registered, the output schema fits the base and the
+    extensions, the map rules pass and the extensions can present the input schema, and the
+    dry-run bake succeeds.
+    """
+    combo_error = _combo_registry_error(body.extensions)
+    if combo_error is not None:
+        raise BadRequestError(combo_error)
+    schema_error = await _output_schema_error(body.base_tool, body.output_schema, body.extensions)
+    if schema_error is not None:
+        raise BadRequestError(schema_error)
+    rules_error = await _input_output_rules_error(
+        name,
+        extensions=body.extensions,
+        input_schema=body.input_schema,
+        input_map=body.input_map,
+        output_map=body.output_map,
+    )
+    if rules_error is not None:
+        raise BadRequestError(rules_error)
+    bind_error = await _dry_run_bind_error(
+        body.base_tool,
+        body.fixed_kwargs,
+        name=name,
+        description=body.description,
+        output_schema=body.output_schema,
+        input_schema=body.input_schema,
+        input_map=body.input_map,
+        output_map=body.output_map,
+        extensions=body.extensions,
+    )
+    if bind_error is not None:
+        raise BadRequestError(bind_error)
 
 
 async def _write_validator_error(body: PresetBody) -> str | None:
@@ -224,9 +293,10 @@ async def _enforce_registration_tier(base_tool: str) -> None:
 def _input_schema_authoring_error(body: PresetBody) -> str | None:
     """A 400 message when ``body`` sets an ``input_schema`` over a base tool with no support, else ``None``.
 
-    Loud, never a silently-ignored schema — the ``_write_validator_error`` precedent.
+    Loud, never a silently-ignored schema — the ``_write_validator_error`` precedent. A body
+    with an ``input_map`` needs no support: the map builds the base tool's whole argument object.
     """
-    if body.input_schema is None:
+    if body.input_schema is None or body.input_map is not None:
         return None
     if instance.app.presets.input_schema_support(body.base_tool) is None:
         return (

@@ -91,7 +91,10 @@ def create_schedule(
         str | None,
         typer.Option(
             "--execution-key",
-            help="The api-key user id a contract-bearing recurring fire runs as (required with any contract jq).",
+            help=(
+                "The api key a contract-bearing recurring fire runs as (required with any contract jq); "
+                "an account is refused."
+            ),
         ),
     ] = None,
     start_expr: Annotated[

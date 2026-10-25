@@ -2,8 +2,8 @@
 
 Read side: a record read or write that meets an unapplied save on its subject applies it first
 (help-along) and runs again; a failed save raises :class:`StatePendingSaveFailedError`, never a
-timeout. The whole-state scans raise on, skip or count the held saves, and the rename referee
-drains a target. Run side: every run entry waits for the outstanding saves of its door's candidate
+timeout. The whole-state scans raise on, skip or count the held saves, and the conversation
+reset's forget drains a target. Run side: every run entry waits for the outstanding saves of its door's candidate
 subjects — their records AND their deferred calls — unless the same task already drained them;
 inside a deferred call a drain skips exactly the saves whose calls wait on that call's save.
 """

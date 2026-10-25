@@ -3,8 +3,10 @@ the contract ``Storage`` ABC, and the registry is dead by default."""
 
 from __future__ import annotations
 
+import mimetypes
+
 import pytest
-from tai42_contract.storage import Storage
+from tai42_contract.storage import ObjectStat, Storage
 
 from tai42_skeleton.storage import StorageRegistry
 
@@ -32,6 +34,13 @@ class _InMemoryStorage(Storage):
         prefix = path.rstrip("/") + "/"
         for key in [k for k in self.items if k.startswith(prefix)]:
             del self.items[key]
+
+    async def stat(self, path: str) -> ObjectStat:
+        content_type, _ = mimetypes.guess_type(path)
+        return ObjectStat(content_type=content_type, size=len(await self.load_bytes(path)))
+
+    async def load_range(self, path: str, start: int, length: int) -> bytes:
+        return (await self.load_bytes(path))[start : start + length]
 
 
 def test_dead_by_default() -> None:

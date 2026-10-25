@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from tai42_contract.monitoring import TraceContext
+
 from tai42_agents._internal.config_util import (
     build_run_config,
     init_langgraph_config,
@@ -18,6 +20,7 @@ async def start_run_config(
     resume_checkpoint_id: str | None,
     recursion_limit: int | None,
     checkpoint_provider: str | None,
+    context: TraceContext | None,
 ) -> tuple[dict[str, Any], str | None]:
     """Build the run config both faces run the graph with, and ready its thread in the ledger.
 
@@ -26,14 +29,15 @@ async def start_run_config(
     top level. With no thread pinned, :func:`init_langgraph_config` mints a fresh isolated one.
     ``recursion_limit`` bounds the TOP-LEVEL graph ONLY: each task-tool subagent runs its own
     graph bound by deepagents at 9999, so the effective step budget is MULTIPLICATIVE across
-    nesting depth, not a total-spend ceiling.
+    nesting depth, not a total-spend ceiling. ``context`` is the run's trace lineage from the face's
+    run-trace opener; the graph's top run records under it.
 
     Returns ``(config, minted_thread)``: a caller-supplied thread leaves the ledger before the
     run; a thread minted for a keyless run is returned so the face marks it finished when the
     run ends without a park.
     """
     source = build_run_config(langgraph_config, thread_id, resume_checkpoint_id, recursion_limit)
-    config = init_langgraph_config(config=source).config
+    config = init_langgraph_config(source, context)
     return config, await start_run_thread(source, config, provider=checkpoint_provider)
 
 

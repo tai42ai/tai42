@@ -45,11 +45,24 @@ class _FakeStorage(Storage):
         raise NotImplementedError
 
     async def stat(self, path: str) -> ObjectStat:
-        return ObjectStat(content_type=None)
+        return ObjectStat(content_type=None, size=len(self._get(path)))
+
+    async def load_range(self, path: str, start: int, length: int) -> bytes:
+        return self._get(path)[start : start + length]
+
+    def _get(self, path: str) -> bytes:
+        if path not in self.objects:
+            raise FileNotFoundError(path)
+        return self.objects[path]
+
+
+_MOUNTED = ["tai42_skeleton.routers.storage_presence", "tai42_skeleton.routers.storage"]
 
 
 @pytest.fixture
 def install(monkeypatch):
+    monkeypatch.setattr(instance.app, "effective_router_modules", lambda: _MOUNTED)
+
     def _install(provider: Storage | None) -> Storage | None:
         monkeypatch.setattr(instance.app._storage_registry, "_provider", provider)
         return provider
@@ -73,10 +86,11 @@ async def test_info_present(install):
     assert data["present"] is True
     assert data["provider"] == "_FakeStorage"
     assert data["module"] == type(fake).__module__
+    assert data["surfaces"] == ["storage"]
 
 
 async def test_info_absent_is_200_present_false(install):
     install(None)
     resp = await router.storage_info(_req())
     assert resp.status_code == 200
-    assert _json(resp) == {"data": {"present": False, "provider": None, "module": None}}
+    assert _json(resp) == {"data": {"present": False, "provider": None, "module": None, "surfaces": ["storage"]}}

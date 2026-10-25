@@ -17,7 +17,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 from collections.abc import Iterator, Mapping, Sequence
-from contextlib import ExitStack, asynccontextmanager, contextmanager
+from contextlib import ExitStack, asynccontextmanager, contextmanager, nullcontext
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
@@ -31,26 +31,34 @@ from tai42_contract.interactions import (
     ParkResumeUnauthorizedError,
     ResumeItem,
     RunFailed,
+    RunTerminalFailed,
     SuspendedInteraction,
     reset_chained_resume,
     reset_resume_continuation_tool,
     set_chained_resume,
     set_resume_continuation_tool,
 )
+from tai42_contract.presets import PresetOutputStage
 from tai42_contract.tools import RunDelivery, run_delivery, tool_call_frame
 from tai42_kit.interactions import park_giveup
 from tai42_kit.interactions import park_kill as kit_park_kill
-from tai42_kit.interactions.park_giveup import ParkGiveUpOutcome, register_park_giveup_handler
+from tai42_kit.interactions.park_giveup import ParkGiveUpFailure, ParkGiveUpOutcome, register_park_giveup_handler
 from tai42_kit.interactions.park_kill import ParkKillNotReadyError, register_park_kill_handler
 
-from tai42_skeleton.authz.execution_identity import reset_execution_identity, set_execution_identity
+from tai42_skeleton.authz.execution_identity import (
+    get_execution_identity,
+    reset_execution_identity,
+    set_execution_identity,
+)
 from tai42_skeleton.authz.identity import CallerIdentity
 from tai42_skeleton.interactions import ask, authorization, giveup_delivery
 from tai42_skeleton.interactions import continuation as continuation_module
+from tai42_skeleton.interactions import continuation_dispatch as continuation_dispatch_module
 from tai42_skeleton.interactions import visit as visit_module
 from tai42_skeleton.interactions.kill import kill_park
 from tai42_skeleton.interactions.store import ContinuationDue, KillDue
-from tai42_skeleton.runs.chokepoint import get_resume_lineage, resume_lineage, resume_origin
+from tai42_skeleton.runs.chokepoint import get_resume_lineage, get_resume_origin, resume_lineage, resume_origin
+from tai42_skeleton.tools.stage_frames import stage_frame
 
 from ._continuation_support import configure_interactions_store, make_wired
 
@@ -153,9 +161,9 @@ class _ProbeDriver:
         await self.fire_all()
         return {"done": arguments["interaction_id"]}
 
-    async def give_up(self, interaction_id: str, failed_outcome: Mapping[str, Any]) -> ParkGiveUpOutcome:
+    async def give_up(self, interaction_id: str, failure: ParkGiveUpFailure) -> ParkGiveUpOutcome:
         await self.fire_all()
-        return ParkGiveUpOutcome(RunFailed(outcome=dict(failed_outcome)))
+        return ParkGiveUpOutcome(RunFailed(outcome=dict(failure.outcome)))
 
 
 @pytest.fixture
@@ -187,12 +195,17 @@ async def _ask() -> SuspendedInteraction:
     return result
 
 
-async def _park(wired: SimpleNamespace, keys: Sequence[str]) -> InteractionState:
-    """Park an ask of the probe driver's run inside chained dispatches of ``keys``; return its stored state."""
+async def _park(
+    wired: SimpleNamespace, keys: Sequence[str], answer_stage: PresetOutputStage | None = None
+) -> InteractionState:
+    """Park an ask of the probe driver's run inside chained dispatches of ``keys``; return its stored state.
+
+    ``answer_stage`` is the stage of a preset the asking run dispatched between its tool call and the ask.
+    """
     tool_token = set_resume_continuation_tool(RESUME)
     id_token = set_execution_identity(CallerIdentity(user_id="svc-key", execution_key_fingerprint="fp-1"))
     try:
-        with tool_call_frame(), _chained(keys):
+        with tool_call_frame(), _chained(keys), stage_frame(answer_stage) if answer_stage else nullcontext():
             parked = await _ask()
     finally:
         reset_execution_identity(id_token)
@@ -203,7 +216,7 @@ async def _park(wired: SimpleNamespace, keys: Sequence[str]) -> InteractionState
 
 
 async def _claim(wired: SimpleNamespace, state: InteractionState, answer: Any = "yes") -> InteractionResponse:
-    due_ttl, first_attempt_ms = continuation_module.continuation_due_timing(wired.settings)
+    due_ttl, first_attempt_ms = continuation_dispatch_module.continuation_due_timing(wired.settings)
     response = InteractionResponse(
         interaction_id=state.request.interaction_id,
         answer=answer,
@@ -224,14 +237,14 @@ async def _claim(wired: SimpleNamespace, state: InteractionState, answer: Any = 
 
 async def _settle() -> None:
     # Wait for every detached continuation task the door spawned.
-    while continuation_module._CONTINUATION_TASKS:
-        await asyncio.gather(*list(continuation_module._CONTINUATION_TASKS), return_exceptions=True)
+    while continuation_dispatch_module._CONTINUATION_TASKS:
+        await asyncio.gather(*list(continuation_dispatch_module._CONTINUATION_TASKS), return_exceptions=True)
 
 
 async def _answer_door(wired: SimpleNamespace, state: InteractionState) -> None:
     """The HTTP answer door's path: the atomic claim, then the shared post-claim fire (detached)."""
     response = await _claim(wired, state)
-    await continuation_module.fire_continuation_after_claim(wired.fake, wired.store, state.request, response)
+    await continuation_dispatch_module.fire_continuation_after_claim(wired.fake, wired.store, state.request, response)
     await _settle()
 
 
@@ -242,7 +255,7 @@ async def _reaper_redelivery(wired: SimpleNamespace, state: InteractionState) ->
         wired.fake, state.request.interaction_id, datetime.now(UTC) + timedelta(hours=2), 1000, 60000
     )
     assert isinstance(due, ContinuationDue)
-    continuation_module.redeliver_continuation(wired.store, due)
+    continuation_dispatch_module.redeliver_continuation(wired.store, due)
     await _settle()
 
 
@@ -420,13 +433,53 @@ async def test_the_give_up_runs_its_handler_under_the_parks_lineage(wired, probe
     state = await _park(wired, [OUTER, INNER])
     seen: list[tuple[str, ...]] = []
 
-    async def _handler(interaction_id: str, failed_outcome: Mapping[str, Any]) -> None:
+    async def _handler(interaction_id: str, failure: ParkGiveUpFailure) -> None:
         seen.append(get_resume_lineage())
 
     register_park_giveup_handler(_handler)
     await giveup_delivery.deliver_park_giveup(wired.store, state.request, fingerprint="fp-1")
     assert seen == [(OUTER, INNER)]
     assert get_resume_lineage() == ()
+
+
+@pytest.mark.parametrize("door", ["answer", "reaper", "visit"])
+async def test_an_answer_stage_refusal_gives_the_park_up_inside_its_frame(wired, probe, door) -> None:
+    state = await _park(wired, [OUTER], answer_stage=PresetOutputStage(preset="p", output_map='error("no")'))
+    seen: list[dict[str, Any]] = []
+
+    async def _handler(interaction_id: str, failure: ParkGiveUpFailure) -> ParkGiveUpOutcome:
+        identity = get_execution_identity()
+        try:
+            await authorization.assert_resume_authorized(OUTER)
+            verdict = "admitted"
+        except ParkResumeUnauthorizedError:
+            verdict = "refused"
+        seen.append(
+            {
+                "origin": get_resume_origin(),
+                "identity": identity.user_id if identity is not None else None,
+                "verdict": verdict,
+                "message": failure.message,
+            }
+        )
+        return ParkGiveUpOutcome(RunFailed(outcome=dict(failure.outcome)))
+
+    register_park_giveup_handler(_handler)
+    if door == "visit":
+        with pytest.raises(RunTerminalFailed):
+            await _drive(door, wired, state, probe)
+    else:
+        await _drive(door, wired, state, probe)
+    assert seen == [
+        {
+            "origin": state.request.interaction_id,
+            "identity": "svc-key",
+            "verdict": "admitted",
+            "message": "preset 'p' output map failed",
+        }
+    ]
+    # The driver's continuation never ran: the park ended at its answer stage.
+    assert probe.verdicts == []
 
 
 # --- the predicate on a chain key -----------------------------------------------------------------

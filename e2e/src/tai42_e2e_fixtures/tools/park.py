@@ -7,14 +7,13 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Literal
+from typing import Any, Literal
 
 from tai42_contract.app import tai42_app
-from tai42_contract.conversations import ReplyTo
 from tai42_contract.interactions import ResumeBuffered
 from tai42_contract.tools import TOOL_META_PAUSES
 
-from tai42_e2e_fixtures.tools.ask_results import parked
+from tai42_e2e_fixtures.tools.ask_results import parked, resumed_with
 from tai42_e2e_fixtures.tools.basic import _E2eProbeRedisSettings
 from tai42_e2e_fixtures.tools.driving import driving_as
 
@@ -117,15 +116,14 @@ async def e2e_chained_park(question: str, expiry_seconds: float) -> object:
 
 
 @tai42_app.tools.tool(tags={"e2e"})
-async def e2e_async_resume(
-    interaction_id: str, answer: object, reply_to: ReplyTo | None, params: dict[str, str] | None
-) -> dict:
+async def e2e_async_resume(interaction_id: str, ask_result: Any) -> dict:
     """The generic resume continuation an async park fires ONCE — the stand-in flow
     driver's resume seam.
 
-    Runs as the park's stored identity with ``{interaction_id, answer, reply_to, params}``: the
-    ANSWER branch records the delivered answer, the EXPIRY branch (``answer`` is the generic
-    ``EXPIRY_ANSWER`` marker) records that the park expired unanswered. Reads the
+    Runs as the park's stored identity with ``{interaction_id, ask_result}``: the ANSWER branch
+    records the answer, quote and params of the delivered ``AskAnswer`` JSON, the EXPIRY branch
+    (its ``answer`` is the generic ``EXPIRY_ANSWER`` marker) records that the park expired
+    unanswered. Reads the
     execution identity it is CURRENTLY bound under — the same seam the continuation runs
     beneath (``get_execution_identity().user_id``) — and RPUSHes
     ``{"branch", "value", "reply_to", "params", "pid", "identity"}`` onto
@@ -141,17 +139,18 @@ async def e2e_async_resume(
     from tai42_kit.clients.impl.redis import RedisClient
     from tai42_skeleton.authz.execution_identity import get_execution_identity
 
-    expired = answer == EXPIRY_ANSWER
+    resumed = resumed_with(ask_result)
+    expired = resumed.answer == EXPIRY_ANSWER
     branch = "expiry" if expired else "answer"
-    value = "expired" if expired else json.dumps(answer)
+    value = "expired" if expired else json.dumps(resumed.answer)
     bound_identity = get_execution_identity()
     identity = bound_identity.user_id if bound_identity is not None else None
     record = json.dumps(
         {
             "branch": branch,
             "value": value,
-            "reply_to": None if reply_to is None else reply_to.model_dump(mode="json"),
-            "params": params,
+            "reply_to": None if resumed.reply_to is None else resumed.reply_to.model_dump(mode="json"),
+            "params": resumed.params,
             "pid": os.getpid(),
             "identity": identity,
         }
@@ -164,7 +163,7 @@ async def e2e_async_resume(
 # The N-park super-step barrier the multi-suspend leg drives. Three async parks are
 # minted in ONE driver call (one logical super-step); each fires the shared
 # ``e2e_async_multipark_resume`` continuation on whichever worker resolves it. The
-# continuation receives only ``{interaction_id, answer, reply_to, params}`` (flow-blind), so the driver
+# continuation receives only ``{interaction_id, ask_result}`` (flow-blind), so the driver
 # routes each park's interaction id to its barrier slot on the probe channel.
 _MULTIPARK_ROUTE_KEY = "e2e:multipark:route"
 
@@ -242,9 +241,7 @@ async def e2e_async_multipark_flow(
 
 
 @tai42_app.tools.tool(tags={"e2e"})
-async def e2e_async_multipark_resume(
-    interaction_id: str, answer: object, reply_to: ReplyTo | None, params: dict[str, str] | None
-) -> dict:
+async def e2e_async_multipark_resume(interaction_id: str, ask_result: Any) -> dict:
     """The shared resume continuation for the multi-park super-step barrier.
 
     Recovers its ``{super_step_id, slot, n}`` from the interaction-id route, then applies
@@ -276,8 +273,9 @@ async def e2e_async_multipark_resume(
             # Hold this fire in flight past the reaper interval so a redelivery laps it,
             # exercising a concurrent redelivery the barrier's idempotent apply must absorb.
             await asyncio.sleep(route["slow_seconds"])  # noqa: TID251 — the concurrency hazard under test
-        expired = answer == EXPIRY_ANSWER
-        value = "expired" if expired else json.dumps(answer)
+        resumed = resumed_with(ask_result)
+        expired = resumed.answer == EXPIRY_ANSWER
+        value = "expired" if expired else json.dumps(resumed.answer)
         bound_identity = get_execution_identity()
         identity = bound_identity.user_id if bound_identity is not None else None
         slot_payload = json.dumps({"value": value, "identity": identity})

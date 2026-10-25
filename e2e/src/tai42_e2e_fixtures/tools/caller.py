@@ -16,13 +16,12 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Literal
+from typing import Any, Literal
 
 from tai42_contract.app import tai42_app
-from tai42_contract.conversations import ReplyTo
 from tai42_contract.tools import TOOL_META_PAUSES
 
-from tai42_e2e_fixtures.tools.ask_results import parked
+from tai42_e2e_fixtures.tools.ask_results import parked, resumed_with
 from tai42_e2e_fixtures.tools.basic import _E2eProbeRedisSettings
 from tai42_e2e_fixtures.tools.driving import driving_as
 
@@ -185,9 +184,7 @@ async def held_deeper(marker: str, expiry_seconds: float) -> object:
 
 
 @tai42_app.tools.tool(tags={"e2e"}, meta={TOOL_META_PAUSES: True})
-async def held_run_resume(
-    interaction_id: str, answer: object, reply_to: ReplyTo | None, params: dict[str, str] | None
-) -> object:
+async def held_run_resume(interaction_id: str, ask_result: Any) -> object:
     """Re-drive a resumed ``held_run`` with the answer, under the restored call chain.
 
     Reads the resumed ask's stored ``payload`` for whether to re-park (and how deep), RPUSHes
@@ -204,6 +201,8 @@ async def held_run_resume(
     from tai42_kit.clients.impl.redis import RedisClient
     from tai42_skeleton.interactions import InteractionStore, interactions_settings
 
+    resumed = resumed_with(ask_result)
+    answer = resumed.answer
     settings = interactions_settings()
     store = InteractionStore(settings.key_prefix)
     async with client_ctx(RedisClient, settings.redis) as r:
@@ -215,8 +214,8 @@ async def held_run_resume(
     record = json.dumps(
         {
             "answer": answer,
-            "reply_to": None if reply_to is None else reply_to.model_dump(mode="json"),
-            "params": params,
+            "reply_to": None if resumed.reply_to is None else resumed.reply_to.model_dump(mode="json"),
+            "params": resumed.params,
             "chain": chain,
             "pid": os.getpid(),
         }

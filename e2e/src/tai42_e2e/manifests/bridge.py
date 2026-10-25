@@ -250,6 +250,7 @@ def build_bridge_stack(res: StackResources, variants: Variants) -> StackConfig:
         "routers_modules": [
             *_CORE_ROUTERS,
             "tai42_skeleton.routers.conversations",
+            "tai42_skeleton.routers.channels",
             "tai42_skeleton.routers.checkpoints",
             "tai42_skeleton.routers.api_keys",
             "tai42_skeleton.routers.agents",
@@ -330,7 +331,8 @@ def build_media_bridge_stack(res: StackResources, variants: Variants) -> StackCo
     Identical to :func:`build_bridge_stack` (backend + metrics + the redis conversations backend +
     the hooks manager an unsupported event is observed through) with the telegram + slack channel
     plugins added, so one stack bridges a media inbound to a turn AND replies + emits the platform
-    rejection event on every channel. Telegram's ``setWebhook`` needs its inbound-door origin, so
+    rejection event on every channel. The backup router is mounted so a suite exports the
+    storage section after an ingest. Telegram's ``setWebhook`` needs its inbound-door origin, so
     ``CHANNEL_TELEGRAM_PUBLIC_BASE_URL`` joins the replica-B origin fill; the shared
     ``^/api/channels/.*$`` public route already covers the telegram + slack inbound doors."""
     base = build_bridge_stack(res, variants)
@@ -342,6 +344,7 @@ def build_media_bridge_stack(res: StackResources, variants: Variants) -> StackCo
             "tai42_channel_telegram.register",
             "tai42_channel_slack.register",
         ],
+        "routers_modules": [*base.manifest["routers_modules"], "tai42_skeleton.routers.backup"],
     }
     # The blob provider the ingest chokepoint writes through is already live on the base stack (its
     # ``storage_module`` = ``variants.storage.module`` registers ``tai42_storage_local``, rooted at

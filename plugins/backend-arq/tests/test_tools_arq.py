@@ -10,25 +10,13 @@ from unittest.mock import AsyncMock
 
 import orjson
 import pytest
-from arq.jobs import JobDef, JobResult, JobStatus, SerializationError
-from arq.utils import timestamp_ms
+from arq.jobs import JobResult, JobStatus, SerializationError
 
-from tai42_backend_arq import scheduler, tools
+from tai42_backend_arq import scheduler, tasks, tools
+from tai42_backend_arq.jobs import register_queue
 from tai42_backend_arq.settings import TaskFailedError
 
-from .conftest import DeleteOnLockRedis
-
-
-def _job_def(job_id: str, score: int) -> JobDef:
-    return JobDef(
-        function="tool_execution",
-        args=(),
-        kwargs={},
-        job_try=1,
-        enqueue_time=datetime.now(UTC),
-        score=score,
-        job_id=job_id,
-    )
+from .conftest import SETTINGS_QUEUE, DeleteOnLockRedis, handle_of
 
 
 def _job_result(job_id: str, success: bool, result: Any = "x") -> JobResult:
@@ -90,22 +78,30 @@ async def test_active_tasks_lists_only_in_progress(fake_redis, monkeypatch, bind
     # in-progress marker keys live in the hash store the fake scan() walks.
     fake_redis._store["arq:in-progress:job-a"] = {}
     fake_redis._store["arq:in-progress:job-b"] = {}
-    monkeypatch.setattr(tools, "Job", _StatusJob({"job-a": JobStatus.in_progress, "job-b": JobStatus.complete}))
+    monkeypatch.setattr(
+        tools, "job_handle", handle_of(_StatusJob({"job-a": JobStatus.in_progress, "job-b": JobStatus.complete}))
+    )
 
     assert await tools.backend_active_tasks() == {"job-a": {"status": "in_progress"}}
 
 
-async def test_reserved_and_scheduled_tasks_split_by_due_time(monkeypatch, bind_pool) -> None:
-    now_ms = timestamp_ms()
-    due = _job_def("due-1", now_ms - 1000)
-    future = _job_def("future-1", now_ms + 60_000)
-    fake = AsyncMock()
-    fake.queued_jobs = AsyncMock(return_value=[due, future])
-    bind_pool(fake)
+async def test_reserved_and_scheduled_tasks_span_every_known_queue(arq_redis) -> None:
+    """Due ids are listed per queue, every known queue keyed (an empty one as ``[]``);
+    future ids merge into one id-to-due-time map."""
+    due_main = await tasks.enqueue_task(arq_redis, backend_tool_name="t")
+    future_main = await tasks.enqueue_task(arq_redis, countdown=60, backend_tool_name="t")
+    due_gpu = await tasks.enqueue_task(arq_redis, queue="gpu", backend_tool_name="t")
+    future_gpu = await tasks.enqueue_task(arq_redis, queue="gpu", countdown=120, backend_tool_name="t")
+    await register_queue(arq_redis, f"{SETTINGS_QUEUE}.idle")
 
-    assert await tools.backend_reserved_tasks() == ["due-1"]
+    assert await tools.backend_reserved_tasks() == {
+        SETTINGS_QUEUE: [due_main.job_id],
+        f"{SETTINGS_QUEUE}.gpu": [due_gpu.job_id],
+        f"{SETTINGS_QUEUE}.idle": [],
+    }
     scheduled = await tools.backend_scheduled_tasks()
-    assert scheduled == {"future-1": float(now_ms + 60_000)}
+    assert set(scheduled) == {future_main.job_id, future_gpu.job_id}
+    assert scheduled[future_gpu.job_id] == await arq_redis.zscore(f"{SETTINGS_QUEUE}.gpu", future_gpu.job_id)
 
 
 async def test_list_failed_tasks_rows_carry_stored_failure_detail(bind_pool) -> None:
@@ -136,7 +132,7 @@ async def test_cancel_task_confirmed(monkeypatch, bind_pool) -> None:
     from the tagged description a stored abort serializes to."""
     bind_pool(object())
     jobs = _StatusJob({"j1": JobStatus.in_progress})
-    monkeypatch.setattr(tools, "Job", jobs)
+    monkeypatch.setattr(tools, "job_handle", handle_of(jobs))
 
     assert await tools.backend_cancel_task("j1") == "Task j1 aborted"
     # Bounded by the configured task timeout — never an infinite wait.
@@ -149,7 +145,7 @@ async def test_cancel_task_unconfirmed_reported(monkeypatch, bind_pool) -> None:
     requested-but-unconfirmed."""
     bind_pool(object())
     jobs = _StatusJob({"j1": JobStatus.queued, "abort:j1": False})
-    monkeypatch.setattr(tools, "Job", jobs)
+    monkeypatch.setattr(tools, "job_handle", handle_of(jobs))
 
     assert await tools.backend_cancel_task("j1") == "Task j1 abort requested but not confirmed"
 
@@ -157,7 +153,7 @@ async def test_cancel_task_unconfirmed_reported(monkeypatch, bind_pool) -> None:
 @pytest.mark.parametrize("status", [JobStatus.not_found, JobStatus.complete])
 async def test_cancel_task_not_cancellable(monkeypatch, bind_pool, status) -> None:
     bind_pool(object())
-    monkeypatch.setattr(tools, "Job", _StatusJob({"j1": status}))
+    monkeypatch.setattr(tools, "job_handle", handle_of(_StatusJob({"j1": status})))
 
     out = await tools.backend_cancel_task("j1")
     assert out == f"Task j1 cannot be canceled (status: {status})"
@@ -169,7 +165,7 @@ async def test_cancel_task_wait_elapsed_reports_unconfirmed(monkeypatch, bind_po
     the request stays recorded and the worker honors it at pick-up."""
     bind_pool(object())
     jobs = _StatusJob({"j1": JobStatus.in_progress, "abort:j1": TimeoutError()})
-    monkeypatch.setattr(tools, "Job", jobs)
+    monkeypatch.setattr(tools, "job_handle", handle_of(jobs))
 
     assert await tools.backend_cancel_task("j1") == "Task j1 abort requested but not confirmed"
 
@@ -190,7 +186,7 @@ async def test_cancel_task_revived_failure_replay_reports_failed_on_its_own(monk
             "result:j1": _job_result("j1", success=False, result=stored),
         }
     )
-    monkeypatch.setattr(tools, "Job", jobs)
+    monkeypatch.setattr(tools, "job_handle", handle_of(jobs))
 
     out = await tools.backend_cancel_task("j1")
     assert out == "Task j1 failed on its own before the abort could take effect: ValueError('boom')"
@@ -226,7 +222,7 @@ async def test_cancel_task_undetailed_failure_replay_reports_aborted_or_failed(
             "result:j1": _job_result("j1", success=False, result=stored),
         }
     )
-    monkeypatch.setattr(tools, "Job", jobs)
+    monkeypatch.setattr(tools, "job_handle", handle_of(jobs))
 
     out = await tools.backend_cancel_task("j1")
     assert out == f"Task j1 finished in failure after the abort request (aborted or failed on its own): {detail}"
@@ -245,7 +241,7 @@ async def test_cancel_task_exception_replay_without_stored_failure_reports_not_c
             "abort:j1": SerializationError("unable to serialize result"),
         }
     )
-    monkeypatch.setattr(tools, "Job", jobs)
+    monkeypatch.setattr(tools, "job_handle", handle_of(jobs))
 
     out = await tools.backend_cancel_task("j1")
     assert out == f"Task j1 cannot be canceled (status: {JobStatus.complete})"
@@ -262,7 +258,7 @@ async def test_cancel_task_job_vanishing_during_wait_reports_not_cancelable(monk
             "abort:j1": SerializationError("unable to serialize result"),
         }
     )
-    monkeypatch.setattr(tools, "Job", jobs)
+    monkeypatch.setattr(tools, "job_handle", handle_of(jobs))
 
     out = await tools.backend_cancel_task("j1")
     assert out == f"Task j1 cannot be canceled (status: {JobStatus.not_found})"
@@ -292,7 +288,7 @@ async def test_cancel_task_own_cancellation_propagates_never_reads_as_aborted(mo
                 return True
             raise AssertionError("unreachable")
 
-    monkeypatch.setattr(tools, "Job", _SwallowingJob)
+    monkeypatch.setattr(tools, "job_handle", handle_of(_SwallowingJob))
     task = asyncio.get_running_loop().create_task(tools.backend_cancel_task("j1"))
     await entered.wait()
     task.cancel()
@@ -308,7 +304,7 @@ async def test_cancel_task_success_replay_reports_not_cancelable(monkeypatch, bi
     nothing to cancel" -- never as a still-pending abort request."""
     bind_pool(object())
     jobs = _StatusJob({"j1": [JobStatus.in_progress, final_status], "abort:j1": False})
-    monkeypatch.setattr(tools, "Job", jobs)
+    monkeypatch.setattr(tools, "job_handle", handle_of(jobs))
 
     out = await tools.backend_cancel_task("j1")
     assert out == f"Task j1 cannot be canceled (status: {final_status})"
@@ -317,7 +313,7 @@ async def test_cancel_task_success_replay_reports_not_cancelable(monkeypatch, bi
 async def test_cancel_task_real_abort_error_propagates(monkeypatch, bind_pool) -> None:
     bind_pool(object())
     jobs = _StatusJob({"j1": JobStatus.in_progress, "abort:j1": ConnectionError("redis gone")})
-    monkeypatch.setattr(tools, "Job", jobs)
+    monkeypatch.setattr(tools, "job_handle", handle_of(jobs))
 
     with pytest.raises(ConnectionError, match="redis gone"):
         await tools.backend_cancel_task("j1")
@@ -391,7 +387,7 @@ async def test_an_un_reset_store_is_loud_on_list_export_and_get(fake_redis, bind
 
 async def test_update_refuses_a_relative_interval(fake_redis, monkeypatch, bind_pool) -> None:
     bind_pool(fake_redis)
-    monkeypatch.setattr(scheduler, "Job", _OkJob)
+    monkeypatch.setattr(scheduler, "job_handle", handle_of(_OkJob))
     key = _seed_schedule(fake_redis)
     with pytest.raises(ValueError, match="does not support relative interval schedules"):
         await tools.backend_update_schedule("s1", new_schedule={"kind": "interval", "every": 30, "relative": True})
@@ -449,7 +445,7 @@ async def test_enable_disable_deleted_concurrently_not_resurrected(fake_redis, b
 
 async def test_delete_schedule_aborts_and_deletes(fake_redis, monkeypatch, bind_pool) -> None:
     bind_pool(fake_redis)
-    monkeypatch.setattr(scheduler, "Job", _OkJob)
+    monkeypatch.setattr(scheduler, "job_handle", handle_of(_OkJob))
     key = _seed_schedule(fake_redis)
 
     assert await tools.backend_delete_schedule("s1") == {"status": "deleted", "name": "s1"}
@@ -463,7 +459,7 @@ async def test_delete_schedule_failed_abort_propagates(fake_redis, monkeypatch, 
             raise RuntimeError("abort failed")
 
     bind_pool(fake_redis)
-    monkeypatch.setattr(scheduler, "Job", _BadAbort)
+    monkeypatch.setattr(scheduler, "job_handle", handle_of(_BadAbort))
     key = _seed_schedule(fake_redis)
 
     with pytest.raises(RuntimeError, match="abort failed"):
@@ -475,7 +471,9 @@ async def test_delete_schedule_failed_abort_propagates(fake_redis, monkeypatch, 
 async def test_delete_schedule_deleted_concurrently_reports_not_found(fake_redis, monkeypatch, bind_pool) -> None:
     """A delete that loses the race for the per-schedule lock to another delete
     finds the hash gone: it reports not_found without touching any job."""
-    monkeypatch.setattr(scheduler, "Job", _StatusJob({"abort:pending-1": RuntimeError("must not be called")}))
+    monkeypatch.setattr(
+        scheduler, "job_handle", handle_of(_StatusJob({"abort:pending-1": RuntimeError("must not be called")}))
+    )
     key = _seed_schedule(fake_redis)
     bind_pool(DeleteOnLockRedis(fake_redis, key))
 
@@ -504,9 +502,18 @@ async def test_run_schedule_now_enqueues_target(fake_redis, bind_pool) -> None:
     assert await tools.backend_run_schedule_now("nope") == {"status": "not_found"}
 
 
+async def test_run_schedule_now_enqueues_on_the_settings_queue(arq_redis) -> None:
+    arq_redis.default_queue_name = f"{SETTINGS_QUEUE}.gpu"
+    await arq_redis.hset("arq:schedule:s1", mapping={"target": "tool_execution", "args": "[]", "kwargs": "{}"})
+
+    assert await tools.backend_run_schedule_now("s1") == {"status": "queued"}
+    assert await arq_redis.zcard(SETTINGS_QUEUE) == 1
+    assert await arq_redis.zcard(f"{SETTINGS_QUEUE}.gpu") == 0
+
+
 async def test_update_schedule_new_schedule(fake_redis, monkeypatch, bind_pool) -> None:
     bind_pool(fake_redis)
-    monkeypatch.setattr(scheduler, "Job", _OkJob)
+    monkeypatch.setattr(scheduler, "job_handle", handle_of(_OkJob))
     key = _seed_schedule(fake_redis)
 
     out = await tools.backend_update_schedule("s1", new_schedule=120)
@@ -522,7 +529,7 @@ async def test_update_schedule_new_schedule(fake_redis, monkeypatch, bind_pool) 
 
 async def test_update_schedule_next_run_in_ms(fake_redis, monkeypatch, bind_pool) -> None:
     bind_pool(fake_redis)
-    monkeypatch.setattr(scheduler, "Job", _OkJob)
+    monkeypatch.setattr(scheduler, "job_handle", handle_of(_OkJob))
     _seed_schedule(fake_redis)
 
     out = await tools.backend_update_schedule("s1", next_run_in_ms=5000)
@@ -533,7 +540,7 @@ async def test_update_schedule_next_run_in_ms(fake_redis, monkeypatch, bind_pool
 
 async def test_update_schedule_crontab_next_run(fake_redis, monkeypatch, bind_pool) -> None:
     bind_pool(fake_redis)
-    monkeypatch.setattr(scheduler, "Job", _OkJob)
+    monkeypatch.setattr(scheduler, "job_handle", handle_of(_OkJob))
     key = _seed_schedule(fake_redis)
 
     out = await tools.backend_update_schedule("s1", new_schedule="0 9 * * 1")
@@ -549,7 +556,7 @@ async def test_update_schedule_deleted_concurrently_reports_not_found(fake_redis
     a partial hash."""
     key = _seed_schedule(fake_redis)
     bind_pool(DeleteOnLockRedis(fake_redis, key))
-    monkeypatch.setattr(scheduler, "Job", _OkJob)
+    monkeypatch.setattr(scheduler, "job_handle", handle_of(_OkJob))
 
     out = await tools.backend_update_schedule("s1", new_schedule=120)
 

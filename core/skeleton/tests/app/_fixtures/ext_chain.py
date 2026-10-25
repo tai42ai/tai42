@@ -14,7 +14,7 @@ from tai42_contract.extensions import ExtensionKind
 
 
 @tai42_app.extensions.extension(kind=ExtensionKind.WRAPPER, name="first")
-def first(func, name, desc, config=None):
+def first(func, name, desc):
     @functools.wraps(func)
     def first_variant(*args, **kwargs):
         return func(*args, **kwargs)
@@ -26,7 +26,7 @@ def first(func, name, desc, config=None):
 
 
 @tai42_app.extensions.extension(kind=ExtensionKind.WRAPPER, name="second")
-def second(func, name, desc, config=None):
+def second(func, name, desc):
     @functools.wraps(func)
     def second_variant(*args, **kwargs):
         return func(*args, **kwargs)

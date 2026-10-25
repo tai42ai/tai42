@@ -14,7 +14,7 @@ from fastmcp.exceptions import ToolError
 from mcp.types import TextContent
 from tai42_contract.access_control import reset_request_user_id, set_request_user_id
 from tai42_contract.interactions import SuspendedInteraction
-from tai42_contract.secrets import SECRET_PLACEHOLDER, SecretValue
+from tai42_contract.secrets import SecretValue
 from tai42_contract.tools import TOOL_META_PAUSES
 from tai42_kit.interactions.park_marker import read_suspended_interaction_marker
 
@@ -231,8 +231,7 @@ def test_mcp_edge_secret_preset_schema_violation_redacts_the_secret_from_logs_an
     # is UNARMED, so convert_result reveals the secret into structured_content and the
     # output-schema guard validates the revealed value. The violation raises loudly, but
     # the plaintext token must ride NEITHER fastmcp's ``logger.exception`` NOR the error
-    # returned to the client — the redacted failure keeps only the json_path and the
-    # placeholder.
+    # returned to the client — the refusal names the json_path and the broken rule only.
     schema = {
         "type": "object",
         "properties": {"account": {"type": "string"}, "token": {"type": "string", "minLength": 6}},
@@ -262,10 +261,12 @@ def test_mcp_edge_secret_preset_schema_violation_redacts_the_secret_from_logs_an
                 await app.preset_manager.remove("x_vault")
 
             client_error = str(caught.value)
-            # The client-visible error carries the redacted failure, never the real token.
+            # The client-visible error is the value-free refusal, never the real token.
             assert "tok-x" not in client_error
-            assert "$.token" in client_error
-            assert SECRET_PLACEHOLDER in client_error
+            assert client_error == (
+                "preset 'x_vault' output does not match its output_schema: value does not match schema at "
+                "$.token: breaks the schema's 'minLength' rule: 6 (the value is not shown)"
+            )
 
             # The failure WAS logged (not swallowed), and the real token appears in NO
             # log record — neither its message nor the attached traceback.

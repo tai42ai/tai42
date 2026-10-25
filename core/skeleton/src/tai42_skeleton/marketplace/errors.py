@@ -147,10 +147,28 @@ class ManifestComposeError(MarketplaceError):
 class InstallEnvError(MarketplaceError):
     """An mcp-server install/update whose required ``!ENV`` markers were not satisfied.
 
-    A dangling-marker refusal (each missing var + json-pointer named), or another
-    env-boundary refusal (X-band / key-material) raised by the combined
-    env+manifest pipeline before anything persisted. The caller's own input error
-    (supply the values), mapped at the boundary to a 400. Names only, never values.
+    A dangling-marker refusal (each missing var + json-pointer named), another
+    env-boundary refusal (X-band / key-material), or a tool-extension combo the composed
+    manifest turns refused (named by its manifest path), raised by the combined
+    env+manifest pipeline before anything persisted. The caller's own input error, mapped
+    at the boundary to a 400. Names only, never values.
+    """
+
+
+class EnvRevertConflictError(MarketplaceError):
+    """An unwind cannot revert an env key the operation wrote: another write replaced its value since.
+
+    The message names each such key. The revert writes nothing, so every value stands.
+    """
+
+
+class ManifestRefusedError(MarketplaceError):
+    """The config pipeline refused the composed manifest of an install, update or uninstall.
+
+    A boundary refusal of the composed document (a tool-extension combo whose dry-run bind
+    refuses, named by its manifest path and the extension's reason, or a dangling ``!ENV``
+    marker) raised before anything persisted. The deployment's own manifest state is what the
+    operator changes, so the boundary maps it to a 400 carrying the refusal text.
     """
 
 
@@ -159,10 +177,14 @@ class InstallUnwindError(MarketplaceError):
 
     Carries both the original ``step_error`` and the ``unwind_error`` raised
     while rolling back, and a composed message stating exactly what was left
-    behind so the operator can finish the cleanup by hand.
+    behind so the operator can finish the cleanup by hand. ``span_release_error`` is the
+    failed span releases of the config writes the unwind landed before it failed, joined in
+    write order (``None`` when each released, or the unwind landed no write).
     """
 
-    def __init__(self, step_error: Exception, unwind_error: Exception) -> None:
+    def __init__(
+        self, step_error: Exception, unwind_error: Exception, *, span_release_error: str | None = None
+    ) -> None:
         """Build the error from the original ``step_error`` and the ``unwind_error`` raised while rolling back."""
         super().__init__(
             f"install step failed ({step_error}); the unwind then also failed "
@@ -170,6 +192,7 @@ class InstallUnwindError(MarketplaceError):
         )
         self.step_error = step_error
         self.unwind_error = unwind_error
+        self.span_release_error = span_release_error
 
 
 class LocalStateError(MarketplaceError):

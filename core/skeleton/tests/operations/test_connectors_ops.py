@@ -154,6 +154,7 @@ async def test_patch_sub_services_returns_result_view(monkeypatch: pytest.Monkey
             added_manifest_entries=["issues"],
             removed_manifest_entries=[],
             fanout={"mode": "local-only"},
+            span_release_error="OSError: releasing the span failed",
         )
 
     monkeypatch.setattr(conn_ops, "load_record_or_none", _load)
@@ -170,6 +171,7 @@ async def test_patch_sub_services_returns_result_view(monkeypatch: pytest.Monkey
     assert result["consent_required"] is False
     # The patch that mutated the manifest threads the service's fleet report through.
     assert result["fanout"] == {"mode": "local-only"}
+    assert result["span_release_error"] == "OSError: releasing the span failed"
 
 
 # -- OFF state: no connector store configured --------------------------

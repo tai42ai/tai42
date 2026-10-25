@@ -6,12 +6,13 @@ paths. All storage is an in-memory ``Storage`` double; no real backend."""
 from __future__ import annotations
 
 import logging
+import mimetypes
 from typing import Protocol, cast
 
 import pytest
 from jinja2 import TemplateError
 from jinja2.exceptions import SecurityError
-from tai42_contract.storage import Storage
+from tai42_contract.storage import ObjectStat, Storage
 from tai42_contract.template import TemplatedText
 
 from tai42_skeleton.storage import StorageRegistry
@@ -55,6 +56,13 @@ class _InMemoryStorage(Storage):
         prefix = path.rstrip("/") + "/"
         for key in [k for k in self.items if k.startswith(prefix)]:
             del self.items[key]
+
+    async def stat(self, path: str) -> ObjectStat:
+        content_type, _ = mimetypes.guess_type(path)
+        return ObjectStat(content_type=content_type, size=len(await self.load_bytes(path)))
+
+    async def load_range(self, path: str, start: int, length: int) -> bytes:
+        return (await self.load_bytes(path))[start : start + length]
 
 
 def _manager(items: dict[str, str] | None = None) -> tuple[ResourceManager, _InMemoryStorage]:

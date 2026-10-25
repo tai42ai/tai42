@@ -107,6 +107,8 @@ class PresetStoreView(PresetStore):
         output_schema: TemplatedText | dict[str, Any] | None = None,
         input_schema: TemplatedText | dict[str, Any] | None = None,
         *,
+        input_map: TemplatedText | str | None = None,
+        output_map: TemplatedText | str | None = None,
         state_binding: StateBinding | None = None,
         tags: list[str] | None = None,
     ) -> DocumentRecord:
@@ -122,6 +124,8 @@ class PresetStoreView(PresetStore):
             extensions=[list(combo) for combo in extensions],
             output_schema=output_schema,
             input_schema=input_schema,
+            input_map=input_map,
+            output_map=output_map,
             state_binding=state_binding,
         )
         # ``tags`` labels version 1 in the SAME commit — a caller that must tag the
@@ -141,6 +145,8 @@ class PresetStoreView(PresetStore):
         description: str | None = None,
         *,
         input_schema: TemplatedText | dict[str, Any] | CarryForward | None = CARRY_FORWARD,
+        input_map: TemplatedText | str | CarryForward | None = CARRY_FORWARD,
+        output_map: TemplatedText | str | CarryForward | None = CARRY_FORWARD,
         state_binding: StateBinding | CarryForward | None = CARRY_FORWARD,
         tags: list[str] | None = None,
     ) -> DocumentVersion:
@@ -150,6 +156,8 @@ class PresetStoreView(PresetStore):
         _validate_extensions(new_extensions)
         new_output_schema = active.output_schema if isinstance(output_schema, CarryForward) else output_schema
         new_input_schema = active.input_schema if isinstance(input_schema, CarryForward) else input_schema
+        new_input_map = active.input_map if isinstance(input_map, CarryForward) else input_map
+        new_output_map = active.output_map if isinstance(output_map, CarryForward) else output_map
         new_state_binding = active.state_binding if isinstance(state_binding, CarryForward) else state_binding
         # ``description`` is editable per version: None carries the active value
         # forward, an explicit string sets it; an explicit "" is rejected.
@@ -162,6 +170,8 @@ class PresetStoreView(PresetStore):
             extensions=[list(combo) for combo in new_extensions],
             output_schema=new_output_schema,
             input_schema=new_input_schema,
+            input_map=new_input_map,
+            output_map=new_output_map,
             state_binding=new_state_binding,
         )
         # ``tags`` labels the new version in the SAME save commit — a caller that must

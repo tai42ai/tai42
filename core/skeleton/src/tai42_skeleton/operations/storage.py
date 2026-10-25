@@ -7,15 +7,15 @@ concrete storage facet (``instance.app.storage.provider``) and reports honestly
 when none is installed — a loud ``501`` (``NotSupportedError``) rather than a
 fabricated default (except ``storage_info``, which answers ``present: false``).
 
-Every id/path-carrying input must be a relative path with no ``..`` segment — an
-absolute path (leading ``/``) or a ``..`` segment is rejected with a ``400``: the
-flagship provider is filesystem-backed, where both are real traversal vectors. The
-guard runs INSIDE the operation, so it defends the MCP tool edge and the CLI as
-well as the HTTP route; every operation that passes a path to the provider also maps
-the provider's boundary ``ValueError`` to a ``400`` so a provider-reported violation
-is a loud ``400``, never a ``500``.
+Every id or path input is a canonical store key, checked by the shared key guard
+(``checked_store_key``) INSIDE the operation, so the MCP tool edge and the CLI get the
+same ``400`` as the HTTP route. Every operation that passes a path to the provider also
+maps the provider's boundary ``ValueError`` to a ``400``, never a ``500``.
 
-``list_resources`` is the op behind ``GET /api/storage/resources``; the write/delete ops
+``list_resources`` is the op behind ``GET /api/storage/resources``; it leaves out every
+key under a prefix marked unlisted (the objects stay reachable by id). ``read_resource``
+answers one object as a text, document or binary entry through the shared stored-entry
+reader (``tai42_skeleton.storage.entries``). The write/delete ops
 (``upload_resource``, ``delete_resource``, ``delete_dir``) mutate the store, so they
 are ``destructive``.
 
@@ -43,6 +43,7 @@ from tai42_skeleton.operations import (
     ConflictError,
     NotFoundError,
     NotSupportedError,
+    OperationFailedError,
     operation,
 )
 from tai42_skeleton.operations._broadcast import broadcast
@@ -53,10 +54,17 @@ from tai42_skeleton.operations.response_models_group_b import (
     ResourceStat,
     ResourceStored,
     StorageInfo,
+    StoredEntry,
 )
+from tai42_skeleton.operations.storage_provider import require_storage_provider, storage_provider
+from tai42_skeleton.operations.store_keys import checked_store_key
+from tai42_skeleton.storage.entries import read_stored_entry
+from tai42_skeleton.storage.listing import listed_keys
 
-_NO_PROVIDER_MESSAGE = "storage needs a storage-provider plugin"
-_UNSAFE_ID_MESSAGE = "must be a relative path with no '..' segment"
+_SURFACE_ROUTERS = (
+    ("storage", "tai42_skeleton.routers.storage"),
+    ("templates", "tai42_skeleton.routers.templates"),
+)
 
 
 class StorageUpload(BaseModel):
@@ -69,33 +77,6 @@ class StorageUpload(BaseModel):
     id: str
     content_text: str | None = None
     content_base64: str | None = None
-
-
-def _provider() -> Storage | None:
-    """The registered storage provider, or ``None`` while dead by default."""
-    return instance.app.storage.provider
-
-
-def _require_provider() -> Storage:
-    """The registered provider, or a loud ``501`` when none is installed."""
-    provider = _provider()
-    if provider is None:
-        raise NotSupportedError(_NO_PROVIDER_MESSAGE)
-    return provider
-
-
-def _is_unsafe_path(value: str) -> bool:
-    """Whether an id/path input is unsafe to pass to the provider.
-
-    Unsafe means absolute (a leading ``/``) or carrying a ``..`` segment. A safe
-    input is a relative path with no ``..`` segment.
-    """
-    return value.startswith("/") or ".." in value.split("/")
-
-
-def _reject_unsafe(kind: str, value: str) -> None:
-    if _is_unsafe_path(value):
-        raise BadRequestError(f"{kind} {value!r} {_UNSAFE_ID_MESSAGE}")
 
 
 async def _write_then_evict(resource_id: str, write: Callable[[], Awaitable[None]]) -> None:
@@ -149,16 +130,31 @@ def _content_disposition(filename: str) -> str:
     return f"attachment; filename=\"{ascii_fallback}\"; filename*=UTF-8''{ext_value}"
 
 
-@operation(summary="Get the storage provider identity", tags=["storage"], response_model=StorageInfo)
+@operation(
+    summary="Get the storage provider identity",
+    tags=["storage", "templates"],
+    response_model=StorageInfo,
+)
 async def storage_info() -> dict:
     """Report the registered provider's identity, or ``present: false`` when none is installed.
 
-    A ``200``, so the UI renders the empty state without an error.
+    A ``200``, so the UI renders the empty state without an error. ``surfaces`` names the
+    management routers this deployment mounts (``storage``, ``templates``), so a caller
+    never calls a door that is not served.
     """
-    provider = _provider()
+    modules = instance.app.effective_router_modules()
+    if modules is None:
+        raise RuntimeError("storage_info needs a started deployment: no effective router set")
+    surfaces = [surface for surface, module in _SURFACE_ROUTERS if module in modules]
+    provider = storage_provider()
     if provider is None:
-        return {"present": False, "provider": None, "module": None}
-    return {"present": True, "provider": type(provider).__name__, "module": type(provider).__module__}
+        return {"present": False, "provider": None, "module": None, "surfaces": surfaces}
+    return {
+        "present": True,
+        "provider": type(provider).__name__,
+        "module": type(provider).__module__,
+        "surfaces": surfaces,
+    }
 
 
 @operation(
@@ -168,27 +164,46 @@ async def storage_info() -> dict:
     response_model=ResourceList,
 )
 async def list_resources() -> dict:
-    """List the sorted resource ids from the active storage provider."""
-    provider = _require_provider()
-    return {"resources": sorted(await provider.list())}
+    """List the sorted resource ids from the active storage provider, without unlisted prefixes."""
+    provider = require_storage_provider()
+    return {"resources": listed_keys(sorted(await provider.list()))}
 
 
 @operation(
     summary="Stat a storage resource",
     tags=["storage"],
-    errors=[BadRequestError, NotSupportedError],
+    errors=[BadRequestError, NotFoundError, NotSupportedError],
     response_model=ResourceStat,
 )
 async def stat_resource(resource_id: str) -> dict:
-    """Return the resource's inferred content type."""
-    _reject_unsafe("resource id", resource_id)
-    provider = _require_provider()
+    """Return the resource's inferred content type; a missing object is a ``404``."""
+    checked_store_key(resource_id)
+    provider = require_storage_provider()
     try:
         stat = await provider.stat(resource_id)
+    except FileNotFoundError as exc:
+        raise NotFoundError(f"resource {resource_id!r} not found") from exc
     except ValueError as exc:
         # A provider-reported boundary violation is a client error (400), never a 500.
         raise BadRequestError(str(exc)) from exc
     return {"id": resource_id, "content_type": stat.content_type}
+
+
+@operation(
+    summary="Read a stored object as a text, document or binary entry",
+    tags=["storage"],
+    errors=[BadRequestError, NotFoundError, NotSupportedError],
+    response_model=StoredEntry,
+)
+async def read_resource(resource_id: str) -> dict:
+    """Read one stored object as an entry: ``text`` or ``document`` with its ``content``, else ``binary``.
+
+    The kind and the content are the shared content classifier's. A binary object is
+    classified from its size and at most two detection windows, never read whole. A
+    refused text or document (over the size cap, not UTF-8, an extractor's failure) is
+    a ``400``; a missing object a ``404``; no provider, or no ``files`` extra, a ``501``.
+    """
+    return await read_stored_entry(resource_id)
 
 
 @operation(
@@ -213,7 +228,7 @@ async def upload_resource(
     """
     if not isinstance(resource_id, str) or not resource_id:
         raise BadRequestError("body must contain a non-empty string 'id'")
-    _reject_unsafe("resource id", resource_id)
+    checked_store_key(resource_id)
 
     if (content_text is None) == (content_base64 is None):
         raise BadRequestError("exactly one of 'content_text' or 'content_base64' is required")
@@ -222,7 +237,7 @@ async def upload_resource(
     if content_base64 is not None and not isinstance(content_base64, str):
         raise BadRequestError("'content_base64' must be a base64 string")
 
-    write = _upload_write(_require_provider(), resource_id, content_text, content_base64)
+    write = _upload_write(require_storage_provider(), resource_id, content_text, content_base64)
     try:
         await _write_then_evict(resource_id, write)
     except StoragePathConflictError as exc:
@@ -241,15 +256,19 @@ async def upload_resource(
 @operation(
     summary="Delete a storage resource",
     tags=["storage"],
-    errors=[BadRequestError, NotFoundError, NotSupportedError],
+    errors=[BadRequestError, ConflictError, NotFoundError, NotSupportedError, OperationFailedError],
     response_model=ResourceDeleted,
 )
 async def delete_resource(resource_id: str) -> dict:
-    """Remove one object from the store; its render state is evicted fleet-wide."""
-    _reject_unsafe("resource id", resource_id)
-    provider = _require_provider()
+    """Remove one object from the store; its render state is evicted fleet-wide.
+
+    An object a stored object still names is refused with a ``409`` naming its holders.
+    """
+    checked_store_key(resource_id)
+    require_storage_provider()
+    manager = instance.app.storage.resource_manager
     try:
-        await _write_then_evict(resource_id, lambda: provider.delete(resource_id))
+        await _write_then_evict(resource_id, lambda: manager.delete_object(resource_id))
     except FileNotFoundError as exc:
         raise NotFoundError(f"resource {resource_id!r} not found") from exc
     except ValueError as exc:
@@ -261,40 +280,34 @@ async def delete_resource(resource_id: str) -> dict:
 @operation(
     summary="Delete a storage directory",
     tags=["storage"],
-    errors=[BadRequestError, NotFoundError, NotSupportedError],
+    errors=[BadRequestError, ConflictError, NotFoundError, NotSupportedError, OperationFailedError],
     response_model=DirDeleted,
 )
 async def delete_dir(dir_path: str) -> dict:
     """Remove a directory subtree from the store; the render state under it is evicted fleet-wide.
 
-    This worker evicts whatever the outcome. A failure before deletion begins — a missing
-    directory (``404``) or a rejected path (``400``) — broadcasts nothing. A failure once
-    deletion may have begun leaves the store partially changed, so the eviction still fans
-    out before the error propagates (a ``FleetBroadcastError`` carrying the fleet report).
+    This worker evicts whatever the outcome once deletion begins. A failure before deletion
+    begins — a missing directory (``404``), a rejected path (``400``), an object under it a
+    stored object names (``409``) or a holder that cannot be read (``500``) — broadcasts
+    nothing. A failure once deletion may have begun leaves the store partially changed, so
+    the eviction still fans out before the error propagates (a ``FleetBroadcastError``
+    carrying the fleet report).
     """
-    _reject_unsafe("directory path", dir_path)
-    provider = _require_provider()
+    checked_store_key(dir_path)
+    require_storage_provider()
     manager = instance.app.storage.resource_manager
-
-    async def _apply() -> None:
-        try:
-            await provider.delete_dir(dir_path)
-        finally:
-            # A partial delete must never leave content under the directory served stale.
-            manager.evict_dir(dir_path)
 
     try:
         await broadcast(
             EvictTemplate(op="evict_template", path=dir_path, prefix=True),
             None,
-            _apply,
+            lambda: manager.delete_template_dir(dir_path),
             publish_on_local_failure=True,
-            pre_mutation_errors=(FileNotFoundError, ValueError),
+            pre_mutation_errors=(FileNotFoundError, ValueError, ConflictError, OperationFailedError),
         )
     except FileNotFoundError as exc:
         raise NotFoundError(f"directory {dir_path!r} not found") from exc
     except ValueError as exc:
-        # ``assert_not_root`` raises ``ValueError`` for a root-resolving dir path
-        # (``"."`` / ``"/"`` / ``"a/.."``) — a client error, surfaced as 400.
+        # A provider-reported boundary violation is a client error (400), never a 500.
         raise BadRequestError(str(exc)) from exc
     return {"dir": dir_path, "deleted": True}

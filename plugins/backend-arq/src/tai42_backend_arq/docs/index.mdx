@@ -29,6 +29,7 @@ namespace when unset; a set `ARQ_` value always wins.
 | --- | --- | --- |
 | `ARQ_REDIS_URL` | `redis://localhost:6379/0` | Queue, results, and the schedule hashes. |
 | `ARQ_REDIS_MAX_CONNECTIONS` | unset | Caps the arq connection pool; uncapped when unset. |
+| `ARQ_QUEUE_NAME` | `arq:queue` | The arq queue key the host enqueues to and a worker started without `--queue` consumes; a `--queue <label>` worker consumes `<ARQ_QUEUE_NAME>.<label>`. Every process of one stack sets the same value. Stacks sharing one Redis DB set distinct values, and no stack's value is another stack's value followed by `.<label>`. |
 | `ARQ_RETRY_ATTEMPTS` | `0` | Times a failed Redis connect or command is retried, each retry logged as a warning; `0` makes one attempt. |
 | `ARQ_RETRY_ON_TIMEOUT` | `false` | With `ARQ_RETRY_ATTEMPTS` at `0`, retries a timed-out command once at once. |
 | `ARQ_SOCKET_TIMEOUT` | unset | Seconds a Redis command may wait on its socket; redis-py's default when unset. |
@@ -53,9 +54,37 @@ own, so a longer outage ends the worker.
 
 `--job-timeout` defaults to `ARQ_TASK_TIMEOUT`; an explicit flag wins.
 
-Queue name, burst mode, result retention, and poll delay are worker CLI flags,
-not env vars. `worker` is the only `tai backend` subcommand this backend accepts
-— there is no beat or dashboard process, and anything else is refused by name.
+The queue label, burst mode, result retention, and poll delay are worker CLI
+flags, not env vars. `worker` is the only `tai backend` subcommand this backend
+accepts — there is no beat or dashboard process, and anything else is refused by
+name.
+
+## Send a task to a chosen worker
+
+The `sync_task` and `async_task` branches take an optional `queue` argument, a
+label of letters, digits, `_` and `-`. A job sent with `queue: gpu` goes to the
+queue `<ARQ_QUEUE_NAME>.gpu`; any other value is refused before anything is
+written, and no `queue` keeps the job on `ARQ_QUEUE_NAME`. A preset can fix
+`queue` in its arguments like any other argument.
+
+A worker started with `--queue <label>` consumes that label's queue alone; a
+worker without the flag consumes `ARQ_QUEUE_NAME`. One worker serves one queue,
+so a stack that runs labelled tasks runs one more worker per label. In the
+compose file, beside the `backend` service:
+
+```yaml docker-compose.yml
+services:
+  backend-gpu:
+    extends:
+      service: backend
+    command: ["backend", "worker", "--queue", "gpu"]
+```
+
+A job on a queue no worker consumes waits: a `sync_task` raises `TimeoutError`
+after `ARQ_TASK_TIMEOUT`, and an `async_task` id stays `queued`. Schedules carry
+no queue, so they need a worker without a label. The task tools find a job by
+id on whichever queue holds it, and `backend_reserved_tasks` lists due job ids
+keyed by queue.
 
 ## Worker lifecycle
 
@@ -85,6 +114,10 @@ healthy or restarts it.
 
 ## Quirks
 
+- Every process of one stack sets the same `ARQ_QUEUE_NAME`: labelled queues
+  and the record of them (`<ARQ_QUEUE_NAME>:queues`) are named from it.
+- A tool with its own `queue` parameter cannot take a `sync_task` or
+  `async_task` branch.
 - `ARQ_MANIFEST_KEY`, `ARQ_TASK_TIMEOUT`, and `ARQ_TOOL_NAME_ARG` mirror the
   host's own `BACKEND_` group. Change them in lockstep or the worker and the
   server stop agreeing. `ARQ_MANIFEST_KEY` and `ARQ_TOOL_NAME_ARG` pin wiring

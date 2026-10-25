@@ -1,11 +1,13 @@
 """Reverse a failed install or update in the order that keeps the fleet consistent.
 
-Reverts the env write, restores the manifest, and re-instates the package or old pin.
+Reverts the env write, reverses the manifest patch, and re-instates the package or old pin.
 
-The env write is reverted AFTER the manifest restore so no restored marker
-references a key being dropped; the old wheel goes back BEFORE the manifest
-restore's reload so the old manifest never loads against the new wheel. Any failed
-sub-step escalates to :class:`InstallUnwindError`.
+The manifest patch is reversed through the pipeline from the stored manifest the write
+exclusion holds (:func:`~tai42_skeleton.marketplace.manifest_patch.revert_provides`), so
+every edit another config door landed meanwhile stands. The env write is reverted AFTER
+the manifest reversal so no restored marker references a key being dropped; the old wheel
+goes back BEFORE the reversal's reload so the old manifest never loads against the new
+wheel. Any failed sub-step escalates to :class:`InstallUnwindError`.
 """
 
 from __future__ import annotations
@@ -13,20 +15,22 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
-from tai42_skeleton.config.service import ConfigService
+from tai42_skeleton.config.service import ApplyResult, ConfigService, joined_span_release_errors
 from tai42_skeleton.marketplace import env_apply, package_ops
 from tai42_skeleton.marketplace.errors import InstallUnwindError
+from tai42_skeleton.marketplace.manifest_patch import ProvidesUndo, revert_provides
 from tai42_skeleton.marketplace.pip import PipRunner
 from tai42_skeleton.marketplace.prefix import environment_constraints
 from tai42_skeleton.marketplace.store import InstallRecord
+from tai42_skeleton.operations._broadcast import FleetBroadcastError
 
 
 async def unwind_install(
     step_error: Exception,
     *,
     package: str | None,
-    saved_manifest: dict[str, Any] | None,
-    env_restore: dict[str, str] | None,
+    provides_undo: ProvidesUndo | None,
+    env_written: env_apply.EnvWrite | None,
     svc: ConfigService,
     cm: Any,
     pip_runner: PipRunner,
@@ -37,24 +41,23 @@ async def unwind_install(
 ) -> None:
     """Reverse an install whose Step 4/5 failed.
 
-    Reverts THIS install's env write (the combined pipeline leaves it standing as an
-    orphaned, unreferenced write, but this layer restores exactly this install's
-    contribution — each key it
-    wrote back to its captured PRIOR store value, so a newly-created key is deleted, an
-    overwritten pre-existing key keeps its operator value, and the ``TAI_ENV_SECRET_KEYS``
-    marks var keeps an operator's OTHER marks), restores the manifest through the pipeline
-    (converging the live app and the fleet back) when the change had persisted, then pip
+    Reverses the provides patch through the pipeline (converging the live app and the fleet
+    back) when the change had persisted — ``provides_undo`` is that patch's
+    :class:`ProvidesUndo`, ``None`` when nothing persisted — then reverts THIS install's env
+    write ``env_written`` (the combined pipeline leaves it standing as an orphaned,
+    unreferenced write; :func:`~tai42_skeleton.marketplace.env_apply.revert_env_write`
+    reverts exactly this install's contribution against the stored env), then pip
     uninstalls the freshly-installed package. A descriptor-only spec (``package is None``)
     installed nothing, so no package is removed. A failed sub-step escalates to
     :class:`InstallUnwindError`; otherwise the caller re-raises the original step error.
     """
     try:
-        if saved_manifest is not None:
-            await svc.apply_replace(saved_manifest)
-        # Revert AFTER the manifest restore so no restored marker references a
+        if provides_undo is not None:
+            await _revert_manifest(svc, provides_undo)
+        # Revert AFTER the manifest reversal so no restored marker references a
         # key being dropped (on the orphan path the manifest never persisted, so
         # the live manifest already names none of these keys).
-        await env_apply.revert_env_write(svc, cm, env_restore)
+        await env_apply.revert_env_write(svc, cm, env_written)
     except Exception as unwind_error:
         raise InstallUnwindError(step_error, unwind_error) from step_error
     if package is None:
@@ -79,34 +82,41 @@ async def unwind_update(
     old_package: str | None,
     new_package: str | None,
     row: InstallRecord,
-    saved_manifest: dict[str, Any] | None,
-    env_restore: dict[str, str] | None,
+    provides_undo: ProvidesUndo | None,
+    env_written: env_apply.EnvWrite | None,
     svc: ConfigService,
     cm: Any,
     pip_runner: PipRunner,
     prefix: str | None,
     prefix_uninstall: Callable[[str, str], None],
     env_constraints: Callable[[str], list[str]] = environment_constraints,
-) -> None:
+) -> str | None:
     """Reverse an update whose Step 5/6 failed.
 
-    Reverts THIS update's env write (every key it wrote restored to its captured PRIOR
-    store value — a newly-created key deleted, an overwritten one kept, the
-    ``TAI_ENV_SECRET_KEYS`` marks var back to its prior value), reinstalls the OLD pin,
-    then restores the manifest through the pipeline (when the change had persisted). The
-    old wheel goes back BEFORE the restore's reload so the old manifest never loads against
-    the new wheel. A github old pin is reinstalled through the SAME fetch-and-verify path
-    as a forward install, using the stored row's ``artifact_ref`` + ``sha256`` — the old
+    Reinstalls the OLD pin, reverses the provides swap through the pipeline when the change
+    had persisted (``provides_undo`` is the swap's :class:`ProvidesUndo`, ``None`` when
+    nothing persisted), then reverts THIS update's env write ``env_written`` against the
+    stored env (:func:`~tai42_skeleton.marketplace.env_apply.revert_env_write`). The old
+    wheel goes back BEFORE the reversal's reload so the old manifest never loads against the
+    new wheel. A github old pin is reinstalled through the SAME fetch-and-verify path as a
+    forward install, using the stored row's ``artifact_ref`` + ``sha256`` — the old
     version's integrity is re-checked, never cloned from a mutable tag. On the prefix path
     the NEW version's files are removed first, or the old and new dist-info would coexist
     in the prefix. A descriptor-only update (``old_package``/``new_package`` both None)
     installed no package, so only the manifest and env write are reverted. A failed
     sub-step (including an integrity mismatch on the old artifact) escalates to
     :class:`InstallUnwindError`.
+
+    Returns the failed span releases of the config writes the unwind landed (the manifest
+    reversal, then the env revert), joined in write order — ``None`` when each released or
+    nothing was written. An escalated :class:`InstallUnwindError` carries the same for the
+    writes landed before the failure, a failing write's :class:`FleetBroadcastError` (landed,
+    then its propagation failed) included.
     """
+    released: list[str | None] = []
     try:
         if old_package is not None:
-            # A packaged update: put the OLD wheel back BEFORE the manifest restore's
+            # A packaged update: put the OLD wheel back BEFORE the manifest reversal's
             # reload. The delivery-form check guarantees new_package is packaged too.
             if prefix is not None:
                 if new_package is None:
@@ -122,10 +132,24 @@ async def unwind_update(
                 row.sha256,
                 env_constraints=env_constraints,
             )
-        if saved_manifest is not None:
-            await svc.apply_replace(saved_manifest)
+        if provides_undo is not None:
+            released.append((await _revert_manifest(svc, provides_undo)).span_release_error)
         # Revert the env write this update made AFTER the old manifest is back, so
         # the restored old entry never references a dropped key.
-        await env_apply.revert_env_write(svc, cm, env_restore)
+        released.append(await env_apply.revert_env_write(svc, cm, env_written))
     except Exception as unwind_error:
-        raise InstallUnwindError(step_error, unwind_error) from step_error
+        if isinstance(unwind_error, FleetBroadcastError):
+            released.append(unwind_error.span_release_error)
+        raise InstallUnwindError(
+            step_error, unwind_error, span_release_error=joined_span_release_errors(*released)
+        ) from step_error
+    return joined_span_release_errors(*released)
+
+
+async def _revert_manifest(svc: ConfigService, undo: ProvidesUndo) -> ApplyResult:
+    """Reverse one provides patch on the stored manifest through the pipeline."""
+
+    def mutator(document: dict[str, Any]) -> None:
+        revert_provides(document, undo)
+
+    return await svc.apply_change(mutator)

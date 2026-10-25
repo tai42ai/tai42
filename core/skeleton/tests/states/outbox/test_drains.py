@@ -2,7 +2,7 @@
 
 Covers the record reads and writes, a lock held past the timeout, a save held behind a failed one,
 every whole-state scan's raise/skip/count rule, the re-declare guard counting held saves, the write
-history, and the rename referee's target drain.
+history, and the target drain the conversation reset's forget runs.
 """
 
 from __future__ import annotations
@@ -307,7 +307,7 @@ async def _message_of(bed: OutboxBed) -> str:
     return str([r[0] for r in rows])
 
 
-# -- the rename referee's target drain --------------------------------------------------------------
+# -- the target drain (the conversation reset's forget) --------------------------------------------
 
 
 async def test_the_target_drain_applies_a_pending_save_under_the_target(bed: OutboxBed) -> None:

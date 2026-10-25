@@ -9,11 +9,13 @@ text against exactly what was seeded/served — the tool actually parsed the byt
 
 from __future__ import annotations
 
+import base64
 from collections.abc import Callable
 
 import pytest
 from fastmcp.client.client import CallToolResult
 
+from tai42_e2e.content_samples import locked_pdf, locked_pdf_message
 from tai42_e2e.recording_proxy import TargetServer
 from tai42_e2e.stack import TaiStack
 
@@ -58,3 +60,20 @@ async def test_file_loader_fetches_loopback_url(
     assert marker in text, f"file_loader did not return the served text: {text!r}"
     after = sum(1 for record in target_server.records if record.path == "/doc.txt")
     assert after == before + 1, "the guarded fetch never reached the target server"
+
+
+@pytest.mark.needs("kind:storage")
+async def test_file_loader_on_a_locked_pdf_returns_the_extraction_error(
+    core_stack: TaiStack, uniq: Callable[[str], str]
+) -> None:
+    api = core_stack.api()
+    resource_id = f"{uniq('docs')}/locked.pdf"
+    content = base64.b64encode(locked_pdf()).decode()
+    await api.post("/api/storage/resources", json={"id": resource_id, "content_base64": content})
+    try:
+        async with core_stack.mcp() as mcp:
+            result = await mcp.call_tool("file_loader", {"source": resource_id}, raise_on_error=False)
+        assert result.is_error
+        assert locked_pdf_message(resource_id) in _result_text(result)
+    finally:
+        await api.delete(f"/api/storage/resources/{resource_id}")

@@ -300,7 +300,7 @@ def test_two_runs_of_the_run_face_on_one_loop_compile_once(
     from tai42_agents._internal import base_tool_agent as bta
     from tai42_agents.tools_agent import ToolsAgent
 
-    from .conftest import fake_run_trace
+    from .conftest import fake_init_langgraph_config
 
     app_tools.client_tools["search"] = make_tool("search")
     model = _ToolBindingFake(responses=[AIMessage(content="first"), AIMessage(content="second")])
@@ -318,7 +318,7 @@ def test_two_runs_of_the_run_face_on_one_loop_compile_once(
     monkeypatch.setattr(bta, "get_llm_async", fake_llm)
     monkeypatch.setattr(bta, "checkpoint_registry", lambda: SimpleNamespace(get_checkpointer=fake_checkpointer))
     monkeypatch.setattr(bta, "context_overflow_middlewares", no_overflow)
-    monkeypatch.setattr(bta, "init_langgraph_config", lambda config: fake_run_trace(config))
+    monkeypatch.setattr(bta, "init_langgraph_config", fake_init_langgraph_config)
     compiles: list[int] = []
     real_compile = graph_cache._compile_tools_agent
 

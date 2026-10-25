@@ -106,6 +106,16 @@ class MonitoringWriter(Protocol):
         """
         ...
 
+    def use_span(self, span: Span) -> AbstractContextManager[None]:
+        """Make ``span``, opened by this writer, the current span of the calling context for the block.
+
+        The span is not ended on exit; the span current before the block is current again after it. Enter
+        and exit the block in the same context. A span that never opened (the no-op span of a disabled
+        writer or a failed open) leaves the current span unchanged. A span this writer did not open is a
+        record failure: it is logged and counted, and the current span is unchanged.
+        """
+        ...
+
     def start_span(
         self,
         *,

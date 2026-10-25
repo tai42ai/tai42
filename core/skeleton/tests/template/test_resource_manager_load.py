@@ -58,7 +58,10 @@ class _BinStorage(Storage):
         import mimetypes
 
         content_type, _ = mimetypes.guess_type(path)
-        return ObjectStat(content_type=content_type)
+        return ObjectStat(content_type=content_type, size=len(await self.load_bytes(path)))
+
+    async def load_range(self, path: str, start: int, length: int) -> bytes:
+        return (await self.load_bytes(path))[start : start + length]
 
 
 def _manager(items: dict[str, bytes] | None = None) -> ResourceManager:

@@ -17,6 +17,7 @@ plugin-registered section flowing through both doors.
 
 from __future__ import annotations
 
+import base64
 import json
 from types import SimpleNamespace
 
@@ -36,6 +37,8 @@ from tai42_skeleton.routers.backup import export_backup, import_backup, list_sec
 from tai42_skeleton.template import TemplateNotFoundError
 
 from .._fakes.bus import FakeBus
+from .._fakes.mcp_listing import no_mcp_listing
+from .._fakes.write_span import ExclusiveWriteStore
 
 # -- request builders --------------------------------------------------------
 
@@ -71,8 +74,8 @@ def _report(*, created: int = 0, updated: int = 0, skipped: int = 0, skipped_exi
     """The section report's wire shape, defaulting every count to zero — the router tests
     assert exact reports, so this keeps them terse and one place to evolve. The platform
     reads the typed counts; ``skipped_existing`` rides the open ``details`` map, and
-    ``fanout`` and ``recycle`` are ``null`` and ``awaiting_respawn`` is empty for a section whose
-    restore broadcasts nothing."""
+    ``fanout``, ``recycle`` and ``span_release_error`` are ``null`` and ``awaiting_respawn`` is
+    empty for a section whose restore broadcasts nothing."""
     return {
         "created": created,
         "updated": updated,
@@ -82,16 +85,18 @@ def _report(*, created: int = 0, updated: int = 0, skipped: int = 0, skipped_exi
         "fanout": None,
         "recycle": None,
         "awaiting_respawn": [],
+        "span_release_error": None,
     }
 
 
 # -- subsystem fakes ---------------------------------------------------------
 
 
-class _FakeConfigManager:
+class _FakeConfigManager(ExclusiveWriteStore):
     """In-memory stand-in for the file config manager's env/manifest seam."""
 
     def __init__(self, env=None, manifest=None, manifest_preserved=None):
+        super().__init__()
         self._env = env
         self._manifest = manifest
         # The preserved-tag view exported by the manifest section; defaults to the
@@ -127,9 +132,19 @@ class _FakeConfigManager:
 
 
 class _FakeResourceManager:
-    def __init__(self, templates=None):
-        self._templates = dict(templates or {})
+    """The content store as the ``storage`` section reaches it: each object is its bytes and
+    the content type it was written with. ``text_only`` models a store that holds text only,
+    whose bytes write strict-decodes UTF-8 exactly as the contract's text bridge does."""
+
+    def __init__(self, templates=None, *, text_only: bool = False):
+        self.objects: dict[str, tuple[bytes, str | None]] = {
+            path: (content.encode("utf-8"), "text/plain; charset=utf-8") for path, content in (templates or {}).items()
+        }
+        self.text_only = text_only
         self.cleared = 0
+
+    def texts(self) -> dict[str, str]:
+        return {path: data.decode("utf-8") for path, (data, _) in self.objects.items()}
 
     def clear_cache(self) -> None:
         # A template restore drops the compiled cache fleet-wide; the router import
@@ -137,23 +152,26 @@ class _FakeResourceManager:
         self.cleared += 1
 
     async def list_resources(self) -> list[str]:
-        return list(self._templates)
+        return list(self.objects)
 
-    async def fetch_template(self, template_id: str) -> str:
-        return self._templates[template_id]
+    async def load_stored(self, path: str) -> tuple[bytes, str | None]:
+        return self.objects[path]
 
-    async def upload_template(self, path: str, content: str) -> None:
-        self._templates[path] = content
+    async def upload_bytes(self, path: str, data: bytes, content_type: str | None = None) -> None:
+        if self.text_only:
+            data.decode("utf-8")
+            content_type = None
+        self.objects[path] = (data, content_type)
 
     async def render_templated_text(self, text, locale=None) -> str:
         """The condition render, resolving a stored ``id`` against the SAME store
-        ``upload_template`` writes into — so a condition template that has not been
+        ``upload_bytes`` writes into — so a condition template that has not been
         restored yet raises exactly as the real manager does."""
         if text.id is None:
             return text.content
-        if text.id not in self._templates:
+        if text.id not in self.objects:
             raise TemplateNotFoundError(text.id)
-        return self._templates[text.id]
+        return self.objects[text.id][0].decode("utf-8")
 
 
 class _FakeRouteConfig:
@@ -169,7 +187,7 @@ class _FakeSubAppRouter:
     def __init__(self, routes=None):
         self.routes = dict(routes or {})
 
-    async def register_sub_mcp_app(self, slug, tools, transport="http"):
+    async def bind_route(self, slug, tools, transport="http"):
         self.routes[slug] = _FakeRouteConfig(tools, transport)
 
 
@@ -196,14 +214,25 @@ def execution_gate_off(monkeypatch):
     monkeypatch.setattr(execution_module, "access_control_settings", lambda: AccessControlSettings(enable=False))
 
 
+def _storage(manager, *, not_backed_up: frozenset[str] = frozenset()) -> SimpleNamespace:
+    """The storage facet the ``storage`` section reads: the resource manager and the not-backed-up marks."""
+    return SimpleNamespace(resource_manager=manager, not_backed_up_prefixes=lambda: not_backed_up)
+
+
 def _install(monkeypatch, *, registry=None, **facets) -> SimpleNamespace:
     # The manifest/env sections import through ``ConfigService.from_app()``, which
     # resolves the admin reload seam off ``tai42_app`` and the worker bus off the app
     # singleton — wire a local-reload admin and a recording bus so a restore runs the
     # real pipeline (validate + reload + broadcast) against the faked config manager.
-    facets.setdefault("admin", SimpleNamespace(reload_config=lambda: {"status": "ok", "reloaded": True}))
+    facets.setdefault(
+        "admin",
+        SimpleNamespace(reload_config=lambda: {"status": "ok", "reloaded": True}, served_mcp_names=no_mcp_listing),
+    )
     impl = SimpleNamespace(backup=registry or _registry(), **facets)
     monkeypatch.setattr(tai42_app, "_impl", impl)
+    if "sub_app" in facets:
+        # The store-first service binds through the process app's own router.
+        monkeypatch.setattr(instance.build_app(), "_mcp_sub_app_router", facets["sub_app"].mcp_sub_app_router)
     monkeypatch.setattr(instance.app, "_bus", FakeBus(origin="serve-test"))
     return impl
 
@@ -217,14 +246,14 @@ async def test_sections_lists_core_sections_with_secret_flags(monkeypatch):
     assert resp.status_code == 200
     sections = _json(resp)["data"]
     by_name = {s["name"]: s["secret"] for s in sections}
-    # Exactly the registered core sections, in their replay order: ``states`` restores right
-    # after ``templates`` and before every section that restores a binding.
+    # Exactly the registered core sections, in their replay order: ``storage`` restores right
+    # after ``env``, and ``states`` before every section that restores a binding.
     assert [s["name"] for s in sections] == [
         "manifest",
         "env",
+        "storage",
         "access_control",
         "sub_mcp",
-        "templates",
         "states",
         "webhooks",
         "conversations",
@@ -240,7 +269,7 @@ async def test_sections_lists_core_sections_with_secret_flags(monkeypatch):
     assert by_name["manifest"] is False
     assert by_name["env"] is True
     assert by_name["access_control"] is True
-    assert by_name["templates"] is False
+    assert by_name["storage"] is False
     # Secret sections carry the flag so the export credential gate applies.
     assert by_name["schedules"] is True
     assert by_name["connector_connections"] is True
@@ -286,7 +315,35 @@ async def test_manifest_roundtrip(monkeypatch):
         "errors": [],
     }
     assert section["fanout"]["mode"] == "local-only"
+    assert section["span_release_error"] is None
     assert cm._manifest == manifest
+
+
+async def test_manifest_restore_whose_span_fails_to_release_reports_it_on_the_section(monkeypatch):
+    manifest = {"mcp": [{"title": "x", "config": {"url": "http://x"}}]}
+    cm = _FakeConfigManager(manifest={})
+    cm.fail_exit = OSError("releasing the span failed")
+    _install(monkeypatch, config=SimpleNamespace(config_manager=cm))
+    document = {"version": 1, "sections": {"manifest": manifest}}
+    data = _json(await import_backup(_post_req({"document": document, "sections": ["manifest"]})))["data"]
+    section = data["sections"]["manifest"]
+    assert section["errors"] == []
+    assert section["fanout"]["mode"] == "local-only"
+    assert section["span_release_error"] == "OSError: releasing the span failed"
+    assert cm._manifest == manifest
+
+
+async def test_env_restore_whose_span_fails_to_release_reports_it_on_the_section(monkeypatch):
+    cm = _FakeConfigManager(env={"A": "old"})
+    cm.fail_exit = OSError("releasing the span failed")
+    _install(monkeypatch, config=SimpleNamespace(config_manager=cm))
+    document = {"version": 1, "sections": {"env": {"A": "1", "B": "2"}}}
+    data = _json(await import_backup(_post_req({"document": document, "sections": ["env"]})))["data"]
+    section = data["sections"]["env"]
+    assert section["errors"] == []
+    assert section["fanout"]["mode"] == "local-only"
+    assert section["span_release_error"] == "OSError: releasing the span failed"
+    assert cm._env == {"A": "1", "B": "2"}
 
 
 async def test_manifest_import_invalid_document_reports_error_and_leaves_store_untouched(monkeypatch):
@@ -573,7 +630,6 @@ async def test_import_restores_condition_templates_before_the_hooks_that_render_
     """A hook bound to a key whose policy condition names a stored template by id
     restores from a document that also carries the template — the replay order is what
     makes the execution-key scan able to render it."""
-    from types import SimpleNamespace as _NS
 
     from tai42_skeleton.access_control import policy as policy_module
     from tai42_skeleton.access_control import store as store_module
@@ -597,12 +653,12 @@ async def test_import_restores_condition_templates_before_the_hooks_that_render_
     target = InMemoryHooksManager(HooksSettings())
     monkeypatch.setattr("tai42_skeleton.hooks.cache.get_hooks_manager", lambda: target)
     manager = _FakeResourceManager()
-    _install(monkeypatch, storage=_NS(resource_manager=manager))
+    _install(monkeypatch, storage=_storage(manager))
 
     document = {
         "version": 1,
         "sections": {
-            "templates": {"policies/svc.j2": ".context.used < 10"},
+            "storage": {"policies/svc.j2": {"content_text": ".context.used < 10", "content_type": None}},
             "webhooks": {
                 "hooks": [
                     {
@@ -619,55 +675,128 @@ async def test_import_restores_condition_templates_before_the_hooks_that_render_
             },
         },
     }
-    data = _json(await import_backup(_post_req({"document": document, "sections": ["webhooks", "templates"]})))["data"]
+    data = _json(await import_backup(_post_req({"document": document, "sections": ["webhooks", "storage"]})))["data"]
     assert data["ok"] is True
     assert data["sections"]["webhooks"] == _report(created=1)
     assert set((await target.list_hooks()).keys()) == {"h1"}
 
 
-# -- templates round-trip ----------------------------------------------------
+# -- storage round-trip ------------------------------------------------------
 
 
-async def test_templates_roundtrip(monkeypatch):
+async def test_storage_roundtrip(monkeypatch):
     manager = _FakeResourceManager({"greeting.j2": "hello {{ name }}"})
-    _install(monkeypatch, storage=SimpleNamespace(resource_manager=manager))
+    _install(monkeypatch, storage=_storage(manager))
 
-    doc = _json(await export_backup(_post_req({"sections": ["templates"]})))
-    assert doc["sections"]["templates"] == {"greeting.j2": "hello {{ name }}"}
+    doc = _json(await export_backup(_post_req({"sections": ["storage"]})))
+    assert doc["sections"]["storage"] == {
+        "greeting.j2": {"content_text": "hello {{ name }}", "content_type": "text/plain; charset=utf-8"}
+    }
 
-    manager._templates = {}  # wipe
-    data = _json(await import_backup(_post_req({"document": doc, "sections": ["templates"]})))["data"]
+    manager.objects = {}  # wipe
+    data = _json(await import_backup(_post_req({"document": doc, "sections": ["storage"]})))["data"]
     assert data["ok"] is True
     # A restore that wrote keys drops the compiled cache fleet-wide; the section report
     # carries the eviction fan-out, as the manifest/env sections do.
-    templates_report = data["sections"]["templates"]
-    assert templates_report.pop("fanout")["mode"] == "local-only"
+    storage_report = data["sections"]["storage"]
+    assert storage_report.pop("fanout")["mode"] == "local-only"
     expected = _report(created=1)
     del expected["fanout"]
-    assert templates_report == expected
+    assert storage_report == expected
     assert manager.cleared == 1
-    assert manager._templates == {"greeting.j2": "hello {{ name }}"}
+    assert manager.objects == {"greeting.j2": (b"hello {{ name }}", "text/plain; charset=utf-8")}
 
 
-async def test_templates_import_skips_traversal_key(monkeypatch):
+_PNG = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01"
+
+
+async def test_storage_roundtrip_carries_a_binary_object_beside_a_text_one(monkeypatch):
+    # One object that is not UTF-8 text never empties the section: it travels base64-encoded
+    # beside the text template and both restore byte-equal with their content types.
+    manager = _FakeResourceManager({"greeting.j2": "hello {{ name }}"})
+    manager.objects["logo.png"] = (_PNG, "image/png")
+    _install(monkeypatch, storage=_storage(manager))
+
+    doc = _json(await export_backup(_post_req({"sections": ["storage"]})))
+    assert doc["errors"] == {}
+    assert doc["sections"]["storage"] == {
+        "greeting.j2": {"content_text": "hello {{ name }}", "content_type": "text/plain; charset=utf-8"},
+        "logo.png": {"content_base64": base64.b64encode(_PNG).decode("ascii"), "content_type": "image/png"},
+    }
+
+    stored = dict(manager.objects)
+    manager.objects = {}  # wipe
+    data = _json(await import_backup(_post_req({"document": doc, "sections": ["storage"]})))["data"]
+    assert data["ok"] is True
+    assert data["sections"]["storage"]["created"] == 2
+    assert manager.objects == stored
+
+
+async def test_storage_import_malformed_entries_are_per_path_rejections(monkeypatch):
+    manager = _FakeResourceManager()
+    _install(monkeypatch, storage=_storage(manager))
+
+    entries = {
+        "bare.j2": "a bare string",
+        "both.j2": {"content_text": "a", "content_base64": "YQ==", "content_type": None},
+        "badb64.bin": {"content_base64": "not base64!", "content_type": None},
+        "ok.j2": {"content_text": "fine", "content_type": "text/plain"},
+    }
+    doc = {"version": 1, "sections": {"storage": entries}}
+    data = _json(await import_backup(_post_req({"document": doc, "sections": ["storage"]})))["data"]
+    assert data["ok"] is False
+    report = data["sections"]["storage"]
+    assert (report["created"], report["skipped"]) == (1, 3)
+    assert report["errors"] == [
+        "template 'bare.j2': entry must be an object carrying content_text or content_base64",
+        "template 'both.j2': entry must carry exactly one of content_text or content_base64",
+        "template 'badb64.bin': content_base64 is not valid base64 (Only base64 data is allowed)",
+    ]
+    assert manager.objects == {"ok.j2": (b"fine", "text/plain")}
+
+
+async def test_storage_import_binary_onto_a_text_only_store_is_a_per_path_rejection(monkeypatch):
+    manager = _FakeResourceManager(text_only=True)
+    _install(monkeypatch, storage=_storage(manager))
+
+    entries = {
+        "logo.png": {"content_base64": base64.b64encode(_PNG).decode("ascii"), "content_type": "image/png"},
+        "greeting.j2": {"content_text": "hello", "content_type": "text/plain"},
+    }
+    doc = {"version": 1, "sections": {"storage": entries}}
+    data = _json(await import_backup(_post_req({"document": doc, "sections": ["storage"]})))["data"]
+    assert data["ok"] is False
+    report = data["sections"]["storage"]
+    assert (report["created"], report["skipped"]) == (1, 1)
+    assert report["errors"] == [
+        "template 'logo.png': the storage provider holds text only and cannot store this object"
+    ]
+    assert manager.texts() == {"greeting.j2": "hello"}
+
+
+async def test_storage_import_skips_traversal_key(monkeypatch):
     # An untrusted backup carrying a traversal key must be rejected per-key: the
     # unsafe key is skipped with a report error + log, the safe key still uploads,
     # and one bad key never aborts the restore.
     manager = _FakeResourceManager()
-    _install(monkeypatch, storage=SimpleNamespace(resource_manager=manager))
+    _install(monkeypatch, storage=_storage(manager))
 
-    doc = {"version": 1, "sections": {"templates": {"../../evil": "x", "ok/name.j2": "y"}}}
-    data = _json(await import_backup(_post_req({"document": doc, "sections": ["templates"]})))["data"]
+    entries = {
+        "../../evil": {"content_text": "x", "content_type": None},
+        "ok/name.j2": {"content_text": "y", "content_type": None},
+    }
+    doc = {"version": 1, "sections": {"storage": entries}}
+    data = _json(await import_backup(_post_req({"document": doc, "sections": ["storage"]})))["data"]
     # A per-key skip surfaces in the report (so ``ok`` is False), but the restore is
     # NOT aborted — the safe key still imports.
     assert data["ok"] is False
-    report = data["sections"]["templates"]
+    report = data["sections"]["storage"]
     assert report["created"] == 1
     assert report["skipped"] == 1
     assert len(report["errors"]) == 1
     assert "../../evil" in report["errors"][0]
     # Exactly the safe key was uploaded; the traversal key never reached the store.
-    assert manager._templates == {"ok/name.j2": "y"}
+    assert manager.texts() == {"ok/name.j2": "y"}
 
 
 # -- absent/failing subsystem is a section error, not a 500 ------------------
@@ -996,6 +1125,7 @@ async def test_plugin_section_round_trips_through_both_doors(monkeypatch):
         "fanout": None,
         "recycle": None,
         "awaiting_respawn": [],
+        "span_release_error": None,
     }
     assert store == {"value": "seeded"}
 
@@ -1278,34 +1408,34 @@ async def test_import_webhooks_uncompilable_jq_record_is_per_record_not_a_torn_i
     assert set(await manager.list_hooks()) == {"first", "last"}
 
 
-async def test_import_templates_existing_path_overwrites(monkeypatch):
+async def test_import_storage_existing_path_overwrites(monkeypatch):
     manager = _FakeResourceManager({"greeting.j2": "old"})
-    _install(monkeypatch, storage=SimpleNamespace(resource_manager=manager))
-    document = {"version": 1, "sections": {"templates": {"greeting.j2": "new"}}}
-    data = _json(
-        await import_backup(_post_req({"document": document, "sections": ["templates"], "mode": "overwrite"}))
-    )["data"]
+    _install(monkeypatch, storage=_storage(manager))
+    document = {"version": 1, "sections": {"storage": {"greeting.j2": {"content_text": "new", "content_type": None}}}}
+    data = _json(await import_backup(_post_req({"document": document, "sections": ["storage"], "mode": "overwrite"})))[
+        "data"
+    ]
     assert data["ok"] is True
     # The path already existed; overwrite replaces its content as an update, and the
     # store mutation drops the compiled cache fleet-wide (fan-out on the report).
-    templates_report = data["sections"]["templates"]
-    assert templates_report.pop("fanout")["mode"] == "local-only"
+    storage_report = data["sections"]["storage"]
+    assert storage_report.pop("fanout")["mode"] == "local-only"
     expected = _report(updated=1)
     del expected["fanout"]
-    assert templates_report == expected
+    assert storage_report == expected
     assert manager.cleared == 1
-    assert manager._templates == {"greeting.j2": "new"}
+    assert manager.texts() == {"greeting.j2": "new"}
 
 
-async def test_import_templates_existing_path_skipped_by_default(monkeypatch):
+async def test_import_storage_existing_path_skipped_by_default(monkeypatch):
     manager = _FakeResourceManager({"greeting.j2": "old"})
-    _install(monkeypatch, storage=SimpleNamespace(resource_manager=manager))
-    document = {"version": 1, "sections": {"templates": {"greeting.j2": "new"}}}
-    data = _json(await import_backup(_post_req({"document": document, "sections": ["templates"]})))["data"]
+    _install(monkeypatch, storage=_storage(manager))
+    document = {"version": 1, "sections": {"storage": {"greeting.j2": {"content_text": "new", "content_type": None}}}}
+    data = _json(await import_backup(_post_req({"document": document, "sections": ["storage"]})))["data"]
     assert data["ok"] is True
     # Under skip the existing template is left untouched, counted as a clean skip.
-    assert data["sections"]["templates"] == _report(skipped_existing=1)
-    assert manager._templates == {"greeting.j2": "old"}
+    assert data["sections"]["storage"] == _report(skipped_existing=1)
+    assert manager.texts() == {"greeting.j2": "old"}
 
 
 async def test_import_access_control_scope_failure_is_per_token_skip(monkeypatch):

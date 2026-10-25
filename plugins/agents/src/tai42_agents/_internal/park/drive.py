@@ -5,7 +5,8 @@ parked on, and classifies a stopped drive's pending interrupt.
 
 :func:`park_continuation` / :func:`park_step_binding` / :func:`park_drive` bind the resume
 continuation (and, for a park-capable drive, the chained-park claims ledger) around a drive;
-:func:`bind_resume_per_step` re-enters a binding around each step of a streaming drive;
+:func:`bind_resume_per_step` re-enters a binding around each step of a streaming drive, and
+:func:`step_bindings` composes several bindings into one;
 :func:`detach_dead_chains` tombstones the claims a drive left unparked; :func:`finalize_drive`
 turns a pending interrupt into the terminal park/HITL events over :func:`~persist_park`.
 """
@@ -161,6 +162,20 @@ async def bind_resume_per_step[StreamItemT](
         aclose = getattr(step, "aclose", None)
         if aclose is not None:
             await aclose()
+
+
+@contextlib.contextmanager
+def step_bindings(*factories: Callable[[], AbstractContextManager[Any]]) -> Iterator[None]:
+    """Enter one context manager from each zero-arg factory, in order, and exit them in reverse.
+
+    The composite binding :func:`bind_resume_per_step` re-enters around each step when a drive binds
+    more than one thing per step, e.g. ``lambda: step_bindings(root.step, lambda: park_step_binding(park,
+    claims))`` for a run's trace root plus its park binding.
+    """
+    with contextlib.ExitStack() as stack:
+        for factory in factories:
+            stack.enter_context(factory())
+        yield
 
 
 def collect_pending_interrupts(snapshot: Any) -> list[tuple[str, Any]]:

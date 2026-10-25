@@ -1,5 +1,5 @@
-"""Channels router: the authed catalog door lists the registered channel names
-inside the ``{"data": ...}`` envelope."""
+"""Channels router: the authed catalog door lists the registered channels, each with its
+declared identity hint, inside the ``{"data": ...}`` envelope."""
 
 from __future__ import annotations
 
@@ -47,8 +47,19 @@ async def test_list_channels_empty(registry) -> None:
     assert json.loads(bytes(resp.body)) == {"data": {"channels": []}}
 
 
-async def test_list_channels_returns_sorted_names(registry) -> None:
-    tai42_app.channels.register("zeta", _Chan())
-    tai42_app.channels.register("alpha", _Chan())
+class _HintedChan(_Chan):
+    identity_hint = "The number clients text."
+
+
+async def test_list_channels_returns_sorted_entries_with_their_hints(registry) -> None:
+    tai42_app.channels.register("b", _Chan())
+    tai42_app.channels.register("a", _HintedChan())
     resp = await router.list_channels(_get_request())
-    assert json.loads(bytes(resp.body)) == {"data": {"channels": ["alpha", "zeta"]}}
+    assert json.loads(bytes(resp.body)) == {
+        "data": {
+            "channels": [
+                {"name": "a", "identity_hint": "The number clients text."},
+                {"name": "b", "identity_hint": None},
+            ]
+        }
+    }

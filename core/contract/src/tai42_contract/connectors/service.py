@@ -56,6 +56,9 @@ class NoAuthConnectResult:
     # write triggered, as the untyped summary the runtime embeds in the connector's
     # HTTP response; ``None`` when the operation performed no manifest mutation.
     fanout: dict[str, Any] | None = None
+    # The config store's error when its exclusive write span failed to release after
+    # this result's manifest write persisted; ``None`` when it released or no write ran.
+    span_release_error: str | None = None
 
 
 @dataclass(frozen=True)
@@ -71,6 +74,9 @@ class CompleteConnectResult:
     # write triggered, as the untyped summary the runtime embeds in the connector's
     # HTTP response; ``None`` when the operation performed no manifest mutation.
     fanout: dict[str, Any] | None = None
+    # The config store's error when its exclusive write span failed to release after
+    # this result's manifest write persisted; ``None`` when it released or no write ran.
+    span_release_error: str | None = None
 
 
 @dataclass(frozen=True)
@@ -85,6 +91,9 @@ class DisconnectResult:
     # write triggered, as the untyped summary the runtime embeds in the connector's
     # HTTP response; ``None`` when the operation performed no manifest mutation.
     fanout: dict[str, Any] | None = None
+    # The config store's error when its exclusive write span failed to release after
+    # this result's manifest write persisted; ``None`` when it released or no write ran.
+    span_release_error: str | None = None
 
 
 @dataclass(frozen=True)
@@ -102,6 +111,9 @@ class PatchResult:
     # write triggered, as the untyped summary the runtime embeds in the connector's
     # HTTP response; ``None`` when the operation performed no manifest mutation.
     fanout: dict[str, Any] | None = None
+    # The config store's error when its exclusive write span failed to release after
+    # this result's manifest write persisted; ``None`` when it released or no write ran.
+    span_release_error: str | None = None
 
 
 # -- Service protocol -----------------------------------------------------

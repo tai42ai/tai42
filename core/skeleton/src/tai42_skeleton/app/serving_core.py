@@ -35,7 +35,10 @@ from tai42_skeleton.states.service import (
     StatesConsumerListerRegistry,
     StatesService,
 )
+from tai42_skeleton.storage.prefix_marks import PrefixMarkRegistry
+from tai42_skeleton.template.delete_referees import TemplateDeleteRefereeRegistry
 from tai42_skeleton.tools import (
+    TemplateRefsRegistry,
     ToolExtrasRegistry,
     ToolPauseRegistry,
     ToolRefsRegistry,
@@ -45,6 +48,7 @@ from tai42_skeleton.tools import (
 )
 from tai42_skeleton.tools.binding import ToolBinding
 from tai42_skeleton.tools.binding.surface import SurfaceToolIndex, bump_tool_surface_generation
+from tai42_skeleton.tools.delete_cascades import ToolDeleteCascadeRegistry
 from tai42_skeleton.tools.delete_referees import ToolDeleteRefereeRegistry
 from tai42_skeleton.tools.detach_referees import StateTemplateDetachRefereeRegistry
 from tai42_skeleton.tools.rename_referees import ToolRenameRefereeRegistry
@@ -263,6 +267,10 @@ class ServingCore:
         self._webhook_verifier_registry = WebhookVerifierRegistry()
         self._channel_registry = ChannelRegistry()
 
+        # Storage prefix marks ("not backed up", "unlisted"), reset each start() so a
+        # plugin dropped on reload stops marking its prefix.
+        self._prefix_mark_registry = PrefixMarkRegistry()
+
         # Per-base-tool preset write-validator registry, reset each start() so a
         # reload re-imports the tool modules and re-registers cleanly.
         self._write_validator_registry = PresetWriteValidatorRegistry()
@@ -286,6 +294,9 @@ class ServingCore:
         # write-validator registry above.
         self._tool_refs_registry = ToolRefsRegistry()
 
+        # Per-tool declared template-references registry, reset each start() likewise.
+        self._template_refs_registry = TemplateRefsRegistry()
+
         # Per-tool declared retry-policy registry (@app.tools.tool(retry=...)),
         # reset each start() for the same reload reason.
         self._tool_retry_registry = ToolRetryRegistry()
@@ -304,7 +315,9 @@ class ServingCore:
         # collection gates every rename; the seeds drive the startup/reload applier.
         self._rename_referee_registry = ToolRenameRefereeRegistry()
         self._delete_referee_registry = ToolDeleteRefereeRegistry()
+        self._delete_cascade_registry = ToolDeleteCascadeRegistry()
         self._detach_referee_registry = StateTemplateDetachRefereeRegistry()
+        self._template_delete_referee_registry = TemplateDeleteRefereeRegistry()
         self._seed_registry = PresetSeedRegistry()
 
         # The subject-keyed state store: one shared service over the record substrate,

@@ -80,8 +80,9 @@ def register_hook(
     Exactly one of ``--params`` or ``--params-file`` is required.
 
     The body REQUIRES an ``execution_key`` — the api-key user id the hook fires as. Bind
-    your own identity or a key you own (an admin may bind any); its policy condition must
-    be evaluable without a presented token.
+    your own identity when you are an api key, or a key you own (an admin may bind any
+    key); an account is refused. Its policy condition must be evaluable without a
+    presented token.
 
     An existing name is REPLACED, ``execution_key`` included, and ``registered`` is
     ``true`` either way — run ``tai hooks list`` first to see whether the name is taken.
@@ -170,8 +171,9 @@ def create_trigger_link(
 
     ``--execution-key`` is REQUIRED: the api-key identity the link's DISPATCH is gated on,
     so revoking or disabling that key kills the link (each hook the link fires is
-    authorized against its OWN bound key). Bind your own identity or a key you own (an
-    admin may bind any); its policy condition must be evaluable without a presented token.
+    authorized against its OWN bound key). Bind your own identity when you are an api key,
+    or a key you own (an admin may bind any key); an account is refused. Its policy
+    condition must be evaluable without a presented token.
     Exactly ONE of ``--ttl SECONDS`` or ``--permanent`` is required — expiry is an explicit
     choice. ``--require-api-key`` also demands an authenticated caller, enforced only where
     access control is ENABLED; it does not touch the topic's own

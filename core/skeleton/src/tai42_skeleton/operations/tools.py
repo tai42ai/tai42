@@ -222,6 +222,7 @@ def _run_tool_return(outcome: VisitOutcome) -> RunAnswer:
         ConflictError,
         UpstreamError,
         UnavailableError,
+        NotSupportedError,
         OperationFailedError,
     ],
     request_model=RunToolRequest,

@@ -160,6 +160,28 @@ async def test_the_row_carries_every_item_subject_key_and_origin(
     assert not pg.writes  # nothing applied yet
 
 
+async def test_the_row_carries_the_trace_and_the_span_live_when_the_save_was_staged(
+    svc: StatesService, pg: FakeStatesPg, held_back: list, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    writer = SimpleNamespace(current_trace_id=lambda: "a" * 32, current_span_id=lambda: "b" * 16)
+    monkeypatch.setattr("tai42_skeleton.monitoring.registry.get_monitoring", lambda: SimpleNamespace(writer=writer))
+    await svc.put_declaration(_decl())
+    async with svc.open_unit() as unit:
+        await unit.stage([_write(_subject(), [{"op": "set", "path": ["n"], "value": 2}])])
+        await unit.commit()
+    assert (pg.outbox[1]["trace_id"], pg.outbox[1]["parent_span_id"]) == ("a" * 32, "b" * 16)
+
+
+async def test_a_save_staged_with_no_live_span_carries_no_trace(
+    svc: StatesService, pg: FakeStatesPg, held_back: list
+) -> None:
+    await svc.put_declaration(_decl())
+    async with svc.open_unit() as unit:
+        await unit.stage([_write(_subject(), [{"op": "set", "path": ["n"], "value": 2}])])
+        await unit.commit()
+    assert (pg.outbox[1]["trace_id"], pg.outbox[1]["parent_span_id"]) == (None, None)
+
+
 async def test_an_empty_unit_enqueues_nothing(svc: StatesService, pg: FakeStatesPg, held_back: list) -> None:
     await svc.put_declaration(_decl())
     async with svc.open_unit() as unit:

@@ -44,6 +44,7 @@ class TestBuild:
                 system_message=TemplatedText(content="be brief"),
                 user_message=TemplatedText(content="do it"),
                 tools_limit=7,
+                context=None,
             )
         )
 
@@ -81,6 +82,7 @@ class TestBuild:
                 embedding_provider="my_embedding",
                 checkpoint_provider="my_checkpoint",
                 store_provider="my_store",
+                context=None,
             )
         )
 
@@ -209,13 +211,16 @@ class TestAstreamAndRun:
                 agent.astream(
                     user_message=TemplatedText(content="hi"),
                     thread_id="th",
-                    langgraph_config={"configurable": {"monitoring_trace_id": "1" * 32}},
+                    langgraph_config={
+                        "configurable": {"monitoring_trace_id": "1" * 32, "monitoring_parent_span_id": "2" * 16}
+                    },
                 )
             )
         )
 
         assert captured["build_kwargs"]["config"]["configurable"] == {
             "monitoring_trace_id": "1" * 32,
+            "monitoring_parent_span_id": "2" * 16,
             "thread_id": "th",
         }
 

@@ -22,6 +22,7 @@ import pytest
 from starlette.requests import Request
 from tai42_contract.presets import PresetBody
 from tai42_contract.presets.errors import PresetNotFoundError
+from tai42_contract.tools import ReferenceHolder
 from tai42_kit.clients.impl.postgres import PostgresClient
 
 import tai42_skeleton.versioning.store as store_module
@@ -43,11 +44,13 @@ from tai42_skeleton.operations import presets as preset_ops
 from tai42_skeleton.routers import presets as router
 from tai42_skeleton.tools.binding import UnknownToolError
 
+from .._fakes.recording_storage import RecordingStorage
 from ..versioning.conftest import FakeVersioningPg
 
 _MANIFEST = {
     "extensions_modules": ["tests.presets._ext_fixtures"],
     "tools": [{"title": "fx", "module": "tests.presets._fixtures", "include": ["weather", "echo"]}],
+    "agents": [{"title": "ag", "module": "tests.routers._authoring_fixtures", "include": ["authorable_agent"]}],
 }
 
 
@@ -357,6 +360,41 @@ def test_create_preset_typed_base_400(pg, emit):
                 _request("POST", "/api/presets", body=_create_body("chained", base_tool="basep"))
             )
             assert resp.status_code == 400
+
+    asyncio.run(run())
+
+
+def test_create_over_a_preset_branch_400(pg, emit):
+    async def run():
+        async with instance.app.app_context(_manifest()):
+            # ``src`` binds a ``src_exta`` branch tool. That branch is a live tool, but it is
+            # derived from a preset, so it is no more a legal base than ``src`` itself.
+            await _create_versioned("src", fixed_kwargs={"units": "v"}, extensions=[["exta"]])
+            assert "src_exta" in await instance.app.tools.get_tools()
+            emit.clear()
+            resp = await router.create_preset(
+                _request("POST", "/api/presets", body=_create_body("onbranch", base_tool="src_exta"))
+            )
+            assert resp.status_code == 400
+            assert _err(resp) == "base tool 'src_exta' is derived from preset 'src'"
+            assert not instance.app.preset_manager.is_registered("onbranch")
+            assert all(d["name"] != "onbranch" for d in _non_role_documents(pg))
+            assert emit == []
+
+    asyncio.run(run())
+
+
+def test_create_over_a_non_preset_branch_is_accepted(pg, emit):
+    manifest = Manifest.model_validate(
+        {**_MANIFEST, "tools": [{**_MANIFEST["tools"][0], "extensions": {"weather": [["exta"]]}}]}
+    )
+
+    async def run():
+        async with instance.app.app_context(manifest):
+            # ``weather_exta`` is a branch of a plain tool, not of a preset: a legal base.
+            assert instance.app.tools.base_of("weather_exta") == "weather"
+            await _create_versioned("onplainbranch", base_tool="weather_exta", fixed_kwargs={"units": "v"})
+            assert instance.app.preset_manager.is_registered("onplainbranch")
 
     asyncio.run(run())
 
@@ -1173,7 +1211,7 @@ def test_rollback_to_unbindable_target_400_nothing_committed(pg, emit):
                 _request("POST", "/api/presets/wv/rollback", name="wv", body={"version": 1})
             )
             assert resp.status_code == 400
-            assert "cannot bind" in _err(resp)
+            assert _err(resp) == "base tool 'echo' is not a registered tool"
             # Active version unchanged, nothing committed, no emit.
             record = await instance.app.presets.store.get_preset("wv")
             assert record.active_version == 2
@@ -1193,10 +1231,14 @@ def test_list_reads_active_bodies_in_one_batched_query(pg, emit):
             rows = _data(await router.list_presets(_request("GET", "/api/presets")))
             assert {r["name"] for r in rows} == {"a", "b", "c"}
 
-            # ONE batched JOIN read for all rows (list_active_bodies), never a
+            # ONE batched JOIN read for all rows (list_active_versioned_bodies), never a
             # per-row get_active_body round-trip — a regression to per-row reads
             # fails this.
-            batched = [s for s in pg.executed if s.startswith("SELECT d.name, v.body FROM versioned_documents d")]
+            batched = [
+                s
+                for s in pg.executed
+                if s.startswith("SELECT d.name, d.active_version, v.body FROM versioned_documents d")
+            ]
             per_row = [s for s in pg.executed if s.startswith("SELECT v.body FROM versioned_documents d")]
             assert len(batched) == 1
             assert per_row == []
@@ -1529,10 +1571,10 @@ def test_rename_blocked_by_referencing_presets_409_lists_all_sorted(pg, emit):
             # store (the referee scan reads active bodies, not the live registry);
             # neutral names pin the SORTED, fully-listed referee message.
             direct = PresetBody(
-                base_tool="echo", description="d", fixed_kwargs={"tool_names": ["target"]}, extensions=[]
+                base_tool="authorable_agent", description="d", fixed_kwargs={"tool_names": ["target"]}, extensions=[]
             )
             nested = PresetBody(
-                base_tool="echo",
+                base_tool="authorable_agent",
                 description="d",
                 fixed_kwargs={"subagents": [{"tool_names": ["target"]}]},
                 extensions=[],
@@ -1545,7 +1587,7 @@ def test_rename_blocked_by_referencing_presets_409_lists_all_sorted(pg, emit):
                 _request("POST", "/api/presets/target/rename", name="target", body={"new_name": "renamed"})
             )
             assert resp.status_code == 409
-            assert "['a_ref', 'z_ref']" in _err(resp)  # every referee, sorted
+            assert "held by:\n- preset 'a_ref'\n- preset 'z_ref'\n" in _err(resp)  # every referee, sorted
             # Nothing moved, nothing emitted.
             assert await instance.app.tools.run_tool("target", {"city": "x"}) == {"city": "x", "units": "v"}
             assert emit == []
@@ -2127,13 +2169,20 @@ def test_conflicted_reason_null_when_healthy(pg, emit):
 
 # -- referees door -----------------------------------------------------------
 
+_COMPOSER_HOLDER = {"kind": "preset", "name": "composer", "locator": {}, "summary": "preset 'composer'"}
+
+
+def _referees_request(name: str, action: str) -> Request:
+    return _request("GET", f"/api/presets/{name}/referees", query=f"action={action}", name=name)
+
 
 def test_referees_empty(pg, emit):
     async def run():
         async with instance.app.app_context(_manifest()):
             await _create_versioned("ver", fixed_kwargs={"units": "v"})
-            data = _data(await router.preset_referees(_request("GET", "/api/presets/ver/referees", name="ver")))
-            assert data == {"name": "ver", "referees": []}
+            for action in ("rename", "delete"):
+                data = _data(await router.preset_referees(_referees_request("ver", action)))
+                assert data == {"action": action, "holders": []}
 
     asyncio.run(run())
 
@@ -2146,11 +2195,40 @@ def test_referees_lists_referencing_presets(pg, emit):
             # Seeded through the GENERIC store (the referee scan reads active bodies,
             # not the live registry).
             composer = PresetBody(
-                base_tool="echo", description="d", fixed_kwargs={"tool_names": ["leaf"]}, extensions=[]
+                base_tool="authorable_agent", description="d", fixed_kwargs={"tool_names": ["leaf"]}, extensions=[]
             )
             await instance.app.versioning.store.create("preset", "composer", composer.model_dump())
-            data = _data(await router.preset_referees(_request("GET", "/api/presets/leaf/referees", name="leaf")))
-            assert data == {"name": "leaf", "referees": ["composer"]}
+            data = _data(await router.preset_referees(_referees_request("leaf", "rename")))
+            assert data == {"action": "rename", "holders": [_COMPOSER_HOLDER]}
+
+    asyncio.run(run())
+
+
+def test_referees_lists_presets_composing_a_branch_of_the_preset(pg, emit):
+    async def run():
+        async with instance.app.app_context(_manifest()):
+            await _create_versioned("leaf", base_tool="weather", fixed_kwargs={"units": "v"}, extensions=[["exta"]])
+            # A rename of ``leaf`` also renames its ``leaf_exta`` branch, so a preset composing
+            # that branch as a tool is stranded by the rename exactly like one composing ``leaf``.
+            composer = PresetBody(
+                base_tool="authorable_agent", description="d", fixed_kwargs={"tool_names": ["leaf_exta"]}, extensions=[]
+            )
+            await instance.app.versioning.store.create("preset", "composer", composer.model_dump())
+            data = _data(await router.preset_referees(_referees_request("leaf", "rename")))
+            assert data == {"action": "rename", "holders": [_COMPOSER_HOLDER]}
+
+            rows = {r["name"]: r for r in _data(await router.list_presets(_request("GET", "/api/presets")))}
+            assert rows["leaf"]["used_by"] == ["composer"]
+            assert rows["composer"]["uses"] == ["leaf"]
+
+            emit.clear()
+            resp = await router.rename_preset(
+                _request("POST", "/api/presets/leaf/rename", name="leaf", body={"new_name": "renamed"})
+            )
+            assert resp.status_code == 409
+            assert "- preset 'composer'" in _err(resp)
+            assert "leaf_exta" in await instance.app.tools.get_tools()
+            assert emit == []
 
     asyncio.run(run())
 
@@ -2158,8 +2236,44 @@ def test_referees_lists_referencing_presets(pg, emit):
 def test_referees_404_unknown(pg, emit):
     async def run():
         async with instance.app.app_context(_manifest()):
-            resp = await router.preset_referees(_request("GET", "/api/presets/nope/referees", name="nope"))
+            resp = await router.preset_referees(_referees_request("nope", "rename"))
             assert resp.status_code == 404
+
+    asyncio.run(run())
+
+
+def test_referees_refuses_a_missing_or_unknown_action(pg, emit):
+    async def run():
+        async with instance.app.app_context(_manifest()):
+            await _create_versioned("ver", fixed_kwargs={"units": "v"})
+            missing = await router.preset_referees(_request("GET", "/api/presets/ver/referees", name="ver"))
+            assert missing.status_code == 422
+            unknown = await router.preset_referees(_referees_request("ver", "detach"))
+            assert unknown.status_code == 422
+
+    asyncio.run(run())
+
+
+def test_referees_delete_lists_the_delete_vetoes_the_gate_refuses_on(pg, emit):
+    holder = ReferenceHolder(kind="fixture holder", name="n1", summary="node 'n1' binding references it")
+
+    async def _veto(name: str) -> list[ReferenceHolder]:
+        return [holder] if name == "ver" else []
+
+    async def run():
+        async with instance.app.app_context(_manifest()):
+            await _create_versioned("ver", fixed_kwargs={"units": "v"})
+            instance.app.tools.register_delete_referee(_veto)
+            try:
+                data = _data(await router.preset_referees(_referees_request("ver", "delete")))
+                assert data == {"action": "delete", "holders": [holder.model_dump()]}
+                # The rename gather does not ask the delete vetoes.
+                assert _data(await router.preset_referees(_referees_request("ver", "rename")))["holders"] == []
+                resp = await router.delete_preset(_request("DELETE", "/api/presets/ver", name="ver"))
+                assert resp.status_code == 409
+                assert json.loads(bytes(resp.body))["holders"] == data["holders"]
+            finally:
+                instance.app._delete_referee_registry.reset()
 
     asyncio.run(run())
 
@@ -2189,6 +2303,16 @@ def test_validate_create_unknown_base_tool(pg, emit):
             data = _data(await _validate({"name": "newp", "base_tool": "ghost"}))
             assert data["valid"] is False
             assert "not a registered tool" in data["error"]
+
+    asyncio.run(run())
+
+
+def test_validate_create_over_a_preset_branch_verdict(pg, emit):
+    async def run():
+        async with instance.app.app_context(_manifest()):
+            await _create_versioned("src", fixed_kwargs={"units": "v"}, extensions=[["exta"]])
+            data = _data(await _validate({"name": "onbranch", "base_tool": "src_exta"}))
+            assert data == {"valid": False, "error": "base tool 'src_exta' is derived from preset 'src'"}
 
     asyncio.run(run())
 
@@ -2748,6 +2872,24 @@ def test_create_and_save_version_thread_the_state_binding_over_http(pg, emit):
     asyncio.run(run())
 
 
+def test_create_refuses_a_state_binding_naming_an_id_the_store_lacks(pg, emit, monkeypatch):
+    monkeypatch.setattr(instance.app._storage_registry, "_provider", RecordingStorage())
+    binding = {"states": [{"state": "status", "subject_expr": {"id": "jq/subject"}}]}
+
+    async def run():
+        async with instance.app.app_context(_manifest()):
+            resp = await router.create_preset(
+                _request("POST", "/api/presets", body=_create_body("wv", state_binding=binding))
+            )
+            assert resp.status_code == 400
+            assert _err(resp) == (
+                "invalid state_binding: stored id 'jq/subject' at states[0].subject_expr is not a stored template"
+            )
+            assert _non_role_documents(pg) == []
+
+    asyncio.run(run())
+
+
 # -- rollback re-attaches the target version's state binding ----------------------
 
 
@@ -3080,7 +3222,7 @@ def test_a_preset_restore_never_runs_a_live_registry_rule(pg, emit, monkeypatch)
             )
             assert resp.status_code == 400
             assert _err(resp) == "base tool 'later-tool' is not a registered tool"
-            bind_error = await _dry_run_bind_error("later-tool", {}, name="probe-later", description="d")
+            bind_error = await _dry_run_bind_error("later-tool", {}, name="probe-later", description="d", extensions=[])
             assert bind_error is not None
             assert bind_error.startswith("preset 'probe-later' cannot bind: ")
 
@@ -3174,5 +3316,498 @@ def test_a_store_fault_during_a_preset_restore_fails_the_section_and_skips_nothi
             assert (section["created"], section["updated"], section["skipped"]) == (0, 0, 0)
             assert len(calls["attach"]) == 1
             assert _non_role_documents(pg) == []
+
+    asyncio.run(run())
+
+
+# -- a stored body the reference walk cannot read --------------------------------
+
+
+_UNREADABLE = {
+    "error": "stored preset 'bad': fixed_kwargs.tool_names must be a list of tool names",
+    "code": "stored-preset-unreadable",
+    "preset": "bad",
+}
+
+
+def test_a_malformed_stored_body_is_a_500_naming_the_row_until_it_is_deleted(pg, emit, monkeypatch) -> None:
+    async def run():
+        async with instance.app.app_context(_manifest()):
+            attached: set[tuple[str, str]] = set()
+            calls = _patch_fake_states(monkeypatch, existing={"t1"}, attached=attached)
+            await _create_versioned("ok")
+            body = PresetBody(
+                base_tool="authorable_agent", description="d", fixed_kwargs={"tool_names": "x"}, extensions=[]
+            )
+            await instance.app.versioning.store.create("preset", "bad", body.model_dump())
+
+            for resp in (
+                await router.list_presets(_request("GET", "/api/presets")),
+                await router.get_preset(_request("GET", "/api/presets/bad", name="bad")),
+                await router.preset_referees(_referees_request("ok", "rename")),
+            ):
+                assert resp.status_code == 500
+                assert json.loads(bytes(resp.body)) == _UNREADABLE
+            assert (await router.preset_referees(_referees_request("bad", "delete"))).status_code == 200
+
+            create_q = _create_body("q", base_tool="echo", state_binding=_TEMPLATED_BINDING)
+            for _ in range(2):
+                resp = await router.create_preset(_request("POST", "/api/presets", body=create_q))
+                assert resp.status_code == 500
+                assert json.loads(bytes(resp.body)) == _UNREADABLE
+            with pytest.raises(PresetNotFoundError):
+                await instance.app.presets.store.get_preset("q")
+            assert calls == []
+            assert attached == set()
+
+            assert (await router.delete_preset(_request("DELETE", "/api/presets/bad", name="bad"))).status_code == 200
+            assert (await router.list_presets(_request("GET", "/api/presets"))).status_code == 200
+            resp = await router.create_preset(_request("POST", "/api/presets", body=create_q))
+            assert resp.status_code == 200, _err(resp)
+            assert _data(resp)["name"] == "q"
+            assert calls == [("status", "t1")]
+
+    asyncio.run(run())
+
+
+# -- input and output maps at the write doors --------------------------------------
+
+
+_MAPS_MANIFEST = {
+    **_MANIFEST,
+    "tools": [{**_MANIFEST["tools"][0], "include": ["weather", "echo", "payload_echo"]}],
+}
+
+# The caller sends ``place``; the input map routes it into ``payload_echo``'s ``payload``.
+_PLACE_SCHEMA = {
+    "type": "object",
+    "properties": {"place": {"type": "string"}},
+    "required": ["place"],
+    "additionalProperties": False,
+}
+_INPUT_MAP = "{payload: {where: .place}}"
+_PAIRING = "an input map needs an input schema that describes what the caller sends"
+
+
+# A field ``_mapped_body`` leaves out of the request body.
+_OMIT = object()
+
+
+def _maps_manifest() -> Manifest:
+    return Manifest.model_validate(_MAPS_MANIFEST)
+
+
+def _mapped_body(name: str, **over: Any) -> dict[str, Any]:
+    body = _create_body(
+        name,
+        "payload_echo",
+        fixed_kwargs={"tag": "t1"},
+        input_schema=_PLACE_SCHEMA,
+        input_map=_INPUT_MAP,
+        output_map="ascii_upcase",
+    )
+    body.update(over)
+    return {key: value for key, value in body.items() if value is not _OMIT}
+
+
+async def _create_mapped(name: str, **over: Any) -> None:
+    resp = await router.create_preset(_request("POST", "/api/presets", body=_mapped_body(name, **over)))
+    assert resp.status_code == 200, _err(resp)
+
+
+async def _save(name: str, body: dict[str, Any]):
+    return await router.save_version(_request("POST", f"/api/presets/{name}/versions", name=name, body=body))
+
+
+def test_create_with_maps_binds_the_mapped_tool_and_answers_them(pg, emit):
+    async def run():
+        async with instance.app.app_context(_maps_manifest()):
+            resp = await router.create_preset(_request("POST", "/api/presets", body=_mapped_body("m")))
+            assert resp.status_code == 200, _err(resp)
+            data = _data(resp)
+            assert (data["input_map"], data["output_map"]) == (_INPUT_MAP, "ascii_upcase")
+
+            assert await instance.app.tools.run_tool("m", {"place": "xy"}) == "XY:NONE:T1"
+            active = await instance.app.presets.store.get_active_body("m")
+            assert (active.input_map, active.output_map) == (_INPUT_MAP, "ascii_upcase")
+            detail = _data(await router.get_preset(_request("GET", "/api/presets/m", name="m")))
+            assert (detail["input_map"], detail["output_map"]) == (_INPUT_MAP, "ascii_upcase")
+            rows = _data(await router.list_presets(_request("GET", "/api/presets")))
+            assert [(r["input_map"], r["output_map"]) for r in rows] == [(_INPUT_MAP, "ascii_upcase")]
+
+    asyncio.run(run())
+
+
+def test_a_mapped_preset_needs_no_input_schema_support_from_its_base(pg, emit):
+    # ``echo`` registers no input-schema support: the input map builds its whole argument object.
+    text_schema = {
+        "type": "object",
+        "properties": {"words": {"type": "string"}},
+        "required": ["words"],
+        "additionalProperties": False,
+    }
+    body = _create_body("m", "echo", input_schema=text_schema, input_map="{text: .words}")
+
+    async def run():
+        async with instance.app.app_context(_maps_manifest()):
+            draft = {key: value for key, value in body.items() if key != "description"}
+            assert _data(await _validate(draft)) == {"valid": True, "error": None}
+            resp = await router.create_preset(_request("POST", "/api/presets", body=body))
+            assert resp.status_code == 200, _err(resp)
+            assert await instance.app.tools.run_tool("m", {"words": "hi"}) == "hi"
+            resp = await _save("m", {"input_schema": text_schema, "input_map": "{text: (.words + .words)}"})
+            assert resp.status_code == 200, _err(resp)
+            assert await instance.app.tools.run_tool("m", {"words": "hi"}) == "hihi"
+            resp = await _save("m", {"input_map": None})
+            assert resp.status_code == 400
+            assert _err(resp) == (
+                "preset 'm' cannot bind: base tool 'echo' does not accept a preset input_schema "
+                "(no PresetInputSchemaSupport is registered for it)"
+            )
+
+    asyncio.run(run())
+
+
+def test_create_takes_a_map_as_a_templated_text_object(pg, emit):
+    async def run():
+        async with instance.app.app_context(_maps_manifest()):
+            resp = await router.create_preset(
+                _request("POST", "/api/presets", body=_mapped_body("m", output_map={"content": "ascii_downcase"}))
+            )
+            assert resp.status_code == 200, _err(resp)
+            assert _data(resp)["output_map"]["content"] == "ascii_downcase"
+            assert await instance.app.tools.run_tool("m", {"place": "XY"}) == "xy:none:t1"
+
+    asyncio.run(run())
+
+
+def test_create_answers_with_a_templated_text_schema_as_its_object(pg, emit):
+    content = json.dumps({"type": "object", "properties": {"v": {"type": "string"}}})
+
+    async def run():
+        async with instance.app.app_context(_maps_manifest()):
+            resp = await router.create_preset(
+                _request(
+                    "POST",
+                    "/api/presets",
+                    body=_mapped_body("m", output_map="{v: .}", output_schema={"content": content}),
+                )
+            )
+            assert resp.status_code == 200, _err(resp)
+            assert _data(resp)["output_schema"]["content"] == content
+            detail = _data(await router.get_preset(_request("GET", "/api/presets/m", name="m")))
+            assert detail["output_schema"]["content"] == content
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("field", ["input_map", "output_map"])
+def test_a_map_that_is_neither_text_nor_a_templated_text_is_a_400_naming_the_field(pg, emit, field):
+    async def run():
+        async with instance.app.app_context(_maps_manifest()):
+            resp = await router.create_preset(_request("POST", "/api/presets", body=_mapped_body("m", **{field: 5})))
+            assert resp.status_code == 400
+            assert _err(resp) == f"'{field}' must be a jq program string or a stored-body reference"
+            assert _non_role_documents(pg) == []
+
+    asyncio.run(run())
+
+
+def test_create_refuses_an_input_map_without_an_input_schema(pg, emit):
+    async def run():
+        async with instance.app.app_context(_maps_manifest()):
+            resp = await router.create_preset(
+                _request("POST", "/api/presets", body=_mapped_body("m", input_schema=_OMIT))
+            )
+            assert resp.status_code == 400
+            assert _err(resp) == _PAIRING
+            assert _non_role_documents(pg) == []
+            assert emit == []
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("field", ["input_map", "output_map"])
+def test_create_refuses_a_map_that_does_not_compile(pg, emit, field):
+    async def run():
+        async with instance.app.app_context(_maps_manifest()):
+            resp = await router.create_preset(_request("POST", "/api/presets", body=_mapped_body("m", **{field: "{"})))
+            assert resp.status_code == 400
+            assert _err(resp).startswith(f"{field} does not compile: ")
+            assert _non_role_documents(pg) == []
+
+    asyncio.run(run())
+
+
+def test_save_version_carries_clears_and_sets_the_maps(pg, emit):
+    async def run():
+        async with instance.app.app_context(_maps_manifest()):
+            store = instance.app.presets.store
+            await _create_mapped("m")
+
+            resp = await _save("m", {"description": "d2"})
+            assert resp.status_code == 200, _err(resp)
+            active = await store.get_active_body("m")
+            assert (active.input_map, active.output_map) == (_INPUT_MAP, "ascii_upcase")
+            assert await instance.app.tools.run_tool("m", {"place": "xy"}) == "XY:NONE:T1"
+
+            resp = await _save("m", {"output_map": None})
+            assert resp.status_code == 200, _err(resp)
+            active = await store.get_active_body("m")
+            assert (active.input_map, active.output_map) == (_INPUT_MAP, None)
+            assert await instance.app.tools.run_tool("m", {"place": "xy"}) == "xy:None:t1"
+
+            resp = await _save(
+                "m", {"input_map": "{payload: {where: (.place + .place)}}", "output_map": "ascii_upcase"}
+            )
+            assert resp.status_code == 200, _err(resp)
+            assert await instance.app.tools.run_tool("m", {"place": "xy"}) == "XYXY:NONE:T1"
+            assert (await store.get_preset("m")).active_version == 4
+
+    asyncio.run(run())
+
+
+def test_save_version_judges_a_map_against_the_carried_input_schema(pg, emit):
+    async def run():
+        async with instance.app.app_context(_maps_manifest()):
+            await _create_mapped("m", input_map=_OMIT, output_map=_OMIT)
+
+            # The input schema carries forward, so the new input map pairs with it.
+            resp = await _save("m", {"input_map": _INPUT_MAP})
+            assert resp.status_code == 200, _err(resp)
+            assert await instance.app.tools.run_tool("m", {"place": "xy"}) == "xy:None:t1"
+
+            # Clearing the schema under the carried input map is the pairing refusal; nothing is saved.
+            resp = await _save("m", {"input_schema": None})
+            assert resp.status_code == 400
+            assert _err(resp) == _PAIRING
+            assert (await instance.app.presets.store.get_preset("m")).active_version == 2
+
+    asyncio.run(run())
+
+
+def test_save_version_refuses_a_map_that_does_not_compile(pg, emit):
+    async def run():
+        async with instance.app.app_context(_maps_manifest()):
+            await _create_mapped("m")
+            resp = await _save("m", {"output_map": "{"})
+            assert resp.status_code == 400
+            assert _err(resp).startswith("output_map does not compile: ")
+            assert (await instance.app.presets.store.get_preset("m")).active_version == 1
+
+    asyncio.run(run())
+
+
+def test_the_save_version_emptiness_refusal_names_the_maps(pg, emit):
+    async def run():
+        async with instance.app.app_context(_maps_manifest()):
+            await _create_mapped("m")
+            resp = await _save("m", {})
+            assert resp.status_code == 400
+            assert _err(resp) == (
+                "body must provide at least one of 'fixed_kwargs', 'extensions', 'output_schema', "
+                "'input_schema', 'input_map', 'output_map', 'description', 'state_binding'"
+            )
+
+    asyncio.run(run())
+
+
+def test_rollback_restores_the_target_versions_maps(pg, emit):
+    async def run():
+        async with instance.app.app_context(_maps_manifest()):
+            await _create_mapped("m")
+            assert (await _save("m", {"output_map": None})).status_code == 200
+            assert await instance.app.tools.run_tool("m", {"place": "xy"}) == "xy:None:t1"
+
+            resp = await router.rollback_preset(
+                _request("POST", "/api/presets/m/rollback", name="m", body={"version": 1})
+            )
+            assert resp.status_code == 200, _err(resp)
+            assert await instance.app.tools.run_tool("m", {"place": "xy"}) == "XY:NONE:T1"
+
+    asyncio.run(run())
+
+
+def test_validate_judges_the_maps_in_both_modes(pg, emit):
+    async def run():
+        async with instance.app.app_context(_maps_manifest()):
+            draft = {key: value for key, value in _mapped_body("newm").items() if key != "description"}
+            assert _data(await _validate(draft)) == {"valid": True, "error": None}
+            unpaired = {key: value for key, value in draft.items() if key != "input_schema"}
+            assert _data(await _validate(unpaired)) == {"valid": False, "error": _PAIRING}
+
+            await _create_mapped("m")
+            assert _data(await _validate({"name": "m", "output_map": "ascii_downcase"})) == {
+                "valid": True,
+                "error": None,
+            }
+            # The input map carries forward, so clearing the schema is the pairing verdict.
+            assert _data(await _validate({"name": "m", "input_schema": None})) == {"valid": False, "error": _PAIRING}
+            verdict = _data(await _validate({"name": "m", "output_map": "{"}))
+            assert verdict["valid"] is False
+            assert verdict["error"].startswith("output_map does not compile: ")
+            assert _non_role_documents(pg)[0]["name"] == "m"
+            assert len(_non_role_documents(pg)) == 1
+
+    asyncio.run(run())
+
+
+def test_a_preset_restore_refuses_an_input_map_without_an_input_schema(pg, emit, monkeypatch) -> None:
+    from tai42_skeleton.versioning.backup import import_versioned_documents
+
+    _wire_backup_onto(pg, monkeypatch)
+    unpaired = {
+        "base_tool": "payload_echo",
+        "description": "d",
+        "fixed_kwargs": {"tag": "t1"},
+        "input_map": _INPUT_MAP,
+    }
+    payload = _restore_payload((9041, "probe-unpaired", unpaired))
+
+    async def run():
+        async with instance.app.app_context(_maps_manifest()):
+            report = await import_versioned_documents(payload)
+            assert report.errors == [f"preset 'probe-unpaired': {_PAIRING}"]
+            assert report.skipped == 1
+
+    asyncio.run(run())
+
+
+# -- an input schema the preset's extensions cannot present ------------------------
+
+
+_PRESENTABLE_SCHEMA = {
+    "type": "object",
+    "properties": {"where": {"type": "string", "minLength": 2}, "n": {"type": "integer", "default": 3}},
+    "required": ["where"],
+    "additionalProperties": False,
+}
+_OPEN_SCHEMA = {key: value for key, value in _PRESENTABLE_SCHEMA.items() if key != "additionalProperties"}
+_UNPRESENTABLE = [
+    (_OPEN_SCHEMA, 'the schema must set "additionalProperties": false'),
+    (
+        {"type": "object", "properties": {"first-name": {"type": "string"}}, "additionalProperties": False},
+        "property name 'first-name' is not a valid parameter name",
+    ),
+    (
+        {"type": "object", "properties": {"where": {"$ref": "#/$defs/place"}}, "additionalProperties": False},
+        "property 'where' holds a $ref",
+    ),
+    (
+        {
+            "type": "object",
+            "properties": {"where": {"type": "string"}},
+            "anyOf": [{"required": ["where"]}],
+            "additionalProperties": False,
+        },
+        "the schema root keyword 'anyOf' cannot be presented as named arguments",
+    ),
+]
+_UNPRESENTABLE_PREFIX = "input_schema cannot be presented to the preset's extensions: "
+
+
+def _branched_body(name: str, input_schema: dict[str, Any], **over: Any) -> dict[str, Any]:
+    body = _create_body(
+        name, "payload_echo", fixed_kwargs={"tag": "t1"}, input_schema=input_schema, extensions=[["exta"]]
+    )
+    body.update(over)
+    return body
+
+
+@pytest.mark.parametrize(("schema", "reason"), _UNPRESENTABLE)
+def test_create_refuses_an_input_schema_its_extensions_cannot_present(pg, emit, schema, reason):
+    async def run():
+        async with instance.app.app_context(_maps_manifest()):
+            resp = await router.create_preset(_request("POST", "/api/presets", body=_branched_body("b", schema)))
+            assert resp.status_code == 400
+            assert _err(resp) == _UNPRESENTABLE_PREFIX + reason
+            assert _non_role_documents(pg) == []
+            assert emit == []
+
+            verdict = _data(await _validate(_branched_body("b", schema)))
+            assert verdict == {"valid": False, "error": _UNPRESENTABLE_PREFIX + reason}
+
+    asyncio.run(run())
+
+
+def test_an_open_input_schema_without_extensions_still_creates(pg, emit):
+    async def run():
+        async with instance.app.app_context(_maps_manifest()):
+            body = _branched_body("open", _OPEN_SCHEMA)
+            del body["extensions"]
+            resp = await router.create_preset(_request("POST", "/api/presets", body=body))
+            assert resp.status_code == 200, _err(resp)
+            assert await instance.app.tools.run_tool("open", {"where": "xy"}) == "xy:3:t1"
+
+    asyncio.run(run())
+
+
+def test_save_version_refuses_extensions_over_an_input_schema_they_cannot_present(pg, emit):
+    reason = _UNPRESENTABLE_PREFIX + _UNPRESENTABLE[0][1]
+
+    async def run():
+        async with instance.app.app_context(_maps_manifest()):
+            closed = _branched_body("b", _PRESENTABLE_SCHEMA)
+            del closed["extensions"]
+            assert (await router.create_preset(_request("POST", "/api/presets", body=closed))).status_code == 200
+
+            resp = await _save("b", {"extensions": [["exta"]], "input_schema": _OPEN_SCHEMA})
+            assert resp.status_code == 400
+            assert _err(resp) == reason
+            assert _data(await _validate({"name": "b", "extensions": [["exta"]], "input_schema": _OPEN_SCHEMA})) == {
+                "valid": False,
+                "error": reason,
+            }
+
+            # The same refusal when the open schema is the one carried forward.
+            assert (await _save("b", {"input_schema": _OPEN_SCHEMA})).status_code == 200
+            resp = await _save("b", {"extensions": [["exta"]]})
+            assert resp.status_code == 400
+            assert _err(resp) == reason
+            assert _data(await _validate({"name": "b", "extensions": [["exta"]]})) == {"valid": False, "error": reason}
+            assert (await instance.app.presets.store.get_preset("b")).active_version == 2
+
+    asyncio.run(run())
+
+
+def test_rollback_refuses_a_version_whose_input_schema_its_extensions_cannot_present(pg, emit):
+    async def run():
+        async with instance.app.app_context(_maps_manifest()):
+            store = instance.app.presets.store
+            body = _branched_body("b", _OPEN_SCHEMA)
+            del body["extensions"]
+            assert (await router.create_preset(_request("POST", "/api/presets", body=body))).status_code == 200
+            # A version written past the doors (as a restored history holds one), then the active one re-pointed.
+            await store.save_version("b", extensions=[["exta"]])
+            await store.rollback("b", 1)
+
+            resp = await router.rollback_preset(
+                _request("POST", "/api/presets/b/rollback", name="b", body={"version": 2})
+            )
+            assert resp.status_code == 400
+            assert _err(resp) == _UNPRESENTABLE_PREFIX + _UNPRESENTABLE[0][1]
+            assert (await store.get_preset("b")).active_version == 1
+
+    asyncio.run(run())
+
+
+def test_a_preset_restore_refuses_extensions_over_an_input_schema_they_cannot_present(pg, emit, monkeypatch) -> None:
+    from tai42_skeleton.versioning.backup import import_versioned_documents
+
+    _wire_backup_onto(pg, monkeypatch)
+    body = {
+        "base_tool": "payload_echo",
+        "description": "d",
+        "fixed_kwargs": {"tag": "t1"},
+        "input_schema": _OPEN_SCHEMA,
+        "extensions": [["exta"]],
+    }
+    payload = _restore_payload((9051, "probe-open", body))
+
+    async def run():
+        async with instance.app.app_context(_maps_manifest()):
+            report = await import_versioned_documents(payload)
+            assert report.errors == [f"preset 'probe-open': {_UNPRESENTABLE_PREFIX}{_UNPRESENTABLE[0][1]}"]
+            assert report.skipped == 1
 
     asyncio.run(run())

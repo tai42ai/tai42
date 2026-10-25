@@ -122,3 +122,35 @@ def test_applied_entry_validates_against_the_manifest_schema() -> None:
     resolved = parse_config(data=dump_manifest(cast("Any", manifest))) or {}
     Manifest.model_validate(resolved)
     assert os.environ  # sanity: resolution used the process env
+
+
+def test_update_carries_the_tool_selection_onto_the_new_entry_and_takes_every_other_key_from_it() -> None:
+    from tai42_skeleton.marketplace.manifest_patch import update_provides
+
+    old = _mcp_spec(command="pg-mcp-server")
+    new = _mcp_spec(command="pg-mcp-server-2")
+    manifest: dict = {}
+    apply_provides(manifest, old)
+    manifest["mcp"][0].update({"include": ["postgres_query"], "exclude": [], "description": "operator note"})
+
+    update_provides(manifest, old, new)
+
+    (entry,) = manifest["mcp"]
+    assert entry == {
+        "title": "postgres",
+        "config": {"command": "pg-mcp-server-2", "args": [], "headers": {}, "env": {}},
+        "include": ["postgres_query"],
+        "exclude": [],
+    }
+
+
+def test_update_of_an_entry_with_no_selection_adds_none() -> None:
+    from tai42_skeleton.marketplace.manifest_patch import update_provides
+
+    old = _mcp_spec(command="pg-mcp-server")
+    manifest: dict = {}
+    apply_provides(manifest, old)
+
+    update_provides(manifest, old, _mcp_spec(command="pg-mcp-server-2"))
+
+    assert set(manifest["mcp"][0]) == {"title", "config"}

@@ -15,9 +15,9 @@ what is actually bound:
   version-aware read), lets the run chokepoint attribute a dispatched preset with the
   version it is actually bound at (:meth:`active_version`);
 * a **quarantine map** of names whose stored preset could not register at load
-  (name taken by a foreign tool, or a missing / preset-owned base tool) to the
-  human-readable reason — surfaced as ``conflicted`` records carrying that reason
-  rather than bricking boot;
+  (name taken by a foreign tool, or a base tool that is missing, a preset, or
+  derived from a preset) to the human-readable reason — surfaced as ``conflicted``
+  records carrying that reason rather than bricking boot;
 * the register/reload/remove/rehydrate operations over both, plus the
   :meth:`name_conflicts` predicate the :class:`PresetStoreView` consults so a
   colliding name raises before any store write.
@@ -34,7 +34,7 @@ import contextlib
 import logging
 import re
 from collections import defaultdict
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Collection, Sequence
 from typing import TYPE_CHECKING, Any
 
 from tai42_contract.agent import PRESET_NAME_PATTERN
@@ -43,6 +43,12 @@ from tai42_contract.presets import PresetBody
 from tai42_contract.presets.errors import PresetExistsError, PresetNameConflictError, PresetNotFoundError
 from tai42_contract.states.binding import StateBinding
 from tai42_contract.template import TemplatedText
+from tai42_kit.utils.render import SchemaBodyError, TextBodyError, resolve_schema_body
+
+from tai42_skeleton.presets.errors import PresetStoreReadError
+from tai42_skeleton.presets.maps import PresetMapError
+from tai42_skeleton.tools.binding.errors import SchemaSignatureError
+from tai42_skeleton.tools.binding.schema import schema_signature
 
 if TYPE_CHECKING:
     from tai42_skeleton.app.server import TaiMCP
@@ -83,6 +89,45 @@ def output_schema_extension_clash(
             if declares_output_schema(element):
                 return OUTPUT_SCHEMA_EXTENSION_CLASH
     return None
+
+
+async def branch_input_schema_error(
+    name: str, extensions: Sequence[Sequence[ExtensionElement]], input_schema: TemplatedText | dict[str, Any] | None
+) -> str | None:
+    """The refusal of an ``input_schema`` the preset's extension branches cannot present, or ``None``.
+
+    A branch of a preset with an input schema presents that schema as named arguments, so with
+    extensions the schema must be one :func:`~tai42_skeleton.tools.binding.schema.schema_signature`
+    accepts. ``None`` when there are no extensions or no schema; a schema that cannot be rendered is
+    refused with its own text.
+    """
+    if not extensions or input_schema is None:
+        return None
+    try:
+        resolved = await resolve_schema_body(f"preset {name!r} input_schema", input_schema)
+    except SchemaBodyError as exc:
+        return str(exc)
+    if resolved is None:
+        raise AssertionError
+    try:
+        schema_signature(resolved)
+    except SchemaSignatureError as exc:
+        return f"input_schema cannot be presented to the preset's extensions: {exc}"
+    return None
+
+
+def preset_base_refusal(base_tool: str, origin: str | None) -> str | None:
+    """The refusal of ``base_tool`` as a preset's base, given the preset it is or derives from (``origin``).
+
+    A preset's base must be a tool that is neither a preset nor derived from one (an extension branch a
+    preset produces): such a base exists only once that other preset is bound, so a preset over it would
+    bind or not depending on load order. ``None`` when ``origin`` is ``None`` (no preset behind it).
+    """
+    if origin is None:
+        return None
+    if origin == base_tool:
+        return f"base tool {base_tool!r} is itself a preset"
+    return f"base tool {base_tool!r} is derived from preset {origin!r}"
 
 
 class PresetManager:
@@ -142,6 +187,18 @@ class PresetManager:
         """Whether ``name`` is a live registered preset."""
         return name in self._specs
 
+    async def stored_preset_names(self) -> frozenset[str]:
+        """The names of the stored presets; empty on a deployment with no skeleton database.
+
+        A configured store that cannot be read raises :class:`PresetStoreReadError`, never
+        an empty set.
+        """
+        try:
+            bodies = await self._app.presets.list_active_bodies()
+        except Exception as exc:
+            raise PresetStoreReadError(f"the preset store could not be read: {exc}") from exc
+        return frozenset(bodies)
+
     def active_version(self, name: str) -> int | None:
         """Return the store active version currently bound for ``name``, or ``None`` if none is registered.
 
@@ -154,6 +211,28 @@ class PresetManager:
     def registered_names(self) -> frozenset[str]:
         """Every live registered preset name."""
         return frozenset(self._specs)
+
+    def _origin_among(self, tool_name: str, preset_names: Collection[str]) -> str | None:
+        """The preset among ``preset_names`` that ``tool_name`` is, or whose extension branch it is, else ``None``.
+
+        A branch's origin is read from the tool registry, which records the base every bound branch was
+        produced from.
+        """
+        if tool_name in preset_names:
+            return tool_name
+        base = self._app.tools.base_of(tool_name)
+        return base if base in preset_names else None
+
+    def preset_origin(self, tool_name: str) -> str | None:
+        """The registered preset ``tool_name`` is or derives from (one of its extension branches), else ``None``."""
+        return self._origin_among(tool_name, self._specs.keys())
+
+    def base_refusal(self, base_tool: str) -> str | None:
+        """Why ``base_tool`` cannot be a preset's base because a registered preset is behind it, else ``None``.
+
+        The base rule every door that authors a preset base shares (see :func:`preset_base_refusal`).
+        """
+        return preset_base_refusal(base_tool, self.preset_origin(base_tool))
 
     # -- quarantine map (the ``conflicted`` mechanism) ------------------------
 
@@ -209,6 +288,8 @@ class PresetManager:
         output_schema: TemplatedText | dict[str, Any] | None = None,
         input_schema: TemplatedText | dict[str, Any] | None = None,
         *,
+        input_map: TemplatedText | str | None = None,
+        output_map: TemplatedText | str | None = None,
         state_binding: StateBinding | None = None,
         version: int = 1,
     ) -> None:
@@ -236,6 +317,8 @@ class PresetManager:
                 description,
                 output_schema,
                 input_schema,
+                input_map=input_map,
+                output_map=output_map,
                 state_binding=state_binding,
                 version=version,
             )
@@ -250,6 +333,8 @@ class PresetManager:
         output_schema: TemplatedText | dict[str, Any] | None = None,
         input_schema: TemplatedText | dict[str, Any] | None = None,
         *,
+        input_map: TemplatedText | str | None = None,
+        output_map: TemplatedText | str | None = None,
         state_binding: StateBinding | None = None,
         version: int,
     ) -> None:
@@ -280,6 +365,8 @@ class PresetManager:
             description=description,
             output_schema=output_schema,
             input_schema=input_schema,
+            input_map=input_map,
+            output_map=output_map,
         )
         self._commit_registration(
             name,
@@ -290,6 +377,8 @@ class PresetManager:
             description=description,
             output_schema=output_schema,
             input_schema=input_schema,
+            input_map=input_map,
+            output_map=output_map,
             state_binding=state_binding,
             version=version,
         )
@@ -305,6 +394,8 @@ class PresetManager:
         description: str,
         output_schema: TemplatedText | dict[str, Any] | None,
         input_schema: TemplatedText | dict[str, Any] | None,
+        input_map: TemplatedText | str | None,
+        output_map: TemplatedText | str | None,
         state_binding: StateBinding | None = None,
         version: int,
     ) -> None:
@@ -343,6 +434,8 @@ class PresetManager:
             extensions=[list(combo) for combo in extensions],
             output_schema=output_schema,
             input_schema=input_schema,
+            input_map=input_map,
+            output_map=output_map,
             state_binding=state_binding,
         )
         # The version is captured in lockstep with the spec it was read at, so the two
@@ -390,6 +483,8 @@ class PresetManager:
                 description=body.description,
                 output_schema=body.output_schema,
                 input_schema=body.input_schema,
+                input_map=body.input_map,
+                output_map=body.output_map,
             )
             self._remove_registration(name)
             try:
@@ -402,6 +497,8 @@ class PresetManager:
                     description=body.description,
                     output_schema=body.output_schema,
                     input_schema=body.input_schema,
+                    input_map=body.input_map,
+                    output_map=body.output_map,
                     state_binding=body.state_binding,
                     version=version,
                 )
@@ -415,6 +512,8 @@ class PresetManager:
                         captured.description,
                         captured.output_schema,
                         captured.input_schema,
+                        input_map=captured.input_map,
+                        output_map=captured.output_map,
                         state_binding=captured.state_binding,
                         version=captured_version if captured_version is not None else version,
                     )
@@ -471,6 +570,8 @@ class PresetManager:
                             body.description,
                             body.output_schema,
                             body.input_schema,
+                            input_map=body.input_map,
+                            output_map=body.output_map,
                             state_binding=body.state_binding,
                             version=version,
                         )
@@ -493,41 +594,36 @@ class PresetManager:
         quarantine map are cleared WHOLESALE first, then every preset is rebuilt from
         its active store body. A stale preset is QUARANTINED
         (logged loudly, surfaced as ``conflicted``) rather than registered when its
-        name is taken by a foreign tool, or its base tool is missing or itself a
-        preset. A preset already bound as THIS SAME spec is re-adopted without a
-        rebind (idempotent self-registration). One bad name never aborts the
-        boot.
+        name is taken by a foreign tool, or its base tool is missing, a stored
+        preset, or derived from one (an extension branch a preset produces). A preset
+        already bound as THIS SAME spec is re-adopted without a rebind (idempotent
+        self-registration). One bad name never aborts the boot.
+
+        A base absent from the live-tool snapshot is judged after every preset has
+        bound, so its verdict names a preset that produces it whichever order the
+        records load in.
         """
         prior = self._specs
         self._specs = {}
         self._versions = {}
         self._quarantine = {}
-        records = await self._app.presets.store.list_presets()
-        # One batched version-aware read instead of a per-record round-trip: each
-        # preset's active version and body are captured TOGETHER, so the version the
-        # engine retains beside a body is exactly the one it was built from.
+        # One batched version-aware read: each preset's active version and body are
+        # captured TOGETHER, so the version the engine retains beside a body is exactly
+        # the one it was built from.
         versioned = await self._app.presets.list_active_versioned_bodies()
-        preset_names = {rec.name for rec in records}
+        preset_names = set(versioned)
         # Snapshot the live tools ONCE, before registering any preset, so a name
         # found here that is NOT one of ours is genuinely a foreign tool.
         live = set(await self._app.tools.get_tools())
-        for rec in records:
-            version_body = versioned.get(rec.name)
-            if version_body is None:
-                # The record list and the active-body map are two separate store
-                # round-trips; a delete landing between them leaves a record whose
-                # active body is already gone. Skip it — the list route makes the
-                # same call for this divergence, and the next reload reconciles it —
-                # rather than let a bare ``bodies[rec.name]`` KeyError abort the whole
-                # boot/reload under the hook's ``raise_on_error``.
-                logger.warning(
-                    "preset %r skipped during rehydration: its active body is absent "
-                    "(store read-skew or a concurrent delete); the next reload reconciles it",
-                    rec.name,
-                )
-                continue
-            version, body = version_body
-            await self._rehydrate_one(rec.name, version, body, prior, preset_names, live)
+        # name -> base tool, for each preset whose base was absent from the snapshot.
+        absent_bases: dict[str, str] = {}
+        for name, (version, body) in versioned.items():
+            await self._rehydrate_one(name, version, body, prior, preset_names, live, absent_bases)
+        for name, base in absent_bases.items():
+            refusal = preset_base_refusal(base, self._origin_among(base, preset_names))
+            reason = f"its {refusal}" if refusal is not None else f"its base tool {base!r} is not a registered tool"
+            self._quarantine[name] = reason
+            logger.error("preset %r quarantined: %s", name, reason)
 
     async def _rehydrate_one(
         self,
@@ -537,6 +633,7 @@ class PresetManager:
         prior: dict[str, PresetBody],
         preset_names: set[str],
         live: set[str],
+        absent_bases: dict[str, str],
     ) -> None:
         if not is_valid_preset_name(name):
             self._quarantine[name] = _NAME_LAW_REASON
@@ -560,41 +657,59 @@ class PresetManager:
             # before re-binding the new body.
             self._remove_registration(name)
         base = body.base_tool
-        if base in preset_names:
-            reason = f"its base tool {base!r} is itself a preset"
+        refusal = preset_base_refusal(base, self._origin_among(base, preset_names))
+        if refusal is not None:
+            reason = f"its {refusal}"
             self._quarantine[name] = reason
             logger.error("preset %r quarantined: %s", name, reason)
             return
         if base not in live:
-            reason = f"its base tool {base!r} is not a registered tool"
+            # Judged by :meth:`rehydrate` once every preset has bound.
+            absent_bases[name] = base
+            return
+        try:
+            reason = await self._bind_rehydrated(name, version, body)
+        except Exception:
+            reason = "registration failed"
+            self._quarantine[name] = reason
+            logger.exception("preset %r quarantined: %s", name, reason)
+            return
+        if reason is not None:
             self._quarantine[name] = reason
             logger.error("preset %r quarantined: %s", name, reason)
-            return
+
+    async def _bind_rehydrated(self, name: str, version: int, body: PresetBody) -> str | None:
+        """Bind a stored ``body`` whose base is live; the reason it is refused, or ``None`` once bound.
+
+        A body the extensions cannot present, or whose maps or text bodies are refused, is
+        refused with that reason; any other failure raises.
+        """
         try:
             clash = (
                 output_schema_extension_clash(body.extensions, self._app._extension_registry.declares_output_schema)
                 if body.output_schema is not None
                 else None
             )
+            if clash is None:
+                clash = await branch_input_schema_error(name, body.extensions, body.input_schema)
             if clash is not None:
-                self._quarantine[name] = clash
-                logger.error("preset %r quarantined: %s", name, clash)
-                return
+                return clash
             await self._register(
                 name,
-                base,
+                body.base_tool,
                 body.fixed_kwargs,
                 body.extensions,
                 body.description,
                 body.output_schema,
                 body.input_schema,
+                input_map=body.input_map,
+                output_map=body.output_map,
                 state_binding=body.state_binding,
                 version=version,
             )
-        except Exception:
-            reason = "registration failed"
-            self._quarantine[name] = reason
-            logger.exception("preset %r quarantined: %s", name, reason)
+        except (PresetMapError, TextBodyError) as exc:
+            return str(exc)
+        return None
 
     # -- internal teardown ----------------------------------------------------
 

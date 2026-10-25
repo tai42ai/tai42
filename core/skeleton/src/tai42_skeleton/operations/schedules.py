@@ -5,13 +5,13 @@ pre-check that an installed backend registers the contract's marker tools (``SCH
 raise :class:`NotSupportedError` (501) when it does not. ``server_datetime`` dispatches
 no tool at all — it reads the platform's own clock (:func:`~tai42_skeleton.tools.time.server_time`),
 so it needs no backend and answers unconditionally. An unknown caller-named tool on
-create is :class:`NotFoundError` (404) instead.
+create is a :class:`BadRequestError` (400) instead, from the write doors' reference check.
 
 List/create/delete each dispatch a NAMED inner tool and wrap that dispatch identically:
 
 * an :class:`~tai42_skeleton.tools.binding.UnknownToolError` naming the tool the door
   itself asked for is that tool's absence — the door's own verdict (501 for
-  list/delete, 404 for create);
+  list/delete, 400 for create);
 * an ``UnknownToolError`` naming a DIFFERENT tool escaped the running tool's own body —
   a structured :class:`OperationFailedError` (500);
 * a typed :class:`OperationError` (most sharply ``PermissionDeniedError``) passes through as
@@ -21,7 +21,7 @@ List/create/delete each dispatch a NAMED inner tool and wrap that dispatch ident
 
 Only list's and delete's absent-marker-tool branch logs (``logger.warning``): the
 marker passed the presence pre-check moments earlier, so failing to resolve at dispatch
-is an ANOMALY worth a trace, and the caller sees only a plain 501. create's 404 stays
+is an ANOMALY worth a trace, and the caller sees only a plain 501. create's 400 stays
 silent — an unregistered caller-named tool is steady-state/ordinary, and logging it would
 repeat every request. Both 500 branches always ``logger.exception``.
 
@@ -100,6 +100,8 @@ from tai42_skeleton.operations import (
 from tai42_skeleton.operations._authority import assert_execution_key_bindable, resolve_caller
 from tai42_skeleton.operations._submitted_tool_authz import authorize_submitted_tool
 from tai42_skeleton.operations.definition_door import definition_door
+from tai42_skeleton.operations.reference_check import RegistryReference, reference_refusal
+from tai42_skeleton.operations.reference_graph import assert_blob_references_resolve
 from tai42_skeleton.operations.response_models_group_b import ScheduleListResponse
 from tai42_skeleton.schedules import check_schedule_definition
 from tai42_skeleton.tools.binding import UnknownToolError
@@ -383,14 +385,14 @@ async def _fire_run_once(
 async def _dispatch_schedule_creation(dispatch_name: str, coro_factory: Callable[[], Awaitable[Any]]) -> Any:
     """Run ``coro_factory`` (the recurring schedule submit or the run-once fire), mapping its failures.
 
-    The unknown target vanishing between lookup and dispatch is a 404; a typed operation error is the
+    The unknown target vanishing between lookup and dispatch is a 400; a typed operation error is the
     inner tool's own answer and propagates; any other raise is a wrapped creation failure.
     """
     try:
         return await coro_factory()
     except UnknownToolError as exc:
         if exc.tool_name == dispatch_name:
-            raise NotFoundError(f"unknown tool: {dispatch_name}") from exc
+            raise BadRequestError(reference_refusal([RegistryReference("scheduled tool", dispatch_name)])) from exc
         logger.exception("create-schedule %r raised unknown-tool %r during execution", dispatch_name, exc.tool_name)
         raise OperationFailedError(f"schedule creation failed (unknown tool {exc.tool_name})") from exc
     except OperationError:
@@ -469,13 +471,18 @@ async def create_schedule(
     )
     if has_contract and execution_key is None:
         raise BadRequestError("a schedule contract jq (start/cancel/resume/extras) requires an execution_key")
+    # The tool and every name its arguments compose must be served, judged over the arguments as given.
+    await assert_blob_references_resolve(
+        RegistryReference("scheduled tool", tool_name), tool_name, tool_kwargs, "tool_kwargs"
+    )
     dispatch_name, arguments = await _resolve_schedule_dispatch(tool_name, tool_kwargs, cadence, schedule_name)
     _refuse_reserved_schedule_keys(arguments)
     recurring = cadence is not None
-    # Attach-on-use + validate the binding at SAVE (create), before persisting the schedule — a
-    # refused binding fails the create as a 4xx, never a schedule that fires broken.
+    # Check the contract's stored ids and attach-on-use + validate the binding at SAVE (create),
+    # before persisting the schedule — a refusal fails the create as a 4xx, never a schedule that
+    # fires broken.
     with definition_door("schedule"):
-        await check_schedule_definition(state_binding)
+        await check_schedule_definition(state_binding, contract if has_contract else None)
     fingerprint: str | None = None
     if execution_key is not None:
         # Validate the key is bindable and derive its per-mint fingerprint, the way a hook does; the

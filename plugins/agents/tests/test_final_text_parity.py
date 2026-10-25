@@ -24,7 +24,7 @@ from tai42_contract.agent import MessageFinal
 from tai42_agents._internal import base_tool_agent as bta
 
 from ._graph_support import invoke_tools_agent, stream_tools_agent_events
-from .conftest import fake_run_trace
+from .conftest import fake_init_langgraph_config
 
 _FINAL = AIMessage(
     content=[
@@ -82,7 +82,9 @@ def _seams(monkeypatch: pytest.MonkeyPatch, model: BaseChatModel) -> None:
     monkeypatch.setattr(
         bta,
         "init_langgraph_config",
-        lambda config: fake_run_trace({"configurable": {"thread_id": config["configurable"]["thread_id"]}}),
+        lambda config, _context: fake_init_langgraph_config(
+            {"configurable": {"thread_id": config["configurable"]["thread_id"]}}
+        ),
     )
 
 

@@ -13,6 +13,7 @@ import pytest
 from tai42_contract.backup import BackupSectionInfo, BackupSectionReport
 
 from tai42_skeleton.backup.registry import BackupRegistry, BackupSectionReportError
+from tai42_skeleton.backup.sections import register_core_sections
 
 
 def test_sections_reports_registration_order_and_secret_flag():
@@ -24,6 +25,13 @@ def test_sections_reports_registration_order_and_secret_flag():
         BackupSectionInfo(name="alpha", secret=True),
         BackupSectionInfo(name="beta", secret=False),
     ]
+
+
+def test_core_sections_restore_the_store_before_every_section_naming_a_stored_id():
+    registry = BackupRegistry()
+    register_core_sections(registry)
+    names = [info.name for info in registry.sections()]
+    assert names[:7] == ["manifest", "env", "storage", "access_control", "sub_mcp", "states", "webhooks"]
 
 
 def test_register_duplicate_name_raises():

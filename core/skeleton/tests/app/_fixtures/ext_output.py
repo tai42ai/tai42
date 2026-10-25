@@ -19,7 +19,7 @@ from tai42_contract.extensions import ExtensionKind
 
 
 @tai42_app.extensions.extension(kind=ExtensionKind.WRAPPER, name="passw")
-def passw(func, name, desc, config=None):
+def passw(func, name, desc):
     """Shape-preserving wrapper with no return annotation — branch inherits."""
 
     def impl(*args, **kwargs):
@@ -29,7 +29,7 @@ def passw(func, name, desc, config=None):
 
 
 @tai42_app.extensions.extension(kind=ExtensionKind.BACKEND, name="passb")
-def passb(func, name, desc, config=None):
+def passb(func, name, desc):
     """Shape-preserving backend swap with no return annotation — branch inherits."""
 
     def impl(*args, **kwargs):
@@ -39,7 +39,7 @@ def passb(func, name, desc, config=None):
 
 
 @tai42_app.extensions.extension(kind=ExtensionKind.TRANSFORMER, name="listtf")
-def listtf(func, name, desc, config=None):
+def listtf(func, name, desc):
     """Reshape the single result into a list — its branch must NOT inherit the
     base's single-object output schema. Presents a concrete signature (the
     transformer input-schema rule)."""
@@ -55,7 +55,7 @@ class OwnOut(BaseModel):
 
 
 @tai42_app.extensions.extension(kind=ExtensionKind.WRAPPER, name="ownw")
-def ownw(func, name, desc, config=None):
+def ownw(func, name, desc):
     """Shape-preserving wrapper that declares its OWN object output schema — the
     gate must leave it, never force the base schema over it."""
 

@@ -51,7 +51,7 @@ class Measure(StrEnum):
     ``COST`` / ``TOKENS`` / ``LATENCY`` are the cost, token and latency aggregates.
     A backend maps each onto its own metric names and declares the set it serves
     through :class:`MetricsCapability`; a query for a measure it does not serve
-    raises ``MonitoringReadNotSupportedError``.
+    raises ``MonitoringReadNotServedError``.
     """
 
     COUNT = "count"
@@ -66,7 +66,7 @@ class Dimension(StrEnum):
     ``MODEL`` groups the aggregates per model. A backend maps it onto its own
     per-generation model attribute and declares whether it serves it through
     :class:`MetricsCapability`; a query that groups by a dimension the backend does
-    not serve raises ``MonitoringReadNotSupportedError`` rather than silently
+    not serve raises ``MonitoringReadNotServedError`` rather than silently
     returning one ungrouped total.
     """
 
@@ -78,7 +78,7 @@ class MetricsCapability(BaseModel):
 
     A backend declares the neutral :class:`Measure` set it can aggregate and the
     :class:`Dimension` set it can group by. A query that requests a measure or
-    dimension outside this set raises ``MonitoringReadNotSupportedError`` — never a
+    dimension outside this set raises ``MonitoringReadNotServedError`` — never a
     silent zero, never a silently dropped group. A reader consults this before a
     query so an unserved panel is reported as declared-absent, not as a swallowed
     failure.
@@ -97,7 +97,7 @@ class ListCapability(BaseModel):
     ``list_traces`` serves. ``incompatible_filters`` maps a sort field to the
     :class:`MonitoringFilter` field names it cannot be combined with; a sort field
     absent from the map combines with every filter. ``list_traces`` raises
-    ``MonitoringReadNotSupportedError`` for a sort or a combination outside this
+    ``MonitoringReadNotServedError`` for a sort or a combination outside this
     declaration.
     """
 
@@ -180,6 +180,10 @@ class TraceContext(BaseModel):
     parent_span_id) and carried to ``open_span`` / ``start_span`` / ``record_span`` /
     ``create_event`` and to the kit's ``bind_run_trace``. ``tags`` drive the run/tag
     filtering on the totals screen; ``metadata`` carries attribution.
+
+    ``trace_id`` and ``parent_span_id`` come together: a span joins a trace only under a
+    parent in it. A context with neither starts the span under the live span, or as the
+    root of a new trace.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -188,6 +192,15 @@ class TraceContext(BaseModel):
     parent_span_id: str | None = None
     tags: list[str] | None = None
     metadata: dict[str, Any] | None = None
+
+    @model_validator(mode="after")
+    def _trace_and_parent_together(self) -> TraceContext:
+        if bool(self.trace_id) != bool(self.parent_span_id):
+            raise ValueError(
+                "a trace context names a trace id and a parent span id together, or neither: "
+                f"got trace_id={self.trace_id!r}, parent_span_id={self.parent_span_id!r}"
+            )
+        return self
 
 
 class RecordId(BaseModel):
@@ -316,7 +329,7 @@ class MetricsQuery(BaseModel):
     (``hour`` / ``day`` / ``week``); ``None`` is no time bucketing. Every member is
     neutral: a backend maps each onto its own metrics API and declares the measures
     and dimensions it serves through :class:`MetricsCapability`. A measure or
-    dimension the backend does not serve raises ``MonitoringReadNotSupportedError``
+    dimension the backend does not serve raises ``MonitoringReadNotServedError``
     rather than returning a silent zero.
     """
 
@@ -430,7 +443,7 @@ class OrderBy(BaseModel):
 
     ``field`` names a NEUTRAL, scalar/comparable model field (or a derived sort
     key the reader documents). Only one key — no multi-key / tie-break order.
-    A field a backend cannot sort on raises ``MonitoringReadNotSupportedError``.
+    A field a backend does not sort on raises ``MonitoringReadNotServedError``.
 
     Sortable keys:
     - ``list_traces`` (over ``MonitoringTraceSummary``): ``timestamp`` (default),
@@ -484,7 +497,7 @@ class MonitoringFilter(BaseModel):
     entry is one equality match on the neutral ``metadata`` field. The min/max
     bounds are inclusive ranges over cost / token / latency totals; an inverted
     range (``min`` greater than ``max``) is rejected at construction. A backend
-    that cannot honor a requested clause raises ``MonitoringReadNotSupportedError`` —
+    that does not serve a requested clause raises ``MonitoringReadNotServedError`` —
     it never silently drops the clause.
 
     ``latency`` is measured in seconds; ``cost`` in the backend's cost unit;

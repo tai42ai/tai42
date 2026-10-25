@@ -39,9 +39,11 @@ from tai42_skeleton.states import service as service_mod
 from tai42_skeleton.states.service import StatesService
 from tai42_skeleton.states.service.rendered import rendered_digest
 from tai42_skeleton.states.store import PostgresStatesStore
-from tai42_skeleton.template.resource_manager import ResourceManager, TemplateNotFoundError
+from tai42_skeleton.template.errors import TemplateNotFoundError
+from tai42_skeleton.template.resource_manager import ResourceManager
 from tai42_skeleton.template.settings import TemplateCacheSettings
 
+from .._fakes.recording_storage import MappedStorage
 from ..app._fixtures.reload import reload_with
 from .conftest import FakeStatesPg
 
@@ -101,6 +103,11 @@ _DECL = StateDeclaration(
     subject_kinds=["thread"],
     default_subject_kind="thread",
 )
+
+
+@pytest.fixture(autouse=True)
+def _stored(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(app._storage_registry, "_provider", MappedStorage(_STORED))
 
 
 @pytest.fixture

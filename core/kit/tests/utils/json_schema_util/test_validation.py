@@ -245,3 +245,88 @@ def test_validator_admits_a_pointer_into_a_meta_schema_subschema_binding_no_dyna
     validate_against_json_schema({"p": "ab"}, schema)
     with pytest.raises(JsonSchemaValidationError):
         validate_against_json_schema({"p": 5}, schema)
+
+
+_LABELLED = {
+    "type": "object",
+    "properties": {"label": {"type": "string", "minLength": 1}},
+    "required": ["label"],
+    "additionalProperties": False,
+}
+
+_SCHEMA_VALUED = {
+    "type": "object",
+    "properties": {"schema": {"$ref": "https://json-schema.org/draft/2020-12/schema"}},
+    "required": ["schema"],
+    "additionalProperties": False,
+}
+
+
+@pytest.mark.parametrize(
+    ("schema", "instance", "message"),
+    [
+        (_LABELLED, {}, "value does not match schema at $: breaks the schema's 'required' rule: 'label'"),
+        (
+            _LABELLED,
+            {"label": "ok", "x": "s3cr3t-unknown"},
+            "value does not match schema at $: breaks the schema's 'additionalProperties' rule: false",
+        ),
+        (_LABELLED, {"label": 7}, "value does not match schema at $.label: breaks the schema's 'type' rule: 'string'"),
+        (_LABELLED, {"label": ""}, "value does not match schema at $.label: breaks the schema's 'minLength' rule: 1"),
+        (
+            {"type": "object", "properties": {"s": {"anyOf": [{"type": "object"}, {"type": "boolean"}]}}},
+            {"s": "s3cr3t-any"},
+            "value does not match schema at $.s: breaks the schema's 'anyOf' rule",
+        ),
+        (
+            {"type": "object", "properties": {"s": {"type": ["object", "boolean"]}}},
+            {"s": "s3cr3t-scalar"},
+            "value does not match schema at $.s: breaks the schema's 'type' rule: 'object', 'boolean'",
+        ),
+        (
+            _SCHEMA_VALUED,
+            {"schema": {"type": "s3cr3t-type"}},
+            "value does not match schema at $.schema.type: breaks the schema's 'anyOf' rule",
+        ),
+        (
+            _SCHEMA_VALUED,
+            {"schema": "s3cr3t-scalar"},
+            "value does not match schema at $.schema: breaks the schema's 'type' rule: 'object', 'boolean'",
+        ),
+        (
+            {"type": "object", "properties": {"a": False}},
+            {"a": "s3cr3t-closed"},
+            "value does not match schema at $: refused by the schema",
+        ),
+        (
+            {"type": "object", "properties": {"n": {"maximum": 2.5}}},
+            {"n": 99},
+            "value does not match schema at $.n: breaks the schema's 'maximum' rule: 2.5",
+        ),
+        (
+            {"type": "object", "properties": {"n": {"const": None}}},
+            {"n": "s3cr3t-null"},
+            "value does not match schema at $.n: breaks the schema's 'const' rule: null",
+        ),
+    ],
+)
+def test_redacted_mismatch_names_the_path_and_the_rule_never_the_value(
+    schema: dict[str, object], instance: object, message: str
+) -> None:
+    with pytest.raises(JsonSchemaValidationError) as caught:
+        validate_against_json_schema(instance, schema, redact_value=True)
+    assert str(caught.value) == f"{message} (the value is not shown)"
+    assert caught.value.offending_value is None
+    assert caught.value.json_path
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+    assert "s3cr3t" not in str(caught.value)
+
+
+def test_redacted_mode_still_refuses_a_broken_schema_first() -> None:
+    with pytest.raises(InvalidJsonSchemaError):
+        validate_against_json_schema({"a": 1}, {"type": "s3cr3t-type"}, redact_value=True)
+
+
+def test_redacted_mode_passes_a_conforming_instance() -> None:
+    assert validate_against_json_schema({"label": "ok"}, _LABELLED, redact_value=True) is None

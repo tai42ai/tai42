@@ -69,6 +69,8 @@ class WhatsAppChannel:
     # Meta caps a text message body at 4096 characters; the conversation-delivery machine splits a
     # long answer against this (an operator may override it per deployment).
     max_message_chars: ClassVar[int] = 4096
+    # The address a conversation route on this channel names as its ``our_identity``.
+    identity_hint: ClassVar[str] = "The number's phone_number_id from the Meta dashboard, not the display number."
 
     def validate_template(self, template: ChannelTemplate) -> None:
         """Enforce this channel's template-parameter schema, before any send.

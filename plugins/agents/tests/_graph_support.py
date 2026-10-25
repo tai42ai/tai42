@@ -60,7 +60,9 @@ async def build_agent_and_input(
     graph = await compiled_graph(
         system_message, tools, llm_provider, checkpoint_provider, llm_kwargs, system_content_kwargs, response_format
     )
-    messages, config, minted_thread = await bta._build_agent_and_input(graph, user_message, config, user_content_kwargs)
+    messages, config, minted_thread = await bta._build_agent_and_input(
+        graph, user_message, config, user_content_kwargs, None
+    )
     return graph.agent, messages, config, graph.strategy, minted_thread
 
 

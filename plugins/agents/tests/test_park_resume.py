@@ -14,8 +14,9 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, cast
 
+import orjson
 import pytest
 from fakeredis import aioredis
 from langchain_core.language_models import BaseChatModel
@@ -32,8 +33,11 @@ from tai42_contract.interactions import (
     SuspendedInteraction,
     get_resume_continuation_tool,
 )
+from tai42_contract.monitoring import RUN_ATTRIBUTION_TRACE_NAME
 from tai42_contract.template import TemplatedText
 from tai42_kit.interactions.park_index import DriveInProgressError, superstep_id
+from tai42_kit.monitoring import encode_payload
+from tai42_kit.monitoring.testing import span_to_observation
 
 from tai42_agents._internal.park import agent_resume, finalize_drive
 from tai42_agents._internal.park import capability as cap
@@ -48,7 +52,7 @@ from tai42_agents.langchain_deep_agent import run_thread as run_thread_mod
 from tai42_agents.langchain_deep_agent.tool_spec import DeepSubAgentSpec
 
 from ._client_tool import FakeClientTool, client_tool
-from .conftest import bind_park_index, fake_run_trace
+from .conftest import RecordingMonitoringWriter, bind_park_index, fake_init_langgraph_config
 
 
 class ScriptedChatModel(BaseChatModel):
@@ -349,7 +353,7 @@ def _wire_real_build(
     monkeypatch.setattr(agent_mod, "llm_settings", _LlmSettings)
     # The recording app's monitoring writer hands back string callback sentinels; keep
     # them out of the run config (the config already carries the pinned thread_id).
-    monkeypatch.setattr(run_thread_mod, "init_langgraph_config", lambda config=None: fake_run_trace(config))
+    monkeypatch.setattr(run_thread_mod, "init_langgraph_config", fake_init_langgraph_config)
 
 
 def test_full_park_resume_cycle_runs_ask_once_and_clears_index(
@@ -389,6 +393,45 @@ def test_full_park_resume_cycle_runs_ask_once_and_clears_index(
         assert _is_resolved(entry)
 
     asyncio.run(go())
+
+
+def test_a_parked_deep_run_and_its_resume_each_record_their_input_and_output_on_their_run_root(
+    fake_park_redis: Any, monkeypatch: pytest.MonkeyPatch, app_tools: Any
+) -> None:
+    # The parked run's root records the turn and the suspended receipt; the resume opens its own root
+    # recording the answers it resumed with and the run's answer.
+    saver = InMemorySaver()
+    store = InMemoryStore()
+    ask = _CountingAsk("i1")
+    model = ScriptedChatModel([_ask_call(), AIMessage(content="all done")])
+    _wire_real_build(monkeypatch, model, saver, store)
+    app_tools.client_tools["ask"] = ask.tool()
+    writer = cast(RecordingMonitoringWriter, tai42_app.monitoring.active.writer)
+    writer.clear()
+
+    agent = tai42_app.agents.get_agent("langchain_deep_agent")
+
+    async def go() -> tuple[Any, dict[str, Any]]:
+        receipt = await agent.run(
+            tool_names=["ask"],
+            checkpoint_provider="redis",
+            user_message=TemplatedText(content="go"),
+            thread_id="t-roots",
+        )
+        entry = await agents_park_index().read_entry("i1")
+        assert entry is not None
+        assert await agent_resume("i1", "the answer") == "all done"
+        return receipt, {entry["interrupt_id"]: {"i1": "the answer"}}
+
+    receipt, resume_map = asyncio.run(go())
+
+    roots = [span_to_observation(s) for s in writer.spans() if s.parent is None]
+    assert [r.name for r in roots] == [RUN_ATTRIBUTION_TRACE_NAME, RUN_ATTRIBUTION_TRACE_NAME]
+    parked, resumed = sorted(roots, key=lambda r: r.start or datetime.min.replace(tzinfo=UTC))
+    assert parked.input == orjson.loads(encode_payload({"user_message": TemplatedText(content="go")}))
+    assert parked.output == orjson.loads(encode_payload(receipt))
+    assert resumed.input == {"resume": resume_map}
+    assert resumed.output == "all done"
 
 
 def test_deep_agent_resume_over_a_gone_checkpoint_fails_loudly(

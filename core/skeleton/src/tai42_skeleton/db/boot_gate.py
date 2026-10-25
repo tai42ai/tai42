@@ -1,6 +1,6 @@
 """Boot-time schema gate — refuse to serve on an out-of-date database.
 
-The skeleton asserts, once at startup, that its migration chain is fully applied
+The skeleton asserts, once per epoch build, that its migration chain is fully applied
 before the app accepts traffic: a pending migration or a checksum mismatch is a
 loud refusal naming ``tai db migrate``, never a half-migrated serve. The check
 reads the ``tai_schema_history`` table through the skeleton's OWN store connection
@@ -41,13 +41,14 @@ __all__ = ["SchemaOutOfDateError", "assert_chain_applied", "assert_skeleton_sche
 
 
 async def assert_skeleton_schema_applied() -> None:
-    """Startup gate: assert the ``skeleton`` chain is applied when the skeleton database is configured.
+    """Epoch-build gate: assert the ``skeleton`` chain is applied when the skeleton database is configured.
 
     Verifies the chain on the skeleton's runtime store connection — the exact
     database its features read and write. A deployment with no skeleton database
-    configured owns no skeleton tables, so the gate is a no-op. Registered ahead of
-    the feature startup handlers so a pending-migration database refuses with the
-    ``tai db migrate`` fix rather than failing deeper on a missing table.
+    configured owns no skeleton tables, so the gate is a no-op. Run as the first
+    step of ``BootMixin.start()``, before any store read of the build, so a
+    pending-migration database refuses with the ``tai db migrate`` fix rather than
+    failing deeper on a missing table.
     """
     if not component_store_configured(SKELETON_COMPONENT):
         logger.info("schema gate: the skeleton database is not configured — skipping the migration check")

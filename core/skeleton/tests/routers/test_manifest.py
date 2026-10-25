@@ -15,6 +15,8 @@ import tai42_skeleton.routers.manifest as router
 from tai42_skeleton.app import instance
 
 from .._fakes.bus import FakeBus
+from .._fakes.mcp_listing import no_mcp_listing
+from .._fakes.write_span import ExclusiveWriteStore
 
 
 def _req(body=None, **path_params) -> Request:
@@ -43,7 +45,7 @@ def _data(resp):
     return json.loads(bytes(resp.body))
 
 
-class _FakeConfigManager:
+class _FakeConfigManager(ExclusiveWriteStore):
     """The transactional config-manager seams the ConfigService pipeline drives.
 
     ``mutate_manifest`` runs the mutator on a copy and persists it only if the mutator
@@ -52,6 +54,7 @@ class _FakeConfigManager:
     persisted document (``None`` until a persist lands)."""
 
     def __init__(self, manifest, env=None):
+        super().__init__()
         self._manifest = manifest
         self._env = dict(env or {})
         self.written = None
@@ -93,6 +96,7 @@ def fake(monkeypatch):
         live_manifest=live,
         live_mcp_status=lambda: {"bound": {"gh": ["t1"]}, "failed": []},
         reload_config=lambda: {"status": "ok", "env_keys": 3},
+        served_mcp_names=no_mcp_listing,
         reload_mcp=lambda title: {"title": title, "status": "ok", "tools": ["t1"]},
     )
     # No worker bus: reloads stay local-only (fan-out has its own test). Patch the
@@ -126,9 +130,49 @@ async def test_get_manifest_serves_preserved_markers_not_resolved_secrets(fake):
     assert body["user_tools"] == ["a", "b"]  # sorted
 
 
+_MARKER_COMBO = [{"name": "labelled", "config": {"label": "!ENV ${EXT_TOKEN}"}}]
+
+
+def _store_with_extension_marker(fake) -> None:
+    """A preserved store whose tool combo holds an ``!ENV`` marker; the live view holds its resolved value."""
+    fake.cm._manifest = {
+        "extensions_modules": ["pkg.ext"],
+        "tools": [{"title": "a", "module": "m", "extensions": {"echo": [_MARKER_COMBO]}}],
+        "mcp": [],
+        "user_tools": [],
+    }
+    fake.live["tools"] = [
+        {
+            "title": "a",
+            "module": "m",
+            "extensions": {"echo": [[{"name": "labelled", "config": {"label": "plain-val"}}]]},
+        }
+    ]
+
+
+_EXPECTED_SETTINGS = {
+    "extensions_modules": ["pkg.ext"],
+    "backend_module": None,
+    "tools": [{"title": "a", "extensions": {"echo": [_MARKER_COMBO]}}],
+    "mcp": [],
+    "api_tools": {},
+}
+
+
+@pytest.mark.parametrize("door", ["get_manifest", "get_manifest_preserved"])
+async def test_manifest_read_doors_serve_extension_settings_with_markers(fake, door):
+    _store_with_extension_marker(fake)
+
+    resp = await getattr(router, door)(_req())
+    body = _data(resp)["data"]
+
+    assert body["extension_settings"] == _EXPECTED_SETTINGS
+    assert "plain-val" not in json.dumps(body)
+
+
 async def test_get_manifest_preserved_route(fake):
     # The explicit /api/manifest/preserved door serves the same preserved {mcp, user_tools}
-    # view with markers intact — the source the Studio McpTab editor reads.
+    # view with markers intact — the source an MCP config editor reads.
     fake.cm._manifest = {
         "mcp": [{"title": "gh", "config": {"url": "https://x", "headers": {"Authorization": "!ENV ${GITHUB_TOKEN}"}}}],
         "user_tools": ["search"],
@@ -490,6 +534,7 @@ async def test_mcp_config_valid_persists_and_reloads(fake):
         "fanout": {"mode": "local-only", "note": "no worker bus configured; only this worker reloaded"},
         "recycle": None,
         "awaiting_respawn": [],
+        "span_release_error": None,
     }
     assert fake.cm.written is not None
     assert fake.cm.written["mcp"] == []
@@ -616,6 +661,7 @@ def fake_full(monkeypatch):
         deregister_mcp=lambda title: {"title": title, "status": "ok", "removed": [f"{title}_t"]},
         reload_mcp=lambda title: {"title": title, "status": "ok"},
         reload_config=lambda: {"status": "ok", "env_keys": 0},
+        served_mcp_names=no_mcp_listing,
     )
     fake_app = SimpleNamespace(
         admin=admin,

@@ -150,9 +150,11 @@ class ArqSettings(BackendDispatchSettings, TaiBaseSettings):
     # The Redis connection both sides use, composed from the kit (a field, not a base).
     redis: ArqRedisSettings = Field(default_factory=ArqRedisSettings)
     # The arq queue key both sides bind: the enqueue pool's default target and the
-    # worker's consume target. It is a full Redis key (arq's own default is the
-    # literal ``arq:queue``), so co-tenant deployments on one logical DB diverge
-    # here to keep each worker consuming only its own jobs.
+    # consume target of a worker started without a label; a labelled queue is
+    # ``<queue_name>.<label>``. It is a full Redis key (arq's own default is the
+    # literal ``arq:queue``), so co-tenant deployments on one logical DB set
+    # distinct values, none another's value followed by ``.<label>``, to keep
+    # each worker consuming only its own jobs.
     queue_name: str = default_queue_name
     # How long a callback job waits for its predecessor to complete.
     callback_timeout: int = 5
@@ -168,6 +170,11 @@ class ArqSettings(BackendDispatchSettings, TaiBaseSettings):
     def arq_prefix(self) -> str:
         """The Redis key prefix arq itself uses."""
         return "arq:"
+
+    @property
+    def arq_queue_registry_key(self) -> str:
+        """The Redis set of derived queues this deployment has sent tasks to; the settings queue is implied."""
+        return f"{self.queue_name}:queues"
 
     # -- own schedule namespace ------------------------------------------------
 

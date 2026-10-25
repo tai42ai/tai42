@@ -106,6 +106,16 @@ class InteractionsFacet(_Facet):
 
         await assert_resume_authorized(interaction_id)
 
+    async def settle_chained_terminal(self, chain_key: str, result: Any) -> Any:
+        """``result`` with the chained stages the current drive holds under ``chain_key`` applied.
+
+        Delegates to :func:`tai42_skeleton.tools.stage_frames.settle_chained_terminal`: a stage's
+        refusal is returned as the preset's ``RunFailed``; a ``RunFailed`` passes through.
+        """
+        from tai42_skeleton.tools.stage_frames import settle_chained_terminal
+
+        return await settle_chained_terminal(chain_key, result)
+
     def assert_delivery_authorized(self, completion_id: str | None) -> None:
         """Authorise a door delivery-address tool to fire for ``completion_id`` — or raise.
 

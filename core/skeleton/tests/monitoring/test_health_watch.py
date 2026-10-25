@@ -314,7 +314,7 @@ def test_the_lifespan_spawns_and_cancels_the_watch(monkeypatch: pytest.MonkeyPat
     from tai42_skeleton.app.lifecycle import TaiMCPLifecycleMixin
 
     class _M(TaiMCPLifecycleMixin):
-        def _mcp_tools(self, config, tools):  # pragma: no cover - unused here
+        def _mcp_tools(self, config, tools, preset_names):  # pragma: no cover - unused here
             self._mcp_bound_tools[config.title] = set()
 
     started: list[int] = []
@@ -421,7 +421,7 @@ def test_cancelling_a_watch_that_died_completes_the_shutdown(monkeypatch: pytest
     from tai42_skeleton.app.lifecycle import TaiMCPLifecycleMixin, lifespan
 
     class _M(TaiMCPLifecycleMixin):
-        def _mcp_tools(self, config, tools):  # pragma: no cover - unused here
+        def _mcp_tools(self, config, tools, preset_names):  # pragma: no cover - unused here
             self._mcp_bound_tools[config.title] = set()
 
     async def dies() -> None:

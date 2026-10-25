@@ -17,9 +17,11 @@ from tai42_contract.states.errors import (
 from tai42_contract.states.models import AttachBody, StateTemplateDocument, WriteOrigin
 from tai42_contract.template import TemplatedText
 
+from tai42_skeleton.app import instance
 from tai42_skeleton.states import service as service_mod
 from tai42_skeleton.states.service import StatesService
 
+from .._fakes.recording_storage import MappedStorage
 from .fake_service_store import _STATE, FakeStatesStore, _subject
 
 _ORIGIN = WriteOrigin(consumer="c")
@@ -47,7 +49,7 @@ class _FakeResourceManager:
 
     async def render_templated_text(self, text: TemplatedText, locale: str | None = None) -> str:
         if text.id is not None:
-            from tai42_skeleton.template.resource_manager import TemplateNotFoundError
+            from tai42_skeleton.template.errors import TemplateNotFoundError
 
             if text.id not in _STORED_PROGRAMS:
                 raise TemplateNotFoundError(f"no stored resource {text.id!r}")
@@ -108,6 +110,7 @@ def svc(monkeypatch: pytest.MonkeyPatch):
     # stored-program map each test.
     _STORED_PROGRAMS.clear()
     _STORED_PROGRAMS.update(_STORED_PROGRAMS_BASE)
+    monkeypatch.setattr(instance.app._storage_registry, "_provider", MappedStorage(_STORED_PROGRAMS))
     with tai42_app.bound(_FakeApp()):
         yield StatesService(store=FakeStatesStore())  # type: ignore[arg-type]
 
@@ -512,8 +515,7 @@ async def test_input_program_naming_input_variable_is_refused(svc: StatesService
 
 
 async def test_input_program_by_id_unfetchable_is_loud_at_save(svc: StatesService) -> None:
-    # A by-id body whose stored resource cannot be fetched fails the SAVE loudly, naming the
-    # program and the id.
+    # A by-id body the store does not hold fails the SAVE loudly, naming the site and the id.
     template = StateTemplateDocument.model_validate(
         {
             "name": "byid",
@@ -522,8 +524,9 @@ async def test_input_program_by_id_unfetchable_is_loud_at_save(svc: StatesServic
         }
     )
     await svc.put_declaration(_STATE)
-    with pytest.raises(TemplateValidationError, match="template_jq 'any_due' references stored id 'ghost'"):
+    with pytest.raises(TemplateValidationError) as excinfo:
         await svc.put_template(template, replace=False)
+    assert str(excinfo.value) == "stored id 'ghost' at template_jq.any_due.jq is not a stored template"
 
 
 async def test_input_program_by_id_unfetchable_at_run_time_is_loud(svc: StatesService) -> None:
@@ -597,5 +600,6 @@ async def test_reconcile_by_id_unfetchable_is_loud_at_save(svc: StatesService) -
         }
     )
     await svc.put_declaration(_STATE)
-    with pytest.raises(TemplateValidationError, match="reconcile orphans references stored id 'ghost'"):
+    with pytest.raises(TemplateValidationError) as excinfo:
         await svc.put_template(template, replace=False)
+    assert str(excinfo.value) == "stored id 'ghost' at reconcile.orphans is not a stored template"

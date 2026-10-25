@@ -1562,7 +1562,7 @@
         "type": "object"
       },
       "ApplyResponse": {
-        "description": "The standard mutation-op response: this worker's local reload result merged with the fleet fan-out summary.\n\n``env_keys`` is the count of env keys the reload loaded. ``recycle`` is the fleet recycle\nroll the change ran — ``null`` when it carried no recycle-class key. ``awaiting_respawn`` is\nthe operation's verdict: the workers still awaiting a respawn after it (name + keys) — empty\nwhen the change rolled a recycle that converged and this worker recycles itself; a worker the\nroll did not reach, and every listed worker of a change that rolls nothing, keep their keys.",
+        "description": "The standard mutation-op response: this worker's local reload result merged with the fleet fan-out summary.\n\n``env_keys`` is the count of env keys the reload loaded. ``recycle`` is the fleet recycle\nroll the change ran — ``null`` when it carried no recycle-class key. ``awaiting_respawn`` is\nthe operation's verdict: the workers still awaiting a respawn after it (name + keys) — empty\nwhen the change rolled a recycle that converged and this worker recycles itself; a worker the\nroll did not reach, and every listed worker of a change that rolls nothing, keep their keys.\n``span_release_error`` is ``null`` when the config store released its\nexclusive write span after the persist; otherwise the store's error — the change landed and\nthe reload, broadcast and roll reported here still ran, but the store may still hold its write\nspan until the writer process exits, so a later write can block or be refused until then.",
         "properties": {
           "awaiting_respawn": {
             "items": {
@@ -1588,6 +1588,18 @@
               }
             ],
             "default": null
+          },
+          "span_release_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Span Release Error"
           },
           "status": {
             "title": "Status",
@@ -2026,7 +2038,7 @@
       },
       "BackupSectionReport": {
         "additionalProperties": false,
-        "description": "One section's import outcome — the typed result every importer returns.\n\nThe platform reads ONLY these fields: ``created``/``updated``/``skipped`` are\nthe per-record counts (``skipped`` is the per-record REJECTION count, each also\ncarried in ``errors``), ``errors`` is the per-record failure messages, and\n``fanout`` is the platform's own per-worker report for a section whose restore\nbroadcasts a fleet eviction (``None`` for every section that does not), and\n``recycle`` the fleet recycle roll a section's restore ran for a recycle-class env\nchange (``None`` for every section that ran none), and ``awaiting_respawn`` the workers\nstill awaiting a respawn after the section's env change (name + keys; empty for every\nsection that ran none).\n\n``details`` is an OPEN map for an importer's OWN counts and data — a\nper-entity breakdown, a ``skipped_existing`` tally, minted credentials to\nsurface once — so a backend declares its own shape there without the platform\nknowing it. The typed surface is CLOSED (``extra=\"forbid\"``): an importer that\nreturns a stray top-level field is a wrong shape the registry refuses loudly\nrather than silently dropping. ``validate_assignment`` coerces ``fanout`` and ``recycle`` on\nassignment, so a mutation building the report cannot leave an unvalidated shape.",
+        "description": "One section's import outcome — the typed result every importer returns.\n\nThe platform reads ONLY these fields: ``created``/``updated``/``skipped`` are\nthe per-record counts (``skipped`` is the per-record REJECTION count, each also\ncarried in ``errors``), ``errors`` is the per-record failure messages, and\n``fanout`` is the platform's own per-worker report for a section whose restore\nbroadcasts a fleet eviction (``None`` for every section that does not), and\n``recycle`` the fleet recycle roll a section's restore ran for a recycle-class env\nchange (``None`` for every section that ran none), and ``awaiting_respawn`` the workers\nstill awaiting a respawn after the section's env change (name + keys; empty for every\nsection that ran none), and ``span_release_error`` ``None`` when the config store released\nits exclusive write span after a section's config write (and for every section that writes\nno config), otherwise the store's error — the section's change landed and the reload,\nbroadcast and roll reported here still ran, but the store may still hold its write span\nuntil the writer process exits, so a later write can block or be refused until then.\n\n``details`` is an OPEN map for an importer's OWN counts and data — a\nper-entity breakdown, a ``skipped_existing`` tally, minted credentials to\nsurface once — so a backend declares its own shape there without the platform\nknowing it. The typed surface is CLOSED (``extra=\"forbid\"``): an importer that\nreturns a stray top-level field is a wrong shape the registry refuses loudly\nrather than silently dropping. ``validate_assignment`` coerces ``fanout`` and ``recycle`` on\nassignment, so a mutation building the report cannot leave an unvalidated shape.",
         "properties": {
           "awaiting_respawn": {
             "items": {
@@ -2078,6 +2090,18 @@
             "default": 0,
             "title": "Skipped",
             "type": "integer"
+          },
+          "span_release_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Span Release Error"
           },
           "updated": {
             "default": 0,
@@ -2960,12 +2984,38 @@
         "title": "ChannelConversationRouteView",
         "type": "object"
       },
+      "ChannelEntry": {
+        "description": "One registered channel: its registry name and the hint for a route's ``our_identity``.",
+        "properties": {
+          "identity_hint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Identity Hint"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "identity_hint"
+        ],
+        "title": "ChannelEntry",
+        "type": "object"
+      },
       "ChannelListing": {
-        "description": "The registered channel names the delivery media can resolve.",
+        "description": "The registered channels, sorted by name.",
         "properties": {
           "channels": {
             "items": {
-              "type": "string"
+              "$ref": "#/components/schemas/ChannelEntry"
             },
             "title": "Channels",
             "type": "array"
@@ -4975,6 +5025,18 @@
             "title": "Removed Manifest Entries",
             "type": "array"
           },
+          "span_release_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Span Release Error"
+          },
           "upstream_revoke_outcome": {
             "enum": [
               "success",
@@ -5341,8 +5403,21 @@
         "type": "array"
       },
       "ExtensionView": {
-        "description": "One registered extension: ``name``, the lowercase ``kind`` value, and ``multiple``.\n\n``multiple`` says whether one tool may stack several extensions of that kind.",
+        "description": "One registered extension: ``name``, the lowercase ``kind`` value, ``multiple`` and ``config_schema``.\n\n``multiple`` says whether one tool may stack several extensions of that kind.",
         "properties": {
+          "config_schema": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "the JSON Schema of the settings this extension binds as ``config``; ``null`` when it takes none",
+            "title": "Config Schema"
+          },
           "kind": {
             "title": "Kind",
             "type": "string"
@@ -5359,7 +5434,8 @@
         "required": [
           "name",
           "kind",
-          "multiple"
+          "multiple",
+          "config_schema"
         ],
         "title": "ExtensionView",
         "type": "object"
@@ -5392,7 +5468,7 @@
         "type": "object"
       },
       "FailedMcp": {
-        "description": "An MCP server skipped by the viability check — title, coarse status, and credential-free failure detail.\n\n``category`` is the coarse, credential-free cause (``auth`` for a 401/403,\n``unreachable`` for a transport error or timeout, ``error`` otherwise); ``message``\nis the redacted exception message (URL-embedded credentials stripped); ``http_status``\nis the HTTP status the failure carried, or ``null`` for a pure transport failure.",
+        "description": "An MCP server skipped by the viability check — title, coarse status, and credential-free failure detail.\n\n``category`` is the coarse, credential-free cause (``preset_store`` when the preset\nstore could not be read while the server's tools were being bound, ``auth`` for a\n401/403, ``unreachable`` for a transport error or timeout, ``error`` otherwise); ``message``\nis the redacted exception message (URL-embedded credentials stripped); ``http_status``\nis the HTTP status the failure carried, or ``null`` for a pure transport failure.",
         "properties": {
           "category": {
             "title": "Category",
@@ -6382,6 +6458,33 @@
         },
         "title": "HeldPendingSaveList",
         "type": "array"
+      },
+      "HoldersPreview": {
+        "description": "Every live holder the named action would be refused on — the same gather its gate reads.",
+        "properties": {
+          "action": {
+            "enum": [
+              "rename",
+              "delete",
+              "detach"
+            ],
+            "title": "Action",
+            "type": "string"
+          },
+          "holders": {
+            "items": {
+              "$ref": "#/components/schemas/ReferenceHolder"
+            },
+            "title": "Holders",
+            "type": "array"
+          }
+        },
+        "required": [
+          "action",
+          "holders"
+        ],
+        "title": "HoldersPreview",
+        "type": "object"
       },
       "HookListView": {
         "description": "The registered hooks plus the live per-topic verifier bindings and derived trigger-auth axis.\n\n``topic_verifiers`` values are dumped binding metadata (an open,\nsecret-adjacent map, kept opaque so a bound config is not widened onto the wire);\n``trigger_auth`` maps each visible topic to how its webhook ingress door\nauthenticates, derived live, never stored.",
@@ -8247,6 +8350,109 @@
         "title": "MCPConfig",
         "type": "object"
       },
+      "ManifestExtensionMap": {
+        "description": "One ``tools`` or ``mcp`` entry's ``extensions`` map, keyed by the entry's ``title``.\n\n``extensions`` maps a tool base-name to its list of combos in the contract's normalized shape; a combo element\nis an extension name or a ``{\"name\", \"config\"}`` mapping whose config values keep their ``!ENV`` markers.",
+        "properties": {
+          "extensions": {
+            "additionalProperties": {
+              "items": {
+                "items": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "additionalProperties": true,
+                      "type": "object"
+                    }
+                  ]
+                },
+                "type": "array"
+              },
+              "type": "array"
+            },
+            "title": "Extensions",
+            "type": "object"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "title",
+          "extensions"
+        ],
+        "title": "ManifestExtensionMap",
+        "type": "object"
+      },
+      "ManifestExtensionSettings": {
+        "description": "The extension settings the PRESERVED manifest declares, ``!ENV`` markers intact.\n\n``tools`` and ``mcp`` list only the entries that carry a non-empty ``extensions`` map, in document order;\n``api_tools`` is the ``api_tools.extensions`` map.",
+        "properties": {
+          "api_tools": {
+            "additionalProperties": {
+              "items": {
+                "items": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "additionalProperties": true,
+                      "type": "object"
+                    }
+                  ]
+                },
+                "type": "array"
+              },
+              "type": "array"
+            },
+            "title": "Api Tools",
+            "type": "object"
+          },
+          "backend_module": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Backend Module"
+          },
+          "extensions_modules": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Extensions Modules",
+            "type": "array"
+          },
+          "mcp": {
+            "items": {
+              "$ref": "#/components/schemas/ManifestExtensionMap"
+            },
+            "title": "Mcp",
+            "type": "array"
+          },
+          "tools": {
+            "items": {
+              "$ref": "#/components/schemas/ManifestExtensionMap"
+            },
+            "title": "Tools",
+            "type": "array"
+          }
+        },
+        "required": [
+          "extensions_modules",
+          "backend_module",
+          "tools",
+          "mcp",
+          "api_tools"
+        ],
+        "title": "ManifestExtensionSettings",
+        "type": "object"
+      },
       "ManifestReplace": {
         "description": "A full-manifest replacement carrying the manifest TEXT verbatim.\n\nThe PRESERVED view (``!ENV`` markers intact). The server loads it to the\npreserved document and persists it through the pipeline, so it owns resolution\nand no secret bakes to disk. There is no ``targets``: a persisted replacement\nreaches the whole fleet.",
         "properties": {
@@ -8468,6 +8674,119 @@
         "title": "MarketplaceUpdate",
         "type": "object"
       },
+      "McpAdvertisedTool": {
+        "description": "One tool an MCP server advertises.\n\n``name`` is its served name and ``title``/``description`` the server's; ``selected`` says whether the\nentry's selection admits it, ``bound`` whether the live binding carries it, and ``unbound_reason`` why a\nselected tool is not bound (``None`` otherwise).",
+        "properties": {
+          "bound": {
+            "title": "Bound",
+            "type": "boolean"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "selected": {
+            "title": "Selected",
+            "type": "boolean"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          },
+          "unbound_reason": {
+            "anyOf": [
+              {
+                "enum": [
+                  "server_failed",
+                  "not_loaded",
+                  "preset_conflict",
+                  "unusable_schema",
+                  "not_listed_at_bind"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Unbound Reason"
+          }
+        },
+        "required": [
+          "name",
+          "title",
+          "description",
+          "selected",
+          "bound",
+          "unbound_reason"
+        ],
+        "title": "McpAdvertisedTool",
+        "type": "object"
+      },
+      "McpAdvertisedTools": {
+        "description": "A server's advertised tools with the entry's stored selection lists.\n\n``unadvertised`` holds the names of the set list (``include`` when non-empty, else ``exclude``) that the\nserver no longer advertises.",
+        "properties": {
+          "exclude": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Exclude",
+            "type": "array"
+          },
+          "include": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Include",
+            "type": "array"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "tools": {
+            "items": {
+              "$ref": "#/components/schemas/McpAdvertisedTool"
+            },
+            "title": "Tools",
+            "type": "array"
+          },
+          "unadvertised": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Unadvertised",
+            "type": "array"
+          }
+        },
+        "required": [
+          "title",
+          "include",
+          "exclude",
+          "tools",
+          "unadvertised"
+        ],
+        "title": "McpAdvertisedTools",
+        "type": "object"
+      },
       "McpConfigUpdate": {
         "description": "A replacement MCP config section.\n\nThe full list of MCP server entries that overwrites the manifest's ``mcp``\nlist before the reload.",
         "properties": {
@@ -8653,6 +8972,27 @@
           }
         },
         "title": "McpTargets",
+        "type": "object"
+      },
+      "McpToolFilterUpdate": {
+        "description": "An MCP entry's whole tool selection: its ``include`` and ``exclude`` lists.\n\nEach name is non-empty and unique within its list; at most one list is non-empty (a\nnon-empty ``include`` ignores ``exclude``). Both empty selects every tool.",
+        "properties": {
+          "exclude": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Exclude",
+            "type": "array"
+          },
+          "include": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Include",
+            "type": "array"
+          }
+        },
+        "title": "McpToolFilterUpdate",
         "type": "object"
       },
       "MediaItem": {
@@ -9747,7 +10087,7 @@
         "type": "object"
       },
       "OAuthSuccess": {
-        "description": "A completed connection (served 200).\n\nThe new connection's id, the same-origin ``return_url`` to send the operator back to, and\nthe fleet reload fan-out.",
+        "description": "A completed connection (served 200).\n\nThe new connection's id, the same-origin ``return_url`` to send the operator back to, and\nthe fleet reload fan-out. ``span_release_error`` is ``null`` when the config store released\nits exclusive write span after the manifest write, otherwise the store's error: the\nconnection stands and its reload and broadcast ran, but the store may still hold the span\nuntil the writer process exits, so a later write can block or be refused until then.",
         "properties": {
           "connection_id": {
             "title": "Connection Id",
@@ -9764,6 +10104,18 @@
           "return_url": {
             "title": "Return Url",
             "type": "string"
+          },
+          "span_release_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Span Release Error"
           }
         },
         "required": [
@@ -10449,6 +10801,18 @@
             },
             "title": "Removed Manifest Entries",
             "type": "array"
+          },
+          "span_release_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Span Release Error"
           }
         },
         "required": [
@@ -10796,8 +11160,11 @@
         "type": "object"
       },
       "PreservedManifestView": {
-        "description": "The PRESERVED persisted manifest's MCP section + user tools.\n\nThe ``mcp`` entries carry their raw ``!ENV ${KEY}`` markers intact (unresolved config entries, NOT a\nresolved ``TaiMCPConfig``), so no secret value ever leaves on the wire.",
+        "description": "The PRESERVED persisted manifest's MCP section, user tools and extension settings.\n\nThe ``mcp`` entries carry their raw ``!ENV ${KEY}`` markers intact (unresolved config entries, NOT a\nresolved ``TaiMCPConfig``), and so do the extension settings, so no secret value ever leaves on the wire.",
         "properties": {
+          "extension_settings": {
+            "$ref": "#/components/schemas/ManifestExtensionSettings"
+          },
           "mcp": {
             "items": {
               "additionalProperties": true,
@@ -10816,13 +11183,14 @@
         },
         "required": [
           "mcp",
-          "user_tools"
+          "user_tools",
+          "extension_settings"
         ],
         "title": "PreservedManifestView",
         "type": "object"
       },
       "PresetCreate": {
-        "description": "A preset-creation request.\n\n``description`` is the bound tool's LLM-facing docstring — REQUIRED non-empty on every\ncreate. ``extensions`` is the list of extension combos (each element an extension name or a\n``{\"name\", \"config\"}`` mapping binding author config). ``output_schema`` is the optional\nauthor-set OUTPUT JSON Schema (an object schema).",
+        "description": "A preset-creation request.\n\n``description`` is the bound tool's LLM-facing docstring — REQUIRED non-empty on every\ncreate. ``extensions`` is the list of extension combos (each element an extension name or a\n``{\"name\", \"config\"}`` mapping binding author config). ``output_schema`` is the optional\nauthor-set OUTPUT JSON Schema (an object schema). ``input_map`` is an optional jq program\nturning the caller's input (described by ``input_schema``, which it needs) into the base\ntool's arguments, with ``$fixed`` holding ``fixed_kwargs``; ``output_map`` is an optional jq\nprogram reshaping the base tool's result before ``output_schema`` is checked. Each map is the\nprogram text or a stored-body reference.",
         "properties": {
           "base_tool": {
             "title": "Base Tool",
@@ -10857,6 +11225,21 @@
             "title": "Fixed Kwargs",
             "type": "object"
           },
+          "input_map": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TemplatedText-Input"
+              },
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Input Map"
+          },
           "input_schema": {
             "anyOf": [
               {
@@ -10876,6 +11259,21 @@
           "name": {
             "title": "Name",
             "type": "string"
+          },
+          "output_map": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TemplatedText-Input"
+              },
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Output Map"
           },
           "output_schema": {
             "anyOf": [
@@ -10964,8 +11362,25 @@
           "fanout": {
             "$ref": "#/components/schemas/FanoutSummary"
           },
+          "input_map": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TemplatedText-Output"
+              },
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Input Map"
+          },
           "input_schema": {
             "anyOf": [
+              {
+                "$ref": "#/components/schemas/TemplatedText-Output"
+              },
               {
                 "additionalProperties": true,
                 "type": "object"
@@ -10980,8 +11395,25 @@
             "title": "Name",
             "type": "string"
           },
+          "output_map": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TemplatedText-Output"
+              },
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Output Map"
+          },
           "output_schema": {
             "anyOf": [
+              {
+                "$ref": "#/components/schemas/TemplatedText-Output"
+              },
               {
                 "additionalProperties": true,
                 "type": "object"
@@ -11015,6 +11447,8 @@
           "extensions",
           "output_schema",
           "input_schema",
+          "input_map",
+          "output_map",
           "conflicted",
           "conflicted_reason",
           "uses",
@@ -11100,8 +11534,25 @@
             "title": "Fixed Kwargs",
             "type": "object"
           },
+          "input_map": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TemplatedText-Output"
+              },
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Input Map"
+          },
           "input_schema": {
             "anyOf": [
+              {
+                "$ref": "#/components/schemas/TemplatedText-Output"
+              },
               {
                 "additionalProperties": true,
                 "type": "object"
@@ -11116,8 +11567,25 @@
             "title": "Name",
             "type": "string"
           },
+          "output_map": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TemplatedText-Output"
+              },
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Output Map"
+          },
           "output_schema": {
             "anyOf": [
+              {
+                "$ref": "#/components/schemas/TemplatedText-Output"
+              },
               {
                 "additionalProperties": true,
                 "type": "object"
@@ -11151,6 +11619,8 @@
           "extensions",
           "output_schema",
           "input_schema",
+          "input_map",
+          "output_map",
           "conflicted",
           "conflicted_reason",
           "uses",
@@ -11169,7 +11639,7 @@
         "type": "array"
       },
       "PresetRecordView": {
-        "description": "A preset's record row.\n\n``extensions`` is the ordered extension combos; ``conflicted`` marks a quarantined record with its\n``conflicted_reason`` (``null`` when clean); ``uses`` / ``used_by`` are the sorted other presets this\nbody composes and that compose it.",
+        "description": "A preset's record row.\n\n``extensions`` is the ordered extension combos; ``conflicted`` marks a quarantined record with its\n``conflicted_reason`` (``null`` when clean); ``uses`` / ``used_by`` are the sorted other presets this\nbody composes and that compose it. ``input_map`` / ``output_map`` are the stored jq programs (inline\ntext or a stored-body reference), ``null`` when unset.",
         "properties": {
           "active_version": {
             "title": "Active Version",
@@ -11216,8 +11686,25 @@
             "title": "Extensions",
             "type": "array"
           },
+          "input_map": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TemplatedText-Output"
+              },
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Input Map"
+          },
           "input_schema": {
             "anyOf": [
+              {
+                "$ref": "#/components/schemas/TemplatedText-Output"
+              },
               {
                 "additionalProperties": true,
                 "type": "object"
@@ -11232,8 +11719,25 @@
             "title": "Name",
             "type": "string"
           },
+          "output_map": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TemplatedText-Output"
+              },
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Output Map"
+          },
           "output_schema": {
             "anyOf": [
+              {
+                "$ref": "#/components/schemas/TemplatedText-Output"
+              },
               {
                 "additionalProperties": true,
                 "type": "object"
@@ -11267,34 +11771,14 @@
           "extensions",
           "output_schema",
           "input_schema",
+          "input_map",
+          "output_map",
           "conflicted",
           "conflicted_reason",
           "uses",
           "used_by"
         ],
         "title": "PresetRecordView",
-        "type": "object"
-      },
-      "PresetRefereesResult": {
-        "description": "Every live reference a rename of this preset would strand.",
-        "properties": {
-          "name": {
-            "title": "Name",
-            "type": "string"
-          },
-          "referees": {
-            "items": {
-              "type": "string"
-            },
-            "title": "Referees",
-            "type": "array"
-          }
-        },
-        "required": [
-          "name",
-          "referees"
-        ],
-        "title": "PresetRefereesResult",
         "type": "object"
       },
       "PresetRename": {
@@ -11442,6 +11926,21 @@
             "default": null,
             "title": "Fixed Kwargs"
           },
+          "input_map": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TemplatedText-Input"
+              },
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Input Map"
+          },
           "input_schema": {
             "anyOf": [
               {
@@ -11461,6 +11960,21 @@
           "name": {
             "title": "Name",
             "type": "string"
+          },
+          "output_map": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TemplatedText-Input"
+              },
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Output Map"
           },
           "output_schema": {
             "anyOf": [
@@ -11523,7 +12037,7 @@
         "type": "object"
       },
       "PresetVersionSave": {
-        "description": "A new-preset-version request.\n\nAt least one field must be present; an omitted field carries forward, an explicit ``[]``\nclears (the store sentinel rule). ``output_schema`` carries forward when omitted, clears on\nan explicit ``null``, and wins on an explicit object schema; ``input_schema`` follows the\nSAME carry-forward rule (omitted carries, ``null`` clears, an object schema wins).\n``description`` carries forward when omitted and is SET by an explicit non-empty string (an\nexplicit ``\"\"`` is rejected — the resulting description is validated non-empty on every save).",
+        "description": "A new-preset-version request.\n\nAt least one field must be present; an omitted field carries forward, an explicit ``[]``\nclears (the store sentinel rule). ``output_schema`` carries forward when omitted, clears on\nan explicit ``null``, and wins on an explicit object schema; ``input_schema`` follows the\nSAME carry-forward rule (omitted carries, ``null`` clears, an object schema wins), and so do\n``input_map`` and ``output_map`` (omitted carries, ``null`` clears, a program wins).\n``description`` carries forward when omitted and is SET by an explicit non-empty string (an\nexplicit ``\"\"`` is rejected — the resulting description is validated non-empty on every save).",
         "properties": {
           "description": {
             "anyOf": [
@@ -11576,6 +12090,21 @@
             "default": null,
             "title": "Fixed Kwargs"
           },
+          "input_map": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TemplatedText-Input"
+              },
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Input Map"
+          },
           "input_schema": {
             "anyOf": [
               {
@@ -11591,6 +12120,21 @@
             ],
             "default": null,
             "title": "Input Schema"
+          },
+          "output_map": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TemplatedText-Input"
+              },
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Output Map"
           },
           "output_schema": {
             "anyOf": [
@@ -11966,7 +12510,7 @@
         "type": "object"
       },
       "ProfileApplyResponse": {
-        "description": "The dedicated profile-apply response.\n\n``hot`` are the hot-class diff key names; ``recycle`` the worker lines of the recycle roll;\n``fresh`` the new ready lives seen since the pre-apply snapshot; ``refused`` is empty on success\n(any refusal aborts the pipeline before a response is built); ``recycle_stopped`` is ``null``\nwhen the roll ran to its end, otherwise where it stopped and why; ``awaiting_respawn`` the\nworkers still awaiting a respawn after the apply (name + keys; empty when the roll converged);\n``fanout`` the reload broadcast's fleet summary. Names only — never env values.",
+        "description": "The dedicated profile-apply response.\n\n``hot`` are the hot-class diff key names; ``recycle`` the worker lines of the recycle roll;\n``fresh`` the new ready lives seen since the pre-apply snapshot; ``refused`` is empty on success\n(any refusal aborts the pipeline before a response is built); ``recycle_stopped`` is ``null``\nwhen the roll ran to its end, otherwise where it stopped and why; ``awaiting_respawn`` the\nworkers still awaiting a respawn after the apply (name + keys; empty when the roll converged);\n``fanout`` the reload broadcast's fleet summary. Names only — never env values.\n``span_release_error`` is ``null`` when the config store released its\nexclusive write span after the persist; otherwise the store's error — the change landed and\nthe reload, broadcast and roll reported here still ran, but the store may still hold its write\nspan until the writer process exits, so a later write can block or be refused until then.",
         "properties": {
           "awaiting_respawn": {
             "items": {
@@ -12016,6 +12560,18 @@
             },
             "title": "Refused",
             "type": "array"
+          },
+          "span_release_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Span Release Error"
           }
         },
         "required": [
@@ -12238,8 +12794,12 @@
         "type": "object"
       },
       "ProjectionResult": {
-        "description": "The caller's derived capability projection — every field derived, never stored.",
+        "description": "The caller's derived capability projection — every field derived, never stored.\n\n``access_control_enabled`` is ``True`` on every projection built for a checked identity and\n``False`` only on the gate-off synthetic projection, where no identity is checked.",
         "properties": {
+          "access_control_enabled": {
+            "title": "Access Control Enabled",
+            "type": "boolean"
+          },
           "admin": {
             "title": "Admin",
             "type": "boolean"
@@ -12332,7 +12892,8 @@
           "sub_mcp",
           "tools",
           "agents",
-          "mintable"
+          "mintable",
+          "access_control_enabled"
         ],
         "title": "ProjectionResult",
         "type": "object"
@@ -12496,6 +13057,18 @@
           },
           "provider": {
             "$ref": "#/components/schemas/ProviderCatalogEntry"
+          },
+          "span_release_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Span Release Error"
           }
         },
         "required": [
@@ -12795,6 +13368,48 @@
         "title": "RecycleStop",
         "type": "object"
       },
+      "ReferenceHolder": {
+        "additionalProperties": false,
+        "description": "One live holder of a name: what it is, which one, where inside it, and a one-line description.\n\n``kind`` is the holder's kind (``\"hook\"``, ``\"preset version\"``; a plugin declares its own),\n``name`` the holder's own name, ``locator`` the fields that place the reference inside the\nholder (a version, a node id), and ``summary`` the line a person reads.",
+        "properties": {
+          "kind": {
+            "minLength": 1,
+            "title": "Kind",
+            "type": "string"
+          },
+          "locator": {
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Locator",
+            "type": "object"
+          },
+          "name": {
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "summary": {
+            "minLength": 1,
+            "title": "Summary",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "name",
+          "summary"
+        ],
+        "title": "ReferenceHolder",
+        "type": "object"
+      },
       "ReloadConfig": {
         "description": "A fleet reload-config request.\n\nAn optional ``targets`` list restricts the soft-restart to named workers (all workers when\nomitted).",
         "properties": {
@@ -12879,6 +13494,18 @@
           "removed_clients": {
             "title": "Removed Clients",
             "type": "integer"
+          },
+          "span_release_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Span Release Error"
           }
         },
         "required": [
@@ -13728,7 +14355,7 @@
         "type": "object"
       },
       "RouteEntry": {
-        "description": "A concrete route the caller can reach, with the methods that pass its jq.",
+        "description": "A route the caller can reach, with the methods its gate and jq admit.\n\nA templated ``path`` (``/api/presets/{name}``) lists the methods admitted on a\nrepresentative instance of the route.",
         "properties": {
           "methods": {
             "items": {
@@ -13758,7 +14385,7 @@
         "type": "array"
       },
       "RouteMappingRow": {
-        "description": "One HTTP route joined with its scope mapping and route-registry metadata.\n\n``mapped`` is the route's scope id, the public marker, or ``null`` when unmapped;\n``action`` is its authorization action class, ``null`` when the route carries no\nregistry metadata; ``declared_public`` is ``True`` when the route is public by its own\ndeclaration and so answers everyone whatever scope it is mapped to.",
+        "description": "One HTTP route joined with its scope mapping and route-registry metadata.\n\n``mapped`` is the route's scope id, the public marker, or ``null`` when unmapped;\n``action`` is its authorization action class, ``null`` when the route carries no\nregistry metadata; ``role_reach`` is the server's decision of what opens the route for a\nnon-admin role (``level``: a role's per-tag level; ``self_service``: every role keeps it,\nno level; ``admin_only``: a fenced/secret class or a control-plane route the base tier\nreserves; ``public``: the route is not authenticated and answers everyone without a\nlogin), ``null`` when the route carries no registry metadata; ``declared_public`` is\n``True`` when the route is public by its own declaration and so answers everyone whatever\nscope it is mapped to.",
         "properties": {
           "action": {
             "anyOf": [
@@ -13803,6 +14430,23 @@
             "title": "Path",
             "type": "string"
           },
+          "role_reach": {
+            "anyOf": [
+              {
+                "enum": [
+                  "level",
+                  "self_service",
+                  "admin_only",
+                  "public"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Role Reach"
+          },
           "summary": {
             "title": "Summary",
             "type": "string"
@@ -13822,6 +14466,7 @@
           "tags",
           "summary",
           "action",
+          "role_reach",
           "declared_public"
         ],
         "title": "RouteMappingRow",
@@ -15655,6 +16300,18 @@
             ],
             "default": null,
             "title": "Fanout"
+          },
+          "span_release_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Span Release Error"
           }
         },
         "required": [
@@ -17464,7 +18121,7 @@
         "type": "object"
       },
       "StorageInfo": {
-        "description": "The storage provider identity, or ``present: false`` when none is installed.",
+        "description": "The storage provider identity, or ``present: false`` when none is installed.\n\n``surfaces`` names the management routers this deployment mounts over the store.",
         "properties": {
           "module": {
             "anyOf": [
@@ -17491,12 +18148,24 @@
               }
             ],
             "title": "Provider"
+          },
+          "surfaces": {
+            "items": {
+              "enum": [
+                "storage",
+                "templates"
+              ],
+              "type": "string"
+            },
+            "title": "Surfaces",
+            "type": "array"
           }
         },
         "required": [
           "present",
           "provider",
-          "module"
+          "module",
+          "surfaces"
         ],
         "title": "StorageInfo",
         "type": "object"
@@ -17537,6 +18206,150 @@
           "id"
         ],
         "title": "StorageUpload",
+        "type": "object"
+      },
+      "StoredBinaryEntry": {
+        "description": "A stored binary object: its metadata, with no content.",
+        "properties": {
+          "content_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Content Type"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "const": "binary",
+            "title": "Kind",
+            "type": "string"
+          },
+          "size": {
+            "title": "Size",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "kind",
+          "id",
+          "content_type",
+          "size"
+        ],
+        "title": "StoredBinaryEntry",
+        "type": "object"
+      },
+      "StoredDocumentEntry": {
+        "description": "A stored document (PDF, DOCX, …): ``content`` is the text extracted from it, not its stored bytes.",
+        "properties": {
+          "content": {
+            "title": "Content",
+            "type": "string"
+          },
+          "content_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Content Type"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "const": "document",
+            "title": "Kind",
+            "type": "string"
+          },
+          "size": {
+            "title": "Size",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "kind",
+          "id",
+          "content_type",
+          "size",
+          "content"
+        ],
+        "title": "StoredDocumentEntry",
+        "type": "object"
+      },
+      "StoredEntry": {
+        "description": "One stored object as a text, document or binary entry.",
+        "discriminator": {
+          "mapping": {
+            "binary": "#/components/schemas/StoredBinaryEntry",
+            "document": "#/components/schemas/StoredDocumentEntry",
+            "text": "#/components/schemas/StoredTextEntry"
+          },
+          "propertyName": "kind"
+        },
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/StoredTextEntry"
+          },
+          {
+            "$ref": "#/components/schemas/StoredDocumentEntry"
+          },
+          {
+            "$ref": "#/components/schemas/StoredBinaryEntry"
+          }
+        ],
+        "title": "StoredEntry"
+      },
+      "StoredTextEntry": {
+        "description": "A stored object the classifier reads as text, with its UTF-8 content.",
+        "properties": {
+          "content": {
+            "title": "Content",
+            "type": "string"
+          },
+          "content_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Content Type"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "const": "text",
+            "title": "Kind",
+            "type": "string"
+          },
+          "size": {
+            "title": "Size",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "kind",
+          "id",
+          "content_type",
+          "size",
+          "content"
+        ],
+        "title": "StoredTextEntry",
         "type": "object"
       },
       "StringList": {
@@ -18026,6 +18839,48 @@
         "title": "TargetConversationConfig",
         "type": "object"
       },
+      "TemplateBinaryEntry": {
+        "description": "A binary entry; it is not a template, so it has no schema.",
+        "properties": {
+          "content_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Content Type"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "const": "binary",
+            "title": "Kind",
+            "type": "string"
+          },
+          "schema": {
+            "default": null,
+            "title": "Schema",
+            "type": "null"
+          },
+          "size": {
+            "title": "Size",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "kind",
+          "id",
+          "content_type",
+          "size"
+        ],
+        "title": "TemplateBinaryEntry",
+        "type": "object"
+      },
       "TemplateDelete": {
         "description": "Delete the template at ``path``.",
         "properties": {
@@ -18077,8 +18932,78 @@
         "title": "TemplateDirDelete",
         "type": "object"
       },
+      "TemplateDocumentEntry": {
+        "description": "A document entry; its extracted text is not a template, so it has no schema.",
+        "properties": {
+          "content": {
+            "title": "Content",
+            "type": "string"
+          },
+          "content_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Content Type"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "const": "document",
+            "title": "Kind",
+            "type": "string"
+          },
+          "schema": {
+            "default": null,
+            "title": "Schema",
+            "type": "null"
+          },
+          "size": {
+            "title": "Size",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "kind",
+          "id",
+          "content_type",
+          "size",
+          "content"
+        ],
+        "title": "TemplateDocumentEntry",
+        "type": "object"
+      },
+      "TemplateEntry": {
+        "description": "One stored object as a template entry: the stored entry plus its inferred input schema.",
+        "discriminator": {
+          "mapping": {
+            "binary": "#/components/schemas/TemplateBinaryEntry",
+            "document": "#/components/schemas/TemplateDocumentEntry",
+            "text": "#/components/schemas/TemplateTextEntry"
+          },
+          "propertyName": "kind"
+        },
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/TemplateTextEntry"
+          },
+          {
+            "$ref": "#/components/schemas/TemplateDocumentEntry"
+          },
+          {
+            "$ref": "#/components/schemas/TemplateBinaryEntry"
+          }
+        ],
+        "title": "TemplateEntry"
+      },
       "TemplateFetch": {
-        "description": "Fetch a template's content and its input schema by id.",
+        "description": "Read a stored object as a template entry by id.",
         "properties": {
           "template_id": {
             "title": "Template Id",
@@ -18089,28 +19014,6 @@
           "template_id"
         ],
         "title": "TemplateFetch",
-        "type": "object"
-      },
-      "TemplateFetchView": {
-        "description": "A stored template's content and its inferred input schema.\n\nThe ``schema`` object is an inferred JSON schema (it may carry an ``x-tai42-inference: partial`` marker\nwhen type inference is incomplete). The Python attribute is suffixed to avoid\nshadowing a ``BaseModel`` member; the wire key stays ``schema`` via the alias.",
-        "properties": {
-          "schema": {
-            "additionalProperties": {
-              "$ref": "#/components/schemas/JsonValue"
-            },
-            "title": "Schema",
-            "type": "object"
-          },
-          "template": {
-            "title": "Template",
-            "type": "string"
-          }
-        },
-        "required": [
-          "template",
-          "schema"
-        ],
-        "title": "TemplateFetchView",
         "type": "object"
       },
       "TemplateJqApplyResult": {
@@ -18202,6 +19105,75 @@
           "text"
         ],
         "title": "TemplateRender",
+        "type": "object"
+      },
+      "TemplateTextEntry": {
+        "description": "A text entry with its inferred input schema, or the template error that stopped the inference.\n\nThe ``schema`` object is an inferred JSON schema (it may carry an ``x-tai42-inference: partial``\nmarker when type inference is incomplete). Exactly one of ``schema`` and ``schema_error`` is set.\nThe Python attribute is suffixed to avoid shadowing a ``BaseModel`` member; the wire key stays\n``schema`` via the alias.",
+        "properties": {
+          "content": {
+            "title": "Content",
+            "type": "string"
+          },
+          "content_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Content Type"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "const": "text",
+            "title": "Kind",
+            "type": "string"
+          },
+          "schema": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "$ref": "#/components/schemas/JsonValue"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Schema"
+          },
+          "schema_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Schema Error"
+          },
+          "size": {
+            "title": "Size",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "kind",
+          "id",
+          "content_type",
+          "size",
+          "content",
+          "schema",
+          "schema_error"
+        ],
+        "title": "TemplateTextEntry",
         "type": "object"
       },
       "TemplateUpload": {
@@ -18768,6 +19740,54 @@
           "description"
         ],
         "title": "TokenPayloadRow",
+        "type": "object"
+      },
+      "ToolExtensionCombosModified": {
+        "description": "A combo edit's reply: the tool's new combos and the extension catalog, plus the write's span release.\n\n``span_release_error`` is ``null`` when the config store released its exclusive write span after the persist;\notherwise the store's error — the change landed and its reload and broadcast still ran, but the store may still\nhold its write span until the writer process exits, so a later write can block or be refused until then.",
+        "properties": {
+          "available": {
+            "items": {
+              "$ref": "#/components/schemas/ExtensionView"
+            },
+            "title": "Available",
+            "type": "array"
+          },
+          "combos": {
+            "items": {
+              "items": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "additionalProperties": true,
+                    "type": "object"
+                  }
+                ]
+              },
+              "type": "array"
+            },
+            "title": "Combos",
+            "type": "array"
+          },
+          "span_release_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Span Release Error"
+          }
+        },
+        "required": [
+          "combos",
+          "available",
+          "span_release_error"
+        ],
+        "title": "ToolExtensionCombosModified",
         "type": "object"
       },
       "ToolExtensionCombosModify": {
@@ -19824,7 +20844,7 @@
         "type": "object"
       },
       "UpgradeRow": {
-        "description": "One ref's upgrade-all outcome.\n\n``outcome`` is one of ``upgraded`` / ``up-to-date`` / ``no-compatible-version`` / ``failed``;\n``detail`` is its human-readable note.",
+        "description": "One ref's upgrade-all outcome.\n\n``outcome`` is one of ``upgraded`` / ``up-to-date`` / ``no-compatible-version`` / ``failed``;\n``detail`` is its human-readable note. ``span_release_error`` is ``null`` when the ref wrote nothing\nor the config store released its exclusive write span after each config write the ref landed;\notherwise the store's errors, joined with ``\"; \"`` in write order — an ``upgraded`` ref's manifest\nwrite, or a ``failed`` ref's forward write and the restore writes of its unwind. Those writes stand,\nbut the store may still hold its write span until the writer process exits, so a later write can\nblock or be refused until then.",
         "properties": {
           "detail": {
             "title": "Detail",
@@ -19843,12 +20863,24 @@
           "ref": {
             "title": "Ref",
             "type": "string"
+          },
+          "span_release_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Span Release Error"
           }
         },
         "required": [
           "ref",
           "outcome",
-          "detail"
+          "detail",
+          "span_release_error"
         ],
         "title": "UpgradeRow",
         "type": "object"
@@ -20207,7 +21239,7 @@
   "info": {
     "description": "The operator HTTP surface served under /api/*. The platform's core routes. Plugin routes are published by each plugin.",
     "title": "tai42-skeleton API",
-    "version": "29.0.1"
+    "version": "30.0.0"
   },
   "openapi": "3.1.0",
   "paths": {
@@ -21557,7 +22589,7 @@
     },
     "/api/auth/me": {
       "get": {
-        "description": "The authenticated caller's derived capability projection.\n\nThe concrete routes, dynamic patterns, sub-MCP mounts, tools, and agents it can reach right\nnow (derived, never stored).\n\n``user_id``/``effective_scopes``/``claims`` are the caller's OWN identity, derived at\nthe HTTP edge from the authenticated request — never caller-supplied. This is\n``caller_context=True`` (tier-1, never projectable): as an MCP tool a caller would\nsupply those identity params itself and read ANY principal's projection, so the HTTP\nroute (``/api/auth/me``, whose extractor derives them from ``request.user``) is the\nonly surface. With the gate OFF there is no identity to project (the edge passes\n``user_id=None``), so a synthetic TOTAL projection is returned; otherwise the\nprojection is built through the REAL enforcer so it can never advertise a door the\ngate would deny. Any infrastructure error propagates per the projection's failure\ndoctrine.",
+        "description": "The authenticated caller's derived capability projection.\n\nThe concrete routes, dynamic patterns, sub-MCP mounts, tools, and agents it can reach right\nnow (derived, never stored).\n\n``user_id``/``effective_scopes``/``claims`` are the caller's OWN identity, derived at\nthe HTTP edge from the authenticated request — never caller-supplied. This is\n``caller_context=True`` (tier-1, never projectable): as an MCP tool a caller would\nsupply those identity params itself and read ANY principal's projection, so the HTTP\nroute (``/api/auth/me``, whose extractor derives them from ``request.user``) is the\nonly surface. With the gate OFF there is no identity to project (the edge passes\n``user_id=None``), so a synthetic TOTAL projection is returned with\n``access_control_enabled`` false; otherwise the projection is built through the REAL\nenforcer so it can never advertise a door the gate would deny, with\n``access_control_enabled`` true. Any infrastructure error propagates per the\nprojection's failure doctrine.",
         "operationId": "get_api_auth_me",
         "responses": {
           "200": {
@@ -22759,7 +23791,7 @@
     },
     "/api/auth/roles/{name}/rollback": {
       "post": {
-        "description": "Re-point a role's active version to a prior one (LIVE — holders follow on their next request).\n\nAdmin-only; the reserved ``admin`` role has no editable history. Bumps the version and audits.",
+        "description": "Re-point a role's active version to a prior one (LIVE — holders follow on their next request).\n\nAdmin-only; the reserved ``admin`` role has no editable history. A target version whose\n``condition`` names a stored template id the store lacks is refused (400) and nothing is\nre-pointed. Bumps the version and audits.",
         "operationId": "post_api_auth_roles_name_rollback",
         "parameters": [
           {
@@ -23617,7 +24649,7 @@
     },
     "/api/channels": {
       "get": {
-        "description": "The registered channel names ``ask(channel=...)`` can resolve.",
+        "description": "The registered channels, sorted by name, for ``ask(channel=...)`` and route authoring.\n\nEach entry carries the channel's ``identity_hint`` for a route's ``our_identity`` (``None``\nwhen the channel declares none).",
         "operationId": "get_api_channels",
         "responses": {
           "200": {
@@ -23814,7 +24846,7 @@
         ]
       },
       "post": {
-        "description": "Merge env overrides into the stored config and reload this worker and the fleet.\n\nA hot-class key is re-read in place. A recycle-class key rolls a worker recycle across the\nfleet on a supervised deployment: the response's ``recycle`` carries the roll's rows (``null``\nwhen the change carried no recycle-class key), and when the roll converged this worker\nrecycles itself after replying — on the HTTP edge and on every projected tool door alike (a\npost-reply graceful self-exit its supervisor respawns).\nA change the deployment cannot carry is refused with a 400 before anything is written, naming\nthe key: a recycle-class key on a bare (unsupervised) deployment, and the bus URL or a key the\ndeployment pins on every shape.\n\n``secret_keys`` (when not ``None``) replaces the operator's secret marks in the same write;\nthe marks variable itself is never accepted as an ``env`` key.\n\nCalled over MCP, the reload answers on the session that called it and then retires that session with\nthe generation it ran on: a later call on the same session fails (streamable HTTP answers it 404,\nand an SSE session's stream closes), so the client starts a new session to go on.",
+        "description": "Merge env overrides into the stored config and reload this worker and the fleet.\n\nA hot-class key is re-read in place. A recycle-class key rolls a worker recycle across the\nfleet on a supervised deployment: the response's ``recycle`` carries the roll's rows (``null``\nwhen the change carried no recycle-class key), and when the roll converged this worker\nrecycles itself after replying — on the HTTP edge and on every projected tool door alike (a\npost-reply graceful self-exit its supervisor respawns).\nA change the deployment cannot carry is refused with a 400 before anything is written, naming\nthe key: a recycle-class key on a bare (unsupervised) deployment, and the bus URL or a key the\ndeployment pins on every shape.\n\n``secret_keys`` (when not ``None``) replaces the operator's secret marks in the same write;\nthe marks variable itself is never accepted as an ``env`` key.\nAn ``mcp`` selection list whose ``!ENV`` marker would resolve so that a tool something still\nuses stops being picked is refused with a 409 naming the holders, or a 502 when the server\ncannot list its tools for that check, before anything is written.\n\nCalled over MCP, the reload answers on the session that called it and then retires that session with\nthe generation it ran on: a later call on the same session fails (streamable HTTP answers it 404,\nand an SSE session's stream closes), so the client starts a new session to go on.",
         "operationId": "post_api_config_env",
         "requestBody": {
           "content": {
@@ -23864,6 +24896,26 @@
               }
             },
             "description": "Missing or invalid api key."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Conflict with the current resource state."
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Error."
           },
           "503": {
             "content": {
@@ -24220,7 +25272,7 @@
     },
     "/api/config/profiles/{name}/apply": {
       "post": {
-        "description": "Apply the profile's active env as the WHOLE stored env band and reload the fleet.\n\nThe profile's ``secret_keys`` are written as the stored secret marks in the same replace.\n\nA key the profile omits is deleted, save the carried deployment X band; build+swap a fresh serving\nepoch under it, persist env-write-LAST, broadcast the reload, and recycle the fleet for recycle-class\ndiffs. NO request body.\n\nThe response is the dedicated ``profileApplyResponse`` ``{hot, recycle:[{name, kind, status,\ngeneration_before, detail}], fresh:[{name, kind, generation}], refused:[],\nrecycle_stopped:{kind, name, detail} | null, awaiting_respawn:[{name, keys}], fanout}`` — key names\n+ worker identities only,\nnever env values. ``recycle`` is one line per sibling the roll reached (plus the applier's\nown deferred self-exit line when it is armed). A ``recycled`` line is confirmed on reality;\nthe roll stops at the first line that is not: ``timed-out`` (its old life did not go, fresh\ncapacity did not boot, or it never returned to ready, within the step budget) or ``failed``\n(the worker refused the op, or the bus could not be reached while it was in hand), its\n``detail`` naming why — or when the bus could not be read before a target was reached.\n``recycle_stopped`` names where the roll stopped and why (``null`` when it ran to its end; a\n``null`` name when no target was in hand). Later siblings and the applier's own recycle are\nthen not attempted, and the call still answers with the report: the env is persisted and the\nfleet reloaded. ``fresh`` is the per-kind new ready lives observed since the pre-apply\nsnapshot, capacity evidence never claimed as any target's successor. ``refused`` is ``[]``:\na refusal (X-band key, dangling ``!ENV``, a recycle-class diff the deployment shape cannot\ncarry) aborts upfront with a loud 400 naming the key, before anything is snapshotted, built,\nor persisted. ``awaiting_respawn`` names the workers (name + keys) still awaiting a respawn\nafter the roll — empty when it converged. When the diff carries serve-affecting recycle keys\nand the roll converged, the applier's OWN recycle is armed as a post-reply graceful self-exit\n— after the HTTP body flushes, or once a projected tool call (MCP, ``tai tools run``, an\nagent, a preset, a schedule, a hook) returned — and its supervisor respawns it on the new\nenv. 404 for an absent name.\n\nCalled over MCP, the reload answers on the session that called it and then retires that session with\nthe generation it ran on: a later call on the same session fails (streamable HTTP answers it 404,\nand an SSE session's stream closes), so the client starts a new session to go on.",
+        "description": "Apply the profile's active env as the WHOLE stored env band and reload the fleet.\n\nThe profile's ``secret_keys`` are written as the stored secret marks in the same replace.\n\nA key the profile omits is deleted, save the carried deployment X band; build+swap a fresh serving\nepoch under it, persist env-write-LAST, broadcast the reload, and recycle the fleet for recycle-class\ndiffs. NO request body.\n\nThe response is the dedicated ``profileApplyResponse`` ``{hot, recycle:[{name, kind, status,\ngeneration_before, detail}], fresh:[{name, kind, generation}], refused:[],\nrecycle_stopped:{kind, name, detail} | null, awaiting_respawn:[{name, keys}], span_release_error, fanout}``\n— key names + worker identities only,\nnever env values. ``recycle`` is one line per sibling the roll reached (plus the applier's\nown deferred self-exit line when it is armed). A ``recycled`` line is confirmed on reality;\nthe roll stops at the first line that is not: ``timed-out`` (its old life did not go, fresh\ncapacity did not boot, or it never returned to ready, within the step budget) or ``failed``\n(the worker refused the op, or the bus could not be reached while it was in hand), its\n``detail`` naming why — or when the bus could not be read before a target was reached.\n``recycle_stopped`` names where the roll stopped and why (``null`` when it ran to its end; a\n``null`` name when no target was in hand). Later siblings and the applier's own recycle are\nthen not attempted, and the call still answers with the report: the env is persisted and the\nfleet reloaded. ``fresh`` is the per-kind new ready lives observed since the pre-apply\nsnapshot, capacity evidence never claimed as any target's successor. ``refused`` is ``[]``:\na refusal (X-band key, dangling ``!ENV``, a recycle-class diff the deployment shape cannot\ncarry) aborts upfront with a loud 400 naming the key, before anything is snapshotted, built,\nor persisted. ``awaiting_respawn`` names the workers (name + keys) still awaiting a respawn\nafter the roll — empty when it converged. ``span_release_error`` is ``null`` when the config\nstore released its exclusive write span after the env persisted, otherwise the store's error:\nthe env is persisted and the broadcast and roll reported here still ran, but the store may still\nhold its write span until this worker exits. When the diff carries serve-affecting recycle keys\nand the roll converged, the applier's OWN recycle is armed as a post-reply graceful self-exit\n— after the HTTP body flushes, or once a projected tool call (MCP, ``tai tools run``, an\nagent, a preset, a schedule, a hook) returned — and its supervisor respawns it on the new\nenv. 404 for an absent name.\nAn ``mcp`` selection list whose ``!ENV`` marker would resolve so that a tool something still\nuses stops being picked is refused with a 409 naming the holders, or a 502 when the server\ncannot list its tools for that check, before anything is snapshotted.\n\nCalled over MCP, the reload answers on the session that called it and then retires that session with\nthe generation it ran on: a later call on the same session fails (streamable HTTP answers it 404,\nand an SSE session's stream closes), so the client starts a new session to go on.",
         "operationId": "post_api_config_profiles_name_apply",
         "parameters": [
           {
@@ -24281,7 +25333,27 @@
             },
             "description": "Resource not found."
           },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Conflict with the current resource state."
+          },
           "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Error."
+          },
+          "502": {
             "content": {
               "application/json": {
                 "schema": {
@@ -25569,7 +26641,7 @@
     },
     "/api/connectors/providers/{provider_id}": {
       "delete": {
-        "description": "Remove a removable provider and its stored clients.\n\nA provider that is not removable here is a 409 naming where it is managed; a provider with a\nLIVE connection is a 409 naming the count. A connection whose session has lapsed is purged first,\nthrough the disconnect routine. The manifest change comes before the client rows are deleted, so a\nfailed change leaves them; a failed deletion after it is raised, and running the remove again\ndeletes the rows left under the id (nothing else holds it any more; no manifest change, so no\nfan-out).",
+        "description": "Remove a removable provider and its stored clients.\n\nA provider that is not removable here is a 409 naming where it is managed; a provider with a\nLIVE connection is a 409 naming the count. A connection whose session has lapsed is purged first,\nthrough the disconnect routine. The manifest change comes before the client rows are deleted, so a\nfailed change leaves them; a failed deletion after it is raised, and running the remove again\ndeletes the rows left under the id (nothing else holds it any more; no manifest change, so no\nfan-out). ``span_release_error`` names every one of these manifest writes — each purge and the\nremoval — whose config-store write span failed to release, joined with ``\"; \"`` in write order;\nwhen the removal persists but its propagation raises :class:`FleetBroadcastError`, the raised\nerror's ``span_release_error`` names them the same way.",
         "operationId": "delete_api_connectors_providers_provider_id",
         "parameters": [
           {
@@ -26736,7 +27808,7 @@
         ]
       },
       "post": {
-        "description": "Create a conversation route from its flat parameters — an UPSERT (create AND edit path).\n\n``initial_mode`` is the route's default control mode (``agent`` runs the turn, ``manual``\nsuppresses it for an operator to answer) when a thread carries no per-thread override.\n\n``target_name`` must merely EXIST — the agent (``target_kind=agent``) or tool\n(``target_kind=tool``) — the key's live grants bound the turn at fire. ``execution_key`` is\nthe api-key identity the turn runs AS; the caller must be allowed to delegate it and it must\nbe usable by a tokenless fire. Both are decided at this door BEFORE the route write service\nruns the route's own rules, so a refusal leaves any existing row untouched. The write service\nruns the target's bind check (a refusal is a 422 carrying its lines), then renders and\ncompiles the door jqs (``start_expr``/``cancel_expr``/``resume_expr``/``extras_expr``) and\n``reply_expr``, so an invalid one — or a by-id text whose stored resource cannot be fetched —\nis refused at create, not at first message. A\n``channel`` row's ``our_identity`` is stored canonicalized and must not already be routed\non that channel. An edit that would change the ``door`` of a route already HOLDING\nthreads is refused: the two doors key their threads differently, so the held threads\ncannot be re-keyed under the new door.\nAn ``api`` row that declares a ``callback_url`` has its ``callback_secret`` minted by the\nwrite and returned ONCE; a poll-only api row (no callback) mints none and reads its answers\nback from the poll door. A positive\n``turns_per_hour_override`` runs this route's per-address buckets at that rate instead\nof the global ``per_address_turns_per_hour`` cap; ``None`` runs them at the global rate.\nA ``reply_texts`` catalogue carries the route's own words for the platform's fixed\nparticipant replies (a failed turn, the slow-down line, the pairing replies, the inbound\nrefusal notices), in the line's language; ``None`` or an unset member sends the built-in\nEnglish reply.\nA ``locale`` is the operator-declared default language templated reply parts render in when\na turn supplies none; it is the last fallback under a per-turn or stored-contact locale and\nis stored canonicalized. ``None`` declares no route default (bare/English).\nAn ``overlap`` policy governs how a running turn treats the newer participant messages that\noverlap it (learn/cancel/carry); ``None`` stores the default policy (continue/one/no window),\nwhich runs one turn per message and leaves the payload unchanged.\nReturns ``{\"created\", \"route_name\", \"route\", \"callback_secret\"}``.",
+        "description": "Create a conversation route from its flat parameters — an UPSERT (create AND edit path).\n\n``initial_mode`` is the route's default control mode (``agent`` runs the turn, ``manual``\nsuppresses it for an operator to answer) when a thread carries no per-thread override.\n\n``target_name`` must merely EXIST — the agent (``target_kind=agent``) or tool\n(``target_kind=tool``) — the key's live grants bound the turn at fire. A ``channel`` row must\nname a channel a plugin registered on this deployment (400 otherwise). ``execution_key`` is\nthe api-key identity the turn runs AS; the caller must be allowed to delegate it and it must\nbe usable by a tokenless fire. Both are decided at this door BEFORE the route write service\nruns the route's own rules, so a refusal leaves any existing row untouched. The write service\nruns the target's bind check (a refusal is a 422 carrying its lines), then renders and\ncompiles the door jqs (``start_expr``/``cancel_expr``/``resume_expr``/``extras_expr``) and\n``reply_expr``, so an invalid one — or a text whose stored resource cannot be fetched, or\nthat cannot be rendered — is refused at create, not at first message. A\n``channel`` row's ``our_identity`` is stored canonicalized and must not already be routed\non that channel. An edit that would change the ``door`` of a route already HOLDING\nthreads is refused: the two doors key their threads differently, so the held threads\ncannot be re-keyed under the new door.\nAn ``api`` row that declares a ``callback_url`` has its ``callback_secret`` minted by the\nwrite and returned ONCE; a poll-only api row (no callback) mints none and reads its answers\nback from the poll door. A positive\n``turns_per_hour_override`` runs this route's per-address buckets at that rate instead\nof the global ``per_address_turns_per_hour`` cap; ``None`` runs them at the global rate.\nA ``reply_texts`` catalogue carries the route's own words for the platform's fixed\nparticipant replies (a failed turn, the slow-down line, the pairing replies, the inbound\nrefusal notices), in the line's language; ``None`` or an unset member sends the built-in\nEnglish reply.\nA ``locale`` is the operator-declared default language templated reply parts render in when\na turn supplies none; it is the last fallback under a per-turn or stored-contact locale and\nis stored canonicalized. ``None`` declares no route default (bare/English).\nAn ``overlap`` policy governs how a running turn treats the newer participant messages that\noverlap it (learn/cancel/carry); ``None`` stores the default policy (continue/one/no window),\nwhich runs one turn per message and leaves the payload unchanged.\nReturns ``{\"created\", \"route_name\", \"route\", \"callback_secret\"}``.",
         "operationId": "post_api_conversations_route_name",
         "parameters": [
           {
@@ -28083,7 +29155,7 @@
     },
     "/api/delete-template": {
       "post": {
-        "description": "Delete the stored template at ``path``.\n\nIdempotent: an already-absent path is a no-op success (the store treats a\nmissing template as a no-op rather than raising), so this returns ``200``.\n\nThe store delete is followed by a fleet ``evict_template`` broadcast so every\nworker drops the stale compilation, not only the one that served this call; the\nresponse embeds the per-worker fleet report.",
+        "description": "Delete the stored template at ``path``.\n\nIdempotent: an already-absent path is a no-op success (the store treats a\nmissing template as a no-op rather than raising), so this returns ``200``. A\ntemplate a stored object still names is refused with a ``409`` naming its holders;\na holder that cannot be read fails the delete with a ``500``.\n\nThe store delete is followed by a fleet ``evict_template`` broadcast so every\nworker drops the stale compilation, not only the one that served this call; the\nresponse embeds the per-worker fleet report.",
         "operationId": "post_api_delete_template",
         "requestBody": {
           "content": {
@@ -28133,6 +29205,26 @@
               }
             },
             "description": "Missing or invalid api key."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Conflict with the current resource state."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Internal server error."
           }
         },
         "security": [
@@ -28149,7 +29241,7 @@
     },
     "/api/delete-template-dir": {
       "post": {
-        "description": "Delete every stored template under the directory ``path``.\n\nUnlike the idempotent single-template delete, a directory matching nothing is a loud\n``404`` (the provider's ``FileNotFoundError``). A key resolving to the template ROOT\nwould wipe the whole store, so it is refused with a ``400`` HERE, ahead of the provider;\na provider reporting a root violation as ``ValueError`` maps to ``400`` too.",
+        "description": "Delete every stored template under the directory ``path``.\n\nUnlike the idempotent single-template delete, a directory matching nothing is a loud\n``404`` (the provider's ``FileNotFoundError``). The key guard refuses every spelling\nof the template root (``.``, ``a/..``); a provider reporting a root violation as\n``ValueError`` maps to ``400`` too. A directory holding a template a stored object\nnames is refused with a ``409`` naming every holder, deleting nothing.",
         "operationId": "post_api_delete_template_dir",
         "requestBody": {
           "content": {
@@ -28209,6 +29301,26 @@
               }
             },
             "description": "Resource not found."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Conflict with the current resource state."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Internal server error."
           }
         },
         "security": [
@@ -28225,7 +29337,7 @@
     },
     "/api/extensions": {
       "get": {
-        "description": "Return the flat ``{\"name\", \"kind\", \"multiple\"}`` list of every registered extension for the picker.",
+        "description": "Return the flat ``{\"name\", \"kind\", \"multiple\", \"config_schema\"}`` list of every registered extension.",
         "operationId": "get_api_extensions",
         "responses": {
           "200": {
@@ -28642,7 +29754,7 @@
         ]
       },
       "post": {
-        "description": "Register a hook from its flat parameters — an UPSERT (the create path and the edit path).\n\nSupports conditional execution (``condition``) and the four door-contract expressions\n(``start_expr`` builds the fired tool's kwargs; ``cancel_expr`` / ``resume_expr`` act on the\nrun's parked interactions; ``extras_expr`` builds the started run's extras) — each a templated\ntext carrying its jq inline or by stored id — plus dynamic tool arguments.\n``execution_key`` is the api-key identity every fire runs as; the caller's authority\nto delegate it and its usability by a tokenless fire are decided BEFORE the upsert, so\na refusal stores nothing and leaves any existing hook of that name untouched. Returns\n``{\"registered\", \"name\"}``; ``registered`` is ``True`` for a create and a replace\nalike.",
+        "description": "Register a hook from its flat parameters — an UPSERT (the create path and the edit path).\n\nSupports conditional execution (``condition``) and the four door-contract expressions\n(``start_expr`` builds the fired tool's kwargs; ``cancel_expr`` / ``resume_expr`` act on the\nrun's parked interactions; ``extras_expr`` builds the started run's extras) — each a templated\ntext carrying its jq inline or by stored id — plus dynamic tool arguments.\n``execution_key`` is the api-key identity every fire runs as; the caller's authority\nto delegate it and its usability by a tokenless fire are decided BEFORE the upsert, so\na refusal stores nothing and leaves any existing hook of that name untouched. Returns\n``{\"registered\", \"name\"}``; ``registered`` is ``True`` for a create and a replace\nalike. The hook tool and every name its ``tool_kwargs`` compose must be served (a 400);\nwhat ``start_expr`` builds at fire is judged at fire.",
         "operationId": "post_api_hooks",
         "requestBody": {
           "content": {
@@ -28722,6 +29834,16 @@
               }
             },
             "description": "Conflict with the current resource state."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Internal server error."
           }
         },
         "security": [
@@ -30243,7 +31365,7 @@
     },
     "/api/manifest": {
       "get": {
-        "description": "Return the MCP section and user tools of the PRESERVED persisted manifest.\n\n``!ENV ${KEY}`` markers are kept intact, so a secret leaf is its placeholder marker, NEVER the\nplaintext value.\n\nThis door serves ONLY the preserved read: no resolved-view surface exists here, so no\n``!ENV`` marker is ever materialized onto the wire. McpTab reads\n``/api/manifest/preserved`` and ManifestTab renders the markers directly.",
+        "description": "Return the MCP section, user tools and extension settings of the PRESERVED persisted manifest.\n\n``!ENV ${KEY}`` markers are kept intact, so a secret leaf is its placeholder marker, NEVER the\nplaintext value.\n\nThis door serves ONLY the preserved read: no resolved-view surface exists here, so no\n``!ENV`` marker is ever materialized onto the wire; a client renders the markers as they are.",
         "operationId": "get_api_manifest",
         "responses": {
           "200": {
@@ -30280,7 +31402,7 @@
             "ApiKeyAuth": []
           }
         ],
-        "summary": "Read the PRESERVED manifest MCP section and user tools",
+        "summary": "Read the PRESERVED manifest MCP section, user tools and extension settings",
         "tags": [
           "manifest"
         ]
@@ -30333,7 +31455,7 @@
     },
     "/api/manifest/preserved": {
       "get": {
-        "description": "Return the PRESERVED persisted manifest's MCP section + user tools, every ``!ENV`` marker intact.\n\nNo secret is resolved — the source the Studio McpTab config editor reads so it can round-trip\nmarkers instead of baking a resolved secret. Same ``{mcp, user_tools}`` view as\n``get_manifest`` — both serve the preserved read; this explicit ``/preserved`` door names that\nno-resolve contract in its path.",
+        "description": "Return the PRESERVED persisted manifest's MCP section, user tools and extension settings, markers intact.\n\nNo secret is resolved — the source an MCP config editor reads so it can round-trip\nmarkers instead of baking a resolved secret. Same view (MCP section, user tools and extension settings) as\n``get_manifest`` — both serve the preserved read; this explicit ``/preserved`` door names that\nno-resolve contract in its path.",
         "operationId": "get_api_manifest_preserved",
         "responses": {
           "200": {
@@ -30370,7 +31492,7 @@
             "ApiKeyAuth": []
           }
         ],
-        "summary": "Read the PRESERVED manifest (markers intact) MCP section and user tools",
+        "summary": "Read the PRESERVED manifest (markers intact) MCP section, user tools and extension settings",
         "tags": [
           "manifest"
         ]
@@ -30428,6 +31550,26 @@
               }
             },
             "description": "Missing or invalid api key."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Conflict with the current resource state."
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Error."
           },
           "503": {
             "content": {
@@ -31212,6 +32354,16 @@
             },
             "description": "Success."
           },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Malformed request."
+          },
           "401": {
             "content": {
               "application/json": {
@@ -31433,7 +32585,7 @@
     },
     "/api/marketplace/upgrade-all": {
       "post": {
-        "description": "Move every installed plugin onto its latest COMPATIBLE version in one lock-held batch.\n\nAnswers ``{\"results\": [{ref, outcome, detail}, ...]}``.\n\nPer-ref failures (including a ref with NO compatible version) are report\nentries, never a batch abort — the ONE operation-level failure is the\nfleet marketplace lock being held elsewhere (the retriable 503). See\n:meth:`Installer.upgrade_all` for the outcome vocabulary.",
+        "description": "Move every installed plugin onto its latest COMPATIBLE version in one lock-held batch.\n\nAnswers ``{\"results\": [{ref, outcome, detail, span_release_error}, ...]}``; a row's\n``span_release_error`` names the failed config-store span releases of the config writes its ref\nlanded — an upgrade's write, or a failed upgrade's forward and restore writes — joined in write\norder (``null`` when each released or the ref wrote nothing).\n\nPer-ref failures (including a ref with NO compatible version) are report\nentries, never a batch abort — the ONE operation-level failure is the\nfleet marketplace lock being held elsewhere (the retriable 503). See\n:meth:`Installer.upgrade_all` for the outcome vocabulary.",
         "operationId": "post_api_marketplace_upgrade_all",
         "responses": {
           "200": {
@@ -31565,6 +32717,26 @@
             },
             "description": "Missing or invalid api key."
           },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Conflict with the current resource state."
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Error."
+          },
           "503": {
             "content": {
               "application/json": {
@@ -31648,6 +32820,26 @@
               }
             },
             "description": "Missing or invalid api key."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Conflict with the current resource state."
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Error."
           },
           "503": {
             "content": {
@@ -31774,6 +32966,130 @@
         "x-destructive": true
       }
     },
+    "/api/mcp-config/entries/{title}/tool-filter": {
+      "put": {
+        "description": "Set the ``include`` and ``exclude`` of the ``mcp`` entry named ``title`` and hot-reload the fleet.\n\nEvery other key of the entry is kept as stored. An unknown title is a 404; unpicking a tool\nsomething still uses is a 409, and a server that cannot be listed for that check a 502.",
+        "operationId": "put_api_mcp_config_entries_title_tool_filter",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "title",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/McpToolFilterUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/ApplyResponse"
+                    }
+                  },
+                  "required": [
+                    "data"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Malformed request."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Missing or invalid api key."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Resource not found."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Conflict with the current resource state."
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Error."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReloadingError"
+                }
+              }
+            },
+            "description": "The server is applying a config reload; retry shortly.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying.",
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "summary": "Set an MCP server's tool selection",
+        "tags": [
+          "manifest"
+        ],
+        "x-destructive": true
+      }
+    },
     "/api/mcp-config/schema": {
       "get": {
         "description": "The JSON schema for one MCP-config entry.",
@@ -31821,7 +33137,7 @@
     },
     "/api/mcp-config/secret-env": {
       "post": {
-        "description": "Store a pasted secret as an env value and reference it from the manifest by a marker.\n\nThe env KEY is EITHER an explicit ``key`` OR generated from ``key_hint`` — exactly one\n(``key | key_hint``). Writes the secret ``value`` to the env store under that key AND\nmarks the key secret (adding it to ``TAI_ENV_SECRET_KEYS``), and writes an ``!ENV ${KEY}``\nMARKER at ``manifest_pointer`` — all through the combined\n``ConfigService.apply_env_and_change`` pipeline so the env write and the manifest mutate\nstay consistent. Partial-failure: a manifest-persist failure after the env write does\nNO rollback — the env write stands as an inert, re-runnable orphan and the op raises\nloudly. An explicit ``key`` colliding with an existing stored key holding a DIFFERENT value\nis a loud 400 naming the key; a generated key never shadows a registered settings\n``env_var``. The pointer's HEAD segment MUST be ``mcp`` (loud 400 otherwise). The response\nis the ``reloadConfigResult`` shape; the resolved key is NEVER returned. A dangling\n``!ENV`` / X-band refusal surfaces as a loud 400 naming the key (the shared boundary\nvalidator, same as ``POST /api/mcp-config``). An explicit ``key`` that is a recycle-class\nsetting rolls a worker recycle as every env write does (the response's ``recycle``; this\nworker recycles itself after replying when the roll converged).",
+        "description": "Store a pasted secret as an env value and reference it from the manifest by a marker.\n\nThe env KEY is EITHER an explicit ``key`` OR generated from ``key_hint`` — exactly one\n(``key | key_hint``). Writes the secret ``value`` to the env store under that key AND\nmarks the key secret (adding it to ``TAI_ENV_SECRET_KEYS``), and writes an ``!ENV ${KEY}``\nMARKER at ``manifest_pointer`` — all through the combined\n``ConfigService.apply_env_and_change`` pipeline so the env write and the manifest mutate\nstay consistent. Partial-failure: a manifest-persist failure after the env write does\nNO rollback — the env write stands as an inert, re-runnable orphan and the op raises\nloudly. An explicit ``key`` colliding with an existing stored key holding a DIFFERENT value\nis a loud 400 naming the key; a generated key never shadows a registered settings\n``env_var``. The pointer's HEAD segment MUST be ``mcp`` (loud 400 otherwise). The response\nis the ``reloadConfigResult`` shape; the resolved key is NEVER returned. A dangling\n``!ENV`` / X-band refusal surfaces as a loud 400 naming the key (the shared boundary\nvalidator, same as ``POST /api/mcp-config``). An explicit ``key`` that is a recycle-class\nsetting rolls a worker recycle as every env write does (the response's ``recycle``; this\nworker recycles itself after replying when the roll converged).\nAn ``mcp`` selection list whose ``!ENV`` marker would resolve so that a tool something still\nuses stops being picked is refused with a 409 naming the holders, or a 502 when the server\ncannot list its tools for that check, before anything is written.",
         "operationId": "post_api_mcp_config_secret_env",
         "requestBody": {
           "content": {
@@ -31871,6 +33187,26 @@
               }
             },
             "description": "Missing or invalid api key."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Conflict with the current resource state."
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Error."
           },
           "503": {
             "content": {
@@ -31950,7 +33286,7 @@
     },
     "/api/mcp-status/failed": {
       "get": {
-        "description": "List MCP servers skipped due to a failed viability check (server down or slow).\n\nSkipped at boot or last reload. Use ``reload_mcp`` to re-attach one once healthy.\n\nEach entry is ``{\"title\", \"status\", \"category\", \"message\", \"http_status\"}`` — the\ntitle plus the coarse status and a credential-free failure detail (``category`` one\nof ``auth`` / ``unreachable`` / ``error``, the redacted ``message``, and the\n``http_status`` when the failure carried one). A query op rides the same fan-out primitive as a mutation:\nevery worker's list arrives as its per-worker ``payload`` in the fleet report\n(this worker's list on its own self entry); ``targets`` optionally restricts the\nquery to specific workers.",
+        "description": "List MCP servers skipped due to a failed viability check (server down or slow).\n\nSkipped at boot or last reload. Use ``reload_mcp`` to re-attach one once healthy.\n\nEach entry is ``{\"title\", \"status\", \"category\", \"message\", \"http_status\"}`` — the\ntitle plus the coarse status and a credential-free failure detail (``category`` one\nof ``preset_store`` / ``auth`` / ``unreachable`` / ``error``, the redacted ``message``, and the\n``http_status`` when the failure carried one). A query op rides the same fan-out primitive as a mutation:\nevery worker's list arrives as its per-worker ``payload`` in the fleet report\n(this worker's list on its own self entry); ``targets`` optionally restricts the\nquery to specific workers.",
         "operationId": "get_api_mcp_status_failed",
         "parameters": [
           {
@@ -32080,6 +33416,81 @@
           "manifest"
         ],
         "x-destructive": true
+      }
+    },
+    "/api/mcp-status/{title}/advertised-tools": {
+      "post": {
+        "description": "Every tool the live MCP server ``title`` advertises, before the selection, with the entry's lists.\n\n``unadvertised`` names the entries of the set list (``include`` when non-empty, else ``exclude``)\nthat no advertised tool carries, in stored order. Unknown title → 404; a server that cannot be\nlisted → 502.",
+        "operationId": "post_api_mcp_status_title_advertised_tools",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "title",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/McpAdvertisedTools"
+                    }
+                  },
+                  "required": [
+                    "data"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Missing or invalid api key."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Resource not found."
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Error."
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "summary": "Probe an MCP server for its advertised tools",
+        "tags": [
+          "manifest"
+        ]
       }
     },
     "/api/mcp-status/{title}/deregister": {
@@ -32456,7 +33867,7 @@
     },
     "/api/observability/metrics": {
       "get": {
-        "description": "Aggregate metrics over the time range via the contract's ``query_metrics``.\n\nThe backend DECLARES what it serves (``metrics_capability``) before any query.\nA backend that does not serve the core measures fails loudly (501). The by-model\npanel's availability is the backend's DECLARATION that it groups by the model\ndimension — not a swallowed query error: when declared, the by-model query runs\nHARD and any failure propagates; when not declared, the panel is reported absent\nand no query is issued.",
+        "description": "Aggregate metrics over the time range via the contract's ``query_metrics``.\n\nThe backend DECLARES what it serves (``metrics_capability``) before any query.\nA backend that does not serve the core measures is refused (400 not served). The by-model\npanel's availability is the backend's DECLARATION that it groups by the model\ndimension — not a swallowed query error: when declared, the by-model query runs\nHARD and any failure propagates; when not declared, the panel is reported absent\nand no query is issued.",
         "operationId": "get_api_observability_metrics",
         "parameters": [
           {
@@ -33571,6 +34982,16 @@
               }
             },
             "description": "Missing or invalid api key."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Internal server error."
           }
         },
         "security": [
@@ -33654,6 +35075,16 @@
               }
             },
             "description": "Conflict with the current resource state."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Internal server error."
           },
           "501": {
             "content": {
@@ -33749,6 +35180,16 @@
             },
             "description": "Missing or invalid api key."
           },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Internal server error."
+          },
           "501": {
             "content": {
               "application/json": {
@@ -33773,7 +35214,7 @@
     },
     "/api/presets/{name}": {
       "delete": {
-        "description": "Delete a preset.\n\nA non-conflicted record is soft-deleted and its base + branch tools torn down (one ``list_changed``);\na conflicted record is removed store-side ONLY (HARD delete + drop the quarantine entry), touching no\nregistration and firing no emit. Both branches fan the removal out on the bus and embed the per-worker\nfleet report under ``fanout``.",
+        "description": "Delete a preset.\n\nOrder: existence → refuse with a 409 listing every holder of the preset or one of its\nextension branch tools → every delete cascade for each of those names → removal → the\noverlay rows of those names cleared. A non-conflicted record is soft-deleted and its base + branch\ntools torn down (one ``list_changed``); a conflicted record is removed store-side ONLY (HARD delete +\ndrop the quarantine entry), touching no registration and firing no emit. Both branches fan the\nremoval out on the bus and embed the per-worker fleet report under ``fanout``.",
         "operationId": "delete_api_presets_name",
         "parameters": [
           {
@@ -33915,6 +35356,16 @@
               }
             },
             "description": "Resource not found."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Internal server error."
           }
         },
         "security": [
@@ -33930,7 +35381,7 @@
     },
     "/api/presets/{name}/referees": {
       "get": {
-        "description": "Every live reference a rename of this preset would strand — the SAME union the rename door blocks on.\n\nThe OTHER presets whose active body composes it, plus every registered referee\n(platform wiring — schedules/hooks/routes/extensions/parks — and plugin holders).\nExposed so the UI can preflight a rename. 404 for an unknown preset, the same\nexistence check the rename door runs first; a referee raising propagates loudly,\nexactly as at the rename gate.",
+        "description": "Every live holder a rename or delete of this preset would be refused on — the gate's own gather.\n\n``action`` picks the gather: ``rename`` answers what the rename door blocks on, ``delete``\nwhat the delete door blocks on, each over the preset and every extension branch tool bound\noff it. 404 for an unknown preset; a referee raising propagates loudly, exactly as at the gate.",
         "operationId": "get_api_presets_name_referees",
         "parameters": [
           {
@@ -33938,6 +35389,19 @@
             "name": "name",
             "required": true,
             "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "action",
+            "required": true,
+            "schema": {
+              "enum": [
+                "rename",
+                "delete"
+              ],
+              "title": "Action",
               "type": "string"
             }
           }
@@ -33949,7 +35413,7 @@
                 "schema": {
                   "properties": {
                     "data": {
-                      "$ref": "#/components/schemas/PresetRefereesResult"
+                      "$ref": "#/components/schemas/HoldersPreview"
                     }
                   },
                   "required": [
@@ -33980,6 +35444,26 @@
               }
             },
             "description": "Resource not found."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Request failed validation."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Internal server error."
           }
         },
         "security": [
@@ -33987,7 +35471,7 @@
             "ApiKeyAuth": []
           }
         ],
-        "summary": "List live references to this preset",
+        "summary": "List live holders of this preset",
         "tags": [
           "presets"
         ]
@@ -33995,7 +35479,7 @@
     },
     "/api/presets/{name}/rename": {
       "post": {
-        "description": "Rename a preset, ATOMIC (a preset's name IS its live tool name).\n\nRuns create's ordered name pre-checks on the NEW name, BLOCKS with a 409 listing every referee if any\nlive reference composes the current name, binds the new tool BEFORE tearing the old one down, fires one\n``list_changed``, and fans the rebind out NEW-first then the old removal. The response embeds the\nprimary rebind (new-name) fan-out report under ``fanout``; the old-name removal stays log-only.\n\nA preset's NAME is its identity everywhere — it IS the live tool binding, and every\nreference (preset bodies, platform wiring, plugin holders) keys on it deliberately;\nrename integrity is enforced at THIS gate, and there are no surrogate ids.",
+        "description": "Rename a preset, ATOMIC (a preset's name IS its live tool name).\n\nRuns create's ordered name pre-checks on the NEW name, BLOCKS with a 409 listing every holder of\nthe current name or one of its extension branch tools, binds the new tool BEFORE tearing the old\none down, fires one ``list_changed``, and fans the rebind out NEW-first then the old removal. The\nresponse embeds the primary rebind (new-name) fan-out report under ``fanout``; the old-name removal\nstays log-only.\n\nA preset's NAME is its identity everywhere — it IS the live tool binding, and every\nreference (preset bodies, platform wiring, plugin holders) keys on it deliberately;\nrename integrity is enforced at THIS gate, and there are no surrogate ids.",
         "operationId": "post_api_presets_name_rename",
         "parameters": [
           {
@@ -34075,6 +35559,16 @@
               }
             },
             "description": "Conflict with the current resource state."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Internal server error."
           },
           "503": {
             "content": {
@@ -34189,6 +35683,16 @@
               }
             },
             "description": "Conflict with the current resource state."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Internal server error."
           },
           "503": {
             "content": {
@@ -34366,6 +35870,16 @@
               }
             },
             "description": "Conflict with the current resource state."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Internal server error."
           },
           "503": {
             "content": {
@@ -34587,7 +36101,7 @@
     },
     "/api/render-template": {
       "post": {
-        "description": "Render the one authored ``text`` — inline ``content`` OR a stored ``id`` — with its ``kwargs``.\n\n``text`` carries EXACTLY ONE source: its own type refuses neither and both, so a\ncaller supplying the wrong shape is a loud ``400`` at the edge. A stored ``id`` that\ncannot be fetched is a ``404`` naming that id; broken client-supplied Jinja (a syntax\nerror, a sandbox-blocked dunder traversal → ``SecurityError``, an undefined access)\nis author error → ``400``. Genuine storage failures raise other types (``500``).",
+        "description": "Render the one authored ``text`` — inline ``content`` OR a stored ``id`` — with its ``kwargs``.\n\n``text`` carries EXACTLY ONE source: its own type refuses neither and both, so a\ncaller supplying the wrong shape is a loud ``400`` at the edge. A stored ``id`` that\ncannot be fetched is a ``404`` naming that id; broken client-supplied Jinja (a syntax\nerror, a sandbox-blocked dunder traversal → ``SecurityError``, an undefined access)\nis author error → ``400``, as is a stored ``id`` naming an object that is not UTF-8\ntext. Genuine storage failures raise other types (``500``).",
         "operationId": "post_api_render_template",
         "requestBody": {
           "content": {
@@ -34662,7 +36176,7 @@
     },
     "/api/resources/get": {
       "get": {
-        "description": "Load a stored resource by its id, optionally rendering it as a template.\n\nArgs:\n    resource_id: The id (path) of the resource to load.\n    kwargs: When omitted, the resource's loaded content is returned\n        as-is. When provided (any dict, incl. ``{}``), text is rendered as a\n        Jinja template with these variables; media raises loudly (``400``).\n\nReturns:\n    The loaded (and optionally rendered) content — text or a ``MediaBlock``.\n\nA missing resource is a ``404``; a traversal-escaping id, a render of media, or\nbroken client-supplied Jinja is a ``400``. Genuine storage/transport failures\nraise other types and propagate as a ``500``.",
+        "description": "Load a stored resource by its id, optionally rendering it as a template.\n\nArgs:\n    resource_id: The id (path) of the resource to load.\n    kwargs: When omitted, the resource's loaded content is returned\n        as-is. When provided (any dict, incl. ``{}``), text is rendered as a\n        Jinja template with these variables; media raises loudly (``400``).\n\nReturns:\n    The loaded (and optionally rendered) content — text or a ``MediaBlock``.\n\nA missing resource is a ``404``; a traversal-escaping id, a stored object no loader\ncan turn into text or media (an unsupported type, over the size cap, or text that is\nnot UTF-8, an extractor's failure on the stored bytes), a render of media, or broken\nclient-supplied Jinja is a ``400``. A deployment without the ``files`` extra answers a\n``501``. Genuine storage/transport failures raise other types and propagate as a ``500``.",
         "operationId": "get_api_resources_get",
         "parameters": [
           {
@@ -34725,6 +36239,16 @@
               }
             },
             "description": "Resource not found."
+          },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Error."
           }
         },
         "security": [
@@ -34738,7 +36262,7 @@
         ]
       },
       "post": {
-        "description": "Load a stored resource by its id, optionally rendering it as a template.\n\nArgs:\n    resource_id: The id (path) of the resource to load.\n    kwargs: When omitted, the resource's loaded content is returned\n        as-is. When provided (any dict, incl. ``{}``), text is rendered as a\n        Jinja template with these variables; media raises loudly (``400``).\n\nReturns:\n    The loaded (and optionally rendered) content — text or a ``MediaBlock``.\n\nA missing resource is a ``404``; a traversal-escaping id, a render of media, or\nbroken client-supplied Jinja is a ``400``. Genuine storage/transport failures\nraise other types and propagate as a ``500``.",
+        "description": "Load a stored resource by its id, optionally rendering it as a template.\n\nArgs:\n    resource_id: The id (path) of the resource to load.\n    kwargs: When omitted, the resource's loaded content is returned\n        as-is. When provided (any dict, incl. ``{}``), text is rendered as a\n        Jinja template with these variables; media raises loudly (``400``).\n\nReturns:\n    The loaded (and optionally rendered) content — text or a ``MediaBlock``.\n\nA missing resource is a ``404``; a traversal-escaping id, a stored object no loader\ncan turn into text or media (an unsupported type, over the size cap, or text that is\nnot UTF-8, an extractor's failure on the stored bytes), a render of media, or broken\nclient-supplied Jinja is a ``400``. A deployment without the ``files`` extra answers a\n``501``. Genuine storage/transport failures raise other types and propagate as a ``500``.",
         "operationId": "post_api_resources_get",
         "requestBody": {
           "content": {
@@ -34798,6 +36322,16 @@
               }
             },
             "description": "Resource not found."
+          },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Error."
           }
         },
         "security": [
@@ -34903,6 +36437,16 @@
               }
             },
             "description": "Internal server error."
+          },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Error."
           },
           "502": {
             "content": {
@@ -36707,7 +38251,7 @@
     },
     "/api/states/{name}/attachments/{template}": {
       "delete": {
-        "description": "Remove a template's attachment and recompose the effective schema — nothing else.\n\nConsults the detach referees FIRST: a template still named by a live door binding (a\npreset version, a conversation config, a hook, a schedule) is a 409 that detaches nothing\nand lists the referencing bindings — the attach-at-save contract's referee, so a binding\nnever faults at run time on a template detached out from under it.",
+        "description": "Remove a template's attachment and recompose the effective schema — nothing else.\n\nA template still named by a live door binding (a preset version, a conversation config, a\nhook, a schedule, a plugin's binding) is a 409 that detaches nothing and lists those\nholders, so a binding never faults at run time on a template detached out from under it.",
         "operationId": "delete_api_states_name_attachments_template",
         "parameters": [
           {
@@ -37112,6 +38656,89 @@
           "states"
         ],
         "x-destructive": true
+      }
+    },
+    "/api/states/{name}/attachments/{template}/referees": {
+      "get": {
+        "description": "Every live door binding a detach of ``template`` from ``name`` would be refused on — the gate's own gather.\n\n404 for an unknown state or an unattached template; a referee raising propagates loudly,\nexactly as at the gate.",
+        "operationId": "get_api_states_name_attachments_template_referees",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "template",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/HoldersPreview"
+                    }
+                  },
+                  "required": [
+                    "data"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Missing or invalid api key."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Resource not found."
+          },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Error."
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "summary": "List live holders of a state's template attachment",
+        "tags": [
+          "states"
+        ]
       }
     },
     "/api/states/{name}/consumers": {
@@ -38863,7 +40490,7 @@
     },
     "/api/storage": {
       "get": {
-        "description": "Report the registered provider's identity, or ``present: false`` when none is installed.\n\nA ``200``, so the UI renders the empty state without an error.",
+        "description": "Report the registered provider's identity, or ``present: false`` when none is installed.\n\nA ``200``, so the UI renders the empty state without an error. ``surfaces`` names the\nmanagement routers this deployment mounts (``storage``, ``templates``), so a caller\nnever calls a door that is not served.",
         "operationId": "get_api_storage",
         "responses": {
           "200": {
@@ -38902,13 +40529,14 @@
         ],
         "summary": "Get the storage provider identity",
         "tags": [
-          "storage"
+          "storage",
+          "templates"
         ]
       }
     },
     "/api/storage/dirs/{dir_path}": {
       "delete": {
-        "description": "Remove a directory subtree from the store; the render state under it is evicted fleet-wide.\n\nThis worker evicts whatever the outcome. A failure before deletion begins — a missing\ndirectory (``404``) or a rejected path (``400``) — broadcasts nothing. A failure once\ndeletion may have begun leaves the store partially changed, so the eviction still fans\nout before the error propagates (a ``FleetBroadcastError`` carrying the fleet report).",
+        "description": "Remove a directory subtree from the store; the render state under it is evicted fleet-wide.\n\nThis worker evicts whatever the outcome once deletion begins. A failure before deletion\nbegins — a missing directory (``404``), a rejected path (``400``), an object under it a\nstored object names (``409``) or a holder that cannot be read (``500``) — broadcasts\nnothing. A failure once deletion may have begun leaves the store partially changed, so\nthe eviction still fans out before the error propagates (a ``FleetBroadcastError``\ncarrying the fleet report).",
         "operationId": "delete_api_storage_dirs_dir_path",
         "parameters": [
           {
@@ -38970,6 +40598,26 @@
             },
             "description": "Resource not found."
           },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Conflict with the current resource state."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Internal server error."
+          },
           "501": {
             "content": {
               "application/json": {
@@ -38993,9 +40641,95 @@
         "x-destructive": true
       }
     },
+    "/api/storage/entries/{resource_id}": {
+      "get": {
+        "description": "Read one stored object as an entry: ``text`` or ``document`` with its ``content``, else ``binary``.\n\nThe kind and the content are the shared content classifier's. A binary object is\nclassified from its size and at most two detection windows, never read whole. A\nrefused text or document (over the size cap, not UTF-8, an extractor's failure) is\na ``400``; a missing object a ``404``; no provider, or no ``files`` extra, a ``501``.",
+        "operationId": "get_api_storage_entries_resource_id",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "resource_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "x-tai42-converter": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/StoredEntry"
+                    }
+                  },
+                  "required": [
+                    "data"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Malformed request."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Missing or invalid api key."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Resource not found."
+          },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Error."
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "summary": "Read a stored object as a text, document or binary entry",
+        "tags": [
+          "storage"
+        ]
+      }
+    },
     "/api/storage/resources": {
       "get": {
-        "description": "List the sorted resource ids from the active storage provider.",
+        "description": "List the sorted resource ids from the active storage provider, without unlisted prefixes.",
         "operationId": "get_api_storage_resources",
         "responses": {
           "200": {
@@ -39134,7 +40868,7 @@
     },
     "/api/storage/resources/{resource_id}": {
       "delete": {
-        "description": "Remove one object from the store; its render state is evicted fleet-wide.",
+        "description": "Remove one object from the store; its render state is evicted fleet-wide.\n\nAn object a stored object still names is refused with a ``409`` naming its holders.",
         "operationId": "delete_api_storage_resources_resource_id",
         "parameters": [
           {
@@ -39195,6 +40929,26 @@
               }
             },
             "description": "Resource not found."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Conflict with the current resource state."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Internal server error."
           },
           "501": {
             "content": {
@@ -39310,7 +41064,7 @@
     },
     "/api/storage/resources/{resource_id}/stat": {
       "get": {
-        "description": "Return the resource's inferred content type.",
+        "description": "Return the resource's inferred content type; a missing object is a ``404``.",
         "operationId": "get_api_storage_resources_resource_id_stat",
         "parameters": [
           {
@@ -39361,6 +41115,16 @@
               }
             },
             "description": "Missing or invalid api key."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Resource not found."
           },
           "501": {
             "content": {
@@ -39429,7 +41193,7 @@
         ]
       },
       "post": {
-        "description": "Register or reload the sub-MCP app ``slug`` exposing ``tools`` on ``transport``; an unknown tool is a 404.",
+        "description": "Register or reload the sub-MCP app ``slug`` exposing ``tools`` on ``transport``; an unserved tool is a 400.",
         "operationId": "post_api_sub_mcp",
         "requestBody": {
           "content": {
@@ -39479,16 +41243,6 @@
               }
             },
             "description": "Missing or invalid api key."
-          },
-          "404": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            },
-            "description": "Resource not found."
           },
           "503": {
             "content": {
@@ -39652,7 +41406,7 @@
     },
     "/api/template": {
       "post": {
-        "description": "Return a stored template's content and its inferred input schema.\n\nA missing stored template is a ``404`` (never a leaked storage ``500``); a\nstored template with broken Jinja is author error — the schema inference parses\nit — surfaced as a ``400``. Genuine storage failures raise other types (``500``).\n\nA renderable template always reads back ``200``: when type inference cannot\ndescribe it, the schema degrades to variable names carrying an\n``x-tai42-inference: partial`` marker rather than failing the read.",
+        "description": "Return one stored object as a template entry: the stored entry plus its inferred input schema.\n\nThe entry is the shared stored-entry reader's (``text``, ``document`` or ``binary``).\nA text entry carries the schema inferred from its content; when the inference meets\nbroken Jinja the entry is still served (``200``) with ``schema: null`` and the\n``schema_error`` beside it. A document's extracted text and a binary object are not\ntemplates: their ``schema`` is ``null``.\n\nA missing object is a ``404``; a non-canonical key or a refused text or document\n(over the size cap, not UTF-8, an extractor's failure) a ``400``; no provider, or no\n``files`` extra, a ``501``. When type inference cannot describe a template, the schema\ndegrades to variable names carrying an ``x-tai42-inference: partial`` marker.",
         "operationId": "post_api_template",
         "requestBody": {
           "content": {
@@ -39671,7 +41425,7 @@
                 "schema": {
                   "properties": {
                     "data": {
-                      "$ref": "#/components/schemas/TemplateFetchView"
+                      "$ref": "#/components/schemas/TemplateEntry"
                     }
                   },
                   "required": [
@@ -39712,6 +41466,16 @@
               }
             },
             "description": "Resource not found."
+          },
+          "501": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Error."
           }
         },
         "security": [
@@ -39719,7 +41483,7 @@
             "ApiKeyAuth": []
           }
         ],
-        "summary": "Fetch a template and its schema",
+        "summary": "Read a stored object as a template entry with its inferred input schema",
         "tags": [
           "templates"
         ]
@@ -39727,7 +41491,7 @@
     },
     "/api/templates": {
       "get": {
-        "description": "List the stored template ids/paths from the active storage provider.",
+        "description": "List the stored template ids/paths from the active storage provider, without unlisted prefixes.",
         "operationId": "get_api_templates",
         "responses": {
           "200": {
@@ -41024,7 +42788,7 @@
     },
     "/api/tools/{name}/extensions": {
       "get": {
-        "description": "Return the tool's applied extension combos and the available extensions; 404 for an unknown tool.",
+        "description": "Return the tool's applied extension combos and the available extensions; 404 for an unknown tool.\n\nThe combos are served as stored, ``!ENV`` markers intact; no resolved value leaves on the wire.",
         "operationId": "get_api_tools_name_extensions",
         "parameters": [
           {
@@ -41191,7 +42955,7 @@
     },
     "/api/tools/{name}/extensions/combos": {
       "post": {
-        "description": "Granularly edit a tool's extension combos: append ``add`` and drop ``remove``.\n\nApplied over the merge of its current combos, then persisted through the same\npipeline ``set_tool_extensions`` rides. Pinned order (each check loud, nothing\npersisted on a reject): the tool must be\nREGISTERED (404, as ``get_tool_extensions``); its owning config resolves\n(400/400/409, as ``set_tool_extensions``); membership over the OWNING config's\ncombos in their stored form — adding a present combo → 400, removing an absent\none → 404, each naming the combo; the MERGED list validates against the live\nregistry (400) before any write. Returns the tool's full new combos in the GET\ndoor's shape.",
+        "description": "Granularly edit a tool's extension combos: append ``add`` and drop ``remove``.\n\nApplied over the merge of its current combos, then persisted through the same\npipeline ``set_tool_extensions`` rides. Pinned order (each check loud, nothing\npersisted on a reject): the tool must be\nREGISTERED (404, as ``get_tool_extensions``); its owning config resolves\n(400/400/409, as ``set_tool_extensions``); membership over the OWNING config's\ncombos in their stored form — adding a present combo → 400, removing an absent\none → 404, each naming the combo; the MERGED list validates against the live\nregistry (400) before any write. Returns the tool's full new combos and the catalog in the\nGET door's shape, served as stored, ``!ENV`` markers intact (no resolved value leaves on the\nwire), plus the write's ``span_release_error``: the store's error when its exclusive write\nspan failed to release after the persist, ``None`` when it released.",
         "operationId": "post_api_tools_name_extensions_combos",
         "parameters": [
           {
@@ -41220,7 +42984,7 @@
                 "schema": {
                   "properties": {
                     "data": {
-                      "$ref": "#/components/schemas/ToolExtensionsView"
+                      "$ref": "#/components/schemas/ToolExtensionCombosModified"
                     }
                   },
                   "required": [

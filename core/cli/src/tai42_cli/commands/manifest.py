@@ -1,6 +1,6 @@
 """``tai manifest`` — inspect and edit the server manifest.
 
-``show`` reads the live manifest over ``/api/manifest``, ``plugins`` lists the
+``show`` reads the preserved manifest over ``/api/manifest``, ``plugins`` lists the
 installed studio plugins over ``/api/plugins``, and ``replace`` installs a manifest
 file over ``/api/manifest/replace``. The ``tools-add``/``tools-remove``,
 ``agents-add``/``agents-remove``, and ``api-tools`` commands edit single manifest
@@ -58,7 +58,7 @@ def _load_add_entries(file: Path) -> list[Any]:
 @app.command("show")
 @covers(("GET", "/api/manifest"))
 def show_manifest(ctx: typer.Context) -> None:
-    """Show the live manifest's MCP section and user tools.
+    """Show the preserved manifest's MCP section, user tools and extension settings.
 
     Example: ``tai manifest show``
     """

@@ -210,6 +210,10 @@ async def test_run_backend_beat_reaches_import_registered_backend(monkeypatch: p
     real_app = instance.build_app()
     saved_backend = real_app._backend_holder._backend
     real_app._backend_holder._backend = None
+    # ``run_backend`` registers the CLI root-logger reload handler on the process app.
+    # Scope it to this test: a later reload on the same app would otherwise re-run
+    # ``setup_logging(force=True)`` and replace the root handlers pytest captures through.
+    monkeypatch.setattr(real_app, "_reload_handlers", dict(real_app._reload_handlers))
     # Model a fresh process: the handle is unbound until start() binds it, so an
     # import-before-bind registration raises instead of landing anywhere. The
     # plugin module is therefore NOT imported here — start() imports it, after

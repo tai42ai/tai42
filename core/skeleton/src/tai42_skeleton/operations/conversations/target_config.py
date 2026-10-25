@@ -13,6 +13,7 @@ from tai42_contract.states.binding import StateBinding
 from tai42_skeleton.operations import BadRequestError, NotFoundError, operation
 from tai42_skeleton.operations.definition_door import definition_door
 from tai42_skeleton.operations.errors import ConflictError, NotSupportedError
+from tai42_skeleton.operations.reference_check import RegistryReference, assert_references_resolve
 from tai42_skeleton.operations.response_models_group_a import (
     ConversationConfigDeleteResult,
     ConversationConfigListEnvelope,
@@ -20,7 +21,6 @@ from tai42_skeleton.operations.response_models_group_a import (
 )
 
 from .backend import _require_backend
-from .routes import _assert_target_exists
 
 _TARGET_KINDS = get_args(ConversationTargetKind)
 
@@ -112,7 +112,9 @@ async def set_conversation_config(
     except ValueError as exc:
         raise BadRequestError(f"invalid conversation config: {exc}") from exc
     manager = _require_backend()
-    await _assert_target_exists(config.target_kind, config.target_name)
+    await assert_references_resolve(
+        [RegistryReference(f"conversation config target {config.target_kind}", config.target_name, config.target_kind)]
+    )
     from tai42_skeleton.conversations.target_config import write_target_config
 
     # The write service attaches the binding's templates and stores the row; a refused binding is

@@ -10,21 +10,20 @@ from fastmcp.tools.tool_transform import TransformedTool
 from fastmcp.utilities.types import get_cached_typeadapter
 from tai42_contract.interactions import ResumeBuffered, SuspendedInteraction
 from tai42_contract.tools import UndeclaredPauseError
+from tai42_kit.utils.unset import without_unset
 
-from tai42_skeleton.agent.unset import _UNSET
 from tai42_skeleton.tools.binding.arguments import _validation_wrapper
 from tai42_skeleton.tools.binding.resolution import _ResolutionMixin
 from tai42_skeleton.tools.binding.result import (
     ToolResultEncodingError,
     UnencodableLeafError,
     _serialize_result,
-    _tool_result_value,
     find_lone_surrogate,
 )
+from tai42_skeleton.tools.binding.transformed_run import run_transformed_tool
 from tai42_skeleton.tools.context_bridge import bridge_context
 from tai42_skeleton.tools.dispatch_scope import dispatch_scope
 from tai42_skeleton.tools.retry import dispatch_with_retry
-from tai42_skeleton.tools.reveal_gate import InprocessRevealGate, inprocess_reveal_gate
 from tai42_skeleton.tools.tier import enforce_run_tier
 
 
@@ -85,12 +84,11 @@ class _DispatchMixin(_ResolutionMixin):
         # so its refusal is a recorded failed run. The MCP edge never reaches this seam and
         # fences at its own middleware. A non-fenced tool resolves no caller (a dict read).
         await enforce_run_tier(self._app, key)
-        # An agent run tool's re-dispatch (e.g. a chain TRANSFORMER re-invoking it by
-        # name) materializes the _UNSET sentinel for optionals the caller never
-        # supplied; strip it here so the set-fields-only contract holds and the tool's
-        # own defaults apply instead of a sentinel failing validation. No external
-        # caller can produce _UNSET, so this is a no-op for ordinary arguments.
-        arguments = {name: value for name, value in arguments.items() if value is not _UNSET}
+        # A synthesized signature (an agent run tool's, a branch runner's) defaults its
+        # optionals to ``UNSET``, and a re-dispatch through it by name (e.g. a chain
+        # TRANSFORMER) carries that marker for every optional the caller omitted. Dropped
+        # here so only supplied arguments reach the tool and its own defaults apply.
+        arguments = without_unset(arguments)
         async with dispatch_scope(self._app, key, arguments, continues_chain=continues_chain, extras=extras) as scope:
             # Refuse a result no JSON encoder can render (a lone UTF-16 surrogate) HERE, at the
             # shared seam every ``run_tool`` door flows through, so the innermost tool that
@@ -121,7 +119,7 @@ class _DispatchMixin(_ResolutionMixin):
     async def _dispatch_tool(self, key: str, arguments: dict[str, Any], *, offload_sync: bool) -> Any:
         """Resolve ``key`` and invoke it under any bound execution identity.
 
-        Arguments already stripped of the ``_UNSET`` sentinel. The turn budget (:meth:`run_tool`) wraps
+        Arguments already stripped of the ``UNSET`` marker. The turn budget (:meth:`run_tool`) wraps
         this dispatch.
 
         A tool that DECLARED a retry policy has its invocation re-fired through
@@ -141,36 +139,12 @@ class _DispatchMixin(_ResolutionMixin):
         retry_policy = self._retry_policy_for(key, mcp_tool)
         if isinstance(mcp_tool, TransformedTool):
             # A prebuilt transformed tool (e.g. a preset) has no plain callable to
-            # validate against — its ``fn`` takes one opaque ``**kwargs`` and its
-            # typed contract lives on the object. Run it through the tool's OWN
-            # schema-validating ``run``, which applies the baked hidden constants
-            # and REJECTS a caller that passes a baked key. Bridge the in-process
-            # Context the same way the callable path does.
+            # validate against: its typed contract lives on the object, so it runs
+            # through its own schema-validating ``run``.
+            fastmcp = self._app.fastmcp
 
             async def run_transformed_attempt() -> Any:
-                # The preset's forwarding fn re-enters the parent tool's ``run`` — and
-                # so its secret-revealing ``convert_result`` — in-process. Arm the gate
-                # so that reveal is suppressed and any secret-bearing return is carried
-                # out wrapper-intact (each downstream door then masks or reveals its own
-                # copy), instead of the ``ToolResult`` handing back already-revealed
-                # plaintext a recorder can no longer mask. A fresh gate per attempt: a
-                # failed attempt's stale gate state must never leak into the next.
-                gate = InprocessRevealGate()
-                token = inprocess_reveal_gate.set(gate)
-                try:
-                    with bridge_context(self._app.fastmcp):
-                        result = await mcp_tool.run(arguments)
-                finally:
-                    inprocess_reveal_gate.reset(token)
-                if gate.has_park:
-                    # An async ask parked the caller: return the sentinel object by
-                    # TYPE (never the flattened ToolResult), so the preset path recognizes
-                    # the park exactly as the direct-run path does. A park is a RETURN —
-                    # never a retried failure.
-                    return gate.park
-                if gate.has_payload:
-                    return gate.payload
-                return _tool_result_value(result)
+                return await run_transformed_tool(fastmcp, mcp_tool, arguments)
 
             return await dispatch_with_retry(key, retry_policy, run_transformed_attempt)
         if not isinstance(mcp_tool, FunctionTool):

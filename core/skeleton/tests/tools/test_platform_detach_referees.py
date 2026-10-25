@@ -11,6 +11,7 @@ from types import SimpleNamespace
 
 from tai42_contract.backend import IntervalCadence, ScheduleRecord
 from tai42_contract.conversations import TargetConversationConfig
+from tai42_contract.tools import ReferenceHolder
 from tai42_kit.utils.schedule_subject import SCHEDULE_STATE_BINDING_ARG
 
 from tai42_skeleton.tools import platform_referees
@@ -26,20 +27,19 @@ class _FakePresetStore:
     def __init__(self, versions_by_name: dict[str, list[tuple[int, dict]]]) -> None:
         self._versions = versions_by_name
 
-    async def list_presets(self) -> list[object]:
-        return [SimpleNamespace(name=name) for name in self._versions]
-
     async def list_versions(self, name: str) -> list[object]:
         return [SimpleNamespace(version=v, body=body) for v, body in self._versions[name]]
 
 
 def _patch_preset_store(monkeypatch, versions_by_name: dict[str, list[tuple[int, dict]]]) -> None:
-    import tai42_kit.db as kit_db
-
     from tai42_skeleton.app import instance
 
-    monkeypatch.setattr(kit_db, "component_store_configured", lambda _c: True)
-    fake_app = SimpleNamespace(presets=SimpleNamespace(store=_FakePresetStore(versions_by_name)))
+    async def list_active_bodies() -> dict[str, object]:
+        return {name: object() for name in versions_by_name}
+
+    fake_app = SimpleNamespace(
+        presets=SimpleNamespace(store=_FakePresetStore(versions_by_name), list_active_bodies=list_active_bodies)
+    )
     monkeypatch.setattr(instance, "app", fake_app, raising=False)
 
 
@@ -56,16 +56,18 @@ async def test_preset_referee_blocks_on_a_version_binding_the_template(monkeypat
             "q": [(1, {"base_tool": "echo", "description": "d", "state_binding": _BINDS_OTHER})],
         },
     )
-    assert await platform_referees._preset_detach_referee("status", "t1") == ["preset 'p' version 1"]
+    assert await platform_referees._preset_detach_referee("status", "t1") == [
+        ReferenceHolder(kind="preset version", name="p", locator={"version": 1}, summary="preset 'p' version 1")
+    ]
     # A different template / a different state draws no objection.
-    assert await platform_referees._preset_detach_referee("status", "t2") == ["preset 'q' version 1"]
+    assert await platform_referees._preset_detach_referee("status", "t2") == [
+        ReferenceHolder(kind="preset version", name="q", locator={"version": 1}, summary="preset 'q' version 1")
+    ]
     assert await platform_referees._preset_detach_referee("other", "t1") == []
 
 
-async def test_preset_referee_feature_off_is_empty(monkeypatch) -> None:
-    import tai42_kit.db as kit_db
-
-    monkeypatch.setattr(kit_db, "component_store_configured", lambda _c: False)
+async def test_preset_referee_with_no_stored_preset_is_empty(monkeypatch) -> None:
+    _patch_preset_store(monkeypatch, {})
     assert await platform_referees._preset_detach_referee("status", "t1") == []
 
 
@@ -97,7 +99,12 @@ async def test_conversation_config_referee_blocks_on_binding_config(monkeypatch)
     }
     _patch_configs(monkeypatch, configs)
     assert await platform_referees._conversation_config_detach_referee("status", "t1") == [
-        "conversation config tool/lookup"
+        ReferenceHolder(
+            kind="conversation config",
+            name="lookup",
+            locator={"target_kind": "tool"},
+            summary="conversation config tool/lookup",
+        )
     ]
     assert await platform_referees._conversation_config_detach_referee("status", "t2") == []
 
@@ -131,7 +138,9 @@ async def test_hook_referee_blocks_on_binding_hook(monkeypatch) -> None:
     import tai42_skeleton.hooks.cache as hooks_cache
 
     monkeypatch.setattr(hooks_cache, "get_hooks_manager", lambda: SimpleNamespace(list_hooks=fake_list_hooks))
-    assert await platform_referees._hook_detach_referee("status", "t1") == ["hook 'status-hook'"]
+    assert await platform_referees._hook_detach_referee("status", "t1") == [
+        ReferenceHolder(kind="hook", name="status-hook", summary="hook 'status-hook'")
+    ]
     assert await platform_referees._hook_detach_referee("status", "t2") == []
 
 
@@ -155,8 +164,12 @@ async def test_schedule_referee_blocks_on_binding_schedule(monkeypatch) -> None:
     import tai42_skeleton.operations.schedules as schedules_mod
 
     monkeypatch.setattr(schedules_mod, "export_schedules_raw", fake_export)
-    assert await platform_referees._schedule_detach_referee("status", "t1") == ["schedule 'nightly'"]
-    assert await platform_referees._schedule_detach_referee("status", "t2") == ["schedule 'weekly'"]
+    assert await platform_referees._schedule_detach_referee("status", "t1") == [
+        ReferenceHolder(kind="schedule", name="nightly", summary="schedule 'nightly'")
+    ]
+    assert await platform_referees._schedule_detach_referee("status", "t2") == [
+        ReferenceHolder(kind="schedule", name="weekly", summary="schedule 'weekly'")
+    ]
 
 
 async def test_schedule_referee_feature_off_is_empty(monkeypatch) -> None:

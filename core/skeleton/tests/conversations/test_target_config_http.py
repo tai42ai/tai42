@@ -24,6 +24,9 @@ class _FakeTools:
 
         raise UnknownToolError(key)
 
+    async def get_tools(self) -> dict[str, object]:
+        return {}
+
 
 class _FakeApp:
     agents = _FakeAgents()
@@ -130,9 +133,10 @@ def test_an_unknown_placeholder_is_a_400(client):
     assert "pairing_code" in resp.json()["error"]
 
 
-def test_a_put_to_an_unknown_target_is_a_404(client):
+def test_a_put_to_an_unknown_target_is_a_400(client):
     resp = client.put("/api/conversation-configs/agent/ghost", json={"multichannel": True})
-    assert resp.status_code == 404
+    assert resp.status_code == 400
+    assert resp.json()["error"] == "conversation config target agent 'ghost' is not a registered agent"
 
 
 def test_get_unknown_is_a_404(client):

@@ -4,14 +4,16 @@ the ``list_format`` filter formats a sequence with that locale's CLDR patterns."
 
 from __future__ import annotations
 
+import mimetypes
+
 import pytest
-from tai42_contract.storage import Storage
+from tai42_contract.storage import ObjectStat, Storage
 from tai42_contract.template import TemplatedText
 from tai42_kit.settings import reset_all_settings
 
 from tai42_skeleton.storage import StorageRegistry
 from tai42_skeleton.template import ResourceManager
-from tai42_skeleton.template.resource_manager import TemplateLocaleNotFoundError, TemplateNotFoundError
+from tai42_skeleton.template.errors import TemplateLocaleNotFoundError, TemplateNotFoundError
 
 
 class _InMemoryStorage(Storage):
@@ -37,6 +39,13 @@ class _InMemoryStorage(Storage):
         prefix = path.rstrip("/") + "/"
         for key in [k for k in self.items if k.startswith(prefix)]:
             del self.items[key]
+
+    async def stat(self, path: str) -> ObjectStat:
+        content_type, _ = mimetypes.guess_type(path)
+        return ObjectStat(content_type=content_type, size=len(await self.load_bytes(path)))
+
+    async def load_range(self, path: str, start: int, length: int) -> bytes:
+        return (await self.load_bytes(path))[start : start + length]
 
 
 def _manager(items: dict[str, str]) -> ResourceManager:

@@ -428,6 +428,20 @@ class PostgresAccessControlStore(PrincipalsStoreMixin):
             rows = await cur.fetchall()
         return [(row[0], policy_body_from_row(row[1:])) for row in rows]
 
+    async def list_conditioned_policies(self) -> list[tuple[str, dict[str, Any]]]:
+        """Every policy row whose ``condition`` names a stored template id, as ``(user_id, body)`` by ``user_id``."""
+        async with (
+            client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
+            read_connection(pool) as conn,
+            conn.cursor() as cur,
+        ):
+            await cur.execute(
+                f"SELECT user_id, {POLICY_COLUMNS} FROM access_control_policies "  # noqa: S608 query built from constant, code-defined identifiers, not user input
+                "WHERE condition ->> 'id' IS NOT NULL ORDER BY user_id"
+            )
+            rows = await cur.fetchall()
+        return [(row[0], policy_body_from_row(row[1:])) for row in rows]
+
     async def create_policy(
         self,
         user_id: str,

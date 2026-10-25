@@ -17,6 +17,7 @@ from tai42_skeleton.monitoring.noop import (
     NoOpWriter,
 )
 from tai42_skeleton.monitoring.registry import (
+    current_trace_parent,
     get_monitoring,
     init_monitoring,
     register_monitoring,
@@ -28,6 +29,7 @@ __all__ = [
     "NoOpReader",
     "NoOpSpan",
     "NoOpWriter",
+    "current_trace_parent",
     "get_monitoring",
     "init_monitoring",
     "register_monitoring",

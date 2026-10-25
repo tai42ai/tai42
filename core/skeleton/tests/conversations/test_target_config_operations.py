@@ -33,6 +33,9 @@ class _FakeTools:
             raise UnknownToolError(key)
         return object()
 
+    async def get_tools(self) -> dict[str, object]:
+        return {name: object() for name in self._names}
+
 
 class _FakeApp:
     def __init__(self, agents: set[str], tools: set[str]) -> None:
@@ -102,12 +105,12 @@ async def test_list_counts_an_indexed_member_with_no_row(wired):
 
 
 async def test_set_refuses_an_unknown_agent(wired):
-    with pytest.raises(NotFoundError, match="agent not found"):
+    with pytest.raises(BadRequestError, match=r"^conversation config target agent 'ghost' is not a registered agent$"):
         await ops.set_conversation_config("agent", "ghost")
 
 
 async def test_set_refuses_an_unknown_tool(wired):
-    with pytest.raises(NotFoundError, match="tool not found"):
+    with pytest.raises(BadRequestError, match=r"^conversation config target tool 'ghost' is not a registered tool$"):
         await ops.set_conversation_config("tool", "ghost")
 
 
@@ -242,6 +245,8 @@ async def test_set_attaches_the_binding_before_storing(wired, monkeypatch):
 async def test_set_on_a_target_that_does_not_exist_is_refused_before_the_binding(wired, monkeypatch):
     # Target existence is the door's own rule: it runs before the write service attaches anything.
     calls = _patch_binding_validation(monkeypatch, None)
-    with pytest.raises(NotFoundError, match=r"^tool not found: 'probe-preset'$"):
+    with pytest.raises(
+        BadRequestError, match=r"^conversation config target tool 'probe-preset' is not a registered tool$"
+    ):
         await ops.set_conversation_config("tool", "probe-preset", state_binding=_tool_binding())
     assert calls == []

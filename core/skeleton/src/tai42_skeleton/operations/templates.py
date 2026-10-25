@@ -2,8 +2,8 @@
 
 A thin skin over the app's resource manager (``tai42_app.storage.resource_manager``):
 
-* ``list_templates`` — the stored template ids/paths.
-* ``get_template`` — one template's content plus its inferred input schema.
+* ``list_templates`` — the stored template ids/paths, without unlisted prefixes.
+* ``get_template`` — one stored object as a template entry, with its inferred input schema.
 * ``upload_template`` — write (create or overwrite) a template.
 * ``delete_template`` — remove a stored template.
 * ``render_template`` — render inline content OR a stored template with kwargs.
@@ -16,16 +16,12 @@ the store, then broadcasts an ``evict_template`` op (``clear_templates_cache`` b
 door uses, so every worker drops the stale compilation; the response embeds the per-worker
 fleet report and an unconfirmed worker is logged loudly.
 
-**Path-argument hardening:** every logical template key reaching the store runs
-through the shared lexical containment guard (:func:`safe_template_path`) INSIDE the
-operation, so the guard defends the MCP tool and CLI edges as well as the HTTP route
-(a ``..`` escape, absolute key, embedded backslash/NUL, or empty key is refused loudly).
-Defense in depth over the store's own root check.
+**Keys:** every template key is a canonical store key, checked by the shared key guard
+(``checked_store_key``) INSIDE the operation, so the MCP tool and CLI edges get the same
+``400`` as the HTTP route.
 """
 
 from __future__ import annotations
-
-import os
 
 from jinja2 import TemplateError
 from pydantic import BaseModel
@@ -35,22 +31,31 @@ from tai42_contract.template import TemplatedText
 
 from tai42_skeleton.app.bus import FleetResult
 from tai42_skeleton.app.bus.ops import ClearTemplateCache, EvictTemplate
-from tai42_skeleton.operations import BadRequestError, ConflictError, NotFoundError, operation
+from tai42_skeleton.operations import (
+    BadRequestError,
+    ConflictError,
+    NotFoundError,
+    NotSupportedError,
+    OperationFailedError,
+    operation,
+)
 from tai42_skeleton.operations._broadcast import broadcast, fleet_fanout
 from tai42_skeleton.operations.response_models_group_b import (
     CacheClearResult,
     RenderedTemplate,
     StringListResponse,
     TemplateDeleteResult,
-    TemplateFetchView,
+    TemplateEntry,
     TemplateUploadResult,
 )
+from tai42_skeleton.operations.store_keys import checked_store_key
+from tai42_skeleton.storage.entries import read_stored_entry
+from tai42_skeleton.storage.listing import listed_keys
 from tai42_skeleton.template import TemplateNotFoundError
-from tai42_skeleton.template.path_guard import _TEMPLATE_ROOT, UnsafeTemplatePathError, safe_template_path
 
 
 class TemplateFetch(BaseModel):
-    """Fetch a template's content and its input schema by id."""
+    """Read a stored object as a template entry by id."""
 
     template_id: str
 
@@ -83,62 +88,45 @@ class TemplateRender(BaseModel):
     text: TemplatedText
 
 
-def _safe_key(key: object) -> str:
-    """Guard a caller-supplied template key, mapping an escape to a loud ``400``."""
-    try:
-        return safe_template_path(key)
-    except UnsafeTemplatePathError as exc:
-        raise BadRequestError(str(exc)) from exc
-
-
-def _resolves_to_template_root(key: str) -> bool:
-    """True when a guard-passed key targets the template ROOT itself (``.`` / ``a/..``).
-
-    The shared lexical guard rejects resolution ABOVE the root but admits a key landing
-    EXACTLY on it; resolving under the guard's anchor and comparing catches that case.
-    """
-    root = os.path.realpath(_TEMPLATE_ROOT)
-    return os.path.realpath(os.path.join(root, key)) == root
-
-
 @operation(summary="List templates", tags=["templates"], response_model=StringListResponse)
 async def list_templates() -> list[str]:
-    """List the stored template ids/paths from the active storage provider."""
-    return await tai42_app.storage.resource_manager.list_resources()
+    """List the stored template ids/paths from the active storage provider, without unlisted prefixes."""
+    return listed_keys(await tai42_app.storage.resource_manager.list_resources())
 
 
 @operation(
-    summary="Fetch a template and its schema",
+    summary="Read a stored object as a template entry with its inferred input schema",
     tags=["templates"],
-    errors=[BadRequestError, NotFoundError],
+    errors=[BadRequestError, NotFoundError, NotSupportedError],
     request_model=TemplateFetch,
-    response_model=TemplateFetchView,
+    response_model=TemplateEntry,
 )
 async def get_template(template_id: str) -> dict:
-    """Return a stored template's content and its inferred input schema.
+    """Return one stored object as a template entry: the stored entry plus its inferred input schema.
 
-    A missing stored template is a ``404`` (never a leaked storage ``500``); a
-    stored template with broken Jinja is author error — the schema inference parses
-    it — surfaced as a ``400``. Genuine storage failures raise other types (``500``).
+    The entry is the shared stored-entry reader's (``text``, ``document`` or ``binary``).
+    A text entry carries the schema inferred from its content; when the inference meets
+    broken Jinja the entry is still served (``200``) with ``schema: null`` and the
+    ``schema_error`` beside it. A document's extracted text and a binary object are not
+    templates: their ``schema`` is ``null``.
 
-    A renderable template always reads back ``200``: when type inference cannot
-    describe it, the schema degrades to variable names carrying an
-    ``x-tai42-inference: partial`` marker rather than failing the read.
+    A missing object is a ``404``; a non-canonical key or a refused text or document
+    (over the size cap, not UTF-8, an extractor's failure) a ``400``; no provider, or no
+    ``files`` extra, a ``501``. When type inference cannot describe a template, the schema
+    degrades to variable names carrying an ``x-tai42-inference: partial`` marker.
     """
     # A field-specific 400 for a blank/absent id, ahead of the lexical path guard, so
     # the message names ``template_id`` rather than the guard's generic ``path``.
     if not isinstance(template_id, str) or not template_id:
         raise BadRequestError("template_id must be a non-empty string")
-    key = _safe_key(template_id)
-    manager = tai42_app.storage.resource_manager
+    entry = await read_stored_entry(template_id)
+    if entry["kind"] != "text":
+        return {**entry, "schema": None}
     try:
-        content = await manager.fetch_template(key)
-        schema = await manager.get_template_schema(template_id=key)
-    except TemplateNotFoundError as exc:
-        raise NotFoundError(str(exc)) from exc
+        schema = await tai42_app.storage.resource_manager.get_template_schema(content=entry["content"])
     except TemplateError as exc:
-        raise BadRequestError(f"template error: {exc}") from exc
-    return {"template": content, "schema": schema}
+        return {**entry, "schema": None, "schema_error": f"template error: {exc}"}
+    return {**entry, "schema": schema, "schema_error": None}
 
 
 @operation(
@@ -165,7 +153,7 @@ async def upload_template(path: str, content: str) -> dict:
     caller has deterministic proof the eviction propagated; an unconfirmed worker is
     logged loudly, matching the reload broadcast.
     """
-    key = _safe_key(path)
+    key = checked_store_key(path)
     if not isinstance(content, str):
         raise BadRequestError("content must be a string")
     manager = tai42_app.storage.resource_manager
@@ -189,7 +177,7 @@ async def upload_template(path: str, content: str) -> dict:
     summary="Delete a template",
     tags=["templates"],
     destructive=True,
-    errors=[BadRequestError],
+    errors=[BadRequestError, ConflictError, OperationFailedError],
     request_model=TemplateDelete,
     response_model=TemplateDeleteResult,
 )
@@ -197,13 +185,15 @@ async def delete_template(path: str) -> dict:
     """Delete the stored template at ``path``.
 
     Idempotent: an already-absent path is a no-op success (the store treats a
-    missing template as a no-op rather than raising), so this returns ``200``.
+    missing template as a no-op rather than raising), so this returns ``200``. A
+    template a stored object still names is refused with a ``409`` naming its holders;
+    a holder that cannot be read fails the delete with a ``500``.
 
     The store delete is followed by a fleet ``evict_template`` broadcast so every
     worker drops the stale compilation, not only the one that served this call; the
     response embeds the per-worker fleet report.
     """
-    key = _safe_key(path)
+    key = checked_store_key(path)
     manager = tai42_app.storage.resource_manager
     fleet = FleetResult.model_validate(
         await broadcast(
@@ -219,7 +209,7 @@ async def delete_template(path: str) -> dict:
     summary="Delete a template directory",
     tags=["templates"],
     destructive=True,
-    errors=[BadRequestError, NotFoundError],
+    errors=[BadRequestError, ConflictError, NotFoundError, OperationFailedError],
     request_model=TemplateDirDelete,
     response_model=TemplateDeleteResult,
 )
@@ -227,23 +217,21 @@ async def delete_template_dir(path: str) -> dict:
     """Delete every stored template under the directory ``path``.
 
     Unlike the idempotent single-template delete, a directory matching nothing is a loud
-    ``404`` (the provider's ``FileNotFoundError``). A key resolving to the template ROOT
-    would wipe the whole store, so it is refused with a ``400`` HERE, ahead of the provider;
-    a provider reporting a root violation as ``ValueError`` maps to ``400`` too.
+    ``404`` (the provider's ``FileNotFoundError``). The key guard refuses every spelling
+    of the template root (``.``, ``a/..``); a provider reporting a root violation as
+    ``ValueError`` maps to ``400`` too. A directory holding a template a stored object
+    names is refused with a ``409`` naming every holder, deleting nothing.
     """
-    key = _safe_key(path)
-    # The shared guard admits a key resolving EXACTLY to the root; refuse it here before
-    # the provider rather than rely on each backend's own root check.
-    if _resolves_to_template_root(key):
-        raise BadRequestError("refusing to delete the template root; a directory path is required")
+    key = checked_store_key(path)
     manager = tai42_app.storage.resource_manager
     # The store delete is this worker's local apply; the fleet ``evict_template`` op
     # carries the directory key (``prefix`` marks the prefix semantics) so every sibling
     # drops every stale compilation under it.
     #
     # Failure splits by phase. A pre-mutation failure deleted nothing — a missing
-    # directory (``FileNotFoundError`` → 404) or a rejected path (``ValueError`` → 400)
-    # — so it aborts before any broadcast, siblings untouched, and its typed outcome is
+    # directory (``FileNotFoundError`` → 404), a rejected path (``ValueError`` → 400),
+    # a held template (``ConflictError`` → 409) or an unreadable holder
+    # (``OperationFailedError`` → 500) — so it aborts before any broadcast, siblings untouched, and its typed outcome is
     # mapped here unchanged. A failure once destructive deletion may have begun leaves
     # the store partially mutated, so the eviction MUST still fan out (it is idempotent —
     # a spurious evict costs one re-render) before the original error propagates loudly
@@ -255,7 +243,7 @@ async def delete_template_dir(path: str) -> dict:
                 None,
                 lambda: manager.delete_template_dir(key),
                 publish_on_local_failure=True,
-                pre_mutation_errors=(FileNotFoundError, ValueError),
+                pre_mutation_errors=(FileNotFoundError, ValueError, ConflictError, OperationFailedError),
             )
         )
     except FileNotFoundError as exc:
@@ -279,12 +267,13 @@ async def render_template(text: TemplatedText) -> dict:
     caller supplying the wrong shape is a loud ``400`` at the edge. A stored ``id`` that
     cannot be fetched is a ``404`` naming that id; broken client-supplied Jinja (a syntax
     error, a sandbox-blocked dunder traversal → ``SecurityError``, an undefined access)
-    is author error → ``400``. Genuine storage failures raise other types (``500``).
+    is author error → ``400``, as is a stored ``id`` naming an object that is not UTF-8
+    text. Genuine storage failures raise other types (``500``).
     """
     # A stored id is a caller-supplied logical key: run it through the containment guard
     # (which maps an escape to a loud 400) before it reaches the store.
     if text.id is not None:
-        text = TemplatedText(id=_safe_key(text.id), kwargs=text.kwargs)
+        text = TemplatedText(id=checked_store_key(text.id), kwargs=text.kwargs)
     try:
         rendered = await tai42_app.storage.resource_manager.render_templated_text(text)
     except TemplateNotFoundError as exc:

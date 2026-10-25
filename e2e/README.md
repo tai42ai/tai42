@@ -152,6 +152,7 @@ docker compose --profile agents-redis up -d
 | Cross-entrypoint lifecycle on the shared mmap dir | `tests/metrics/` |
 | Cross-worker registry divergence (sub-MCP, presets, tool-extensions) | `tests/crossworker/` |
 | Cross-process lost-update on shared config files | `tests/crossworker/` |
+| Cross-worker config-write exclusion (a marker on a key a concurrent profile drops) | `tests/crossworker/` |
 | Real-Redis / real-Postgres semantics (rate limit, AC, interactions, connectors) | `tests/redis_semantics/`, `tests/interactions/`, `tests/connectors/` |
 | Cross-repo running-service contract (agents, webhooks, tool-runs, storage, monitoring) | `tests/agents/`, `tests/webhooks/`, ... |
 | Process-global socket-state bleed (proxy extension) | `tests/proxy/` |

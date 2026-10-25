@@ -23,6 +23,8 @@ from tai42_skeleton.operations._broadcast import FleetBroadcastError
 from tai42_skeleton.operations.projection import project_operations
 
 from .._fakes.bus import FakeBus
+from .._fakes.mcp_listing import no_mcp_listing
+from .._fakes.write_span import ExclusiveWriteStore
 
 
 class _Admin:
@@ -36,6 +38,8 @@ class _Admin:
         if self._raise_reload is not None:
             raise self._raise_reload
         return self._result
+
+    served_mcp_names = staticmethod(no_mcp_listing)
 
 
 def _install(
@@ -99,7 +103,7 @@ async def test_reload_config_local_failure_still_broadcasts_then_raises(monkeypa
 
 
 async def test_write_env_maps_manager_value_error_to_400(monkeypatch: pytest.MonkeyPatch) -> None:
-    class _Manager:
+    class _Manager(ExclusiveWriteStore):
         def read_env(self) -> dict:
             return {}
 
@@ -116,8 +120,9 @@ async def test_write_env_maps_manager_value_error_to_400(monkeypatch: pytest.Mon
 
 
 async def test_write_env_local_only_fanout(monkeypatch: pytest.MonkeyPatch) -> None:
-    class _Manager:
+    class _Manager(ExclusiveWriteStore):
         def __init__(self) -> None:
+            super().__init__()
             self.written: list[dict] = []
             self.env: dict[str, str] = {}
 
@@ -149,6 +154,7 @@ async def test_write_env_local_only_fanout(monkeypatch: pytest.MonkeyPatch) -> N
         "fanout": {"mode": "local-only", "note": "no worker bus configured; only this worker reloaded"},
         "recycle": None,
         "awaiting_respawn": [],
+        "span_release_error": None,
     }
 
 
@@ -159,8 +165,9 @@ async def test_write_env_removing_bus_with_backend_maps_to_400(monkeypatch: pyte
     # TAI_BUS_REDIS_URL, not let it escape as an unhandled 500.
     monkeypatch.delenv("TAI_BUS_REDIS_URL", raising=False)
 
-    class _Manager:
+    class _Manager(ExclusiveWriteStore):
         def __init__(self) -> None:
+            super().__init__()
             self.written: list[dict] = []
 
         def read_env(self) -> dict:

@@ -19,6 +19,8 @@ from tai42_skeleton.routers import config as router
 from tai42_skeleton.settings.env_secret_marks import env_secret_marks_settings
 
 from .._fakes.bus import FakeBus
+from .._fakes.mcp_listing import no_mcp_listing
+from .._fakes.write_span import ExclusiveWriteStore
 
 
 class _SecretDemoSettings(TaiBaseSettings):
@@ -83,8 +85,9 @@ def _json(resp) -> dict:
     return json.loads(bytes(resp.body))
 
 
-class _FakeConfigManager:
+class _FakeConfigManager(ExclusiveWriteStore):
     def __init__(self, env):
+        super().__init__()
         self._env = env
         self.written: list[dict] = []
 
@@ -109,6 +112,8 @@ class _FakeAdmin:
     def reload_config(self):
         self.reloads += 1
         return {"status": "ok", "env_keys": len(self._manager._env)}
+
+    served_mcp_names = staticmethod(no_mcp_listing)
 
     @property
     def live_manifest(self):
@@ -402,8 +407,21 @@ async def test_write_env_happy(install):
             "fanout": {"mode": "local-only", "note": "no worker bus configured; only this worker reloaded"},
             "recycle": None,
             "awaiting_respawn": [],
+            "span_release_error": None,
         }
     }
+    assert ctx.manager.written == [{"NEW": "val"}]
+    assert ctx.admin.reloads == 1
+
+
+async def test_write_env_whose_span_fails_to_release_is_a_200_naming_the_store_error(install):
+    ctx = install({"OLD": "keep"})
+    ctx.manager.fail_exit = OSError("releasing the span failed")
+    resp = await router.write_env(_body_req(b'{"env": {"NEW": "val"}}'))
+    assert resp.status_code == 200
+    data = _json(resp)["data"]
+    assert data["span_release_error"] == "OSError: releasing the span failed"
+    assert data["fanout"] == {"mode": "local-only", "note": "no worker bus configured; only this worker reloaded"}
     assert ctx.manager.written == [{"NEW": "val"}]
     assert ctx.admin.reloads == 1
 

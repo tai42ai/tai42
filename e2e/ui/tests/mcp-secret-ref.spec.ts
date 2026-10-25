@@ -1,6 +1,6 @@
 /**
- * The MCP config editor's secret-reference flow (the Connectors page `/connectors`) over
- * the REAL stack. An
+ * The MCP config editor's secret-reference flow (the Manifest screen `/manifest`) over the
+ * REAL stack. An
  * MCP entry's `config.env` map is secret-bearing: the editor mounts a masked
  * `SecretRefField` per env value that EITHER references an existing env key (stored
  * as an `!ENV ${KEY}` manifest leaf) OR pastes a new secret (a combined
@@ -43,7 +43,7 @@ const ENV_ENTRY = 'REFVAL';
 /** SecretRefField's masked stand-in (8 bullets) — display only. */
 const MASK = '••••••••';
 
-/** An `!ENV ${KEY}` manifest leaf referencing env key `key` (McpTab's wire form). */
+/** An `!ENV ${KEY}` manifest leaf referencing env key `key` (the MCP editor's wire form). */
 function envMarker(key: string): string {
   return `!ENV \${${key}}`;
 }
@@ -93,7 +93,7 @@ async function seedEntry(request: APIRequestContext, title: string, key: string)
  * projection resolves, the shell's post-render effect lists `/api/plugins` and
  * dynamic-imports each installed plugin's studio bundle
  * (`/api/plugins/<name>/studio/<file>`); the pass completing pushes the plugins'
- * contributions into the host store, and the connectors route re-renders off them —
+ * contributions into the host store, and the manifest route re-renders off them —
  * which REMOUNTS the seeded entry's SecretRefField and resets its local reveal state to
  * hidden. A `Show value` click that lands against the pre-pass field is therefore
  * dropped by that remount, and the field-visible check alone races it: the field paints
@@ -142,13 +142,11 @@ function armPluginsLoaded(page: Page): () => Promise<void> {
   };
 }
 
-/** Open the Connectors page (the MCP config surface's new home) and wait for the entry's
- *  `leaf` SecretRefField. The nav refit folded the former Manifest → MCP tab into the
- *  Connectors page's inline "Configuration" section (default form view), so no tab click:
- *  the seeded entry's SecretRefField mounts directly once the page loads. */
+/** Open the Manifest screen and wait for the entry's `leaf` SecretRefField in the "MCP
+ *  servers" block's "Configuration" editor (default form view). */
 async function openMcpField(page: Page, leaf: string = ENV_ENTRY): Promise<void> {
   const pluginsLoaded = armPluginsLoaded(page);
-  await page.goto('/connectors');
+  await page.goto('/manifest');
   // The field paints from the manifest read, but the studio's plugin load pass runs just
   // after and remounts it (see armPluginsLoaded); wait that pass out before returning so
   // the caller's interactions land on a field that will not remount underneath them.

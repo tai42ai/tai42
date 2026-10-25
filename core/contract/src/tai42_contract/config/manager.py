@@ -7,6 +7,11 @@ provider ships downstream and is selected by config mode, following the same
 pattern as ``TaiApp``: the contract provides the interface, providers the
 implementation. No tenant / hosted-SaaS coupling lives here.
 
+A provider makes each single write atomic and exclusive, and also grants an exclusive write
+span (:meth:`ConfigManager.exclusive_write`) a writer holds across a whole read → validate →
+write sequence, so every process sharing the store, and every writer of one process, sees the
+writes of the others one at a time.
+
 The connectors token store is not a config-manager concern: it is reached
 through the ``AppConnectors`` facet (``tai42_app.connectors.token_store``),
 independent of the active config mode.
@@ -17,6 +22,7 @@ from __future__ import annotations
 import re
 from abc import ABC, abstractmethod
 from collections.abc import Callable
+from contextlib import AbstractContextManager
 from typing import Any, Final
 
 CONFIG_MODE_ENV: Final = "TAI_CONFIG_MODE"
@@ -36,6 +42,34 @@ class ConfigManager(ABC):
     Each config mode (``file`` built in, or an external provider) supplies a concrete implementation.
     Consumers access the active manager via ``tai42_app.config.config_manager``.
     """
+
+    # -- Write exclusion -------------------------------------------------------
+
+    @abstractmethod
+    def exclusive_write(self) -> AbstractContextManager[None]:
+        """Hold exclusive write access to this store for the whole span the caller wraps.
+
+        A writer holds the span across a whole read → validate → build → write sequence, so no
+        other write lands between its reads and its writes. While a span is held, no other span
+        over the same store is held: not by another process sharing the store, and not by
+        another thread or task of the same process; the provider excludes both. Entering blocks
+        until the span is exclusive and raises when the store cannot grant exclusion — a write
+        never proceeds unserialized. The span is released on exit and when the holding process
+        terminates.
+
+        Exiting releases the span. A release the provider cannot complete raises from the exit; the
+        writes made inside the span stand regardless — an exit never undoes a write — and the store
+        may still hold the span until the holding process terminates, so a later entry blocks or
+        raises as described above. A provider never swallows a failed release: the caller records
+        and reports it.
+
+        The span is entered and exited on worker threads of the calling process, never on its
+        event loop, and the exiting thread may differ from the entering one: the span is entered
+        on one worker-thread call and exited on another. A span whose waiter was abandoned before
+        its entry completed is exited exactly once, by the entering thread, as soon as entry
+        completes; a span whose waiter's cancellation lands as its entry completes is exited once,
+        by the waiter. The span is therefore not bound to the thread that entered it.
+        """
 
     # -- Environment configuration -------------------------------------------
 

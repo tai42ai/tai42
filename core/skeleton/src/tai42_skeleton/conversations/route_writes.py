@@ -22,7 +22,9 @@ from tai42_kit.utils.data.jq_util import compile_check
 from tai42_skeleton.conversations.address import canonical_address
 from tai42_skeleton.conversations.managers.base_conversations_manager import BaseConversationsManager
 from tai42_skeleton.conversations.target_validators import active_target_candidate_body, target_bind_refusal_lines
-from tai42_skeleton.template.resource_manager import TemplateLocaleNotFoundError, TemplateNotFoundError
+from tai42_skeleton.template.errors import TEMPLATE_RENDER_ERRORS, template_render_refusal
+from tai42_skeleton.template.references import assert_templates_stored
+from tai42_skeleton.template.stored_refs import route_template_refs
 
 # The named jq variables each expression may read, declared at compilation so an author
 # referencing one passes (jq resolves ``$name`` references at compile). The four door jqs read the
@@ -71,7 +73,7 @@ async def _assert_bindable(route: ConversationRoute) -> None:
 async def _assert_exprs_compile(route: ConversationRoute) -> None:
     """Render each templated jq program and compile it, declaring the variables it may read.
 
-    A by-id text whose stored resource cannot be fetched is refused, naming the field and the id.
+    A text that cannot be rendered is refused, naming the field (and the id of a by-id text).
     Both target kinds may carry the door jqs.
     """
     exprs = (
@@ -86,10 +88,8 @@ async def _assert_exprs_compile(route: ConversationRoute) -> None:
             continue
         try:
             program = await tai42_app.storage.resource_manager.render_templated_text(text)
-        except (TemplateNotFoundError, TemplateLocaleNotFoundError) as exc:
-            raise RouteWriteRefusedError(
-                f"{field} references stored id {text.id!r}, which could not be fetched: {exc}"
-            ) from exc
+        except TEMPLATE_RENDER_ERRORS as exc:
+            raise RouteWriteRefusedError(f"{field} {template_render_refusal(text, exc)}") from exc
         try:
             compile_check(program, variables=variables)
         except Exception as exc:
@@ -127,12 +127,14 @@ async def _unclaimed_channel_identity(
 async def write_route(route: ConversationRoute, *, manager: BaseConversationsManager) -> RouteWriteResult:
     """Write ``route`` (an upsert) after its save rules, minting its callback secret.
 
-    In order: the bind check, the expressions, the canonical ``our_identity`` and its claim, then
-    the store write. An ``api`` row that declares a ``callback_url`` gets a fresh
-    ``callback_secret`` (returned once); every other row carries none. The store write refuses a
-    door flip on a route that holds threads with :class:`DoorFlipRefusedError`, writing nothing.
+    In order: the bind check, the stored template ids the expressions name, the expressions, the
+    canonical ``our_identity`` and its claim, then the store write. An ``api`` row that declares a
+    ``callback_url`` gets a fresh ``callback_secret`` (returned once); every other row carries none.
+    The store write refuses a door flip on a route that holds threads with
+    :class:`DoorFlipRefusedError`, writing nothing.
     """
     await _assert_bindable(route)
+    await assert_templates_stored(route_template_refs(route), RouteWriteRefusedError)
     await _assert_exprs_compile(route)
     update: dict[str, object] = {}
     # Only a ``channel`` row carries both fields; its identity is stored canonicalized.

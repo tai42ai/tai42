@@ -246,14 +246,15 @@ def test_presets_lister_reads_active_bodies_when_store_configured(monkeypatch: p
         return {"assistant": _preset("run_agent", ["state_merge"])}
 
     _fake_app(monkeypatch, kinds={"thread"}, presets=SimpleNamespace(list_active_bodies=_bodies))
-    monkeypatch.setattr("tai42_kit.db.component_store_configured", lambda component: True)
     rows = _run(consumers_mod.presets_lister("alerts"))
     assert [r.name for r in rows] == ["assistant"]
 
 
-def test_presets_lister_skips_read_when_store_absent(monkeypatch: pytest.MonkeyPatch) -> None:
-    _fake_app(monkeypatch, kinds={"thread"})
-    monkeypatch.setattr("tai42_kit.db.component_store_configured", lambda component: False)
+def test_presets_lister_empty_when_no_preset_is_stored(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _no_bodies():
+        return {}
+
+    _fake_app(monkeypatch, kinds={"thread"}, presets=SimpleNamespace(list_active_bodies=_no_bodies))
     assert _run(consumers_mod.presets_lister("alerts")) == []
 
 

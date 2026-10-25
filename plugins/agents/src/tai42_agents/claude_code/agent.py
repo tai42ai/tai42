@@ -42,7 +42,7 @@ from tai42_contract.sandbox import SandboxSession
 from tai42_contract.template import TemplatedText
 from tai42_contract.tools import TOOL_META_CRASH_RESUME
 from tai42_kit.interactions.park_index import superstep_id as park_superstep_id
-from tai42_kit.llm import resolve_trace_context
+from tai42_kit.monitoring import resolve_trace_context
 
 from tai42_agents._internal.park import (
     AGENT_RESUME_TOOL_NAME,
@@ -758,9 +758,10 @@ class ClaudeCodeAgent(Agent):
         """Emit the SDK-reported usage/cost under the run's trace (its model calls bypass the platform LLM seam).
 
         Resolves the run's trace lineage through the same seam the LLM-driven agents bind:
-        a run driven as a node JOINS the driver's trace (the ambient deposit), a STANDALONE
-        run mints its own root trace carrying this usage span — so the usage is recorded
-        either way, never dropped. Fail-safe by construction (``start_span`` catches + logs).
+        a run driven as a node JOINS the driver's trace (the ambient deposit); a run with no
+        lineage opens this usage span under the live span, or as the root of its own trace —
+        so the usage is recorded either way, never dropped. Fail-safe by construction
+        (``start_span`` catches + logs).
         """
         if frame.usage is None:
             return

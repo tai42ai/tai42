@@ -24,6 +24,7 @@ from typing import Any
 import httpx
 import pytest
 import uvloop
+from sse_starlette import EventSourceResponse
 
 from tai42_skeleton.app import epoch as epoch_mod
 from tai42_skeleton.app.instance import app
@@ -46,8 +47,12 @@ _POOLED_STORE_ROUTER = "tests.app._fixtures.pooled_store_route"
 # The access-control cache TTL the served app runs with: a request's cache entries, and
 # the timers that expire them, last this long.
 _CACHE_TTL_SECONDS = 1
+# The keep-alive ping interval of every streaming response the served app sends. The ping
+# task sleeps this long; when the response ends the sleep is cancelled, but an asyncio loop
+# keeps a cancelled timer, and the request context it captured, until the timer's due time.
+_SSE_PING_INTERVAL_SECONDS = 1
 # How long a retired generation with only bounded holds may take to be collected: above
-# the cache TTL, with room for a loaded host.
+# the cache TTL and the ping interval, with room for a loaded host.
 _RELEASE_DEADLINE_SECONDS = 15.0
 # How long a reload waits for the generation's in-flight requests.
 _DRAIN_DEADLINE_SECONDS = 5.0
@@ -61,7 +66,10 @@ _LOOPS = pytest.mark.parametrize(
 
 @pytest.fixture(autouse=True)
 def _served_process(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    """Access control over in-memory stores with a short cache TTL; the env and route records a boot leaves restored."""
+    """Access control over in-memory stores, a short cache TTL and short stream pings.
+
+    The env and the route records a boot leaves are restored.
+    """
     from tai42_kit.settings import reset_all_settings
 
     from tai42_skeleton.app.route_registry import route_registry
@@ -69,6 +77,7 @@ def _served_process(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     install_access_control(monkeypatch)
     snapshot = dict(os.environ)
     monkeypatch.setenv("ACCESS_CONTROL_CACHE_TTL_SECONDS", str(_CACHE_TTL_SECONDS))
+    monkeypatch.setattr(EventSourceResponse, "DEFAULT_PING_INTERVAL", _SSE_PING_INTERVAL_SECONDS)
     monkeypatch.setattr(route_registry, "_routes", dict(route_registry._routes))
     monkeypatch.setattr(route_registry, "_control_plane_mount", route_registry._control_plane_mount)
     monkeypatch.setattr(app.config.config_manager, "read_env", dict)

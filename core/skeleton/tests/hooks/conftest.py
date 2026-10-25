@@ -31,7 +31,7 @@ from tai42_contract.app import tai42_app
 
 from tai42_skeleton.access_control.settings import AccessControlSettings
 from tai42_skeleton.authz import execution as execution_module
-from tai42_skeleton.template.resource_manager import TemplateNotFoundError
+from tai42_skeleton.template.errors import TemplateNotFoundError
 
 
 def _bind_app_and_load_tool_runs() -> None:
@@ -416,15 +416,22 @@ class _FakeApp:
 
 
 @pytest.fixture
-def make_app():
+def make_app(monkeypatch: pytest.MonkeyPatch):
     """Factory binding a fake ``tai42_app`` impl for the test. Each binding is SCOPED,
-    so teardown restores what another suite had bound rather than unbinding outright."""
+    so teardown restores what another suite had bound rather than unbinding outright.
+
+    The ``by_id`` resources are also what the storage provider holds, so the register
+    door's stored-id check finds them."""
     from tai42_contract.app import tai42_app
+    from tests._fakes.recording_storage import MappedStorage
+
+    from tai42_skeleton.app import instance
 
     with ExitStack() as stack:
 
         def _make(*, by_id: dict | None = None, raise_tools: set[str] | None = None) -> _FakeApp:
             app = _FakeApp(by_id=by_id, raise_tools=raise_tools)
+            monkeypatch.setattr(instance.app._storage_registry, "_provider", MappedStorage(dict(by_id or {})))
             stack.enter_context(tai42_app.bound(app))
             return app
 

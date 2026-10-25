@@ -334,6 +334,28 @@ def test_start_logs_kind_summary_and_warns_once_on_noop_monitoring(monkeypatch, 
     assert len(noop_warnings) == 1
 
 
+@pytest.mark.usefixtures("files_extra_missing")
+def test_start_without_the_files_extra_logs_the_files_row_off_and_boots(caplog):
+    booted: list[bool] = []
+
+    async def run():
+        async with app.app_context(Manifest.model_validate({})):
+            booted.append(True)
+
+    with caplog.at_level(logging.INFO, logger=_BOOT_LOGGER):
+        asyncio.run(run())
+
+    assert booted == [True]
+    messages = [r.getMessage() for r in caplog.records if r.name == _BOOT_LOGGER]
+    assert any(
+        m.strip()
+        == ". files: off — tai42-skeleton 'files' resource loading requires the 'files' optional dependencies "
+        "(magika, pandas, langchain-community, pypdf, docx2txt, openpyxl, tabulate, beautifulsoup4, python-pptx, "
+        "striprtf, odfpy, ebooklib). Install them with: pip install 'tai42-skeleton[files]'"
+        for m in messages
+    ), messages
+
+
 def test_start_fails_when_kind_status_collector_raises(monkeypatch):
     # A collector exception during the startup summary must fail the boot loudly,
     # never a silently degraded server with a missing table.

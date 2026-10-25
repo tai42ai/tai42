@@ -21,7 +21,11 @@ from tai42_skeleton.conversations.records import ConversationRecordStore
 from tai42_skeleton.conversations.settings import ConversationsSettings
 from tai42_skeleton.operations import conversations as ops
 from tai42_skeleton.operations.errors import BadRequestError, NotFoundError, ValidationRejectedError
+from tai42_skeleton.storage import StorageRegistry
+from tai42_skeleton.template import ResourceManager
 
+from .._fakes.recording_storage import MappedStorage
+from ..template.test_resource_manager import _InMemoryStorage
 from .conftest import DOOR_RULE_REFUSALS, _assert_park_cancelled, _seed_park, create_record
 
 
@@ -447,7 +451,7 @@ async def test_create_rejects_a_colon_channel_name(wired):
 
 
 async def test_create_rejects_unknown_agent(wired):
-    with pytest.raises(NotFoundError, match="agent not found"):
+    with pytest.raises(BadRequestError, match=r"^route target agent 'ghost' is not a registered agent$"):
         await ops.create_conversation_route(
             route_name="chat",
             door="api",
@@ -456,6 +460,82 @@ async def test_create_rejects_unknown_agent(wired):
             execution_key="svc",
             callback_url="https://example.com/cb",
         )
+
+
+async def test_create_refuses_a_channel_no_plugin_registered(wired):
+    with pytest.raises(BadRequestError, match=r"^route channel 'ghost' is not a registered channel$"):
+        await ops.create_conversation_route(
+            route_name="line",
+            door="channel",
+            target_kind="agent",
+            target_name="relay",
+            execution_key="svc",
+            channel="ghost",
+            our_identity="+15550001111",
+        )
+    assert wired.rows == {}
+
+
+def test_the_http_door_answers_a_400_naming_an_unregistered_channel(wired):
+    from starlette.applications import Starlette
+    from starlette.routing import Route
+    from starlette.testclient import TestClient
+    from tai42_contract.app import tai42_app
+
+    from tai42_skeleton.app import instance
+
+    with tai42_app.bound(instance.build_app()):
+        from tai42_skeleton.routers import conversations as router
+
+    routes = [Route("/api/conversations/{route_name}", router.create_conversation_route, methods=["POST"])]
+    response = TestClient(Starlette(routes=routes)).post(
+        "/api/conversations/line",
+        json={
+            "door": "channel",
+            "target_kind": "agent",
+            "target_name": "relay",
+            "execution_key": "svc",
+            "channel": "ghost",
+            "our_identity": "+15550001111",
+        },
+    )
+    assert response.status_code == 400
+    assert "route channel 'ghost' is not a registered channel" in response.text
+    assert wired.rows == {}
+
+
+async def test_an_unknown_target_and_an_unknown_channel_are_one_refusal_target_first(wired):
+    with pytest.raises(BadRequestError) as caught:
+        await ops.create_conversation_route(
+            route_name="line",
+            door="channel",
+            target_kind="agent",
+            target_name="ghost-agent",
+            execution_key="svc",
+            channel="ghost",
+            our_identity="+15550001111",
+        )
+    assert str(caught.value) == (
+        "route target agent 'ghost-agent' is not a registered agent\nroute channel 'ghost' is not a registered channel"
+    )
+    assert wired.rows == {}
+
+
+async def test_an_api_route_never_reads_the_channel_registry(wired, monkeypatch):
+    from tai42_skeleton.app import instance
+
+    def _unread() -> list[str]:
+        raise AssertionError("an api route must not read the channel registry")
+
+    monkeypatch.setattr(instance.app.channels, "names", _unread)
+    result = await ops.create_conversation_route(
+        route_name="chat",
+        door="api",
+        target_kind="agent",
+        target_name="relay",
+        execution_key="svc",
+    )
+    assert result["created"] is True
 
 
 async def test_create_tool_route_validates_tool_and_compiles_exprs(wired):
@@ -496,21 +576,27 @@ async def test_create_tool_route_renders_and_stores_by_id_exprs(wired):
     assert row.reply_expr == TemplatedText(id="route-reply")
 
 
-async def test_create_rejects_unfetchable_by_id_start_expr(wired):
-    with pytest.raises(BadRequestError, match="start_expr references stored id 'ghost'"):
+@pytest.mark.parametrize("field", ["start_expr", "cancel_expr", "resume_expr", "extras_expr", "reply_expr"])
+async def test_create_refuses_an_id_the_store_lacks(wired, field: str):
+    exprs: dict[str, Any] = {field: TemplatedText(id="jq/reply")}
+    with pytest.raises(BadRequestError) as caught:
         await ops.create_conversation_route(
             route_name="chat",
             door="api",
             target_kind="tool",
             target_name="echo-tool",
-            start_expr=TemplatedText(id="ghost"),
             execution_key="svc",
             callback_url="https://example.com/cb",
+            **exprs,
         )
+    assert (
+        caught.value.message == f"invalid conversation route: stored id 'jq/reply' at {field} is not a stored template"
+    )
+    assert wired.rows == {}
 
 
 async def test_create_rejects_unknown_tool(wired):
-    with pytest.raises(NotFoundError, match="tool not found"):
+    with pytest.raises(BadRequestError, match=r"^route target tool 'ghost-tool' is not a registered tool$"):
         await ops.create_conversation_route(
             route_name="chat",
             door="api",
@@ -626,6 +712,50 @@ async def test_create_bind_refusal_leaves_no_row(wired, monkeypatch):
             execution_key="svc",
             callback_url="https://example.com/cb",
         )
+    assert "chat" not in wired.rows
+
+
+async def test_create_binding_an_account_is_a_400_and_leaves_no_row(wired, monkeypatch):
+    from tai42_contract.access_control.models import AccessPolicy
+
+    from tai42_skeleton.access_control import management
+    from tai42_skeleton.access_control.settings import AccessControlSettings
+    from tai42_skeleton.operations import _authority as authority
+
+    account = AccessPolicy(scopes=["conversations"])
+
+    class _Enforcer:
+        def __init__(self, _settings: AccessControlSettings) -> None:
+            pass
+
+        async def get_policy(self, user_id: str) -> AccessPolicy:
+            return account if user_id == "alice" else AccessPolicy(scopes=[])
+
+    async def _get_principal(user_id: str) -> dict | None:
+        return {"user_id": user_id, "kind": "human"} if user_id == "alice" else None
+
+    async def _caller() -> authority.Caller:
+        return authority.Caller(caller_id="alice", policy=account, is_admin=False, owner_claim=None)
+
+    monkeypatch.setattr(authority, "access_control_settings", lambda: AccessControlSettings(enable=True))
+    monkeypatch.setattr(authority, "policy_enforcer", _Enforcer)
+    monkeypatch.setattr(management, "get_principal", _get_principal)
+    monkeypatch.setattr(ops, "assert_execution_key_bindable", authority.assert_execution_key_bindable)
+    monkeypatch.setattr(ops, "resolve_caller", _caller)
+
+    with pytest.raises(BadRequestError) as refused:
+        await ops.create_conversation_route(
+            route_name="chat",
+            door="api",
+            target_kind="agent",
+            target_name="relay",
+            execution_key="alice",
+            callback_url="https://example.com/cb",
+        )
+    assert refused.value.message == (
+        "execution key 'alice' is an account, not an api key; a route, hook, trigger link or schedule runs as an "
+        "api key, so bind an api key instead"
+    )
     assert "chat" not in wired.rows
 
 
@@ -1268,7 +1398,7 @@ async def test_bound_route_recheck_refuses_a_save_that_would_break_it(wired, mon
     import tai42_skeleton.conversations as conv_pkg
     from tai42_skeleton.app import instance
     from tai42_skeleton.operations.errors import ConflictError
-    from tai42_skeleton.operations.presets.references import _assert_bound_routes_still_bind
+    from tai42_skeleton.operations.reference_graph import _assert_bound_routes_still_bind
 
     async def _validator(create: ConversationRouteCreate, candidate: PresetBody | None) -> list[str]:
         if candidate is not None and candidate.fixed_kwargs.get("broken"):
@@ -1299,19 +1429,18 @@ async def test_bound_route_recheck_refuses_a_save_that_would_break_it(wired, mon
 async def test_bound_route_recheck_ignores_a_preset_no_route_binds(wired, monkeypatch):
     """A save of a preset no route targets is never refused by the re-check."""
     import tai42_skeleton.conversations as conv_pkg
-    from tai42_skeleton.operations.presets.references import _assert_bound_routes_still_bind
+    from tai42_skeleton.operations.reference_graph import _assert_bound_routes_still_bind
 
     monkeypatch.setattr(conv_pkg, "get_conversations_manager", lambda: wired)
     # No routes exist at all — the re-check finds nothing to refuse.
     await _assert_bound_routes_still_bind("echo-preset", None)
 
 
-async def test_delete_is_refused_while_a_route_is_bound(wired, monkeypatch):
-    """A preset delete is refused — naming the routes — while a conversation route still targets it."""
+async def test_a_route_bound_to_the_preset_is_a_delete_holder(wired, monkeypatch):
+    """A route bound to the preset is a ``conversation route`` holder of its delete."""
     import tai42_skeleton.conversations as conv_pkg
     from tai42_skeleton.app import instance
-    from tai42_skeleton.operations.errors import ConflictError
-    from tai42_skeleton.operations.presets.references import _assert_no_bound_routes
+    from tai42_skeleton.operations.holders import delete_holders
 
     async def _validator(create: ConversationRouteCreate, candidate: object) -> list[str]:
         return []
@@ -1327,11 +1456,37 @@ async def test_delete_is_refused_while_a_route_is_bound(wired, monkeypatch):
     )
     monkeypatch.setattr(conv_pkg, "get_conversations_manager", lambda: wired)
 
-    with pytest.raises(ConflictError, match="cannot be deleted — held by: conversation route 'r1'"):
-        await _assert_no_bound_routes("echo-preset")
+    holders = await delete_holders("echo-preset", [])
+    assert [holder.model_dump() for holder in holders] == [
+        {"kind": "conversation route", "name": "r1", "locator": {}, "summary": "conversation route 'r1'"}
+    ]
+    # A preset no route targets has no route holder.
+    assert await delete_holders("other-preset", []) == []
 
-    # A preset no route targets deletes freely (nothing held).
-    await _assert_no_bound_routes("other-preset")
+
+async def test_a_route_bound_to_a_branch_of_the_preset_is_a_delete_holder_naming_the_branch(wired, monkeypatch):
+    """A delete removes the preset's extension branch tools too, so a route bound to a branch holds it."""
+    import tai42_skeleton.conversations as conv_pkg
+    from tai42_skeleton.app import instance
+    from tai42_skeleton.operations.holders import delete_holders
+
+    async def _validator(create: ConversationRouteCreate, candidate: object) -> list[str]:
+        return []
+
+    instance.app.conversations.register_target_validator("tool", "echo-tool", _validator)
+    await ops.create_conversation_route(
+        route_name="r1",
+        door="api",
+        target_kind="tool",
+        target_name="echo-tool",
+        execution_key="svc",
+        callback_url="https://example.com/cb",
+    )
+    monkeypatch.setattr(conv_pkg, "get_conversations_manager", lambda: wired)
+
+    # ``echo-tool`` stands in for a branch the preset ``echo-preset`` binds.
+    holders = await delete_holders("echo-preset", ["echo-tool"])
+    assert [holder.summary for holder in holders] == ["conversation route 'r1' targets 'echo-tool'"]
 
 
 # -- the route door's order and texts over the route write service ----------------------------
@@ -1394,7 +1549,7 @@ async def test_a_duplicate_channel_claim_reads_the_full_prefixed_text(wired):
         target_kind="agent",
         target_name="relay",
         execution_key="svc",
-        channel="c",
+        channel="twilio",
         our_identity="i",
     )
     with pytest.raises(BadRequestError) as caught:
@@ -1404,10 +1559,10 @@ async def test_a_duplicate_channel_claim_reads_the_full_prefixed_text(wired):
             target_kind="agent",
             target_name="relay",
             execution_key="svc",
-            channel="c",
+            channel="twilio",
             our_identity="i",
         )
-    assert str(caught.value) == "invalid conversation route: channel 'c' identity 'i' is already routed by 'r'"
+    assert str(caught.value) == "invalid conversation route: channel 'twilio' identity 'i' is already routed by 'r'"
     assert "r2" not in wired.rows
 
 
@@ -1446,3 +1601,45 @@ async def test_the_operation_refuses_each_door_rule_with_a_400(wired, overrides:
         await ops.create_conversation_route(**fields)
     assert location in str(caught.value) or (location == "door" and "union_tag_invalid" in str(caught.value))
     assert wired.rows == {}
+
+
+def _real_resource_manager(resources: dict[str, str]) -> ResourceManager:
+    """A real resource manager over an in-memory store holding ``resources``."""
+
+    class _Store(_InMemoryStorage):
+        def __init__(self) -> None:
+            super().__init__(resources)
+
+    registry = StorageRegistry()
+    registry.register_storage(_Store)
+    return ResourceManager(registry.provider, on_evicted=lambda _eviction: None)
+
+
+@pytest.mark.parametrize(
+    ("start_expr", "message"),
+    [
+        (
+            TemplatedText(id="broken-payload"),
+            "start_expr references stored id 'broken-payload', which could not be rendered",
+        ),
+        (TemplatedText(content='"{{ oops"'), "start_expr is not a renderable template"),
+    ],
+)
+async def test_create_rejects_a_start_expr_that_cannot_be_rendered(wired, monkeypatch, start_expr, message):
+    # A start_expr body with broken Jinja (stored or inline) fails its render at create: a
+    # client error naming the field, never an unmapped template-engine error.
+    from tai42_skeleton.app import instance
+
+    resources = {"broken-payload": "{{ oops"}
+    monkeypatch.setattr(instance.app.storage, "resource_manager", _real_resource_manager(resources))
+    monkeypatch.setattr(instance.app.storage, "provider", MappedStorage(resources))
+    with pytest.raises(BadRequestError, match=message):
+        await ops.create_conversation_route(
+            route_name="chat",
+            door="api",
+            target_kind="tool",
+            target_name="echo-tool",
+            start_expr=start_expr,
+            execution_key="svc",
+            callback_url="https://example.com/cb",
+        )

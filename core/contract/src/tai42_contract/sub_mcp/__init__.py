@@ -43,7 +43,11 @@ class SubMcpAppRouter(Protocol):
         ...
 
     async def register_sub_mcp_app(self, slug: str, tools: list[str], transport: str = "http") -> None:
-        """Register (or reload) a sub-MCP app exposing ``tools`` under ``slug``."""
+        """Register (or reload) a sub-MCP app exposing ``tools`` under ``slug``.
+
+        A tool name the live registry does not serve is refused with an ``OperationError`` of
+        kind ``bad_input`` naming every such tool, and nothing is registered.
+        """
         ...
 
     async def unregister_sub_mcp_app(self, slug: str) -> None:

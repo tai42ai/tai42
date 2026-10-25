@@ -211,7 +211,8 @@ async def assert_execution_key_bindable(caller: Caller, execution_key: str) -> s
     returns :data:`GATE_OFF_EXECUTION_FINGERPRINT`.
     A non-admin's refusal is a UNIFORM 403 across absent-key and not-yours, so this door is
     no probe for api-key ids; every check after the pass-role test runs only for a caller
-    that cleared it.
+    that cleared it. An account named as the key is a 400: a stored record runs only as an
+    api key.
     """
     settings = access_control_settings()
     if not settings.enable:
@@ -228,10 +229,15 @@ async def assert_execution_key_bindable(caller: Caller, execution_key: str) -> s
     elif not exists or (execution_key != caller.caller_id and owner_of(policy.policy_data) != caller.caller_id):
         raise ForbiddenError("you may only bind your own identity or an execution key you own")
 
-    # An existing key carrying no anchor is corrupt (every mint stamps one): refuse loudly
-    # rather than bind a record no fire could resolve.
+    # Every mint stamps a fingerprint. A row without one is either an account, which a stored record
+    # cannot run as, or a minted key that lost its anchor, which is corrupt.
     fingerprint = policy.policy_data.get(KEY_FINGERPRINT_CLAIM)
     if not isinstance(fingerprint, str) or not fingerprint:
+        if await management.get_principal(execution_key) is not None:
+            raise BadRequestError(
+                f"execution key {execution_key!r} is an account, not an api key; a route, hook, trigger link or "
+                "schedule runs as an api key, so bind an api key instead"
+            )
         logger.error(
             "access_control: execution key %r has a policy but no %s claim; refusing to bind an unanchored record",
             execution_key,

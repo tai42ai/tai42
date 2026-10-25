@@ -269,6 +269,17 @@ class AppInteractions(Protocol):
         """
         ...
 
+    async def settle_chained_terminal(self, chain_key: str, result: Any) -> Any:
+        """Return a chained run's terminal ``result`` with the output stages captured for ``chain_key`` applied.
+
+        A chained run fires its terminal along its routing through this settle: the output stages
+        of the preset dispatches its park sat under, captured at the park for the routing keyed
+        ``chain_key``, apply in order, innermost first. A stage that refuses the result settles it
+        to a :class:`~tai42_contract.interactions.RunFailed` naming the preset. With no stages
+        captured for the key the result is returned unchanged.
+        """
+        ...
+
     @property
     def ask(self) -> Ask:
         """The bound, :class:`~tai42_contract.interactions.Ask`-typed ``ask`` callable.
@@ -320,7 +331,8 @@ class AppChannels(Protocol):
         A channel plugin calls this through the ``tai42_app`` handle when its
         import-only ``channel_modules`` entry loads. Registering a name already
         taken raises loudly — a silent overwrite could swap the medium a live
-        ask is delivered on.
+        ask is delivered on. Raises ``ValueError`` when the channel declares a
+        malformed ``identity_hint`` (see :class:`Channel`).
         """
         ...
 

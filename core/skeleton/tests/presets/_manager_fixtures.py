@@ -15,7 +15,9 @@ __all__ = ["FakeVersioningPg", "_create_versioned", "_live_tool_names", "_manife
 
 _MANIFEST = {
     "extensions_modules": ["tests.presets._ext_fixtures"],
-    "tools": [{"title": "fx", "module": "tests.presets._fixtures", "include": ["weather", "echo"]}],
+    "tools": [
+        {"title": "fx", "module": "tests.presets._fixtures", "include": ["weather", "echo", "ctx_echo", "payload_echo"]}
+    ],
 }
 
 

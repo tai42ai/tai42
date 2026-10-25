@@ -13,6 +13,8 @@ manifest is byte-identical (nothing partial lands).
 
 from __future__ import annotations
 
+import base64
+import secrets
 from collections.abc import Callable, Iterator
 
 import pytest
@@ -27,6 +29,7 @@ from ._fleet import (
     build_backup_definitions_stack,
     build_backup_populated_stack,
     build_backup_source_stack,
+    build_backup_storage_stack,
     build_fleet_env_stack_builder,
     converged_baseline,
     converged_digest,
@@ -116,7 +119,7 @@ async def test_backup_sub_mcp_import_mode_matrix_on_populated_instance(
       ``updated``.
 
     This is the keyed-record contract every mode-aware section (conversations, tokens,
-    templates, ...) shares; the section-specific legs (token skip-only, conversations
+    storage, ...) shares; the section-specific legs (token skip-only, conversations
     callback-secret non-remint) are exercised on a populated instance by
     ``test_skip_import_preserves_conversation_secret_and_token`` below.
     """
@@ -426,5 +429,95 @@ async def test_stored_definitions_restore_their_bindings_onto_a_fresh_stack(
     assert (restored_attach["state"], restored_attach["templates"]) == (state, [template]), config
 
     refused = await fresh.request_raw("PUT", f"/api/conversation-configs/tool/{preset}", json=config_body)
-    assert refused.status_code == 404, refused.text
-    assert refused.json()["error"] == f"tool not found: {preset!r}", refused.text
+    assert refused.status_code == 400, refused.text
+    expected = f"conversation config target tool {preset!r} is not a registered tool"
+    assert refused.json()["error"] == expected, refused.text
+
+
+_PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+
+
+@pytest.mark.needs("kind:storage")
+async def test_storage_section_restores_text_and_binary_objects_byte_equal(
+    fresh_stack: Callable[..., TaiStack], uniq: Callable[[str], str]
+) -> None:
+    """The ``storage`` section carries every object of the content store: a text object as
+    ``content_text`` and a binary one as ``content_base64``, each with its content type. Both
+    are exported, deleted, restored, and then download byte-equal."""
+    stack = fresh_stack(build_backup_storage_stack)
+    api = stack.api()
+    text_id = f"{uniq('bkp-text')}.j2"
+    text = f"hello {{{{ name }}}} {uniq('body')}"
+    binary_id = f"{uniq('bkp-blob')}.png"
+    raw = _PNG_SIGNATURE + secrets.token_bytes(48)
+    await api.post("/api/storage/resources", json={"id": text_id, "content_text": text})
+    await api.post("/api/storage/resources", json={"id": binary_id, "content_base64": base64.b64encode(raw).decode()})
+    binary_type = (await api.get(f"/api/storage/resources/{binary_id}/stat"))["content_type"]
+
+    export = await api.request_raw("POST", "/api/backup/export", json={"sections": ["storage"]})
+    assert export.status_code == 200, export.text
+    document = export.json()
+    assert document["errors"] == {}, document["errors"]
+    entries = document["sections"]["storage"]
+    assert entries[text_id]["content_text"] == text, entries[text_id]
+    assert base64.b64decode(entries[binary_id]["content_base64"]) == raw
+    assert entries[binary_id]["content_type"] == binary_type, entries[binary_id]
+
+    for resource_id in (text_id, binary_id):
+        await api.delete(f"/api/storage/resources/{resource_id}")
+
+    result = await api.post(
+        "/api/backup/import", json={"document": document, "sections": ["storage"]}, retry_on_reloading=True
+    )
+    assert result["ok"], result
+    report = result["sections"]["storage"]
+    assert report["created"] == 2, report
+    assert report["errors"] == [], report
+
+    for resource_id, expected in ((text_id, text.encode()), (binary_id, raw)):
+        download = await api.request_raw("GET", f"/api/storage/resources/{resource_id}/content")
+        assert download.status_code == 200, download.text
+        assert download.content == expected, resource_id
+    restored_type = (await api.get(f"/api/storage/resources/{binary_id}/stat"))["content_type"]
+    assert restored_type == binary_type
+
+
+def _non_canonical(key: str) -> str:
+    return f"non-canonical store key {key!r}: a key is '/'-separated names with no empty, '.' or '..' segment"
+
+
+@pytest.mark.needs("kind:storage")
+async def test_a_storage_import_refuses_rows_under_the_inbound_media_prefix_and_changes_nothing(
+    fresh_stack: Callable[..., TaiStack], uniq: Callable[[str], str]
+) -> None:
+    """A hand-made archive naming the not-backed-up ``inbound-media/`` prefix, directly and
+    through a non-canonical ``./`` key, has both rows refused and writes nothing."""
+    stack = fresh_stack(build_backup_storage_stack)
+    api = stack.api()
+    media_id = uniq("media")
+    marked = f"inbound-media/{media_id}"
+    dotted = f"./inbound-media/{media_id}"
+    before = (await api.get("/api/storage/resources"))["resources"]
+    document = {
+        "version": 1,
+        "sections": {
+            "storage": {
+                marked: {"content_base64": base64.b64encode(_PNG_SIGNATURE).decode(), "content_type": "image/png"},
+                dotted: {"content_text": "x", "content_type": None},
+            }
+        },
+    }
+
+    result = await api.post(
+        "/api/backup/import",
+        json={"document": document, "sections": ["storage"], "mode": "overwrite"},
+        retry_on_reloading=True,
+    )
+    report = result["sections"]["storage"]
+    assert report["errors"] == [
+        f"template {marked!r}: path is under 'inbound-media/', which is marked not backed up",
+        f"template {dotted!r}: {_non_canonical(dotted)}",
+    ], report
+    assert (report["created"], report["skipped"]) == (0, 2), report
+    assert (await api.get("/api/storage/resources"))["resources"] == before
+    await api.get(f"/api/storage/entries/{marked}", expect=404)

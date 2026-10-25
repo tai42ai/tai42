@@ -42,6 +42,7 @@ from tai42_agents._internal.park.drive import (
     park_step_binding,
     require_stored_checkpoint,
     resume_command,
+    step_bindings,
 )
 from tai42_agents._internal.park.lease import (
     LEASE_HEADROOM_SECONDS,
@@ -83,5 +84,6 @@ __all__ = [
     "register_chained_park_tool",
     "require_stored_checkpoint",
     "resume_command",
+    "step_bindings",
     "workspace_lease",
 ]

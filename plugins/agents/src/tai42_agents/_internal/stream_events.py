@@ -54,8 +54,9 @@ from tai42_contract.agent.events import (
     ToolResultStep,
 )
 from tai42_kit.llm.runtime import validate_structured_output
+from tai42_kit.monitoring import begin_run_trace
 
-from tai42_agents._internal.base_tool_agent import ParkBuilder, _build_agent_and_input
+from tai42_agents._internal.base_tool_agent import ParkBuilder, _build_agent_and_input, turn_input
 from tai42_agents._internal.config_util import mark_minted_thread_finished
 from tai42_agents._internal.graph_cache import ToolsAgentGraph
 from tai42_agents._internal.outcomes import (
@@ -70,8 +71,10 @@ from tai42_agents._internal.park import (
     finalize_drive,
     park_step_binding,
     resume_command,
+    step_bindings,
 )
 from tai42_agents._internal.recovery import _is_answerable
+from tai42_agents._internal.run_record import TerminalEvents
 from tai42_agents._internal.usage import usage_event
 
 
@@ -163,38 +166,60 @@ async def astream_tools_agent_events(
 
     Cancellation (``asyncio.CancelledError``) propagates out unchanged so the
     caller can do its own abort bookkeeping.
+
+    The run's one trace lineage comes from the kit's run-trace opener: the lineage ``config`` or
+    the ambient deposit names, or else one ``run`` span this drive opens, current only inside each
+    step and ended when the stream stops; a failure is recorded on it, a cancellation or an
+    abandoned stream is not. The root records the turn (the user messages, or the answers a
+    resume drives) and, when the stream ends, its terminal events.
     """
     # The compile seam minted the structured-output strategy ONCE with the graph; that
     # same object is bound into both the graph and the projection, so the synthetic
     # tool the graph binds and the names the projection suppresses derive from one
     # object — an untitled ``oneOf`` variant's random name matches by identity.
     agent, strategy, response_format = graph.agent, graph.strategy, graph.response_format
-    messages, config, minted_thread = await _build_agent_and_input(graph, user_message, config, user_content_kwargs)
-    park = park_builder(config) if park_builder is not None else None
-    agent_input: Any = await resume_command(agent, config, resume) if resume is not None else messages
-
-    async def _drive() -> AsyncIterator[StreamEvent]:
-        async for event in aproject_agent_events(
-            agent, agent_input, config, response_format=response_format, structured_strategy=strategy
-        ):
-            yield event
-        pauses = await finalize_drive(agent, config, None, park)
-        if not any(isinstance(event, SuspendedFinal | InterruptFinal) for event in pauses):
-            await mark_minted_thread_finished(minted_thread, provider=graph.checkpoint_provider)
-        for event in pauses:
-            yield event
-
-    # Bind the resume continuation and the chained-park claims ledger around each drive step,
-    # NOT in this generator's body: a ``with`` wrapping the ``yield`` would leak the bindings
-    # into the consumer's task (PEP 568 is unimplemented) and strand them on an abandoned
-    # stream. The claims ledger is owned here for the whole drive — each step re-binds it — and the
-    # dead chains it holds when the drive stops are detached, whether it drained or was abandoned.
+    root = begin_run_trace(config, input_=turn_input(user_message, resume))
+    terminals = TerminalEvents()
+    # The claims ledger is owned here for the whole drive and its dead chains are detached when the
+    # drive stops, whether it drained, failed or was abandoned.
     claims: dict[str, datetime | None] = {}
     try:
-        async for event in bind_resume_per_step(lambda: park_step_binding(park, claims), _drive()):
-            yield event
+        with root.step():
+            messages, run_config, minted_thread = await _build_agent_and_input(
+                graph, user_message, config, user_content_kwargs, root.context
+            )
+            park = park_builder(run_config) if park_builder is not None else None
+            agent_input: Any = await resume_command(agent, run_config, resume) if resume is not None else messages
+
+        async def _drive() -> AsyncIterator[StreamEvent]:
+            async for event in aproject_agent_events(
+                agent, agent_input, run_config, response_format=response_format, structured_strategy=strategy
+            ):
+                yield event
+            pauses = await finalize_drive(agent, run_config, None, park)
+            if not any(isinstance(event, SuspendedFinal | InterruptFinal) for event in pauses):
+                await mark_minted_thread_finished(minted_thread, provider=graph.checkpoint_provider)
+            for event in pauses:
+                yield event
+
+        # Bind the run's trace root, the resume continuation and the chained-park claims ledger around
+        # each drive step, NOT in this generator's body: a ``with`` wrapping the ``yield`` would leak
+        # the bindings into the consumer's task (PEP 568 is unimplemented) and strand them on an
+        # abandoned stream.
+        try:
+            async for event in bind_resume_per_step(
+                lambda: step_bindings(root.step, lambda: park_step_binding(park, claims)), _drive()
+            ):
+                yield terminals.note(event)
+        finally:
+            with root.step():
+                await detach_dead_chains(claims)
+        root.record_output(terminals.events)
+    except Exception as exc:
+        root.fail(exc)
+        raise
     finally:
-        await detach_dead_chains(claims)
+        root.end()
 
 
 def _split_stream_item(item: Any) -> tuple[str, Any]:

@@ -14,10 +14,10 @@ from tai42_contract.app.responses import ApplyResponse
 
 from tai42_skeleton.app.boot_rules import translate_config_invariants
 from tai42_skeleton.config.service import ConfigService
-from tai42_skeleton.operations import BadRequestError, NotFoundError, operation
+from tai42_skeleton.operations import BadRequestError, ConflictError, NotFoundError, UpstreamError, operation
 from tai42_skeleton.operations._broadcast import apply_response, translate_orphan_env_write
 
-from .models import AgentsEntriesAdd, McpConfigUpdate, McpEntriesAdd, ToolsEntriesAdd
+from .models import AgentsEntriesAdd, McpConfigUpdate, McpEntriesAdd, McpToolFilterUpdate, ToolsEntriesAdd
 
 
 @operation(
@@ -25,7 +25,7 @@ from .models import AgentsEntriesAdd, McpConfigUpdate, McpEntriesAdd, ToolsEntri
     tags=["manifest"],
     destructive=True,
     reload_gated=True,
-    errors=[BadRequestError],
+    errors=[BadRequestError, ConflictError, UpstreamError],
     request_model=McpConfigUpdate,
     response_model=ApplyResponse,
 )
@@ -43,6 +43,40 @@ async def set_mcp_config(mcp: list[Any]) -> dict:
     with translate_orphan_env_write(), translate_config_invariants(BadRequestError):
         try:
             result = await ConfigService.from_app().apply_change(mutator)
+        except ValueError as exc:
+            raise BadRequestError(f"invalid mcp config: {exc}") from exc
+        return apply_response(result)
+
+
+@operation(
+    summary="Set an MCP server's tool selection",
+    tags=["manifest"],
+    destructive=True,
+    reload_gated=True,
+    errors=[BadRequestError, ConflictError, NotFoundError, UpstreamError],
+    request_model=McpToolFilterUpdate,
+    response_model=ApplyResponse,
+)
+async def set_mcp_tool_filter(title: str, include: list[str], exclude: list[str]) -> dict:
+    """Set the ``include`` and ``exclude`` of the ``mcp`` entry named ``title`` and hot-reload the fleet.
+
+    Every other key of the entry is kept as stored. An unknown title is a 404; unpicking a tool
+    something still uses is a 409, and a server that cannot be listed for that check a 502.
+    """
+
+    def mutator(document: dict[str, Any]) -> None:
+        for entry in document.get("mcp") or []:
+            if isinstance(entry, dict) and entry.get("title") == title:
+                entry["include"] = list(include)
+                entry["exclude"] = list(exclude)
+                return
+        raise LookupError(title)
+
+    with translate_orphan_env_write(), translate_config_invariants(BadRequestError):
+        try:
+            result = await ConfigService.from_app().apply_change(mutator)
+        except LookupError as exc:
+            raise NotFoundError(f"unknown mcp entry title: {title!r}") from exc
         except ValueError as exc:
             raise BadRequestError(f"invalid mcp config: {exc}") from exc
         return apply_response(result)
@@ -129,7 +163,7 @@ async def _apply_entry_remove(section: str, title: str) -> dict:
     tags=["manifest"],
     destructive=True,
     reload_gated=True,
-    errors=[BadRequestError],
+    errors=[BadRequestError, ConflictError, UpstreamError],
     request_model=McpEntriesAdd,
     response_model=ApplyResponse,
 )

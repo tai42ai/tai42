@@ -6,16 +6,17 @@ detach-gate consult through a live app is pinned in
 from __future__ import annotations
 
 import pytest
+from tai42_contract.tools import ReferenceHolder
 
 from tai42_skeleton.tools.detach_referees import StateTemplateDetachRefereeRegistry
 
 
-async def _empty(_state: str, _template: str) -> list[str]:
+async def _empty(_state: str, _template: str) -> list[ReferenceHolder]:
     return []
 
 
-async def _holder(_state: str, _template: str) -> list[str]:
-    return ["a preset version binds it"]
+async def _holder(_state: str, _template: str) -> list[ReferenceHolder]:
+    return [ReferenceHolder(kind="preset version", name="p", summary="preset 'p' version 1")]
 
 
 def test_registry_collects_and_snapshots() -> None:

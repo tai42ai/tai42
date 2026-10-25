@@ -7,6 +7,7 @@ from typing import Any
 
 from tai42_contract.app import tai42_app
 from tai42_contract.app.responses import OpaqueJson
+from tai42_contract.manifest import ExtensionElement, ExtensionsConfigMixin
 from tai42_kit.utils.data.env_markers import scan_env_marker_refs
 
 import tai42_skeleton.operations.manifest as _pkg
@@ -24,48 +25,79 @@ from tai42_skeleton.operations.response_models_group_a import (
 from .models import FailedMcpsQuery
 
 
+def read_preserved_document() -> dict[str, Any]:
+    """The PRESERVED persisted manifest document, ``!ENV`` markers intact; ``{}`` for a never-written store."""
+    try:
+        return tai42_app.config.config_manager.read_manifest_preserved()
+    except FileNotFoundError:
+        return {}
+
+
+def normalized_extension_map(raw: object) -> dict[str, list[list[ExtensionElement]]]:
+    """One ``extensions`` map in the contract's stored shape: a flat combo wrapped, a malformed map refused.
+
+    Config values pass through as written, so an ``!ENV`` marker string stays the marker.
+    """
+    return ExtensionsConfigMixin.model_validate({"extensions": raw}).extensions
+
+
+def _extension_maps(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The ``{title, extensions}`` maps of the entries that carry a non-empty ``extensions`` map, in order."""
+    return [
+        {"title": entry["title"], "extensions": normalized_extension_map(entry["extensions"])}
+        for entry in entries
+        if entry.get("extensions")
+    ]
+
+
 def _preserved_manifest_view() -> dict:
-    """The PRESERVED persisted manifest's MCP section + user tools, ``!ENV`` markers intact.
+    """The PRESERVED persisted manifest's MCP section, user tools and extension settings, ``!ENV`` markers intact.
 
     No resolved secret value ever leaves on the wire. A never-written store yields an empty view.
     """
-    try:
-        preserved = tai42_app.config.config_manager.read_manifest_preserved()
-    except FileNotFoundError:
-        preserved = {}
+    preserved = read_preserved_document()
     # user_tools may serialize from a set; JSON needs a stable list.
     user_tools = sorted(preserved.get("user_tools", []))
-    return {"mcp": preserved.get("mcp", []), "user_tools": user_tools}
+    return {
+        "mcp": preserved.get("mcp", []),
+        "user_tools": user_tools,
+        "extension_settings": {
+            "extensions_modules": list(preserved.get("extensions_modules", [])),
+            "backend_module": preserved.get("backend_module"),
+            "tools": _extension_maps(preserved.get("tools", [])),
+            "mcp": _extension_maps(preserved.get("mcp", [])),
+            "api_tools": normalized_extension_map(preserved.get("api_tools", {}).get("extensions")),
+        },
+    }
 
 
 @operation(
-    summary="Read the PRESERVED manifest MCP section and user tools",
+    summary="Read the PRESERVED manifest MCP section, user tools and extension settings",
     tags=["manifest"],
     response_model=PreservedManifestView,
 )
 async def get_manifest() -> dict:
-    """Return the MCP section and user tools of the PRESERVED persisted manifest.
+    """Return the MCP section, user tools and extension settings of the PRESERVED persisted manifest.
 
     ``!ENV ${KEY}`` markers are kept intact, so a secret leaf is its placeholder marker, NEVER the
     plaintext value.
 
     This door serves ONLY the preserved read: no resolved-view surface exists here, so no
-    ``!ENV`` marker is ever materialized onto the wire. McpTab reads
-    ``/api/manifest/preserved`` and ManifestTab renders the markers directly.
+    ``!ENV`` marker is ever materialized onto the wire; a client renders the markers as they are.
     """
     return _pkg._preserved_manifest_view()
 
 
 @operation(
-    summary="Read the PRESERVED manifest (markers intact) MCP section and user tools",
+    summary="Read the PRESERVED manifest (markers intact) MCP section, user tools and extension settings",
     tags=["manifest"],
     response_model=PreservedManifestView,
 )
 async def get_manifest_preserved() -> dict:
-    """Return the PRESERVED persisted manifest's MCP section + user tools, every ``!ENV`` marker intact.
+    """Return the PRESERVED persisted manifest's MCP section, user tools and extension settings, markers intact.
 
-    No secret is resolved — the source the Studio McpTab config editor reads so it can round-trip
-    markers instead of baking a resolved secret. Same ``{mcp, user_tools}`` view as
+    No secret is resolved — the source an MCP config editor reads so it can round-trip
+    markers instead of baking a resolved secret. Same view (MCP section, user tools and extension settings) as
     ``get_manifest`` — both serve the preserved read; this explicit ``/preserved`` door names that
     no-resolve contract in its path.
     """
@@ -129,7 +161,7 @@ async def list_failed_mcps(targets: list[str] | None = None) -> Any:
 
     Each entry is ``{"title", "status", "category", "message", "http_status"}`` — the
     title plus the coarse status and a credential-free failure detail (``category`` one
-    of ``auth`` / ``unreachable`` / ``error``, the redacted ``message``, and the
+    of ``preset_store`` / ``auth`` / ``unreachable`` / ``error``, the redacted ``message``, and the
     ``http_status`` when the failure carried one). A query op rides the same fan-out primitive as a mutation:
     every worker's list arrives as its per-worker ``payload`` in the fleet report
     (this worker's list on its own self entry); ``targets`` optionally restricts the

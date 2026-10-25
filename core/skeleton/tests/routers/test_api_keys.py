@@ -39,9 +39,11 @@ from tai42_skeleton.access_control import store as store_module
 from tai42_skeleton.access_control.policy import PolicyEnforcer
 from tai42_skeleton.access_control.policy_store import AcPolicyStore
 from tai42_skeleton.access_control.settings import access_control_settings
+from tai42_skeleton.app import instance
 from tai42_skeleton.operations import api_keys as operations_api_keys
 from tai42_skeleton.routers import api_keys
 
+from .._fakes.recording_storage import MappedStorage
 from ..access_control.conftest import (
     FakeAccessControlPg,
     FakeRedis,
@@ -1072,7 +1074,10 @@ async def test_create_non_dict_policy_data_400(store: _Fakes) -> None:
     assert "policy_data" in _body(resp)["error"]
 
 
-async def test_edit_condition_by_stored_id_written(store: _Fakes, pg_store: _MemStore) -> None:
+async def test_edit_condition_by_stored_id_written(
+    store: _Fakes, pg_store: _MemStore, acl_store: MappedStorage
+) -> None:
+    acl_store.items["quota"] = ".context.used < 3"
     await api_keys.add_scope_url(_req(body={"scope_id": "scope-a", "url": "/a"}))
     await api_keys.create_api_key(_req(body={"user_id": "u1", "description": "d", "scopes": ["scope-a"]}))
     resp = await api_keys.edit_api_key(
@@ -1203,6 +1208,7 @@ async def test_list_routes_catalogs_route_table(monkeypatch: pytest.MonkeyPatch)
         "tags": [],
         "summary": "",
         "action": None,
+        "role_reach": None,
         "declared_public": False,
     }
     # The unassigned-routes bucket: no mapping → null.
@@ -1213,6 +1219,7 @@ async def test_list_routes_catalogs_route_table(monkeypatch: pytest.MonkeyPatch)
         "tags": [],
         "summary": "",
         "action": None,
+        "role_reach": None,
         "declared_public": False,
     }
     # A scope-mapped route reports its scope id.
@@ -1223,6 +1230,7 @@ async def test_list_routes_catalogs_route_table(monkeypatch: pytest.MonkeyPatch)
         "tags": [],
         "summary": "",
         "action": None,
+        "role_reach": None,
         "declared_public": False,
     }
 
@@ -1301,6 +1309,26 @@ async def test_list_routes_marks_the_routes_public_by_their_declaration(monkeypa
     by_path = {entry["path"]: entry for entry in catalog}
     assert by_path["/health"]["declared_public"] is True
     assert by_path["/api/auth/routes"]["declared_public"] is False
+
+
+async def test_list_routes_reports_each_routes_role_reach(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Each row carries the server's decision of what opens the route for a non-admin role.
+    from tai42_skeleton.app.instance import app
+    from tai42_skeleton.manifest import Manifest
+
+    async def _mappings() -> dict[str, str]:
+        return {}
+
+    monkeypatch.setattr(management, "get_all_route_mappings", _mappings)
+    async with app.app_context(Manifest.model_validate({})):
+        star = app.http_app()
+        routing_app = getattr(star, "mcp_lifespan_app", star)
+        catalog = _body(await api_keys.list_routes(cast(Request, SimpleNamespace(app=routing_app))))["data"]
+    by_key = {(entry["path"], tuple(entry["methods"])): entry for entry in catalog}
+    assert by_key[("/api/auth/api-keys", ("POST",))]["role_reach"] == "self_service"
+    assert by_key[("/api/auth/scopes", ("POST",))]["role_reach"] == "admin_only"
+    assert by_key[("/api/tools", ("GET",))]["role_reach"] == "level"
+    assert by_key[("/ready", ("GET",))]["role_reach"] == "public"
 
 
 async def test_add_scope_url_refuses_a_route_public_by_its_declaration(store: _Fakes) -> None:
@@ -1447,6 +1475,7 @@ async def test_get_me_gate_off_returns_synthetic_total(store: _Fakes, monkeypatc
     assert data["agents"] == []
     # ``mintable`` is DERIVED from the provider chain (redis mints), never hardcoded.
     assert data["mintable"] is True
+    assert data["access_control_enabled"] is False
 
 
 async def test_get_me_gate_on_wraps_projection(store: _Fakes, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1472,6 +1501,7 @@ async def test_get_me_gate_on_wraps_projection(store: _Fakes, monkeypatch: pytes
             tools=[],
             agents=[],
             mintable=True,
+            access_control_enabled=True,
         )
 
     monkeypatch.setattr(operations_api_keys, "build_projection", fake_build)
@@ -1480,5 +1510,53 @@ async def test_get_me_gate_on_wraps_projection(store: _Fakes, monkeypatch: pytes
     data = _body(resp)["data"]
     assert data["user_id"] == "u1"
     assert data["scopes"] == ["read"]
+    assert data["access_control_enabled"] is True
     # The edge passed the effective scopes + claims through verbatim (scopes are READ).
     assert captured["args"] == ("u1", ["read"], {"sub": "u1"})
+
+
+# -- the stored template id a condition names ---------------------------------
+
+_ACL_LINE = "stored id 'jq/acl' at condition is not a stored template"
+
+
+@pytest.fixture
+def acl_store(monkeypatch: pytest.MonkeyPatch) -> MappedStorage:
+    storage = MappedStorage({})
+    monkeypatch.setattr(instance.app._storage_registry, "_provider", storage)
+    return storage
+
+
+async def test_create_naming_a_condition_id_the_store_lacks_is_400(store: _Fakes, acl_store: MappedStorage) -> None:
+    resp = await api_keys.create_api_key(
+        _req(body={"user_id": "u1", "description": "d", "scopes": [], "condition": {"id": "jq/acl"}})
+    )
+    assert resp.status_code == 400
+    assert _body(resp)["error"] == _ACL_LINE
+    assert store.pg.policy("u1") is None
+
+
+async def test_edit_naming_a_condition_id_the_store_lacks_is_400(store: _Fakes, acl_store: MappedStorage) -> None:
+    await _seed_key(store, condition="a")
+    resp = await api_keys.edit_api_key(_req(path_params={"user_id": "u1"}, body={"condition": {"id": "jq/acl"}}))
+    assert resp.status_code == 400
+    assert _body(resp)["error"] == _ACL_LINE
+    assert store.pg.policy_body("u1")["condition"] == _cond_doc("a")
+
+
+async def test_rollback_to_a_version_naming_an_id_the_store_lacks_is_400(
+    store: _Fakes, pg_store: _MemStore, acl_store: MappedStorage
+) -> None:
+    acl_store.items["jq/acl"] = ".ok"
+    await api_keys.add_scope_url(_req(body={"scope_id": "scope-a", "url": "/a"}))
+    await api_keys.create_api_key(
+        _req(body={"user_id": "u1", "description": "d", "scopes": ["scope-a"], "condition": {"id": "jq/acl"}})
+    )
+    await api_keys.edit_api_key(_req(path_params={"user_id": "u1"}, body={"condition": _cond("b")}))  # v2 active
+    del acl_store.items["jq/acl"]
+
+    resp = await api_keys.rollback_policy(_req(path_params={"user_id": "u1"}, body={"version": 1}))
+    assert resp.status_code == 400
+    assert _body(resp)["error"] == _ACL_LINE
+    assert store.pg.policy_body("u1")["condition"] == _cond_doc("b")
+    assert pg_store.docs[("ac_policy", "u1")]["active"] == 2

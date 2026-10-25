@@ -47,7 +47,7 @@ class _FakeRouter:
         # version counter, so a test can assert a mount mutation bumped the version.
         self.redis: Any = None
 
-    async def register_sub_mcp_app(self, slug, tools, transport="http"):
+    async def bind_route(self, slug, tools, transport="http"):
         self.registered.append((slug, tools, transport))
         self.routes[slug] = RouteConfig(tools=tools, transport=transport)
 
@@ -65,7 +65,7 @@ class _FakeTools:
 
 
 @pytest.fixture
-def install(monkeypatch):
+def install(monkeypatch, serve_tools, bind_sub_mcp_router):
     """Install a fake router + a FRESH in-memory registration store seeded to match.
 
     The routes go through the store-first service now, so a fresh per-test store is
@@ -91,7 +91,9 @@ def install(monkeypatch):
 
     def _install(routes=None, registered=("get_forecast",)):
         routes = routes or {}
+        serve_tools(*registered)
         fake = _FakeRouter(dict(routes))
+        bind_sub_mcp_router(fake)
         fresh_store = sub_mcp_store.InMemorySubMcpStore()
         for slug, config in routes.items():
             fresh_store._routes[slug] = config
@@ -190,11 +192,16 @@ async def test_register_slug_with_trailing_newline_400(install):
     assert "slug" in _json(resp)["error"]
 
 
-async def test_register_unknown_tool_404(install):
-    install({}, registered=("get_forecast",))
-    resp = await router.register_sub_mcp(_body_req(b'{"slug": "weather", "tools": ["get_forecast", "ghost"]}'))
-    assert resp.status_code == 404
-    assert "ghost" in _json(resp)["error"]
+async def test_register_unknown_tools_400_names_every_miss(install):
+    fake = install({}, registered=("get_forecast",))
+    resp = await router.register_sub_mcp(
+        _body_req(b'{"slug": "weather", "tools": ["get_forecast", "ghost", "phantom"]}')
+    )
+    assert resp.status_code == 400
+    assert _json(resp)["error"] == (
+        "served tool 'ghost' is not a registered tool\nserved tool 'phantom' is not a registered tool"
+    )
+    assert fake.store._routes == {}
 
 
 async def test_register_missing_slug_400(install):
@@ -314,7 +321,7 @@ async def test_register_and_unregister_bump_policy_version(install):
 
 
 async def test_failed_register_and_unregister_do_not_bump_version(install):
-    # A registration/unregistration that wrote nothing (an unknown tool 404, an unknown
+    # A registration/unregistration that wrote nothing (an unknown tool 400, an unknown
     # slug 404) must NOT bump the version — no surface changed.
     from tai42_skeleton.access_control.settings import access_control_settings
 
@@ -322,7 +329,7 @@ async def test_failed_register_and_unregister_do_not_bump_version(install):
     fake = install({}, registered=("get_forecast",))
 
     resp = await router.register_sub_mcp(_body_req(b'{"slug": "weather", "tools": ["ghost"]}'))
-    assert resp.status_code == 404
+    assert resp.status_code == 400
     assert version_key not in fake.redis._strings
 
     resp = await router.unregister_sub_mcp(_req(slug="ghost"))

@@ -7,11 +7,12 @@ the id of every stored template a render resolves or probes.
 
 from __future__ import annotations
 
+import mimetypes
 from collections.abc import Iterator
 
 import pytest
 from tai42_contract.app import tai42_app
-from tai42_contract.storage import Storage
+from tai42_contract.storage import ObjectStat, Storage
 from tai42_contract.template import TemplatedText, TemplateEviction
 
 from tai42_skeleton.app.bus.ops import ClearTemplateCache, EvictTemplate
@@ -47,6 +48,13 @@ class _Store(Storage):
         prefix = path.rstrip("/") + "/"
         for key in [k for k in self.items if k.startswith(prefix)]:
             del self.items[key]
+
+    async def stat(self, path: str) -> ObjectStat:
+        content_type, _ = mimetypes.guess_type(path)
+        return ObjectStat(content_type=content_type, size=len(await self.load_bytes(path)))
+
+    async def load_range(self, path: str, start: int, length: int) -> bytes:
+        return (await self.load_bytes(path))[start : start + length]
 
 
 @pytest.fixture

@@ -37,6 +37,7 @@ from tai42_contract.agent.events import SuspendedFinal
 from tai42_contract.interactions import (
     EXPIRY_ANSWER,
     SUSPENDED_INTERACTION_MARKER_KEY,
+    AskAnswer,
     get_resume_continuation_tool,
     reset_resume_continuation_tool,
     set_resume_continuation_tool,
@@ -232,7 +233,8 @@ def test_park_then_expiry_feeds_the_expiry_marker() -> None:
     interrupt_id, interactions = _park_interrupt(snapshot)
     assert interactions == {"i1": deadline.isoformat()}
 
-    final = asyncio.run(graph.ainvoke(Command(resume={interrupt_id: {"i1": EXPIRY_ANSWER}}), config))
+    expired = AskAnswer(answer=EXPIRY_ANSWER, reply_to=None, params=None).model_dump(mode="json")
+    final = asyncio.run(graph.ainvoke(Command(resume={interrupt_id: {"i1": expired}}), config))
     tool_messages = [m for m in final["messages"] if getattr(m, "tool_call_id", None) == "c1"]
     # The expiry marker round-trips as the tool result content (JSON-serialized).
     assert '"tai42:interaction_expired"' in tool_messages[-1].content

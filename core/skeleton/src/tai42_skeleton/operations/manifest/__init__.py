@@ -5,14 +5,16 @@ manager, the reload gate, and the worker bus (``instance.app.bus``). Two groups:
 
 Reads (each returns its shape directly; the adapter envelopes it):
 
-* ``get_manifest`` — the PRESERVED persisted manifest's MCP section + user tools
-  (``!ENV`` markers intact — the no-leak retighten; the resolved read is retired).
-* ``get_manifest_preserved`` — the same preserved ``{mcp, user_tools}`` view behind the
-  explicit ``/api/manifest/preserved`` door the Studio McpTab editor reads.
+* ``get_manifest`` — the PRESERVED persisted manifest's MCP section, user tools and extension
+  settings (``!ENV`` markers intact; no resolved value leaves on the wire).
+* ``get_manifest_preserved`` — the same preserved view (MCP section, user tools and extension
+  settings) behind the explicit ``/api/manifest/preserved`` door an MCP config editor reads.
 * ``get_mcp_config_schema`` — the JSON Schema for one MCP-config entry.
 * ``get_mcp_status`` — the live MCP binding snapshot.
 * ``list_failed_mcps`` — the MCP servers skipped by the viability check; a query op
   over the bus, so every worker's list arrives as its per-worker report payload.
+* ``list_mcp_advertised_tools`` — probe one live MCP server for every tool it advertises,
+  before the selection (write tier: the probe connects with the stored credential).
 
 Mutations cross the single :class:`~tai42_skeleton.config.service.ConfigService`
 pipeline (validate → persist → local reload → broadcast) or, for pure runtime ops,
@@ -21,6 +23,7 @@ the shared :func:`~tai42_skeleton.operations._broadcast.broadcast` primitive. Ea
 report as a ``fanout`` summary:
 
 * ``set_mcp_config`` — replace the manifest's MCP section, persist, and reload the fleet.
+* ``set_mcp_tool_filter`` — set one MCP entry's ``include``/``exclude``, persist, and reload the fleet.
 * ``set_mcp_secret_env`` — write a secret env value AND its ``!ENV ${KEY}`` manifest marker
   together (the combined ``apply_env_and_change`` pipeline), persist, and reload the fleet.
 * ``reload_mcp`` — re-probe a single MCP server by title (all workers, or only
@@ -60,7 +63,7 @@ from .reads import (
     get_mcp_status,
     list_failed_mcps,
 )
-from .runtime import deregister_mcp, reload_failed_mcps, reload_mcp, update_manifest
+from .runtime import deregister_mcp, list_mcp_advertised_tools, reload_failed_mcps, reload_mcp, update_manifest
 from .secret_env import set_mcp_secret_env
 from .sections import (
     add_agents_entries,
@@ -70,6 +73,7 @@ from .sections import (
     remove_mcp_entry,
     remove_tools_entry,
     set_mcp_config,
+    set_mcp_tool_filter,
 )
 
 reads.__dict__["_pkg"] = sys.modules[__name__]
@@ -88,6 +92,7 @@ __all__ = [
     "get_mcp_env_refs",
     "get_mcp_status",
     "list_failed_mcps",
+    "list_mcp_advertised_tools",
     "reload_failed_mcps",
     "reload_mcp",
     "remove_agents_entry",
@@ -95,6 +100,7 @@ __all__ = [
     "remove_tools_entry",
     "set_mcp_config",
     "set_mcp_secret_env",
+    "set_mcp_tool_filter",
     "update_api_tools",
     "update_manifest",
 ]

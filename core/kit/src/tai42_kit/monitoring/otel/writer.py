@@ -63,7 +63,6 @@ from tai42_kit.monitoring.otel.attribution import (
 )
 from tai42_kit.monitoring.otel.exporter import CountingSpanExporter, QueueDropMetricExporter
 from tai42_kit.monitoring.otel.health import ExportHealthCounters
-from tai42_kit.monitoring.otel.ids import ChosenTraceIdGenerator, chosen_trace_id
 
 logger = logging.getLogger(__name__)
 
@@ -397,7 +396,6 @@ class OtelWriter:
         )
         provider = TracerProvider(
             resource=resource,
-            id_generator=ChosenTraceIdGenerator(),
             span_limits=SpanLimits(
                 max_span_attributes=_MAX_SPAN_ATTRIBUTES,
                 max_attribute_length=SpanLimits.UNSET,
@@ -452,21 +450,18 @@ class OtelWriter:
 
     # --- span construction ----------------------------------------------------
 
-    def _parent_context(self, trace_context: TraceContext | None) -> tuple[Context | None, int | None]:
-        """The context a span starts in, and the trace id a parent-less span must take."""
-        if trace_context is None or not trace_context.trace_id:
+    def _parent_context(self, trace_context: TraceContext | None) -> Context:
+        """The context a span starts in: the explicit parent when ``trace_context`` names one, else the live span."""
+        if trace_context is None or not trace_context.trace_id or not trace_context.parent_span_id:
             _, current = _live_current()
-            return otel_trace.set_span_in_context(current), None
-        trace_id = _parse_hex(trace_context.trace_id, 32)
-        if trace_context.parent_span_id:
-            parent = SpanContext(
-                trace_id,
-                _parse_hex(trace_context.parent_span_id, 16),
-                is_remote=True,
-                trace_flags=TraceFlags(TraceFlags.SAMPLED),
-            )
-            return otel_trace.set_span_in_context(NonRecordingSpan(parent), Context()), None
-        return Context(), trace_id
+            return otel_trace.set_span_in_context(current)
+        parent = SpanContext(
+            _parse_hex(trace_context.trace_id, 32),
+            _parse_hex(trace_context.parent_span_id, 16),
+            is_remote=True,
+            trace_flags=TraceFlags(TraceFlags.SAMPLED),
+        )
+        return otel_trace.set_span_in_context(NonRecordingSpan(parent), Context())
 
     def _start(
         self,
@@ -478,18 +473,14 @@ class OtelWriter:
     ) -> _OtelSpan | None:
         """Start a span, or ``None`` when the trace context is invalid (logged and counted)."""
         try:
-            parent, chosen = self._parent_context(trace_context)
+            parent = self._parent_context(trace_context)
         except ValueError as exc:
             logger.error("monitoring: invalid trace context %r for record %r", trace_context, name)  # noqa: TRY400
             self._health.add_record_failed(f"invalid trace context for record {name!r}: {exc}")
             return None
         tracer = self._ensure_built().tracer
         attributes = attr.kind_attributes(kind, name)
-        if chosen is None:
-            otel_span = tracer.start_span(name, context=parent, attributes=attributes, start_time=_ns(start_time))
-        else:
-            with chosen_trace_id(chosen):
-                otel_span = tracer.start_span(name, context=parent, attributes=attributes, start_time=_ns(start_time))
+        otel_span = tracer.start_span(name, context=parent, attributes=attributes, start_time=_ns(start_time))
         return _OtelSpan(self, otel_span, kind)
 
     # --- emit (fail-safe) -----------------------------------------------------
@@ -526,6 +517,27 @@ class OtelWriter:
             self.record_failure("open_span", name, exc)
             return _NOOP_SPAN
         return span
+
+    @contextmanager
+    def use_span(self, span: Span) -> Iterator[None]:
+        """Make ``span`` current for the block without ending it (fail-safe).
+
+        The no-op span changes nothing; a span of another writer is counted as a record failure and changes nothing.
+        """
+        if isinstance(span, _NoOpSpan):
+            yield
+            return
+        if not isinstance(span, _OtelSpan) or span._writer is not self:
+            self.record_failure("use_span", None, TypeError(f"not a span of this writer: {type(span).__qualname__}"))
+            yield
+            return
+        activation = otel_context.attach(otel_trace.set_span_in_context(span._otel))
+        handle_token = _ACTIVE_HANDLE.set(span)
+        try:
+            yield
+        finally:
+            _ACTIVE_HANDLE.reset(handle_token)
+            otel_context.detach(activation)
 
     @contextmanager
     def start_span(

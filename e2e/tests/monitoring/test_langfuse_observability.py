@@ -106,8 +106,7 @@ async def test_tool_run_spans_reach_langfuse_and_serve_back(
     capabilities = await api.get("/api/observability/capabilities")
     assert capabilities["pageSizeMax"] == 100
     assert "createdAt" in capabilities["sortKeys"]
-    assert "user" not in capabilities["incompatibleFilters"]["cost"]
-    assert "status" in capabilities["incompatibleFilters"]["cost"]
+    assert capabilities["incompatibleFilters"] == {}
 
 
 @pytest.mark.needs("setting:tools_agent", "helper:llm")
@@ -227,3 +226,78 @@ async def test_mcp_call_of_a_preset_registers_a_runs_index_row(
         deadline=30.0,
         message="MCP-invoked preset registered no runs-index row with a traceId",
     )
+
+
+@pytest.mark.needs("probe-tools", "kind:states")
+async def test_a_run_with_a_deferred_step_is_one_trace_with_one_root(
+    monitoring_stack: TaiStack, uniq: Callable[[str], str]
+) -> None:
+    # A preset of the defer probe, run through ``/api/run-tool``, defers a preset of
+    # ``e2e_record_probe`` in a states unit. The deferred call runs after the reply, in the
+    # caller's trace: its ``deferred-call:<tool>`` span is a child of the span live when it
+    # was deferred, the target's own spans (its graph and the graph's two nodes) sit under
+    # it, the target's runs-index row is stamped with that trace, and the run list shows the
+    # trace once.
+    api = monitoring_stack.api()
+    since = _run_window_start()
+    target = uniq("dftarget")
+    await _create_preset(api, target, "e2e_record_probe", {})
+    caller = uniq("dfcaller")
+    await _create_preset(api, caller, "e2e_defer_after_reply", {"target": target})
+
+    answer = await api.post(
+        "/api/run-tool", json={"tool_name": caller, "arguments": {}}, expect=200, retry_on_reloading=True
+    )
+    assert answer["kind"] == "result", answer
+    trace_id = answer["result"]["trace_id"]
+    live_span_id = answer["result"]["span_id"]
+    deferred_name = f"deferred-call:{target}"
+    target_nodes = {"first", "second"}
+
+    async def target_row_in_the_trace() -> dict | None:
+        row = _runs_row(await api.get("/api/runs"), target)
+        return row if row is not None and row.get("traceId") == trace_id else None
+
+    await wait_for_async(
+        target_row_in_the_trace,
+        deadline=30.0,
+        message=f"the deferred preset {target!r} never registered a runs-index row stamped with the trace {trace_id}",
+    )
+
+    async def trace_with_the_deferred_step() -> dict | None:
+        try:
+            detail = await api.get(f"/api/observability/runs/{trace_id}/trace")
+        except Exception:
+            return None
+        spans = detail.get("spans") if isinstance(detail, dict) else None
+        names = {span.get("name") for span in spans or []}
+        return detail if {deferred_name, *target_nodes} <= names else None
+
+    detail = await wait_for_async(
+        trace_with_the_deferred_step,
+        deadline=60.0,
+        message=f"the trace {trace_id} never served its {deferred_name!r} span and the target's {target_nodes} spans",
+    )
+    spans = detail["spans"]
+    roots = [span for span in spans if span["parentId"] is None]
+    assert len(roots) == 1, roots
+    (deferred,) = [span for span in spans if span["name"] == deferred_name]
+    assert deferred["parentId"] == live_span_id, deferred
+
+    parent_of = {span["id"]: span["parentId"] for span in spans}
+
+    def ancestors(span_id: str) -> list[str]:
+        chain: list[str] = []
+        parent = parent_of.get(span_id)
+        while parent is not None:
+            chain.append(parent)
+            parent = parent_of.get(parent)
+        return chain
+
+    assert [span for span in spans if span["parentId"] == deferred["id"]], spans
+    for node in target_nodes:
+        (node_span,) = [span for span in spans if span["name"] == node]
+        assert deferred["id"] in ancestors(node_span["id"]), (node_span, spans)
+
+    rows = (await api.get(f"/api/observability/runs?{urlencode({'from': since, 'pageSize': 100})}"))["items"]
+    assert [row["traceId"] for row in rows].count(trace_id) == 1, rows

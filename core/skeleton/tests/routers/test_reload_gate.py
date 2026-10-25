@@ -43,6 +43,8 @@ from tai42_skeleton.routers import tool_runs as tool_runs_router
 from tai42_skeleton.routers import tools as tools_router
 
 from .._fakes.bus import FakeBus
+from .._fakes.mcp_listing import no_mcp_listing
+from .._fakes.write_span import ExclusiveWriteStore
 
 
 def _dummy_req(**path_params: Any) -> Request:
@@ -285,8 +287,9 @@ def test_reload_rejection_middleware_registered_on_server() -> None:
 # -- real reload-through-gate result shape -----------------------------------
 
 
-class _FakeConfigManager:
+class _FakeConfigManager(ExclusiveWriteStore):
     def __init__(self) -> None:
+        super().__init__()
         self._env: dict[str, str] = {}
         self.written: list[dict[str, str]] = []
 
@@ -312,6 +315,8 @@ class _FakeAdmin:
         self.reloads += 1
         self.reload_thread = threading.get_ident()
         return {"status": "ok", "env_keys": len(self._manager._env)}
+
+    served_mcp_names = staticmethod(no_mcp_listing)
 
 
 async def test_write_env_reloads_through_gate_same_result_shape(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -341,6 +346,7 @@ async def test_write_env_reloads_through_gate_same_result_shape(monkeypatch: pyt
             "fanout": {"mode": "local-only", "note": "no worker bus configured; only this worker reloaded"},
             "recycle": None,
             "awaiting_respawn": [],
+            "span_release_error": None,
         }
     }
     assert manager.written == [{"NEW": "val"}]

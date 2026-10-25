@@ -33,7 +33,7 @@ from tai42_agents._internal import recovery as rec
 
 from ._client_tool import FakeClientTool, client_tool
 from ._graph_support import build_agent_and_input, invoke_tools_agent, stream_tools_agent_events
-from .conftest import fake_run_trace
+from .conftest import fake_init_langgraph_config
 
 _RECOVERY_LOGGER = "tai42_agents._internal.recovery"
 
@@ -116,7 +116,9 @@ def _seams(monkeypatch: pytest.MonkeyPatch, model: BaseChatModel, saver: InMemor
     monkeypatch.setattr(
         bta,
         "init_langgraph_config",
-        lambda config: fake_run_trace({"configurable": {"thread_id": config["configurable"]["thread_id"]}}),
+        lambda config, _context: fake_init_langgraph_config(
+            {"configurable": {"thread_id": config["configurable"]["thread_id"]}}
+        ),
     )
 
 

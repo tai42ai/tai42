@@ -1,8 +1,8 @@
 """The template-directory delete door (``POST /api/delete-template-dir``).
 
 Unlike the idempotent single-template delete (an absent key is a no-op 200), a directory
-that matches nothing is a loud 404; and a key resolving to the template ROOT — which would
-wipe the whole store — is refused with a 400 HERE, ahead of the provider. Runs over the
+that matches nothing is a loud 404; and a key spelling the template ROOT — which would
+wipe the whole store — is refused by the key guard with a 400, ahead of the provider. Runs over the
 real active storage provider (``core_stack``).
 """
 
@@ -25,10 +25,11 @@ async def test_delete_template_dir_absent_is_404(core_stack: TaiStack, uniq: Cal
     assert absent in resp.json()["error"], resp.text
 
 
-async def test_delete_template_dir_root_is_400(core_stack: TaiStack) -> None:
+@pytest.mark.parametrize("root", [".", "a/.."])
+async def test_delete_template_dir_root_is_400(core_stack: TaiStack, root: str) -> None:
     api = core_stack.api()
-    # ``.`` resolves to the template ROOT; the lexical guard admits a root-resolving key,
-    # so the door's own destructive-delete check is what must refuse it.
-    resp = await api.request_raw("POST", "/api/delete-template-dir", json={"path": "."})
+    resp = await api.request_raw("POST", "/api/delete-template-dir", json={"path": root})
     assert resp.status_code == 400, resp.text
-    assert "root" in resp.json()["error"].lower(), resp.text
+    assert resp.json()["error"] == (
+        f"non-canonical store key {root!r}: a key is '/'-separated names with no empty, '.' or '..' segment"
+    )

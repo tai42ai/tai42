@@ -6,11 +6,13 @@ stamps the active version, and save numbering is MAX+1."""
 from __future__ import annotations
 
 import asyncio
+from contextlib import nullcontext
 
 import pytest
 from tai42_contract.presets.errors import PresetNotFoundError
 
 from tai42_skeleton.app.instance import app
+from tai42_skeleton.monitoring import NoOpWriter
 from tai42_skeleton.tools.binding import UnknownToolError
 
 from ._manager_fixtures import FakeVersioningPg, _create_versioned, _manifest
@@ -170,8 +172,11 @@ def test_run_tool_stamps_registered_preset_with_active_version(pg: FakeVersionin
     """The run chokepoint attributes a registered preset dispatch with its version;
     a plain tool is left unstamped."""
 
-    class _SpyWriter:
+    class _SpyWriter(NoOpWriter):
+        """A writer that records nothing but the run attribution it is asked to stamp."""
+
         def __init__(self) -> None:
+            super().__init__()
             self.stamps: list[dict] = []
 
         def current_trace_id(self):
@@ -179,8 +184,6 @@ def test_run_tool_stamps_registered_preset_with_active_version(pg: FakeVersionin
 
         def trace_attributes(self, *, name, tags, metadata, user_id=None, session_id=None):
             self.stamps.append({"tags": tags, "metadata": metadata})
-            from contextlib import nullcontext
-
             return nullcontext()
 
     class _SpyMonitoring:

@@ -67,7 +67,7 @@ from ._tools_agent_park_support import (
     _Registry,
     _wire_tools_build,
 )
-from .conftest import APP, bind_park_index, fake_run_trace
+from .conftest import APP, bind_park_index, fake_init_langgraph_config
 
 #: The holder's delivery tool: a held run's terminal re-enters the holder through it.
 _DELIVERY_TOOL = "held_chain_deliver"
@@ -207,7 +207,7 @@ def test_a_held_deep_agent_parks_and_sends_its_caller_ask_up(monkeypatch: pytest
     monkeypatch.setattr(deep_agent_module, "checkpoint_registry", lambda: _Registry(saver))
     monkeypatch.setattr(deep_agent_module, "llm_provider_settings", _ProviderSettings)
     monkeypatch.setattr(deep_agent_module, "llm_settings", _LlmSettings)
-    monkeypatch.setattr(deep_run_thread, "init_langgraph_config", lambda config=None: fake_run_trace(config))
+    monkeypatch.setattr(deep_run_thread, "init_langgraph_config", fake_init_langgraph_config)
     monkeypatch.setattr(park_capability, "llm_provider_settings", _ProviderSettings)
     app_tools.client_tools["ask"] = client_tool("ask", _caller_ask, description="Ask the caller and park.")
     app_tools.tool_runners[_DELIVERY_TOOL] = probe

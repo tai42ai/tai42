@@ -10,18 +10,19 @@ fleet op the door broadcasts, on every other worker. Driven against a REAL
 
 The doors: the templates operations (upload, delete, directory delete), the storage
 operations (text upload, base64 upload, delete, directory delete), the backup restore of
-the templates section, and the fleet op a sibling worker applies.
+the storage section, and the fleet op a sibling worker applies.
 """
 
 from __future__ import annotations
 
 import base64
+import mimetypes
 from collections.abc import Awaitable, Callable
 from types import SimpleNamespace
 
 import pytest
 from tai42_contract.app import tai42_app
-from tai42_contract.storage import Storage
+from tai42_contract.storage import ObjectStat, Storage
 
 import tai42_skeleton.operations.storage as storage_ops
 import tai42_skeleton.operations.templates as templates_ops
@@ -31,7 +32,7 @@ from tai42_skeleton.backup.registry import BackupRegistry
 from tai42_skeleton.backup.sections import register_core_sections
 from tai42_skeleton.operations.backup import import_backup
 from tai42_skeleton.template import ResourceManager
-from tai42_skeleton.template.resource_manager import TemplateNotFoundError
+from tai42_skeleton.template.errors import TemplateNotFoundError
 
 from .._fakes.bus import FakeBus
 
@@ -73,6 +74,13 @@ class _Store(Storage):
         for key in doomed:
             del self.items[key]
 
+    async def stat(self, path: str) -> ObjectStat:
+        content_type, _ = mimetypes.guess_type(path)
+        return ObjectStat(content_type=content_type, size=len(await self.load_bytes(path)))
+
+    async def load_range(self, path: str, start: int, length: int) -> bytes:
+        return (await self.load_bytes(path))[start : start + length]
+
 
 def _install(monkeypatch: pytest.MonkeyPatch, items: dict[str, str], bus: FakeBus) -> tuple[ResourceManager, _Store]:
     """Install ``items`` as the app's storage provider and a real manager over it on the app the doors read."""
@@ -102,7 +110,10 @@ async def _backup_restore(monkeypatch: pytest.MonkeyPatch) -> None:
     register_core_sections(registry)
     monkeypatch.setattr(tai42_app, "_impl", SimpleNamespace(backup=registry, storage=instance.app.storage))
     result = (
-        await import_backup({"version": 1, "sections": {"templates": {"welcome@he": "shalom"}}}, ["templates"])
+        await import_backup(
+            {"version": 1, "sections": {"storage": {"welcome@he": {"content_text": "shalom", "content_type": None}}}},
+            ["storage"],
+        )
     ).payload
     monkeypatch.setattr(tai42_app, "_impl", instance.app)
     assert result.ok, result

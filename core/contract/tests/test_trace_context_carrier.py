@@ -45,7 +45,7 @@ def test_context_manager_deposits_and_restores():
     )
 
     assert get_ambient_trace_context() is None
-    with ambient_trace_context(TraceContext(trace_id="outer", parent_span_id=None)):
+    with ambient_trace_context(TraceContext(trace_id="outer", parent_span_id="s0")):
         outer = get_ambient_trace_context()
         assert outer is not None
         assert outer.trace_id == "outer"
@@ -70,7 +70,7 @@ def test_deposit_inherited_by_a_task_on_a_copy():
     async def run() -> str | None:
         # A task created INSIDE the block runs on a context copy carrying the deposit, so a
         # detached nested run stays joined to the trace even after the block exits.
-        with ambient_trace_context(TraceContext(trace_id="trace-1", parent_span_id=None)):
+        with ambient_trace_context(TraceContext(trace_id="trace-1", parent_span_id="s1")):
             task = asyncio.ensure_future(_read_after_yield())
         return await task
 

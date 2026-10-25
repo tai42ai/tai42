@@ -59,8 +59,11 @@ def spawn_all(stack: TaiStack, manifest_path: Path, family_dirs: list[str]) -> N
         # full ``tai backend <args>`` process with its own ProcessHandle, log,
         # and teardown leak-reap — an early exit aborts boot loudly through the
         # shared ``_early_exit_detail`` readiness check, exactly like the worker.
-        for extra_args in stack.infra.variants.backend.extra_backend_processes():
-            extra_name = f"backend-{extra_args[0]}"
+        backend = stack.infra.variants.backend
+        extras = [(f"backend-{args[0]}", args) for args in backend.extra_backend_processes()]
+        # One more worker per queue label, serving only that label's queue.
+        extras += [(f"backend-queue-{label}", backend.queue_worker_args(label)) for label in stack.config.queue_workers]
+        for extra_name, extra_args in extras:
             extra_cwd = stack.config.cwd_overrides.get(extra_name)
             spawn(
                 stack,

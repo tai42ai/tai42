@@ -39,6 +39,16 @@ class PresetBody(BaseModel):
     :class:`PresetInputSchemaSupport`). Only a base tool that DECLARES input-schema
     support accepts one; otherwise a set ``input_schema`` is a loud authoring error.
 
+    ``input_map`` and ``output_map`` are optional jq programs. With an ``input_map`` the
+    caller's object (validated against ``input_schema``, which the map requires) is mapped
+    to the base tool's arguments, with the stored ``fixed_kwargs`` readable as ``$fixed``;
+    the mapped object is merged with ``fixed_kwargs`` and a key both set is refused, so a
+    fixed value is never overridden. The base tool's result then passes the output stage:
+    ``output_map`` maps it, and ``output_schema`` validates what the map produced (or the
+    raw result when there is no map). An output map never runs over a result that carries
+    a secret. A ``str`` map is the jq program itself; a
+    :class:`~tai42_contract.template.TemplatedText` is rendered to the program.
+
     Each schema is the ``TemplatedText | dict`` union: an inline ``dict`` is the JSON
     Schema document itself; a :class:`~tai42_contract.template.TemplatedText` names a stored
     schema by ``id`` (or carries it inline as ``content``), rendered and parsed as JSON to the
@@ -48,8 +58,9 @@ class PresetBody(BaseModel):
     ``extensions`` would make the branch tools vanish on reload, dropping
     ``base_tool`` would break the bind, dropping ``description`` would strip the
     tool's description, dropping ``output_schema`` would silently un-enforce the
-    structured output, and dropping ``input_schema`` would silently un-enforce the
-    structured input.
+    structured output, dropping ``input_schema`` would silently un-enforce the
+    structured input, and dropping ``input_map`` or ``output_map`` would silently
+    change what the base tool receives or what the caller gets back.
 
     A ``fixed_kwargs`` scalar-string value written ``!ENV ${VAR}`` is a SECRET
     REFERENCE, not a credential: the server resolves it from the environment at bind
@@ -72,6 +83,8 @@ class PresetBody(BaseModel):
     extensions: list[list[ExtensionElement]] = Field(default_factory=list[list[ExtensionElement]])
     output_schema: TemplatedText | dict[str, Any] | None = None
     input_schema: TemplatedText | dict[str, Any] | None = None
+    input_map: TemplatedText | str | None = None
+    output_map: TemplatedText | str | None = None
     #: The OPTIONAL door-layer state binding this preset carries; the dispatch chokepoint
     #: resolves it from the active version stamp and merges it with any door binding. Like
     #: every other body field it must survive version carry-forward (dropping it would
@@ -114,7 +127,7 @@ class PresetSeed(BaseModel):
     A seed names the preset (``name``), its human ``description``, the
     ``base_tool`` it binds, and the ``fixed_kwargs`` baked in — the same body a
     :class:`PresetBody` carries — plus the optional author ``input_schema`` /
-    ``output_schema`` and optional ``tool_meta`` display seed. The applier creates
+    ``output_schema``, ``input_map`` / ``output_map`` and optional ``tool_meta`` display seed. The applier creates
     or upgrades the preset from this shape; the contract holds only the SHAPE,
     never the applier logic.
 
@@ -138,6 +151,8 @@ class PresetSeed(BaseModel):
         ),
     )
     input_schema: TemplatedText | dict[str, Any] | None = None
+    input_map: TemplatedText | str | None = None
+    output_map: TemplatedText | str | None = None
     output_schema: TemplatedText | dict[str, Any] | None = None
     tool_meta: PresetSeedToolMeta | None = None
     #: The OPTIONAL door-layer state binding the seed installs onto the preset it creates.
@@ -148,8 +163,8 @@ class CarryForward:
     """Sentinel for a :meth:`~tai42_contract.presets.PresetStore.save_version` field the caller did not provide.
 
     Carry the ACTIVE value forward. ``fixed_kwargs`` / ``extensions`` clear with an empty container, so
-    ``None`` is their carry-forward sentinel; ``output_schema`` / ``input_schema``
-    have no empty container (their cleared state IS ``None``), so each needs a
+    ``None`` is their carry-forward sentinel; ``output_schema`` / ``input_schema`` /
+    ``input_map`` / ``output_map`` have no empty container (their cleared state IS ``None``), so each needs a
     distinct sentinel to tell "not provided" (carry forward) apart from an explicit
     ``None`` (clear).
     """

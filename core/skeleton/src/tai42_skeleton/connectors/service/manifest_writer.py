@@ -120,9 +120,14 @@ def _reconcile(
                 f"and is not owned by connection {connection_id}"
             )
         # An owned entry is left as written (a stdio entry keeps the package version it was written
-        # with) unless the run-time check would refuse it its credential: that one is rewritten.
+        # with) unless the run-time check would refuse it its credential: that one is replaced by the
+        # builder's entry, keeping the entry's ``include``/``exclude``.
         if own_server_refusal(TaiMCPConfig.model_validate(current), descriptor) is not None:
-            entries[position] = entry.model_dump(mode="json", exclude_none=True)
+            replacement = entry.model_dump(mode="json", exclude_none=True)
+            for key in ("include", "exclude"):
+                if key in current:
+                    replacement[key] = current[key]
+            entries[position] = replacement
             rewritten.append(entry.title)
     return entries, ManagedEntriesWrite(appended=appended, rewritten=rewritten)
 
@@ -161,8 +166,9 @@ def add_managed_entries(
 
     A missing entry is appended. An entry this connection already owns is left in place, except one
     the run-time check refuses its credential (it talks to a ``url`` that is not the descriptor's),
-    which is replaced by the builder's output. A title owned by anything else raises (collision is
-    operator-visible). Returns the titles written, appended then rewritten.
+    which is replaced by the builder's entry, keeping the entry's ``include``/``exclude``. A title
+    owned by anything else raises (collision is operator-visible). Returns the titles written,
+    appended then rewritten.
     """
     entries, write = _reconcile(
         document,

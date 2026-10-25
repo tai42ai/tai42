@@ -35,10 +35,13 @@ from tai42_kit.llm.models import get_llm_async
 from tai42_kit.llm.runtime import validate_structured_output
 from tai42_kit.llm.settings import llm_provider_settings, llm_settings
 from tai42_kit.llm.structured import plan_structured_output
+from tai42_kit.monitoring import begin_run_trace
 
 from tai42_agents._internal.outcomes import RepromptCapError, outcome_for_drive_error
+from tai42_agents._internal.park import bind_resume_per_step
 from tai42_agents._internal.reject import resolve_response_format
 from tai42_agents._internal.run_kwargs import guard_run_kwargs
+from tai42_agents._internal.run_record import TerminalEvents, run_input
 from tai42_agents._internal.structured import ainvoke_structured
 from tai42_agents._internal.usage import usage_event
 
@@ -52,6 +55,26 @@ async def _vqa_message(image_url: str, query: str) -> HumanMessage:
     ref = await tai42_app.storage.resolve_image(image_url)
     image_part = {"type": "image_url", "image_url": {"url": ref.url}}
     return HumanMessage(content=[{"type": "text", "text": query}, image_part])
+
+
+async def _structured_terminal(
+    llm: Any, provider: str, message: HumanMessage, response_format: Any, config: dict[str, Any]
+) -> StreamEvent:
+    """The structured door's one terminal: the validated :class:`StructuredFinal`, or the typed re-prompt-cap outcome.
+
+    The capability-negotiated plan routes native-first (grammar-enforced) or to the bounded tool tier;
+    ``ainvoke_structured`` runs the capped re-prompt loop, ending a never-conforming run on the typed outcome
+    instead of a raw raise.
+    """
+    plan = plan_structured_output(llm, provider, response_format)
+    try:
+        structured = await ainvoke_structured(llm, plan, [message], config=config)
+    except RepromptCapError as exc:
+        outcome = outcome_for_drive_error(exc, None)
+        if outcome is None:
+            raise
+        return outcome
+    return StructuredFinal(data=validate_structured_output(structured, response_format))
 
 
 class VqaAgentInput(BaseModel):
@@ -206,47 +229,52 @@ class VqaAgent(Agent):
             tool_names=tool_names,
             response_format=response_format,
         )
-        response_format = await resolve_response_format("vqa_agent", response_format)
-        provider = llm_provider or llm_provider_settings().llm
-        llm = await get_llm_async(provider=provider, **llm_settings().with_fallbacks(llm_kwargs or {}))
+        # The run's one trace root over every model call (the structured door's re-prompts included):
+        # current only inside each step, never across a yield. It records the image and the query, and
+        # the terminal events when the stream ends.
+        root = begin_run_trace(input_=run_input(image_url=image_url, query=query))
+        terminals = TerminalEvents()
+        try:
+            with root.step():
+                response_format = await resolve_response_format("vqa_agent", response_format)
+                provider = llm_provider or llm_provider_settings().llm
+                llm = await get_llm_async(provider=provider, **llm_settings().with_fallbacks(llm_kwargs or {}))
+                message = await _vqa_message(image_url, query)
 
-        message = await _vqa_message(image_url, query)
+            # This agent calls the model directly (no graph), so it binds the run's trace here
+            # and threads the per-invoke config onto each model call — the single-shot
+            # structured door and the streaming text door alike — so both record under the
+            # run's trace through the same seam the graph agents reach.
+            trace_config = bind_run_trace(None, root.context)
 
-        # This agent calls the model directly (no graph), so it binds the run's trace here
-        # and threads the per-invoke config onto each model call — the single-shot
-        # structured door and the streaming text door alike — so both record under the
-        # run's trace through the same seam the graph agents reach.
-        trace = bind_run_trace()
-
-        if response_format is not None:
-            # The capability-negotiated plan routes native-first (grammar-enforced) or to
-            # the bounded tool tier; ``ainvoke_structured`` runs the capped re-prompt loop,
-            # ending a never-conforming run on the typed outcome instead of a raw raise.
-            plan = plan_structured_output(llm, provider, response_format)
-            try:
-                structured = await ainvoke_structured(llm, plan, [message], config=trace.config)
-            except RepromptCapError as exc:
-                outcome = outcome_for_drive_error(exc, None)
-                if outcome is None:
-                    raise
-                yield outcome
+            if response_format is not None:
+                with root.step():
+                    terminal = await _structured_terminal(llm, provider, message, response_format, trace_config)
+                yield terminals.note(terminal)
+                root.record_output(terminals.events)
                 return
-            yield StructuredFinal(data=validate_structured_output(structured, response_format))
-            return
 
-        parts: list[str] = []
-        accumulated: Any = None
-        async for chunk in llm.astream([message], config=cast(RunnableConfig, trace.config)):
-            accumulated = chunk if accumulated is None else accumulated + chunk
-            text = chunk.text
-            if text:
-                parts.append(text)
-                yield MessageDelta(text=text)
+            parts: list[str] = []
+            accumulated: Any = None
+            async for chunk in bind_resume_per_step(
+                root.step, llm.astream([message], config=cast(RunnableConfig, trace_config))
+            ):
+                accumulated = chunk if accumulated is None else accumulated + chunk
+                text = chunk.text
+                if text:
+                    parts.append(text)
+                    yield MessageDelta(text=text)
 
-        if accumulated is not None:
-            usage = usage_event(accumulated)
-            if usage is not None:
-                yield usage
-        final = "".join(parts).strip()
-        if final:
-            yield MessageFinal(text=final)
+            if accumulated is not None:
+                usage = usage_event(accumulated)
+                if usage is not None:
+                    yield usage
+            final = "".join(parts).strip()
+            if final:
+                yield terminals.note(MessageFinal(text=final))
+            root.record_output(terminals.events)
+        except Exception as exc:
+            root.fail(exc)
+            raise
+        finally:
+            root.end()

@@ -16,10 +16,12 @@ from tai42_contract.states.errors import (
 )
 from tai42_contract.states.models import AttachBody, StateDeclaration
 
+from tai42_skeleton.app import instance
 from tai42_skeleton.states import service as service_mod
 from tai42_skeleton.states.service import StatesService
 from tai42_skeleton.states.templates import validate_template
 
+from .._fakes.recording_storage import MappedStorage
 from . import fake_service_store
 from .fake_service_store import _STATE, FakeStatesStore, _FakeApp, _template_doc
 
@@ -27,6 +29,7 @@ from .fake_service_store import _STATE, FakeStatesStore, _FakeApp, _template_doc
 @pytest.fixture
 def svc(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(service_mod, "states_store_configured", lambda: True)
+    monkeypatch.setattr(instance.app._storage_registry, "_provider", MappedStorage(fake_service_store._CHECK_RESOURCES))
     with tai42_app.bound(_FakeApp()):
         yield StatesService(store=FakeStatesStore())  # type: ignore[arg-type]
 
@@ -120,14 +123,14 @@ async def test_attach_check_by_id_renders_then_evaluates(svc: StatesService) -> 
 
 
 async def test_put_template_rejects_unfetchable_by_id_check(svc: StatesService) -> None:
-    # The save door renders the by-id check to compile it; a stored id that cannot be fetched
-    # fails the save loudly, naming the field and the id.
+    # A by-id check the store does not hold fails the save loudly, naming the site and the id.
     doc = _template_doc(
         "ghost-check",
         declarations={"schema": {"type": "object"}, "check": {"id": "missing-resource"}},
     )
-    with pytest.raises(TemplateValidationError, match="references stored id 'missing-resource'"):
+    with pytest.raises(TemplateValidationError) as excinfo:
         await svc.put_template(doc, replace=False)
+    assert str(excinfo.value) == "stored id 'missing-resource' at declarations.check is not a stored template"
 
 
 async def test_effective_schema_for_undeclared_raises(svc: StatesService) -> None:

@@ -1,6 +1,8 @@
 """The record-reference probe: a synthetic two-node graph whose second record references the first.
 
-``e2e_record_probe`` runs a LangGraph graph bound with ``bind_run_trace(chain_payloads="producer")``:
+``e2e_record_probe`` runs a LangGraph graph inside its run's lineage (``open_run_trace``, whose root
+records the probe's result as its output), bound with
+``bind_run_trace(..., chain_payloads="producer")``:
 node ``first`` records its own input and output (a large value) through ``update_current_span``,
 node ``second`` records as its input a ``payload_ref`` to ``first``'s output instead of a copy.
 It returns the trace and the two record ids so a spec reads the trace back and resolves the
@@ -15,7 +17,7 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
 from tai42_contract.app import tai42_app
 from tai42_kit.llm import bind_run_trace
-from tai42_kit.monitoring import payload_ref
+from tai42_kit.monitoring import open_run_trace, payload_ref
 
 FIRST_VALUE = "alpha-" * 2000
 
@@ -61,10 +63,15 @@ def _graph() -> Any:
 @tai42_app.tools.tool(tags={"e2e"})
 async def e2e_record_probe() -> dict[str, str]:
     """Run the two-node reference graph; return ``{"trace_id", "first_span", "second_span"}``."""
-    trace = bind_run_trace(chain_payloads="producer")
-    final = await _graph().ainvoke({}, trace.config)
-    return {
-        "trace_id": str(trace.context.trace_id),
-        "first_span": final["first_span"],
-        "second_span": final["second_span"],
-    }
+    with open_run_trace() as root:
+        context = root.context
+        if context is None or context.trace_id is None:
+            raise RuntimeError("the record probe ran with no recording monitoring writer")
+        final = await _graph().ainvoke({}, bind_run_trace(None, context, chain_payloads="producer"))
+        result = {
+            "trace_id": context.trace_id,
+            "first_span": final["first_span"],
+            "second_span": final["second_span"],
+        }
+        root.record_output(result)
+    return result

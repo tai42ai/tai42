@@ -21,11 +21,11 @@ from tai42_contract.agent import (
     Agent,
     StreamEvent,
 )
-from tai42_kit.llm import RunTrace
+from tai42_contract.monitoring import TraceContext
 
 import tai42_agents.refine_agent.agent as agent_mod
 
-from .conftest import fake_run_trace
+from .conftest import fake_init_langgraph_config
 
 AGENT_NAME = "refine_agent"
 
@@ -134,8 +134,8 @@ def _patch_loop(monkeypatch: pytest.MonkeyPatch, agents: list[FakeAgent]) -> Cre
     monkeypatch.setattr(agent_mod, "llm_provider_settings", lambda: _ProviderSettings())
     monkeypatch.setattr(agent_mod, "llm_settings", lambda: _LlmSettings())
 
-    def _init_config(config: dict[str, Any] | None) -> RunTrace:
-        return fake_run_trace(config or {"configurable": {"thread_id": "t"}})
+    def _init_config(config: dict[str, Any] | None, context: TraceContext | None) -> dict[str, Any]:
+        return fake_init_langgraph_config(config or {"configurable": {"thread_id": "t"}}, context)
 
     monkeypatch.setattr(agent_mod, "init_langgraph_config", _init_config)
     return recorder
@@ -255,6 +255,6 @@ def _patch_loop_real(
     monkeypatch.setattr(
         agent_mod,
         "init_langgraph_config",
-        lambda config: fake_run_trace(config or {"configurable": {"thread_id": "t"}}),
+        lambda config, _context: fake_init_langgraph_config(config or {"configurable": {"thread_id": "t"}}),
     )
     return created

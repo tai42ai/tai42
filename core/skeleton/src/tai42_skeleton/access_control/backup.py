@@ -71,7 +71,9 @@ async def _restore_principals(payload: dict[str, Any], report: BackupSectionRepo
 
     Each principal's own policy row (the fingerprint-less role policy) travels with it. An
     existing principal is identity and is never overwritten; a missing/empty id or a store
-    failure is a loud per-principal error.
+    failure is a loud per-principal error. A policy the store refuses (a scope with no live
+    route, a condition naming a stored template id the store lacks) deletes the principal row
+    just created, so a refused principal leaves nothing behind.
 
     A principal whose policy row already exists in Postgres (but whose principal row does
     not — a Redis-only loss recovered from a surviving Postgres) keeps the live policy: the
@@ -99,9 +101,14 @@ async def _restore_principals(payload: dict[str, Any], report: BackupSectionRepo
             )
             if await management.get_policy_body(user_id) is None:
                 policy = principal.get("policy") or _default_policy_body()
-                await management.create_principal_policy(
-                    user_id, list(policy.get("scopes") or []), policy.get("policy_data"), policy.get("condition")
-                )
+                try:
+                    await management.create_principal_policy(
+                        user_id, list(policy.get("scopes") or []), policy.get("policy_data"), policy.get("condition")
+                    )
+                except Exception:
+                    # The policy never landed, so the principal row must not survive.
+                    await management.delete_principal_row(user_id)
+                    raise
             await management.set_principal_disabled_row(user_id, bool(principal.get("disabled")))
         except (ValueError, KeyError) as exc:
             report.errors.append(f"principal {user_id!r}: {exc}")

@@ -74,8 +74,7 @@ def ambient_trace_context(ctx: TraceContext) -> Generator[None]:
     """Deposit ``ctx`` as the ambient trace context for the wrapped block, resetting it in a ``finally``.
 
     A task created inside the block inherits it on a copy. Absent this wrap the deposit stays
-    ``None`` and a nested run mints its own fresh trace — byte-identical to the pre-deposit
-    behavior.
+    ``None``.
     """
     token = set_ambient_trace_context(ctx)
     try:

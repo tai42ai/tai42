@@ -10,12 +10,12 @@ from __future__ import annotations
 
 import json
 import os
+from typing import Any
 
 from tai42_contract.app import tai42_app
-from tai42_contract.conversations import ReplyTo
 from tai42_contract.tools import TOOL_META_PAUSES
 
-from tai42_e2e_fixtures.tools.ask_results import parked
+from tai42_e2e_fixtures.tools.ask_results import parked, resumed_with
 from tai42_e2e_fixtures.tools.basic import _E2eProbeRedisSettings
 from tai42_e2e_fixtures.tools.driving import driving_as
 
@@ -99,18 +99,16 @@ async def e2e_schedule_park(question: str, expiry_seconds: float, record_key: st
 
 
 @tai42_app.tools.tool(tags={"e2e"})
-async def e2e_schedule_park_deliver(
-    interaction_id: str, answer: object, reply_to: ReplyTo | None, params: dict[str, str] | None
-) -> dict:
+async def e2e_schedule_park_deliver(interaction_id: str, ask_result: Any) -> dict:
     """The stored resume continuation an ``e2e_schedule_park`` park is resumed through.
 
-    The platform's continuation seam fires it with ``{interaction_id, answer, reply_to, params}``
+    The platform's continuation seam fires it with ``{interaction_id, ask_result}``
     under the park's stored (schedule execution-key) identity when the park resolves by an answer or its expiry. A
     schedule fire is receiver-less, so returning the answer as the run's terminal lets the platform
-    subject-track it — no door completion to fire. Returns ``{answer}`` so a spec that drives the
-    resume reads the value the continuation produced.
+    subject-track it — no door completion to fire. Returns ``{answer}`` (the ``ask_result``'s answer,
+    or the expiry marker) so a spec that drives the resume reads the value the continuation produced.
     """
-    return {"answer": answer}
+    return {"answer": resumed_with(ask_result).answer}
 
 
 @tai42_app.tools.tool(tags={"e2e"}, meta={TOOL_META_PAUSES: True})
@@ -142,16 +140,14 @@ async def e2e_caller_hold(question: str, expiry_seconds: float) -> object:
 
 
 @tai42_app.tools.tool(tags={"e2e"})
-async def e2e_caller_hold_deliver(
-    interaction_id: str, answer: object, reply_to: ReplyTo | None, params: dict[str, str] | None
-) -> dict:
+async def e2e_caller_hold_deliver(interaction_id: str, ask_result: Any) -> dict:
     """The stored resume continuation an ``e2e_caller_hold`` caller ask is resumed through.
 
-    Fired once with ``{interaction_id, answer, reply_to, params}`` under the park's stored identity
-    when a door resumes the ask. Returns ``{answer}`` as the run's terminal so a receiver-less
-    resuming door subject-tracks it as the waiting outcome a later run takes.
+    Fired once with ``{interaction_id, ask_result}`` under the park's stored identity when a door
+    resumes the ask. Returns ``{answer}`` (the ``ask_result``'s answer) as the run's terminal so a
+    receiver-less resuming door subject-tracks it as the waiting outcome a later run takes.
     """
-    return {"answer": answer}
+    return {"answer": resumed_with(ask_result).answer}
 
 
 @tai42_app.tools.tool(tags={"e2e"}, extras_keys=frozenset({"tag"}))

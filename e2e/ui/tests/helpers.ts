@@ -572,6 +572,22 @@ export async function createMemberInvite(
 }
 
 /**
+ * Create a member holding `role` and return its `tai-sess-` session token: the admin mints
+ * the invite ({@link createMemberInvite}) and the public accept sets a password and answers
+ * with a session. The token authenticates as `x-api-key` (the gate reads `tai-sess-` from
+ * either auth header), so {@link seedCredential} drives the Studio as that member.
+ */
+export async function createMemberSession(request: APIRequestContext, role: string): Promise<string> {
+  const inviteToken = await createMemberInvite(request, { email: `${uniq(role)}@e2e.test`, role });
+  const password = `${uniq('Pw')}-Aa1`;
+  const accepted = await request.post('/api/login/invite/accept', {
+    data: { invite_token: inviteToken, password, password_confirm: password },
+  });
+  expect(accepted.status(), await accepted.text()).toBe(200);
+  return ((await accepted.json()) as { data: { token: string } }).data.token;
+}
+
+/**
  * Provision an UNRESTRICTED operator and return its `tai-sess-` session token. The operator
  * is a top-level ADMIN HUMAN — an admin invite, accepted with a password, then logged in
  * for a session — which carries no owner claim, so the isolation gates give it the full

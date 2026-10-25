@@ -22,12 +22,26 @@ from tai42_kit.utils.data.json_schema_util import (
 
 from tai42_toolbox._internal.extensions.output_schema_validator import enforce_output_schema
 
+# The declared settings: one ``schema`` key whose value is itself a JSON Schema.
+_CONFIG_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "schema": {
+            "$ref": "https://json-schema.org/draft/2020-12/schema",
+            "title": "Output schema",
+            "description": "The JSON Schema every result of the branch must match.",
+        }
+    },
+    "required": ["schema"],
+    "additionalProperties": False,
+}
+
 
 def _configured_schema(config: dict[str, Any]) -> dict[str, Any]:
     """The JSON Schema dict from the config, validated at bind time.
 
-    Raises loudly and distinctly on a missing ``"schema"`` key (``ValueError``) or a ``"schema"``
-    that is not valid draft-2020-12 (from the kit validator).
+    Raises loudly and distinctly on a missing ``"schema"`` key or a key beside it (``ValueError``)
+    or a ``"schema"`` that is not valid draft-2020-12 (from the kit validator).
     """
     try:
         schema = config["schema"]
@@ -35,12 +49,17 @@ def _configured_schema(config: dict[str, Any]) -> dict[str, Any]:
         raise ValueError(
             "the 'output_schema' tool extension requires a 'schema' key in its config carrying a JSON Schema dict"
         ) from None
+    unknown = sorted(set(config) - {"schema"})
+    if unknown:
+        raise ValueError(f"the 'output_schema' tool extension config has unknown key(s): {', '.join(unknown)}")
 
     check_json_schema(schema)
     return schema
 
 
-@tai42_app.extensions.extension(kind=ExtensionKind.TRANSFORMER, name="output_schema", declares_output_schema=True)
+@tai42_app.extensions.extension(
+    kind=ExtensionKind.TRANSFORMER, name="output_schema", declares_output_schema=True, config_schema=_CONFIG_SCHEMA
+)
 def output_schema(func, orig_name, orig_desc, config):
     """Branch ``func`` into an ``<orig_name>_output_schema`` variant gated on a JSON Schema.
 

@@ -328,22 +328,29 @@ def test_explicit_parent(writer: OtelWriter, exporter: InMemorySpanExporter):
     assert format(record.parent.span_id, "016x") == _PARENT
 
 
-def test_chosen_trace_without_parent_is_a_root_of_that_trace(writer: OtelWriter, exporter: InMemorySpanExporter):
-    writer.open_span(name="n", kind=SpanKind.CHAIN, trace_context=TraceContext(trace_id=_TRACE)).end()
+def test_a_context_with_both_ids_starts_a_child_of_that_parent(writer: OtelWriter, exporter: InMemorySpanExporter):
+    writer.open_span(
+        name="n", kind=SpanKind.CHAIN, trace_context=TraceContext(trace_id=_TRACE, parent_span_id=_PARENT)
+    ).end()
     writer.open_span(name="m", kind=SpanKind.CHAIN).end()
-    chosen, random_root = finished(writer, exporter)
-    assert chosen.context is not None
-    assert random_root.context is not None
-    assert format(chosen.context.trace_id, "032x") == _TRACE
-    assert chosen.parent is None
-    assert format(random_root.context.trace_id, "032x") != _TRACE
+    child, new_root = finished(writer, exporter)
+    assert child.context is not None
+    assert child.parent is not None
+    assert format(child.context.trace_id, "032x") == _TRACE
+    assert format(child.parent.span_id, "016x") == _PARENT
+    assert new_root.context is not None
+    assert new_root.parent is None
+    assert format(new_root.context.trace_id, "032x") != _TRACE
 
 
 def test_explicit_trace_ignores_the_ambient_span(writer: OtelWriter, exporter: InMemorySpanExporter):
     with writer.start_span(name="ambient", kind=SpanKind.CHAIN):
-        writer.open_span(name="n", kind=SpanKind.CHAIN, trace_context=TraceContext(trace_id=_TRACE)).end()
+        writer.open_span(
+            name="n", kind=SpanKind.CHAIN, trace_context=TraceContext(trace_id=_TRACE, parent_span_id=_PARENT)
+        ).end()
     n = next(s for s in finished(writer, exporter) if s.name == "n")
-    assert n.parent is None
+    assert n.parent is not None
+    assert format(n.parent.span_id, "016x") == _PARENT
     assert n.context is not None
     assert format(n.context.trace_id, "032x") == _TRACE
 
@@ -359,10 +366,10 @@ def test_ambient_parent_by_default(writer: OtelWriter, exporter: InMemorySpanExp
 @pytest.mark.parametrize(
     "ctx",
     [
-        TraceContext(trace_id="not-hex"),
-        TraceContext(trace_id="0x" + "a" * 30),
+        TraceContext(trace_id="not-hex", parent_span_id=_PARENT),
+        TraceContext(trace_id="0x" + "a" * 30, parent_span_id=_PARENT),
         TraceContext(trace_id=_TRACE, parent_span_id="short"),
-        TraceContext(trace_id="0" * 32),
+        TraceContext(trace_id="0" * 32, parent_span_id=_PARENT),
     ],
 )
 def test_invalid_trace_context_records_nothing_and_counts(
@@ -441,6 +448,58 @@ def test_not_activated_span_is_not_current(writer: OtelWriter):
     span.end()
 
 
+def test_use_span_makes_an_open_span_current_for_the_block(writer: OtelWriter, exporter: InMemorySpanExporter):
+    outer = writer.open_span(name="outer", kind=SpanKind.CHAIN, activate=True)
+    span = writer.open_span(name="used", kind=SpanKind.CHAIN)
+    with writer.use_span(span):
+        assert writer.current_span_id() == span.id
+        writer.open_span(name="inside", kind=SpanKind.CHAIN).end()
+    assert writer.current_span_id() == outer.id
+    assert finished(writer, exporter)[0].name == "inside"
+    span.end()
+    outer.end()
+    by_name = {s.name: s for s in finished(writer, exporter)}
+    assert by_name["inside"].parent is not None
+    assert format(by_name["inside"].parent.span_id, "016x") == span.id
+
+
+def test_use_span_does_not_end_the_span(writer: OtelWriter, exporter: InMemorySpanExporter):
+    span = writer.open_span(name="used", kind=SpanKind.CHAIN)
+    with writer.use_span(span):
+        pass
+    assert finished(writer, exporter) == []
+    span.end()
+    assert only(writer, exporter).name == "used"
+
+
+def test_use_span_with_the_no_op_span_changes_nothing(writer: OtelWriter):
+    outer = writer.open_span(name="outer", kind=SpanKind.CHAIN, activate=True)
+    with writer.disable():
+        noop = writer.open_span(name="off", kind=SpanKind.CHAIN)
+    with writer.use_span(noop):
+        assert writer.current_span_id() == outer.id
+    assert writer.export_health().records_failed == 0
+    outer.end()
+
+
+def test_use_span_with_a_span_of_another_writer_counts_a_failure(
+    writer: OtelWriter, exporter: InMemorySpanExporter, caplog: pytest.LogCaptureFixture
+):
+    other = OtelWriter(exporter=InMemorySpanExporter())
+    try:
+        foreign = other.open_span(name="foreign", kind=SpanKind.CHAIN)
+        outer = writer.open_span(name="outer", kind=SpanKind.CHAIN, activate=True)
+        with caplog.at_level(logging.ERROR), writer.use_span(foreign):
+            assert writer.current_span_id() == outer.id
+        assert writer.export_health().records_failed == 1
+        assert "use_span" in caplog.text
+        assert writer.current_span_id() == outer.id
+        outer.end()
+        foreign.end()
+    finally:
+        other.shutdown()
+
+
 def test_nested_activation_restores_the_previous_span(writer: OtelWriter):
     outer = writer.open_span(name="o", kind=SpanKind.CHAIN, activate=True)
     inner = writer.open_span(name="i", kind=SpanKind.CHAIN, activate=True)
@@ -512,7 +571,7 @@ def test_disable_creates_nothing(writer: OtelWriter, exporter: InMemorySpanExpor
             kind=SpanKind.TOOL,
             start=datetime.now(UTC),
             end=datetime.now(UTC),
-            trace_context=TraceContext(trace_id=_TRACE),
+            trace_context=TraceContext(trace_id=_TRACE, parent_span_id=_PARENT),
         )
     assert finished(writer, exporter) == []
 

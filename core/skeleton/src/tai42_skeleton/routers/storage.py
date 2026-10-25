@@ -1,4 +1,4 @@
-"""HTTP surface for the storage MANAGEMENT operations — ``/api/storage/resources*`` and ``/api/storage/dirs*``.
+"""HTTP surface for the storage MANAGEMENT operations — ``/api/storage/{resources,entries,dirs}*``.
 
 All routes are AUTHED.
 AUTHED thin adapters over operations in ``tai42_skeleton.operations.storage`` — a thin
@@ -11,6 +11,7 @@ backend registers one as a manifest-loaded plugin:
 - ``GET /api/storage/resources/{id}/content`` — the raw object bytes, as a file
   download. THIS door stays a native handler: it answers raw bytes + a
   Content-Disposition attachment header, not the ``{"data": ...}`` envelope.
+- ``GET /api/storage/entries/{id}`` — the object as a text, document or binary entry.
 - ``POST /api/storage/resources`` — upload text OR base64 bytes under an id.
 - ``DELETE /api/storage/resources/{id}`` — remove one object.
 - ``DELETE /api/storage/dirs/{path}`` — remove a directory subtree.
@@ -22,8 +23,10 @@ provider installed?" is answerable even where this management surface is absent.
 
 With no provider registered every management door answers a loud 501. Success bodies
 are ``{"data": ...}`` (or the raw download for content); failures are
-``{"error": "<message>"}``. The id/path containment guard and the provider-error
-mapping live in the operations (so the MCP tool edge and the CLI carry them too).
+``{"error": "<message>"}``. Every id or path input is a canonical store key, checked
+by the shared key guard inside the operation (so the MCP tool edge and the CLI carry
+it too); the download handler runs the same guard. The provider-error mapping lives in
+the operations.
 """
 
 from __future__ import annotations
@@ -38,18 +41,15 @@ from tai42_skeleton.app.http import http_surface
 from tai42_skeleton.app.route_registry import DeclaredRouteMetadata
 from tai42_skeleton.operations import operation_metadata_of, register_operation_route
 from tai42_skeleton.operations.adapter import read_json_object
-from tai42_skeleton.operations.storage import (
-    _NO_PROVIDER_MESSAGE,
-    _UNSAFE_ID_MESSAGE,
-    _content_disposition,
-    _is_unsafe_path,
-    _provider,
-)
+from tai42_skeleton.operations.storage import _content_disposition
 from tai42_skeleton.operations.storage import delete_dir as _delete_dir_op
 from tai42_skeleton.operations.storage import delete_resource as _delete_resource_op
 from tai42_skeleton.operations.storage import list_resources as _list_resources_op
+from tai42_skeleton.operations.storage import read_resource as _read_resource_op
 from tai42_skeleton.operations.storage import stat_resource as _stat_resource_op
 from tai42_skeleton.operations.storage import upload_resource as _upload_resource_op
+from tai42_skeleton.operations.storage_provider import NO_PROVIDER_MESSAGE, storage_provider
+from tai42_skeleton.template.path_guard import UnsafeTemplatePathError, safe_template_path
 
 
 def _error(message: str, status_code: int) -> JSONResponse:
@@ -81,6 +81,14 @@ stat_resource = register_operation_route(
     tai42_app,
     operation_metadata_of(_stat_resource_op),
     path="/api/storage/resources/{resource_id:path}/stat",
+    method="GET",
+    action="read",
+)
+
+read_resource = register_operation_route(
+    tai42_app,
+    operation_metadata_of(_read_resource_op),
+    path="/api/storage/entries/{resource_id:path}",
     method="GET",
     action="read",
 )
@@ -135,11 +143,13 @@ async def download_resource(request: Request) -> Response:
     operation adapter.
     """
     resource_id = request.path_params["resource_id"]
-    if _is_unsafe_path(resource_id):
-        return _error(f"resource id {resource_id!r} {_UNSAFE_ID_MESSAGE}", 400)
-    provider = _provider()
+    try:
+        safe_template_path(resource_id)
+    except UnsafeTemplatePathError as exc:
+        return _error(str(exc), 400)
+    provider = storage_provider()
     if provider is None:
-        return _error(_NO_PROVIDER_MESSAGE, 501)
+        return _error(NO_PROVIDER_MESSAGE, 501)
     try:
         data = await provider.load_bytes(resource_id)
         content_type = (await provider.stat(resource_id)).content_type or "application/octet-stream"

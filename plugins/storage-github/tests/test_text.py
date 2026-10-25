@@ -14,14 +14,36 @@ from .conftest import make_response
 pytestmark = pytest.mark.usefixtures("client")
 
 
-async def test_load_returns_text_from_raw_endpoint(client):
-    client.get.return_value = make_response(status=200, text="hello world")
+RAW_FORM = "application/vnd.github.raw+json"
+RAW_FORM_HEADERS = {"Content-Type": f"{RAW_FORM}; charset=utf-8"}
+
+
+async def test_load_reads_the_raw_form_from_the_contents_api_at_the_branch(client):
+    client.get.return_value = make_response(status=200, text="hello world", headers=RAW_FORM_HEADERS)
 
     result = await GithubStorage().load("greetings/hi.j2")
 
     assert result == "hello world"
-    url = client.get.call_args.args[0]
-    assert url == "https://raw.githubusercontent.com/acme/content/refs/heads/main/greetings/hi.j2"
+    client.get.assert_awaited_once()
+    args, kwargs = client.get.call_args
+    assert args[0] == "https://api.github.com/repos/acme/content/contents/greetings/hi.j2"
+    assert kwargs["params"] == {"ref": "dev"}
+    assert kwargs["headers"]["Accept"] == RAW_FORM
+    assert kwargs["headers"]["X-GitHub-Api-Version"] == "2022-11-28"
+    assert "Range" not in kwargs["headers"]
+    client.stream.assert_not_called()
+
+
+async def test_load_non_utf8_object_raises_unicode_decode_error(client):
+    # httpx's ``Response.text`` would substitute U+FFFD for the invalid bytes; ``load``
+    # strictly decodes the raw bytes so a binary object is refused, never garbled.
+    png = b"\x89PNG\r\n\x1a\n"
+    client.get.return_value = make_response(
+        status=200, text=png.decode("utf-8", errors="replace"), content=png, headers=RAW_FORM_HEADERS
+    )
+
+    with pytest.raises(UnicodeDecodeError):
+        await GithubStorage().load("images/logo.png")
 
 
 async def test_load_missing_raises_filenotfound(client):
@@ -29,6 +51,22 @@ async def test_load_missing_raises_filenotfound(client):
 
     with pytest.raises(FileNotFoundError):
         await GithubStorage().load("missing.j2")
+
+
+async def test_load_of_a_directory_listing_raises_filenotfound(client):
+    client.get.return_value = make_response(
+        status=200, text="[]", headers={"Content-Type": "application/json; charset=utf-8"}
+    )
+
+    with pytest.raises(FileNotFoundError, match="Object not found: d"):
+        await GithubStorage().load("d")
+
+
+async def test_load_of_another_content_type_raises_naming_it(client):
+    client.get.return_value = make_response(status=200, text="<html>", headers={"Content-Type": "text/html"})
+
+    with pytest.raises(RuntimeError, match="text/html"):
+        await GithubStorage().load("x.j2")
 
 
 async def test_load_server_error_propagates(client):
@@ -55,7 +93,7 @@ async def test_list_returns_blob_paths_via_trees(client):
 
     assert files == ["a.j2", "d/b.j2"]
     assert client.get.call_args.kwargs["params"] == {"recursive": "1"}
-    assert client.get.call_args.args[0].endswith("/git/trees/main")
+    assert client.get.call_args.args[0].endswith("/git/trees/dev")
 
 
 async def test_list_empty_tree_returns_empty(client):
@@ -113,7 +151,7 @@ async def test_upload_create_puts_without_sha(client):
     payload = client.put.call_args.kwargs["json"]
     assert "sha" not in payload
     assert base64.b64decode(payload["content"]) == b"hello"
-    assert payload["branch"] == "main"
+    assert payload["branch"] == "dev"
 
 
 async def test_upload_update_reuses_existing_sha(client):
@@ -172,7 +210,7 @@ async def test_delete_resolves_sha_then_deletes(client):
     assert args[0] == "DELETE"
     assert args[1].endswith("a/b.j2")
     assert kwargs["json"]["sha"] == "abc123"
-    assert kwargs["json"]["branch"] == "main"
+    assert kwargs["json"]["branch"] == "dev"
 
 
 async def test_delete_missing_raises_filenotfound(client):

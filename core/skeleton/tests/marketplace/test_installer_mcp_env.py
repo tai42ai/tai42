@@ -7,9 +7,11 @@ An mcp-server install routes through the COMBINED env+manifest pipeline: the req
 * a missing required var → a typed :class:`InstallEnvError` naming the var + pointer;
 * the happy combined transaction (values + entry land together);
 * a manifest-persist failure leaves NO orphan env write of either kind (the
-  installer-unwind deletes exactly the value keys this install wrote AND restores the
-  ``TAI_ENV_SECRET_KEYS`` marks var to its prior value, atop the pipeline's orphan
+  installer-unwind deletes exactly the value keys this install wrote AND drops the marks
+  it added to the ``TAI_ENV_SECRET_KEYS`` marks var, atop the pipeline's orphan
   contract);
+* the unwind's env revert keeps every write another door landed meanwhile, and refuses
+  loudly to revert a value key another door rewrote;
 * an upgrade to a version adding a required var is refused unless supplied;
 * uninstall LEAVES the stored env values and surfaces the orphaned vars via the notes.
 """
@@ -17,7 +19,6 @@ An mcp-server install routes through the COMBINED env+manifest pipeline: the req
 from __future__ import annotations
 
 import copy
-from collections.abc import Sequence
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any, cast
@@ -29,10 +30,11 @@ from tai42_skeleton.app.bus import FleetResult
 from tai42_skeleton.config.boundary import refuse_dangling_env_markers
 from tai42_skeleton.config.service import ApplyResult, OrphanEnvWriteError
 from tai42_skeleton.manifest import Manifest
-from tai42_skeleton.marketplace.errors import InstallEnvError, InstallStateError
+from tai42_skeleton.marketplace.errors import InstallEnvError, InstallStateError, InstallUnwindError
 from tai42_skeleton.marketplace.installer import Installer
 from tai42_skeleton.marketplace.manifest_patch import apply_provides
 from tai42_skeleton.marketplace.store import InstallRecord
+from tai42_skeleton.settings.env_secret_marks import SECRET_MARKS_ENV_VAR, merge_secret_marks
 
 from ._specs import make_resolved, make_spec
 
@@ -152,12 +154,6 @@ class _FakeSvc:
         self._cm._manifest = document
         return ApplyResult(fleet=_fleet_report(), local={"reloaded": True}, document=document)
 
-    async def apply_replace(
-        self, document: dict[str, Any], *, continues: ApplyResult | None = None, recycle_keys: Sequence[str] = ()
-    ) -> ApplyResult:
-        self._cm._manifest = copy.deepcopy(document)
-        return ApplyResult(fleet=_fleet_report(), local={"reloaded": True}, document=document)
-
     def effective_env(self, changes: dict[str, str]) -> dict[str, str]:
         import os
 
@@ -169,6 +165,9 @@ class _FakeSvc:
         self.env_change_calls += 1
         self._cm.write_env(changes)
         return ApplyResult(fleet=_fleet_report(), local={"reloaded": True}, document=None)
+
+    async def apply_derived_env_change(self, derive: Any) -> ApplyResult:
+        return await self.apply_env_change(derive(self._cm.read_env()))
 
     async def apply_env_and_change(self, prepare: Any, *, manifest_pointer: str | None = None) -> ApplyResult:
         import os
@@ -328,6 +327,46 @@ async def test_persist_failure_restores_prior_store_value_not_this_installs(monk
     assert h.store.rows == {}
 
 
+def _another_door_writes_a_secret_during_the_row_record(h: Harness) -> None:
+    # Another door writes its own secret and appends its mark (read-merged from the store)
+    # while the row write is in flight; then the row write fails and the install unwinds.
+    async def _record(*_args: Any, **_kwargs: Any) -> None:
+        stored = h.cm.read_env()
+        marks = merge_secret_marks(stored.get(SECRET_MARKS_ENV_VAR), ["NEW_SECRET"])
+        await h.svc.apply_env_change({"NEW_SECRET": "v", SECRET_MARKS_ENV_VAR: marks})
+        raise RuntimeError("pg down")
+
+    h.store.record = _record  # type: ignore[method-assign]
+
+
+async def test_an_install_env_revert_keeps_a_secret_mark_another_door_appended(monkeypatch: pytest.MonkeyPatch) -> None:
+    spec = _mcp_spec(env={"PGPASSWORD": "!ENV ${GUARD_PG_PW}"})
+    h = Harness(env={"TAI_ENV_SECRET_KEYS": "OTHER_KEY"})
+    h.registry.resolved = make_resolved(spec)
+    _another_door_writes_a_secret_during_the_row_record(h)
+    with pytest.raises(RuntimeError, match="pg down"):
+        await h.installer().install(spec.ref, env={"GUARD_PG_PW": "s3cret"}, secret_keys=["GUARD_PG_PW"])
+    assert h.cm._env == {"TAI_ENV_SECRET_KEYS": "OTHER_KEY,NEW_SECRET", "NEW_SECRET": "v"}
+
+
+async def test_an_install_env_revert_refuses_a_value_another_door_rewrote(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The install wrote GUARD_PG_PW; another door rewrote it before the unwind, so restoring
+    # the prior value would drop that door's write: the unwind fails loudly and leaves it.
+    spec = _mcp_spec(env={"PGPASSWORD": "!ENV ${GUARD_PG_PW}"})
+    h = Harness()
+    h.registry.resolved = make_resolved(spec)
+
+    async def _record(*_args: Any, **_kwargs: Any) -> None:
+        await h.svc.apply_env_change({"GUARD_PG_PW": "rotated"})
+        raise RuntimeError("pg down")
+
+    h.store.record = _record  # type: ignore[method-assign]
+    with pytest.raises(InstallUnwindError, match="GUARD_PG_PW") as raised:
+        await h.installer().install(spec.ref, env={"GUARD_PG_PW": "s3cret"})
+    assert str(raised.value.step_error) == "pg down"
+    assert h.cm._env == {"GUARD_PG_PW": "rotated"}
+
+
 async def test_pre_persist_refusal_writes_nothing_and_broadcasts_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
     # Both required var KEYS are supplied (so the early presence pre-check passes), but one
     # carries an EMPTY value — the store drops empties, so the pipeline's dangling-marker
@@ -345,6 +384,20 @@ async def test_pre_persist_refusal_writes_nothing_and_broadcasts_nothing(monkeyp
     assert h.cm._env == {}
     assert h.cm._manifest.get("mcp", []) == []
     assert h.store.rows == {}
+    assert h.svc.env_change_calls == 0
+
+
+async def test_pre_persist_refusal_leaves_stored_marks_in_their_written_form(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The stored marks var lists its names with a space after the comma; the refusal persisted
+    # nothing, so the unwind leaves the var as written and fires no env change.
+    spec = _mcp_spec(env={"PGPASSWORD": "!ENV ${GUARD_PG_PW}", "PGUSER": "!ENV ${GUARD_PG_USER}"})
+    h = Harness(env={"TAI_ENV_SECRET_KEYS": "OTHER_KEY, X"})
+    h.registry.resolved = make_resolved(spec)
+    with pytest.raises(InstallEnvError, match="GUARD_PG_USER"):
+        await h.installer().install(
+            spec.ref, env={"GUARD_PG_PW": "s3cret", "GUARD_PG_USER": ""}, secret_keys=["GUARD_PG_PW"]
+        )
+    assert h.cm._env == {"TAI_ENV_SECRET_KEYS": "OTHER_KEY, X"}
     assert h.svc.env_change_calls == 0
 
 

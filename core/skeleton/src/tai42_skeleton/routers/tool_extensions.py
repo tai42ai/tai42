@@ -11,8 +11,9 @@ The doors:
 
 * ``GET /api/tools/{name}/extensions`` — the FULL lossless list-of-combos the
   ``extensions`` map holds for the base tool (the UNION across every ``tools`` +
-  ``mcp`` config that maps it) plus the catalog of available extensions. 404 when
-  ``name`` is not a registered tool.
+  ``mcp`` config that maps it, then ``api_tools``) plus the catalog of available
+  extensions. The combos are served as stored, ``!ENV`` markers intact; no resolved
+  value leaves on the wire. 404 when ``name`` is not a registered tool.
 * ``POST /api/tools/{name}/extensions`` — author ALL of the tool's combos at
   once (``{"combos": [[ext, …], …]}``). The write targets the SINGLE config that
   provides the tool; an ambiguous or missing owner raises loudly (400), and a
@@ -21,7 +22,9 @@ The doors:
 * ``POST /api/tools/{name}/extensions/combos`` — granular edit of the same list
   (``{"add": [[ext, …], …], "remove": [...]}``): registration (404) and owner
   (400/409) resolve as above, then adding a present combo is a 400 and removing an
-  absent one a 404. Both lists empty is a 400. Returns the GET door's shape.
+  absent one a 404, each compared against the combos as stored. Both lists empty is
+  a 400. Returns the GET door's shape plus the write's ``span_release_error``
+  (``null`` when the config store released its write span after the persist).
 
 These doors are thin adapters over operations in
 ``tai42_skeleton.operations.tool_extensions``. The POST body carries a nested

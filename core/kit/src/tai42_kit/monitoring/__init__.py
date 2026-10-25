@@ -1,4 +1,6 @@
-"""The monitoring feature's shared logic: the encoder, references, the OpenTelemetry writer, and the row preview.
+"""The monitoring feature's shared logic.
+
+The encoder, references, the run-trace opener, the OpenTelemetry writer, and the row preview.
 
 Everything here except ``encode_payload`` is importable without the ``monitoring`` extra;
 ``encode_payload`` (orjson) is imported on first access.
@@ -19,21 +21,35 @@ from tai42_kit.monitoring.refs import (
     resolve_refs,
     unrecorded,
 )
+from tai42_kit.monitoring.run_trace import (
+    InvalidRunTraceError,
+    RunTraceRoot,
+    begin_run_trace,
+    open_lineage_span,
+    open_run_trace,
+    resolve_trace_context,
+)
 
 if TYPE_CHECKING:
     from tai42_kit.monitoring.encode import encode_payload
 
 __all__ = [
     "TRACE_PREVIEW_MAX_CHARS",
+    "InvalidRunTraceError",
     "MonitoringEncodeError",
     "PayloadRefValue",
+    "RunTraceRoot",
     "UnrecordedValue",
+    "begin_run_trace",
     "encode_payload",
     "escape_pointer_token",
     "is_payload_ref",
+    "open_lineage_span",
+    "open_run_trace",
     "payload_ref",
     "preview",
     "resolve_refs",
+    "resolve_trace_context",
     "unrecorded",
 ]
 

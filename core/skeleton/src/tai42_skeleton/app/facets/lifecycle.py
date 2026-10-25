@@ -12,8 +12,9 @@ if TYPE_CHECKING:
 
     from tai42_contract.backend import FleetOpApplied
     from tai42_contract.config import ConfigManager
-    from tai42_contract.sub_mcp import SubMcpAppRouter
+    from tai42_contract.manifest import TaiMCPConfig
 
+    from tai42_skeleton.app.sub_mcp_app import SubMcpAppRouter
     from tai42_skeleton.manifest import Manifest as ManifestImpl
 
 
@@ -97,6 +98,21 @@ class AdminFacet(_Facet):
         Probes off the reload gate on the cold-boot probe budget and takes the gate only to bind.
         """
         return await self._app._reprobe_failed_titles(titles)
+
+    async def advertised_mcp_tools(self, title: str) -> list[dict[str, Any]]:
+        """List every tool the live MCP server ``title`` advertises, before the manifest's selection.
+
+        Each row says why a selected tool is not bound on this worker (``unbound_reason``).
+        Raises ``LookupError`` for a title not in the live manifest.
+        """
+        return await self._app._advertised_mcp_tools(title)
+
+    async def served_mcp_names(self, config: TaiMCPConfig) -> list[str]:
+        """The names the binder would bind from the listing of ``config``'s server, before the selection.
+
+        A listed tool whose input schema cannot be adapted is not served; a probe failure raises.
+        """
+        return await self._app._served_mcp_names(config)
 
     def list_failed_mcps(self) -> list[dict[str, Any]]:
         """List the sub-MCP apps that failed to load."""

@@ -11,6 +11,7 @@ pipeline's ordering / failure contract is oracled in ``tests/config/test_profile
 
 from __future__ import annotations
 
+import copy
 from types import SimpleNamespace
 from typing import Any
 
@@ -34,6 +35,9 @@ from tai42_skeleton.operations import config as config_ops
 from tai42_skeleton.settings_profiles.store import SettingsProfileStoreView
 
 from .._fakes.bus import FakeBus
+from .._fakes.combo_check_app import CHECK_DOCUMENT, booted_check_app, clean_server
+from .._fakes.write_span import ExclusiveWriteStore
+from ..config.fake_pipeline import ComboChecks
 
 
 class _MemStore(VersionedStore):
@@ -143,7 +147,9 @@ def _wire(monkeypatch: pytest.MonkeyPatch, view: SettingsProfileStoreView) -> No
     monkeypatch.setattr(
         config_ops.ConfigService,
         "from_app",
-        classmethod(lambda cls: ConfigService(config_manager=_FakeManager(), admin=None, bus=None)),  # type: ignore[arg-type]
+        classmethod(
+            lambda cls: ConfigService(config_manager=_FakeManager(), admin=None, bus=None, combo_check=ComboChecks())  # type: ignore[arg-type]
+        ),
     )
 
 
@@ -215,7 +221,9 @@ async def test_put_refuses_a_dangling_env_marker(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(
         config_ops.ConfigService,
         "from_app",
-        classmethod(lambda cls: ConfigService(config_manager=_Manager(), admin=None, bus=None)),  # type: ignore[arg-type]
+        classmethod(
+            lambda cls: ConfigService(config_manager=_Manager(), admin=None, bus=None, combo_check=ComboChecks())  # type: ignore[arg-type]
+        ),
     )
     with pytest.raises(BadRequestError, match="NEEDED"):
         await config_ops.put_profile("p", **_body(env={"OTHER": "1"}, secret_keys=[]))
@@ -378,7 +386,9 @@ def _stub_apply_service(monkeypatch: pytest.MonkeyPatch, outcome: ProfileApplyOu
     return seen
 
 
-def _apply_outcome(*, serve_affecting: bool, recycle: RecycleReport | None = None) -> ProfileApplyOutcome:
+def _apply_outcome(
+    *, serve_affecting: bool, recycle: RecycleReport | None = None, span_release_error: str | None = None
+) -> ProfileApplyOutcome:
     from tai42_skeleton.app.bus import FleetResult, WorkerIdentity, WorkerKind
 
     return ProfileApplyOutcome(
@@ -387,6 +397,7 @@ def _apply_outcome(*, serve_affecting: bool, recycle: RecycleReport | None = Non
         self_identity=WorkerIdentity(name="serve-applier", kind=WorkerKind.serve, pid=1, generation=1),
         serve_affecting=serve_affecting,
         fleet=FleetResult(op="reload_config", results=[]),
+        span_release_error=span_release_error,
     )
 
 
@@ -423,6 +434,17 @@ async def test_apply_no_self_exit_when_not_serve_affecting(
     response = await config_ops.apply_profile("p")
     assert isinstance(response, OperationResponse)
     assert response.background is None  # hot-only / backend-only / bare → no self-exit
+
+
+async def test_apply_reports_the_store_span_release_error(
+    monkeypatch: pytest.MonkeyPatch, view: SettingsProfileStoreView
+) -> None:
+    await view.create_profile("p", SettingsProfileBody(**_body(env={"A": "1"}, secret_keys=[])))
+    error = "OSError: releasing the span failed"
+    _stub_apply_service(monkeypatch, _apply_outcome(serve_affecting=False, span_release_error=error))
+    response = await config_ops.apply_profile("p")
+    assert isinstance(response, OperationResponse)
+    assert response.payload["span_release_error"] == error
 
 
 async def test_apply_does_not_arm_self_exit_when_the_roll_stopped(
@@ -545,3 +567,60 @@ async def test_apply_without_marks_writes_no_marks_variable(
     seen = _stub_apply_service(monkeypatch, _apply_outcome(serve_affecting=False))
     await config_ops.apply_profile("p")
     assert seen["env"] == {"A": "1"}
+
+
+# -- the extension combo gate ------------------------------------------------
+
+_REFUSAL = "tools[a].extensions[echo][0]: extension 'refusing' on tool 'echo' cannot bind: bad label"
+
+
+class _MarkedManager(ExclusiveWriteStore):
+    """A deployment whose manifest binds ``refusing`` on ``echo`` with its setting behind ``!ENV ${EXT_L}``."""
+
+    def read_env(self) -> dict[str, str]:
+        return {"EXT_L": "ok"}
+
+    def read_manifest_preserved(self) -> dict[str, Any]:
+        document = copy.deepcopy(CHECK_DOCUMENT)
+        document["tools"][0]["extensions"] = {"echo": [[{"name": "refusing", "config": {"label": "!ENV ${EXT_L}"}}]]}
+        return document
+
+
+def _live_check_service(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        config_ops.ConfigService,
+        "from_app",
+        classmethod(
+            lambda cls: ConfigService(
+                config_manager=_MarkedManager(),  # type: ignore[arg-type]
+                admin=None,  # type: ignore[arg-type]
+                bus=None,  # type: ignore[arg-type]
+                combo_check=instance.app.extensions.check_combo,
+            )
+        ),
+    )
+
+
+@pytest.mark.usefixtures(clean_server.__name__)
+async def test_put_profile_refuses_an_env_the_combo_check_refuses(
+    monkeypatch: pytest.MonkeyPatch, view: SettingsProfileStoreView
+) -> None:
+    _live_check_service(monkeypatch)
+    async with booted_check_app():
+        with pytest.raises(BadRequestError) as caught:
+            await config_ops.put_profile("p", **_body(env={"EXT_L": "x"}, secret_keys=[]))
+        assert str(caught.value) == _REFUSAL
+        await config_ops.put_profile("p", **_body(env={"EXT_L": "fine"}, secret_keys=[]))
+    assert (await view.get_active_body("p")).env == {"EXT_L": "fine"}
+
+
+@pytest.mark.usefixtures(clean_server.__name__)
+async def test_apply_profile_refuses_an_env_the_combo_check_refuses(
+    monkeypatch: pytest.MonkeyPatch, view: SettingsProfileStoreView
+) -> None:
+    await view.create_profile("p", SettingsProfileBody(**_body(env={"EXT_L": "x"}, secret_keys=[])))
+    _live_check_service(monkeypatch)
+    async with booted_check_app():
+        with pytest.raises(BadRequestError) as caught:
+            await config_ops.apply_profile("p")
+        assert str(caught.value) == _REFUSAL

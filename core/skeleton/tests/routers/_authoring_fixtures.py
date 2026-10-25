@@ -16,6 +16,10 @@ a real generic tools-agent without depending on any concrete implementation:
   ``preset_bakeable_fields = {"secret_config"}``: a non-UI-composable agent that still
   honors one baked field, so baking ``secret_config`` authors while baking any other
   field is rejected. Its ``astream`` records the kwargs it received.
+* ``tools_agent`` — ``spec_runnable``, its ``ToolInput`` typed as a generic tools-agent's:
+  ``TemplatedText`` messages, a ``TemplatedText | dict`` ``response_format`` and
+  self-nesting ``subagents`` specs carrying their own ``system_prompt``. Its run renders
+  ``system_prompt`` through the template store, so a missing stored id fails the run.
 """
 
 from __future__ import annotations
@@ -27,6 +31,8 @@ from pydantic import BaseModel, Field, model_validator
 from tai42_contract.agent import AddressedMemory, Agent
 from tai42_contract.agent.events import MessageFinal, StreamEvent
 from tai42_contract.app import tai42_app
+from tai42_contract.template import TemplatedText
+from tai42_kit.utils.render import render_templated_text
 from tests.agent._memoryless import MemorylessTestAgent
 
 
@@ -193,3 +199,37 @@ class AliasedAgent(MemorylessTestAgent):
 
     async def run(self, *, text: str = "", **_: Any) -> str:
         return text
+
+
+class _SubAgentInput(BaseModel):
+    name: str = ""
+    system_prompt: TemplatedText | None = None
+    tool_names: list[str] = []
+    subagents: list[_SubAgentInput] = []
+
+
+class _ToolsInput(BaseModel):
+    user_message: TemplatedText | None = None
+    system_prompt: TemplatedText | None = None
+    system_message: TemplatedText | None = None
+    response_format: TemplatedText | dict[str, Any] | None = None
+    tool_names: list[str] = []
+    presets: list[dict[str, Any]] = []
+    subagents: list[_SubAgentInput] = []
+    max_steps: int = Field(default=4, ge=1)
+
+
+@tai42_app.agents.agent("tools_agent")
+class ToolsAgent(MemorylessTestAgent):
+    tool_name = "tools_agent"
+    tool_description = "A fake agent typed as a generic tools-agent."
+    ToolInput = _ToolsInput
+    spec_runnable = True
+
+    async def run(self, **kwargs: Any) -> Any:
+        return await self._drain(self.astream(**kwargs))
+
+    async def astream(self, **kwargs: Any) -> AsyncIterator[StreamEvent]:  # type: ignore[override]
+        prompt = kwargs.get("system_prompt")
+        system = await render_templated_text(prompt) if prompt is not None else ""
+        yield MessageFinal(text=f"system={system}")

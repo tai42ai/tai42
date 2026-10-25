@@ -105,12 +105,22 @@ async def test_a_delivery_past_its_deadline_is_never_sent_and_the_question_is_pr
 
 
 async def test_a_deadline_passing_during_the_backoff_is_refused_before_the_next_send(pruned, monkeypatch):
-    # The dispatcher reads the interactions settings at each use: three attempts, 1.5 s apart.
+    # The dispatcher reads the interactions settings at each use: three attempts, a short backoff apart.
     monkeypatch.setenv("INTERACTIONS_DELIVERY_MAX_ATTEMPTS", "3")
-    monkeypatch.setenv("INTERACTIONS_DELIVERY_RETRY_BACKOFF_SECONDS", "1.5")
+    monkeypatch.setenv("INTERACTIONS_DELIVERY_RETRY_BACKOFF_SECONDS", "0.05")
     reset_all_settings()
     channel = _RecordingChannel(failures=[ChannelDeliveryError("transient", retryable=True)])
-    frame = _frame(datetime.now(UTC) + timedelta(seconds=1))
+    start = datetime.now(UTC)
+
+    class _Clock(datetime):
+        """The dispatcher's wall clock: before the deadline until the first send, past it after."""
+
+        @classmethod
+        def now(cls, tz: Any = None) -> datetime:  # type: ignore[override]
+            return start + timedelta(seconds=2 if channel.delivered else 0)
+
+    monkeypatch.setattr(delivery_module, "datetime", _Clock)
+    frame = _frame(start + timedelta(seconds=1))
     with pytest.raises(ChannelDeliveryError, match="already timed out"):
         await _deliver(channel, frame)
     assert len(channel.delivered) == 1

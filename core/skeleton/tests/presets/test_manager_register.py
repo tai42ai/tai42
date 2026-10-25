@@ -109,11 +109,9 @@ def test_secret_preset_output_schema_validates_revealed_value(pg: FakeVersioning
 def test_secret_preset_output_schema_rejects_when_real_value_violates(pg: FakeVersioningPg):
     # The output_schema demands ``minLength: 6`` on the secret field. The REAL token
     # ``tok-x`` (5 chars) VIOLATES it while the ``[secret]`` placeholder (8 chars)
-    # SATISFIES it — a masked-projection guard would be silently defeated. The guard
-    # judges the REAL value, so dispatch raises loudly — but the raised error redacts
-    # the offending instance: the real token never rides the message, repr, or chain.
-    from tai42_contract.secrets import SECRET_PLACEHOLDER
-    from tai42_kit.utils.data.json_schema_util import JsonSchemaValidationError
+    # SATISFIES it: the guard judges the real value and refuses the call, naming the
+    # path and the broken rule only, never the value, and chaining nothing.
+    from fastmcp.exceptions import ToolError
 
     schema = {
         "type": "object",
@@ -126,19 +124,18 @@ def test_secret_preset_output_schema_rejects_when_real_value_violates(pg: FakeVe
             await app.preset_manager.register(
                 "x_vault", "vault", {"account": "x"}, [], "Short vault", output_schema=schema
             )
-            with pytest.raises(JsonSchemaValidationError) as caught:
+            with pytest.raises(ToolError) as caught:
                 await app.tools.run_tool("x_vault", {})
 
             exc = caught.value
-            # The real token is absent from every rendering of the error...
+            assert str(exc) == (
+                "preset 'x_vault' output does not match its output_schema: value does not match schema at "
+                "$.token: breaks the schema's 'minLength' rule: 6 (the value is not shown)"
+            )
             assert "tok-x" not in str(exc)
             assert "tok-x" not in repr(exc)
-            # ...the caught secret-bearing error survives on no chain attribute...
             assert exc.__cause__ is None
             assert exc.__context__ is None
-            # ...the json path is kept, and the offending value is the placeholder, not the raw.
-            assert exc.json_path == "$.token"
-            assert exc.offending_value == SECRET_PLACEHOLDER
 
     asyncio.run(run())
 
@@ -146,8 +143,8 @@ def test_secret_preset_output_schema_rejects_when_real_value_violates(pg: FakeVe
 def test_non_secret_preset_output_schema_validates_structured_content(pg: FakeVersioningPg):
     # A NON-secret preset's dispatch arms the gate but stows nothing, so the guard
     # validates the structured content: a conforming result passes
-    # and a violating one raises loudly.
-    from tai42_kit.utils.data.json_schema_util import JsonSchemaValidationError
+    # and a violating one is refused loudly, quoting the instance.
+    from fastmcp.exceptions import ToolError
 
     conforming = {
         "type": "object",
@@ -167,10 +164,9 @@ def test_non_secret_preset_output_schema_validates_structured_content(pg: FakeVe
             assert await app.tools.run_tool("p_ok", {"city": "x"}) == {"city": "x", "units": "imperial"}
 
             await mgr.register("p_bad", "weather", {"units": "imperial"}, [], "bad", output_schema=violating)
-            with pytest.raises(JsonSchemaValidationError) as caught:
+            with pytest.raises(ToolError) as caught:
                 await app.tools.run_tool("p_bad", {"city": "x"})
-            # The non-secret branch still quotes the offending instance verbatim — the
-            # secret-branch redaction did NOT widen to this path.
+            assert str(caught.value).startswith("preset 'p_bad' output does not match its output_schema: ")
             assert "imperial" in str(caught.value)
 
     asyncio.run(run())

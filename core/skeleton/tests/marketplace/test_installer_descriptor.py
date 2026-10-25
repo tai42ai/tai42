@@ -195,10 +195,10 @@ async def test_descriptor_install_persist_failure_reverts_env_write() -> None:
     assert h.store.rows == {}
 
 
-async def test_descriptor_install_attribution_failure_restores_saved_manifest() -> None:
+async def test_descriptor_install_attribution_failure_reverses_the_manifest_patch() -> None:
     # Attribution-FAILURE path: the manifest persist SUCCEEDS (the connector is added and the
     # env lands), then a LATER step — the store.record attribution write — fails. The installer
-    # unwind must RESTORE the saved manifest (dropping the just-added connector) and revert the
+    # unwind must REVERSE the provides patch (dropping the just-added connector) and revert the
     # env, so the connector is genuinely added-THEN-removed (not never-added).
     spec = _connector_spec()
     h, pip = _descriptor_harness()
@@ -208,7 +208,7 @@ async def test_descriptor_install_attribution_failure_restores_saved_manifest() 
 
     async def _failing_record(*args: object, **kwargs: object) -> None:
         # Runs AFTER the manifest persist committed: snapshot the just-added connector + env,
-        # then fail the attribution write to drive the saved-manifest restore.
+        # then fail the attribution write to drive the manifest reversal.
         captured["connectors"] = [c["id"] for c in h.cm._manifest.get("connectors", [])]
         captured["env"] = dict(h.cm._env)
         raise RuntimeError("attribution store down")
@@ -222,7 +222,7 @@ async def test_descriptor_install_attribution_failure_restores_saved_manifest() 
     assert captured["connectors"] == ["acme"]
     assert captured["env"]["ACME_CLIENT_ID"] == "id"
     assert captured["env"]["ACME_CLIENT_SECRET"] == "sec"
-    # ...and the unwind restored the saved (empty) manifest, dropping the just-added connector,
+    # ...and the unwind reversed the provides patch, dropping the just-added connector,
     # and reverted the env write; no row remains.
     assert pip.calls == []
     assert h.cm._manifest.get("connectors", []) == []

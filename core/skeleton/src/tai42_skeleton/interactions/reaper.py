@@ -23,7 +23,7 @@ from tai42_contract.interactions import PARK_COMPLETION_FAILED, InteractionReque
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.redis import RedisClient
 
-from tai42_skeleton.interactions.continuation import (
+from tai42_skeleton.interactions.continuation_dispatch import (
     EXPIRY_ANSWER,
     EXPIRY_ANSWERED_BY,
     continuation_due_timing,

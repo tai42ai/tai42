@@ -34,6 +34,7 @@ from tai42_skeleton.app import instance
 from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.operations import BadRequestError
 from tai42_skeleton.operations import presets as preset_ops
+from tai42_skeleton.operations.presets.create import PresetSeedRefusedError
 from tai42_skeleton.presets.seeds import PresetSeedRegistry
 from tai42_skeleton.presets.store import PresetStoreView
 from tai42_skeleton.tool_meta.store import PostgresToolMetaStore
@@ -531,11 +532,57 @@ def test_invalid_seed_raises_loudly(pg) -> None:
             seed = PresetSeed(name="broken_default", description="d", base_tool="no_such_tool")
             instance.app.presets.register_seed(seed)
 
-            with pytest.raises(BadRequestError, match="not a registered tool"):
+            with pytest.raises(
+                PresetSeedRefusedError,
+                match=(
+                    r"^preset seed 'broken_default' cannot be created: preset 'broken_default' over base tool "
+                    r"'no_such_tool' — base tool 'no_such_tool' is not a registered tool$"
+                ),
+            ):
                 await preset_ops.apply_preset_seeds()
 
             # Nothing was persisted for the rejected seed.
             with pytest.raises(PresetNotFoundError):
                 await instance.app.presets.store.get_preset("broken_default")
+
+    asyncio.run(run())
+
+
+def test_a_seed_with_an_output_map_creates_the_mapped_preset(pg) -> None:
+    async def run() -> None:
+        async with instance.app.app_context(_manifest()):
+            seed = PresetSeed(
+                name="echo_loud",
+                description="d",
+                base_tool="echo",
+                fixed_kwargs={"text": "hello"},
+                output_map="ascii_upcase",
+            )
+            instance.app.presets.register_seed(seed)
+
+            await preset_ops.apply_preset_seeds()
+
+            assert await instance.app.tools.run_tool("echo_loud", {}) == "HELLO"
+            assert (await instance.app.presets.store.get_active_body("echo_loud")).output_map == "ascii_upcase"
+
+    asyncio.run(run())
+
+
+def test_a_seed_whose_map_the_create_path_refuses_raises_loudly(pg) -> None:
+    async def run() -> None:
+        async with instance.app.app_context(_manifest()):
+            seed = PresetSeed(name="echo_unpaired", description="d", base_tool="echo", input_map="{text: .}")
+            instance.app.presets.register_seed(seed)
+
+            with pytest.raises(
+                PresetSeedRefusedError,
+                match=(
+                    r"^preset seed 'echo_unpaired' cannot be created: preset 'echo_unpaired' over base tool 'echo' — "
+                    r"an input map needs an input schema that describes what the caller sends$"
+                ),
+            ):
+                await preset_ops.apply_preset_seeds()
+            with pytest.raises(PresetNotFoundError):
+                await instance.app.presets.store.get_preset("echo_unpaired")
 
     asyncio.run(run())

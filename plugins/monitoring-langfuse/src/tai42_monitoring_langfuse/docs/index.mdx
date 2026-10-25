@@ -10,8 +10,8 @@ the same interface.
 Records are written by the platform's OpenTelemetry writer: each process exports
 OTLP to an **OpenTelemetry collector** running as its own container, and the
 collector maps the platform's attribute names onto Langfuse's and sends them to
-Langfuse's OTLP endpoint. The Langfuse SDK is used for reading only (its tracing is
-turned off).
+Langfuse's OTLP endpoint. Reads go to Langfuse's public REST API (Observations v2
+and Metrics v2) over HTTP, authenticated with the project's key pair.
 
 ## Enable it
 
@@ -60,7 +60,9 @@ have no effect: the writer never truncates a recorded value.
 
 The collector holds the backend credential, named outside the `LANGFUSE_` prefix:
 `OTEL_COLLECTOR_LANGFUSE_AUTH` is the base64 of `public_key:secret_key`, sent as
-`Authorization: Basic …` to `${LANGFUSE_HOST}/api/public/otel`. Its pipeline maps
+`Authorization: Basic …` to `${LANGFUSE_HOST}/api/public/otel`, together with the
+header `x-langfuse-ingestion-version: 4` (without it Langfuse delays new data on the
+reads by up to 15 minutes). Its pipeline maps
 the platform's `tai42.trace.*`, `tai42.run.version`, `tai42.level`,
 `tai42.status_message`, `tai42.span.kind` and `tai42.usage.cost_usd` attributes onto
 Langfuse's names; GenAI messages, tool arguments and results, and chain inputs and
@@ -106,10 +108,35 @@ subject); person-id-first keeps a linked subject's cross-channel history under
 one deletable key.
 </Warning>
 
+## What the reader serves
+
+A run is one trace with one root observation: the run's start is its root's
+start, and its latency is its root's duration. On the runs list every sort
+combines with every filter, within these bounds:
+
+1. **Newest first** with only the name, user, session, version, tags, metadata
+   and latency filters: paged up to run 5,000.
+2. **Cost or tokens, highest first**, with only the name and tags filters:
+   ranked by Langfuse over the whole time range, paged up to run 1,000.
+3. **Every other read** (a latency, name or run id sort, any ascending sort, a
+   cost or tokens sort with a user, session, version, metadata or latency
+   filter, or a cost, token, status or model filter with any sort) is ranked by
+   the plugin over the runs
+   that started in the time range. It is served when the range holds at most
+   2,000 matching runs and, when the read needs every observation of every run,
+   at most 50,000 observations.
+
+A read past a bound answers that it is too broad and names the bound; narrow the
+time range or add filters. The Studio always sends a time range (the last 30
+days by default).
+
 ## Quirks
 
-- The package pins the Langfuse SDK to a narrow range for its read API. Upgrading
-  the Langfuse **server** is safe; changing the pinned SDK is not.
+- The plugin reads Langfuse's Observations v2 and Metrics v2 REST endpoints, which
+  need a Langfuse server 4.59.0 or newer — Langfuse Cloud, or a self-hosted 4.x stack.
+- A read answered 408, 429 or 5xx is retried up to twice (after the answer's
+  `Retry-After`, at most 60 s, or a 1 s / 2 s backoff); any other failed read,
+  a timeout included, answers with an error naming the request.
 - A self-hosted Langfuse is a standalone stack (its own Postgres, ClickHouse,
   Redis, and object store); the collector and the reader both reach it at
   `LANGFUSE_HOST`.

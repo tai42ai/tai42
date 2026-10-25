@@ -143,8 +143,12 @@ def _tool_result_value(result: Any) -> Any:
     (Image/Audio/File) carries no structured and no text, so serialize its
     remaining content blocks to their JSON wire dicts — the same media shape the
     direct-run path preserves. Only a genuinely empty result reduces to ``None``. The returned
-    structured value is the ``ToolResult``'s own object, not a copy.
+    structured value is the ``ToolResult``'s own object, not a copy. An error result (a mounted
+    connector's failed call keeps ``is_error``) reduces to its whole MCP result envelope, flag
+    included, the value a direct call of that base returns.
     """
+    if result.is_error:
+        return _serialize_result(result.to_mcp_result())
     structured = result.structured_content
     meta = result.meta or {}
     # ``ToolResult.__init__`` already reduced ``structured_content`` with ``to_jsonable_python``

@@ -44,9 +44,11 @@ class RqSettings(BackendDispatchSettings, TaiBaseSettings):
     redis: RqRedisSettings = Field(default_factory=RqRedisSettings)
     # Key prefix RQ uses for all of its Redis structures.
     rq_prefix: str = "rq:"
-    # The RQ queue name every enqueue, worker, and scheduler binds. RQ's own
-    # default is ``default``; co-tenant deployments on one logical DB diverge here
-    # so each worker consumes only its own jobs (the queue key is
+    # The RQ queue the host enqueues to, ``beat`` schedules on, and a worker
+    # started without a label serves; a labelled queue is ``<queue_name>.<label>``.
+    # RQ's own default is ``default``; co-tenant deployments on one logical DB set
+    # distinct values, none another's value followed by ``.<label>``, so each
+    # worker consumes only its own jobs (the queue key is
     # ``<rq_prefix>queue:<queue_name>``).
     queue_name: str = "default"
 

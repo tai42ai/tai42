@@ -2,10 +2,17 @@
 
 import inspect
 from collections.abc import Callable, Iterator, Sequence
+from copy import deepcopy
 from typing import Any
 
 from tai42_contract.extensions import ExtensionKind
 from tai42_contract.manifest import ExtensionElement
+from tai42_kit.utils.data.json_schema_util import (
+    InvalidJsonSchemaError,
+    JsonSchemaValidationError,
+    check_json_schema,
+    validate_against_json_schema,
+)
 
 from tai42_skeleton.core.registry.base_registry import BaseRegistry
 from tai42_skeleton.exceptions.exceptions import TaiValidationError
@@ -41,6 +48,25 @@ def factory_accepts_config(func: Callable) -> bool:
     return any(p.name == "config" and p.kind in (p.POSITIONAL_OR_KEYWORD, p.KEYWORD_ONLY) for p in params)
 
 
+def _check_config_schema(func: Callable, name: str, config_schema: dict[str, Any] | None) -> None:
+    """Refuse a settings schema that does not match the factory's ``config`` parameter or the JSON Schema rules."""
+    takes_config = factory_accepts_config(func)
+    if config_schema is None:
+        if takes_config:
+            raise TaiValidationError(f"Extension '{name}' takes a config parameter but declares no config_schema.")
+        return
+    if not takes_config:
+        raise TaiValidationError(
+            f"Extension '{name}' declares a config_schema but its factory takes no config parameter."
+        )
+    try:
+        check_json_schema(config_schema)
+    except InvalidJsonSchemaError as exc:
+        raise TaiValidationError(f"Extension '{name}' config_schema: {exc}") from exc
+    if config_schema.get("type") != "object":
+        raise TaiValidationError(f"Extension '{name}' config_schema must describe an object.")
+
+
 class ExtensionRegistry(BaseRegistry):
     """Registry of tool extensions keyed by name, with kind and body-locality metadata."""
 
@@ -54,6 +80,7 @@ class ExtensionRegistry(BaseRegistry):
         self._requires_body_locality: dict[str, bool] = {}
         self._pauses: dict[str, bool] = {}
         self._declares_output_schema: dict[str, bool] = {}
+        self._config_schemas: dict[str, dict[str, Any] | None] = {}
 
     def register_extension(
         self,
@@ -64,19 +91,28 @@ class ExtensionRegistry(BaseRegistry):
         requires_body_locality: bool = False,
         pauses: bool = False,
         declares_output_schema: bool = False,
+        config_schema: dict[str, Any] | None = None,
     ):
-        """Register extension ``func`` under ``name`` with its ``kind``; a duplicate name raises."""
+        """Register extension ``func`` under ``name`` with its ``kind``; a duplicate name raises.
+
+        ``config_schema`` is the JSON Schema of the settings the factory's ``config`` parameter
+        receives. A factory taking ``config`` must declare one and a factory without ``config``
+        must not; the schema must hold the JSON Schema rules and describe an object. Any breach
+        raises and registers nothing.
+        """
         # The registry is rebuilt fresh on every start/reload, so a name already
         # present within one build is a genuine collision (two extensions claiming
         # one name), never a legitimate re-register — fail loud rather than let the
         # last one silently win.
         if name in self._extensions:
             raise TaiValidationError(f"Extension '{name}' is already registered.")
+        _check_config_schema(func, name, config_schema)
         self._extensions[name] = func
         self._kinds[name] = kind
         self._requires_body_locality[name] = requires_body_locality
         self._pauses[name] = pauses
         self._declares_output_schema[name] = declares_output_schema
+        self._config_schemas[name] = deepcopy(config_schema)
         self._available_extensions.add(name)
 
     def extension(
@@ -88,6 +124,7 @@ class ExtensionRegistry(BaseRegistry):
         requires_body_locality: bool = False,
         pauses: bool = False,
         declares_output_schema: bool = False,
+        config_schema: dict[str, Any] | None = None,
     ):
         """Decorator form of :meth:`register_extension` (the ``app.extensions`` facet body); bare or with arguments.
 
@@ -97,6 +134,7 @@ class ExtensionRegistry(BaseRegistry):
         (``ExtensionKind.relocates_execution``) extension in a stacked combo.
         ``pauses`` marks an extension every branch of which can pause, whatever its base declares.
         ``declares_output_schema`` marks an extension that declares the wrapped tool's output shape.
+        ``config_schema`` is the JSON Schema of the settings the factory's ``config`` parameter receives.
         """
         if f and callable(f):
             return self.extension(
@@ -105,6 +143,7 @@ class ExtensionRegistry(BaseRegistry):
                 requires_body_locality=requires_body_locality,
                 pauses=pauses,
                 declares_output_schema=declares_output_schema,
+                config_schema=config_schema,
             )(f)
 
         def decorator(func):
@@ -115,6 +154,7 @@ class ExtensionRegistry(BaseRegistry):
                 requires_body_locality=requires_body_locality,
                 pauses=pauses,
                 declares_output_schema=declares_output_schema,
+                config_schema=config_schema,
             )
             return func
 
@@ -164,16 +204,51 @@ class ExtensionRegistry(BaseRegistry):
         except KeyError:
             raise TaiValidationError(f"Extension '{name}' is not registered.") from None
 
-    def available_extensions(self) -> list[dict[str, str | bool]]:
-        """Every registered extension as ``{"name", "kind", "multiple"}``, sorted by name.
+    def config_schema(self, element: ExtensionElement) -> dict[str, Any] | None:
+        """The declared settings schema of combo ``element``'s extension, ``None`` when it takes none."""
+        name = extension_name(element)
+        try:
+            return self._config_schemas[name]
+        except KeyError:
+            raise TaiValidationError(f"Extension '{name}' is not registered.") from None
 
-        ``multiple`` is the kind's own rule: whether one tool may carry more than one extension of it.
+    def validate_config(self, element: ExtensionElement) -> None:
+        """Check combo ``element``'s settings against its extension's declared schema.
+
+        An extension without a schema accepts no settings. A mismatch is named by its JSON path and
+        the schema rule it breaks, never by the value, since settings can hold secrets.
+        """
+        name = extension_name(element)
+        schema = self.config_schema(element)
+        config = extension_config(element)
+        if schema is None:
+            if config:
+                raise TaiValidationError(f"extension '{name}' does not accept config")
+            return
+        try:
+            validate_against_json_schema(config, schema, redact_value=True)
+        except JsonSchemaValidationError as exc:
+            refusal = str(exc)
+        else:
+            return
+        raise TaiValidationError(f"extension '{name}' config: {refusal}")
+
+    def available_extensions(self) -> list[dict[str, Any]]:
+        """Every registered extension as ``{"name", "kind", "multiple", "config_schema"}``, sorted by name.
+
+        ``multiple`` is the kind's own rule: whether one tool may carry more than one extension of it;
+        ``config_schema`` is the declared settings schema, ``None`` for an extension that takes none.
         """
         # Serialize the enum VALUE (lowercase, e.g. "backend"), not its member
         # name ("BACKEND"): only the value round-trips back through
         # ``ExtensionKind("backend")``.
         return [
-            {"name": name, "kind": self._kinds[name].value, "multiple": self._kinds[name].multiple}
+            {
+                "name": name,
+                "kind": self._kinds[name].value,
+                "multiple": self._kinds[name].multiple,
+                "config_schema": deepcopy(self._config_schemas[name]),
+            }
             for name in sorted(self._available_extensions)
         ]
 

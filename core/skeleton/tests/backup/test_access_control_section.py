@@ -17,13 +17,18 @@ from typing import Any
 import pytest
 from tai42_contract.access_control import KEY_FINGERPRINT_CLAIM, OWNER_USER_ID_CLAIM
 from tai42_contract.access_control.identity import ApiKeyIdentityProvider
+from tai42_contract.app.responses import FanoutSummary
 from tai42_kit.access_control import registry
 
 from tai42_skeleton.access_control import backup as ac_backup
 from tai42_skeleton.access_control import management
 from tai42_skeleton.access_control import store as store_module
 from tai42_skeleton.access_control.store import PostgresAccessControlStore
+from tai42_skeleton.app import instance
+from tai42_skeleton.operations import backup as backup_ops
+from tai42_skeleton.operations.backup import import_backup
 
+from .._fakes.recording_storage import RecordingStorage
 from ..access_control.conftest import FakeAccessControlPg, make_pg_ctx
 from ..access_control.conftest import FakeRedis as FakeAccessControlRedis
 from ..access_control.conftest import make_client_ctx as make_access_control_client_ctx
@@ -585,3 +590,87 @@ async def test_each_wrapper_bumps_at_once_outside_a_batch(recorder: _Recorder, p
     assert await _bumps_of(recorder) == 2
     await management.set_principal_disabled_row("w-3", True)
     assert await _bumps_of(recorder) == 3
+
+
+# -- a stored template id a restored condition names -------------------------
+
+_ACL_LINE = "stored id 'jq/acl' at condition is not a stored template"
+
+
+@pytest.fixture
+def store(monkeypatch: pytest.MonkeyPatch) -> RecordingStorage:
+    """An empty content store installed as the app's provider, serving the store section and the id check."""
+    storage = RecordingStorage()
+    monkeypatch.setattr(instance.app._storage_registry, "_provider", storage)
+    monkeypatch.setattr(instance.app, "_resource_manager_cache", None)
+    return storage
+
+
+def _gated_principal(user_id: str) -> dict[str, Any]:
+    return {
+        "user_id": user_id,
+        "kind": "service",
+        "display_name": "Gated",
+        "created_by": "owner-1",
+        "disabled": False,
+        "created_at": None,
+        "policy": {"scopes": ["*"], "policy_data": {}, "condition": {"id": "jq/acl"}},
+    }
+
+
+def _gated_token(user_id: str) -> dict[str, Any]:
+    return {**_token(user_id), "condition": {"id": "jq/acl"}}
+
+
+async def test_import_reports_a_token_naming_an_id_the_store_lacks(
+    pg: FakeAccessControlPg, provider: _SpyProvider, store: RecordingStorage
+) -> None:
+    report = await ac_backup.import_access_control({"tokens": [_gated_token("k-gated")]}, "skip")
+    assert report.errors == [f"token 'k-gated': {_ACL_LINE}"]
+    assert report.skipped == 1
+    assert "k-gated" not in provider.identities
+    assert pg.policy("k-gated") is None
+
+
+async def test_import_reports_a_principal_naming_an_id_the_store_lacks(
+    pg: FakeAccessControlPg, provider: _SpyProvider, store: RecordingStorage
+) -> None:
+    report = await ac_backup.import_access_control({"principals": [_gated_principal("owner-2")]}, "skip")
+    assert report.errors == [f"principal 'owner-2': {_ACL_LINE}"]
+    assert report.skipped == 1
+    assert pg.principal("owner-2") is None
+    assert pg.policy("owner-2") is None
+
+
+async def test_import_leaves_no_principal_row_when_its_policy_is_refused(
+    pg: FakeAccessControlPg, provider: _SpyProvider
+) -> None:
+    entry = _principal_entry("owner-2", policy={"scopes": ["no-such-scope"], "policy_data": {}, "condition": None})
+    report = await ac_backup.import_access_control({"principals": [entry]}, "skip")
+    assert len(report.errors) == 1
+    assert report.errors[0].startswith("principal 'owner-2': ")
+    assert report.skipped == 1
+    assert pg.principal("owner-2") is None
+    assert pg.policy("owner-2") is None
+
+
+async def test_a_template_in_the_same_archive_restores_before_the_rows_naming_it(
+    pg: FakeAccessControlPg, provider: _SpyProvider, store: RecordingStorage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def _local_evict() -> FanoutSummary:
+        return FanoutSummary(mode="local-only")
+
+    monkeypatch.setattr(backup_ops, "_evict_templates_fleetwide", _local_evict)
+    document = {
+        "version": 1,
+        "sections": {
+            "access_control": {"principals": [_gated_principal("owner-2")], "tokens": [_gated_token("k-gated")]},
+            "storage": {"jq/acl": {"content_text": ".context.ok", "content_type": "text/plain"}},
+        },
+    }
+    result = (await import_backup(document, ["access_control", "storage"])).payload
+    assert result.sections["storage"].errors == []
+    assert result.sections["access_control"].errors == []
+    assert pg.principal("owner-2") is not None
+    assert pg.policy_body("owner-2")["condition"] == {"id": "jq/acl"}
+    assert provider.identities["k-gated"] == "restored"

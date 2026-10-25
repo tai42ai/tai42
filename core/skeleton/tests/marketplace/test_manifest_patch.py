@@ -1,6 +1,6 @@
 """The pure manifest-patch functions, one behaviour per test, across every kind.
 
-``collisions``/``apply_provides``/``remove_provides`` are side-effect-free over a
+``collisions``/``apply_provides``/``remove_provides``/``revert_provides`` are side-effect-free over a
 plain manifest dict, so each patch shape (config row, module list, package list,
 scalar slot, env-selected no-op) is checked in isolation, plus the convergence and
 collision semantics and the final ``Manifest.model_validate`` acceptance.
@@ -14,7 +14,13 @@ from tai42_skeleton.app.route_defaults import STUDIO_SPA_ROUTER
 from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.marketplace import manifest_patch
 from tai42_skeleton.marketplace.errors import ManifestBindingError, ManifestCollisionError
-from tai42_skeleton.marketplace.manifest_patch import apply_provides, collisions, remove_provides
+from tai42_skeleton.marketplace.manifest_patch import (
+    apply_provides,
+    collisions,
+    remove_provides,
+    revert_provides,
+    update_provides,
+)
 
 from ._specs import connector_item, make_spec
 
@@ -355,6 +361,107 @@ def test_remove_clears_a_scalar_still_holding_the_specs_package_root() -> None:
     manifest = {"backend_module": "pkg"}
     assert remove_provides(manifest, spec) is True
     assert manifest["backend_module"] is None
+
+
+# -- revert ------------------------------------------------------------------
+
+
+def test_revert_of_an_install_drops_its_references_and_the_fields_it_created() -> None:
+    spec = make_spec(provides=[_item("tool", "t", "pkg.tools.t"), _item("backend", "be", "pkg.backend")])
+    manifest: dict = {"agents": []}
+    undo = apply_provides(manifest, spec)
+    revert_provides(manifest, undo)
+    assert manifest == {"agents": []}
+
+
+def test_revert_of_an_install_keeps_an_entry_another_edit_added_meanwhile() -> None:
+    spec = make_spec(provides=[_item("tool", "t", "pkg.tools.t")])
+    manifest: dict = {}
+    undo = apply_provides(manifest, spec)
+    manifest["tools"].append({"title": "kept", "module": "kept_mod"})
+    revert_provides(manifest, undo)
+    assert manifest == {"tools": [{"title": "kept", "module": "kept_mod"}]}
+
+
+def test_revert_of_an_update_puts_the_old_entries_back_where_and_as_they_were() -> None:
+    old = make_spec(provides=[_item("tool", "t", "pkg.tools.old"), _item("backend", "be", "pkg.backend")])
+    new = make_spec(provides=[_item("tool", "t", "pkg.tools.new"), _item("backend", "be", "next.backend")])
+    edited = {"title": "pkg.tools.old", "module": "pkg.tools.old", "include": ["a"]}
+    manifest: dict = {"tools": [{"title": "x", "module": "x"}, edited, {"title": "y", "module": "y"}]}
+    manifest["backend_module"] = "pkg"
+    undo = update_provides(manifest, old, new)
+    manifest["tools"].append({"title": "kept", "module": "kept_mod"})
+    revert_provides(manifest, undo)
+    assert manifest == {
+        "tools": [
+            {"title": "x", "module": "x"},
+            edited,
+            {"title": "y", "module": "y"},
+            {"title": "kept", "module": "kept_mod"},
+        ],
+        "backend_module": "pkg",
+    }
+
+
+def test_revert_puts_an_entry_back_before_its_next_neighbour_when_an_earlier_one_went_meanwhile() -> None:
+    old = make_spec(provides=[_item("tool", "t", "pkg.tools.old")])
+    new = make_spec(provides=[_item("tool", "t", "pkg.tools.new")])
+    old_row = {"title": "pkg.tools.old", "module": "pkg.tools.old"}
+    manifest: dict = {"tools": [{"title": "a", "module": "a"}, old_row, {"title": "b", "module": "b"}]}
+    undo = update_provides(manifest, old, new)
+    manifest["tools"] = [entry for entry in manifest["tools"] if entry["module"] != "a"]
+    revert_provides(manifest, undo)
+    assert manifest["tools"] == [old_row, {"title": "b", "module": "b"}]
+
+
+def test_revert_puts_a_router_back_before_the_spa_catch_all_when_an_earlier_one_went_meanwhile() -> None:
+    old = make_spec(provides=[_item("router", "r", "pkg.routers.old")])
+    new = make_spec(provides=[_item("router", "r", "pkg.routers.new")])
+    manifest: dict = {"routers_modules": ["q.routers.q", "pkg.routers.old", STUDIO_SPA_ROUTER]}
+    undo = update_provides(manifest, old, new)
+    manifest["routers_modules"].remove("q.routers.q")
+    revert_provides(manifest, undo)
+    assert manifest["routers_modules"] == ["pkg.routers.old", STUDIO_SPA_ROUTER]
+
+
+def test_revert_keeps_a_restored_router_before_the_spa_catch_all_when_its_neighbour_moved_after_it() -> None:
+    old = make_spec(provides=[_item("router", "r", "pkg.routers.old")])
+    new = make_spec(provides=[_item("router", "r", "pkg.routers.new")])
+    manifest: dict = {"routers_modules": ["q.routers.q", "pkg.routers.old", STUDIO_SPA_ROUTER]}
+    undo = update_provides(manifest, old, new)
+    manifest["routers_modules"] = [STUDIO_SPA_ROUTER, "pkg.routers.new", "q.routers.q"]
+    revert_provides(manifest, undo)
+    assert manifest["routers_modules"] == ["pkg.routers.old", STUDIO_SPA_ROUTER, "q.routers.q"]
+
+
+def test_revert_puts_a_run_of_displaced_entries_back_in_order() -> None:
+    old = make_spec(provides=[_item("extension", "e1", "pkg.ext.one"), _item("extension", "e2", "pkg.ext.two")])
+    new = make_spec(provides=[_item("extension", "e", "pkg.ext.next")])
+    manifest: dict = {"extensions_modules": ["head", "pkg.ext.one", "pkg.ext.two"]}
+    undo = update_provides(manifest, old, new)
+    manifest["extensions_modules"].append("tail")
+    revert_provides(manifest, undo)
+    assert manifest["extensions_modules"] == ["head", "pkg.ext.one", "pkg.ext.two", "tail"]
+
+
+def test_revert_refuses_to_put_back_an_entry_another_edit_already_restored() -> None:
+    old = make_spec(provides=[_item("tool", "t", "pkg.tools.old")])
+    new = make_spec(provides=[_item("tool", "t", "pkg.tools.new")])
+    manifest: dict = {"tools": [{"title": "pkg.tools.old", "module": "pkg.tools.old"}]}
+    undo = update_provides(manifest, old, new)
+    manifest["tools"].append({"title": "again", "module": "pkg.tools.old"})
+    with pytest.raises(ManifestCollisionError, match=r"pkg\.tools\.old"):
+        revert_provides(manifest, undo)
+
+
+def test_revert_refuses_to_overwrite_a_slot_another_edit_set() -> None:
+    old = make_spec(provides=[_item("backend", "be", "pkg.backend")])
+    new = make_spec(provides=[_item("backend", "be", "next.backend")])
+    manifest: dict = {"backend_module": "pkg"}
+    undo = update_provides(manifest, old, new)
+    manifest["backend_module"] = "operator_replacement"
+    with pytest.raises(ManifestCollisionError, match="operator_replacement"):
+        revert_provides(manifest, undo)
 
 
 # -- env-selected config: documented no-op across all three ------------------

@@ -1,4 +1,4 @@
-"""Response models for group-A operations (api_keys · conversations · manifest · marketplace · presets).
+"""Response models for group-A operations (api_keys · conversations · manifest · marketplace · holders).
 
 Each model DESCRIBES the inner payload its operation returns; the route adapter
 wraps that payload in the ``{"data": ...}`` success envelope, so nothing here re-declares
@@ -11,11 +11,11 @@ record models are imported, never redefined here.
 
 from __future__ import annotations
 
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Field, JsonValue, RootModel
 from tai42_contract.access_control.models import RoleDefinition
-from tai42_contract.app.responses import ApplyResponse, FanoutSummary
+from tai42_contract.app.responses import ApplyResponse
 from tai42_contract.conversations import (
     ApiConversationRouteCreate,
     ChannelConversationRouteCreate,
@@ -23,11 +23,14 @@ from tai42_contract.conversations import (
     ConversationTargetKind,
     TargetConversationConfig,
 )
+from tai42_contract.manifest import ExtensionElement
 from tai42_contract.plugins import PluginDelivery, RouteMethod
 from tai42_contract.template import TemplatedText
+from tai42_contract.tools import ReferenceHolder
 from tai42_contract.versioning.models import DocumentVersion
 
 from tai42_skeleton.access_control.projection import PrincipalRef
+from tai42_skeleton.access_control.role_gate import RoleReach
 from tai42_skeleton.app.route_registry import RouteAction
 from tai42_skeleton.conversations.mode import ModeSource
 from tai42_skeleton.conversations.models import AskReplyView, AskSendView, ConversationRecord, DeliveryStatus
@@ -72,8 +75,13 @@ class RouteMappingRow(BaseModel):
 
     ``mapped`` is the route's scope id, the public marker, or ``null`` when unmapped;
     ``action`` is its authorization action class, ``null`` when the route carries no
-    registry metadata; ``declared_public`` is ``True`` when the route is public by its own
-    declaration and so answers everyone whatever scope it is mapped to.
+    registry metadata; ``role_reach`` is the server's decision of what opens the route for a
+    non-admin role (``level``: a role's per-tag level; ``self_service``: every role keeps it,
+    no level; ``admin_only``: a fenced/secret class or a control-plane route the base tier
+    reserves; ``public``: the route is not authenticated and answers everyone without a
+    login), ``null`` when the route carries no registry metadata; ``declared_public`` is
+    ``True`` when the route is public by its own declaration and so answers everyone whatever
+    scope it is mapped to.
     """
 
     path: str
@@ -82,6 +90,7 @@ class RouteMappingRow(BaseModel):
     tags: list[str]
     summary: str
     action: RouteAction | None
+    role_reach: RoleReach | None
     declared_public: bool
 
 
@@ -449,15 +458,41 @@ class ConversationConfigDeleteResult(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+class ManifestExtensionMap(BaseModel):
+    """One ``tools`` or ``mcp`` entry's ``extensions`` map, keyed by the entry's ``title``.
+
+    ``extensions`` maps a tool base-name to its list of combos in the contract's normalized shape; a combo element
+    is an extension name or a ``{"name", "config"}`` mapping whose config values keep their ``!ENV`` markers.
+    """
+
+    title: str
+    extensions: dict[str, list[list[ExtensionElement]]]
+
+
+class ManifestExtensionSettings(BaseModel):
+    """The extension settings the PRESERVED manifest declares, ``!ENV`` markers intact.
+
+    ``tools`` and ``mcp`` list only the entries that carry a non-empty ``extensions`` map, in document order;
+    ``api_tools`` is the ``api_tools.extensions`` map.
+    """
+
+    extensions_modules: list[str]
+    backend_module: str | None
+    tools: list[ManifestExtensionMap]
+    mcp: list[ManifestExtensionMap]
+    api_tools: dict[str, list[list[ExtensionElement]]]
+
+
 class PreservedManifestView(BaseModel):
-    """The PRESERVED persisted manifest's MCP section + user tools.
+    """The PRESERVED persisted manifest's MCP section, user tools and extension settings.
 
     The ``mcp`` entries carry their raw ``!ENV ${KEY}`` markers intact (unresolved config entries, NOT a
-    resolved ``TaiMCPConfig``), so no secret value ever leaves on the wire.
+    resolved ``TaiMCPConfig``), and so do the extension settings, so no secret value ever leaves on the wire.
     """
 
     mcp: list[dict[str, Any]]
     user_tools: list[str]
+    extension_settings: ManifestExtensionSettings
 
 
 class McpEnvRef(BaseModel):
@@ -480,8 +515,9 @@ class McpEnvRefList(RootModel[list[McpEnvRef]]):
 class FailedMcp(BaseModel):
     """An MCP server skipped by the viability check — title, coarse status, and credential-free failure detail.
 
-    ``category`` is the coarse, credential-free cause (``auth`` for a 401/403,
-    ``unreachable`` for a transport error or timeout, ``error`` otherwise); ``message``
+    ``category`` is the coarse, credential-free cause (``preset_store`` when the preset
+    store could not be read while the server's tools were being bound, ``auth`` for a
+    401/403, ``unreachable`` for a transport error or timeout, ``error`` otherwise); ``message``
     is the redacted exception message (URL-embedded credentials stripped); ``http_status``
     is the HTTP status the failure carried, or ``null`` for a pure transport failure.
     """
@@ -516,6 +552,38 @@ class McpStatusSnapshot(BaseModel):
     bound: dict[str, list[str]]
     failed: list[FailedMcp]
     health: dict[str, McpHealth]
+
+
+class McpAdvertisedTool(BaseModel):
+    """One tool an MCP server advertises.
+
+    ``name`` is its served name and ``title``/``description`` the server's; ``selected`` says whether the
+    entry's selection admits it, ``bound`` whether the live binding carries it, and ``unbound_reason`` why a
+    selected tool is not bound (``None`` otherwise).
+    """
+
+    name: str
+    title: str | None
+    description: str | None
+    selected: bool
+    bound: bool
+    unbound_reason: (
+        Literal["server_failed", "not_loaded", "preset_conflict", "unusable_schema", "not_listed_at_bind"] | None
+    )
+
+
+class McpAdvertisedTools(BaseModel):
+    """A server's advertised tools with the entry's stored selection lists.
+
+    ``unadvertised`` holds the names of the set list (``include`` when non-empty, else ``exclude``) that the
+    server no longer advertises.
+    """
+
+    title: str
+    include: list[str]
+    exclude: list[str]
+    tools: list[McpAdvertisedTool]
+    unadvertised: list[str]
 
 
 # ---------------------------------------------------------------------------
@@ -685,12 +753,18 @@ class UpgradeRow(BaseModel):
     """One ref's upgrade-all outcome.
 
     ``outcome`` is one of ``upgraded`` / ``up-to-date`` / ``no-compatible-version`` / ``failed``;
-    ``detail`` is its human-readable note.
+    ``detail`` is its human-readable note. ``span_release_error`` is ``null`` when the ref wrote nothing
+    or the config store released its exclusive write span after each config write the ref landed;
+    otherwise the store's errors, joined with ``"; "`` in write order — an ``upgraded`` ref's manifest
+    write, or a ``failed`` ref's forward write and the restore writes of its unwind. Those writes stand,
+    but the store may still hold its write span until the writer process exits, so a later write can
+    block or be refused until then.
     """
 
     ref: str
     outcome: UpgradeOutcome
     detail: str
+    span_release_error: str | None
 
 
 class UpgradeAllResult(BaseModel):
@@ -700,99 +774,12 @@ class UpgradeAllResult(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# presets
+# holders
 # ---------------------------------------------------------------------------
 
 
-class PresetRecordView(BaseModel):
-    """A preset's record row.
+class HoldersPreview(BaseModel):
+    """Every live holder the named action would be refused on — the same gather its gate reads."""
 
-    ``extensions`` is the ordered extension combos; ``conflicted`` marks a quarantined record with its
-    ``conflicted_reason`` (``null`` when clean); ``uses`` / ``used_by`` are the sorted other presets this
-    body composes and that compose it.
-    """
-
-    name: str
-    base_tool: str
-    description: str
-    active_version: int
-    extensions: list[list[str | dict[str, Any]]]
-    output_schema: dict[str, Any] | None
-    input_schema: dict[str, Any] | None
-    conflicted: bool
-    conflicted_reason: str | None
-    uses: list[str]
-    used_by: list[str]
-
-
-class PresetRecordList(RootModel[list[PresetRecordView]]):
-    """One row per store-backed preset record, including conflicted rows."""
-
-
-class PresetDetailView(PresetRecordView):
-    """A single preset's record plus its active ``fixed_kwargs``."""
-
-    fixed_kwargs: dict[str, Any]
-
-
-class PresetCreateResult(PresetRecordView):
-    """A created preset's record with the per-worker rebind fan-out report."""
-
-    fanout: FanoutSummary
-
-
-class PresetVersionSaveResult(DocumentVersion):
-    """A newly saved preset version row with the per-worker rebind fan-out report (fields merged, not nested)."""
-
-    fanout: FanoutSummary
-
-
-class PresetRollbackResult(BaseModel):
-    """The version a preset was rolled back to, with the rebind fan-out report."""
-
-    name: str
-    active_version: int
-    fanout: FanoutSummary
-
-
-class PresetRenameResult(BaseModel):
-    """A renamed preset.
-
-    ``name`` is the new name and ``renamed_from`` the old one; the fan-out report is the new binding's
-    propagation.
-    """
-
-    name: str
-    renamed_from: str
-    active_version: int
-    fanout: FanoutSummary
-
-
-class PresetDeleteResult(BaseModel):
-    """A deleted preset with the per-worker removal fan-out report."""
-
-    name: str
-    deleted: bool
-    fanout: FanoutSummary
-
-
-class PresetRefereesResult(BaseModel):
-    """Every live reference a rename of this preset would strand."""
-
-    name: str
-    referees: list[str]
-
-
-class PresetValidateVerdict(BaseModel):
-    """A preset draft validation verdict — ``valid`` is the absence of an ``error`` (both outcomes answer 200)."""
-
-    valid: bool
-    error: str | None
-
-
-class PresetVersionTagsResult(BaseModel):
-    """A preset version's replaced tag annotation."""
-
-    name: str
-    version: int
-    tags: list[str]
+    action: Literal["rename", "delete", "detach"]
+    holders: list[ReferenceHolder]

@@ -6,6 +6,7 @@ these exercise those contracts directly, with no server involved.
 
 from __future__ import annotations
 
+import io
 from types import SimpleNamespace
 from typing import cast
 
@@ -124,3 +125,32 @@ def test_emit_records_requires_a_route_or_columns() -> None:
 def test_emit_records_raises_on_a_route_with_no_table_entry() -> None:
     with pytest.raises(KeyError, match="no derived shape"):
         _common.emit_records(_ctx(), [], route=("GET", "/api/does-not-exist"))
+
+
+def test_load_text_arg_returns_the_inline_text_as_written() -> None:
+    assert _common.load_text_arg(".a | .b", None, param_hint="--m", file_param_hint="--m-file") == ".a | .b"
+
+
+def test_load_text_arg_reads_a_file_as_written(tmp_path) -> None:
+    source = tmp_path / "program.jq"
+    source.write_text("{x: .y}\n")
+    assert _common.load_text_arg(None, str(source), param_hint="--m", file_param_hint="--m-file") == "{x: .y}\n"
+
+
+def test_load_text_arg_reads_stdin_for_dash(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("sys.stdin", io.StringIO("{x: .y}"))
+    assert _common.load_text_arg(None, "-", param_hint="--m", file_param_hint="--m-file") == "{x: .y}"
+
+
+def test_load_text_arg_returns_none_when_neither_is_given() -> None:
+    assert _common.load_text_arg(None, None, param_hint="--m", file_param_hint="--m-file") is None
+
+
+def test_load_text_arg_refuses_both_sources(tmp_path) -> None:
+    with pytest.raises(typer.BadParameter, match="give only one of --m or --m-file"):
+        _common.load_text_arg(".", str(tmp_path / "p.jq"), param_hint="--m", file_param_hint="--m-file")
+
+
+def test_load_text_arg_refuses_an_unreadable_file(tmp_path) -> None:
+    with pytest.raises(typer.BadParameter, match="cannot read"):
+        _common.load_text_arg(None, str(tmp_path / "missing.jq"), param_hint="--m", file_param_hint="--m-file")

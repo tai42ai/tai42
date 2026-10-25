@@ -33,7 +33,7 @@ from tai42_contract.errors import ErrorKind
 from tai42_contract.monitoring import MonitoringLevel, SpanKind, TokenUsage
 
 from tai42_kit.llm._secret_kwargs import KwargsCacheKey, unwrap_secret_kwargs
-from tai42_kit.llm.run_trace import resolve_trace_context
+from tai42_kit.monitoring import resolve_trace_context
 
 QuestionContent = str | dict[str, JsonValue] | list[JsonValue]
 """Instruction text or structured content the classifier judges against: free text, a JSON object, or a JSON array."""
@@ -239,8 +239,8 @@ def _recording_classifier(
     response adapter) and records, from the kit's own :class:`ClassifyResponse`, the model
     id, the token usage, and the provider request id; the span's duration is the call's
     latency. The span joins the run's one trace through :func:`resolve_trace_context` (the
-    invoke config's explicit lineage, else the run's ambient deposit, else a fresh root for a
-    standalone call) — the same lineage rule every feature's model calls follow. Emission
+    invoke config's explicit lineage, else the run's ambient deposit); with neither it opens
+    under the live span, or as its own root for a standalone call. Emission
     goes through the contract writer, which is fail-safe; a provider failure records the span
     as an error and propagates unchanged, never swallowed. The inner pipeline still runs under
     the caller's config, so its framework step record is unaffected.

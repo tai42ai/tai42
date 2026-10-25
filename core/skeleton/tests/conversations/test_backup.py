@@ -504,6 +504,21 @@ async def test_a_restored_channel_route_stores_the_canonical_identity(wired):
     assert wired.rows["line"].our_identity == "+15550001111"
 
 
+async def test_a_restored_channel_route_naming_an_unregistered_channel_restores(wired, monkeypatch):
+    # Restore never judges a row against the live registries: a route whose channel no plugin
+    # registered is written, and stays loud at send.
+    from tai42_skeleton.app import instance
+
+    monkeypatch.setattr(instance.app._channel_registry, "_channels", {})
+    assert instance.app.channels.names() == []
+    row = _channel_route("line").model_dump(mode="json") | {"channel": "ghost"}
+
+    report = await backup.import_conversation_routes({"routes": [row]})
+
+    assert report.created == 1
+    assert wired.rows["line"].channel == "ghost"
+
+
 async def test_a_restored_route_with_an_uncompilable_reply_expr_is_refused_per_row(wired, monkeypatch):
     from tai42_contract.app import tai42_app
 
@@ -585,3 +600,19 @@ async def test_a_states_refusal_inside_the_bind_check_is_a_per_row_skip(wired, m
     assert report.errors == ["route 'r1': state 'ghost' is not declared"]
     assert report.skipped == 1
     assert set(wired.rows) == {"r2"}
+
+
+async def test_a_restored_route_naming_an_id_the_store_lacks_is_refused_per_row(wired, monkeypatch):
+    from tests._fakes.recording_storage import MappedStorage
+
+    from tai42_skeleton.app import instance
+
+    monkeypatch.setattr(instance.app._storage_registry, "_provider", MappedStorage({}))
+    bad = _api_route("bad", "x").model_dump(mode="json") | {"reply_expr": {"id": "jq/reply"}}
+    good = _api_route("good", "x").model_dump(mode="json")
+
+    report = await backup.import_conversation_routes({"routes": [bad, good]})
+
+    assert report.errors == ["route 'bad': stored id 'jq/reply' at reply_expr is not a stored template"]
+    assert report.skipped == 1
+    assert set(wired.rows) == {"good"}

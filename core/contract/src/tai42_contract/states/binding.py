@@ -6,7 +6,8 @@ BEFORE the dispatch and applies template/custom updates AFTER it. The SAME docum
 re-applied per binding site by a consumer. Tools stay PURE — they never see
 the binding; the door applies it around them at the shared dispatch chokepoint.
 
-Only the SHAPE lives here (a contract holds models, never logic): every authored jq slot is a
+The SHAPE lives here, with :func:`binding_template_refs`, the one reader of the stored
+template ids a binding names: every authored jq slot is a
 :class:`~tai42_contract.template.TemplatedText` — inline ``content`` or a stored ``id`` — that
 the binding door RENDERS to its jq program before compiling/evaluating it; the render never
 runs inside a model validator. The resolve/merge/apply seam and the save-time
@@ -16,12 +17,15 @@ validate-and-attach live in the skeleton, and the wire shape mirrors the Studio 
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from tai42_contract.states.models import STATE_NAME_RE
 from tai42_contract.template import EXPRESSION_ANNOTATION_KEY, TemplatedText, expression_annotation
+
+if TYPE_CHECKING:
+    from tai42_contract.tools import TemplateRef
 
 
 class StateInjection(BaseModel):
@@ -198,4 +202,31 @@ class StateBinding(BaseModel):
     states: list[StateAttach] = Field(min_length=1)
 
 
-__all__ = ["StateAttach", "StateBinding", "StateInjection", "StateUpdate"]
+def binding_template_refs(binding: StateBinding) -> list[TemplateRef]:
+    """One :class:`~tai42_contract.tools.TemplateRef` per stored template id ``binding`` names, in field order.
+
+    Sites read ``states[<i>].subject_expr``, ``states[<i>].scope_expr``,
+    ``states[<i>].input_injections[<j>].jq`` and ``states[<i>].updates[<j>].jq|adapter|op_id``.
+    A slot given inline (``content``) names nothing.
+    """
+    from tai42_contract.tools import TemplateRef
+
+    refs: list[TemplateRef] = []
+
+    def add(text: TemplatedText | None, site: str) -> None:
+        if text is not None and text.id is not None:
+            refs.append(TemplateRef(id=text.id, site=site))
+
+    for i, attach in enumerate(binding.states):
+        add(attach.subject_expr, f"states[{i}].subject_expr")
+        add(attach.scope_expr, f"states[{i}].scope_expr")
+        for j, injection in enumerate(attach.input_injections):
+            add(injection.jq, f"states[{i}].input_injections[{j}].jq")
+        for j, update in enumerate(attach.updates):
+            add(update.jq, f"states[{i}].updates[{j}].jq")
+            add(update.adapter, f"states[{i}].updates[{j}].adapter")
+            add(update.op_id, f"states[{i}].updates[{j}].op_id")
+    return refs
+
+
+__all__ = ["StateAttach", "StateBinding", "StateInjection", "StateUpdate", "binding_template_refs"]

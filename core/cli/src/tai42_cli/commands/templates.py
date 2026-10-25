@@ -15,9 +15,11 @@ import typer
 from tai42_cli.commands._common import (
     app_context,
     covers,
+    echo_stderr,
     emit_result,
     load_json_object_arg,
 )
+from tai42_cli.render import strip_control
 
 app = typer.Typer(
     name="templates",
@@ -53,12 +55,21 @@ def list_templates(ctx: typer.Context) -> None:
 def get_template(ctx: typer.Context, template_id: Annotated[str, typer.Argument(help="Template id.")]) -> None:
     """Fetch a template's content and its input schema.
 
+    A document prints its extracted text and a binary object its metadata, each with
+    ``schema: null``. When the schema cannot be inferred the entry is printed, the
+    ``schema_error`` goes to stderr and the command exits 1.
+
     Example: ``tai templates get prompts/greeting.md``
     """
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
         data = client.post("/api/template", json={"template_id": template_id})
     emit_result(ctx_obj, data)
+    schema_error = data.get("schema_error")
+    if schema_error:
+        # Server text reaches the terminal stripped of control characters, as every rendered value does.
+        echo_stderr(strip_control(f"Error: {schema_error}"))
+        raise typer.Exit(code=1)
 
 
 @app.command("upload")

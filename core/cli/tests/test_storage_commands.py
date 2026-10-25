@@ -15,7 +15,7 @@ import json
 import httpx
 import pytest
 
-from .remote_harness import data_response, run_cli
+from .remote_harness import data_response, error_response, run_cli, visible
 
 _SLASH_ID = "images/logo v2#final.png"
 
@@ -184,3 +184,132 @@ def test_storage_upload_missing_file_raises(monkeypatch: pytest.MonkeyPatch, tmp
     )
     assert result.exit_code != 0
     assert "--file" in result.output
+
+
+# -- the stored entry --------------------------------------------------------------
+
+_LOCKED = (
+    "resource 'docs/locked.pdf' cannot be loaded: 'docs/locked.pdf' could not be extracted as pdf: "
+    "FileNotDecryptedError: File has not been decrypted"
+)
+FILES_INSTALL_LINE = (
+    "tai42-skeleton 'files' resource loading requires the 'files' optional "
+    "dependencies (magika, pandas, langchain-community, pypdf, docx2txt, "
+    "openpyxl, tabulate, beautifulsoup4, python-pptx, striprtf, odfpy, "
+    "ebooklib). Install them with: pip install 'tai42-skeleton[files]'"
+)
+
+
+def _non_canonical(key: str) -> str:
+    return f"non-canonical store key {key!r}: a key is '/'-separated names with no empty, '.' or '..' segment"
+
+
+def test_read_prints_a_text_entry_with_no_schema(monkeypatch: pytest.MonkeyPatch) -> None:
+    entry = {"kind": "text", "id": "notes/todo.txt", "content_type": "text/plain", "size": 9, "content": "buy milk"}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        assert request.url.raw_path.decode() == "/api/storage/entries/notes/todo.txt"
+        return data_response(entry)
+
+    result = run_cli(monkeypatch, handler, ["storage", "read", "notes/todo.txt"], json_output=True)
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout) == entry
+    assert "schema" not in result.stdout
+
+
+def test_read_prints_a_binary_entry_as_its_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
+    entry = {"kind": "binary", "id": "img/a.png", "content_type": "image/png", "size": 120}
+    result = run_cli(monkeypatch, lambda r: data_response(entry), ["storage", "read", "img/a.png"])
+    assert result.exit_code == 0, result.output
+    assert "binary" in result.stdout
+    assert "image/png" in result.stdout
+
+
+def test_read_prints_a_documents_kind_and_extracted_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    entry = {
+        "kind": "document",
+        "id": "docs/notes.pdf",
+        "content_type": "application/pdf",
+        "size": 600,
+        "content": "Quarterly notes",
+    }
+    result = run_cli(monkeypatch, lambda r: data_response(entry), ["storage", "read", "docs/notes.pdf"])
+    assert result.exit_code == 0, result.output
+    assert "document" in result.stdout
+    assert "Quarterly notes" in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("args", "message"),
+    [
+        (["storage", "read", "docs/locked.pdf"], _LOCKED),
+        (["storage", "read", "a//b"], _non_canonical("a//b")),
+    ],
+)
+def test_read_prints_the_servers_400_and_exits_1(monkeypatch: pytest.MonkeyPatch, args, message) -> None:
+    result = run_cli(monkeypatch, lambda r: error_response(message, 400), args)
+    assert result.exit_code == 1
+    assert result.stderr.strip() == f"Error (HTTP 400): {message}"
+
+
+def test_read_without_the_files_extra_prints_the_install_line(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(501, json={"error": FILES_INSTALL_LINE, "code": "files-not-configured"})
+
+    result = run_cli(monkeypatch, handler, ["storage", "read", "notes/todo.txt"])
+    assert result.exit_code == 1
+    assert result.stderr.strip() == f"Error (HTTP 501): {FILES_INSTALL_LINE}"
+
+
+# -- canonical keys on the path doors ----------------------------------------------
+
+_PATH_COMMANDS = {
+    "stat": "/api/storage/resources/{key}/stat",
+    "download": "/api/storage/resources/{key}/content",
+    "delete": "/api/storage/resources/{key}",
+    "delete-dir": "/api/storage/dirs/{key}",
+    "read": "/api/storage/entries/{key}",
+}
+
+
+@pytest.mark.parametrize("command", list(_PATH_COMMANDS))
+@pytest.mark.parametrize("key", ["./x", "x/.", "../x"])
+def test_a_dot_segment_key_is_refused_before_any_request(monkeypatch: pytest.MonkeyPatch, command, key) -> None:
+    sent: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.append(request)
+        return data_response({})
+
+    result = run_cli(monkeypatch, handler, ["storage", command, key])
+    assert result.exit_code == 2
+    assert _non_canonical(key) in visible(result.stderr)
+    assert sent == []
+
+
+@pytest.mark.parametrize("command", list(_PATH_COMMANDS))
+@pytest.mark.parametrize("key", ["a//b", "x/"])
+def test_an_empty_segment_key_is_sent_as_typed_and_the_servers_400_printed(
+    monkeypatch: pytest.MonkeyPatch, command, key
+) -> None:
+    sent: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.append(request.url.raw_path.decode())
+        return error_response(_non_canonical(key), 400)
+
+    result = run_cli(monkeypatch, handler, ["storage", command, key])
+    assert sent == [_PATH_COMMANDS[command].format(key=key)]
+    assert result.exit_code == 1
+    assert result.stderr.strip() == f"Error (HTTP 400): {_non_canonical(key)}"
+
+
+def test_upload_of_a_non_canonical_id_prints_the_servers_400(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert json.loads(request.content)["id"] == "a//b"
+        return error_response(_non_canonical("a//b"), 400)
+
+    result = run_cli(monkeypatch, handler, ["storage", "upload", "a//b", "--text", "t"])
+    assert result.exit_code == 1
+    assert result.stderr.strip() == f"Error (HTTP 400): {_non_canonical('a//b')}"

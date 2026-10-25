@@ -1,6 +1,7 @@
 """Observability router: metrics composition, run list filter/sort/paging
 parsing, single-trace detail + 404, the typed monitoring-error mappings
-(501 read-not-supported / 400 read-too-broad / 404 not-found), loud propagation
+(501 read-not-supported / 400 read-not-served / 400 read-too-broad / 404
+not-found), loud propagation
 of any other reader error, per-request reader fetch, and the CSV/JSON exports.
 
 Handlers are driven directly as coroutines with real ``Request`` objects
@@ -27,6 +28,7 @@ from tai42_contract.monitoring import (
     MetricsRow,
     MonitoringLevel,
     MonitoringObservation,
+    MonitoringReadNotServedError,
     MonitoringReadNotSupportedError,
     MonitoringReadTooBroadError,
     MonitoringTrace,
@@ -108,6 +110,7 @@ class _FakeReader:
         self.list_error: Exception | None = None
         self.get_trace_error: Exception | None = None
         self.list_calls: list[dict] = []
+        self.export_calls: list[dict] = []
 
     def metrics_capability(self) -> MetricsCapability:
         return self.capability
@@ -136,6 +139,14 @@ class _FakeReader:
         if self.list_error is not None:
             raise self.list_error
         return self.summaries
+
+    async def export_traces(
+        self, *, from_timestamp=None, to_timestamp=None, max_rows: int, filter_=None, order_by=None
+    ) -> list[MonitoringTraceSummary]:
+        self.export_calls.append({"max_rows": max_rows, "filter": filter_, "order_by": order_by})
+        if self.list_error is not None:
+            raise self.list_error
+        return self.summaries[: max_rows + 1]
 
     async def get_trace(self, trace_id: str) -> MonitoringTrace:
         if self.get_trace_error is not None:
@@ -294,14 +305,16 @@ async def test_by_model_unavailable_when_dimension_not_declared():
     assert "timeSeries" in data
 
 
-async def test_metrics_core_measure_not_served_501():
-    # A backend that does not declare the core measures cannot drive the tiles: the
-    # door fails loudly with the read-not-supported code, never a zeroed dashboard.
+async def test_metrics_core_measure_not_served_400():
+    # A backend that reads but does not declare the core measures cannot drive the
+    # tiles: the door refuses with the read-not-served code, never a zeroed dashboard.
     reader = _install(_FakeReader())
     reader.capability = MetricsCapability(measures=frozenset({Measure.COUNT}), dimensions=frozenset())
     resp = await router.get_metrics(_req(""))
-    assert resp.status_code == 501
-    assert _json(resp)["code"] == "monitoring-read-not-supported"
+    assert resp.status_code == 400
+    body = _json(resp)
+    assert body["code"] == "monitoring-read-not-served"
+    assert "metrics measures" in body["error"]
 
 
 async def test_metrics_bad_token_400():
@@ -601,6 +614,26 @@ async def test_runs_read_too_broad_400():
     assert body["error"] == "narrow the time range"
 
 
+_NOT_SERVED_DOORS = [
+    ("query_error", router.get_metrics, {}),
+    ("list_error", router.list_runs, {}),
+    ("get_trace_error", router.get_run_trace, {"trace_id": "t1"}),
+    ("get_trace_error", router.export_run_trace, {"trace_id": "t1"}),
+    ("list_error", router.export_runs, {}),
+]
+
+
+@pytest.mark.parametrize(("fault", "door", "path_params"), _NOT_SERVED_DOORS)
+async def test_a_read_not_served_is_400_with_its_code_and_message(fault, door, path_params):
+    reader = _install(_FakeReader())
+    setattr(reader, fault, MonitoringReadNotServedError("sort 'name' is not served"))
+    resp = await door(_req("", **path_params))
+    assert resp.status_code == 400
+    body = _json(resp)
+    assert body["code"] == "monitoring-read-not-served"
+    assert body["error"] == "sort 'name' is not served"
+
+
 async def test_noop_reader_yields_empty_not_501():
     # No backend installed → the process no-op reader answers with empty data.
     resp = await router.get_metrics(_req(""))
@@ -668,6 +701,27 @@ async def test_export_runs_json_download():
     body = json.loads(bytes(resp.body))
     assert body["truncated"] is False
     assert body["items"][0]["traceId"] == "t1"
+
+
+async def test_export_runs_reads_the_rows_in_one_bounded_call():
+    reader = _install(_FakeReader())
+    reader.summaries = [_summary(id=f"t{i}", timestamp=_T0) for i in range(3)]
+    resp = await router.export_runs(_req(_q(format="json", sort="cost", dir="asc")))
+    body = json.loads(bytes(resp.body))
+    assert [call["max_rows"] for call in reader.export_calls] == [5000]
+    assert reader.export_calls[0]["order_by"] is not None
+    assert reader.list_calls == []
+    assert len(body["items"]) == 3
+    assert body["truncated"] is False
+
+
+async def test_export_runs_flags_truncation_when_a_row_past_the_cap_comes_back():
+    reader = _install(_FakeReader())
+    reader.summaries = [_summary(id=f"t{i}", timestamp=_T0) for i in range(5001)]
+    resp = await router.export_runs(_req(_q(format="json")))
+    body = json.loads(bytes(resp.body))
+    assert len(body["items"]) == 5000
+    assert body["truncated"] is True
 
 
 async def test_export_runs_csv_download_and_injection_guard():

@@ -108,8 +108,10 @@ def apply_response(result: ApplyResult) -> dict[str, Any]:
     (:func:`recycle_roll`, ``None`` when it carried no recycle-class key) — and
     ``awaiting_respawn``, the operation's verdict (``result.awaiting_respawn``, computed by the
     pipeline with :func:`awaiting_respawn_after`). The local reload's own ``awaiting_respawn``
-    is a fact the verdict judges; it never reaches the top level. One reply on every edge: the
-    writer's post-reply self-exit runs on the HTTP and the projected tool edge alike.
+    is a fact the verdict judges; it never reaches the top level. ``span_release_error`` is the
+    store's error when its exclusive write span failed to release after the persist, ``None``
+    when it released. One reply on every edge: the writer's post-reply self-exit runs on the
+    HTTP and the projected tool edge alike.
     """
     local = {key: value for key, value in result.local.items() if key != "awaiting_respawn"}
     return {
@@ -117,6 +119,7 @@ def apply_response(result: ApplyResult) -> dict[str, Any]:
         "fanout": result.fanout,
         "recycle": result_recycle_roll(result),
         "awaiting_respawn": [worker.model_dump() for worker in result.awaiting_respawn],
+        "span_release_error": result.span_release_error,
     }
 
 
@@ -256,8 +259,8 @@ def writer_self_exit_armed(roll: Mapping[str, Any] | None) -> bool:
 def profile_apply_response(outcome: ProfileApplyOutcome) -> dict[str, Any]:
     """The DEDICATED profile-apply response — NOT :func:`apply_response`.
 
-    ``{hot, recycle, fresh, refused, recycle_stopped, awaiting_respawn, fanout}``: ``hot`` are the
-    hot-class diff key NAMES;
+    ``{hot, recycle, fresh, refused, recycle_stopped, awaiting_respawn, span_release_error, fanout}``:
+    ``hot`` are the hot-class diff key NAMES;
     ``recycle`` is one ``{name, kind, status, generation_before, detail}`` line per target
     the roll reached — ``recycled``, or, for the target the roll stopped at, ``timed-out``
     or ``failed`` with the ``detail`` naming why — plus, when the applier's own self-exit
@@ -272,7 +275,8 @@ def profile_apply_response(outcome: ProfileApplyOutcome) -> dict[str, Any]:
     stopped and why ``{kind, name, detail}`` — ``name`` is ``None`` when the bus could not
     be read with no target in hand, so a body whose rows all read ``recycled`` never
     reads as a complete roll it was not. ``awaiting_respawn`` is the operation's verdict
-    (``outcome.awaiting_respawn``).
+    (``outcome.awaiting_respawn``). ``span_release_error`` is the store's error when its exclusive
+    write span failed to release after the env persisted, ``None`` when it released.
     ``fanout`` is the reload broadcast's fleet-fanout summary. NAMES-ONLY: the
     report enumerates key names + worker identities, never env VALUES.
     """
@@ -288,6 +292,7 @@ def profile_apply_response(outcome: ProfileApplyOutcome) -> dict[str, Any]:
         "refused": [],
         "recycle_stopped": roll["recycle_stopped"],
         "awaiting_respawn": [worker.model_dump() for worker in outcome.awaiting_respawn],
+        "span_release_error": outcome.span_release_error,
         "fanout": fleet_fanout(outcome.fleet),
     }
 
@@ -300,15 +305,24 @@ class FleetBroadcastError(RuntimeError):
     surface it and knows the change already landed on disk; the specific failure is the
     ``cause`` and the report's ``error``. ``unrolled_recycle_keys`` are the recycle-class keys the
     persisted change carried whose roll never ran (the failure came before it), so a caller that
-    recovers can hand them to the reload that continues the change.
+    recovers can hand them to the reload that continues the change. ``span_release_error`` is the
+    store's error when the change's exclusive write span failed to release after the persist
+    (``None`` when it released), so a caller that recovers keeps it on the result it answers with.
     """
 
     def __init__(
-        self, op_name: str, report: FleetResult, cause: BaseException, *, unrolled_recycle_keys: tuple[str, ...] = ()
+        self,
+        op_name: str,
+        report: FleetResult,
+        cause: BaseException,
+        *,
+        unrolled_recycle_keys: tuple[str, ...] = (),
+        span_release_error: str | None = None,
     ) -> None:
         super().__init__(f"{op_name}: change persisted but fleet propagation failed — {cause}")
         self.report = report
         self.unrolled_recycle_keys = unrolled_recycle_keys
+        self.span_release_error = span_release_error
 
 
 def log_non_convergence(report: FleetResult) -> None:

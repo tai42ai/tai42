@@ -28,7 +28,7 @@ from tai42_skeleton.connectors.service.manifest_writer import _build_entry
 from tai42_skeleton.manifest import Manifest
 
 from ..._fakes.bus import FakeBus
-from ...config.fake_pipeline import FakeConfigStore, FakeReloadAdmin
+from ...config.fake_pipeline import ComboChecks, FakeConfigStore, FakeReloadAdmin
 from ...connectors.credential_path import CONNECTION_ID, CredentialPath
 
 BUDGET = 1.5  # every probe budget these tests run with (boot, targeted and reload)
@@ -123,6 +123,7 @@ class AppHarness:
             config_manager=cast("Any", FakeConfigStore(env={})),
             admin=cast("Any", FakeReloadAdmin()),
             bus=cast("Any", FakeBus()),
+            combo_check=ComboChecks(),
         )
         await service.apply_replace_env({}, save_previous=_previous)
 

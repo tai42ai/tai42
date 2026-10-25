@@ -259,6 +259,7 @@ def _start_result_view(result: StartConnectResult | NoAuthConnectResult) -> dict
         connection_id=result.connection_id,
         added_manifest_entries=result.added_manifest_entries,
         fanout=result.fanout,
+        span_release_error=result.span_release_error,
     ).model_dump(mode="json")
 
 
@@ -466,6 +467,7 @@ async def disconnect(connection_id: str) -> dict[str, Any]:
         upstream_revoke_status=result.upstream_revoke_status,
         removed_manifest_entries=result.removed_manifest_entries,
         fanout=result.fanout,
+        span_release_error=result.span_release_error,
     ).model_dump(mode="json")
 
 
@@ -565,6 +567,7 @@ async def patch_sub_services(
         added_manifest_entries=result.added_manifest_entries,
         removed_manifest_entries=result.removed_manifest_entries,
         fanout=result.fanout,
+        span_release_error=result.span_release_error,
     ).model_dump(mode="json")
 
 

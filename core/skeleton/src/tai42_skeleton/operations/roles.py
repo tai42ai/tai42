@@ -38,6 +38,8 @@ from tai42_skeleton.operations._authority import require_admin, resolve_caller
 from tai42_skeleton.operations.decorator import operation
 from tai42_skeleton.operations.errors import BadRequestError, ConflictError, ForbiddenError, NotFoundError
 from tai42_skeleton.operations.response_models_group_b import RoleDeleted, RoleVersionsView
+from tai42_skeleton.template.references import assert_templates_stored
+from tai42_skeleton.template.stored_refs import condition_template_refs
 
 # The base-tier jq a NEW role inherits from its ``base_tier`` — resolved SERVER-SIDE from
 # the seeded builders, NEVER accepted as raw jq from the operator. ``admin`` is reserved
@@ -94,18 +96,18 @@ class RoleGrantsModify(BaseModel):
 def _validate_grants(grants: Mapping[str, str]) -> None:
     """Reject a grant on a non-grantable tag or a LEVEL outside ``_GrantLevel``.
 
-    A non-grantable tag is a nonexistent one or one whose routes are ALL fenced/secret (admin-only,
-    never opened by a level). A loud 400 so a typo'd or un-openable tag, or a bad level, can never
-    be persisted as dead access. The level check lives here because model validation does NOT run on
-    every path (a context_extractor route skips it, and the api_tools/MCP projection calls the op
-    function directly).
+    A non-grantable tag is a nonexistent one or one with no route a level opens (every route
+    admin-only, self-service or public, by ``role_reach``). A loud 400 so a typo'd or
+    un-openable tag, or a bad level, can never be persisted as dead access. The level check lives
+    here because model validation does NOT run on every path (a context_extractor route skips it,
+    and the api_tools/MCP projection calls the op function directly).
     """
     grantable = grantable_feature_tags()
     unknown = sorted(tag for tag in grants if tag not in grantable)
     if unknown:
         raise BadRequestError(
-            f"grant tag(s) are not grantable feature groups (nonexistent, or all their routes are "
-            f"admin-only fenced/secret): {unknown}"
+            f"grant tag(s) are not grantable feature groups (nonexistent, or no route of theirs is "
+            f"opened by a level: admin-only, self-service or public): {unknown}"
         )
     bad_levels = sorted(f"{tag}={level!r}" for tag, level in grants.items() if level not in _GRANT_LEVELS)
     if bad_levels:
@@ -352,7 +354,9 @@ async def list_role_versions(name: str) -> dict[str, Any]:
 async def rollback_role(name: str, version: int) -> dict[str, Any]:
     """Re-point a role's active version to a prior one (LIVE — holders follow on their next request).
 
-    Admin-only; the reserved ``admin`` role has no editable history. Bumps the version and audits.
+    Admin-only; the reserved ``admin`` role has no editable history. A target version whose
+    ``condition`` names a stored template id the store lacks is refused (400) and nothing is
+    re-pointed. Bumps the version and audits.
     """
     caller = await resolve_caller()
     require_admin(caller)
@@ -369,9 +373,10 @@ async def rollback_role(name: str, version: int) -> dict[str, Any]:
         except DocumentNotFoundError as exc:
             raise NotFoundError(f"unknown role: {name!r}") from exc
         try:
-            await role_store().rollback(name, version, tx=tx)
+            after = (await role_store().get_version(name, version, tx=tx)).body
         except DocumentVersionNotFoundError as exc:
             raise NotFoundError(f"role {name!r} has no version {version}") from exc
-        after = (await role_store().get_version(name, version, tx=tx)).body
+        await assert_templates_stored(condition_template_refs(after.get("condition")), BadRequestError)
+        await role_store().rollback(name, version, tx=tx)
         await role_audit().record(name, "rollback", caller.caller_id, before, after, tx=tx)
     return after

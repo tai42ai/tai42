@@ -84,6 +84,15 @@ def build_backup_source_stack(res: StackResources, variants: Variants) -> StackC
     return _replace(cfg, name="backup-source", manifest=manifest, env=_pin_hashseed(cfg.env), run_metrics=False)
 
 
+def build_backup_storage_stack(res: StackResources, variants: Variants) -> StackConfig:
+    """The single-worker backup source plus the selected storage provider: a stack whose
+    content store the ``templates`` section exports and restores."""
+    cfg = build_backup_source_stack(res, variants)
+    manifest = copy.deepcopy(cfg.manifest)
+    manifest["storage_module"] = variants.storage.module
+    return _replace(cfg, name="backup-storage", manifest=manifest)
+
+
 def build_backup_definitions_stack(res: StackResources, variants: Variants) -> StackConfig:
     """The single-worker backup source plus the redis conversations backend: a stack that holds
     every stored definition a binding rides on — a hook, a preset, a per-target conversation

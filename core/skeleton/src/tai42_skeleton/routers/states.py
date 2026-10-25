@@ -106,6 +106,9 @@ from tai42_skeleton.operations.states import (
     state_stats as _state_stats_op,
 )
 from tai42_skeleton.operations.states import (
+    state_template_referees as _state_template_referees_op,
+)
+from tai42_skeleton.operations.states import (
     update_state_attachment as _update_state_attachment_op,
 )
 from tai42_skeleton.operations.states import (
@@ -400,6 +403,13 @@ detach_state_template = register_operation_route(
     path="/api/states/{name}/attachments/{template}",
     method="DELETE",
     action="write",
+)
+state_template_referees = register_operation_route(
+    tai42_app,
+    operation_metadata_of(_state_template_referees_op),
+    path="/api/states/{name}/attachments/{template}/referees",
+    method="GET",
+    action="read",
 )
 list_state_subjects = register_operation_route(
     tai42_app,

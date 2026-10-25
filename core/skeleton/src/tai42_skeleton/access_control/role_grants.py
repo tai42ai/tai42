@@ -107,10 +107,12 @@ async def role_level_decision_for_route(
       inherit the owner's role grant map — no per-key grant), else the caller's own
       policy. An ``allow_all``/admin governing role skips the pass entirely (admin is
       everything, un-lockable).
-    * Otherwise the route is grantable: the governing role's per-tag level must satisfy
-      the method's derived action. A governing role with NO pointer is not level-governed
-      (its reach is the jq base); a pointer naming a MISSING/deleted role is a
-      fail-closed DENY.
+    * Otherwise the route is grantable. A governing role with NO pointer is not
+      level-governed (its reach is the jq base); a pointer naming a MISSING/deleted role
+      is a fail-closed DENY. A route declared ``self_service`` is not level-governed
+      either: its reach is the base-tier jq, which carves it in from the same
+      declaration. Any other route needs the governing role's per-tag level to satisfy
+      the method's derived action.
 
     Returns ``(allowed, cause)``; ``cause`` names the internal denial reason on a deny.
     """
@@ -141,6 +143,8 @@ async def role_level_decision_for_route(
         # The pointer names a role that no longer exists — deny fail-closed (LIVE:
         # deleting a role denies its holders on their next request).
         return False, DenialCause.LEVEL_MISS
+    if meta.self_service:
+        return True, None
     return grant_map_admits(meta, method, grants)
 
 

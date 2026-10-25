@@ -1,12 +1,15 @@
 /**
- * Connectors OAuth flow. The pytest twin proves
+ * The Connectors directory and its connect flow. The pytest twin proves
  * connect-on-A / complete-on-B + token-encrypted-at-rest against the fixture
  * provider + stub IdP (`tests/connectors/test_oauth_and_refresh.py`); the browser
  * never clicked through it. The studio stack carries the same fixture connector
  * provider + stub IdP (the `build_studio_stack` extension), so here the real
- * browser drives the OAuth popup: Connect opens the popup, the threaded stub IdP
- * redirects back through the deployment's callback bridge, and the connection
- * lands (UI badge + API connections list). It is then DISCONNECTED from the UI.
+ * browser drives it from the directory: the provider's card opens the connect flow,
+ * Connect opens the OAuth popup, the threaded stub IdP redirects back through the
+ * deployment's callback bridge, and the flow advances to Pick tools, where a pick over
+ * the connection's managed server is saved through the tool-filter write before Done.
+ * The connection lands (UI list + API connections list) and is then DISCONNECTED from
+ * the UI.
  *
  * The loud negative scripts the stub IdP to DENY consent (`/_deny`): the popup
  * comes back with an OAuth error, the UI surfaces the failed sign-in, and no
@@ -14,8 +17,10 @@
  *
  * The stack also runs an OAuth-protected MCP server fixture that is its own sign-in
  * service (registering apps by itself, sending `iss` on its redirect). An MCP server is
- * added from the UI by that fixture's address, connected through the popup, then
- * disconnected and removed.
+ * added from the UI by that fixture's address; adding a server that registers apps by
+ * itself opens the connect flow for it at once, and that flow drives through the popup to
+ * Pick tools and Done before the connection is disconnected and the server is removed
+ * from its row's actions menu in the directory's list view.
  */
 import { expect, type APIRequestContext, type Locator, type Page } from '@playwright/test';
 import {
@@ -41,16 +46,48 @@ async function connectionAliases(request: APIRequestContext): Promise<string[]> 
 }
 
 /**
- * The fixture provider's OWN card in the Providers section. Never a `.first()`
- * Connect button: a provider that already carries a connection offers "Add another
- * account" instead of "Connect", so a first-match Connect belongs to a DIFFERENT
- * provider and its dialog is titled for that one.
+ * Open the Connectors directory in its card view: the "Servers and apps" grid is a
+ * `list` whose cards are its `listitem`s, so a card is located by what it names.
  */
-function providerCard(page: Page): Locator {
-  return page.getByRole('region', { name: 'Providers' }).locator('.tai-card').filter({ hasText: PROVIDER });
+async function openDirectory(page: Page): Promise<void> {
+  await page.goto('/connectors');
+  await page
+    .getByRole('radiogroup', { name: 'Servers and apps view' })
+    .getByRole('radio', { name: 'Card view' })
+    .click();
 }
 
-/** Open the fixture provider's connect dialog and name the connection. */
+/**
+ * Open the Connectors directory in its list view: the "Servers and apps" entries are the
+ * rows of a table, each row carrying its entry's actions menu.
+ */
+async function openDirectoryList(page: Page): Promise<void> {
+  await page.goto('/connectors');
+  await page
+    .getByRole('radiogroup', { name: 'Servers and apps view' })
+    .getByRole('radio', { name: 'List view' })
+    .click();
+}
+
+/**
+ * The fixture provider's OWN card in the directory. Never a `.first()` Connect
+ * button: a provider that already carries a connection offers "Add another account"
+ * instead of "Connect", so a first-match Connect belongs to a DIFFERENT provider and
+ * its flow is titled for that one.
+ */
+function providerCard(page: Page): Locator {
+  return page
+    .getByRole('list', { name: 'Servers and apps' })
+    .getByRole('listitem')
+    .filter({ hasText: PROVIDER });
+}
+
+/** The "Your connections" region below the directory, one alias link per connection. */
+function yourConnections(page: Page): Locator {
+  return page.getByRole('region', { name: 'Your connections' });
+}
+
+/** Open the fixture provider's connect flow at its Connect step and name the connection. */
 async function openConnectDialog(page: Page, alias: string): Promise<Locator> {
   await providerCard(page)
     .getByRole('button', { name: /^(Connect|Add another account)$/ })
@@ -67,8 +104,9 @@ async function openConnectDialog(page: Page, alias: string): Promise<Locator> {
  *  what the next test drives. */
 const connectedAliases = new Set<string>();
 
-/** Providers a test added by address. The afterEach removes whatever a failing test left
- *  behind (after its connections, which a provider removal refuses while they live). */
+/** Providers a test added by address, registered once the add has answered 200. The
+ *  afterEach removes each through the API, after the connections (a provider removal is
+ *  refused while one lives). */
 const addedProviders = new Set<string>();
 
 test.afterEach(async ({ request }) => {
@@ -108,17 +146,20 @@ test.afterEach(async ({ request }) => {
   expect(allow.status()).toBe(200);
 });
 
-test('connect a provider through the OAuth popup, then disconnect it', async ({ page, request }) => {
+test('a provider connects through the OAuth popup and its tools are picked, then it disconnects', async ({
+  page,
+  request,
+}) => {
   const alias = uniq('conn');
   connectedAliases.add(alias);
 
   await seedCredential(page);
-  await page.goto('/connectors');
+  await openDirectory(page);
 
-  // The fixture provider is listed, disconnected.
-  await expect(page.getByText(PROVIDER)).toBeVisible();
+  // The fixture provider has its card in the directory.
+  await expect(providerCard(page)).toBeVisible();
 
-  // Open the connect dialog for the provider and start the OAuth flow.
+  // Open the connect flow for the provider and start the OAuth flow.
   const dialog = await openConnectDialog(page, alias);
 
   // Clicking Connect calls startConnect → opens the OAuth popup at the stub IdP,
@@ -143,8 +184,40 @@ test('connect a provider through the OAuth popup, then disconnect it', async ({ 
   const completion = await completed;
   expect(completion.status(), await completion.text()).toBe(200);
 
-  // UI: the connection lands in the Connections list (its alias becomes a link).
-  await expect(page.getByRole('link', { name: alias })).toBeVisible();
+  // Pick tools: the flow asks the connection's managed server for its tools. A new
+  // connection mounts every tool, so the all-checkbox starts on. The managed server is a
+  // cold stdio child, so its first listing waits out the server's start.
+  const mountEvery = dialog.getByRole('checkbox', {
+    name: 'Mount every tool, including tools the server adds later',
+  });
+  await expect(mountEvery).toBeChecked({ timeout: 30_000 });
+  await mountEvery.uncheck();
+  await dialog.getByRole('button', { name: 'Clear', exact: true }).click();
+  await dialog.getByRole('textbox', { name: 'Filter tools' }).fill('ping');
+  await dialog.getByRole('checkbox', { name: /ping/ }).check();
+
+  // Save writes the pick through the entry's tool-filter door as an include list.
+  const picked = awaitMutation(
+    page,
+    (r) =>
+      /^\/api\/mcp-config\/entries\/[^/]+\/tool-filter$/.test(new URL(r.url()).pathname) &&
+      r.request().method() === 'PUT',
+  );
+  await dialog.getByRole('button', { name: 'Save', exact: true }).click();
+  const pick = await picked;
+  expect(pick.status(), await pick.text()).toBe(200);
+  const written = pick.request().postDataJSON() as { include: string[]; exclude: string[] };
+  expect(written.exclude).toEqual([]);
+  expect(written.include).toHaveLength(1);
+  expect(written.include[0]).toMatch(/ping/);
+
+  // Done names the connected provider; Close returns to the directory.
+  await expect(dialog.getByRole('heading', { name: `${PROVIDER} is connected.` })).toBeVisible();
+  await dialog.getByRole('button', { name: 'Close' }).click();
+  await expect(dialog).toBeHidden();
+
+  // UI: the connection lands in "Your connections" (its alias becomes a link).
+  await expect(yourConnections(page).getByRole('link', { name: alias })).toBeVisible();
 
   // API: the same connection is present over the same origin. The connections GET
   // round-robins across the MULTIWORKER(2) port, so it can land on the sibling worker
@@ -154,7 +227,7 @@ test('connect a provider through the OAuth popup, then disconnect it', async ({ 
   // DISCONNECT from the UI: open the connection, confirm the disconnect dialog. Same
   // shape as the connect above — the DELETE reloads this worker and awaits the
   // sibling's reload, so the list repaint is asserted after that response lands.
-  await page.getByRole('link', { name: alias }).click();
+  await yourConnections(page).getByRole('link', { name: alias }).click();
   await expect(page.getByRole('heading', { name: alias })).toBeVisible();
   await page.getByRole('button', { name: 'Disconnect' }).click();
   const disconnected = awaitMutation(
@@ -172,7 +245,7 @@ test('connect a provider through the OAuth popup, then disconnect it', async ({ 
   connectedAliases.delete(alias);
 
   // UI: back on the list, the connection is gone.
-  await expect(page.getByRole('link', { name: alias })).toHaveCount(0);
+  await expect(yourConnections(page).getByRole('link', { name: alias })).toHaveCount(0);
   // API: the connections list no longer carries it. Same MULTIWORKER round-robin as the
   // connect assertion above.
   await expect.poll(async () => await connectionAliases(request)).not.toContain(alias);
@@ -191,7 +264,7 @@ test('a denied authorization surfaces a loud failure and creates no connection',
   expect(deny.status()).toBe(200);
 
   await seedCredential(page);
-  await page.goto('/connectors');
+  await openDirectory(page);
 
   const dialog = await openConnectDialog(page, alias);
 
@@ -209,29 +282,26 @@ test('a denied authorization surfaces a loud failure and creates no connection',
   const completion = await completed;
   expect(completion.status(), await completion.text()).toBe(200);
 
-  // UI: the dialog shows the loud sign-in-cancelled notice, not a silent return.
+  // UI: the flow stays on Connect with the loud sign-in-cancelled notice, not a silent return.
   await expect(dialog.locator('[data-kind="cancelled"]')).toBeVisible();
 
   // API: no connection was created for the denied alias.
   expect(await connectionAliases(request)).not.toContain(alias);
 });
 
-test('add a server by address, connect through the popup, remove it', async ({ page, request }) => {
+test('add a server by address, connect it through the flow the add opens, disconnect, remove it', async ({
+  page,
+  request,
+}) => {
   const id = uniq('srv');
   const name = `Fixture server ${id}`;
   const alias = uniq('mcp');
-  addedProviders.add(id);
-  connectedAliases.add(alias);
 
   await seedCredential(page);
-  await page.goto('/connectors');
+  await openDirectory(page);
 
-  // Add MCP server → the fixture's address → Look up.
-  await page
-    .getByRole('region', { name: 'Providers' })
-    .getByRole('button', { name: 'Add MCP server' })
-    .first()
-    .click();
+  // Add a custom server → the fixture's address → Look up.
+  await page.getByRole('button', { name: 'Add a custom server' }).click();
   const add = page.getByRole('dialog', { name: 'Add MCP server' });
   await add.getByRole('textbox', { name: 'Server address' }).fill(OAUTH_MCP_URL);
   await add.getByRole('button', { name: 'Look up' }).click();
@@ -247,10 +317,16 @@ test('add a server by address, connect through the popup, remove it', async ({ p
   await add.getByRole('button', { name: 'Add server' }).click();
   const addition = await added;
   expect(addition.status(), await addition.text()).toBe(200);
+  connectedAliases.add(alias);
+  addedProviders.add(id);
+  await expect(add).toBeHidden();
 
-  // The connect dialog opens for the new provider; the popup drives the fixture's sign-in
-  // (it registers the app, answers with a code and its `iss`) and closes.
+  // The server registers apps by itself, so the add opens the connect flow for it at once.
   const connect = page.getByRole('dialog', { name: `Connect ${name}` });
+  await expect(connect).toBeVisible();
+
+  // The popup drives the fixture's sign-in (it registers the app, answers with a code and
+  // its `iss`) and closes.
   await connect.getByRole('textbox', { name: 'Alias' }).fill(alias);
   const completed = awaitMutation(
     page,
@@ -264,12 +340,19 @@ test('add a server by address, connect through the popup, remove it', async ({ p
   expect(completion.status(), await completion.text()).toBe(200);
   expect(((await completion.json()) as { data: { kind: string } }).data.kind).toBe('success');
 
+  // Pick tools with the stored selection untouched reads "Continue" and advances with no
+  // write; the server's first listing waits out its start.
+  await connect.getByRole('button', { name: 'Continue', exact: true }).click({ timeout: 30_000 });
+  await expect(connect.getByRole('heading', { name: `${name} is connected.` })).toBeVisible();
+  await connect.getByRole('button', { name: 'Close' }).click();
+  await expect(connect).toBeHidden();
+
   // The connection is listed (UI and API).
-  await expect(page.getByRole('link', { name: alias })).toBeVisible();
+  await expect(yourConnections(page).getByRole('link', { name: alias })).toBeVisible();
   await expect.poll(async () => await connectionAliases(request)).toContain(alias);
 
   // Disconnect it from its detail view.
-  await page.getByRole('link', { name: alias }).click();
+  await yourConnections(page).getByRole('link', { name: alias }).click();
   await expect(page.getByRole('heading', { name: alias })).toBeVisible();
   await page.getByRole('button', { name: 'Disconnect' }).click();
   const disconnected = awaitMutation(
@@ -284,14 +367,14 @@ test('add a server by address, connect through the popup, remove it', async ({ p
     .click();
   expect((await disconnected).status()).toBe(200);
   connectedAliases.delete(alias);
-  await expect(page.getByRole('link', { name: alias })).toHaveCount(0);
+  await expect(yourConnections(page).getByRole('link', { name: alias })).toHaveCount(0);
 
-  // Remove the provider; it is gone from the catalog.
-  const card = page
-    .getByRole('region', { name: 'Providers' })
-    .locator('.tai-card')
-    .filter({ hasText: name });
-  await card.getByRole('button', { name: 'Remove' }).click();
+  // Remove the server from its row's actions menu in the list view; it is gone from the
+  // catalog.
+  await openDirectoryList(page);
+  const row = page.getByRole('table').getByRole('row').filter({ hasText: name });
+  await row.getByRole('button', { name: `Actions for ${name}` }).click();
+  await page.getByRole('menuitem', { name: 'Remove' }).click();
   const removed = awaitMutation(
     page,
     (r) =>
@@ -305,7 +388,7 @@ test('add a server by address, connect through the popup, remove it', async ({ p
   const removal = await removed;
   expect(removal.status(), await removal.text()).toBe(200);
   addedProviders.delete(id);
-  await expect(card).toHaveCount(0);
+  await expect(row).toHaveCount(0);
   const catalog = await request.get('/api/connectors/providers', { headers: apiHeaders() });
   const body = (await catalog.json()) as { data: { providers: Array<{ id: string }> } };
   expect(body.data.providers.map((p) => p.id)).not.toContain(id);

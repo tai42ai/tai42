@@ -19,10 +19,12 @@ from tai42_kit.db import component_store_configured
 from tai42_skeleton.app import instance
 from tai42_skeleton.db import SKELETON_COMPONENT, not_configured_message
 from tai42_skeleton.operations import BadRequestError, NotSupportedError, operation
+from tai42_skeleton.operations.errors import OperationFailedError
 from tai42_skeleton.operations.presets.authoring import (
     _combo_registry_error,
     _dry_run_bind_error,
     _dry_run_body_error,
+    _input_output_rules_error,
     _input_schema_authoring_error,
     _output_schema_error,
     _write_validator_error,
@@ -32,12 +34,20 @@ from tai42_skeleton.operations.presets.models import PresetValidate
 from tai42_skeleton.operations.presets.readers import (
     read_create_extensions,
     read_edit_extensions,
+    read_input_map,
     read_input_schema,
+    read_output_map,
     read_output_schema,
     read_state_binding,
 )
 from tai42_skeleton.operations.presets.views import _verdict
-from tai42_skeleton.operations.response_models_group_a import PresetValidateVerdict
+from tai42_skeleton.operations.reference_check import reference_fault_lines
+from tai42_skeleton.operations.reference_graph import (
+    assert_blob_references_resolve,
+    base_reference,
+    schema_references,
+)
+from tai42_skeleton.operations.response_models_group_presets import PresetValidateVerdict
 from tai42_skeleton.presets.manager import is_valid_preset_name
 
 # This submodule's own package generation, captured at import time (a reload builds a
@@ -56,12 +66,15 @@ async def _validate_create(
     output_schema: TemplatedText | dict[str, Any] | None,
     input_schema: TemplatedText | dict[str, Any] | None = None,
     state_binding: StateBinding | None = None,
+    *,
+    input_map: TemplatedText | str | None = None,
+    output_map: TemplatedText | str | None = None,
 ) -> dict[str, Any]:
     """The create route's full pre-store verdict for a brand-new preset, as a verdict rather than a write.
 
     Runs the exact ordered checks create runs before its store write (name safety →
     description non-empty → quarantine → tool collision → agent-name collision → duplicate →
-    base rules → agent authoring), then combo → schema → dry-run bake — as a
+    base rules → agent authoring), then combo → schema → map rules → dry-run bake — as a
     ``valid``/``error`` verdict rather than a write. A draft may omit ``description``
     (``None``): the emptiness gate applies only to an explicitly provided value, so an
     unfilled draft validates its structure and defers the required-description rule to
@@ -80,10 +93,14 @@ async def _validate_create(
         return _verdict(f"preset name {name!r} collides with an agent tool name")
     if mgr.is_registered(name):
         return _verdict(f"preset {name!r} already exists")
-    if base_tool in mgr.registered_names():
-        return _verdict(f"base tool {base_tool!r} is itself a preset")
-    if base_tool not in await instance.app.tools.get_tools():
-        return _verdict(f"base tool {base_tool!r} is not a registered tool")
+    base_refusal = mgr.base_refusal(base_tool)
+    if base_refusal is not None:
+        return _verdict(base_refusal)
+    base_faults = await reference_fault_lines(
+        [base_reference(base_tool), *schema_references(output_schema, input_schema)]
+    )
+    if base_faults:
+        return _verdict("\n".join(base_faults))
     authoring_error = await _pkg._agent_authoring_error(base_tool, fixed_kwargs)
     if authoring_error is not None:
         return _verdict(authoring_error)
@@ -94,6 +111,8 @@ async def _validate_create(
         description=description or "",
         output_schema=output_schema,
         input_schema=input_schema,
+        input_map=input_map,
+        output_map=output_map,
         extensions=extensions,
         state_binding=state_binding,
     )
@@ -107,10 +126,14 @@ async def _verdict_bind_chain(
     description: str,
     output_schema: TemplatedText | dict[str, Any] | None,
     input_schema: TemplatedText | dict[str, Any] | None = None,
+    input_map: TemplatedText | str | None = None,
+    output_map: TemplatedText | str | None = None,
     extensions: list[list[ExtensionElement]] | None = None,
     state_binding: StateBinding | None = None,
 ) -> dict[str, Any]:
-    """The shared tail both modes run: combo → schema → bake → input support → validator → state binding.
+    """The shared tail both modes run.
+
+    Combo → schema → map rules → bake → input support → validator → references → state binding.
 
     Returns a verdict — the SAME chain the real create/save doors run, so the dry run never
     reports valid on a draft the write door would 400. ``extensions`` defaults to no combos
@@ -125,6 +148,11 @@ async def _verdict_bind_chain(
     schema_error = await _output_schema_error(base_tool, output_schema, combos)
     if schema_error is not None:
         return _verdict(schema_error)
+    rules_error = await _input_output_rules_error(
+        name, extensions=combos, input_schema=input_schema, input_map=input_map, output_map=output_map
+    )
+    if rules_error is not None:
+        return _verdict(rules_error)
     bind_error = await _dry_run_bind_error(
         base_tool,
         fixed_kwargs,
@@ -132,6 +160,9 @@ async def _verdict_bind_chain(
         description=description,
         output_schema=output_schema,
         input_schema=input_schema,
+        input_map=input_map,
+        output_map=output_map,
+        extensions=combos,
     )
     if bind_error is not None:
         return _verdict(bind_error)
@@ -142,6 +173,8 @@ async def _verdict_bind_chain(
         extensions=combos,
         output_schema=output_schema,
         input_schema=input_schema,
+        input_map=input_map,
+        output_map=output_map,
         state_binding=state_binding,
     )
     # A set ``input_schema`` over a base tool with no registered support is the same loud
@@ -153,6 +186,13 @@ async def _verdict_bind_chain(
     write_validator_error = await _write_validator_error(body)
     if write_validator_error is not None:
         return _verdict(write_validator_error)
+    # The write doors' reference check; an extractor fault is not a verdict on the draft and propagates.
+    try:
+        await assert_blob_references_resolve(
+            base_reference(base_tool), base_tool, fixed_kwargs, "fixed_kwargs", body_root=True
+        )
+    except BadRequestError as exc:
+        return _verdict(exc.message)
     # The document rules over the draft, its binding validated WITHOUT attaching — a dry run
     # writes nothing. A store fault is not a verdict on the draft and propagates.
     return _verdict(await _dry_run_body_error(body, name=name))
@@ -161,7 +201,7 @@ async def _verdict_bind_chain(
 @operation(
     summary="Validate a preset draft (dry-run)",
     tags=["presets"],
-    errors=[BadRequestError, NotSupportedError],
+    errors=[BadRequestError, NotSupportedError, OperationFailedError],
     request_model=PresetValidate,
     response_model=PresetValidateVerdict,
 )
@@ -176,6 +216,10 @@ async def validate_preset(
     output_schema_value: Any = None,
     input_schema_present: bool = False,
     input_schema_value: Any = None,
+    input_map_present: bool = False,
+    input_map_value: Any = None,
+    output_map_present: bool = False,
+    output_map_value: Any = None,
     state_binding_present: bool = False,
     state_binding_value: Any = None,
 ) -> dict[str, Any]:
@@ -205,6 +249,8 @@ async def validate_preset(
         extensions = read_create_extensions(extensions_present, extensions_value)
         output_schema = read_output_schema(output_schema_value) if output_schema_present else None
         input_schema = read_input_schema(input_schema_value) if input_schema_present else None
+        input_map = read_input_map(input_map_value) if input_map_present else None
+        output_map = read_output_map(output_map_value) if output_map_present else None
         state_binding = read_state_binding(state_binding_value) if state_binding_present else None
         return await _validate_create(
             name,
@@ -215,6 +261,8 @@ async def validate_preset(
             output_schema,
             input_schema,
             state_binding,
+            input_map=input_map,
+            output_map=output_map,
         )
 
     # VERSION mode. The corresponding write route is save_version, whose FIRST
@@ -240,26 +288,65 @@ async def validate_preset(
     # output_schema: PRESENT (even ``null``) is the deliberate value, ABSENT carries the
     # active value forward — mirroring the save-version door exactly.
     new_input_schema = read_input_schema(input_schema_value) if input_schema_present else active.input_schema
+    # The maps follow the same presence-flag carry-forward.
+    new_input_map = read_input_map(input_map_value) if input_map_present else active.input_map
+    new_output_map = read_output_map(output_map_value) if output_map_present else active.output_map
     # ``state_binding`` is a version field under the SAME presence-flag carry-forward:
     # PRESENT (even ``null``) is the deliberate value (``null`` clears the binding), ABSENT
     # carries the active binding forward — mirroring the save-version door exactly.
     new_state_binding = read_state_binding(state_binding_value) if state_binding_present else active.state_binding
 
-    new_fixed_kwargs = active.fixed_kwargs if fixed_kwargs is None else fixed_kwargs
-    # An authored-agent (``fixed_kwargs``) edit runs the full authoring validation
-    # over the carried-forward base tool, exactly as save-version does — only when
-    # fixed_kwargs was provided.
-    if fixed_kwargs is not None:
-        authoring_error = await _pkg._agent_authoring_error(active.base_tool, new_fixed_kwargs)
-        if authoring_error is not None:
-            return _verdict(authoring_error)
-    return await _verdict_bind_chain(
+    return await _validate_version(
+        name,
         active.base_tool,
-        new_fixed_kwargs,
-        name=name,
+        fixed_kwargs,
+        active.fixed_kwargs if fixed_kwargs is None else fixed_kwargs,
         description=new_description,
         output_schema=new_output_schema,
         input_schema=new_input_schema,
+        input_map=new_input_map,
+        output_map=new_output_map,
         extensions=new_extensions,
         state_binding=new_state_binding,
+    )
+
+
+async def _validate_version(
+    name: str,
+    base_tool: str,
+    given_fixed_kwargs: dict[str, Any] | None,
+    new_fixed_kwargs: dict[str, Any],
+    *,
+    description: str,
+    output_schema: TemplatedText | dict[str, Any] | None,
+    input_schema: TemplatedText | dict[str, Any] | None,
+    input_map: TemplatedText | str | None,
+    output_map: TemplatedText | str | None,
+    extensions: list[list[ExtensionElement]] | None,
+    state_binding: StateBinding | None,
+) -> dict[str, Any]:
+    """VERSION mode's verdict over the resolved fields: base and schema-id references → authoring → the shared tail."""
+    base_faults = await reference_fault_lines(
+        [base_reference(base_tool), *schema_references(output_schema, input_schema)]
+    )
+    if base_faults:
+        return _verdict("\n".join(base_faults))
+    # An authored-agent (``fixed_kwargs``) edit runs the full authoring validation
+    # over the carried-forward base tool, exactly as save-version does — only when
+    # fixed_kwargs was provided.
+    if given_fixed_kwargs is not None:
+        authoring_error = await _pkg._agent_authoring_error(base_tool, new_fixed_kwargs)
+        if authoring_error is not None:
+            return _verdict(authoring_error)
+    return await _verdict_bind_chain(
+        base_tool,
+        new_fixed_kwargs,
+        name=name,
+        description=description,
+        output_schema=output_schema,
+        input_schema=input_schema,
+        input_map=input_map,
+        output_map=output_map,
+        extensions=extensions,
+        state_binding=state_binding,
     )

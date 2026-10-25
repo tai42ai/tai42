@@ -138,6 +138,7 @@ async def _connect_no_auth(
         connection_id=connection_id,
         added_manifest_entries=added,
         fanout=applied.fanout,
+        span_release_error=applied.span_release_error,
     )
 
 

@@ -2,11 +2,10 @@
 
 ``register_agent_resume_tool()`` binds the ``agent_resume`` driver continuation a flow-blind
 platform fires when an async ``ask`` a park-capable run parked on is answered (or expires): it
-carries the generic ``{interaction_id, answer, reply_to, params}``, and hands the parked run
-``AskAnswer(answer, reply_to, params)`` as JSON, the value a sync ``ask`` returns. The agents
-plugin's own durable park index
-reverses the interaction id to its parked run and drives auto-pilot to its next outcome, which the
-face returns to the platform in CONTRACT types. The face fires NO door completion — the platform
+carries the generic ``{interaction_id, ask_result}`` and hands the parked run ``ask_result``
+unchanged, the value a sync ``ask`` returns. The agents plugin's own durable park index reverses
+the interaction id to its parked run and drives auto-pilot to its next outcome, which the face
+returns to the platform in CONTRACT types. The face fires NO door completion — the platform
 captures, binds and delivers the resumed run's outcome to the run's own address.
 
 The face is AUTHORISED: it is dispatchable by name at the run-tool door and the MCP edge, so it
@@ -23,14 +22,12 @@ registration.
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
 from typing import Any
 
 from tai42_contract.app import tai42_app
-from tai42_contract.conversations import ReplyTo
-from tai42_contract.interactions import AskAnswer, RunFailed
+from tai42_contract.interactions import RunFailed
 from tai42_contract.tools import TOOL_META_HIDDEN, TOOL_META_PAUSES, ToolAlreadyRegisteredError
-from tai42_kit.interactions.park_giveup import ParkGiveUpOutcome, register_park_giveup_handler
+from tai42_kit.interactions.park_giveup import ParkGiveUpFailure, ParkGiveUpOutcome, register_park_giveup_handler
 from tai42_kit.interactions.park_index import DriveInProgressError, ResolutionMissingError
 from tai42_kit.interactions.park_kill import ParkKillNotReadyError, register_park_kill_handler
 
@@ -48,15 +45,12 @@ from tai42_agents._internal.park.resume import (
 logger = logging.getLogger(__name__)
 
 
-async def agent_resume_tool(
-    interaction_id: str, answer: Any, reply_to: ReplyTo | None, params: dict[str, str] | None
-) -> Any:
+async def agent_resume_tool(interaction_id: str, ask_result: Any) -> Any:
     """Resume an async-parked agent run from an answered ``ask`` interaction, in CONTRACT types.
 
     This is the driver continuation the platform invokes when an async ``ask`` is answered or
-    expires; it carries the generic ``{interaction_id, answer, reply_to, params}``. The parked run
-    is handed ``AskAnswer(answer=answer, reply_to=reply_to, params=params)`` as JSON, so its
-    waiting ``ask`` reads what a sync ``ask`` returns. AUTHORISATION: the tool is
+    expires; it carries the generic ``{interaction_id, ask_result}``. The parked run is handed
+    ``ask_result`` unchanged, so its waiting ``ask`` reads what a sync ``ask`` returns. AUTHORISATION: the tool is
     hidden but dispatchable by name at the run-tool door and the MCP edge, so it asserts
     ``assert_resume_authorized(interaction_id)`` FIRST, before reading any park state — a caller
     with no matching resume context (an external run-tool / MCP caller) is refused loudly with
@@ -73,14 +67,12 @@ async def agent_resume_tool(
 
     Args:
         interaction_id: The parked interaction to resume.
-        answer: The answer value (or the expiry marker) the parked run resumes with; each agent hands
-            it to its paused turn its own way.
-        reply_to: The message the answering reply quoted, or ``None`` (always ``None`` on expiry).
-        params: The answer's channel params, or ``None`` (always ``None`` on expiry).
+        ask_result: The ``AskAnswer`` JSON the parked run resumes with, as the platform composed and
+            mapped it (on expiry its ``answer`` is the expiry marker and ``reply_to``/``params`` are
+            null); each agent hands it to its paused turn its own way.
     """
     await tai42_app.interactions.assert_resume_authorized(interaction_id)
-    answered = AskAnswer(answer=answer, reply_to=reply_to, params=params).model_dump(mode="json")
-    return to_contract_outcome(await agent_resume(interaction_id, answered), raise_failed=True)
+    return to_contract_outcome(await agent_resume(interaction_id, ask_result), raise_failed=True)
 
 
 def register_agent_resume_tool() -> None:
@@ -196,7 +188,7 @@ async def agent_park_kill_handler(node: str, reason: str) -> bool:
     return True
 
 
-async def agent_park_giveup_handler(interaction_id: str, failed_outcome: Mapping[str, Any]) -> ParkGiveUpOutcome | None:
+async def agent_park_giveup_handler(interaction_id: str, failure: ParkGiveUpFailure) -> ParkGiveUpOutcome | None:
     """End an agent park the platform gave up on, telling the waiter this run's driver captured.
 
     Fired by the platform's give-up when it drops an answered park's continuation-due record past
@@ -205,7 +197,7 @@ async def agent_park_giveup_handler(interaction_id: str, failed_outcome: Mapping
     drive finalized but its due record was never cleared) returns the stored outcome, as a lapped
     redelivery would replay it. A LIVE park is ended under its drive lease (a held lease raises the
     kit ``DriveInProgressError``) through the same failed-terminal epilogue a resumed run's raise
-    takes, with ``RunFailed(failed_outcome)``: a chained park fires the routing its entry captured
+    takes, with ``RunFailed(failure.outcome)``: a chained park fires the routing its entry captured
     and returns what the waiting ancestor answered; an unchained one finalizes the failure and
     returns it.
     """
@@ -228,7 +220,7 @@ async def agent_park_giveup_handler(interaction_id: str, failed_outcome: Mapping
         outcome = await _fire_failed_terminal(
             lease,
             list(barrier.expected),
-            RunFailed(outcome=dict(failed_outcome)),
+            RunFailed(outcome=dict(failure.outcome)),
             chained_resume_from_entry(entry),
             aborted=False,
         )

@@ -42,7 +42,11 @@ class BackupSectionReport(BaseModel):
     ``recycle`` the fleet recycle roll a section's restore ran for a recycle-class env
     change (``None`` for every section that ran none), and ``awaiting_respawn`` the workers
     still awaiting a respawn after the section's env change (name + keys; empty for every
-    section that ran none).
+    section that ran none), and ``span_release_error`` ``None`` when the config store released
+    its exclusive write span after a section's config write (and for every section that writes
+    no config), otherwise the store's error — the section's change landed and the reload,
+    broadcast and roll reported here still ran, but the store may still hold its write span
+    until the writer process exits, so a later write can block or be refused until then.
 
     ``details`` is an OPEN map for an importer's OWN counts and data — a
     per-entity breakdown, a ``skipped_existing`` tally, minted credentials to
@@ -63,3 +67,4 @@ class BackupSectionReport(BaseModel):
     fanout: FanoutSummary | None = None
     recycle: RecycleRoll | None = None
     awaiting_respawn: list[AwaitingWorker] = Field(default_factory=list[AwaitingWorker])
+    span_release_error: str | None = None

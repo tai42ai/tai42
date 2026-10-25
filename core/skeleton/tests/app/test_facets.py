@@ -15,7 +15,7 @@ from pydantic import BaseModel
 from tai42_contract.app import DeclaredRouteMetadata
 from tai42_contract.extensions import ExtensionKind
 from tai42_contract.presets import PresetBody
-from tai42_contract.storage import Storage
+from tai42_contract.storage import ObjectStat, Storage
 
 import tai42_skeleton.monitoring
 from tai42_skeleton.app.facets import (
@@ -61,6 +61,8 @@ class _Storage(Storage):
     async def upload(self, path: str, content: str) -> None: ...
     async def delete(self, path: str) -> None: ...
     async def delete_dir(self, path: str) -> None: ...
+    async def stat(self, path: str) -> ObjectStat: ...
+    async def load_range(self, path: str, start: int, length: int) -> bytes: ...
 
 
 def _noop() -> None: ...
@@ -191,17 +193,33 @@ async def test_presets_facet_forwarding():
     result = await f.bind("base", {"k": 1}, name="p", description="d")
     assert result == "bound"
     app._preset_bind.assert_awaited_once_with(
-        "base", {"k": 1}, name="p", description="d", output_schema=None, input_schema=None
+        "base",
+        {"k": 1},
+        name="p",
+        description="d",
+        output_schema=None,
+        input_schema=None,
+        input_map=None,
+        output_map=None,
     )
 
 
-async def test_presets_facet_bind_threads_input_schema():
+async def test_presets_facet_bind_threads_input_schema_and_maps():
     app = _app()
     app._preset_bind = AsyncMock(return_value="bound")
     f = PresetsFacet(app)
-    await f.bind("base", {}, name="p", description="d", input_schema={"type": "object"})
+    await f.bind(
+        "base", {}, name="p", description="d", input_schema={"type": "object"}, input_map="{x: .y}", output_map="."
+    )
     app._preset_bind.assert_awaited_once_with(
-        "base", {}, name="p", description="d", output_schema=None, input_schema={"type": "object"}
+        "base",
+        {},
+        name="p",
+        description="d",
+        output_schema=None,
+        input_schema={"type": "object"},
+        input_map="{x: .y}",
+        output_map=".",
     )
 
 
@@ -218,18 +236,22 @@ def test_presets_facet_input_schema_and_tier_forwarding():
     app._registration_tier_registry.get.assert_called_once_with("base")
 
 
-async def test_presets_facet_list_active_bodies_validates_each_raw_body():
+async def test_presets_facet_list_active_bodies_validates_each_raw_body(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "secret")
     app = _app()
     raw = {
-        "a": PresetBody(base_tool="echo", description="d", fixed_kwargs={"x": 1}, extensions=[["exta"]]).model_dump(),
+        "a": (
+            3,
+            PresetBody(base_tool="echo", description="d", fixed_kwargs={"x": 1}, extensions=[["exta"]]).model_dump(),
+        ),
     }
     app._versioned_store = MagicMock()
-    app._versioned_store.list_active_bodies = AsyncMock(return_value=raw)
+    app._versioned_store.list_active_versioned_bodies = AsyncMock(return_value=raw)
     f = PresetsFacet(app)
     bodies = await f.list_active_bodies()
-    # Reaches the concrete store's batched read for the "preset" kind and validates
-    # each raw body into a typed PresetBody.
-    app._versioned_store.list_active_bodies.assert_awaited_once_with("preset")
+    # The body-only projection of the one batched versioned read for the "preset" kind,
+    # each raw body validated into a typed PresetBody.
+    app._versioned_store.list_active_versioned_bodies.assert_awaited_once_with("preset")
     assert set(bodies) == {"a"}
     assert isinstance(bodies["a"], PresetBody)
     assert bodies["a"].base_tool == "echo"
@@ -326,6 +348,7 @@ def test_extensions_facet_forwarding():
         requires_body_locality=False,
         pauses=False,
         declares_output_schema=False,
+        config_schema=None,
     )
     assert f.available_extensions() is app._extension_registry.available_extensions.return_value
     app._extension_registry.available_extensions.assert_called_once_with()

@@ -13,6 +13,7 @@ from tai42_contract.states.binding import (
     StateBinding,
     StateInjection,
     StateUpdate,
+    binding_template_refs,
 )
 from tai42_contract.states.errors import (
     AttachConflictError,
@@ -195,6 +196,7 @@ __all__ = [
     "WriteEntry",
     "WriteOrigin",
     "WritesPage",
+    "binding_template_refs",
     "json_equal",
     "keyed_op_match_counts",
     "path_overlaps",

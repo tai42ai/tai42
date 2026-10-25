@@ -18,12 +18,18 @@ from unittest.mock import AsyncMock
 
 import pytest
 from fakeredis import aioredis
+from tai42_contract.app import tai42_app
 from tai42_contract.interactions.models import MediaKind
+from tai42_contract.tools import ReferenceHolder
 
+from tai42_skeleton.app import instance
 from tai42_skeleton.conversations import media_meta as store_module
 from tai42_skeleton.conversations import media_reaper
 from tai42_skeleton.conversations.media_meta import InboundMediaMetaStore
 from tai42_skeleton.conversations.settings import ConversationsSettings
+from tai42_skeleton.template.delete_referees import TemplateDeleteRefereeRegistry
+
+tai42_app.bind(instance.build_app())
 
 
 @pytest.fixture(autouse=True)
@@ -68,8 +74,16 @@ class _FakeProvider:
         self.deleted.append(path)
 
 
+@pytest.fixture(autouse=True)
+def referees(monkeypatch: pytest.MonkeyPatch) -> TemplateDeleteRefereeRegistry:
+    registry = TemplateDeleteRefereeRegistry()
+    monkeypatch.setattr(instance.app._serving_core, "_template_delete_referee_registry", registry)
+    return registry
+
+
 def _install_provider(monkeypatch: pytest.MonkeyPatch, provider: _FakeProvider | None) -> None:
-    monkeypatch.setattr(media_reaper, "_storage_provider", lambda: provider)
+    monkeypatch.setattr(instance.app._storage_registry, "_provider", provider)
+    monkeypatch.setattr(instance.app, "_resource_manager_cache", None)
 
 
 def _blob(media_id: str) -> str:
@@ -289,6 +303,39 @@ async def test_reaper_store_fault_on_delete_leaves_member_for_next_pass(store, l
     assert await store.get("stuck") is None
 
 
+async def test_a_blob_a_stored_object_names_is_kept_until_the_holder_is_removed(
+    store, lua_redis, monkeypatch, fixed_now, referees, caplog
+):
+    fixed_now(2000.0)
+    provider = _FakeProvider({_blob("held")})
+    _install_provider(monkeypatch, provider)
+    events: list[tuple[str, dict]] = []
+    hooks = SimpleNamespace(on_event=AsyncMock(side_effect=lambda *, topic, payload: events.append((topic, payload))))
+    monkeypatch.setattr("tai42_skeleton.hooks.cache.get_hooks_manager", lambda: hooks)
+    await _put(store, "held", pending=False, message_id="msg-1", expiry_at=1000.0)
+    held = {_blob("held")}
+
+    async def _referee(ids: frozenset[str]) -> list[ReferenceHolder]:
+        return [
+            ReferenceHolder(kind="hook", name="h", summary=f"hook 'h' names {blob!r} at condition")
+            for blob in sorted(ids & held)
+        ]
+
+    referees.register(_referee)
+
+    assert await media_reaper.reap_expired_media_once() == 0
+    assert provider.existing == {_blob("held")}
+    assert await store.get("held") is not None
+    assert await store.score("held") == 1000.0
+    assert events == [(media_reaper.MEDIA_REAP_FAILED_EVENT_TOPIC, {"media_id": "held"})]
+    assert "hook 'h' names 'inbound-media/held' at condition" in caplog.text
+
+    held.clear()
+    assert await media_reaper.reap_expired_media_once() == 1
+    assert provider.deleted == [_blob("held")]
+    assert await store.get("held") is None
+
+
 async def test_media_reaper_scan_fault_propagates(store, lua_redis, monkeypatch, fixed_now):
     # A whole-scan fault (the index read itself) is NOT swallowed — it propagates out of the pass.
     fixed_now(2000.0)
@@ -323,7 +370,7 @@ async def test_media_reaper_dead_task_marks_readiness(monkeypatch: pytest.Monkey
     from tai42_skeleton.app.lifecycle import TaiMCPLifecycleMixin, lifespan
 
     class _M(TaiMCPLifecycleMixin):
-        def _mcp_tools(self, config, tools):  # pragma: no cover - unused here
+        def _mcp_tools(self, config, tools, preset_names):  # pragma: no cover - unused here
             self._mcp_bound_tools[config.title] = set()
 
     m = _M()

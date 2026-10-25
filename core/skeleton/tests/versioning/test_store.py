@@ -282,10 +282,10 @@ async def test_list_returns_active_only(pg, store):
     assert [r.name for r in await store.list("preset")] == ["live"]
 
 
-async def test_list_active_bodies_batched_read(pg, store):
-    # Active bodies of one kind, name-keyed, from a SINGLE JOIN read — the batched
-    # replacement for a per-record get_active_body round-trip (the list/rehydrate
-    # N+1). Only active rows of the requested kind, at their active version.
+async def test_list_active_versioned_bodies_batched_read(pg, store):
+    # Active versions and bodies of one kind, name-keyed, from a SINGLE JOIN read in
+    # place of a per-record get_active_body round-trip. Only active rows of the
+    # requested kind, at their active version.
     await store.create("preset", "alpha", {"n": 1})
     await store.save_version("preset", "alpha", {"n": 2})  # active = v2
     await store.create("preset", "beta", {"m": 1})
@@ -294,11 +294,13 @@ async def test_list_active_bodies_batched_read(pg, store):
     await store.soft_delete("preset", "ghost")  # inactive — excluded
     pg.executed.clear()
 
-    bodies = await store.list_active_bodies("preset")
-    assert bodies == {"alpha": {"n": 2}, "beta": {"m": 1}}
+    bodies = await store.list_active_versioned_bodies("preset")
+    assert bodies == {"alpha": (2, {"n": 2}), "beta": (1, {"m": 1})}
 
     # One batched JOIN read, never a per-row get_active_body.
-    batched = [s for s in pg.executed if s.startswith("SELECT d.name, v.body FROM versioned_documents d")]
+    batched = [
+        s for s in pg.executed if s.startswith("SELECT d.name, d.active_version, v.body FROM versioned_documents d")
+    ]
     per_row = [s for s in pg.executed if s.startswith("SELECT v.body FROM versioned_documents d")]
     assert len(batched) == 1
     assert per_row == []

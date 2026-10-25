@@ -35,8 +35,10 @@ class RequestAdmission:
     The request's in-flight slot is released for good exactly once: early by a long-lived
     stream that exempts itself from the retire drain (``long_lived``) or by a request that
     drives a gated body, else by the wrapper when the request ends. While the request
-    waits on the reload gate its slot is not counted (it cannot move until the gate is
-    released); it is counted again when the wait ends. ``finished`` is set when the
+    waits on a lock whose holder may drive its generation's retire (the reload gate, or a
+    lock acquired through :func:`~tai42_skeleton.app.reload_gate.hold_recorded`) its slot is
+    not counted (it cannot move until the lock is released); it is counted again when the
+    wait ends. ``finished`` is set when the
     request ends. ``session_call`` marks the record of one call of a session served on a
     long-lived stream (:func:`admit_session_call`).
     """
@@ -63,7 +65,7 @@ class RequestAdmission:
         self._uncount()
 
     def begin_wait(self) -> None:
-        """Record one wait of this request on the reload gate; the first leaves the in-flight count."""
+        """Record one wait of this request on a recorded lock; the first leaves the in-flight count."""
         self._waits += 1
         if self._waits == 1:
             self.epoch.waiting.add(self)
@@ -71,7 +73,7 @@ class RequestAdmission:
         self.epoch.note_gate_wait()
 
     def end_wait(self) -> None:
-        """Record that one wait on the reload gate ended; the last returns a live request to the in-flight count."""
+        """Record that one wait on a recorded lock ended; the last returns a live request to the in-flight count."""
         self._waits -= 1
         if self._waits > 0:
             return
@@ -79,6 +81,7 @@ class RequestAdmission:
         if not self._counted and not self.slot_released and not self.finished.is_set():
             self._counted = True
             self.epoch.admit()
+        self.epoch.note_wait_ended()
 
     def _uncount(self) -> None:
         if self._counted:

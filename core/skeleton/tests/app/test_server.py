@@ -26,7 +26,7 @@ from starlette.types import ASGIApp
 from tai42_contract.errors import OperationError
 from tai42_contract.extensions import ExtensionKind
 from tai42_contract.manifest import MCPConfig, TaiMCPConfig
-from tai42_contract.storage import Storage
+from tai42_contract.storage import ObjectStat, Storage
 from tests.agent._memoryless import MemorylessTestAgent
 
 from tai42_skeleton.app import error_envelope
@@ -54,6 +54,8 @@ class _Storage(Storage):
     async def upload(self, path: str, content: str) -> None: ...
     async def delete(self, path: str) -> None: ...
     async def delete_dir(self, path: str) -> None: ...
+    async def stat(self, path: str) -> ObjectStat: ...
+    async def load_range(self, path: str, start: int, length: int) -> bytes: ...
 
 
 def _fresh() -> TaiMCP:
@@ -131,7 +133,7 @@ def test_live_manifest_and_tool_title_require_start():
     with pytest.raises(RuntimeError, match="not started"):
         a.tools.tool_title(lambda: None)
     with pytest.raises(RuntimeError, match="not started"):
-        a._mcp_tools(TaiMCPConfig(title="x", config=MCPConfig(type="http", url="http://x")), [])
+        a._mcp_tools(TaiMCPConfig(title="x", config=MCPConfig(type="http", url="http://x")), [], frozenset())
 
 
 def test_get_agent_missing_raises():
@@ -661,7 +663,7 @@ def test_get_client_tools_non_branchable_tool_raises():
     # A tool that is neither a FunctionTool nor a TransformedTool has no callable
     # body to branch/expose, so resolving its client runnable raises loudly.
     a._tool_binding.get_tools = AsyncMock(return_value={"t": MagicMock()})
-    with pytest.raises(TypeError, match="cannot branch-bind"):
+    with pytest.raises(TypeError, match="as a client tool: expected a FunctionTool or TransformedTool"):
         asyncio.run(a.tools.get_client_tools())
 
 
@@ -692,7 +694,9 @@ def test_started_app_tool_extension_agent_and_client_tools():
             # base + extension-branched tool both bound
             assert {"shout", "shout_loud"} <= set(tools)
             # extension listing
-            assert {"name": "loud", "kind": "wrapper", "multiple": True} in app.extensions.available_extensions()
+            assert {"name": "loud", "kind": "wrapper", "multiple": True, "config_schema": None} in (
+                app.extensions.available_extensions()
+            )
             # extension-branched run
             assert await app.tools.run_tool("shout_loud", {"text": "hi"}) == "HI"
             # agent + its synthesized run tool, driven to its final value

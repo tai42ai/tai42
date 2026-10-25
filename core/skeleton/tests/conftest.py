@@ -55,7 +55,7 @@ if str(Path(__file__).resolve().parent.parent) not in sys.path:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import logging
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import asynccontextmanager
 
 import pytest
@@ -98,6 +98,45 @@ def fake_client_ctx(fake_redis: FakeRedis):
         yield fake_redis
 
     return _ctx
+
+
+@pytest.fixture
+def serve_tools(monkeypatch: pytest.MonkeyPatch) -> Callable[..., None]:
+    """Make the process app's tool registry also serve the given names, for this test.
+
+    A write door checks every tool name it stores against ``instance.app.tools.get_tools()``;
+    a test whose door stores a name its fakes run calls ``serve_tools("name", ...)`` first.
+    """
+    from tai42_skeleton.app import instance
+
+    tools = instance.build_app().tools
+    real = tools.get_tools
+    served: dict[str, object] = {}
+
+    async def _get_tools() -> dict[str, object]:
+        return {**await real(), **served}
+
+    monkeypatch.setattr(tools, "get_tools", _get_tools)
+
+    def _serve(*names: str) -> None:
+        served.update({name: object() for name in names})
+
+    return _serve
+
+
+@pytest.fixture
+def bind_sub_mcp_router(monkeypatch: pytest.MonkeyPatch) -> Callable[[object], None]:
+    """Make the process app's sub-MCP router the given fake, for this test.
+
+    The store-first sub-MCP service binds through the process app's own router
+    (``build_app().sub_app.mcp_sub_app_router``), not through ``tai42_app``.
+    """
+    from tai42_skeleton.app import instance
+
+    def _bind(router: object) -> None:
+        monkeypatch.setattr(instance.build_app(), "_mcp_sub_app_router", router)
+
+    return _bind
 
 
 class _FakeCursor:
@@ -502,3 +541,10 @@ def pytest_runtest_setup(item: pytest.Item) -> None:
     # an orphaned re-import left by an earlier suite's reload exercise cannot answer the states
     # feature gate (which resolves through the parent package). Runs before the item's fixtures.
     restore_states_module_identity()
+
+
+@pytest.fixture
+def files_extra_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A deployment without the ``files`` extra: ``import magika`` raises and the classifier module re-imports."""
+    monkeypatch.setitem(sys.modules, "magika", None)
+    monkeypatch.delitem(sys.modules, "tai42_skeleton.template.file_loading", raising=False)

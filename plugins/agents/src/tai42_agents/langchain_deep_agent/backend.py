@@ -8,7 +8,9 @@ Serves two needs through one interface:
   ``skills/<name>/`` holding a ``SKILL.md`` plus any bundled reference files and
   scripts; the backend serves the WHOLE tree (per the Agent Skills spec, which lets
   a bundle reference files and scripts), so ``ls``/``read``/``glob``/``grep`` over
-  the skills mount see every bundled file, not only ``SKILL.md``.
+  the skills mount see every bundled file, not only ``SKILL.md``. Files are read
+  as raw bytes: a binary file (by deepagents' read classification) is served as
+  its base64 payload, a text file as UTF-8 text.
 * **Scratch filesystem** — the files the agent writes while it works. These live in
   per-thread agent state so concurrent sessions never clobber each other.
 
@@ -19,12 +21,14 @@ skills routed to a read-only :class:`TemplateSkillsBackend` mounted at
 
 from __future__ import annotations
 
+import base64
 from collections.abc import Iterable
 
 import wcmatch.glob as wcglob
 from deepagents.backends import BackendProtocol, CompositeBackend, StateBackend
 from deepagents.backends.protocol import (
     EditResult,
+    FileData,
     FileDownloadResponse,
     FileInfo,
     FileUploadResponse,
@@ -35,7 +39,9 @@ from deepagents.backends.protocol import (
     WriteResult,
 )
 from deepagents.backends.utils import (
+    _get_backend_read_file_type,
     create_file_data,
+    grep_matches_from_files,
     slice_read_response,
 )
 from tai42_contract.app import tai42_app
@@ -72,6 +78,42 @@ def _key_to_backend_path(key: str) -> str:
     ``"/jq/SKILL.md"``.
     """
     return "/" + key[len(_SKILLS_KEY_PREFIX) :]
+
+
+async def _load_skill_bytes(key: str) -> bytes:
+    """Return the raw bytes of a listed skill key.
+
+    Read through the resource manager's byte loader, which root-contains the key;
+    a key that vanished after the listing raises the storage's own error.
+    """
+    data, _mime = await tai42_app.storage.resource_manager.load(key, with_mime=False)
+    return data
+
+
+def _is_binary_path(backend_path: str) -> bool:
+    """Whether deepagents reads ``backend_path`` as binary (the ``read_file`` tool's own routing)."""
+    return _get_backend_read_file_type(backend_path) != "text"
+
+
+async def _text_file_index(keys: Iterable[str]) -> dict[str, FileData]:
+    """Return the text view of ``keys`` for search, keyed by backend path.
+
+    A binary file (by suffix or by bytes that are not UTF-8) is not searched,
+    matching ripgrep's and deepagents' filesystem grep's binary-file skip, so
+    every hit is a line ``read_file`` shows as text.
+    """
+    files: dict[str, FileData] = {}
+    for key in keys:
+        backend_path = _key_to_backend_path(key)
+        if _is_binary_path(backend_path):
+            continue
+        data = await _load_skill_bytes(key)
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError:
+            continue
+        files[backend_path] = create_file_data(text, encoding="utf-8")
+    return files
 
 
 def _glob_skill_paths(paths: Iterable[str], pattern: str, path: str) -> list[str]:
@@ -124,9 +166,9 @@ class TemplateSkillsBackend(BackendProtocol):
     """Read-only deepagents backend backed by the app's template provider.
 
     Serves whole skill bundles live from ``tai42_app.storage.resource_manager``
-    with the provider's raw loader (``fetch_template``), never jinja-rendered:
-    every key under ``skills/<name>/`` (``SKILL.md`` plus bundled reference files
-    and scripts) is listable, readable, globbable, and greppable. Every
+    as raw bytes (``load``), never jinja-rendered: every key under
+    ``skills/<name>/`` (``SKILL.md`` plus bundled reference files, scripts and
+    assets) is listable, readable and globbable, and its text files are greppable. Every
     write/edit/upload path raises loudly; skills are managed through the
     ``upload_template`` / ``list_resources`` tools.
     """
@@ -194,14 +236,23 @@ class TemplateSkillsBackend(BackendProtocol):
         """Read a skill file's raw content for the requested line window.
 
         The provider's listing is authoritative for existence: an unlisted path is
-        reported not found without a fetch. A listed key is read verbatim via
-        ``fetch_template`` (never jinja-evaluated). Line-number formatting is applied
-        by the middleware.
+        reported not found without a fetch. A listed key is read as raw bytes
+        (never jinja-evaluated). A binary file returns its full base64 payload
+        (``offset``/``limit`` apply to text only); a text file whose bytes are not
+        UTF-8 returns an error result for this read. Line-number formatting is
+        applied by the middleware.
         """
         key = _backend_path_to_key(file_path)
         if key not in await self._list_skill_keys():
             return ReadResult(error=f"File '{file_path}' not found")
-        content = await tai42_app.storage.resource_manager.fetch_template(key)
+        data = await _load_skill_bytes(key)
+        if _is_binary_path(file_path):
+            encoded = base64.standard_b64encode(data).decode("ascii")
+            return ReadResult(file_data=create_file_data(encoded, encoding="base64"))
+        try:
+            content = data.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            return ReadResult(error=f"Error reading file '{file_path}': {exc}")
         file_data = create_file_data(content, encoding="utf-8")
         sliced = slice_read_response(file_data, offset, limit)
         if isinstance(sliced, ReadResult):
@@ -217,7 +268,7 @@ class TemplateSkillsBackend(BackendProtocol):
 
         The provider's listing is authoritative: an unlisted path is reported as
         ``file_not_found`` for that path without a fetch, so a partial set still
-        yields the skills that exist. A listed key is read via the raw loader.
+        yields the skills that exist. A listed key returns its raw bytes.
         """
         listed = set(await self._list_skill_keys())
         responses: list[FileDownloadResponse] = []
@@ -226,8 +277,7 @@ class TemplateSkillsBackend(BackendProtocol):
             if key not in listed:
                 responses.append(FileDownloadResponse(path=path, content=None, error="file_not_found"))
                 continue
-            content = await tai42_app.storage.resource_manager.fetch_template(key)
-            responses.append(FileDownloadResponse(path=path, content=content.encode("utf-8"), error=None))
+            responses.append(FileDownloadResponse(path=path, content=await _load_skill_bytes(key), error=None))
         return responses
 
     def download_files(self, paths: list[str]) -> list[FileDownloadResponse]:
@@ -252,13 +302,8 @@ class TemplateSkillsBackend(BackendProtocol):
         raise NotImplementedError("TemplateSkillsBackend is async-only; use als/aread/adownload_files.")
 
     async def agrep(self, pattern: str, path: str | None = None, glob: str | None = None) -> GrepResult:
-        """Search skill files for a literal text pattern."""
-        from deepagents.backends.utils import grep_matches_from_files
-
-        files = {}
-        for key in await self._list_skill_keys():
-            content = await tai42_app.storage.resource_manager.fetch_template(key)
-            files[_key_to_backend_path(key)] = create_file_data(content, encoding="utf-8")
+        """Search the text skill files for a literal text pattern (binary files are not searched)."""
+        files = await _text_file_index(await self._list_skill_keys())
         return grep_matches_from_files(files, pattern, path, glob)
 
     def grep(self, pattern: str, path: str | None = None, glob: str | None = None) -> GrepResult:
@@ -433,16 +478,17 @@ class InlineSkillsBackend(BackendProtocol):
         raise NotImplementedError("InlineSkillsBackend is async-only; use als/aread/adownload_files.")
 
     async def agrep(self, pattern: str, path: str | None = None, glob: str | None = None) -> GrepResult:
-        """Search inline and template skill files for a literal text pattern."""
-        from deepagents.backends.utils import grep_matches_from_files
+        """Search inline and template text skill files for a literal text pattern.
 
-        files = {}
-        for key in await self._template._list_skill_keys():
-            name = key[len(_SKILLS_KEY_PREFIX) :].split("/", 1)[0]
-            if name in self._inline:
-                continue
-            content = await tai42_app.storage.resource_manager.fetch_template(key)
-            files[_key_to_backend_path(key)] = create_file_data(content, encoding="utf-8")
+        A template skill shadowed by an inline name is not read; binary template
+        files are not searched.
+        """
+        unshadowed = [
+            key
+            for key in await self._template._list_skill_keys()
+            if key[len(_SKILLS_KEY_PREFIX) :].split("/", 1)[0] not in self._inline
+        ]
+        files = await _text_file_index(unshadowed)
         for name, content in self._inline.items():
             files[self._inline_skill_md_path(name)] = create_file_data(content, encoding="utf-8")
         return grep_matches_from_files(files, pattern, path, glob)

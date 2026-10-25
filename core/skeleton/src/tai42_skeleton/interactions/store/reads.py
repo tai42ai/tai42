@@ -22,6 +22,7 @@ from tai42_contract.interactions import (
     InteractionResponse,
     InteractionState,
 )
+from tai42_contract.presets import PresetParkStages
 from tai42_contract.states import StateBinding, StateContext, SubjectCandidates
 
 from . import scripts, serde, ttl
@@ -327,6 +328,7 @@ class _StoreReads(_StoreKeys):
         raw_binding = fields.get("deferred_binding")
         raw_run_input = fields.get("run_input")
         raw_params = fields.get("params")
+        raw_stages = fields.get("deferred_output_stages")
         return ContinuationDue(
             interaction_id=interaction_id,
             tool=fields["tool"],
@@ -345,6 +347,9 @@ class _StoreReads(_StoreKeys):
             chain_keys=_chain_keys(fields),
             reply_to_medium_message_id=fields.get("reply_to_medium_message_id"),
             params=json.loads(raw_params) if raw_params is not None else None,
+            deferred_output_stages=(
+                PresetParkStages.model_validate_json(raw_stages) if raw_stages is not None else None
+            ),
         )
 
     async def read_kill_target(self, r: Redis, interaction_id: str) -> KillTarget | None:

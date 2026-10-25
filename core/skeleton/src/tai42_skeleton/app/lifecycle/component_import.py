@@ -176,10 +176,15 @@ class ComponentImportMixin(LifecycleState):
         """
         manifest = self._require_live_manifest()
         if manifest.mcp:
-            successes, failures = run_blocking(self._load_mcps)
+
+            async def probe_and_read_preset_names():
+                probed = await self._load_mcps()
+                return probed, await self.preset_manager.stored_preset_names()
+
+            (successes, failures), preset_names = run_blocking(probe_and_read_preset_names)
 
             for cfg, tools in successes:
-                self._mcp_tools(cfg, tools)
+                self._mcp_tools(cfg, tools, preset_names)
 
             for cfg, exc in failures:
                 self._record_failed_mcp(cfg, exc)
