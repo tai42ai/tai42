@@ -21239,7 +21239,7 @@
   "info": {
     "description": "The operator HTTP surface served under /api/*. The platform's core routes. Plugin routes are published by each plugin.",
     "title": "tai42-skeleton API",
-    "version": "30.0.0"
+    "version": "30.0.1"
   },
   "openapi": "3.1.0",
   "paths": {
