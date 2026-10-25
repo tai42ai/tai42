@@ -11,7 +11,7 @@ real driver's code takes part.
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -19,6 +19,7 @@ from typing import Any
 
 import pytest
 from tai42_contract.app import tai42_app
+from tai42_contract.errors import ErrorKind
 from tai42_contract.interactions import (
     PARK_COMPLETION_FAILED,
     PARK_COMPLETION_SUCCEEDED,
@@ -34,7 +35,7 @@ from tai42_contract.template import TemplatedText
 from tai42_contract.tools import get_run_delivery, get_run_delivery_id
 from tai42_kit.interactions import park_giveup
 from tai42_kit.interactions.park_adoption import terminal_chain_notice
-from tai42_kit.interactions.park_giveup import ParkGiveUpOutcome, register_park_giveup_handler
+from tai42_kit.interactions.park_giveup import ParkGiveUpFailure, ParkGiveUpOutcome, register_park_giveup_handler
 
 from tai42_skeleton.authz.execution_identity import (
     get_execution_identity,
@@ -51,6 +52,17 @@ from tai42_skeleton.tools.state_binding import current_deferred_binding
 from ._continuation_support import configure_interactions_store, make_wired
 
 ABANDONED = {"tai42:resume_abandoned": True}
+
+
+def _abandoned(interaction_id: str) -> ParkGiveUpFailure:
+    return ParkGiveUpFailure(
+        ABANDONED,
+        f"Resume of interaction '{interaction_id}' was abandoned: its answer was never driven within the "
+        "redelivery horizon",
+        "ResumeAbandoned",
+        ErrorKind.UNAVAILABLE,
+        True,
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -140,21 +152,21 @@ class _ProbeDriver:
         self.routing: dict[str, ChainedResume] = {}
         self.calls: list[dict[str, Any]] = []
 
-    async def give_up(self, interaction_id: str, failed_outcome: Mapping[str, Any]) -> ParkGiveUpOutcome | None:
+    async def give_up(self, interaction_id: str, failure: ParkGiveUpFailure) -> ParkGiveUpOutcome | None:
         routing = self.routing.get(interaction_id)
         if routing is None:
             return None
         self.calls.append(
             {
                 "interaction_id": interaction_id,
-                "failed_outcome": dict(failed_outcome),
+                "failure": failure,
                 "identity": getattr(get_execution_identity(), "user_id", None),
                 "origin": get_resume_origin(),
                 "run_delivery_id": get_run_delivery_id(),
                 "run_delivery": get_run_delivery(),
             }
         )
-        tool, payload = terminal_chain_notice(routing, RunFailed(outcome=dict(failed_outcome)))
+        tool, payload = terminal_chain_notice(routing, RunFailed(outcome=dict(failure.outcome)))
         return ParkGiveUpOutcome(await tai42_app.tools.run_tool(tool, payload, continues_chain=routing.asked_by))
 
 
@@ -190,7 +202,7 @@ async def test_the_owning_driver_tells_its_captured_caller_inside_the_parks_fram
 
     (call,) = driver.calls
     assert call["interaction_id"] == "iid-g"
-    assert call["failed_outcome"] == ABANDONED
+    assert call["failure"] == _abandoned("iid-g")
     assert call["identity"] == "svc-key"
     assert binds == [("svc-key", "fp-g")]
     assert call["origin"] == "iid-g"
@@ -220,9 +232,9 @@ async def test_a_handled_answer_is_delivered_succeeded_with_the_deferred_binding
 
     real_give_up = _driver.give_up
 
-    async def _give_up(interaction_id: str, failed_outcome: Mapping[str, Any]) -> ParkGiveUpOutcome | None:
+    async def _give_up(interaction_id: str, failure: ParkGiveUpFailure) -> ParkGiveUpOutcome | None:
         seen_binding.append(current_deferred_binding())
-        return await real_give_up(interaction_id, failed_outcome)
+        return await real_give_up(interaction_id, failure)
 
     park_giveup._park_giveup_handlers[:] = [_give_up]
     monkeypatch.setattr(continuation_module, "apply_deferred_binding", _apply)
@@ -259,7 +271,7 @@ async def test_a_raising_handler_is_logged_the_failed_still_delivered_and_the_er
 ) -> None:
     tools = _wire_tools(monkeypatch, {})
 
-    async def broken(interaction_id: str, failed_outcome: Mapping[str, Any]) -> ParkGiveUpOutcome | None:
+    async def broken(interaction_id: str, failure: ParkGiveUpFailure) -> ParkGiveUpOutcome | None:
         raise RuntimeError("lease held")
 
     register_park_giveup_handler(broken)

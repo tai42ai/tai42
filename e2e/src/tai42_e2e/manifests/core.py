@@ -83,6 +83,10 @@ def build_bare_stack(res: StackResources, variants: Variants) -> StackConfig:
 def build_core_stack(res: StackResources, variants: Variants) -> StackConfig:
     """MULTIWORKER(2) + backend + metrics — the metrics round-trip / import-order
     home. Auth off."""
+    probe_tools = _probe_tools_entry(with_backend_branches=True)
+    # The fields agent's run tool runs on the backend worker; an agents entry carries no
+    # extensions, so its branch is attached through the probe tools entry's map.
+    probe_tools["extensions"]["e2e_fields_agent"] = [["sync_task"]]
     manifest = {
         "default_routers": "none",
         "routers_modules": _CORE_ROUTERS,
@@ -90,7 +94,7 @@ def build_core_stack(res: StackResources, variants: Variants) -> StackConfig:
         "backend_module": variants.backend.module,
         "storage_module": variants.storage.module,
         "tools": [
-            _probe_tools_entry(with_backend_branches=True),
+            probe_tools,
             _toolbox_tools_entry(),
             # The five toolbox tools not otherwise exercised (request / generate_embeddings /
             # pad_embeddings / current_time_info / classify) load on the core profile — its tests
@@ -100,6 +104,9 @@ def build_core_stack(res: StackResources, variants: Variants) -> StackConfig:
             *_TOOLBOX_EXTRA_TOOL_ENTRIES,
             {"title": "builtin-file-loader", "module": "tai42_skeleton.tools.builtin.file_loader"},
             *_builtin_entries(),
+        ],
+        "agents": [
+            {"title": "e2e-fields-agent", "module": "tai42_e2e_fixtures.fields_agent", "include": ["e2e_fields_agent"]}
         ],
         "api_tools": _PROJECTED_API_TOOLS,
         "user_tools": ["ask", "reload_config"],
@@ -112,6 +119,35 @@ def build_core_stack(res: StackResources, variants: Variants) -> StackConfig:
         workers=2,
         run_backend=True,
         run_metrics=True,
+        auth=False,
+    )
+
+
+def build_queue_choice_stack(res: StackResources, variants: Variants) -> StackConfig:
+    """One serve worker + the backend worker on the settings queue + a second backend worker
+    serving only the queue labelled ``b`` — the per-task queue choice home. The worker-info
+    and slow probes carry ``sync_task`` and ``async_task`` branches. Auth off."""
+    manifest = {
+        "default_routers": "none",
+        "routers_modules": _CORE_ROUTERS,
+        "extensions_modules": _EXTENSION_MODULES,
+        "backend_module": variants.backend.module,
+        "storage_module": variants.storage.module,
+        "tools": [
+            _probe_tools_entry(with_backend_branches=True, with_async_worker_branches=True),
+            *_builtin_entries(),
+        ],
+        "api_tools": _PROJECTED_API_TOOLS,
+        "user_tools": ["ask", "reload_config"],
+    }
+    return StackConfig(
+        name="queue-choice",
+        topology=Topology.MULTIWORKER,
+        manifest=manifest,
+        env=_base_env(res, variants),
+        workers=1,
+        run_backend=True,
+        queue_workers=("b",),
         auth=False,
     )
 

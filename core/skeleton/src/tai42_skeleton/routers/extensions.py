@@ -1,9 +1,10 @@
 """HTTP route for the extension surface — ``GET /api/extensions``.
 
 One AUTHED door: the flat list of every registered extension for the UI's
-extension picker. Each item is ``{"name": str, "kind": str}`` (the extension's
-kind — WRAPPER / TRANSFORMER / BACKEND — carried as its lowercase enum value so
-the UI can group and single-select the non-stackable BACKEND kind).
+extension picker. Each item is ``{"name": str, "kind": str, "multiple": bool,
+"config_schema": object | null}``: the kind as its lowercase enum value, whether
+more than one extension of that kind may sit in one combo, and the JSON Schema of
+the settings the extension binds as ``config`` (``null`` when it takes none).
 
 The route is a thin adapter over the :func:`list_extensions` operation; the
 operation logic lives in ``tai42_skeleton.operations.extensions``. Success bodies

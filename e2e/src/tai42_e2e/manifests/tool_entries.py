@@ -51,6 +51,7 @@ def _probe_tools_entry(
     with_async_branch: bool = False,
     with_monitor_branch: bool = False,
     with_undeclared_park_chain: bool = False,
+    with_async_worker_branches: bool = False,
 ) -> dict:
     """The SUT-side probe tools entry. ``with_backend_branches`` attaches the
     ``sync_task`` combos (needs a backend stack). ``with_schedule_branch`` attaches
@@ -58,7 +59,9 @@ def _probe_tools_entry(
     never on the reload-heavy ``replicas`` profile (on celery a ``schedule_task``
     tool riding reload churn can leave the prefork pool unable to dispatch).
     ``with_async_branch`` attaches ``async_task`` to ``run_tool``: any tool by name queued
-    as a backend job, its result read back with ``backend_task_result``."""
+    as a backend job, its result read back with ``backend_task_result``.
+    ``with_async_worker_branches`` attaches ``async_task`` beside ``sync_task`` to the
+    worker-info and slow probes, so a spec queues them by id (on a chosen queue)."""
     extensions: dict[str, list[list[str]]] = {
         "e2e_echo": [["prometheus_metrics"]],
         "e2e_fail": [["prometheus_metrics"]],
@@ -100,17 +103,22 @@ def _probe_tools_entry(
         # ``chain`` whose body dispatches the undeclared tool, so a spec drives the refusal
         # from inside a branch an agent calls.
         extensions["e2e_undeclared_park"] = [["chain"]]
+    if with_async_worker_branches:
+        # Queue the worker-info and slow probes as by-id jobs: which worker ran a job,
+        # and a job held deferred long enough to be listed and cancelled.
+        for name in ("e2e_worker_info", "e2e_slow_task"):
+            extensions[name] = [*extensions.get(name, []), ["async_task"]]
     return {"title": PROBE_TOOLS_TITLE, "module": "tai42_e2e_fixtures.tools", "extensions": extensions}
 
 
 # The platform-seams fixture module: at import it registers a preset seed, a rename
-# referee (holder + raising arms), and the invocation-seam probe tool. ``include`` names
-# only the probe tool it exposes on the surface; the seed/referee registrations run on
-# every (re)import regardless of the include filter.
+# referee (holder + raising arms), the composing tool and the invocation-seam probe tool.
+# ``include`` names the tools it exposes on the surface; the seed/referee registrations run
+# on every (re)import regardless of the include filter.
 _SEAMS_TOOLS_ENTRY = {
     "title": "e2e-seams",
     "module": "tai42_e2e_fixtures.seams",
-    "include": ["e2e_invocation_probe"],
+    "include": ["e2e_composer", "e2e_invocation_probe"],
 }
 
 

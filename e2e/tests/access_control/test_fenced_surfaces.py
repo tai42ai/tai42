@@ -36,7 +36,7 @@ from ._rbac_support import create_role, create_user_with_role, hook_body
 
 pytestmark = pytest.mark.needs("kind:identity")
 
-# The grantable feature tags the broadest role holds WRITE on — every product family the
+# The grantable feature tags the broadest role holds WRITE on — every grantable tag the
 # accounts profile mounts a fenced route under, so a fenced-route denial is provably the
 # fence (not a missing grant).
 _BROAD_GRANTS = {
@@ -46,7 +46,6 @@ _BROAD_GRANTS = {
     "backend": "write",
     "hooks": "write",
     "presets": "write",
-    "access-control": "write",
 }
 
 # Mounted ``fenced`` mutations and the grantable tag the broad role holds WRITE on — each
@@ -111,20 +110,21 @@ async def test_broadest_grant_still_denied_every_fence_but_reaches_grantable_rea
 
 async def test_save_rejects_a_grant_on_an_ungrantable_tag(accounts_stack: TaiStack, uniq: Callable[[str], str]) -> None:
     """The save-time validator refuses a grant on a tag that is not a grantable feature
-    group (a nonexistent tag, or one whose routes are all admin-only fenced/secret) — a
-    loud 400, so an un-openable grant can never be persisted as dead access. Every
-    product tag carries at least one grantable read, so the un-grantable case is a
-    nonexistent tag; the ``secret``-read fence itself is proven un-grantable at runtime
-    by ``test_broadest_grant_still_denied_every_fence_...``."""
+    group — a nonexistent tag, or one with no route a level opens (every route
+    admin-only, self-service or public) — a loud 400, so an un-openable grant can never
+    be persisted as dead access. Shown by a nonexistent tag and by ``access-control``,
+    whose routes are all admin-only or self-service."""
     admin = accounts_stack.api(port=accounts_stack.port_a)
-    rejected = await admin.request_raw(
-        "POST",
-        "/api/auth/roles",
-        json={"name": uniq("bad"), "base_tier": "editor", "grants": {uniq("nope-tag"): "read"}},
-    )
-    assert rejected.status_code == 400, (
-        f"a grant on an un-grantable tag must be rejected at save (400): {rejected.status_code} {rejected.text}"
-    )
+    for tag in (uniq("nope-tag"), "access-control"):
+        rejected = await admin.request_raw(
+            "POST",
+            "/api/auth/roles",
+            json={"name": uniq("bad"), "base_tier": "editor", "grants": {tag: "read"}},
+        )
+        assert rejected.status_code == 400, (
+            f"a grant on the un-grantable tag {tag!r} must be rejected at save (400): "
+            f"{rejected.status_code} {rejected.text}"
+        )
 
 
 @pytest.mark.needs("kind:accounts:postgres", "topology:replicas", "setting:seeded-access-control")

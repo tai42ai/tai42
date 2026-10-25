@@ -20,7 +20,14 @@ import pytest
 
 from tai42_e2e.ports import allocate_port
 from tai42_e2e.settings import HarnessSettings
-from tai42_e2e.variants import GITHUB_STUB_ENV, S3_AXIS_BUCKET, github_stub_base, open_s3_client, s3_coordinates
+from tai42_e2e.variants import (
+    GITHUB_STUB_BRANCH,
+    GITHUB_STUB_ENV,
+    S3_AXIS_BUCKET,
+    github_stub_base,
+    open_s3_client,
+    s3_coordinates,
+)
 from tai42_e2e.waiting import wait_for
 
 # Resolved via the tests/storage path insertion (pytest prepend import mode).
@@ -72,7 +79,7 @@ def storage_axis_backing() -> Iterator[None]:
         base = urlparse(github_stub_base())
         if base.hostname is None or base.port is None:
             raise ValueError(f"github stub base must carry host and port: {github_stub_base()!r}")
-        fake = FakeGithub(base.hostname, base.port)
+        fake = FakeGithub(base.hostname, base.port, GITHUB_STUB_BRANCH)
         fake.start()
         try:
             yield

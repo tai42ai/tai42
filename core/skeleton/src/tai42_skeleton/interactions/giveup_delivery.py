@@ -14,13 +14,20 @@ import logging
 from contextlib import AbstractContextManager, nullcontext
 from typing import Any, Final
 
-from tai42_contract.interactions import PARK_COMPLETION_FAILED, InteractionRequest
+from tai42_contract.errors import ErrorKind
+from tai42_contract.interactions import PARK_COMPLETION_FAILED, InteractionRequest, RunFailed, RunTerminalFailed
 from tai42_contract.states import SubjectCandidates
 from tai42_contract.tools import RunDelivery, run_delivery
-from tai42_kit.interactions.park_giveup import fire_park_giveup
+from tai42_kit.interactions.park_giveup import ParkGiveUpFailure, fire_park_giveup
 
-from tai42_skeleton.interactions.continuation import _continuation_scope, _deliver_run_outcome, _deliver_terminal
+from tai42_skeleton.interactions.continuation import (
+    _continuation_scope,
+    _deliver_run_outcome,
+    _deliver_terminal,
+    apply_terminal_stages,
+)
 from tai42_skeleton.interactions.store import InteractionStore
+from tai42_skeleton.tools.stage_frames import drive_output_stages
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +41,18 @@ __all__ = ["deliver_park_giveup"]
 _RESUME_ABANDONED_OUTCOME: Final[dict[str, Any]] = {"tai42:resume_abandoned": True}
 
 
+def _abandoned_failure(interaction_id: str) -> ParkGiveUpFailure:
+    """The failure a give-up handler is handed for a park whose resume was abandoned."""
+    return ParkGiveUpFailure(
+        _RESUME_ABANDONED_OUTCOME,
+        f"Resume of interaction '{interaction_id}' was abandoned: its answer was never driven within the "
+        "redelivery horizon",
+        "ResumeAbandoned",
+        ErrorKind.UNAVAILABLE,
+        True,
+    )
+
+
 async def deliver_park_giveup(store: InteractionStore, request: InteractionRequest, *, fingerprint: str | None) -> None:
     """Deliver the outcome of a PERMANENTLY abandoned park: its driver's give-up first, else the run's FAILED.
 
@@ -43,9 +62,11 @@ async def deliver_park_giveup(store: InteractionStore, request: InteractionReque
     (:func:`tai42_kit.interactions.park_giveup.fire_park_giveup`) to end the park with the abandoned
     outcome, in the SAME frame a receiver-less drive of this park runs in: the run's stored delivery
     and deferred binding, and the park's continuation identity (``fingerprint`` is the key
-    fingerprint the park captured), origin, chain lineage, state context and caller-ask landing. The outermost
-    outcome a handler returns is delivered exactly as a drive's would be (a handled answer
-    SUCCEEDED, a ``RunFailed`` FAILED, a re-park nothing).
+    fingerprint the park captured), origin, chain lineage, state context, caller-ask landing and
+    captured preset output stages (a handler settling a chained terminal applies the chained stages).
+    The outermost outcome a handler returns is delivered exactly as a drive's would be: a handled
+    answer SUCCEEDED after the park's terminal stages map it (a stage's refusal is delivered as the
+    preset's FAILED), a ``RunFailed`` FAILED, a re-park nothing.
 
     When no driver owns a record of the park, the platform delivers the run's single FAILED itself —
     fire the run's address, else a ``failed`` waiting outcome on its subject, else drop — keyed by the
@@ -70,7 +91,7 @@ async def deliver_park_giveup(store: InteractionStore, request: InteractionReque
         RunDelivery(request.run_delivery_id, request.delivery) if request.run_delivery_id is not None else None
     )
     try:
-        with delivery_ctx, deferred_ctx:
+        with delivery_ctx, deferred_ctx, drive_output_stages(request.deferred_output_stages):
             async with _continuation_scope(
                 request.continuation_identity,
                 fingerprint,
@@ -80,7 +101,7 @@ async def deliver_park_giveup(store: InteractionStore, request: InteractionReque
                 request.chain_keys,
                 mark_detached=True,
             ):
-                handled = await fire_park_giveup(request.interaction_id, dict(_RESUME_ABANDONED_OUTCOME))
+                handled = await fire_park_giveup(request.interaction_id, _abandoned_failure(request.interaction_id))
     except Exception:
         logger.error(
             "park give-up for interaction %s failed in its driver's give-up handler; delivering FAILED to the "
@@ -93,10 +114,14 @@ async def deliver_park_giveup(store: InteractionStore, request: InteractionReque
     if handled is None:
         await _deliver_abandoned(store, request, candidates)
         return
+    try:
+        result = await apply_terminal_stages(request.deferred_output_stages, handled.result)
+    except RunTerminalFailed as exc:
+        result = RunFailed(outcome=exc.outcome, reply=exc.reply)
     await _deliver_run_outcome(
         store,
         interaction_id=request.interaction_id,
-        result=handled.result,
+        result=result,
         delivery=request.delivery,
         run_delivery_id=request.run_delivery_id,
         candidates=candidates,

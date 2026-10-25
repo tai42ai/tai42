@@ -69,6 +69,19 @@ def stat_resource(ctx: typer.Context, resource_id: Annotated[str, typer.Argument
     emit_result(ctx_obj, data)
 
 
+@app.command("read")
+@covers(("GET", "/api/storage/entries/{resource_id:path}"))
+def read_resource(ctx: typer.Context, resource_id: Annotated[str, typer.Argument(help="Resource id.")]) -> None:
+    """Read a stored object as an entry: its kind, size and content type, plus the text of a text or document.
+
+    Example: ``tai storage read notes/todo.txt``
+    """
+    ctx_obj = app_context(ctx)
+    with ctx_obj.client() as client:
+        data = client.get(f"/api/storage/entries/{subpath(resource_id)}")
+    emit_result(ctx_obj, data)
+
+
 @app.command("download")
 @covers(("GET", "/api/storage/resources/{resource_id:path}/content"))
 def download_resource(ctx: typer.Context, resource_id: Annotated[str, typer.Argument(help="Resource id.")]) -> None:

@@ -2,9 +2,10 @@
 
 An in-process agent engine drives a bound tool through its handle: the handle carries the full
 registered name, the description and the argument schema the MCP edge advertises, and its
-``invoke`` runs the tool body directly (never the ``run_tool`` seam) with the platform's work done
+``invoke`` runs the tool directly (never the ``run_tool`` seam) with the platform's work done
 here — the tier fence, the execution-identity gate, argument validation, the undeclared-park
-refusal, the encoding refusal and secret masking. The adaptation to any one engine's tool type
+refusal, the encoding refusal and secret masking. A transformed tool runs its own transform,
+which validates its arguments. The adaptation to any one engine's tool type
 lives with that engine.
 """
 
@@ -17,6 +18,8 @@ from typing import Any, cast
 
 from fastmcp.server.dependencies import without_injected_parameters
 from fastmcp.tools.base import Tool
+from fastmcp.tools.function_tool import FunctionTool
+from fastmcp.tools.tool_transform import TransformedTool
 from fastmcp.utilities.types import get_cached_typeadapter
 from makefun import create_function
 from pydantic import ValidationError
@@ -26,13 +29,14 @@ from tai42_contract.tools import ClientTool, ClientToolError, UndeclaredPauseErr
 from tai42_kit.interactions.outcome_text import failed_outcome_text
 from tai42_kit.llm.models import check_tool_name
 from tai42_kit.utils.data import makefun_func_name
+from tai42_kit.utils.unset import UNSET, without_unset
 
-from tai42_skeleton.agent.unset import _UNSET
 from tai42_skeleton.tools.binding.branch import _BranchBindingMixin
 from tai42_skeleton.tools.binding.errors import UnknownToolError
 from tai42_skeleton.tools.binding.resolution import _ResolutionMixin
 from tai42_skeleton.tools.binding.result import UnencodableLeafError, _serialize_result, find_lone_surrogate
 from tai42_skeleton.tools.binding.schema import _VAR_PARAM_KINDS, _resolved_signature
+from tai42_skeleton.tools.binding.transformed_run import run_transformed_tool
 from tai42_skeleton.tools.context_bridge import bridge_context
 from tai42_skeleton.tools.tier import enforce_run_tier
 
@@ -56,13 +60,15 @@ class BoundClientTool:
 def _is_permissive(signature: inspect.Signature) -> bool:
     """Whether a body takes the supplied keys as they are rather than a validated argument set.
 
-    A bare ``*args``/``**kwargs`` passthrough validates nothing of its own, and a synthesized agent
-    run tool defaults every optional parameter to the :data:`_UNSET` sentinel so its body sees only
-    the keys the caller supplied (its own ``ToolInput`` validates them).
+    A bare ``*args``/``**kwargs`` passthrough validates nothing of its own. A synthesized signature
+    that defaults its optional parameters to :data:`~tai42_kit.utils.unset.UNSET` (an agent run
+    tool's, and a branch runner's over an authored-schema transformed tool) hands its body only the
+    keys the caller supplied, and the body validates them (the agent's ``ToolInput``, the
+    transformed tool's own transform).
     """
     params = list(signature.parameters.values())
     all_var = bool(params) and all(p.kind in _VAR_PARAM_KINDS for p in params)
-    return all_var or any(p.default is _UNSET for p in params)
+    return all_var or any(p.default is UNSET for p in params)
 
 
 @lru_cache(maxsize=2048)
@@ -71,8 +77,8 @@ def _argument_validator(resolved_fn: Callable[..., Any]) -> Callable[..., dict[s
 
     Validated through fastmcp's process-global ``get_cached_typeadapter`` over the same resolved
     signature the ``run_tool`` seam validates against, so a call is accepted or refused exactly as
-    there. Keyed on ``resolved_fn`` (fastmcp's process-cached ``without_injected_parameters`` wrapper,
-    or a preset's cached baked partial), so one wrapper serves every call.
+    there. Keyed on ``resolved_fn`` (fastmcp's process-cached ``without_injected_parameters`` wrapper),
+    so one wrapper serves every call.
     """
 
     def collect(**kwargs: Any) -> dict[str, Any]:
@@ -170,43 +176,38 @@ class _ClientToolsMixin(_ResolutionMixin, _BranchBindingMixin):
     def _client_call(self, tool_obj: Tool) -> Callable[[Mapping[str, Any]], Awaitable[Any]]:
         """The call one handle's ``invoke`` runs.
 
-        Resolves the tool's typed callable via ``_branch_base_callable`` (``FunctionTool`` →
-        ``fn``; a preset ``TransformedTool`` → its baked partial; anything else raises) and strips
-        the fastmcp-injected Context/``Depends`` params, so the arguments validate against the real
-        user parameters and the injected ones resolve at call time.
+        A ``FunctionTool`` runs its ``fn`` with the fastmcp-injected Context/``Depends`` params
+        stripped, so the arguments validate against the real user parameters and the injected
+        ones resolve at call time; the body runs under ``bridge_context`` so an injected
+        ``ctx.elicit()`` / ``ctx.sample()`` resolves through the platform bridges. A
+        ``TransformedTool`` runs through :func:`run_transformed_tool`, and its own transform is the
+        one validator of its arguments. Anything else raises loudly.
 
         The call opens this tool's own call frame (a PUSH of its name, so an ask it raises records
         it in ``asked_by``), enforces the run-time tier fence through the SAME ``enforce_run_tier``
         the ``run_tool`` seam uses, and gates on the execution identity under the tool's registered
-        name. Under a bound identity the body is re-resolved from the name LIVE, so the registration
+        name. Under a bound identity the tool is re-resolved from the name LIVE, so the registration
         decided about is the one that runs — a handle outlives an agent turn, and a preset re-based
-        or deleted mid-turn would otherwise run its stale baked body; a vanished registration fails
-        loudly as an unknown tool. The body runs under ``bridge_context`` so an injected
-        ``ctx.elicit()`` / ``ctx.sample()`` resolves through the platform bridges.
+        or deleted mid-turn would otherwise run its stale body; a vanished registration fails
+        loudly as an unknown tool.
 
         The body path is the direct body path by design: no ``run_tool`` seam, no retry policy and
         no dispatch-scope row, because the agent run tool that drives the engine is itself the
         recorded dispatch.
         """
-        resolved = without_injected_parameters(self._branch_base_callable(tool_obj))
-        resolved_permissive = _is_permissive(inspect.signature(resolved))
+        bound_body = self._client_body(tool_obj)
         name = tool_obj.name
 
         async def call(arguments: Mapping[str, Any]) -> Any:
-            supplied = {key: value for key, value in arguments.items() if value is not _UNSET}
+            supplied = without_unset(arguments)
             with tool_call_frame(name=name):
                 await enforce_run_tier(self._app, name)
-                target, permissive = resolved, resolved_permissive
+                body = bound_body
                 execution_identity = self._bound_execution_identity()
                 if execution_identity is not None:
-                    target = without_injected_parameters(
-                        self._branch_base_callable(await self._resolve_run_target(name))
-                    )
-                    permissive = _is_permissive(inspect.signature(target))
+                    body = self._client_body(await self._resolve_run_target(name))
                     await self._authorize_execution_dispatch(execution_identity, name, supplied)
-                with bridge_context(self._app.fastmcp):
-                    kwargs = supplied if permissive else _validated_arguments(name, target, supplied)
-                    result = await _invoke_tool_body(target, kwargs, name)
+                result = await body(name, supplied)
                 # Only a tool that declares it can pause may return a park signal. Refused RAW,
                 # never a ClientToolError: an undeclared park is a registration fault the model
                 # must not retry around (a retry would fire the body a second time).
@@ -220,3 +221,31 @@ class _ClientToolsMixin(_ResolutionMixin, _BranchBindingMixin):
                 return mask_secrets(result)
 
         return call
+
+    def _client_body(self, tool_obj: Tool) -> Callable[[str, dict[str, Any]], Awaitable[Any]]:
+        """The run of ``tool_obj`` over the supplied arguments, its own failure a :class:`ClientToolError`."""
+        fastmcp = self._app.fastmcp
+        if isinstance(tool_obj, TransformedTool):
+            transformed = tool_obj
+
+            async def run_transformed(tool_name: str, supplied: dict[str, Any]) -> Any:
+                async def run(**kwargs: Any) -> Any:
+                    return await run_transformed_tool(fastmcp, transformed, kwargs)
+
+                return await _invoke_tool_body(run, supplied, tool_name)
+
+            return run_transformed
+        if not isinstance(tool_obj, FunctionTool):
+            raise TypeError(
+                f"cannot bind {type(tool_obj).__name__} {tool_obj.name!r} as a client tool: "
+                "expected a FunctionTool or TransformedTool"
+            )
+        target = without_injected_parameters(tool_obj.fn)
+        permissive = _is_permissive(inspect.signature(target))
+
+        async def run_function(tool_name: str, supplied: dict[str, Any]) -> Any:
+            with bridge_context(fastmcp):
+                kwargs = supplied if permissive else _validated_arguments(tool_name, target, supplied)
+                return await _invoke_tool_body(target, kwargs, tool_name)
+
+        return run_function

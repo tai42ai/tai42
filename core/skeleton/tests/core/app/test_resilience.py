@@ -52,7 +52,7 @@ class _Mixin(TaiMCPLifecycleMixin):
         )
         self._config_manager = _NoManifestConfig()  # pyright: ignore[reportAttributeAccessIssue]
 
-    def _mcp_tools(self, config, tools):  # abstract in the mixin
+    def _mcp_tools(self, config, tools, preset_names):  # abstract in the mixin
         self._mcp_bound_tools[config.title] = {f"{config.title}_t"}
 
 

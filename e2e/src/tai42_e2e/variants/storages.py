@@ -161,7 +161,7 @@ _GITHUB_USERNAME = "tai42-e2e"
 _GITHUB_REPO = "storage"
 
 
-_GITHUB_BRANCH = "main"
+GITHUB_STUB_BRANCH = "main"
 
 
 @dataclass(frozen=True)
@@ -211,8 +211,13 @@ def github_stub_base() -> str:
     return os.environ.get(GITHUB_STUB_ENV, GITHUB_STUB_DEFAULT)
 
 
-def _github_raw_url(rel_path: str) -> str:
-    return f"{github_stub_base()}/raw/{_GITHUB_USERNAME}/{_GITHUB_REPO}/refs/heads/{_GITHUB_BRANCH}/{rel_path}"
+def _github_contents_read(rel_path: str) -> tuple[str, Any]:
+    """GET ``rel_path`` in the raw form from the fake's Contents API at the branch."""
+    import httpx
+
+    url = f"{github_stub_base()}/api/repos/{_GITHUB_USERNAME}/{_GITHUB_REPO}/contents/{rel_path}"
+    resp = httpx.get(url, params={"ref": GITHUB_STUB_BRANCH}, headers={"Accept": "application/vnd.github.raw+json"})
+    return url, resp
 
 
 _S3_NOT_FOUND_CODES = frozenset({"404", "NoSuchKey", "NotFound"})
@@ -281,8 +286,8 @@ def _s3_error_code(exc: Any) -> str | None:
 
 class GithubStorage(StorageVariant):
     """The GitHub storage backend, run hermetically against an in-process fake
-    GitHub REST server (raw + contents + trees). Read-back GETs the fake's raw
-    endpoint directly (an independent httpx client), never the plugin under test."""
+    GitHub server (contents + ref + raw + trees). Read-back GETs the fake's Contents
+    API at the branch directly (an independent httpx client), never the plugin under test."""
 
     name = "github"
     module = "tai42_storage_github"
@@ -291,23 +296,21 @@ class GithubStorage(StorageVariant):
 
     def feature_env(self, res: StackResources) -> dict[str, str]:
         base = github_stub_base()
-        # The base-URL settings hold ``{username}``/``{repo}``/``{branch}`` placeholders
-        # the plugin ``.format()``s; only the host is swapped from the real GitHub
-        # surfaces to the fake, so the plugin's URL construction is exercised unchanged.
+        # The base-URL settings hold ``{username}``/``{repo}``/``{branch}``/``{commit}``
+        # placeholders the plugin ``.format()``s; only the host is swapped from the real
+        # GitHub surfaces to the fake, so the plugin's URL construction is exercised unchanged.
         return {
             "STORAGE_GITHUB_USERNAME": _GITHUB_USERNAME,
             "STORAGE_GITHUB_REPO": _GITHUB_REPO,
-            "STORAGE_GITHUB_BRANCH": _GITHUB_BRANCH,
-            "STORAGE_GITHUB_RAW_BASE_URL": f"{base}/raw/{{username}}/{{repo}}/refs/heads/{{branch}}",
+            "STORAGE_GITHUB_BRANCH": GITHUB_STUB_BRANCH,
+            "STORAGE_GITHUB_RAW_BASE_URL": f"{base}/raw/{{username}}/{{repo}}/{{commit}}",
+            "STORAGE_GITHUB_REF_API_URL": f"{base}/api/repos/{{username}}/{{repo}}/git/ref/heads/{{branch}}",
             "STORAGE_GITHUB_CONTENTS_API_URL": f"{base}/api/repos/{{username}}/{{repo}}/contents",
             "STORAGE_GITHUB_TREES_API_URL": f"{base}/api/repos/{{username}}/{{repo}}/git/trees/{{branch}}",
         }
 
     def assert_stored(self, res: StackResources, rel_path: str, content: str) -> None:
-        import httpx
-
-        url = _github_raw_url(rel_path)
-        resp = httpx.get(url)
+        url, resp = _github_contents_read(rel_path)
         if resp.status_code == 404:
             raise AssertionError(f"GitHub storage plugin did not write {rel_path} (404 at {url})")
         resp.raise_for_status()
@@ -315,10 +318,7 @@ class GithubStorage(StorageVariant):
             raise AssertionError(f"stored bytes at {url} decode to {resp.text!r}, not {content!r}")
 
     def assert_absent(self, res: StackResources, rel_path: str) -> None:
-        import httpx
-
-        url = _github_raw_url(rel_path)
-        resp = httpx.get(url)
+        url, resp = _github_contents_read(rel_path)
         if resp.status_code != 404:
             raise AssertionError(f"object still present at {url}: HTTP {resp.status_code}")
 

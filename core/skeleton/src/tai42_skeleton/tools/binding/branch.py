@@ -1,24 +1,28 @@
 """Expands a base tool into its extension-combo branches and registers each resulting tool onto the FastMCP server."""
 
 import inspect
-from collections.abc import Callable
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
+from functools import cached_property, partial
 from typing import Any
 
 from fastmcp.tools.base import Tool
 from fastmcp.tools.function_tool import FunctionTool
 from fastmcp.tools.tool_transform import TransformedTool
 from mcp.types import ToolAnnotations
+from tai42_contract.manifest import ExtensionElement
 from tai42_contract.tools import TOOL_META_PAUSES
 
+from tai42_skeleton.app.lifecycle.off_loop import run_blocking
 from tai42_skeleton.exceptions.exceptions import TaiValidationError
-from tai42_skeleton.extensions.registry import extension_config, extension_name, factory_accepts_config
-from tai42_skeleton.tools.binding.baked_partial import _cached_baked_partial
+from tai42_skeleton.extensions.registry import ExtensionRegistry, extension_config, extension_name
+from tai42_skeleton.tools.binding.errors import ExtensionComboRefusedError
 from tai42_skeleton.tools.binding.extension_schema import _enforce_extension_schema
 from tai42_skeleton.tools.binding.schema import _declares_own_output_schema, _derive_output_schema
 from tai42_skeleton.tools.binding.secret_tool import _SecretRevealingTool
 from tai42_skeleton.tools.binding.state import _ToolBindingBase
 from tai42_skeleton.tools.binding.surface import add_surface_tool
+from tai42_skeleton.tools.binding.transformed_run import transformed_tool_runner
 
 
 @dataclass(frozen=True)
@@ -35,6 +39,10 @@ class _Branch:
     stack_pauses: bool
 
 
+def _identity(value: Callable[..., Any]) -> Callable[..., Any]:
+    return value
+
+
 def _declares_pauses(meta: dict[str, Any] | None) -> bool:
     return (meta or {}).get(TOOL_META_PAUSES) is True
 
@@ -43,18 +51,128 @@ def _declares_pauses(meta: dict[str, Any] | None) -> bool:
 class _BranchBase:
     """The resolved base a branch expansion builds from.
 
-    The original registered object/callable, the typed callable extensions wrap, its inherited docstring,
-    name, description, and derived output schema.
+    The original registered object/callable, its name, description and output schema, and the typed
+    callable extensions wrap with its inherited docstring. The callable is resolved on first read, so a
+    base with no combo builds none.
     """
 
     func: Callable[..., Any] | Tool
     is_obj: bool
-    branch_base: Callable[..., Any]
-    base_doc: str | None
+    resolve_branch_base: Callable[[], Callable[..., Any]]
     orig_name: str
     orig_desc: str | None
     base_output_schema: dict[str, Any] | None
     base_annotations: ToolAnnotations | None
+
+    @cached_property
+    def branch_base(self) -> Callable[..., Any]:
+        """The typed callable an extension wraps."""
+        return self.resolve_branch_base()
+
+    @cached_property
+    def base_doc(self) -> str | None:
+        """The docstring an extension inherits from the layer it wraps: the branch base callable's.
+
+        Not a ``Tool`` object's ``__doc__`` (the fastmcp class docstring). A wrapper that leaves
+        the docstring at this value has not authored its own, so the running description survives.
+        """
+        return self.branch_base.__doc__
+
+
+def combo_layers(
+    extension_registry: ExtensionRegistry, prepared: _BranchBase, extensions: Sequence[ExtensionElement]
+) -> Iterator[tuple[str, _Branch]]:
+    """Apply one combo's extension chain left-to-right, yielding the ``(name, branch)`` of EACH layer.
+
+    Per extension: resolve name/config/factory, check the settings against the declared
+    schema, enforce the locality-vs-relocation ordering, apply the factory, reject a
+    same-name return, enforce the schema rule, track whether the stack still preserves
+    the output shape, and carry the running description forward. The bind and the
+    dry-run check both walk it, so they refuse the same combos with the same words.
+    """
+    if not extensions:
+        return
+    curr_func, curr_name, curr_desc = prepared.branch_base, prepared.orig_name, prepared.orig_desc
+    stack_preserves_output = True
+    stack_pauses = False
+    # The relocating extension already applied in this stack, if any:
+    # extensions apply left-to-right, so a later element wraps (sits
+    # OUTSIDE) everything applied before it, and a relocating layer
+    # ships exactly the callable it received to the worker.
+    relocating_name: str | None = None
+    for extension in extensions:
+        # A combo element is an extension name or a ``{"name",
+        # "config"}`` mapping binding author config. The registry keys
+        # on the name; the config is threaded to the factory so an
+        # extension closes over author-bound values (e.g.
+        # ``ask_external``'s verifier) never exposed as a tool param.
+        ext_name = extension_name(extension)
+        ext_config = extension_config(extension)
+        extension_func = extension_registry.get_extension(extension)
+        # The settings are checked against the extension's declared schema before
+        # the factory sees them; an extension without a schema accepts none.
+        extension_registry.validate_config(extension)
+        kind = extension_registry.get_kind(extension)
+        # A locality-requiring extension's wrapper only works in the
+        # process running the tool body. Applied AFTER a relocating
+        # extension it would wrap the worker-submitting stub in this
+        # process — the wrapper stays behind and silently never
+        # applies — so the combo is rejected loudly at bind time.
+        if relocating_name is not None and extension_registry.requires_body_locality(extension):
+            raise TaiValidationError(
+                f"tool '{prepared.orig_name}': extension '{ext_name}' requires body locality but is "
+                f"stacked outside the execution-relocating extension '{relocating_name}'; "
+                f"a locality-requiring extension must bind INSIDE the relocating one — "
+                f"place '{ext_name}' before '{relocating_name}' in the combo so its wrapper "
+                f"travels with the tool body to the worker"
+            )
+        if kind.relocates_execution:
+            relocating_name = ext_name
+        # Capture the layer's INPUT function: wrapper schema
+        # enforcement compares against what this extension received,
+        # not the original tool, so a transformer->wrapper stack is
+        # judged against the transformer's composed schema.
+        prev_func = curr_func
+        # Author config is threaded (by keyword) only to a factory that
+        # declares a settings schema (registration ties the schema to the
+        # ``config`` parameter); a config-agnostic factory keeps its
+        # three-argument signature.
+        if extension_registry.config_schema(extension) is not None:
+            curr_func = extension_func(curr_func, curr_name, curr_desc, config=ext_config)
+        else:
+            curr_func = extension_func(curr_func, curr_name, curr_desc)
+
+        if curr_func.__name__ == prepared.orig_name:
+            raise ValueError(
+                f"Extension '{ext_name}' returned the same name '{prepared.orig_name}' as the original tool. "
+                "Extensions must return a new name to create a branch."
+            )
+
+        _enforce_extension_schema(ext_name, kind, extension_func, prev_func, curr_func, prepared.orig_name)
+
+        stack_preserves_output = stack_preserves_output and kind.preserves_output_shape
+        stack_pauses = stack_pauses or extension_registry.pauses(extension)
+        curr_name = curr_func.__name__
+        # Carry the running description forward so each stacked
+        # extension composes on the previous one's output, not the
+        # original. Adopt the extension's docstring only when it set a
+        # NEW non-None one; a wrapper that left the docstring unchanged
+        # — or has none at all (``__doc__`` is ``None``, e.g. no
+        # ``functools.wraps``) — keeps the running description rather
+        # than dropping it.
+        if curr_func.__doc__ is not None and curr_func.__doc__ != prepared.base_doc:
+            curr_desc = curr_func.__doc__
+        yield curr_name, _Branch(curr_func, curr_desc, stack_preserves_output, stack_pauses)
+
+
+def _reason(exc: BaseException) -> str:
+    """An exception's own message, or its type name when the message is empty."""
+    return str(exc) or type(exc).__name__
+
+
+def _layer_refusal(element: ExtensionElement, tool: str, exc: BaseException) -> str:
+    """The dry-run refusal naming the extension whose settings or layer refused."""
+    return f"extension '{extension_name(element)}' on tool '{tool}' cannot bind: {_reason(exc)}"
 
 
 class _BranchBindingMixin(_ToolBindingBase):
@@ -84,23 +202,21 @@ class _BranchBindingMixin(_ToolBindingBase):
         once (as the carried value), never a second time through ``**kwargs``.
         """
         is_obj = isinstance(func, Tool)
-        branch_base = self._branch_base_callable(func) if is_obj else func
-        # The docstring an extension inherits from the layer it wraps: the
-        # branch base callable's, NOT the ``Tool`` object's (a Tool object's
-        # ``__doc__`` is the fastmcp CLASS docstring, not the tool
-        # description). A wrapper that leaves the docstring at this inherited
-        # value has not authored its own, so the running description survives.
-        base_doc = branch_base.__doc__ if is_obj else func.__doc__
-
         orig_name = kwargs.pop("name", None) or (func.name if is_obj else func.__name__)
         orig_desc = kwargs.pop("description", None) or (func.description if is_obj else inspect.getdoc(func))
 
-        # The base tool's declared OUTPUT schema, derived from the branch base
-        # callable (the base is bound AFTER its branches, so it is not yet a
-        # registered Tool to read from). A shape-preserving branch that
-        # declares no output schema of its own inherits this, so the
-        # structured-output contract survives the wrap.
-        base_output_schema = _derive_output_schema(branch_base)
+        # The base tool's declared OUTPUT schema, which a shape-preserving branch that declares
+        # none of its own inherits. A transformed tool advertises its own; any other base's is
+        # derived from its callable (the base is bound AFTER its branches, so it is not yet a
+        # registered Tool to read from).
+        resolve_branch_base: Callable[[], Callable[..., Any]]
+        if isinstance(func, TransformedTool):
+            resolve_branch_base = partial(self._branch_base_callable, func)
+            base_output_schema = func.output_schema
+        else:
+            branch_base = self._branch_base_callable(func) if is_obj else func
+            resolve_branch_base = partial(_identity, branch_base)
+            base_output_schema = _derive_output_schema(branch_base)
         # A prebuilt Tool object's behaviour hints, which its branches serve: a branch wraps the
         # same body, and a hint describes that body. A callable base's hints already ride in the
         # caller's kwargs, which every branch copies.
@@ -108,8 +224,7 @@ class _BranchBindingMixin(_ToolBindingBase):
         return _BranchBase(
             func=func,
             is_obj=is_obj,
-            branch_base=branch_base,
-            base_doc=base_doc,
+            resolve_branch_base=resolve_branch_base,
             orig_name=orig_name,
             orig_desc=orig_desc,
             base_output_schema=base_output_schema,
@@ -137,88 +252,53 @@ class _BranchBindingMixin(_ToolBindingBase):
         return extend_tools
 
     def _apply_combo(self, prepared: _BranchBase, extensions: Any) -> list[tuple[str, _Branch]]:
-        """Apply one combo's extension chain left-to-right.
+        """Apply one combo's extension chain left-to-right; the ``(name, branch)`` produced at EACH layer."""
+        return list(combo_layers(self._extension_registry, prepared, extensions))
 
-        Returns the ``(name, branch)`` produced at EACH layer.
+    def check_combo(self, tool: str, combo: Sequence[ExtensionElement], *, base: Tool | None = None) -> None:
+        """Dry-run bind ``combo`` on ``tool`` against the live registry; nothing is mounted or stored.
 
-        Per extension: resolve name/config/factory, enforce the locality-vs-relocation
-        ordering, apply the factory, reject a same-name return, enforce the schema rule,
-        track whether the stack still preserves the output shape, and carry the running
-        description forward.
+        Checks every registered element's settings against its declared schema first. When every
+        element is registered, it then checks the combo's names and cardinality and, when a base is
+        known (``base``, else the live server's tool named ``tool``), walks the bind's own layers
+        over it, so each factory runs once and its branch is discarded. A combo naming an
+        unregistered extension, or a tool the live server does not serve, leaves the rest to the
+        bind after the reload. Raises :class:`ExtensionComboRefusedError` carrying the refusal as
+        text, with nothing chained.
         """
-        branches: list[tuple[str, _Branch]] = []
-        curr_func, curr_name, curr_desc = prepared.branch_base, prepared.orig_name, prepared.orig_desc
-        stack_preserves_output = True
-        stack_pauses = False
-        # The relocating extension already applied in this stack, if any:
-        # extensions apply left-to-right, so a later element wraps (sits
-        # OUTSIDE) everything applied before it, and a relocating layer
-        # ships exactly the callable it received to the worker.
-        relocating_name: str | None = None
-        for extension in extensions:
-            # A combo element is an extension name or a ``{"name",
-            # "config"}`` mapping binding author config. The registry keys
-            # on the name; the config is threaded to the factory so an
-            # extension closes over author-bound values (e.g.
-            # ``ask_external``'s verifier) never exposed as a tool param.
-            ext_name = extension_name(extension)
-            ext_config = extension_config(extension)
-            extension_func = self._extension_registry.get_extension(extension)
-            kind = self._extension_registry.get_kind(extension)
-            # A locality-requiring extension's wrapper only works in the
-            # process running the tool body. Applied AFTER a relocating
-            # extension it would wrap the worker-submitting stub in this
-            # process — the wrapper stays behind and silently never
-            # applies — so the combo is rejected loudly at bind time.
-            if relocating_name is not None and self._extension_registry.requires_body_locality(extension):
-                raise TaiValidationError(
-                    f"tool '{prepared.orig_name}': extension '{ext_name}' requires body locality but is "
-                    f"stacked outside the execution-relocating extension '{relocating_name}'; "
-                    f"a locality-requiring extension must bind INSIDE the relocating one — "
-                    f"place '{ext_name}' before '{relocating_name}' in the combo so its wrapper "
-                    f"travels with the tool body to the worker"
-                )
-            if kind.relocates_execution:
-                relocating_name = ext_name
-            # Capture the layer's INPUT function: wrapper schema
-            # enforcement compares against what this extension received,
-            # not the original tool, so a transformer->wrapper stack is
-            # judged against the transformer's composed schema.
-            prev_func = curr_func
-            # Author config is threaded (by keyword) only to a factory that
-            # declares the config parameter; a config-agnostic factory keeps
-            # its three-argument signature. Binding config to a factory that
-            # does not accept it would silently drop the author's intent, so it
-            # raises instead.
-            if factory_accepts_config(extension_func):
-                curr_func = extension_func(curr_func, curr_name, curr_desc, config=ext_config)
-            else:
-                if ext_config:
-                    raise ValueError(f"extension '{ext_name}' does not accept config")
-                curr_func = extension_func(curr_func, curr_name, curr_desc)
+        refusal = self._combo_refusal(tool, combo, base)
+        if refusal is not None:
+            raise ExtensionComboRefusedError(refusal)
 
-            if curr_func.__name__ == prepared.orig_name:
-                raise ValueError(
-                    f"Extension '{ext_name}' returned the same name '{prepared.orig_name}' as the original tool. "
-                    "Extensions must return a new name to create a branch."
-                )
-
-            _enforce_extension_schema(ext_name, kind, extension_func, prev_func, curr_func, prepared.orig_name)
-
-            stack_preserves_output = stack_preserves_output and kind.preserves_output_shape
-            stack_pauses = stack_pauses or self._extension_registry.pauses(extension)
-            curr_name = curr_func.__name__
-            # Carry the running description forward so each stacked
-            # extension composes on the previous one's output, not the
-            # original. Adopt the extension's docstring only when it set a
-            # NEW non-None one; a wrapper that left the docstring unchanged
-            # — or has none at all (``__doc__`` is ``None``, e.g. no
-            # ``functools.wraps``) — keeps the running description rather
-            # than dropping it.
-            if curr_func.__doc__ is not None and curr_func.__doc__ != prepared.base_doc:
-                curr_desc = curr_func.__doc__
-            branches.append((curr_name, _Branch(curr_func, curr_desc, stack_preserves_output, stack_pauses)))
-        return branches
+    def _combo_refusal(self, tool: str, combo: Sequence[ExtensionElement], base: Tool | None) -> str | None:
+        """The refusal text of :meth:`check_combo`, or ``None`` when the combo passes."""
+        live = self._app._live_serving_core
+        registry = live._extension_registry
+        registered = {entry["name"] for entry in registry.available_extensions()}
+        for element in combo:
+            if extension_name(element) not in registered:
+                continue
+            try:
+                registry.validate_config(element)
+            except Exception as exc:
+                return _layer_refusal(element, tool, exc)
+        if any(extension_name(element) not in registered for element in combo):
+            return None
+        try:
+            registry.validate(combo)
+            served = base if base is not None else run_blocking(lambda: live._fast_mcp.get_tool(tool))
+            if served is None:
+                return None
+            prepared = self._prepared_branch(served, {})
+        except Exception as exc:
+            return f"extensions on tool '{tool}' cannot bind: {_reason(exc)}"
+        finished = 0
+        try:
+            for _ in combo_layers(registry, prepared, combo):
+                finished += 1
+        except Exception as exc:
+            return _layer_refusal(combo[finished], tool, exc)
+        return None
 
     def _register_expanded(
         self,
@@ -314,18 +394,16 @@ class _BranchBindingMixin(_ToolBindingBase):
     def _branch_base_callable(self, tool_obj: Tool) -> Callable[..., Any]:
         """The callable an extension branch wraps when the bound base is a prebuilt Tool object.
 
-        A ``FunctionTool`` exposes its real ``fn`` directly. A ``TransformedTool``
-        (a preset's baked tool) has no plain callable — its ``fn`` takes one opaque
-        ``**kwargs`` and returns a ``ToolResult`` — so reconstruct a typed partial
-        of the UNDERLYING function with the hidden baked args applied: it presents
-        the remaining typed signature and returns the raw value, so a
-        schema-preserving wrapper composes on it exactly as on a native tool.
-        Anything else has no branchable body and raises loudly.
+        A ``FunctionTool`` exposes its real ``fn`` directly. A ``TransformedTool`` has no plain
+        callable (its ``fn`` takes one opaque ``**kwargs`` and returns a ``ToolResult``), so a
+        branch wraps its typed runner (:func:`transformed_tool_runner`): it presents the
+        transformed tool's arguments and runs the transformed tool itself, so a branch call gets
+        what a call of the tool gets. Anything else has no branchable body and raises loudly.
         """
         if isinstance(tool_obj, FunctionTool):
             return tool_obj.fn
         if isinstance(tool_obj, TransformedTool):
-            return _cached_baked_partial(tool_obj)
+            return transformed_tool_runner(tool_obj, lambda: self._fast_mcp)
         raise TypeError(
             f"cannot branch-bind {type(tool_obj).__name__} {tool_obj.name!r}: "
             "expected a FunctionTool or TransformedTool"

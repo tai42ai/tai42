@@ -35,6 +35,7 @@ path, the worker and the beat — is built from them.
 | `RQ_SOCKET_TIMEOUT` | unset | Seconds a Redis command may wait on its socket; redis-py's default when unset. |
 | `RQ_SOCKET_CONNECT_TIMEOUT` | unset | Seconds a Redis connect may take; redis-py's default when unset. |
 | `RQ_RQ_PREFIX` | `rq:` | Key prefix for every RQ structure in Redis. |
+| `RQ_QUEUE_NAME` | `default` | The RQ queue the host enqueues to, `beat` schedules on, and a worker started without `--queue` serves; a `--queue <label>` worker serves `<RQ_QUEUE_NAME>.<label>`. Every process of one stack sets the same value. Stacks sharing one Redis DB set distinct values, and no stack's value is another stack's value followed by `.<label>`. |
 | `RQ_TASK_TIMEOUT` | `300` | The dispatch job budget in seconds: the timeout the worker runs every job under, and how long a synchronous dispatch waits for a result. |
 | `RQ_MANIFEST_KEY` | `MANIFEST_KEY` | Env var the worker stores the manifest JSON under, inherited by forked work-horses. |
 | `RQ_TOOL_NAME_ARG` | `backend_tool_name` | Queued-job kwarg naming the target tool. |
@@ -72,8 +73,30 @@ The dashboard opens its own Redis connection from its `--redis-url` option,
 outside the backend's connection settings, so the `RQ_` retry and timeouts do
 not apply to it.
 
+## Send a task to a chosen worker
+
+The `sync_task` and `async_task` branches take an optional `queue` argument, a
+label of letters, digits, `_` and `-`. A job sent with `queue: gpu` goes to the
+queue `<RQ_QUEUE_NAME>.gpu`, its callback with it; any other value is refused
+before anything is written, and no `queue` keeps the job on `RQ_QUEUE_NAME`. A
+preset can fix `queue` in its arguments like any other argument.
+
+```bash
+tai backend worker --queue gpu
+```
+
+A worker started with `--queue <label>` serves that label's queue alone, and
+moves its `countdown` / `eta` jobs onto it; a worker without the flag serves
+`RQ_QUEUE_NAME`. A stack that runs labelled tasks runs one more worker per
+label. A job on a queue no worker serves waits: a `sync_task` raises
+`TimeoutError` after `RQ_TASK_TIMEOUT`, and an `async_task` id stays queued.
+Recurring schedules carry no queue: `beat` puts them on `RQ_QUEUE_NAME`, so they
+need a worker without a label.
+
 ## Quirks
 
+- A tool with its own `queue` parameter cannot take a `sync_task` or
+  `async_task` branch.
 - RQ has no disabled-schedule state, so `backend_list_schedules` always reports a
   schedule as enabled, and disabling one deletes it.
 - `backend_registered_tasks` and `backend_list_failed_tasks` are not implemented.

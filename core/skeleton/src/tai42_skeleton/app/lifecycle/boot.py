@@ -26,6 +26,7 @@ from tai42_skeleton.app.kind_status import warn_if_noop_monitoring
 from tai42_skeleton.app.lifecycle.off_loop import run_blocking
 from tai42_skeleton.app.lifecycle.state import LifecycleState
 from tai42_skeleton.connectors.providers.registry import reset_registry
+from tai42_skeleton.db.boot_gate import assert_skeleton_schema_applied
 from tai42_skeleton.extensions import ExtensionRegistry
 from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.middleware.rate_limit import warn_if_rate_limiting_off
@@ -46,80 +47,16 @@ class BootMixin(LifecycleState):
         # the global ``tai42_app`` handle. Constructing a ``TaiMCP`` must not — only
         # start()/app_context binds, so building a throwaway app can't hijack it.
         tai42_app.bind(self)
+        # The schema gate runs FIRST, before any store read of the build: a database
+        # with pending migrations refuses with the ``tai db migrate`` fix named, rather
+        # than failing deeper on a missing table. It fires only for a CONFIGURED
+        # skeleton database, so an all-off deployment is a no-op.
+        run_blocking(assert_skeleton_schema_applied)
         self._manifest = manifest
         self._failed_mcps = {}
         self._mcp_bound_tools = {}
         self._mcp_credential_demanded = set()
-        # Reset so a dropped agent doesn't linger across update()/reload —
-        # importer.py re-fires the @tai42_app.agents.agent decorator each start().
-        self._agent_binding.reset()
-
-        # Reset so a dropped webhook verifier doesn't linger across update()/reload
-        # — the manifest's verifier modules re-run their register() call each
-        # start(). Mirrors the agent reset above.
-        self._webhook_verifier_registry.reset()
-
-        # Reset so a dropped channel doesn't linger across update()/reload — the
-        # manifest's channel modules re-run their register() call each start().
-        # Mirrors the webhook-verifier reset above.
-        self._channel_registry.reset()
-
-        # Reset so a dropped preset write validator doesn't linger across
-        # update()/reload — the manifest's tool modules re-run their
-        # register_write_validator() call each start(). Mirrors the resets above.
-        self._write_validator_registry.reset()
-
-        # Reset so a dropped conversation target validator doesn't linger across
-        # update()/reload — the manifest's plugin modules re-run their
-        # register_target_validator() call each start(). Mirrors the reset above. The
-        # platform's own bind rules are plain code in the route bind check, not a registry
-        # entry, so there is nothing of the platform's to re-register here.
-        self._target_validator_registry.reset()
-
-        # Reset the per-base-tool preset input-schema support + registration-tier
-        # declarations alongside the write validator, for the same reload reason. The
-        # tier registry backs both the authoring gate and the run-time fence.
-        self._input_schema_support_registry.reset()
-        self._registration_tier_registry.reset()
-
-        # Reset so a dropped tool-references declaration doesn't linger across
-        # update()/reload — the manifest's tool modules re-run their
-        # @app.tools.tool(tool_refs=...) decorator each start(). Mirrors the reset above.
-        self._tool_refs_registry.reset()
-
-        # Reset the per-tool retry-policy declarations for the same reload reason —
-        # a dropped @app.tools.tool(retry=...) declaration must not keep retrying a
-        # tool that no longer claims idempotency.
-        self._tool_retry_registry.reset()
-
-        # Reset the per-tool door-extras declarations for the same reload reason — a
-        # dropped @app.tools.tool(extras_keys=...) declaration must not keep admitting an
-        # extras key a tool no longer reads.
-        self._tool_extras_registry.reset()
-
-        # Reset the bound pausing-tool names for the same reload reason — a dropped
-        # pause declaration must not keep a tool on the pausing side.
-        self._tool_pause_registry.reset()
-
-        # Reset the rename-referee collection and the declared-preset-seed registry
-        # alongside the registries above: a reload re-imports the plugin modules (which
-        # re-run their register_rename_referee/register_seed calls) and the
-        # platform-internal referees re-arm through their startup/reload handler, so a
-        # stale referee or a dropped seed never lingers across update()/reload.
-        self._rename_referee_registry.reset()
-        self._delete_referee_registry.reset()
-        self._detach_referee_registry.reset()
-        self._seed_registry.reset()
-
-        # Reset the state store's consumer-owned registries (attach validators, attach
-        # reconcilers, consumer listers, template seeds) alongside the registries above: a
-        # reload re-imports the plugin modules (which re-run their register_attach_validator/
-        # register_attach_reconciler/register_consumer_lister/register_template_seed calls), so a
-        # stale validator, reconciler, lister or seed never lingers.
-        self._states_attach_validators.reset()
-        self._states_attach_reconcilers.reset()
-        self._states_consumer_listers.reset()
-        self._states_template_seeds.reset()
+        self._reset_declaration_registries()
 
         # Drop the cached resource manager: a reload re-imports the storage
         # module and rebuilds the storage provider, so a stale cache would keep
@@ -218,6 +155,86 @@ class BootMixin(LifecycleState):
         # The public doors run unthrottled when no Redis backs the rate limiter —
         # one loud once-per-process WARNING here (never a boot refusal).
         warn_if_rate_limiting_off(logger)
+
+    def _reset_declaration_registries(self) -> None:
+        """Empty every registry the manifest's modules fill on import, before they are re-imported."""
+        # Reset so a dropped agent doesn't linger across update()/reload —
+        # importer.py re-fires the @tai42_app.agents.agent decorator each start().
+        self._agent_binding.reset()
+
+        # Reset so a dropped webhook verifier doesn't linger across update()/reload
+        # — the manifest's verifier modules re-run their register() call each
+        # start(). Mirrors the agent reset above.
+        self._webhook_verifier_registry.reset()
+
+        # Reset so a dropped channel doesn't linger across update()/reload — the
+        # manifest's channel modules re-run their register() call each start().
+        # Mirrors the webhook-verifier reset above.
+        self._channel_registry.reset()
+
+        # Reset so a dropped plugin's storage prefix marks don't linger across
+        # update()/reload — declarers re-mark from their startup/reload handlers.
+        self._prefix_mark_registry.reset()
+
+        # Reset so a dropped preset write validator doesn't linger across
+        # update()/reload — the manifest's tool modules re-run their
+        # register_write_validator() call each start(). Mirrors the resets above.
+        self._write_validator_registry.reset()
+
+        # Reset so a dropped conversation target validator doesn't linger across
+        # update()/reload — the manifest's plugin modules re-run their
+        # register_target_validator() call each start(). Mirrors the reset above. The
+        # platform's own bind rules are plain code in the route bind check, not a registry
+        # entry, so there is nothing of the platform's to re-register here.
+        self._target_validator_registry.reset()
+
+        # Reset the per-base-tool preset input-schema support + registration-tier
+        # declarations alongside the write validator, for the same reload reason. The
+        # tier registry backs both the authoring gate and the run-time fence.
+        self._input_schema_support_registry.reset()
+        self._registration_tier_registry.reset()
+
+        # Reset so a dropped tool- or template-references declaration doesn't linger
+        # across update()/reload — the manifest's tool modules re-run their
+        # @app.tools.tool(tool_refs=..., template_refs=...) decorator each start().
+        self._tool_refs_registry.reset()
+        self._template_refs_registry.reset()
+
+        # Reset the per-tool retry-policy declarations for the same reload reason —
+        # a dropped @app.tools.tool(retry=...) declaration must not keep retrying a
+        # tool that no longer claims idempotency.
+        self._tool_retry_registry.reset()
+
+        # Reset the per-tool door-extras declarations for the same reload reason — a
+        # dropped @app.tools.tool(extras_keys=...) declaration must not keep admitting an
+        # extras key a tool no longer reads.
+        self._tool_extras_registry.reset()
+
+        # Reset the bound pausing-tool names for the same reload reason — a dropped
+        # pause declaration must not keep a tool on the pausing side.
+        self._tool_pause_registry.reset()
+
+        # Reset the rename-referee collection and the declared-preset-seed registry
+        # alongside the registries above: a reload re-imports the plugin modules (which
+        # re-run their register_rename_referee/register_seed calls) and the
+        # platform-internal referees re-arm through their startup/reload handler, so a
+        # stale referee or a dropped seed never lingers across update()/reload.
+        self._rename_referee_registry.reset()
+        self._delete_referee_registry.reset()
+        self._delete_cascade_registry.reset()
+        self._detach_referee_registry.reset()
+        self._template_delete_referee_registry.reset()
+        self._seed_registry.reset()
+
+        # Reset the state store's consumer-owned registries (attach validators, attach
+        # reconcilers, consumer listers, template seeds) alongside the registries above: a
+        # reload re-imports the plugin modules (which re-run their register_attach_validator/
+        # register_attach_reconciler/register_consumer_lister/register_template_seed calls), so a
+        # stale validator, reconciler, lister or seed never lingers.
+        self._states_attach_validators.reset()
+        self._states_attach_reconcilers.reset()
+        self._states_consumer_listers.reset()
+        self._states_template_seeds.reset()
 
     def _reload_registries(self, manifest: Manifest) -> dict[str, Any]:
         """Re-initialise the process registries from ``manifest`` and run the per-epoch handler list ONCE.

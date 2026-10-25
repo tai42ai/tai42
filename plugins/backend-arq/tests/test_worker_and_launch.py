@@ -508,22 +508,18 @@ def test_the_drain_budget_tracks_the_live_job_completion_wait(monkeypatch: pytes
         reset_all_settings()
 
 
-async def test_build_takes_the_queue_name_from_settings(worker_env, monkeypatch) -> None:
-    """An unset ``--queue-name`` binds the worker's consume target to the
-    ``ARQ_QUEUE_NAME`` setting, so it tracks the enqueue pool's default queue
-    without a CLI flag — the seam per-stack isolation rides on."""
-    from tai42_backend_arq.settings import ArqSettings
-
-    monkeypatch.setattr(worker, "arq_settings", lambda: ArqSettings(queue_name="tai42_e2e_abc123:arq:queue"))
+async def test_a_worker_without_a_label_consumes_the_settings_queue(worker_env, settings_queue) -> None:
     await _built()
 
-    assert worker_env.latest().kwargs["queue_name"] == "tai42_e2e_abc123:arq:queue"
+    assert worker_env.latest().kwargs["queue_name"] == settings_queue
 
 
-async def test_explicit_queue_name_flag_beats_the_setting(worker_env, monkeypatch) -> None:
-    from tai42_backend_arq.settings import ArqSettings
+async def test_a_worker_on_a_label_consumes_the_derived_queue(worker_env, settings_queue) -> None:
+    await _built("--queue", "gpu")
 
-    monkeypatch.setattr(worker, "arq_settings", lambda: ArqSettings(queue_name="from-setting"))
-    await _built("--queue-name", "from-flag")
+    assert worker_env.latest().kwargs["queue_name"] == f"{settings_queue}.gpu"
 
-    assert worker_env.latest().kwargs["queue_name"] == "from-flag"
+
+def test_a_worker_label_outside_the_rule_is_a_bad_parameter() -> None:
+    with pytest.raises(click.BadParameter, match=r"must match \[A-Za-z0-9_-\]\+"):
+        ArqWorkerRuntime.from_args(["--queue", "a:b"])

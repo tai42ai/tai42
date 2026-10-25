@@ -13,7 +13,7 @@ from tai42_skeleton.app.boot_rules import translate_config_invariants
 from tai42_skeleton.config.boundary import registered_env_var_names, x_band_env_keys
 from tai42_skeleton.config.file_manager import ENV_KEY_RE
 from tai42_skeleton.config.service import ConfigService
-from tai42_skeleton.operations import BadRequestError, OperationResponse, operation
+from tai42_skeleton.operations import BadRequestError, ConflictError, OperationResponse, UpstreamError, operation
 from tai42_skeleton.operations._broadcast import apply_response, translate_orphan_env_write, writer_exit_response
 from tai42_skeleton.settings.env_secret_marks import SECRET_MARKS_ENV_VAR, merge_secret_marks
 from tai42_skeleton.settings.owned_settings import register_owned_settings_groups
@@ -157,7 +157,7 @@ def _pointer_index(node: list[Any], segment: str, segments: list[str]) -> int:
     tags=["manifest"],
     destructive=True,
     reload_gated=True,
-    errors=[BadRequestError],
+    errors=[BadRequestError, ConflictError, UpstreamError],
     request_model=SetMcpSecretEnv,
     response_model=ApplyResponse,
 )
@@ -181,13 +181,16 @@ async def set_mcp_secret_env(
     validator, same as ``POST /api/mcp-config``). An explicit ``key`` that is a recycle-class
     setting rolls a worker recycle as every env write does (the response's ``recycle``; this
     worker recycles itself after replying when the roll converged).
+    An ``mcp`` selection list whose ``!ENV`` marker would resolve so that a tool something still
+    uses stops being picked is refused with a 409 naming the holders, or a 502 when the server
+    cannot list its tools for that check, before anything is written.
     """
     segments = _parse_manifest_pointer(manifest_pointer)  # loud 400 on a non-mcp head
 
     service = ConfigService.from_app()
 
     async def prepare(stored: dict[str, str]) -> tuple[dict[str, str], Callable[[dict[str, Any]], None]]:
-        # Runs INSIDE the ConfigService env-write lock, against the stored env read once
+        # Runs INSIDE the ConfigService config-write lock, against the stored env read once
         # under that lock — so the key resolution and the secret-marks append are read-then-
         # write against a snapshot no concurrent combined op can clobber.
         #

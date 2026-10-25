@@ -11,6 +11,7 @@ bodies of the filter predicates / ``replace_mcp`` / ``live_manifest`` /
 """
 
 from collections import defaultdict
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from copy import deepcopy
 from typing import Literal
 
@@ -26,6 +27,31 @@ from tai42_contract.manifest import (
 from tai42_contract.manifest import (
     Manifest as ManifestContract,
 )
+
+
+def union_tool_extensions(
+    entry_maps: Iterable[Mapping[str, Sequence[Sequence[ExtensionElement]]]],
+    api_tools_map: Mapping[str, Sequence[Sequence[ExtensionElement]]],
+) -> dict[str, list[list[ExtensionElement]]]:
+    """The single attachment map (tool base name -> combos) of the manifest's ``extensions`` maps.
+
+    ``entry_maps`` are the maps of every ``tools`` entry then every ``mcp`` entry, in document
+    order; ``api_tools_map`` is ``api_tools.extensions``, the home of combos whose base is a
+    projected operation. The combos of a base are concatenated in that order.
+    """
+    tool_extensions: dict[str, list[list[ExtensionElement]]] = defaultdict(list)
+    for extensions in [*entry_maps, api_tools_map]:
+        for base, combos in extensions.items():
+            tool_extensions[base].extend(list(combo) for combo in combos)
+    return dict(tool_extensions)
+
+
+def selection_admits(name: str, include: Collection[str], exclude: Collection[str]) -> bool:
+    """Whether ``name`` passes an include/exclude selection.
+
+    A non-empty ``include`` admits only its names; an empty one admits every name not in ``exclude``.
+    """
+    return name in include or (not include and name not in exclude)
 
 
 class Manifest(ManifestContract):
@@ -90,18 +116,9 @@ class Manifest(ManifestContract):
         self.tool_extensions = self._build_tool_extensions()
 
     def _build_tool_extensions(self) -> dict[str, list[list[ExtensionElement]]]:
-        # Union the ``extensions`` maps of tools + mcp AND ``api_tools`` into a
-        # single attachment map (tool base-name -> combos), applied AFTER
-        # selection and independent of it. ``api_tools.extensions`` is the home
-        # for combos whose base is a PROJECTED operation, so a combo over a
-        # projected op attaches exactly like a ``tools[]``-entry combo.
-        tool_extensions: dict[str, list[list[ExtensionElement]]] = defaultdict(list)
-        for cfg in self.tools + self.mcp:
-            for base, combos in cfg.extensions.items():
-                tool_extensions[base].extend(combos)
-        for base, combos in self.api_tools.extensions.items():
-            tool_extensions[base].extend(combos)
-        return dict(tool_extensions)
+        # The attachment map is applied AFTER selection and independent of it, so a
+        # combo over a projected op attaches exactly like a ``tools[]``-entry combo.
+        return union_tool_extensions((cfg.extensions for cfg in self.tools + self.mcp), self.api_tools.extensions)
 
     def _build_map(
         self, configs, key: Literal["title", "module"] = "title"
@@ -161,7 +178,7 @@ class Manifest(ManifestContract):
                 raise
         include_map = getattr(self, f"include_{prefix}_map")
         exclude_map = getattr(self, f"exclude_{prefix}_map")
-        should_include = name in include_map[key] or (not include_map[key] and name not in exclude_map[key])
+        should_include = selection_admits(name, include_map[key], exclude_map[key])
         # Record the resolved decision off to the side, never into the emitted
         # ``cfg.include``/``cfg.exclude`` (which back ``live_manifest``).
         if should_include:
@@ -260,4 +277,5 @@ __all__ = [
     "Manifest",
     "TaiMCPConfig",
     "ToolsConfig",
+    "union_tool_extensions",
 ]

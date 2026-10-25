@@ -29,7 +29,9 @@ from tai42_kit.utils.schedule_subject import (
     SCHEDULE_EXECUTION_FINGERPRINT_ARG,
     SCHEDULE_EXECUTION_KEY_ARG,
     SCHEDULE_SUBJECT_ARG,
+    schedule_create_fire,
 )
+from tai42_kit.utils.unset import UNSET
 from tai42_kit.utils.worker_secret_capability import WORKER_SECRET_CAPABILITY_ARG, set_access_control_gate_state
 
 _FORWARDED = {
@@ -112,6 +114,19 @@ async def test_prepare_backend_kwargs_strips_fastmcp_context() -> None:
 
     kwargs = await prepare_backend_kwargs(some_tool, "backend_tool_name", "some_tool", {"x": 1, "ctx": object()})
     assert kwargs == {"x": 1, "backend_tool_name": "some_tool", "backend_secret_capability": False}
+
+
+async def test_prepare_backend_kwargs_drops_every_omitted_argument_and_keeps_none() -> None:
+    async def some_tool(a: int, b: Any = UNSET, c: Any = None, d: int = 0) -> None: ...
+
+    supplied = {"a": 1, "b": UNSET, "c": None, "d": 0}
+    expected = {"a": 1, "c": None, "d": 0, "backend_tool_name": "some_tool", "backend_secret_capability": False}
+    assert await prepare_backend_kwargs(some_tool, "backend_tool_name", "some_tool", dict(supplied)) == expected
+    with schedule_create_fire():
+        scheduled = await prepare_backend_kwargs(
+            some_tool, "backend_tool_name", "some_tool", dict(supplied), scheduled=True
+        )
+    assert scheduled == expected
 
 
 # -- render methods ---------------------------------------------------------

@@ -11,6 +11,7 @@ apply window covers the retire's drain floor) against the post-change env.
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from tai42_skeleton.app.boot_rules import (
@@ -24,6 +25,7 @@ from tai42_skeleton.app.boot_rules import (
     serve_workers,
 )
 from tai42_skeleton.app.bus_settings import BusSettings, bus_settings
+from tai42_skeleton.app.epoch import Epoch, current_epoch_or_none
 from tai42_skeleton.config.boundary import (
     refuse_incomplete_admin_pair,
     refuse_key_material,
@@ -37,9 +39,12 @@ from tai42_skeleton.hooks.settings import HooksSettings
 from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.settings.owned_settings import refuse_unknown_owned_env_write
 from tai42_skeleton.sub_mcp.settings import SubMcpSettings
+from tai42_skeleton.tools.binding.errors import ExtensionComboRefusedError
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Iterator, Mapping
+
+    from tai42_contract.manifest import ExtensionElement
 
 
 def _refuse_unrecyclable_merge(stored: Mapping[str, str], changes: Mapping[str, str]) -> list[str]:
@@ -97,6 +102,55 @@ def _check_store_invariants(*, backend_module: str | None, workers: int) -> None
     check_workers_need_hooks_store(workers=workers, hooks_store_shared=hooks_store_shared)
 
 
+def _extension_combos(manifest: Manifest) -> Iterator[tuple[str, str, list[ExtensionElement]]]:
+    """Every extension combo of ``manifest`` as ``(path, tool, combo)``, in document order."""
+    for section, entries in (("tools", manifest.tools), ("mcp", manifest.mcp)):
+        for entry in entries:
+            for tool, combos in entry.extensions.items():
+                for index, combo in enumerate(combos):
+                    yield f"{section}[{entry.title}].extensions[{tool}][{index}]", tool, combo
+    for tool, combos in manifest.api_tools.extensions.items():
+        for index, combo in enumerate(combos):
+            yield f"api_tools.extensions[{tool}][{index}]", tool, combo
+
+
+@dataclass(frozen=True, eq=False)
+class _ManifestValidationInputs:
+    """What :meth:`_ValidationMixin._validate_manifest` reads besides the document, taken at one moment.
+
+    The process env (the env ``!ENV`` markers and combo settings resolve against is derived from it
+    and the stored env, which the write exclusion holds still), whether the bus is
+    configured (the backend-needs-bus rule), and the live serving generation (the combo check
+    dry-runs against its extension registry; a reload or a settings-profile apply installs a new one).
+    """
+
+    env: dict[str, str]
+    bus_enabled: bool
+    epoch: Epoch | None
+
+    @classmethod
+    def now(cls) -> _ManifestValidationInputs:
+        return cls(env=dict(os.environ), bus_enabled=bus_settings().enabled, epoch=current_epoch_or_none())
+
+    def unchanged(self) -> bool:
+        """Whether the process env, the bus setting and the live serving generation are still these."""
+        current = _ManifestValidationInputs.now()
+        return current.env == self.env and current.bus_enabled == self.bus_enabled and current.epoch is self.epoch
+
+
+@dataclass(frozen=True, eq=False)
+class _EnvValidationInputs:
+    """What an env-write validation reads, taken at one moment.
+
+    The process inputs of :class:`_ManifestValidationInputs` plus the stored env (the change
+    merges onto it) and the stored manifest (its ``!ENV`` markers resolve against the new env).
+    """
+
+    process: _ManifestValidationInputs
+    stored_env: dict[str, str]
+    manifest: dict[str, Any]
+
+
 class _ValidationMixin(_ConfigServiceBase):
     """The validate-before-persist gate every pipeline entrypoint runs its change through.
 
@@ -106,19 +160,52 @@ class _ValidationMixin(_ConfigServiceBase):
     def _validate_manifest(self, document: Mapping[str, Any]) -> None:
         """Validate the resolved projection of a manifest change.
 
-        Checks the pydantic ``Manifest`` schema plus the backend-needs-bus,
-        backend-needs-hooks-store, workers-need-bus and workers-need-shared-stores invariants,
-        and refuses any ``!ENV`` marker left dangling against the current env. The env is unchanged by a manifest
-        mutation, so markers resolve against the current process env and the bus and store
-        configuration is the current one.
+        Refuses any ``!ENV`` marker left dangling first, so it is named as dangling before the
+        resolved projection, where it would read as ``"N/A"``, is validated; then checks the
+        pydantic ``Manifest`` schema and the extension combos, then the backend-needs-bus,
+        backend-needs-hooks-store, workers-need-bus and workers-need-shared-stores invariants.
+        Markers and the projection resolve against the env a reload applies from the store
+        (:meth:`_converged_env` of the stored env), not this process's env alone: the write holds
+        the store's exclusive span, so that env is the one every worker converges to. A manifest
+        mutation leaves the env unchanged, so the invariants read the current bus and store
+        configuration, after the projection.
         """
-        manifest = self._validated_projection(document)
+        env = self._converged_env(self._read_stored_env())
+        refuse_unresolved_env(document, env)
+        with _environ(env, stored_env_file=self._stored_env_file()):
+            manifest = self._validated_projection(document)
         workers = serve_workers()
         _check_bus_invariants(
             backend_module=manifest.backend_module, workers=workers, bus_configured=bus_settings().enabled
         )
         _check_store_invariants(backend_module=manifest.backend_module, workers=workers)
-        refuse_unresolved_env(document, dict(os.environ))
+
+    def _validate_manifest_noting_inputs(self, document: Mapping[str, Any]) -> _ManifestValidationInputs:
+        """Validate ``document`` as :meth:`_validate_manifest` does; return the inputs it was validated against.
+
+        The inputs are taken before the validation reads them, so a change landing while it runs
+        reads as changed. A caller that awaits before it persists validates again unless the
+        document and :meth:`_ManifestValidationInputs.unchanged` both still hold.
+        """
+        inputs = _ManifestValidationInputs.now()
+        self._validate_manifest(document)
+        return inputs
+
+    def _env_validation_inputs(self) -> _EnvValidationInputs:
+        """The inputs an env-write validation is about to read; taken before it reads them."""
+        return _EnvValidationInputs(
+            process=_ManifestValidationInputs.now(),
+            stored_env=self._read_stored_env(),
+            manifest=self._read_preserved_manifest(),
+        )
+
+    def _env_validation_inputs_unchanged(self, inputs: _EnvValidationInputs) -> bool:
+        """Whether the process inputs, the stored env and the stored manifest are still ``inputs``."""
+        return (
+            inputs.process.unchanged()
+            and self._read_stored_env() == inputs.stored_env
+            and self._read_preserved_manifest() == inputs.manifest
+        )
 
     def _validate_env(self, changes: dict[str, str]) -> list[str]:
         """Validate the effective config an env change produces; return the recycle-class keys it changes.
@@ -232,6 +319,14 @@ class _ValidationMixin(_ConfigServiceBase):
         """Build and validate the RESOLVED in-memory projection of a PRESERVED document.
 
         The ``!ENV`` markers are materialized for validation only, then the projection is validated
-        against the ``Manifest`` schema. Raises on an invalid document.
+        against the ``Manifest`` schema and every extension combo of ``tools``, ``mcp`` and
+        ``api_tools`` is dry-run bound, in document order, with its settings resolved. Raises on an
+        invalid document; a refused combo raises ``ValueError`` naming its path.
         """
-        return Manifest.model_validate(self._resolve(document))
+        manifest = Manifest.model_validate(self._resolve(document))
+        for path, tool, combo in _extension_combos(manifest):
+            try:
+                self._combo_check(tool, combo)
+            except ExtensionComboRefusedError as exc:
+                raise ValueError(f"{path}: {exc}") from exc
+        return manifest

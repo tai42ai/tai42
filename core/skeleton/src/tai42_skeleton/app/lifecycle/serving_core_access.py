@@ -36,8 +36,11 @@ if TYPE_CHECKING:
         StatesConsumerListerRegistry,
         StatesService,
     )
+    from tai42_skeleton.storage.prefix_marks import PrefixMarkRegistry
     from tai42_skeleton.template import ResourceManager
+    from tai42_skeleton.template.delete_referees import TemplateDeleteRefereeRegistry
     from tai42_skeleton.tools import (
+        TemplateRefsRegistry,
         ToolExtrasRegistry,
         ToolPauseRegistry,
         ToolRefsRegistry,
@@ -45,6 +48,7 @@ if TYPE_CHECKING:
         ToolTierRegistry,
     )
     from tai42_skeleton.tools.binding import ToolBinding
+    from tai42_skeleton.tools.delete_cascades import ToolDeleteCascadeRegistry
     from tai42_skeleton.tools.delete_referees import ToolDeleteRefereeRegistry
     from tai42_skeleton.tools.detach_referees import StateTemplateDetachRefereeRegistry
     from tai42_skeleton.tools.rename_referees import ToolRenameRefereeRegistry
@@ -226,6 +230,10 @@ class ServingCoreAccessMixin(LifecycleState):
         return self._serving_core._channel_registry
 
     @property
+    def _prefix_mark_registry(self) -> "PrefixMarkRegistry":
+        return self._serving_core._prefix_mark_registry
+
+    @property
     def _write_validator_registry(self) -> "PresetWriteValidatorRegistry":
         return self._serving_core._write_validator_registry
 
@@ -250,6 +258,10 @@ class ServingCoreAccessMixin(LifecycleState):
         return self._serving_core._tool_refs_registry
 
     @property
+    def _template_refs_registry(self) -> "TemplateRefsRegistry":
+        return self._serving_core._template_refs_registry
+
+    @property
     def _tool_retry_registry(self) -> "ToolRetryRegistry":
         return self._serving_core._tool_retry_registry
 
@@ -270,8 +282,16 @@ class ServingCoreAccessMixin(LifecycleState):
         return self._serving_core._delete_referee_registry
 
     @property
+    def _delete_cascade_registry(self) -> "ToolDeleteCascadeRegistry":
+        return self._serving_core._delete_cascade_registry
+
+    @property
     def _detach_referee_registry(self) -> "StateTemplateDetachRefereeRegistry":
         return self._serving_core._detach_referee_registry
+
+    @property
+    def _template_delete_referee_registry(self) -> "TemplateDeleteRefereeRegistry":
+        return self._serving_core._template_delete_referee_registry
 
     @property
     def _seed_registry(self) -> "PresetSeedRegistry":

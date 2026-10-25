@@ -62,7 +62,7 @@ from tai42_agents._internal.structured import structured_output_stack
 
 from ._client_tool import client_tool
 from ._graph_support import invoke_tools_agent
-from .conftest import fake_run_trace
+from .conftest import fake_init_langgraph_config
 
 _RECOVERY_LOGGER = "tai42_agents._internal.recovery"
 
@@ -498,11 +498,7 @@ def test_tools_agent_door_answers_a_broken_call(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(bta, "get_llm_async", fake_get_llm)
     monkeypatch.setattr(bta, "checkpoint_registry", lambda: SimpleNamespace(get_checkpointer=fake_get_checkpointer))
     monkeypatch.setattr(bta, "context_overflow_middlewares", AsyncMock(return_value=[]))
-    monkeypatch.setattr(
-        bta,
-        "init_langgraph_config",
-        lambda config: fake_run_trace({"configurable": {"thread_id": config["configurable"]["thread_id"]}}),
-    )
+    monkeypatch.setattr(bta, "init_langgraph_config", fake_init_langgraph_config)
 
     async def _lookup() -> str:
         return "found"

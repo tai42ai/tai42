@@ -37,7 +37,7 @@ async def test_returns_data_envelope_of_kind_rows(bound_app) -> None:
     assert set(body) == {"data"}
     rows = body["data"]
     assert isinstance(rows, list)
-    # Every row round-trips through the model, and the door reports the ten pluggable
+    # Every row round-trips through the model, and the door reports the eleven pluggable
     # kinds plus one row per DB-backed gated feature.
     validated = [KindStatus.model_validate(row) for row in rows]
     assert {row.kind for row in validated} == {
@@ -45,6 +45,7 @@ async def test_returns_data_envelope_of_kind_rows(bound_app) -> None:
         "accounts",
         "monitoring",
         "storage",
+        "files",
         "backend",
         "sandbox",
         "channels",

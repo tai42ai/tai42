@@ -412,15 +412,6 @@ wheels = [
 ]
 
 [[package]]
-name = "backoff"
-version = "2.2.1"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/47/d7/5bbeb12c44d7c4f2fb5b56abce497eb5ed9f34d85701de869acedd602619/backoff-2.2.1.tar.gz", hash = "sha256:03f829f5bb1923180821643f8753b0502c3b682293992485b0eef2807afa5cba", size = 17001, upload-time = "2022-10-05T19:19:32.061Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/df/73/b6e24bd22e6720ca8ee9a85a0c4a2971af8497d8f3193fa05390cbd46e09/backoff-2.2.1-py3-none-any.whl", hash = "sha256:63579f9a0628e06278f7e47b7d7d5b6ce20dc65c5e96a6f3ca99a6adca0396e8", size = 15148, upload-time = "2022-10-05T19:19:30.546Z" },
-]
-
-[[package]]
 name = "backrefs"
 version = "8.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2364,25 +2355,6 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/cd/69/d6dda0484482b74cfc7c6e3812587c7a57face6b74f519bc01aa12a1cd07/langchain_xai-1.3.0.tar.gz", hash = "sha256:81924cdf5061108d424bd7a4a52ad72a96e3a2d20da47b16ef2531da667ba866", size = 211202, upload-time = "2026-07-21T16:15:29.522Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/4a/4d/08a2494344e728c7a159d5f2eba5255a76bdef9f72222d622921d3971684/langchain_xai-1.3.0-py3-none-any.whl", hash = "sha256:a40e0664a8bdf9eb31fed73998d88b7f49610ad596bc4a115d0270ad22a09098", size = 12942, upload-time = "2026-07-21T16:15:28.317Z" },
-]
-
-[[package]]
-name = "langfuse"
-version = "4.0.6"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "backoff" },
-    { name = "httpx" },
-    { name = "opentelemetry-api" },
-    { name = "opentelemetry-exporter-otlp-proto-http" },
-    { name = "opentelemetry-sdk" },
-    { name = "packaging" },
-    { name = "pydantic" },
-    { name = "wrapt" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/ab/d0/6d79ed5614f86f27f5df199cf10c6facf6874ff6f91b828ae4dad90aa86d/langfuse-4.0.6.tar.gz", hash = "sha256:83a6f8cc8f1431fa2958c91e2673bc4179f993297e9b1acd1dbf001785e6cf83", size = 274094, upload-time = "2026-04-01T20:04:15.153Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/50/b4/088048e37b6d7ec1b52c6a11bc33101454285a22eaab8303dcccfd78344d/langfuse-4.0.6-py3-none-any.whl", hash = "sha256:0562b1dcf83247f9d8349f0f755eaed9a7f952fee67e66580970f0738bf3adbf", size = 472841, upload-time = "2026-04-01T20:04:16.451Z" },
 ]
 
 [[package]]
@@ -4457,7 +4429,7 @@ wheels = [
 [[package]]
 name = "reference-plugin"
 version = "0.1.0"
-source = { git = "https://github.com/tai42ai/tai-studio?subdirectory=e2e%2Freference-plugin#2d731db2312ee139ca5110fb6a4af0ac6d72da98" }
+source = { git = "https://github.com/tai42ai/tai-studio?subdirectory=e2e%2Freference-plugin&rev=99a44ca89ac71d239c4f40adde3a27428986350a#99a44ca89ac71d239c4f40adde3a27428986350a" }
 dependencies = [
     { name = "tai42-contract" },
 ]
@@ -5105,7 +5077,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "tai42-agents"
-version = "13.0.1"
+version = "14.0.0"
 source = { editable = "plugins/agents" }
 dependencies = [
     { name = "deepagents" },
@@ -5161,7 +5133,7 @@ provides-extras = ["park", "dev"]
 
 [[package]]
 name = "tai42-backend-arq"
-version = "7.0.1"
+version = "8.0.0"
 source = { editable = "plugins/backend-arq" }
 dependencies = [
     { name = "arq" },
@@ -5271,7 +5243,7 @@ dev = [
 
 [[package]]
 name = "tai42-backend-rq"
-version = "7.0.1"
+version = "8.0.0"
 source = { editable = "plugins/backend-rq" }
 dependencies = [
     { name = "click" },
@@ -5326,7 +5298,7 @@ dev = [
 
 [[package]]
 name = "tai42-channel-slack"
-version = "8.0.1"
+version = "8.1.0"
 source = { editable = "plugins/channel-slack" }
 dependencies = [
     { name = "httpx" },
@@ -5369,7 +5341,7 @@ dev = [
 
 [[package]]
 name = "tai42-channel-telegram"
-version = "8.0.1"
+version = "8.1.0"
 source = { editable = "plugins/channel-telegram" }
 dependencies = [
     { name = "httpx" },
@@ -5412,7 +5384,7 @@ dev = [
 
 [[package]]
 name = "tai42-channel-twilio"
-version = "9.0.1"
+version = "9.1.0"
 source = { editable = "plugins/channel-twilio" }
 dependencies = [
     { name = "httpx" },
@@ -5455,7 +5427,7 @@ dev = [
 
 [[package]]
 name = "tai42-channel-web"
-version = "9.0.2"
+version = "9.1.0"
 source = { editable = "plugins/channel-web" }
 dependencies = [
     { name = "httpx" },
@@ -5498,7 +5470,7 @@ dev = [
 
 [[package]]
 name = "tai42-channel-whatsapp"
-version = "13.0.1"
+version = "13.1.0"
 source = { editable = "plugins/channel-whatsapp" }
 dependencies = [
     { name = "cryptography" },
@@ -5543,7 +5515,7 @@ dev = [
 
 [[package]]
 name = "tai42-cli"
-version = "16.0.2"
+version = "17.0.0"
 source = { editable = "core/cli" }
 dependencies = [
     { name = "click" },
@@ -5585,7 +5557,7 @@ provides-extras = ["dev", "api-gate"]
 
 [[package]]
 name = "tai42-contract"
-version = "23.0.0"
+version = "24.0.0"
 source = { editable = "core/contract" }
 dependencies = [
     { name = "pydantic" },
@@ -5617,7 +5589,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "tai42-e2e"
-version = "22.0.1"
+version = "23.0.0"
 source = { editable = "e2e" }
 dependencies = [
     { name = "aiosqlite" },
@@ -5738,7 +5710,7 @@ capture = [
 dev = [
     { name = "pyright", specifier = ">=1.1.389" },
     { name = "pytest-split", specifier = ">=0.10" },
-    { name = "reference-plugin", git = "https://github.com/tai42ai/tai-studio?subdirectory=e2e%2Freference-plugin" },
+    { name = "reference-plugin", git = "https://github.com/tai42ai/tai-studio?subdirectory=e2e%2Freference-plugin&rev=99a44ca89ac71d239c4f40adde3a27428986350a" },
     { name = "ruff", specifier = ">=0.6" },
 ]
 
@@ -5776,7 +5748,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "tai42-kit"
-version = "12.0.1"
+version = "13.0.0"
 source = { editable = "core/kit" }
 dependencies = [
     { name = "anyio" },
@@ -6050,10 +6022,10 @@ wheels = [
 
 [[package]]
 name = "tai42-monitoring-langfuse"
-version = "5.4.1"
+version = "6.0.0"
 source = { editable = "plugins/monitoring-langfuse" }
 dependencies = [
-    { name = "langfuse" },
+    { name = "httpx" },
     { name = "orjson" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
@@ -6073,7 +6045,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "langfuse", specifier = "~=4.0.6" },
+    { name = "httpx", specifier = ">=0.28" },
     { name = "orjson", specifier = ">=3.11" },
     { name = "pydantic", specifier = ">=2.12" },
     { name = "pydantic-settings", specifier = ">=2.15.0" },
@@ -6173,7 +6145,7 @@ dev = [
 
 [[package]]
 name = "tai42-skeleton"
-version = "29.0.1"
+version = "30.0.0"
 source = { editable = "core/skeleton" }
 dependencies = [
     { name = "anyio" },
@@ -6332,7 +6304,7 @@ provides-extras = ["toolbox", "files", "dev"]
 
 [[package]]
 name = "tai42-storage-github"
-version = "1.5.1"
+version = "2.0.0"
 source = { editable = "plugins/storage-github" }
 dependencies = [
     { name = "httpx" },
@@ -6373,7 +6345,7 @@ dev = [
 
 [[package]]
 name = "tai42-storage-local"
-version = "2.3.1"
+version = "3.0.0"
 source = { editable = "plugins/storage-local" }
 dependencies = [
     { name = "aiofiles" },
@@ -6412,7 +6384,7 @@ dev = [
 
 [[package]]
 name = "tai42-storage-s3"
-version = "2.3.1"
+version = "3.0.0"
 source = { editable = "plugins/storage-s3" }
 dependencies = [
     { name = "aioboto3" },
@@ -6457,7 +6429,7 @@ dev = [
 
 [[package]]
 name = "tai42-toolbox"
-version = "6.0.1"
+version = "6.1.0"
 source = { editable = "plugins/toolbox" }
 dependencies = [
     { name = "makefun" },

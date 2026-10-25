@@ -3,7 +3,8 @@
 ``tai42_storage_github.storage`` registers ``GithubStorage`` and reaches the pooled
 HTTP client via ``tai42_app`` at import time, so a fake is bound here first. The
 registration decorator is a passthrough, and ``client_ctx`` yields whatever mock
-client a test installs via the ``client`` fixture.
+client a test installs via the ``client`` fixture. A streamed request
+(``client.stream``) yields the response a test installs with :func:`set_stream`.
 """
 
 from __future__ import annotations
@@ -11,7 +12,8 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from tai42_contract.app import tai42_app
@@ -62,12 +64,13 @@ def settings() -> SimpleNamespace:
     return SimpleNamespace(
         username="acme",
         repo="content",
-        branch="main",
+        branch="dev",
         token=SimpleNamespace(get_secret_value=lambda: "s3cr3t-token-value"),
         # Mirror the real ``GithubStorageSettings`` base-URL templates so the provider's
         # per-request URL construction is exercised exactly as in production.
-        raw_base_url="https://raw.githubusercontent.com/{username}/{repo}/refs/heads/{branch}",
+        raw_base_url="https://raw.githubusercontent.com/{username}/{repo}/{commit}",
         contents_api_url="https://api.github.com/repos/{username}/{repo}/contents",
+        ref_api_url="https://api.github.com/repos/{username}/{repo}/git/ref/heads/{branch}",
         trees_api_url="https://api.github.com/repos/{username}/{repo}/git/trees/{branch}",
     )
 
@@ -79,21 +82,59 @@ def client(monkeypatch: pytest.MonkeyPatch, settings: SimpleNamespace) -> AsyncM
 
     monkeypatch.setattr(storage_mod, "github_storage_settings", lambda: settings)
     mock = AsyncMock()
+    # ``stream`` is a synchronous call answering an async context manager.
+    mock.stream = MagicMock()
     _fake_app.clients.client = mock
     return mock
 
 
-def make_response(*, status: int = 200, json_body: object = None, text: str = "", content: bytes | None = None):
-    """A MagicMock httpx.Response; ``raise_for_status`` raises a real error on 4xx/5xx."""
-    from unittest.mock import MagicMock
+def set_stream(client: AsyncMock, resp: Any) -> None:
+    """Make ``client.stream(...)`` yield ``resp`` as its streamed response."""
 
-    from httpx import HTTPStatusError, Request, Response
+    @asynccontextmanager
+    async def _ctx() -> AsyncIterator[Any]:
+        yield resp
+
+    client.stream.side_effect = lambda *args, **kwargs: _ctx()
+
+
+def make_response(
+    *,
+    status: int = 200,
+    json_body: object = None,
+    text: str = "",
+    content: bytes | None = None,
+    headers: dict[str, str] | None = None,
+    chunks: list[bytes] | None = None,
+):
+    """A MagicMock httpx.Response; ``raise_for_status`` raises a real error on 4xx/5xx.
+
+    ``headers`` is a real case-insensitive :class:`httpx.Headers`. The streamed body
+    (``aiter_bytes`` yields ``chunks``, else the whole ``content``; ``aread``) sets
+    ``body_read`` once consumed.
+    """
+    from httpx import Headers, HTTPStatusError, Request, Response
 
     resp = MagicMock()
     resp.status_code = status
     resp.json.return_value = {} if json_body is None else json_body
     resp.text = text
     resp.content = content if content is not None else text.encode("utf-8")
+    resp.headers = Headers(headers or {})
+    resp.body_read = False
+    body_chunks = list(chunks) if chunks is not None else [resp.content]
+
+    async def _aiter_bytes() -> AsyncIterator[bytes]:
+        resp.body_read = True
+        for chunk in body_chunks:
+            yield chunk
+
+    async def _aread() -> bytes:
+        resp.body_read = True
+        return resp.content
+
+    resp.aiter_bytes = _aiter_bytes
+    resp.aread = _aread
     if status >= 400:
         real = Response(status, request=Request("GET", "https://example.invalid"))
         resp.raise_for_status.side_effect = HTTPStatusError("err", request=real.request, response=real)

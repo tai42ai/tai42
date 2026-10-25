@@ -1,16 +1,9 @@
-"""The Langfuse read/query implementation of ``MonitoringReader``.
+"""The Langfuse read implementation of ``MonitoringReader``.
 
-- ``query_metrics`` -> the Metrics API.
-- ``list_spans_in_window`` -> the Observations API (one item per tool/node run).
-- ``get_trace`` / ``list_traces`` -> the Traces API.
-- ``get_observation`` -> the Observations API (one observation by id).
-
-``LangfuseReader`` is a thin façade: it composes one query object per API surface
-and delegates each contract method to it. The reader methods are ``async`` but the
-Langfuse client is synchronous, so every blocking call is dispatched via
-``asyncio.to_thread``. Every read is scoped to the active project's ``source`` (the
-Langfuse ``environment``) so a shared project returns only our rows; ``get_trace``
-is exempt, since a trace id is globally unique.
+``LangfuseReader`` composes one query object per read surface and delegates each contract method to it:
+``query_metrics`` reads Metrics v2, every other read the observations list. The Langfuse client is synchronous,
+so every call runs off the event loop. Every read but ``get_trace`` and ``get_observation`` is scoped to the
+active project's ``source`` (the Langfuse ``environment``); a trace id is globally unique.
 """
 
 from __future__ import annotations
@@ -32,10 +25,9 @@ from tai42_contract.monitoring import (
 )
 
 from tai42_monitoring_langfuse.client_manager import LangfuseClientManager
-from tai42_monitoring_langfuse.filters import METRIC_SORT_UNSUPPORTED_FILTERS
 from tai42_monitoring_langfuse.metrics_query import MetricsQueryRunner
 from tai42_monitoring_langfuse.query_base import PAGE_SIZE
-from tai42_monitoring_langfuse.sorting import TRACE_METRIC_MEASURE, TRACE_SORT_FIELDS
+from tai42_monitoring_langfuse.sorting import TRACE_SORT_FIELDS
 from tai42_monitoring_langfuse.span_window import SpanWindowQuery
 from tai42_monitoring_langfuse.trace_query import TraceQuery
 
@@ -54,11 +46,8 @@ class LangfuseReader:
         return self._metrics.metrics_capability()
 
     def list_capability(self) -> ListCapability:
-        """Declare the trace sorts; a metric-ranked sort cannot combine with the filters the metrics view lacks."""
-        return ListCapability(
-            sort_fields=TRACE_SORT_FIELDS,
-            incompatible_filters=dict.fromkeys(TRACE_METRIC_MEASURE, METRIC_SORT_UNSUPPORTED_FILTERS),
-        )
+        """Declare the trace sorts; every sort combines with every filter."""
+        return ListCapability(sort_fields=TRACE_SORT_FIELDS)
 
     def max_page_size(self) -> int:
         """The largest ``limit`` one ``list_traces`` call accepts."""
@@ -105,6 +94,24 @@ class LangfuseReader:
             to_timestamp=to_timestamp,
             limit=limit,
             page=page,
+            filter_=filter_,
+            order_by=order_by,
+        )
+
+    async def export_traces(
+        self,
+        *,
+        from_timestamp: datetime | None = None,
+        to_timestamp: datetime | None = None,
+        max_rows: int,
+        filter_: MonitoringFilter | None = None,
+        order_by: OrderBy | None = None,
+    ) -> list[MonitoringTraceSummary]:
+        """Up to ``max_rows + 1`` trace summaries in the ``list_traces`` order, in one read."""
+        return await self._traces.export_traces(
+            from_timestamp=from_timestamp,
+            to_timestamp=to_timestamp,
+            max_rows=max_rows,
             filter_=filter_,
             order_by=order_by,
         )

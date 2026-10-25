@@ -24,6 +24,7 @@ from tai42_kit.net import fetch_url
 
 from tai42_skeleton.template.absent_ids import AbsentTemplateIds
 from tai42_skeleton.template.data_uri import assert_image, data_uri, decode_data_uri
+from tai42_skeleton.template.errors import TemplateLocaleNotFoundError, TemplateNotFoundError, TemplateNotTextError
 from tai42_skeleton.template.media import MediaBlock
 from tai42_skeleton.template.path_guard import safe_template_path
 from tai42_skeleton.template.reads import RecordingEnvironment, record_template_read
@@ -38,29 +39,9 @@ _INFERENCE_MARKER_KEY = "x-tai42-inference"
 _PARTIAL_INFERENCE = "partial"
 
 
-class TemplateNotFoundError(Exception):
-    """A requested stored template does not exist.
-
-    Raised by the read paths when a ``template_id`` resolves to no stored
-    content, so an HTTP surface can map a missing template to 404 instead of
-    leaking storage's ``FileNotFoundError`` as a 500. Genuine storage/transport
-    failures are NOT this type and keep propagating.
-    """
-
-
 #: The reserved render-context key the rendering layer stamps the subject's locale onto,
 #: read by :func:`_list_format` — never a template author's variable (a collision raises).
 _LOCALE_CONTEXT_KEY = "_tai_locale"
-
-
-class TemplateLocaleNotFoundError(Exception):
-    """A stored template has no variant for the resolved locale chain and no default variant.
-
-    Raised by :meth:`ResourceManager.render_by_id` when a locale-scoped render walks the
-    chain (``he-IL`` -> ``he`` -> the bare default id) and finds NONE of them stored, so
-    the render refuses loudly naming the template and locale instead of silently rendering
-    the wrong language.
-    """
 
 
 @pass_context
@@ -224,9 +205,17 @@ class ResourceManager:
         id like ``../../x`` (from an untrusted backup or an LLM-driven tool) raises
         :class:`~tai42_skeleton.template.path_guard.UnsafeTemplatePathError` instead of
         reading outside the template root.
+
+        A stored object that is not UTF-8 text raises :class:`TemplateNotTextError`
+        naming ``template_id``: it exists, but it is not a template.
         """
         safe_template_path(template_id)
-        return await self.provider.load(template_id)
+        try:
+            return await self.provider.load(template_id)
+        except UnicodeDecodeError as exc:
+            raise TemplateNotTextError(
+                f"Template '{template_id}' is not a text template: the stored object is not UTF-8 text."
+            ) from exc
 
     def _sync_loader(self, template_id: str) -> str | None:
         """Synchronous bridge for Jinja2's FunctionLoader, fetching a dependency from async storage.
@@ -347,18 +336,25 @@ class ResourceManager:
         if scheme == "data":
             return decode_data_uri(source)
         if scheme == "" and "://" not in source:
-            # A bare storage id is a caller-supplied logical key; enforce root
-            # containment before it reaches the provider, so this one seam guards
-            # every unguarded read (get_resource_by_id, file_loader, resolve_image's
-            # storage branch, and any future caller of ``load``).
-            safe_template_path(source)
-            data = await self.provider.load_bytes(source)
-            mime = (await self.provider.stat(source)).content_type if with_mime else None
-            return data, mime
+            return await self.load_stored(source, with_mime=with_mime)
         raise ValueError(
             f"Cannot resolve source {source!r}: only http(s) URLs, data URIs, and bare "
             "storage ids are supported (a file:/ftp: scheme or an embedded '://' is rejected)."
         )
+
+    async def load_stored(self, path: str, *, with_mime: bool = True) -> tuple[bytes, str | None]:
+        """Read the stored object at storage id ``path`` as ``(bytes, mime)``.
+
+        ``path`` is always a storage id, never a URL, whatever characters it holds.
+        A storage id is a caller-supplied logical key, so root containment is
+        enforced before it reaches the provider (an ``UnsafeTemplatePathError``
+        propagates); every storage read, including :meth:`load`'s storage branch,
+        is guarded at this one seam. ``with_mime`` is as in :meth:`load`.
+        """
+        safe_template_path(path)
+        data = await self.provider.load_bytes(path)
+        mime = (await self.provider.stat(path)).content_type if with_mime else None
+        return data, mime
 
     async def load_file(self, source: str) -> str | MediaBlock:
         """Load ``source`` and decode it to extracted text OR a ``MediaBlock``.
@@ -366,7 +362,10 @@ class ResourceManager:
         Resolves the bytes via :meth:`load` (``with_mime=False`` — the type is
         re-detected here with Magika, so the storage mime lookup is skipped),
         then dispatches through the type registry (the opt-in ``files`` extra).
-        An unknown type raises loudly.
+        Bytes of an unknown type, over the size cap, detected as text but not
+        UTF-8, or refused by their extractor raise :class:`ContentNotLoadableError`.
+        Without the ``files`` extra it raises the ``501`` ``NotSupportedError``
+        before any read.
         """
         from tai42_skeleton.template.file_loading import load_content
 
@@ -739,9 +738,30 @@ class ResourceManager:
         await self.provider.upload(path, content)
         self.evict_compiled(path)
 
+    async def upload_bytes(self, path: str, data: bytes, content_type: str | None = None) -> None:
+        """Store raw ``data`` at ``path`` with ``content_type`` and evict its compiled entry.
+
+        The bytes twin of :meth:`upload_template`. A text-only provider refuses bytes
+        that are not UTF-8 with ``UnicodeDecodeError``, which propagates.
+        """
+        await self.provider.upload_bytes(path, data, content_type)
+        self.evict_compiled(path)
+
     async def list_resources(self) -> list[str]:
         """List every stored resource path in the storage provider."""
         return await self.provider.list()
+
+    async def delete_object(self, path: str) -> None:
+        """Delete the stored object at ``path`` unless a stored object still names it.
+
+        Every delete of a stored object goes through here or :meth:`delete_template_dir`.
+        A held object raises the ``409`` naming its holders and deletes nothing; a holder
+        that cannot be read raises a ``500``; a missing object raises ``FileNotFoundError``.
+        """
+        from tai42_skeleton.operations.holders import refuse_held_templates  # operations sit above this layer
+
+        await refuse_held_templates(frozenset({path}), head=f"stored template '{path}' cannot be deleted")
+        await self.provider.delete(path)
 
     async def delete_template(self, path: str) -> None:
         """Delete the stored template at ``path`` and evict its compiled entry.
@@ -749,10 +769,10 @@ class ResourceManager:
         Idempotent: an already-absent template is a no-op. This is the one seam
         every backend flows through, so the backends' ``FileNotFoundError`` for a
         missing object is mapped to the documented no-op here rather than in each
-        backend.
+        backend. A held template is refused by :meth:`delete_object`.
         """
         try:
-            await self.provider.delete(path)
+            await self.delete_object(path)
         except FileNotFoundError:
             logger.info("delete_template: %s already absent; delete is a no-op", path)
         # The compiled cache retains an entry per path until TTL; evict only the
@@ -763,8 +783,13 @@ class ResourceManager:
     async def delete_template_dir(self, path: str) -> None:
         """Delete every stored template under ``path/`` and evict their compiled entries.
 
-        Eviction runs even on a partial-delete failure.
+        Refused, deleting and evicting nothing, when a stored object names any object under
+        ``path/``. Eviction runs even on a partial-delete failure.
         """
+        from tai42_skeleton.operations.holders import refuse_held_templates  # operations sit above this layer
+
+        ids = frozenset(key for key in await self.provider.list() if key.startswith(path + "/"))
+        await refuse_held_templates(ids, head=f"directory '{path}' cannot be deleted")
         try:
             return await self.provider.delete_dir(path)
         finally:

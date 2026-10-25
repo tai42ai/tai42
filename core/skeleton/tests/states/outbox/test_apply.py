@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 from psycopg.errors import AdminShutdown
 from tai42_contract.errors import ErrorKind
+from tai42_contract.monitoring import TraceContext
 from tai42_contract.states.errors import StatePendingSaveFailedError, ValueValidationError
 
 from tai42_skeleton.states.outbox import apply as apply_mod
@@ -221,6 +222,9 @@ async def test_a_divergence_is_logged_counted_and_emitted_on_the_runs_trace(
         def current_trace_id(self) -> str | None:
             return "trace-1"
 
+        def current_span_id(self) -> str | None:
+            return "span-1"
+
         def create_event(self, **kwargs: Any) -> None:
             events.append(kwargs)
 
@@ -228,6 +232,7 @@ async def test_a_divergence_is_logged_counted_and_emitted_on_the_runs_trace(
         writer = _Writer()
 
     monkeypatch.setattr("tai42_skeleton.monitoring.get_monitoring", lambda: _Monitoring())
+    monkeypatch.setattr("tai42_skeleton.monitoring.registry.get_monitoring", lambda: _Monitoring())
     before = outbox_metrics().divergences._value.get()
     row = await bed.enqueue(
         bed.write(bed.subject(), [{"op": "set", "path": ["n"], "value": 1, "guard": {"path": ["n"], "expected": None}}])
@@ -243,5 +248,5 @@ async def test_a_divergence_is_logged_counted_and_emitted_on_the_runs_trace(
     assert f"pending save {row} diverged from its projection" in caplog.text
     assert outbox_metrics().divergences._value.get() == before + 1
     assert [e["name"] for e in events] == ["state:pending-save-divergence"]
-    assert events[0]["trace_context"].trace_id == "trace-1"
+    assert events[0]["trace_context"] == TraceContext(trace_id="trace-1", parent_span_id="span-1")
     assert events[0]["output"]["outbox_id"] == str(row)

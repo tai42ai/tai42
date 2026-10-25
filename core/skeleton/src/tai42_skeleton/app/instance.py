@@ -35,7 +35,7 @@ from tai42_skeleton.conversations.lifecycle import (
     start_conversations_delivery_sweep,
     stop_conversations_delivery_sweep,
 )
-from tai42_skeleton.db import SKELETON_COMPONENT, assert_skeleton_schema_applied
+from tai42_skeleton.db import SKELETON_COMPONENT
 from tai42_skeleton.hooks import settings as hooks_readiness
 from tai42_skeleton.interactions import settings as interactions_readiness
 from tai42_skeleton.marketplace import settings as marketplace_readiness
@@ -101,15 +101,6 @@ def connectors_in_use() -> bool:
     return component_store_configured(SKELETON_COMPONENT)
 
 
-def versioned_store_in_use() -> bool:
-    """Whether this deployment uses the versioned-document store at all.
-
-    ON exactly when the skeleton database is configured, so the boot/reload hook
-    skips the Postgres open on an all-off deployment.
-    """
-    return component_store_configured(SKELETON_COMPONENT)
-
-
 async def rehydrate_versioned_presets_if_store_in_use() -> None:
     """Startup/reload handler: re-register every versioned preset from the store.
 
@@ -122,12 +113,12 @@ async def rehydrate_versioned_presets_if_store_in_use() -> None:
     A stale preset (foreign name / missing or preset-owned base) is QUARANTINED
     and surfaced as ``conflicted`` rather than raising, so one bad name never
     bricks boot; a genuinely unreachable Postgres still fails the boot/op loudly
-    under the handler's ``raise_on_error``. The load is skipped when connectors'
-    sibling store is unconfigured (see :func:`versioned_store_in_use`), so a
-    deployment with no versioned documents never opens a Postgres connection at
-    boot.
+    under the handler's ``raise_on_error``. The load is skipped when the skeleton
+    database is unconfigured (``component_store_configured(SKELETON_COMPONENT)``),
+    so a deployment with no versioned documents never opens a Postgres connection
+    at boot.
     """
-    if not versioned_store_in_use():
+    if not component_store_configured(SKELETON_COMPONENT):
         logger.info(
             "presets: skipping versioned-preset rehydration — the skeleton database is not configured (%s)",
             database_password_env(component_binding(SKELETON_COMPONENT)),
@@ -155,7 +146,7 @@ async def rehydrate_sub_mcp_apps() -> None:
     router = build_app().sub_app.mcp_sub_app_router
     routes = await get_sub_mcp_store().list_routes()
     for slug, config in list(routes.items()):
-        await router.register_sub_mcp_app(slug, config.tools, config.transport)
+        await router.bind_route(slug, config.tools, config.transport)
 
 
 async def _apply_preset_tool_reload(action: str, name: str) -> None:
@@ -285,6 +276,23 @@ def _register_generation_checks(app: TaiMCP) -> None:
     app.lifecycle.on_reload(check_hosted_ui_settings)
 
 
+def _register_storage_lifecycles(app: TaiMCP) -> None:
+    """Register the storage declarations every epoch's fresh registries need.
+
+    The platform's template-delete referees re-arm at boot and on every reload, into the
+    epoch's fresh referee registry; consulted only by the delete gates, after boot, so their
+    order among the handlers is free. The inbound-media storage marks (not backed up,
+    unlisted) are declared into each epoch's fresh mark registry: every startup handler also
+    runs at each reload build.
+    """
+    from tai42_skeleton.conversations.media_meta import declare_media_prefix_marks
+    from tai42_skeleton.template.platform_referees import register_platform_template_referees
+
+    app.lifecycle.on_startup(register_platform_template_referees)
+    app.lifecycle.on_reload(register_platform_template_referees)
+    app.lifecycle.on_startup(declare_media_prefix_marks)
+
+
 def build_app() -> TaiMCP:
     """Build (once) the process app singleton.
 
@@ -321,12 +329,6 @@ def build_app() -> TaiMCP:
         # The gate state is handed to the kit FIRST in every epoch build, whatever the
         # gate's setting, so any later handler that enqueues a callback job finds it.
         app.lifecycle.on_startup(declare_gate_state_to_kit)
-        # The schema gate runs FIRST, before any handler that touches a store: a
-        # database with pending migrations refuses to boot with the ``tai db
-        # migrate`` fix named, rather than failing deeper on a missing table. It
-        # fires only for a CONFIGURED schema-owning feature, so an all-off
-        # deployment is a no-op.
-        app.lifecycle.on_startup(assert_skeleton_schema_applied)
         _register_states_lifecycles(app)
         _register_generation_checks(app)
         if settings.enable:
@@ -391,10 +393,11 @@ def build_app() -> TaiMCP:
         # is unconfigured, and an unreachable Postgres fails the boot/op loudly.
         app.lifecycle.on_startup(rehydrate_versioned_presets_if_store_in_use)
         app.lifecycle.on_reload(rehydrate_versioned_presets_if_store_in_use)
-        # Platform-internal rename referees (schedules/hooks/routes/extensions/parks) are
+        # Platform-internal rename referees (schedules/hooks/routes/extensions/parks/states) are
         # re-armed every epoch: the referee collection is reset on each start(), and these
         # in-house holders re-register here (the public register_rename_referee seam is for
-        # plugins). Consulted only at rename time, so ordering among the handlers is free.
+        # plugins). Consulted only by the rename gate and its preview, after boot, so ordering
+        # among the handlers is free.
         from tai42_skeleton.tools.platform_referees import (
             register_platform_detach_referees,
             register_platform_rename_referees,
@@ -404,10 +407,11 @@ def build_app() -> TaiMCP:
         app.lifecycle.on_reload(register_platform_rename_referees)
         # The platform's own door-binding holders (presets/conversation configs/hooks/
         # schedules) re-arm the template-detach referees the same way: the collection is
-        # reset each start(), so these in-house holders re-register here. Consulted only at
-        # detach time, so ordering among the handlers is free.
+        # reset each start(), so these in-house holders re-register here. Consulted only by the
+        # detach gate and its preview, after boot, so ordering among the handlers is free.
         app.lifecycle.on_startup(register_platform_detach_referees)
         app.lifecycle.on_reload(register_platform_detach_referees)
+        _register_storage_lifecycles(app)
         # The platform's own state-consumer listers (hooks/schedules/agents) re-arm the
         # same way: the consumer-lister registry is reset on each start(), so these
         # platform-owned families re-register here (the public register_consumer_lister

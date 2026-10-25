@@ -84,6 +84,13 @@ class ToolRegistry(BaseRegistry):
         """
         return self._extend_tools.get(name, name)
 
+    def branches_of(self, base: str) -> list[str]:
+        """The extension BRANCH tools bound off ``base``, in registration order (empty for none or an unbound name).
+
+        Read-only: the same branch set, in the same order, :meth:`unregister_tool_base` tears down.
+        """
+        return [b for b, origin in self._extend_tools.items() if origin == base and b != base]
+
     def is_branch(self, name: str) -> bool:
         """Whether ``name`` is an extension BRANCH tool (produced by a combo) rather than a base tool.
 

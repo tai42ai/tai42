@@ -152,6 +152,11 @@ class NoOpWriter:
         """Record nothing for the current span."""
 
     @contextmanager
+    def use_span(self, span: Span) -> Iterator[None]:
+        """Change nothing; a no-op writer has no current span."""
+        yield
+
+    @contextmanager
     def trace_attributes(
         self,
         *,
@@ -257,6 +262,18 @@ class NoOpReader:
         """Return no traces; a ``limit`` above :meth:`max_page_size` raises ``ValueError``."""
         if limit is not None and limit > _MAX_PAGE_SIZE:
             raise ValueError(f"limit {limit} exceeds the reader's maximum page size {_MAX_PAGE_SIZE}")
+        return []
+
+    async def export_traces(
+        self,
+        *,
+        from_timestamp: datetime | None = None,
+        to_timestamp: datetime | None = None,
+        max_rows: int,
+        filter_: MonitoringFilter | None = None,
+        order_by: OrderBy | None = None,
+    ) -> list[MonitoringTraceSummary]:
+        """Return no traces."""
         return []
 
 

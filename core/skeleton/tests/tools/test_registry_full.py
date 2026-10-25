@@ -131,3 +131,15 @@ def test_validation_passes_when_all_backed():
 
 def test_validation_ignore_suppresses_named_missing():
     ToolRegistry({"foo"}, {}).validation(ignore=frozenset({"foo"}))
+
+
+def test_branches_of_answers_the_branches_in_registration_order():
+    reg = ToolRegistry(set(), {})
+    reg.register_extend_tool("foo", "foo")
+    reg.register_extend_tool("foo", "foo_zeta")
+    reg.register_extend_tool("bar", "bar_alpha")
+    reg.register_extend_tool("foo", "foo_alpha")
+    assert reg.branches_of("foo") == ["foo_zeta", "foo_alpha"]
+    assert reg.branches_of("bar") == ["bar_alpha"]
+    assert reg.branches_of("unbound") == []
+    assert reg.unregister_tool_base("foo") == ["foo_zeta", "foo_alpha"]

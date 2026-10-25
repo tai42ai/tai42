@@ -23,14 +23,16 @@ from tai42_contract.agent import AddressedMemory, Agent
 from tai42_contract.agent.events import MessageFinal, RunUsage, StreamEvent, StructuredFinal
 from tai42_contract.app import tai42_app
 from tai42_contract.template import TemplatedText
-from tai42_kit.llm import resolve_trace_context
 from tai42_kit.llm.settings import llm_provider_settings
+from tai42_kit.monitoring import begin_run_trace
 
 from tai42_agents._internal.base_tool_agent import ainvoke_tools_agent
 from tai42_agents._internal.config_util import config_addressed, with_run_trace_lineage
 from tai42_agents._internal.graph_cache import ToolsAgentGraph, ToolsAgentGraphSpec, tools_agent_graph
+from tai42_agents._internal.park import bind_resume_per_step
 from tai42_agents._internal.render import render_message
 from tai42_agents._internal.run_kwargs import guard_run_kwargs
+from tai42_agents._internal.run_record import TerminalEvents, run_input
 from tai42_agents._internal.stream_events import astream_tools_agent_events
 from tai42_agents.settings import agents_limits_settings
 from tai42_agents.voting_agent.model import VoteInfo, VoterSpec, VotingOutput
@@ -254,53 +256,71 @@ class VotingAgent(Agent):
         )
         judge_llm_provider = judge_llm_provider or llm_provider_settings().llm
         judge_llm_kwargs = judge_llm_kwargs or {}
-        judge_graph = await tools_agent_graph(
-            ToolsAgentGraphSpec(
-                tool_names=tuple(judge_tools or ()),
-                system_message=JUDGE_SYSTEM_MESSAGE,
-                llm_provider=judge_llm_provider,
-                llm_kwargs=judge_llm_kwargs,
-                checkpoint_provider=checkpoint_provider,
-            )
+        # One trace per voting run: the run's one lineage (the judge config is the lead role's
+        # carrier) is written into the voter and judge configs, so every voter and the judge nest
+        # under the one run. Each voter still gets its own thread_id and callbacks. The root is
+        # current only inside each step, never across a yield. It records the judge and voter
+        # messages, and the terminal events when the stream ends.
+        root = begin_run_trace(
+            judge_langgraph_config, input_=run_input(judge_message=judge_message, voter_message=voter_message)
         )
+        terminals = TerminalEvents()
+        try:
+            voter_config = with_run_trace_lineage(voter_langgraph_config, root.context)
+            judge_config = with_run_trace_lineage(judge_langgraph_config, root.context)
+            with root.step():
+                judge_graph = await tools_agent_graph(
+                    ToolsAgentGraphSpec(
+                        tool_names=tuple(judge_tools or ()),
+                        system_message=JUDGE_SYSTEM_MESSAGE,
+                        llm_provider=judge_llm_provider,
+                        llm_kwargs=judge_llm_kwargs,
+                        checkpoint_provider=checkpoint_provider,
+                    )
+                )
+                user_messages, voters_info = await _run_voters(
+                    judge_message,
+                    voter_message,
+                    judge_llm_provider,
+                    judge_llm_kwargs,
+                    voters,
+                    voter_tools,
+                    checkpoint_provider,
+                    voter_config,
+                )
 
-        # One trace per voting run: resolve the run's lineage once (the judge config is the
-        # lead role's carrier), then derive the voter and judge configs from it so every
-        # voter and the judge nest under the ONE run trace rather than each minting a fresh
-        # root. Each voter still gets its own thread_id and callbacks.
-        run_context = resolve_trace_context(judge_langgraph_config)
-        voter_config = with_run_trace_lineage(voter_langgraph_config, run_context)
-        judge_config = with_run_trace_lineage(judge_langgraph_config, run_context)
-
-        user_messages, voters_info = await _run_voters(
-            judge_message,
-            voter_message,
-            judge_llm_provider,
-            judge_llm_kwargs,
-            voters,
-            voter_tools,
-            checkpoint_provider,
-            voter_config,
-        )
-
-        judge_verdict = ""
-        judge_model: str | None = None
-        async for event in astream_tools_agent_events(
-            graph=judge_graph, user_message=user_messages, config=judge_config, user_content_kwargs=user_content_kwargs
-        ):
-            if isinstance(event, MessageFinal):
-                judge_verdict = event.text
-            elif isinstance(event, RunUsage):
-                judge_model = event.model
-            yield event
-
-        yield StructuredFinal(
-            data=VotingOutput(
-                judge=VoteInfo(
-                    provider=judge_llm_provider,
-                    model=judge_model or judge_llm_kwargs.get("model"),
-                    verdict=judge_verdict,
+            judge_verdict = ""
+            judge_model: str | None = None
+            async for event in bind_resume_per_step(
+                root.step,
+                astream_tools_agent_events(
+                    graph=judge_graph,
+                    user_message=user_messages,
+                    config=judge_config,
+                    user_content_kwargs=user_content_kwargs,
                 ),
-                voters=voters_info,
+            ):
+                if isinstance(event, MessageFinal):
+                    judge_verdict = event.text
+                elif isinstance(event, RunUsage):
+                    judge_model = event.model
+                yield terminals.note(event)
+
+            yield terminals.note(
+                StructuredFinal(
+                    data=VotingOutput(
+                        judge=VoteInfo(
+                            provider=judge_llm_provider,
+                            model=judge_model or judge_llm_kwargs.get("model"),
+                            verdict=judge_verdict,
+                        ),
+                        voters=voters_info,
+                    )
+                )
             )
-        )
+            root.record_output(terminals.events)
+        except Exception as exc:
+            root.fail(exc)
+            raise
+        finally:
+            root.end()

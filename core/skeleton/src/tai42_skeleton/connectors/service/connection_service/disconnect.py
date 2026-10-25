@@ -57,6 +57,7 @@ async def disconnect(
                 upstream_revoke_status=None,
                 removed_manifest_entries=removed,
                 fanout=applied.fanout,
+                span_release_error=applied.span_release_error,
             )
 
         revoke_outcome = await _revoke_upstream(record)
@@ -79,6 +80,7 @@ async def disconnect(
         upstream_revoke_status=revoke_outcome.http_status,
         removed_manifest_entries=removed,
         fanout=applied.fanout,
+        span_release_error=applied.span_release_error,
     )
 
 

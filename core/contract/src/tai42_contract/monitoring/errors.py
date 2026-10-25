@@ -31,6 +31,8 @@ class MonitoringReadNotSupportedError(MonitoringError):
 
     Every backend exposes a ``reader`` object, but a write-only backend's read
     methods raise this on call (the property access still returns an object).
+    Raised only by a backend that cannot read at all; a request outside a reading
+    backend's declaration is :class:`MonitoringReadNotServedError`.
     """
 
     # A capability the backend does not provide — mirrors the skeleton's
@@ -52,6 +54,18 @@ class MonitoringReadTooBroadError(MonitoringError):
 
     # The caller's request was too broad — a client input fault, not a backend
     # capability gap (maps to a 4xx the caller corrects, never a 501).
+    __tai_error_kind__ = ErrorKind.BAD_INPUT
+
+
+class MonitoringReadNotServedError(MonitoringError):
+    """The backend reads, but this request asks for something outside what it declares it serves.
+
+    A sort it does not list, a filter a declared sort cannot combine with, a measure,
+    dimension, granularity or order field it does not serve. The caller changes the
+    request; a different backend is not needed. The message names what was asked and
+    what the backend serves.
+    """
+
     __tai_error_kind__ = ErrorKind.BAD_INPUT
 
 

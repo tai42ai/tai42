@@ -121,13 +121,17 @@ class OAuthSuccess(BaseModel):
     """A completed connection (served 200).
 
     The new connection's id, the same-origin ``return_url`` to send the operator back to, and
-    the fleet reload fan-out.
+    the fleet reload fan-out. ``span_release_error`` is ``null`` when the config store released
+    its exclusive write span after the manifest write, otherwise the store's error: the
+    connection stands and its reload and broadcast ran, but the store may still hold the span
+    until the writer process exits, so a later write can block or be refused until then.
     """
 
     kind: Literal["success"]
     connection_id: str
     return_url: str
     fanout: FanoutSummary
+    span_release_error: str | None = None
 
 
 class OAuthCompletionResult(
@@ -473,6 +477,7 @@ async def oauth_complete(request: Request) -> Response:
                 "connection_id": result.connection_id,
                 "return_url": result.return_url,
                 "fanout": result.fanout,
+                "span_release_error": result.span_release_error,
             }
         }
     )

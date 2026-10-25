@@ -4,8 +4,8 @@ Boots the app through the real ``app.app_context`` harness with an ``api_tools``
 manifest that loads no management tool modules and enables projection, then
 asserts the projected surface end-to-end:
 
-1. the projected tool surface is exactly the expected op surface — the 183
-   default-projected ops (238 total - 51 tier-2 default-excluded - 4 tier-1
+1. the projected tool surface is exactly the expected op surface — the 187
+   default-projected ops (242 total - 51 tier-2 default-excluded - 4 tier-1
    hardcode-blocked);
 2. ``destructiveHint`` is present on destructive ops (a DELETE, a mutating POST)
    and absent on reads (a GET);
@@ -118,7 +118,7 @@ class _RecordingApp:
         self.tools = _RecordingTools()
 
 
-# -- the projected surface is exactly the 166 default ops ---------
+# -- the projected surface is exactly the 187 default ops ---------
 
 
 def test_projected_surface_is_the_expected_op_count():
@@ -131,20 +131,20 @@ def test_projected_surface_is_the_expected_op_count():
             tier2 = sorted(op.name for op in ops if is_tier2(op) and not is_tier1(op))
 
             # The registered surface decomposes by projection tier (each asserted below):
-            # 238 total = 4 tier-1 (hardcode-blocked from projection) + 51 tier-2
-            # (default-excluded, includable) + 183 tier-0 (default-projected). A destructive
+            # 242 total = 4 tier-1 (hardcode-blocked from projection) + 51 tier-2
+            # (default-excluded, includable) + 187 tier-0 (default-projected). A destructive
             # tier-0 op is still default-projected under ``expose_destructive`` — a data write
             # or purge (``delete_*``, ``erase_*``, ``prune_runs``, ``prune_state_retention``)
             # is destructive but not authority_changing, so it stays tier-0 like
             # ``delete_conversation_config``; authority_changing writes (roles, api keys,
-            # api_tools) and the ``/api/auth/`` family are the tier-2 set. The 29 states-surface
+            # api_tools) and the ``/api/auth/`` family are the tier-2 set. The 30 states-surface
             # doors (module + state ``list``/``get``/``put``/``delete``, the record CRUD plus
             # ``search``/``fold``/``apply`` doors, the schema ``validate``/``check`` doors, the
-            # mount/subjects/consumers/stats reads, ``prune_state_retention``, and the pending-save
-            # ``list``/``retry``/``discard`` doors) are all tier-0 CRUD over the states service, and
-            # the three hook-run doors (``list_hook_runs``, ``retry_hook_run``, ``discard_hook_run``)
-            # are tier-0 like them.
-            assert total == 238, total
+            # mount/subjects/consumers/stats reads, ``prune_state_retention``, the pending-save
+            # ``list``/``retry``/``discard`` doors, and the attachment holders read) are all
+            # tier-0 CRUD over the states service, and the three hook-run doors (``list_hook_runs``,
+            # ``retry_hook_run``, ``discard_hook_run``) are tier-0 like them.
+            assert total == 242, total
             # Tier-1 (never projectable): the three meta-executors, each running a
             # caller-named tool, plus ``get_me`` (``caller_context=True``).
             assert tier1 == ["create_schedule", "get_me", "run_tool", "submit_run"], tier1
@@ -221,28 +221,28 @@ def test_projected_surface_is_the_expected_op_count():
                 "validate_condition",
             }, tier2
 
-            # The default-projected surface = 183 (every op that is neither tier-1 nor
+            # The default-projected surface = 187 (every op that is neither tier-1 nor
             # tier-2, destructive tier-0 ops included under the default ``expose_destructive``),
             # measured two ways.
             recorder = _RecordingApp()
             projected = project_operations(recorder, ApiToolsConfig(), registry=reg)
-            assert len(projected) == 183, len(projected)
-            assert total - len(tier2) - len(tier1) == 183
+            assert len(projected) == 187, len(projected)
+            assert total - len(tier2) - len(tier1) == 187
 
-            # The LIVE booted tool surface is the 183 projected ops PLUS the two
+            # The LIVE booted tool surface is the 187 projected ops PLUS the two
             # force-registered hidden mechanism tools the conversations router installs at
             # startup: ``conversation_deliver`` (a parked AGENT turn's resumed answer) and
             # ``deliver_tool_completion`` (a parked TOOL turn's terminal, mapped via reply_expr),
             # both fired through ``run_tool`` by the resumer. Neither is an api_tools projection
-            # (``projected`` stays 183) — they are mandatory bridges registered independently of
+            # (``projected`` stays 187) — they are mandatory bridges registered independently of
             # the api_tools toggle and carried on the live surface like any hidden tool, so the
-            # live count is 185.
+            # live count is 189.
             hidden_bridges = {"conversation_deliver", "deliver_tool_completion"}
             live = await app.tools.get_tools()
             assert set(live) == set(projected) | hidden_bridges
             for name in hidden_bridges:
                 assert (live[name].meta or {}).get("tai42/hidden") is True
-            assert len(live) == 185
+            assert len(live) == 189
 
             # Tier-1 and default tier-2 never appear on the live surface.
             assert "run_tool" not in live
@@ -282,6 +282,41 @@ def test_destructive_hint_present_on_mutations_absent_on_reads():
             assert hint("list_system_kinds") in (None, False)
             assert hint("list_hooks") in (None, False)
             assert hint("list_channels") in (None, False)
+
+    asyncio.run(run())
+
+
+def test_stored_entry_reads_project_as_reads_and_get_template_returns_its_schema(monkeypatch):
+    """``read_resource`` projects at the tier of ``stat_resource``; ``get_template`` keeps its
+    projection and its tool result is the ``TemplateEntry``: the content and the inferred
+    schema side by side."""
+    from .._fakes.recording_storage import RecordingStorage
+
+    read_op = operation_registry.get("read_resource")
+    stat_op = operation_registry.get("stat_resource")
+    assert (is_tier1(read_op), is_tier2(read_op)) == (is_tier1(stat_op), is_tier2(stat_op)) == (False, False)
+    store = RecordingStorage({"greet.txt": (b"Hello {{ name }}", "text/plain")})
+
+    async def run():
+        async with app.app_context(_manifest()):
+            monkeypatch.setattr(app._storage_registry, "_provider", store)
+            live = await app.tools.get_tools()
+            for name in ("read_resource", "stat_resource", "get_template"):
+                ann = live[name].annotations
+                assert (getattr(ann, "destructiveHint", None) if ann is not None else None) in (None, False)
+            entry = await app.tools.run_tool("get_template", {"template_id": "greet.txt"})
+            assert entry["kind"] == "text"
+            assert entry["content"] == "Hello {{ name }}"
+            assert entry["schema"]["required"] == ["name"]
+            assert entry["schema_error"] is None
+            read = await app.tools.run_tool("read_resource", {"resource_id": "greet.txt"})
+            assert read == {
+                "kind": "text",
+                "id": "greet.txt",
+                "content_type": "text/plain",
+                "size": 16,
+                "content": "Hello {{ name }}",
+            }
 
     asyncio.run(run())
 
@@ -445,13 +480,13 @@ def test_user_tools_curation_coexists_with_api_tools():
             }
         )
         async with app.app_context(manifest):
-            # api_tools projected the surface: the 183 projected ops plus the two
+            # api_tools projected the surface: the 187 projected ops plus the two
             # force-registered hidden completion mechanisms the conversations router installs at
-            # startup (``conversation_deliver`` + ``deliver_tool_completion``), so 185 live.
+            # startup (``conversation_deliver`` + ``deliver_tool_completion``), so 189 live.
             live = await app.tools.get_tools()
             assert "remove_tool" in live
             assert "list_hooks" in live
-            assert len(live) == 185
+            assert len(live) == 189
 
             # user_tools curation is preserved and surfaced to the flow builder (the
             # read-time view over the registered set). It lives on the LIVE in-process
@@ -460,5 +495,83 @@ def test_user_tools_curation_coexists_with_api_tools():
             # leak), which this in-process harness does not persist, so ``get_manifest`` would
             # return the empty persisted view. The curation verified here is the live one.
             assert sorted(app.admin.live_manifest_typed.user_tools) == ["list_hooks", "remove_tool"]
+
+    asyncio.run(run())
+
+
+# -- the channel listing tool carries each channel's identity hint ---
+
+
+def test_list_channels_tool_returns_entries_with_identity_hints():
+    """The ``list_channels`` tool projected from the operation answers the same entries as
+    ``GET /api/channels``: each registered channel's name and its declared hint."""
+    from tai42_contract.channels import ChannelDelivery, SendOutcome
+
+    from .._helpers import DeliverOnlyChannel
+
+    class _Plain(DeliverOnlyChannel):
+        async def deliver(self, delivery: ChannelDelivery) -> SendOutcome:
+            return self.outcome(delivery, [])
+
+    class _Hinted(_Plain):
+        identity_hint = "The number clients text."
+
+    async def run():
+        async with app.app_context(_manifest()):
+            app.channels.register("b-plain", _Plain())
+            app.channels.register("a-hinted", _Hinted())
+            try:
+                listing = await app.tools.run_tool("list_channels", {})
+            finally:
+                app._channel_registry.reset()
+            assert listing == {
+                "channels": [
+                    {"name": "a-hinted", "identity_hint": "The number clients text."},
+                    {"name": "b-plain", "identity_hint": None},
+                ]
+            }
+
+    asyncio.run(run())
+
+
+# -- the route tool refuses an unregistered channel like the HTTP door ---
+
+
+def test_create_conversation_route_tool_refuses_an_unregistered_channel(monkeypatch):
+    """The projected ``create_conversation_route`` tool (authority-changing, so present only when
+    named in ``api_tools.include``) runs the same reference check as the HTTP door: a channel
+    no plugin registered is refused before anything is bound or stored."""
+    from fastmcp.exceptions import ToolError
+
+    import tai42_skeleton.operations.conversations as conversations_ops
+    from tai42_skeleton.operations.errors import BadRequestError
+
+    class _DurableManager:
+        durable = True
+
+    def _no_bind(*_args, **_kwargs):
+        raise AssertionError("the channel refusal comes before the bind check")
+
+    monkeypatch.setattr(conversations_ops, "get_conversations_manager", lambda: _DurableManager())
+    monkeypatch.setattr(conversations_ops, "assert_execution_key_bindable", _no_bind)
+
+    async def run():
+        async with app.app_context(_manifest(include=["create_conversation_route"])):
+            live = await app.tools.get_tools()
+            assert "create_conversation_route" in live
+            with pytest.raises(ToolError, match=r"^route channel 'ghost' is not a registered channel$") as refused:
+                await app.tools.run_tool(
+                    "create_conversation_route",
+                    {
+                        "route_name": "line",
+                        "door": "channel",
+                        "target_kind": "tool",
+                        "target_name": "list_channels",
+                        "execution_key": "svc",
+                        "channel": "ghost",
+                        "our_identity": "+15550001111",
+                    },
+                )
+            assert isinstance(refused.value.__cause__, BadRequestError)
 
     asyncio.run(run())

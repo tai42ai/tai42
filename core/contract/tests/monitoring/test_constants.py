@@ -19,6 +19,7 @@ from tai42_contract.monitoring import (
     MonitoringError,
     MonitoringExportHealth,
     MonitoringReader,
+    MonitoringTraceSummary,
     MonitoringWriter,
     ObservationNotFoundError,
     PayloadRefUnresolvedError,
@@ -83,6 +84,7 @@ def test_writer_protocol_members():
     assert typing.get_protocol_members(MonitoringWriter) == frozenset(
         {
             "open_span",
+            "use_span",
             "start_span",
             "record_span",
             "create_event",
@@ -116,3 +118,17 @@ def test_record_span_takes_typed_usage():
 
 def test_reader_has_get_observation():
     assert "get_observation" in typing.get_protocol_members(MonitoringReader)
+
+
+def test_reader_declares_export_traces():
+    assert "export_traces" in typing.get_protocol_members(MonitoringReader)
+    hints = typing.get_type_hints(MonitoringReader.export_traces)
+    assert hints["max_rows"] is int
+    assert hints["return"] == list[MonitoringTraceSummary]
+
+
+def test_read_not_served_is_a_bad_input_monitoring_error():
+    from tai42_contract.monitoring import MonitoringReadNotServedError
+
+    assert issubclass(MonitoringReadNotServedError, MonitoringError)
+    assert MonitoringReadNotServedError.__tai_error_kind__ is ErrorKind.BAD_INPUT

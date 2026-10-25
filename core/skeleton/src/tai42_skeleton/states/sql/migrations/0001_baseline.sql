@@ -154,6 +154,7 @@ CREATE TABLE IF NOT EXISTS state_outbox (
     states             TEXT[]      NOT NULL,             -- every state the row writes
     run_id             TEXT,
     trace_id           TEXT,                             -- the run's monitoring trace, when one was active
+    parent_span_id     TEXT,                             -- the span live when the save was staged
     records            JSONB       NOT NULL,             -- the staged writes in authored order
     subjects           JSONB       NOT NULL,             -- per subject: base seq, declaration version, projection
     calls              JSONB       NOT NULL,             -- the deferred calls in authored order

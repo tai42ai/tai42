@@ -52,6 +52,8 @@ class PresetsFacet(_Facet):
         description: str = "",
         output_schema: TemplatedText | dict[str, Any] | None = None,
         input_schema: TemplatedText | dict[str, Any] | None = None,
+        input_map: TemplatedText | str | None = None,
+        output_map: TemplatedText | str | None = None,
     ) -> Tool:
         """Bind ``base_tool`` with ``fixed_kwargs`` as a live tool named ``name`` and return it."""
         return await self._app._preset_bind(
@@ -61,6 +63,8 @@ class PresetsFacet(_Facet):
             description=description,
             output_schema=output_schema,
             input_schema=input_schema,
+            input_map=input_map,
+            output_map=output_map,
         )
 
     async def create(
@@ -72,6 +76,8 @@ class PresetsFacet(_Facet):
         *,
         input_schema: TemplatedText | dict[str, Any] | None = None,
         output_schema: TemplatedText | dict[str, Any] | None = None,
+        input_map: TemplatedText | str | None = None,
+        output_map: TemplatedText | str | None = None,
         extensions: list[list[ExtensionElement]] | None = None,
         state_binding: StateBinding | None = None,
         tags: list[str] | None = None,
@@ -91,7 +97,7 @@ class PresetsFacet(_Facet):
         from tai42_skeleton.operations.presets import _create_preset_core, _create_response
 
         combos = extensions or []
-        record, report = await _create_preset_core(
+        record, report, cross = await _create_preset_core(
             name,
             base_tool,
             description,
@@ -99,19 +105,24 @@ class PresetsFacet(_Facet):
             combos,
             output_schema,
             input_schema,
+            input_map=input_map,
+            output_map=output_map,
             state_binding=state_binding,
             tags=tags,
             enforce_tier=False,
         )
-        return await _create_response(
+        return _create_response(
             name,
             base_tool,
             description,
             combos,
             output_schema,
             input_schema,
+            input_map=input_map,
+            output_map=output_map,
             active_version=record.active_version,
             report=report,
+            cross=cross,
         )
 
     async def save_version(
@@ -122,6 +133,8 @@ class PresetsFacet(_Facet):
         input_schema: TemplatedText | dict[str, Any] | CarryForward | None = CARRY_FORWARD,
         output_schema: TemplatedText | dict[str, Any] | None = None,
         output_schema_provided: bool = False,
+        input_map: TemplatedText | str | CarryForward | None = CARRY_FORWARD,
+        output_map: TemplatedText | str | CarryForward | None = CARRY_FORWARD,
         description: str | None = None,
         extensions: list[list[ExtensionElement]] | None = None,
         state_binding: StateBinding | CarryForward | None = CARRY_FORWARD,
@@ -130,8 +143,8 @@ class PresetsFacet(_Facet):
         """Save a new preset version in-process, returning the version row the HTTP save door returns.
 
         Shared response builder — the two doors cannot drift. Omitted fields carry the active value forward
-        (``input_schema`` via the ``CARRY_FORWARD`` sentinel; ``output_schema`` only when
-        ``output_schema_provided`` is ``True``).
+        (``input_schema``, ``input_map`` and ``output_map`` via the ``CARRY_FORWARD`` sentinel;
+        ``output_schema`` only when ``output_schema_provided`` is ``True``).
 
         The tier fence is OFF for the reason :meth:`create` states — the registration-tier
         fence authorizes a request principal at the HTTP doors, and an in-process caller
@@ -148,6 +161,8 @@ class PresetsFacet(_Facet):
             output_schema_provided=output_schema_provided,
             description=description,
             input_schema=input_schema,
+            input_map=input_map,
+            output_map=output_map,
             state_binding=state_binding,
             tags=tags,
             enforce_tier=False,
@@ -204,25 +219,28 @@ class PresetsFacet(_Facet):
         return self._app._preset_store
 
     async def list_active_bodies(self) -> dict[str, PresetBody]:
-        """Every store-backed preset's active body, keyed by name — one batched JOIN read.
+        """Every stored preset's active body, keyed by name.
 
-        Replaces a per-record ``get_active_body`` round-trip on the list route + rehydrate. Reached through
-        the concrete ``_versioned_store`` so the concrete-only ``list_active_bodies`` resolves.
+        The body-only projection of :meth:`list_active_versioned_bodies`: its one store query and its
+        store gate, so a deployment with no skeleton database answers ``{}``.
         """
-        from tai42_skeleton.presets.store import stored_preset_body
-
-        raw = await self._app._versioned_store.list_active_bodies("preset")
-        return {name: stored_preset_body(name, body) for name, body in raw.items()}
+        return {name: body for name, (_version, body) in (await self.list_active_versioned_bodies()).items()}
 
     async def list_active_versioned_bodies(self) -> dict[str, tuple[int, PresetBody]]:
-        """Every preset's ``(active_version, active_body)``, keyed by name — one batched JOIN read.
+        """Every stored preset's ``(active_version, active_body)``, keyed by name — one batched JOIN read.
 
-        Captures the version pointer and its body TOGETHER (never a skewed second read). The version-aware
-        sibling of :meth:`list_active_bodies`, used by the rehydration path so each preset's version is
-        retained beside its body. Reached through the concrete ``_versioned_store``.
+        The one read of the stored-preset population and its one store gate: a deployment with no
+        skeleton database has no stored presets, so it answers ``{}`` and opens no store. A configured
+        store that cannot be read raises. The version pointer and its body are captured TOGETHER (never
+        a skewed second read). Reached through the concrete ``_versioned_store``.
         """
+        from tai42_kit.db import component_store_configured
+
+        from tai42_skeleton.db import SKELETON_COMPONENT
         from tai42_skeleton.presets.store import stored_preset_body
 
+        if not component_store_configured(SKELETON_COMPONENT):
+            return {}
         raw = await self._app._versioned_store.list_active_versioned_bodies("preset")
         return {name: (version, stored_preset_body(name, body)) for name, (version, body) in raw.items()}
 
@@ -258,12 +276,12 @@ class PresetsFacet(_Facet):
         """
         from tai42_contract.presets.errors import PresetNotFoundError
 
-        from tai42_skeleton.operations.presets.references import _reference_maps
+        from tai42_skeleton.operations.reference_graph import _reference_maps
 
         bodies = await self.list_active_bodies()
         if name not in bodies:
             raise PresetNotFoundError(name)
-        _uses, used_by = _reference_maps(bodies)
+        _uses, used_by = await _reference_maps(bodies)
         return used_by[name]
 
     async def set_version_tags(self, name: str, version: int, tags: list[str]) -> None:
@@ -273,7 +291,7 @@ class PresetsFacet(_Facet):
         annotation only and never rebinds the live tool. Reached through the
         concrete ``_versioned_store`` (the ``set_version_tags`` UPDATE is a
         concrete-store member, not on the ``VersionedStore`` protocol), the same
-        precedent as :meth:`list_active_bodies`. Raises
+        precedent as :meth:`list_active_versioned_bodies`. Raises
         :class:`~tai42_contract.versioning.errors.DocumentVersionNotFoundError` for an
         unknown preset or version.
         """

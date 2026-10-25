@@ -4,7 +4,8 @@ A thin shim over the app's ``resource_manager`` — it delegates to
 :meth:`ResourceManager.load_file`, which resolves the source (SSRF-pinned url
 fetch, data URI, or storage read), detects the type with Magika, and extracts
 text or passes media through as a ``MediaBlock``. The type-detection deps are the
-opt-in ``files`` extra: ``pip install 'tai42-skeleton[files]'``.
+opt-in ``files`` extra: ``pip install 'tai42-skeleton[files]'``; without it the tool
+raises the ``501`` ``NotSupportedError`` naming that install line.
 """
 
 from __future__ import annotations

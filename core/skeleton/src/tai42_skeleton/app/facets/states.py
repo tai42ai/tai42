@@ -210,7 +210,7 @@ class StatesFacet(_Facet):
     async def drain_target_saves(self, target_kind: str, target_name: str) -> list[str]:
         """Finish the pending saves under one conversation target; the lines naming the saves that cannot finish.
 
-        Skeleton-only (the tool-rename referee), off the ``AppStates`` protocol.
+        Skeleton-only (the conversation reset's forget), off the ``AppStates`` protocol.
         """
         return await self._app._states_service.drain_target_saves(target_kind, target_name)
 

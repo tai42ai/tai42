@@ -22,6 +22,7 @@ _ROUTES = [
     Route("/api/storage/resources/{resource_id:path}/stat", router.stat_resource, methods=["GET"]),
     Route("/api/storage/resources/{resource_id:path}/content", router.download_resource, methods=["GET"]),
     Route("/api/storage/resources/{resource_id:path}", router.delete_resource, methods=["DELETE"]),
+    Route("/api/storage/entries/{resource_id:path}", router.read_resource, methods=["GET"]),
     Route("/api/storage/dirs/{dir_path:path}", router.delete_dir, methods=["DELETE"]),
 ]
 _STANCES = {
@@ -31,6 +32,7 @@ _STANCES = {
     r"/api/storage/resources/[^/]+/content": AUTHED,
     r"/api/storage/resources/[^/]+": AUTHED,
     r"/api/storage/dirs/[^/]+": AUTHED,
+    r"/api/storage/entries/.+": AUTHED,
 }
 
 
@@ -67,3 +69,8 @@ def test_delete_rejected_without_auth(monkeypatch):
 def test_delete_dir_rejected_without_auth(monkeypatch):
     client = boundary_client(monkeypatch, _ROUTES, _STANCES)
     assert client.delete("/api/storage/dirs/x").status_code in (401, 403)
+
+
+def test_entry_read_rejected_without_auth(monkeypatch):
+    client = boundary_client(monkeypatch, _ROUTES, _STANCES)
+    assert client.get("/api/storage/entries/notes/a.txt").status_code in (401, 403)

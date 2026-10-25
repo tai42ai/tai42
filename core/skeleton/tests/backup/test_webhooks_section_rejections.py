@@ -8,9 +8,11 @@ from pydantic import ValidationError
 from tai42_contract.access_control import KEY_FINGERPRINT_CLAIM
 from tai42_contract.hooks import HookParams
 
+from tai42_skeleton.app import instance
 from tai42_skeleton.backup import webhooks_section
 from tai42_skeleton.hooks import trigger_links
 
+from .._fakes.recording_storage import MappedStorage
 from .conftest import _link_record
 
 # -- per-item malformations ---------------------------------------------------
@@ -203,6 +205,38 @@ async def test_hook_with_non_compiling_jq_per_record_rest_restored(store) -> Non
     assert len(report.errors) == 1
     assert "broken" in report.errors[0]
     assert "not valid jq" in report.errors[0]
+    assert report.skipped == 1
+    assert report.created == 1
+    assert set(await store.manager.list_hooks()) == {"sound"}
+
+
+async def test_hook_naming_a_stored_id_the_store_lacks_per_record_rest_restored(store, monkeypatch) -> None:
+    monkeypatch.setattr(instance.app._storage_registry, "_provider", MappedStorage({}))
+    doc = {
+        "hooks": [
+            {
+                "name": "h",
+                "topic": "t",
+                "tool": "notify",
+                "execution_key": "k-fire",
+                "execution_key_fingerprint": "fp",
+                "condition": {"id": "jq/gate"},
+            },
+            {
+                "name": "sound",
+                "topic": "t",
+                "tool": "notify",
+                "execution_key": "k-fire",
+                "execution_key_fingerprint": "fp",
+            },
+        ],
+        "trigger_links": [],
+        "topic_verifiers": {},
+        "tombstones": [],
+    }
+    report = await webhooks_section._import_webhooks(doc)
+
+    assert report.errors == ["hook 'h': stored id 'jq/gate' at condition is not a stored template"]
     assert report.skipped == 1
     assert report.created == 1
     assert set(await store.manager.list_hooks()) == {"sound"}

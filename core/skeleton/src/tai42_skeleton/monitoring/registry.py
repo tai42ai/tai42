@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import typing
 
-from tai42_contract.monitoring import Monitoring, MonitoringReader, MonitoringWriter
+from tai42_contract.monitoring import Monitoring, MonitoringReader, MonitoringWriter, TraceContext
 from tai42_kit.registry import StagedSlot
 
 from tai42_skeleton.monitoring.health_watch import activate_export_health, deactivate_export_health
@@ -155,3 +155,13 @@ def get_monitoring() -> Monitoring:
     if _noop_default is None:
         _noop_default = NoOpMonitoring()
     return _noop_default
+
+
+def current_trace_parent() -> TraceContext | None:
+    """The live span's trace and span ids as one parent context, or ``None`` when no span is live."""
+    writer = get_monitoring().writer
+    trace_id = writer.current_trace_id()
+    parent_span_id = writer.current_span_id()
+    if not trace_id or not parent_span_id:
+        return None
+    return TraceContext(trace_id=trace_id, parent_span_id=parent_span_id)

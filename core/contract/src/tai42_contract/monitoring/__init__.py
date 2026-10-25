@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from tai42_contract.monitoring.errors import (
     MonitoringError,
+    MonitoringReadNotServedError,
     MonitoringReadNotSupportedError,
     MonitoringReadTooBroadError,
     ObservationNotFoundError,
@@ -100,6 +101,7 @@ __all__ = [
     "MonitoringFilter",
     "MonitoringLevel",
     "MonitoringObservation",
+    "MonitoringReadNotServedError",
     "MonitoringReadNotSupportedError",
     "MonitoringReadTooBroadError",
     "MonitoringReader",

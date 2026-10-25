@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from copy import deepcopy
 from typing import Any
 
@@ -161,6 +161,8 @@ def cfg(monkeypatch) -> dict[str, Any]:
     monkeypatch.setattr(manager, "mutate_manifest", mutate_manifest)
     monkeypatch.setattr(manager, "replace_manifest", replace_manifest)
     monkeypatch.setattr(manager, "read_env", dict)
+    # The store is the in-memory ``state`` of this one process: no other process shares it.
+    monkeypatch.setattr(manager, "exclusive_write", nullcontext)
     return state
 
 

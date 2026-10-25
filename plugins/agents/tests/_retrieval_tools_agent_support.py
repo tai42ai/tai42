@@ -24,7 +24,7 @@ from tai42_agents.retrieval_tools_agent.agent import (
 )
 from tai42_agents.retrieval_tools_agent.graph import RetrievalToolsGraph
 
-from .conftest import fake_run_trace
+from .conftest import fake_init_langgraph_config
 
 AGENT_NAME = "retrieval_tools_agent"
 
@@ -260,7 +260,9 @@ def _patch_build_seams(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
 
     monkeypatch.setattr(ragent, "RetrievalToolsGraph", FakeGraph)
     monkeypatch.setattr(
-        ragent, "init_langgraph_config", lambda config: fake_run_trace({"configurable": {"thread_id": "t"}})
+        ragent,
+        "init_langgraph_config",
+        lambda config, _context: fake_init_langgraph_config({"configurable": {"thread_id": "t"}}),
     )
     _embedding_dims_cache.clear()
     return captured

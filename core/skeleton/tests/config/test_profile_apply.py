@@ -50,7 +50,7 @@ from tai42_skeleton.config.service import ConfigService, ProfileApplyOutcome
 from tai42_skeleton.operations._broadcast import SELF_DEFERRED, profile_apply_response
 
 from .._fakes.bus import FakeBus
-from .fake_pipeline import FakeConfigStore, FakeReloadAdmin, _orchestrate_spy
+from .fake_pipeline import ComboChecks, FakeConfigStore, FakeReloadAdmin, _orchestrate_spy
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -64,7 +64,11 @@ def _service(
     orchestrate: Callable[..., Awaitable[RecycleReport]] = orchestrate_recycle,
 ) -> ConfigService:
     return ConfigService(
-        config_manager=store, admin=FakeReloadAdmin(), bus=cast("Any", bus or FakeBus()), orchestrate=orchestrate
+        config_manager=store,
+        admin=FakeReloadAdmin(),
+        bus=cast("Any", bus or FakeBus()),
+        combo_check=ComboChecks(),
+        orchestrate=orchestrate,
     )
 
 
@@ -362,6 +366,41 @@ async def test_apply_releases_the_fork_gate_when_the_build_raises(monkeypatch: p
 
     with pytest.raises(_BuildBoomError):
         await _service(store).apply_replace_env({"MY_APP_FLAG": "new"}, save_previous=_PrevSpy(), build_and_swap=_build)
+    assert not fork_gate.blocked
+    assert not reload_gate.locked
+
+
+class _StoreChangingBus(FakeBus):
+    """A bus whose membership census stores a manifest marker on a key the profile omits."""
+
+    def __init__(self, store: FakeConfigStore) -> None:
+        super().__init__()
+        self._store = store
+
+    async def expected_at_start(self) -> dict[str, int]:
+        self._store.manifest["mcp"] = [
+            {"title": "m", "config": {"url": "http://x", "headers": {"X-Race": "!ENV ${PROFILE_GONE}"}}}
+        ]
+        return await super().expected_at_start()
+
+
+async def test_a_store_change_before_the_gates_is_refused_before_the_build(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The stored manifest changes after the apply's held-unpick check, while it censuses the
+    # fleet: the apply validates again before the build, so it refuses with ``@previous``
+    # already written and nothing built or persisted.
+    monkeypatch.delenv("TAI_SUPERVISED", raising=False)
+    store = FakeConfigStore(env={"MY_APP_FLAG": "old"})
+    prev = _PrevSpy()
+    swap, swapped = _swap_spy()
+
+    with pytest.raises(ValueError, match=r"markers dangling .*PROFILE_GONE"):
+        await _service(store, _StoreChangingBus(store)).apply_replace_env(
+            {"MY_APP_FLAG": "new"}, save_previous=prev, build_and_swap=swap
+        )
+
+    assert prev.saved == {"MY_APP_FLAG": "old"}
+    assert swapped == {}
+    assert store.env_writes == []
     assert not fork_gate.blocked
     assert not reload_gate.locked
 

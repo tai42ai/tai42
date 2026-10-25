@@ -26,11 +26,10 @@ needs('setting:default-routers-all');
 
 /**
  * Every primary-nav page: its nav link's accessible name (the label rendered in
- * the sidebar) paired with the page's own `<h1>` text. The two differ for the
- * Dashboard row (nav "Dashboard" → observability page `<h1>` "Dashboard") and the
- * extensions page (nav "Extensions" → `<h1>` "Tool extensions"). Ordered as the
+ * the sidebar) paired with the page's own `<h1>` text. The Dashboard row's nav link
+ * leads to the observability page, whose `<h1>` is "Dashboard". Ordered as the
  * grouped nav renders: the Dashboard lead row, then Capabilities, Connections,
- * Triggers, Activity, Administration.
+ * Doors, Activity, Administration.
  *
  * Marketplace lives in Administration but is intentionally NOT walked here: its
  * Browse tab reads a live registry that this smoke stack does not wire (the
@@ -46,21 +45,20 @@ const NAV_PAGES: ReadonlyArray<{ readonly navLabel: string; readonly heading: st
   { navLabel: 'Tools', heading: 'Tools' },
   { navLabel: 'Agents', heading: 'Agents' },
   { navLabel: 'Presets', heading: 'Presets' },
-  { navLabel: 'Extensions', heading: 'Tool extensions' },
-  { navLabel: 'Templates', heading: 'Templates' },
-  // Connections. The MCP config surface moved onto the Connectors page (its own
-  // secret-ref flow is covered by mcp-secret-ref.spec.ts); sub-MCP is now the
-  // Served endpoints page.
+  // Connections. The MCP config editor lives on the Manifest screen (its secret-ref flow is
+  // covered by mcp-secret-ref.spec.ts); sub-MCP is the Served endpoints page.
   { navLabel: 'Connectors', heading: 'Connectors' },
-  { navLabel: 'Served endpoints', heading: 'Served endpoints' },
-  // Triggers.
+  // Doors.
+  { navLabel: 'Conversations', heading: 'Conversations' },
   { navLabel: 'Hooks', heading: 'Hooks' },
   { navLabel: 'Scheduling', heading: 'Scheduling' },
+  { navLabel: 'Served endpoints', heading: 'Served endpoints' },
+  { navLabel: 'States', heading: 'States' },
   // Activity.
-  { navLabel: 'Conversations', heading: 'Conversations' },
   { navLabel: 'Interactions', heading: 'Interactions' },
   { navLabel: 'Notifications', heading: 'Notifications' },
   // Administration.
+  { navLabel: 'Members', heading: 'Members' },
   { navLabel: 'Settings', heading: 'Settings' },
   { navLabel: 'Storage', heading: 'Storage' },
   { navLabel: 'Manifest', heading: 'Manifest' },
@@ -68,7 +66,7 @@ const NAV_PAGES: ReadonlyArray<{ readonly navLabel: string; readonly heading: st
 ];
 
 /** The grouped nav's five section headers, in render order under the Dashboard row. */
-const NAV_SECTIONS = ['Capabilities', 'Connections', 'Triggers', 'Activity', 'Administration'] as const;
+const NAV_SECTIONS = ['Capabilities', 'Connections', 'Doors', 'Activity', 'Administration'] as const;
 
 /**
  * Assert the routed feature page came up cleanly: its own heading is visible and

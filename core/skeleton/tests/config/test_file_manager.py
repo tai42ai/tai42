@@ -8,20 +8,34 @@ missing-file behavior, defaults backfill)."""
 
 from __future__ import annotations
 
+import asyncio
+import errno
 import multiprocessing
 import multiprocessing.connection
 import os
+import select
+import threading
 import time
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 from multiprocessing.connection import Connection
 from multiprocessing.context import SpawnContext
 from multiprocessing.process import BaseProcess
+from multiprocessing.synchronize import Event
 
 import pytest
 import yaml
-from tests.config._file_manager_children import LockTraffic, env_writer, mutate_writer, single_env_write
+from tests.config._file_manager_children import (
+    LockTraffic,
+    env_writer,
+    hold_write_span,
+    mutate_writer,
+    single_env_write,
+    take_write_span,
+)
 
 import tai42_skeleton.config.file_manager as fm
+from tai42_skeleton.app.reload_gate import GateParty, hold_recorded, hold_recorded_blocking
 from tai42_skeleton.config.file_manager import FileConfigManager
 
 # --- spawned-child start-up and exit ------------------------------------------
@@ -821,3 +835,340 @@ def test_windows_lock_path_refuses_manifest_seams(monkeypatch, tmp_path) -> None
     with pytest.raises(RuntimeError, match="POSIX"):
         mgr.replace_manifest({"a": 1})
     assert not (tmp_path / "manifest.yml").exists()
+
+
+# --- the store-wide write span ----------------------------------------------
+
+# How long a child that must stay blocked on the span is watched before the test releases it.
+_BLOCKED_WATCH_S = 1.0
+
+
+def _hold_span_in_child(ctx: SpawnContext, config_dir: str) -> tuple[BaseProcess, Event]:
+    """Start a child holding ``exclusive_write`` on *config_dir*; return it, inside the span, with its release event."""
+    entered, release = ctx.Event(), ctx.Event()
+    holder, ready = _spawn_reporting(ctx, hold_write_span, (config_dir, entered, release))
+    _await_ready(("the holder", holder, ready))
+    assert entered.wait(_LOCKED_PHASE_BOUND_S), "the holder did not enter the span"
+    return holder, release
+
+
+def test_the_write_span_excludes_a_second_process_until_the_holder_leaves(tmp_path) -> None:
+    ctx = multiprocessing.get_context("spawn")
+    holder, release = _hold_span_in_child(ctx, str(tmp_path))
+    acquired = ctx.Event()
+    taker, ready = _spawn_reporting(ctx, take_write_span, (str(tmp_path), acquired))
+    try:
+        _await_ready(("the taker", taker, ready))
+        assert not acquired.wait(_BLOCKED_WATCH_S), "a second process entered the span while it was held"
+        release.set()
+        assert acquired.wait(_LOCKED_PHASE_BOUND_S)
+        _join_after_ready(("the holder", holder), ("the taker", taker))
+    finally:
+        _stop_leftovers(holder, taker)
+
+
+def test_the_write_span_is_released_when_its_holder_dies(tmp_path) -> None:
+    ctx = multiprocessing.get_context("spawn")
+    holder, _release = _hold_span_in_child(ctx, str(tmp_path))
+    acquired = ctx.Event()
+    taker, ready = _spawn_reporting(ctx, take_write_span, (str(tmp_path), acquired))
+    try:
+        _await_ready(("the taker", taker, ready))
+        assert not acquired.wait(_BLOCKED_WATCH_S)
+        holder.kill()
+        holder.join()
+        assert acquired.wait(_LOCKED_PHASE_BOUND_S), "the span stayed held after its holder died"
+        _join_after_ready(("the taker", taker))
+    finally:
+        _stop_leftovers(holder, taker)
+
+
+def test_per_file_writes_inside_the_span_leave_it_held(tmp_path) -> None:
+    """``write_env`` and ``mutate_manifest`` inside the span take and close their own
+    per-file locks; the span stays held across them and its lock file is ``0600``."""
+    mgr = FileConfigManager(config_dir_path=str(tmp_path))
+    mgr.replace_manifest({"a": 1})
+    ctx = multiprocessing.get_context("spawn")
+    acquired = ctx.Event()
+    with mgr.exclusive_write():
+        mgr.write_env({"A": "1"})
+        mgr.mutate_manifest(lambda doc: doc.__setitem__("b", 2))
+        taker, ready = _spawn_reporting(ctx, take_write_span, (str(tmp_path), acquired))
+        try:
+            _await_ready(("the taker", taker, ready))
+            assert not acquired.wait(_BLOCKED_WATCH_S), "a per-file write inside the span released it"
+        except BaseException:
+            _stop_leftovers(taker)
+            raise
+    try:
+        assert acquired.wait(_LOCKED_PHASE_BOUND_S)
+        _join_after_ready(("the taker", taker))
+    finally:
+        _stop_leftovers(taker)
+    assert mgr.read_env() == {"A": "1"}
+    assert mgr.read_manifest() == {"a": 1, "b": 2}
+    assert (os.stat(tmp_path / ".config-write.lock").st_mode & 0o777) == 0o600
+
+
+def test_a_raw_write_from_another_process_does_not_wait_for_the_span(tmp_path) -> None:
+    """The span excludes spans only: a sibling's ``write_env`` serializes on the env file's own lock."""
+    ctx = multiprocessing.get_context("spawn")
+    holder, release = _hold_span_in_child(ctx, str(tmp_path))
+    writer, ready = _spawn_reporting(ctx, single_env_write, (str(tmp_path), "A", "1"))
+    try:
+        _await_ready(("the writer", writer, ready))
+        _join_after_ready(("the writer", writer))
+        assert FileConfigManager(config_dir_path=str(tmp_path)).read_env() == {"A": "1"}
+        release.set()
+        _join_after_ready(("the holder", holder))
+    finally:
+        _stop_leftovers(holder, writer)
+
+
+def test_a_lock_file_close_that_fails_raises_from_the_exit_and_leaves_the_span_free(monkeypatch, tmp_path) -> None:
+    lock_path = tmp_path / ".config-write.lock"
+    real_close = os.close
+    failed: list[int] = []
+
+    def close(fd: int) -> None:
+        is_lock = lock_path.exists() and os.path.samestat(os.fstat(fd), lock_path.stat())
+        real_close(fd)
+        if is_lock and not failed:
+            failed.append(fd)
+            raise OSError(errno.EIO, "closing the lock file failed")
+
+    monkeypatch.setattr(fm.os, "close", close)
+    mgr = FileConfigManager(config_dir_path=str(tmp_path))
+    with pytest.raises(OSError, match="closing the lock file failed"), mgr.exclusive_write():
+        mgr.write_env({"A": "1"})
+    assert failed, "the span's exit never closed its lock file"
+    assert mgr.read_env() == {"A": "1"}
+
+    # The descriptor, and with it the record lock, is gone: another process and this one enter at once.
+    ctx = multiprocessing.get_context("spawn")
+    acquired = ctx.Event()
+    taker, ready = _spawn_reporting(ctx, take_write_span, (str(tmp_path), acquired))
+    try:
+        _await_ready(("the taker", taker, ready))
+        assert acquired.wait(_LOCKED_PHASE_BOUND_S), "the span stayed held after its lock file failed to close"
+        _join_after_ready(("the taker", taker))
+    finally:
+        _stop_leftovers(taker)
+    with mgr.exclusive_write():
+        pass
+
+
+def test_the_write_span_raises_when_its_lock_file_cannot_be_opened(tmp_path) -> None:
+    mgr = FileConfigManager(config_dir_path=str(tmp_path / "absent"))
+    with pytest.raises(FileNotFoundError), mgr.exclusive_write():
+        pytest.fail("the span was entered without its lock file")
+
+
+def test_windows_lock_path_refuses_the_write_span(monkeypatch, tmp_path) -> None:
+    import types
+
+    monkeypatch.setattr(fm, "sys", types.SimpleNamespace(platform="win32"))
+    mgr = FileConfigManager(config_dir_path=str(tmp_path))
+    with pytest.raises(RuntimeError, match="POSIX"), mgr.exclusive_write():
+        pytest.fail("the span was entered on Windows")
+
+
+def test_two_threads_of_one_process_hold_the_write_span_one_at_a_time(tmp_path) -> None:
+    """A record lock does not exclude its own process; the span still admits one thread at a time."""
+    mgr = FileConfigManager(config_dir_path=str(tmp_path))
+    entered, release, acquired = threading.Event(), threading.Event(), threading.Event()
+    errors: list[BaseException] = []
+
+    def hold() -> None:
+        try:
+            with mgr.exclusive_write():
+                entered.set()
+                if not release.wait(_LOCKED_PHASE_BOUND_S):
+                    raise TimeoutError("the test never released the first span")
+        except BaseException as exc:
+            errors.append(exc)
+
+    def take() -> None:
+        with FileConfigManager(config_dir_path=str(tmp_path)).exclusive_write():
+            acquired.set()
+
+    first = threading.Thread(target=hold)
+    second = threading.Thread(target=take)
+    first.start()
+    try:
+        assert entered.wait(_LOCKED_PHASE_BOUND_S), "the first thread did not enter the span"
+        second.start()
+        assert not acquired.wait(_BLOCKED_WATCH_S), "a second thread of the holding process entered the span"
+    finally:
+        release.set()
+        first.join(_LOCKED_PHASE_BOUND_S)
+    assert acquired.wait(_LOCKED_PHASE_BOUND_S), "the second thread did not enter the span after the first left it"
+    second.join(_LOCKED_PHASE_BOUND_S)
+    assert errors == []
+
+
+def test_a_span_exited_on_another_thread_than_entered_it_is_released_for_every_holder(tmp_path) -> None:
+    """The span is not bound to its entering thread: an exit from another thread releases both
+    the record lock and this process's lock, so a third thread and then another process enter."""
+    span = FileConfigManager(config_dir_path=str(tmp_path)).exclusive_write()
+    span_entered, span_exited = threading.Event(), threading.Event()
+    errors: list[BaseException] = []
+
+    def enter_span() -> None:
+        # Stays alive until the exit is done, so the exiting thread is a different live thread.
+        span.__enter__()
+        span_entered.set()
+        span_exited.wait(_LOCKED_PHASE_BOUND_S)
+
+    def exit_span() -> None:
+        try:
+            span.__exit__(None, None, None)
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            span_exited.set()
+
+    entering = threading.Thread(target=enter_span)
+    entering.start()
+    try:
+        assert span_entered.wait(_LOCKED_PHASE_BOUND_S), "the first thread did not enter the span"
+        exiting = threading.Thread(target=exit_span)
+        exiting.start()
+        exiting.join(_LOCKED_PHASE_BOUND_S)
+    finally:
+        span_exited.set()
+        entering.join(_LOCKED_PHASE_BOUND_S)
+    assert errors == []
+
+    ctx = multiprocessing.get_context("spawn")
+    entered, release, acquired = threading.Event(), threading.Event(), ctx.Event()
+
+    def hold() -> None:
+        with FileConfigManager(config_dir_path=str(tmp_path)).exclusive_write():
+            entered.set()
+            release.wait(_LOCKED_PHASE_BOUND_S)
+
+    third = threading.Thread(target=hold)
+    third.start()
+    taker: BaseProcess | None = None
+    try:
+        assert entered.wait(_LOCKED_PHASE_BOUND_S), "a third thread could not enter after a foreign-thread exit"
+        taker, ready = _spawn_reporting(ctx, take_write_span, (str(tmp_path), acquired))
+        _await_ready(("the taker", taker, ready))
+        assert not acquired.wait(_BLOCKED_WATCH_S), "another process entered the span while the third thread held it"
+        release.set()
+        third.join(_LOCKED_PHASE_BOUND_S)
+        assert acquired.wait(_LOCKED_PHASE_BOUND_S), "another process could not enter after the third thread left"
+        _join_after_ready(("the taker", taker))
+    finally:
+        release.set()
+        third.join(_LOCKED_PHASE_BOUND_S)
+        _stop_leftovers(*([taker] if taker is not None else []))
+
+
+async def test_a_waiter_cancelled_on_the_span_keeps_the_next_writer_of_its_process_excluding(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """A span waiter cancelled while its thread blocks on the record lock leaves that thread to
+    take and close the lock after the caller's queue moved on. The next writer of the same
+    process still holds the span against every other process once it is inside."""
+    ctx = multiprocessing.get_context("spawn")
+    blocking = threading.Event()
+    take_record_lock = fm._acquire_exclusive_record_lock
+
+    def record_blocking(fd: int) -> None:
+        blocking.set()
+        take_record_lock(fd)
+
+    monkeypatch.setattr(fm, "_acquire_exclusive_record_lock", record_blocking)
+    mgr = FileConfigManager(config_dir_path=str(tmp_path))
+    queue = asyncio.Lock()
+
+    @asynccontextmanager
+    async def write_exclusion() -> AsyncIterator[None]:
+        async with (
+            hold_recorded(queue, GateParty(request=None, task=None, task_epoch=None)) as party,
+            hold_recorded_blocking(mgr.exclusive_write(), party),
+        ):
+            yield
+
+    async def cancelled_writer() -> None:
+        async with write_exclusion():
+            pytest.fail("the body of a cancelled span waiter ran")
+
+    inside, done = asyncio.Event(), asyncio.Event()
+
+    async def next_writer() -> None:
+        async with write_exclusion():
+            inside.set()
+            await done.wait()
+
+    holder, release = _hold_span_in_child(ctx, str(tmp_path))
+    taker: BaseProcess | None = None
+    try:
+        first = asyncio.create_task(cancelled_writer())
+        assert await asyncio.to_thread(blocking.wait, _LOCKED_PHASE_BOUND_S), "the first writer never took the lock"
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        second = asyncio.create_task(next_writer())
+        await asyncio.sleep(_BLOCKED_WATCH_S)
+        assert not inside.is_set(), "the next writer entered while another process held the span"
+        release.set()
+        await asyncio.to_thread(_join_after_ready, ("the holder", holder))
+        await asyncio.wait_for(inside.wait(), _LOCKED_PHASE_BOUND_S)
+        acquired = ctx.Event()
+        taker, ready = _spawn_reporting(ctx, take_write_span, (str(tmp_path), acquired))
+        await asyncio.to_thread(_await_ready, ("the taker", taker, ready))
+        held_out = not await asyncio.to_thread(acquired.wait, _BLOCKED_WATCH_S)
+        done.set()
+        await second
+        assert held_out, "another process entered the span while the next writer held it"
+        assert await asyncio.to_thread(acquired.wait, _LOCKED_PHASE_BOUND_S)
+        await asyncio.to_thread(_join_after_ready, ("the taker", taker))
+    finally:
+        release.set()
+        _stop_leftovers(holder, *([taker] if taker is not None else []))
+
+
+def test_a_child_forked_while_a_thread_holds_the_span_takes_the_span_once_the_parent_leaves_it(tmp_path) -> None:
+    """A forked child inherits no record lock and none of the parent's threads, so it starts with
+    no span held: it waits only for the parent's record lock, never for a lock no thread of its own
+    can release."""
+    mgr = FileConfigManager(config_dir_path=str(tmp_path))
+    entered, release = threading.Event(), threading.Event()
+
+    def hold() -> None:
+        with mgr.exclusive_write():
+            entered.set()
+            release.wait(_LOCKED_PHASE_BOUND_S)
+
+    holder = threading.Thread(target=hold)
+    holder.start()
+    try:
+        assert entered.wait(_LOCKED_PHASE_BOUND_S), "the thread did not enter the span"
+        read_fd, write_fd = os.pipe()
+        pid = os.fork()
+        if pid == 0:  # pragma: no cover - the child exits through os._exit
+            try:
+                os.close(read_fd)
+                with FileConfigManager(config_dir_path=str(tmp_path)).exclusive_write():
+                    os.write(write_fd, b"1")
+            finally:
+                os._exit(0)
+        os.close(write_fd)
+        try:
+            early, _, _ = select.select([read_fd], [], [], _BLOCKED_WATCH_S)
+            assert early == [], "the child entered the span while the parent held it"
+            release.set()
+            woke, _, _ = select.select([read_fd], [], [], _LOCKED_PHASE_BOUND_S)
+            assert woke == [read_fd], "the child did not enter the span after the parent left it"
+            assert os.read(read_fd, 1) == b"1"
+        finally:
+            os.close(read_fd)
+            if os.waitpid(pid, os.WNOHANG) == (0, 0):
+                os.kill(pid, 9)
+                os.waitpid(pid, 0)
+    finally:
+        release.set()
+        holder.join(_LOCKED_PHASE_BOUND_S)

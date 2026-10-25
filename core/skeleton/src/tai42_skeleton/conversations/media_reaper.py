@@ -11,8 +11,10 @@ member: the hash carries no Redis TTL, so this loop closes the orphaned-blob gap
 store's lack of TTL would otherwise leave.
 
 A per-member delete fault that is NOT a missing blob is logged loudly AND evented, and the member is
-LEFT in the index for the next pass — a DEFINED retry, never a swallow. A whole-scan fault (the index
-read itself) propagates. The loop is a no-op each pass when the conversations store is unconfigured or
+LEFT in the index for the next pass — a DEFINED retry, never a swallow. The blob is deleted through
+the resource manager's held-object gate, so a blob a stored object names is kept with its record: its
+refusal, naming the holders, is logged and evented each pass until the holder is removed. A whole-scan
+fault (the index read itself) propagates. The loop is a no-op each pass when the conversations store is unconfigured or
 no blob provider is registered.
 """
 
@@ -33,6 +35,7 @@ if TYPE_CHECKING:
     from tai42_contract.storage import Storage
 
     from tai42_skeleton.app.facets import StorageFacet
+    from tai42_skeleton.template import ResourceManager
 
 logger = logging.getLogger(__name__)
 
@@ -68,18 +71,18 @@ async def _emit_media_reap_failed(media_id: str) -> None:
         )
 
 
-async def _reap_one_media(provider: Storage, store: InboundMediaMetaStore, media_id: str) -> None:
+async def _reap_one_media(manager: ResourceManager, store: InboundMediaMetaStore, media_id: str) -> None:
     """Delete one due member's blob (if present) then its metadata hash + expiry member, idempotently.
 
     A missing blob (``FileNotFoundError``) is the contract's own idempotent-caller instruction: it means
     the blob is already absent (a re-driven crash, or a record whose upload never landed), so the record
-    is still dropped. Any OTHER exception from the blob delete propagates to the per-member guard, which
-    keeps the member for the next pass — the blob delete precedes the record delete, so the member is
-    never removed while its blob may still exist.
+    is still dropped. Any OTHER exception from the blob delete (a held blob's ``409`` among them)
+    propagates to the per-member guard, which keeps the member for the next pass — the blob delete
+    precedes the record delete, so the member is never removed while its blob may still exist.
     """
     storage_path = inbound_media_blob_path(media_id)
     try:
-        await provider.delete(storage_path)
+        await manager.delete_object(storage_path)
     except FileNotFoundError:
         logger.warning("media retention reaper: blob %s already absent; dropping its metadata record", storage_path)
     await store.delete(media_id)
@@ -96,9 +99,9 @@ async def reap_expired_media_once() -> int:
     manager = get_conversations_manager()
     if not manager.durable:
         return 0
-    provider = _storage_provider()
-    if provider is None:
+    if _storage_provider() is None:
         return 0
+    resource_manager = cast("StorageFacet", tai42_app.storage).resource_manager
     store = manager.media_meta
     reaped = 0
     now = time.time()
@@ -106,7 +109,7 @@ async def reap_expired_media_once() -> int:
         # Guard each member: one member whose blob delete deterministically faults must not abort the
         # whole pass and strand the others. Log loudly, event it, keep it for the next pass, continue.
         try:
-            await _reap_one_media(provider, store, media_id)
+            await _reap_one_media(resource_manager, store, media_id)
             reaped += 1
         except Exception:
             logger.error(

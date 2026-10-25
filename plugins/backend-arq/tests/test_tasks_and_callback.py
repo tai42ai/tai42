@@ -26,6 +26,8 @@ from tai42_kit.utils.worker_secret_capability import WORKER_SECRET_CAPABILITY_AR
 from tai42_backend_arq import tasks
 from tai42_backend_arq.settings import ArqSettings, TaskFailedError
 
+from .conftest import handle_of
+
 _SUBJECT = {"target_kind": "tool", "target_name": "assistant", "kind": "person", "key": "p-1"}
 _FORWARDED = {
     SCHEDULE_SUBJECT_ARG: _SUBJECT,
@@ -143,7 +145,7 @@ class _FakeJob:
 
 
 def _bind_job(monkeypatch, job: _FakeJob, callback_timeout: int = 5) -> None:
-    monkeypatch.setattr(tasks, "Job", lambda *a, **kw: job)
+    monkeypatch.setattr(tasks, "job_handle", handle_of(lambda *a, **kw: job))
     monkeypatch.setattr(tasks, "arq_settings", lambda: ArqSettings(callback_timeout=callback_timeout))
 
 

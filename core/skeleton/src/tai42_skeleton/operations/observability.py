@@ -8,12 +8,13 @@ filterable run list, and single-run trace detail. A "run" is a monitoring
 The reader is fetched per operation from the process monitoring registry
 (``get_monitoring().reader``) so a reload swaps the backend without stale
 capture; with no backend registered the no-op reader answers with EMPTY data
-(not an error). Three typed monitoring errors are mapped: through the shared
+(not an error). Four typed monitoring errors are mapped: through the shared
 ``_translate_reader_errors`` seam every read door funnels its reader call
 through, a read the backend cannot serve at all becomes ``NotSupportedError``
-(501) and a read whose window/paging is too broad becomes ``BadRequestError``
-(400) the caller narrows — each carrying the ``code`` the UI keys its dedicated
-state on; an absent trace becomes ``NotFoundError`` (404). Every other reader
+(501), a request outside a reading backend's declaration becomes
+``BadRequestError`` (400) and a read whose window/paging is too broad becomes
+``BadRequestError`` (400) the caller narrows — each carrying the ``code`` the UI
+keys its dedicated state on; an absent trace becomes ``NotFoundError`` (404). Every other reader
 error propagates loudly as a 500. The query string is decoded into the neutral
 filter/paging types at the HTTP edge (the router's context extractors, which
 raise ``BadRequestError`` → 400); these operations receive the already-parsed
@@ -34,6 +35,7 @@ from tai42_contract.monitoring import (
     Measure,
     MetricsQuery,
     MonitoringFilter,
+    MonitoringReadNotServedError,
     MonitoringReadNotSupportedError,
     MonitoringReadTooBroadError,
     ObservationNotFoundError,
@@ -80,16 +82,21 @@ _READ_NOT_SUPPORTED_CODE = "monitoring-read-not-supported"
 # its dedicated 'narrow the request' state (the filters stay; not the install page).
 _READ_TOO_BROAD_CODE = "monitoring-read-too-broad"
 
+# The ``code`` a monitoring read-not-served answer carries so the UI can render
+# the request-fault state; the filters stay.
+_READ_NOT_SERVED_CODE = "monitoring-read-not-served"
+
 
 @contextmanager
 def _translate_reader_errors() -> Iterator[None]:
-    """Map the two typed monitoring READ faults to this layer's typed errors.
+    """Map the three typed monitoring READ faults to this layer's typed errors.
 
     The single seam every observability read door funnels its reader call through,
     so the translation holds identically on each door with no per-door copy. A read
-    the backend cannot serve at all becomes a 501 ``NotSupportedError``; a read
-    whose window or paging is too broad for the backend to resolve becomes a 400
-    ``BadRequestError`` the caller narrows. Each carries the ``code`` the UI keys
+    the backend cannot serve at all becomes a 501 ``NotSupportedError``; a request
+    outside a reading backend's declaration becomes a 400 ``BadRequestError``; a
+    read whose window or paging is too broad for the backend to resolve becomes a
+    400 ``BadRequestError`` the caller narrows. Each carries the ``code`` the UI keys
     its dedicated state on, and the backend's own guidance as the message. Every
     other reader error propagates untouched (loud).
     """
@@ -97,6 +104,8 @@ def _translate_reader_errors() -> Iterator[None]:
         yield
     except MonitoringReadTooBroadError as exc:
         raise BadRequestError(str(exc), extra={"code": _READ_TOO_BROAD_CODE}) from exc
+    except MonitoringReadNotServedError as exc:
+        raise BadRequestError(str(exc), extra={"code": _READ_NOT_SERVED_CODE}) from exc
     except MonitoringReadNotSupportedError as exc:
         raise NotSupportedError(str(exc), extra={"code": _READ_NOT_SUPPORTED_CODE}) from exc
 
@@ -200,7 +209,7 @@ async def get_metrics(t0: datetime, t1: datetime, granularity: str) -> dict:
     """Aggregate metrics over the time range via the contract's ``query_metrics``.
 
     The backend DECLARES what it serves (``metrics_capability``) before any query.
-    A backend that does not serve the core measures fails loudly (501). The by-model
+    A backend that does not serve the core measures is refused (400 not served). The by-model
     panel's availability is the backend's DECLARATION that it groups by the model
     dimension — not a swallowed query error: when declared, the by-model query runs
     HARD and any failure propagates; when not declared, the panel is reported absent
@@ -211,10 +220,10 @@ async def get_metrics(t0: datetime, t1: datetime, granularity: str) -> dict:
 
     missing = [m for m in _MEASURES if m not in capability.measures]
     if missing:
-        raise NotSupportedError(
-            f"monitoring backend does not serve the metrics measures {[m.value for m in missing]}",
-            extra={"code": _READ_NOT_SUPPORTED_CODE},
-        )
+        with _translate_reader_errors():
+            raise MonitoringReadNotServedError(
+                f"monitoring backend does not serve the metrics measures {[m.value for m in missing]}"
+            )
     by_model_available = Dimension.MODEL in capability.dimensions
 
     summary_query = MetricsQuery(measures=_MEASURES, from_timestamp=t0, to_timestamp=t1)

@@ -105,24 +105,74 @@ async def test_load_bytes_missing_raises_file_not_found(storage):
         await storage.load_bytes("nope.bin")
 
 
-# --- stat (inherited mimetypes default) ------------------------------------
+# --- stat ---------------------------------------------------------------------
 
 
-async def test_stat_infers_mime_from_suffix(storage):
-    stat = await storage.stat("photo.png")
-    assert isinstance(stat, ObjectStat)
-    assert stat.content_type == "image/png"
+async def test_stat_answers_size_and_path_inferred_content_type(storage, storage_root):
+    (storage_root / "photo.png").write_bytes(b"\x89PNG\r\n")
+    assert await storage.stat("photo.png") == ObjectStat(content_type="image/png", size=6)
 
 
-async def test_stat_unknown_suffix_returns_none(storage):
-    stat = await storage.stat("data.unknownext")
-    assert stat.content_type is None
+async def test_stat_unknown_suffix_returns_none(storage, storage_root):
+    (storage_root / "data.unknownext").write_bytes(b"x")
+    assert await storage.stat("data.unknownext") == ObjectStat(content_type=None, size=1)
 
 
-async def test_stat_does_not_verify_existence(storage):
-    # The default stat answers from the path string, not the filesystem.
-    stat = await storage.stat("never/written.mp3")
-    assert stat.content_type == "audio/mpeg"
+async def test_stat_missing_raises_file_not_found(storage):
+    with pytest.raises(FileNotFoundError, match=r"Object not found: never/written\.mp3"):
+        await storage.stat("never/written.mp3")
+
+
+async def test_a_directory_is_not_an_object(storage, storage_root):
+    (storage_root / "jq").mkdir()
+    (storage_root / "jq" / "fetch.jq").write_text(".items")
+    with pytest.raises(FileNotFoundError, match="Object not found: jq"):
+        await storage.stat("jq")
+    assert await storage.stat("jq/fetch.jq") == ObjectStat(content_type=None, size=6)
+
+
+# --- load_range ---------------------------------------------------------------
+
+
+async def test_load_range_reads_the_head_and_the_tail(storage, storage_root):
+    (storage_root / "blob.bin").write_bytes(b"0123456789")
+    assert await storage.load_range("blob.bin", 0, 4) == b"0123"
+    assert await storage.load_range("blob.bin", 6, 4) == b"6789"
+
+
+async def test_load_range_running_past_the_end_answers_the_tail_only(storage, storage_root):
+    (storage_root / "blob.bin").write_bytes(b"0123456789")
+    assert await storage.load_range("blob.bin", 8, 10) == b"89"
+
+
+async def test_load_range_past_the_end_answers_empty(storage, storage_root):
+    (storage_root / "blob.bin").write_bytes(b"0123456789")
+    assert await storage.load_range("blob.bin", 10, 4) == b""
+    assert await storage.load_range("blob.bin", 50, 4) == b""
+
+
+async def test_load_range_missing_raises_file_not_found(storage):
+    with pytest.raises(FileNotFoundError, match=r"Object not found: nope\.bin"):
+        await storage.load_range("nope.bin", 0, 4)
+
+
+async def test_load_range_of_a_directory_raises_file_not_found(storage, storage_root):
+    (storage_root / "jq").mkdir()
+    (storage_root / "jq" / "fetch.jq").write_text(".items")
+    with pytest.raises(FileNotFoundError, match="Object not found: jq"):
+        await storage.load_range("jq", 0, 4)
+
+
+async def test_load_range_zero_length_opens_no_file(storage, storage_root, monkeypatch):
+    from tai42_storage_local.driver import AsyncLocalDriver
+
+    (storage_root / "blob.bin").write_bytes(b"0123456789")
+
+    async def _no_read(*args: object) -> bytes:
+        raise AssertionError("read_range must not be called for a zero-length read")
+
+    monkeypatch.setattr(AsyncLocalDriver, "read_range", _no_read)
+    assert await storage.load_range("blob.bin", 0, 0) == b""
 
 
 # --- file/directory id collision (propagated through the backend) -----------
@@ -173,6 +223,7 @@ def unconfigured(monkeypatch: pytest.MonkeyPatch, tmp_path):
         ("load_bytes", ("a.txt",)),
         ("upload_bytes", ("a.bin", b"\x00")),
         ("stat", ("a.png",)),
+        ("load_range", ("a.bin", 0, 4)),
     ],
 )
 async def test_every_call_refuses_until_the_root_is_set(unconfigured, tmp_path, method, args):

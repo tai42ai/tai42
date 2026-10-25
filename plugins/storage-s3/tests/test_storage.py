@@ -61,8 +61,9 @@ def test_settings_accessor_is_cached() -> None:
         lambda s: s.delete("x.j2"),
         lambda s: s.delete_dir("d"),
         lambda s: s.stat("x.j2"),
+        lambda s: s.load_range("x.bin", 0, 4),
     ],
-    ids=["load", "load_bytes", "list", "upload", "upload_bytes", "delete", "delete_dir", "stat"],
+    ids=["load", "load_bytes", "list", "upload", "upload_bytes", "delete", "delete_dir", "stat", "load_range"],
 )
 async def test_unset_bucket_raises_config_error(
     s3_client: Any, monkeypatch: pytest.MonkeyPatch, operation: Any
@@ -329,21 +330,21 @@ async def test_delete_dir_surfaces_partial_errors(s3_client: Any) -> None:
 # --- stat --------------------------------------------------------------------
 
 
-async def test_stat_returns_stored_content_type(s3_client: Any) -> None:
+async def test_stat_returns_stored_content_type_and_size(s3_client: Any) -> None:
     # The stored ContentType differs from what the ".png" suffix would infer,
     # proving stat reports the stored metadata, not path inference.
-    s3_client.head_object.return_value = {"ContentType": "application/octet-stream"}
+    s3_client.head_object.return_value = {"ContentType": "application/octet-stream", "ContentLength": 26214400}
 
     result = await S3Storage().stat("pic.png")
 
-    assert result == ObjectStat(content_type="application/octet-stream")
+    assert result == ObjectStat(content_type="application/octet-stream", size=26214400)
     s3_client.head_object.assert_awaited_once_with(Bucket="b", Key="pic.png")
 
 
 async def test_stat_missing_content_type_is_none(s3_client: Any) -> None:
-    s3_client.head_object.return_value = {}
+    s3_client.head_object.return_value = {"ContentLength": 3}
 
-    assert await S3Storage().stat("x") == ObjectStat(content_type=None)
+    assert await S3Storage().stat("x") == ObjectStat(content_type=None, size=3)
 
 
 async def test_stat_missing_object_raises_filenotfound(s3_client: Any) -> None:
@@ -358,6 +359,60 @@ async def test_stat_non_404_clienterror_propagates(s3_client: Any) -> None:
 
     with pytest.raises(ClientError):
         await S3Storage().stat("x.png")
+
+
+# --- load_range --------------------------------------------------------------
+
+
+def invalid_range_error() -> Any:
+    return ClientError({"Error": {"Code": "InvalidRange", "Message": "Requested Range Not Satisfiable"}}, "GetObject")
+
+
+async def test_load_range_sends_the_byte_range_and_answers_the_body(s3_client: Any) -> None:
+    s3_client.get_object.return_value = {"Body": FakeBody(b"\x89PNG")}
+
+    assert await S3Storage().load_range("pic.png", 0, 4) == b"\x89PNG"
+    s3_client.get_object.assert_awaited_once_with(Bucket="b", Key="pic.png", Range="bytes=0-3")
+
+
+async def test_load_range_of_the_tail_sends_the_tail_range(s3_client: Any) -> None:
+    s3_client.get_object.return_value = {"Body": FakeBody(b"tail")}
+
+    assert await S3Storage().load_range("blob.bin", 96, 4) == b"tail"
+    s3_client.get_object.assert_awaited_once_with(Bucket="b", Key="blob.bin", Range="bytes=96-99")
+
+
+async def test_load_range_running_past_the_end_answers_the_tail_only(s3_client: Any) -> None:
+    # S3 clamps a range whose end is past the object to the bytes it has.
+    s3_client.get_object.return_value = {"Body": FakeBody(b"ab")}
+
+    assert await S3Storage().load_range("blob.bin", 98, 10) == b"ab"
+    s3_client.get_object.assert_awaited_once_with(Bucket="b", Key="blob.bin", Range="bytes=98-107")
+
+
+async def test_load_range_past_the_end_answers_empty(s3_client: Any) -> None:
+    s3_client.get_object.side_effect = invalid_range_error()
+
+    assert await S3Storage().load_range("blob.bin", 100, 4) == b""
+
+
+async def test_load_range_zero_length_answers_empty_without_a_call(s3_client: Any) -> None:
+    assert await S3Storage().load_range("blob.bin", 0, 0) == b""
+    s3_client.get_object.assert_not_called()
+
+
+async def test_load_range_missing_object_raises_filenotfound(s3_client: Any) -> None:
+    s3_client.get_object.side_effect = not_found_error("GetObject")
+
+    with pytest.raises(FileNotFoundError, match=r"gone\.bin"):
+        await S3Storage().load_range("gone.bin", 0, 4)
+
+
+async def test_load_range_other_clienterror_propagates(s3_client: Any) -> None:
+    s3_client.get_object.side_effect = forbidden_error("GetObject")
+
+    with pytest.raises(ClientError):
+        await S3Storage().load_range("x.bin", 0, 4)
 
 
 # --- checksum algorithm for S3-compatible stores -----------------------------

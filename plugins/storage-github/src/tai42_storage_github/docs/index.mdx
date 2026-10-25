@@ -1,6 +1,6 @@
 ---
 title: "GitHub storage"
-description: "Configure the GitHub-repository storage provider, its token scopes, and the size and CDN caveats."
+description: "Configure the GitHub-repository storage provider, its token scopes, the 1 MiB write cap, and the API calls each read costs."
 ---
 
 Stores content as files on a branch of a GitHub repository, which makes every write
@@ -33,10 +33,15 @@ is ignored, as are proxy environment variables.
 
 <Warning>
 Two limits shape what this provider suits. Writes are capped at 1 MiB and a larger
-payload raises before the request. Reads come from the raw content CDN, which can
-serve a stale copy for a few minutes after a write — do not use GitHub storage for
-content a tool writes and immediately reads back.
+payload raises before the request. Reads are GitHub REST API calls, and GitHub
+allows 60 of them an hour without a token and 5000 with one.
 </Warning>
+
+A whole read and a stat are one REST call each, made at the configured branch, so
+they answer the branch as it is right after a write. A ranged read resolves the
+branch's head commit (one REST call) and then reads the raw content host at that
+commit with a `Range` header; reading at the commit, never at the branch name,
+means it never serves a cached copy of an older version.
 
 Listing uses the recursive tree API and raises on a truncated response rather than
 acting on a partial listing. The API host is fixed, so GitHub Enterprise Server is

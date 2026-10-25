@@ -13,7 +13,17 @@ from starlette.requests import Request
 
 import tai42_skeleton.operations.resources as resources_ops
 import tai42_skeleton.routers.resources as router
+from tai42_skeleton.template import ResourceManager
 from tai42_skeleton.template.media import MediaBlock
+
+from .._fakes.content_fixtures import (
+    FILES_INSTALL_LINE,
+    LOCKED_PDF_MESSAGE,
+    RAGGED_CSV,
+    RAGGED_CSV_MESSAGE,
+    locked_pdf,
+)
+from .._fakes.recording_storage import RecordingStorage
 
 
 def _req(body: dict | None = None, *, query: dict | None = None) -> Request:
@@ -98,3 +108,35 @@ async def test_render_media_is_400(bind):
     resp = await router.get_resource_by_id(_req({"resource_id": "logo.png", "kwargs": {"x": 1}}))
     assert resp.status_code == 400
     assert "Cannot render media" in _data(resp)["error"]
+
+
+def _bind_recording(monkeypatch, objects: dict[str, bytes]) -> RecordingStorage:
+    provider = RecordingStorage({key: (data, None) for key, data in objects.items()})
+    manager = ResourceManager(provider, on_evicted=lambda _eviction: None)
+    monkeypatch.setattr(resources_ops, "tai42_app", SimpleNamespace(storage=SimpleNamespace(resource_manager=manager)))
+    return provider
+
+
+async def _both_doors(resource_id: str):
+    return [
+        await router.fetch_resource(_req(query={"resource_id": resource_id})),
+        await router.get_resource_by_id(_req({"resource_id": resource_id})),
+    ]
+
+
+async def test_an_extractors_failure_is_400_with_its_text_on_both_doors(monkeypatch):
+    _bind_recording(monkeypatch, {"docs/locked.pdf": locked_pdf(), "data/scores.csv": RAGGED_CSV})
+    for resp in await _both_doors("docs/locked.pdf"):
+        assert resp.status_code == 400
+        assert _data(resp) == {"error": f"resource 'docs/locked.pdf' cannot be loaded: {LOCKED_PDF_MESSAGE}"}
+    for resp in await _both_doors("data/scores.csv"):
+        assert resp.status_code == 400
+        assert _data(resp) == {"error": f"resource 'data/scores.csv' cannot be loaded: {RAGGED_CSV_MESSAGE}"}
+
+
+@pytest.mark.usefixtures("files_extra_missing")
+async def test_without_the_files_extra_both_doors_answer_501(monkeypatch):
+    _bind_recording(monkeypatch, {"a.txt": b"hello"})
+    for resp in await _both_doors("a.txt"):
+        assert resp.status_code == 501
+        assert _data(resp) == {"error": FILES_INSTALL_LINE, "code": "files-not-configured"}

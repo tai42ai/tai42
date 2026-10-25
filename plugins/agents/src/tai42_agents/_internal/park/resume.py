@@ -34,7 +34,7 @@ from tai42_contract.interactions import (
     reset_chained_resume,
     set_chained_resume,
 )
-from tai42_kit.interactions.park_adoption import supersede_chain_notice, terminal_chain_notice
+from tai42_kit.interactions.park_adoption import fire_terminal_chain, supersede_chain_notice
 from tai42_kit.interactions.park_index import Barrier, BarrierNotFoundError, DriveLease, LeaseLostError
 
 from tai42_agents._internal.park.capability import chained_resume_from_entry
@@ -51,7 +51,7 @@ logger = logging.getLogger(__name__)
 # Registered name of the hidden tool that resumes an async-parked agent run. Bound as the
 # driver continuation (``set_resume_continuation_tool``) so a flow-blind platform
 # ``ask(async)`` stamps it onto the parked interaction and later invokes it with
-# ``{interaction_id, answer}`` to resume auto-pilot. Must equal the bound tool name.
+# ``{interaction_id, ask_result}`` to resume auto-pilot. Must equal the bound tool name.
 AGENT_RESUME_TOOL_NAME: Final[str] = "agent_resume"
 
 
@@ -116,15 +116,16 @@ async def agent_resume(interaction_id: str, answer: Any) -> Any:
 
     Drives the parked run to its next OUTCOME — exactly once — and returns it. This is the driver
     continuation the flow-blind platform invokes when an async ``ask`` is answered (or expires): it
-    carries ``{interaction_id, answer}`` and buffers whatever value it is given; an ask's value
-    arrives already wrapped as ``AskAnswer`` JSON by ``agent_resume_tool``. The park index
+    carries ``{interaction_id, ask_result}`` and buffers whatever value it is given; an ask's
+    value arrives as the ``AskAnswer`` JSON the platform composed. The park index
     reverses the id to the parked thread, the super-step, and the interrupt the answers target.
     The answer is buffered idempotently in the super-step barrier; a super-step cannot advance
     until every interaction in it holds a resume value, so partial drives buy no progress and are
     skipped. When the barrier is complete, one
     caller wins the drive lease and feeds ALL M answers into the graph in a single resume. A
-    redelivered answer is a no-op; a still-pending sibling is never re-driven. An ``answer`` equal
-    to ``EXPIRY_ANSWER`` buffers the same way. Single-suspend is the M=1 degenerate case.
+    redelivered answer is a no-op; a still-pending sibling is never re-driven. An expiry (the
+    ``AskAnswer`` JSON whose ``answer`` is ``EXPIRY_ANSWER``) buffers the same way.
+    Single-suspend is the M=1 degenerate case.
 
     Returns (the faces map it with :func:`to_contract_outcome`):
 
@@ -233,13 +234,23 @@ async def _drive_superstep(entry: Mapping[str, Any], thread_id: str, superstep_i
             # The run parked again: this super-step resolves ``suspended`` and no cascade fires.
             await index.finalize(lease, member_ids=members, resolution="suspended", value=result)
             return result
-        if terminal_routing is not None:
-            # A NESTED run's terminal re-enters the waiting ancestor; the fire's return IS the
-            # outermost outcome, stored so a redrive replays it.
-            tool, payload = terminal_chain_notice(terminal_routing, result)
-            result = await tai42_app.tools.run_tool(tool, payload, continues_chain=terminal_routing.asked_by)
+        result = await _deliver_terminal(result, terminal_routing, stored)
         await index.finalize(lease, member_ids=members, resolution="terminal", value=result)
         return result
+
+
+async def _deliver_terminal(result: Any, terminal_routing: ChainedResume | None, stored: ChainedResume | None) -> Any:
+    """The successful terminal as the drive records and returns it.
+
+    A NESTED run's terminal re-enters the waiting ancestor; the fire's return IS the outermost
+    outcome, stored so a redrive replays it. A take-over returns the terminal inline, settled by the
+    routing the park captured. A run with no routing returns its terminal unchanged.
+    """
+    if terminal_routing is not None:
+        return await fire_terminal_chain(terminal_routing, result)
+    if stored is not None:
+        return await tai42_app.interactions.settle_chained_terminal(stored.chain_key, result)
+    return result
 
 
 def _resumer_takeover(stored: ChainedResume | None) -> ChainedResume | None:
@@ -335,8 +346,7 @@ async def _fire_failed_terminal(
     if not await lease.holds():
         raise LeaseLostError(lease.thread_id, lease.superstep)
     if routing is not None:
-        tool, payload = terminal_chain_notice(routing, failed)
-        outcome = await tai42_app.tools.run_tool(tool, payload, continues_chain=routing.asked_by)
+        outcome = await fire_terminal_chain(routing, failed)
         await index.finalize(lease, member_ids=member_ids, resolution="terminal", value=outcome)
         return outcome
     await index.finalize(lease, member_ids=member_ids, resolution="aborted" if aborted else "terminal", value=failed)

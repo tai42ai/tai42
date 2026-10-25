@@ -8,6 +8,10 @@ registration recoverable (the next rehydrate re-materializes it). A router-first
 order would durably LOSE a registration on a crash in that window — the store-first
 ordering is the durability contract. Errors from either half propagate loudly.
 
+The router binding this service calls judges nothing against the registries: the
+registration operation checks the served tools before its store write, and a restore
+replays what was stored.
+
 Every durable mount change is announced to the mount-change listeners the composition
 root registers (:func:`on_mount_changed`), after the store write, on both writers.
 """
@@ -47,13 +51,16 @@ async def register_sub_mcp_app(slug: str, tools: list[str], transport: str = "ht
     The slug/transport are validated up front so invalid input can never reach the
     store, THEN the store write lands (durability), THEN the in-process router swap
     runs, and the mount-change listeners are notified once the durable write has landed
-    — even when the swap then raises. Any failure — a store error, a bad slug, a build
-    error surfaced by the router, a listener's error — propagates loudly.
+    — even when the swap then raises. The swap is the router's :meth:`bind_route`, which
+    reads no registry. Any failure — a store error, a bad slug, a build error surfaced by
+    the router, a listener's error — propagates loudly.
     """
+    from tai42_skeleton.app.instance import build_app
+
     validate_registration(slug, transport)
     await get_sub_mcp_store().save_route(slug, RouteConfig(tools=tools, transport=transport))
     try:
-        await tai42_app.sub_app.mcp_sub_app_router.register_sub_mcp_app(slug, tools, transport=transport)
+        await build_app().sub_app.mcp_sub_app_router.bind_route(slug, tools, transport=transport)
     finally:
         await _notify_mount_changed()
 

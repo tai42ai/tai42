@@ -113,9 +113,15 @@ def serve_workers_on_port(stack: TaiStack) -> int:
 
 def wait_full_census(stack: TaiStack, deadline: float) -> None:
     """Poll the bus census until the FULL expected fleet is present — every
-    serve worker the topology spawns plus the backend worker when a backend is
-    registered — so readiness never returns on a half-formed fleet."""
+    serve worker the topology spawns plus, when a backend is registered, the backend
+    worker and every queue-label worker, each by its own pid — so readiness never
+    returns on a half-formed fleet."""
     expected_serve = expected_serve_workers(stack)
+    backend_procs = (
+        ["backend", *(f"backend-queue-{label}" for label in stack.config.queue_workers)]
+        if stack.config.run_backend
+        else []
+    )
 
     def probe() -> bool:
         early = early_exit_detail(stack)
@@ -124,9 +130,10 @@ def wait_full_census(stack: TaiStack, deadline: float) -> None:
         workers = stack.census()
         if sum(1 for w in workers if w.kind == "serve") < expected_serve:
             return False
-        return not (stack.config.run_backend and not any(w.kind == "backend" for w in workers))
+        backend_pids = {w.pid for w in workers if w.kind == "backend"}
+        return all(stack.process(name).pid in backend_pids for name in backend_procs)
 
-    want = f"{expected_serve} serve workers" + (" + backend" if stack.config.run_backend else "")
+    want = " + ".join([f"{expected_serve} serve workers", *backend_procs])
     wait_for(probe, deadline=deadline, message=f"the worker-bus census never reached the full fleet ({want})")
 
 

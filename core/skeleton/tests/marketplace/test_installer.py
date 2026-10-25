@@ -195,7 +195,7 @@ class FakeStore:
 
 class FakeCM:
     """The read seam the installer drives for its pre-flights (collision check and
-    the saved-manifest capture). Writes never go through here — they cross the
+    the update's remove-then-collide preview). Writes never go through here — they cross the
     :class:`FakeConfigService` pipeline, which mutates ``_manifest`` in place."""
 
     def __init__(self, events: list[str], manifest: dict[str, Any] | None = None) -> None:
@@ -254,7 +254,7 @@ class FakeConfigService:
         self.fail_reload_on: set[int] = set()
         self.fail_broadcast_on: set[int] = set()
         self.raise_on_validate: Exception | None = None
-        self.replace_calls: list[dict[str, Any]] = []
+        self.reapply_calls: list[dict[str, Any]] = []
 
     async def apply_change(self, mutator: Any) -> ApplyResult:
         document = copy.deepcopy(self._cm._manifest)
@@ -278,11 +278,11 @@ class FakeConfigService:
         # so the process env plus any ``changes`` stands in.
         return {**os.environ, **changes}
 
-    async def apply_replace(
-        self, document: dict[str, Any], *, continues: ApplyResult | None = None, recycle_keys: Sequence[str] = ()
+    async def reapply_manifest(
+        self, *, continues: ApplyResult | None = None, recycle_keys: Sequence[str] = ()
     ) -> ApplyResult:
-        self.replace_calls.append({"continues": continues, "recycle_keys": tuple(recycle_keys)})
-        return self._persist(copy.deepcopy(document))
+        self.reapply_calls.append({"continues": continues, "recycle_keys": tuple(recycle_keys)})
+        return self._persist(copy.deepcopy(self._cm._manifest))
 
     def _persist(self, document: dict[str, Any]) -> ApplyResult:
         idx = self.calls

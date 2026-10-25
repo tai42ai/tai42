@@ -92,6 +92,7 @@ _EXPECTED_503_GATE_ONLY: set[tuple[str, str]] = {
     ("POST", "/api/mcp-status/reload-failed"),
     ("POST", "/api/mcp-status/{title}/deregister"),
     ("POST", "/api/mcp-status/{title}/reload"),
+    ("PUT", "/api/mcp-config/entries/{title}/tool-filter"),
     # ``/api/presets`` create refuses a store-less deploy with a 501 (NotSupportedError),
     # not a declared 503, so only the reload gate's 503 remains here.
     ("POST", "/api/presets"),
@@ -284,6 +285,7 @@ _EXPECTED_RELOAD_GATED: set[tuple[str, str]] = {
     ("POST", "/api/mcp-config"),
     ("POST", "/api/mcp-config/entries"),
     ("DELETE", "/api/mcp-config/entries/{title}"),
+    ("PUT", "/api/mcp-config/entries/{title}/tool-filter"),
     ("POST", "/api/mcp-config/secret-env"),
     ("POST", "/api/mcp-status/reload-failed"),
     ("POST", "/api/mcp-status/{title}/deregister"),
@@ -373,6 +375,7 @@ _EXPECTED_READS_BODY: set[tuple[str, str]] = {
     ("POST", "/api/mcp-status/reload-failed"),
     ("POST", "/api/mcp-status/{title}/deregister"),
     ("POST", "/api/mcp-status/{title}/reload"),
+    ("PUT", "/api/mcp-config/entries/{title}/tool-filter"),
     ("POST", "/api/notifications"),
     ("POST", "/api/presets"),
     ("POST", "/api/presets/validate"),
@@ -512,11 +515,33 @@ def test_off_gate_doors_document_the_501(spec: dict, api_routes: list[RouteMetad
     assert "501" in spec["paths"][path][method.lower()]["responses"], f"{method} {path} 501 missing from the spec"
 
 
-def test_delete_template_declares_only_its_typed_errors(api_routes: list[RouteMetadata]) -> None:
-    # delete-template's operation declares BadRequestError only, so the route
-    # documents {400, 401} and no spurious 500.
-    (meta,) = [m for m in api_routes if m.path == "/api/delete-template"]
-    assert set(meta.error_statuses) == {400, 401}
+_STORED_OBJECT_DELETE_DOORS: dict[tuple[str, str], set[int]] = {
+    ("POST", "/api/delete-template"): {400, 401, 409, 500},
+    ("POST", "/api/delete-template-dir"): {400, 401, 404, 409, 500},
+    ("DELETE", "/api/storage/resources/{resource_id:path}"): {400, 401, 404, 409, 500, 501},
+    ("DELETE", "/api/storage/dirs/{dir_path:path}"): {400, 401, 404, 409, 500, 501},
+}
+
+
+@pytest.mark.parametrize(("method", "path"), sorted(_STORED_OBJECT_DELETE_DOORS))
+def test_a_stored_object_delete_door_documents_the_held_409(
+    spec: dict, api_routes: list[RouteMetadata], method: str, path: str
+) -> None:
+    # A delete refused because a stored object names what it removes is a 409; a holder
+    # that cannot be read is a 500.
+    (meta,) = [m for m in api_routes if m.path == path and method in m.methods]
+    assert set(meta.error_statuses) == _STORED_OBJECT_DELETE_DOORS[(method, path)]
+    assert "409" in _operation(spec, meta, method)["responses"]
+
+
+@pytest.mark.parametrize("method", ["GET", "POST"])
+def test_resource_load_doors_document_the_files_extra_501(
+    spec: dict, api_routes: list[RouteMetadata], method: str
+) -> None:
+    # A deployment without the ``files`` extra answers the typed 501 on both resource doors.
+    (meta,) = [m for m in api_routes if m.path == "/api/resources/get" and method in m.methods]
+    assert 501 in meta.error_statuses
+    assert "501" in spec["paths"]["/api/resources/get"][method.lower()]["responses"]
 
 
 @pytest.mark.parametrize(
@@ -559,9 +584,10 @@ _EXPECTED_TOOL_DISPATCH_DOOR_STATUSES: dict[tuple[str, str], set[int]] = {
     # BadRequestError, 401 authed, PermissionDeniedError, NotFoundError, ConflictError (409 — a
     # subject of the run is held by a failed pending state save), UpstreamError (502 — a tool
     # result no JSON encoder can render is a bad-tool-output fault), UnavailableError (503 — a
-    # subject's pending state save did not finish in time), OperationFailedError — and the reload
-    # gate's own 503 beside it.
-    ("POST", "/api/run-tool"): {400, 401, 403, 404, 409, 500, 502, 503},
+    # subject's pending state save did not finish in time), NotSupportedError (501 — a tool that
+    # needs an optional extra the deployment lacks), OperationFailedError — and the reload gate's
+    # own 503 beside it.
+    ("POST", "/api/run-tool"): {400, 401, 403, 404, 409, 500, 501, 502, 503},
     # 401 authed, PermissionDeniedError, OperationFailedError, NotSupportedError, UnavailableError
     # (503 — this door is not reload-gated, so the dispatch seam is its only source).
     ("GET", "/api/schedules"): {401, 403, 500, 501, 503},

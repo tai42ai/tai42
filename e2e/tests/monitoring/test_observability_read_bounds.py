@@ -1,12 +1,10 @@
-"""Observability READ bounds against the compose-provided self-hosted Langfuse:
-a too-broad read, a genuinely unsupported read, and a valid-but-empty read are
-three distinct answers on ``/api/observability/runs``.
+"""Observability READ bounds against the compose-provided self-hosted Langfuse on
+``/api/observability/runs``.
 
 A read whose window/paging is too broad for the backend to resolve answers 400
-``monitoring-read-too-broad`` (the caller narrows the request); a read the
-backend cannot serve at all answers 501 ``monitoring-read-not-supported`` (the
-Studio install path); a valid, bounded filter that simply matches nothing
-answers a normal 200 empty page. Opt-in: collects only with
+``monitoring-read-too-broad`` (the caller narrows the request); a metric sort
+combined with any run-list filter answers a normal 200 page; a valid, bounded
+filter that simply matches nothing answers a normal 200 empty page. Opt-in: collects only with
 ``TAI_E2E_MONITORING=1`` (the compose ``monitoring`` profile up); skipped at
 collection otherwise."""
 
@@ -39,11 +37,9 @@ pytestmark = [
 # row cap, so a page over it trips the bound with no seeded data.
 _METRIC_RANK_ROW_CAP = 1000
 
-# The wire error codes the observability doors stamp so the UI keys its dedicated
-# states on them: a too-broad read (400) carries the first; a read the backend
-# cannot serve (501) the second.
+# The wire error code the observability doors stamp on a too-broad read (400), so
+# the UI keys its dedicated state on it.
 _READ_TOO_BROAD_CODE = "monitoring-read-too-broad"
-_READ_NOT_SUPPORTED_CODE = "monitoring-read-not-supported"
 
 
 def _window_start() -> str:
@@ -56,7 +52,7 @@ async def test_too_broad_metric_page_is_400_not_the_install_path(monitoring_stac
     # A metric-sorted run list whose page reaches past the backend's metric-rank row
     # cap is too broad to resolve: the reader raises MonitoringReadTooBroadError and
     # the shared skeleton translator maps it to 400 monitoring-read-too-broad — the
-    # caller narrows the request, never the 501 install page.
+    # caller narrows the request.
     api: ApiClient = monitoring_stack.api()
     caps = await api.get("/api/observability/capabilities", retry_on_reloading=True)
     page_size = caps["pageSizeMax"]
@@ -75,11 +71,10 @@ async def test_too_broad_metric_page_is_400_not_the_install_path(monitoring_stac
     assert body.get("error"), body
 
 
-# A valid run-list value for each filter query param the metrics traces view may
-# declare incompatible with a metric sort, so the read is refused for the filter
-# combination — never rejected as a malformed value. ``status=error`` sets the
-# level clause; each cost/token/latency range is single-sided (never inverted).
-_INCOMPATIBLE_FILTER_SAMPLES: dict[str, str] = {
+# A valid run-list value for every filter query param a metric sort combines with:
+# ``status=error`` sets the level clause; each cost/token/latency range is
+# single-sided (never inverted), so each read is a well-formed, bounded filter.
+_METRIC_SORT_FILTER_SAMPLES: dict[str, str] = {
     "status": "error",
     "version": "v1",
     "minCost": "0",
@@ -91,36 +86,30 @@ _INCOMPATIBLE_FILTER_SAMPLES: dict[str, str] = {
 }
 
 
-async def test_unsupported_metric_sort_filter_is_501_install_path(monitoring_stack: TaiStack) -> None:
-    # A metric sort ranks globally through the Langfuse metrics traces view, which carries
-    # only a subset of the run-list filter columns. Combining a metric sort with a filter
-    # that view has no column for is a capability the backend does not have: it declares the
-    # incompatibility, the reader raises MonitoringReadNotSupportedError, and the skeleton
-    # maps it to 501 monitoring-read-not-supported (the install path).
+@pytest.mark.parametrize("param", sorted(_METRIC_SORT_FILTER_SAMPLES))
+async def test_a_metric_sort_combines_with_every_filter(monitoring_stack: TaiStack, param: str) -> None:
+    # A metric sort ranks runs globally and applies every run-list filter with it: the
+    # backend declares no filter it cannot combine with the sort, and the read answers a
+    # normal 200 page.
     api: ApiClient = monitoring_stack.api()
     caps = await api.get("/api/observability/capabilities", retry_on_reloading=True)
     assert "cost" in caps["sortKeys"], caps["sortKeys"]
-    # The capability names each sort's incompatible filters by their run-list WIRE param
-    # (camelCase), not the neutral contract field — so drive one the backend actually lists.
-    incompatible = caps["incompatibleFilters"].get("cost", [])
-    param = next((p for p in _INCOMPATIBLE_FILTER_SAMPLES if p in incompatible), None)
-    assert param is not None, incompatible
+    assert caps["incompatibleFilters"] == {}, caps["incompatibleFilters"]
 
-    # page 1 stays within the rank row cap, so the read is refused for the unsupported
-    # filter combination, not for being too broad.
+    # page 1 stays within the rank row cap, so the read is never refused as too broad.
     query = urlencode(
-        {"from": _window_start(), "sort": "cost", "dir": "desc", param: _INCOMPATIBLE_FILTER_SAMPLES[param], "page": 1}
+        {"from": _window_start(), "sort": "cost", "dir": "desc", param: _METRIC_SORT_FILTER_SAMPLES[param], "page": 1}
     )
-    body = await api.request("GET", f"/api/observability/runs?{query}", expect=501, retry_on_reloading=True)
+    page = await api.get(f"/api/observability/runs?{query}", retry_on_reloading=True)
 
-    assert body["code"] == _READ_NOT_SUPPORTED_CODE, body
-    assert body.get("error"), body
+    assert isinstance(page["items"], list), page
+    assert page["page"] == 1, page
 
 
 async def test_valid_empty_filter_is_200_empty_page(monitoring_stack: TaiStack, uniq: Callable[[str], str]) -> None:
     # A valid, bounded native listing filtered to a run user no trace carries matches
     # nothing: the reader returns an empty page and the door answers a normal 200 empty
-    # list — not the too-broad 400 and not the not-supported 501.
+    # list, not the too-broad 400.
     api: ApiClient = monitoring_stack.api()
     absent_user = uniq("nouser")
 

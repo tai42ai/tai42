@@ -31,6 +31,7 @@ def _failed_row() -> OutboxRow:
         states=["profile"],
         run_id=None,
         trace_id=None,
+        parent_span_id=None,
         records=[],
         subjects=[],
         calls=[],

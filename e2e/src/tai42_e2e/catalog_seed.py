@@ -266,6 +266,16 @@ async def seed_eta_listing(mp: MarketplaceService, index: FixturePackageIndex, a
     await _wait_published(mp, ETA_REF, "0.1.0")
 
 
+async def publish_eta_v2(mp: MarketplaceService, index: FixturePackageIndex, artifacts: FixtureArtifacts) -> None:
+    """Publish eta ``0.2.0`` over a seeded ``0.1.0`` listing (:func:`seed_eta_listing`).
+
+    Registers the ``0.2.0`` wheel and re-seeds eta with its stamped spec, so an installed
+    ``0.1.0`` has an update to take."""
+    index.register(artifacts.eta_v2)
+    await _admin_seed(mp, ((ETA_PACKAGE, artifacts.eta_v2.plugin_yml),))
+    await _wait_published(mp, ETA_REF, "0.2.0")
+
+
 # ---- descriptor-only (source='spec') seeding ----------------------------
 
 

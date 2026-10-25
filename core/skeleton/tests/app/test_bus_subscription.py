@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import mimetypes
 import os
 from types import SimpleNamespace
 from typing import Any, cast
@@ -30,7 +31,7 @@ from unittest.mock import AsyncMock
 import pytest
 from tai42_contract.app import tai42_app
 from tai42_contract.backend import FleetOpApplied, FleetOpEffect
-from tai42_contract.storage import Storage
+from tai42_contract.storage import ObjectStat, Storage
 from tai42_kit.settings import reset_all_settings
 
 from tai42_skeleton.app.bus import WorkerBus, WorkerKind
@@ -53,7 +54,7 @@ class _Mixin(TaiMCPLifecycleMixin):
         super().__init__(*args, **kwargs)
         self.preset_manager = cast("Any", SimpleNamespace(reconcile_bases=AsyncMock()))
 
-    def _mcp_tools(self, config, tools):  # pragma: no cover - unused here
+    def _mcp_tools(self, config, tools, preset_names):  # pragma: no cover - unused here
         self._mcp_bound_tools[config.title] = {f"{config.title}_t"}
 
 
@@ -365,6 +366,13 @@ class _StubStorage(Storage):
         prefix = path.rstrip("/") + "/"
         for key in [k for k in self.items if k.startswith(prefix)]:
             del self.items[key]
+
+    async def stat(self, path: str) -> ObjectStat:
+        content_type, _ = mimetypes.guess_type(path)
+        return ObjectStat(content_type=content_type, size=len(await self.load_bytes(path)))
+
+    async def load_range(self, path: str, start: int, length: int) -> bytes:
+        return (await self.load_bytes(path))[start : start + length]
 
 
 def _install_manager(monkeypatch: pytest.MonkeyPatch, items: dict[str, str]) -> ResourceManager:

@@ -59,7 +59,7 @@ def test_malformed_tool_skipped_good_tools_still_bind(caplog, monkeypatch):
             ]
             with caplog.at_level(logging.ERROR):
                 # Raises NOTHING despite the malformed middle tool.
-                app._tool_binding.mcp_tools(_cfg(), tools)
+                app._tool_binding.mcp_tools(_cfg(), tools, frozenset())
 
             bound = {t.name for t in await app._fast_mcp.local_provider.list_tools()}
             assert "svc_alpha" in bound
@@ -88,7 +88,7 @@ def test_bind_tool_func_failure_still_raises(monkeypatch):
 
             monkeypatch.setattr(app._tool_binding, "bind_tool_func", _boom)
             with pytest.raises(RuntimeError, match="registration bug"):
-                app._tool_binding.mcp_tools(_cfg(), [cast(mcp.types.Tool, _GoodTool("alpha"))])
+                app._tool_binding.mcp_tools(_cfg(), [cast(mcp.types.Tool, _GoodTool("alpha"))], frozenset())
 
     asyncio.run(run())
 
@@ -113,7 +113,7 @@ def test_malformed_schema_max_depth_env_surfaces_as_config_error(monkeypatch):
                 # before the loop). Reverting the resolve back inside the per-tool
                 # guard would catch this and skip the tool instead — no raise.
                 with pytest.raises(ValidationError):
-                    app._tool_binding.mcp_tools(_cfg(), [cast(mcp.types.Tool, _GoodTool("alpha"))])
+                    app._tool_binding.mcp_tools(_cfg(), [cast(mcp.types.Tool, _GoodTool("alpha"))], frozenset())
             finally:
                 monkeypatch.delenv("TAI_MCP_SCHEMA_MAX_DEPTH", raising=False)
                 reset_all_settings()

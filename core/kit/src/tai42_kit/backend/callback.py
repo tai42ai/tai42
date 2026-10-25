@@ -4,7 +4,8 @@
 that reach the host's resource manager. ``callback_execution`` gates a task
 result on the rendered condition, transforms it with the rendered expression,
 and optionally runs a follow-up tool. ``prepare_backend_kwargs`` strips the
-FastMCP context and injects the tool name before a backend dispatch.
+FastMCP context and every argument the caller left out, and injects the tool name before a
+backend dispatch.
 """
 
 from __future__ import annotations
@@ -35,6 +36,7 @@ from tai42_kit.utils.schedule_subject import (
     pop_schedule_subject,
     schedule_subject_context,
 )
+from tai42_kit.utils.unset import without_unset
 from tai42_kit.utils.worker_secret_capability import (
     WORKER_SECRET_CAPABILITY_ARG,
     access_control_gate_state,
@@ -60,6 +62,10 @@ async def prepare_backend_kwargs(
     func: Callable[..., Any], tool_name_arg: str, tool_name: str, kwargs: dict[str, Any], *, scheduled: bool = False
 ) -> dict[str, Any]:
     """Prepare a backend dispatch's kwargs: strip the context, inject the tool name, stamp the capability.
+
+    Every argument whose value is the omitted-value marker
+    (:data:`~tai42_kit.utils.unset.UNSET`) is dropped with the context, so no job carries it and
+    the worker's tool applies its own default; every other value, ``None`` included, is kept.
 
     Stamps the submitting caller's secret-read capability so the worker binds it for
     the job. Runs in the submitter's request context, so :func:`caller_may_read_secrets` reads the
@@ -89,7 +95,7 @@ async def prepare_backend_kwargs(
     ``<tool>_schedule_task`` branch directly at the run-tool/MCP edge reaches this path with no create
     fire on the stack and is refused loudly, so a forged reserved key can never ride the job to the fire.
     """
-    kwargs = exclude_fastmcp_ctx_from_kwargs(func, kwargs)
+    kwargs = without_unset(exclude_fastmcp_ctx_from_kwargs(func, kwargs))
     kwargs[tool_name_arg] = tool_name
     kwargs[WORKER_SECRET_CAPABILITY_ARG] = caller_may_read_secrets()
     if scheduled:

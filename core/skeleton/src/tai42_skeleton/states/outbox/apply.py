@@ -159,7 +159,7 @@ def _report_divergence(row: OutboxRow, provisional: list[ApplyResult], applied: 
 
     get_monitoring().writer.create_event(
         name="state:pending-save-divergence",
-        trace_context=TraceContext(trace_id=row.trace_id),
+        trace_context=TraceContext(trace_id=row.trace_id, parent_span_id=row.parent_span_id),
         output={"outbox_id": str(row.id), "divergences": diverged},
     )
 

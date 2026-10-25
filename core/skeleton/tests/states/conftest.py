@@ -1294,7 +1294,7 @@ def _resolve_alias_checked(cur, pg, norm, params):
 
 
 def _insert_outbox(pg, params, *, status: str):
-    record_keys, subject_keys, targets, states, run_id, trace_id, records, subjects, calls = params
+    record_keys, subject_keys, targets, states, run_id, trace_id, parent_span_id, records, subjects, calls = params
     row_id = pg.next_outbox_id()
     pg.outbox[row_id] = {
         "id": row_id,
@@ -1305,6 +1305,7 @@ def _insert_outbox(pg, params, *, status: str):
         "states": list(states),
         "run_id": run_id,
         "trace_id": trace_id,
+        "parent_span_id": parent_span_id,
         "records": _unwrap(records),
         "subjects": _unwrap(subjects),
         "calls": _unwrap(calls),
@@ -1324,7 +1325,8 @@ def _insert_outbox(pg, params, *, status: str):
 
 @_exact(
     "INSERT INTO state_outbox (status, records_applied_at, record_keys, subject_keys, targets, states, "
-    "run_id, trace_id, records, subjects, calls) VALUES ('pending', NULL, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+    "run_id, trace_id, parent_span_id, records, subjects, calls) VALUES ('pending', NULL, "
+    "%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
     "RETURNING id"
 )
 def _insert_outbox_pending(cur, pg, norm, params):
@@ -1333,8 +1335,8 @@ def _insert_outbox_pending(cur, pg, norm, params):
 
 @_exact(
     "INSERT INTO state_outbox (status, records_applied_at, record_keys, subject_keys, targets, states, "
-    "run_id, trace_id, records, subjects, calls) VALUES ('calls', clock_timestamp(), "
-    "%s, %s, %s, %s, %s, %s, %s, %s, %s) "
+    "run_id, trace_id, parent_span_id, records, subjects, calls) VALUES ('calls', clock_timestamp(), "
+    "%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
     "RETURNING id"
 )
 def _insert_outbox_calls(cur, pg, norm, params):
@@ -1461,9 +1463,9 @@ def _outbox_unapplied_on_records(cur, pg, norm, params):
 
 
 @_exact(
-    "SELECT id, status, record_keys, subject_keys, targets, states, run_id, trace_id, records, subjects, calls, "
-    "calls_done, attempts, next_attempt_at, claimed_by, lease_until, last_error, failed_phase, created_at, "
-    "records_applied_at, failed_at FROM state_outbox WHERE states @> ARRAY[%s]::text[] "
+    "SELECT id, status, record_keys, subject_keys, targets, states, run_id, trace_id, parent_span_id, records, "
+    "subjects, calls, calls_done, attempts, next_attempt_at, claimed_by, lease_until, last_error, failed_phase, "
+    "created_at, records_applied_at, failed_at FROM state_outbox WHERE states @> ARRAY[%s]::text[] "
     "AND (status = 'pending' OR (status = 'failed' AND records_applied_at IS NULL)) ORDER BY id"
 )
 def _outbox_unapplied_on_state(cur, pg, norm, params):

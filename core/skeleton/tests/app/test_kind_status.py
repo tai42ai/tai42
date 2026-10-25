@@ -1,4 +1,4 @@
-"""``collect_kind_status`` reports the nine pluggable kinds plus one row per
+"""``collect_kind_status`` reports the eleven pluggable kinds plus one row per
 DB-backed gated feature, each with the live ``active``/``default``/``off`` state of
 its registry or store config, and the NoOp-monitoring warning fires once per
 process only when NoOp is the active recorder."""
@@ -27,6 +27,7 @@ _PLUGGABLE_KINDS = [
     "accounts",
     "monitoring",
     "storage",
+    "files",
     "backend",
     "sandbox",
     "channels",
@@ -389,3 +390,39 @@ def test_noop_warning_silent_when_backend_active(monkeypatch: pytest.MonkeyPatch
         ks.warn_if_noop_monitoring(rows, log)
     warnings = [r for r in caplog.records if "monitoring: OFF" in r.getMessage()]
     assert warnings == []
+
+
+# -- the files row ------------------------------------------------------------------
+
+_FILES_INSTALL_LINE = (
+    "tai42-skeleton 'files' resource loading requires the 'files' optional "
+    "dependencies (magika, pandas, langchain-community, pypdf, docx2txt, "
+    "openpyxl, tabulate, beautifulsoup4, python-pptx, striprtf, odfpy, "
+    "ebooklib). Install them with: pip install 'tai42-skeleton[files]'"
+)
+
+
+@pytest.mark.usefixtures("files_extra_missing")
+def test_files_off_names_the_install_line_and_probes_again(bound_app) -> None:
+    expected = KindStatus(kind="files", state="off", plugin=None, detail=_FILES_INSTALL_LINE)
+    assert _row("files") == expected
+    assert _row("files") == expected
+
+
+def test_files_active_when_the_extra_is_installed(bound_app) -> None:
+    assert _row("files") == KindStatus(
+        kind="files", state="active", plugin=None, detail="file loading is installed (the 'files' extra)"
+    )
+
+
+def test_a_broken_files_install_fails_the_summary(bound_app, monkeypatch: pytest.MonkeyPatch) -> None:
+    real_import = ks.importlib.import_module
+
+    def _import(name: str, package: str | None = None):
+        if name == "tai42_skeleton.template.file_loading":
+            raise RuntimeError("broken install")
+        return real_import(name, package)
+
+    monkeypatch.setattr(ks.importlib, "import_module", _import)
+    with pytest.raises(RuntimeError, match="broken install"):
+        collect_kind_status()

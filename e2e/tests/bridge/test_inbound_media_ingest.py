@@ -98,9 +98,10 @@ async def _ingest_and_serve(
     served_mime: str,
     expected_filename: str,
     document: bool,
-) -> None:
+) -> str:
     """Route a media inbound to a tool target, assert the ONE turn's served attachment + parity
-    params, then GET the served reference and assert the stored bytes + security headers."""
+    params, then GET the served reference and assert the stored bytes + security headers. Returns
+    the served media id."""
     exec_key = uniq("ingest-exec")
     await bridge.mint_key(user_id=exec_key, scopes=["e2e-all"])
     probe = uniq("ingest-probe")
@@ -156,6 +157,7 @@ async def _ingest_and_serve(
         assert expected_filename in disposition, disposition
     else:
         assert disposition is None, disposition
+    return seen["i"]
 
 
 @pytest.mark.needs("kind:channels:telegram", "helper:telegram")
@@ -165,7 +167,7 @@ async def test_telegram_photo_ingests_to_served_image(media_bridge: BridgeHarnes
     caption = uniq("tg-cap")
     media_bridge.telegram.media[file_id] = MediaBlob(body=TINY_PNG, content_type="image/png")
     inbound = media_bridge.telegram_inbound_photo(chat_id=chat_id, file_id=file_id, caption=caption)
-    await _ingest_and_serve(
+    media_id = await _ingest_and_serve(
         media_bridge,
         uniq,
         channel="telegram",
@@ -180,6 +182,18 @@ async def test_telegram_photo_ingests_to_served_image(media_bridge: BridgeHarnes
         expected_filename="",
         document=False,
     )
+
+    # The ingested blob is stored under the unlisted, not-backed-up inbound-media prefix: the
+    # listings and a storage backup leave it out, and the entry door still reads it by id.
+    key = f"inbound-media/{media_id}"
+    api = media_bridge.api()
+    assert key not in (await api.get("/api/storage/resources"))["resources"]
+    assert key not in await api.get("/api/templates")
+    entry = await api.get(f"/api/storage/entries/{key}")
+    assert (entry["kind"], entry["size"]) == ("binary", len(TINY_PNG))
+    exported = await api.post("/api/backup/export", json={"sections": ["storage"]})
+    assert exported["errors"] == {}, exported["errors"]
+    assert not [path for path in exported["sections"]["storage"] if path.startswith("inbound-media/")]
 
 
 @pytest.mark.needs("kind:channels:slack", "helper:slack")

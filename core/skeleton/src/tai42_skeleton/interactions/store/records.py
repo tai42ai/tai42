@@ -13,6 +13,7 @@ from typing import Any, Final, Literal
 
 from tai42_contract.conversation_target import ConversationTargetKind
 from tai42_contract.interactions import PARK_COMPLETION_FAILED, CallerAskLanding, DeliveryAddress
+from tai42_contract.presets import PresetParkStages
 from tai42_contract.states import StateBinding, StateContext, SubjectCandidates
 
 
@@ -84,6 +85,9 @@ class ContinuationDue:
     # continuation runs) and the answer's opaque ``params``. ``None`` when the answer carried none.
     reply_to_medium_message_id: str | None = None
     params: dict[str, str] | None = None
+    # The output stages the park captured (``InteractionRequest.deferred_output_stages``), applied by
+    # the reaper's redelivery where each preset's result reappears. ``None`` when it captured none.
+    deferred_output_stages: PresetParkStages | None = None
 
 
 class ContinuationRetryDrop(enum.Enum):
@@ -132,6 +136,7 @@ def _continuation_due_mapping(
     chain_keys: str | None = None,
     reply_to_medium_message_id: str | None = None,
     params: dict[str, str] | None = None,
+    deferred_output_stages: str | None = None,
 ) -> dict[str, str]:
     """The flow-blind continuation-due record fields.
 
@@ -141,14 +146,15 @@ def _continuation_due_mapping(
     park carried one, so a redelivery keeps the same door/actor as the immediate fire. It also
     copies the parking run's call chain (``asked_by``, JSON) so a redelivery restores the same
     chain the immediate fire did, the chained calls it is nested under (``chain_keys``, JSON) so a
-    redelivery deposits the same resume lineage, and the run's ``delivery`` address (JSON) and ``run_delivery_id``
-    when the park carried them, so the reaper's DETACHED redelivery binds the run's address and
-    re-establishes its delivery identity without re-reading the request. The medium id of the
-    message the answering reply quoted (never its text) and the answer's ``params`` (JSON) ride
-    beside the answer when it carried them. It carries no consumer-specific data. Written into
-    the SAME MULTI as the resolving claim (``record_answer``), so the outbox enqueue commits
-    atomically with the ``answered`` state change — a crash can never leave a claimed answer with
-    no due-record.
+    redelivery deposits the same resume lineage, the captured preset output stages
+    (``deferred_output_stages``, JSON) so a redelivery applies them, and the run's ``delivery``
+    address (JSON) and ``run_delivery_id`` when the park carried them, so the reaper's DETACHED
+    redelivery binds the run's address and re-establishes its delivery identity without re-reading
+    the request. The medium id of the message the answering reply quoted (never its text) and the
+    answer's ``params`` (JSON) ride beside the answer when it carried them. It carries no
+    consumer-specific data. Written into the SAME MULTI as the resolving claim
+    (``record_answer``), so the outbox enqueue commits atomically with the ``answered`` state
+    change — a crash can never leave a claimed answer with no due-record.
     """
     mapping = {
         "tool": tool,
@@ -170,6 +176,7 @@ def _continuation_due_mapping(
         "chain_keys": chain_keys,
         "reply_to_medium_message_id": reply_to_medium_message_id,
         "params": None if params is None else json.dumps(params),
+        "deferred_output_stages": deferred_output_stages,
     }
     mapping.update({name: value for name, value in optional.items() if value is not None})
     return mapping

@@ -4,7 +4,8 @@
 through ``graph_cache``); ``_build_agent_and_input`` builds a run's input messages and run
 config over a compiled graph. ``ainvoke_tools_agent`` runs it once and returns the user text
 plus per-call usage; ``astream_tools_agent`` yields the raw LangGraph chunks (the normalized
-event projection lives in ``stream_events``).
+event projection lives in ``stream_events``). Each drive opens its run's one trace lineage
+through the kit's run-trace opener and binds the graph's monitoring callbacks to it.
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ from langchain_core.messages import BaseMessage
 from langchain_core.tools import StructuredTool
 from langgraph.errors import GraphRecursionError
 from tai42_contract.agent.events import SuspendedFinal
+from tai42_contract.monitoring import TraceContext
 from tai42_kit.llm.checkpoint.checkpoint_registry import checkpoint_registry
 from tai42_kit.llm.middleware import history_middlewares
 from tai42_kit.llm.middleware.context_overflow import context_overflow_middlewares
@@ -25,6 +27,7 @@ from tai42_kit.llm.models import get_llm_async
 from tai42_kit.llm.runtime import build_agent_input, build_system_message, build_user_output, extract_structured_output
 from tai42_kit.llm.settings import llm_provider_settings, llm_settings
 from tai42_kit.logging.settings import logging_settings
+from tai42_kit.monitoring import begin_run_trace, open_run_trace
 
 from tai42_agents._internal.append import awrite_thread_messages
 from tai42_agents._internal.cache_mark import default_system_cache_mark
@@ -35,9 +38,17 @@ from tai42_agents._internal.outcomes import (
     drive_reprompt_scope,
     outcome_for_drive_error,
 )
-from tai42_agents._internal.park import ParkIdentity, bind_resume_per_step, finalize_drive, park_drive, resume_command
+from tai42_agents._internal.park import (
+    ParkIdentity,
+    bind_resume_per_step,
+    finalize_drive,
+    park_drive,
+    resume_command,
+    step_bindings,
+)
 from tai42_agents._internal.park.middleware import AsyncParkMiddleware
 from tai42_agents._internal.recovery import _repair_dangling_tool_calls, _tool_error_middleware
+from tai42_agents._internal.run_record import run_input
 from tai42_agents._internal.structured import structured_output_stack
 from tai42_agents._internal.usage import AgentInvokeResult, CallUsage, aggregate_usage
 
@@ -141,8 +152,9 @@ async def _compile_tools_agent(
 async def _build_agent_and_input(
     graph: ToolsAgentGraph,
     user_message: list[str],
-    config: dict[str, Any] | None = None,
-    user_content_kwargs: dict[str, Any] | None = None,
+    config: dict[str, Any] | None,
+    user_content_kwargs: dict[str, Any] | None,
+    context: TraceContext | None,
 ) -> tuple[dict[str, Any], dict[str, Any], str | None]:
     """Build a run's input messages and run config over ``graph``, and ready the thread.
 
@@ -152,10 +164,12 @@ async def _build_agent_and_input(
     user messages, so thread state stays system-free. ``user_content_kwargs`` (e.g.
     ``cache_control``) carries content-block keys onto the last user message. A caller-supplied
     thread leaves the checkpoint finished-thread ledger here, before any face runs the graph.
-    Returns ``(messages, config, minted_thread)`` — the thread id this run minted (``None`` for a
-    caller-supplied thread), which the face marks finished when the run ends without a park.
+    ``context`` is the run's trace lineage from the face's run-trace opener; the graph's top run
+    records under it. Returns ``(messages, config, minted_thread)`` — the thread id this run minted
+    (``None`` for a caller-supplied thread), which the face marks finished when the run ends
+    without a park.
     """
-    run_config = init_langgraph_config(config).config
+    run_config = init_langgraph_config(config, context)
     minted_thread = await start_run_thread(config, run_config, provider=graph.checkpoint_provider)
     messages = build_agent_input(*user_message, user_content_kwargs=user_content_kwargs)
     await _repair_dangling_tool_calls(graph.agent, run_config)
@@ -196,9 +210,38 @@ async def ainvoke_tools_agent(
     ``ask`` persists its durable index and returns a ``.suspended`` receipt
     instead of an answer. ``resume`` drives ``Command(resume=...)`` — answering a
     prior park — in place of a fresh user turn.
+
+    The whole drive runs inside the run's one trace lineage: the lineage ``config`` or the
+    ambient deposit names, or else one ``run`` span the drive opens and ends, recording the turn
+    and the returned result.
     """
+    with open_run_trace(config, input_=turn_input(user_message, resume)) as root:
+        result = await _ainvoke_in_lineage(
+            graph, user_message, config, user_content_kwargs, park_builder, resume, root.context
+        )
+        root.record_output(result)
+        return result
+
+
+def turn_input(user_message: list[str], resume: Any) -> dict[str, Any]:
+    """A tools-agent drive's run input: the answers it resumes with, else its user messages."""
+    return run_input(resume=resume) if resume is not None else run_input(user_message=user_message)
+
+
+async def _ainvoke_in_lineage(
+    graph: ToolsAgentGraph,
+    user_message: list[str],
+    config: dict[str, Any] | None,
+    user_content_kwargs: dict[str, Any] | None,
+    park_builder: ParkBuilder | None,
+    resume: Any,
+    context: TraceContext | None,
+) -> AgentInvokeResult:
+    """Drive one :func:`ainvoke_tools_agent` run inside its lineage ``context``."""
     agent = graph.agent
-    messages, config, minted_thread = await _build_agent_and_input(graph, user_message, config, user_content_kwargs)
+    messages, config, minted_thread = await _build_agent_and_input(
+        graph, user_message, config, user_content_kwargs, context
+    )
     park = park_builder(config) if park_builder is not None else None
     agent_input: Any = await resume_command(agent, config, resume) if resume is not None else messages
     # The resume continuation and the chained-park claims ledger are bound for the drive's
@@ -248,13 +291,32 @@ async def astream_tools_agent(
     """Run the tools agent ``graph`` and yield the raw LangGraph ``astream`` chunks for ``stream_mode``.
 
     The caller decodes the channel shapes. A graph compiled with a ``response_format`` forces
-    structured output onto the ``structured_response`` state channel.
+    structured output onto the ``structured_response`` state channel. The run's trace root is
+    current only inside each step, never across a yield, so an abandoned or foreign-closed stream
+    leaves the consumer's context untouched; a failure is recorded on the root before it ends. The
+    root records the user messages and, when the stream ends, its last chunk.
     """
-    messages, config, minted_thread = await _build_agent_and_input(graph, user_message, config, user_content_kwargs)
-    # One counter map for the whole drive, bound around each step (never across a yield).
-    counters: dict[int, RepromptCounter] = {}
-    async for chunk in bind_resume_per_step(
-        lambda: drive_reprompt_scope(counters), graph.agent.astream(messages, config, stream_mode=stream_mode)
-    ):
-        yield chunk
-    await mark_minted_thread_finished(minted_thread, provider=graph.checkpoint_provider)
+    root = begin_run_trace(config, input_=turn_input(user_message, None))
+    try:
+        with root.step():
+            messages, run_config, minted_thread = await _build_agent_and_input(
+                graph, user_message, config, user_content_kwargs, root.context
+            )
+        # One counter map for the whole drive, bound around each step with the run's trace root (never
+        # across a yield).
+        counters: dict[int, RepromptCounter] = {}
+        last: Any = None
+        async for chunk in bind_resume_per_step(
+            lambda: step_bindings(root.step, lambda: drive_reprompt_scope(counters)),
+            graph.agent.astream(messages, run_config, stream_mode=stream_mode),
+        ):
+            last = chunk
+            yield chunk
+        with root.step():
+            await mark_minted_thread_finished(minted_thread, provider=graph.checkpoint_provider)
+        root.record_output(last)
+    except Exception as exc:
+        root.fail(exc)
+        raise
+    finally:
+        root.end()

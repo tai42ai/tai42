@@ -7,6 +7,7 @@ from tai42_e2e.variants.census import BrokerLease, BusWorker, bus_census, short_
 from tai42_e2e.variants.identities import IDENTITIES, FixtureIdentity, IdentityVariant, RedisIdentity
 from tai42_e2e.variants.resolve import Variants, resolve_variants
 from tai42_e2e.variants.storages import (
+    GITHUB_STUB_BRANCH,
     GITHUB_STUB_DEFAULT,
     GITHUB_STUB_ENV,
     S3_AXIS_BUCKET,
@@ -26,6 +27,7 @@ from tai42_e2e.variants.storages import (
 
 __all__ = [
     "BACKENDS",
+    "GITHUB_STUB_BRANCH",
     "GITHUB_STUB_DEFAULT",
     "GITHUB_STUB_ENV",
     "IDENTITIES",

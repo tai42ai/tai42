@@ -103,7 +103,7 @@ def test_sync_task_branch_shape():
     branch = extensions.sync_task(sample_tool, "sample_tool", "the doc")
     assert branch.__name__ == "sample_tool_sync_task"
     params = inspect.signature(branch).parameters
-    assert set(params) == {"x", "note", "countdown", "expires", "eta", "callback_kwargs"}
+    assert set(params) == {"x", "note", "countdown", "expires", "eta", "callback_kwargs", "queue"}
     assert params["countdown"].kind is inspect.Parameter.KEYWORD_ONLY
     assert branch.__doc__ == "the doc"
 

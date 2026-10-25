@@ -309,6 +309,12 @@ async def test_missing_role_denies_fail_closed(mem, pg, redis_mgmt, monkeypatch)
     allowed, cause = await role_level_decision(policy, None, meta.path, "GET", 1)
     assert allowed is False
     assert cause is DenialCause.LEVEL_MISS
+    # The dangling pointer is denied before the self-service rule is reached: a self-service
+    # route is no exception to the fail-closed deny.
+    assert await role_level_decision(policy, None, "/api/auth/logout", "POST", 1) == (
+        False,
+        DenialCause.LEVEL_MISS,
+    )
 
 
 async def test_role_level_decision_allows_a_method_less_non_http_scope(mem, pg, redis_mgmt):
@@ -348,19 +354,21 @@ async def test_role_level_decision_does_not_act_on_a_path_with_no_registered_rou
 
 
 def _a_grantable_read_route():
+    from tai42_skeleton.access_control.role_gate import role_reach
     from tai42_skeleton.app.route_registry import load_all_routes
 
     for meta in load_all_routes():
-        if meta.authed and meta.action == "read" and "GET" in meta.methods and "{" not in meta.path:
+        if role_reach(meta) == "level" and meta.action == "read" and "GET" in meta.methods and "{" not in meta.path:
             return meta
     raise AssertionError("no concrete grantable GET route found")
 
 
 def _a_grantable_write_route():
+    from tai42_skeleton.access_control.role_gate import role_reach
     from tai42_skeleton.app.route_registry import load_all_routes
 
     for meta in load_all_routes():
-        if meta.authed and meta.action == "write" and "{" not in meta.path:
+        if role_reach(meta) == "level" and meta.action == "write" and "{" not in meta.path:
             return meta
     raise AssertionError("no concrete grantable write route found")
 
@@ -500,8 +508,8 @@ _ADMIN_CONTROL_ROUTES = [
 
 async def test_admin_control_routes_hard_fenced_to_editor_and_viewer(mem, pg, redis_mgmt):
     # The role/policy-administration routes are fenced/secret, so no per-tag level opens
-    # them — every non-admin (editor + viewer) is a HARD_FENCE deny even though both carry an
-    # access-control grant. The action-class fence, not the shared tag, is the boundary.
+    # them — every non-admin (editor + viewer) is a HARD_FENCE deny, whatever its grant map
+    # holds. The action-class fence is the boundary.
     from tai42_skeleton.access_control.role_gate import grant_map_admits, resolve_route_meta
 
     await seed_default_roles()
@@ -516,45 +524,117 @@ async def test_admin_control_routes_hard_fenced_to_editor_and_viewer(mem, pg, re
             assert cause is DenialCause.HARD_FENCE
 
 
-async def test_access_control_tag_stays_grantable_for_self_service(mem, pg, redis_mgmt):
-    # The access-control tag remains grantable via the self-service key/scope routes (own-key
-    # management), so editor/viewer keep it in their seeded grant maps and a self-service key
-    # route is NOT hard-fenced — the fence is scoped to the admin routes by action class.
-    from tai42_skeleton.access_control.role_gate import grant_map_admits, resolve_route_meta
-
-    assert "access-control" in grantable_feature_tags()
+async def test_seeded_maps_hold_only_tags_a_level_opens(mem, pg, redis_mgmt):
+    # The access-control tag carries no route a level opens: its routes are admin-only or
+    # self-service. A self-service route is admitted without a level, so the tag is in no
+    # seeded grant map, and an editor still mints its own key.
     await seed_default_roles()
     roles = {r["name"]: r for r in await role_store().list_roles()}
-    assert roles["editor"]["grants"]["access-control"] == "write"
-    meta = resolve_route_meta("/api/auth/api-keys", "POST")
-    assert meta is not None
-    allowed, cause = grant_map_admits(meta, "POST", roles["editor"]["grants"])
-    assert allowed is True
-    assert cause is None
+    assert "access-control" not in roles["editor"]["grants"]
+    assert "access-control" not in roles["viewer"]["grants"]
+    editor = AccessPolicy(
+        scopes=["*"], condition=TemplatedText(content="editorbase"), policy_data={ROLE_POINTER_KEY: "editor"}
+    )
+    assert await role_level_decision(editor, None, "/api/auth/api-keys", "POST", 1) == (True, None)
 
 
-async def test_access_control_tag_still_grantable_via_a_non_admin_editor_read(mem, pg, redis_mgmt):
-    # The access-control tag is grantable via its self-service reads (GET /scopes, GET /me,
-    # ...), so a non-admin editor reaches a self-service read through its seeded
-    # access-control: write grant. (The scope + public-route MUTATIONS are action=write but
-    # stay denied to editor/viewer by the base-tier /api/auth jq ceiling, not the fence.)
+async def test_editor_reaches_a_self_service_read_without_a_grant(mem, pg, redis_mgmt):
+    # A self-service read (GET /scopes) is admitted without a level: the editor's seeded map
+    # holds no key for its tag, so the per-tag check alone would deny it, and the decision
+    # admits it from the route's self-service declaration.
     from tai42_skeleton.access_control.role_gate import grant_map_admits, resolve_route_meta
 
-    assert "access-control" in grantable_feature_tags()
     await seed_default_roles()
     roles = {r["name"]: r for r in await role_store().list_roles()}
     meta = resolve_route_meta("/api/auth/scopes", "GET")  # list_scopes — a self-service read
     assert meta is not None
-    assert meta.action == "read"
-    allowed, cause = grant_map_admits(meta, "GET", roles["editor"]["grants"])
-    assert allowed is True
-    assert cause is None
+    assert meta.self_service is True
+    editor = AccessPolicy(
+        scopes=["*"], condition=TemplatedText(content="editorbase"), policy_data={ROLE_POINTER_KEY: "editor"}
+    )
+    assert await role_level_decision(editor, None, "/api/auth/scopes", "GET", 1) == (True, None)
+    assert grant_map_admits(meta, "GET", roles["editor"]["grants"]) == (False, DenialCause.LEVEL_MISS)
 
 
-def test_scope_and_public_route_mutations_are_grantable_writes() -> None:
-    # The scope + public-route mutations are grantable ``write`` routes: no action-class
-    # fence. A seeded editor/viewer is still denied them, but by the base-tier /api/auth jq
-    # ceiling (pinned in the editor/viewer jq matrices), not the fence. Pin the write class +
+def _viewer_policy() -> AccessPolicy:
+    return AccessPolicy(
+        scopes=["*"], condition=TemplatedText(content="viewerbase"), policy_data={ROLE_POINTER_KEY: "viewer"}
+    )
+
+
+async def test_viewer_reaches_its_self_service_writes(mem, pg, redis_mgmt):
+    await seed_default_roles()
+    viewer = _viewer_policy()
+    assert await role_level_decision(viewer, None, "/api/auth/logout", "POST", 1) == (True, None)
+    assert await role_level_decision(viewer, None, "/api/auth/api-keys", "POST", 1) == (True, None)
+
+
+async def test_role_without_grants_reaches_its_self_service_writes(mem, pg, redis_mgmt, monkeypatch):
+    _admin_caller(monkeypatch)
+    await seed_default_roles()
+    await roles_ops.create_role("bare", "x", "viewer", {})
+    bare = AccessPolicy(
+        scopes=["*"], condition=TemplatedText(content="viewerbase"), policy_data={ROLE_POINTER_KEY: "bare"}
+    )
+    assert await role_level_decision(bare, None, "/api/auth/logout", "POST", 1) == (True, None)
+    assert await role_level_decision(bare, None, "/api/auth/api-keys", "POST", 1) == (True, None)
+
+
+async def test_self_service_fenced_routes_stay_admin_only(mem, pg, redis_mgmt):
+    await seed_default_roles()
+    viewer = _viewer_policy()
+    for path, method in (
+        ("/api/auth/api-keys/u/policy/versions", "GET"),
+        ("/api/auth/api-keys/u/policy/rollback", "POST"),
+    ):
+        meta = resolve_route_meta(path, method)
+        assert meta is not None, f"{method} {path} did not resolve"
+        assert meta.self_service is True
+        assert await role_level_decision(viewer, None, path, method, 1) == (False, DenialCause.HARD_FENCE)
+
+
+async def test_non_self_service_write_still_needs_the_level(mem, pg, redis_mgmt):
+    await seed_default_roles()
+    meta = resolve_route_meta("/api/auth/scopes", "POST")
+    assert meta is not None
+    assert meta.action == "write"
+    assert meta.self_service is False
+    assert await role_level_decision(_viewer_policy(), None, "/api/auth/scopes", "POST", 1) == (
+        False,
+        DenialCause.LEVEL_MISS,
+    )
+
+
+def test_grantable_tags_exclude_self_service_and_control_plane_routes() -> None:
+    from tai42_skeleton.access_control.role_gate import role_reach
+
+    def reach(path: str, method: str) -> str:
+        meta = resolve_route_meta(path, method)
+        assert meta is not None, f"{method} {path} did not resolve"
+        return role_reach(meta)
+
+    assert "access-control" not in grantable_feature_tags()
+    assert reach("/api/auth/api-keys", "POST") == "self_service"
+    assert reach("/api/auth/scopes", "POST") == "admin_only"
+    assert reach("/api/auth/api-keys/u/policy/versions", "GET") == "admin_only"
+    assert reach("/api/tools", "GET") == "level"
+    assert reach("/health", "GET") == "public"
+
+
+async def test_grant_on_a_tag_no_level_opens_is_refused(mem, pg, redis_mgmt, monkeypatch):
+    _admin_caller(monkeypatch)
+    await seed_default_roles()
+    for tag, level in (("access-control", "write"), ("health", "read")):
+        with pytest.raises(BadRequestError) as excinfo:
+            await roles_ops.create_role("acx", "x", "viewer", {tag: level})
+        assert "admin-only, self-service or public" in str(excinfo.value)
+        assert tag in str(excinfo.value)
+
+
+def test_scope_and_public_route_mutations_keep_the_write_class() -> None:
+    # The scope + public-route mutations keep the ``write`` action class: no action-class
+    # fence. A seeded editor/viewer is denied them by the base-tier /api/auth jq ceiling
+    # (pinned in the editor/viewer jq matrices), not the fence. Pin the write class +
     # authed=True here so a re-fence regression is caught.
     from tai42_skeleton.app.route_registry import load_all_routes
 

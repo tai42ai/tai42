@@ -181,6 +181,17 @@ class _RecordingWriter(NoOpWriter):
             span.end()
 
     @contextmanager
+    def use_span(self, span: Span) -> Iterator[None]:
+        if not isinstance(span, _RecordingSpan):
+            yield
+            return
+        token = _open_spans.set((*_open_spans.get(), span))
+        try:
+            yield
+        finally:
+            _open_spans.reset(token)
+
+    @contextmanager
     def trace_attributes(
         self,
         *,

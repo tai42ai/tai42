@@ -10,8 +10,13 @@ from types import SimpleNamespace
 import pytest
 from fastmcp.utilities.types import Image
 
+from tai42_skeleton.operations import NotSupportedError
+from tai42_skeleton.template import ContentNotLoadableError
 from tai42_skeleton.template.media import MediaBlock
 from tai42_skeleton.tools.builtin import file_loader as builtin_file_loader
+
+from ..._fakes.content_fixtures import FILES_INSTALL_LINE, LOCKED_PDF_MESSAGE, locked_pdf
+from ..._fakes.recording_storage import RecordingStorage
 
 
 class _ResourceManager:
@@ -82,3 +87,29 @@ async def test_file_loader_rejects_traversal_id(bind_app) -> None:
 
     with pytest.raises(UnsafeTemplatePathError):
         await builtin_file_loader.file_loader("../x")
+
+
+def _bind_recording(bind_app, objects: dict[str, bytes]) -> RecordingStorage:
+    from tai42_skeleton.template import ResourceManager
+
+    provider = RecordingStorage({key: (data, None) for key, data in objects.items()})
+    manager = ResourceManager(provider, on_evicted=lambda _eviction: None)
+    bind_app(SimpleNamespace(storage=SimpleNamespace(resource_manager=manager)))
+    return provider
+
+
+async def test_file_loader_raises_an_extractors_failure_with_its_text(bind_app) -> None:
+    _bind_recording(bind_app, {"docs/locked.pdf": locked_pdf()})
+    with pytest.raises(ContentNotLoadableError) as caught:
+        await builtin_file_loader.file_loader("docs/locked.pdf")
+    assert str(caught.value) == LOCKED_PDF_MESSAGE
+
+
+@pytest.mark.usefixtures("files_extra_missing")
+async def test_file_loader_without_the_files_extra_is_the_501(bind_app) -> None:
+    provider = _bind_recording(bind_app, {"a.txt": b"hello"})
+    with pytest.raises(NotSupportedError) as caught:
+        await builtin_file_loader.file_loader("a.txt")
+    assert caught.value.message == FILES_INSTALL_LINE
+    assert caught.value.status == 501
+    assert provider.calls == []

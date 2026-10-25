@@ -45,7 +45,15 @@ from tai42_skeleton.config.file_manager import ENV_KEY_RE
 from tai42_skeleton.config.recycle_policy import capability_report
 from tai42_skeleton.config.service import ConfigService
 from tai42_skeleton.db import SKELETON_COMPONENT, not_configured_message
-from tai42_skeleton.operations import BadRequestError, NotFoundError, NotSupportedError, OperationResponse, operation
+from tai42_skeleton.operations import (
+    BadRequestError,
+    ConflictError,
+    NotFoundError,
+    NotSupportedError,
+    OperationResponse,
+    UpstreamError,
+    operation,
+)
 from tai42_skeleton.operations._broadcast import (
     apply_response,
     awaiting_respawn_after,
@@ -215,7 +223,7 @@ async def read_settings_schema() -> dict:
     tags=["config"],
     destructive=True,
     reload_gated=True,
-    errors=[BadRequestError],
+    errors=[BadRequestError, ConflictError, UpstreamError],
     request_model=EnvUpdate,
     response_model=ApplyResponse,
 )
@@ -233,6 +241,9 @@ async def write_env(env: dict[str, str], secret_keys: list[str] | None = None) -
 
     ``secret_keys`` (when not ``None``) replaces the operator's secret marks in the same write;
     the marks variable itself is never accepted as an ``env`` key.
+    An ``mcp`` selection list whose ``!ENV`` marker would resolve so that a tool something still
+    uses stops being picked is refused with a 409 naming the holders, or a 502 when the server
+    cannot list its tools for that check, before anything is written.
 
     Called over MCP, the reload answers on the session that called it and then retires that session with
     the generation it ran on: a later call on the same session fails (streamable HTTP answers it 404,
@@ -618,7 +629,7 @@ async def _save_previous_version(stored_env: dict[str, str]) -> None:
     destructive=True,
     reload_gated=True,
     authority_changing=True,
-    errors=[BadRequestError, NotFoundError, NotSupportedError],
+    errors=[BadRequestError, ConflictError, NotFoundError, NotSupportedError, UpstreamError],
     response_model=ProfileApplyResponse,
 )
 async def apply_profile(name: str) -> OperationResponse:
@@ -632,8 +643,8 @@ async def apply_profile(name: str) -> OperationResponse:
 
     The response is the dedicated ``profileApplyResponse`` ``{hot, recycle:[{name, kind, status,
     generation_before, detail}], fresh:[{name, kind, generation}], refused:[],
-    recycle_stopped:{kind, name, detail} | null, awaiting_respawn:[{name, keys}], fanout}`` — key names
-    + worker identities only,
+    recycle_stopped:{kind, name, detail} | null, awaiting_respawn:[{name, keys}], span_release_error, fanout}``
+    — key names + worker identities only,
     never env values. ``recycle`` is one line per sibling the roll reached (plus the applier's
     own deferred self-exit line when it is armed). A ``recycled`` line is confirmed on reality;
     the roll stops at the first line that is not: ``timed-out`` (its old life did not go, fresh
@@ -648,11 +659,17 @@ async def apply_profile(name: str) -> OperationResponse:
     a refusal (X-band key, dangling ``!ENV``, a recycle-class diff the deployment shape cannot
     carry) aborts upfront with a loud 400 naming the key, before anything is snapshotted, built,
     or persisted. ``awaiting_respawn`` names the workers (name + keys) still awaiting a respawn
-    after the roll — empty when it converged. When the diff carries serve-affecting recycle keys
+    after the roll — empty when it converged. ``span_release_error`` is ``null`` when the config
+    store released its exclusive write span after the env persisted, otherwise the store's error:
+    the env is persisted and the broadcast and roll reported here still ran, but the store may still
+    hold its write span until this worker exits. When the diff carries serve-affecting recycle keys
     and the roll converged, the applier's OWN recycle is armed as a post-reply graceful self-exit
     — after the HTTP body flushes, or once a projected tool call (MCP, ``tai tools run``, an
     agent, a preset, a schedule, a hook) returned — and its supervisor respawns it on the new
     env. 404 for an absent name.
+    An ``mcp`` selection list whose ``!ENV`` marker would resolve so that a tool something still
+    uses stops being picked is refused with a 409 naming the holders, or a 502 when the server
+    cannot list its tools for that check, before anything is snapshotted.
 
     Called over MCP, the reload answers on the session that called it and then retires that session with
     the generation it ran on: a later call on the same session fails (streamable HTTP answers it 404,

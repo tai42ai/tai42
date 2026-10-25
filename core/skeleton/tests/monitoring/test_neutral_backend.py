@@ -27,7 +27,7 @@ from tai42_contract.monitoring import (
     MetricsResult,
     MetricsRow,
     MonitoringObservation,
-    MonitoringReadNotSupportedError,
+    MonitoringReadNotServedError,
     MonitoringTrace,
     MonitoringTraceSummary,
     SpanKind,
@@ -72,6 +72,7 @@ class _NeutralReader:
     summaries: list[MonitoringTraceSummary] = field(default_factory=list)
     capability: MetricsCapability = _FULL
     list_calls: list[dict[str, Any]] = field(default_factory=list)
+    export_calls: list[dict[str, Any]] = field(default_factory=list)
 
     def metrics_capability(self) -> MetricsCapability:
         return self.capability
@@ -86,7 +87,7 @@ class _NeutralReader:
         unserved_m = [m for m in query.measures if m not in self.capability.measures]
         unserved_d = [d for d in query.dimensions if d not in self.capability.dimensions]
         if unserved_m or unserved_d:
-            raise MonitoringReadNotSupportedError(
+            raise MonitoringReadNotServedError(
                 f"neutral backend does not serve measures={unserved_m} dimensions={unserved_d}"
             )
         if Dimension.MODEL in query.dimensions:
@@ -133,6 +134,10 @@ class _NeutralReader:
         size = limit or _PAGE_MAX
         start = ((page or 1) - 1) * size
         return self.summaries[start : start + size]
+
+    async def export_traces(self, *, max_rows: int, **kwargs: Any) -> list[Any]:
+        self.export_calls.append({"max_rows": max_rows, **kwargs})
+        return self.summaries[: max_rows + 1]
 
     async def get_observation(self, trace_id: str, observation_id: str) -> MonitoringObservation:
         for observation in (await self.get_trace(trace_id)).observations:
@@ -224,7 +229,7 @@ async def test_query_metrics_maps_declared_measures_and_dimensions():
 
 async def test_query_metrics_raises_on_undeclared_measure():
     reader = _NeutralReader(capability=MetricsCapability(measures=frozenset({Measure.COUNT}), dimensions=frozenset()))
-    with pytest.raises(MonitoringReadNotSupportedError):
+    with pytest.raises(MonitoringReadNotServedError):
         await reader.query_metrics(
             MetricsQuery(measures=[Measure.LATENCY], from_timestamp=datetime.now(UTC), to_timestamp=datetime.now(UTC))
         )
@@ -232,7 +237,7 @@ async def test_query_metrics_raises_on_undeclared_measure():
 
 async def test_query_metrics_raises_on_undeclared_dimension():
     reader = _NeutralReader(capability=MetricsCapability(measures=frozenset(Measure), dimensions=frozenset()))
-    with pytest.raises(MonitoringReadNotSupportedError):
+    with pytest.raises(MonitoringReadNotServedError):
         await reader.query_metrics(
             MetricsQuery(
                 measures=[Measure.COUNT],
@@ -317,12 +322,12 @@ async def test_run_list_caps_the_page_to_the_backend_ceiling():
     assert data["nextPage"] == 2
 
 
-async def test_export_drains_ceiling_sized_pages_and_stops_on_a_short_page():
+async def test_export_reads_the_rows_in_one_bounded_call():
     reader = _install(_NeutralReader(summaries=[_summary(i) for i in range(17)]))
     resp = await router.export_runs(_req("format=json"))
     body = json.loads(bytes(resp.body))
-    assert [call["limit"] for call in reader.list_calls] == [7, 7, 7]
-    assert [call["page"] for call in reader.list_calls] == [1, 2, 3]
+    assert [call["max_rows"] for call in reader.export_calls] == [5000]
+    assert reader.list_calls == []
     assert len(body["items"]) == 17
     assert body["truncated"] is False
 

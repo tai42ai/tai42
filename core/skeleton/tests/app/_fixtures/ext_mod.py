@@ -13,7 +13,7 @@ from tai42_contract.extensions import ExtensionKind
 
 
 @tai42_app.extensions.extension(kind=ExtensionKind.WRAPPER, name="loud")
-def loud(func, name, desc, config=None):
+def loud(func, name, desc):
     """Branch ``func`` into a renamed variant whose string result is upper-cased."""
 
     @functools.wraps(func)

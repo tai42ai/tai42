@@ -34,6 +34,7 @@ _ANSWER_CLAIM_FIELDS = (
     "deferred_binding",
     "run_input",
     "door_id",
+    "deferred_output_stages",
     "continuation_tool",
     "continuation_identity",
     "continuation_fingerprint",
@@ -68,6 +69,7 @@ class _AnswerClaim:
     deferred_binding: str | None
     run_input: str | None
     door_id: str | None
+    deferred_output_stages: str | None
     remaining: int
 
 
@@ -231,6 +233,8 @@ class _StoreAnswerWrites(_StoreWritesBase):
         deferred_binding = state["deferred_binding"]
         run_input = state["run_input"]
         door_id = state["door_id"]
+        # The captured preset output stages (JSON), copied the same way so the redelivery applies them.
+        deferred_output_stages = state["deferred_output_stages"]
         # An async park carries a denormalized continuation tool + identity (+
         # fingerprint); their presence is the signal to enqueue the durable
         # continuation-due record in THIS claim's MULTI.
@@ -270,6 +274,7 @@ class _StoreAnswerWrites(_StoreWritesBase):
             deferred_binding=deferred_binding,
             run_input=run_input,
             door_id=door_id,
+            deferred_output_stages=deferred_output_stages,
             remaining=int(current) - 1,
         )
 
@@ -366,6 +371,7 @@ class _StoreAnswerWrites(_StoreWritesBase):
                 claim.chain_keys,
                 response.reply_to_medium_message_id,
                 response.params,
+                claim.deferred_output_stages,
             )
             pipe.hset(due_key, mapping=due_mapping)
             pipe.expire(due_key, continuation_due_ttl)

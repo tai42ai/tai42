@@ -32,7 +32,7 @@ async function createEchoPreset(page: Page, name: string, payload: string): Prom
   await expect(page.getByRole('link', { name: `Open preset ${name}` })).toBeVisible();
 }
 
-test('rename preflight lists referees and disables submit', async ({ page, request }) => {
+test('rename preflight lists holders and disables submit', async ({ page, request }) => {
   const base = uniq('base');
   const composer = uniq('composer');
   await seedCredential(page);
@@ -54,14 +54,14 @@ test('rename preflight lists referees and disables submit', async ({ page, reque
   });
   expect(created.status(), await created.text()).toBe(200);
 
-  // Renaming the referenced preset is preflighted: the callout lists the referee
+  // Renaming the referenced preset is preflighted: the holder list names the referee
   // and the submit button is disabled.
   await page.goto(`/presets?preset=${base}`);
   await page.getByRole('button', { name: `Rename preset ${base}` }).click();
   const renameDialog = page.getByRole('dialog', { name: `Rename preset — ${base}` });
   await expect(renameDialog).toBeVisible();
-  const callout = page.getByRole('alert');
-  await expect(callout).toContainText(`Referenced by: ${composer}`);
+  await expect(renameDialog.getByText('Still used by — update these first:')).toBeVisible();
+  await expect(renameDialog.getByRole('list', { name: `Holders of ${base}` })).toContainText(composer);
   await expect(renameDialog.getByRole('button', { name: 'Rename' })).toBeDisabled();
 });
 

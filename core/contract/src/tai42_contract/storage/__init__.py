@@ -3,20 +3,21 @@
 ``Storage`` is "where content is stored" — distinct from
 :mod:`tai42_contract.template` ("what we do with it", the render mixins). The store
 exposes the text surface ``load`` / ``list`` / ``upload`` / ``delete`` /
-``delete_dir`` plus the binary/media surface ``load_bytes`` / ``upload_bytes`` /
-``stat``, with the module-level ``assert_not_root`` guarding deletes against the
-store root. The binary methods ship text-bridging defaults so a text-only backend
-satisfies the whole contract with no new code; binary-native backends override.
+``delete_dir``, the metadata read ``stat`` (content type and byte size), the bounded
+read ``load_range`` and the binary surface ``load_bytes`` / ``upload_bytes``, with the
+module-level ``assert_not_root`` guarding deletes against the store root. ``stat`` and
+``load_range`` are abstract: only the backend knows an object's size and how to read a
+slice of it without reading all of it. ``load_bytes`` / ``upload_bytes`` ship
+text-bridging defaults; binary-native backends override.
 """
 
 from __future__ import annotations
 
 import builtins
-import mimetypes
 import posixpath
 from abc import ABC, abstractmethod
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from tai42_contract.errors import ErrorKind
 
@@ -62,15 +63,16 @@ class StoragePathConflictError(Exception):
 class ObjectStat(BaseModel):
     """Metadata for a stored object, returned by :meth:`Storage.stat`.
 
-    Carries only ``content_type`` — the MIME type consumed here for image/audio
-    media gating (a backend that stores no metadata infers it from the path, a
-    metadata-bearing backend returns the stored type). Frozen: a stat snapshot is
-    a value, not a mutable handle.
+    Carries the content type and the byte size. ``content_type`` is the MIME type
+    consumed for media gating (a backend that stores no metadata infers it from the
+    path, a metadata-bearing backend returns the stored type); ``size`` is the stored
+    object's length in bytes. Frozen: a stat snapshot is a value, not a mutable handle.
     """
 
     model_config = ConfigDict(frozen=True)
 
     content_type: str | None
+    size: int = Field(ge=0)
 
 
 def assert_not_root(path: str) -> None:
@@ -103,8 +105,10 @@ class Storage(ABC):
         Must raise ``FileNotFoundError`` when the item does not exist — the
         manager relies on that exact type to map a missing ``{% include %}`` /
         ``{% extends %}`` dependency to Jinja's ``TemplateNotFound`` (so
-        ``{% include ... ignore missing %}`` works). Any other failure (auth,
-        network) must propagate as its own error.
+        ``{% include ... ignore missing %}`` works). Content that is not UTF-8
+        text must raise ``UnicodeDecodeError`` (a strict decode, never a lossy
+        substitution) — the manager maps it to a typed not-a-text-template error.
+        Any other failure (auth, network) must propagate as its own error.
         """
         raise NotImplementedError
 
@@ -163,19 +167,25 @@ class Storage(ABC):
         """
         await self.upload(path, data.decode("utf-8"))
 
+    @abstractmethod
     async def stat(self, path: str) -> ObjectStat:
-        """Return metadata for the object at ``path``.
+        """Return the content type and the byte size of the object at ``path``.
 
-        Path-inference default: guesses ``content_type`` from the path suffix via
-        ``mimetypes.guess_type`` — it does NOT verify existence (it answers from
-        the path string), so a standalone ``stat`` on a metadata-less backend is
-        best-effort metadata; existence for a real read is enforced by the paired
-        :meth:`load_bytes`. A metadata-bearing backend (e.g. S3) overrides to
-        return the stored content-type and maps a missing object to
-        ``FileNotFoundError``.
+        Raises ``FileNotFoundError`` when the object does not exist; a directory is
+        not an object.
         """
-        content_type, _ = mimetypes.guess_type(path)
-        return ObjectStat(content_type=content_type)
+        raise NotImplementedError
+
+    @abstractmethod
+    async def load_range(self, path: str, start: int, length: int) -> bytes:
+        """Return at most ``length`` bytes of the object at ``path``, from byte ``start``.
+
+        Fewer bytes when the object ends first, ``b""`` when ``start`` is at or past
+        the end. ``length == 0`` answers ``b""`` with no request to the backend (and
+        so checks no existence). Raises ``FileNotFoundError`` when the object does not
+        exist. Never reads the whole object to answer.
+        """
+        raise NotImplementedError
 
 
 __all__ = ["ObjectStat", "Storage", "StoragePathConflictError", "assert_not_root"]

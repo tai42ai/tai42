@@ -100,7 +100,15 @@ def test_the_mutation_responses() -> None:
         "provider_id": "remote",
         "removed_clients": 2,
         "fanout": {"mode": "local-only"},
+        "span_release_error": None,
     }
+    held = RemoveProviderResponse(
+        provider_id="remote",
+        removed_clients=0,
+        fanout={"mode": "local-only"},
+        span_release_error="OSError: releasing the span failed",
+    )
+    assert held.model_dump(mode="json")["span_release_error"] == "OSError: releasing the span failed"
 
 
 def test_a_catalog_entry_says_whether_it_is_removable_and_where_its_client_comes_from() -> None:

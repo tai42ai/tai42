@@ -12,6 +12,7 @@ import os
 import re
 import sys
 import tempfile
+import threading
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from typing import Any, cast
@@ -52,6 +53,59 @@ def _acquire_exclusive_lock(fd: int) -> None:
     import fcntl
 
     fcntl.flock(fd, fcntl.LOCK_EX)
+
+
+def _acquire_exclusive_record_lock(fd: int) -> None:
+    """Take a blocking exclusive POSIX record lock (``F_SETLKW``) on the whole file *fd* refers to.
+
+    The kernel releases a record lock when the holding process terminates, and a child
+    created by ``fork`` does not inherit it. Refused on Windows as
+    :func:`_acquire_exclusive_lock` is.
+    """
+    if sys.platform == "win32":
+        raise RuntimeError(
+            "config file locking requires fcntl, which is POSIX-only and "
+            "unavailable on Windows; a serialized config write cannot be "
+            "guaranteed here, so the write is refused (run on a POSIX host)."
+        )
+    import fcntl
+
+    fcntl.lockf(fd, fcntl.LOCK_EX)
+
+
+class _ProcessSpanLocks:
+    """One ``threading.Lock`` per write-span lock file, shared by every manager in this process.
+
+    A POSIX record lock belongs to the process, not to the descriptor: a second ``lockf`` from
+    the same process is granted at once, and closing ANY descriptor of the file drops the
+    process's lock. Two spans of one process on one file would therefore both be granted, and
+    the first to close would leave the other holding nothing against other processes. A span
+    holds its path's lock here from before it opens the lock file until after it closes it, so
+    at most one span of this process has the file open at a time, whichever thread runs it.
+    """
+
+    def __init__(self) -> None:
+        self._guard = threading.Lock()
+        self._locks: dict[str, threading.Lock] = {}
+
+    def for_path(self, path: str) -> threading.Lock:
+        """The lock of the resolved *path*, created on first use."""
+        key = os.path.realpath(path)
+        with self._guard:
+            lock = self._locks.get(key)
+            if lock is None:
+                lock = self._locks[key] = threading.Lock()
+            return lock
+
+    def reset_after_fork(self) -> None:
+        """Start a forked child with no lock held: it inherits no record lock and none of the parent's threads."""
+        self._guard = threading.Lock()
+        self._locks = {}
+
+
+_span_locks = _ProcessSpanLocks()
+if sys.platform != "win32":
+    os.register_at_fork(after_in_child=_span_locks.reset_after_fork)
 
 
 # An env key is a shell-identifier: a letter/underscore then letters/digits/
@@ -116,9 +170,11 @@ class FileConfigManager(ConfigManager):
         swaps the target's inode out from under any lock held on it, making a lock
         on the target useless.
 
-        This is the lock primitive; :meth:`_manifest_transaction` builds the
+        This is the per-file lock primitive; :meth:`_manifest_transaction` builds the
         manifest read-modify-write span on top of it, and :meth:`write_env` uses it
-        for the env file.
+        for the env file. The store-wide write span is :meth:`exclusive_write`, on a
+        file of its own: closing any descriptor of a file releases every record lock the
+        process holds on it, so the span's file is one no per-file lock ever opens.
 
         On Windows ``fcntl`` is unavailable, so acquiring the lock raises rather
         than proceeding unserialized. An ``OSError`` from opening the lock file or
@@ -143,6 +199,34 @@ class FileConfigManager(ConfigManager):
         """
         with self._file_lock(self.manifest_path):
             yield
+
+    @contextmanager
+    def exclusive_write(self) -> Iterator[None]:
+        """Hold the store-wide write span: a record lock on ``<config_dir>/.config-write.lock``.
+
+        Blocks until no other span holds the file, in this process or another. A POSIX record
+        lock (``F_SETLKW``) rather than a ``flock``: the kernel releases it when the holder
+        terminates, and a child a worker forks while it holds the span does not inherit it, so
+        the release on exit is the only release. A record lock does not exclude the process
+        that holds it, so the span first takes this process's lock for the file
+        (:class:`_ProcessSpanLocks`) and keeps it until the descriptor is closed: the span
+        admits one thread of this process at a time, from before the lock file is opened until
+        after its descriptor is closed, whichever thread enters and whichever exits. There is
+        no timeout or retry loop: the holder's own steps carry their budgets, and the caller
+        records the wait on the waiting request. An ``OSError`` from opening the lock file or
+        taking the lock propagates loudly.
+        """
+        path = os.path.join(self._config_dir_path, ".config-write.lock")
+        with _span_locks.for_path(path):
+            fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+            try:
+                _acquire_exclusive_record_lock(fd)
+                yield
+            finally:
+                # Closing the descriptor releases the record lock; a close(2) error is raised from the
+                # exit after the descriptor — and with it the lock — is gone, and the process-local
+                # lock is released by the enclosing ``with``.
+                os.close(fd)
 
     # -- Environment configuration -------------------------------------------
 

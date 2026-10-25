@@ -63,7 +63,10 @@ def create_route(
         str,
         typer.Option(
             "--execution-key",
-            help="The api-key user id the turn runs AS; you must own it (or be admin), tokenless-evaluable.",
+            help=(
+                "The api key the turn runs AS: your own key identity or a key you own (an admin: any key), "
+                "never an account; tokenless-evaluable."
+            ),
         ),
     ],
     target_kind: Annotated[str, typer.Option("--target-kind", help="What the turn runs: 'agent' or 'tool'.")] = "agent",
@@ -92,10 +95,16 @@ def create_route(
         typer.Option("--initial-mode", help="Default control mode when a thread has no override: 'agent' or 'manual'."),
     ] = "agent",
     channel: Annotated[
-        str | None, typer.Option("--channel", help="door=channel: the channel registry name (e.g. twilio).")
+        str | None,
+        typer.Option("--channel", help="door=channel: an installed channel's name (see `tai channels list`)."),
     ] = None,
     our_identity: Annotated[
-        str | None, typer.Option("--identity", help="door=channel: the medium address we are texted at.")
+        str | None,
+        typer.Option(
+            "--identity",
+            help="door=channel: the address on that channel clients message; `tai channels list` shows each "
+            "channel's hint.",
+        ),
     ] = None,
     callback_url: Annotated[
         str | None,

@@ -8,6 +8,7 @@ from starlette.routing import Mount, Route
 
 import tai42_skeleton.operations.api_keys as _pkg
 from tai42_skeleton.access_control import management
+from tai42_skeleton.access_control.role_gate import role_reach
 from tai42_skeleton.operations import BadRequestError, NotFoundError, NotSupportedError, operation
 from tai42_skeleton.operations.response_models_group_a import RouteMappingList, StringList, UrlAck
 
@@ -83,7 +84,7 @@ async def list_routes(routes: list[Any]) -> list[dict[str, Any]]:
         # predicate the access check's declared-public tier reads — so a scope row cannot gate it.
         entry["declared_public"] = declares_public_reach(meta, route.path, settings)
         if meta is not None:
-            entry.update(tags=list(meta.tags), summary=meta.summary, action=meta.action)
+            entry.update(tags=list(meta.tags), summary=meta.summary, action=meta.action, role_reach=role_reach(meta))
         elif route.path in registered_paths:
             # The PATH is a registered route but this method set did not join — a genuine
             # method-normalization drift between the two collections. A loud STOP, never a
@@ -95,7 +96,7 @@ async def list_routes(routes: list[Any]) -> list[dict[str, Any]]:
         else:
             # A path not in the registry at all carries no metadata to join (the boot
             # action-class audit guarantees every registered gated route is classified).
-            entry.update(tags=[], summary="", action=None)
+            entry.update(tags=[], summary="", action=None, role_reach=None)
         entries.append(entry)
     entries.sort(key=lambda entry: entry["path"])
     return entries

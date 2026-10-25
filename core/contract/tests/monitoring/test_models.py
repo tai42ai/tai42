@@ -177,3 +177,37 @@ def test_span_window_item_tags_unavailable_is_distinct_from_empty():
     item = SpanWindowItem(id="x", start=datetime(2026, 1, 1), tags=[], tags_available=False)
     assert item.tags == []
     assert item.tags_available is False
+
+
+_TRACE = "a" * 32
+_SPAN = "b" * 16
+
+
+def test_trace_context_with_a_trace_and_no_parent_is_refused():
+    import pytest
+    from pydantic import ValidationError
+
+    from tai42_contract.monitoring import TraceContext
+
+    with pytest.raises(ValidationError, match="names a trace id and a parent span id together, or neither"):
+        TraceContext(trace_id=_TRACE)
+
+
+def test_trace_context_with_a_parent_and_no_trace_is_refused():
+    import pytest
+    from pydantic import ValidationError
+
+    from tai42_contract.monitoring import TraceContext
+
+    with pytest.raises(ValidationError, match=f"got trace_id=None, parent_span_id='{_SPAN}'"):
+        TraceContext(parent_span_id=_SPAN)
+
+
+def test_trace_context_builds_with_both_ids_or_neither():
+    from tai42_contract.monitoring import TraceContext
+
+    both = TraceContext(trace_id=_TRACE, parent_span_id=_SPAN)
+    assert (both.trace_id, both.parent_span_id) == (_TRACE, _SPAN)
+    assert TraceContext().trace_id is None
+    empty = TraceContext(trace_id="")
+    assert empty.parent_span_id is None

@@ -9,13 +9,13 @@ pip and prefix seams from :class:`~tai42_skeleton.marketplace.installer_base._In
 
 from __future__ import annotations
 
-import copy
+import dataclasses
 from typing import Any
 
 from tai42_contract.plugins import PluginSpec
 
 from tai42_skeleton.app.route_registry import CrossOwnerRouteCollisionError
-from tai42_skeleton.config.service import ApplyResult
+from tai42_skeleton.config.service import ApplyResult, joined_span_release_errors
 from tai42_skeleton.marketplace import (
     env_apply,
     locks,
@@ -30,7 +30,7 @@ from tai42_skeleton.marketplace import (
 from tai42_skeleton.marketplace import routes as routes_mod
 from tai42_skeleton.marketplace.errors import InstallStateError, ManifestCollisionError
 from tai42_skeleton.marketplace.installer_base import _InstallerBase
-from tai42_skeleton.marketplace.manifest_patch import apply_provides, collisions, remove_provides
+from tai42_skeleton.marketplace.manifest_patch import ProvidesUndo, apply_provides, collisions, remove_provides
 from tai42_skeleton.marketplace.pip import ensure_pip_available
 from tai42_skeleton.operations._broadcast import FleetBroadcastError
 
@@ -151,7 +151,6 @@ class _InstallFlow(_InstallerBase):
         )
 
         pip_output = await self._install_package_steps(spec, source, resolved, pinned_version)
-        saved_manifest = copy.deepcopy(cm.read_manifest_preserved())
         apply_result = await self._commit_install(
             ref,
             pinned_version,
@@ -162,7 +161,6 @@ class _InstallFlow(_InstallerBase):
             resolved_route_list,
             env,
             secret_keys,
-            saved_manifest,
         )
 
         return {
@@ -215,8 +213,8 @@ class _InstallFlow(_InstallerBase):
             await unwind.unwind_install(
                 migration_error,
                 package=spec.package,
-                saved_manifest=None,
-                env_restore=None,
+                provides_undo=None,
+                env_written=None,
                 **self._install_unwind_seams(),
             )
             raise
@@ -233,7 +231,6 @@ class _InstallFlow(_InstallerBase):
         resolved_route_list: list[routes_mod.ResolvedRoute],
         env: dict[str, str] | None,
         secret_keys: list[str] | None,
-        saved_manifest: dict[str, Any],
     ) -> ApplyResult:
         """Commit the manifest+env+row transactionally.
 
@@ -251,14 +248,16 @@ class _InstallFlow(_InstallerBase):
         """
         manifest_persisted = False
         row_persisted = False
-        # ``env_restore`` captures the PRIOR store value of every key written, so the
-        # unwind restores each rather than blind-deleting it.
-        env_written = env_apply.env_to_write(env)
-        env_restore: dict[str, str] = {}
+        # ``env_written`` records what the env write changes, so the unwind reverts exactly
+        # that rather than blind-deleting a key.
+        env_values = env_apply.env_to_write(env)
+        env_written = env_apply.EnvWrite()
+        provides_undo: list[ProvidesUndo] = []
         try:
 
             def mutator(document: dict[str, Any]) -> None:
-                apply_provides(document, spec)
+                # The last run is the one that persists, so its undo is the one kept.
+                provides_undo[:] = [apply_provides(document, spec)]
 
             try:
                 apply_result = await env_apply.apply_provides_change(
@@ -267,8 +266,8 @@ class _InstallFlow(_InstallerBase):
                     mutator,
                     env=env,
                     secret_keys=secret_keys,
-                    env_to_write=env_written,
-                    env_restore=env_restore,
+                    env_to_write=env_values,
+                    env_written=env_written,
                 )
             except FleetBroadcastError as reload_error:
                 if not (resolved_route_list and isinstance(reload_error.__cause__, CrossOwnerRouteCollisionError)):
@@ -281,9 +280,14 @@ class _InstallFlow(_InstallerBase):
                 await self._record_install_row(ref, pinned_version, spec, source, resolved, resolved_mounts)
                 row_persisted = True
                 # The failed forward reload rolled nothing: hand the change's recycle-class keys
-                # to the recovery reload, which rolls them.
-                return await self._svc().apply_replace(
-                    self._cm().read_manifest_preserved(), recycle_keys=reload_error.unrolled_recycle_keys
+                # to the recovery reload, which rolls them. The forward write landed, so its failed
+                # span release is the change's too and rides beside the recovery's own.
+                recovered = await self._svc().reapply_manifest(recycle_keys=reload_error.unrolled_recycle_keys)
+                return dataclasses.replace(
+                    recovered,
+                    span_release_error=joined_span_release_errors(
+                        reload_error.span_release_error, recovered.span_release_error
+                    ),
                 )
             manifest_persisted = True
             await self._record_install_row(ref, pinned_version, spec, source, resolved, resolved_mounts)
@@ -291,9 +295,7 @@ class _InstallFlow(_InstallerBase):
             # With the row persisted, re-reload so the mount map remounts each route at
             # its remapped base. Route-declaring specs only; best-effort (never unwinds).
             if resolved_route_list:
-                apply_result = await manifest_apply.remount_reload(
-                    self._svc(), lambda: self._cm().read_manifest_preserved(), apply_result
-                )
+                apply_result = await manifest_apply.remount_reload(self._svc(), apply_result)
         except Exception as step_error:
             # The pipeline aborts a failed mutation with nothing persisted, so the
             # manifest needs restoring only when the change actually landed.
@@ -301,8 +303,8 @@ class _InstallFlow(_InstallerBase):
             await unwind.unwind_install(
                 step_error,
                 package=spec.package,
-                saved_manifest=saved_manifest if persisted else None,
-                env_restore=env_restore,
+                provides_undo=provides_undo[0] if persisted else None,
+                env_written=env_written,
                 **self._install_unwind_seams(),
             )
             # The row is written only after the manifest reload, so it needs dropping only on

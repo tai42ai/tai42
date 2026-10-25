@@ -22,8 +22,9 @@ from arq.jobs import Job, JobStatus
 from croniter import croniter
 
 from tai42_backend_arq import pool
+from tai42_backend_arq.jobs import job_handle
 from tai42_backend_arq.records import parse_cron_or_interval
-from tai42_backend_arq.settings import TaskFailedError, arq_settings, job_deserializer
+from tai42_backend_arq.settings import TaskFailedError, arq_settings
 
 logger = logging.getLogger(__name__)
 
@@ -135,9 +136,7 @@ async def safe_schedule_transition(
         if not enforce_job_id and current_job_id:
             # Abort the job being replaced first; a failed abort propagates
             # rather than leave the old job live alongside its replacement.
-            await request_job_abort(
-                Job(current_job_id, redis=redis, _queue_name=arq_settings().queue_name, _deserializer=job_deserializer)
-            )
+            await request_job_abort(await job_handle(redis, current_job_id))
 
         next_job_id = uuid.uuid4().hex
         new_mapping: dict[str, Any] = {
@@ -152,7 +151,13 @@ async def safe_schedule_transition(
         # predecessor. A crash between the two writes leaves a not-found job the
         # startup watchdog recovers.
         await redis.hset(key, mapping=new_mapping)
-        next_job = await redis.enqueue_job("task_scheduler", schedule_name, _job_id=next_job_id, _defer_by=defer_by)
+        next_job = await redis.enqueue_job(
+            "task_scheduler",
+            schedule_name,
+            _job_id=next_job_id,
+            _defer_by=defer_by,
+            _queue_name=arq_settings().queue_name,
+        )
         if next_job is None:
             raise RuntimeError(f"Schedule '{schedule_name}': job id {next_job_id} already exists; nothing enqueued")
         return next_job
@@ -170,14 +175,7 @@ async def abort_schedule_task(key: str) -> None:
             prev_job_id = data.get(b"job_id", b"").decode()
             if prev_job_id:
                 await arq_redis.hset(key, "aborted", prev_job_id)
-                await request_job_abort(
-                    Job(
-                        prev_job_id,
-                        redis=arq_redis,
-                        _queue_name=arq_settings().queue_name,
-                        _deserializer=job_deserializer,
-                    )
-                )
+                await request_job_abort(await job_handle(arq_redis, prev_job_id))
 
 
 async def recover_stalled_schedules(ctx: dict[str, Any]) -> None:
@@ -213,7 +211,7 @@ async def recover_stalled_schedules(ctx: dict[str, Any]) -> None:
             if not job_id:
                 should_recover = True
             else:
-                job = Job(job_id, redis=redis, _queue_name=arq_settings().queue_name, _deserializer=job_deserializer)
+                job = await job_handle(redis, job_id)
                 status = await job.status()
 
                 # not_found: pending job lost. complete: ran but never rescheduled.
@@ -326,7 +324,7 @@ async def task_scheduler(ctx: dict[str, Any], schedule_name: str) -> Any:
 
     try:
         if enabled:
-            job = await ctx["redis"].enqueue_job(target, *args, **kwargs)
+            job = await ctx["redis"].enqueue_job(target, *args, _queue_name=arq_settings().queue_name, **kwargs)
             # wait_job_result surfaces an aborted target as TaskFailedError, not
             # a raw CancelledError that would read as a cancellation of THIS job.
             return await wait_job_result(job)

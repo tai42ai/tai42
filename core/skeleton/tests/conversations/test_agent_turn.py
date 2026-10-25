@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import mimetypes
 import time
 from typing import cast
 
@@ -322,11 +323,11 @@ async def test_channel_locale_composes_through_the_turn_into_a_rendered_variant(
     carries it onto the subject block AND the ambient state context, and the rendering layer
     resolves the per-locale template variant off that same locale — the flow selects no
     language. Without a variant (and no default) the render refuses loudly."""
-    from tai42_contract.storage import Storage
+    from tai42_contract.storage import ObjectStat, Storage
 
     from tai42_skeleton.storage import StorageRegistry
     from tai42_skeleton.template import ResourceManager
-    from tai42_skeleton.template.resource_manager import TemplateLocaleNotFoundError
+    from tai42_skeleton.template.errors import TemplateLocaleNotFoundError
 
     channel = FakeChannel()
     _wire(monkeypatch, FakeManager(_tool_channel_route()), channel)
@@ -382,6 +383,13 @@ async def test_channel_locale_composes_through_the_turn_into_a_rendered_variant(
 
         async def delete_dir(self, path: str) -> None:
             pass
+
+        async def stat(self, path: str) -> ObjectStat:
+            content_type, _ = mimetypes.guess_type(path)
+            return ObjectStat(content_type=content_type, size=len(await self.load_bytes(path)))
+
+        async def load_range(self, path: str, start: int, length: int) -> bytes:
+            return (await self.load_bytes(path))[start : start + length]
 
     registry = StorageRegistry()
     registry.register_storage(_InMemory)

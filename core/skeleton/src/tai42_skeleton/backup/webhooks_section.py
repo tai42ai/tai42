@@ -108,11 +108,12 @@ async def _restore_hooks(
             report.skipped += 1
             continue
         try:
-            # The hook write service the register door uses: the inline jq compiles, a carried
-            # binding is validated and its templates attached, then the hook is stored.
+            # The hook write service the register door uses: the stored template ids exist, the
+            # inline jq compiles, a carried binding is validated and its templates attached, then
+            # the hook is stored.
             await manager.register(params)
         except ValueError as exc:
-            # A non-compiling inline condition/expr jq is a per-hook rejection.
+            # A refused definition (a missing stored id, a non-compiling inline jq) is a per-hook rejection.
             report.errors.append(f"hook {name!r}: {exc}")
             report.skipped += 1
             continue

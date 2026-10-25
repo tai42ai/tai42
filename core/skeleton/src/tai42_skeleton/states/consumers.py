@@ -223,16 +223,8 @@ async def agents_lister(state: str) -> Sequence[ConsumerRow]:
 
 
 async def presets_lister(state: str) -> Sequence[ConsumerRow]:
-    """The preset consumer rows for ``state``, or empty when it is undeclared or store-less."""
+    """The preset consumer rows for ``state``, or empty when it is undeclared or no preset is stored."""
     if await _declared_subject_kinds(state) is None:
-        return []
-    from tai42_kit.db import component_store_configured
-
-    from tai42_skeleton.db import SKELETON_COMPONENT
-
-    # Presets live in the skeleton component's versioned store; a store-less deploy has
-    # none, so skip the read rather than fault (the presets list route guards the same way).
-    if not component_store_configured(SKELETON_COMPONENT):
         return []
     return preset_consumer_rows(await instance.app.presets.list_active_bodies())
 

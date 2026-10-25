@@ -113,11 +113,13 @@ def test_middleware_discovers_multi_file_skill_via_per_skill_source(fake_tm: _Fa
     source and downloads ``<dir>/SKILL.md`` from each. The per-skill source
     ``/skills/jq/`` (and the mount-root source ``/skills/``) must resolve to
     exactly the ``jq`` skill — the widening's extra bundle subdirs (references/,
-    scripts/) carry no SKILL.md and are harmlessly skipped, never dropping jq."""
+    scripts/, assets/) carry no SKILL.md and are harmlessly skipped, never dropping
+    jq, and a binary asset in the bundle does not disturb discovery."""
     from deepagents.middleware.skills import _alist_skills
 
     async def go() -> tuple[Any, Any]:
         await _seed_multi_file_skill(fake_tm)
+        await fake_tm.upload_template("skills/jq/assets/logo.png", b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR")
         backend = build_backend()
         per_skill = await _alist_skills(backend, f"{SKILLS_ROOT}jq/")
         whole_mount = await _alist_skills(backend, SKILLS_ROOT)

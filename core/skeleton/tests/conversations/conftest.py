@@ -62,6 +62,7 @@ from tai42_skeleton.conversations.turn import schedule as schedule_module
 from tai42_skeleton.conversations.turn import tool_turn as tool_turn_module
 from tai42_skeleton.operations import conversations as ops
 
+from .._fakes.recording_storage import MappedStorage
 from .fake_record_redis import FakeRecordRedis, make_record_client_ctx
 
 
@@ -315,6 +316,17 @@ class _OpsFakeTools:
             raise UnknownToolError(key)
         return tool
 
+    async def get_tools(self) -> dict[str, Any]:
+        return dict(self._tools)
+
+    def branches_of(self, base: str) -> list[str]:
+        # No tool in this registry carries extension branches.
+        return []
+
+    def delete_referees(self) -> list[Any]:
+        # No delete veto is registered.
+        return []
+
 
 class _FakeResourceManager:
     """Renders a route jq slot: inline ``content`` verbatim, or a stored ``id`` from a
@@ -325,7 +337,7 @@ class _FakeResourceManager:
 
     async def render_templated_text(self, text, locale=None):
         if text.id is not None:
-            from tai42_skeleton.template.resource_manager import TemplateNotFoundError
+            from tai42_skeleton.template.errors import TemplateNotFoundError
 
             if text.id not in self._by_id:
                 raise TemplateNotFoundError(f"no stored resource {text.id!r}")
@@ -335,8 +347,9 @@ class _FakeResourceManager:
 
 
 class _FakeStorage:
-    def __init__(self, resource_manager: _FakeResourceManager) -> None:
+    def __init__(self, resource_manager: _FakeResourceManager, provider: MappedStorage) -> None:
         self.resource_manager = resource_manager
+        self.provider = provider
 
 
 class _OpsFakePresetStore:
@@ -365,10 +378,12 @@ class _OpsFakeApp:
 
         self.agents = _FakeAgents(agents)
         self.tools = _OpsFakeTools(tools)
+        self.channels = _FakeChannels(FakeChannel())
         self.presets = _OpsFakePresets()
         self._target_validator_registry = TargetBindValidatorRegistry()
         self.conversations = ConversationsFacet(self)  # pyright: ignore[reportArgumentType]
-        self.storage = _FakeStorage(_FakeResourceManager(by_id))
+        # The provider holds what the resource manager serves, so the stored-id check finds it.
+        self.storage = _FakeStorage(_FakeResourceManager(by_id), MappedStorage(dict(by_id or {})))
         # The ``app.states`` seam the widened thread/person delete ops reach to forget a
         # forgotten subject's declared state. Inert while the states feature is unconfigured
         # (the delete's state-erase step no-ops then); a test that wires the fake state store
@@ -583,6 +598,10 @@ class _FakeChannels:
     def get(self, name: str) -> AddressingChannel:
         return self._channel
 
+    def names(self) -> list[str]:
+        """The channel names the fixture serves: the ones the route fixtures name."""
+        return ["telegram", "twilio"]
+
 
 class _FakeApp:
     def __init__(self, channel: AddressingChannel) -> None:
@@ -598,7 +617,7 @@ class _FakeTemplateResourceManager:
 
     async def render_templated_text(self, text: TemplatedText, locale: str | None = None) -> str:
         if text.id is not None:
-            from tai42_skeleton.template.resource_manager import TemplateNotFoundError
+            from tai42_skeleton.template.errors import TemplateNotFoundError
 
             if text.id not in self._by_id:
                 raise TemplateNotFoundError(f"no stored resource {text.id!r}")

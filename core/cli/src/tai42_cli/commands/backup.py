@@ -1,7 +1,9 @@
 """``tai backup`` — export and import server state.
 
 Thin wrappers over the ``/api/backup/*`` routes. ``export`` streams the raw backup
-document to stdout (redirect it to a file); ``import`` consumes exactly that file.
+document to stdout (redirect it to a file); ``import`` consumes exactly that file. A
+section whose exporter failed is absent from the document and named under its
+``errors`` map; ``export`` prints each one to stderr and exits 1.
 """
 
 from __future__ import annotations
@@ -15,10 +17,12 @@ import typer
 from tai42_cli.commands._common import (
     app_context,
     covers,
+    echo_stderr,
     emit_records,
     emit_result,
     fetch_download,
 )
+from tai42_cli.render import strip_control
 
 app = typer.Typer(
     name="backup",
@@ -49,10 +53,20 @@ def export_backup(
     """Export the named sections as a backup document (printed to stdout).
 
     Redirect stdout to save it: ``tai backup export --section access_control > backup.json``
+
+    A section the server failed to export is left out of the document: the document is
+    still printed, each failed section is named with its message on stderr, and the
+    command exits 1.
     """
     ctx_obj = app_context(ctx)
     document = fetch_download(ctx_obj, "POST", "/api/backup/export", json_body={"sections": list(section)})
     typer.echo(document)
+    errors: dict[str, str] = json.loads(document)["errors"]
+    for name, message in errors.items():
+        # Server text reaches the terminal stripped of control characters, as every rendered value does.
+        echo_stderr(strip_control(f"backup section {name!r} failed to export: {message}"))
+    if errors:
+        raise typer.Exit(code=1)
 
 
 @app.command("import")

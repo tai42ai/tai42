@@ -120,6 +120,10 @@ class ApplyResponse(BaseModel):
     the operation's verdict: the workers still awaiting a respawn after it (name + keys) — empty
     when the change rolled a recycle that converged and this worker recycles itself; a worker the
     roll did not reach, and every listed worker of a change that rolls nothing, keep their keys.
+    ``span_release_error`` is ``null`` when the config store released its
+    exclusive write span after the persist; otherwise the store's error — the change landed and
+    the reload, broadcast and roll reported here still ran, but the store may still hold its write
+    span until the writer process exits, so a later write can block or be refused until then.
     """
 
     status: str
@@ -127,6 +131,7 @@ class ApplyResponse(BaseModel):
     awaiting_respawn: list[AwaitingWorker] = Field(default_factory=list[AwaitingWorker])
     fanout: FanoutSummary
     recycle: RecycleRoll | None = None
+    span_release_error: str | None = None
 
 
 class ProfileApplyResponse(BaseModel):
@@ -138,6 +143,10 @@ class ProfileApplyResponse(BaseModel):
     when the roll ran to its end, otherwise where it stopped and why; ``awaiting_respawn`` the
     workers still awaiting a respawn after the apply (name + keys; empty when the roll converged);
     ``fanout`` the reload broadcast's fleet summary. Names only — never env values.
+    ``span_release_error`` is ``null`` when the config store released its
+    exclusive write span after the persist; otherwise the store's error — the change landed and
+    the reload, broadcast and roll reported here still ran, but the store may still hold its write
+    span until the writer process exits, so a later write can block or be refused until then.
     """
 
     hot: list[str]
@@ -146,6 +155,7 @@ class ProfileApplyResponse(BaseModel):
     refused: list[str]
     recycle_stopped: RecycleStop | None = None
     awaiting_respawn: list[AwaitingWorker] = Field(default_factory=list[AwaitingWorker])
+    span_release_error: str | None = None
     fanout: FanoutSummary
 
 

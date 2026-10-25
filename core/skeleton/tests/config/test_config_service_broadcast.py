@@ -19,6 +19,7 @@ from typing import Any
 import pytest
 from tai42_kit.settings import reset_all_settings
 
+from tai42_skeleton.app import instance
 from tai42_skeleton.app.boot_rules import (
     BackendNeedsBusError,
     BackendNeedsHooksStoreError,
@@ -31,6 +32,7 @@ from tai42_skeleton.app.epoch import Epoch
 from tai42_skeleton.config.file_manager import FileConfigManager
 from tai42_skeleton.operations._broadcast import FleetBroadcastError
 
+from .._fakes.combo_check_app import CHECK_DOCUMENT, booted_check_app, clean_server, factory_calls
 from .fake_pipeline import (
     FakeConfigStore,
     FakeReloadAdmin,
@@ -44,6 +46,29 @@ from .fake_pipeline import (
 # ---------------------------------------------------------------------------
 # Failure discipline
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.usefixtures(clean_server.__name__)
+async def test_a_combo_on_a_base_not_bound_passes_the_gate_and_the_reload_refusal_still_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _with_bus(monkeypatch)
+    async with booted_check_app():
+        store = FakeConfigStore(manifest=dict(CHECK_DOCUMENT))
+        admin = FakeReloadAdmin(raise_reload=RuntimeError("Tools 'fresh' not found in server."))
+        service, _admin, _bus = _service(store, admin=admin, combo_check=instance.app.extensions.check_combo)
+        factory_calls().clear()
+        combo = [{"name": "labelled", "config": {"label": "ok"}}]
+
+        def attach(document: dict[str, Any]) -> None:
+            document["tools"][0]["extensions"] = {"fresh": [combo]}
+
+        with pytest.raises(FleetBroadcastError, match="'fresh' not found"):
+            await service.apply_change(attach)
+
+        assert factory_calls() == []
+        assert store.manifest["tools"][0]["extensions"] == {"fresh": [combo]}
+        assert admin.calls == 1
 
 
 async def test_local_reload_failure_after_persist_still_broadcasts_then_raises(monkeypatch: pytest.MonkeyPatch) -> None:

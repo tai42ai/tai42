@@ -1,269 +1,182 @@
-"""SpanWindowQuery: tool-granularity selection, session/run scoping, filter
-mapping, and the client-side span sort for list_spans_in_window."""
+"""``list_spans_in_window``: one item per step observation in the window, from the observations list."""
 
 from __future__ import annotations
 
-import json
-from datetime import UTC, datetime
-from types import SimpleNamespace
+from datetime import UTC, datetime, timedelta
 
 import pytest
-from tai42_contract.monitoring import MonitoringFilter, MonitoringReadNotSupportedError, OrderBy, SpanKind
+from tai42_contract.monitoring import (
+    MonitoringError,
+    MonitoringFilter,
+    MonitoringLevel,
+    MonitoringReadNotServedError,
+    OrderBy,
+    SpanKind,
+)
 
-from tai42_monitoring_langfuse.reader import LangfuseReader
+from tai42_monitoring_langfuse.observation_query import EXPAND_METADATA
 
-
-def _marked(role: str) -> dict:
-    # A Langfuse observation keeps the record's promoted attributes under ``metadata.attributes``.
-    return {"attributes": {"tai42.step_role": role}}
-
-
-async def test_list_spans_selects_tool_granularity(manager, mock_client, obs, obs_page):
-    observations = [
-        obs(id="span1", type="SPAN", name="my_node"),
-        obs(id="tool1", type="TOOL", name="search"),
-        obs(id="gen1", type="GENERATION", name="llm"),  # a generation is never an item
-        obs(id="emb1", type="EMBEDDING", name="embed"),  # nor an embedding call
-        obs(id="evt1", type="EVENT", name="ToolCall:search"),  # nor an event
-        obs(id="grp1", type="SPAN", name="tools", metadata=_marked("grouping")),
-        obs(id="sub1", type="SPAN", name="condition:check", metadata=_marked("sub_step")),
-    ]
-    mock_client.api.legacy.observations_v1.get_many.return_value = obs_page(observations)
-    mock_client.api.trace.get.return_value = SimpleNamespace(tags=["run:7"])
-
-    reader = LangfuseReader(manager)
-    now = datetime(2026, 1, 1, tzinfo=UTC)
-    items = await reader.list_spans_in_window(now, now)
-
-    ids = {i.id for i in items}
-    assert ids == {"span1", "tool1"}
-    assert all(i.tags == ["run:7"] for i in items)
+T0 = datetime(2026, 1, 1, 10, tzinfo=UTC)
+T1 = T0 + timedelta(hours=1)
 
 
-async def test_a_step_is_selected_by_its_marker_never_by_its_name(manager, mock_client, obs, obs_page):
-    observations = [
-        obs(id="named_tools", type="SPAN", name="tools"),
-        obs(id="named_model", type="SPAN", name="model"),
-        obs(id="colon", type="SPAN", name="a:b"),
-        obs(id="grouping", type="SPAN", name="anything", metadata=_marked("grouping")),
-        obs(id="sub_step", type="TOOL", name="other", metadata=_marked("sub_step")),
-        obs(id="unmarked_meta", type="SPAN", name="n", metadata={"attributes": {"k": "v"}}),
-    ]
-    mock_client.api.legacy.observations_v1.get_many.return_value = obs_page(observations)
-    mock_client.api.trace.get.return_value = SimpleNamespace(tags=[])
-    now = datetime(2026, 1, 1, tzinfo=UTC)
-    items = await LangfuseReader(manager).list_spans_in_window(now, now)
-    assert {i.id for i in items} == {"named_tools", "named_model", "colon", "unmarked_meta"}
-
-
-async def test_list_spans_run_scope_and_kind_narrowing(manager, mock_client, obs, obs_page):
-    observations = [
-        obs(id="tool1", type="TOOL", name="search"),
-        obs(id="agent1", type="AGENT", name="planner"),
-        obs(id="chain1", type="CHAIN", name="step"),
-        obs(id="retr1", type="RETRIEVER", name="lookup"),
-        obs(id="span1", type="SPAN", name="node"),
-        obs(id="gen1", type="GENERATION", name="llm"),
-    ]
-    mock_client.api.legacy.observations_v1.get_many.return_value = obs_page(observations)
-    mock_client.api.trace.get.return_value = SimpleNamespace(tags=[])
-    reader = LangfuseReader(manager)
-    now = datetime(2026, 1, 1, tzinfo=UTC)
-
-    # run= scopes to a single trace (forwarded as trace_id).
-    await reader.list_spans_in_window(now, now, run="trace-7")
-    assert mock_client.api.legacy.observations_v1.get_many.call_args.kwargs["trace_id"] == "trace-7"
-
-    # No kind -> AGENT/CHAIN/RETRIEVER/TOOL/SPAN all kept (tool-granularity set).
-    items = await reader.list_spans_in_window(now, now)
-    assert {i.id for i in items} == {"tool1", "agent1", "chain1", "retr1", "span1"}
-
-    # kind narrows within the set by the mapped neutral kind.
-    items = await reader.list_spans_in_window(now, now, kind=SpanKind.TOOL)
-    assert {i.id for i in items} == {"tool1", "retr1"}
-    items = await reader.list_spans_in_window(now, now, kind=SpanKind.CHAIN)
-    assert {i.id for i in items} == {"agent1", "chain1", "span1"}
-    # A generation or an event is never an item, so those kinds select nothing.
-    assert await reader.list_spans_in_window(now, now, kind=SpanKind.LLM) == []
-    assert await reader.list_spans_in_window(now, now, kind=SpanKind.EVENT) == []
-
-
-async def test_list_spans_failed_tag_fetch_degrades_to_empty(manager, mock_client, obs, obs_page):
-    mock_client.api.legacy.observations_v1.get_many.return_value = obs_page([obs(id="a", type="TOOL", name="x")])
-    mock_client.api.trace.get.side_effect = RuntimeError("boom")
-    now = datetime(2026, 1, 1, tzinfo=UTC)
-    items = await LangfuseReader(manager).list_spans_in_window(now, now)
-    assert [i.id for i in items] == ["a"]
-    assert items[0].tags == []
-
-
-async def test_tag_fetch_failure_marks_tags_unavailable(manager, mock_client, obs, obs_page):
-    mock_client.api.legacy.observations_v1.get_many.return_value = obs_page([obs(id="a", type="TOOL", name="x")])
-    mock_client.api.trace.get.side_effect = RuntimeError("boom")
-    now = datetime(2026, 1, 1, tzinfo=UTC)
-    items = await LangfuseReader(manager).list_spans_in_window(now, now)
-    assert items[0].tags == []
-    assert items[0].tags_available is False
-
-
-async def test_tags_present_are_available(manager, mock_client, obs, obs_page):
-    mock_client.api.legacy.observations_v1.get_many.return_value = obs_page([obs(id="a", type="TOOL", name="x")])
-    mock_client.api.trace.get.return_value = SimpleNamespace(tags=["run:7"])
-    now = datetime(2026, 1, 1, tzinfo=UTC)
-    items = await LangfuseReader(manager).list_spans_in_window(now, now)
-    assert items[0].tags == ["run:7"]
-    assert items[0].tags_available is True
-
-
-async def test_no_trace_id_is_available_empty(manager, mock_client, obs, obs_page):
-    mock_client.api.legacy.observations_v1.get_many.return_value = obs_page(
-        [obs(id="a", trace_id=None, type="TOOL", name="x")]
+def _steps(fake):
+    fake.add(id="root", trace_id="t1", start=T0, end=T0 + timedelta(seconds=9), tags=["a"], name="run")
+    fake.add(
+        id="tool",
+        trace_id="t1",
+        parent_id="root",
+        type="TOOL",
+        name="echo",
+        start=T0 + timedelta(seconds=1),
+        end=T0 + timedelta(seconds=2),
+        tags=["a"],
+        input='{"x": 1}',
+        output="ok",
+        metadata={"attributes.tai42.metadata": '{"k": "' + "v" * 300 + '"}'},
     )
-    now = datetime(2026, 1, 1, tzinfo=UTC)
-    items = await LangfuseReader(manager).list_spans_in_window(now, now)
-    assert items[0].tags == []
-    assert items[0].tags_available is True
-    # An obs with no trace_id is never fetched for tags.
-    mock_client.api.trace.get.assert_not_called()
-
-
-async def test_list_spans_tag_filter_and_pagination(manager, mock_client, obs, obs_page):
-    page1 = obs_page([obs(id="a", type="TOOL", name="x")], page=1, total_pages=2)
-    page2 = obs_page([obs(id="b", type="TOOL", name="y")], page=2, total_pages=2)
-    mock_client.api.legacy.observations_v1.get_many.side_effect = [page1, page2]
-    mock_client.api.trace.get.return_value = SimpleNamespace(tags=[])
-
-    reader = LangfuseReader(manager)
-    now = datetime(2026, 1, 1, tzinfo=UTC)
-    items = await reader.list_spans_in_window(now, now, filter_=MonitoringFilter(tags=["run:7"]))
-
-    assert {i.id for i in items} == {"a", "b"}
-    # tag filter is sent server-side via the traceTags advanced filter
-    first_call = mock_client.api.legacy.observations_v1.get_many.call_args_list[0]
-    sent = json.loads(first_call.kwargs["filter"])
-    assert sent[0]["column"] == "traceTags"
-    assert sent[0]["value"] == ["run:7"]
-    # every read is scoped to the active source via environment
-    assert first_call.kwargs["environment"] == "tai"
-    # page-based pagination followed
-    assert mock_client.api.legacy.observations_v1.get_many.call_count == 2
-
-
-async def test_span_filter_maps_native_and_advanced(manager, mock_client, obs_page):
-    mock_client.api.legacy.observations_v1.get_many.return_value = obs_page([])
-    now = datetime(2026, 1, 1, tzinfo=UTC)
-    await LangfuseReader(manager).list_spans_in_window(
-        now,
-        now,
-        filter_=MonitoringFilter(
-            name="node",
-            user_id="u1",
-            level=None,
-            model="gpt",
-            min_cost=0.1,
-            max_cost=2.0,
-            min_tokens=10,
-            max_tokens=100,
-            min_latency=0.5,
-            max_latency=5.0,
-            metadata={"k": "v"},
-        ),
+    fake.add(
+        id="node",
+        trace_id="t1",
+        parent_id="root",
+        type="CHAIN",
+        name="plan",
+        start=T0 + timedelta(seconds=3),
+        end=T0 + timedelta(seconds=7),
     )
-    kwargs = mock_client.api.legacy.observations_v1.get_many.call_args.kwargs
-    assert kwargs["name"] == "node"
-    assert kwargs["user_id"] == "u1"
-    sent = json.loads(kwargs["filter"])
-    cols = {(c["column"], c["operator"]): c for c in sent}
-    assert ("model", "=") in cols
-    assert cols[("model", "=")]["value"] == "gpt"
-    assert cols[("totalCost", ">=")]["value"] == 0.1
-    assert cols[("totalCost", "<=")]["value"] == 2.0
-    assert cols[("totalTokens", ">=")]["value"] == 10
-    assert cols[("totalTokens", "<=")]["value"] == 100
-    assert cols[("latency", ">=")]["value"] == 0.5
-    assert cols[("latency", "<=")]["value"] == 5.0
-    meta = cols[("metadata", "=")]
-    assert meta["type"] == "stringObject"
-    assert meta["key"] == "k"
-    assert meta["value"] == "v"
-
-
-async def test_span_session_id_resolves_and_postfilters(manager, mock_client, obs, obs_page):
-    observations = [
-        obs(id="keep", trace_id="t-keep", type="TOOL", name="x"),
-        obs(id="drop", trace_id="t-other", type="TOOL", name="y"),
-    ]
-    mock_client.api.legacy.observations_v1.get_many.return_value = obs_page(observations)
-    mock_client.api.trace.list.return_value = SimpleNamespace(
-        data=[SimpleNamespace(id="t-keep")], meta=SimpleNamespace(total_pages=1)
+    fake.add(
+        id="group",
+        trace_id="t1",
+        parent_id="root",
+        type="SPAN",
+        start=T0 + timedelta(seconds=4),
+        metadata={"attributes.tai42.step_role": "grouping"},
     )
-    mock_client.api.trace.get.return_value = SimpleNamespace(tags=[])
-    now = datetime(2026, 1, 1, tzinfo=UTC)
-    items = await LangfuseReader(manager).list_spans_in_window(now, now, filter_=MonitoringFilter(session_id="s1"))
-    assert {i.id for i in items} == {"keep"}
-    assert mock_client.api.trace.list.call_args.kwargs["session_id"] == "s1"
-    assert mock_client.api.trace.list.call_args.kwargs["environment"] == "tai"
-
-
-async def test_span_session_resolution_drains_all_pages(manager, mock_client, obs, obs_page):
-    observations = [
-        obs(id="p1", trace_id="t-page1", type="TOOL", name="x"),
-        obs(id="p2", trace_id="t-page2", type="TOOL", name="y"),
-    ]
-    mock_client.api.legacy.observations_v1.get_many.return_value = obs_page(observations)
-    mock_client.api.trace.list.side_effect = [
-        SimpleNamespace(data=[SimpleNamespace(id="t-page1")], meta=SimpleNamespace(total_pages=2)),
-        SimpleNamespace(data=[SimpleNamespace(id="t-page2")], meta=SimpleNamespace(total_pages=2)),
-    ]
-    mock_client.api.trace.get.return_value = SimpleNamespace(tags=[])
-    now = datetime(2026, 1, 1, tzinfo=UTC)
-    items = await LangfuseReader(manager).list_spans_in_window(now, now, filter_=MonitoringFilter(session_id="s1"))
-    # Both pages of the session's trace ids were collected before filtering.
-    assert {i.id for i in items} == {"p1", "p2"}
-    assert mock_client.api.trace.list.call_count == 2
-
-
-async def test_span_default_sort_is_newest_first(manager, mock_client, obs, obs_page):
-    t = datetime(2026, 1, 1, tzinfo=UTC)
-    observations = [
-        obs(id="old", type="TOOL", name="a", start_time=t.replace(hour=1)),
-        obs(id="new", type="TOOL", name="b", start_time=t.replace(hour=9)),
-    ]
-    mock_client.api.legacy.observations_v1.get_many.return_value = obs_page(observations)
-    mock_client.api.trace.get.return_value = SimpleNamespace(tags=[])
-    items = await LangfuseReader(manager).list_spans_in_window(t, t)
-    assert [i.id for i in items] == ["new", "old"]
-
-
-async def test_span_sort_by_duration_open_span_last(manager, mock_client, obs, obs_page):
-    t = datetime(2026, 1, 1, tzinfo=UTC)
-    observations = [
-        obs(id="short", type="TOOL", name="a", start_time=t, end_time=t.replace(minute=1)),
-        obs(id="long", type="TOOL", name="b", start_time=t, end_time=t.replace(minute=5)),
-        obs(id="open", type="TOOL", name="c", start_time=t, end_time=None),
-    ]
-    mock_client.api.legacy.observations_v1.get_many.return_value = obs_page(observations)
-    mock_client.api.trace.get.return_value = SimpleNamespace(tags=[])
-    items = await LangfuseReader(manager).list_spans_in_window(
-        t, t, order_by=OrderBy(field="duration", direction="desc")
+    fake.add(
+        id="sub",
+        trace_id="t1",
+        parent_id="tool",
+        type="TOOL",
+        start=T0 + timedelta(seconds=5),
+        metadata={"attributes.tai42.step_role": "sub_step"},
     )
-    assert [i.id for i in items] == ["long", "short", "open"]
+    fake.add(id="gen", trace_id="t1", parent_id="node", type="GENERATION", start=T0 + timedelta(seconds=6))
+    fake.add(id="evt", trace_id="t1", parent_id="node", type="EVENT", start=T0 + timedelta(seconds=6))
+    fake.add(id="other-run", trace_id="t2", type="TOOL", start=T0 + timedelta(seconds=8), name="echo")
+    fake.add(id="later", trace_id="t3", type="TOOL", start=T1)
 
 
-async def test_span_sort_by_name_asc(manager, mock_client, obs, obs_page):
-    t = datetime(2026, 1, 1, tzinfo=UTC)
-    observations = [
-        obs(id="b", type="TOOL", name="beta", start_time=t),
-        obs(id="a", type="TOOL", name="alpha", start_time=t),
+async def test_one_item_per_step_newest_first(fake, reader):
+    _steps(fake)
+    items = await reader.list_spans_in_window(T0, T1)
+    assert [i.id for i in items] == ["other-run", "node", "tool", "root"]
+    tool = items[2]
+    assert tool.parent_id == "root"
+    assert tool.name == "echo"
+    assert tool.tags == ["a"]
+    assert tool.tags_available is True
+    assert tool.input == {"x": 1}
+    assert tool.output == "ok"
+    assert tool.metadata == {"attributes.tai42.metadata": {"k": "v" * 300}}
+    assert tool.end == T0 + timedelta(seconds=2)
+
+
+async def test_the_window_read_sends_one_filter(fake, reader):
+    _steps(fake)
+    await reader.list_spans_in_window(T0, T1, run="t1", kind=SpanKind.TOOL)
+    [call] = fake.calls_of("observations")
+    assert call["expandMetadata"] == EXPAND_METADATA
+    assert fake.filters_sent() == [
+        [
+            {"column": "environment", "operator": "any of", "value": ["tai"], "type": "stringOptions"},
+            {"column": "startTime", "operator": ">=", "value": T0.isoformat(), "type": "datetime"},
+            {"column": "startTime", "operator": "<", "value": T1.isoformat(), "type": "datetime"},
+            {"column": "type", "operator": "any of", "value": ["RETRIEVER", "TOOL"], "type": "stringOptions"},
+            {"column": "traceId", "operator": "=", "value": "t1", "type": "string"},
+        ]
     ]
-    mock_client.api.legacy.observations_v1.get_many.return_value = obs_page(observations)
-    mock_client.api.trace.get.return_value = SimpleNamespace(tags=[])
-    items = await LangfuseReader(manager).list_spans_in_window(t, t, order_by=OrderBy(field="name", direction="asc"))
-    assert [i.id for i in items] == ["a", "b"]
 
 
-async def test_span_sort_unknown_field_raises(manager, mock_client, obs_page):
-    mock_client.api.legacy.observations_v1.get_many.return_value = obs_page([])
-    t = datetime(2026, 1, 1, tzinfo=UTC)
-    with pytest.raises(MonitoringReadNotSupportedError):
-        await LangfuseReader(manager).list_spans_in_window(t, t, order_by=OrderBy(field="tags"))
+async def test_run_and_kind_narrow_the_steps(fake, reader):
+    _steps(fake)
+    assert [i.id for i in await reader.list_spans_in_window(T0, T1, run="t1", kind=SpanKind.TOOL)] == ["tool"]
+    assert [i.id for i in await reader.list_spans_in_window(T0, T1, kind=SpanKind.CHAIN)] == ["node", "root"]
+
+
+@pytest.mark.parametrize("kind", [SpanKind.LLM, SpanKind.EVENT])
+async def test_a_kind_no_step_has_reads_nothing(fake, reader, kind):
+    _steps(fake)
+    assert await reader.list_spans_in_window(T0, T1, kind=kind) == []
+    assert fake.calls == []
+
+
+async def test_filter_clauses_ride_the_filter_json(fake, reader):
+    _steps(fake)
+    flt = MonitoringFilter(
+        name="echo",
+        user_id="alice",
+        session_id="s",
+        version="v",
+        level=MonitoringLevel.ERROR,
+        model="m",
+        tags=["a", "b"],
+        min_cost=0.1,
+        max_tokens=9,
+        min_latency=1.0,
+        metadata={"team": "blue"},
+    )
+    assert await reader.list_spans_in_window(T0, T1, filter_=flt) == []
+    assert fake.filters_sent()[0][4:] == [
+        {"column": "name", "operator": "=", "value": "echo", "type": "string"},
+        {"column": "userId", "operator": "=", "value": "alice", "type": "string"},
+        {"column": "sessionId", "operator": "=", "value": "s", "type": "string"},
+        {"column": "version", "operator": "=", "value": "v", "type": "string"},
+        {"column": "level", "operator": "=", "value": "ERROR", "type": "string"},
+        {"column": "model", "operator": "=", "value": "m", "type": "string"},
+        {"column": "traceTags", "operator": "any of", "value": ["a", "b"], "type": "arrayOptions"},
+        {"column": "totalCost", "operator": ">=", "value": 0.1, "type": "number"},
+        {"column": "totalTokens", "operator": "<=", "value": 9, "type": "number"},
+        {"column": "latency", "operator": ">=", "value": 1.0, "type": "number"},
+        {"column": "metadata", "type": "stringObject", "key": "team", "operator": "=", "value": "blue"},
+    ]
+
+
+async def test_a_name_filter_selects_by_the_observation_name(fake, reader):
+    _steps(fake)
+    items = await reader.list_spans_in_window(T0, T1, filter_=MonitoringFilter(name="echo"))
+    assert [i.id for i in items] == ["other-run", "tool"]
+
+
+async def test_the_window_follows_the_cursor(fake, reader):
+    for n in range(1500):
+        fake.add(id=f"s{n:04}", trace_id="t", type="TOOL", start=T0 + timedelta(milliseconds=n))
+    items = await reader.list_spans_in_window(T0, T1)
+    assert len(items) == 1500
+    assert len(fake.calls_of("observations")) == 2
+
+
+async def test_a_step_marker_that_does_not_decode_fails_loudly(fake, reader):
+    fake.add(id="bad", trace_id="t", type="TOOL", start=T0, metadata={"attributes.tai42.metadata": "[1, 2]"})
+    with pytest.raises(MonitoringError, match=r"malformed tai42\.metadata attribute on observation bad"):
+        await reader.list_spans_in_window(T0, T1)
+
+
+@pytest.mark.parametrize(
+    ("order_by", "expected"),
+    [
+        (OrderBy(field="start", direction="asc"), ["root", "tool", "node", "other-run"]),
+        (OrderBy(field="duration", direction="desc"), ["root", "node", "tool", "other-run"]),
+        (OrderBy(field="name", direction="asc"), ["other-run", "tool", "node", "root"]),
+        (OrderBy(field="id", direction="desc"), ["tool", "root", "other-run", "node"]),
+    ],
+)
+async def test_items_sort_with_missing_keys_last(fake, reader, order_by, expected):
+    _steps(fake)
+    items = await reader.list_spans_in_window(T0, T1, order_by=order_by)
+    assert [i.id for i in items] == expected
+
+
+async def test_an_unknown_span_sort_is_not_served(fake, reader):
+    _steps(fake)
+    with pytest.raises(MonitoringReadNotServedError, match="cannot sort on 'cost'"):
+        await reader.list_spans_in_window(T0, T1, order_by=OrderBy(field="cost"))

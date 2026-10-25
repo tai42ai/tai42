@@ -14,17 +14,18 @@ Two generic context variables naming registered tools a resuming driver binds:
   completion delivery is wired.
 
 The resume continuation is a bare tool name. The platform runs it with
-``{"interaction_id", "answer", "reply_to", "params"}``: ``answer`` is the answer value (or
-:data:`EXPIRY_ANSWER`); ``reply_to`` is the message the answering reply quoted, as
-:class:`~tai42_contract.conversations.ReplyTo` JSON, or ``null``; ``params`` is the answer's
-:attr:`~tai42_contract.interactions.models.InteractionResponse.params`, or ``null`` (both are
-always ``null`` on expiry). Every continuation tool declares ``reply_to: ReplyTo | None`` and
-``params: dict[str, str] | None``. A driver that hands the answer back to a waiting ``ask`` hands
-it ``AskAnswer(answer=answer, reply_to=reply_to, params=params)`` as JSON, so a parked asker
-reads what a synchronous asker reads. Both are a generic platform mechanism that never
-names a flow, a session, or any engine state — the address's ``context`` is fully opaque to this
-contract (it carries no route/flow/thread meaning here) and MUST be JSON-serializable, since a
-durable resume path round-trips it. A resume name of ``None`` (the default) means no resuming
+``{"interaction_id", "ask_result"}``: ``ask_result`` is the value the parked call reads in place
+of the ask, which the driver hands back to it unchanged. It is always the
+:class:`~tai42_contract.interactions.AskAnswer` JSON a synchronous ask returns (the answer, the
+message the answering reply quoted and the answer's params). On an answer it is mapped by the
+output stage of every preset the park sits under between the driver's call and the ask, so a
+parked asker reads what a synchronous asker reads. On expiry its ``answer`` is
+:data:`EXPIRY_ANSWER` and its ``reply_to`` and ``params`` are null; no output stage maps it.
+
+Both context variables are a generic platform mechanism that never names a flow, a session, or
+any engine state — the address's ``context`` is fully opaque to this contract (it carries no
+route/flow/thread meaning here) and MUST be JSON-serializable, since a durable resume path
+round-trips it. A resume name of ``None`` (the default) means no resuming
 driver is bound, and an async ask raised there fails loudly.
 
 The rest is shared vocabulary: the chain routing a platform seam binds around a nested dispatch
@@ -59,9 +60,11 @@ __all__ = [
     "ParkResumeUnauthorizedError",
     "RunTerminalFailed",
     "chained_lineage",
+    "current_run_face",
     "get_chained_resume",
     "get_park_completion",
     "get_resume_continuation_tool",
+    "open_nested_run_face",
     "reset_chained_resume",
     "reset_park_completion",
     "reset_resume_continuation_tool",
@@ -127,16 +130,19 @@ class _ResumeFrame(NamedTuple):
     ``continuation_tool`` is the bound driver continuation. ``routing`` is the chain routing bound
     around the current nested dispatch. ``lineage`` holds the chain key of every chained call whose
     run face the context crossed, outermost first: a key joins it when a driver binds its resume
-    continuation under the routing that carries it.
+    continuation under the routing that carries it. ``face`` identifies the run the context
+    belongs to: a token minted fresh by every :func:`set_resume_continuation_tool` bind and by
+    :func:`open_nested_run_face`, compared by identity only.
     """
 
     continuation_tool: str | None
     routing: ChainedResume | None
     lineage: tuple[str, ...]
+    face: object
 
 
-# The frame outside any driver and any chained dispatch.
-_UNBOUND: Final[_ResumeFrame] = _ResumeFrame(None, None, ())
+# The frame outside any driver and any chained dispatch, under the root run face.
+_UNBOUND: Final[_ResumeFrame] = _ResumeFrame(None, None, (), object())
 
 _resume_frame: ContextVar[_ResumeFrame] = ContextVar("tai42_resume_frame", default=_UNBOUND)
 
@@ -165,8 +171,8 @@ def set_chained_resume(routing: ChainedResume | None) -> Token[_ResumeFrame]:
     """
     frame = _resume_frame.get()
     if routing is None:
-        return _resume_frame.set(_ResumeFrame(frame.continuation_tool, None, ()))
-    return _resume_frame.set(_ResumeFrame(frame.continuation_tool, routing, frame.lineage))
+        return _resume_frame.set(_ResumeFrame(frame.continuation_tool, None, (), frame.face))
+    return _resume_frame.set(_ResumeFrame(frame.continuation_tool, routing, frame.lineage, frame.face))
 
 
 def reset_chained_resume(token: Token[_ResumeFrame]) -> None:
@@ -256,9 +262,9 @@ class ParkDeliveryUnauthorizedError(Exception):
     __tai_error_kind__ = ErrorKind.UNAUTHORIZED
 
 
-# The answer value a continuation receives when its interaction expired unanswered — the
-# generic marker a resuming consumer reads to run its expiry branch instead of a real answer.
-# An expiry run carries ``reply_to`` and ``params`` as ``null``.
+# The ``answer`` of the ``ask_result`` a continuation receives when its interaction expired
+# unanswered — the generic marker a resuming consumer reads to run its expiry branch instead of a
+# real answer.
 EXPIRY_ANSWER: Final[dict[str, bool]] = {"tai42:interaction_expired": True}
 
 
@@ -352,14 +358,36 @@ def set_resume_continuation_tool(tool_name: str | None) -> Token[_ResumeFrame]:
     :func:`reset_resume_continuation_tool` to restore the previous binding. The binding is the
     run's face: under a bound chain routing it crosses that routing's key into
     :func:`chained_lineage` (once — a driver re-binding per step under one routing does not repeat
-    it), so every park the run raises records the chained call it is nested under. The reset
-    restores the lineage with the binding.
+    it), so every park the run raises records the chained call it is nested under. Every bind
+    mints a fresh run face (:func:`current_run_face`). The reset restores the lineage and the face
+    with the binding.
     """
     frame = _resume_frame.get()
     lineage = frame.lineage
     if frame.routing is not None and (not lineage or lineage[-1] != frame.routing.chain_key):
         lineage = (*lineage, frame.routing.chain_key)
-    return _resume_frame.set(_ResumeFrame(tool_name, frame.routing, lineage))
+    return _resume_frame.set(_ResumeFrame(tool_name, frame.routing, lineage, object()))
+
+
+def current_run_face() -> object:
+    """The token of the run the current context belongs to, compared by identity.
+
+    Outside any driver it is the root face. A fresh face is minted by every
+    :func:`set_resume_continuation_tool` bind and by :func:`open_nested_run_face`; binding a chain
+    routing keeps the face.
+    """
+    return _resume_frame.get().face
+
+
+def open_nested_run_face() -> Token[_ResumeFrame]:
+    """Mint a fresh run face under the current continuation, routing and lineage; return the reset token.
+
+    For a driver that runs a nested run under its parent's continuation: the nested run gets a face
+    of its own while it resumes through the parent. Nothing joins the lineage. Reset with
+    :func:`reset_resume_continuation_tool`.
+    """
+    frame = _resume_frame.get()
+    return _resume_frame.set(_ResumeFrame(frame.continuation_tool, frame.routing, frame.lineage, object()))
 
 
 def reset_resume_continuation_tool(token: Token[_ResumeFrame]) -> None:

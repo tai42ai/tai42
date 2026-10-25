@@ -78,6 +78,46 @@ async def test_caller_ask_parks_and_a_later_run_takes_the_resumed_result(
     assert outcome["result"]["answer"] == "the-answer"
 
 
+@pytest.mark.needs("kind:versioning", "mutable")
+async def test_a_preset_output_map_shapes_the_result_a_caller_ask_resumes_into(
+    replicas_stack: TaiStack, uniq: Callable[[str], str]
+) -> None:
+    api_a = replicas_stack.api(port=replicas_stack.port_a)
+    api_b = replicas_stack.api(port=replicas_stack.port_b)
+    subject = _subject(uniq("subject"))
+    name = uniq("mapped_held")
+    await api_a.post(
+        "/api/presets",
+        json={
+            "name": name,
+            "base_tool": "held_run",
+            "description": "held_run with its result wrapped",
+            "output_map": "{mapped: .}",
+        },
+        retry_on_reloading=True,
+    )
+
+    # The preset parks on A through held_run's caller ask.
+    submitted = await api_a.post(
+        "/api/tool-runs",
+        json={"tool_name": name, "arguments": {"marker": uniq("q")}, "subject": subject},
+        expect=202,
+        retry_on_reloading=True,
+    )
+    held_run_id = submitted["run_id"]
+    await _await_status(api_b, held_run_id, "parked")
+
+    # A run on B answers it; the resumed drive's result passes the preset's output map.
+    relay_run_id = await _submit(api_b, "caller_relay", {"payload": "the-answer"}, subject)
+    view = await _await_status(api_a, relay_run_id, "succeeded")
+
+    outcome = view["result"]
+    assert outcome["action"] == "resumed"
+    assert outcome["kind"] == "result"
+    assert list(outcome["result"]) == ["mapped"], outcome
+    assert outcome["result"]["mapped"]["answer"] == "the-answer"
+
+
 async def test_a_resumed_re_park_records_the_restored_chain(
     replicas_stack: TaiStack, uniq: Callable[[str], str]
 ) -> None:

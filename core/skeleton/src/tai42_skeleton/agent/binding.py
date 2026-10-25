@@ -23,13 +23,13 @@ from tai42_contract.interactions import (
 )
 from tai42_contract.tools import TOOL_META_PAUSES
 from tai42_kit.utils.data import makefun_func_name
+from tai42_kit.utils.unset import UNSET, without_unset
 
 from tai42_skeleton.agent.session_thread import get_agent_session_thread
 from tai42_skeleton.agent.thread_reservation import (
     ReservedThreadNamespaceError,
     run_kwargs_from_tool_input,
 )
-from tai42_skeleton.agent.unset import _UNSET
 from tai42_skeleton.exceptions.exceptions import TaiValidationError
 from tai42_skeleton.tools.binding.secret_tool import _SecretRevealingTool
 
@@ -60,7 +60,7 @@ def _run_tool_signature(tool_input: type[BaseModel]) -> inspect.Signature:
     the copy-and-clear keeps every schema-affecting attribute (description,
     constraints, alias, title, examples) while removing the model default so it
     cannot clash with the parameter default. A required field gets no parameter
-    default; an optional field defaults to :data:`_UNSET`, the runtime marker the
+    default; an optional field defaults to :data:`~tai42_kit.utils.unset.UNSET`, the omitted-value marker the
     body strips before validation. Extensions derive their branch schema from this
     signature, so it carries the agent's real input contract.
     """
@@ -74,7 +74,7 @@ def _run_tool_signature(tool_input: type[BaseModel]) -> inspect.Signature:
             params.append(inspect.Parameter(field_name, inspect.Parameter.KEYWORD_ONLY, annotation=annotation))
         else:
             params.append(
-                inspect.Parameter(field_name, inspect.Parameter.KEYWORD_ONLY, annotation=annotation, default=_UNSET)
+                inspect.Parameter(field_name, inspect.Parameter.KEYWORD_ONLY, annotation=annotation, default=UNSET)
             )
     return inspect.Signature(params, return_annotation=Any)
 
@@ -180,7 +180,7 @@ class AgentBinding:
         The tool advertises the agent's ``ToolInput`` schema (live ``tools=`` is
         deliberately absent — API-only via ``astream``). The body sees EXACTLY the
         caller-supplied argument keys — the optional parameters the caller omitted
-        arrive as the :data:`_UNSET` sentinel and are stripped, so
+        arrive as the :data:`~tai42_kit.utils.unset.UNSET` marker and are stripped, so
         ``model_fields_set`` after ``model_validate`` reflects only what was passed.
         An explicit ``None`` on a field whose advertised schema default is ``null`` is
         stripped the same way (treated as unset): a transformed-tool caller fills every
@@ -212,7 +212,7 @@ class AgentBinding:
         # caller (a preset is a fastmcp transformed tool) fills every omitted optional
         # argument with the schema default before forwarding, so these arrive as an
         # explicit ``None`` even when the caller passed nothing — indistinguishable from
-        # omission and stripped alongside :data:`_UNSET` below. A field whose default is
+        # omission and stripped alongside the ``UNSET`` marker below. A field whose default is
         # NOT ``null`` keeps an explicit ``None`` (there it is a real, caller-chosen value).
         # Computed once per binding; the closure only reads it.
         null_default_fields = frozenset(
@@ -224,8 +224,8 @@ class AgentBinding:
         async def run_impl(**arguments: Any) -> Any:
             supplied = {
                 key: value
-                for key, value in arguments.items()
-                if value is not _UNSET and not (value is None and key in null_default_fields)
+                for key, value in without_unset(arguments).items()
+                if not (value is None and key in null_default_fields)
             }
             validated = tool_input.model_validate(supplied)
             run_kwargs = run_kwargs_from_tool_input(agent, validated)
@@ -313,7 +313,7 @@ class AgentBinding:
         # prebuilt ``FunctionTool`` (advertised schema exact by construction) and one
         # branch is minted per attached extension combo, composed over the concrete
         # signature. The optional parameters default to the non-serializable
-        # ``_UNSET`` sentinel, so any JSON-schema derivation over this signature emits
+        # ``UNSET`` marker, so any JSON-schema derivation over this signature emits
         # a benign ``PydanticJsonSchemaWarning`` (excluding the sentinel default) — a
         # narrow ``filterwarnings`` ignore in ``pyproject.toml`` keeps the intended
         # omission from tripping the warnings-as-error test policy.

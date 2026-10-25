@@ -6,6 +6,7 @@ import importlib.metadata
 from typing import Any
 
 import pytest
+from tai42_contract.plugins import PluginSpec
 
 from tai42_skeleton.marketplace import installer_update as installer_update_module
 from tai42_skeleton.marketplace.errors import (
@@ -46,6 +47,48 @@ async def test_update_happy_replaces_row_in_one_write(monkeypatch: pytest.Monkey
     # One RMW: old removed, new applied.
     assert h.svc.writes[-1]["tools"] == [{"title": "pkg.new", "module": "pkg.new"}]
     assert h.store.record_calls[-1][1] == "2.0.0"
+
+
+def _relay_spec(version: str, url: str) -> PluginSpec:
+    """An all-mcp-server spec (no ``contract``) providing the server ``relay`` at ``url``."""
+    return PluginSpec.model_validate(
+        {
+            "spec_version": 1,
+            "namespace": "tai42",
+            "name": "toolbox",
+            "package": "tai42-toolbox",
+            "version": version,
+            "description": "A test plugin",
+            "license": "Apache-2.0",
+            "categories": ["dev"],
+            "provides": [
+                {"kind": "mcp-server", "name": "relay", "mcp": {"type": "http", "url": url}, "description": "d"}
+            ],
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    "selection",
+    [
+        pytest.param({"include": ["relay_send"], "exclude": []}, id="include"),
+        pytest.param({"include": [], "exclude": ["relay_delete"]}, id="exclude"),
+    ],
+)
+async def test_update_keeps_an_mcp_entrys_tool_selection(monkeypatch: pytest.MonkeyPatch, selection) -> None:
+    monkeypatch.setattr(importlib.metadata, "version", lambda name: "0.1.0")
+    old = _relay_spec("1.0.0", "https://old.example.com/mcp")
+    new = _relay_spec("2.0.0", "https://new.example.com/mcp")
+    stored = {"title": "relay", "config": {"type": "http", "url": "https://old.example.com/mcp"}, **selection}
+    h = Harness(manifest={"mcp": [stored]})
+    h.store.preload(old, version="1.0.0")
+    h.registry.resolved = make_resolved(new, version="2.0.0", contract_range=None)
+
+    await h.installer().update("tai42/toolbox")
+
+    (relay,) = h.svc.writes[-1]["mcp"]
+    assert relay["config"]["url"] == "https://new.example.com/mcp"
+    assert (relay["include"], relay["exclude"]) == (selection["include"], selection["exclude"])
 
 
 async def test_update_same_version_is_state_error(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -135,10 +178,10 @@ async def test_update_unwind_reinstalls_old_github_pin_through_verified_fetch(
     assert h.pip.calls[0][-1] == str(calls[0]["path"])
     assert h.pip.calls[1][-1] == str(calls[1]["path"])
     assert not h.pip.calls[1][-1].startswith("git+")
-    # Ordering: old-pin reinstall -> manifest restore apply (persist + reload-back).
-    # The old wheel is back BEFORE the restore's reload loads the old manifest.
+    # Ordering: old-pin reinstall -> manifest reversal apply (persist + reload-back).
+    # The old wheel is back BEFORE the reversal's reload loads the old manifest.
     tail = [e for e in h.events if e in ("cm:write", "pip", "reload")]
-    # ... write(new), reload(fail), pip(old), write(saved), reload(back)
+    # ... write(new), reload(fail), pip(old), write(reversed), reload(back)
     assert tail[-3:] == ["pip", "cm:write", "reload"]
 
 
@@ -292,3 +335,179 @@ async def test_upgrade_all_lock_held_elsewhere_refuses_before_any_read() -> None
 async def test_upgrade_all_empty_store_is_an_empty_report() -> None:
     h = Harness()
     assert await h.installer().upgrade_all() == []
+
+
+async def test_upgrade_all_row_carries_its_write_s_span_release_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The upgraded ref's manifest write landed but its span release failed: that row names the
+    # error; the ref that wrote nothing carries ``None``.
+    import dataclasses
+
+    monkeypatch.setattr(importlib.metadata, "version", lambda name: "0.1.0")
+    up = make_spec(name="up", package="pkg-up", provides=_tool_provides("pkg.up"))
+    current = make_spec(name="current", package="pkg-current", provides=_tool_provides("pkg.current"))
+    h = Harness()
+    h.store.preload(up, version="1.0.0")
+    h.store.preload(current, version="1.0.0")
+    h.registry.versions_map = {
+        "tai42/up": [_published_row("1.2.0"), _published_row("1.0.0")],
+        "tai42/current": [_published_row("1.0.0")],
+    }
+    h.registry.resolved = make_resolved(make_spec(name="up", package="pkg-up"), version="1.2.0")
+    original = h.svc.apply_change
+
+    async def _change(mutator: Any) -> Any:
+        result = await original(mutator)
+        return dataclasses.replace(result, span_release_error="OSError: the release failed")
+
+    monkeypatch.setattr(h.svc, "apply_change", _change)
+
+    report = await h.installer().upgrade_all()
+
+    by_ref = {entry["ref"]: entry for entry in report}
+    assert by_ref["tai42/up"]["outcome"] == "upgraded"
+    assert by_ref["tai42/up"]["span_release_error"] == "OSError: the release failed"
+    assert by_ref["tai42/current"]["span_release_error"] is None
+
+
+def _failed_upgrade_harness(monkeypatch: pytest.MonkeyPatch) -> Harness:
+    # One installed ref with a newer compatible version whose row record fails after the
+    # forward manifest write landed, so the update unwinds by reversing the provides swap.
+    monkeypatch.setattr(importlib.metadata, "version", lambda name: "0.1.0")
+    up = make_spec(name="up", package="pkg-up", provides=_tool_provides("pkg.up"))
+    h = Harness()
+    h.store.preload(up, version="1.0.0")
+    h.registry.versions_map = {"tai42/up": [_published_row("1.2.0"), _published_row("1.0.0")]}
+    h.registry.resolved = make_resolved(make_spec(name="up", package="pkg-up"), version="1.2.0")
+    h.store.record_error = RuntimeError("store record failed")
+    return h
+
+
+async def test_an_update_unwind_keeps_a_manifest_edit_another_door_landed(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The forward write swapped the old spec's tool for the new one; while the row write is in
+    # flight another door adds its own tool, then the row write fails and the update unwinds.
+    h = _failed_upgrade_harness(monkeypatch)
+    h.cm._manifest = {"tools": [{"title": "pkg.up", "module": "pkg.up"}]}
+    kept = {"title": "kept", "module": "kept_mod"}
+    original = h.store.record
+
+    async def _record(*args: Any, **kwargs: Any) -> None:
+        await h.svc.apply_change(lambda document: document.setdefault("tools", []).append(kept))
+        await original(*args, **kwargs)
+
+    h.store.record = _record  # type: ignore[method-assign]
+
+    report = await h.installer().upgrade_all()
+
+    assert report[0]["outcome"] == "failed"
+    assert h.cm._manifest == {"tools": [{"title": "pkg.up", "module": "pkg.up"}, kept]}
+
+
+def _released_with(error: str) -> Any:
+    import dataclasses
+
+    return lambda result: dataclasses.replace(result, span_release_error=error)
+
+
+def _propagation_fails(error: str, release_error: str) -> Any:
+    def _raise(result: Any) -> Any:
+        raise FleetBroadcastError("reload_config", result.fleet, RuntimeError(error), span_release_error=release_error)
+
+    return _raise
+
+
+def _on_each_landed_change(monkeypatch: pytest.MonkeyPatch, h: Harness, *outcomes: Any) -> None:
+    # The forward swap is the first apply_change and the unwind's reversal the second; each
+    # outcome maps that write's landed result (or raises), in that order.
+    original = h.svc.apply_change
+    pending = list(outcomes)
+
+    async def _change(mutator: Any) -> Any:
+        result = await original(mutator)
+        return pending.pop(0)(result)
+
+    monkeypatch.setattr(h.svc, "apply_change", _change)
+
+
+def _lands(result: Any) -> Any:
+    return result
+
+
+async def test_upgrade_all_failed_row_joins_forward_and_restore_release_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The forward write and the unwind's reversal write both landed and both failed their span
+    # release: the failed row names both, in write order.
+    h = _failed_upgrade_harness(monkeypatch)
+    _on_each_landed_change(
+        monkeypatch,
+        h,
+        _released_with("OSError: forward release failed"),
+        _released_with("OSError: restore release failed"),
+    )
+
+    report = await h.installer().upgrade_all()
+
+    assert len(h.svc.writes) == 2
+    assert report == [
+        {
+            "ref": "tai42/up",
+            "outcome": "failed",
+            "detail": "store record failed",
+            "span_release_error": "OSError: forward release failed; OSError: restore release failed",
+        }
+    ]
+
+
+async def test_upgrade_all_failed_row_carries_the_restore_release_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The forward write released; only the unwind's reversal write failed its span release.
+    h = _failed_upgrade_harness(monkeypatch)
+    _on_each_landed_change(monkeypatch, h, _lands, _released_with("OSError: restore release failed"))
+
+    report = await h.installer().upgrade_all()
+
+    assert len(h.svc.writes) == 2
+    assert report[0]["outcome"] == "failed"
+    assert report[0]["span_release_error"] == "OSError: restore release failed"
+
+
+async def test_upgrade_all_failed_row_carries_a_forward_fleet_broadcast_error_s_release_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The forward write landed, failed its span release, then its propagation raised
+    # FleetBroadcastError; the unwind's reversal write landed and failed its release too.
+    h = _failed_upgrade_harness(monkeypatch)
+    h.store.record_error = None
+    _on_each_landed_change(
+        monkeypatch,
+        h,
+        _propagation_fails("reload failed", "OSError: forward release failed"),
+        _released_with("OSError: restore release failed"),
+    )
+
+    report = await h.installer().upgrade_all()
+
+    assert len(h.svc.writes) == 2
+    assert report[0]["outcome"] == "failed"
+    assert report[0]["span_release_error"] == "OSError: forward release failed; OSError: restore release failed"
+
+
+async def test_upgrade_all_failed_unwind_row_carries_both_writes_release_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The forward write's propagation raised FleetBroadcastError, and so did the unwind's reversal
+    # write: both landed with a failed span release, and the escalated failure's row names both.
+    h = _failed_upgrade_harness(monkeypatch)
+    h.store.record_error = None
+    _on_each_landed_change(
+        monkeypatch,
+        h,
+        _propagation_fails("reload failed", "OSError: forward"),
+        _propagation_fails("restore reload failed", "OSError: restore"),
+    )
+
+    report = await h.installer().upgrade_all()
+
+    assert len(h.svc.writes) == 2
+    assert report[0]["outcome"] == "failed"
+    assert "the unwind then also failed" in report[0]["detail"]
+    assert report[0]["span_release_error"] == "OSError: forward; OSError: restore"

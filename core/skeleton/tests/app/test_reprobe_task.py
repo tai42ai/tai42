@@ -86,9 +86,12 @@ class _Mixin(TaiMCPLifecycleMixin):
         self._config_manager = _NoManifestConfig()  # pyright: ignore[reportAttributeAccessIssue]
         # No presets are bound in these network-free tests, so the post-reload
         # reconciliation is a no-op stub (a bare mixin has no preset manager).
-        self.preset_manager = cast("Any", SimpleNamespace(reconcile_bases=AsyncMock()))
+        self.preset_manager = cast(
+            "Any",
+            SimpleNamespace(reconcile_bases=AsyncMock(), stored_preset_names=AsyncMock(return_value=frozenset())),
+        )
 
-    def _mcp_tools(self, config, tools):
+    def _mcp_tools(self, config, tools, preset_names):
         self._mcp_bound_tools[config.title] = {f"{config.title}_t"}
 
 

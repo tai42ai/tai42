@@ -1,17 +1,19 @@
 """The env-store side of a provides change.
 
-The pre-check, the combined env+manifest apply, and the exact-restore revert.
+The pre-check, the combined env+manifest apply, and the revert of exactly that write.
 A spec that ACCEPTS env (an ``!ENV`` marker or a required connector env) writes its
 supplied values in the SAME pipeline unit as its provides entry, so the entry lands
-exactly once alongside the values. The unwind restores every key this operation
-wrote to its captured PRIOR store value, so an overwritten operator key is never
-blind-deleted and the secret-marks var keeps an operator's other marks.
+exactly once alongside the values. The unwind derives its revert from the stored env
+under the write exclusion: each value key this operation wrote goes back to its PRIOR
+store value while the store still holds the value written, and only the secret marks
+this operation added leave the marks var, so every other write stands.
 """
 
 from __future__ import annotations
 
 import os
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from typing import Any
 
 from pydantic import ValidationError
@@ -20,10 +22,15 @@ from tai42_kit.plugins import accepts_env, required_env_for_spec
 
 from tai42_skeleton.app.boot_rules import translate_config_invariants
 from tai42_skeleton.config.service import ApplyResult, ConfigService
-from tai42_skeleton.marketplace.errors import InstallEnvError, InstallStateError
+from tai42_skeleton.marketplace.errors import EnvRevertConflictError, InstallEnvError, InstallStateError
 from tai42_skeleton.marketplace.manifest_apply import apply_composed, composed_manifest_invalid
 from tai42_skeleton.marketplace.provides import env_manifest_pointer
-from tai42_skeleton.settings.env_secret_marks import SECRET_MARKS_ENV_VAR, merge_secret_marks
+from tai42_skeleton.settings.env_secret_marks import (
+    SECRET_MARKS_ENV_VAR,
+    format_secret_marks,
+    merge_secret_marks,
+    parse_secret_marks,
+)
 
 
 def precheck_required_env(cm: Any, spec: PluginSpec, env: dict[str, str] | None) -> None:
@@ -61,27 +68,83 @@ def env_to_write(env: dict[str, str] | None) -> dict[str, str]:
     return {key: value for key, value in (env or {}).items() if key not in os.environ}
 
 
-async def revert_env_write(svc: ConfigService, cm: Any, env_restore: dict[str, str] | None) -> None:
-    """Revert THIS install's env contribution through the ConfigService env door.
+@dataclass
+class EnvWrite:
+    """What one operation's env write changed, so :func:`revert_env_write` reverses exactly that.
 
-    Restores every key this install wrote to the PRIOR store value ``prepare``
-    captured (its exact prior string, or ``""`` to delete a key that was ABSENT
-    before) — never a blind delete, so a key this install merely OVERWROTE keeps its
-    operator value and the ``TAI_ENV_SECRET_KEYS`` marks var keeps an operator's OTHER
-    marks. The change set is DIFFED against the live store, so when nothing actually
-    persisted (the pre-persist dangling refusal) it is EMPTY and no env change fires —
-    no fleet broadcast on a no-op. Runs AFTER any manifest restore, so no restored
-    marker references a dropped key.
+    ``values`` maps each value key written to its PRIOR store value and the value written
+    (``""`` for an absent key). ``added_marks`` are the secret marks the write added to the
+    ``TAI_ENV_SECRET_KEYS`` marks var (those it already held are not this write's).
     """
-    if not env_restore:
-        return
+
+    values: dict[str, tuple[str, str]] = field(default_factory=dict)
+    added_marks: list[str] = field(default_factory=list)
+
+
+def _revert_plan(written: EnvWrite, stored: dict[str, str]) -> tuple[dict[str, str], list[str]]:
+    """The env changes that revert ``written`` against ``stored``, and the keys that cannot be reverted.
+
+    A value key still holding its prior value needs no change; one still holding the value
+    written goes back to its prior value; one holding any other value was rewritten by
+    another write and cannot be reverted. The marks var keeps every mark but the ones
+    ``written`` added, and is rewritten only while it still holds one of them.
+    """
+    changes: dict[str, str] = {}
+    conflicts: list[str] = []
+    for key, (prior, value) in written.values.items():
+        current = stored.get(key, "")
+        if current == prior:
+            continue
+        if current == value:
+            changes[key] = prior
+        else:
+            conflicts.append(key)
+    if written.added_marks:
+        current_marks = parse_secret_marks(stored.get(SECRET_MARKS_ENV_VAR))
+        if any(mark in current_marks for mark in written.added_marks):
+            changes[SECRET_MARKS_ENV_VAR] = format_secret_marks(
+                mark for mark in current_marks if mark not in written.added_marks
+            )
+    return changes, conflicts
+
+
+async def revert_env_write(svc: ConfigService, cm: Any, written: EnvWrite | None) -> str | None:
+    """Revert THIS operation's env contribution through the ConfigService env door.
+
+    The revert is derived from the stored env read under the write exclusion
+    (:meth:`~tai42_skeleton.config.service.ConfigService.apply_derived_env_change`), so every
+    write another door landed since stands: a value key this operation wrote goes back to
+    its PRIOR store value (``""`` deletes a key that was ABSENT before) while the store still
+    holds the value written, and the ``TAI_ENV_SECRET_KEYS`` marks var loses only the marks
+    this operation added. A value key another write replaced since raises
+    :class:`EnvRevertConflictError` naming it, and the revert writes nothing. A store read
+    outside the exclusion first decides whether a revert is due, so when nothing persisted
+    (the pre-persist dangling refusal) no env change fires — no fleet broadcast on a no-op.
+    Runs AFTER any manifest reversal, so no restored marker references a dropped key.
+
+    Returns the revert write's failed span release (``None`` when it released, or nothing
+    needed reverting).
+    """
+    if written is None or not (written.values or written.added_marks):
+        return None
     try:
         current = cm.read_env()
     except FileNotFoundError:
         current = {}
-    changes = {key: value for key, value in env_restore.items() if current.get(key, "") != value}
-    if changes:
-        await svc.apply_env_change(changes)
+    changes, conflicts = _revert_plan(written, current)
+    if not changes and not conflicts:
+        return None
+
+    def derive(stored: dict[str, str]) -> dict[str, str]:
+        changes, conflicts = _revert_plan(written, stored)
+        if conflicts:
+            raise EnvRevertConflictError(
+                "cannot revert the env key(s) another write replaced since this operation wrote them: "
+                + ", ".join(sorted(conflicts))
+            )
+        return changes
+
+    return (await svc.apply_derived_env_change(derive)).span_release_error
 
 
 async def apply_provides_change(
@@ -92,7 +155,7 @@ async def apply_provides_change(
     env: dict[str, str] | None,
     secret_keys: list[str] | None,
     env_to_write: dict[str, str],
-    env_restore: dict[str, str],
+    env_written: EnvWrite,
 ) -> ApplyResult:
     """Persist a provides patch through the pipeline.
 
@@ -110,13 +173,12 @@ async def apply_provides_change(
     manifest-persist failure leaves the env write standing and raises
     ``OrphanEnvWriteError``); the installer-unwind above reverts it.
 
-    Under the pipeline's env-write lock (against the SAME stored-env snapshot the write
-    derives from) this records the PRIOR store value of EVERY key it will write into
-    ``env_restore`` — the value keys AND, when ``secret_keys`` are supplied, the
-    ``TAI_ENV_SECRET_KEYS`` marks var it MERGES into (each key's exact prior string, or
-    ``""`` when the key was absent). The unwind restores exactly those, so it reverts
-    this install's contribution without deleting an operator's pre-existing store value
-    or clobbering their other secret marks.
+    Under the pipeline's config-write lock (against the SAME stored-env snapshot the write
+    derives from) this records into ``env_written`` each value key's prior store value and
+    the value written (``""`` for an absent key) and, when ``secret_keys`` are supplied, the
+    marks the ``TAI_ENV_SECRET_KEYS`` merge adds. :func:`revert_env_write` reverts exactly
+    those, so the unwind never deletes an operator's pre-existing store value or drops
+    another write's secret marks.
 
     A spec that accepts no env routes through ``apply_change``; ``env`` /
     ``secret_keys`` are meaningless there and supplying them is a loud input error.
@@ -134,17 +196,18 @@ async def apply_provides_change(
 
     async def prepare(stored: dict[str, str]) -> tuple[dict[str, str], Callable[[dict[str, Any]], None]]:
         changes = dict(env_to_write)
+        # Record what this write changes, from the STORED snapshot it derives from: each
+        # value key's prior string (``""`` when absent) beside the value written, and the
+        # marks the merge adds.
+        env_written.values = {key: (stored.get(key, ""), value) for key, value in changes.items()}
+        env_written.added_marks = []
         if marks:
             # Append to the marks read from the STORED env (never the settings
             # cache, stale until a reload), mirroring ``set_mcp_secret_env``.
-            changes[SECRET_MARKS_ENV_VAR] = merge_secret_marks(stored.get(SECRET_MARKS_ENV_VAR), marks)
-        # Capture the PRIOR store value of EVERY key this install writes (value keys
-        # AND the marks var) from the STORED snapshot: its exact prior string when
-        # present, else ``""`` (the key was absent). The unwind restores each to this,
-        # so an overwritten pre-existing store key is never blind-deleted and the marks
-        # var keeps an operator's OTHER marks.
-        for key in changes:
-            env_restore[key] = stored.get(key, "")
+            stored_marks = stored.get(SECRET_MARKS_ENV_VAR)
+            env_written.values.pop(SECRET_MARKS_ENV_VAR, None)
+            env_written.added_marks = [mark for mark in marks if mark not in parse_secret_marks(stored_marks)]
+            changes[SECRET_MARKS_ENV_VAR] = merge_secret_marks(stored_marks, marks)
         return changes, mutator
 
     with translate_config_invariants(composed_manifest_invalid):

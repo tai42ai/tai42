@@ -121,6 +121,43 @@ def test_get_attachment_reads_one_attachment(monkeypatch: pytest.MonkeyPatch) ->
     assert json.loads(result.output) == {"template": "counters", "path": "/c", "parameters": {}, "declarations": {}}
 
 
+def test_attachment_referees_prints_one_row_per_holder(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        assert request.url.path == "/api/states/status/attachments/counters/referees"
+        return data_response(
+            {
+                "action": "detach",
+                "holders": [
+                    {
+                        "kind": "preset",
+                        "name": "p",
+                        "locator": {},
+                        "summary": "preset 'p' binds template 'counters' on state 'status'",
+                    }
+                ],
+            }
+        )
+
+    result = run_cli(monkeypatch, handler, ["states", "attachment-referees", "status", "counters"])
+    assert result.exit_code == 0, result.output
+    assert result.output.splitlines()[2].split(None, 3) == [
+        "preset",
+        "p",
+        "{}",
+        "preset 'p' binds template 'counters' on state 'status'",
+    ]
+
+
+def test_attachment_referees_json_prints_the_raw_body(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return data_response({"action": "detach", "holders": []})
+
+    result = run_cli(monkeypatch, handler, ["states", "attachment-referees", "status", "counters"], json_output=True)
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output) == {"action": "detach", "holders": []}
+
+
 def test_attach_puts_the_body_from_a_file(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     body = tmp_path / "attach.json"
     body.write_text('{"path": "/c", "parameters": {}}')

@@ -123,6 +123,8 @@ def test_arq_backend_feature_env_and_process_model() -> None:
     # arq's recurring scheduler is a self-rescheduling queue job in the worker, so
     # a schedule fires without any extra backend process.
     assert arq.extra_backend_processes() == []
+    # A worker on a labelled queue takes the bare label; the plugin derives the queue.
+    assert arq.queue_worker_args("b") == ["worker", "--queue", "b"]
     assert arq.task_timeout_env(8) == {"ARQ_TASK_TIMEOUT": "8"}
 
 
@@ -138,6 +140,7 @@ def test_rq_backend_feature_env_and_process_model() -> None:
     # rq-scheduler's recurring zset is only drained by a separate ``rqscheduler``
     # daemon — ``tai backend beat`` — so a schedule needs its own process.
     assert rq.extra_backend_processes() == [["beat", "-i", "1"]]
+    assert rq.queue_worker_args("b") == ["worker", "--queue", "b"]
     assert rq.task_timeout_env(8) == {"RQ_TASK_TIMEOUT": "8"}
 
 
@@ -155,4 +158,6 @@ def test_celery_feature_env_and_process_model() -> None:
     }
     # RedBeat only fires while a beat process runs; ``tai backend beat`` starts it.
     assert celery.extra_backend_processes() == [["beat", "--max-interval", "2"]]
+    # A second Celery worker consumes the label's queue under its own node name.
+    assert celery.queue_worker_args("b") == ["worker", "-Q", "b", "-n", "b@%h"]
     assert celery.task_timeout_env(8) == {"CELERY_TASK_TIMEOUT": "8"}

@@ -155,6 +155,9 @@ class StackConfig:
     raw_manifest: str | None = None
     workers: int = 2
     run_backend: bool = True
+    # Worker queue labels: each runs one more ``tai backend worker`` (``backend-queue-<label>``)
+    # serving only that label's queue, beside the worker on the settings queue.
+    queue_workers: tuple[str, ...] = ()
     run_metrics: bool = True
     auth: bool = False
     # Serve the SUT as a user-owned embed host (uvicorn running the host FastAPI
@@ -231,6 +234,10 @@ class StackConfig:
     # web channel's answer door FORWARDS the answer to that callback URL — a loopback
     # origin resolves, an off-host placeholder does not). Filled from the first app port.
     app_origin_env_keys: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if self.queue_workers and not self.run_backend:
+            raise ValueError(f"stack {self.name!r}: queue_workers {self.queue_workers} need run_backend=True")
 
 
 @dataclass

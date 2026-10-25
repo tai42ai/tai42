@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Literal
 
 from tai42_contract.presets.errors import PresetNotFoundError, PresetVersionNotFoundError
 from tai42_contract.versioning.models import DocumentVersion
@@ -11,15 +11,14 @@ from tai42_kit.db import component_store_configured
 
 from tai42_skeleton.app import instance
 from tai42_skeleton.db import SKELETON_COMPONENT
-from tai42_skeleton.operations import BadRequestError, NotFoundError, operation
-from tai42_skeleton.operations.presets.references import _reference_maps, _rename_referees
+from tai42_skeleton.operations import BadRequestError, NotFoundError, ValidationRejectedError, operation
+from tai42_skeleton.operations.errors import OperationFailedError
+from tai42_skeleton.operations.holders import bound_branches, delete_holders, rename_holders
+from tai42_skeleton.operations.presets.models import PresetRefereesQuery
 from tai42_skeleton.operations.presets.views import _store_record_view
-from tai42_skeleton.operations.response_models_group_a import (
-    DocumentVersionList,
-    PresetDetailView,
-    PresetRecordList,
-    PresetRefereesResult,
-)
+from tai42_skeleton.operations.reference_graph import StoredPresets, _reference_maps
+from tai42_skeleton.operations.response_models_group_a import DocumentVersionList, HoldersPreview
+from tai42_skeleton.operations.response_models_group_presets import PresetDetailView, PresetRecordList
 from tai42_skeleton.presets.secret_refs import mask_all_baked_secrets, redact_baked_secrets
 from tai42_skeleton.tools.binding.errors import UnknownToolError
 
@@ -66,39 +65,30 @@ async def _redact_version_body(preset_name: str, body: dict[str, Any]) -> dict[s
     return body
 
 
-@operation(summary="List presets", tags=["presets"], response_model=PresetRecordList)
+@operation(summary="List presets", tags=["presets"], errors=[OperationFailedError], response_model=PresetRecordList)
 async def list_presets() -> list[dict[str, Any]]:
     """One row per store-backed record (the presets plus the ``conflicted`` quarantined ones).
 
     The population the presets management table shows.
     """
-    rows: list[dict[str, Any]] = []
-    # A store-less deploy (no versioned store configured) has no presets — skip the
-    # Postgres read and serve an empty list.
-    if component_store_configured(SKELETON_COMPONENT):
-        records = await instance.app.presets.store.list_presets()
-        # One batched active-body read instead of a per-record round-trip (N+1).
-        bodies = await instance.app.presets.list_active_bodies()
-        # Both cross-reference maps in one pass over the population.
-        uses_map, used_by_map = _reference_maps(bodies)
-        # ``records`` and ``bodies`` are two separate reads; a preset deleted between
-        # them is gone from ``bodies`` — skip it rather than KeyError, it is no longer
-        # a live row to list.
-        rows = [
-            _store_record_view(
-                rec.name,
-                rec.active_version,
-                bodies[rec.name],
-                uses=uses_map[rec.name],
-                used_by=used_by_map[rec.name],
-            )
-            for rec in records
-            if rec.name in bodies
-        ]
-    return rows
+    # One batched read of the population (its store gate answers no presets on a
+    # deployment with no skeleton database); rows come in name order.
+    versioned = await instance.app.presets.list_active_versioned_bodies()
+    bodies = {name: body for name, (_version, body) in versioned.items()}
+    # Both cross-reference maps in one pass over the population.
+    uses_map, used_by_map = await _reference_maps(bodies)
+    return [
+        _store_record_view(name, version, body, uses=uses_map[name], used_by=used_by_map[name])
+        for name, (version, body) in versioned.items()
+    ]
 
 
-@operation(summary="Get a preset", tags=["presets"], errors=[NotFoundError], response_model=PresetDetailView)
+@operation(
+    summary="Get a preset",
+    tags=["presets"],
+    errors=[NotFoundError, OperationFailedError],
+    response_model=PresetDetailView,
+)
 async def get_preset(name: str) -> dict[str, Any]:
     """The store record + the active ``fixed_kwargs`` + the ``uses`` / ``used_by`` cross-references.
 
@@ -115,7 +105,7 @@ async def get_preset(name: str) -> dict[str, Any]:
     if name not in bodies:
         raise NotFoundError(f"preset {name!r} not found")
     body = bodies[name]
-    uses_map, used_by_map = _reference_maps(bodies)
+    uses_map, used_by_map = await _reference_maps(bodies)
     view = _store_record_view(name, record.active_version, body, uses=uses_map[name], used_by=used_by_map[name])
     view["fixed_kwargs"] = await _redacted_fixed_kwargs(name, body.base_tool, body.fixed_kwargs)
     return view
@@ -165,28 +155,42 @@ async def get_version(name: str, version: str) -> dict[str, Any]:
     return result
 
 
-@operation(
-    summary="List live references to this preset",
-    tags=["presets"],
-    errors=[NotFoundError],
-    response_model=PresetRefereesResult,
-)
-async def preset_referees(name: str) -> dict[str, Any]:
-    """Every live reference a rename of this preset would strand — the SAME union the rename door blocks on.
+async def require_preset(name: str) -> None:
+    """Raise the 404 for a name that is neither a quarantined record nor a stored preset.
 
-    The OTHER presets whose active body composes it, plus every registered referee
-    (platform wiring — schedules/hooks/routes/extensions/parks — and plugin holders).
-    Exposed so the UI can preflight a rename. 404 for an unknown preset, the same
-    existence check the rename door runs first; a referee raising propagates loudly,
-    exactly as at the rename gate.
+    A store-less deploy holds no preset, so an unquarantined name is a genuine 404 without a
+    Postgres open.
     """
-    # A store-less deploy holds no preset, so an unknown name is a genuine 404
-    # without a Postgres open (the rename/delete doors' reasoning).
+    if instance.app.preset_manager.is_quarantined(name):
+        return
     if not component_store_configured(SKELETON_COMPONENT):
         raise NotFoundError(f"preset {name!r} not found")
     try:
         await instance.app.presets.store.get_preset(name)
     except PresetNotFoundError as exc:
         raise NotFoundError(f"preset {name!r} not found") from exc
-    referees = await _rename_referees(name)
-    return {"name": name, "referees": referees}
+
+
+@operation(
+    summary="List live holders of this preset",
+    tags=["presets"],
+    errors=[NotFoundError, OperationFailedError, ValidationRejectedError],
+    request_model=PresetRefereesQuery,
+    response_model=HoldersPreview,
+)
+async def preset_referees(name: str, action: Literal["rename", "delete"]) -> dict[str, Any]:
+    """Every live holder a rename or delete of this preset would be refused on — the gate's own gather.
+
+    ``action`` picks the gather: ``rename`` answers what the rename door blocks on, ``delete``
+    what the delete door blocks on, each over the preset and every extension branch tool bound
+    off it. 404 for an unknown preset; a referee raising propagates loudly, exactly as at the gate.
+    """
+    if action not in ("rename", "delete"):
+        raise ValidationRejectedError(f"action is 'rename' or 'delete', got {action!r}")
+    await require_preset(name)
+    branches = bound_branches(name)
+    if action == "rename":
+        holders = await rename_holders(name, branches, await StoredPresets.read())
+    else:
+        holders = await delete_holders(name, branches)
+    return {"action": action, "holders": [holder.model_dump() for holder in holders]}

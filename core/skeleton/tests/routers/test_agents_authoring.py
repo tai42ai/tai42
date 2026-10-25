@@ -406,6 +406,37 @@ def test_author_preset_typed_base_reference_400(pg, emit):
     asyncio.run(run())
 
 
+def test_author_preset_branch_base_reference_400(pg, emit):
+    async def run():
+        async with instance.app.app_context(_manifest()):
+            # A stored preset with an extension combo binds the ``basep_exta`` branch. An inline
+            # presets entry may NOT point its base_tool at a tool derived from a preset either.
+            resp0 = await presets_router.create_preset(
+                _json_request(
+                    "POST",
+                    "/api/presets",
+                    body={
+                        "name": "basep",
+                        "base_tool": "weather",
+                        "fixed_kwargs": {"units": "v"},
+                        "description": "base preset",
+                        "extensions": [["exta"]],
+                    },
+                )
+            )
+            assert resp0.status_code == 200, _err(resp0)
+            resp = await _author(
+                "authored",
+                fixed_kwargs={
+                    "presets": [{"name": "p", "base_tool": "basep_exta", "fixed_kwargs": {}, "description": "p"}]
+                },
+            )
+            assert resp.status_code == 400
+            assert _err(resp) == "fixed_kwargs.presets[0] base tool 'basep_exta' is derived from preset 'basep'"
+
+    asyncio.run(run())
+
+
 def test_author_nested_subagent_unknown_reference_400(pg, emit):
     async def run():
         async with instance.app.app_context(_manifest()):

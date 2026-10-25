@@ -8,10 +8,11 @@ fails loudly instead of silently mis-validating. References resolve through
 :data:`SCHEMA_REFS`, so no schema is ever fetched.
 """
 
-from typing import Any
+import json
+from typing import Any, cast
 
 from jsonschema import Draft202012Validator
-from jsonschema.exceptions import best_match
+from jsonschema.exceptions import ValidationError, best_match
 
 from tai42_kit.utils.data.json_schema_util.schema_rules import SCHEMA_REFS, check_schema_rules
 
@@ -32,7 +33,8 @@ class JsonSchemaValidationError(JsonSchemaError):
     """The instance does not conform to the (valid) schema.
 
     ``json_path`` is the ``jsonschema`` JSONPath of the reported offending node
-    (e.g. ``$.items[0].name``) and ``offending_value`` is the value found there.
+    (e.g. ``$.items[0].name``) and ``offending_value`` is the value found there, or
+    ``None`` when the check ran with ``redact_value=True``.
     """
 
     def __init__(self, message: str, *, json_path: str, offending_value: Any) -> None:
@@ -66,7 +68,38 @@ def check_json_schema(schema: dict[str, Any]) -> None:
         raise InvalidJsonSchemaError(str(exc)) from exc
 
 
-def validate_against_json_schema(instance: Any, schema: dict[str, Any]) -> None:
+def _scalar_text(value: Any) -> str | None:
+    if isinstance(value, str):
+        return repr(value)
+    if value is None or isinstance(value, (bool, int, float)):
+        return json.dumps(value)
+    return None
+
+
+def _rule_shown(value: Any) -> str:
+    """The schema rule's own value for a value-free refusal: a scalar or a list of scalars, else nothing."""
+    text = _scalar_text(value)
+    if text is not None:
+        return f": {text}"
+    if isinstance(value, list):
+        items = [_scalar_text(item) for item in cast("list[Any]", value)]
+        if items and all(item is not None for item in items):
+            return ": " + ", ".join(cast("list[str]", items))
+    return ""
+
+
+def _redacted_refusal(error: ValidationError) -> JsonSchemaValidationError:
+    if error.validator is None:
+        message = f"value does not match schema at {error.json_path}: refused by the schema (the value is not shown)"
+    else:
+        message = (
+            f"value does not match schema at {error.json_path}: breaks the schema's "
+            f"'{error.validator}' rule{_rule_shown(error.validator_value)} (the value is not shown)"
+        )
+    return JsonSchemaValidationError(message, json_path=error.json_path, offending_value=None)
+
+
+def validate_against_json_schema(instance: Any, schema: dict[str, Any], *, redact_value: bool = False) -> None:
     """Validate ``instance`` against ``schema`` (JSON Schema draft 2020-12).
 
     Returns ``None`` when the instance conforms. Otherwise raises loudly — never
@@ -78,15 +111,22 @@ def validate_against_json_schema(instance: Any, schema: dict[str, Any]) -> None:
     * ``JsonSchemaValidationError`` for a mismatch, carrying the JSON-path and
       offending value of the reported failure.
 
+    With ``redact_value=True`` the mismatch is reported by its JSON path and the schema
+    rule it breaks, never by the instance: the message holds no part of the value,
+    ``offending_value`` is ``None`` and nothing is chained.
+
     Every JSON-Schema keyword is enforced (the faithful path that the
     signature-bound converters cannot fully express).
     """
     check_json_schema(schema)
 
     error = best_match(Draft202012Validator(schema, registry=SCHEMA_REFS).iter_errors(instance))
-    if error is not None:
-        raise JsonSchemaValidationError(
-            f"value does not match schema at {error.json_path}: {error.message}",
-            json_path=error.json_path,
-            offending_value=error.instance,
-        ) from error
+    if error is None:
+        return
+    if redact_value:
+        raise _redacted_refusal(error)
+    raise JsonSchemaValidationError(
+        f"value does not match schema at {error.json_path}: {error.message}",
+        json_path=error.json_path,
+        offending_value=error.instance,
+    ) from error

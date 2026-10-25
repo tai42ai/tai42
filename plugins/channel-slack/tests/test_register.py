@@ -39,6 +39,14 @@ def test_import_registers_channel_and_inbound_route(stub_app):
     assert route.tags == ["channels"]
 
 
+def test_the_registered_channel_declares_an_identity_hint(stub_app):
+    _import_register_module(stub_app)
+
+    hint = getattr(stub_app.channels.registered["slack"], "identity_hint", None)
+    assert isinstance(hint, str)
+    assert hint.strip()
+
+
 def test_import_registers_the_interactivity_route(stub_app):
     _import_register_module(stub_app)
 

@@ -104,6 +104,9 @@ def build_request(
         # The chained calls the parking run is nested under (empty for a sync ask, whose binding is
         # empty), so the platform admits the run's chain re-entry from inside its drive of this park.
         chain_keys=list(park_binding.chain_keys),
+        # The output stages of the preset dispatches the park sits under, applied where each one's
+        # result reappears after the resume (None for a sync ask, whose binding is empty).
+        deferred_output_stages=park_binding.deferred_output_stages,
         expiry_at=expiry_at,
     )
 

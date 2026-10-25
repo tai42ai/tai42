@@ -14,20 +14,24 @@ bytes differ from tai42-storage-local's raw ``<root>/<path>``.
 Binary-native, like any filesystem backend: ``load_bytes`` / ``upload_bytes`` store
 the payload bytes verbatim after the header, and the text surface is UTF-8 on top
 of them. (The contract's text-bridge defaults would STRICT-decode UTF-8 and so
-could not hold arbitrary bytes.) ``stat`` inherits the contract's ``mimetypes``
-path inference — the filesystem stores no content-type metadata.
+could not hold arbitrary bytes.) ``stat`` answers the payload size (the header
+excluded) and infers the content type from the path suffix — the filesystem stores
+no content-type metadata. ``load_range`` reads the payload window after the header.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import mimetypes
+import os
 import shutil
 from pathlib import Path
+from typing import BinaryIO
 
 from pydantic_settings import SettingsConfigDict
 from tai42_contract.app import tai42_app
-from tai42_contract.storage import Storage, assert_not_root
+from tai42_contract.storage import ObjectStat, Storage, assert_not_root
 from tai42_kit.settings import TaiBaseSettings, settings_cache
 
 logger = logging.getLogger(__name__)
@@ -64,6 +68,21 @@ def _resolve(path: str) -> Path:
     return target
 
 
+def _open_payload(path: str) -> BinaryIO:
+    """Open the stored file for ``path`` positioned at its payload, after the checked header.
+
+    A missing path or a directory is ``FileNotFoundError``; a file without the header raises.
+    """
+    target = _resolve(path)
+    if not target.is_file():
+        raise FileNotFoundError(f"Object not found: {path}")
+    handle = target.open("rb")
+    if handle.read(len(_HEADER)) != _HEADER:
+        handle.close()
+        raise ValueError(f"Object {path} is not in the fixture-storage format")
+    return handle
+
+
 @tai42_app.storage.register_storage
 class FixtureStorage(Storage):
     async def load_bytes(self, path: str) -> bytes:
@@ -89,6 +108,26 @@ class FixtureStorage(Storage):
 
         await asyncio.to_thread(_write)
         logger.info("Wrote bytes to fixture storage: %s", path)
+
+    async def stat(self, path: str) -> ObjectStat:
+        def _size() -> int:
+            with _open_payload(path) as handle:
+                return os.fstat(handle.fileno()).st_size - len(_HEADER)
+
+        size = await asyncio.to_thread(_size)
+        content_type, _ = mimetypes.guess_type(path)
+        return ObjectStat(content_type=content_type, size=size)
+
+    async def load_range(self, path: str, start: int, length: int) -> bytes:
+        if length == 0:
+            return b""
+
+        def _read_range() -> bytes:
+            with _open_payload(path) as handle:
+                handle.seek(start, os.SEEK_CUR)
+                return handle.read(length)
+
+        return await asyncio.to_thread(_read_range)
 
     async def load(self, path: str) -> str:
         return (await self.load_bytes(path)).decode("utf-8")

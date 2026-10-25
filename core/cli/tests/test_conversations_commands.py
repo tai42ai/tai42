@@ -521,6 +521,35 @@ def test_conversations_create_forwards_a_server_overlap_rejection(monkeypatch: p
     assert "settle_seconds" in visible(result.output)
 
 
+def test_conversations_create_prints_the_account_refusal_and_exits_1(monkeypatch: pytest.MonkeyPatch) -> None:
+    refusal = (
+        "execution key 'alice' is an account, not an api key; a route, hook, trigger link or schedule runs as an "
+        "api key, so bind an api key instead"
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert json.loads(request.content)["execution_key"] == "alice"
+        return error_response(refusal, 400)
+
+    result = run_cli(
+        monkeypatch,
+        handler,
+        [
+            "conversations",
+            "create",
+            "chat",
+            "--door",
+            "api",
+            "--target-name",
+            "relay",
+            "--execution-key",
+            "alice",
+        ],
+    )
+    assert result.exit_code == 1
+    assert result.output == f"Error (HTTP 400): {refusal}\n"
+
+
 def test_conversations_create_help_lists_the_overlap_options(monkeypatch: pytest.MonkeyPatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover - --help exits before any call
         raise AssertionError("--help must not reach the server")

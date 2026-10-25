@@ -38,6 +38,8 @@ from tai42_skeleton.operations import NotFoundError, NotSupportedError, Validati
 from tai42_skeleton.operations import states as ops
 from tai42_skeleton.routers import states as router
 
+from .._fakes.recording_storage import RecordingStorage
+
 tai42_app.bind(instance.build_app())
 
 
@@ -73,6 +75,7 @@ _EXPECTED: set[tuple[str, str]] = {
     ("PUT", "/api/states/{name}/attachments/{template}"),
     ("PATCH", "/api/states/{name}/attachments/{template}"),
     ("DELETE", "/api/states/{name}/attachments/{template}"),
+    ("GET", "/api/states/{name}/attachments/{template}/referees"),
     ("GET", "/api/states/{name}/subjects"),
     ("POST", "/api/states/{name}/records/search"),
     ("POST", "/api/states/{name}/records/validate"),
@@ -432,6 +435,33 @@ def test_get_attachment_absent_is_404(monkeypatch: pytest.MonkeyPatch) -> None:
     assert excinfo.value.status == 404
 
 
+class _AttachedOnce:
+    """Reports ``tagmod`` attached on ``alerts`` and nothing else."""
+
+    async def list_attachments(self, state=None, *, template=None):
+        return [_ATTACHMENT_ROW] if (state, template) == ("alerts", "tagmod") else []
+
+
+def test_the_attachment_referees_route_serves_the_detach_preview(monkeypatch: pytest.MonkeyPatch) -> None:
+    from tai42_contract.tools import ReferenceHolder
+
+    holder = ReferenceHolder(kind="hook", name="on-alert", summary="hook 'on-alert'")
+
+    async def _gather(state: str, template: str) -> list[ReferenceHolder]:
+        return [holder] if (state, template) == ("alerts", "tagmod") else []
+
+    monkeypatch.setattr(ops, "_states", _AttachedOnce)
+    monkeypatch.setattr(ops, "detach_holders", _gather)
+    path = "/api/states/alerts/attachments/tagmod/referees"
+    resp = _run(router.state_template_referees(_request("GET", path, name="alerts", template="tagmod")))
+    assert resp.status_code == 200
+    assert json.loads(bytes(resp.body))["data"] == {"action": "detach", "holders": [holder.model_dump()]}
+
+    absent = "/api/states/alerts/attachments/nope/referees"
+    resp = _run(router.state_template_referees(_request("GET", absent, name="alerts", template="nope")))
+    assert resp.status_code == 404
+
+
 class _RecordingAttachStates:
     """Records the attach options the door threads through."""
 
@@ -581,14 +611,20 @@ def test_consumers_union_serializes_every_family_including_unavailable(monkeypat
 _TEMPLATE_JQ_STORED = {"stored-any-due": "(.ledger // []) | length > 0"}
 
 
+_STORED_BINARY_ID = "stored-image.png"
+
+
 class _ProgramResourceManager:
     """Renders a program body: inline ``content`` verbatim, a stored ``id`` from the
-    map, and a loud not-found for an unmapped id (the real manager's behavior)."""
+    map, a loud not-text refusal for the stored binary object, and a loud not-found for
+    an unmapped id (the real manager's behavior)."""
 
     async def render_templated_text(self, text, locale=None):
         if text.id is not None:
-            from tai42_skeleton.template.resource_manager import TemplateNotFoundError
+            from tai42_skeleton.template.errors import TemplateNotFoundError, TemplateNotTextError
 
+            if text.id == _STORED_BINARY_ID:
+                raise TemplateNotTextError(f"Template {text.id!r} is not a text template")
             if text.id not in _TEMPLATE_JQ_STORED:
                 raise TemplateNotFoundError(f"no stored resource {text.id!r}")
             return _TEMPLATE_JQ_STORED[text.id]
@@ -607,6 +643,8 @@ def _real_states_door(monkeypatch: pytest.MonkeyPatch):
         storage = type("_S", (), {"resource_manager": _ProgramResourceManager()})()
 
     monkeypatch.setattr(service_mod, "states_store_configured", lambda: True)
+    stored = RecordingStorage(dict.fromkeys((*_TEMPLATE_JQ_STORED, _STORED_BINARY_ID), (b".", None)))
+    monkeypatch.setattr(instance.app._storage_registry, "_provider", stored)
     svc = StatesService(store=FakeStatesStore())  # type: ignore[arg-type]
     monkeypatch.setattr(ops, "_states", lambda: svc)
     return _App()
@@ -671,8 +709,24 @@ def test_put_state_template_by_id_body_that_cannot_be_fetched_fails_loudly(monke
             )
         )
     assert excinfo.value.status == 422
-    assert "absent-id" in str(excinfo.value)
+    assert excinfo.value.message == "stored id 'absent-id' at template_jq.any_due.jq is not a stored template"
+
+
+def test_put_state_template_by_id_body_that_is_not_text_fails_loudly(monkeypatch: pytest.MonkeyPatch) -> None:
+    app = _real_states_door(monkeypatch)
+    with tai42_app.bound(app), pytest.raises(ValidationRejectedError) as excinfo:
+        asyncio.run(
+            ops.put_state_template(
+                "summary-binary",
+                {
+                    "schema": _LEDGER_SCHEMA,
+                    "template_jq": {"any_due": {"purpose": "input", "jq": {"id": _STORED_BINARY_ID}}},
+                },
+            )
+        )
+    assert excinfo.value.status == 422
     assert "could not be fetched" in str(excinfo.value)
+    assert "is not a text template" in str(excinfo.value)
 
 
 def test_put_state_template_keeps_an_explicit_null_parameter_default(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -27,6 +27,7 @@ from tai42_contract.interactions.models.forms import (
 )
 from tai42_contract.interactions.models.media import MediaItem, check_media_list
 from tai42_contract.interactions.models.wording import Wording, check_wording_for_ask
+from tai42_contract.preset_stages import PresetParkStages
 from tai42_contract.states import StateBinding, StateContext
 
 # Cap on the question text stored verbatim into the interaction state hash and the
@@ -346,6 +347,10 @@ class InteractionRequest(BaseModel):
     # a deferred custom update writes as the same door-scoped writer the live apply would. None when
     # the run carried no state binding.
     door_id: str | None = None
+    # The output stages of the preset dispatches this park sits under, captured at park time and
+    # applied where each preset's result reappears after the resume: the answer, the resumed
+    # drive's terminal, or a chained run's terminal. None when the park sits under no preset stage.
+    deferred_output_stages: PresetParkStages | None = None
     # When the parked question expires. Distinct from ``timeout_at`` (the sync
     # wait budget) and mutually exclusive with a sync ``timeout`` at the ask
     # surface (see ``check_ask_timing``). Required for async (a park always carries

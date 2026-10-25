@@ -12,7 +12,9 @@ from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Callable, Mapping, Sequence
+
+    from tai42_contract.manifest import ExtensionElement
 
     from tai42_skeleton.config.service.results import _FleetPublisher, _ManifestStore, _ReloadAdmin
 
@@ -27,6 +29,7 @@ class _ConfigServiceBase(ABC):
     _config_manager: _ManifestStore
     _admin: _ReloadAdmin
     _bus: _FleetPublisher
+    _combo_check: Callable[[str, Sequence[ExtensionElement]], None]
 
     @abstractmethod
     def _resolve(self, document: Mapping[str, Any]) -> dict[str, Any]:
@@ -46,6 +49,10 @@ class _ConfigServiceBase(ABC):
     @abstractmethod
     def _stored_env_file(self) -> str | None:
         """The file the stored env is kept in, or ``None`` when the config manager keeps it elsewhere."""
+
+    @abstractmethod
+    def _converged_env(self, stored: Mapping[str, str]) -> dict[str, str]:
+        """The env a reload from the ``stored`` env leaves this process with."""
 
     @abstractmethod
     def effective_env(self, changes: Mapping[str, str]) -> dict[str, str]:

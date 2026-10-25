@@ -46,7 +46,7 @@ ALLOWLIST: set[tuple[str, str]] = {
     # NB the settings-profiles surface is CLI-covered (``tai config profile ...``), so
     # those routes are attributed via ``@covers`` and NOT allowlisted.
     # manifest secret-env + preserved-read surface — Studio-only (no CLI command yet).
-    ("GET", "/api/manifest/preserved"),  # studio McpTab preserved-manifest editor read
+    ("GET", "/api/manifest/preserved"),  # studio manifest-screen MCP editor read
     ("GET", "/api/manifest/mcp-env-refs"),  # studio mcp !ENV-refs checklist (names/booleans only)
     ("POST", "/api/mcp-config/secret-env"),  # studio combined env+manifest secret write
 }

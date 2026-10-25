@@ -38,7 +38,7 @@ class MonitoringReader(Protocol):
         A pure capability declaration (no I/O), so a caller can tell a panel the
         backend cannot serve from one it served empty, WITHOUT issuing a query that
         swallows the difference. ``query_metrics`` raises
-        ``MonitoringReadNotSupportedError`` for anything outside this set.
+        ``MonitoringReadNotServedError`` for anything outside this set.
         """
         ...
 
@@ -47,7 +47,7 @@ class MonitoringReader(Protocol):
 
         A pure capability declaration (no I/O), so a caller offers only the sorts and
         filter combinations the backend serves. ``list_traces`` raises
-        ``MonitoringReadNotSupportedError`` for anything outside it.
+        ``MonitoringReadNotServedError`` for anything outside it.
         """
         ...
 
@@ -63,7 +63,7 @@ class MonitoringReader(Protocol):
 
         Aggregates the requested :class:`Measure` set grouped by the requested
         :class:`Dimension` set over the query window. A measure or dimension outside
-        :meth:`metrics_capability` raises ``MonitoringReadNotSupportedError`` — never
+        :meth:`metrics_capability` raises ``MonitoringReadNotServedError`` — never
         a silent zero.
         """
         ...
@@ -91,8 +91,8 @@ class MonitoringReader(Protocol):
         or overrides the guarantee). ``filter`` applies the neutral
         ``MonitoringFilter`` clauses (tags live here, not as a discrete param).
         ``order_by`` sorts the result; omitted ⇒ newest-first (``start`` desc).
-        An unsupported ``order_by.field`` or filter clause raises
-        ``MonitoringReadNotSupportedError``.
+        An unserved ``order_by.field`` or filter clause raises
+        ``MonitoringReadNotServedError``.
         """
         ...
 
@@ -136,8 +136,26 @@ class MonitoringReader(Protocol):
         here, not as a discrete param). ``order_by`` sorts the result; omitted ⇒
         newest-first (``timestamp`` desc). The sortable fields and the filters
         each sort cannot combine with are declared by ``list_capability``; a sort
-        or combination outside it, or another unsupported filter clause, raises
-        ``MonitoringReadNotSupportedError``. A ``limit`` above ``max_page_size()``
-        raises ``ValueError``.
+        or combination outside it, or another unserved filter clause, raises
+        ``MonitoringReadNotServedError``. A read the backend serves only within a
+        bound raises ``MonitoringReadTooBroadError`` past it. A ``limit`` above
+        ``max_page_size()`` raises ``ValueError``.
+        """
+        ...
+
+    async def export_traces(
+        self,
+        *,
+        from_timestamp: datetime | None = None,
+        to_timestamp: datetime | None = None,
+        max_rows: int,
+        filter_: MonitoringFilter | None = None,
+        order_by: OrderBy | None = None,
+    ) -> list[MonitoringTraceSummary]:
+        """The run summaries ``list_traces`` would page through, in its order, in one read.
+
+        Returns at most ``max_rows + 1`` rows; more than ``max_rows`` means more runs match. Same window,
+        filter, sort and errors as ``list_traces``; a bound the backend cannot read past raises
+        ``MonitoringReadTooBroadError``.
         """
         ...

@@ -407,5 +407,5 @@ def test_recording_fake_conforms_to_monitoring_protocol():
         kind=SpanKind.TOOL,
         start=now,
         end=now,
-        trace_context=TraceContext(trace_id="t"),
+        trace_context=TraceContext(trace_id="t", parent_span_id="s"),
     )

@@ -24,7 +24,7 @@ from tai42_skeleton.access_control import policy as policy_module
 from tai42_skeleton.access_control import projection
 from tai42_skeleton.access_control.path_canon import under_prefix
 from tai42_skeleton.access_control.policy import PolicyEnforcer, RenderedCondition
-from tai42_skeleton.access_control.projection import build_projection, synthetic_full_projection
+from tai42_skeleton.access_control.projection import RouteEntry, build_projection, synthetic_full_projection
 from tai42_skeleton.access_control.projection_pattern_sampling import pattern_open_prefix
 from tai42_skeleton.access_control.roles import editor_jq, viewer_jq
 from tai42_skeleton.access_control.settings import access_control_settings
@@ -138,6 +138,16 @@ async def test_admin_projection_is_total_without_jq(env: _Env):
     # A global tool-run door is projected → every registry tool.
     assert result.tools == ["alpha", "beta"]
     assert result.mintable is True
+
+
+async def test_a_built_projection_reports_access_control_on(env: _Env):
+    env.pg.add_policy("u1", scopes=["s"])
+    result = await build_projection("u1", ["s"], {})
+    assert result.access_control_enabled is True
+
+
+def test_the_gate_off_projection_reports_access_control_off():
+    assert synthetic_full_projection().access_control_enabled is False
 
 
 async def test_scoped_caller_projects_only_covered_routes(env: _Env):
@@ -359,22 +369,73 @@ def test_under_prefix_agrees_with_every_published_path_coverage_vector(row: dict
     assert under_prefix(path, prefix) is row["covered"]
 
 
-async def test_templated_route_projects_as_pattern_not_concrete(env: _Env):
-    # The real route registry (``load_api_routes``) returns TEMPLATED brace paths like
-    # ``/api/agents/{name}/runs``. When such a path is scope-mapped by a dynamic-pattern
-    # row (``[^/]+`` fullmatches the ``{name}`` literal), it must project ONLY via
-    # route_patterns — never as a concrete RouteEntry carrying literal braces (which would
-    # also double-list the surface the pattern already carries).
+async def test_templated_route_projects_with_its_methods_beside_its_pattern(env: _Env):
+    # A templated registry path projects under its template with the methods admitted on a
+    # representative instance; an operator's pattern row over it still projects as a pattern.
     env.pg.add_policy("u1", scopes=["agents-run"])
     env.pg.add_route("/api/agents/dyn", "agents-run", pattern=r"^/api/agents/[^/]+/runs$")
     env.pg.add_route("/api/agents/list", "agents-run")
     env.routes(("/api/agents/{name}/runs", ["POST"]), ("/api/agents/list", ["GET"]))
     result = await build_projection("u1", ["agents-run"], {})
-    # The concrete sibling route projects as itself; the templated path is emitted ONLY as a
-    # pattern, never as a concrete RouteEntry carrying literal braces.
-    assert {r.path for r in result.routes} == {"/api/agents/list"}
-    assert all("{" not in r.path for r in result.routes)
+    assert result.routes == [
+        RouteEntry(path="/api/agents/list", methods=["GET"]),
+        RouteEntry(path="/api/agents/{name}/runs", methods=["POST"]),
+    ]
     assert {p.pattern for p in result.route_patterns} == {r"^/api/agents/[^/]+/runs$"}
+
+
+@pytest.fixture
+async def seeded_roles(env: _Env, bound_app) -> _Env:
+    """The seeded ``editor`` / ``viewer`` roles, with one policy holding each."""
+    import tai42_skeleton.versioning as versioning_module
+    from tai42_skeleton.access_control import role_grants as role_grants_module
+    from tai42_skeleton.access_control.role_gate import reset_route_index
+    from tai42_skeleton.access_control.roles import ROLE_POINTER_KEY, seed_default_roles
+
+    from .test_policy_store import _MemStore
+
+    bound_app.http = object()
+    mem = _MemStore()
+    env.mp.setattr(versioning_module, "versioned_store", lambda: mem)
+    env.mp.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "secret")
+    role_grants_module.reset_role_grants_cache()
+    reset_route_index()
+    await seed_default_roles()
+    env.pg.add_policy("ed", scopes=["*"], condition={"content": editor_jq()}, policy_data={ROLE_POINTER_KEY: "editor"})
+    env.pg.add_policy("vw", scopes=["*"], condition={"content": viewer_jq()}, policy_data={ROLE_POINTER_KEY: "viewer"})
+    return env
+
+
+async def test_a_role_holder_sees_the_templated_write_routes_its_grant_admits(seeded_roles: _Env):
+    seeded_roles.routes(("/api/presets/{name}/versions", ["POST"]), ("/api/presets/{name}", ["DELETE"]))
+    editor = await build_projection("ed", ["*"], {})
+    assert editor.routes == [
+        RouteEntry(path="/api/presets/{name}", methods=["DELETE"]),
+        RouteEntry(path="/api/presets/{name}/versions", methods=["POST"]),
+    ]
+    viewer = await build_projection("vw", ["*"], {})
+    assert viewer.routes == []
+
+
+async def test_the_editor_sees_the_mcp_tool_pick_routes_and_the_viewer_does_not(seeded_roles: _Env):
+    seeded_roles.routes(
+        ("/api/mcp-status/{title}/advertised-tools", ["POST"]),
+        ("/api/mcp-config/entries/{title}/tool-filter", ["PUT"]),
+    )
+    editor = await build_projection("ed", ["*"], {})
+    assert editor.routes == [
+        RouteEntry(path="/api/mcp-config/entries/{title}/tool-filter", methods=["PUT"]),
+        RouteEntry(path="/api/mcp-status/{title}/advertised-tools", methods=["POST"]),
+    ]
+    viewer = await build_projection("vw", ["*"], {})
+    assert viewer.routes == []
+
+
+async def test_a_templated_route_projects_only_the_methods_the_jq_admits(env: _Env):
+    env.pg.add_policy("u1", scopes=["*"], condition={"content": '.request.method == "GET"'})
+    env.routes(("/api/presets/{name}", ["GET", "DELETE"]))
+    result = await build_projection("u1", ["*"], {})
+    assert result.routes == [RouteEntry(path="/api/presets/{name}", methods=["GET"])]
 
 
 async def test_non_sampleable_pattern_is_excluded_and_logged(env: _Env, caplog):
@@ -420,7 +481,7 @@ async def test_sub_mcp_restore_invalidates_a_warm_projection(env: _Env, bound_ap
         def __init__(self) -> None:
             self.routes: dict = {}
 
-        async def register_sub_mcp_app(self, slug, tools, transport="http"):
+        async def bind_route(self, slug, tools, transport="http"):
             self.routes[slug] = SimpleNamespace(tools=tools, transport=transport)
 
     env.mp.setattr(sub_mcp_store, "_IN_MEMORY_STORE", sub_mcp_store.InMemorySubMcpStore())
@@ -650,3 +711,53 @@ async def test_projected_pattern_is_admitted_by_the_gate(env: _Env):
     assert projected == {r"^/api/dyn/\d+$"}
     assert await _gate_oracle(settings, "u1", ["pub-dyn"], {}, "/api/dyn/1", "GET") is True
     assert await _gate_oracle(settings, "u1", ["pub-dyn"], {}, "/api/secret/1", "GET") is False
+
+
+# -- the storage and templates grant reach -------------------------------------
+
+_REACH_DOORS = [
+    ("/api/storage", "GET"),
+    ("/api/storage/resources", "GET"),
+    ("/api/storage/entries/{resource_id:path}", "GET"),
+    ("/api/templates", "GET"),
+    ("/api/template", "POST"),
+]
+
+_REACH = {
+    ("storage", "read"): {
+        "/api/storage",
+        "/api/storage/resources",
+        "/api/storage/entries/{resource_id:path}",
+    },
+    ("storage", "write"): {
+        "/api/storage",
+        "/api/storage/resources",
+        "/api/storage/entries/{resource_id:path}",
+    },
+    ("templates", "read"): {"/api/storage", "/api/templates"},
+    ("templates", "write"): {"/api/storage", "/api/templates", "/api/template"},
+}
+
+
+@pytest.mark.parametrize(("tag", "level"), list(_REACH), ids=lambda value: str(value))
+async def test_a_storage_or_templates_grant_reaches_its_row_of_doors(env: _Env, tag: str, level: str):
+    import tai42_skeleton.routers.storage
+    import tai42_skeleton.routers.storage_presence
+    import tai42_skeleton.routers.templates  # noqa: F401
+    from tai42_skeleton.access_control import role_grants as role_grants_module
+    from tai42_skeleton.access_control.role_gate import reset_route_index
+    from tai42_skeleton.access_control.roles import ROLE_POINTER_KEY
+
+    async def _grants(role_name: str, version: int) -> dict[str, str]:
+        return {tag: level}
+
+    env.mp.setattr(role_grants_module, "resolve_role_grants", _grants)
+    reset_route_index()
+    metas = [
+        meta for meta in route_registry.routes() if any(meta.path == p and m in meta.methods for p, m in _REACH_DOORS)
+    ]
+    assert sorted((meta.path, method) for meta in metas for method in meta.methods) == sorted(_REACH_DOORS)
+    env.mp.setattr(projection, "_registry_routes", lambda: metas)
+    env.pg.add_policy("u1", scopes=["*"], condition={"content": "true"}, policy_data={ROLE_POINTER_KEY: "custom"})
+    result = await build_projection("u1", ["*"], {})
+    assert {entry.path for entry in result.routes} == _REACH[(tag, level)]

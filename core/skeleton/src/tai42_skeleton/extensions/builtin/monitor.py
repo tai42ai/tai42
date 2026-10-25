@@ -18,6 +18,7 @@ from tai42_contract.app import tai42_app
 from tai42_contract.extensions import ExtensionKind
 from tai42_contract.monitoring import MonitoringLevel, SpanKind
 from tai42_kit.utils.data import makefun_func_name
+from tai42_kit.utils.unset import without_unset
 
 from tai42_skeleton.monitoring import get_monitoring
 
@@ -38,6 +39,10 @@ def monitor(func: Callable[..., Any], name: str, description: str) -> Callable[.
     and just runs the tool — it emits only for a genuinely standalone invocation.
     Errors propagate in both the emitting and the suppressed path; on error the
     span is marked ``MonitoringLevel.ERROR`` before the exception is re-raised.
+
+    The span input is the caller-supplied arguments: an optional argument the caller
+    left out (the omitted-value marker of a synthesized signature) is absent from it.
+    The wrapped tool still receives the arguments as they came.
     """
 
     async def wrapper(*args: Any, **kwargs: Any) -> Any:
@@ -54,11 +59,12 @@ def monitor(func: Callable[..., Any], name: str, description: str) -> Callable[.
         if writer.current_trace_id() is not None:
             return await _call()
 
-        # The writer masks any wrapped secret in the arguments or the result.
+        # The input is the caller-supplied arguments; the writer masks any wrapped
+        # secret in them or in the result.
         with writer.start_span(
             name=name,
             kind=SpanKind.TOOL,
-            input_={"args": args, "kwargs": kwargs},
+            input_={"args": args, "kwargs": without_unset(kwargs)},
         ) as span:
             try:
                 result = await _call()

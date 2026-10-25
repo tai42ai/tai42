@@ -39,9 +39,13 @@ _FANOUT = {"mode": "local-only", "note": "no worker bus configured; only this wo
 
 class _Applied:
     """The :class:`~tai42_skeleton.config.service.ApplyResult` stand-in the fake pipeline
-    returns — only the ``fanout`` summary the connection service reads off it."""
+    returns — only the ``fanout`` summary and the ``span_release_error`` the connection
+    service reads off it."""
 
     fanout = _FANOUT
+
+    def __init__(self, span_release_error: str | None) -> None:
+        self.span_release_error = span_release_error
 
 
 class _FakeConfigService:
@@ -52,13 +56,15 @@ class _FakeConfigService:
     then records the managed titles that landed / left so a test can assert the
     pipeline both ran (``applies`` ⇒ validate + reload + broadcast) and applied the
     intended mutation. The real reload / fleet broadcast are exercised in
-    ``tests/config/test_config_service_broadcast.py``.
+    ``tests/config/test_config_service_broadcast.py``. ``span_release_error`` is the
+    store's span-release failure every apply reports (``None``: the span released).
     """
 
     def __init__(self, events: dict[str, list]) -> None:
         self.doc: dict[str, Any] = {"mcp": []}
         self._events = events
         self.applies = 0
+        self.span_release_error: str | None = None
 
     def seed(self, *, descriptor, enabled_sub_services, alias, connection_id) -> None:
         """Pre-populate the document with a connection's managed entries so a later
@@ -85,8 +91,8 @@ class _FakeConfigService:
         self._events["added"].extend(title for title in after_titles if title not in before)
         self._events["removed"].extend(sorted(before - after))
         # The connection service reads its added/removed titles from the mutator's
-        # captured lists; it reads only ``fanout`` off this ApplyResult stand-in.
-        return _Applied()
+        # captured lists; it reads only ``fanout`` and ``span_release_error`` off this stand-in.
+        return _Applied(self.span_release_error)
 
 
 def _blob_for(cid: str) -> bytes:

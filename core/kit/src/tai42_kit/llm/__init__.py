@@ -20,13 +20,11 @@ from tai42_kit.llm.models import (
     system_prompt_cache_mark,
 )
 from tai42_kit.llm.monitoring_callbacks import MonitoringCallbackHandler, declared_chain_payload
-from tai42_kit.llm.run_trace import InvalidRunTraceError, RunTrace, bind_run_trace, resolve_trace_context
+from tai42_kit.llm.run_trace import bind_run_trace
 from tai42_kit.llm.store.store_registry import store_registry
 
 __all__ = [
-    "InvalidRunTraceError",
     "MonitoringCallbackHandler",
-    "RunTrace",
     "ToolNameTooLongError",
     "bind_run_trace",
     "check_tool_name",
@@ -39,7 +37,6 @@ __all__ = [
     "get_llm",
     "get_llm_async",
     "release_loop_bound_resources",
-    "resolve_trace_context",
     "store_registry",
     "system_prompt_cache_mark",
 ]

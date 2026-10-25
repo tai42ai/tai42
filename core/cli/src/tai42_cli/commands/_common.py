@@ -75,14 +75,24 @@ def seg(value: Any) -> str:
 
 
 def subpath(value: Any) -> str:
-    """A user-supplied value bound to a ``{name:path}`` route parameter — a multi-segment path.
+    """A user-supplied store key bound to a ``{name:path}`` route parameter — a multi-segment path.
 
     Each segment is percent-encoded while ``safe="/"`` keeps the ``/`` separators, so a
     reserved character inside a segment forms a valid segment and the path structure the
     ``:path`` converter matches on survives on the wire. Contrast :func:`seg`, which encodes a
     value as ONE segment (``/`` included) for a single-segment ``{name}`` parameter.
+
+    The HTTP transport removes ``.`` and ``..`` segments from a request path, so a key with one
+    would silently reach another key: it is refused here, before any request, in the server's
+    words. Every other spelling (``a//b``, ``x/``, ``/a``) is sent as typed and the server
+    refuses a non-canonical one with its ``400``.
     """
-    return quote(str(value), safe="/")
+    text = str(value)
+    if any(segment in (".", "..") for segment in text.split("/")):
+        raise typer.BadParameter(
+            f"non-canonical store key {text!r}: a key is '/'-separated names with no empty, '.' or '..' segment"
+        )
+    return quote(text, safe="/")
 
 
 def app_context(ctx: typer.Context) -> AppContext:
@@ -294,6 +304,26 @@ def load_json_object_arg(
         return parse_json_object(inline, param_hint=param_hint)
     if file is not None:
         return parse_json_object(read_file_or_stdin(file, param_hint=file_param_hint), param_hint=file_param_hint)
+    return None
+
+
+def load_text_arg(
+    inline: str | None,
+    file: str | None,
+    *,
+    param_hint: str,
+    file_param_hint: str,
+) -> str | None:
+    """Resolve a text value, as written, from an inline string OR a file/stdin (``-``) source.
+
+    Giving both is a usage error; giving neither returns ``None``.
+    """
+    if inline is not None and file is not None:
+        raise typer.BadParameter(f"give only one of {param_hint} or {file_param_hint}", param_hint=file_param_hint)
+    if inline is not None:
+        return inline
+    if file is not None:
+        return read_file_or_stdin(file, param_hint=file_param_hint)
     return None
 
 

@@ -10,8 +10,8 @@ about the tool the door asked for — including when the name is the door's SIBL
 tool, which is still not the tool that door asked for. One naming the door's OWN tool is
 that tool's absence, and each door answers it honestly: ``NotSupportedError`` (501) for
 ``list_schedules`` / ``delete_schedule`` (their marker tool passed the presence pre-check
-and vanished before the dispatch) and ``NotFoundError`` (404) for ``create_schedule``,
-whose named tool is the caller's and is never covered by the marker pre-check.
+and vanished before the dispatch) and ``BadRequestError`` (400) for ``create_schedule``,
+whose named tool is the caller's and is checked by the write doors' reference check.
 ``server_datetime`` dispatches no tool at all — it reads the platform's own clock, so it
 needs no backend and answers unconditionally. A typed ``OperationError`` from the
 dispatch seam passes through untouched — a ``PermissionDeniedError`` 403, or the retriable
@@ -25,7 +25,7 @@ the detail the caller is denied lands SERVER-side, as one ERROR record from the 
 logger carrying the original exception, so the traceback still names what the bounded
 message drops (a backend's host and port). List's and delete's 501 leaves its own server
 record — a WARNING naming the door and the marker tool that passed the pre-check and did
-not resolve at the dispatch. Server-datetime's 501, create's 404 and every typed
+not resolve at the dispatch. Server-datetime's 501, create's 400 and every typed
 passthrough pin the opposite: no record at all — neither absence is an anomaly, and a
 passthrough is the tool's own answer rather than a failure of the door.
 """
@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import logging
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from pydantic import ValidationError
@@ -103,8 +104,9 @@ class _FakeScheduleInteractions:
 
 
 @pytest.fixture
-def install(monkeypatch: pytest.MonkeyPatch):
+def install(monkeypatch: pytest.MonkeyPatch, serve_tools):
     def _install(fake: _FakeTools) -> _FakeTools:
+        serve_tools(*fake._registered)
         monkeypatch.setattr(
             tai42_app,
             "_impl",
@@ -387,14 +389,14 @@ async def test_create_unsettled_operation_surface_is_503(install, monkeypatch) -
     assert caught.value.status == 503
 
 
-async def test_create_unknown_tool_is_404(install, caplog) -> None:
-    # The marker pre-check tests the MARKER tools, never the caller-named one, so an
-    # unregistered caller-named tool surfaces here as a 404 — and is not logged: naming a
-    # tool that is not registered is an ordinary caller error the response answers in full.
+async def test_create_unknown_tool_is_400(install, caplog) -> None:
+    # The reference check refuses an unregistered caller-named tool before any dispatch, and
+    # nothing is logged: naming a tool that is not registered is an ordinary caller error the
+    # response answers in full.
     install(_FakeTools(_MARKERS))  # markers present, target tool absent
     with (
         caplog.at_level(logging.DEBUG, logger=schedules_ops.logger.name),
-        pytest.raises(NotFoundError, match="unknown tool: typo"),
+        pytest.raises(BadRequestError, match=r"^scheduled tool 'typo' is not a registered tool$"),
     ):
         await schedules_ops.create_schedule("typo", {})
     _assert_nothing_logged_server_side(caplog)
@@ -543,7 +545,7 @@ async def test_run_once_schedule_applies_binding_around_start_without_injecting_
 
     install(_Tools(set(_MARKERS) | {"mytool"}))
 
-    async def _noop_check(b) -> None:
+    async def _noop_check(b, contract) -> None:
         return None
 
     monkeypatch.setattr(schedules_ops, "check_schedule_definition", _noop_check)
@@ -572,7 +574,10 @@ class _OutcomeInteractions(_FakeScheduleInteractions):
         return self._outcome
 
 
-def _install_with_interactions(monkeypatch: pytest.MonkeyPatch, tools: _FakeTools, interactions: object) -> None:
+def _install_with_interactions(
+    monkeypatch: pytest.MonkeyPatch, serve_tools, tools: _FakeTools, interactions: object
+) -> None:
+    serve_tools(*tools._registered)
     monkeypatch.setattr(
         tai42_app,
         "_impl",
@@ -614,13 +619,14 @@ async def test_a_forged_reserved_schedule_door_key_is_refused(install) -> None:
             await schedules_ops.create_schedule("mytool", {forged: {"x": 1}})
 
 
-async def test_run_once_returns_the_caller_ask_entries_for_an_asks_outcome(monkeypatch) -> None:
+async def test_run_once_returns_the_caller_ask_entries_for_an_asks_outcome(monkeypatch, serve_tools) -> None:
     # A run-once fire whose door asks the caller maps to the parked caller ask entries verbatim.
     from tai42_contract.interactions import ParkedEntry, VisitOutcome
 
     ask = ParkedEntry(id="c1", status="asking", to="caller", question="proceed?", answer_format="free")
     _install_with_interactions(
         monkeypatch,
+        serve_tools,
         _FakeTools(set(_MARKERS) | {"mytool"}),
         _OutcomeInteractions(VisitOutcome(action="started", kind="asks", asks=[ask])),
     )
@@ -628,12 +634,13 @@ async def test_run_once_returns_the_caller_ask_entries_for_an_asks_outcome(monke
     assert result == [{"id": "c1", "status": "asking", "to": "caller", "question": "proceed?", "answer_format": "free"}]
 
 
-async def test_run_once_returns_the_park_notice_for_a_parked_outcome(monkeypatch) -> None:
+async def test_run_once_returns_the_park_notice_for_a_parked_outcome(monkeypatch, serve_tools) -> None:
     # A run-once fire whose door parks a user ask maps to the park notice: the parked interaction ids.
     from tai42_contract.interactions import SuspendedInteraction, VisitOutcome
 
     _install_with_interactions(
         monkeypatch,
+        serve_tools,
         _FakeTools(set(_MARKERS) | {"mytool"}),
         _OutcomeInteractions(
             VisitOutcome(action="started", kind="parked", suspended=SuspendedInteraction(interaction_id="u1"))
@@ -644,6 +651,69 @@ async def test_run_once_returns_the_park_notice_for_a_parked_outcome(monkeypatch
 
 
 # -- the schedule definition check at the create door ----------------------------------------
+
+
+class _RecordingTools(_FakeTools):
+    def __init__(self, registered: set[str]) -> None:
+        super().__init__(registered, run_result="ran")
+        self.ran: list[str] = []
+
+    async def run_tool(self, key: str, arguments: dict, *, offload_sync: bool = False, extras: object = None) -> object:
+        self.ran.append(key)
+        return await super().run_tool(key, arguments, offload_sync=offload_sync, extras=extras)
+
+
+@pytest.mark.parametrize("field", ["start_expr", "cancel_expr", "resume_expr", "extras_expr"])
+async def test_create_refuses_a_contract_naming_an_id_the_store_lacks(install, monkeypatch, field: str) -> None:
+    from tai42_contract.template import TemplatedText
+    from tests._fakes.recording_storage import MappedStorage
+
+    from tai42_skeleton.app import instance
+
+    monkeypatch.setattr(instance.app._storage_registry, "_provider", MappedStorage({}))
+    tools = install(_RecordingTools(set(_MARKERS) | {"mytool", "mytool_schedule_task"}))
+    exprs: dict[str, Any] = {field: TemplatedText(id="jq/start")}
+    with pytest.raises(BadRequestError) as caught:
+        await schedules_ops.create_schedule("mytool", {}, cadence=_EVERY_MINUTE, execution_key="k-fire", **exprs)
+    assert caught.value.message == f"invalid schedule: stored id 'jq/start' at {field} is not a stored template"
+    assert tools.ran == []
+
+
+async def test_create_binding_an_account_is_a_400_and_fires_nothing(install, monkeypatch) -> None:
+    from tai42_contract.access_control.models import AccessPolicy
+
+    from tai42_skeleton.access_control import management
+    from tai42_skeleton.access_control.settings import AccessControlSettings
+    from tai42_skeleton.operations import _authority as authority
+
+    account = AccessPolicy(scopes=["schedules"])
+
+    class _Enforcer:
+        def __init__(self, _settings: AccessControlSettings) -> None:
+            pass
+
+        async def get_policy(self, user_id: str) -> AccessPolicy:
+            return account if user_id == "alice" else AccessPolicy(scopes=[])
+
+    async def _get_principal(user_id: str) -> dict | None:
+        return {"user_id": user_id, "kind": "human"} if user_id == "alice" else None
+
+    async def _caller() -> authority.Caller:
+        return authority.Caller(caller_id="alice", policy=account, is_admin=False, owner_claim=None)
+
+    monkeypatch.setattr(authority, "access_control_settings", lambda: AccessControlSettings(enable=True))
+    monkeypatch.setattr(authority, "policy_enforcer", _Enforcer)
+    monkeypatch.setattr(management, "get_principal", _get_principal)
+    monkeypatch.setattr(schedules_ops, "resolve_caller", _caller)
+    tools = install(_RecordingTools(set(_MARKERS) | {"mytool", "mytool_schedule_task"}))
+
+    with pytest.raises(BadRequestError) as caught:
+        await schedules_ops.create_schedule("mytool", {}, cadence=_EVERY_MINUTE, execution_key="alice")
+    assert caught.value.message == (
+        "execution key 'alice' is an account, not an api key; a route, hook, trigger link or schedule runs as an "
+        "api key, so bind an api key instead"
+    )
+    assert tools.ran == []
 
 
 def _ghost_binding():

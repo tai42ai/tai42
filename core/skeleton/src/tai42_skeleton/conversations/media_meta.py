@@ -19,6 +19,7 @@ from collections.abc import Awaitable
 from typing import cast
 
 from pydantic import BaseModel
+from tai42_contract.app import tai42_app
 from tai42_contract.interactions.models import MediaKind
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.redis import RedisClient
@@ -37,6 +38,16 @@ INBOUND_MEDIA_BLOB_PREFIX = "inbound-media/"
 def inbound_media_blob_path(media_id: str) -> str:
     """The blob key for ``media_id`` — the one path both the ingest seam and the reaper address."""
     return f"{INBOUND_MEDIA_BLOB_PREFIX}{media_id}"
+
+
+def declare_media_prefix_marks() -> None:
+    """Mark the inbound-media prefix not backed up and unlisted for this serving epoch.
+
+    Inbound media is left out of backups and out of the storage and template listings;
+    deleting the ``mark_unlisted`` call lists it again.
+    """
+    tai42_app.storage.mark_not_backed_up(INBOUND_MEDIA_BLOB_PREFIX)
+    tai42_app.storage.mark_unlisted(INBOUND_MEDIA_BLOB_PREFIX)
 
 
 # Atomic write of the metadata hash AND its expiry-index member. The expiry score is validated

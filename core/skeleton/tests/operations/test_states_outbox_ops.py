@@ -32,6 +32,7 @@ def _row(row_id: int, *, status: str = "failed", last_error: str | None = "Value
         states=["profile"],
         run_id="run-1",
         trace_id=None,
+        parent_span_id=None,
         records=[],
         subjects=[
             OutboxSubject(

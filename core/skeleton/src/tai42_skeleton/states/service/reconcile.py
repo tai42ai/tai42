@@ -26,7 +26,7 @@ from tai42_skeleton.states.service.reconcile_support import (
     _record_subtree,
 )
 from tai42_skeleton.states.templates import validate_template
-from tai42_skeleton.template.resource_manager import TemplateLocaleNotFoundError, TemplateNotFoundError
+from tai42_skeleton.template.errors import TEMPLATE_RENDER_ERRORS, template_render_refusal
 
 
 class _ReconcileMixin(_StatesServiceBase):
@@ -187,16 +187,15 @@ class _ReconcileMixin(_StatesServiceBase):
     ) -> Any:
         """One reconcile jq program over its ``.`` (``data``) with the per-label ``variables`` bound as ``$name``.
 
-        Its body is a templated text rendered to jq text IMMEDIATELY before it runs — a by-id body whose stored
-        resource cannot be fetched is a LOUD refusal naming the program and the id. Loud, too, on an evaluation
-        failure, carrying the program's own ``error(...)`` message out.
+        Its body is a templated text rendered to jq text IMMEDIATELY before it runs — a body whose stored
+        resource cannot be fetched, or that cannot be rendered, is a LOUD refusal naming the program. Loud,
+        too, on an evaluation failure, carrying the program's own ``error(...)`` message out.
         """
         try:
             expr = await tai42_app.storage.resource_manager.render_templated_text(text)
-        except (TemplateNotFoundError, TemplateLocaleNotFoundError) as exc:
+        except TEMPLATE_RENDER_ERRORS as exc:
             raise TemplateValidationError(
-                f"template {template_name!r} reconcile {label} references stored id {text.id!r}, "
-                f"which could not be fetched: {exc}"
+                f"template {template_name!r} reconcile {label} {template_render_refusal(text, exc)}"
             ) from exc
         try:
             return await run_jq_first(expr, data, variables=variables)

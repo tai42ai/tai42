@@ -50,6 +50,8 @@ from tai42_skeleton.access_control.policy_rows import refuse_disabled_claim_at_m
 from tai42_skeleton.access_control.policy_version_scope import remember_policy_version
 from tai42_skeleton.access_control.settings import AccessControlSettings, access_control_settings
 from tai42_skeleton.access_control.store import access_control_store
+from tai42_skeleton.template.references import assert_templates_stored
+from tai42_skeleton.template.stored_refs import condition_template_refs
 from tai42_skeleton.utils.redis_typing import awaited
 
 logger = logging.getLogger(__name__)
@@ -390,10 +392,23 @@ async def create_principal_row(user_id: str, kind: str, display_name: str, creat
     await record_policy_change()
 
 
+async def delete_principal_row(user_id: str) -> None:
+    """Delete a principal row whose policy never landed (the backup restore's compensation).
+
+    The policy cache is invalidated.
+    """
+    await access_control_store().delete_principal(user_id)
+    await record_policy_change()
+
+
 async def create_principal_policy(
     user_id: str, scopes: list[str], policy_data: dict[str, Any] | None, condition: dict[str, Any] | None
 ) -> None:
-    """Insert a principal's own policy row (the backup restore's create); the policy cache is invalidated."""
+    """Insert a principal's own policy row (the backup restore's create); the policy cache is invalidated.
+
+    A condition naming a stored template id the store lacks raises ``ValueError`` before the write.
+    """
+    await assert_templates_stored(condition_template_refs(condition), ValueError)
     await access_control_store().create_policy(user_id, scopes, policy_data, condition)
     await record_policy_change()
 
@@ -413,10 +428,12 @@ async def restore_policy_body(user_id: str, body: dict[str, Any]) -> dict[str, A
     """Write a prior policy ``body`` back as the enforced policy — the store side of a version rollback.
 
     Returns the restored body, or ``None`` if ``user_id`` is not provisioned (a falsy sentinel the
-    route's 404 guard tests). A restored body invalidates the policy cache. A principal's own row
-    is written under the last-admin guard: a body that demotes the last enabled admin principal
-    raises :class:`~tai42_contract.accounts.errors.LastAdminError` with nothing written.
+    route's 404 guard tests). A restored body invalidates the policy cache. A body whose condition
+    names a stored template id the store lacks raises ``ValueError`` before the write. A principal's
+    own row is written under the last-admin guard: a body that demotes the last enabled admin
+    principal raises :class:`~tai42_contract.accounts.errors.LastAdminError` with nothing written.
     """
+    await assert_templates_stored(condition_template_refs(body.get("condition")), ValueError)
     store = access_control_store()
     if await store.get_principal(user_id) is not None:
         async with store.principal_guard_txn() as guard:
@@ -495,9 +512,9 @@ async def add_user_api_key(
     ORCHESTRATES the backends in a FAIL-CLOSED order. Raises ``ValueError`` if the
     user id is already provisioned, if the owner is not an enabled principal (unless
     ``owner_may_be_disabled``), if ``policy_data`` carries the ``disabled`` claim, if the
-    key has neither a scope nor a condition, or if any requested scope does not exist (has
-    no url mapping) — all checked BEFORE any write, so a user error never leaves a
-    half-provisioned key. Then:
+    key has neither a scope nor a condition, if any requested scope does not exist (has
+    no url mapping), or if the condition names a stored template id the store lacks — all
+    checked BEFORE any write, so a user error never leaves a half-provisioned key. Then:
 
     1. the provider's ``provision`` writes the identity/key record FIRST — the key
        authenticates but GRANTS NOTHING until the policy below exists;
@@ -511,6 +528,7 @@ async def add_user_api_key(
     the documented recovery is ``revoke_api_key(user_id)`` then a fresh mint (the
     mint is NOT idempotent — a plain retry hits the duplicate guard).
     """
+    await assert_templates_stored(condition_template_refs(condition), ValueError)
     provider = _identity_provider()
     store = access_control_store()
 
@@ -591,13 +609,17 @@ async def edit_user_payload(
 
     Returns the committed policy body on success, or ``None`` if ``user_id`` is not
     provisioned (a falsy sentinel the route's 404 guard tests). Raises ``ValueError``
-    if any supplied scope does not exist, or if the edit leaves the policy with neither a
-    scope nor a condition (the message names the repair for a key or for a principal). A
+    if a supplied condition names a stored template id the store lacks (checked before any
+    write; a stored condition the edit does not supply is not read), if any supplied scope
+    does not exist, or if the edit leaves the policy with neither a scope nor a condition
+    (the message names the repair for a key or for a principal). A
     principal's own row is written under the last-admin guard: an edit that demotes the
     last enabled admin principal raises
     :class:`~tai42_contract.accounts.errors.LastAdminError` with nothing written, ahead of
     the empty-policy refusal.
     """
+    if isinstance(condition, TemplatedText):
+        await assert_templates_stored(condition_template_refs(condition), ValueError)
     provider = _identity_provider()
     store = access_control_store()
 

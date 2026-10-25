@@ -112,6 +112,28 @@ async def test_a_reconnect_rewrites_the_connectors_own_entry_that_fell_behind(ha
     assert opened["config"]["headers"]["authorization"] == "Bearer at"
 
 
+@pytest.mark.parametrize(
+    "selection",
+    [
+        pytest.param({"include": ["acme_mail_work_send"], "exclude": []}, id="include"),
+        pytest.param({"include": [], "exclude": ["acme_mail_work_delete"]}, id="exclude"),
+    ],
+)
+async def test_a_reconnect_rewrite_keeps_the_entrys_tool_selection(harness, monkeypatch, selection):
+    _cs, records, _store, _flows, _events, providers = harness
+    records[CID] = make_oauth_record(connection_id=CID, alias="work", enabled_sub_services=["mail"])
+    pipeline = _pipeline(harness)
+    pipeline.seed(descriptor=providers["acme"], enabled_sub_services=["mail"], alias="work", connection_id=CID)
+    next(e for e in pipeline.doc["mcp"] if e["title"] == "acme_mail_work").update(selection)
+
+    _use(providers, _moved(providers["acme"], "mail", "https://new.acme.test/mcp/mail"))
+    await _reconnect(harness, monkeypatch, enabled=["mail"])
+
+    rewritten = _entry(pipeline.doc, "acme_mail_work")
+    assert rewritten.config.url == "https://new.acme.test/mcp/mail"
+    assert (rewritten.include, rewritten.exclude) == (selection["include"], selection["exclude"])
+
+
 async def _call_once_through_the_seam(monkeypatch, config: TaiMCPConfig) -> dict:
     """Make one call of ``config`` through the call seam and return the config its request opened."""
     import mcp.types

@@ -2,9 +2,10 @@
 answer's ``params``.
 
 A sync ask returns an ``AskAnswer``; an async ask's continuation tool runs with
-``{interaction_id, answer, reply_to, params}``. The quoted message's id and the params travel
-with the answer through the interaction store (the reply list and the continuation-due record);
-the quote's text is resolved when the asker is handed the answer.
+``{interaction_id, ask_result}``, ``ask_result`` being the same ``AskAnswer`` as JSON. The
+quoted message's id and the params travel with the answer through the interaction store (the
+reply list and the continuation-due record); the quote's text is resolved when the asker is
+handed the answer.
 """
 
 from __future__ import annotations
@@ -30,7 +31,7 @@ from tai42_skeleton.interactions import continuation as continuation_module
 from tai42_skeleton.interactions import reaper as reaper_module
 from tai42_skeleton.interactions.ask import wait as wait_module
 from tai42_skeleton.interactions.ask.timing import DeadlineWindow
-from tai42_skeleton.interactions.continuation import EXPIRY_ANSWER, fire_continuation_after_claim
+from tai42_skeleton.interactions.continuation_dispatch import EXPIRY_ANSWER, fire_continuation_after_claim
 from tai42_skeleton.interactions.store import ContinuationDue
 from tai42_skeleton.operations import interactions as ops
 
@@ -258,7 +259,10 @@ async def test_the_continuation_tool_runs_with_the_resolved_quote_and_the_params
         "svc-key", None, "resume_tool", "c1", "yes", reply_to_medium_message_id="M-1", params=_PARAMS
     )
     assert ran == [
-        {"interaction_id": "c1", "answer": "yes", "reply_to": _QUOTE.model_dump(mode="json"), "params": _PARAMS}
+        {
+            "interaction_id": "c1",
+            "ask_result": {"answer": "yes", "reply_to": _QUOTE.model_dump(mode="json"), "params": _PARAMS},
+        }
     ]
     assert resolved == [("c1", "M-1")]
 
@@ -267,5 +271,5 @@ async def test_a_continuation_with_no_quote_runs_with_null_reply_to_and_resolves
     await continuation_module._run_continuation(
         "svc-key", None, "resume_tool", "c2", "yes", reply_to_medium_message_id=None, params=None
     )
-    assert ran == [{"interaction_id": "c2", "answer": "yes", "reply_to": None, "params": None}]
+    assert ran == [{"interaction_id": "c2", "ask_result": {"answer": "yes", "reply_to": None, "params": None}}]
     assert resolved == []

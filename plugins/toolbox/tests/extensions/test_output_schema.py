@@ -9,11 +9,15 @@ from tai42_contract.extensions import ExtensionKind
 from tai42_kit.utils.data.json_schema_util import (
     InvalidJsonSchemaError,
     JsonSchemaValidationError,
+    check_json_schema,
+    validate_against_json_schema,
 )
 
 import tai42_toolbox.extensions.output_schema as output_schema_module
 from tai42_toolbox.extensions.cache import cache
 from tai42_toolbox.extensions.output_schema import output_schema
+
+from .conftest import capture_extensions
 
 _USER_SCHEMA = {
     "type": "object",
@@ -35,6 +39,18 @@ def _advertised_output_schema(branch):
 
 def test_registers_as_transformer_named_output_schema(capture_registration):
     assert capture_registration(output_schema_module) == [("output_schema", ExtensionKind.TRANSFORMER, False)]
+
+
+def test_declares_its_settings_schema():
+    declared = capture_extensions(output_schema_module).config_schemas["output_schema"]
+    assert declared is not None
+    assert declared["required"] == ["schema"]
+    assert declared["additionalProperties"] is False
+    assert declared["properties"]["schema"]["$ref"] == "https://json-schema.org/draft/2020-12/schema"
+    check_json_schema(declared)
+    with pytest.raises(JsonSchemaValidationError, match="'required' rule: 'schema'"):
+        validate_against_json_schema({}, declared, redact_value=True)
+    validate_against_json_schema({"schema": _USER_SCHEMA}, declared)
 
 
 def test_factory_is_config_accepting_four_arg():
@@ -112,6 +128,16 @@ def test_pattern_constraint_is_enforced_at_runtime():
 def test_missing_schema_key_fails_the_bind_loudly():
     with pytest.raises(ValueError, match="requires a 'schema' key"):
         output_schema(_get_user, "get_user", "desc", {})
+
+
+def test_unknown_key_beside_schema_fails_the_bind_loudly():
+    settings = {"schema": {"type": "object"}, "extra": 1}
+    with pytest.raises(ValueError, match=r"has unknown key\(s\): extra"):
+        output_schema(_get_user, "get_user", "desc", settings)
+    declared = capture_extensions(output_schema_module).config_schemas["output_schema"]
+    assert declared is not None
+    with pytest.raises(JsonSchemaValidationError, match="'additionalProperties' rule"):
+        validate_against_json_schema(settings, declared, redact_value=True)
 
 
 def test_meta_schema_invalid_schema_fails_the_bind_loudly():

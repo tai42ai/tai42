@@ -28,19 +28,19 @@ class _RecordingResourceManager:
         self.cleared = True
 
 
-def _templates_backup(
+def _storage_backup(
     monkeypatch: pytest.MonkeyPatch, report: BackupSectionReport, bus: FakeBus
 ) -> _RecordingResourceManager:
-    """Point ``tai42_app`` at a lone ``templates`` section whose importer returns
+    """Point ``tai42_app`` at a lone ``storage`` section whose importer returns
     ``report``, plus a recording resource manager and ``bus``, so the fleet eviction the
-    op fans out after a template restore is assertable."""
+    op fans out after a store restore is assertable."""
     rm = _RecordingResourceManager()
 
     async def _import_section(name: str, payload: object) -> BackupSectionReport:
         return report
 
     backup = SimpleNamespace(
-        sections=lambda: [SimpleNamespace(name="templates", secret=False)],
+        sections=lambda: [SimpleNamespace(name="storage", secret=False)],
         import_section=_import_section,
     )
     monkeypatch.setattr(
@@ -80,17 +80,20 @@ async def test_import_registered_section_absent_from_document_reports_error(monk
     assert "not present in the backup document" in result.sections["manifest"].errors[0]
 
 
-async def test_template_restore_broadcasts_clear_cache_fleetwide(monkeypatch: pytest.MonkeyPatch) -> None:
-    # A template section import writes the store on THIS worker only; without the
+async def test_storage_restore_broadcasts_clear_cache_fleetwide(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A storage section import writes the store on THIS worker only; without the
     # broadcast every sibling (and a forking backend's prefork children) keeps rendering
     # the pre-restore compilation. The op drops the whole fleet's compiled cache in one
     # ``clear_template_cache`` and the fan-out rides the section report.
     report = BackupSectionReport(created=2, details={"skipped_existing": 0})
     bus = FakeBus(remotes=["serve-w1"])
-    rm = _templates_backup(monkeypatch, report, bus)
+    rm = _storage_backup(monkeypatch, report, bus)
 
     result = (
-        await import_backup({"version": 1, "sections": {"templates": {"a.j2": "x", "b.j2": "y"}}}, ["templates"])
+        await import_backup(
+            {"version": 1, "sections": {"storage": {"a.j2": {"content_text": "x"}, "b.j2": {"content_text": "y"}}}},
+            ["storage"],
+        )
     ).payload
 
     assert rm.cleared is True
@@ -98,24 +101,45 @@ async def test_template_restore_broadcasts_clear_cache_fleetwide(monkeypatch: py
         ({"op": "clear_template_cache"}, None, LocalApplyResult(outcome=OpOutcome.applied, payload=None))
     ]
     assert result.ok is True
-    assert result.sections["templates"].fanout is not None
-    assert result.sections["templates"].fanout.mode == "fleet"
+    assert result.sections["storage"].fanout is not None
+    assert result.sections["storage"].fanout.mode == "fleet"
 
 
-async def test_template_restore_that_changed_nothing_does_not_broadcast(monkeypatch: pytest.MonkeyPatch) -> None:
-    # A skip-mode restore where every template already exists mutates no store, so the
+async def test_storage_restore_that_changed_nothing_does_not_broadcast(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A skip-mode restore where every object already exists mutates no store, so the
     # spurious fleet eviction (and its pool turnover) is suppressed.
     report = BackupSectionReport(created=0, updated=0, skipped=0, details={"skipped_existing": 2})
     bus = FakeBus(remotes=["serve-w1"])
-    rm = _templates_backup(monkeypatch, report, bus)
+    rm = _storage_backup(monkeypatch, report, bus)
 
     result = (
-        await import_backup({"version": 1, "sections": {"templates": {"a.j2": "x", "b.j2": "y"}}}, ["templates"])
+        await import_backup(
+            {"version": 1, "sections": {"storage": {"a.j2": {"content_text": "x"}, "b.j2": {"content_text": "y"}}}},
+            ["storage"],
+        )
     ).payload
 
     assert rm.cleared is False
     assert bus.publish_calls == []
-    assert result.sections["templates"].fanout is None
+    assert result.sections["storage"].fanout is None
+
+
+async def test_a_document_section_named_templates_is_an_unknown_section_and_storage_still_restores(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report = BackupSectionReport(created=1, details={"skipped_existing": 0})
+    rm = _storage_backup(monkeypatch, report, FakeBus())
+    rows = {"a.j2": {"content_text": "x"}}
+
+    result = (
+        await import_backup({"version": 1, "sections": {"templates": rows, "storage": rows}}, ["templates", "storage"])
+    ).payload
+
+    assert result.ok is False
+    assert result.sections["templates"].errors == ["unknown section: 'templates'"]
+    assert result.sections["storage"].created == 1
+    assert result.sections["storage"].errors == []
+    assert rm.cleared is True
 
 
 async def test_neutral_importer_valid_report_is_accepted_and_its_typed_fields_read(

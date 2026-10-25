@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from fastmcp.tools import Tool
 
     from tai42_contract.manifest import ExtensionElement
+    from tai42_contract.template import TemplatedText
     from tai42_contract.tool_meta import ToolMetaStore
 
 
@@ -57,8 +58,10 @@ class AppPresets(Protocol):
         *,
         name: str,
         description: str = "",
-        tags: list[str] | None = None,
-        output_schema: dict[str, Any] | None = None,
+        output_schema: TemplatedText | dict[str, Any] | None = None,
+        input_schema: TemplatedText | dict[str, Any] | None = None,
+        input_map: TemplatedText | str | None = None,
+        output_map: TemplatedText | str | None = None,
     ) -> Tool:
         """Return a FastMCP tool transform of ``base_tool`` as a new named tool.
 
@@ -66,12 +69,15 @@ class AppPresets(Protocol):
         a HIDDEN, FIXED constant (removed from the exposed schema; a caller that
         passes it is rejected — it cannot be overridden at runtime) while the
         REMAINING arguments keep the base tool's real typed schema (names, types,
-        descriptions). ``tags`` sets the transformed tool's native tags. An
-        ``output_schema`` (an object JSON Schema) is baked into an agent base's
-        ``response_format`` (forcing structured output) or advertised + validated on
-        a plain tool base. ``bind`` is async because it must resolve the base
-        ``Tool`` object (via ``app.tools.get_tool(base_tool)``) to feed the
-        transform.
+        descriptions). An ``input_schema`` becomes the exposed input contract; an
+        ``input_map`` (jq, which needs the ``input_schema``) maps the caller's object
+        to the base tool's arguments, merged with ``fixed_kwargs``. An ``output_map``
+        (jq) maps the base tool's result, and an ``output_schema`` (an object JSON
+        Schema) validates what the caller receives; on an agent base with no output
+        map the ``output_schema`` is baked into the agent's ``response_format``
+        instead (forcing structured output). ``bind`` is async because it must
+        resolve the base ``Tool`` object (via ``app.tools.get_tool(base_tool)``) to
+        feed the transform.
         """
         ...
 
@@ -82,8 +88,10 @@ class AppPresets(Protocol):
         description: str,
         fixed_kwargs: dict[str, Any],
         *,
-        input_schema: dict[str, Any] | None = None,
-        output_schema: dict[str, Any] | None = None,
+        input_schema: TemplatedText | dict[str, Any] | None = None,
+        output_schema: TemplatedText | dict[str, Any] | None = None,
+        input_map: TemplatedText | str | None = None,
+        output_map: TemplatedText | str | None = None,
         extensions: list[list[ExtensionElement]] | None = None,
         state_binding: StateBinding | None = None,
         tags: list[str] | None = None,
@@ -108,9 +116,11 @@ class AppPresets(Protocol):
         name: str,
         *,
         fixed_kwargs: dict[str, Any] | None = None,
-        input_schema: dict[str, Any] | CarryForward | None = CARRY_FORWARD,
-        output_schema: dict[str, Any] | None = None,
+        input_schema: TemplatedText | dict[str, Any] | CarryForward | None = CARRY_FORWARD,
+        output_schema: TemplatedText | dict[str, Any] | None = None,
         output_schema_provided: bool = False,
+        input_map: TemplatedText | str | CarryForward | None = CARRY_FORWARD,
+        output_map: TemplatedText | str | CarryForward | None = CARRY_FORWARD,
         description: str | None = None,
         extensions: list[list[ExtensionElement]] | None = None,
         state_binding: StateBinding | CarryForward | None = CARRY_FORWARD,
@@ -120,7 +130,8 @@ class AppPresets(Protocol):
 
         The in-process sibling of the HTTP save-version door, running the identical
         content path and returning the same shape. Omitted fields carry the active
-        value forward (``input_schema`` via the ``CARRY_FORWARD`` sentinel;
+        value forward (``input_schema``, ``input_map`` and ``output_map`` via the
+        ``CARRY_FORWARD`` sentinel;
         ``output_schema`` only when ``output_schema_provided`` is ``True``). A body that
         cannot bind is a loud error that commits nothing; the tier fence is OFF for the
         reason :meth:`create` states.

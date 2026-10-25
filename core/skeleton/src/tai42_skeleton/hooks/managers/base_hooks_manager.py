@@ -41,6 +41,8 @@ from tai42_skeleton.hooks.settings import HooksSettings
 from tai42_skeleton.monitoring import get_monitoring
 from tai42_skeleton.operations.errors import PermissionDeniedError
 from tai42_skeleton.states.context import state_context
+from tai42_skeleton.template.references import assert_templates_stored
+from tai42_skeleton.template.stored_refs import hook_template_refs
 
 logger = logging.getLogger(__name__)
 
@@ -62,9 +64,10 @@ class BaseHooksManager(ABC):
 
         A broken condition or door-contract expression would otherwise surface only as a hook
         that never fires (indistinguishable from a false condition). A templated text naming a
-        stored resource renders per event and cannot be compiled here — its failures surface
-        loudly at fire time instead. The four door-contract expressions read the run's parked
-        interactions as ``$parked``, so they are compiled with that variable declared.
+        stored resource is checked to exist by ``register``; its content renders per event and is
+        compiled then, so a compile failure surfaces loudly at fire time. The four door-contract
+        expressions read the run's parked interactions as ``$parked``, so they are compiled with
+        that variable declared.
         """
         condition: TemplatedText | None = params.condition
         if condition is not None and condition.content:
@@ -193,10 +196,11 @@ class BaseHooksManager(ABC):
         """Register the hook described by ``params``; return whether it was newly added.
 
         The one write service every hook write runs through (the register door and the backup
-        restore alike): the inline jq compiles, then a carried state binding is validated and its
-        templates attached, then the backend stores the hook. A refusal raises before anything is
-        stored.
+        restore alike): the stored template ids it names exist, the inline jq compiles, then a
+        carried state binding is validated and its templates attached, then the backend stores the
+        hook. A refusal raises before anything is stored.
         """
+        await assert_templates_stored(hook_template_refs(params), ValueError)
         self.validate_jq_fields(params)
         if params.state_binding is not None:
             from tai42_skeleton.app import instance

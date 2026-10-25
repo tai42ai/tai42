@@ -24,6 +24,7 @@ from tai42_skeleton.settings.owned_settings import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
+    from contextlib import AbstractContextManager
     from pathlib import Path
 
 
@@ -32,6 +33,9 @@ class _StandInManager(ConfigManager):
 
     def __init__(self, env: dict[str, str]) -> None:
         self._env = env
+
+    def exclusive_write(self) -> AbstractContextManager[None]:
+        raise NotImplementedError
 
     def read_env(self) -> dict[str, str]:
         return dict(self._env)

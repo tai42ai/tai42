@@ -7,5 +7,5 @@ from tai42_contract.extensions import ExtensionKind
 
 
 @tai42_app.extensions.extension(kind=ExtensionKind.WRAPPER, name="samename")
-def samename(func, name, desc, config=None):
+def samename(func, name, desc):
     return func

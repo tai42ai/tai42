@@ -54,7 +54,6 @@ from tai42_contract.monitoring import TraceContext
 from tai42_contract.sandbox import Sandbox, SandboxPolicy, SandboxUnavailableError
 from tai42_contract.template import ImageReference, TemplatedText
 from tai42_contract.tools import ClientTool
-from tai42_kit.llm import RunTrace
 from tai42_kit.monitoring.otel import OtelWriter
 from tai42_kit.monitoring.testing import InMemoryOtelReader
 
@@ -112,19 +111,18 @@ class RecordingMonitoringWriter(OtelWriter):
         self.exporter.clear()
 
 
-def fake_run_trace(config: dict[str, Any] | None = None) -> RunTrace:
-    """A deterministic :class:`~tai42_kit.llm.RunTrace` for a test that stubs ``init_langgraph_config``.
+def fake_init_langgraph_config(config: dict[str, Any] | None, context: TraceContext | None = None) -> dict[str, Any]:
+    """A deterministic stand-in for ``init_langgraph_config`` that binds no monitoring callback.
 
-    Wraps the given run config under a fixed ``"t"`` trace id, so a test double can
-    stand in for ``init_langgraph_config`` with the return type the callers consume
-    (``.config``) without resolving a lineage or touching a live backend. Like the real
-    builder, a keyless config gets a thread id (the fixed ``"t"``).
+    Returns a by-value copy of the given run config, so a test double can stand in for
+    ``init_langgraph_config`` without touching a live backend. Like the real builder, a
+    keyless config gets a thread id (the fixed ``"t"``).
     """
     run_config = dict(config or {})
     configurable = dict(run_config.get("configurable") or {})
     configurable.setdefault("thread_id", "t")
     run_config["configurable"] = configurable
-    return RunTrace(context=TraceContext(trace_id="t"), config=run_config)
+    return run_config
 
 
 class RecordingMonitoring:
@@ -373,6 +371,10 @@ class RecordingInteractions:
             from tai42_contract.interactions import ParkResumeUnauthorizedError
 
             raise ParkResumeUnauthorizedError(f"unauthorised resume of {interaction_id!r}")
+
+    async def settle_chained_terminal(self, chain_key: str, result: Any) -> Any:
+        # No preset stages in the agents tests: a chained terminal settles to itself.
+        return result
 
 
 class RecordingConnectors:

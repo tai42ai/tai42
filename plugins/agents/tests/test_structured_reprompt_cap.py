@@ -34,7 +34,7 @@ from tai42_agents._internal.usage import AgentInvokeResult
 
 from ._client_tool import FakeClientTool, client_tool
 from ._graph_support import invoke_tools_agent
-from .conftest import fake_run_trace
+from .conftest import fake_init_langgraph_config
 
 _SCHEMA = {
     "title": "Answer",
@@ -218,7 +218,9 @@ def _patch_invoke_seams(monkeypatch: pytest.MonkeyPatch, model: BaseChatModel, r
     monkeypatch.setattr(
         bta,
         "init_langgraph_config",
-        lambda config: fake_run_trace({"configurable": {"thread_id": "t"}, "recursion_limit": recursion_limit}),
+        lambda config, _context: fake_init_langgraph_config(
+            {"configurable": {"thread_id": "t"}, "recursion_limit": recursion_limit}
+        ),
     )
 
 

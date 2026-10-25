@@ -500,7 +500,7 @@ def test_hidden_continuation_tools_dispatch_through_the_registry_and_refuse_with
 
     An external caller naming either continuation is exactly the case the face's authorization guards
     against, reached here through the registry rather than a direct function call: ``agent_resume``
-    over ``{interaction_id, answer, reply_to, params}`` and ``deliver_chained_park`` over a chain token both assert the
+    over ``{interaction_id, ask_result}`` and ``deliver_chained_park`` over a chain token both assert the
     platform's resume authorization first, and the ambient resume origin is ``None``, so both raise.
     Reaching that refusal proves the names ARE registered and dispatchable at those edges.
     """
@@ -514,7 +514,7 @@ def test_hidden_continuation_tools_dispatch_through_the_registry_and_refuse_with
             with pytest.raises(ParkResumeUnauthorizedError):
                 await instance.app.tools.run_tool(
                     AGENT_RESUME_TOOL_NAME,
-                    {"interaction_id": "i-x", "answer": "late", "reply_to": None, "params": None},
+                    {"interaction_id": "i-x", "ask_result": "late"},
                 )
             with pytest.raises(ParkResumeUnauthorizedError):
                 await instance.app.tools.run_tool(

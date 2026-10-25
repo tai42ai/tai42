@@ -1,18 +1,20 @@
-"""Storage-contract behavior tests — the ``ObjectStat`` value type, the
-text-bridging binary defaults on ``Storage``, the ``storage_module`` field on
-``Manifest``, and the ``resource_manager`` facet on ``AppStorage``.
+"""Storage-contract behavior tests — the ``ObjectStat`` value type, the abstract
+``stat`` / ``load_range`` members, the text-bridging binary defaults on ``Storage``,
+the ``storage_module`` field on ``Manifest``, and the ``resource_manager`` facet on
+``AppStorage``.
 
-The binary methods (``load_bytes`` / ``upload_bytes`` / ``stat``) ship concrete
-text-bridging defaults, so a text-only backend satisfies the whole contract with
-zero new code — these exercise that bridge (including the STRICT UTF-8 decode that
-must raise on non-UTF-8 bytes rather than corrupt the store). The suite is
-sync-only, so each async method is driven through ``asyncio.run``.
+``load_bytes`` / ``upload_bytes`` ship concrete text-bridging defaults — these exercise
+that bridge (including the STRICT UTF-8 decode that must raise on non-UTF-8 bytes rather
+than corrupt the store). The suite is sync-only, so each async method is driven through
+``asyncio.run``.
 """
 
 from __future__ import annotations
 
 import asyncio
 import builtins
+import inspect
+import mimetypes
 
 import pydantic
 import pytest
@@ -23,11 +25,11 @@ from tai42_contract.storage import ObjectStat, Storage
 
 
 class _MemoryTextStorage(Storage):
-    """A minimal text-only backend — implements only the five abstract text
-    methods over an in-memory dict, inheriting the binary/media defaults."""
+    """A minimal text-only backend over an in-memory dict, inheriting the binary defaults."""
 
     def __init__(self) -> None:
         self._store: dict[str, str] = {}
+        self.range_reads = 0
 
     async def load(self, path: str) -> str:
         if path not in self._store:
@@ -48,25 +50,88 @@ class _MemoryTextStorage(Storage):
         for key in [k for k in self._store if k.startswith(prefix)]:
             del self._store[key]
 
+    async def stat(self, path: str) -> ObjectStat:
+        if path not in self._store:
+            raise FileNotFoundError(path)
+        content_type, _ = mimetypes.guess_type(path)
+        return ObjectStat(content_type=content_type, size=len(self._store[path].encode("utf-8")))
+
+    async def load_range(self, path: str, start: int, length: int) -> bytes:
+        if length == 0:
+            return b""
+        self.range_reads += 1
+        if path not in self._store:
+            raise FileNotFoundError(path)
+        return self._store[path].encode("utf-8")[start : start + length]
+
 
 # -- ObjectStat -----------------------------------------------------------------
 
 
-def test_object_stat_round_trips_and_only_content_type():
-    stat = ObjectStat(content_type="image/png")
-    assert stat.content_type == "image/png"
-    assert set(ObjectStat.model_fields) == {"content_type"}
+def test_object_stat_round_trips_content_type_and_size():
+    stat = ObjectStat(content_type="image/png", size=12)
+    assert (stat.content_type, stat.size) == ("image/png", 12)
+    assert set(ObjectStat.model_fields) == {"content_type", "size"}
     assert ObjectStat.model_validate(stat.model_dump()) == stat
 
 
-def test_object_stat_accepts_none():
-    assert ObjectStat(content_type=None).content_type is None
+def test_object_stat_accepts_none_content_type():
+    assert ObjectStat(content_type=None, size=0).content_type is None
+
+
+def test_object_stat_requires_size():
+    with pytest.raises(pydantic.ValidationError):
+        ObjectStat(content_type="text/plain")  # pyright: ignore[reportCallIssue]
+
+
+def test_object_stat_refuses_a_negative_size():
+    with pytest.raises(pydantic.ValidationError):
+        ObjectStat(content_type="text/plain", size=-1)
 
 
 def test_object_stat_is_frozen():
-    stat = ObjectStat(content_type="text/plain")
+    stat = ObjectStat(content_type="text/plain", size=1)
     with pytest.raises(pydantic.ValidationError):
         stat.content_type = "image/png"  # pyright: ignore[reportAttributeAccessIssue]
+
+
+# -- Abstract stat / load_range -------------------------------------------------
+
+
+def test_storage_without_stat_cannot_be_instantiated():
+    no_stat = type("_NoStatStorage", (Storage,), _methods_except("stat"))
+    assert inspect.isabstract(no_stat)
+    assert getattr(no_stat.stat, "__isabstractmethod__", False)
+    with pytest.raises(TypeError):
+        no_stat()
+
+
+def test_storage_without_load_range_cannot_be_instantiated():
+    no_range = type("_NoRangeStorage", (Storage,), _methods_except("load_range"))
+    assert inspect.isabstract(no_range)
+    assert getattr(no_range.load_range, "__isabstractmethod__", False)
+    with pytest.raises(TypeError):
+        no_range()
+
+
+def _methods_except(name: str) -> dict[str, object]:
+    members = ("load", "list", "upload", "delete", "delete_dir", "stat", "load_range")
+    return {m: _MemoryTextStorage.__dict__[m] for m in members if m != name}
+
+
+def test_stat_answers_size_and_content_type_and_raises_on_a_miss():
+    store = _MemoryTextStorage()
+    asyncio.run(store.upload("cover.txt", "héllo"))
+    assert asyncio.run(store.stat("cover.txt")) == ObjectStat(content_type="text/plain", size=6)
+    with pytest.raises(FileNotFoundError):
+        asyncio.run(store.stat("missing.txt"))
+
+
+def test_load_range_zero_length_answers_empty_without_a_read():
+    store = _MemoryTextStorage()
+    asyncio.run(store.upload("a.txt", "abcdef"))
+    assert asyncio.run(store.load_range("a.txt", 0, 0)) == b""
+    assert store.range_reads == 0
 
 
 # -- Storage binary text-bridge defaults ----------------------------------------
@@ -96,18 +161,6 @@ def test_upload_bytes_strict_decode_raises_on_non_utf8():
     with pytest.raises(UnicodeDecodeError):
         asyncio.run(store.upload_bytes("bad.bin", b"\xff\xfe"))
     assert asyncio.run(store.list()) == []
-
-
-def test_stat_infers_content_type_from_path():
-    store = _MemoryTextStorage()
-    stat = asyncio.run(store.stat("cover.png"))
-    assert isinstance(stat, ObjectStat)
-    assert stat.content_type == "image/png"
-
-
-def test_stat_unguessable_path_yields_none():
-    store = _MemoryTextStorage()
-    assert asyncio.run(store.stat("mystery")).content_type is None
 
 
 # -- Manifest storage module field ----------------------------------------------

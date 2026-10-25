@@ -30,6 +30,17 @@ def test_importing_register_registers_channel_and_route(stub_app):
     assert all(route.methods == ["POST"] and route.authed is None for route in stub_app.http.routes)
 
 
+def test_the_registered_channel_declares_an_identity_hint(stub_app):
+    sys.modules.pop("tai42_channel_twilio.register", None)
+    stub_app.channels.registered.clear()
+
+    importlib.import_module("tai42_channel_twilio.register")
+
+    hint = getattr(stub_app.channels.registered["twilio"], "identity_hint", None)
+    assert isinstance(hint, str)
+    assert hint.strip()
+
+
 def test_bare_package_import_does_not_register():
     # `import tai42_channel_twilio` (library use) must not touch the app handle;
     # only the register module carries the side-effect. Checked in a clean

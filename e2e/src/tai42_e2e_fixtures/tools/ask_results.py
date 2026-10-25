@@ -3,10 +3,12 @@
 A sync ``ask`` answers with an ``AskAnswer`` and an async one parks and returns a
 ``SuspendedInteraction``; the helper's declared return is their union. A probe that asked in
 one mode reads the matching shape through ``answered`` or ``parked``, and any other value
-raises ``TypeError``.
+raises ``TypeError``. A continuation reads the ``ask_result`` it is handed through ``resumed_with``.
 """
 
 from __future__ import annotations
+
+from typing import Any
 
 from tai42_contract.interactions import AskAnswer, SuspendedInteraction
 
@@ -23,3 +25,8 @@ def parked(result: AskAnswer | SuspendedInteraction) -> SuspendedInteraction:
     if not isinstance(result, SuspendedInteraction):
         raise TypeError(f"an async ask returned {type(result).__name__}, not a SuspendedInteraction")
     return result
+
+
+def resumed_with(ask_result: Any) -> AskAnswer:
+    """The ``AskAnswer`` a continuation's ``ask_result`` JSON carries; any other value raises."""
+    return AskAnswer.model_validate(ask_result)

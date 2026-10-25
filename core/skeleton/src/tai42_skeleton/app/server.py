@@ -658,7 +658,7 @@ class TaiMCP(TaiMCPLifecycleMixin):
     @property
     def _versioned_store(self) -> "PostgresVersionedStore":
         # Concretely typed (not the ``VersionedStore`` protocol) so the batched
-        # ``list_active_bodies`` accessor — a concrete-only method — resolves
+        # ``list_active_versioned_bodies`` accessor — a concrete-only method — resolves
         # through this reference. The ``app.versioning.store`` facet re-narrows to
         # the protocol for the contract surface.
         from tai42_skeleton.versioning import versioned_store
@@ -699,6 +699,8 @@ class TaiMCP(TaiMCPLifecycleMixin):
         description: str = "",
         output_schema: TemplatedText | dict[str, Any] | None = None,
         input_schema: TemplatedText | dict[str, Any] | None = None,
+        input_map: TemplatedText | str | None = None,
+        output_map: TemplatedText | str | None = None,
     ) -> "Tool":
         from tai42_skeleton.presets import preset_bind
 
@@ -712,10 +714,12 @@ class TaiMCP(TaiMCPLifecycleMixin):
             description=description,
             output_schema=output_schema,
             input_schema=input_schema,
+            input_map=input_map,
+            output_map=output_map,
         )
 
     # -- Lifecycle seam --------------------------------------------------------
 
-    def _mcp_tools(self, config: TaiMCPConfig, tools):
+    def _mcp_tools(self, config: TaiMCPConfig, tools, preset_names: frozenset[str]):
         # The mixin's re-init path binds remote-MCP tools through this seam.
-        self._tool_binding.mcp_tools(config, tools)
+        self._tool_binding.mcp_tools(config, tools, preset_names)

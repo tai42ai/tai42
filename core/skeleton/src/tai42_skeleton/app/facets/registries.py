@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     from contextlib import AbstractContextManager
     from typing import Any, TypeVar
 
+    from fastmcp.tools.base import Tool
     from starlette.requests import Request
     from tai42_contract.access_control.identity import IdentityProvider
     from tai42_contract.agent import Agent
@@ -28,6 +29,7 @@ if TYPE_CHECKING:
     from tai42_contract.sandbox import Sandbox, SandboxPolicy
     from tai42_contract.storage import Storage
     from tai42_contract.template import ImageReference, TemplateEviction
+    from tai42_contract.tools import TemplateDeleteReferee
     from tai42_contract.webhooks import WebhookVerifier
 
     from tai42_skeleton.template import ResourceManager
@@ -146,6 +148,33 @@ class StorageFacet(_Facet):
         """Record, into the yielded set, the id of every stored template a render in the block resolves or probes."""
         return template_reads()
 
+    # Marks are declared into the epoch being built and read from the live epoch, so a
+    # list or an export served while a reload builds the next epoch still sees them.
+
+    def mark_not_backed_up(self, prefix: str) -> None:
+        """Declare that every object under ``prefix`` is left out of backups (this epoch)."""
+        self._app._serving_core._prefix_mark_registry.not_backed_up.declare(prefix)
+
+    def not_backed_up_prefixes(self) -> frozenset[str]:
+        """The prefixes the live epoch marks not backed up."""
+        return self._app._live_serving_core._prefix_mark_registry.not_backed_up.prefixes()
+
+    def mark_unlisted(self, prefix: str) -> None:
+        """Declare that every object under ``prefix`` is left out of the storage and template listings (this epoch)."""
+        self._app._serving_core._prefix_mark_registry.unlisted.declare(prefix)
+
+    def unlisted_prefixes(self) -> frozenset[str]:
+        """The prefixes the live epoch marks unlisted."""
+        return self._app._live_serving_core._prefix_mark_registry.unlisted.prefixes()
+
+    def register_template_delete_referee(self, referee: TemplateDeleteReferee) -> None:
+        """Register a referee consulted before a stored object is deleted; a double registration raises."""
+        self._app._template_delete_referee_registry.register(referee)
+
+    def template_delete_referees(self) -> list[TemplateDeleteReferee]:
+        """Every registered template-delete referee, in registration order (the delete gate reads it)."""
+        return self._app._template_delete_referee_registry.all()
+
 
 class MonitoringFacet(_Facet):
     """``app.monitoring`` — monitoring backend registration (``AppMonitoring``)."""
@@ -176,6 +205,7 @@ class ExtensionsFacet(_Facet):
         requires_body_locality: bool = False,
         pauses: bool = False,
         declares_output_schema: bool = False,
+        config_schema: dict[str, Any] | None = None,
     ) -> Callable[..., Any]:
         """Register an extension of ``kind`` (or return the decorator when called bare)."""
         return self._app._extension_registry.extension(
@@ -185,14 +215,15 @@ class ExtensionsFacet(_Facet):
             requires_body_locality=requires_body_locality,
             pauses=pauses,
             declares_output_schema=declares_output_schema,
+            config_schema=config_schema,
         )
 
     def declares_output_schema(self, element: ExtensionElement) -> bool:
         """Whether the extension of combo ``element`` declares the wrapped tool's output shape; unknown raises."""
         return self._app._extension_registry.declares_output_schema(element)
 
-    def available_extensions(self) -> list[dict]:
-        """Every registered extension as a listing dict."""
+    def available_extensions(self) -> list[dict[str, Any]]:
+        """Every registered extension as ``{"name", "kind", "multiple", "config_schema"}``."""
         return self._app._extension_registry.available_extensions()
 
     def validate_combo(self, combo: Sequence[ExtensionElement]) -> None:
@@ -214,6 +245,14 @@ class ExtensionsFacet(_Facet):
 
             raise TaiValidationError(f"unknown extension(s): {', '.join(unknown)}")
         registry.validate(combo)
+
+    def check_combo(self, tool: str, combo: Sequence[ExtensionElement], *, base: Tool | None = None) -> None:
+        """Dry-run bind one extension combo on ``tool`` against the LIVE registry; nothing is mounted or stored.
+
+        ``base`` is the tool the combo binds over; without it the live server's tool named ``tool`` is used.
+        Raises :class:`~tai42_skeleton.tools.binding.errors.ExtensionComboRefusedError` with the refusal text.
+        """
+        self._app._live_serving_core._tool_binding.check_combo(tool, combo, base=base)
 
 
 class WebhookVerifiersFacet(_Facet):

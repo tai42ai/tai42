@@ -401,6 +401,10 @@ class ProviderMutationResponse(BaseModel):
     provider: ProviderCatalogEntry
     # The awaited per-origin fleet report embedded untyped; ``None`` when no manifest write occurred.
     fanout: dict[str, Any] | None = None
+    # The config store's error when its exclusive write span failed to release after the
+    # manifest write persisted (the change landed, and the store may still hold the span until
+    # the writer process exits); ``None`` when it released or no manifest write occurred.
+    span_release_error: str | None = None
 
 
 class RemoveProviderResponse(BaseModel):
@@ -409,6 +413,12 @@ class RemoveProviderResponse(BaseModel):
     provider_id: str
     removed_clients: int
     fanout: dict[str, Any] | None = None
+    # The config store's error when its exclusive write span failed to release after a manifest
+    # write of the removal persisted (the change landed, and the store may still hold the span
+    # until the writer process exits). The removal writes once per lapsed connection it purges and
+    # once for the provider; each failed release is named, joined with "; " in write order.
+    # ``None`` when every one released or no manifest write occurred.
+    span_release_error: str | None = None
 
 
 class ConnectorCategoryView(BaseModel):
@@ -468,6 +478,10 @@ class StartConnectNoAuthResponse(BaseModel):
     # The awaited per-origin fleet report of the manifest broadcast this mutation
     # triggered, embedded untyped; ``None`` when no manifest mutation occurred.
     fanout: dict[str, Any] | None = None
+    # The config store's error when its exclusive write span failed to release after the
+    # manifest write persisted (the change landed, and the store may still hold the span until
+    # the writer process exits); ``None`` when it released or no manifest write occurred.
+    span_release_error: str | None = None
 
 
 class StartReconnectRequest(BaseModel):
@@ -500,6 +514,10 @@ class PatchSubServicesResponse(BaseModel):
     # triggered, embedded untyped; ``None`` when no manifest mutation occurred (a
     # consent-only toggle forks an OAuth flow without touching the manifest).
     fanout: dict[str, Any] | None = None
+    # The config store's error when its exclusive write span failed to release after the
+    # manifest write persisted (the change landed, and the store may still hold the span until
+    # the writer process exits); ``None`` when it released or no manifest write occurred.
+    span_release_error: str | None = None
 
 
 class DisconnectResponse(BaseModel):
@@ -512,3 +530,7 @@ class DisconnectResponse(BaseModel):
     # The awaited per-origin fleet report of the manifest broadcast this mutation
     # triggered, embedded untyped; a disconnect always mutates the manifest.
     fanout: dict[str, Any] | None = None
+    # The config store's error when its exclusive write span failed to release after the
+    # manifest write persisted (the change landed, and the store may still hold the span until
+    # the writer process exits); ``None`` when it released or no manifest write occurred.
+    span_release_error: str | None = None

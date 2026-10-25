@@ -11,6 +11,7 @@ from tai42_skeleton.app.lifecycle.off_loop import run_blocking
 from tai42_skeleton.app.lifecycle.state import LifecycleState
 from tai42_skeleton.connectors.token_injection import evict_pooled_session
 from tai42_skeleton.manifest.transport import detect_transport
+from tai42_skeleton.presets.errors import PresetStoreReadError
 from tai42_skeleton.tools import mcp_health
 from tai42_skeleton.tools.binding.surface import remove_surface_tool
 
@@ -50,6 +51,16 @@ class McpReloadMixin(LifecycleState):
         threads. ``_reload_failed_mcps_async`` therefore probes servers concurrently
         but calls this ONE server at a time; the single-server reload calls it once.
         """
+        # The stored presets' names, read before anything is touched: a store that cannot
+        # be read leaves the bound tools as they are, and a failed title's record names
+        # the store.
+        try:
+            preset_names = await self.preset_manager.stored_preset_names()
+        except PresetStoreReadError as exc:
+            if title in self._failed_mcps:
+                self._record_failed_mcp(config, exc)
+            raise
+
         # Heal the connection this reload manages: drop the pooled dispatch session
         # for this title so the next dispatch builds a fresh one. The probe passed on
         # a throwaway off-pool client, so a dead pooled session survives it and every
@@ -64,7 +75,7 @@ class McpReloadMixin(LifecycleState):
             except Exception:
                 logger.warning("reload_mcp: could not remove stale tool %s", name, exc_info=True)
 
-        self._mcp_tools(config, tools)
+        self._mcp_tools(config, tools, preset_names)
         new_bound = set(self._mcp_bound_tools.get(title, set()))
 
         # Symmetry with _deregister_mcp: a tool this MCP no longer serves must ALSO
@@ -83,7 +94,7 @@ class McpReloadMixin(LifecycleState):
             "status": "ok",
             "tools": sorted(new_bound),
         }
-        # A name the (re)bind refused because a registered preset owns it — surfaced
+        # A name the (re)bind refused because a stored preset owns it — surfaced
         # loudly so the caller sees the returning server did NOT clobber the preset.
         conflicts = sorted(self._mcp_preset_conflicts.get(title, set()))
         if conflicts:

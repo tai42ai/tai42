@@ -1,7 +1,8 @@
 """S3 ``Storage`` backend over an S3 bucket.
 
 S3 stores bytes and content-types natively; ``stat`` reports the stored
-``ContentType`` and maps a missing object to ``FileNotFoundError``.
+``ContentType`` and ``ContentLength`` and maps a missing object to
+``FileNotFoundError``; ``load_range`` reads a byte range with a ranged ``get_object``.
 """
 
 from __future__ import annotations
@@ -20,6 +21,9 @@ logger = logging.getLogger(__name__)
 
 # S3 error codes for a missing key across get/head operations.
 _NOT_FOUND_CODES = frozenset({"NoSuchKey", "404", "NotFound"})
+
+# S3's error code for a range whose start is at or past the object's end.
+_INVALID_RANGE_CODE: Final = "InvalidRange"
 
 # S3 rejects a single ``delete_objects`` request carrying more than 1000 keys.
 _DELETE_BATCH_SIZE = 1000
@@ -193,4 +197,26 @@ class S3Storage(Storage):
                 if _is_not_found(e):
                     raise FileNotFoundError(f"Object not found: {path}") from e
                 raise
-            return ObjectStat(content_type=resp.get("ContentType"))
+            return ObjectStat(content_type=resp.get("ContentType"), size=resp["ContentLength"])
+
+    async def load_range(self, path: str, start: int, length: int) -> bytes:
+        """At most ``length`` bytes of ``path`` from ``start`` via a ranged ``get_object``.
+
+        ``b""`` for ``length == 0`` (no call) and for a start at or past the end;
+        ``FileNotFoundError`` when absent.
+        """
+        if length == 0:
+            return b""
+        bucket = _bucket()
+        async with tai42_app.clients.client_ctx(S3Client) as client:
+            try:
+                resp = await client.get_object(Bucket=bucket, Key=path, Range=f"bytes={start}-{start + length - 1}")
+            except ClientError as e:
+                if _is_not_found(e):
+                    raise FileNotFoundError(f"Object not found: {path}") from e
+                if e.response.get("Error", {}).get("Code") == _INVALID_RANGE_CODE:
+                    return b""
+                raise
+            async with resp["Body"] as stream:
+                data: bytes = await stream.read()
+                return data

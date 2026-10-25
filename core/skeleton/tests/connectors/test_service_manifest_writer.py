@@ -46,6 +46,15 @@ def test_add_managed_entries_http():
     assert mail["managed"]["connection_id"] == CID
 
 
+def test_a_new_connection_writes_entries_that_mount_every_tool():
+    doc: dict[str, Any] = {"mcp": []}
+    add_managed_entries(
+        doc, descriptor=make_oauth_descriptor(), enabled_sub_services=["mail"], alias="work", connection_id=CID
+    )
+    mail = next(e for e in doc["mcp"] if e["title"] == "acme_mail_work")
+    assert (mail["include"], mail["exclude"]) == ([], [])
+
+
 def test_add_managed_entries_stdio():
     from .conftest import make_noauth_stdio_descriptor
 

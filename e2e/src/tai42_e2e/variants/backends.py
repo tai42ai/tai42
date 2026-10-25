@@ -55,6 +55,13 @@ class BackendVariant(abc.ABC):
         can ever fire."""
 
     @abc.abstractmethod
+    def queue_worker_args(self, label: str) -> list[str]:
+        """The ``tai backend <args>`` of a worker serving only the queue a task sent with
+        ``queue=label`` lands on. The caller passes the bare label: arq and RQ derive the
+        queue under this stack's settings queue, and Celery's queue lives in this stack's
+        own vhost."""
+
+    @abc.abstractmethod
     def task_timeout_env(self, seconds: int) -> dict[str, str]:
         """Env that sets the dispatch job budget to ~``seconds``: it bounds a dispatched
         job (the worker limit and the sync result wait). The worker-crash spec sets it
@@ -96,6 +103,9 @@ class ArqVariant(BackendVariant):
         # queue job the worker runs, so a schedule fires without any extra process.
         return []
 
+    def queue_worker_args(self, label: str) -> list[str]:
+        return ["worker", "--queue", label]
+
     def task_timeout_env(self, seconds: int) -> dict[str, str]:
         return {"ARQ_TASK_TIMEOUT": str(seconds)}
 
@@ -126,6 +136,9 @@ class RqVariant(BackendVariant):
         # ``enqueue_at`` jobs). ``tai backend beat`` runs that daemon; ``-i 1`` polls once
         # a second so a short-interval schedule fires promptly.
         return [["beat", "-i", "1"]]
+
+    def queue_worker_args(self, label: str) -> list[str]:
+        return ["worker", "--queue", label]
 
     def task_timeout_env(self, seconds: int) -> dict[str, str]:
         return {"RQ_TASK_TIMEOUT": str(seconds)}
@@ -182,6 +195,10 @@ class CeleryVariant(BackendVariant):
         # ``--max-interval 2`` bounds the beat loop so a schedule created after
         # beat starts is picked up within ~2s rather than the 60s conf default.
         return [["beat", "--max-interval", "2"]]
+
+    def queue_worker_args(self, label: str) -> list[str]:
+        # A second Celery worker on one host needs its own node name beside the default one.
+        return ["worker", "-Q", label, "-n", f"{label}@%h"]
 
     def task_timeout_env(self, seconds: int) -> dict[str, str]:
         return {"CELERY_TASK_TIMEOUT": str(seconds)}

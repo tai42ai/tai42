@@ -139,7 +139,7 @@ services:
   # disjoint from the core services; Langfuse's internal redis/postgres are never
   # shared with the SUT's.
   langfuse-web:
-    image: langfuse/langfuse:3.172.1
+    image: docker.langfuse.com/langfuse/langfuse:4.67.0
     profiles: ["monitoring"]
     # No healthcheck upstream, so a crash-looping web (e.g. a bad ENCRYPTION_KEY)
     # passed `up --wait` silently. Gate readiness on the health route so a boot
@@ -255,8 +255,15 @@ services:
       start_interval: 1s
 
   langfuse-worker:
-    image: langfuse/langfuse-worker:3.172.1
+    image: docker.langfuse.com/langfuse/langfuse-worker:4.67.0
     profiles: ["monitoring"]
+    # The worker binds $HOSTNAME (the container's address), not localhost.
+    healthcheck:
+      test: ["CMD-SHELL", "wget --quiet --tries=1 --spider http://$${HOSTNAME}:3030/api/health || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 90s
     depends_on:
       langfuse-postgres:
         condition: service_healthy
@@ -299,7 +306,7 @@ services:
       retries: 30
 
   langfuse-clickhouse:
-    image: clickhouse/clickhouse-server:24.10.2.80
+    image: clickhouse/clickhouse-server:26.4.5.143
     profiles: ["monitoring"]
     environment:
       CLICKHOUSE_USER: default

@@ -95,15 +95,80 @@ def test_templates_list(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "greeting" in result.output
 
 
-def test_templates_get_posts_id(monkeypatch: pytest.MonkeyPatch) -> None:
+FILES_INSTALL_LINE = (
+    "tai42-skeleton 'files' resource loading requires the 'files' optional "
+    "dependencies (magika, pandas, langchain-community, pypdf, docx2txt, "
+    "openpyxl, tabulate, beautifulsoup4, python-pptx, striprtf, odfpy, "
+    "ebooklib). Install them with: pip install 'tai42-skeleton[files]'"
+)
+
+
+def test_templates_get_prints_a_text_entry_with_its_schema(monkeypatch: pytest.MonkeyPatch) -> None:
+    entry = {
+        "kind": "text",
+        "id": "prompts/greeting.md",
+        "content_type": "text/markdown",
+        "size": 14,
+        "content": "Hi {{ name }}",
+        "schema": {"type": "object", "properties": {"name": {"title": "name"}}, "required": ["name"]},
+        "schema_error": None,
+    }
+
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "POST"
         assert request.url.path == "/api/template"
         assert json.loads(request.content) == {"template_id": "prompts/greeting.md"}
-        return data_response({"content": "Hi {{ name }}"})
+        return data_response(entry)
 
-    result = run_cli(monkeypatch, handler, ["templates", "get", "prompts/greeting.md"])
+    result = run_cli(monkeypatch, handler, ["templates", "get", "prompts/greeting.md"], json_output=True)
     assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout) == entry
+    assert result.stderr == ""
+
+
+def test_templates_get_prints_a_binary_entry_with_a_null_schema(monkeypatch: pytest.MonkeyPatch) -> None:
+    entry = {"kind": "binary", "id": "img/a.png", "content_type": "image/png", "size": 120, "schema": None}
+    result = run_cli(monkeypatch, lambda r: data_response(entry), ["templates", "get", "img/a.png"], json_output=True)
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout) == entry
+
+
+def test_templates_get_with_a_schema_error_prints_the_entry_then_the_error_and_exits_1(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entry = {
+        "kind": "text",
+        "id": "prompts/broken.md",
+        "content_type": "text/markdown",
+        "size": 15,
+        "content": "Hello {{ name }",
+        "schema": None,
+        "schema_error": "template error: unexpected '}'",
+    }
+    result = run_cli(monkeypatch, lambda r: data_response(entry), ["templates", "get", "prompts/broken.md"])
+    assert result.exit_code == 1
+    assert "Hello {{ name }" in result.stdout
+    assert "template error: unexpected '}'" in result.stdout
+    assert result.stderr.strip() == "Error: template error: unexpected '}'"
+
+
+@pytest.mark.parametrize(
+    ("status", "body"),
+    [
+        (
+            400,
+            {
+                "error": "resource 'docs/locked.pdf' cannot be loaded: 'docs/locked.pdf' could not be extracted as "
+                "pdf: FileNotDecryptedError: File has not been decrypted"
+            },
+        ),
+        (501, {"error": FILES_INSTALL_LINE, "code": "files-not-configured"}),
+    ],
+)
+def test_templates_get_prints_the_servers_refusal_and_exits_1(monkeypatch: pytest.MonkeyPatch, status, body) -> None:
+    result = run_cli(monkeypatch, lambda r: httpx.Response(status, json=body), ["templates", "get", "docs/locked.pdf"])
+    assert result.exit_code == 1
+    assert result.stderr.strip() == f"Error (HTTP {status}): {body['error']}"
 
 
 def test_templates_upload_sends_file_content(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:

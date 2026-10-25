@@ -69,3 +69,36 @@ async def resolve_schema_body(
             f"{field}: its {where} rendered to a {type(parsed).__name__}, not a JSON object (a JSON Schema)"
         )
     return parsed
+
+
+class TextBodyError(ValueError):
+    """An authored text body could not be resolved to a program text.
+
+    Raised for a :class:`~tai42_contract.template.TemplatedText` whose stored resource could not be
+    rendered, and for a text (either form) that is empty or only whitespace. The message names the
+    field.
+    """
+
+
+async def resolve_text_body(field: str, value: TemplatedText | str | None, *, locale: str | None = None) -> str | None:
+    """Resolve an authored text body — the ``TemplatedText | str`` union — to its text.
+
+    A ``str`` is the text itself; a :class:`~tai42_contract.template.TemplatedText` is RENDERED
+    through the resource manager (its stored ``id`` or inline ``content``). A render failure raises
+    :class:`TextBodyError` naming ``field`` (and the stored ``id`` when it is by-id), and so does an
+    empty or whitespace-only text: the unset state is ``None``. ``None`` resolves to ``None``.
+    ``locale`` selects a stored resource's locale variant.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        text = value
+    else:
+        where = f"stored id {value.id!r}" if value.id is not None else "inline templated content"
+        try:
+            text = await render_templated_text(value, locale)
+        except Exception as exc:
+            raise TextBodyError(f"{field}: its {where} could not be rendered: {exc}") from exc
+    if not text.strip():
+        raise TextBodyError(f"{field} is empty; send null to clear it")
+    return text

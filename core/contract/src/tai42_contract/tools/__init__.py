@@ -11,7 +11,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar, overload, runtime_checkable
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 from tai42_contract.app.facets import RouteAction
 from tai42_contract.errors import ErrorKind
@@ -55,37 +55,114 @@ if TYPE_CHECKING:
 # ``@app.tools.tool`` keeps the wrapped function's signature instead of ``Any``.
 F = TypeVar("F", bound=Callable[..., Any])
 
-#: A base tool's declared tool-references extractor: given a preset's baked
-#: ``fixed_kwargs``, returns the tool names a preset of THIS base composes. The
-#: platform never knows a base tool's config shape — the base tool declares how to
-#: read composed tool names out of its own ``fixed_kwargs``. Every entry must be a
-#: string; a non-string / None entry is a plugin bug the reader raises on.
-ToolRefsExtractor = Callable[[dict[str, Any]], Iterable[str]]
 
-#: A rename referee: given the tool name about to be renamed, returns
-#: human-readable descriptions of every live reference that would be stranded by
-#: the rename (empty = no objection). A referee raising is a hard failure of the
-#: rename — never a silent bypass. The platform gathers every registered
-#: referee's answers and blocks the rename when any is non-empty.
-ToolRenameReferee = Callable[[str], Awaitable[list[str]]]
+class ReferenceHolder(BaseModel):
+    """One live holder of a name: what it is, which one, where inside it, and a one-line description.
 
-#: A delete referee: given the preset/tool name about to be DELETED, either performs
-#: its own CASCADE cleanup of the resources it holds against that name and returns an
-#: empty list (allow), or VETOES by returning human-readable descriptions of the live
-#: references it will not let the delete strand (non-empty = block). A referee raising is
-#: a hard failure of the delete — never a silent bypass. The platform gathers every
-#: registered referee's answers and blocks the delete when any is non-empty; a referee
-#: that intends to cascade must run its own veto check first, since the platform does not
-#: order referees.
-ToolDeleteReferee = Callable[[str], Awaitable[list[str]]]
+    ``kind`` is the holder's kind (``"hook"``, ``"preset version"``; a plugin declares its own),
+    ``name`` the holder's own name, ``locator`` the fields that place the reference inside the
+    holder (a version, a node id), and ``summary`` the line a person reads.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    kind: str = Field(min_length=1)
+    name: str = Field(min_length=1)
+    locator: dict[str, str | int] = Field(default_factory=dict)
+    summary: str = Field(min_length=1)
+
+
+class ComposedToolRef(BaseModel):
+    """One tool name a kwargs blob composes, and where the base tool's own config names it.
+
+    ``site`` is the base tool's own words for where the name sits (``None`` when the place has no
+    inner position); ``tool_kwargs`` is the kwargs that place passes to the composed tool, as
+    stored (``None`` when the config passes none).
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    name: str = Field(min_length=1)
+    site: str | None = Field(default=None, min_length=1)
+    tool_kwargs: dict[str, Any] | None = None
+
+
+#: A base tool's declared tool-references extractor. It is called with a kwargs blob the base
+#: tool receives — a preset body's ``fixed_kwargs``, a hook's or schedule's ``tool_kwargs``, an
+#: inline preset's ``fixed_kwargs``, the ``tool_kwargs`` a composed site passes — as given, before
+#: any validation of its own. It returns one :class:`ComposedToolRef` per place the blob names a
+#: tool, and none when the blob names no tool (its config key absent or ``None``, or a form the
+#: base resolves only at run). ``site`` is printed verbatim after the quoted name in a refusal
+#: (``at <site>``), so it is a short phrase in the base tool's own vocabulary; the platform never
+#: parses it. ``tool_kwargs`` is walked by the platform with the same function; the extractor
+#: never interprets it. A blob off the shape the base accepts is answered by raising
+#: ``ValueError`` whose text names the place and the fault and quotes no value from the blob;
+#: any other exception, or an entry that is not a ``ComposedToolRef``, is a plugin bug answered
+#: as a server fault naming the base tool.
+ToolRefsExtractor = Callable[[dict[str, Any]], Iterable[ComposedToolRef]]
+
+
+class TemplateRef(BaseModel):
+    """One stored template id a kwargs blob names, and where the base tool's own config names it.
+
+    ``site`` is the base tool's own words for the place, printed as given.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    id: str = Field(min_length=1)
+    site: str = Field(min_length=1)
+
+
+#: A base tool's declared template-references extractor, with the calling contract of
+#: :data:`ToolRefsExtractor`: called with a kwargs blob the base tool receives, as given, it
+#: returns one :class:`TemplateRef` per place the blob names a stored template id, and none
+#: when it names none. A blob off the shape the base accepts is answered by raising
+#: ``ValueError`` whose text names the place and quotes no value from the blob; any other
+#: exception, or an entry that is not a ``TemplateRef``, is a plugin bug answered as a server
+#: fault naming the base tool.
+TemplateRefsExtractor = Callable[[dict[str, Any]], Iterable[TemplateRef]]
+
+#: A rename referee: given a tool name about to be renamed, returns one
+#: :class:`ReferenceHolder` per live reference the rename would strand (empty = no
+#: objection). It answers holders and has no side effect: the rename preview calls it. A
+#: rename moves the tool and every extension branch tool bound off it, so the referee is
+#: asked once for each of those names. A referee raising is a hard failure of the rename —
+#: never a silent bypass. The platform gathers every registered referee's answers and
+#: blocks the rename when any is non-empty.
+ToolRenameReferee = Callable[[str], Awaitable[list[ReferenceHolder]]]
+
+#: A delete referee: given a tool name a delete is about to remove, returns one
+#: :class:`ReferenceHolder` per live reference it will not let the delete strand (empty =
+#: allow, non-empty = VETO). It answers holders and has no side effect: the delete preview
+#: calls it. It is asked once for each tool the delete removes — the preset and every
+#: extension branch tool bound off it — and a holder's summary names the name it holds.
+#: Cleanup belongs in a :data:`ToolDeleteCascade`. A referee raising is a hard failure of the
+#: delete — never a silent bypass. The platform gathers every registered referee's answers
+#: and blocks the delete when any is non-empty.
+ToolDeleteReferee = Callable[[str], Awaitable[list[ReferenceHolder]]]
+
+#: A delete cascade: given a tool name a delete removes, cleans up what its owner holds
+#: against that name. The platform calls it once for each tool the delete removes (the
+#: preset, then each extension branch tool), only after every veto and guard has passed and
+#: before the record is removed. A cascade raising fails the delete loudly. The platform does
+#: not order the cascades among themselves.
+ToolDeleteCascade = Callable[[str], Awaitable[None]]
 
 #: A state-template detach referee: given the ``(state name, template name)`` about to be
-#: DETACHED, returns human-readable descriptions of every live door binding (a preset
-#: version, a conversation config, a hook, a schedule) whose ``state_binding`` still names
-#: that template on that state (empty = no objection). A referee raising is a hard failure
-#: of the detach — never a silent bypass. The platform gathers every registered referee's
-#: answers and blocks the detach when any is non-empty.
-StateTemplateDetachReferee = Callable[[str, str], Awaitable[list[str]]]
+#: DETACHED, returns one :class:`ReferenceHolder` per live door binding (a preset version, a
+#: conversation config, a hook, a schedule) whose ``state_binding`` still names that template
+#: on that state (empty = no objection). It answers holders and has no side effect: the detach
+#: preview calls it. A referee raising is a hard failure of the detach — never a silent
+#: bypass. The platform gathers every registered referee's answers and blocks the detach when
+#: any is non-empty.
+StateTemplateDetachReferee = Callable[[str, str], Awaitable[list[ReferenceHolder]]]
+
+#: A stored-template delete referee: given the set of ids a delete would remove, returns one
+#: :class:`ReferenceHolder` per place a stored object its owner holds names one of them (empty
+#: = allow, non-empty = VETO). It changes nothing. A referee raising is a hard failure of the
+#: delete — never a silent bypass.
+TemplateDeleteReferee = Callable[[frozenset[str]], Awaitable[list[ReferenceHolder]]]
 
 
 @runtime_checkable
@@ -162,9 +239,14 @@ class AppTools(Protocol):
     # Bare ``@app.tools.tool`` decorates the function directly (returns it
     # unchanged); parameterized ``@app.tools.tool(...)`` returns the decorator.
     # Both keep the wrapped function's type. ``tool_refs`` is the optional declared
-    # extractor for the composed tool names a preset of this base tool carries in
-    # its baked ``fixed_kwargs`` (registered only when the manifest includes the
-    # tool). ``retry`` is the optional declared :class:`ToolRetryPolicy` the host
+    # :data:`ToolRefsExtractor`: called with any kwargs blob this base tool receives,
+    # unvalidated, it returns one :class:`ComposedToolRef` per place the blob names a
+    # tool (none when it names none), raises ``ValueError`` with a value-free text for
+    # an off-shape blob, and any other exception is a plugin bug (registered only when
+    # the manifest includes the tool). ``template_refs`` is the optional declared
+    # :data:`TemplateRefsExtractor`, with the same calling contract, answering one
+    # :class:`TemplateRef` per stored template id the blob names (likewise registered only
+    # when the manifest includes the tool). ``retry`` is the optional declared :class:`ToolRetryPolicy` the host
     # dispatch seam retries transient failures of this tool under (likewise
     # registered only when the manifest includes the tool; no declaration = one
     # attempt, exactly). ``tier`` is the optional declared registration tier (a
@@ -185,6 +267,7 @@ class AppTools(Protocol):
         *args: Any,
         force: bool = False,
         tool_refs: ToolRefsExtractor | None = None,
+        template_refs: TemplateRefsExtractor | None = None,
         retry: ToolRetryPolicy | None = None,
         tier: RouteAction | None = None,
         extras_keys: frozenset[str] | None = None,
@@ -303,29 +386,64 @@ class AppTools(Protocol):
         """Return the tool-references extractor base tool ``name`` registered, or ``None`` when it declared none."""
         ...
 
+    def template_refs_extractor(self, name: str) -> TemplateRefsExtractor | None:
+        """Return the template-references extractor base tool ``name`` registered, or ``None`` when it declared none."""
+        ...
+
+    async def kwargs_template_refs(self, tool: str, kwargs: Mapping[str, Any]) -> list[TemplateRef]:
+        """The stored template ids a call of ``tool`` with ``kwargs`` names, one ``TemplateRef`` per id.
+
+        ``site`` is the place inside ``kwargs`` (``system_prompt``, ``subagents[0].system_prompt``), in the
+        walk's order; ``[]`` when the blob names none. A tool the registry does not serve names nothing:
+        ``[]``, as the platform's delete referees read a stored call of it; the call itself fails where it
+        runs. Reads the ids with the same walk the platform's write check and delete referees run. Raises
+        ``ValueError`` naming the place, quoting no value, for a blob the tool's input refuses, and
+        ``RuntimeError`` for a fault of a declared ``tool_refs`` or ``template_refs`` extractor.
+        """
+        ...
+
     def register_rename_referee(self, provider: ToolRenameReferee) -> None:
         """Register a :data:`ToolRenameReferee` consulted before a tool rename.
 
         A plugin holding tool-name references calls this through the ``tai42_app``
         handle when its module loads. Every registered referee is asked for the
-        old name on a rename; any non-empty answer blocks the rename and its
-        descriptions name the holders. Registering the same provider object twice
-        raises loudly — a double registration is a plugin bug, never a silent
-        duplicate consult.
+        old name, and for each extension branch tool bound off it, on a rename and
+        on the rename preview; it answers holders and has no side effect. Any
+        non-empty answer blocks the rename and the holders are named. Registering
+        the same provider object twice raises loudly — a double registration is a
+        plugin bug, never a silent duplicate consult.
         """
         ...
 
     def register_delete_referee(self, provider: ToolDeleteReferee) -> None:
         """Register a :data:`ToolDeleteReferee` consulted before a preset delete.
 
-        A plugin holding resources keyed on a preset/tool name (e.g. per-node state
-        bindings that reference a preset) calls this through the ``tai42_app`` handle when
-        its module loads. Every registered referee is asked for the name on a delete; a
-        referee cascades its own cleanup and returns empty to allow, or returns non-empty
-        descriptions to VETO — any non-empty answer blocks the delete and names the
-        holders. Registering the same provider object twice raises loudly — a double
-        registration is a plugin bug, never a silent duplicate consult.
+        A plugin holding resources keyed on a preset/tool name calls this through the
+        ``tai42_app`` handle when its module loads. Every registered referee is asked once
+        for each tool the delete removes — the preset and every extension branch tool bound
+        off it — on a delete and on the delete preview; it answers holders and has no side
+        effect. Any non-empty answer VETOES the delete and the holders are named. Cleanup
+        belongs in a delete cascade (:meth:`register_delete_cascade`). Registering the same
+        provider object twice raises loudly — a double registration is a plugin bug, never
+        a silent duplicate consult.
         """
+        ...
+
+    def register_delete_cascade(self, provider: ToolDeleteCascade) -> None:
+        """Register a :data:`ToolDeleteCascade` run when a preset delete proceeds.
+
+        A plugin holding resources keyed on a preset/tool name calls this through the
+        ``tai42_app`` handle when its module loads. A cascade is called once for each tool
+        the delete removes (the preset, then each extension branch tool bound off it), with
+        that tool's name, only after every veto and guard has passed and before the record
+        is removed; a cascade raising fails the delete. Registering the same provider object
+        twice raises loudly — a double registration is a plugin bug, never a silent
+        duplicate cleanup.
+        """
+        ...
+
+    def delete_cascades(self) -> list[ToolDeleteCascade]:
+        """Every registered :data:`ToolDeleteCascade`, in registration order."""
         ...
 
     def register_detach_referee(self, provider: StateTemplateDetachReferee) -> None:
@@ -334,10 +452,10 @@ class AppTools(Protocol):
         A holder of door bindings that name templates (e.g. per-node state bindings, or the
         platform's own preset/route/hook/schedule bindings) calls this through the
         ``tai42_app`` handle when its module loads. Every registered referee is asked for the
-        ``(state, template)`` on a detach; any non-empty answer blocks the detach and its
-        descriptions name the referencing bindings. Registering the same provider object
-        twice raises loudly — a double registration is a bug, never a silent duplicate
-        consult.
+        ``(state, template)`` on a detach and on the detach preview; it answers holders and
+        has no side effect. Any non-empty answer blocks the detach and the holders are named.
+        Registering the same provider object twice raises loudly — a double registration is a
+        bug, never a silent duplicate consult.
         """
         ...
 
@@ -376,10 +494,16 @@ __all__ = [
     "AppTools",
     "ClientTool",
     "ClientToolError",
+    "ComposedToolRef",
     "NestedDoorFrameError",
+    "ReferenceHolder",
     "RunDelivery",
     "StateTemplateDetachReferee",
+    "TemplateDeleteReferee",
+    "TemplateRef",
+    "TemplateRefsExtractor",
     "ToolAlreadyRegisteredError",
+    "ToolDeleteCascade",
     "ToolDeleteReferee",
     "ToolInfo",
     "ToolInvocation",

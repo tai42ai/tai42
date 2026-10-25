@@ -347,7 +347,7 @@ def test_projects_as_a_schedulable_tool() -> None:
     assert app.tools.registered["sweep_checkpoints"]["annotations"].destructiveHint is True
 
 
-async def test_schedulable_via_create_schedule(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_schedulable_via_create_schedule(monkeypatch: pytest.MonkeyPatch, serve_tools) -> None:
     # A scheduler-capable backend (marker tools present) plus the projected sweep tool and
     # its ``schedule_task`` vehicle: the create-schedule door dispatches a cadence onto that
     # branch, so the sweep is schedulable.
@@ -367,6 +367,7 @@ async def test_schedulable_via_create_schedule(monkeypatch: pytest.MonkeyPatch) 
         {"backend_list_schedules", "backend_delete_schedule", "sweep_checkpoints", "sweep_checkpoints_schedule_task"}
     )
     monkeypatch.setattr(tai42_app, "_impl", SimpleNamespace(tools=fake))
+    serve_tools(*fake._registered)
 
     # The submitted-tool authorization runs the full HTTP-edge decision against the live
     # caller; there is no caller identity in this op-level unit, so stub it to an allow —

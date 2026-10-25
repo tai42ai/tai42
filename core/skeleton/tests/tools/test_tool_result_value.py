@@ -57,6 +57,14 @@ def test_a_media_result_is_its_wire_blocks() -> None:
     assert _tool_result_value(ToolResult(content=[image])) == to_jsonable_python(image)
 
 
+def test_an_error_result_is_the_error_envelope_a_direct_call_returns() -> None:
+    result = ToolResult(content=[TextContent(type="text", text="upstream down")], is_error=True)
+    value = _tool_result_value(result)
+    assert value == result_module._serialize_result(result.to_mcp_result())
+    assert value["isError"] is True
+    assert value["content"][0]["text"] == "upstream down"
+
+
 # -- one full-tree reduction per call -----------------------------------------------------------
 
 

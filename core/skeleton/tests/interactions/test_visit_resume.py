@@ -176,9 +176,7 @@ async def test_a_caller_resume_hands_the_continuation_no_quote_and_no_params(sto
         outcome = await visit_module.visit(
             target_name="t", cancel=[], resume=[ResumeItem(id="i1", payload={"value": 7})], start=None, extras={}
         )
-    assert outcome.result["value"] == 7
-    assert outcome.result["reply_to_received"] is None
-    assert outcome.result["params_received"] is None
+    assert outcome.result["ask_result_received"] == {"answer": {"value": 7}, "reply_to": None, "params": None}
 
 
 async def test_inline_resume_reparks_user_only(store, fake_redis):

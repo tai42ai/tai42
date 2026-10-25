@@ -17,10 +17,13 @@ swallow it.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import logging
-from typing import Any
+from typing import Any, Self
 
-from pydantic import TypeAdapter, ValidationError
+from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError, model_validator
+from pydantic_core import PydanticCustomError
 from tai42_contract.app import tai42_app
 from tai42_contract.app.responses import FanoutSummary, RecycleRoll
 from tai42_contract.backend import (
@@ -31,14 +34,16 @@ from tai42_contract.backend import (
     ScheduleRecord,
 )
 from tai42_contract.backup import BackupSectionReport
+from tai42_contract.interactions import ParkableDoorMixin
 from tai42_contract.states import StateBinding
 from tai42_contract.states.errors import StatesError
-from tai42_kit.utils.schedule_subject import SCHEDULE_STATE_BINDING_ARG
+from tai42_kit.utils.schedule_subject import SCHEDULE_CONTRACT_ARG, SCHEDULE_STATE_BINDING_ARG
 
 from tai42_skeleton.backup.registry import _empty_report, current_import_mode
 from tai42_skeleton.backup.webhooks_section import _export_webhooks, _import_webhooks
 from tai42_skeleton.schedules import check_schedule_definition
 from tai42_skeleton.states.backup import register_states_backup_section
+from tai42_skeleton.storage.prefix_marks import covering_prefix
 from tai42_skeleton.tools.state_binding import is_binding_refusal
 
 logger = logging.getLogger(__name__)
@@ -67,7 +72,9 @@ async def _import_manifest(payload: dict[str, Any]) -> BackupSectionReport:
     # mapped to a loud, typed OperationFailedError exactly as the marketplace / manifest doors.
     with translate_orphan_env_write():
         result = await ConfigService.from_app().apply_replace(payload)
-    return BackupSectionReport(updated=1, fanout=FanoutSummary.model_validate(result.fanout))
+    return BackupSectionReport(
+        updated=1, fanout=FanoutSummary.model_validate(result.fanout), span_release_error=result.span_release_error
+    )
 
 
 # -- env ---------------------------------------------------------------------
@@ -101,6 +108,7 @@ async def _import_env(payload: dict[str, str]) -> BackupSectionReport:
         fanout=FanoutSummary.model_validate(result.fanout),
         recycle=None if roll is None else RecycleRoll.model_validate(roll),
         awaiting_respawn=list(result.awaiting_respawn),
+        span_release_error=result.span_release_error,
     )
 
 
@@ -196,48 +204,126 @@ async def _import_conversation_target_config(payload: dict[str, Any]) -> BackupS
     return await import_target_configs(payload, current_import_mode())
 
 
-# -- templates ---------------------------------------------------------------
+# -- storage -----------------------------------------------------------------
 
 
-async def _export_templates() -> dict[str, str]:
+class _StoredObjectEntry(BaseModel):
+    """One stored object in the ``storage`` section: its bytes as UTF-8 text or as base64, and its content type."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    content_text: str | None = None
+    content_base64: str | None = None
+    content_type: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _an_object(cls, value: object) -> object:
+        if not isinstance(value, dict):
+            raise PydanticCustomError("entry_type", "entry must be an object carrying content_text or content_base64")
+        return value
+
+    @model_validator(mode="after")
+    def _exactly_one_content(self) -> Self:
+        if (self.content_text is None) == (self.content_base64 is None):
+            raise PydanticCustomError(
+                "content_one_of", "entry must carry exactly one of content_text or content_base64"
+            )
+        return self
+
+
+def _entry_problem(exc: ValidationError) -> str:
+    return "; ".join(
+        f"{'.'.join(str(part) for part in error['loc'])}: {error['msg']}" if error["loc"] else error["msg"]
+        for error in exc.errors()
+    )
+
+
+def _stored_object_entry(data: bytes, content_type: str | None) -> dict[str, Any]:
+    # Strict UTF-8 is the store's own definition of text; the decode is lossless, so
+    # ``content_text`` reproduces the bytes exactly.
+    try:
+        return {"content_text": data.decode("utf-8"), "content_type": content_type}
+    except UnicodeDecodeError:
+        return {"content_base64": base64.b64encode(data).decode("ascii"), "content_type": content_type}
+
+
+async def _export_storage() -> dict[str, dict[str, Any]]:
     resource_manager = tai42_app.storage.resource_manager
-    paths = await resource_manager.list_resources()
-    return {path: await resource_manager.fetch_template(path) for path in paths}
+    not_backed_up = tai42_app.storage.not_backed_up_prefixes()
+    payload: dict[str, dict[str, Any]] = {}
+    for path in await resource_manager.list_resources():
+        if covering_prefix(path, not_backed_up) is not None:
+            continue
+        data, content_type = await resource_manager.load_stored(path)
+        payload[path] = _stored_object_entry(data, content_type)
+    return payload
 
 
-async def _import_templates(payload: dict[str, str]) -> BackupSectionReport:
-    from tai42_contract.storage import StoragePathConflictError
+def _reject_template(report: BackupSectionReport, path: str, reason: object) -> None:
+    # A per-path rejection is recorded loudly and the rest of the section still restores.
+    report.errors.append(f"template {path!r}: {reason}")
+    report.skipped += 1
+    logger.warning("backup restore skipped template path %r: %s", path, reason)
 
+
+def _accepted_storage_row(
+    report: BackupSectionReport, path: str, raw_entry: Any, not_backed_up: frozenset[str]
+) -> tuple[bytes, str | None] | None:
+    """The bytes and content type a backup row restores, or ``None`` after recording its refusal."""
     from tai42_skeleton.template.path_guard import UnsafeTemplatePathError, safe_template_path
 
+    try:
+        # An untrusted backup can carry a traversal key writing outside the store
+        # root; guard each key BEFORE the write.
+        safe_template_path(path)
+    except UnsafeTemplatePathError as exc:
+        _reject_template(report, path, exc)
+        return None
+    prefix = covering_prefix(path, not_backed_up)
+    if prefix is not None:
+        _reject_template(report, path, f"path is under {prefix!r}, which is marked not backed up")
+        return None
+    try:
+        entry = _StoredObjectEntry.model_validate(raw_entry)
+    except ValidationError as exc:
+        _reject_template(report, path, _entry_problem(exc))
+        return None
+    if entry.content_text is not None:
+        return entry.content_text.encode("utf-8"), entry.content_type
+    try:
+        return base64.b64decode(entry.content_base64 or "", validate=True), entry.content_type
+    except binascii.Error as exc:
+        _reject_template(report, path, f"content_base64 is not valid base64 ({exc})")
+        return None
+
+
+async def _import_storage(payload: dict[str, Any]) -> BackupSectionReport:
+    from tai42_contract.storage import StoragePathConflictError
+
     resource_manager = tai42_app.storage.resource_manager
+    not_backed_up = tai42_app.storage.not_backed_up_prefixes()
     existing = set(await resource_manager.list_resources())
     mode = current_import_mode()
     report = _empty_report()
-    for path, content in payload.items():
-        try:
-            # An untrusted backup can carry a traversal key writing outside the store
-            # root; guard each key BEFORE upload. A bad key is a per-path rejection, never
-            # a silent drop and never an aborted restore.
-            safe_template_path(path)
-        except UnsafeTemplatePathError as exc:
-            report.errors.append(f"template {path!r}: {exc}")
-            report.skipped += 1
-            logger.warning("backup restore skipped unsafe template path %r: %s", path, exc)
+    for path, raw_entry in payload.items():
+        accepted = _accepted_storage_row(report, path, raw_entry, not_backed_up)
+        if accepted is None:
             continue
+        data, content_type = accepted
         if path in existing and mode == "skip":
-            # Existing template (keyed by path) left untouched.
+            # Existing object (keyed by path) left untouched.
             report.details["skipped_existing"] += 1
             continue
         try:
-            await resource_manager.upload_template(path, content)
+            await resource_manager.upload_bytes(path, data, content_type)
         except StoragePathConflictError as exc:
-            # A key colliding with a directory that still holds templates is a
-            # per-path rejection recorded loudly, never a silently dropped or
-            # whole-restore-aborting failure.
-            report.errors.append(f"template {path!r}: {exc}")
-            report.skipped += 1
-            logger.warning("backup restore skipped conflicting template path %r: %s", path, exc)
+            # A key colliding with a directory that still holds objects.
+            _reject_template(report, path, exc)
+            continue
+        except UnicodeDecodeError:
+            # A text-only store's bytes write strict-decodes UTF-8 and cannot hold this object.
+            _reject_template(report, path, "the storage provider holds text only and cannot store this object")
             continue
         if path in existing:
             report.updated += 1
@@ -261,14 +347,15 @@ async def _export_schedules() -> list[dict[str, Any]]:
 
 
 async def _check_schedule_rows(payload: Any) -> tuple[Any, list[int], list[dict[str, Any]]]:
-    """Run the schedule definition check over every row carrying a door binding.
+    """Run the schedule definition check over every row carrying a door contract or a door binding.
 
     Returns the rows to forward to the backend, each forwarded row's index in ``payload``, and
     one ``{"index", "name", "error"}`` record per refused row. A ``ScheduleRecord`` row carries
-    its binding under the reserved key of its ``kwargs``; a row of any other shape carries no
-    binding the platform can read and is forwarded untouched for the backend to judge (it
-    refuses a row that is not a ``ScheduleRecord`` as a per-row error). A refusal (a malformed binding, a binding the
-    states store refuses) keeps the row from the backend; any other error fails the section.
+    its contract and its binding under the reserved keys of its ``kwargs``; a row of any other
+    shape carries neither in a form the platform can read and is forwarded untouched for the
+    backend to judge (it refuses a row that is not a ``ScheduleRecord`` as a per-row error). A
+    refusal (a malformed contract or binding, a stored id the store lacks, a binding the states
+    store refuses) keeps the row from the backend; any other error fails the section.
     """
     if not isinstance(payload, list):
         return payload, [], []
@@ -278,9 +365,13 @@ async def _check_schedule_rows(payload: Any) -> tuple[Any, list[int], list[dict[
     for index, row in enumerate(payload):
         kwargs = row.get("kwargs") if isinstance(row, dict) else None
         raw = kwargs.get(SCHEDULE_STATE_BINDING_ARG) if isinstance(kwargs, dict) else None
-        if raw is not None:
+        raw_contract = kwargs.get(SCHEDULE_CONTRACT_ARG) if isinstance(kwargs, dict) else None
+        if raw is not None or raw_contract is not None:
             try:
-                await check_schedule_definition(StateBinding.model_validate(raw))
+                await check_schedule_definition(
+                    StateBinding.model_validate(raw) if raw is not None else None,
+                    ParkableDoorMixin.model_validate(raw_contract) if raw_contract is not None else None,
+                )
             except ValueError as exc:
                 refused.append({"index": index, "name": row.get("name"), "error": str(exc)})
                 continue
@@ -426,19 +517,20 @@ def register_core_sections(registry: Any) -> None:
     """
     registry.register_section("manifest", _export_manifest, _import_manifest)
     registry.register_section("env", _export_env, _import_env, secret=True)
+    # Before every section whose records name a stored resource by id (access control,
+    # states, webhooks, conversations, schedules): they are checked against the objects
+    # this section restores.
+    registry.register_section("storage", _export_storage, _import_storage)
     registry.register_section("access_control", _export_access_control, _import_access_control, secret=True)
     registry.register_section("sub_mcp", _export_sub_mcp, _import_sub_mcp)
-    # Before ``webhooks``/``conversations``: their token-free scan renders policy
-    # conditions naming a stored resource by id, which are templates this section restores.
-    registry.register_section("templates", _export_templates, _import_templates)
     # States before every section that restores a binding: a restored binding attaches templates
-    # on states, so the declarations and templates it names restore first.
+    # on states, so the declarations and stored templates it names restore first.
     register_states_backup_section(registry)
-    # AFTER ``access_control`` and ``templates`` (records decided against the live policy
+    # AFTER ``access_control`` and ``storage`` (records decided against the live policy
     # store, which those restore). secret=True: the bulk export aggregates hook
     # ``tool_kwargs`` and full token hashes, broader than the grantable per-record read.
     registry.register_section("webhooks", _export_webhooks, _import_webhooks, secret=True)
-    # AFTER ``access_control``/``templates``, as ``webhooks``. secret=False: export equals the
+    # AFTER ``access_control``/``storage``, as ``webhooks``. secret=False: export equals the
     # grantable route-list read (``callback_secret`` excluded, re-minted only on overwrite).
     registry.register_section("conversations", _export_conversations, _import_conversations)
     # The per-target conversation config (multichannel opt-in + first-contact greeting).

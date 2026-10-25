@@ -20,7 +20,7 @@ from tai42_contract.extensions import ExtensionKind
 
 
 @tai42_app.extensions.extension(kind=ExtensionKind.WRAPPER, name="argswrap")
-def argswrap(func, name, desc, config=None):
+def argswrap(func, name, desc):
     """Preserve schema via ``functools.wraps`` behind a ``*args/**kwargs`` body;
     upper-case the string result. Presented signature stays ``func``'s."""
 
@@ -35,7 +35,7 @@ def argswrap(func, name, desc, config=None):
 
 
 @tai42_app.extensions.extension(kind=ExtensionKind.WRAPPER, name="sigwrap")
-def sigwrap(func, name, desc, config=None):
+def sigwrap(func, name, desc):
     """Re-present ``func``'s own signature with makefun under ``func``'s module name,
     the shape the cache and monitor wrappers build. The branch's code lives in
     makefun's namespace, so a postponed hint is resolvable only through that module."""
@@ -52,7 +52,7 @@ def sigwrap(func, name, desc, config=None):
 
 
 @tai42_app.extensions.extension(kind=ExtensionKind.WRAPPER, name="renamep")
-def renamep(func, name, desc, config=None):
+def renamep(func, name, desc):
     """Rename the input param ``text`` -> ``txt`` — a schema change a wrapper
     must not make."""
 
@@ -63,7 +63,7 @@ def renamep(func, name, desc, config=None):
 
 
 @tai42_app.extensions.extension(kind=ExtensionKind.WRAPPER, name="cachereq")
-def cachereq(func, name, desc, config=None):
+def cachereq(func, name, desc):
     """Append a default-less reserved control param ``exp`` (lands in
     ``required`` too), mirroring cache's append shape."""
 
@@ -78,7 +78,7 @@ cachereq.reserved_params = frozenset({"exp"})
 
 
 @tai42_app.extensions.extension(kind=ExtensionKind.WRAPPER, name="proxylike")
-def proxylike(func, name, desc, config=None):
+def proxylike(func, name, desc):
     """Inject a reserved list param, mirroring proxy/vpn's list-inject shape."""
 
     def impl(*args, **kwargs):
@@ -92,7 +92,7 @@ proxylike.reserved_params = frozenset({"proxies"})
 
 
 @tai42_app.extensions.extension(kind=ExtensionKind.WRAPPER, name="collidewrap")
-def collidewrap(func, name, desc, config=None):
+def collidewrap(func, name, desc):
     """Declare a reserved name that ALSO exists on the input signature — the
     exclusion would mask a real change, so this must raise at apply time."""
 
@@ -109,7 +109,7 @@ collidewrap.reserved_params = frozenset({"text"})
 
 
 @tai42_app.extensions.extension(kind=ExtensionKind.WRAPPER, name="driftreserved")
-def driftreserved(func, name, desc, config=None):
+def driftreserved(func, name, desc):
     """Tolerated reserved ``exp`` PLUS an untolerated rename ``text`` -> ``txt``:
     the reserved subtraction must not hide the real drift, so this still raises."""
 
@@ -124,7 +124,7 @@ driftreserved.reserved_params = frozenset({"exp"})
 
 
 @tai42_app.extensions.extension(kind=ExtensionKind.WRAPPER, name="onlyreserved")
-def onlyreserved(func, name, desc, config=None):
+def onlyreserved(func, name, desc):
     """Append a default-less reserved param to a tool that has NO required
     params, so subtracting it empties the branch's ``required`` list — exercises
     the empty-``required`` normalization."""
@@ -139,9 +139,9 @@ def onlyreserved(func, name, desc, config=None):
 onlyreserved.reserved_params = frozenset({"exp"})
 
 
-@tai42_app.extensions.extension(kind=ExtensionKind.WRAPPER, name="marka")
-def marka(func, name, desc, config=None):
-    """Order marker: append ``|a`` to the string result; schema-preserving."""
+@tai42_app.extensions.extension(kind=ExtensionKind.WRAPPER, name="marka", config_schema={"type": "object"})
+def marka(func, name, desc, config):
+    """Order marker: append ``|a`` to the string result; schema-preserving. Accepts any settings."""
 
     @functools.wraps(func)
     def variant(*args, **kwargs):
@@ -153,7 +153,7 @@ def marka(func, name, desc, config=None):
 
 
 @tai42_app.extensions.extension(kind=ExtensionKind.WRAPPER, name="localwrap", requires_body_locality=True)
-def localwrap(func, name, desc, config=None):
+def localwrap(func, name, desc):
     """A locality-requiring wrapper (its wrapper only works in the process that
     runs the tool body): schema-preserving, and the bind engine must place it
     INSIDE any execution-relocating (BACKEND) extension in a stacked combo."""
@@ -167,9 +167,9 @@ def localwrap(func, name, desc, config=None):
     return variant
 
 
-@tai42_app.extensions.extension(kind=ExtensionKind.WRAPPER, name="markb")
-def markb(func, name, desc, config=None):
-    """Order marker: append ``|b`` to the string result; schema-preserving."""
+@tai42_app.extensions.extension(kind=ExtensionKind.WRAPPER, name="markb", config_schema={"type": "object"})
+def markb(func, name, desc, config):
+    """Order marker: append ``|b`` to the string result; schema-preserving. Accepts any settings."""
 
     @functools.wraps(func)
     def variant(*args, **kwargs):
@@ -184,7 +184,7 @@ def markb(func, name, desc, config=None):
 
 
 @tai42_app.extensions.extension(kind=ExtensionKind.TRANSFORMER, name="concretetf")
-def concretetf(func, name, desc, config=None):
+def concretetf(func, name, desc):
     """Present a concrete OWN schema via makefun behind a ``*args/**kwargs``
     body — the valid transformer shape."""
 
@@ -195,7 +195,7 @@ def concretetf(func, name, desc, config=None):
 
 
 @tai42_app.extensions.extension(kind=ExtensionKind.TRANSFORMER, name="baretf")
-def baretf(func, name, desc, config=None):
+def baretf(func, name, desc):
     """A raw passthrough presenting a bare ``(*args, **kwargs)`` signature — no
     concrete schema, so a transformer must reject it."""
 
@@ -208,7 +208,7 @@ def baretf(func, name, desc, config=None):
 
 
 @tai42_app.extensions.extension(kind=ExtensionKind.TRANSFORMER, name="reservedtf")
-def reservedtf(func, name, desc, config=None):
+def reservedtf(func, name, desc):
     """A concrete transformer carrying ``reserved_params`` — which is ignored on
     a non-wrapper kind (a transformer owns its whole schema)."""
 
@@ -225,7 +225,7 @@ reservedtf.reserved_params = frozenset({"a"})
 
 
 @tai42_app.extensions.extension(kind=ExtensionKind.BACKEND, name="backendswap")
-def backendswap(func, name, desc, config=None):
+def backendswap(func, name, desc):
     """A single backend strategy that alters the schema — legal, because backend
     branches carry no schema rule."""
 
@@ -236,7 +236,7 @@ def backendswap(func, name, desc, config=None):
 
 
 @tai42_app.extensions.extension(kind=ExtensionKind.BACKEND, name="backendx")
-def backendx(func, name, desc, config=None):
+def backendx(func, name, desc):
     @functools.wraps(func)
     def variant(*args, **kwargs):
         return func(*args, **kwargs)
@@ -247,7 +247,7 @@ def backendx(func, name, desc, config=None):
 
 
 @tai42_app.extensions.extension(kind=ExtensionKind.BACKEND, name="backendy")
-def backendy(func, name, desc, config=None):
+def backendy(func, name, desc):
     @functools.wraps(func)
     def variant(*args, **kwargs):
         return func(*args, **kwargs)

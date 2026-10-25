@@ -43,7 +43,7 @@ from tai42_skeleton.config.service import ConfigService, ProfileApplyOutcome
 from tai42_skeleton.operations import config as config_ops
 
 from .._fakes.bus import FakeBus
-from ..config.fake_pipeline import FakeConfigStore, FakeReloadAdmin
+from ..config.fake_pipeline import ComboChecks, FakeConfigStore, FakeReloadAdmin
 from ._served_app import (
     ADMIN_KEY,
     REQUEST_TIMEOUT_S,
@@ -168,6 +168,7 @@ def _install_pipeline(
             admin=FakeReloadAdmin(),
             bus=cast("Any", bus),
             orchestrate=orchestrate_recycle if outage else _stopping_roll,
+            combo_check=ComboChecks(),
         )
         pipeline.applied = applied
         return pipeline

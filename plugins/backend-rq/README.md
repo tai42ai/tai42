@@ -78,14 +78,29 @@ Importing the package registers, as an import side-effect on the global
   interval is refused loudly — the rq scheduler cannot honour it). Each mints a `<tool>_<extension>` branch tool whose queued job
   dispatches back onto the original tool by name.
 
+The `sync_task` and `async_task` branches take the task options `countdown`,
+`eta`, `expires`, `callback_kwargs` and `queue`. `queue` sends the job, and its
+callback, to the worker started with `--queue <label>`: a label of letters,
+digits, `_` and `-` derives the queue `<RQ_QUEUE_NAME>.<label>`, and any other
+value raises `ValueError` before anything is written. Unset, the job goes to
+`RQ_QUEUE_NAME`. A job on a queue no worker serves waits: a `sync_task` raises
+`TimeoutError` after `RQ_TASK_TIMEOUT`, and an `async_task` id stays queued. A
+tool with its own `queue` parameter cannot take a `sync_task` or `async_task`
+branch. Recurring schedules carry no queue: `beat` puts them on
+`RQ_QUEUE_NAME`, so they need a worker without a label.
+
 ## Runtime
 
 `launch(args)` selects the process role from the first argument:
 
-- `worker [--redis-url URL] [-n NAME] [--loglevel LEVEL] [--burst] [--results-ttl N] [--pool prefork|solo|gevent]`
+- `worker [--redis-url URL] [-n NAME] [--loglevel LEVEL] [--burst] [--results-ttl N] [--pool prefork|solo|gevent] [--queue LABEL]`
   — runs an RQ worker. `prefork` (default) forks a monitored work-horse per
   job; `solo` runs jobs in-process; `gevent` runs jobs in-process on green
-  threads. `--results-ttl` sets the worker's default result TTL. The work
+  threads. `--results-ttl` sets the worker's default result TTL. The worker
+  serves one queue: `RQ_QUEUE_NAME`, or with `--queue <label>` the queue
+  `<RQ_QUEUE_NAME>.<label>` alone (one label, letters, digits, `_` or `-`; any
+  other value is refused before the worker starts); its `countdown` / `eta` jobs
+  are moved onto that queue by a worker serving it. The work
   loop runs on a worker thread so the process's event loop stays responsive
   (the app's worker-bus subscription lives on it, delivering fleet ops);
   SIGTERM/SIGINT request a warm shutdown (finish the current job), a repeated
@@ -187,6 +202,7 @@ from them.
 | `RQ_SOCKET_TIMEOUT` | — | Seconds a Redis command may wait on its socket; redis-py's default when unset. |
 | `RQ_SOCKET_CONNECT_TIMEOUT` | — | Seconds a Redis connect may take; redis-py's default when unset. |
 | `RQ_RQ_PREFIX` | `rq:` | Key prefix RQ uses for its Redis structures. |
+| `RQ_QUEUE_NAME` | `default` | The RQ queue the host enqueues to, `beat` schedules on, and a worker started without `--queue` serves; a `--queue <label>` worker serves `<RQ_QUEUE_NAME>.<label>`. Every process of one stack sets the same value. Stacks sharing one Redis DB set distinct values, and no stack's value is another stack's value followed by `.<label>`. |
 | `RQ_MANIFEST_KEY` | `MANIFEST_KEY` | Env key the worker CLI stores the manifest JSON under (inherited by forked work-horses). |
 | `RQ_TASK_TIMEOUT` | `300` | The dispatch job budget in seconds: the timeout the worker runs every job under (enqueued or scheduler-fired, whatever timeout the job was stored with), and how long a `sync_task` dispatch waits for its job's result. |
 | `RQ_TOOL_NAME_ARG` | `backend_tool_name` | Kwarg carrying the target tool name in a queued job. |

@@ -1,4 +1,4 @@
-"""The typed not-found error raised when a tool name is not registered on the live server."""
+"""The typed errors of the tool-binding engine."""
 
 from tai42_contract.errors import ErrorKind
 
@@ -28,3 +28,11 @@ class UnknownToolError(Exception):
         """Record the missing ``tool_name`` so a caller can tell WHICH tool was not found."""
         super().__init__(f"No such tool: {tool_name}.")
         self.tool_name = tool_name
+
+
+class SchemaSignatureError(ValueError):
+    """Raised when an object JSON Schema cannot be presented as a function's named keyword arguments."""
+
+
+class ExtensionComboRefusedError(ValueError):
+    """A dry-run bind refused an extension combo; the message is the refusal, nothing is chained."""

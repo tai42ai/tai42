@@ -137,7 +137,6 @@ async def patch_sub_services(
         # The pipeline runs only when the manifest changes; a consent-only toggle changes
         # nothing here, so the fanout is honestly ``None`` and the forked consent flow's own
         # completion reports its broadcast.
-        fanout: dict[str, Any] | None = None
         pending_write = manifest_writer.managed_entries_to_write(
             config_service.read_manifest_document(),
             descriptor=descriptor,
@@ -145,8 +144,10 @@ async def patch_sub_services(
             alias=record.alias,
             connection_id=connection_id,
         )
-        if to_remove or pending_write:
-            fanout = (await config_service.apply_change(reconcile)).fanout
+        applied = await config_service.apply_change(reconcile) if to_remove or pending_write else None
+
+    fanout = None if applied is None else applied.fanout
+    span_release_error = None if applied is None else applied.span_release_error
 
     if not needs_consent_subs:
         return PatchResult(
@@ -158,6 +159,7 @@ async def patch_sub_services(
             added_manifest_entries=added,
             removed_manifest_entries=removed,
             fanout=fanout,
+            span_release_error=span_release_error,
         )
 
     # Consent fork: carry both already-enabled and newly-requested sub-services
@@ -183,4 +185,5 @@ async def patch_sub_services(
         added_manifest_entries=added,
         removed_manifest_entries=removed,
         fanout=fanout,
+        span_release_error=span_release_error,
     )

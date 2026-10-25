@@ -62,11 +62,11 @@ from tai42_skeleton.operations.presets.readers import read_combos as read_combos
 from tai42_skeleton.operations.presets.readers import read_create_extensions as read_create_extensions
 from tai42_skeleton.operations.presets.readers import read_edit_extensions as read_edit_extensions
 from tai42_skeleton.operations.presets.readers import read_element as read_element
+from tai42_skeleton.operations.presets.readers import read_input_map as read_input_map
 from tai42_skeleton.operations.presets.readers import read_input_schema as read_input_schema
+from tai42_skeleton.operations.presets.readers import read_output_map as read_output_map
 from tai42_skeleton.operations.presets.readers import read_output_schema as read_output_schema
 from tai42_skeleton.operations.presets.readers import read_state_binding as read_state_binding
-from tai42_skeleton.operations.presets.references import _agent_tool_names as _agent_tool_names
-from tai42_skeleton.operations.presets.references import _referenced_tool_names as _referenced_tool_names
 from tai42_skeleton.operations.presets.rename import delete_preset as delete_preset
 from tai42_skeleton.operations.presets.rename import rename_preset as rename_preset
 from tai42_skeleton.operations.presets.validate import validate_preset as validate_preset
@@ -76,6 +76,7 @@ from tai42_skeleton.operations.presets.versions import save_version as save_vers
 from tai42_skeleton.operations.presets.versions import set_preset_version_tags as set_preset_version_tags
 from tai42_skeleton.operations.presets.views import _create_response as _create_response
 from tai42_skeleton.operations.presets.views import _save_version_response as _save_version_response
+from tai42_skeleton.operations.reference_graph import _agent_tool_names as _agent_tool_names
 
 __all__ = [
     "BadRequestError",
@@ -101,7 +102,9 @@ __all__ = [
     "read_create_extensions",
     "read_edit_extensions",
     "read_element",
+    "read_input_map",
     "read_input_schema",
+    "read_output_map",
     "read_output_schema",
     "read_state_binding",
     "rename_preset",

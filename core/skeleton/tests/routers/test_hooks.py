@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Callable
 from types import SimpleNamespace
 from typing import cast
 
@@ -16,12 +17,17 @@ from tai42_contract.hooks import HookParams, TopicVerifierBinding
 from tests.hooks.test_payload_parser import MULTIPART_WITH_FILE
 
 from tai42_skeleton.access_control.settings import AccessControlSettings
+from tai42_skeleton.app import instance
 from tai42_skeleton.authz import execution as execution_module
+from tai42_skeleton.hooks.managers.in_memory_hooks_manager import InMemoryHooksManager
 from tai42_skeleton.hooks.runs.models import AcceptResult, DispatchKey, ReplayClaim
+from tai42_skeleton.hooks.settings import HooksSettings
 from tai42_skeleton.hooks.trigger_links import ResolvedTrigger
 from tai42_skeleton.operations import _authority as authority
 from tai42_skeleton.operations import hooks as hooks_ops
 from tai42_skeleton.routers import hooks
+
+from .._fakes.recording_storage import MappedStorage
 
 
 @pytest.fixture(autouse=True)
@@ -237,7 +243,10 @@ async def test_list_hooks_filters_by_topic(monkeypatch: pytest.MonkeyPatch) -> N
     assert body["data"]["items"][0]["name"] == "b"
 
 
-async def test_register_hook_validates_and_registers(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_register_hook_validates_and_registers(
+    monkeypatch: pytest.MonkeyPatch, serve_tools: Callable[..., None]
+) -> None:
+    serve_tools("notify")
     manager = _MgmtManager()
     monkeypatch.setattr(hooks_ops, "get_hooks_manager", lambda: manager)
     payload = {"name": "c", "topic": "events", "tool": "notify", "execution_key": "k-fire"}
@@ -291,7 +300,11 @@ async def test_register_hook_rejects_bad_json(monkeypatch: pytest.MonkeyPatch) -
     assert manager.registered == []
 
 
-async def test_register_hook_maps_manager_jq_error_to_400(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_register_hook_maps_manager_jq_error_to_400(
+    monkeypatch: pytest.MonkeyPatch, serve_tools: Callable[..., None]
+) -> None:
+    serve_tools("notify")
+
     class _RaisingManager(_MgmtManager):
         async def register(self, params: HookParams) -> bool:
             raise ValueError(f"hook {params.name!r}: condition is not valid jq")
@@ -308,6 +321,26 @@ async def test_register_hook_maps_manager_jq_error_to_400(monkeypatch: pytest.Mo
     response = await hooks.register_hook(cast(Request, _JsonReq(payload)))
     assert response.status_code == 400
     assert "not valid jq" in _body(response)["error"]
+
+
+async def test_register_hook_refuses_a_condition_id_the_store_lacks(
+    monkeypatch: pytest.MonkeyPatch, serve_tools: Callable[..., None]
+) -> None:
+    serve_tools("notify")
+    monkeypatch.setattr(instance.app._storage_registry, "_provider", MappedStorage({}))
+    manager = InMemoryHooksManager(HooksSettings())
+    monkeypatch.setattr(hooks_ops, "get_hooks_manager", lambda: manager)
+    payload = {
+        "name": "c",
+        "topic": "events",
+        "tool": "notify",
+        "execution_key": "k-fire",
+        "condition": {"id": "jq/gate"},
+    }
+    response = await hooks.register_hook(cast(Request, _JsonReq(payload)))
+    assert response.status_code == 400
+    assert _body(response)["error"] == "invalid hook params: stored id 'jq/gate' at condition is not a stored template"
+    assert await manager.list_hooks() == {}
 
 
 async def test_unregister_hook_removes(monkeypatch: pytest.MonkeyPatch) -> None:

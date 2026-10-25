@@ -28,12 +28,14 @@ from tai42_contract.interactions.models.media_errors import (
 from tai42_kit.conversations.inbound_media import build_inbound_media_params
 from tai42_kit.interactions import media_ingest_cap_settings
 
+from tai42_skeleton.app import instance
 from tai42_skeleton.conversations import media_meta as meta_module
 from tai42_skeleton.conversations.media_meta import InboundMediaMetaStore
 from tai42_skeleton.conversations.settings import ConversationsSettings
 from tai42_skeleton.interactions import media_ingest
 from tai42_skeleton.interactions.media_ingest import _sniff_isobmff, bind_media, ingest_media
 from tai42_skeleton.settings.media_ingest import media_ingest_settings
+from tai42_skeleton.template.delete_referees import TemplateDeleteRefereeRegistry
 
 # -- magic-byte fixtures (a valid header is enough for filetype) ---------------
 
@@ -745,13 +747,21 @@ async def test_bind_requires_message_id(provider):
 # -- ingest / reaper path agreement -------------------------------------------
 
 
-async def test_ingest_writes_the_exact_path_the_reaper_deletes(provider, meta):
+async def test_ingest_writes_the_exact_path_the_reaper_deletes(provider, meta, monkeypatch):
     """The blob path ``ingest_media`` writes is the one ``_reap_one_media`` deletes — one derivation.
 
-    The provider's ``delete`` raises ``FileNotFoundError`` on a miss, so a reaper that derived a
+    The reaper deletes through the app's real ``ResourceManager`` over the same fake provider, so the
+    delete runs the manager's held-object check (no referee holds the blob) and then the provider's
+    ``delete``. That ``delete`` raises ``FileNotFoundError`` on a miss, so a reaper that derived a
     different path would leave the blob; that the blob and its record are both gone pins agreement.
     """
     from tai42_skeleton.conversations.media_reaper import _reap_one_media
+
+    app = instance.build_app()
+    monkeypatch.setattr(app._storage_registry, "_provider", provider)
+    monkeypatch.setattr(app, "_resource_manager_cache", None)
+    monkeypatch.setattr(app._serving_core, "_template_delete_referee_registry", TemplateDeleteRefereeRegistry())
+    resource_manager = app.storage.resource_manager
 
     result = await ingest_media(
         source=_gen(_PNG),
@@ -763,7 +773,7 @@ async def test_ingest_writes_the_exact_path_the_reaper_deletes(provider, meta):
     )
     assert list(provider.blobs) == [meta_module.inbound_media_blob_path(result.media_id)]
 
-    await _reap_one_media(provider, meta, result.media_id)
+    await _reap_one_media(resource_manager, meta, result.media_id)
 
     assert provider.blobs == {}
     assert await meta.get(result.media_id) is None

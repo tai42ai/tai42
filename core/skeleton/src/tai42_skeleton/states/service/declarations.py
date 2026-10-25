@@ -29,6 +29,8 @@ from tai42_skeleton.states.schema import _is_narrowing, _validate_document, _val
 from tai42_skeleton.states.service.base import _StatesServiceBase
 from tai42_skeleton.states.service.catalog import StateEntry, served_row
 from tai42_skeleton.states.service.rows import _resolve_state_schema, _row_to_declaration
+from tai42_skeleton.states.template_refs import declaration_template_refs
+from tai42_skeleton.template.references import assert_templates_stored
 
 logger = logging.getLogger(__name__)
 
@@ -60,9 +62,11 @@ class _DeclarationMixin(_StatesServiceBase):
         schema, so changing it alone is never gated. The state's pending saves are applied
         first; a save held by a failed save counts as records present: a re-declare that would
         refuse a held save's document, or remove a subject kind it writes, raises
-        :class:`DeclarationInUseError`, and an accepted one names the held saves.
+        :class:`DeclarationInUseError`, and an accepted one names the held saves. A ``schema``
+        given by an id the store lacks raises :class:`ValueValidationError` before any render.
         """
         self._ensure_available()
+        await assert_templates_stored(declaration_template_refs(decl), ValueValidationError)
         if decl.effective_schema is not None:
             raise ValueError("effective_schema is computed by the platform")
         if decl.regimes is not None:

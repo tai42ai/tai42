@@ -17,9 +17,12 @@
  * served bundle drove the real overlay store, not a client-only illusion. The overlay
  * is DB-backed and this stack is shared/serial, so each test cleans up the rows and
  * folders it created.
+ *
+ * The edit control is gated on the caller's access to the overlay write route: an editor
+ * session reaches "Edit" on every tool row and its save lands in the overlay store.
  */
 import { expect, type APIRequestContext, type Page } from '@playwright/test';
-import { apiHeaders, seedCredential, uniq } from './helpers';
+import { apiHeaders, createMemberSession, seedCredential, uniq } from './helpers';
 import { needs, test } from './needs';
 
 needs('kind:tool_meta', 'probe-tools', 'mutable', 'setting:tool:generate_uuid');
@@ -216,4 +219,44 @@ test('a hidden tool is excluded from the list; unhiding via the API reveals it',
   await upsert(request, 'generate_uuid', { hidden: false });
   await page.reload();
   await expect(page.getByRole('link', { name: `Open tool generate_uuid` })).toBeVisible();
+});
+
+test.describe('an editor session edits the overlay', () => {
+  needs('kind:identity', 'kind:accounts');
+
+  test('every tool row offers Edit and a save round-trips through the API', async ({ page, request }) => {
+    await seedCredential(page, await createMemberSession(request, 'editor'));
+    // The edit gate reads the caller's capability projection; the list and its side
+    // reads settle before the per-row controls are counted.
+    const projection = page.waitForResponse(
+      (res) => new URL(res.url()).pathname === '/api/auth/me' && res.request().method() === 'GET',
+    );
+    await gotoToolsSettled(page, '/tools?tags=e2e');
+    expect((await projection).status()).toBe(200);
+
+    // The page shows one slice of the tagged tools; every row on it carries its Edit.
+    const rows = page.getByRole('link', { name: /^Open tool / });
+    await expect(rows.first()).toBeVisible();
+    const rowCount = await rows.count();
+    await expect(page.getByRole('button', { name: /^Edit tool / })).toHaveCount(rowCount);
+
+    // The name filter narrows the list to the tool under test for the save.
+    await gotoToolsSettled(page, '/tools?tags=e2e&q=e2e_echo');
+    await page.getByRole('button', { name: 'Edit tool e2e_echo', exact: true }).click();
+    const dialog = page.getByRole('dialog', { name: 'Edit e2e_echo' });
+    await expect(dialog).toBeVisible();
+    const renamed = uniq('Edited');
+    await dialog.getByLabel('Display name').fill(renamed);
+    await dialog.getByRole('button', { name: 'Save', exact: true }).click();
+    await expect(dialog).toBeHidden();
+
+    await expect
+      .poll(async () => {
+        const meta = (await (await request.get('/api/tool-meta', { headers: apiHeaders() })).json()) as {
+          data: { meta: Array<{ tool_name: string; display_name: string | null }> };
+        };
+        return meta.data.meta.find((r) => r.tool_name === 'e2e_echo')?.display_name ?? null;
+      })
+      .toBe(renamed);
+  });
 });

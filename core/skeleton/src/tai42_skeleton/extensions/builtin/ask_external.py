@@ -43,11 +43,22 @@ _CONTROL_PARAMS = ("question", "answer_schema", "timeout")
 # The keys ``ask_external`` accepts in its author-supplied extension config.
 _CONFIG_KEYS = frozenset({"verifier"})
 
+# The declared settings: an optional ``verifier`` binding, nothing else.
+_CONFIG_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "verifier": {
+            **TopicVerifierBinding.model_json_schema(),
+            "title": "Verifier",
+            "description": "The webhook verifier that authenticates the signed callback, and its per-binding settings.",
+        }
+    },
+    "additionalProperties": False,
+}
 
-def _author_verifier(raw: object) -> TopicVerifierBinding | None:
+
+def _author_verifier(raw: object) -> TopicVerifierBinding:
     """The author-bound verifier binding, validated at wrap time (manifest load and reload)."""
-    if raw is None:
-        return None
     try:
         return TopicVerifierBinding.model_validate(raw)
     except ValidationError as exc:
@@ -81,7 +92,7 @@ def _check_wrapped_params(params: Mapping[str, inspect.Parameter]) -> None:
             )
 
 
-@tai42_app.extensions.extension(kind=ExtensionKind.TRANSFORMER, name="ask_external")
+@tai42_app.extensions.extension(kind=ExtensionKind.TRANSFORMER, name="ask_external", config_schema=_CONFIG_SCHEMA)
 def ask_external(
     func: Callable[..., Any], name: str, description: str, config: dict[str, Any] | None = None
 ) -> Callable[..., Any]:
@@ -101,7 +112,7 @@ def ask_external(
     unknown = sorted(set(config) - _CONFIG_KEYS)
     if unknown:
         raise TaiValidationError(f"ask_external config has unknown key(s): {', '.join(unknown)}")
-    verifier = _author_verifier(config.get("verifier"))
+    verifier = _author_verifier(config["verifier"]) if "verifier" in config else None
 
     params = inspect.signature(func).parameters
     _check_wrapped_params(params)

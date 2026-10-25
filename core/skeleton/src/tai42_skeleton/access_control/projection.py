@@ -1,10 +1,10 @@
 """The derived capability projection — what the caller can actually reach.
 
-``GET /api/auth/me`` answers this projection: the concrete (path, method) surface,
-dynamic route patterns, sub-MCP mounts, tools, and agents an authenticated caller can
-reach RIGHT NOW, derived — never stored, never a second ACL. The one invariant is
-**projection ⊆ gate**: every projected surface is one the real middleware + backend
-stack would ADMIT, so the projection can never advertise a door the gate would slam.
+``GET /api/auth/me`` answers this projection: the (path, method) surface, dynamic route
+patterns, sub-MCP mounts, tools, and agents an authenticated caller can reach RIGHT NOW,
+derived — never stored, never a second ACL. The one invariant is **projection ⊆ gate**:
+every projected surface is one the real middleware + backend stack would ADMIT on the
+probe path it was decided on.
 
 How the invariant is held:
 
@@ -23,6 +23,11 @@ How the invariant is held:
   denies a route at the edge denies it in the projection too. An admin (the condition-free
   ``"*"`` discriminator) skips the jq pass — its policy carries no condition by
   definition.
+- **A templated route is decided on a representative path** — its template is listed with
+  the methods admitted on one concrete instance of it. This is exact for every role-holder,
+  whose grants and jq do not depend on the instance a path names; a credential fenced per
+  instance (a pattern row naming one resource, a jq condition on a path parameter) is
+  decided at the gate on submit.
 
 **Point-in-time:** both ``.context.*`` (a single ``get_live_context`` read) and
 ``.system.time`` (a single ``time.time()`` read, baked into every pass when the passes are
@@ -65,7 +70,7 @@ from tai42_skeleton.access_control.coverage import is_public_only, scopes_cover
 from tai42_skeleton.access_control.path_canon import canonicalize_path
 from tai42_skeleton.access_control.policy import PolicyEnforcer, RenderedCondition, policy_enforcer, render_condition
 from tai42_skeleton.access_control.projection_pattern_sampling import _sample_path_for_pattern, pattern_open_prefix
-from tai42_skeleton.access_control.role_gate import declares_any_authenticated
+from tai42_skeleton.access_control.role_gate import declares_any_authenticated, route_template_regex
 from tai42_skeleton.access_control.role_grants import role_level_decision
 from tai42_skeleton.access_control.settings import AccessControlSettings, access_control_settings
 from tai42_skeleton.access_control.standing import JqPass, Standing, StandingDenied, jq_passes, resolve_standing
@@ -92,7 +97,11 @@ _TOOL_RUN_DOORS: frozenset[tuple[str, str]] = frozenset({("POST", RUN_TOOL_PATH)
 
 
 class RouteEntry(BaseModel):
-    """A concrete route the caller can reach, with the methods that pass its jq."""
+    """A route the caller can reach, with the methods its gate and jq admit.
+
+    A templated ``path`` (``/api/presets/{name}``) lists the methods admitted on a
+    representative instance of the route.
+    """
 
     path: str
     methods: list[str]
@@ -131,7 +140,11 @@ class PrincipalRef(BaseModel):
 
 
 class ProjectionResult(BaseModel):
-    """The caller's derived capability projection — every field derived, never stored."""
+    """The caller's derived capability projection — every field derived, never stored.
+
+    ``access_control_enabled`` is ``True`` on every projection built for a checked identity and
+    ``False`` only on the gate-off synthetic projection, where no identity is checked.
+    """
 
     user_id: str
     owner_user_id: str | None
@@ -146,6 +159,8 @@ class ProjectionResult(BaseModel):
     tools: list[str]
     agents: list[str]
     mintable: bool
+    # False only on the gate-off synthetic projection: no identity is checked on this deployment.
+    access_control_enabled: bool
 
 
 # -- Live-source seams (monkeypatch points for unit tests) -------------------
@@ -396,6 +411,7 @@ async def _build_uncached(
         tools=tools,
         agents=agents,
         mintable=_mintable(),
+        access_control_enabled=True,
     )
 
 
@@ -450,9 +466,10 @@ async def _build_admits(
         if not await _jq_admits(enforcer, passes, path, method):
             return False
         # The per-tag LEVEL term — the SAME shared decision the request gate runs, so a
-        # fenced route or an ungranted tag is omitted here exactly as it is denied at the
-        # edge (projection ⊆ gate). A missing-role pointer denies; an infra fault
-        # propagates per the projection's failure doctrine.
+        # fenced route, or an ungranted tag on a route not declared self-service, is
+        # omitted here exactly as it is denied at the edge (projection ⊆ gate). A
+        # missing-role pointer denies; an infra fault propagates per the projection's
+        # failure doctrine.
         allowed, _cause = await role_level_decision(standing.policy, standing.owner_policy, path, method, version)
         return allowed
 
@@ -473,14 +490,13 @@ async def _project_routes(
     routes: list[RouteEntry] = []
     projected_pairs: set[tuple[str, str]] = set()
     for meta in _registry_routes():
-        # A templated registry path (``/api/agents/{name}/runs``) is a dynamic surface, not
-        # a concrete route: ``resolve_resource_ids`` would ``fullmatch`` the brace-literal
-        # under a dynamic-pattern row and emit a bogus RouteEntry with literal braces that
-        # also double-lists a surface the route_patterns loop already carries. Such routes
-        # are represented ONLY via route_patterns (and the sub_mcp/agents lists).
-        if "{" in meta.path:
+        # A templated path is probed on a representative concrete instance, never on its
+        # brace literal; the entry keeps the template as its path.
+        sample = _sample_path_for_pattern(route_template_regex(meta.path).pattern) if "{" in meta.path else meta.path
+        if sample is None:
+            logger.info("access_control: projection excluding non-sampleable route template %r", meta.path)
             continue
-        probe = canonicalize_path(meta.path)
+        probe = canonicalize_path(sample)
         allowed = [
             method
             for method in meta.methods
@@ -607,7 +623,7 @@ def synthetic_full_projection() -> ProjectionResult:
     ``admin=True`` + the universal scope under the named ``__no_auth__`` identity; the list
     fields are explicitly EMPTY (the Studio renders everything off the full-projection
     flag). ``mintable`` is still DERIVED — a provider that physically cannot mint reports
-    ``False`` even here.
+    ``False`` even here. ``access_control_enabled`` is ``False``: no identity is checked.
     """
     return ProjectionResult(
         user_id=NO_AUTH_USER_ID,
@@ -622,4 +638,5 @@ def synthetic_full_projection() -> ProjectionResult:
         tools=[],
         agents=[],
         mintable=_mintable(),
+        access_control_enabled=False,
     )

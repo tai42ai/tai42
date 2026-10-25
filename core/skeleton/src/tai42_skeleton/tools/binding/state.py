@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from tai42_skeleton.tools.pause_registry import ToolPauseRegistry
     from tai42_skeleton.tools.registry import ToolRegistry
     from tai42_skeleton.tools.retry import ToolRetryRegistry
+    from tai42_skeleton.tools.template_refs import TemplateRefsRegistry
     from tai42_skeleton.tools.tier import ToolTierRegistry
     from tai42_skeleton.tools.tool_refs import ToolRefsRegistry
 
@@ -55,6 +56,10 @@ class _ToolBindingBase:
     @property
     def _tool_refs_registry(self) -> "ToolRefsRegistry":
         return self._app._tool_refs_registry
+
+    @property
+    def _template_refs_registry(self) -> "TemplateRefsRegistry":
+        return self._app._template_refs_registry
 
     @property
     def _tool_retry_registry(self) -> "ToolRetryRegistry":

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from contextlib import AbstractContextManager
-from typing import Any, Protocol, TypeVar, overload, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, TypeVar, overload, runtime_checkable
 
 from tai42_contract.agent import Agent
 from tai42_contract.backend import Backend
@@ -13,6 +13,9 @@ from tai42_contract.sandbox import Sandbox, SandboxPolicy
 from tai42_contract.storage import Storage
 from tai42_contract.template import ImageReference
 from tai42_contract.template.eviction import TemplateEviction
+
+if TYPE_CHECKING:
+    from tai42_contract.tools import TemplateDeleteReferee
 
 _AgentT = TypeVar("_AgentT", bound=Agent)
 _StorageT = TypeVar("_StorageT", bound=Storage)
@@ -153,6 +156,44 @@ class AppStorage(Protocol):
         """
         ...
 
+    def mark_not_backed_up(self, prefix: str) -> None:
+        """Declare that every object under ``prefix`` is left out of backups.
+
+        ``prefix`` is a canonical directory key followed by ``/``; any other value raises
+        ``ValueError``. Declaring the same prefix again is a no-op. Declarations last one
+        serving epoch: declare from a startup handler and a reload handler, like a rename
+        referee.
+        """
+        ...
+
+    def not_backed_up_prefixes(self) -> frozenset[str]:
+        """The prefixes declared through :meth:`mark_not_backed_up` in this epoch."""
+        ...
+
+    def mark_unlisted(self, prefix: str) -> None:
+        """Declare that every object under ``prefix`` is left out of the storage and template listings.
+
+        An unlisted object is still read, downloaded, stat-ed and deleted by its id.
+        ``prefix`` follows the same rule as ``mark_not_backed_up``, and declarations
+        last one serving epoch.
+        """
+        ...
+
+    def unlisted_prefixes(self) -> frozenset[str]:
+        """The prefixes declared through :meth:`mark_unlisted` in this epoch."""
+        ...
+
+    def register_template_delete_referee(self, referee: TemplateDeleteReferee) -> None:
+        """Register a :data:`~tai42_contract.tools.TemplateDeleteReferee` consulted before a stored-template delete.
+
+        Called with the set of ids a delete would remove, a referee answers one
+        :class:`~tai42_contract.tools.ReferenceHolder` per place a stored object it owns
+        names one of them, ``[]`` for none, and changes nothing. Any non-empty answer
+        blocks the delete and the holders are named. A referee that cannot answer raises,
+        and the delete fails. Registering the same referee object twice raises loudly.
+        """
+        ...
+
 
 @runtime_checkable
 class AppExtensions(Protocol):
@@ -167,6 +208,7 @@ class AppExtensions(Protocol):
         requires_body_locality: bool = False,
         pauses: bool = False,
         declares_output_schema: bool = False,
+        config_schema: dict[str, Any] | None = None,
     ) -> Callable[..., Any]:
         """Register a tool-extension factory under ``name`` (default: the function's own name).
 
@@ -186,12 +228,23 @@ class AppExtensions(Protocol):
 
         ``declares_output_schema``: this extension declares the wrapped tool's output shape (its
         JSON Schema), so a preset over a tool carrying it may not also set ``output_schema``.
+
+        ``config_schema`` is the JSON Schema (draft 2020-12, root ``"type": "object"``) of the
+        settings a combo element passes to the factory's ``config`` parameter. A factory that takes
+        ``config`` must declare it, and a factory without ``config`` must not; registration refuses
+        either mismatch and a schema that breaks the JSON Schema rules. Every element's settings are
+        checked against it before the factory runs, and an extension without one accepts no settings.
+        The server calls the factory at every bind, and once more for every manifest or preset write
+        naming the combo, to check it before storing; that branch is discarded. A factory may raise to
+        refuse its inputs; whatever else it does when called must be repeatable and must not depend on
+        the branch being served.
         """
         ...
 
-    def available_extensions(self) -> list[dict[str, str | bool]]:
-        """List registered extensions as ``[{"name", "kind", "multiple"}]``.
+    def available_extensions(self) -> list[dict[str, Any]]:
+        """List registered extensions as ``[{"name", "kind", "multiple", "config_schema"}]``.
 
-        ``multiple`` says whether one tool may stack several extensions of that kind.
+        ``multiple`` says whether one tool may stack several extensions of that kind;
+        ``config_schema`` is the declared settings schema, ``None`` for an extension that takes none.
         """
         ...

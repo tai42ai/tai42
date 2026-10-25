@@ -15,7 +15,7 @@ contract shapes) are reused, never re-authored.
 from __future__ import annotations
 
 import warnings
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, JsonValue, RootModel
 from tai42_contract.accounts.models import LoginCredentialKind, LoginMethod
@@ -99,10 +99,17 @@ class BackupImportResult(BaseModel):
 # --- Channels ---------------------------------------------------------------
 
 
-class ChannelListing(BaseModel):
-    """The registered channel names the delivery media can resolve."""
+class ChannelEntry(BaseModel):
+    """One registered channel: its registry name and the hint for a route's ``our_identity``."""
 
-    channels: list[str]
+    name: str
+    identity_hint: str | None
+
+
+class ChannelListing(BaseModel):
+    """The registered channels, sorted by name."""
+
+    channels: list[ChannelEntry]
 
 
 # --- Checkpoints ------------------------------------------------------------
@@ -133,7 +140,7 @@ class CheckpointSweepResult(BaseModel):
 
 
 class ExtensionView(BaseModel):
-    """One registered extension: ``name``, the lowercase ``kind`` value, and ``multiple``.
+    """One registered extension: ``name``, the lowercase ``kind`` value, ``multiple`` and ``config_schema``.
 
     ``multiple`` says whether one tool may stack several extensions of that kind.
     """
@@ -141,6 +148,9 @@ class ExtensionView(BaseModel):
     name: str
     kind: str
     multiple: bool
+    config_schema: dict[str, Any] | None = Field(
+        description="the JSON Schema of the settings this extension binds as ``config``; ``null`` when it takes none"
+    )
 
 
 class ExtensionListing(RootModel[list[ExtensionView]]):

@@ -14,7 +14,13 @@ import pytest
 from tai42_contract.app import tai42_app
 from tai42_contract.template import TemplatedText
 
-from tai42_kit.utils.render import SchemaBodyError, render_templated_text, resolve_schema_body
+from tai42_kit.utils.render import (
+    SchemaBodyError,
+    TextBodyError,
+    render_templated_text,
+    resolve_schema_body,
+    resolve_text_body,
+)
 
 
 class _FakeResourceManager:
@@ -96,3 +102,31 @@ async def test_resolve_schema_body_non_object_raises(manager: _FakeResourceManag
     manager.resources["s"] = "[1, 2, 3]"
     with pytest.raises(SchemaBodyError, match="rendered to a list, not a JSON object"):
         await resolve_schema_body("myfield", TemplatedText(id="s"))
+
+
+async def test_resolve_text_body_none_and_plain_text(manager: _FakeResourceManager) -> None:
+    assert await resolve_text_body("input_map", None) is None
+    assert await resolve_text_body("input_map", "{a: .b}") == "{a: .b}"
+    assert manager.calls == []
+
+
+async def test_resolve_text_body_renders_inline_and_stored(manager: _FakeResourceManager) -> None:
+    manager.resources["map"] = ".temp"
+    assert await resolve_text_body("output_map", TemplatedText(id="map"), locale="he") == ".temp"
+    inline = TemplatedText(content="{x: .y}")
+    assert await resolve_text_body("output_map", inline) == "{x: .y}|[]"
+    assert manager.calls == [(TemplatedText(id="map"), "he"), (inline, None)]
+
+
+async def test_resolve_text_body_unrenderable_names_the_field_and_the_id(manager: _FakeResourceManager) -> None:
+    with pytest.raises(TextBodyError) as caught:
+        await resolve_text_body("preset 'p' input_map", TemplatedText(id="absent"))
+    assert str(caught.value) == "preset 'p' input_map: its stored id 'absent' could not be rendered: 'absent'"
+
+
+@pytest.mark.parametrize("value", ["", "   \n", TemplatedText(id="blank")])
+async def test_resolve_text_body_refuses_an_empty_program(manager: _FakeResourceManager, value: object) -> None:
+    manager.resources["blank"] = "  "
+    with pytest.raises(TextBodyError) as caught:
+        await resolve_text_body("output_map", value)  # pyright: ignore[reportArgumentType]
+    assert str(caught.value) == "output_map is empty; send null to clear it"

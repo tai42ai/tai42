@@ -25,8 +25,8 @@ The doors:
   tool name; new bound BEFORE the old is torn down).
 * ``DELETE /api/presets/{name}`` — soft-delete a live record (or HARD-delete a
   conflicted one) then tear down + fan out.
-* ``GET /api/presets/{name}/referees`` — the full union of live references a rename
-  would strand (referencing presets + platform wiring + plugin holders).
+* ``GET /api/presets/{name}/referees?action=rename|delete`` — the live holders the rename
+  or delete gate would refuse on (the gate's own gather).
 * ``POST /api/presets/validate`` — dry-run a create/version draft (200 verdict).
 * ``PUT /api/presets/{name}/versions/{version}/tags`` — relabel a version.
 
@@ -66,7 +66,9 @@ from tai42_skeleton.operations.presets import (
 from tai42_skeleton.operations.presets import (
     read_create_extensions,
     read_edit_extensions,
+    read_input_map,
     read_input_schema,
+    read_output_map,
     read_output_schema,
     read_state_binding,
 )
@@ -123,20 +125,26 @@ async def _extract_create(request: Request) -> dict[str, Any]:
         "extensions": read_create_extensions("extensions" in body, body.get("extensions")),
         "output_schema": read_output_schema(body.get("output_schema")),
         "input_schema": read_input_schema(body.get("input_schema")),
+        "input_map": read_input_map(body.get("input_map")),
+        "output_map": read_output_map(body.get("output_map")),
         "state_binding": read_state_binding(body.get("state_binding")),
     }
 
 
 async def _extract_save_version(request: Request) -> dict[str, Any]:
     body = await read_json_object(request)
-    if not any(
-        field in body
-        for field in ("fixed_kwargs", "extensions", "output_schema", "input_schema", "description", "state_binding")
-    ):
-        raise BadRequestError(
-            "body must provide at least one of 'fixed_kwargs', 'extensions', 'output_schema', "
-            "'input_schema', 'description', 'state_binding'"
-        )
+    fields = (
+        "fixed_kwargs",
+        "extensions",
+        "output_schema",
+        "input_schema",
+        "input_map",
+        "output_map",
+        "description",
+        "state_binding",
+    )
+    if not any(field in body for field in fields):
+        raise BadRequestError(f"body must provide at least one of {', '.join(repr(field) for field in fields)}")
     fixed_kwargs = body.get("fixed_kwargs")
     if fixed_kwargs is not None and not isinstance(fixed_kwargs, dict):
         raise BadRequestError("'fixed_kwargs' must be a JSON object")
@@ -153,6 +161,11 @@ async def _extract_save_version(request: Request) -> dict[str, Any]:
     # the store's carry-forward sentinel in the operation.
     input_schema_provided = "input_schema" in body
     input_schema = read_input_schema(body.get("input_schema")) if input_schema_provided else None
+    # The two maps follow the same presence-flag carry-forward.
+    input_map_provided = "input_map" in body
+    input_map = read_input_map(body.get("input_map")) if input_map_provided else None
+    output_map_provided = "output_map" in body
+    output_map = read_output_map(body.get("output_map")) if output_map_provided else None
     # ``description`` follows the None-carry sentinel: absent → carry forward (``None``);
     # present → set it (the resulting value is validated non-empty in the store view, so
     # an explicit ``""`` is rejected there). It must be a string when present.
@@ -173,6 +186,10 @@ async def _extract_save_version(request: Request) -> dict[str, Any]:
         "output_schema_provided": output_schema_provided,
         "input_schema": input_schema,
         "input_schema_provided": input_schema_provided,
+        "input_map": input_map,
+        "input_map_provided": input_map_provided,
+        "output_map": output_map,
+        "output_map_provided": output_map_provided,
         "description": description,
         "state_binding": state_binding,
         "state_binding_provided": state_binding_provided,
@@ -209,6 +226,10 @@ async def _extract_validate(request: Request) -> dict[str, Any]:
         "output_schema_value": body.get("output_schema"),
         "input_schema_present": "input_schema" in body,
         "input_schema_value": body.get("input_schema"),
+        "input_map_present": "input_map" in body,
+        "input_map_value": body.get("input_map"),
+        "output_map_present": "output_map" in body,
+        "output_map_value": body.get("output_map"),
         "state_binding_present": "state_binding" in body,
         "state_binding_value": body.get("state_binding"),
     }

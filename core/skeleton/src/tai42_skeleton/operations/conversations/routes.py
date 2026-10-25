@@ -1,6 +1,6 @@
 """Conversation-route CRUD doors and their body validators.
 
-Create/upsert (target-exists + pass-role bind at the door, then the route write service),
+Create/upsert (target- and channel-exist + pass-role bind at the door, then the route write service),
 read/list (secret withheld), delete (with thread-index reclamation), and the single
 answer-record read.
 """
@@ -12,6 +12,7 @@ from typing import Any
 
 from tai42_contract.conversations import (
     ROUTE_NAME_RE,
+    ChannelConversationRouteCreate,
     ConversationRoute,
     ConversationRouteBody,
     ConversationRouteCreateBody,
@@ -25,6 +26,7 @@ from tai42_skeleton.conversations.route_writes import RouteBindRefusedError, wri
 from tai42_skeleton.operations import BadRequestError, NotFoundError, operation
 from tai42_skeleton.operations.definition_door import definition_door
 from tai42_skeleton.operations.errors import ForbiddenError, NotSupportedError, ValidationRejectedError
+from tai42_skeleton.operations.reference_check import RegistryReference, assert_references_resolve
 from tai42_skeleton.operations.response_models_group_a import (
     ConversationRecordView,
     ConversationRouteCreateResult,
@@ -54,26 +56,6 @@ def _public_route_view(route: ConversationRoute) -> dict[str, Any]:
 def _validate_route_name(route_name: str) -> None:
     if not ROUTE_NAME_RE.fullmatch(route_name):
         raise BadRequestError(f"route_name must be a slug matching {ROUTE_NAME_RE.pattern!r}: {route_name!r}")
-
-
-async def _assert_target_exists(target_kind: str, target_name: str) -> None:
-    """Existence only — the key's authority over the target is not checked here.
-
-    The turn runs as the key, so authority is deliberately not checked here. An ``agent``
-    target must be registered; a ``tool`` target must resolve on the live tool registry.
-    A miss is a loud 404, mirroring either side.
-    """
-    from tai42_skeleton.app import instance
-    from tai42_skeleton.tools.binding import UnknownToolError
-
-    if target_kind == "agent":
-        if target_name not in instance.app.agents.all_agents():
-            raise NotFoundError(f"agent not found: {target_name!r}")
-        return
-    try:
-        await instance.app.tools.get_tool(target_name)
-    except UnknownToolError as exc:
-        raise NotFoundError(f"tool not found: {target_name!r}") from exc
 
 
 def _door_flip_refusal(refused: DoorFlipRefusedError) -> BadRequestError:
@@ -165,14 +147,15 @@ async def create_conversation_route(
     suppresses it for an operator to answer) when a thread carries no per-thread override.
 
     ``target_name`` must merely EXIST — the agent (``target_kind=agent``) or tool
-    (``target_kind=tool``) — the key's live grants bound the turn at fire. ``execution_key`` is
+    (``target_kind=tool``) — the key's live grants bound the turn at fire. A ``channel`` row must
+    name a channel a plugin registered on this deployment (400 otherwise). ``execution_key`` is
     the api-key identity the turn runs AS; the caller must be allowed to delegate it and it must
     be usable by a tokenless fire. Both are decided at this door BEFORE the route write service
     runs the route's own rules, so a refusal leaves any existing row untouched. The write service
     runs the target's bind check (a refusal is a 422 carrying its lines), then renders and
     compiles the door jqs (``start_expr``/``cancel_expr``/``resume_expr``/``extras_expr``) and
-    ``reply_expr``, so an invalid one — or a by-id text whose stored resource cannot be fetched —
-    is refused at create, not at first message. A
+    ``reply_expr``, so an invalid one — or a text whose stored resource cannot be fetched, or
+    that cannot be rendered — is refused at create, not at first message. A
     ``channel`` row's ``our_identity`` is stored canonicalized and must not already be routed
     on that channel. An edit that would change the ``door`` of a route already HOLDING
     threads is refused: the two doors key their threads differently, so the held threads
@@ -224,7 +207,12 @@ async def create_conversation_route(
 
     manager = _require_backend()
 
-    await _assert_target_exists(create.target_kind, create.target_name)
+    # The target and a channel row's channel must be served; the key's authority over the target
+    # is not checked, the turn runs as the key.
+    refs = [RegistryReference(f"route target {create.target_kind}", create.target_name, create.target_kind)]
+    if isinstance(create, ChannelConversationRouteCreate):
+        refs.append(RegistryReference("route channel", create.channel, "channel"))
+    await assert_references_resolve(refs)
     execution_key_fingerprint = await _pkg.assert_execution_key_bindable(
         await _pkg.resolve_caller(), create.execution_key
     )

@@ -20,6 +20,7 @@ from typing import Any, Protocol, runtime_checkable
 
 from tai42_contract.agent.base import PresetSpec
 from tai42_contract.manifest import ExtensionElement
+from tai42_contract.preset_stages import PresetOutputStage, PresetParkStages, preset_output_failed_outcome
 from tai42_contract.presets.errors import (
     PresetError,
     PresetExistsError,
@@ -63,6 +64,8 @@ class PresetStore(Protocol):
         output_schema: TemplatedText | dict[str, Any] | None = None,
         input_schema: TemplatedText | dict[str, Any] | None = None,
         *,
+        input_map: TemplatedText | str | None = None,
+        output_map: TemplatedText | str | None = None,
         state_binding: StateBinding | None = None,
         tags: list[str] | None = None,
     ) -> DocumentRecord:
@@ -70,7 +73,7 @@ class PresetStore(Protocol):
 
         ``spec`` carries ``name``/``description``/
         ``base_tool``/``fixed_kwargs``; ``extensions`` (the combos list) and the
-        optional ``output_schema`` / ``input_schema`` ride alongside — all of them
+        optional ``output_schema`` / ``input_schema`` / ``input_map`` / ``output_map`` ride alongside — all of them
         land in the persisted :class:`PresetBody`. ``tags`` labels version 1 in the
         SAME create commit (``None`` leaves it untagged); a caller that must tag the
         first version does so atomically, never through a separate follow-up write.
@@ -89,6 +92,8 @@ class PresetStore(Protocol):
         description: str | None = None,
         *,
         input_schema: TemplatedText | dict[str, Any] | CarryForward | None = CARRY_FORWARD,
+        input_map: TemplatedText | str | CarryForward | None = CARRY_FORWARD,
+        output_map: TemplatedText | str | CarryForward | None = CARRY_FORWARD,
         state_binding: StateBinding | CarryForward | None = CARRY_FORWARD,
         tags: list[str] | None = None,
     ) -> DocumentVersion:
@@ -104,10 +109,11 @@ class PresetStore(Protocol):
         one UNIFORM sentinel: omitted/``None`` = carry the active value forward
         unchanged; an explicit empty list (``extensions=[]``) = deliberately CLEAR
         that field. An explicitly provided empty list is a value, never "not
-        provided". ``output_schema`` and ``input_schema`` each follow the SAME rule
-        but with a distinct :data:`CARRY_FORWARD` sentinel (their cleared state is
-        ``None``, so ``None`` cannot double as "not provided"): omitted = carry
-        forward, an explicit ``None`` = clear, an explicit dict = wins.
+        provided". ``output_schema``, ``input_schema``, ``input_map`` and
+        ``output_map`` each follow the SAME rule but with a distinct
+        :data:`CARRY_FORWARD` sentinel (their cleared state is ``None``, so ``None``
+        cannot double as "not provided"): omitted = carry forward, an explicit
+        ``None`` = clear, an explicit value = wins.
         ``description`` is editable per
         version: ``None`` = carry the active description forward, an explicit
         non-empty string = set it. The RESULTING description — explicit or carried
@@ -197,10 +203,13 @@ __all__ = [
     "PresetInputSchemaSupport",
     "PresetNameConflictError",
     "PresetNotFoundError",
+    "PresetOutputStage",
+    "PresetParkStages",
     "PresetSeed",
     "PresetSeedToolMeta",
     "PresetSpec",
     "PresetStore",
     "PresetVersionNotFoundError",
     "PresetWriteValidator",
+    "preset_output_failed_outcome",
 ]

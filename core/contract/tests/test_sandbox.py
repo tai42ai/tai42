@@ -318,6 +318,7 @@ def test_app_interactions_exposes_ask_typed_by_the_contract_protocol():
         "assert_delivery_authorized",
         "redelivery_horizon_seconds",
         "callback_url_prefix",
+        "settle_chained_terminal",
     }
     # ``ask`` is a read property typed as the already-carried Ask Protocol.
     prop = inspect.getattr_static(AppInteractions, "ask")
@@ -428,6 +429,9 @@ def test_app_interactions_double_threads_on_mismatch_through_the_typed_facet():
 
         def callback_url_prefix(self) -> str | None:
             return None
+
+        async def settle_chained_terminal(self, chain_key: str, result: object) -> object:
+            return result
 
     facet = _InteractionsDouble()
     assert isinstance(facet, AppInteractions)

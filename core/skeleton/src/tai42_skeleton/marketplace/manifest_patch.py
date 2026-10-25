@@ -1,11 +1,16 @@
 """Pure manifest-patch functions for a plugin's ``provides`` index.
 
-Three side-effect-free functions over a plain manifest dict — no I/O, no app
+Five side-effect-free functions over a plain manifest dict — no I/O, no app
 handle — so each kind of provides item is unit-testable in isolation:
 :func:`collisions` (a pre-flight that never mutates), :func:`apply_provides`
-(the install patch), and :func:`remove_provides` (the uninstall unpatch). All
-three are driven by :data:`~tai42_contract.plugins.KIND_MANIFEST_BINDINGS`: it
-names the manifest field each item kind wires into and the patch shape.
+(the install patch), :func:`remove_provides` (the uninstall unpatch),
+:func:`update_provides` (the update swap: the old spec's references removed, the new
+spec's applied, each MCP entry's ``include``/``exclude`` carried onto the entry the
+new spec appends under the same title) and :func:`revert_provides` (the reversal of
+one install or update patch, from the :class:`ProvidesUndo` that patch returned). All
+five are driven by
+:data:`~tai42_contract.plugins.KIND_MANIFEST_BINDINGS`: it names the manifest field
+each item kind wires into and the patch shape.
 
 The six patch shapes:
 
@@ -55,7 +60,9 @@ skipped item.
 
 from __future__ import annotations
 
+import copy
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any, NamedTuple
 
 from tai42_contract.plugins import KIND_MANIFEST_BINDINGS, PluginItem, PluginSpec
@@ -280,24 +287,28 @@ def _remove_by_predicate(manifest_dict: dict[str, Any], field: str, keep: Callab
     return False
 
 
-def _remove_config_row(manifest_dict: dict[str, Any], field: str, target: _FieldTargets) -> bool:
-    modules = set(target.values)
-    return _remove_by_predicate(manifest_dict, field, lambda entry: entry.get("module") not in modules)
+# The key a list entry is matched on, per list-shaped patch shape: a config row by its
+# module, an mcp entry by its title, a connector descriptor by its id. A plain string list
+# entry is its own key.
+_ENTRY_KEY = {"config_row": "module", "mcp_entry": "title", "descriptor_entry": "id"}
 
 
-def _remove_string_list(manifest_dict: dict[str, Any], field: str, target: _FieldTargets) -> bool:
-    values = set(target.values)
-    return _remove_by_predicate(manifest_dict, field, lambda value: value not in values)
+def _entry_key(mode: str, entry: Any) -> Any:
+    """The key ``entry`` of a ``mode``-shaped list field is matched on."""
+    key = _ENTRY_KEY.get(mode)
+    return entry if key is None else entry.get(key)
 
 
-def _remove_mcp_entry(manifest_dict: dict[str, Any], field: str, target: _FieldTargets) -> bool:
-    titles = {payload["title"] for payload in target.values}
-    return _remove_by_predicate(manifest_dict, field, lambda entry: entry.get("title") not in titles)
+def _target_keys(target: _FieldTargets) -> set[Any]:
+    """The entry keys ``target``'s references carry."""
+    if target.mode in _DATA_DEDUPE_KEY:
+        return {payload[_DATA_DEDUPE_KEY[target.mode]] for payload in target.values}
+    return set(target.values)
 
 
-def _remove_descriptor_entry(manifest_dict: dict[str, Any], field: str, target: _FieldTargets) -> bool:
-    ids = {payload["id"] for payload in target.values}
-    return _remove_by_predicate(manifest_dict, field, lambda entry: entry.get("id") not in ids)
+def _remove_list_entries(manifest_dict: dict[str, Any], field: str, target: _FieldTargets) -> bool:
+    keys = _target_keys(target)
+    return _remove_by_predicate(manifest_dict, field, lambda entry: _entry_key(target.mode, entry) not in keys)
 
 
 def _remove_scalar_module(manifest_dict: dict[str, Any], field: str, target: _FieldTargets) -> bool:
@@ -309,13 +320,82 @@ def _remove_scalar_module(manifest_dict: dict[str, Any], field: str, target: _Fi
 
 
 _REMOVE_HANDLERS: dict[str, Callable[[dict[str, Any], str, _FieldTargets], bool]] = {
-    "config_row": _remove_config_row,
-    "module_list": _remove_string_list,
-    "package_list": _remove_string_list,
-    "mcp_entry": _remove_mcp_entry,
-    "descriptor_entry": _remove_descriptor_entry,
+    "config_row": _remove_list_entries,
+    "module_list": _remove_list_entries,
+    "package_list": _remove_list_entries,
+    "mcp_entry": _remove_list_entries,
+    "descriptor_entry": _remove_list_entries,
     "scalar_module": _remove_scalar_module,
 }
+
+
+class _Displaced(NamedTuple):
+    """One list entry a patch took out, with the place it held.
+
+    ``index`` is its position before the patch. ``after`` holds the key of the entry
+    right before it and ``before`` the key of the first following entry the patch kept,
+    each as a one-element tuple, or ``()`` when there is none.
+    """
+
+    index: int
+    entry: Any
+    after: tuple[Any] | tuple[()]
+    before: tuple[Any] | tuple[()]
+
+
+@dataclass(frozen=True)
+class ProvidesUndo:
+    """What one install or update patch changed, so :func:`revert_provides` reverses exactly that.
+
+    ``applied`` is the spec whose references the patch added. ``removed`` maps each list field
+    the patch took entries out of to its patch shape and those entries, in list order, each as
+    stored and with the place it held. ``scalars`` maps each single-module slot the patch touched to whether it was set
+    and its value before the patch. ``created`` names the list fields the patch created.
+    """
+
+    applied: PluginSpec
+    removed: dict[str, tuple[str, list[_Displaced]]]
+    scalars: dict[str, tuple[bool, Any]]
+    created: frozenset[str]
+
+
+def _undo_of(manifest_dict: dict[str, Any], applied: PluginSpec, displaced: PluginSpec | None) -> ProvidesUndo:
+    """The :class:`ProvidesUndo` of a patch that applies ``applied`` after removing ``displaced``.
+
+    Read from ``manifest_dict`` BEFORE the patch mutates it.
+    """
+    applied_targets = _grouped_targets(applied)
+    displaced_targets = _grouped_targets(displaced) if displaced is not None else {}
+    removed: dict[str, tuple[str, list[_Displaced]]] = {}
+    for field, target in displaced_targets.items():
+        if target.mode == "scalar_module":
+            continue
+        keys = _target_keys(target)
+        listed = [_entry_key(target.mode, entry) for entry in _existing_list(manifest_dict, field)]
+        entries = [
+            _Displaced(
+                index=index,
+                entry=copy.deepcopy(entry),
+                after=(listed[index - 1],) if index > 0 else (),
+                before=next(((key,) for key in listed[index + 1 :] if key not in keys), ()),
+            )
+            for index, entry in enumerate(_existing_list(manifest_dict, field))
+            if listed[index] in keys
+        ]
+        if entries:
+            removed[field] = (target.mode, entries)
+    scalars = {
+        field: (field in manifest_dict, manifest_dict.get(field))
+        for targets in (displaced_targets, applied_targets)
+        for field, target in targets.items()
+        if target.mode == "scalar_module"
+    }
+    created = frozenset(
+        field
+        for field, target in applied_targets.items()
+        if target.mode != "scalar_module" and field not in manifest_dict
+    )
+    return ProvidesUndo(applied=applied, removed=removed, scalars=scalars, created=created)
 
 
 def collisions(manifest_dict: dict[str, Any], spec: PluginSpec) -> list[str]:
@@ -341,19 +421,138 @@ def collisions(manifest_dict: dict[str, Any], spec: PluginSpec) -> list[str]:
     return messages
 
 
-def apply_provides(manifest_dict: dict[str, Any], spec: PluginSpec) -> None:
+def apply_provides(manifest_dict: dict[str, Any], spec: PluginSpec) -> ProvidesUndo:
     """Patch ``manifest_dict`` in place, adding one manifest reference per provides target.
 
     Re-checks :func:`collisions` first — the install pre-flight may have raced a
     foreign manifest edit — and raises :class:`ManifestCollisionError` listing
     every collision before mutating anything. ``env_selected`` (``config``) items
-    add nothing.
+    add nothing. Returns the :class:`ProvidesUndo` that reverses this patch.
     """
     found = collisions(manifest_dict, spec)
     if found:
         raise ManifestCollisionError("; ".join(found))
+    undo = _undo_of(manifest_dict, spec, None)
     for field, target in _grouped_targets(spec).items():
         _APPLY_HANDLERS[target.mode](manifest_dict, field, target)
+    return undo
+
+
+_SELECTION_KEYS = ("include", "exclude")
+
+
+def update_provides(manifest_dict: dict[str, Any], old_spec: PluginSpec, new_spec: PluginSpec) -> ProvidesUndo:
+    """Swap ``old_spec``'s manifest references for ``new_spec``'s in place, keeping MCP tool selections.
+
+    :func:`remove_provides` of ``old_spec`` then :func:`apply_provides` of ``new_spec``, with one
+    addition: the ``include`` and ``exclude`` an ``mcp_entry`` of ``old_spec`` carries in the
+    manifest before the swap are set on the entry ``new_spec`` appends under the same title.
+    Every other key of that entry is ``new_spec``'s payload. Returns the :class:`ProvidesUndo`
+    that reverses this swap.
+    """
+    undo = _undo_of(manifest_dict, new_spec, old_spec)
+    kept: dict[str, dict[str, dict[str, Any]]] = {}
+    for field, target in _grouped_targets(old_spec).items():
+        if target.mode != "mcp_entry":
+            continue
+        titles = {payload["title"] for payload in target.values}
+        kept[field] = {
+            entry["title"]: {key: entry[key] for key in _SELECTION_KEYS if key in entry}
+            for entry in _existing_list(manifest_dict, field)
+            if isinstance(entry, dict) and entry.get("title") in titles
+        }
+    remove_provides(manifest_dict, old_spec)
+    apply_provides(manifest_dict, new_spec)
+    for field, target in _grouped_targets(new_spec).items():
+        selections = kept.get(field) if target.mode == "mcp_entry" else None
+        if not selections:
+            continue
+        appended = {payload["title"] for payload in target.values}
+        for entry in _existing_list(manifest_dict, field):
+            title = entry.get("title") if isinstance(entry, dict) else None
+            if title in appended and title in selections:
+                entry.update(selections[title])
+    return undo
+
+
+def revert_provides(manifest_dict: dict[str, Any], undo: ProvidesUndo) -> None:
+    """Reverse in place the install or update patch ``undo`` was returned by.
+
+    Every manifest edit made since the patch stands: the applied spec's references are
+    removed (:func:`remove_provides`), each entry the patch took out goes back as stored,
+    next to the neighbour it had when that one is still listed (a router never after the
+    Studio SPA catch-all), each single-module slot the patch touched gets its prior value
+    back, and a list field the patch created is dropped when it is left empty. An entry or slot value
+    to put back that another edit has already put in place raises
+    :class:`ManifestCollisionError` naming each, and the caller's write persists nothing.
+    """
+    remove_provides(manifest_dict, undo.applied)
+    found = _revert_conflicts(manifest_dict, undo)
+    if found:
+        raise ManifestCollisionError("; ".join(found))
+    _restore_displaced(manifest_dict, undo)
+    for field in undo.created:
+        if manifest_dict.get(field) == []:
+            del manifest_dict[field]
+
+
+def _revert_conflicts(manifest_dict: dict[str, Any], undo: ProvidesUndo) -> list[str]:
+    """Name each entry or slot value ``undo`` would put back that another edit already holds."""
+    found: list[str] = []
+    for field, (mode, entries) in undo.removed.items():
+        present = {_entry_key(mode, entry) for entry in _existing_list(manifest_dict, field)}
+        found.extend(
+            f"{field} entry {_entry_key(mode, displaced.entry)!r} is already back in the manifest"
+            for displaced in entries
+            if _entry_key(mode, displaced.entry) in present
+        )
+    for field, (_was_set, value) in undo.scalars.items():
+        current = manifest_dict.get(field)
+        if value and current is not None and current != value:
+            found.append(f"{field} is now set to {current!r} (cannot restore {value!r})")
+    return found
+
+
+def _key_position(entries: list[Any], mode: str, key: Any) -> int | None:
+    """The index of the first entry of ``entries`` matched by ``key``, or ``None``."""
+    return next((index for index, entry in enumerate(entries) if _entry_key(mode, entry) == key), None)
+
+
+def _restore_position(entries: list[Any], field: str, mode: str, displaced: _Displaced) -> int:
+    """Where ``displaced`` goes back into the current ``entries`` of ``field``.
+
+    Right after the entry that preceded it, when that entry is still listed; else right
+    before the first following entry the patch kept, when that one is still listed; else
+    its old index, capped at the list's end. In ``routers_modules`` the place is moved up
+    to just before the Studio SPA catch-all when it would land after it, the same rule
+    the apply follows.
+    """
+    position: int | None = None
+    if displaced.after:
+        found = _key_position(entries, mode, displaced.after[0])
+        position = None if found is None else found + 1
+    if position is None and displaced.before:
+        position = _key_position(entries, mode, displaced.before[0])
+    if position is None:
+        position = min(displaced.index, len(entries))
+    if field == "routers_modules" and STUDIO_SPA_ROUTER in entries:
+        position = min(position, entries.index(STUDIO_SPA_ROUTER))
+    return position
+
+
+def _restore_displaced(manifest_dict: dict[str, Any], undo: ProvidesUndo) -> None:
+    """Put back each list entry and empty single-module slot the patch ``undo`` displaced."""
+    for field, (mode, entries) in undo.removed.items():
+        restored = _ensure_list(manifest_dict, field)
+        for displaced in entries:
+            restored.insert(_restore_position(restored, field, mode, displaced), copy.deepcopy(displaced.entry))
+    for field, (was_set, value) in undo.scalars.items():
+        if manifest_dict.get(field) is not None:
+            continue
+        if was_set:
+            manifest_dict[field] = value
+        else:
+            manifest_dict.pop(field, None)
 
 
 def remove_provides(manifest_dict: dict[str, Any], spec: PluginSpec) -> bool:

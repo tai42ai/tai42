@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tai42-channel-twilio"
-version = "9.0.1"
+version = "9.1.0"
 description = "Twilio SMS/WhatsApp channel plugin for the TAI ecosystem — delivers ask questions to a human's phone and bridges the reply back."
 readme = "README.md"
 requires-python = ">=3.13"
@@ -26,10 +26,10 @@ dependencies = [
     # The pure interface contract — Channel/ChannelDelivery/ChannelDeliveryError
     # and the tai42_app handle the plugin registers through.
     # The contract floor is rewritten by scripts/range_sync.py at release.
-    "tai42-contract>=23.0,<24",
+    "tai42-contract>=24.0,<25",
     # HttpxClient (pooled outbound HTTP), RedisClient (correlation store),
     # TaiBaseSettings + the settings cache registry. [redis] pulls redis-py.
-    "tai42-kit[redis]>=12.0,<13",
+    "tai42-kit[redis]>=13.0,<14",
     # Imported directly (transport error types + Basic-auth request building).
     "httpx>=0.28",
     # Imported directly by inbound.py (Request/Response handler types).

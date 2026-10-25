@@ -13,8 +13,12 @@ from tai42_skeleton.app.lifecycle.state import LifecycleState
 from tai42_skeleton.connectors.managed_listing import ManagedListing, list_with_managed_auth
 from tai42_skeleton.connectors.runtime.credentials_step import bring_credentials_up_to_date
 from tai42_skeleton.connectors.runtime.http_status import exception_chain, mcp_http_status
+from tai42_skeleton.manifest import selection_admits
+from tai42_skeleton.presets.errors import PresetStoreReadError
 from tai42_skeleton.settings.cache import mcp_probe_timeout, mcp_reload_probe_timeout
+from tai42_skeleton.settings.mcp_settings import mcp_dispatch_settings
 from tai42_skeleton.tools import mcp_health
+from tai42_skeleton.tools.naming import normalized_name
 
 if TYPE_CHECKING:
     import mcp
@@ -38,12 +42,17 @@ _UNREACHABLE_EXC: tuple[type[BaseException], ...] = (
 
 
 def _mcp_failure_category(exc: BaseException, http_status: int | None) -> str:
-    """A coarse, credential-free category for a failed probe: ``auth`` / ``unreachable`` / ``error``.
+    """A coarse, credential-free category for a failed server.
 
-    ``auth`` for a 401/403 (a credential problem, not an outage); ``unreachable`` for a
+    One of ``preset_store`` / ``auth`` / ``unreachable`` / ``error``.
+
+    ``preset_store`` when the preset store could not be read while the server's tools were
+    being bound; ``auth`` for a 401/403 (a credential problem, not an outage); ``unreachable`` for a
     transport/connect error or a timeout with no HTTP status; ``error`` for any other
     HTTP status the server answered with, or an otherwise-unclassified failure.
     """
+    if any(isinstance(err, PresetStoreReadError) for err in exception_chain(exc)):
+        return "preset_store"
     if http_status in _AUTH_STATUSES:
         return "auth"
     if http_status is not None:
@@ -83,6 +92,71 @@ class McpProbeMixin(LifecycleState):
                 self._note_credential_demand(config.title, demanded=listing.credential_demanded)
 
         return await asyncio.wait_for(_do(), timeout=timeout if timeout is not None else mcp_probe_timeout())
+
+    async def _listed_mcp_tools(self, config: TaiMCPConfig) -> list[tuple[str, "mcp.types.Tool"]]:
+        """Every tool the server of ``config`` lists, paired with its served name; a probe failure raises."""
+        tools = await self._probe_mcp(config, timeout=mcp_reload_probe_timeout())
+        return [(normalized_name(config.title, tool.name), tool) for tool in tools]
+
+    async def _served_mcp_names(self, config: TaiMCPConfig) -> list[str]:
+        """The served names of the tools the server of ``config`` lists whose input schema the binder can adapt."""
+        # Imported here: the binding package imports this lifecycle package.
+        from tai42_skeleton.tools.binding.registration import adapt_mcp_tool
+
+        pairs = await self._listed_mcp_tools(config)
+        # Resolved once, outside the per-tool guard, so a malformed depth setting raises.
+        schema_max_depth = mcp_dispatch_settings().schema_max_depth
+        served: list[str] = []
+        for name, tool in pairs:
+            try:
+                adapt_mcp_tool(config, tool, name, schema_max_depth)
+            except Exception:
+                # The binder's own unusable-schema skip: the tool binds on no worker.
+                logger.info("mcp %r tool %r is not served: unusable input schema", config.title, name, exc_info=True)
+                continue
+            served.append(name)
+        return served
+
+    async def _advertised_mcp_tools(self, title: str) -> list[dict[str, Any]]:
+        """Every tool the live MCP server ``title`` lists, before the selection, with its bind state.
+
+        ``unbound_reason`` is set only for a selected row that is not bound, read from this
+        worker's bind records. Raises ``LookupError`` for a title not in the live manifest;
+        a probe failure propagates.
+        """
+        manifest = self._manifest
+        config = next((cfg for cfg in manifest.mcp if cfg.title == title), None) if manifest is not None else None
+        if config is None:
+            raise LookupError(f"unknown mcp title {title!r}")
+        pairs = await self._listed_mcp_tools(config)
+        bound_names = set(self._mcp_bound_tools.get(title, ()))
+        rows: list[dict[str, Any]] = []
+        for name, tool in pairs:
+            selected = selection_admits(name, config.include, config.exclude)
+            bound = name in bound_names
+            rows.append(
+                {
+                    "name": name,
+                    "title": tool.title,
+                    "description": tool.description,
+                    "selected": selected,
+                    "bound": bound,
+                    "unbound_reason": self._unbound_reason(title, name) if selected and not bound else None,
+                }
+            )
+        return sorted(rows, key=lambda row: row["name"])
+
+    def _unbound_reason(self, title: str, name: str) -> str:
+        """Why the selected tool ``name`` of server ``title`` is not bound on this worker."""
+        if title in self._failed_mcps:
+            return "server_failed"
+        if title not in self._mcp_bound_tools:
+            return "not_loaded"
+        if name in self._mcp_preset_conflicts.get(title, ()):
+            return "preset_conflict"
+        if name in self._mcp_unusable_tools.get(title, ()):
+            return "unusable_schema"
+        return "not_listed_at_bind"
 
     def _note_credential_demand(self, title: str, *, demanded: bool) -> None:
         """Keep, per title, whether its server answered its LAST listing's request without a credential with a 401.
@@ -151,7 +225,7 @@ class McpProbeMixin(LifecycleState):
         The shared seam of every failed-probe door (boot ``_load_mcps``, the reprobe
         loop, and the ``reload_mcp`` / ``reload_failed_mcps`` doors), so what a failure
         records is decided in one place. Stores the coarse ``unavailable`` status, a
-        credential-free ``category`` (``auth`` / ``unreachable`` / ``error``), the
+        credential-free ``category`` (``preset_store`` / ``auth`` / ``unreachable`` / ``error``), the
         redacted exception ``message`` (``mcp_health.redact_probe_error`` strips URL-embedded
         credentials, the same way the dispatch-health record does) and the
         ``http_status`` the exception carries when it has one. The config itself is
@@ -178,17 +252,30 @@ class McpProbeMixin(LifecycleState):
         )
 
     def _missing_tools_ignore(self) -> frozenset[str]:
-        """Return tool names the failed MCP servers were to provide, now legitimately absent.
+        """Return the tool names an MCP server was to provide that are legitimately absent.
 
-        The servers are down, so ``tools.validation`` must not raise for them.
-        Matched by base name (``:``-extension stripped), so validation is
-        slightly under-strict for a missing tool sharing a base name with a
-        failed MCP's tool — collisions are unlikely and not crashing wins.
+        Three kinds, so ``tools.validation`` must not raise for them: the names the failed
+        MCP servers were to provide (the servers are down); the names the binder left to a
+        stored preset (the preset binds the name when the stored presets register); and the
+        include names of a bound server that it did not bind for any other reason — the
+        server's listing did not carry them (the advertised-tools read reports them as
+        ``unadvertised``) or the binder skipped them for an unusable input schema (logged
+        loudly at the bind and reported as ``unusable_schema``) — unless a ``tools`` entry
+        includes the same name. The failed-server names match by base name (``:``-extension
+        stripped), so validation is slightly under-strict for a missing tool sharing a base
+        name with a failed MCP's tool — collisions are unlikely and not crashing wins.
         """
         ignore: set[str] = set()
         title_map = getattr(self._manifest, "include_title_mcp_tools_map", {}) or {}
+        module_map = getattr(self._manifest, "include_module_tools_map", {}) or {}
+        module_includes: set[str] = set().union(*module_map.values())
         for title in self._failed_mcps:
             ignore |= set(title_map.get(title, set()))
+        for names in self._mcp_preset_conflicts.values():
+            ignore |= names
+        for title, bound in self._mcp_bound_tools.items():
+            unbound = set(title_map.get(title, set())) - bound - self._mcp_preset_conflicts.get(title, set())
+            ignore |= unbound - module_includes
         return frozenset(ignore)
 
     def _list_failed_mcps(self) -> list[dict[str, Any]]:

@@ -103,6 +103,32 @@ def test_missing_tools_ignore_maps_failed_titles_to_tool_names():
     assert m._missing_tools_ignore() == frozenset({"svc_a", "svc_b"})
 
 
+class _UnusableIncludeManifest:
+    """A stand-in carrying the two maps ``_missing_tools_ignore`` reads."""
+
+    def __init__(self, module_tools: set[str]) -> None:
+        self.include_title_mcp_tools_map = {"svc": {"svc_good", "svc_broken"}}
+        self.include_module_tools_map = {"mod": module_tools}
+
+
+def test_missing_tools_ignore_holds_an_included_tool_skipped_for_an_unusable_schema():
+    m = _Mixin()
+    m._mcp_bound_tools = {"svc": {"svc_good"}}
+    m._mcp_unusable_tools = {"svc": {"svc_broken"}}
+    m._manifest = cast("Manifest", _UnusableIncludeManifest(module_tools=set()))
+
+    assert m._missing_tools_ignore() == frozenset({"svc_broken"})
+
+
+def test_missing_tools_ignore_checks_an_unusable_schema_name_a_tools_entry_also_includes():
+    m = _Mixin()
+    m._mcp_bound_tools = {"svc": {"svc_good"}}
+    m._mcp_unusable_tools = {"svc": {"svc_broken"}}
+    m._manifest = cast("Manifest", _UnusableIncludeManifest(module_tools={"svc_broken"}))
+
+    assert m._missing_tools_ignore() == frozenset()
+
+
 def test_live_mcp_status_snapshot():
     mcp_health._HEALTH.clear()
     m = _Mixin()
@@ -236,6 +262,30 @@ def test_unusable_schema_tool_named_in_skipped_tools(monkeypatch):
             assert "svc_broken" not in result["tools"]
 
     asyncio.run(run())
+
+
+def test_a_boot_whose_include_names_an_unusable_schema_tool_binds_the_rest(monkeypatch, caplog):
+    # The include names a usable tool and one the binder skips for its schema: the boot
+    # comes up with the usable tool bound and the skip logged, never failing validation.
+    import mcp
+
+    manifest = Manifest.model_validate({"mcp": [{**_cfg("svc").model_dump(), "include": ["svc_good", "svc_broken"]}]})
+    probe = AsyncMock(
+        return_value=[
+            cast(mcp.types.Tool, _UsableSchemaTool()),
+            cast(mcp.types.Tool, _UnusableSchemaTool()),
+        ]
+    )
+    monkeypatch.setattr(app, "_probe_mcp", probe)
+
+    async def run():
+        async with app.app_context(manifest):
+            assert app._mcp_bound_tools["svc"] == {"svc_good"}
+            assert app._mcp_unusable_tools["svc"] == {"svc_broken"}
+
+    with caplog.at_level(logging.ERROR):
+        asyncio.run(run())
+    assert any("unusable schema" in record.getMessage() for record in caplog.records)
 
 
 # -- the listing through the managed-credential seam ----------------------------------------------

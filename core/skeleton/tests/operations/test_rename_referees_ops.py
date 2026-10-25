@@ -5,8 +5,8 @@ A registered referee (a plugin holder, or a platform-internal wiring surface) wh
 answer for the OLD name is non-empty BLOCKS the rename with a 409 that NAMES the holder;
 empty answers let the rename proceed; a referee that RAISES fails the rename loudly and
 the rename is never applied. The preview door returns the SAME union — the referencing
-presets (the preset-body leg) plus every registered referee's descriptions. A successful
-rename still MOVES the tool_meta overlay.
+presets (the preset-body leg) plus every registered referee's holders. A successful
+rename MOVES the tool_meta overlay of the preset and of each of its branch tools.
 
 The registered referees here stand in for the union's provider leg; the platform-internal
 referees' own live-reference behavior is pinned directly in
@@ -21,6 +21,7 @@ from typing import Any
 
 import pytest
 from tai42_contract.presets import PresetBody
+from tai42_contract.tools import ReferenceHolder
 from tai42_kit.clients.impl.postgres import PostgresClient
 
 import tai42_skeleton.versioning.store as store_module
@@ -32,6 +33,7 @@ from tai42_skeleton.operations import presets as preset_ops
 from ..versioning.conftest import FakeVersioningPg
 
 _MANIFEST = {
+    "extensions_modules": ["tests.presets._ext_fixtures"],
     "tools": [
         {
             "title": "fx",
@@ -39,6 +41,7 @@ _MANIFEST = {
             "include": ["weather", "echo"],
         }
     ],
+    "agents": [{"title": "ag", "module": "tests.routers._authoring_fixtures", "include": ["authorable_agent"]}],
 }
 
 
@@ -108,15 +111,18 @@ async def _seed_body(name: str, base_tool: str, fixed_kwargs: dict[str, Any]) ->
     await instance.app.versioning.store.create("preset", name, body.model_dump())
 
 
-async def _echo_holder(_name: str) -> list[str]:
-    return ["schedule 'echo' fires it"]
+_SCHEDULE_HOLDER = ReferenceHolder(kind="schedule", name="echo", summary="schedule 'echo' fires it")
 
 
-async def _no_holders(_name: str) -> list[str]:
+async def _echo_holder(_name: str) -> list[ReferenceHolder]:
+    return [_SCHEDULE_HOLDER]
+
+
+async def _no_holders(_name: str) -> list[ReferenceHolder]:
     return []
 
 
-async def _boom_referee(_name: str) -> list[str]:
+async def _boom_referee(_name: str) -> list[ReferenceHolder]:
     raise RuntimeError("referee store unreadable")
 
 
@@ -150,11 +156,45 @@ def test_registered_referee_nonempty_blocks_rename_and_names_holder(pg) -> None:
 
             with pytest.raises(ConflictError, match="cannot be renamed") as ei:
                 await preset_ops.rename_preset(name="alerts", new_name="alerts2")
-            # The 409 NAMES the holder the referee reported.
-            assert "schedule 'echo' fires it" in str(ei.value)
+            # The 409 NAMES the holder the referee reported, and carries it.
+            assert ei.value.message == (
+                "preset 'alerts' cannot be renamed — held by:\n"
+                "- schedule 'echo' fires it\n"
+                "update those references first"
+            )
+            assert ei.value.extra == {"holders": [_SCHEDULE_HOLDER.model_dump()]}
             # The rename was not applied — the preset stays live under its old name.
             assert instance.app.preset_manager.is_registered("alerts")
             assert not instance.app.preset_manager.is_registered("alerts2")
+
+    asyncio.run(run())
+
+
+def test_referee_holding_a_branch_of_the_preset_blocks_rename(pg) -> None:
+    asked: list[str] = []
+
+    relay = ReferenceHolder(kind="hook", name="relay", summary="hook 'relay' targets it")
+
+    async def _branch_holder(name: str) -> list[ReferenceHolder]:
+        asked.append(name)
+        return [relay] if name == "alerts_exta" else []
+
+    async def run() -> None:
+        async with instance.app.app_context(_manifest()):
+            instance.app._rename_referee_registry.reset()
+            instance.app.tools.register_rename_referee(_branch_holder)
+            # A rename of ``alerts`` also renames its ``alerts_exta`` branch tool, so a holder of
+            # that branch is stranded by the rename and must block it.
+            await _create("alerts", extensions=[["exta"]])
+
+            preview = await preset_ops.preset_referees(name="alerts", action="rename")
+            assert preview == {"action": "rename", "holders": [relay.model_dump()]}
+            with pytest.raises(ConflictError, match="cannot be renamed") as ei:
+                await preset_ops.rename_preset(name="alerts", new_name="alerts2")
+            assert "hook 'relay' targets it" in str(ei.value)
+            assert sorted(set(asked)) == ["alerts", "alerts_exta"]
+            assert instance.app.preset_manager.is_registered("alerts")
+            assert "alerts_exta" in await instance.app.tools.get_tools()
 
     asyncio.run(run())
 
@@ -203,12 +243,51 @@ def test_preview_door_returns_union_of_presets_and_referees(pg) -> None:
             instance.app.tools.register_rename_referee(_echo_holder)
             # The preset-body leg: another preset whose active body composes ``leaf``.
             await _seed_body("leaf", "weather", {"units": "v"})
-            await _seed_body("composer", "echo", {"tool_names": ["leaf"]})
+            await _seed_body("composer", "authorable_agent", {"tool_names": ["leaf"]})
 
-            referees = (await preset_ops.preset_referees(name="leaf"))["referees"]
+            holders = (await preset_ops.preset_referees(name="leaf", action="rename"))["holders"]
             # The full union: the referencing preset (preset-body leg) PLUS the registered
-            # referee's description.
-            assert referees == ["composer", "schedule 'echo' fires it"]
+            # referee's holder.
+            assert holders == [
+                {"kind": "preset", "name": "composer", "locator": {}, "summary": "preset 'composer'"},
+                _SCHEDULE_HOLDER.model_dump(),
+            ]
+
+    asyncio.run(run())
+
+
+def test_the_preview_reports_exactly_the_holders_the_rename_gate_refuses_on(pg) -> None:
+    async def run() -> None:
+        async with instance.app.app_context(_manifest()):
+            instance.app._rename_referee_registry.reset()
+            instance.app.tools.register_rename_referee(_echo_holder)
+            await _seed_body("leaf", "weather", {"units": "v"})
+            await _seed_body("composer", "authorable_agent", {"tool_names": ["leaf"]})
+
+            preview = await preset_ops.preset_referees(name="leaf", action="rename")
+            with pytest.raises(ConflictError) as ei:
+                await preset_ops.rename_preset(name="leaf", new_name="leaf2")
+            assert ei.value.extra == {"holders": preview["holders"]}
+
+    asyncio.run(run())
+
+
+def test_a_referee_answering_anything_but_holders_fails_the_rename_naming_it(pg) -> None:
+    async def _strings(_name: str) -> list[str]:
+        return ["a plain line"]
+
+    async def run() -> None:
+        async with instance.app.app_context(_manifest()):
+            instance.app._rename_referee_registry.reset()
+            instance.app.tools.register_rename_referee(_strings)  # type: ignore[arg-type]
+            await _create("alerts")
+
+            with pytest.raises(TypeError, match=r"_strings answered \['a plain line'\]"):
+                await preset_ops.rename_preset(name="alerts", new_name="alerts2")
+            with pytest.raises(TypeError, match="a referee answers a list of ReferenceHolder"):
+                await preset_ops.preset_referees(name="alerts", action="rename")
+            assert instance.app.preset_manager.is_registered("alerts")
+            assert not instance.app.preset_manager.is_registered("alerts2")
 
     asyncio.run(run())
 
@@ -234,5 +313,25 @@ def test_tool_meta_moves_on_successful_rename(pg) -> None:
             assert moved.tags == ["x"]
             # The overlay no longer sits under the old name.
             assert await instance.app.tool_meta.store.get_meta("alerts") is None
+
+    asyncio.run(run())
+
+
+def test_tool_meta_of_each_branch_moves_on_successful_rename(pg) -> None:
+    async def run() -> None:
+        async with instance.app.app_context(_manifest()):
+            instance.app._rename_referee_registry.reset()
+            await _create("alerts", extensions=[["exta"]])
+            meta = instance.app.tool_meta.store
+            await meta.upsert_meta("alerts_exta", display_name="Branch", folder_id=None, tags=["b"], hidden=True)
+            # A ghost row already under the new branch name is never inherited.
+            await meta.upsert_meta("alerts2_exta", display_name="Ghost", folder_id=None, tags=[], hidden=None)
+
+            await preset_ops.rename_preset(name="alerts", new_name="alerts2")
+
+            moved = await meta.get_meta("alerts2_exta")
+            assert moved is not None
+            assert (moved.display_name, moved.tags, moved.hidden) == ("Branch", ["b"], True)
+            assert await meta.get_meta("alerts_exta") is None
 
     asyncio.run(run())

@@ -18,6 +18,7 @@ from tai42_contract.app import tai42_app
 from tai42_skeleton.app import instance
 
 from ..._fakes.bus import FakeBus
+from ..._fakes.write_span import ExclusiveWriteStore
 
 
 class _Admin:
@@ -62,11 +63,12 @@ def _install(
     return bus
 
 
-class _ReplaceStore:
+class _ReplaceStore(ExclusiveWriteStore):
     """A config manager whose ``replace_manifest`` records and persists the whole
     posted document — the seam the update_manifest pipeline drives."""
 
     def __init__(self, *, manifest: dict | None = None, env: dict | None = None) -> None:
+        super().__init__()
         self.manifest: dict = manifest if manifest is not None else {}
         self.env: dict = env if env is not None else {}
         self.replaced: list[dict] = []
@@ -83,13 +85,16 @@ class _ReplaceStore:
         return dict(self.env)
 
 
-class _MutateStore:
+class _MutateStore(ExclusiveWriteStore):
     """A config manager whose ``mutate_manifest`` runs the guarded mutator on a copy of
     the stored document and persists only if it returns without raising — the seam the
-    set_mcp_config pipeline drives (a raise inside leaves the store untouched)."""
+    set_mcp_config pipeline drives (a raise inside leaves the store untouched). ``env`` is
+    the stored env the manifest's markers are validated against."""
 
-    def __init__(self, *, manifest: dict | None = None) -> None:
+    def __init__(self, *, manifest: dict | None = None, env: dict | None = None) -> None:
+        super().__init__()
         self.manifest: dict = manifest if manifest is not None else {}
+        self.env: dict = env if env is not None else {}
         self.persisted: list[dict] = []
 
     def mutate_manifest(self, mutator: Any) -> dict:
@@ -102,15 +107,24 @@ class _MutateStore:
     def read_manifest_preserved(self) -> dict:
         return deepcopy(self.manifest)
 
+    def read_env(self) -> dict:
+        return dict(self.env)
+
 
 class _ReloadAdmin:
-    def __init__(self, result: dict | None = None) -> None:
+    def __init__(self, result: dict | None = None, served: dict[str, list[str]] | None = None) -> None:
         self.result = result if result is not None else {"status": "ok", "env_keys": 0}
+        self.served = served if served is not None else {}
         self.calls = 0
+        self.listed: list[str] = []
 
     def reload_config(self) -> dict:
         self.calls += 1
         return self.result
+
+    async def served_mcp_names(self, config: Any) -> list[str]:
+        self.listed.append(config.title)
+        return list(self.served.get(config.title, []))
 
 
 def _install_pipeline(

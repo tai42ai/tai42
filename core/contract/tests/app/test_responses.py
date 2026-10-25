@@ -117,3 +117,43 @@ def test_a_backup_section_report_carries_the_workers_awaiting_a_respawn() -> Non
     assert report.awaiting_respawn == [AwaitingWorker(name="serve-2", keys=["BACKEND_MANIFEST_KEY"])]
     assert BackupSectionReport().awaiting_respawn == []
     assert "awaiting_respawn" not in BackupSectionReport.model_json_schema().get("required", [])
+
+
+def test_an_apply_response_carries_the_store_span_release_error() -> None:
+    from tai42_contract.app.responses import ApplyResponse
+
+    body = ApplyResponse.model_validate(
+        {
+            "status": "ok",
+            "env_keys": 1,
+            "fanout": {"mode": "local-only"},
+            "span_release_error": "OSError: releasing the span failed",
+        }
+    )
+    assert body.span_release_error == "OSError: releasing the span failed"
+    released = ApplyResponse.model_validate({"status": "ok", "env_keys": 1, "fanout": {"mode": "local-only"}})
+    assert released.span_release_error is None
+    assert "span_release_error" not in ApplyResponse.model_json_schema()["required"]
+
+
+def test_a_profile_apply_response_carries_the_store_span_release_error() -> None:
+    body = ProfileApplyResponse.model_validate(
+        {
+            "hot": [],
+            "recycle": [],
+            "fresh": [],
+            "refused": [],
+            "fanout": {"mode": "fleet"},
+            "span_release_error": "OSError: releasing the span failed",
+        }
+    )
+    assert body.span_release_error == "OSError: releasing the span failed"
+    assert "span_release_error" not in ProfileApplyResponse.model_json_schema()["required"]
+
+
+def test_a_backup_section_report_carries_the_store_span_release_error() -> None:
+    from tai42_contract.backup.models import BackupSectionReport
+
+    report = BackupSectionReport.model_validate({"span_release_error": "OSError: releasing the span failed"})
+    assert report.span_release_error == "OSError: releasing the span failed"
+    assert BackupSectionReport().span_release_error is None

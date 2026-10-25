@@ -153,3 +153,25 @@ def single_env_write(config_dir: str, key: str, value: str, ready) -> None:
     mgr = FileConfigManager(config_dir_path=config_dir)
     report_ready(ready)
     mgr.write_env({key: value})
+
+
+# The bound a child waits on a parent's event: the parent sets it well inside its own bounds.
+_EVENT_BOUND_S = 60.0
+
+
+def hold_write_span(config_dir: str, entered, release, ready) -> None:
+    """Enter ``exclusive_write``, signal ``entered``, and hold the span until ``release`` is set."""
+    mgr = FileConfigManager(config_dir_path=config_dir)
+    report_ready(ready)
+    with mgr.exclusive_write():
+        entered.set()
+        if not release.wait(_EVENT_BOUND_S):
+            raise TimeoutError(f"the parent did not release the span within {_EVENT_BOUND_S} s")
+
+
+def take_write_span(config_dir: str, acquired, ready) -> None:
+    """Enter ``exclusive_write`` once and signal ``acquired`` from inside the span."""
+    mgr = FileConfigManager(config_dir_path=config_dir)
+    report_ready(ready)
+    with mgr.exclusive_write():
+        acquired.set()

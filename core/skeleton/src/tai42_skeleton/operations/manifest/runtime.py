@@ -13,8 +13,10 @@ from tai42_skeleton.app.bus import FleetResult
 from tai42_skeleton.app.bus.ops import DeregisterMcp, ReloadFailedMcps, ReloadMcp
 from tai42_skeleton.app.reload_gate import reload_gate
 from tai42_skeleton.config.service import ConfigService
-from tai42_skeleton.operations import BadRequestError, NotFoundError, operation
+from tai42_skeleton.operations import BadRequestError, ConflictError, NotFoundError, UpstreamError, operation
 from tai42_skeleton.operations._broadcast import apply_response, broadcast, translate_orphan_env_write
+from tai42_skeleton.operations.response_models_group_a import McpAdvertisedTools
+from tai42_skeleton.tools.mcp_health import redact_probe_error
 
 from .models import ManifestReplace, McpTargets
 
@@ -47,12 +49,47 @@ async def reload_mcp(title: str, targets: list[str] | None = None) -> Any:
 
 
 @operation(
+    summary="Probe an MCP server for its advertised tools",
+    tags=["manifest"],
+    errors=[NotFoundError, UpstreamError],
+    response_model=McpAdvertisedTools,
+)
+async def list_mcp_advertised_tools(title: str) -> dict[str, Any]:
+    """Every tool the live MCP server ``title`` advertises, before the selection, with the entry's lists.
+
+    ``unadvertised`` names the entries of the set list (``include`` when non-empty, else ``exclude``)
+    that no advertised tool carries, in stored order. Unknown title → 404; a server that cannot be
+    listed → 502.
+    """
+    live = tai42_app.admin.live_manifest
+    entry = next((row for row in live.get("mcp", []) if row.get("title") == title), None)
+    if entry is None:
+        raise NotFoundError(f"unknown mcp title {title!r}")
+    try:
+        tools = await tai42_app.admin.advertised_mcp_tools(title)
+    except LookupError as exc:
+        raise NotFoundError(str(exc)) from exc
+    except Exception as exc:
+        raise UpstreamError(f"mcp server {title!r} did not list its tools: {redact_probe_error(str(exc))}") from exc
+    include = list(entry.get("include") or [])
+    exclude = list(entry.get("exclude") or [])
+    advertised = {row["name"] for row in tools}
+    return {
+        "title": title,
+        "include": include,
+        "exclude": exclude,
+        "tools": tools,
+        "unadvertised": [name for name in (include or exclude) if name not in advertised],
+    }
+
+
+@operation(
     summary="Replace the whole manifest, persist, and reload the fleet",
     tags=["manifest"],
     destructive=True,
     reload_gated=True,
     authority_changing=True,
-    errors=[BadRequestError],
+    errors=[BadRequestError, ConflictError, UpstreamError],
     request_model=ManifestReplace,
     response_model=ApplyResponse,
 )

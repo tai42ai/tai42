@@ -26,6 +26,7 @@ from tai42_contract.connectors.models import (
 from tai42_contract.connectors.providers import ProviderDescriptor
 from tai42_kit.db import component_store_configured
 
+from tai42_skeleton.config.service import joined_span_release_errors
 from tai42_skeleton.connectors.oauth import client as oauth_client
 from tai42_skeleton.connectors.oauth import client_document, discovery, redirect
 from tai42_skeleton.connectors.oauth.client import ClientAuthMethod
@@ -36,6 +37,7 @@ from tai42_skeleton.connectors.store import client_store
 from tai42_skeleton.connectors.store.client_store import ConnectorStoreNotConfiguredError
 from tai42_skeleton.db import SKELETON_COMPONENT, not_configured_message
 from tai42_skeleton.operations import BadRequestError, ConflictError, NotFoundError, NotSupportedError, operation
+from tai42_skeleton.operations._broadcast import FleetBroadcastError
 from tai42_skeleton.operations.adapter import validation_error_fields
 from tai42_skeleton.operations.connectors import catalog_entries
 
@@ -277,7 +279,11 @@ async def add_connector_provider(
         raise ConflictError(str(exc)) from exc
     logger.info("connectors: provider %s added for %s", descriptor.id, request.url)
     return ProviderMutationResponse.model_validate(
-        {"provider": await _entry(descriptor), "fanout": applied.fanout}
+        {
+            "provider": await _entry(descriptor),
+            "fanout": applied.fanout,
+            "span_release_error": applied.span_release_error,
+        }
     ).model_dump(mode="json")
 
 
@@ -300,7 +306,10 @@ async def remove_connector_provider(provider_id: str) -> dict[str, Any]:
     through the disconnect routine. The manifest change comes before the client rows are deleted, so a
     failed change leaves them; a failed deletion after it is raised, and running the remove again
     deletes the rows left under the id (nothing else holds it any more; no manifest change, so no
-    fan-out).
+    fan-out). ``span_release_error`` names every one of these manifest writes — each purge and the
+    removal — whose config-store write span failed to release, joined with ``"; "`` in write order;
+    when the removal persists but its propagation raises :class:`FleetBroadcastError`, the raised
+    error's ``span_release_error`` names them the same way.
     """
     _require_store()
     try:
@@ -319,19 +328,32 @@ async def remove_connector_provider(provider_id: str) -> dict[str, Any]:
         raise ConflictError(
             f"provider {provider_id!r} has {len(live)} live connection(s); disconnect them before removing it"
         )
+    # Each purge is a manifest write of its own: a failed span release of any of them rides the
+    # reply beside the removal's own, in write order.
+    release_errors: list[str | None] = []
     for connection_id in lapsed:
-        await connection_service.disconnect(connection_id=connection_id)
+        purged = await connection_service.disconnect(connection_id=connection_id)
+        release_errors.append(purged.span_release_error)
     try:
         applied = await connection_service.ConfigService.from_app().apply_change(
             lambda document: provider_service.remove_provider(document, provider_id)
         )
     except KeyError as exc:
         raise NotFoundError(f"provider {provider_id!r} is no longer in the manifest") from exc
+    except FleetBroadcastError as exc:
+        # The removal persisted but its propagation failed: the purges' failed span releases
+        # ride the raised error ahead of the removal's own, in write order.
+        exc.span_release_error = joined_span_release_errors(*release_errors, exc.span_release_error)
+        raise
+    release_errors.append(applied.span_release_error)
     removed = await client_store.active_client_store().delete_for_provider(provider_id)
     logger.info("connectors: provider %s removed with %d stored client(s)", provider_id, removed)
-    return RemoveProviderResponse(provider_id=provider_id, removed_clients=removed, fanout=applied.fanout).model_dump(
-        mode="json"
-    )
+    return RemoveProviderResponse(
+        provider_id=provider_id,
+        removed_clients=removed,
+        fanout=applied.fanout,
+        span_release_error=joined_span_release_errors(*release_errors),
+    ).model_dump(mode="json")
 
 
 # -- set client ----------------------------------------------------------------------------------

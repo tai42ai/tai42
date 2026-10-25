@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import importlib
 import warnings
+from types import ModuleType
 from typing import cast
 
 import pytest
@@ -66,7 +68,7 @@ def _cache_manifest(*agents: str) -> Manifest:
 
 
 def _derive_under_ignore(tool: Tool) -> dict:
-    # An agent run tool's concrete signature carries the ``_UNSET`` sentinel as the
+    # An agent run tool's concrete signature carries the ``UNSET`` marker as the
     # default of every optional parameter; deriving its JSON schema deliberately
     # excludes that non-serializable default (a benign PydanticJsonSchemaWarning).
     with warnings.catch_warnings():
@@ -121,7 +123,7 @@ def test_explicit_none_is_unset_for_a_null_default_field_and_kept_otherwise():
                 await app.tools.run_tool("null_default_fields", {"text": "hi", "optional_valued": None})
                 == "optional_valued,text"
             )
-            # An omitted optional field arrives as the ``_UNSET`` sentinel and is dropped.
+            # An omitted optional field arrives as the ``UNSET`` marker and is dropped.
             assert await app.tools.run_tool("null_default_fields", {"text": "hi"}) == "text"
 
     asyncio.run(run())
@@ -332,6 +334,37 @@ def test_agent_run_tool_accepts_extension_combo():
     asyncio.run(run())
 
 
+def test_a_relocating_branch_of_an_agent_run_tool_ships_only_the_supplied_arguments():
+    # The branch's job payload carries the supplied field and the platform stamps, never the
+    # omitted-value marker of an optional field; the agent runs it with its own defaults.
+    manifest = Manifest.model_validate(
+        {
+            "extensions_modules": ["tests.app._fixtures.ext_mod", "tests.app._fixtures.relocate_ext"],
+            "tools": [
+                {
+                    "title": "fxt",
+                    "module": "tests.app._fixtures.tools_b",
+                    "include": ["shout"],
+                    "extensions": {"echo_fields": [["relocate"]]},
+                }
+            ],
+            "agents": [{"title": "agents", "module": "tests.agent._fixtures", "include": ["echo_fields"]}],
+        }
+    )
+
+    async def run() -> tuple[str, ModuleType]:
+        async with app.app_context(manifest):
+            # The manifest's extension modules are imported afresh for the context.
+            relocate_ext = importlib.import_module("tests.app._fixtures.relocate_ext")
+            return await app.tools.run_tool("echo_fields_relocate", {"text": "hi"}), relocate_ext
+
+    result, relocate_ext = asyncio.run(run())
+    assert result == "text"
+    (job,) = relocate_ext.RECORDED
+    assert {key: value for key, value in job.items() if key not in relocate_ext.PLATFORM_STAMPS} == {"text": "hi"}
+    assert job[relocate_ext.TOOL_NAME_ARG] == "echo_fields"
+
+
 def test_cache_and_chain_compose_over_agent_run_tool_across_a_real_run():
     # A WRAPPER (cache) and a TRANSFORMER (chain) compose over the same agent run
     # tool and both execute end-to-end.
@@ -386,7 +419,7 @@ def test_cache_and_chain_compose_over_agent_run_tool_across_a_real_run():
 
 def test_chain_over_agent_run_tool_omitting_an_optional_preserves_set_fields_only():
     # A chain TRANSFORMER re-dispatches the agent run tool BY NAME; an optional the
-    # caller omits must not reach the agent as the _UNSET sentinel (which would fail
+    # caller omits must not reach the agent as the UNSET marker (which would fail
     # validation) — the run_tool boundary strips it, so the agent sees only ``text``.
     manifest = Manifest.model_validate(
         {

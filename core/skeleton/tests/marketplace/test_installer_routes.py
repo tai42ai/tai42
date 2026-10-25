@@ -378,11 +378,38 @@ async def test_the_remount_reload_continues_the_forward_apply_with_its_recycle_r
     handed: list[ApplyResult | None] = []
 
     class _Svc:
-        async def apply_replace(self, document: dict, *, continues: ApplyResult | None = None) -> ApplyResult:
+        async def reapply_manifest(self, *, continues: ApplyResult | None = None) -> ApplyResult:
             handed.append(continues)
             return remounted
 
-    result = await manifest_apply.remount_reload(_Svc(), dict, prior)  # type: ignore[arg-type]
+    result = await manifest_apply.remount_reload(_Svc(), prior)  # type: ignore[arg-type]
 
     assert handed == [prior]
     assert result is remounted
+
+
+async def test_a_failed_remount_keeps_its_span_release_error_on_the_forward_result() -> None:
+    from tai42_skeleton.app.bus import FleetResult
+    from tai42_skeleton.config.service import ApplyResult
+    from tai42_skeleton.marketplace import manifest_apply
+    from tai42_skeleton.operations._broadcast import FleetBroadcastError
+
+    prior = ApplyResult(
+        fleet=FleetResult(op="reload_config", results=[]),
+        local={"status": "ok", "env_keys": 1},
+        span_release_error="OSError: the forward release failed",
+    )
+
+    class _Svc:
+        async def reapply_manifest(self, *, continues: ApplyResult | None = None) -> ApplyResult:
+            raise FleetBroadcastError(
+                "reload_config",
+                FleetResult(op="reload_config", reachable=False, error="boom"),
+                RuntimeError("boom"),
+                span_release_error="OSError: the remount release failed",
+            )
+
+    result = await manifest_apply.remount_reload(_Svc(), prior)  # type: ignore[arg-type]
+
+    assert result.local == prior.local
+    assert result.span_release_error == "OSError: the forward release failed; OSError: the remount release failed"

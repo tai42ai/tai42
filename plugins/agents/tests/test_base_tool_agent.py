@@ -30,7 +30,7 @@ from tai42_agents._internal.usage import CallUsage
 
 from ._client_tool import FakeClientTool, client_tool
 from ._graph_support import build_agent_and_input, invoke_tools_agent, stream_tools_agent
-from .conftest import fake_run_trace
+from .conftest import fake_init_langgraph_config
 
 
 def _tool(name: str) -> FakeClientTool:
@@ -67,7 +67,9 @@ def _patch_seams(
     monkeypatch.setattr(bta, "context_overflow_middlewares", AsyncMock(return_value=["mw"]))
     monkeypatch.setattr(bta, "logging_settings", lambda: SimpleNamespace(is_enabled_for=lambda level: level == "DEBUG"))
     monkeypatch.setattr(
-        bta, "init_langgraph_config", lambda config: fake_run_trace({"configurable": {"thread_id": "t"}})
+        bta,
+        "init_langgraph_config",
+        lambda config, _context: fake_init_langgraph_config({"configurable": {"thread_id": "t"}}),
     )
 
     fake_agent = MagicMock()

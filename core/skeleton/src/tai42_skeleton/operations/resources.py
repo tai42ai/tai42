@@ -20,9 +20,9 @@ from pydantic import BaseModel, Field
 from tai42_contract.app import tai42_app
 from tai42_contract.template import TemplatedText
 
-from tai42_skeleton.operations import BadRequestError, NotFoundError, operation
+from tai42_skeleton.operations import BadRequestError, NotFoundError, NotSupportedError, operation
 from tai42_skeleton.operations.response_models_group_c import ResourceContent
-from tai42_skeleton.template import TemplateNotFoundError
+from tai42_skeleton.template import ContentNotLoadableError, TemplateNotFoundError
 from tai42_skeleton.template.media import MediaBlock
 from tai42_skeleton.template.path_guard import UnsafeTemplatePathError
 
@@ -55,7 +55,7 @@ class ResourceGetQuery(BaseModel):
 @operation(
     summary="Load a stored resource by id, optionally rendering it",
     tags=["resources"],
-    errors=[BadRequestError, NotFoundError],
+    errors=[BadRequestError, NotFoundError, NotSupportedError],
     request_model=ResourceGet,
     response_model=ResourceContent,
 )
@@ -71,9 +71,11 @@ async def get_resource_by_id(resource_id: str, kwargs: dict[str, Any] | None = N
     Returns:
         The loaded (and optionally rendered) content — text or a ``MediaBlock``.
 
-    A missing resource is a ``404``; a traversal-escaping id, a render of media, or
-    broken client-supplied Jinja is a ``400``. Genuine storage/transport failures
-    raise other types and propagate as a ``500``.
+    A missing resource is a ``404``; a traversal-escaping id, a stored object no loader
+    can turn into text or media (an unsupported type, over the size cap, or text that is
+    not UTF-8, an extractor's failure on the stored bytes), a render of media, or broken
+    client-supplied Jinja is a ``400``. A deployment without the ``files`` extra answers a
+    ``501``. Genuine storage/transport failures raise other types and propagate as a ``500``.
     """
     manager = tai42_app.storage.resource_manager
     try:
@@ -82,6 +84,8 @@ async def get_resource_by_id(resource_id: str, kwargs: dict[str, Any] | None = N
         raise BadRequestError(str(exc)) from exc
     except (FileNotFoundError, TemplateNotFoundError) as exc:
         raise NotFoundError(f"resource {resource_id!r} not found") from exc
+    except ContentNotLoadableError as exc:
+        raise BadRequestError(f"resource {resource_id!r} cannot be loaded: {exc}") from exc
     if kwargs is None:
         return content
     if isinstance(content, MediaBlock):

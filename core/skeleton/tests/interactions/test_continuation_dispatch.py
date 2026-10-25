@@ -1,7 +1,7 @@
 """The async park's continuation dispatch: both answer doors and the expiry reaper
 funnel through the single post-claim seam, so a resolved park fires its stored
 continuation EXACTLY ONCE, bound to the STORED identity (never the answerer's),
-carrying ``{interaction_id, answer}``. The reaper resolves an expired park by the
+carrying ``{interaction_id, ask_result}``. The reaper resolves an expired park by the
 generic EXPIRY answer and prunes it, run-and-clear clears the record on return, and
 the detached fire runs out of band.
 """
@@ -24,8 +24,9 @@ from tai42_contract.interactions import AnswerFormat, InteractionRequest, Intera
 
 from tai42_skeleton.interactions import InteractionStore
 from tai42_skeleton.interactions import continuation as continuation_module
+from tai42_skeleton.interactions import continuation_dispatch as continuation_dispatch_module
 from tai42_skeleton.interactions import reaper as reaper_module
-from tai42_skeleton.interactions.continuation import EXPIRY_ANSWER
+from tai42_skeleton.interactions.continuation_dispatch import EXPIRY_ANSWER
 from tai42_skeleton.interactions.settings import InteractionsSettings
 from tai42_skeleton.operations import interactions as ops
 
@@ -257,6 +258,52 @@ async def test_park_state_survives_past_idle_ttl_so_reaper_can_fire(wired, captu
     assert await wired.store.get_state(wired.fake, "p1") is None
 
 
+async def test_an_expired_resume_park_hands_the_continuation_the_ask_answer_of_the_marker(wired, monkeypatch):
+    # The REAL ``_run_continuation`` behind the REAL reaper: a park with ``on_expiry="resume"``
+    # that lapses unanswered runs its continuation with the ``AskAnswer`` JSON whose answer is
+    # the expiry marker and whose quote and params are null.
+    from tai42_skeleton.access_control.settings import AccessControlSettings
+    from tai42_skeleton.authz import execution as execution_module
+
+    monkeypatch.setattr(execution_module, "access_control_settings", lambda: AccessControlSettings(enable=False))
+
+    seen: list[dict] = []
+
+    async def _fake_run_tool(tool, arguments, *, continues_chain=None):
+        seen.append({"tool": tool, "arguments": arguments})
+        return {"ran": True}
+
+    monkeypatch.setattr(
+        continuation_module, "tai42_app", SimpleNamespace(tools=SimpleNamespace(run_tool=_fake_run_tool))
+    )
+
+    expiry = datetime.now(UTC) + timedelta(seconds=60)
+    await wired.store.add(
+        wired.fake,
+        async_req(wired.store, iid="ex1", expiry_at=expiry, on_expiry="resume"),
+        idle_ttl=86400,
+        continuation_fingerprint="fp-1",
+    )
+
+    class _Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return expiry + timedelta(seconds=1)
+
+    monkeypatch.setattr(reaper_module, "datetime", _Clock)
+    assert await reaper_module.reap_expired_parks_once() == 1
+    await drain()
+    assert seen == [
+        {
+            "tool": "resume_tool",
+            "arguments": {
+                "interaction_id": "ex1",
+                "ask_result": {"answer": EXPIRY_ANSWER, "reply_to": None, "params": None},
+            },
+        }
+    ]
+
+
 async def test_run_continuation_runs_tool_under_stored_identity(wired, monkeypatch):
     # The REAL ``_run_continuation`` (not the stub): it binds the STORED continuation
     # identity via ``bind_execution_identity`` and then calls ``run_tool`` — the tool
@@ -293,7 +340,10 @@ async def test_run_continuation_runs_tool_under_stored_identity(wired, monkeypat
     await drain()
     assert len(seen) == 1
     assert seen[0]["tool"] == "resume_tool"
-    assert seen[0]["arguments"] == {"interaction_id": "rc1", "answer": "go", "reply_to": None, "params": None}
+    assert seen[0]["arguments"] == {
+        "interaction_id": "rc1",
+        "ask_result": {"answer": "go", "reply_to": None, "params": None},
+    }
     assert seen[0]["user_id"] == "svc-key"  # the STORED identity, never "answerer-x"
 
 
@@ -394,17 +444,19 @@ async def test_dispatch_continuation_retains_task_until_done(wired, monkeypatch)
 
     monkeypatch.setattr(continuation_module, "_run_continuation", _slow)
 
-    continuation_module.dispatch_continuation(
+    continuation_dispatch_module.dispatch_continuation(
         wired.store,
         async_req(wired.store, iid="gc1"),
         "fp-1",
         InteractionResponse(interaction_id="gc1", answer="answer", answered_by="u-1", answered_at=datetime.now(UTC)),
     )
     await started.wait()
-    assert any(t.get_name() == "interaction-continuation-gc1" for t in continuation_module._CONTINUATION_TASKS)
+    assert any(t.get_name() == "interaction-continuation-gc1" for t in continuation_dispatch_module._CONTINUATION_TASKS)
     release.set()
     await drain()
-    assert not any(t.get_name() == "interaction-continuation-gc1" for t in continuation_module._CONTINUATION_TASKS)
+    assert not any(
+        t.get_name() == "interaction-continuation-gc1" for t in continuation_dispatch_module._CONTINUATION_TASKS
+    )
 
 
 async def test_concurrent_same_group_parks_never_shrink_shared_ttls(monkeypatch, captured):

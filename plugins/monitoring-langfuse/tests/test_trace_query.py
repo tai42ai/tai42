@@ -1,308 +1,349 @@
-"""TraceQuery: get_trace mapping, list_traces summaries, trace filter mapping, and
-the native (server-side) trace sort."""
+"""The run reads: ``get_trace``, ``get_observation`` and the newest-first ``list_traces``."""
 
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
-from types import SimpleNamespace
+from datetime import UTC, datetime, timedelta
 
+import httpx
 import pytest
-from langfuse.api.commons.errors import NotFoundError
 from tai42_contract.monitoring import (
     MonitoringError,
     MonitoringFilter,
-    MonitoringLevel,
-    MonitoringReadNotSupportedError,
+    MonitoringReadNotServedError,
+    MonitoringReadTooBroadError,
     ObservationNotFoundError,
     OrderBy,
     SpanKind,
     TraceNotFoundError,
 )
 
-from tai42_monitoring_langfuse.reader import LangfuseReader
+from tai42_monitoring_langfuse.observation_query import EXPAND_METADATA
+
+from ._fake_langfuse import FakeLangfuse
+
+T0 = datetime(2026, 1, 1, 10, tzinfo=UTC)
+_LONG_METADATA = json.dumps({"k": "x" * 600})
+_LONG_TIMING = json.dumps({"phases": ["p" * 40] * 8})
 
 
-async def test_get_trace_maps_to_neutral(manager, mock_client, trace_body):
-    obs = {
-        "id": "o1",
-        "type": "TOOL",
-        "name": "search",
-        "input": {"q": 1},
-        "output": {"a": 2},
-        "parent_observation_id": "p",
-        "usage_details": {"input": 5, "output": 3, "total": 8},
-        "start_time": datetime(2026, 1, 1, tzinfo=UTC),
+def _tool_run(fake: FakeLangfuse) -> None:
+    fake.run(
+        "t1",
+        T0,
+        seconds=2,
+        tags=["a", "b"],
+        trace_name="run",
+        input='{"q": 1}',
+        output="hello",
+        metadata={"team": "blue"},
+    )
+    fake.add(
+        id="tool",
+        trace_id="t1",
+        parent_id="t1-root",
+        type="TOOL",
+        name="echo",
+        start=T0 + timedelta(milliseconds=5),
+        end=T0 + timedelta(seconds=1),
+        input='{"a": 1}',
+        output="done",
+        metadata={
+            "attributes.tai42.metadata": _LONG_METADATA,
+            "attributes.tai42.step_role": "tool-call",
+            "attributes.tai42.timing": _LONG_TIMING,
+        },
+    )
+    fake.add(
+        id="llm",
+        trace_id="t1",
+        parent_id="t1-root",
+        type="GENERATION",
+        start=T0 + timedelta(milliseconds=10),
+        level="ERROR",
+        status_message="boom",
+        model="m-1",
+        usage={"input": 3, "output": 4, "total": 7},
+        total_cost=0.25,
+    )
+
+
+async def test_get_trace_maps_every_observation(fake, reader):
+    _tool_run(fake)
+    trace = await reader.get_trace("t1")
+    assert trace.id == "t1"
+    assert trace.timestamp == T0
+    assert trace.tags == ["a", "b"]
+    assert trace.input == {"q": 1}
+    assert trace.output == "hello"
+    assert trace.metadata == {"team": "blue"}
+    assert trace.total_cost == 0.25
+    assert [o.id for o in trace.observations] == ["t1-root", "tool", "llm"]
+    root, tool, llm = trace.observations
+    assert root.parent_id is None
+    assert root.kind is SpanKind.CHAIN
+    assert tool.kind is SpanKind.TOOL
+    assert tool.input == {"a": 1}
+    assert tool.output == "done"
+    assert llm.kind is SpanKind.LLM
+    assert llm.level == "ERROR"
+    assert llm.status_message == "boom"
+    assert llm.model == "m-1"
+    assert (llm.input_tokens, llm.output_tokens, llm.total_tokens) == (3, 4, 7)
+
+
+async def test_get_trace_reads_long_producer_metadata_whole(fake, reader):
+    _tool_run(fake)
+    trace = await reader.get_trace("t1")
+    tool = next(o for o in trace.observations if o.id == "tool")
+    assert tool.metadata == {
+        "k": "x" * 600,
+        "tai42.step_role": "tool-call",
+        "tai42.timing": json.loads(_LONG_TIMING),
     }
-    mock_client.api.trace.get.return_value = trace_body(observations=[obs])
+    assert all(kw["expandMetadata"] == EXPAND_METADATA for kw in fake.calls_of("observations"))
 
-    t = await LangfuseReader(manager).get_trace("t1")
-    assert t.id == "t1"
-    assert t.tags == ["run:7"]
-    assert t.output == {"r": 1}
-    assert len(t.observations) == 1
-    o = t.observations[0]
-    assert o.name == "search"
-    assert o.kind is SpanKind.TOOL
-    assert o.parent_id == "p"
-    assert (o.input_tokens, o.output_tokens, o.total_tokens) == (5, 3, 8)
-    assert o.input == {"q": 1}
-    assert o.output == {"a": 2}
+
+async def test_get_trace_scopes_only_by_the_trace_id(fake, reader):
+    _tool_run(fake)
+    await reader.get_trace("t1")
+    assert fake.filters_sent() == [[{"column": "traceId", "operator": "=", "value": "t1", "type": "string"}]]
+
+
+async def test_get_trace_with_no_rows_is_not_found(fake, reader):
+    with pytest.raises(TraceNotFoundError, match="t-missing"):
+        await reader.get_trace("t-missing")
+
+
+async def test_get_trace_failure_propagates(fake, reader):
+    timeout = httpx.ReadTimeout("read timed out")
+    fake.fail(timeout)
+    with pytest.raises(MonitoringError, match="GET /api/public/v2/observations") as caught:
+        await reader.get_trace("t1")
+    assert type(caught.value) is MonitoringError
+    assert caught.value.__cause__ is timeout
+
+
+async def test_get_trace_without_a_root_reads_the_earliest_start(fake, reader):
+    fake.add(id="late", trace_id="t1", parent_id="gone", start=T0 + timedelta(seconds=3))
+    fake.add(id="early", trace_id="t1", parent_id="gone", start=T0)
+    trace = await reader.get_trace("t1")
+    assert trace.timestamp == T0
+    assert trace.tags == []
+    assert trace.total_cost is None
+
+
+async def test_get_observation_sends_only_the_filter(fake, reader):
+    _tool_run(fake)
+    observation = await reader.get_observation("t1", "tool")
+    assert observation.id == "tool"
+    assert observation.metadata is not None
+    assert observation.metadata["k"] == "x" * 600
+    assert fake.filters_sent() == [
+        [
+            {"column": "traceId", "operator": "=", "value": "t1", "type": "string"},
+            {"column": "id", "operator": "=", "value": "tool", "type": "string"},
+        ]
+    ]
+
+
+async def test_get_observation_absent_is_observation_not_found(fake, reader):
+    _tool_run(fake)
+    with pytest.raises(ObservationNotFoundError, match="nope"):
+        await reader.get_observation("t1", "nope")
+
+
+async def test_get_observation_of_an_absent_trace_is_trace_not_found(fake, reader):
+    with pytest.raises(TraceNotFoundError, match="t-missing"):
+        await reader.get_observation("t-missing", "tool")
+
+
+async def test_get_observation_failure_propagates(fake, reader):
+    timeout = httpx.ReadTimeout("read timed out")
+    fake.fail(timeout)
+    with pytest.raises(MonitoringError, match="GET /api/public/v2/observations") as caught:
+        await reader.get_observation("t1", "tool")
+    assert type(caught.value) is MonitoringError
+    assert caught.value.__cause__ is timeout
+
+
+async def test_list_traces_summarizes_a_run_from_its_root_and_every_observation(fake, reader):
+    _tool_run(fake)
+    fake.add(
+        id="deferred",
+        trace_id="t1",
+        parent_id="t1-root",
+        start=T0 + timedelta(seconds=1),
+        end=T0 + timedelta(seconds=30),
+        usage={"input": 1, "output": 2},
+        total_cost=0.5,
+    )
+    [summary] = await reader.list_traces(from_timestamp=T0 - timedelta(hours=1))
+    assert summary.id == "t1"
+    assert summary.timestamp == T0
+    assert summary.name == "run"
+    assert summary.tags == ["a", "b"]
+    assert summary.input == {"q": 1}
+    assert summary.output == "hello"
+    assert summary.latency_ms == 2000.0
+    assert summary.total_cost == 0.75
+    assert summary.total_tokens == 10
+    assert summary.status == "error"
+
+
+async def test_a_run_with_no_usage_lists_none_totals_and_ok(fake, reader):
+    fake.run("t1", T0)
+    [summary] = await reader.list_traces()
+    assert summary.total_cost is None
+    assert summary.total_tokens is None
+    assert summary.status == "ok"
+    assert summary.name is None
+
+
+async def test_a_run_still_open_lists_no_latency(fake, reader):
+    fake.add(id="r", trace_id="t1", start=T0, name="open")
+    [summary] = await reader.list_traces()
+    assert summary.latency_ms is None
+    assert summary.name == "open"
+
+
+async def test_native_list_walks_roots_with_the_run_level_clauses(fake, reader):
+    fake.run("t1", T0, seconds=3, trace_name="run", user_id="alice", tags=["a", "b"])
+    page = await reader.list_traces(
+        from_timestamp=T0 - timedelta(hours=1),
+        to_timestamp=T0 + timedelta(hours=1),
+        filter_=MonitoringFilter(
+            name="run",
+            user_id="alice",
+            session_id="s-1",
+            version="v-1",
+            tags=["a", "b"],
+            metadata={"team": "blue"},
+            min_latency=2.5,
+            max_latency=10.0,
+        ),
+    )
+    assert page == []
+    walk = fake.filters_sent()[0]
+    assert walk == [
+        {"column": "environment", "operator": "any of", "value": ["tai"], "type": "stringOptions"},
+        {"column": "isRootObservation", "operator": "=", "value": True, "type": "boolean"},
+        {"column": "startTime", "operator": ">=", "value": (T0 - timedelta(hours=1)).isoformat(), "type": "datetime"},
+        {"column": "startTime", "operator": "<", "value": (T0 + timedelta(hours=1)).isoformat(), "type": "datetime"},
+        {"column": "traceName", "operator": "=", "value": "run", "type": "string"},
+        {"column": "userId", "operator": "=", "value": "alice", "type": "string"},
+        {"column": "sessionId", "operator": "=", "value": "s-1", "type": "string"},
+        {"column": "version", "operator": "=", "value": "v-1", "type": "string"},
+        {"column": "traceTags", "operator": "all of", "value": ["a", "b"], "type": "arrayOptions"},
+        {"column": "metadata", "type": "stringObject", "key": "team", "operator": "=", "value": "blue"},
+        {"column": "latency", "operator": ">=", "value": 2.5, "type": "number"},
+        {"column": "latency", "operator": "<=", "value": 10.0, "type": "number"},
+    ]
+
+
+async def test_native_list_filters_by_latency_on_the_root(fake, reader):
+    fake.run("slow", T0, seconds=3)
+    fake.run("fast", T0 + timedelta(seconds=1), seconds=1)
+    page = await reader.list_traces(filter_=MonitoringFilter(min_latency=2.0))
+    assert [s.id for s in page] == ["slow"]
+
+
+async def test_tags_match_every_tag_asked(fake, reader):
+    fake.run("both", T0, tags=["a", "b"])
+    fake.run("one", T0 + timedelta(seconds=1), tags=["a"])
+    page = await reader.list_traces(filter_=MonitoringFilter(tags=["a", "b"]))
+    assert [s.id for s in page] == ["both"]
+
+
+async def test_source_scopes_every_list_read(fake, reader):
+    fake.run("ours", T0)
+    fake.run("theirs", T0, environment="other")
+    assert [s.id for s in await reader.list_traces()] == ["ours"]
+
+
+async def test_native_list_follows_the_cursor_and_pages(fake, reader):
+    for n in range(250):
+        fake.run(f"t{n:03}", T0 + timedelta(seconds=n))
+    first = await reader.list_traces(limit=100, page=1)
+    third = await reader.list_traces(limit=100, page=3)
+    assert [s.id for s in first] == [f"t{n:03}" for n in range(249, 149, -1)]
+    assert [s.id for s in third] == [f"t{n:03}" for n in range(49, -1, -1)]
+
+
+async def test_native_list_stops_at_its_reach(fake, reader):
+    for n in range(2500):
+        fake.add(id=f"r{n}", trace_id=f"t{n:04}", start=T0 + timedelta(seconds=n))
+    await reader.list_traces(limit=10, page=1)
+    walks = [kw for kw in fake.calls_of("observations") if "metrics" in kw["fields"]]
+    assert len(walks) == 1
+
+
+async def test_roots_tied_on_start_list_once_each_in_trace_id_order(fake, reader):
+    for n in range(999):
+        fake.add(id=f"r{n}", trace_id=f"late{n:03}", start=T0 + timedelta(hours=1, seconds=n))
+    for trace_id in ("tie-c", "tie-a", "tie-b"):
+        fake.add(id=f"{trace_id}-root", trace_id=trace_id, start=T0)
+    first = await reader.list_traces(limit=100, page=10)
+    second = await reader.list_traces(limit=100, page=11)
+    assert [s.id for s in first][-1:] == ["tie-c"]
+    assert [s.id for s in second] == ["tie-b", "tie-a"]
+
+
+async def test_rows_out_of_start_order_fail_loudly(fake, reader):
+    fake.run("t1", T0)
+    fake.run("t2", T0 + timedelta(seconds=1))
+    fake.out_of_order = True
+    with pytest.raises(MonitoringError, match="out of startTime order"):
+        await reader.list_traces()
+
+
+async def test_paging_past_run_5000_is_too_broad(fake, reader):
+    with pytest.raises(MonitoringReadTooBroadError, match="Paging past run 5,000 is not served"):
+        await reader.list_traces(limit=100, page=51)
+    assert fake.calls == []
+
+
+async def test_export_reads_past_the_paging_bound(fake, reader):
+    for n in range(5100):
+        fake.add(id=f"r{n}", trace_id=f"t{n:04}", start=T0 + timedelta(seconds=n))
+    rows = await reader.export_traces(max_rows=5000)
+    assert len(rows) == 5001
+    assert rows[0].id == "t5099"
+
+
+async def test_export_of_nothing_is_empty(fake, reader):
+    assert await reader.export_traces(max_rows=10) == []
+
+
+async def test_export_with_a_negative_bound_raises(reader):
+    with pytest.raises(ValueError, match="max_rows -1"):
+        await reader.export_traces(max_rows=-1)
 
 
 @pytest.mark.parametrize(
-    ("langfuse_type", "kind"),
+    ("kwargs", "message"),
     [
-        ("GENERATION", SpanKind.LLM),
-        ("EMBEDDING", SpanKind.LLM),
-        ("TOOL", SpanKind.TOOL),
-        ("RETRIEVER", SpanKind.TOOL),
-        ("EVENT", SpanKind.EVENT),
-        ("SPAN", SpanKind.CHAIN),
-        ("CHAIN", SpanKind.CHAIN),
-        ("AGENT", SpanKind.CHAIN),
-        ("EVALUATOR", SpanKind.CHAIN),
-        ("GUARDRAIL", SpanKind.CHAIN),
-        ("SOMETHING_NEW", SpanKind.CHAIN),
+        ({"limit": 101}, "limit 101 exceeds the reader's maximum page size 100"),
+        ({"limit": 0}, "limit 0 must be 1 or more"),
+        ({"page": 0}, "page 0 must be 1 or more"),
     ],
 )
-async def test_each_langfuse_type_maps_to_a_neutral_kind(manager, mock_client, trace_body, langfuse_type, kind):
-    obs = {"id": "o1", "type": langfuse_type, "start_time": None}
-    mock_client.api.trace.get.return_value = trace_body(observations=[obs])
-    (o,) = (await LangfuseReader(manager).get_trace("t1")).observations
-    assert o.kind is kind
+async def test_bad_paging_raises_before_any_read(fake, reader, kwargs, message):
+    with pytest.raises(ValueError, match=message):
+        await reader.list_traces(**kwargs)
+    assert fake.calls == []
 
 
-async def test_tokens_are_read_from_the_usage_details(manager, mock_client, trace_body):
-    observations = [
-        {"id": "full", "type": "GENERATION", "usage_details": {"input": 7, "output": 2, "total": 9}},
-        {"id": "partial", "type": "GENERATION", "usage_details": {"input": 7}},
-        {"id": "none", "type": "SPAN", "usage_details": {}},
-    ]
-    mock_client.api.trace.get.return_value = trace_body(observations=observations)
-    full, partial, none = (await LangfuseReader(manager).get_trace("t1")).observations
-    assert (full.input_tokens, full.output_tokens, full.total_tokens) == (7, 2, 9)
-    assert (partial.input_tokens, partial.output_tokens, partial.total_tokens) == (7, None, None)
-    assert (none.input_tokens, none.output_tokens, none.total_tokens) == (None, None, None)
+async def test_an_unknown_sort_is_not_served(fake, reader):
+    with pytest.raises(MonitoringReadNotServedError, match="cannot sort on 'bogus'"):
+        await reader.list_traces(order_by=OrderBy(field="bogus"))
 
 
-async def test_map_preserves_present_falsy_values(manager, mock_client, trace_body):
-    # A present 0.0 cost / empty-string model must survive mapping (not collapse
-    # to None via an `or` fallback).
-    obs = {"id": "o1", "type": "TOOL", "model": "", "usage_details": {}, "start_time": None}
-    mock_client.api.trace.get.return_value = trace_body(total_cost=0.0, observations=[obs])
-    t = await LangfuseReader(manager).get_trace("t1")
-    assert t.total_cost == 0.0
-    assert t.observations[0].model == ""
+def test_list_capability_serves_every_sort_with_every_filter(reader):
+    capability = reader.list_capability()
+    assert capability.sort_fields == {"timestamp", "total_cost", "name", "id", "latency", "total_tokens"}
+    assert capability.incompatible_filters == {}
 
 
-async def test_get_trace_not_found_raises(manager, mock_client):
-    mock_client.api.trace.get.side_effect = NotFoundError(body="missing")
-    with pytest.raises(TraceNotFoundError):
-        await LangfuseReader(manager).get_trace("missing")
-
-
-async def test_get_trace_transient_error_propagates(manager, mock_client):
-    # A timeout is backend health, not "not found": it must surface to the
-    # caller (who may retry), never map to TraceNotFoundError or an empty trace.
-    mock_client.api.trace.get.side_effect = TimeoutError("slow")
-    with pytest.raises(TimeoutError, match="slow"):
-        await LangfuseReader(manager).get_trace("t")
-
-
-async def test_list_traces_summarizes_without_bodies(
-    manager, mock_client, trace_row, list_returns, route_metrics, errors_for
-):
-    now = datetime(2026, 1, 1, tzinfo=UTC)
-    list_returns(
-        [
-            trace_row(id="a", latency=1.5, total_cost=0.25, input="hi", output={"r": 1}, tags=["run:7"]),
-            trace_row(id="b", latency=None, total_cost=0.0),
-        ],
-    )
-    route_metrics(tokens={"a": 42})
-    errors_for(["b"])
-
-    result = await LangfuseReader(manager).list_traces(
-        from_timestamp=now, limit=5, page=2, filter_=MonitoringFilter(tags=["x"])
-    )
-    assert [t.id for t in result] == ["a", "b"]
-    a, b = result
-    assert a.latency_ms == 1500.0
-    assert a.total_cost == 0.25
-    assert a.total_tokens == 42
-    assert a.input == "hi"
-    assert a.output == {"r": 1}
-    assert a.tags == ["run:7"]
-    assert a.status == "ok"
-    # b carries an error observation and no usage row.
-    assert b.status == "error"
-    assert b.total_tokens is None
-    assert b.latency_ms is None
-
-    # A trace body is NEVER fetched while listing — get_trace is the only body door.
-    mock_client.api.trace.get.assert_not_called()
-
-    # The bounded-history guard lives or dies on from_timestamp reaching
-    # trace.list — an unbounded scan is what times out. Assert the forwarding.
-    list_kwargs = mock_client.api.trace.list.call_args.kwargs
-    assert list_kwargs["from_timestamp"] == now
-    assert list_kwargs["tags"] == ["x"]
-    assert list_kwargs["limit"] == 5
-    assert list_kwargs["page"] == 2
-    assert list_kwargs["order_by"] == "timestamp.desc"
-    assert list_kwargs["fields"] == "core,io,metrics"
-    # every read is scoped to the active source via environment
-    assert list_kwargs["environment"] == "tai"
-
-
-async def test_list_traces_version_filter_rides_native_param(
-    manager, mock_client, trace_row, list_returns, route_metrics, errors_for
-):
-    now = datetime(2026, 1, 1, tzinfo=UTC)
-    list_returns([trace_row(id="a")])
-    route_metrics(tokens={"a": 1})
-    errors_for([])
-
-    await LangfuseReader(manager).list_traces(from_timestamp=now, filter_=MonitoringFilter(version="5"))
-
-    # ``version`` is a native trace.list param (not an advanced-filter clause).
-    assert mock_client.api.trace.list.call_args.kwargs["version"] == "5"
-
-
-async def test_list_traces_page_is_at_most_three_calls(
-    manager, mock_client, trace_row, list_returns, route_metrics, errors_for
-):
-    list_returns([trace_row(id="a"), trace_row(id="b")])
-    route_metrics(tokens={"a": 1, "b": 2})
-    errors_for([])
-    await LangfuseReader(manager).list_traces()
-    # One list call, one token metrics call, one (single-page) observations call.
-    assert mock_client.api.trace.list.call_count == 1
-    assert mock_client.api.legacy.metrics_v1.metrics.call_count == 1
-    assert mock_client.api.legacy.observations_v1.get_many.call_count == 1
-    mock_client.api.trace.get.assert_not_called()
-
-
-async def test_trace_filter_level_and_metrics_to_advanced(manager, mock_client):
-    mock_client.api.trace.list.return_value = SimpleNamespace(data=[])
-    await LangfuseReader(manager).list_traces(
-        filter_=MonitoringFilter(level=MonitoringLevel.ERROR, min_cost=1.0, metadata={"a": "b"})
-    )
-    kwargs = mock_client.api.trace.list.call_args.kwargs
-    sent = json.loads(kwargs["filter"])
-    cols = {(c["column"], c["operator"]): c for c in sent}
-    assert cols[("level", "=")]["value"] == "ERROR"
-    assert cols[("totalCost", ">=")]["value"] == 1.0
-    assert cols[("metadata", "=")]["key"] == "a"
-
-
-async def test_trace_advanced_filter_folds_time_bounds_into_json(manager, mock_client):
-    # An advanced clause forces the filter JSON, which overrides the native
-    # from/to params — the time bounds must ride inside the JSON too.
-    mock_client.api.trace.list.return_value = SimpleNamespace(data=[])
-    t0 = datetime(2026, 1, 1, tzinfo=UTC)
-    t1 = datetime(2026, 1, 2, tzinfo=UTC)
-    await LangfuseReader(manager).list_traces(
-        from_timestamp=t0, to_timestamp=t1, filter_=MonitoringFilter(min_cost=1.0)
-    )
-    sent = json.loads(mock_client.api.trace.list.call_args.kwargs["filter"])
-    ts = [c for c in sent if c["column"] == "timestamp"]
-    assert {"column": "timestamp", "operator": ">=", "value": t0.isoformat(), "type": "datetime"} in ts
-    # Half-open upper bound: exclusive.
-    assert {"column": "timestamp", "operator": "<", "value": t1.isoformat(), "type": "datetime"} in ts
-
-
-async def test_trace_filter_model_raises(manager, mock_client):
-    with pytest.raises(MonitoringReadNotSupportedError):
-        await LangfuseReader(manager).list_traces(filter_=MonitoringFilter(model="gpt"))
-
-
-async def test_trace_native_sort_forwarded(manager, mock_client):
-    mock_client.api.trace.list.return_value = SimpleNamespace(data=[])
-    await LangfuseReader(manager).list_traces(order_by=OrderBy(field="name", direction="asc"))
-    assert mock_client.api.trace.list.call_args.kwargs["order_by"] == "name.asc"
-    # native sort never touches the metrics endpoint (empty page -> no enrichment)
-    mock_client.api.legacy.metrics_v1.metrics.assert_not_called()
-
-
-async def test_native_sort_preserves_trace_list_order(
-    manager, mock_client, trace_row, list_returns, route_metrics, errors_for
-):
-    # Order guard: native path returns trace.list order untouched.
-    list_returns([trace_row(id="c"), trace_row(id="a"), trace_row(id="b")])
-    route_metrics(tokens={})
-    errors_for([])
-    result = await LangfuseReader(manager).list_traces(order_by=OrderBy(field="name"))
-    assert [t.id for t in result] == ["c", "a", "b"]
-
-
-async def test_native_sort_allows_none_from_timestamp(manager, mock_client):
-    # Native path input validation is unchanged: from_timestamp=None is forwarded.
-    mock_client.api.trace.list.return_value = SimpleNamespace(data=[])
-    await LangfuseReader(manager).list_traces(from_timestamp=None, limit=5)
-    assert mock_client.api.trace.list.call_args.kwargs["from_timestamp"] is None
-
-
-async def test_trace_sort_unknown_field_raises(manager, mock_client):
-    with pytest.raises(MonitoringReadNotSupportedError):
-        await LangfuseReader(manager).list_traces(order_by=OrderBy(field="metadata"))
-
-
-# -- get_observation and the producer-metadata decode ---------------------------------------
-
-
-def _observation_body(**kw):
-    base = {"id": "o1", "trace_id": "t1", "type": "SPAN", "name": "node", "input": {"a": 1}, "output": None}
-    base.update(kw)
-    return SimpleNamespace(model_dump=lambda: base)
-
-
-async def test_get_observation_reads_one_observation(manager, mock_client):
-    mock_client.api.legacy.observations_v1.get.return_value = _observation_body()
-    obs = await LangfuseReader(manager).get_observation("t1", "o1")
-    assert (obs.id, obs.trace_id, obs.input) == ("o1", "t1", {"a": 1})
-    assert mock_client.api.legacy.observations_v1.get.call_args.args == ("o1",)
-
-
-async def test_get_observation_absent_is_not_found(manager, mock_client):
-    mock_client.api.legacy.observations_v1.get.side_effect = NotFoundError(body="nope")
-    with pytest.raises(ObservationNotFoundError):
-        await LangfuseReader(manager).get_observation("t1", "o1")
-
-
-async def test_get_observation_of_another_trace_is_not_found(manager, mock_client):
-    mock_client.api.legacy.observations_v1.get.return_value = _observation_body(trace_id="other")
-    with pytest.raises(ObservationNotFoundError):
-        await LangfuseReader(manager).get_observation("t1", "o1")
-
-
-async def test_get_observation_transient_error_propagates(manager, mock_client):
-    mock_client.api.legacy.observations_v1.get.side_effect = TimeoutError("slow")
-    with pytest.raises(TimeoutError):
-        await LangfuseReader(manager).get_observation("t1", "o1")
-
-
-@pytest.mark.parametrize(
-    "encoded",
-    [json.dumps({"k": "v", "tai42.message": {"content": "c"}}), {"k": "v", "tai42.message": {"content": "c"}}],
-)
-async def test_producer_metadata_is_decoded_with_the_promoted_keys(manager, mock_client, encoded):
-    metadata = {"attributes": {"tai42.metadata": encoded, "tai42.step_role": "grouping", "other": "x"}}
-    mock_client.api.legacy.observations_v1.get.return_value = _observation_body(metadata=metadata)
-    obs = await LangfuseReader(manager).get_observation("t1", "o1")
-    assert obs.metadata == {"k": "v", "tai42.message": {"content": "c"}, "tai42.step_role": "grouping"}
-
-
-async def test_an_observation_without_producer_metadata_has_none(manager, mock_client):
-    mock_client.api.legacy.observations_v1.get.return_value = _observation_body(metadata={"attributes": {"x": 1}})
-    assert (await LangfuseReader(manager).get_observation("t1", "o1")).metadata is None
-    mock_client.api.legacy.observations_v1.get.return_value = _observation_body(metadata=None)
-    assert (await LangfuseReader(manager).get_observation("t1", "o1")).metadata is None
-
-
-async def test_malformed_producer_metadata_is_refused(manager, mock_client):
-    metadata = {"attributes": {"tai42.metadata": json.dumps([1, 2])}}
-    mock_client.api.legacy.observations_v1.get.return_value = _observation_body(metadata=metadata)
-    with pytest.raises(MonitoringError, match=r"malformed tai42\.metadata attribute on observation o1"):
-        await LangfuseReader(manager).get_observation("t1", "o1")
+def test_max_page_size_is_the_page_ceiling(reader):
+    assert reader.max_page_size() == 100

@@ -40,7 +40,7 @@ from tai42_kit.clients.impl.redis import RedisClient
 from tai42_skeleton.access_control.user import request_identity
 from tai42_skeleton.interactions.answer_check import check_answer
 from tai42_skeleton.interactions.caller_ask import CALLER_ASK_RESOLUTION_REFUSED, is_caller_ask
-from tai42_skeleton.interactions.continuation import continuation_due_timing, fire_continuation_after_claim
+from tai42_skeleton.interactions.continuation_dispatch import continuation_due_timing, fire_continuation_after_claim
 from tai42_skeleton.interactions.kill import kill_park
 from tai42_skeleton.interactions.reaction import (
     SubmittedCheckRejectedError,

@@ -24,9 +24,14 @@ class ChannelRegistry:
         self._channels: dict[str, Channel] = {}
 
     def register(self, name: str, channel: Channel) -> None:
-        """Register ``channel`` under ``name``; raise if the name is already taken."""
+        """Register ``channel`` under ``name``.
+
+        Raises ``ValueError`` if the name is already taken or the channel declares a malformed
+        ``identity_hint``, so a bad declaration fails the plugin's load, never a listing.
+        """
         if name in self._channels:
             raise ValueError(f"channel {name!r} is already registered")
+        declared_identity_hint(name, channel)
         self._channels[name] = channel
 
     def get(self, name: str) -> Channel:
@@ -43,6 +48,16 @@ class ChannelRegistry:
     def reset(self) -> None:
         """Clear every registration, so a reload can re-register cleanly."""
         self._channels.clear()
+
+
+def declared_identity_hint(name: str, channel: Channel) -> str | None:
+    """The channel's declared ``identity_hint``, or ``None`` when it declares none; a malformed one raises."""
+    value = getattr(channel, "identity_hint", None)
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"channel {name!r} declares identity_hint {value!r}; it must be a non-blank string")
+    return value
 
 
 def resolve_channel(channel: str) -> Channel:

@@ -43,8 +43,11 @@ if TYPE_CHECKING:
         StatesConsumerListerRegistry,
         StatesService,
     )
+    from tai42_skeleton.storage.prefix_marks import PrefixMarkRegistry
     from tai42_skeleton.template import ResourceManager
+    from tai42_skeleton.template.delete_referees import TemplateDeleteRefereeRegistry
     from tai42_skeleton.tools import (
+        TemplateRefsRegistry,
         ToolExtrasRegistry,
         ToolPauseRegistry,
         ToolRefsRegistry,
@@ -53,6 +56,7 @@ if TYPE_CHECKING:
         ToolTierRegistry,
     )
     from tai42_skeleton.tools.binding import ToolBinding
+    from tai42_skeleton.tools.delete_cascades import ToolDeleteCascadeRegistry
     from tai42_skeleton.tools.delete_referees import ToolDeleteRefereeRegistry
     from tai42_skeleton.tools.detach_referees import StateTemplateDetachRefereeRegistry
     from tai42_skeleton.tools.rename_referees import ToolRenameRefereeRegistry
@@ -198,7 +202,7 @@ class LifecycleState(ABC):
         return self._drain_budgets
 
     @abstractmethod
-    def _mcp_tools(self, config: TaiMCPConfig, tools):
+    def _mcp_tools(self, config: TaiMCPConfig, tools, preset_names: frozenset[str]):
         raise NotImplementedError
 
     if TYPE_CHECKING:
@@ -266,17 +270,21 @@ class LifecycleState(ABC):
     _http_surface: "HttpSurface"
     _webhook_verifier_registry: "WebhookVerifierRegistry"
     _channel_registry: "ChannelRegistry"
+    _prefix_mark_registry: "PrefixMarkRegistry"
     _write_validator_registry: "PresetWriteValidatorRegistry"
     _target_validator_registry: "TargetBindValidatorRegistry"
     _input_schema_support_registry: "PresetInputSchemaSupportRegistry"
     _registration_tier_registry: "ToolTierRegistry"
     _tool_refs_registry: "ToolRefsRegistry"
+    _template_refs_registry: "TemplateRefsRegistry"
     _tool_retry_registry: "ToolRetryRegistry"
     _tool_extras_registry: "ToolExtrasRegistry"
     _tool_pause_registry: "ToolPauseRegistry"
     _rename_referee_registry: "ToolRenameRefereeRegistry"
     _delete_referee_registry: "ToolDeleteRefereeRegistry"
+    _delete_cascade_registry: "ToolDeleteCascadeRegistry"
     _detach_referee_registry: "StateTemplateDetachRefereeRegistry"
+    _template_delete_referee_registry: "TemplateDeleteRefereeRegistry"
     _seed_registry: "PresetSeedRegistry"
     _backup_registry: "BackupRegistry"
     _states_service: "StatesService"

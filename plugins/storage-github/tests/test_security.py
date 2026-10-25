@@ -10,7 +10,7 @@ from httpx import HTTPStatusError
 
 from tai42_storage_github import GithubStorage
 
-from .conftest import make_response
+from .conftest import make_response, set_stream
 
 pytestmark = pytest.mark.usefixtures("client")
 
@@ -29,13 +29,40 @@ async def test_token_sent_on_wire_but_not_leaked(client, settings, caplog):
     assert secret not in caplog.text
 
 
-async def test_public_repo_omits_authorization_header(client, settings):
-    settings.token = None
-    client.get.return_value = make_response(status=200, text="public content")
+_RAW_FORM_HEADERS = {"Content-Type": "application/vnd.github.raw+json; charset=utf-8"}
+_REF_ANSWER = {"object": {"type": "commit", "sha": "c" * 40}}
 
+
+async def _read_every_way(client) -> None:
+    client.get.return_value = make_response(status=200, text="content", headers=_RAW_FORM_HEADERS)
     await GithubStorage().load("x.j2")
+    await GithubStorage().load_bytes("x.bin")
+    client.get.return_value = make_response(status=200, json_body={"type": "file", "size": 7})
+    await GithubStorage().stat("x.bin")
+    client.get.return_value = make_response(status=200, json_body=_REF_ANSWER)
+    set_stream(client, make_response(status=206, content=b"con"))
+    await GithubStorage().load_range("x.bin", 0, 3)
 
-    assert "Authorization" not in client.get.call_args.kwargs["headers"]
+
+async def test_token_rides_every_read_on_both_hosts(client, settings):
+    await _read_every_way(client)
+
+    expected = f"Bearer {settings.token.get_secret_value()}"
+    calls = [*client.get.call_args_list, *client.stream.call_args_list]
+    assert len(calls) == 5
+    for call in calls:
+        assert call.kwargs["headers"]["Authorization"] == expected
+
+
+async def test_public_repo_omits_authorization_header_on_both_hosts(client, settings):
+    settings.token = None
+
+    await _read_every_way(client)
+
+    calls = [*client.get.call_args_list, *client.stream.call_args_list]
+    assert len(calls) == 5
+    for call in calls:
+        assert "Authorization" not in call.kwargs["headers"]
 
 
 async def test_settings_secretstr_hides_token_in_repr(monkeypatch):

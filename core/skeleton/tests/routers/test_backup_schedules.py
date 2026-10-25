@@ -128,6 +128,7 @@ async def test_schedules_round_trip_through_bound_backend(monkeypatch):
         "fanout": None,
         "recycle": None,
         "awaiting_respawn": [],
+        "span_release_error": None,
     }
     assert ("backend_import_schedules", {"schedules": backend_doc, "mode": "skip"}) in tools.run_calls
 
@@ -242,6 +243,27 @@ async def test_a_malformed_binding_row_is_refused_per_row(monkeypatch):
     assert section["skipped"] == 1
     assert section["errors"][0].startswith("schedule 'bad' (row 0): ")
     assert tools.run_calls == [("backend_import_schedules", {"schedules": [], "mode": "skip"})]
+
+
+async def test_a_contract_row_naming_an_id_the_store_lacks_is_kept_from_the_backend(monkeypatch):
+    from tai42_kit.utils.schedule_subject import SCHEDULE_CONTRACT_ARG
+    from tests._fakes.recording_storage import MappedStorage
+
+    from tai42_skeleton.app import instance
+
+    monkeypatch.setattr(instance.app._storage_registry, "_provider", MappedStorage({"jq/held": "."}))
+    tools = _FakeTools({"backend_import_schedules": _EMPTY_REPORT})
+    _install(monkeypatch, tools)
+    missing = {"name": "bad", "kwargs": {"tool": "cleanup", SCHEDULE_CONTRACT_ARG: {"start_expr": {"id": "jq/start"}}}}
+    held = {"name": "good", "kwargs": {"tool": "cleanup", SCHEDULE_CONTRACT_ARG: {"start_expr": {"id": "jq/held"}}}}
+
+    document = {"version": 1, "sections": {"schedules": [missing, held]}}
+    data = _json(await import_backup(_post_req({"document": document, "sections": ["schedules"]})))["data"]
+
+    section = data["sections"]["schedules"]
+    assert section["errors"] == ["schedule 'bad' (row 0): stored id 'jq/start' at start_expr is not a stored template"]
+    assert section["skipped"] == 1
+    assert tools.run_calls == [("backend_import_schedules", {"schedules": [held], "mode": "skip"})]
 
 
 async def test_a_store_fault_during_the_binding_check_fails_the_section(monkeypatch):

@@ -4,7 +4,7 @@ import asyncio
 import logging
 import re
 import threading
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from concurrent.futures import CancelledError, Future
 from contextlib import asynccontextmanager, suppress
 from typing import Any
@@ -79,6 +79,13 @@ def validate_registration(slug: str, transport: str) -> None:
         raise ValueError(f"slug {slug!r} must match {PATH_SEGMENT_SLUG_RE.pattern} (one lowercase path segment)")
     if transport not in _VALID_TRANSPORTS:
         raise ValueError(f"transport {transport!r} must be one of {_VALID_TRANSPORTS}")
+
+
+async def assert_served_tools_resolve(tools: Sequence[str]) -> None:
+    """Refuse a registration naming a tool the live registry does not serve: one 400 line per such tool."""
+    from tai42_skeleton.operations.reference_check import RegistryReference, assert_references_resolve
+
+    await assert_references_resolve([RegistryReference("served tool", tool) for tool in tools])
 
 
 async def _not_found(send: Callable[[dict[str, Any]], Awaitable[None]], body: bytes) -> None:
@@ -257,10 +264,21 @@ class SubMcpAppRouter:
         return self._routes
 
     async def register_sub_mcp_app(self, slug: str, tools: list[str], transport: str = "http"):
-        """Register or replace the sub-MCP app for ``slug``, tearing down any stale live instance.
+        """Register or replace the sub-MCP app for ``slug``, refusing a tool the live registry does not serve.
 
-        The slug and transport are validated loudly; a reload stamps a fresh generation token so an
-        in-flight build of the prior config detects it was superseded and does not cache a stale app.
+        The slug and transport are validated, then every served tool is resolved (a 400 naming each
+        unserved one, nothing bound), then the route is bound by :meth:`bind_route`.
+        """
+        validate_registration(slug, transport)
+        await assert_served_tools_resolve(tools)
+        await self.bind_route(slug, tools, transport)
+
+    async def bind_route(self, slug: str, tools: list[str], transport: str = "http") -> None:
+        """Bind or replace the route for ``slug``, tearing down any stale live instance; reads no registry.
+
+        The replay of a stored or an already-checked registration. The slug and transport are
+        validated loudly; a reload stamps a fresh generation token so an in-flight build of the
+        prior config detects it was superseded and does not cache a stale app.
         """
         # Validate the slug shape + transport at the core so every caller is guarded
         # (the HTTP router maps this to a 400; the backup-restore path records it as
@@ -554,7 +572,7 @@ class SubMcpAppRouter:
         config = await get_sub_mcp_store().get_route(slug)
         if config is None:
             return False
-        await self.register_sub_mcp_app(slug, config.tools, config.transport)
+        await self.bind_route(slug, config.tools, config.transport)
         return True
 
     async def _build_with_generation(self, slug: str):

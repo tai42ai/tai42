@@ -323,7 +323,7 @@ def worker_env(monkeypatch) -> dict[str, Any]:
 
 
 def test_start_rq_worker_prefork(worker_env):
-    worker_module.start_rq_worker(None, "w1", "info", False, 500, "prefork")
+    worker_module.start_rq_worker(None, "w1", "info", False, 500, "prefork", None)
     assert worker_env["prepared"] == 1
     assert worker_env["gevent"] == 0
     assert worker_env["hooks"] == 1
@@ -351,7 +351,7 @@ def test_the_worker_connection_carries_the_kit_sync_retry(worker_env, monkeypatc
     monkeypatch.setenv("RQ_SOCKET_TIMEOUT", "3")
     rq_settings.cache_clear()
     try:
-        _worker, conn = worker_module._build_worker(None, "w1", 500, "solo")
+        _worker, conn = worker_module._build_worker(None, "w1", 500, "solo", None)
     finally:
         rq_settings.cache_clear()
 
@@ -369,14 +369,14 @@ def test_the_worker_connection_carries_the_kit_sync_retry(worker_env, monkeypatc
 
 
 def test_the_redis_url_flag_wins_for_the_worker_connection(worker_env):
-    worker_module.start_rq_worker("redis://custom:6391/3", "w2", "debug", True, 100, "solo")
+    worker_module.start_rq_worker("redis://custom:6391/3", "w2", "debug", True, 100, "solo", None)
 
     assert worker_env["from_url"]["url"] == "redis://custom:6391/3"
     assert worker_env["from_url"]["decode_responses"] is False
 
 
 def test_start_rq_worker_solo(worker_env):
-    worker_module.start_rq_worker("redis://custom", "w2", "debug", True, 100, "solo")
+    worker_module.start_rq_worker("redis://custom", "w2", "debug", True, 100, "solo", None)
     assert worker_env["prepared"] == 0
     # The non-forking pools still spawn the rq-scheduler child, so they need the hook.
     assert worker_env["hooks"] == 1
@@ -385,7 +385,7 @@ def test_start_rq_worker_solo(worker_env):
 
 
 def test_start_rq_worker_gevent(worker_env):
-    worker_module.start_rq_worker(None, "w3", "info", False, 500, "gevent")
+    worker_module.start_rq_worker(None, "w3", "info", False, 500, "gevent", None)
     assert worker_env["gevent"] == 1
     assert worker_env["prepared"] == 0
     assert worker_env["hooks"] == 1
@@ -394,8 +394,8 @@ def test_start_rq_worker_gevent(worker_env):
 def test_main_cli_invokes_start(monkeypatch):
     calls: list[Any] = []
     monkeypatch.setattr(worker_module, "start_rq_worker", lambda *args: calls.append(args))
-    worker_module.main.callback(None, "w1", "INFO", False, 500, "solo")  # type: ignore[misc]
-    assert calls == [(None, "w1", "INFO", False, 500, "solo")]
+    worker_module.main.callback(None, "w1", "INFO", False, 500, "solo", "gpu")  # type: ignore[misc]
+    assert calls == [(None, "w1", "INFO", False, 500, "solo", "gpu")]
 
 
 def test_main_cli_without_name_leaves_the_worker_name_to_rq(monkeypatch):
@@ -410,13 +410,13 @@ def test_main_cli_without_name_leaves_the_worker_name_to_rq(monkeypatch):
     result = CliRunner().invoke(worker_module.main, [])
 
     assert result.exit_code == 0, result.output
-    assert calls == [(None, None, "INFO", False, 500, "prefork")]
+    assert calls == [(None, None, "INFO", False, 500, "prefork", None)]
 
 
 def test_build_worker_hands_a_none_name_to_the_worker_class(worker_env):
     # The None reaches the rq worker class as ``name=None`` — that is what makes
     # rq generate the unique name; anything defaulted along the way would not.
-    worker_module.start_rq_worker(None, None, "info", False, 500, "solo")
+    worker_module.start_rq_worker(None, None, "info", False, 500, "solo", None)
 
     assert worker_env["name"] is None
 
@@ -456,6 +456,7 @@ def test_from_args_parses_the_worker_cli_options():
         "burst": True,
         "results_ttl": 500,
         "pool": "solo",
+        "queue": None,
     }
 
 
@@ -487,7 +488,7 @@ async def test_build_constructs_the_worker_and_its_connection(monkeypatch):
     runtime = cast("Any", worker_module.RqWorkerRuntime.from_args(["--pool", "gevent", "--redis-url", "redis://x/1"]))
     await runtime.build()
 
-    assert calls == [("redis://x/1", None, 500, "gevent")]
+    assert calls == [("redis://x/1", None, 500, "gevent", None)]
     assert runtime._worker is worker
     assert runtime._redis_conn is conn
 

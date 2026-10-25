@@ -19,23 +19,25 @@ that produces none raises rather than silently omitting it.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, ClassVar
 
 from langchain_core.tools import StructuredTool
-from langgraph.types import Command
 from pydantic import BaseModel
 from tai42_contract.agent import AddressedMemory, Agent, RecursionLimitFinal, StructuredOutputUnresolvedFinal
 from tai42_contract.agent.events import InterruptFinal, StreamEvent, StructuredFinal, SuspendedFinal
 from tai42_contract.app import tai42_app
+from tai42_contract.monitoring import TraceContext
 from tai42_contract.sandbox import SandboxSession
 from tai42_contract.template import TemplatedText
 from tai42_contract.tools import TOOL_META_CRASH_RESUME, ClientTool
 from tai42_kit.llm.checkpoint.checkpoint_registry import checkpoint_registry
 from tai42_kit.llm.models import get_llm_async
-from tai42_kit.llm.runtime import build_agent_input, build_system_message, build_user_output, extract_structured_output
+from tai42_kit.llm.runtime import build_agent_input, build_system_message
 from tai42_kit.llm.settings import llm_provider_settings, llm_settings
 from tai42_kit.llm.store.store_registry import store_registry
+from tai42_kit.monitoring import begin_run_trace, open_run_trace
 
 from tai42_agents._internal.append import awrite_thread_messages, require_thread_id, to_thread_messages
 from tai42_agents._internal.cache_mark import default_system_cache_mark
@@ -43,7 +45,6 @@ from tai42_agents._internal.config_util import (
     build_run_config,
     config_addressed,
     mark_minted_thread_finished,
-    thread_head_config,
 )
 from tai42_agents._internal.lc_tools import structured_tools
 from tai42_agents._internal.park import (
@@ -51,7 +52,6 @@ from tai42_agents._internal.park import (
     bind_resume_per_step,
     build_park_identity,
     chain_routing_slots,
-    collect_pending_interrupts,
     detach_dead_chains,
     finalize_drive,
     is_suspended_receipt,
@@ -59,19 +59,20 @@ from tai42_agents._internal.park import (
     park_step_binding,
     register_agent_resume_tool,
     register_chained_park_tool,
-    require_stored_checkpoint,
     resume_command,
+    step_bindings,
 )
-from tai42_agents._internal.park.errors import AgentResumeInterruptNotPendingError
 from tai42_agents._internal.recovery import _repair_dangling_tool_calls
 from tai42_agents._internal.reject import reject_blank_memory_keys, resolve_response_format
 from tai42_agents._internal.render import render_message
 from tai42_agents._internal.run_kwargs import guard_run_kwargs
+from tai42_agents._internal.run_record import TerminalEvents, run_input
 from tai42_agents._internal.stream_events import aproject_agent_events
 from tai42_agents._internal.structured import structured_output_stack
 from tai42_agents._internal.subagent_spec import SubAgentSpec as NeutralSubAgentSpec
 from tai42_agents.langchain_deep_agent.factory import build_langchain_deep_agent
 from tai42_agents.langchain_deep_agent.park_identity import build_astream_park, build_rebuild_kwargs
+from tai42_agents.langchain_deep_agent.park_resume import drive_park_resume
 from tai42_agents.langchain_deep_agent.run_input import DeepAgentInput
 from tai42_agents.langchain_deep_agent.run_thread import end_streamed_run, start_run_config
 from tai42_agents.langchain_deep_agent.session import DeepAgentSession
@@ -86,6 +87,57 @@ register_agent_resume_tool()
 # ...and the completion tool that closes a CHAINED park, for the same reason: this loop's
 # dispatches bind it as their delivery address.
 register_chained_park_tool()
+
+
+@dataclass(frozen=True)
+class _StreamTurn:
+    """The resolved inputs of one streaming turn, ready for the build."""
+
+    response_format: Any
+    rendered_system: str
+    rendered_user: str | None
+    tools: list[StructuredTool]
+    subagents: list[ResolvedSubAgentSpec]
+    inline_skills: list[InlineSkill]
+
+
+async def _resolve_stream_turn(
+    *,
+    tools: Sequence[ClientTool],
+    tool_names: Sequence[str],
+    subagents: Sequence[NeutralSubAgentSpec | DeepSubAgentSpec] | None,
+    inline_skills: Sequence[dict[str, Any]] | None,
+    system_message: TemplatedText | None,
+    user_message: TemplatedText | None,
+    response_format: Any,
+    user_content_kwargs: dict[str, Any] | None,
+    resume: Any,
+) -> _StreamTurn:
+    """Resolve a streaming turn's response format, messages, tools, subagents and inline skills.
+
+    Refuses a turn that gives both or neither of ``user_message`` and ``resume``, and
+    ``user_content_kwargs`` on a resume.
+    """
+    resolved_format = await resolve_response_format("langchain_deep_agent", response_format)
+    if (user_message is None) == (resume is None):
+        raise ValueError("langchain_deep_agent.astream requires exactly one of user_message or resume")
+    if resume is not None and user_content_kwargs:
+        raise ValueError(
+            "langchain_deep_agent.astream: user_content_kwargs applies to a fresh user_message turn, not a resume"
+        )
+    rendered_system = await render_message(system_message)
+    rendered_user: str | None = (
+        None if resume is not None else await render_message(user_message, allow_empty=False, field="user_message")
+    )
+    client_tools = await tai42_app.tools.get_client_tools(list(tool_names)) if tool_names else []
+    return _StreamTurn(
+        response_format=resolved_format,
+        rendered_system=rendered_system,
+        rendered_user=rendered_user,
+        tools=structured_tools([*tools, *client_tools]),
+        subagents=[await _to_internal(spec) for spec in (subagents or [])],
+        inline_skills=[s if isinstance(s, InlineSkill) else InlineSkill(**s) for s in (inline_skills or [])],
+    )
 
 
 # The ``crash_resume`` setting is DECLARED to the skeleton at registration as
@@ -178,119 +230,129 @@ class DeepAgent(Agent):
             },
         )
         reject_blank_memory_keys("langchain_deep_agent.run", thread_id=thread_id, resume_checkpoint_id=None)
-        response_format = await resolve_response_format("langchain_deep_agent", response_format)
+        # The run's root records the turn (the user message, or the answers a resume drives) and the
+        # returned result.
+        with open_run_trace(langgraph_config, input_=run_input(user_message=user_message, resume=resume)) as root:
+            context = root.context
+            response_format = await resolve_response_format("langchain_deep_agent", response_format)
 
-        if resume is None and user_message is None:
-            raise ValueError("langchain_deep_agent.run requires exactly one of user_message or resume")
-        if resume is not None:
-            if user_message is not None:
-                raise ValueError("langchain_deep_agent.run requires exactly one of user_message or resume, not both.")
-            if user_content_kwargs:
-                raise ValueError(
-                    "langchain_deep_agent.run: user_content_kwargs applies to a fresh user_message turn, not a resume"
-                )
-            rendered_user: str | None = None
-        else:
-            rendered_user = await render_message(user_message, allow_empty=False, field="user_message")
-        rendered_system = await render_message(system_message)
+            if resume is None and user_message is None:
+                raise ValueError("langchain_deep_agent.run requires exactly one of user_message or resume")
+            if resume is not None:
+                if user_message is not None:
+                    raise ValueError(
+                        "langchain_deep_agent.run requires exactly one of user_message or resume, not both."
+                    )
+                if user_content_kwargs:
+                    raise ValueError(
+                        "langchain_deep_agent.run: user_content_kwargs applies to a fresh user_message turn, "
+                        "not a resume"
+                    )
+                rendered_user: str | None = None
+            else:
+                rendered_user = await render_message(user_message, allow_empty=False, field="user_message")
+            rendered_system = await render_message(system_message)
 
-        client_tools = await tai42_app.tools.get_client_tools(list(tool_names)) if tool_names else []
-        resolved_tools = structured_tools([*tools, *client_tools])
-        internal_subagents = await resolve_subagent_specs(subagents)
-        coerced_inline_skills = [s if isinstance(s, InlineSkill) else InlineSkill(**s) for s in (inline_skills or [])]
+            client_tools = await tai42_app.tools.get_client_tools(list(tool_names)) if tool_names else []
+            resolved_tools = structured_tools([*tools, *client_tools])
+            internal_subagents = await resolve_subagent_specs(subagents)
+            coerced_inline_skills = [
+                s if isinstance(s, InlineSkill) else InlineSkill(**s) for s in (inline_skills or [])
+            ]
 
-        # HARD sandbox dependency: the scratch backend is durable, so a run requires a
-        # provider — acquire the session BEFORE the graph compiles (the backend needs it), a
-        # loud SandboxUnavailableError on a box with none. A threaded run reattaches its durable
-        # volume by workspace_key; a tool-face run gets a fresh ephemeral one. The workspace lease
-        # wraps session-acquire + cred-materialize + drive as one guarded region, so two
-        # same-thread_id workers never each open a session on the shared volume (the lease-loser
-        # raises before any session/cred exists).
-        async with DeepAgentSession.leased(thread_id=thread_id) as drive:
-            suspended = False
-            try:
-                agent, strategy = await self._resolve_and_build(
-                    tools=resolved_tools,
-                    subagents=internal_subagents,
-                    skills=skills,
-                    inline_skills=coerced_inline_skills or None,
-                    system_message=rendered_system,
-                    response_format=response_format,
-                    interrupt_on=interrupt_on,
-                    llm_provider=llm_provider,
-                    checkpoint_provider=checkpoint_provider,
-                    store_provider=store_provider,
-                    llm_kwargs=llm_kwargs,
-                    session=drive.session,
-                )
-                config, minted_thread = await start_run_config(
-                    langgraph_config, thread_id, None, recursion_limit, checkpoint_provider
-                )
-                if resume is not None:
-                    agent_input: Any = await resume_command(agent, config, resume)
-                else:
-                    # The resume/user guard above makes rendered_user a str on this branch.
-                    assert rendered_user is not None  # noqa: S101 (type-narrowing invariant guaranteed above; assert keeps the complexity floor)
-                    agent_input = build_agent_input(rendered_user, user_content_kwargs=user_content_kwargs)
-
-                # The run face returns the park RECEIPT to its caller and resumes out of band, so
-                # it binds the resume continuation: an async ask this run drives parks through
-                # it. The park entry captures the cross-driver chain routing an ancestor bound
-                # around this dispatch (read HERE, in the caller's context): a resumed run's
-                # terminal fires that chain's delivery tool and re-enters the waiting ancestor;
-                # unchained, the terminal fires nothing. A run carrying live tools, a non-durable
-                # checkpoint, an ephemeral (tool-face) workspace, or an unconfigured park index is
-                # not park-capable — build_park_identity returns None and the async ask refuses
-                # loudly pre-persist. The park's retention bound is min(checkpoint, workspace): the
-                # paused graph lives only as long as BOTH stores hold it.
-                completion_tool, completion_context = chain_routing_slots()
-                park = build_park_identity(
-                    agent_name=self.tool_name,
-                    config=config,
-                    checkpoint_provider=checkpoint_provider,
-                    has_live_tools=bool(tools),
-                    rebuild_kwargs=build_rebuild_kwargs(
-                        tool_names=tool_names,
-                        subagents=subagents,
+            # HARD sandbox dependency: the scratch backend is durable, so a run requires a
+            # provider — acquire the session BEFORE the graph compiles (the backend needs it), a
+            # loud SandboxUnavailableError on a box with none. A threaded run reattaches its durable
+            # volume by workspace_key; a tool-face run gets a fresh ephemeral one. The workspace lease
+            # wraps session-acquire + cred-materialize + drive as one guarded region, so two
+            # same-thread_id workers never each open a session on the shared volume (the lease-loser
+            # raises before any session/cred exists).
+            async with DeepAgentSession.leased(thread_id=thread_id) as drive:
+                suspended = False
+                try:
+                    agent, strategy = await self._resolve_and_build(
+                        tools=resolved_tools,
+                        subagents=internal_subagents,
                         skills=skills,
-                        inline_skills=coerced_inline_skills,
-                        rendered_system=rendered_system,
-                        interrupt_on=interrupt_on,
+                        inline_skills=coerced_inline_skills or None,
+                        system_message=rendered_system,
                         response_format=response_format,
+                        interrupt_on=interrupt_on,
                         llm_provider=llm_provider,
+                        checkpoint_provider=checkpoint_provider,
                         store_provider=store_provider,
                         llm_kwargs=llm_kwargs,
-                        langgraph_config=langgraph_config,
-                        workspace_key=drive.workspace_key,
-                    ),
-                    recursion_limit=recursion_limit,
-                    completion_tool=completion_tool,
-                    completion_context=completion_context,
-                    bind=True,
-                    extra_retention_horizon=drive.workspace_retention_horizon,
-                )
-                async with park_drive(park):
-                    result = await self._drain(
-                        self._astream_built(
-                            agent,
-                            agent_input,
-                            config,
-                            interrupt_on,
-                            response_format=response_format,
-                            structured_strategy=strategy,
-                            park=park,
-                        ),
-                        response_format=response_format,
+                        session=drive.session,
                     )
-                # A park-suspend is still a LIVE run: skip the credential scrub so the bearer file
-                # stays for the door-less expiry resume (its own terminal exit scrubs it).
-                suspended = is_suspended_receipt(result)
-                if not suspended:
-                    await mark_minted_thread_finished(minted_thread, provider=checkpoint_provider)
-                return result
-            finally:
-                if not suspended:
-                    await drive.scrub_credentials()
+                    config, minted_thread = await start_run_config(
+                        langgraph_config, thread_id, None, recursion_limit, checkpoint_provider, context
+                    )
+                    if resume is not None:
+                        agent_input: Any = await resume_command(agent, config, resume)
+                    else:
+                        # The resume/user guard above makes rendered_user a str on this branch.
+                        assert rendered_user is not None  # noqa: S101 (type-narrowing invariant guaranteed above; assert keeps the complexity floor)
+                        agent_input = build_agent_input(rendered_user, user_content_kwargs=user_content_kwargs)
+
+                    # The run face returns the park RECEIPT to its caller and resumes out of band, so
+                    # it binds the resume continuation: an async ask this run drives parks through
+                    # it. The park entry captures the cross-driver chain routing an ancestor bound
+                    # around this dispatch (read HERE, in the caller's context): a resumed run's
+                    # terminal fires that chain's delivery tool and re-enters the waiting ancestor;
+                    # unchained, the terminal fires nothing. A run carrying live tools, a non-durable
+                    # checkpoint, an ephemeral (tool-face) workspace, or an unconfigured park index is
+                    # not park-capable — build_park_identity returns None and the async ask refuses
+                    # loudly pre-persist. The park's retention bound is min(checkpoint, workspace): the
+                    # paused graph lives only as long as BOTH stores hold it.
+                    completion_tool, completion_context = chain_routing_slots()
+                    park = build_park_identity(
+                        agent_name=self.tool_name,
+                        config=config,
+                        checkpoint_provider=checkpoint_provider,
+                        has_live_tools=bool(tools),
+                        rebuild_kwargs=build_rebuild_kwargs(
+                            tool_names=tool_names,
+                            subagents=subagents,
+                            skills=skills,
+                            inline_skills=coerced_inline_skills,
+                            rendered_system=rendered_system,
+                            interrupt_on=interrupt_on,
+                            response_format=response_format,
+                            llm_provider=llm_provider,
+                            store_provider=store_provider,
+                            llm_kwargs=llm_kwargs,
+                            langgraph_config=langgraph_config,
+                            workspace_key=drive.workspace_key,
+                        ),
+                        recursion_limit=recursion_limit,
+                        completion_tool=completion_tool,
+                        completion_context=completion_context,
+                        bind=True,
+                        extra_retention_horizon=drive.workspace_retention_horizon,
+                    )
+                    async with park_drive(park):
+                        result = await self._drain(
+                            self._astream_built(
+                                agent,
+                                agent_input,
+                                config,
+                                interrupt_on,
+                                response_format=response_format,
+                                structured_strategy=strategy,
+                                park=park,
+                            ),
+                            response_format=response_format,
+                        )
+                    # A park-suspend is still a LIVE run: skip the credential scrub so the bearer file
+                    # stays for the door-less expiry resume (its own terminal exit scrubs it).
+                    suspended = is_suspended_receipt(result)
+                    if not suspended:
+                        await mark_minted_thread_finished(minted_thread, provider=checkpoint_provider)
+                    root.record_output(result)
+                    return result
+                finally:
+                    if not suspended:
+                        await drive.scrub_credentials()
 
     async def append_thread_messages(
         self,
@@ -395,122 +457,134 @@ class DeepAgent(Agent):
             },
         )
         reject_blank_memory_keys("langchain_deep_agent.astream", thread_id=thread_id, resume_checkpoint_id=None)
-        response_format = await resolve_response_format("langchain_deep_agent", response_format)
-        if (user_message is None) == (resume is None):
-            raise ValueError("langchain_deep_agent.astream requires exactly one of user_message or resume")
-        if resume is not None and user_content_kwargs:
-            raise ValueError(
-                "langchain_deep_agent.astream: user_content_kwargs applies to a fresh user_message turn, not a resume"
-            )
-        rendered_system = await render_message(system_message)
-        rendered_user: str | None = (
-            None if resume is not None else await render_message(user_message, allow_empty=False, field="user_message")
-        )
-
-        client_tools = await tai42_app.tools.get_client_tools(list(tool_names)) if tool_names else []
-        scoped_tools = structured_tools([*tools, *client_tools])
-        internal_subagents = [await _to_internal(spec) for spec in (subagents or [])]
-        coerced_inline_skills = [s if isinstance(s, InlineSkill) else InlineSkill(**s) for s in (inline_skills or [])]
-
-        # HARD sandbox dependency: acquire the durable session BEFORE compile and thread
-        # it into the backend, a loud SandboxUnavailableError on a box with none. The workspace
-        # lease wraps session-acquire + cred-materialize + drive as one guarded region so threaded
-        # turns serialize across workers and the lease-loser never opens a leaked session; a
-        # tool-face run takes none.
-        async with DeepAgentSession.leased(thread_id=thread_id) as drive:
-            saw_structured = False  # also set by a typed non-fatal outcome (re-prompt cap / recursion limit)
-            saw_interrupt = False
-            saw_suspended = False
-            try:
-                agent, config, strategy, minted_thread = await self._build_agent(
-                    tools=scoped_tools,
-                    subagents=internal_subagents,
-                    skills=skills,
-                    inline_skills=coerced_inline_skills or None,
-                    system_message=rendered_system,
-                    response_format=response_format,
-                    interrupt_on=interrupt_on,
-                    thread_id=thread_id,
-                    resume_checkpoint_id=None,
-                    llm_provider=llm_provider,
-                    checkpoint_provider=checkpoint_provider,
-                    store_provider=store_provider,
-                    llm_kwargs=llm_kwargs,
-                    recursion_limit=recursion_limit,
-                    langgraph_config=langgraph_config,
-                    session=drive.session,
-                )
-                if resume is not None:
-                    agent_input: Any = await resume_command(agent, config, resume)
-                else:
-                    # The exactly-one-of guard above makes user_message (and its render) non-None here.
-                    assert rendered_user is not None  # noqa: S101 (type-narrowing invariant guaranteed above; assert keeps the complexity floor)
-                    agent_input = build_agent_input(rendered_user, user_content_kwargs=user_content_kwargs)
-
-                # Assemble the park identity for this streaming turn: it parks only when a
-                # completion tool is bound AND the turn is rebuildable (no live tools, JSON
-                # subagents only). See :func:`build_astream_park`.
-                park: ParkIdentity | None = build_astream_park(
-                    agent_name=self.tool_name,
-                    config=config,
+        # The run's trace root is current only inside each step (every await below, and each step of the
+        # drive), never across a yield, so the consumer's context never carries it. It records the turn
+        # (the user message, or the answers a resume drives) and the terminal events when the stream ends.
+        root = begin_run_trace(langgraph_config, input_=run_input(user_message=user_message, resume=resume))
+        terminals = TerminalEvents()
+        try:
+            with root.step():
+                turn = await _resolve_stream_turn(
                     tools=tools,
-                    subagents=subagents,
                     tool_names=tool_names,
-                    skills=skills,
-                    inline_skills=coerced_inline_skills,
-                    rendered_system=rendered_system,
-                    interrupt_on=interrupt_on,
+                    subagents=subagents,
+                    inline_skills=inline_skills,
+                    system_message=system_message,
+                    user_message=user_message,
                     response_format=response_format,
-                    llm_provider=llm_provider,
-                    store_provider=store_provider,
-                    llm_kwargs=llm_kwargs,
-                    langgraph_config=langgraph_config,
-                    checkpoint_provider=checkpoint_provider,
-                    recursion_limit=recursion_limit,
-                    workspace_key=drive.workspace_key,
-                    workspace_retention_horizon=drive.workspace_retention_horizon,
+                    user_content_kwargs=user_content_kwargs,
+                    resume=resume,
                 )
+            response_format = turn.response_format
+            rendered_system = turn.rendered_system
+            coerced_inline_skills = turn.inline_skills
 
-                # Bind the resume continuation and the chained-park claims ledger around each
-                # drive step, NOT in this generator's body: a ``with`` wrapping the ``yield``
-                # would leak the bindings into the consumer's task (PEP 568 is unimplemented) and
-                # strand them on an abandoned stream. The claims ledger is owned here for the whole
-                # drive — each step re-binds it — and its dead chains are detached on the way out.
-                claims: dict[str, datetime | None] = {}
+            # HARD sandbox dependency: acquire the durable session BEFORE compile and thread
+            # it into the backend, a loud SandboxUnavailableError on a box with none. The workspace
+            # lease wraps session-acquire + cred-materialize + drive as one guarded region so threaded
+            # turns serialize across workers and the lease-loser never opens a leaked session; a
+            # tool-face run takes none.
+            async with DeepAgentSession.leased(thread_id=thread_id) as drive:
                 try:
-                    async for event in bind_resume_per_step(
-                        lambda: park_step_binding(park, claims),
-                        self._astream_built(
-                            agent,
-                            agent_input,
-                            config,
-                            interrupt_on,
+                    with root.step():
+                        agent, config, strategy, minted_thread = await self._build_agent(
+                            tools=turn.tools,
+                            subagents=turn.subagents,
+                            skills=skills,
+                            inline_skills=coerced_inline_skills or None,
+                            system_message=rendered_system,
                             response_format=response_format,
-                            structured_strategy=strategy,
-                            park=park,
-                        ),
-                    ):
-                        if isinstance(event, StructuredFinal | StructuredOutputUnresolvedFinal | RecursionLimitFinal):
-                            saw_structured = True
-                        elif isinstance(event, InterruptFinal):
-                            saw_interrupt = True
-                        elif isinstance(event, SuspendedFinal):
-                            saw_suspended = True
-                        yield event
+                            interrupt_on=interrupt_on,
+                            thread_id=thread_id,
+                            resume_checkpoint_id=None,
+                            llm_provider=llm_provider,
+                            checkpoint_provider=checkpoint_provider,
+                            store_provider=store_provider,
+                            llm_kwargs=llm_kwargs,
+                            recursion_limit=recursion_limit,
+                            langgraph_config=langgraph_config,
+                            session=drive.session,
+                            context=root.context,
+                        )
+                        if resume is not None:
+                            agent_input: Any = await resume_command(agent, config, resume)
+                        else:
+                            # The exactly-one-of guard makes user_message (and its render) non-None here.
+                            assert turn.rendered_user is not None  # noqa: S101 (type-narrowing invariant guaranteed by the guard)
+                            agent_input = build_agent_input(turn.rendered_user, user_content_kwargs=user_content_kwargs)
+
+                    # Assemble the park identity for this streaming turn: it parks only when a
+                    # completion tool is bound AND the turn is rebuildable (no live tools, JSON
+                    # subagents only). See :func:`build_astream_park`.
+                    park: ParkIdentity | None = build_astream_park(
+                        agent_name=self.tool_name,
+                        config=config,
+                        tools=tools,
+                        subagents=subagents,
+                        tool_names=tool_names,
+                        skills=skills,
+                        inline_skills=coerced_inline_skills,
+                        rendered_system=rendered_system,
+                        interrupt_on=interrupt_on,
+                        response_format=response_format,
+                        llm_provider=llm_provider,
+                        store_provider=store_provider,
+                        llm_kwargs=llm_kwargs,
+                        langgraph_config=langgraph_config,
+                        checkpoint_provider=checkpoint_provider,
+                        recursion_limit=recursion_limit,
+                        workspace_key=drive.workspace_key,
+                        workspace_retention_horizon=drive.workspace_retention_horizon,
+                    )
+
+                    # Bind the run's trace root, the resume continuation and the chained-park claims
+                    # ledger around each drive step, NOT in this generator's body: a ``with`` wrapping
+                    # the ``yield`` would leak the bindings into the consumer's task (PEP 568 is
+                    # unimplemented) and strand them on an abandoned stream. The claims ledger is owned
+                    # here for the whole drive — each step re-binds it — and its dead chains are
+                    # detached on the way out.
+                    claims: dict[str, datetime | None] = {}
+                    try:
+                        async for event in bind_resume_per_step(
+                            lambda: step_bindings(root.step, lambda: park_step_binding(park, claims)),
+                            self._astream_built(
+                                agent,
+                                agent_input,
+                                config,
+                                interrupt_on,
+                                response_format=response_format,
+                                structured_strategy=strategy,
+                                park=park,
+                            ),
+                        ):
+                            yield terminals.note(event)
+                    finally:
+                        with root.step():
+                            await detach_dead_chains(claims)
+                    with root.step():
+                        # A typed non-fatal outcome (re-prompt cap / recursion limit) stands for the
+                        # structured result.
+                        await end_streamed_run(
+                            response_format=response_format,
+                            saw_structured=terminals.has(
+                                StructuredFinal, StructuredOutputUnresolvedFinal, RecursionLimitFinal
+                            ),
+                            paused=terminals.has(InterruptFinal, SuspendedFinal),
+                            minted_thread=minted_thread,
+                            checkpoint_provider=checkpoint_provider,
+                        )
+                    root.record_output(terminals.events)
                 finally:
-                    await detach_dead_chains(claims)
-                await end_streamed_run(
-                    response_format=response_format,
-                    saw_structured=saw_structured,
-                    paused=saw_interrupt or saw_suspended,
-                    minted_thread=minted_thread,
-                    checkpoint_provider=checkpoint_provider,
-                )
-            finally:
-                # A park-suspend is still LIVE: keep the bearer file for the door-less expiry
-                # resume (its own terminal exit scrubs it); every other exit is terminal.
-                if not saw_suspended:
-                    await drive.scrub_credentials()
+                    # A park-suspend is still LIVE: keep the bearer file for the door-less expiry
+                    # resume (its own terminal exit scrubs it); every other exit is terminal.
+                    if not terminals.has(SuspendedFinal):
+                        with root.step():
+                            await drive.scrub_credentials()
+        except Exception as exc:
+            root.fail(exc)
+            raise
+        finally:
+            root.end()
 
     async def _astream_built(
         self,
@@ -624,8 +698,9 @@ class DeepAgent(Agent):
         store_provider: str | None,
         llm_kwargs: dict[str, Any] | None,
         recursion_limit: int | None,
-        langgraph_config: dict[str, Any] | None = None,
-        session: SandboxSession | None = None,
+        langgraph_config: dict[str, Any] | None,
+        session: SandboxSession | None,
+        context: TraceContext | None,
     ) -> tuple[Any, dict[str, Any], Any, str | None]:
         """Assemble the compiled deep agent and its run config for the streaming face.
 
@@ -638,7 +713,8 @@ class DeepAgent(Agent):
         for a caller-supplied thread, which leaves the finished-thread ledger here).
 
         ``session`` is the acquired durable sandbox session the caller threads through to
-        the backend (``None`` leaves the non-sandbox ``StateBackend`` default).
+        the backend (``None`` leaves the non-sandbox ``StateBackend`` default). ``context`` is the
+        run's trace lineage from the streaming face's run-trace root.
         """
         agent, strategy = await self._resolve_and_build(
             tools=tools,
@@ -655,7 +731,7 @@ class DeepAgent(Agent):
             session=session,
         )
         config, minted_thread = await start_run_config(
-            langgraph_config, thread_id, resume_checkpoint_id, recursion_limit, checkpoint_provider
+            langgraph_config, thread_id, resume_checkpoint_id, recursion_limit, checkpoint_provider, context
         )
         return agent, config, strategy, minted_thread
 
@@ -692,95 +768,16 @@ class DeepAgent(Agent):
         recursion_limit = rebuild.pop("recursion_limit", None)
         workspace_key = rebuild.pop("workspace_key", None)
         validated = DeepAgentInput.model_validate(rebuild)
-        response_format = validated.response_format
-        interrupt_on = validated.interrupt_on
-
-        client_tools = structured_tools(
-            await tai42_app.tools.get_client_tools(list(validated.tool_names)) if validated.tool_names else []
-        )
-        internal_subagents = await resolve_subagent_specs(validated.subagents)
-        coerced_inline_skills = [
-            s if isinstance(s, InlineSkill) else InlineSkill(**s) for s in (validated.inline_skills or [])
-        ]
-
-        # Reattach the SAME durable volume by workspace_key and serialize this drive on the shared
-        # workspace lease, exactly like a fresh turn: the lease wraps session-acquire +
-        # cred-materialize + drive, so a concurrent resume for the same thread loses the lease
-        # before opening a second session on the volume.
-        async with DeepAgentSession.leased(thread_id=thread_id, workspace_key=workspace_key) as drive:
-            suspended = False
-            try:
-                agent, strategy = await self._resolve_and_build(
-                    tools=client_tools,
-                    subagents=internal_subagents,
-                    skills=validated.skills,
-                    inline_skills=coerced_inline_skills or None,
-                    system_message=(validated.system_message.content or "") if validated.system_message else "",
-                    response_format=response_format,
-                    interrupt_on=interrupt_on,
-                    llm_provider=validated.llm_provider,
-                    checkpoint_provider=validated.checkpoint_provider,
-                    store_provider=validated.store_provider,
-                    llm_kwargs=validated.llm_kwargs,
-                    session=drive.session,
-                )
-                config, _minted = await start_run_config(
-                    validated.langgraph_config, thread_id, None, recursion_limit, validated.checkpoint_provider
-                )
-                # The parked drive wrote its checkpoints after any checkpoint its run was pinned to,
-                # so the resume continues from the thread's latest checkpoint.
-                config = thread_head_config(config)
-
-                snapshot = await agent.aget_state(config, subgraphs=True)
-                require_stored_checkpoint(snapshot, thread_id)
-                pending_ids = {iid for iid, _ in collect_pending_interrupts(snapshot)}
-                missing = [interrupt_id for interrupt_id in resume_map if interrupt_id not in pending_ids]
-                if missing:
-                    if pending_ids:
-                        # The graph is still parked, but not on every interrupt this super-step
-                        # resumes — a corrupted routing, or a graph that advanced past one. Raise.
-                        raise AgentResumeInterruptNotPendingError(next(iter(resume_map[missing[0]])), missing[0])
-                    # A stored checkpoint with no interrupt pending: the super-step already drove to a CLEAN TERMINAL,
-                    # so this is an idempotent re-drive after a crash between the terminal drive and
-                    # the index finalize. Re-produce the SAME terminal output from the persisted
-                    # state — never re-invoke a resolved graph — so the completion handoff re-fires
-                    # under its stable id and the delivery ledger dedupes it to one delivery.
-                    if response_format is not None:
-                        return extract_structured_output(snapshot.values, response_format)
-                    return build_user_output(snapshot.values)
-
-                # Bind again so a re-park on resume re-persists a fresh index (resume re-enters
-                # through the agent's own bound entrypoint); the completion tool the driver
-                # rebound is captured onto the new entry. No live tools on a rebuilt graph, so it is
-                # park-capable by construction. The retention bound is min(checkpoint, workspace).
-                completion_tool, completion_context = chain_routing_slots()
-                park = build_park_identity(
-                    agent_name=self.tool_name,
-                    config=config,
-                    checkpoint_provider=validated.checkpoint_provider,
-                    has_live_tools=False,
-                    rebuild_kwargs=rebuild_kwargs,
-                    recursion_limit=recursion_limit,
-                    completion_tool=completion_tool,
-                    completion_context=completion_context,
-                    bind=True,
-                    extra_retention_horizon=drive.workspace_retention_horizon,
-                )
-                async with park_drive(park):
-                    result = await self._drain(
-                        self._astream_built(
-                            agent,
-                            Command(resume=resume_map),
-                            config,
-                            interrupt_on,
-                            response_format=response_format,
-                            structured_strategy=strategy,
-                            park=park,
-                        ),
-                        response_format=response_format,
-                    )
-                suspended = is_suspended_receipt(result)
-                return result
-            finally:
-                if not suspended:
-                    await drive.scrub_credentials()
+        with open_run_trace(validated.langgraph_config, input_=run_input(resume=resume_map)) as root:
+            result = await drive_park_resume(
+                self,
+                root.context,
+                validated=validated,
+                rebuild_kwargs=rebuild_kwargs,
+                recursion_limit=recursion_limit,
+                workspace_key=workspace_key,
+                thread_id=thread_id,
+                resume_map=resume_map,
+            )
+            root.record_output(result)
+            return result

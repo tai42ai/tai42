@@ -32,6 +32,7 @@ from tai42_contract.agent import (
 )
 from tai42_contract.agent.base import PresetSpec
 from tai42_contract.app import tai42_app
+from tai42_contract.monitoring import TraceContext
 from tai42_contract.template import TemplatedText
 from tai42_contract.tools import ClientTool
 from tai42_kit.llm.checkpoint.checkpoint_registry import checkpoint_registry
@@ -41,6 +42,7 @@ from tai42_kit.llm.runtime import build_agent_input, validate_structured_output
 from tai42_kit.llm.settings import embedding_settings, llm_provider_settings, llm_settings
 from tai42_kit.llm.store.store_registry import store_registry
 from tai42_kit.llm.structured import plan_structured_output
+from tai42_kit.monitoring import begin_run_trace
 
 from tai42_agents._internal.append import awrite_thread_messages, require_thread_id, to_thread_messages
 from tai42_agents._internal.config_util import (
@@ -52,10 +54,12 @@ from tai42_agents._internal.config_util import (
 )
 from tai42_agents._internal.lc_tools import resolve_tools
 from tai42_agents._internal.outcomes import RepromptCapError, outcome_for_drive_error
+from tai42_agents._internal.park import bind_resume_per_step
 from tai42_agents._internal.recovery import _repair_dangling_tool_calls
 from tai42_agents._internal.reject import reject_blank_memory_keys, resolve_response_format
 from tai42_agents._internal.render import render_message
 from tai42_agents._internal.run_kwargs import guard_run_kwargs
+from tai42_agents._internal.run_record import TerminalEvents, run_input
 from tai42_agents._internal.stream_events import aproject_agent_events
 from tai42_agents._internal.structured import ainvoke_structured
 from tai42_agents.retrieval_tools_agent.graph import RetrievalToolsGraph
@@ -224,6 +228,7 @@ class RetrievalToolsAgent(Agent):
         llm_kwargs: dict[str, Any] | None = None,
         user_content_kwargs: dict[str, Any] | None = None,
         config: dict[str, Any] | None = None,
+        context: TraceContext | None,
     ) -> tuple[Any, dict[str, Any], dict[str, Any], Any, str | None]:
         """Resolve providers, embed the tools, compile the graph, and return ``(agent, messages, config, llm, minted)``.
 
@@ -231,7 +236,8 @@ class RetrievalToolsAgent(Agent):
         terminal result when a ``response_format`` was requested. ``user_content_kwargs`` (e.g.
         ``cache_control``) carries content-block keys onto the user message. A caller-supplied
         thread leaves the checkpoint finished-thread ledger before the run; ``minted`` is the
-        thread id this run minted (``None`` for a caller-supplied one).
+        thread id this run minted (``None`` for a caller-supplied one). ``context`` is the run's trace
+        lineage from :meth:`astream`'s run-trace root; the graph's top run records under it.
         """
         rendered_system = await render_message(system_message)
         rendered_user = await render_message(user_message, allow_empty=False, field="user_message")
@@ -275,7 +281,7 @@ class RetrievalToolsAgent(Agent):
             system_prompt=system_prompt,
         ).abuild()
 
-        run_config = init_langgraph_config(config).config
+        run_config = init_langgraph_config(config, context)
         minted = await start_run_thread(config, run_config, provider=checkpoint_provider)
         messages = build_agent_input(rendered_user, user_content_kwargs=user_content_kwargs)
         # The single spot both faces (run drains astream) build through, so a thread
@@ -338,28 +344,45 @@ class RetrievalToolsAgent(Agent):
         reject_blank_memory_keys(
             "retrieval_tools_agent.astream", thread_id=thread_id, resume_checkpoint_id=resume_checkpoint_id
         )
-        resolved_response_format = await resolve_response_format("retrieval_tools_agent", response_format)
-        agent, messages, config, llm, minted = await self._build(
-            tools=tools,
-            tool_names=tool_names,
-            presets=presets,
-            system_message=system_message,
-            user_message=user_message,
-            embedding_provider=embedding_provider,
-            llm_provider=llm_provider,
-            checkpoint_provider=checkpoint_provider,
-            store_provider=store_provider,
-            overwrite_store=overwrite_store,
-            tools_limit=tools_limit,
-            embedding_kwargs=embedding_kwargs,
-            llm_kwargs=llm_kwargs,
-            user_content_kwargs=user_content_kwargs,
-            config=build_run_config(langgraph_config, thread_id, resume_checkpoint_id, recursion_limit),
-        )
-        async for event in self._run_events(agent, messages, config, llm, llm_provider, resolved_response_format):
-            yield event
-        # The run reached its terminal: a thread it minted is finished.
-        await mark_minted_thread_finished(minted, provider=checkpoint_provider)
+        run_config = build_run_config(langgraph_config, thread_id, resume_checkpoint_id, recursion_limit)
+        # The root records the user message, and the terminal events when the stream ends.
+        root = begin_run_trace(run_config, input_=run_input(user_message=user_message))
+        terminals = TerminalEvents()
+        try:
+            with root.step():
+                resolved_response_format = await resolve_response_format("retrieval_tools_agent", response_format)
+                agent, messages, config, llm, minted = await self._build(
+                    tools=tools,
+                    tool_names=tool_names,
+                    presets=presets,
+                    system_message=system_message,
+                    user_message=user_message,
+                    embedding_provider=embedding_provider,
+                    llm_provider=llm_provider,
+                    checkpoint_provider=checkpoint_provider,
+                    store_provider=store_provider,
+                    overwrite_store=overwrite_store,
+                    tools_limit=tools_limit,
+                    embedding_kwargs=embedding_kwargs,
+                    llm_kwargs=llm_kwargs,
+                    user_content_kwargs=user_content_kwargs,
+                    config=run_config,
+                    context=root.context,
+                )
+            # The run's trace root is current only inside each step, never across a yield.
+            async for event in bind_resume_per_step(
+                root.step, self._run_events(agent, messages, config, llm, llm_provider, resolved_response_format)
+            ):
+                yield terminals.note(event)
+            # The run reached its terminal: a thread it minted is finished.
+            with root.step():
+                await mark_minted_thread_finished(minted, provider=checkpoint_provider)
+            root.record_output(terminals.events)
+        except Exception as exc:
+            root.fail(exc)
+            raise
+        finally:
+            root.end()
 
     async def _run_events(
         self,

@@ -11,15 +11,28 @@ from tai42_contract.manifest import ExtensionElement, TaiMCPConfig
 from tai42_contract.tools import ToolRetryPolicy
 
 from tai42_skeleton.tools.adapters.lc_tool_to_func import lc_tool_to_func
+from tai42_skeleton.tools.adapters.mcp_tool_to_func import mcp_tool_to_func
 from tai42_skeleton.tools.binding.branch import _BranchBindingMixin
 from tai42_skeleton.tools.binding.resolution import MCP_VIRTUAL_MODULE_PREFIX
 from tai42_skeleton.tools.naming import normalized_name
 
 if TYPE_CHECKING:
+    import mcp
     from tai42_contract.app import RouteAction
-    from tai42_contract.tools import ToolRefsExtractor
+    from tai42_contract.tools import TemplateRefsExtractor, ToolRefsExtractor
 
 logger = logging.getLogger(__name__)
+
+
+def adapt_mcp_tool(config: TaiMCPConfig, tool: "mcp.types.Tool", name: str, schema_max_depth: int) -> Any:
+    """The callable an MCP server's ``tool`` binds as under ``name``; raises on an unusable schema."""
+    return mcp_tool_to_func(
+        config=config,
+        tool=tool,
+        name=name,
+        module=MCP_VIRTUAL_MODULE_PREFIX + config.title,
+        schema_max_depth=schema_max_depth,
+    )
 
 
 class _RegistrationMixin(_BranchBindingMixin):
@@ -30,6 +43,7 @@ class _RegistrationMixin(_BranchBindingMixin):
         *args,
         force=False,
         tool_refs: "ToolRefsExtractor | None" = None,
+        template_refs: "TemplateRefsExtractor | None" = None,
         retry: ToolRetryPolicy | None = None,
         tier: "RouteAction | None" = None,
         extras_keys: frozenset[str] | None = None,
@@ -53,25 +67,15 @@ class _RegistrationMixin(_BranchBindingMixin):
             module = "" if isinstance(func, Tool) else func.__module__
             if not (force or self._manifest.should_include_tool(name, module)):
                 return func
-            # A manifest-excluded tool registers nothing (returned above); only an
-            # included tool's declared refs extractor lands, keyed by its bound name.
-            if tool_refs is not None:
-                self._tool_refs_registry.register(name, tool_refs)
-            # Likewise for the declared retry policy — validated here so a malformed
-            # declaration (a dict is accepted and coerced) fails loudly at bind time,
-            # never silently at dispatch.
-            if retry is not None:
-                self._tool_retry_registry.register(name, ToolRetryPolicy.model_validate(retry))
-            # Likewise for the declared registration tier — the declarative form of
-            # ``app.tools.register_tier``, keyed by the bound name so both the authoring
-            # gate and the run-time fence read it.
-            if tier is not None:
-                self._registration_tier_registry.register(name, tier)
-            # Likewise for the declared door-extras keys — keyed by the bound name so the
-            # visit's extras check (and a preset's inherited-keys walk) reads it. An empty
-            # declaration is the default (no extras), so only a non-empty set is registered.
-            if extras_keys:
-                self._tool_extras_registry.register(name, frozenset(extras_keys))
+            # A manifest-excluded tool registers nothing (returned above).
+            self._register_declarations(
+                name,
+                tool_refs=tool_refs,
+                template_refs=template_refs,
+                retry=retry,
+                tier=tier,
+                extras_keys=extras_keys,
+            )
             return self.bind_tool_func(*decorator_args, **kwargs)(func)
 
         if func_to_register is not None:
@@ -79,12 +83,51 @@ class _RegistrationMixin(_BranchBindingMixin):
 
         return decorator
 
+    def _register_declarations(
+        self,
+        name: str,
+        *,
+        tool_refs: "ToolRefsExtractor | None",
+        template_refs: "TemplateRefsExtractor | None",
+        retry: ToolRetryPolicy | None,
+        tier: "RouteAction | None",
+        extras_keys: frozenset[str] | None,
+    ) -> None:
+        """Register an included tool's declarations under its bound ``name``."""
+        # Each declared refs extractor lands keyed by the bound name.
+        if tool_refs is not None:
+            self._tool_refs_registry.register(name, tool_refs)
+        if template_refs is not None:
+            self._template_refs_registry.register(name, template_refs)
+        # Likewise for the declared retry policy — validated here so a malformed
+        # declaration (a dict is accepted and coerced) fails loudly at bind time,
+        # never silently at dispatch.
+        if retry is not None:
+            self._tool_retry_registry.register(name, ToolRetryPolicy.model_validate(retry))
+        # Likewise for the declared registration tier — the declarative form of
+        # ``app.tools.register_tier``, keyed by the bound name so both the authoring
+        # gate and the run-time fence read it.
+        if tier is not None:
+            self._registration_tier_registry.register(name, tier)
+        # Likewise for the declared door-extras keys — keyed by the bound name so the
+        # visit's extras check (and a preset's inherited-keys walk) reads it. An empty
+        # declaration is the default (no extras), so only a non-empty set is registered.
+        if extras_keys:
+            self._tool_extras_registry.register(name, frozenset(extras_keys))
+
     def tool_refs_extractor(self, name: str) -> "ToolRefsExtractor | None":
         """The declared tool-references extractor a base tool registered under ``name``.
 
         ``None`` when it declared none.
         """
         return self._tool_refs_registry.get(name)
+
+    def template_refs_extractor(self, name: str) -> "TemplateRefsExtractor | None":
+        """The declared template-references extractor a base tool registered under ``name``.
+
+        ``None`` when it declared none.
+        """
+        return self._template_refs_registry.get(name)
 
     def toolkit(self, *args, **kwargs):
         func_to_register = None
@@ -118,7 +161,7 @@ class _RegistrationMixin(_BranchBindingMixin):
 
         return decorator
 
-    def mcp_tools(self, config: TaiMCPConfig, tools) -> None:
+    def mcp_tools(self, config: TaiMCPConfig, tools, preset_names: frozenset[str]) -> None:
         manifest = self._require_manifest()
         virtual_module = MCP_VIRTUAL_MODULE_PREFIX + config.title
         if virtual_module not in sys.modules:
@@ -142,22 +185,16 @@ class _RegistrationMixin(_BranchBindingMixin):
             if not manifest.should_include_mcp_tool(name=name, title=config.title):
                 continue
 
-            if self._app.preset_manager.is_registered(name):
-                # A registered preset already owns this name (the sanctioned
-                # create-over-a-requested-unbound-MCP-name flow). Binding the
-                # returning server's tool would clobber it — a hard error under
-                # ``on_duplicate="error"`` — so skip it and record the conflict for
-                # the reload result to surface.
+            if name in preset_names:
+                # A stored preset owns this name, and the binder never binds an MCP tool
+                # under it, so the preset keeps the name on every worker whatever the order
+                # of boots and binds. The conflict is recorded for the reload result.
                 self._app._mcp_preset_conflicts[config.title].add(name)
-                logger.warning("mcp %r tool %r skipped: a registered preset owns the name", config.title, name)
+                logger.warning("mcp %r tool %r skipped: a stored preset owns the name", config.title, name)
                 continue
 
-            from tai42_skeleton.tools.adapters.mcp_tool_to_func import mcp_tool_to_func
-
             try:
-                adapted_tool = mcp_tool_to_func(
-                    config=config, tool=t, name=name, module=virtual_module, schema_max_depth=schema_max_depth
-                )
+                adapted_tool = adapt_mcp_tool(config, t, name, schema_max_depth)
             except Exception:
                 # A single tool advertising an unusable schema (empty anyOf/oneOf,
                 # over-depth nesting) is SKIPPED with a loud log, never allowed to
@@ -194,6 +231,9 @@ class _RegistrationMixin(_BranchBindingMixin):
     def base_of(self, name: str) -> str:
         return self._tool_registry.base_of(name)
 
+    def branches_of(self, base: str) -> list[str]:
+        return self._tool_registry.branches_of(base)
+
     def is_branch(self, name: str) -> bool:
         return self._tool_registry.is_branch(name)
 
@@ -204,7 +244,7 @@ class _RegistrationMixin(_BranchBindingMixin):
         """
         return frozenset(self._mcp_bound_tools.get(title, set()))
 
-    def available_extensions(self) -> list[dict[str, str | bool]]:
+    def available_extensions(self) -> list[dict[str, Any]]:
         return self._extension_registry.available_extensions()
 
     @staticmethod

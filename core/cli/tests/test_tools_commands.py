@@ -415,15 +415,15 @@ def test_extensions_list(monkeypatch: pytest.MonkeyPatch) -> None:
         assert request.url.path == "/api/extensions"
         return data_response(
             [
-                {"name": "chain", "kind": "wrapper", "multiple": True},
-                {"name": "queue", "kind": "backend", "multiple": False},
+                {"name": "chain", "kind": "wrapper", "multiple": True, "config_schema": None},
+                {"name": "queue", "kind": "backend", "multiple": False, "config_schema": None},
             ]
         )
 
     result = run_cli(monkeypatch, handler, ["extensions", "list"])
     assert result.exit_code == 0, result.output
     header, _rule, *rows = result.output.splitlines()
-    assert header.split() == ["name", "kind", "multiple"]
+    assert header.split() == ["name", "kind", "multiple", "config_schema"]
     assert [row.split() for row in rows] == [["chain", "wrapper", "true"], ["queue", "backend", "false"]]
 
 

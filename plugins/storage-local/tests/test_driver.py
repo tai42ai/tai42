@@ -307,3 +307,43 @@ async def test_upload_resolving_to_root_refused(tmp_path):
     with pytest.raises(ValueError, match="storage root"):
         await driver.write_file(".", "x")
     assert tmp_path.exists()
+
+
+# --- stat_size / read_range ---------------------------------------------------
+
+
+async def test_stat_size_answers_the_byte_size(tmp_path):
+    (tmp_path / "blob.bin").write_bytes(b"0123456789")
+    assert await _driver(tmp_path).stat_size("blob.bin") == 10
+
+
+async def test_stat_size_missing_raises(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        await _driver(tmp_path).stat_size("nope.bin")
+
+
+async def test_stat_size_of_a_directory_raises_file_not_found(tmp_path):
+    # A bare os.stat answers a size for a directory; a directory is not an object.
+    (tmp_path / "jq").mkdir()
+    (tmp_path / "jq" / "fetch.jq").write_text(".items")
+    with pytest.raises(FileNotFoundError, match="Object not found: jq"):
+        await _driver(tmp_path).stat_size("jq")
+    assert await _driver(tmp_path).stat_size("jq/fetch.jq") == 6
+
+
+async def test_read_range_reads_from_start(tmp_path):
+    (tmp_path / "blob.bin").write_bytes(b"0123456789")
+    driver = _driver(tmp_path)
+    assert await driver.read_range("blob.bin", 2, 3) == b"234"
+    assert await driver.read_range("blob.bin", 8, 10) == b"89"
+    assert await driver.read_range("blob.bin", 12, 4) == b""
+
+
+async def test_read_range_missing_raises(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        await _driver(tmp_path).read_range("nope.bin", 0, 4)
+
+
+async def test_read_range_escape_raises(tmp_path):
+    with pytest.raises(ValueError, match="outside the storage root"):
+        await _driver(tmp_path).read_range("../escape.bin", 0, 4)

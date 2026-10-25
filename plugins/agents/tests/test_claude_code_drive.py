@@ -237,10 +237,10 @@ def test_usage_emits_into_active_trace_via_span_update(monkeypatch: pytest.Monke
     assert writer.update_current_calls == []
 
 
-def test_standalone_run_mints_a_root_trace_carrying_the_usage_span(monkeypatch: pytest.MonkeyPatch) -> None:
-    # A standalone run has no ambient trace carrier, so the usage span roots a freshly
-    # minted root trace rather than being dropped: the model calls happen in the sandbox
-    # and bypass the platform LLM seam, so this is the only record of the run's usage.
+def test_standalone_run_opens_the_usage_span_as_the_root_of_its_own_trace(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A standalone run has no lineage, so the usage span opens with no trace context and the
+    # writer roots a new trace on it rather than dropping it: the model calls happen in the
+    # sandbox and bypass the platform LLM seam, so this is the only record of the run's usage.
     _settings(monkeypatch, model="claude-x")
     monkeypatch.setattr(workspace_module, "runner_payload_files", payload_for(MESSAGE))
     writer = RecordingWriter()  # trace_id stays None: no active trace, no ambient carrier
@@ -249,12 +249,7 @@ def test_standalone_run_mints_a_root_trace_carrying_the_usage_span(monkeypatch: 
     span = writer.spans[0]
     assert span["kind"] == SpanKind.LLM
     assert span["usage"] == TokenUsage(input_tokens=3, output_tokens=5)
-    # A root trace context is minted (a 32-hex id, no parent span), so the span is its root.
-    ctx = span["trace_context"]
-    assert ctx is not None
-    assert ctx.trace_id is not None
-    assert len(ctx.trace_id) == 32
-    assert ctx.parent_span_id is None
+    assert span["trace_context"] is None
 
 
 def test_usage_span_joins_the_ambient_trace_when_driven_as_a_node(monkeypatch: pytest.MonkeyPatch) -> None:

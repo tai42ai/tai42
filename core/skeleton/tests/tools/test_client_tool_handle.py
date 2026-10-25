@@ -213,7 +213,9 @@ def test_a_preset_serves_its_baked_constant_and_refuses_a_baked_key(preset_manag
             await app.preset_manager.register("paris", "weather", {"units": "imperial"}, [], "Paris weather")
             engine = await _engine("paris")
             assert await engine.call("paris", {"city": "paris"}) == {"city": "paris", "units": "imperial"}
-            with pytest.raises(ClientToolError, match="invalid arguments"):
+            with pytest.raises(
+                ClientToolError, match=r"^Error calling tool 'paris': Got unexpected keyword argument\(s\): units"
+            ):
                 await engine.call("paris", {"city": "paris", "units": "metric"})
 
     asyncio.run(run())

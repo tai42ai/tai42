@@ -36,8 +36,9 @@ import uuid
 from collections.abc import Generator
 from contextvars import ContextVar
 from datetime import datetime
-from typing import Any, Final
+from typing import TYPE_CHECKING, Any, Final
 
+from tai42_contract.app import tai42_app
 from tai42_contract.interactions import (
     CHAINED_PARK_KEY_PREFIX,
     CHAINED_PARK_TOKEN_KEY,
@@ -51,11 +52,15 @@ from tai42_contract.interactions import (
     get_resume_continuation_tool,
 )
 
+if TYPE_CHECKING:
+    from tai42_contract.app import TaiApp
+
 __all__ = [
     "PARK_SUPERSEDED_OUTCOME",
     "assert_park_adoptable",
     "attach_chained_park",
     "chained_park_claims",
+    "fire_terminal_chain",
     "is_chained_park_key",
     "new_chained_park_key",
     "repark_notice",
@@ -292,6 +297,20 @@ def terminal_chain_notice(routing: ChainedResume, result: Any) -> tuple[str, dic
     else:
         payload = {CHAINED_PARK_TOKEN_KEY: routing.chain_key, "result": result, "status": PARK_COMPLETION_SUCCEEDED}
     return routing.delivery_tool, payload
+
+
+async def fire_terminal_chain(routing: ChainedResume, result: Any, *, app: TaiApp | None = None) -> Any:
+    """Fire a chained run's terminal ``result`` along ``routing``; return what the fire returns.
+
+    The result is first settled through ``app.interactions.settle_chained_terminal`` (the output
+    stages of the preset dispatches captured for the routing's chain key, a refusal settling to a
+    :class:`~tai42_contract.interactions.RunFailed`), then fired as :func:`terminal_chain_notice`
+    builds it, continuing the ancestor's own chain. ``app`` defaults to the bound ``tai42_app``.
+    """
+    target = tai42_app if app is None else app
+    settled = await target.interactions.settle_chained_terminal(routing.chain_key, result)
+    tool, payload = terminal_chain_notice(routing, settled)
+    return await target.tools.run_tool(tool, payload, continues_chain=routing.asked_by)
 
 
 def supersede_chain_notice(routing: ChainedResume) -> tuple[str, dict[str, Any]]:

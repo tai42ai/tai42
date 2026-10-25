@@ -16,6 +16,7 @@ from fakeredis import aioredis
 from langchain_core.messages import AIMessage
 from langgraph.checkpoint.memory import InMemorySaver
 from tai42_contract.agent.base import PresetSpec
+from tai42_contract.errors import ErrorKind
 from tai42_contract.interactions import (
     CHAINED_PARK_TOKEN_KEY,
     PARK_COMPLETION_FAILED,
@@ -30,7 +31,7 @@ from tai42_contract.interactions import (
 )
 from tai42_contract.template import TemplatedText
 from tai42_kit.interactions.park_adoption import is_chained_park_key
-from tai42_kit.interactions.park_giveup import ParkGiveUpOutcome
+from tai42_kit.interactions.park_giveup import ParkGiveUpFailure, ParkGiveUpOutcome
 from tai42_kit.interactions.park_index import (
     ENTRY_TTL_FLOOR_SECONDS,
     DriveInProgressError,
@@ -646,7 +647,14 @@ def _is_resolved(entry: Any) -> bool:
 # ---- the platform's give-up tells the waiter the agent's park captured --------------------------
 
 _CALLER_KEY = "tai42:chained-park:the-caller"
-_ABANDONED = {"tai42:resume_abandoned": True}
+_ABANDONED_OUTCOME = {"tai42:resume_abandoned": True}
+_ABANDONED = ParkGiveUpFailure(
+    _ABANDONED_OUTCOME,
+    "Resume of interaction 'i-own' was abandoned",
+    "ResumeAbandoned",
+    ErrorKind.UNAVAILABLE,
+    True,
+)
 
 
 class _RoutingRecordingAsk(_AskStandIn):
@@ -723,7 +731,9 @@ def test_the_give_up_fires_the_routing_the_agent_captured_at_its_run_face(
 
         handled = await agent_park_giveup_handler("i-own", _ABANDONED)
 
-        assert probe.fired == [{"chain_token": _CALLER_KEY, "status": PARK_COMPLETION_FAILED, "result": _ABANDONED}]
+        assert probe.fired == [
+            {"chain_token": _CALLER_KEY, "status": PARK_COMPLETION_FAILED, "result": _ABANDONED_OUTCOME}
+        ]
         assert app_tools.run_tool_calls[-1]["continues_chain"] == ("caller",)
         assert handled == ParkGiveUpOutcome(probe.reply)
         record = await agents_park_index().read_resolution("t-giveup", step)
@@ -741,13 +751,15 @@ def test_the_give_up_of_an_unchained_park_finalizes_and_returns_the_failure(
     async def go() -> None:
         _ask, step = await _park_under_caller(monkeypatch, app_tools, chained=False)
         handled = await agent_park_giveup_handler("i-own", _ABANDONED)
-        assert handled == ParkGiveUpOutcome(RunFailed(outcome=_ABANDONED))
+        assert handled == ParkGiveUpOutcome(RunFailed(outcome=_ABANDONED_OUTCOME))
         assert app_tools.run_tool_calls == []
         assert await agents_park_index().read_resolution("t-giveup", step) == ResolutionRecord(
-            "terminal", RunFailed(outcome=_ABANDONED)
+            "terminal", RunFailed(outcome=_ABANDONED_OUTCOME)
         )
         # A resolved tombstone replays its record value.
-        assert await agent_park_giveup_handler("i-own", _ABANDONED) == ParkGiveUpOutcome(RunFailed(outcome=_ABANDONED))
+        assert await agent_park_giveup_handler("i-own", _ABANDONED) == ParkGiveUpOutcome(
+            RunFailed(outcome=_ABANDONED_OUTCOME)
+        )
 
     asyncio.run(go())
 

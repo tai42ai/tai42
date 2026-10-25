@@ -1,6 +1,6 @@
 """A scoped override that makes an UNSAVED preset body visible to the active-body read.
 
-A bound-routes re-check (``operations.presets.references._assert_bound_routes_still_bind``) judges a
+A bound-routes re-check (``operations.reference_graph._assert_bound_routes_still_bind``) judges a
 preset write BEFORE it commits. A route bound to a preset that COMPOSES the changed preset ``P`` is
 re-validated against ``P``'s candidate version, but the owner validator resolves the composed preset
 ``P`` through the same preset-store read (:meth:`PresetStoreView.get_active_body`) every composed-preset

@@ -11,6 +11,8 @@ tokens-payload merge, and the version bump — not the store SQL (that is
 
 from __future__ import annotations
 
+import re
+
 import pytest
 from tai42_contract.access_control import KEY_FINGERPRINT_CLAIM, OWNER_USER_ID_CLAIM
 from tai42_contract.access_control.identity import ApiKeyIdentityProvider, AuthIdentity, IdentityProvider
@@ -20,7 +22,9 @@ from tai42_kit.settings import reset_all_settings
 
 from tai42_skeleton.access_control import management
 from tai42_skeleton.access_control.settings import access_control_settings
+from tai42_skeleton.app import instance
 
+from .._fakes.recording_storage import MappedStorage
 from .conftest import FakeAccessControlPg, FakeRedis, make_client_ctx
 
 S = access_control_settings()
@@ -840,3 +844,70 @@ async def test_writes_after_a_batch_bump_on_their_own(pg: FakeAccessControlPg, b
         await management.add_url_to_scope("scope-a", "/a")
     await management.add_url_to_scope("scope-b", "/b")
     assert bumps == [1, 1]
+
+
+# -- the stored template id a condition names --------------------------------
+
+
+@pytest.fixture
+def store_holding(monkeypatch: pytest.MonkeyPatch):
+    def _install(*ids: str) -> MappedStorage:
+        storage = MappedStorage(dict.fromkeys(ids, ".ok"))
+        monkeypatch.setattr(instance.app._storage_registry, "_provider", storage)
+        return storage
+
+    return _install
+
+
+_ACL_MATCH = "^" + re.escape("stored id 'jq/acl' at condition is not a stored template") + "$"
+
+
+async def test_mint_refuses_a_condition_id_the_store_lacks(
+    pg: FakeAccessControlPg, provider: _SpyProvider, redis: FakeRedis, store_holding
+) -> None:
+    store_holding()
+    with pytest.raises(ValueError, match=_ACL_MATCH):
+        await management.add_user_api_key("u1", "d", [], condition=TemplatedText(id="jq/acl"), owner_user_id=OWNER)
+    assert provider.identities == {}
+    assert pg.policy("u1") is None
+
+
+async def test_edit_refuses_a_supplied_condition_id_the_store_lacks(
+    pg: FakeAccessControlPg, provider: _SpyProvider, redis: FakeRedis, store_holding
+) -> None:
+    store_holding()
+    await management.add_user_api_key("u1", "d", ["*"], owner_user_id=OWNER)
+    with pytest.raises(ValueError, match=_ACL_MATCH):
+        await management.edit_user_payload("u1", condition=TemplatedText(id="jq/acl"))
+    assert pg.policy("u1")["condition"] is None
+
+
+async def test_an_edit_supplying_no_condition_does_not_read_the_stored_one(
+    pg: FakeAccessControlPg, provider: _SpyProvider, redis: FakeRedis, store_holding
+) -> None:
+    storage = store_holding("jq/acl")
+    await management.add_user_api_key("u1", "d", [], condition=TemplatedText(id="jq/acl"), owner_user_id=OWNER)
+    storage.items.clear()
+    updated = await management.edit_user_payload("u1", policy_data={"tier": "x"})
+    assert updated is not None
+    assert updated["condition"] == {"id": "jq/acl"}
+
+
+async def test_create_principal_policy_refuses_a_condition_id_the_store_lacks(
+    pg: FakeAccessControlPg, redis: FakeRedis, store_holding
+) -> None:
+    store_holding()
+    with pytest.raises(ValueError, match=_ACL_MATCH):
+        await management.create_principal_policy("p1", [], None, {"id": "jq/acl"})
+    assert pg.policy("p1") is None
+
+
+async def test_restore_policy_body_refuses_a_condition_id_the_store_lacks(
+    pg: FakeAccessControlPg, provider: _SpyProvider, redis: FakeRedis, store_holding
+) -> None:
+    store_holding()
+    await management.add_user_api_key("u1", "d", ["*"], owner_user_id=OWNER)
+    body = {**pg.policy("u1"), "condition": {"id": "jq/acl"}}
+    with pytest.raises(ValueError, match=_ACL_MATCH):
+        await management.restore_policy_body("u1", body)
+    assert pg.policy("u1")["condition"] is None

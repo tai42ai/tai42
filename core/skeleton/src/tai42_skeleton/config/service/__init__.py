@@ -6,7 +6,12 @@ from ``tai42_skeleton.config.service`` unchanged.
 
 from __future__ import annotations
 
-from tai42_skeleton.config.service.results import ApplyResult, OrphanEnvWriteError, ProfileApplyOutcome
+from tai42_skeleton.config.service.results import (
+    ApplyResult,
+    OrphanEnvWriteError,
+    ProfileApplyOutcome,
+    joined_span_release_errors,
+)
 from tai42_skeleton.config.service.service import ConfigService
 
-__all__ = ["ApplyResult", "ConfigService", "OrphanEnvWriteError", "ProfileApplyOutcome"]
+__all__ = ["ApplyResult", "ConfigService", "OrphanEnvWriteError", "ProfileApplyOutcome", "joined_span_release_errors"]

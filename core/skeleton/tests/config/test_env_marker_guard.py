@@ -103,6 +103,13 @@ def test_get_mcp_env_refs_projects_names_and_booleans_only(monkeypatch: pytest.M
             }
         ],
         "user_tools": [],
+        "extension_settings": {
+            "extensions_modules": [],
+            "backend_module": None,
+            "tools": [],
+            "mcp": [],
+            "api_tools": {},
+        },
     }
     monkeypatch.setattr(ops, "_preserved_manifest_view", lambda: view)
     monkeypatch.setenv("GUARD_PG_PW", "s3cret")

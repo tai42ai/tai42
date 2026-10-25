@@ -1,100 +1,222 @@
-"""The Traces API query surface: ``get_trace`` (one complete trace) and ``list_traces`` (a page of summaries).
+"""The run read surface: ``get_trace``, ``get_observation``, ``list_traces`` and ``export_traces``.
 
-``list_traces`` pages summaries native or metric-ranked, with token and
-error-status enrichment.
+A run is a trace: the observations sharing a trace id. Its root (the one observation marked
+``isRootObservation``) carries the run's start, name, tags, user, session, version, latency, input and
+output; cost, tokens, level and model come from every observation of the trace. A list reads one of three
+ways: newest first with only run-level clauses walks the roots; a cost or token rank with only the name and
+tags clauses asks one top-N metrics query; every other sort or clause reads the roots of the time range and
+ranks them in the plugin. Each way has a bound it answers ``MonitoringReadTooBroadError`` past.
 """
 
 from __future__ import annotations
 
-import asyncio
-import json
-from collections.abc import Mapping
-from datetime import UTC, datetime, timedelta
-from functools import partial
+from collections.abc import Iterator, Sequence
+from contextlib import aclosing
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any
 
-import orjson
-from langfuse.api.commons.errors import NotFoundError
+import httpx
 from tai42_contract.monitoring import (
-    PROMOTED_METADATA_KEYS,
     MonitoringError,
     MonitoringFilter,
     MonitoringObservation,
-    MonitoringReadNotSupportedError,
     MonitoringReadTooBroadError,
     MonitoringTrace,
     MonitoringTraceSummary,
     ObservationNotFoundError,
     OrderBy,
-    SpanKind,
     TraceNotFoundError,
 )
 
 from tai42_monitoring_langfuse.filters import (
-    _environment_clause,
-    _metric_population_filter,
-    _timestamp_clauses,
-    _trace_advanced_filter,
-    _trace_metric_filter,
+    ROOT_CLAUSE,
+    Clause,
+    environment_clause,
+    has_root_only_clauses,
+    level_value,
+    ranked_metric_clauses,
+    run_level_clauses,
+    run_wide_filters,
+    string_clause,
+    trace_ids_clause,
+    window_clauses,
 )
-from tai42_monitoring_langfuse.measures import _measure_key, _measure_value, _nonneg_number, _pick
-from tai42_monitoring_langfuse.query_base import PAGE_SIZE, _LangfuseQuery
-from tai42_monitoring_langfuse.sorting import _trace_sort
+from tai42_monitoring_langfuse.measures import _measure_value, _nonneg_number
+from tai42_monitoring_langfuse.observation_query import (
+    FULL_FIELDS,
+    ObservationQuery,
+    ObservationRow,
+    decode_io,
+    observation_kind,
+    producer_metadata,
+    token_counts,
+    total_tokens,
+)
+from tai42_monitoring_langfuse.query_base import (
+    ENRICH_MAX_OBSERVATIONS,
+    NATIVE_MAX_REACH,
+    PAGE_SIZE,
+    RANKED_MAX_REACH,
+    TRACE_ID_CHUNK,
+    WINDOW_MAX_ROOTS,
+)
+from tai42_monitoring_langfuse.sorting import RANKED_MEASURE, _none_last_sorted, resolve_trace_sort
 
-# The trace.list field groups a row summary needs: core attributes, io (input,
-# output, metadata) and metrics (latency, total_cost). Observation bodies are
-# never listed — get_trace is the only body door.
-_LIST_FIELDS = "core,io,metrics"
-# Buffer added to a page's newest timestamp so a trace/observation exactly at the
-# upper bound is caught by the backend's exclusive upper bound.
-_WINDOW_EPSILON = timedelta(seconds=1)
-# The metrics traces view server-enforces config.row_limit in [1, 1000].
-_METRIC_ROW_LIMIT_MAX = 1000
-# Max trace.list pages walked to cover a metric-sorted page's ranked ids before
-# raising loudly — the ranked ids scatter across the whole window, so a wide
-# window with the ranked traces at its far end could otherwise page unbounded.
-_METRIC_LIST_PAGE_BUDGET = 20
-# Max observation pages walked to collect a page's error ids before raising
-# loudly — errors are rare so the window normally resolves in one call; a wide
-# window with many errors could otherwise page unbounded.
-_ERROR_PAGE_BUDGET = 20
+# The field groups of a root row: its run fields, without its input and output.
+_ROOT_FIELDS = "core,basic,metrics,trace_context"
+_DETAIL_FIELDS = "core,io"
+_ENRICH_FIELDS = "core,basic,usage,model"
+
+_NATIVE_TOO_BROAD = f"Paging past run {NATIVE_MAX_REACH:,} is not served. Narrow the time range."
+_NO_START_TOO_BROAD = "A ranked list needs a start time."
+_RANKED_TOO_BROAD = f"A ranked list pages up to run {RANKED_MAX_REACH:,}. Narrow the time range or add filters."
+_ENRICH_TOO_BROAD = (
+    f"The runs in this time range carry more than {ENRICH_MAX_OBSERVATIONS:,} observations. "
+    "Narrow the time range or add filters."
+)
+_SORT_NOUN = {
+    "timestamp": "time",
+    "total_cost": "cost",
+    "total_tokens": "tokens",
+    "latency": "latency",
+    "name": "name",
+    "id": "run id",
+}
+_ASCENDING_SUFFIX = {"timestamp": ", oldest first", "total_cost": ", lowest first", "total_tokens": ", lowest first"}
+_ASCENDING_SUFFIX["latency"] = ", lowest first"
 
 
-class TraceQuery(_LangfuseQuery):
-    """Serves ``get_trace`` and ``list_traces`` from the Langfuse Traces API."""
+@dataclass
+class _Run:
+    """One run being read: its root row, its decoded input and output, and its run-wide totals."""
+
+    root: ObservationRow
+    input: Any = None
+    output: Any = None
+    enriched: bool = False
+    cost: float | None = None
+    tokens: int | None = None
+    levels: set[str] = field(default_factory=set[str])
+    models: set[str] = field(default_factory=set[str])
+
+    @property
+    def trace_id(self) -> str:
+        return self.root.trace_id
+
+    @property
+    def name(self) -> str | None:
+        return self.root.trace_name or self.root.name
+
+    @property
+    def latency_ms(self) -> float | None:
+        latency = self.root.latency
+        return latency * 1000.0 if _nonneg_number(latency) else None
+
+    def sort_key(self, field_name: str) -> Any:
+        return {
+            "timestamp": self.root.start_time,
+            "total_cost": self.cost,
+            "total_tokens": self.tokens,
+            "latency": self.latency_ms,
+            "name": self.name,
+            "id": self.trace_id,
+        }[field_name]
+
+    def summary(self) -> MonitoringTraceSummary:
+        return MonitoringTraceSummary(
+            id=self.trace_id,
+            timestamp=self.root.start_time,
+            name=self.name,
+            tags=list(self.root.tags or []),
+            input=self.input,
+            output=self.output,
+            latency_ms=self.latency_ms,
+            total_cost=self.cost,
+            total_tokens=self.tokens,
+            status="error" if "ERROR" in self.levels else "ok",
+        )
+
+
+def _in_range(value: float | None, low: float | None, high: float | None) -> bool:
+    if low is None and high is None:
+        return True
+    if value is None:
+        return False
+    return (low is None or value >= low) and (high is None or value <= high)
+
+
+def _matches_run_wide(run: _Run, filter_: MonitoringFilter | None) -> bool:
+    """Whether an enriched run passes the run-wide clauses; a run with no recorded total matches no range on it."""
+    if filter_ is None:
+        return True
+    if not _in_range(run.cost, filter_.min_cost, filter_.max_cost):
+        return False
+    if not _in_range(run.tokens, filter_.min_tokens, filter_.max_tokens):
+        return False
+    if filter_.level is not None and level_value(filter_.level) not in run.levels:
+        return False
+    return filter_.model is None or filter_.model in run.models
+
+
+def _chunks(trace_ids: Sequence[str]) -> Iterator[list[str]]:
+    for start in range(0, len(trace_ids), TRACE_ID_CHUNK):
+        yield list(trace_ids[start : start + TRACE_ID_CHUNK])
+
+
+def _window_purpose(order_by: OrderBy, run_wide: list[str]) -> str:
+    if run_wide:
+        return f"apply the {', '.join(run_wide)} filter{'s' if len(run_wide) > 1 else ''}"
+    suffix = _ASCENDING_SUFFIX.get(order_by.field, "") if order_by.direction == "asc" else ""
+    return f"rank by {_SORT_NOUN[order_by.field]}{suffix}"
+
+
+class TraceQuery(ObservationQuery):
+    """Serves the run read surface from the Langfuse observations list and Metrics v2."""
 
     async def get_trace(self, trace_id: str) -> MonitoringTrace:
-        """Fetch one complete trace; never returns ``None``.
-
-        An absent trace raises ``TraceNotFoundError`` (translated from the vendor
-        error). Any other failure propagates as-is, never mapped to "not found".
-        """
+        """Every observation of ``trace_id``; zero rows raise ``TraceNotFoundError``, any other failure propagates."""
         client = await self._active_client()
-        try:
-            trace = await asyncio.to_thread(
-                partial(client.api.trace.get, trace_id, request_options=self._request_options())
-            )
-        except NotFoundError as e:
-            raise TraceNotFoundError(f"trace {trace_id} not found") from e
-        return self._map_trace(trace.model_dump())
+        rows = await self._walk_all(
+            client, fields=FULL_FIELDS, clauses=[string_clause("traceId", trace_id)], expand_metadata=True
+        )
+        if not rows:
+            raise TraceNotFoundError(f"trace {trace_id} not found")
+        root = next((row for row in rows if row.is_root_observation), None)
+        costs = [row.total_cost for row in rows if _nonneg_number(row.total_cost)]
+        observations = sorted((self._map_observation(row) for row in rows), key=lambda o: (o.start, o.id))
+        return MonitoringTrace(
+            id=trace_id,
+            timestamp=root.start_time if root is not None else observations[0].start,
+            tags=list(root.tags or []) if root is not None else [],
+            input=decode_io(root.input) if root is not None else None,
+            output=decode_io(root.output) if root is not None else None,
+            metadata=root.metadata if root is not None else None,
+            total_cost=sum(costs) if costs else None,
+            observations=observations,
+        )
 
     async def get_observation(self, trace_id: str, observation_id: str) -> MonitoringObservation:
-        """Fetch one observation with its full input/output.
+        """One observation of ``trace_id``.
 
-        An absent observation, or one that belongs to another trace, raises
-        ``ObservationNotFoundError``; any other failure propagates.
+        An absent trace raises ``TraceNotFoundError``, an absent observation ``ObservationNotFoundError``; any
+        other failure propagates.
         """
         client = await self._active_client()
-        try:
-            raw = await asyncio.to_thread(
-                partial(client.api.legacy.observations_v1.get, observation_id, request_options=self._request_options())
-            )
-        except NotFoundError as e:
-            raise ObservationNotFoundError(f"observation {observation_id} not found in trace {trace_id}") from e
-        observation = self._map_observation(raw.model_dump())
-        if observation.trace_id != trace_id:
-            raise ObservationNotFoundError(f"observation {observation_id} not found in trace {trace_id}")
-        return observation
+        rows, _ = await self._list_page(
+            client,
+            fields=FULL_FIELDS,
+            clauses=[string_clause("traceId", trace_id), string_clause("id", observation_id)],
+            expand_metadata=True,
+        )
+        if rows:
+            return self._map_observation(rows[0])
+        trace_rows, _ = await self._list_page(
+            client, fields="core", clauses=[string_clause("traceId", trace_id)], limit=1
+        )
+        if not trace_rows:
+            raise TraceNotFoundError(f"trace {trace_id} not found")
+        raise ObservationNotFoundError(f"observation {observation_id} not found in trace {trace_id}")
 
     async def list_traces(
         self,
@@ -106,498 +228,258 @@ class TraceQuery(_LangfuseQuery):
         filter_: MonitoringFilter | None = None,
         order_by: OrderBy | None = None,
     ) -> list[MonitoringTraceSummary]:
-        """Run SUMMARIES for one page — never per-trace bodies.
+        """One page of run summaries; ``limit`` defaults to the largest page, ``page`` to the first."""
+        size = PAGE_SIZE if limit is None else limit
+        number = 1 if page is None else page
+        if size > PAGE_SIZE:
+            raise ValueError(f"limit {size} exceeds the reader's maximum page size {PAGE_SIZE}")
+        if size < 1:
+            raise ValueError(f"limit {size} must be 1 or more")
+        if number < 1:
+            raise ValueError(f"page {number} must be 1 or more")
+        return await self._read_runs(
+            from_timestamp=from_timestamp,
+            to_timestamp=to_timestamp,
+            start=(number - 1) * size,
+            reach=number * size,
+            filter_=filter_,
+            order_by=order_by,
+            export=False,
+        )
 
-        A page costs ≤3 backend calls (native sort) / ≤3 + a bounded trace.list
-        walk (metric sort): the list surface for the rows, one metrics query for
-        the page's token totals, and one paged observations query for the page's
-        error status. ``get_trace`` remains the only body door.
+    async def export_traces(
+        self,
+        *,
+        from_timestamp: datetime | None = None,
+        to_timestamp: datetime | None = None,
+        max_rows: int,
+        filter_: MonitoringFilter | None = None,
+        order_by: OrderBy | None = None,
+    ) -> list[MonitoringTraceSummary]:
+        """Up to ``max_rows + 1`` run summaries in the ``list_traces`` order, in one read."""
+        if max_rows < 0:
+            raise ValueError(f"max_rows {max_rows} must not be negative")
+        return await self._read_runs(
+            from_timestamp=from_timestamp,
+            to_timestamp=to_timestamp,
+            start=0,
+            reach=max_rows + 1,
+            filter_=filter_,
+            order_by=order_by,
+            export=True,
+        )
+
+    async def _read_runs(
+        self,
+        *,
+        from_timestamp: datetime | None,
+        to_timestamp: datetime | None,
+        start: int,
+        reach: int,
+        filter_: MonitoringFilter | None,
+        order_by: OrderBy | None,
+        export: bool,
+    ) -> list[MonitoringTraceSummary]:
+        """The runs ``[start, reach)`` of the sorted, filtered list, with their input, output and totals.
+
+        An export reads up to ``reach`` runs: the newest-first and ranked page bounds do not refuse it up front.
         """
-        if limit is not None and limit > PAGE_SIZE:
-            raise ValueError(f"limit {limit} exceeds the reader's maximum page size {PAGE_SIZE}")
+        sort = resolve_trace_sort(order_by)
         client = await self._active_client()
         source = self._m.active_source()
-
-        kind, payload = _trace_sort(order_by)
-        if kind == "metric":
-            rows = await self._metric_sorted_rows(
-                client,
-                source,
-                payload,
-                from_timestamp=from_timestamp,
-                to_timestamp=to_timestamp,
-                limit=limit,
-                page=page,
-                filter_=filter_,
+        run_wide = run_wide_filters(filter_)
+        if sort.field == "timestamp" and sort.direction == "desc" and not run_wide:
+            if not export and reach > NATIVE_MAX_REACH:
+                raise MonitoringReadTooBroadError(_NATIVE_TOO_BROAD)
+            runs = await self._native_runs(client, source, from_timestamp, to_timestamp, reach, filter_)
+        elif (
+            sort.field in RANKED_MEASURE
+            and sort.direction == "desc"
+            and not run_wide
+            and not has_root_only_clauses(filter_)
+        ):
+            runs = await self._ranked_runs(
+                client, source, from_timestamp, to_timestamp, reach, filter_, sort.field, export=export
             )
         else:
-            rows = await self._native_rows(
-                client,
-                source,
-                payload,
-                from_timestamp=from_timestamp,
-                to_timestamp=to_timestamp,
-                limit=limit,
-                page=page,
-                filter_=filter_,
-            )
-        if not rows:
-            return []
-        return await self._summarize(client, source, rows, filter_)
+            runs = await self._window_runs(client, source, from_timestamp, to_timestamp, filter_, sort, run_wide)
+        page = runs[start:reach]
+        if page:
+            await self._detail(client, source, page)
+            await self._enrich(client, source, [run for run in page if not run.enriched])
+        return [run.summary() for run in page]
 
-    async def _native_rows(
+    def _root_clauses(
+        self, source: str, t0: datetime | None, t1: datetime | None, filter_: MonitoringFilter | None
+    ) -> list[Clause]:
+        return [environment_clause(source), ROOT_CLAUSE, *window_clauses(t0, t1), *run_level_clauses(filter_)]
+
+    async def _native_runs(
         self,
-        client: Any,
+        client: httpx.Client,
         source: str,
-        native_sort: str,
-        *,
-        from_timestamp: datetime | None,
-        to_timestamp: datetime | None,
-        limit: int | None,
-        page: int | None,
+        t0: datetime | None,
+        t1: datetime | None,
+        reach: int,
         filter_: MonitoringFilter | None,
-    ) -> list[Any]:
-        """The page's summary rows via one server-side trace.list (native sort)."""
-        return await self._list_page(
+    ) -> list[_Run]:
+        """The newest ``reach`` roots, plus every root sharing the last one's start, by start then trace id."""
+        roots: list[ObservationRow] = []
+        walk = self._walk(client, fields=_ROOT_FIELDS, clauses=self._root_clauses(source, t0, t1, filter_))
+        async with aclosing(walk) as rows:
+            async for row in rows:
+                if len(roots) >= reach and row.start_time != roots[reach - 1].start_time:
+                    break
+                roots.append(row)
+        roots.sort(key=lambda row: (row.start_time, row.trace_id), reverse=True)
+        return [_Run(root) for root in roots]
+
+    async def _ranked_runs(
+        self,
+        client: httpx.Client,
+        source: str,
+        t0: datetime | None,
+        t1: datetime | None,
+        reach: int,
+        filter_: MonitoringFilter | None,
+        field_name: str,
+        *,
+        export: bool,
+    ) -> list[_Run]:
+        """The runs ranked by one top-N metrics query over the time range, whose roots started in it."""
+        if t0 is None:
+            raise MonitoringReadTooBroadError(_NO_START_TOO_BROAD)
+        if not export and reach > RANKED_MAX_REACH:
+            raise MonitoringReadTooBroadError(_RANKED_TOO_BROAD)
+        measure = RANKED_MEASURE[field_name]
+        rows = await self._metrics(
             client,
-            source,
-            order_by=native_sort,
-            from_timestamp=from_timestamp,
-            to_timestamp=to_timestamp,
-            limit=limit,
-            page=page,
-            filter_=filter_,
+            {
+                "view": "observations",
+                "dimensions": [{"field": "traceId"}],
+                "metrics": [{"measure": measure, "aggregation": "sum"}],
+                "filters": [environment_clause(source), *ranked_metric_clauses(filter_)],
+                "fromTimestamp": t0.isoformat(),
+                "toTimestamp": (t1 or datetime.now(UTC)).isoformat(),
+                "orderBy": [{"field": f"sum_{measure}", "direction": "desc"}],
+                "config": {"row_limit": RANKED_MAX_REACH},
+            },
         )
-
-    async def _list_page(
-        self,
-        client: Any,
-        source: str,
-        *,
-        order_by: str,
-        from_timestamp: datetime | None,
-        to_timestamp: datetime | None,
-        limit: int | None,
-        page: int | None,
-        filter_: MonitoringFilter | None,
-    ) -> list[Any]:
-        """One trace.list call, returning its ``TraceWithDetails`` summary rows.
-
-        Rows carry the core/io/metrics field groups (no observation bodies).
-        """
-        advanced = _trace_advanced_filter(filter_)
-        # Langfuse's advanced ``filter`` JSON overrides the native
-        # fromTimestamp/toTimestamp params, so time bounds must ride in the JSON too.
-        if advanced:
-            advanced = _timestamp_clauses(from_timestamp, to_timestamp) + advanced
-        filter_json = json.dumps(advanced) if advanced else None
-        summaries = await asyncio.to_thread(
-            partial(
-                client.api.trace.list,
-                from_timestamp=from_timestamp,
-                to_timestamp=to_timestamp,
-                limit=limit,
-                page=page,
-                order_by=order_by,
-                environment=source,
-                fields=_LIST_FIELDS,
-                name=filter_.name if filter_ else None,
-                user_id=filter_.user_id if filter_ else None,
-                session_id=filter_.session_id if filter_ else None,
-                version=filter_.version if filter_ else None,
-                tags=(filter_.tags or None) if filter_ else None,
-                filter=filter_json,
-                request_options=self._request_options(),
-            )
-        )
-        return list(summaries.data or [])
-
-    async def _metric_sorted_rows(
-        self,
-        client: Any,
-        source: str,
-        measure_dir: tuple[str, str],
-        *,
-        from_timestamp: datetime | None,
-        to_timestamp: datetime | None,
-        limit: int | None,
-        page: int | None,
-        filter_: MonitoringFilter | None,
-    ) -> list[Any]:
-        """The page's rows for a metric sort, in rank order.
-
-        Globally ranks the ids via the metrics API, then walks trace.list
-        (newest-first) over the same window to collect their summary rows. Never a
-        per-id trace.get. The ranked ids can sit anywhere in the window, so the walk is bounded by
-        ``_METRIC_LIST_PAGE_BUDGET`` pages; a page whose ranked ids are not all
-        found within that budget raises loudly rather than returning a short row
-        set that reads as a complete page.
-        """
-        ranked_ids = await self._metric_ranked_ids(
-            client,
-            source,
-            measure_dir,
-            from_timestamp=from_timestamp,
-            to_timestamp=to_timestamp,
-            limit=limit,
-            page=page,
-            filter_=filter_,
-        )
-        if not ranked_ids:
-            return []
-
-        wanted = set(ranked_ids)
-        found: dict[str, Any] = {}
-        list_page = 1
-        while wanted - found.keys():
-            if list_page > _METRIC_LIST_PAGE_BUDGET:
-                raise MonitoringReadTooBroadError(
-                    "metric-sorted listing could not resolve the page within the bounded window; narrow the time range"
-                )
-            batch = await self._list_page(
-                client,
-                source,
-                order_by="timestamp.desc",
-                from_timestamp=from_timestamp,
-                to_timestamp=to_timestamp,
-                limit=PAGE_SIZE,
-                page=list_page,
-                filter_=filter_,
-            )
-            for row in batch:
-                if row.id in wanted:
-                    found[row.id] = row
-            if len(batch) < PAGE_SIZE:
-                break
-            list_page += 1
-
-        missing = wanted - found.keys()
-        if missing:
-            raise MonitoringReadTooBroadError(
-                "metric-sorted listing could not locate every ranked row within the bounded window; "
-                "narrow the time range"
-            )
-        return [found[trace_id] for trace_id in ranked_ids]
-
-    async def _metric_ranked_ids(
-        self,
-        client: Any,
-        source: str,
-        measure_dir: tuple[str, str],
-        *,
-        from_timestamp: datetime | None,
-        to_timestamp: datetime | None,
-        limit: int | None,
-        page: int | None,
-        filter_: MonitoringFilter | None,
-    ) -> list[str]:
-        """Globally rank trace-ids by an aggregated measure (cost / latency / tokens) via the metrics API.
-
-        The metrics API can order by the measure where ``trace.list`` cannot.
-        Returns the page slice of the top-N in rank order. Bad inputs (no time
-        bound, non-positive limit/page, paging past the row
-        cap) raise before any request.
-        """
-        measure, direction = measure_dir
-        if from_timestamp is None:
-            raise MonitoringReadNotSupportedError("metric sort requires from_timestamp")
-        if limit is None or limit < 1:
-            raise MonitoringReadNotSupportedError("metric sort requires limit >= 1")
-        if page is not None and page < 1:
-            raise MonitoringReadNotSupportedError("metric sort requires page >= 1 (1-based)")
-
-        # config.row_limit is a server-enforced top-N cap (not an offset), so the
-        # query must reach the whole prefix up to the requested page's end.
-        reach = ((page or 1) - 1) * limit + limit
-        if reach > _METRIC_ROW_LIMIT_MAX:
-            raise MonitoringReadTooBroadError(
-                f"metric sort paging beyond the {_METRIC_ROW_LIMIT_MAX}-row metrics cap (reach {reach})"
-            )
-
-        query: dict[str, Any] = {
-            "view": "traces",
-            "metrics": [{"measure": measure, "aggregation": "sum"}],
-            "dimensions": [{"field": "id"}],
-            "filters": [_environment_clause(source), *_trace_metric_filter(filter_)],
-            # The orderBy key the server emits for a summed measure is sum_<measure>.
-            "orderBy": [{"field": f"sum_{measure}", "direction": direction}],
-            "fromTimestamp": from_timestamp.isoformat(),
-            "toTimestamp": (to_timestamp or datetime.now(UTC)).isoformat(),
-            # Nested config wrapper; a flat row_limit is ignored.
-            "config": {"row_limit": reach},
-        }
-        # Stay on legacy.metrics_v1 view="traces": the v2 metrics endpoint has no
-        # traces view and rejects high-cardinality id grouping.
-        response = await asyncio.to_thread(
-            partial(
-                client.api.legacy.metrics_v1.metrics,
-                query=json.dumps(query),
-                request_options=self._request_options(),
-            )
-        )
-        rows = list(getattr(response, "data", []) or [])
-        # row_limit is a cap, not an offset; slice this page out of the ranked rows.
-        start = ((page or 1) - 1) * limit
-        return [row["id"] for row in rows][start : start + limit]
-
-    async def _summarize(
-        self, client: Any, source: str, rows: list[Any], filter_: MonitoringFilter | None
-    ) -> list[MonitoringTraceSummary]:
-        """Build the page's summaries from the list rows plus two batched, window-scoped enrichments.
-
-        The enrichments are token totals (one metrics query) and error status (one
-        paged observations query). Order is preserved.
-        """
-        timestamps = [row.timestamp for row in rows if row.timestamp is not None]
-        if not timestamps:
-            return [self._to_summary(row, {}, set()) for row in rows]
-
-        # Token window is keyed on trace timestamp (the metrics traces view filters
-        # on it); the status window is keyed on OBSERVATION start time, which lags
-        # the trace timestamp by up to the trace's own latency — so its upper bound
-        # follows the latest estimated trace end, not just the newest timestamp.
-        t_min = min(timestamps)
-        t_max = max(timestamps)
-        page_ids = [row.id for row in rows]
-        estimated_ends = [
-            row.timestamp + timedelta(seconds=row.latency)
-            for row in rows
-            if row.timestamp is not None and _nonneg_number(getattr(row, "latency", None))
+        column = f"sum_{measure}"
+        ranked: list[tuple[float, str]] = []
+        for row in rows:
+            if column not in row or "traceId" not in row:
+                raise MonitoringError(f"Langfuse metrics response row carries no traceId or {column} column: {row!r}")
+            ranked.append((_measure_value(row[column]) or 0.0, row["traceId"]))
+        ranked.sort(reverse=True)
+        roots = await self._roots_of(client, source, [trace_id for _, trace_id in ranked])
+        runs = [
+            _Run(roots[trace_id])
+            for _, trace_id in ranked
+            if trace_id in roots
+            and roots[trace_id].start_time >= t0
+            and (t1 is None or roots[trace_id].start_time < t1)
         ]
-        # A row with no latency is still in flight: its observations can extend to
-        # the present, so the error window's upper bound must reach now.
-        if any(not _nonneg_number(getattr(row, "latency", None)) for row in rows):
-            estimated_ends.append(datetime.now(UTC))
-        obs_end = (max(estimated_ends) if estimated_ends else t_max) + _WINDOW_EPSILON
+        if len(runs) < reach and len(rows) >= RANKED_MAX_REACH:
+            raise MonitoringReadTooBroadError(_RANKED_TOO_BROAD)
+        return runs
 
-        tokens_by_id, error_ids = await asyncio.gather(
-            self._tokens_for_window(client, source, t_min, t_max + _WINDOW_EPSILON, page_ids, filter_),
-            self._error_trace_ids(client, source, t_min, obs_end),
-        )
-        return [self._to_summary(row, tokens_by_id, error_ids) for row in rows]
+    async def _roots_of(self, client: httpx.Client, source: str, trace_ids: list[str]) -> dict[str, ObservationRow]:
+        roots: dict[str, ObservationRow] = {}
+        for chunk in _chunks(trace_ids):
+            clauses = [environment_clause(source), ROOT_CLAUSE, trace_ids_clause(chunk)]
+            for row in await self._walk_all(client, fields=_ROOT_FIELDS, clauses=clauses):
+                roots[row.trace_id] = row
+        return roots
 
-    async def _tokens_for_window(
+    async def _window_runs(
         self,
-        client: Any,
+        client: httpx.Client,
         source: str,
-        t0: datetime,
-        t1: datetime,
-        page_ids: list[str],
+        t0: datetime | None,
+        t1: datetime | None,
         filter_: MonitoringFilter | None,
-    ) -> dict[str, float]:
-        """Per-trace summed token totals over the page window via ONE metrics traces-view query.
-
-        Uses dimension id, measure totalTokens. The page filter's view-supported
-        clauses narrow the metrics population; correctness comes from the per-id
-        join, so the unsupported clauses are dropped, not raised. A trace absent
-        from the result carries no usage.
-
-        The metrics view caps at ``_METRIC_ROW_LIMIT_MAX`` rows: if the cap is hit
-        AND a page id is uncovered, the token join cannot tell "no usage" from
-        "truncated" — it raises loudly rather than reporting a silent None. If rows
-        come back yet none carry a recognised token measure, the query shape is
-        wrong — it raises rather than reporting every trace as usage-less.
-        """
-        query: dict[str, Any] = {
-            "view": "traces",
-            "metrics": [{"measure": "totalTokens", "aggregation": "sum"}],
-            "dimensions": [{"field": "id"}],
-            "filters": [_environment_clause(source), *_metric_population_filter(filter_)],
-            "fromTimestamp": t0.isoformat(),
-            "toTimestamp": t1.isoformat(),
-            "config": {"row_limit": _METRIC_ROW_LIMIT_MAX},
-        }
-        response = await asyncio.to_thread(
-            partial(
-                client.api.legacy.metrics_v1.metrics,
-                query=json.dumps(query),
-                request_options=self._request_options(),
-            )
-        )
-        rows = list(getattr(response, "data", []) or [])
-        tokens_by_id: dict[str, float] = {}
-        # A trace whose summed measure is null IS covered by the result (no usage),
-        # so coverage is the set of ids carrying the measure column, not just those
-        # with a non-null value — otherwise a null-sum page id reads as truncated.
-        covered_ids: set[str] = set()
-        for raw in rows:
-            key = _measure_key(raw, "totalTokens")
-            if key is None:
-                continue
-            trace_id = raw.get("id")
-            if trace_id is None:
-                continue
-            covered_ids.add(trace_id)
-            value = _measure_value(raw[key])
-            if value is not None:
-                tokens_by_id[trace_id] = value
-        if rows and not covered_ids:
-            raise MonitoringReadNotSupportedError("token totals came back without a recognised total-tokens measure")
-        if len(rows) >= _METRIC_ROW_LIMIT_MAX:
-            uncovered = [tid for tid in page_ids if tid not in covered_ids]
-            if uncovered:
-                raise MonitoringReadTooBroadError(
-                    "token totals could not be resolved within the bounded window; narrow the time range"
-                )
-        return tokens_by_id
-
-    async def _error_trace_ids(self, client: Any, source: str, t0: datetime, t1: datetime) -> set[str]:
-        """The (source-scoped) trace ids with an ERROR-level observation whose start falls in the window.
-
-        Drained across pages up to ``_ERROR_PAGE_BUDGET``. Errors are rare, so the
-        window normally resolves in one call. Exceeding the
-        budget, or a full page returned without a page count to bound the walk,
-        raises loudly — it never stops quietly on a partial result.
-        """
-        ids: set[str] = set()
-        page = 1
-        while True:
-            response = await asyncio.to_thread(
-                partial(
-                    client.api.legacy.observations_v1.get_many,
-                    from_start_time=t0,
-                    to_start_time=t1,
-                    level="ERROR",
-                    environment=source,
-                    limit=PAGE_SIZE,
-                    page=page,
-                    request_options=self._request_options(),
-                )
-            )
-            data = response.data or []
-            for obs in data:
-                if obs.trace_id:
-                    ids.add(obs.trace_id)
-            meta = getattr(response, "meta", None)
-            total_pages = getattr(meta, "total_pages", None) if meta else None
-            if total_pages is None:
-                if len(data) >= PAGE_SIZE:
+        sort: OrderBy,
+        run_wide: list[str],
+    ) -> list[_Run]:
+        """Every run whose root started in the time range, filtered and sorted in the plugin."""
+        if t0 is None:
+            raise MonitoringReadTooBroadError(_NO_START_TOO_BROAD)
+        roots: list[ObservationRow] = []
+        walk = self._walk(client, fields=_ROOT_FIELDS, clauses=self._root_clauses(source, t0, t1, filter_))
+        async with aclosing(walk) as rows:
+            async for row in rows:
+                roots.append(row)
+                if len(roots) > WINDOW_MAX_ROOTS:
                     raise MonitoringReadTooBroadError(
-                        "error status could not be resolved within the bounded window; narrow the time range"
+                        f"This list reads at most {WINDOW_MAX_ROOTS:,} runs in the time range to "
+                        f"{_window_purpose(sort, run_wide)}, and this range holds more. "
+                        "Narrow the time range or add filters."
                     )
-                break
-            if page >= total_pages:
-                break
-            if page >= _ERROR_PAGE_BUDGET:
-                raise MonitoringReadTooBroadError(
-                    "error status could not be resolved within the bounded window; narrow the time range"
-                )
-            page += 1
-        return ids
+        runs = [_Run(root) for root in roots]
+        if run_wide or sort.field in RANKED_MEASURE:
+            await self._enrich(client, source, runs)
+            runs = [run for run in runs if _matches_run_wide(run, filter_)]
+        reverse = sort.direction == "desc"
+        runs.sort(key=lambda run: run.trace_id, reverse=reverse)
+        return _none_last_sorted(runs, lambda run: run.sort_key(sort.field), reverse)
+
+    async def _detail(self, client: httpx.Client, source: str, runs: list[_Run]) -> None:
+        """Fill each run's input and output from its root."""
+        by_id = {run.trace_id: run for run in runs}
+        for chunk in _chunks(list(by_id)):
+            clauses = [environment_clause(source), ROOT_CLAUSE, trace_ids_clause(chunk)]
+            for row in await self._walk_all(client, fields=_DETAIL_FIELDS, clauses=clauses):
+                run = by_id.get(row.trace_id)
+                if run is not None:
+                    run.input = decode_io(row.input)
+                    run.output = decode_io(row.output)
+
+    async def _enrich(self, client: httpx.Client, source: str, runs: list[_Run]) -> None:
+        """Total each run's cost and tokens and collect its levels and models from every observation of its trace."""
+        by_id = {run.trace_id: run for run in runs}
+        read = 0
+        for chunk in _chunks(list(by_id)):
+            clauses = [environment_clause(source), trace_ids_clause(chunk)]
+            async with aclosing(self._walk(client, fields=_ENRICH_FIELDS, clauses=clauses)) as rows:
+                async for row in rows:
+                    read += 1
+                    if read > ENRICH_MAX_OBSERVATIONS:
+                        raise MonitoringReadTooBroadError(_ENRICH_TOO_BROAD)
+                    run = by_id.get(row.trace_id)
+                    if run is None:
+                        raise MonitoringError(f"Langfuse returned an observation of unrequested trace {row.trace_id}")
+                    self._add_observation(run, row)
+        for run in runs:
+            run.enriched = True
 
     @staticmethod
-    def _to_summary(row: Any, tokens_by_id: dict[str, float], error_ids: set[str]) -> MonitoringTraceSummary:
-        latency = getattr(row, "latency", None)
-        latency_ms = latency * 1000.0 if _nonneg_number(latency) else None
-        tokens = tokens_by_id.get(row.id)
-        cost = getattr(row, "total_cost", None)
-        return MonitoringTraceSummary(
-            id=row.id,
-            timestamp=row.timestamp,
-            name=getattr(row, "name", None),
-            tags=list(getattr(row, "tags", None) or []),
-            input=getattr(row, "input", None),
-            output=getattr(row, "output", None),
-            latency_ms=latency_ms,
-            # trace.list with the metrics field group returns real costs; -1 marks
-            # a backend that could not compute one — surface it as None, not -1.
-            total_cost=cost if _nonneg_number(cost) else None,
-            total_tokens=int(tokens) if tokens is not None else None,
-            status="error" if row.id in error_ids else "ok",
-        )
-
-    @classmethod
-    def _map_trace(cls, raw: dict[str, Any]) -> MonitoringTrace:
-        observations = [cls._map_observation(o) for o in (raw.get("observations") or [])]
-        return MonitoringTrace(
-            id=raw.get("id", ""),
-            timestamp=raw.get("timestamp"),
-            tags=list(raw.get("tags") or []),
-            input=raw.get("input"),
-            output=raw.get("output"),
-            metadata=raw.get("metadata"),
-            # _pick preserves a genuine 0.0 cost (falsy-but-present), not "missing".
-            total_cost=_pick(raw, "total_cost", "totalCost"),
-            observations=observations,
-        )
+    def _add_observation(run: _Run, row: ObservationRow) -> None:
+        if _nonneg_number(row.total_cost):
+            run.cost = (run.cost or 0.0) + row.total_cost
+        tokens = total_tokens(row.usage_details)
+        if tokens is not None:
+            run.tokens = (run.tokens or 0) + tokens
+        if row.level is not None:
+            run.levels.add(row.level)
+        if row.model:
+            run.models.add(row.model)
 
     @staticmethod
-    def _map_observation(raw: dict[str, Any]) -> MonitoringObservation:
+    def _map_observation(row: ObservationRow) -> MonitoringObservation:
         return MonitoringObservation(
-            id=raw.get("id", ""),
-            trace_id=_pick(raw, "trace_id", "traceId"),
-            parent_id=_pick(raw, "parent_observation_id", "parentObservationId"),
-            kind=observation_kind(raw.get("type")),
-            name=raw.get("name"),
-            level=raw.get("level"),
-            status_message=_pick(raw, "status_message", "statusMessage"),
-            input=raw.get("input"),
-            output=raw.get("output"),
-            metadata=producer_metadata(raw.get("metadata"), raw.get("id")),
-            model=_pick(raw, "provided_model_name", "model"),
-            **_token_counts(_pick(raw, "usage_details", "usageDetails", "usage")),
-            start=_pick(raw, "start_time", "startTime"),
-            end=_pick(raw, "end_time", "endTime"),
+            id=row.id,
+            trace_id=row.trace_id,
+            parent_id=row.parent_observation_id,
+            kind=observation_kind(row.type),
+            name=row.name,
+            level=row.level,
+            status_message=row.status_message,
+            input=decode_io(row.input),
+            output=decode_io(row.output),
+            metadata=producer_metadata(row.metadata, row.id),
+            model=row.model,
+            **token_counts(row.usage_details),
+            start=row.start_time,
+            end=row.end_time,
         )
-
-
-# Langfuse observation type -> neutral kind; any type not named here is a CHAIN.
-_TYPE_TO_KIND: dict[str, SpanKind] = {
-    "GENERATION": SpanKind.LLM,
-    "EMBEDDING": SpanKind.LLM,
-    "TOOL": SpanKind.TOOL,
-    "RETRIEVER": SpanKind.TOOL,
-    "EVENT": SpanKind.EVENT,
-}
-
-
-def observation_type(raw_type: Any) -> str | None:
-    """The Langfuse observation type as an upper-case string; ``None`` when the row carries none."""
-    if raw_type is None:
-        return None
-    return (raw_type.value if hasattr(raw_type, "value") else str(raw_type)).upper()
-
-
-def observation_kind(raw_type: Any) -> SpanKind | None:
-    """The neutral kind of a Langfuse observation type; ``None`` when the row carries no type."""
-    obs_type = observation_type(raw_type)
-    if obs_type is None:
-        return None
-    return _TYPE_TO_KIND.get(obs_type, SpanKind.CHAIN)
-
-
-def _token_counts(usage: Any) -> dict[str, int | None]:
-    """The token counts from Langfuse's usage keys ``input`` / ``output`` / ``total``; ``None`` when absent."""
-    if hasattr(usage, "model_dump"):
-        usage = usage.model_dump()
-    if not isinstance(usage, Mapping):
-        usage = {}
-
-    def _count(key: str) -> int | None:
-        value = usage.get(key)
-        return None if value is None else int(value)
-
-    return {"input_tokens": _count("input"), "output_tokens": _count("output"), "total_tokens": _count("total")}
-
-
-def producer_metadata(metadata: Any, observation_id: Any) -> dict[str, Any] | None:
-    """The record's producer metadata: the decoded ``tai42.metadata`` object plus the promoted keys.
-
-    The backend keeps a non-SDK span's attributes under ``metadata.attributes``; ``None``
-    when the record carries none.
-    """
-    attributes = metadata.get("attributes") if isinstance(metadata, Mapping) else None
-    if not isinstance(attributes, Mapping):
-        return None
-    producer: dict[str, Any] = {}
-    encoded = attributes.get("tai42.metadata")
-    if isinstance(encoded, str):
-        encoded = orjson.loads(encoded)
-    if encoded is not None:
-        if not isinstance(encoded, Mapping):
-            raise MonitoringError(f"malformed tai42.metadata attribute on observation {observation_id}")
-        producer.update(encoded)
-    for key in PROMOTED_METADATA_KEYS:
-        if key in attributes:
-            producer[key] = attributes[key]
-    return producer or None

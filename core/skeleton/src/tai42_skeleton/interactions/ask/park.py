@@ -24,6 +24,7 @@ from tai42_contract.interactions import (
     get_park_completion,
     get_resume_continuation_tool,
 )
+from tai42_contract.presets import PresetParkStages
 from tai42_contract.states import StateBinding, StateContext
 from tai42_contract.tools import get_run_delivery, get_run_delivery_id
 from tai42_kit.interactions.park_adoption import repark_notice
@@ -31,6 +32,7 @@ from tai42_kit.interactions.park_adoption import repark_notice
 from tai42_skeleton.authz import execution_identity
 from tai42_skeleton.interactions.continuation import _current_state_context_for_park
 from tai42_skeleton.runs.chokepoint import get_resume_lineage
+from tai42_skeleton.tools.stage_frames import capture_park_stages
 from tai42_skeleton.tools.state_binding import current_deferred_binding
 
 logger = logging.getLogger(__name__)
@@ -69,6 +71,9 @@ class AsyncParkBinding:
     # lineage of the interaction the platform is driving (a re-park inherits it), then every key of
     # the ambient chained dispatches not already in it. Empty for a run nested under no chained call.
     chain_keys: tuple[str, ...] = ()
+    # The output stages of the preset dispatches the park sits under, by where each preset's result
+    # reappears after the resume. ``None`` when the park sits under no preset stage.
+    deferred_output_stages: PresetParkStages | None = None
 
 
 def resolve_async_continuation(to: Literal["user", "caller"] = "user") -> AsyncParkBinding:
@@ -119,8 +124,10 @@ def resolve_async_continuation(to: Literal["user", "caller"] = "user") -> AsyncP
     # deferred UPDATES apply once at the run's real terminal. A copy of the run input is taken so a
     # later mutation of the live arguments never reaches the stored snapshot.
     deferred = current_deferred_binding()
+    chain_keys = park_chain_keys()
     return AsyncParkBinding(
-        chain_keys=park_chain_keys(),
+        chain_keys=chain_keys,
+        deferred_output_stages=capture_park_stages(chain_keys),
         continuation_tool=continuation_tool,
         continuation_identity=identity.user_id,
         continuation_fingerprint=continuation_fingerprint,

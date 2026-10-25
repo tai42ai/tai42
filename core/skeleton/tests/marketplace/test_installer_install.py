@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import copy
 import importlib.metadata
 from typing import Any
 
@@ -339,6 +338,30 @@ async def test_install_store_failure_full_unwind(monkeypatch: pytest.MonkeyPatch
     assert h.pip.calls[-1] == ["uninstall", "--yes", "tai42-toolbox"]
 
 
+def _another_door_writes_during_the_row_record(h: Harness, entry: dict[str, Any]) -> None:
+    # Another config door lands its manifest edit while the row write is in flight, then the
+    # row write fails and the operation unwinds.
+    original = h.store.record
+
+    async def _record(*args: Any, **kwargs: Any) -> None:
+        await h.svc.apply_change(lambda document: document.setdefault("tools", []).append(entry))
+        await original(*args, **kwargs)
+
+    h.store.record = _record  # type: ignore[method-assign]
+
+
+async def test_an_install_unwind_keeps_a_manifest_edit_another_door_landed(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(importlib.metadata, "version", lambda name: "0.1.0")
+    h = Harness()
+    h.store.record_error = RuntimeError("pg down")
+    h.registry.resolved = make_resolved(make_spec())
+    kept = {"title": "kept", "module": "kept_mod"}
+    _another_door_writes_during_the_row_record(h, kept)
+    with pytest.raises(RuntimeError, match="pg down"):
+        await h.installer().install("tai42/toolbox")
+    assert h.cm._manifest == {"tools": [kept]}
+
+
 async def test_install_unwind_substep_failure_escalates(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(importlib.metadata, "version", lambda name: "0.1.0")
     h = Harness()
@@ -442,7 +465,7 @@ async def test_install_unwind_reload_back_failure_escalates(monkeypatch: pytest.
 # -- install: forward-reload route-collision recovery ------------------------
 
 
-def _collision_forward(monkeypatch: pytest.MonkeyPatch):
+def _collision_forward(monkeypatch: pytest.MonkeyPatch, *, span_release_error: str | None = None):
     """Stub the forward provides reload to fail with a cross-owner route collision.
 
     Mirrors production: the manifest persisted, but the reload mounted the remapped item at
@@ -457,12 +480,14 @@ def _collision_forward(monkeypatch: pytest.MonkeyPatch):
         "one owner per route shape; remap the mount base to resolve"
     )
 
-    async def _forward(*_args, **_kwargs):
+    async def _forward(svc: Any, _spec: Any, mutator: Any, **_kwargs: Any) -> Any:
+        await svc.apply_change(mutator)
         raise FleetBroadcastError(
             "reload_config",
             FleetResult(op="reload_config", reachable=True),
             collision,
             unrolled_recycle_keys=("BACKEND_MANIFEST_KEY",),
+            span_release_error=span_release_error,
         ) from collision
 
     monkeypatch.setattr(env_apply, "apply_provides_change", _forward)
@@ -485,17 +510,16 @@ def _route(base: str) -> Any:
 
 async def test_commit_install_recovers_a_remapped_route_collision(monkeypatch: pytest.MonkeyPatch) -> None:
     # The forward reload collides at the declared base; the recovery records the row (with the
-    # resolved mounts) and remounts authoritatively via apply_replace at the resolved base.
+    # resolved mounts) and remounts authoritatively via reapply_manifest at the resolved base.
     monkeypatch.setattr(importlib.metadata, "version", lambda name: "0.1.0")
     h = Harness()
     inst = h.installer()
     spec = make_spec()
     resolved = make_resolved(spec, version="1.0.0")
-    saved = copy.deepcopy(h.cm.read_manifest_preserved())
     _collision_forward(monkeypatch)
 
     result = await inst._commit_install(
-        "tai42/toolbox", "1.0.0", spec, "pypi", resolved, {"r": "remap"}, [_route("remap")], None, None, saved
+        "tai42/toolbox", "1.0.0", spec, "pypi", resolved, {"r": "remap"}, [_route("remap")], None, None
     )
 
     # The row was recorded with the resolved mounts, and the result is the remount's apply.
@@ -504,7 +528,43 @@ async def test_commit_install_recovers_a_remapped_route_collision(monkeypatch: p
     assert result.local == {"reloaded": True}
     assert "store:delete" not in h.events
     # The failed forward reload rolled nothing, so the recovery reload rolls the change's keys.
-    assert h.svc.replace_calls[-1] == {"continues": None, "recycle_keys": ("BACKEND_MANIFEST_KEY",)}
+    assert h.svc.reapply_calls[-1] == {"continues": None, "recycle_keys": ("BACKEND_MANIFEST_KEY",)}
+
+
+@pytest.mark.parametrize(
+    ("recovery_release_error", "expected"),
+    [
+        (None, "OSError: the forward release failed"),
+        (
+            "OSError: the recovery release failed",
+            "OSError: the forward release failed; OSError: the recovery release failed",
+        ),
+    ],
+)
+async def test_a_recovered_collision_keeps_the_forward_write_s_span_release_error(
+    monkeypatch: pytest.MonkeyPatch, recovery_release_error: str | None, expected: str
+) -> None:
+    import dataclasses
+
+    monkeypatch.setattr(importlib.metadata, "version", lambda name: "0.1.0")
+    h = Harness()
+    inst = h.installer()
+    spec = make_spec()
+    resolved = make_resolved(spec, version="1.0.0")
+    _collision_forward(monkeypatch, span_release_error="OSError: the forward release failed")
+    original = h.svc.reapply_manifest
+
+    async def _reapply(**continuation: Any) -> Any:
+        result = await original(**continuation)
+        return dataclasses.replace(result, span_release_error=recovery_release_error)
+
+    monkeypatch.setattr(h.svc, "reapply_manifest", _reapply)
+
+    result = await inst._commit_install(
+        "tai42/toolbox", "1.0.0", spec, "pypi", resolved, {"r": "remap"}, [_route("remap")], None, None
+    )
+
+    assert result.span_release_error == expected
 
 
 async def test_commit_install_unwinds_when_the_recovery_remount_fails(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -515,25 +575,19 @@ async def test_commit_install_unwinds_when_the_recovery_remount_fails(monkeypatc
     inst = h.installer()
     spec = make_spec()
     resolved = make_resolved(spec, version="1.0.0")
-    saved = copy.deepcopy(h.cm.read_manifest_preserved())
     _collision_forward(monkeypatch)
 
-    # apply_replace raises on the recovery remount (call 1); the unwind's restore (call 2) works.
-    original = h.svc.apply_replace
-    calls = {"n": 0}
+    # The recovery remount raises; the unwind's reversal then lands.
+    async def _reapply(**_continuation: Any) -> Any:
+        raise RuntimeError("remount build failed")
 
-    async def _replace(document: Any, **continuation: Any) -> Any:
-        calls["n"] += 1
-        if calls["n"] == 1:
-            raise RuntimeError("remount build failed")
-        return await original(document, **continuation)
-
-    monkeypatch.setattr(h.svc, "apply_replace", _replace)
+    monkeypatch.setattr(h.svc, "reapply_manifest", _reapply)
 
     with pytest.raises(RuntimeError, match="remount build failed"):
         await inst._commit_install(
-            "tai42/toolbox", "1.0.0", spec, "pypi", resolved, {"r": "remap"}, [_route("remap")], None, None, saved
+            "tai42/toolbox", "1.0.0", spec, "pypi", resolved, {"r": "remap"}, [_route("remap")], None, None
         )
 
     assert "store:delete" in h.events  # the row recorded before the failed remount is dropped
     assert h.store.rows == {}
+    assert h.cm._manifest == {}  # the provides patch is reversed

@@ -8,6 +8,7 @@ every call refuses until ``STORAGE_LOCAL_ROOT_PATH`` is set.
 from __future__ import annotations
 
 import logging
+import mimetypes
 
 from tai42_contract.app import tai42_app
 from tai42_contract.storage import ObjectStat, Storage, assert_not_root
@@ -83,6 +84,26 @@ class LocalStorage(Storage):
         logger.info("Wrote bytes to local storage: %s", path)
 
     async def stat(self, path: str) -> ObjectStat:
-        """The path-inferred metadata of the contract default, refused like every call until the root is set."""
-        _root_path()
-        return await super().stat(path)
+        """The file's byte size and its path-inferred content type, raising ``FileNotFoundError`` on a miss.
+
+        The filesystem stores no MIME metadata, so the content type is guessed from the
+        path; a directory is not an object.
+        """
+        try:
+            size = await self._driver().stat_size(path)
+        except FileNotFoundError as e:
+            raise FileNotFoundError(f"Object not found: {path}") from e
+        content_type, _ = mimetypes.guess_type(path)
+        return ObjectStat(content_type=content_type, size=size)
+
+    async def load_range(self, path: str, start: int, length: int) -> bytes:
+        """At most ``length`` bytes of ``path`` from ``start``, raising ``FileNotFoundError`` on a miss.
+
+        ``b""`` for ``length == 0`` (no file is opened) and for a start at or past the end.
+        """
+        if length == 0:
+            return b""
+        try:
+            return await self._driver().read_range(path, start, length)
+        except FileNotFoundError as e:
+            raise FileNotFoundError(f"Object not found: {path}") from e

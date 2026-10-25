@@ -48,7 +48,7 @@ from tai42_skeleton.conversations.settings import conversations_settings
 # claim helpers, imported from the operations module.
 from tai42_skeleton.interactions.answer_check import check_answer
 from tai42_skeleton.interactions.caller_ask import CALLER_ASK_RESOLUTION_REFUSED, is_caller_ask
-from tai42_skeleton.interactions.continuation import continuation_due_timing, fire_continuation_after_claim
+from tai42_skeleton.interactions.continuation_dispatch import continuation_due_timing, fire_continuation_after_claim
 from tai42_skeleton.interactions.reaction import (
     SubmittedCheckRejectedError,
     enforce_submitted_check,

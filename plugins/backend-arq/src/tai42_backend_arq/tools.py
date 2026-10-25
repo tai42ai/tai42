@@ -16,7 +16,7 @@ from typing import Any
 
 import orjson
 from arq.constants import in_progress_key_prefix
-from arq.jobs import Job, JobStatus, ResultNotFound
+from arq.jobs import JobStatus, ResultNotFound
 from arq.utils import timestamp_ms
 from tai42_contract.app import tai42_app
 from tai42_contract.backend import (
@@ -32,6 +32,7 @@ from tai42_contract.backend import (
 from tai42_kit.utils.runtime.schedule_util import normalize_schedule
 
 from tai42_backend_arq import pool
+from tai42_backend_arq.jobs import job_handle, known_queues
 from tai42_backend_arq.records import (
     derive_cron_or_interval,
     next_run_after,
@@ -46,7 +47,7 @@ from tai42_backend_arq.scheduler import (
     schedule_lock,
     wait_job_result,
 )
-from tai42_backend_arq.settings import TaskFailedError, arq_settings, job_deserializer
+from tai42_backend_arq.settings import TaskFailedError, arq_settings
 
 logger = logging.getLogger(__name__)
 
@@ -95,7 +96,7 @@ def _failure_detail(result: Any) -> str:
 async def backend_task_status(task_id: str) -> str:
     """Return the current status of a given task ID."""
     async with pool.arq_connection() as arq_redis:
-        job = Job(task_id, arq_redis, _queue_name=arq_settings().queue_name, _deserializer=job_deserializer)
+        job = await job_handle(arq_redis, task_id)
         status = await job.status()
         return status.value if status else "unknown"
 
@@ -119,7 +120,7 @@ async def backend_task_result(task_id: str, timeout: float | None = None) -> Any
     stored tagged description (type name and ``repr``) instead of the value.
     """
     async with pool.arq_connection() as arq_redis:
-        job = Job(task_id, arq_redis, _queue_name=arq_settings().queue_name, _deserializer=job_deserializer)
+        job = await job_handle(arq_redis, task_id)
         status = await job.status()
         if status == JobStatus.not_found:
             return f"Task {task_id} not found"
@@ -153,7 +154,7 @@ async def backend_cancel_task(task_id: str) -> str:
     aborted-or-failed, with the raw stored value appended.
     """
     async with pool.arq_connection() as arq_redis:
-        job = Job(task_id, arq_redis, _queue_name=arq_settings().queue_name, _deserializer=job_deserializer)
+        job = await job_handle(arq_redis, task_id)
         status = await job.status()
         if status in (JobStatus.not_found, JobStatus.complete):
             return f"Task {task_id} cannot be canceled (status: {status})"
@@ -211,28 +212,29 @@ async def backend_active_tasks() -> dict[str, Any]:
             job_ids.append(raw[len(in_progress_key_prefix) :])
         tasks: dict[str, Any] = {}
         for job_id in job_ids:
-            status = await Job(
-                job_id, arq_redis, _queue_name=arq_settings().queue_name, _deserializer=job_deserializer
-            ).status()
+            status = await (await job_handle(arq_redis, job_id)).status()
             if status == JobStatus.in_progress:
                 tasks[job_id] = {"status": status.value}
         return tasks
 
 
 @tai42_app.tools.tool(tags={"backend"})
-async def backend_reserved_tasks() -> list[str]:
+async def backend_reserved_tasks() -> dict[str, list[str]]:
     """Get all reserved/queued tasks (due to run, not yet picked up).
 
-    Returns a flat list of job ids — arq has one queue and no per-worker
-    reservation, so there is no worker or queue keying to report.
+    Returns due job ids keyed by queue: the settings queue and every derived queue a
+    task was sent to, an empty queue as ``[]``.
     """
     async with pool.arq_connection() as arq_redis:
         now_ms = timestamp_ms()
-        return [
-            job.job_id
-            for job in await arq_redis.queued_jobs()
-            if job.job_id is not None and job.score is not None and job.score <= now_ms
-        ]
+        reserved: dict[str, list[str]] = {}
+        for queue in await known_queues(arq_redis):
+            reserved[queue] = [
+                job.job_id
+                for job in await arq_redis.queued_jobs(queue_name=queue)
+                if job.job_id is not None and job.score is not None and job.score <= now_ms
+            ]
+        return reserved
 
 
 @tai42_app.tools.tool(tags={"backend"})
@@ -240,15 +242,20 @@ async def backend_scheduled_tasks() -> dict[str, float]:
     """Get all scheduled/deferred tasks (future-dated queue entries).
 
     Returns a flat mapping of job id to its due time in milliseconds since the
-    epoch (the queue zset score).
+    epoch (the queue zset score), across the settings queue and every derived queue.
     """
     async with pool.arq_connection() as arq_redis:
         now_ms = timestamp_ms()
-        return {
-            job.job_id: float(job.score)
-            for job in await arq_redis.queued_jobs()
-            if job.job_id is not None and job.score is not None and job.score > now_ms
-        }
+        scheduled: dict[str, float] = {}
+        for queue in await known_queues(arq_redis):
+            scheduled.update(
+                {
+                    job.job_id: float(job.score)
+                    for job in await arq_redis.queued_jobs(queue_name=queue)
+                    if job.job_id is not None and job.score is not None and job.score > now_ms
+                }
+            )
+        return scheduled
 
 
 @tai42_app.tools.tool(tags={"backend"})
@@ -522,7 +529,7 @@ async def backend_run_schedule_now(name: str) -> dict[str, Any]:
         args = orjson.loads(data.get(b"args", b"[]"))
         kwargs = orjson.loads(data.get(b"kwargs", b"{}"))
 
-        await arq_redis.enqueue_job(target, *args, **kwargs)
+        await arq_redis.enqueue_job(target, *args, _queue_name=settings.queue_name, **kwargs)
         return {"status": "queued"}
 
 

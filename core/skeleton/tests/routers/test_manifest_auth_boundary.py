@@ -22,6 +22,8 @@ _ROUTES = [
     Route("/api/mcp-config/schema", router.get_mcp_config_schema, methods=["GET"]),
     Route("/api/mcp-status", router.get_mcp_status, methods=["GET"]),
     Route("/api/mcp-status/{title}/reload", router.reload_mcp, methods=["POST"]),
+    Route("/api/mcp-status/{title}/advertised-tools", router.list_mcp_advertised_tools, methods=["POST"]),
+    Route("/api/mcp-config/entries/{title}/tool-filter", router.set_mcp_tool_filter, methods=["PUT"]),
 ]
 _STANCES = {
     r"/api/manifest": AUTHED,
@@ -31,6 +33,8 @@ _STANCES = {
     r"/api/mcp-config/schema": AUTHED,
     r"/api/mcp-status": AUTHED,
     r"/api/mcp-status/[^/]+/reload": AUTHED,
+    r"/api/mcp-status/[^/]+/advertised-tools": AUTHED,
+    r"/api/mcp-config/entries/[^/]+/tool-filter": AUTHED,
 }
 
 
@@ -67,3 +71,13 @@ def test_mcp_status_rejected_without_auth(monkeypatch):
 def test_reload_mcp_rejected_without_auth(monkeypatch):
     client = boundary_client(monkeypatch, _ROUTES, _STANCES)
     assert client.post("/api/mcp-status/some_title/reload").status_code in (401, 403)
+
+
+def test_list_mcp_advertised_tools_rejected_without_auth(monkeypatch):
+    client = boundary_client(monkeypatch, _ROUTES, _STANCES)
+    assert client.post("/api/mcp-status/some_title/advertised-tools").status_code in (401, 403)
+
+
+def test_set_mcp_tool_filter_rejected_without_auth(monkeypatch):
+    client = boundary_client(monkeypatch, _ROUTES, _STANCES)
+    assert client.put("/api/mcp-config/entries/some_title/tool-filter", json={}).status_code in (401, 403)

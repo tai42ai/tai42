@@ -9,8 +9,9 @@ installed and drive the real factory against an injected mock transport, under a
 writer bound to ``tai42_app``.
 
 They prove: an in-run call (``invoke`` and ``ainvoke``) records one ``LLM`` span under the
-run's trace id and parent anchor; a standalone call records one ``LLM`` span under a fresh
-root; and a provider failure records the span as an error and re-raises the same error.
+run's trace id and parent anchor; a standalone call records one ``LLM`` span with no lineage
+(under the live span, or as its own root); and a provider failure records the span as an error and re-raises the
+same error.
 """
 
 from __future__ import annotations
@@ -233,16 +234,11 @@ def test_in_run_ainvoke_records_one_llm_span_under_the_run_trace(writer: _Record
     _assert_model_record(opened)
 
 
-def test_standalone_call_records_one_llm_span_under_a_fresh_root(writer: _RecordingWriter) -> None:
+def test_standalone_call_records_one_llm_span_with_no_lineage(writer: _RecordingWriter) -> None:
     built = _built()
     built.invoke(_sample_request())
     assert len(writer.opened) == 1
-    ctx = writer.opened[0].trace_context
-    assert ctx is not None
-    assert ctx.trace_id is not None
-    assert len(ctx.trace_id) == 32
-    assert "-" not in ctx.trace_id
-    assert ctx.parent_span_id is None
+    assert writer.opened[0].trace_context is None
     _assert_model_record(writer.opened[0])
 
 

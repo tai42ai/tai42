@@ -14,10 +14,10 @@ from typing import Any
 
 import pytest
 from fastmcp import Client
+from fastmcp.exceptions import ToolError
 from tai42_contract.interactions import RESUME_BUFFERED_MARKER_KEY, ResumeBuffered, SuspendedInteraction
 from tai42_contract.tools import UndeclaredPauseError
 from tai42_kit.interactions.park_marker import read_suspended_interaction_marker, suspended_interaction_marker
-from tai42_kit.utils.data.json_schema_util import JsonSchemaValidationError
 
 from tai42_skeleton.app import instance
 from tai42_skeleton.manifest import Manifest
@@ -178,7 +178,7 @@ def test_input_schema_preset_path_still_validates_non_parking_result():
             )
             return await instance.app.tools.run_tool("echo_bad_preset", {"q": "hi"})
 
-    with pytest.raises(JsonSchemaValidationError, match="does not match schema"):
+    with pytest.raises(ToolError, match=r"^preset 'echo_bad_preset' output does not match its output_schema: "):
         asyncio.run(violating())
 
 
@@ -377,7 +377,7 @@ def test_marker_shaped_data_from_a_tool_that_cannot_pause_is_validated_in_proces
         async with instance.app.app_context(Manifest.model_validate(_manifest())):
             await _register_relay_presets()
             for name, arguments in (("relay_strict", {"payload": data}), ("relay_strict_routed", data)):
-                with pytest.raises(JsonSchemaValidationError) as caught:
+                with pytest.raises(ToolError) as caught:
                     await instance.app.tools.run_tool(name, arguments)
                 refusals.append(str(caught.value))
         return refusals

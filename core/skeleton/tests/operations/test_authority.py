@@ -12,7 +12,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 import pytest
-from tai42_contract.access_control import OWNER_USER_ID_CLAIM
+from tai42_contract.access_control import KEY_FINGERPRINT_CLAIM, OWNER_USER_ID_CLAIM
 from tai42_contract.access_control.models import AccessPolicy
 from tai42_contract.template import TemplatedText
 
@@ -21,7 +21,7 @@ from tai42_skeleton.access_control.settings import AccessControlSettings
 from tai42_skeleton.authz.execution_identity import reset_execution_identity, set_execution_identity
 from tai42_skeleton.authz.identity import CallerIdentity
 from tai42_skeleton.operations import _authority as authority
-from tai42_skeleton.operations.errors import NotFoundError, OperationFailedError
+from tai42_skeleton.operations.errors import BadRequestError, ForbiddenError, NotFoundError, OperationFailedError
 
 
 def _gate_on(monkeypatch: pytest.MonkeyPatch, *, caller_id: str | None, policies: dict[str, AccessPolicy]) -> None:
@@ -39,6 +39,9 @@ def _gate_on(monkeypatch: pytest.MonkeyPatch, *, caller_id: str | None, policies
             return 0
 
         async def get_policy_at(self, user_id: str, version: int) -> AccessPolicy:
+            return policies.get(user_id, AccessPolicy(scopes=[]))
+
+        async def get_policy(self, user_id: str) -> AccessPolicy:
             return policies.get(user_id, AccessPolicy(scopes=[]))
 
     monkeypatch.setattr(authority, "policy_enforcer", _Enforcer)
@@ -162,3 +165,82 @@ def test_owner_of_reads_the_one_ownership_home() -> None:
     assert authority.owner_of({OWNER_USER_ID_CLAIM: "alice"}) == "alice"
     assert authority.owner_of({}) is None
     assert authority.owner_of(None) is None
+
+
+# -- the execution-key bind check ---------------------------------------------
+
+_ACCOUNT_LINE = (
+    "execution key 'alice' is an account, not an api key; a route, hook, trigger link or schedule runs as an "
+    "api key, so bind an api key instead"
+)
+
+# An account's policy row: it carries scopes but no per-mint fingerprint.
+_ACCOUNT_POLICY = AccessPolicy(scopes=["read"])
+
+
+def _caller(caller_id: str, *, admin: bool) -> authority.Caller:
+    return authority.Caller(caller_id=caller_id, policy=AccessPolicy(scopes=["read"]), is_admin=admin, owner_claim=None)
+
+
+def _principal_rows(monkeypatch: pytest.MonkeyPatch, rows: dict[str, dict]) -> None:
+    async def _get_principal(user_id: str) -> dict | None:
+        return rows.get(user_id)
+
+    monkeypatch.setattr(management, "get_principal", _get_principal)
+
+
+async def test_an_account_binding_its_own_identity_is_a_400(monkeypatch: pytest.MonkeyPatch) -> None:
+    _gate_on(monkeypatch, caller_id="alice", policies={"alice": _ACCOUNT_POLICY})
+    _principal_rows(monkeypatch, {"alice": {"user_id": "alice", "kind": "human"}})
+
+    with pytest.raises(BadRequestError) as refused:
+        await authority.assert_execution_key_bindable(_caller("alice", admin=False), "alice")
+    assert str(refused.value) == _ACCOUNT_LINE
+
+
+async def test_an_admin_naming_an_account_is_the_same_400(monkeypatch: pytest.MonkeyPatch) -> None:
+    _gate_on(monkeypatch, caller_id="root", policies={"alice": _ACCOUNT_POLICY})
+    _principal_rows(monkeypatch, {"alice": {"user_id": "alice", "kind": "service"}})
+
+    with pytest.raises(BadRequestError) as refused:
+        await authority.assert_execution_key_bindable(_caller("root", admin=True), "alice")
+    assert str(refused.value) == _ACCOUNT_LINE
+
+
+async def test_a_non_admin_naming_another_account_is_the_uniform_403(monkeypatch: pytest.MonkeyPatch) -> None:
+    _gate_on(monkeypatch, caller_id="bob", policies={"alice": _ACCOUNT_POLICY})
+
+    async def _never(_user_id: str) -> dict | None:
+        raise AssertionError("the principal store is read only for a caller allowed to name the identity")
+
+    monkeypatch.setattr(management, "get_principal", _never)
+
+    with pytest.raises(ForbiddenError, match="you may only bind your own identity or an execution key you own"):
+        await authority.assert_execution_key_bindable(_caller("bob", admin=False), "alice")
+
+
+async def test_a_row_without_a_fingerprint_and_no_principal_is_the_loud_500(monkeypatch: pytest.MonkeyPatch) -> None:
+    _gate_on(monkeypatch, caller_id="alice", policies={"alice": _ACCOUNT_POLICY})
+    _principal_rows(monkeypatch, {})
+
+    with pytest.raises(OperationFailedError, match=r"^access_control: internal key-fingerprint resolution failure$"):
+        await authority.assert_execution_key_bindable(_caller("alice", admin=False), "alice")
+
+
+async def test_a_minted_key_binds_with_its_fingerprint(monkeypatch: pytest.MonkeyPatch) -> None:
+    minted = AccessPolicy(scopes=["read"], policy_data={KEY_FINGERPRINT_CLAIM: "fp-1"})
+    _gate_on(monkeypatch, caller_id="alice", policies={"alice-bot": minted})
+    _principal_rows(monkeypatch, {})
+    standing = object()
+
+    async def _carries(_enforcer, execution_key: str, *, bound_fingerprint: str) -> object:
+        assert (execution_key, bound_fingerprint) == ("alice-bot", "fp-1")
+        return standing
+
+    async def _evaluable(resolved: object) -> None:
+        assert resolved is standing
+
+    monkeypatch.setattr(authority, "assert_key_carries_authority", _carries)
+    monkeypatch.setattr(authority, "assert_execution_key_evaluable", _evaluable)
+
+    assert await authority.assert_execution_key_bindable(_caller("root", admin=True), "alice-bot") == "fp-1"

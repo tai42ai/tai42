@@ -16,9 +16,10 @@ from tai42_contract.presets import PresetBody
 from tai42_contract.states.binding import StateBinding
 from tai42_contract.template import TemplatedText
 from tai42_kit.utils.data.json_schema_util import InvalidJsonSchemaError, check_json_schema
-from tai42_kit.utils.render import SchemaBodyError, resolve_schema_body
+from tai42_kit.utils.render import SchemaBodyError, TextBodyError, resolve_schema_body
 
-from tai42_skeleton.presets.manager import is_valid_preset_name
+from tai42_skeleton.presets.manager import branch_input_schema_error, is_valid_preset_name
+from tai42_skeleton.presets.maps import PresetMapError, resolve_preset_maps
 from tai42_skeleton.presets.store import stored_preset_body
 from tai42_skeleton.versioning.restore_checks import register_restore_check
 
@@ -55,12 +56,32 @@ async def output_schema_body_error(output_schema: TemplatedText | dict[str, Any]
     return None
 
 
+async def preset_maps_body_error(
+    name: str,
+    input_map: TemplatedText | str | None,
+    output_map: TemplatedText | str | None,
+    *,
+    has_input_schema: bool,
+) -> str | None:
+    """The first violation of the preset ``name``'s two maps, or ``None`` when both are unset or valid.
+
+    The rules of :func:`~tai42_skeleton.presets.maps.resolve_preset_maps`: each map renders to a
+    non-empty jq program that compiles, and an input map needs an input schema.
+    """
+    try:
+        await resolve_preset_maps(name, input_map, output_map, has_input_schema=has_input_schema)
+    except (PresetMapError, TextBodyError) as exc:
+        return str(exc)
+    return None
+
+
 async def check_preset_body(body: PresetBody, *, name: str, attach: bool) -> None:
     """Run the preset document's save rules over ``body`` stored under ``name``.
 
-    In order: the name law, the output-schema body rules, the input-schema resolution, then the
-    state binding when the body carries one — validated and its templates attached
-    (``attach=True``), or validated only (``attach=False``, the dry run). The document rules raise
+    In order: the name law, the output-schema body rules, the input-schema resolution, the map
+    rules, whether the extensions can present the input schema, then the state binding when the
+    body carries one — validated and its templates attached (``attach=True``), or validated only
+    (``attach=False``, the dry run). The document rules raise
     :class:`PresetDefinitionError`; the binding's own errors propagate as the binding validation
     raises them, for the caller to classify by type.
     """
@@ -73,6 +94,14 @@ async def check_preset_body(body: PresetBody, *, name: str, attach: bool) -> Non
         await resolve_schema_body(f"preset {name!r} input_schema", body.input_schema)
     except SchemaBodyError as exc:
         raise PresetDefinitionError(str(exc)) from exc
+    maps_error = await preset_maps_body_error(
+        name, body.input_map, body.output_map, has_input_schema=body.input_schema is not None
+    )
+    if maps_error is not None:
+        raise PresetDefinitionError(maps_error)
+    branch_error = await branch_input_schema_error(name, body.extensions, body.input_schema)
+    if branch_error is not None:
+        raise PresetDefinitionError(branch_error)
     if isinstance(body.state_binding, StateBinding):
         from tai42_skeleton.app import instance
         from tai42_skeleton.tools import state_binding
@@ -91,4 +120,4 @@ async def _restore_check(name: str, body: dict[str, Any]) -> None:
 register_restore_check(_PRESET_KIND, _restore_check)
 
 
-__all__ = ["PresetDefinitionError", "check_preset_body", "output_schema_body_error"]
+__all__ = ["PresetDefinitionError", "check_preset_body", "output_schema_body_error", "preset_maps_body_error"]

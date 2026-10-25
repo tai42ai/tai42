@@ -1,9 +1,12 @@
-"""Lexical containment guard for logical template keys.
+"""The one guard for a caller-supplied store key.
 
-Every non-HTTP entrance that reaches the store with a caller-supplied template key
-runs it through :func:`safe_template_path` — the HTTP router, the backup importer,
-the builtin upload tool, and the read seam in ``ResourceManager.load``. The guard
-is a single shared implementation so no entrance can drift from the others.
+A store key is a canonical, relative, ``/``-separated name: no empty, ``.`` or
+``..`` segment, no backslash, no NUL. Every door that takes a key runs it through
+:func:`safe_template_path` (operations map it with ``checked_store_key``): the
+storage file actions and their download route, the template operations, both entry
+doors through the entry reader, the backup importer, the read seam in
+``ResourceManager.load`` (the builtin upload tool, includes, agent tool loads and
+file loading by id), and the storage prefix-mark declarations.
 """
 
 from __future__ import annotations
@@ -25,9 +28,10 @@ _TEMPLATE_ROOT = "/tai-template-root"
 
 
 def safe_template_path(path: object) -> str:
-    r"""Reject a template key that escapes the template root.
+    r"""Return ``path`` when it is a canonical store key; raise ``UnsafeTemplatePathError`` otherwise.
 
-    LEXICAL containment: the key is resolved with ``os.path.realpath`` under the
+    A key with an empty, ``.`` or ``..`` segment (a leading, trailing or doubled
+    ``/`` included) is refused first. Then LEXICAL containment: the key is resolved with ``os.path.realpath`` under the
     virtual ``_TEMPLATE_ROOT`` anchor (which is not on disk), so realpath collapses
     ``..`` and drops an absolute key but does NOT follow filesystem symlinks — an
     absolute key or a ``..`` escape resolves outside the root and is refused
@@ -37,6 +41,10 @@ def safe_template_path(path: object) -> str:
     """
     if not isinstance(path, str) or not path:
         raise UnsafeTemplatePathError("path must be a non-empty string")
+    if any(segment in ("", ".", "..") for segment in path.split("/")):
+        raise UnsafeTemplatePathError(
+            f"non-canonical store key {path!r}: a key is '/'-separated names with no empty, '.' or '..' segment"
+        )
     if "\\" in path:
         raise UnsafeTemplatePathError(f"unsafe template path: {path!r}")
     root = os.path.realpath(_TEMPLATE_ROOT)

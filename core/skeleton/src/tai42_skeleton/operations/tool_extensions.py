@@ -21,16 +21,17 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 from tai42_contract.app.responses import ApplyResponse
-from tai42_contract.manifest import ExtensionElement, ExtensionsConfigMixin
+from tai42_contract.manifest import ExtensionElement
 
 from tai42_skeleton.app import instance
 from tai42_skeleton.app.boot_rules import translate_config_invariants
 from tai42_skeleton.config.service import ConfigService
 from tai42_skeleton.exceptions.exceptions import TaiValidationError
-from tai42_skeleton.manifest import Manifest
+from tai42_skeleton.manifest import Manifest, union_tool_extensions
 from tai42_skeleton.operations import BadRequestError, ConflictError, NotFoundError, operation
 from tai42_skeleton.operations._broadcast import apply_response
-from tai42_skeleton.operations.response_models_group_b import ToolExtensionsView
+from tai42_skeleton.operations.manifest.reads import normalized_extension_map, read_preserved_document
+from tai42_skeleton.operations.response_models_group_b import ToolExtensionCombosModified, ToolExtensionsView
 
 
 class ToolExtensionsUpdate(BaseModel):
@@ -134,30 +135,48 @@ def _resolve_single_owner(manifest: Manifest, name: str) -> tuple[str, str]:
     return owner
 
 
-def _owner_combos(manifest: Manifest, owner: tuple[str, str], name: str) -> list[list[ExtensionElement]]:
-    """The write target's OWN combos for ``name``.
+def _stored_tool_combos(document: dict[str, Any], name: str) -> list[list[ExtensionElement]]:
+    """Every combo the stored manifest ``document`` attaches to ``name``, ``!ENV`` markers intact.
 
-    After ``_resolve_single_owner``'s gates this is the union view, and it is what
-    the granular merge edits. The owner came from these same configs, so a missing
-    match is an invariant breach and raises (``next`` with no default) rather than
-    fabricating an empty list.
+    The preserved ``tools``, ``mcp`` and ``api_tools`` maps are normalized to the stored shape
+    and unioned in the manifest's own order, so the answer lists what is written, never a
+    resolved value.
+    """
+    entry_maps = [
+        normalized_extension_map(entry["extensions"])
+        for section in ("tools", "mcp")
+        for entry in document.get(section, [])
+        if entry.get("extensions")
+    ]
+    api_tools_map = normalized_extension_map(document.get("api_tools", {}).get("extensions") or {})
+    return union_tool_extensions(entry_maps, api_tools_map).get(name, [])
+
+
+def _stored_owner_combos(document: dict[str, Any], owner: tuple[str, str], name: str) -> list[list[ExtensionElement]]:
+    """The write target's OWN stored combos for ``name``, ``!ENV`` markers intact.
+
+    After ``_resolve_single_owner``'s gates this is the union view, and it is what the
+    granular merge edits. The entry is found as :func:`_apply_combos` finds it; an owner
+    that left the stored ``document`` (a concurrent edit) raises ``BadRequestError`` rather
+    than fabricating an empty list.
     """
     kind, key = owner
-    configs = manifest.tools if kind == "tools" else manifest.mcp
-    key_field = "module" if kind == "tools" else "title"
-    cfg = next(cfg for cfg in configs if getattr(cfg, key_field) == key)
-    return [list(combo) for combo in cfg.extensions.get(name, [])]
+    section, key_field = ("tools", "module") if kind == "tools" else ("mcp", "title")
+    entry = next((entry for entry in document.get(section, []) if entry.get(key_field) == key), None)
+    if entry is None:
+        raise BadRequestError(f"providing config for tool {name!r} not found in the manifest")
+    return normalized_extension_map(entry.get("extensions") or {}).get(name, [])
 
 
 def _normalized_combos(name: str, combos: list[list[ExtensionElement]]) -> list[list[ExtensionElement]]:
-    """Combos in the exact stored form ``ExtensionsConfigMixin`` produces.
+    """Combos in the exact stored form the contract normalization produces.
 
-    So add/remove membership compares against the PERSISTED shape (the contract
-    normalization) rather than the router edge's element reader.
+    So add/remove membership compares against the PERSISTED shape rather than the router
+    edge's element reader.
     """
     if not combos:
         return []
-    return ExtensionsConfigMixin.model_validate({"extensions": {name: combos}}).extensions[name]
+    return normalized_extension_map({name: combos})[name]
 
 
 def _validate_combos_against_registry(combos: list[list[ExtensionElement]]) -> None:
@@ -207,12 +226,14 @@ def _apply_combos(
     response_model=ToolExtensionsView,
 )
 async def get_tool_extensions(name: str) -> dict:
-    """Return the tool's applied extension combos and the available extensions; 404 for an unknown tool."""
+    """Return the tool's applied extension combos and the available extensions; 404 for an unknown tool.
+
+    The combos are served as stored, ``!ENV`` markers intact; no resolved value leaves on the wire.
+    """
     tools = await instance.app.tools.get_tools()
     if name not in tools:
         raise NotFoundError(f"tool {name!r} is not a registered tool")
-    manifest = _live_manifest()
-    combos = [list(combo) for combo in manifest.tool_extensions.get(name, [])]
+    combos = _stored_tool_combos(read_preserved_document(), name)
     return {"combos": combos, "available": instance.app.extensions.available_extensions()}
 
 
@@ -282,7 +303,7 @@ def _merge_combo_edits(current: list[Any], add_combos: list[Any], remove_combos:
     reload_gated=True,
     errors=[BadRequestError, ConflictError, NotFoundError],
     request_model=ToolExtensionCombosModify,
-    response_model=ToolExtensionsView,
+    response_model=ToolExtensionCombosModified,
 )
 async def modify_tool_extension_combos(
     name: str,
@@ -298,8 +319,10 @@ async def modify_tool_extension_combos(
     (400/400/409, as ``set_tool_extensions``); membership over the OWNING config's
     combos in their stored form — adding a present combo → 400, removing an absent
     one → 404, each naming the combo; the MERGED list validates against the live
-    registry (400) before any write. Returns the tool's full new combos in the GET
-    door's shape.
+    registry (400) before any write. Returns the tool's full new combos and the catalog in the
+    GET door's shape, served as stored, ``!ENV`` markers intact (no resolved value leaves on the
+    wire), plus the write's ``span_release_error``: the store's error when its exclusive write
+    span failed to release after the persist, ``None`` when it released.
     """
     add = add or []
     remove = remove or []
@@ -313,23 +336,27 @@ async def modify_tool_extension_combos(
     manifest = _live_manifest()
     owner = _resolve_single_owner(manifest, name)
 
-    current = _normalized_combos(name, _owner_combos(manifest, owner, name))
     add_combos = _normalized_combos(name, add)
     remove_combos = _normalized_combos(name, remove)
 
-    merged = _merge_combo_edits(current, add_combos, remove_combos, name)
-    _validate_combos_against_registry(merged)
-
     def mutator(document: dict[str, Any]) -> None:
-        if not _apply_combos(document, owner, name, merged):
-            raise BadRequestError(f"providing config for tool {name!r} not found in the manifest")
+        # The membership guards and the merge read ``document``, the stored manifest the
+        # write exclusion holds, so a concurrent edit is merged over, never overwritten.
+        merged = _merge_combo_edits(_stored_owner_combos(document, owner, name), add_combos, remove_combos, name)
+        _validate_combos_against_registry(merged)
+        _apply_combos(document, owner, name, merged)
 
     with translate_config_invariants(BadRequestError):
         try:
-            await ConfigService.from_app().apply_change(mutator)
+            result = await ConfigService.from_app().apply_change(mutator)
         except ValueError as exc:
             raise BadRequestError(f"invalid extensions for tool {name!r}: {exc}") from exc
 
-    reloaded = _live_manifest()
-    combos = [list(combo) for combo in reloaded.tool_extensions.get(name, [])]
-    return {"combos": combos, "available": instance.app.extensions.available_extensions()}
+    # The answer is the persisted document: the seal may retag a resolved value the mutator wrote.
+    if result.document is None:
+        raise AssertionError
+    return {
+        "combos": _stored_tool_combos(result.document, name),
+        "available": instance.app.extensions.available_extensions(),
+        "span_release_error": result.span_release_error,
+    }

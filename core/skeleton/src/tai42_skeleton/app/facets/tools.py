@@ -15,6 +15,9 @@ if TYPE_CHECKING:
     from tai42_contract.tools import (
         ClientTool,
         StateTemplateDetachReferee,
+        TemplateRef,
+        TemplateRefsExtractor,
+        ToolDeleteCascade,
         ToolDeleteReferee,
         ToolRefsExtractor,
         ToolRenameReferee,
@@ -113,9 +116,23 @@ class ToolsFacet(_Facet):
         """The tool-references extractor the base tool ``name`` declared, or ``None`` when it declared none."""
         return self._app._tool_binding.tool_refs_extractor(name)
 
+    def template_refs_extractor(self, name: str) -> TemplateRefsExtractor | None:
+        """The template-references extractor the base tool ``name`` declared, or ``None`` when it declared none."""
+        return self._app._tool_binding.template_refs_extractor(name)
+
+    async def kwargs_template_refs(self, tool: str, kwargs: Mapping[str, Any]) -> list[TemplateRef]:
+        """The stored template ids a call of ``tool`` with ``kwargs`` names, by the platform's one reference walk."""
+        from tai42_skeleton.operations.reference_graph import kwargs_template_refs
+
+        return await kwargs_template_refs(tool, kwargs)
+
     def base_of(self, name: str) -> str:
         """The base tool ``name`` was produced from: ``name`` for a base/unbound name, the origin base for a branch."""
         return self._app._tool_binding.base_of(name)
+
+    def branches_of(self, base: str) -> list[str]:
+        """The extension branch tools bound off the base tool ``base``, in registration order (empty when none)."""
+        return self._app._tool_binding.branches_of(base)
 
     def is_branch(self, name: str) -> bool:
         """Whether ``name`` is an extension branch tool rather than a base."""
@@ -139,16 +156,24 @@ class ToolsFacet(_Facet):
         return self._app._rename_referee_registry.all()
 
     def register_delete_referee(self, provider: ToolDeleteReferee) -> None:
-        """Register a delete referee that vets a tool delete before it commits."""
+        """Register a delete referee (a veto only) consulted before a tool delete commits."""
         return self._app._delete_referee_registry.register(provider)
 
     def delete_referees(self) -> list[ToolDeleteReferee]:
         """Every registered delete referee (plugin providers).
 
-        Skeleton-only — the preset delete door consults it, so it is not on the ``AppTools``
-        protocol's read side (the register-only seam), mirroring :meth:`rename_referees`.
+        Skeleton-only — the preset delete gate and the delete preview consult it, so it is not on
+        the ``AppTools`` protocol's read side (the register-only seam), mirroring :meth:`rename_referees`.
         """
         return self._app._delete_referee_registry.all()
+
+    def register_delete_cascade(self, provider: ToolDeleteCascade) -> None:
+        """Register a delete cascade the preset delete runs once it proceeds."""
+        return self._app._delete_cascade_registry.register(provider)
+
+    def delete_cascades(self) -> list[ToolDeleteCascade]:
+        """Every registered delete cascade, in registration order."""
+        return self._app._delete_cascade_registry.all()
 
     def register_detach_referee(self, provider: StateTemplateDetachReferee) -> None:
         """Register a state-template detach referee that vets a detach before it commits."""

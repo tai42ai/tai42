@@ -27,21 +27,26 @@ from tai42_skeleton.operations import (
     operation,
 )
 from tai42_skeleton.operations._broadcast import fleet_fanout
+from tai42_skeleton.operations.errors import OperationFailedError
 from tai42_skeleton.operations.presets import fanout
 from tai42_skeleton.operations.presets.authoring import (
+    _assert_body_binds,
     _check_body_at_door,
-    _combo_registry_error,
-    _dry_run_bind_error,
     _enforce_registration_tier,
     _input_schema_authoring_error,
-    _output_schema_error,
     _write_validator_error,
 )
 from tai42_skeleton.operations.presets.create import _NOT_CONFIGURED_CODE, _NOT_CONFIGURED_NOUN
 from tai42_skeleton.operations.presets.models import PresetRollback, PresetVersionSave, PresetVersionTags
-from tai42_skeleton.operations.presets.references import _assert_bound_routes_still_bind
 from tai42_skeleton.operations.presets.views import _save_version_response, _wire_snapshot
-from tai42_skeleton.operations.response_models_group_a import (
+from tai42_skeleton.operations.reference_check import assert_references_resolve
+from tai42_skeleton.operations.reference_graph import (
+    _assert_bound_routes_still_bind,
+    assert_blob_references_resolve,
+    base_reference,
+    body_head_references,
+)
+from tai42_skeleton.operations.response_models_group_presets import (
     PresetRollbackResult,
     PresetVersionSaveResult,
     PresetVersionTagsResult,
@@ -64,27 +69,27 @@ def _effective_version_body(
     output_schema_provided: bool,
     description: str | None,
     input_schema: TemplatedText | dict[str, Any] | CarryForward | None,
+    input_map: TemplatedText | str | CarryForward | None,
+    output_map: TemplatedText | str | CarryForward | None,
 ) -> PresetBody:
     """The EFFECTIVE new body under the carry-forward sentinels.
 
     Omitted → carry the active value; an explicit value — including a clearing
-    ``[]`` — wins. The store applies the same rule on write; this mirrors it for
-    pre-write validation.
-
-    ``input_schema`` carries forward in the STORE (sentinel passed straight through); it
-    enters validation only when EXPLICITLY provided (the seed path), so the carry-forward
-    sentinel resolves to ``None`` in the effective body. ``description`` is editable per
-    version under the None-carry sentinel; the resulting value is validated non-empty in
-    the store view (this mirror only feeds the dry run).
+    ``[]`` or ``None`` — wins. The store applies the same rule on write; this mirrors it for
+    pre-write validation, so the map pairing rule and the dry-run bake judge the body that
+    will bind. ``description`` is editable per version under the None-carry sentinel; the
+    resulting value is validated non-empty in the store view (this mirror only feeds the
+    dry run).
     """
-    validation_input_schema = None if isinstance(input_schema, CarryForward) else input_schema
     return PresetBody(
         base_tool=active.base_tool,
         description=active.description if description is None else description,
         fixed_kwargs=active.fixed_kwargs if fixed_kwargs is None else fixed_kwargs,
         extensions=active.extensions if extensions is None else extensions,
         output_schema=active.output_schema if not output_schema_provided else output_schema,
-        input_schema=validation_input_schema,
+        input_schema=active.input_schema if isinstance(input_schema, CarryForward) else input_schema,
+        input_map=active.input_map if isinstance(input_map, CarryForward) else input_map,
+        output_map=active.output_map if isinstance(output_map, CarryForward) else output_map,
         # A version edit never changes the binding, so the write validator judges the active one —
         # the same body create's validator sees, never a binding-less stand-in.
         state_binding=active.state_binding,
@@ -101,33 +106,21 @@ async def _validate_version_body(
     """Run the SAME validate-before-commit chain create runs over the effective new body.
 
     A bad edit is a 400 that commits nothing (never a version that can never
-    bind, which would brick the preset into delete-only): authoring gate (only
-    when ``fixed_kwargs`` was provided) → combo registry → output schema →
-    dry-run bake → input-schema support (only when explicitly provided; a
-    carried-forward schema was vetted at its own authoring) → write validator.
-    Raises the mapped 400.
+    bind, which would brick the preset into delete-only): base and schema-id references →
+    authoring gate (only when ``fixed_kwargs`` was provided) → combo registry →
+    output schema → the map rules and the extensions presenting the input schema →
+    dry-run bake → input-schema support (only when explicitly
+    provided; a carried-forward schema was vetted at its own authoring) → write
+    validator → reference check of the body (carried-forward ``fixed_kwargs``
+    included: the write activates the body). Raises the mapped 400.
     """
+    await assert_references_resolve(body_head_references(body))
     # Read the authoring gate through the package object so a monkeypatch bites.
     if fixed_kwargs_provided:
         authoring_error = await _pkg._agent_authoring_error(body.base_tool, body.fixed_kwargs)
         if authoring_error is not None:
             raise BadRequestError(authoring_error)
-    combo_error = _combo_registry_error(body.extensions)
-    if combo_error is not None:
-        raise BadRequestError(combo_error)
-    schema_error = await _output_schema_error(body.base_tool, body.output_schema, body.extensions)
-    if schema_error is not None:
-        raise BadRequestError(schema_error)
-    bind_error = await _dry_run_bind_error(
-        body.base_tool,
-        body.fixed_kwargs,
-        name=name,
-        description=body.description,
-        output_schema=body.output_schema,
-        input_schema=body.input_schema,
-    )
-    if bind_error is not None:
-        raise BadRequestError(bind_error)
+    await _assert_body_binds(body, name=name)
     if not isinstance(input_schema, CarryForward):
         input_schema_error = _input_schema_authoring_error(body)
         if input_schema_error is not None:
@@ -135,6 +128,9 @@ async def _validate_version_body(
     write_validator_error = await _write_validator_error(body)
     if write_validator_error is not None:
         raise BadRequestError(write_validator_error)
+    await assert_blob_references_resolve(
+        base_reference(body.base_tool), body.base_tool, body.fixed_kwargs, "fixed_kwargs", body_root=True
+    )
 
 
 async def _save_version_core(
@@ -146,6 +142,8 @@ async def _save_version_core(
     output_schema_provided: bool,
     description: str | None,
     input_schema: TemplatedText | dict[str, Any] | CarryForward | None = CARRY_FORWARD,
+    input_map: TemplatedText | str | CarryForward | None = CARRY_FORWARD,
+    output_map: TemplatedText | str | CarryForward | None = CARRY_FORWARD,
     state_binding: StateBinding | CarryForward | None = CARRY_FORWARD,
     tags: list[str] | None = None,
     enforce_tier: bool = True,
@@ -159,8 +157,9 @@ async def _save_version_core(
     wire/extension change, and fan the rebind out. Returns the new version row +
     the per-worker fleet report.
 
-    ``input_schema`` carries forward by default (the save door's behavior). ``tags`` labels
-    the new version in the SAME save commit (``None`` is the door's untagged save).
+    ``input_schema``, ``input_map`` and ``output_map`` carry forward by default (the save door's
+    behavior). ``tags`` labels the new version in the SAME save commit (``None`` is the door's
+    untagged save).
     ``enforce_tier`` runs the caller-authorization fence.
     """
     store = instance.app.presets.store
@@ -184,6 +183,8 @@ async def _save_version_core(
         output_schema_provided=output_schema_provided,
         description=description,
         input_schema=input_schema,
+        input_map=input_map,
+        output_map=output_map,
     )
     await _validate_version_body(
         name, new_body, input_schema=input_schema, fixed_kwargs_provided=fixed_kwargs is not None
@@ -227,6 +228,8 @@ async def _save_version_core(
             output_schema=output_schema if output_schema_provided else CARRY_FORWARD,
             description=description,
             input_schema=input_schema,
+            input_map=input_map,
+            output_map=output_map,
             state_binding=state_binding,
             tags=tags,
         )
@@ -261,7 +264,7 @@ async def _save_version_core(
     tags=["presets"],
     destructive=True,
     reload_gated=True,
-    errors=[BadRequestError, ConflictError, NotFoundError],
+    errors=[BadRequestError, ConflictError, NotFoundError, OperationFailedError],
     request_model=PresetVersionSave,
     response_model=PresetVersionSaveResult,
 )
@@ -274,6 +277,10 @@ async def save_version(
     description: str | None,
     input_schema: TemplatedText | dict[str, Any] | None = None,
     input_schema_provided: bool = False,
+    input_map: TemplatedText | str | None = None,
+    input_map_provided: bool = False,
+    output_map: TemplatedText | str | None = None,
+    output_map_provided: bool = False,
     state_binding: StateBinding | None = None,
     state_binding_provided: bool = False,
 ) -> dict[str, Any]:
@@ -295,6 +302,8 @@ async def save_version(
         output_schema_provided=output_schema_provided,
         description=description,
         input_schema=input_schema if input_schema_provided else CARRY_FORWARD,
+        input_map=input_map if input_map_provided else CARRY_FORWARD,
+        output_map=output_map if output_map_provided else CARRY_FORWARD,
         state_binding=state_binding if state_binding_provided else CARRY_FORWARD,
     )
     return _save_version_response(row, report)
@@ -305,7 +314,7 @@ async def save_version(
     tags=["presets"],
     destructive=True,
     reload_gated=True,
-    errors=[BadRequestError, ConflictError, NotFoundError],
+    errors=[BadRequestError, ConflictError, NotFoundError, OperationFailedError],
     request_model=PresetRollback,
     response_model=PresetRollbackResult,
 )
@@ -336,25 +345,18 @@ async def rollback_preset(name: str, version: int) -> dict[str, Any]:
     except PresetVersionNotFoundError as exc:
         raise NotFoundError(f"preset {name!r} has no version {version}") from exc
     target_body = stored_preset_body(name, target.body)
-    combo_error = _combo_registry_error(target_body.extensions)
-    if combo_error is not None:
-        raise BadRequestError(combo_error)
-    schema_error = await _output_schema_error(target_body.base_tool, target_body.output_schema, target_body.extensions)
-    if schema_error is not None:
-        raise BadRequestError(schema_error)
-    bind_error = await _dry_run_bind_error(
-        target_body.base_tool,
-        target_body.fixed_kwargs,
-        name=name,
-        description=target_body.description,
-        output_schema=target_body.output_schema,
-        input_schema=target_body.input_schema,
-    )
-    if bind_error is not None:
-        raise BadRequestError(bind_error)
+    await assert_references_resolve(body_head_references(target_body))
+    await _assert_body_binds(target_body, name=name)
     write_validator_error = await _write_validator_error(target_body)
     if write_validator_error is not None:
         raise BadRequestError(write_validator_error)
+    await assert_blob_references_resolve(
+        base_reference(target_body.base_tool),
+        target_body.base_tool,
+        target_body.fixed_kwargs,
+        "fixed_kwargs",
+        body_root=True,
+    )
     # Referential integrity: a bound conversation route whose target this preset IS must still bind
     # against the version rolled back TO — judged before the re-point so a rollback that would strand
     # a route is a 409 that commits nothing.

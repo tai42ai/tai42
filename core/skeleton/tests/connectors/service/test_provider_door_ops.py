@@ -14,11 +14,13 @@ from pydantic import SecretStr
 from tai42_contract.connectors.models import AuthHealthState, ConnectionGrant, ConnectionRecord
 from tai42_kit.settings import reset_all_settings
 
+from tai42_skeleton.app.bus import FleetResult
 from tai42_skeleton.connectors.oauth import discovery
 from tai42_skeleton.connectors.service import provider_service
 from tai42_skeleton.connectors.store.redis_pg import StoredConnection
 from tai42_skeleton.operations import BadRequestError, ConflictError, NotFoundError, NotSupportedError
 from tai42_skeleton.operations import connector_providers as ops
+from tai42_skeleton.operations._broadcast import FleetBroadcastError
 
 from ..client_store_fake import FakeClientStore
 from ..conftest import CID, CID2, make_discovered_descriptor, make_oauth_descriptor
@@ -335,6 +337,24 @@ async def test_add_writes_the_discovered_descriptor_and_answers_its_catalog_entr
     assert provider["removable"] is True
     assert provider["client_source"] == "unset"
     assert result["fanout"] == {"mode": "local-only", "note": "no worker bus configured; only this worker reloaded"}
+    assert result["span_release_error"] is None
+
+
+async def test_an_add_reports_the_store_span_release_error(door, fake: FakeOAuthServer) -> None:
+    _cs, manifest, _providers, _records = door
+    manifest.span_release_error = "OSError: releasing the span failed"
+    added = await ops.add_connector_provider(url=_publish(fake), scopes=["files.read"])
+    assert added["span_release_error"] == "OSError: releasing the span failed"
+
+
+async def test_a_remove_reports_the_store_span_release_error(
+    door, fake: FakeOAuthServer, client_store_fake: FakeClientStore
+) -> None:
+    _cs, manifest, providers, _records = door
+    _register(providers, manifest, make_discovered_descriptor(mcp_url=_publish(fake)))
+    manifest.span_release_error = "OSError: releasing the span failed"
+    removed = await ops.remove_connector_provider(provider_id="remote")
+    assert removed["span_release_error"] == "OSError: releasing the span failed"
 
 
 async def test_add_under_an_id_in_the_manifest_is_a_409(door, fake: FakeOAuthServer) -> None:
@@ -459,10 +479,98 @@ async def test_remove_purges_a_lapsed_connection_then_the_provider_then_its_clie
     assert order == [f"disconnect:{CID}"]
     assert CID not in records
     assert manifest.doc["connectors"] == []
-    assert result == {"provider_id": "remote", "removed_clients": 2, "fanout": result["fanout"]}
+    assert result == {
+        "provider_id": "remote",
+        "removed_clients": 2,
+        "fanout": result["fanout"],
+        "span_release_error": None,
+    }
     assert result["fanout"] is not None
     assert client_store_fake.rows == []
     assert client_store_fake.calls[-1] == "delete_for_provider"
+
+
+@pytest.mark.parametrize(
+    ("removal_release_error", "expected"),
+    [
+        (None, "OSError: the purge's release failed"),
+        (
+            "OSError: the removal's release failed",
+            "OSError: the purge's release failed; OSError: the removal's release failed",
+        ),
+    ],
+)
+async def test_a_remove_reports_the_span_release_error_of_a_lapsed_connection_s_purge(
+    door,
+    fake: FakeOAuthServer,
+    stored_rows,
+    client_store_fake: FakeClientStore,
+    monkeypatch,
+    removal_release_error: str | None,
+    expected: str,
+) -> None:
+    cs, manifest, providers, records = door
+    _register(providers, manifest, make_discovered_descriptor(mcp_url=_publish(fake)))
+    stored_rows.append(_connection(CID, "remote", lapsed=True))
+    records[CID] = _oauth_record(CID, "remote", f"{fake.base}/a")
+    real_disconnect = cs.disconnect
+
+    async def purge_whose_release_fails(*, connection_id):
+        manifest.span_release_error = "OSError: the purge's release failed"
+        try:
+            return await real_disconnect(connection_id=connection_id)
+        finally:
+            manifest.span_release_error = removal_release_error
+
+    monkeypatch.setattr(ops.connection_service, "disconnect", purge_whose_release_fails)
+    removed = await ops.remove_connector_provider(provider_id="remote")
+    assert CID not in records
+    assert manifest.doc["connectors"] == []
+    assert removed["span_release_error"] == expected
+
+
+@pytest.mark.parametrize(
+    ("removal_release_error", "expected"),
+    [
+        (None, "OSError: the purge's release failed"),
+        (
+            "OSError: the removal's release failed",
+            "OSError: the purge's release failed; OSError: the removal's release failed",
+        ),
+    ],
+)
+async def test_a_removal_whose_propagation_fails_keeps_the_purge_s_span_release_error(
+    door, fake: FakeOAuthServer, stored_rows, monkeypatch, removal_release_error: str | None, expected: str
+) -> None:
+    cs, manifest, providers, records = door
+    _register(providers, manifest, make_discovered_descriptor(mcp_url=_publish(fake)))
+    stored_rows.append(_connection(CID, "remote", lapsed=True))
+    records[CID] = _oauth_record(CID, "remote", f"{fake.base}/a")
+    real_disconnect = cs.disconnect
+    real_apply_change = manifest.apply_change
+
+    async def removal_whose_propagation_fails(mutator):
+        await real_apply_change(mutator)
+        raise FleetBroadcastError(
+            "reload_config",
+            FleetResult(op="reload_config", reachable=False, error="bus down"),
+            RuntimeError("bus down"),
+            span_release_error=removal_release_error,
+        )
+
+    async def purge_whose_release_fails(*, connection_id):
+        manifest.span_release_error = "OSError: the purge's release failed"
+        try:
+            return await real_disconnect(connection_id=connection_id)
+        finally:
+            manifest.span_release_error = None
+            monkeypatch.setattr(manifest, "apply_change", removal_whose_propagation_fails)
+
+    monkeypatch.setattr(ops.connection_service, "disconnect", purge_whose_release_fails)
+    with pytest.raises(FleetBroadcastError) as raised:
+        await ops.remove_connector_provider(provider_id="remote")
+    assert manifest.doc["connectors"] == []
+    assert raised.value.span_release_error == expected
 
 
 async def test_a_failed_manifest_change_leaves_the_clients(
@@ -516,7 +624,7 @@ async def test_a_rerun_of_a_remove_whose_client_deletion_failed_deletes_the_rows
 
     rerun = await ops.remove_connector_provider(provider_id="remote")
 
-    assert rerun == {"provider_id": "remote", "removed_clients": 1, "fanout": None}
+    assert rerun == {"provider_id": "remote", "removed_clients": 1, "fanout": None, "span_release_error": None}
     assert not await client_store_fake.has_rows("remote")
     assert await provider_service.id_taken_reason("remote") is None
 

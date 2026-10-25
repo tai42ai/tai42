@@ -10,17 +10,28 @@ from typing import cast
 import pytest
 from jinja2 import TemplateSyntaxError
 from starlette.requests import Request
-from tai42_contract.storage import Storage
 
 import tai42_skeleton.operations.templates as templates_ops
 import tai42_skeleton.routers.templates as router
 import tai42_skeleton.template.path_guard as path_guard
 from tai42_skeleton.app import instance
-from tai42_skeleton.storage import StorageRegistry
 from tai42_skeleton.template import ResourceManager, TemplateNotFoundError
 from tai42_skeleton.template.path_guard import UnsafeTemplatePathError
 
 from .._fakes.bus import FakeBus
+from .._fakes.content_fixtures import (
+    FILES_INSTALL_LINE,
+    JAVASCRIPT,
+    LOCKED_PDF_MESSAGE,
+    NOTES_PDF,
+    RAGGED_CSV,
+    RAGGED_CSV_MESSAGE,
+    SQL,
+    SQL_LATIN1,
+    locked_pdf,
+)
+from .._fakes.recording_storage import RecordingStorage
+from .._fakes.template_holders import HELD_DIRECTORY_REFUSAL, HELD_HOLDERS, HELD_TEMPLATE_REFUSAL, hold_jq_gate
 
 
 def _req(body=None) -> Request:
@@ -86,13 +97,6 @@ async def test_list(manager):
     assert _data(resp)["data"] == ["a.j2", "b.j2"]
 
 
-async def test_get(manager):
-    resp = await router.get_template(_req({"template_id": "a.j2"}))
-    body = _data(resp)["data"]
-    assert body["template"] == "content of a.j2"
-    assert body["schema"] == {"vars": ["name"]}
-
-
 async def test_get_missing_id_400(manager):
     resp = await router.get_template(_req({}))
     assert resp.status_code == 400
@@ -137,6 +141,30 @@ async def test_upload_directory_id_collision_is_409(manager, monkeypatch):
     body = _data(resp)
     assert "dir/x.j2" in body["error"]
     assert "delete them first" in body["error"]
+
+
+@pytest.mark.parametrize(
+    ("handler", "path", "refusal"),
+    [
+        (router.delete_template, "jq/gate", HELD_TEMPLATE_REFUSAL),
+        (router.delete_template_dir, "jq", HELD_DIRECTORY_REFUSAL),
+    ],
+    ids=["file", "dir"],
+)
+async def test_a_held_delete_is_409_naming_its_holders(monkeypatch, handler, path, refusal):
+    provider = RecordingStorage({"jq/gate": (b".a", None)})
+    fake_app = SimpleNamespace(
+        storage=SimpleNamespace(
+            resource_manager=ResourceManager(provider, on_evicted=instance.app._fire_template_evicted)
+        )
+    )
+    monkeypatch.setattr(templates_ops, "tai42_app", fake_app)
+    monkeypatch.setattr(instance.app, "_bus", FakeBus())
+    hold_jq_gate(monkeypatch)
+    resp = await handler(_req({"path": path}))
+    assert resp.status_code == 409
+    assert _data(resp) == {"error": refusal, "holders": HELD_HOLDERS}
+    assert list(provider.objects) == ["jq/gate"]
 
 
 async def test_delete_traversal_rejected(manager):
@@ -198,17 +226,49 @@ async def test_delete_dir_absent_is_404(manager, monkeypatch):
     assert "not found" in _data(resp)["error"]
 
 
-async def test_delete_dir_root_resolving_is_400(manager, monkeypatch):
-    # A key that clears the lexical guard but resolves to exactly the template root
-    # is refused at the operation layer with a client 400 before the provider is
-    # reached, independent of any backend's own root check.
-    async def _unreached(path):
-        raise AssertionError("provider must not be reached for a root-resolving key")
+_NON_CANONICAL = ["./a", "a/../b", "a//b", "a/", "/a", ".", "a/.."]
 
-    monkeypatch.setattr(manager, "delete_template_dir", _unreached)
-    resp = await router.delete_template_dir(_req({"path": "."}))
-    assert resp.status_code == 400
-    assert "template root" in _data(resp)["error"]
+
+def _non_canonical(key: str) -> str:
+    return f"non-canonical store key {key!r}: a key is '/'-separated names with no empty, '.' or '..' segment"
+
+
+@pytest.mark.parametrize("key", _NON_CANONICAL)
+async def test_every_template_route_refuses_a_non_canonical_key(manager, key):
+    responses = [
+        await router.upload_template(_req({"path": key, "content": "x"})),
+        await router.delete_template(_req({"path": key})),
+        await router.delete_template_dir(_req({"path": key})),
+        await router.get_template(_req({"template_id": key})),
+        await router.render_template(_req({"text": {"id": key}})),
+    ]
+    for resp in responses:
+        assert resp.status_code == 400
+        assert _data(resp) == {"error": _non_canonical(key)}
+    assert manager.uploaded == {}
+    assert manager.deleted == []
+
+
+async def test_a_canonical_nested_key_passes_the_template_routes(manager):
+    resp = await router.upload_template(_req({"path": "a/b.txt", "content": "x"}))
+    assert resp.status_code == 200
+    assert manager.uploaded == {"a/b.txt": "x"}
+
+
+async def test_list_leaves_out_an_unlisted_prefix(manager, monkeypatch):
+    from tai42_skeleton.conversations.media_meta import declare_media_prefix_marks
+
+    from .._fakes.prefix_marks import fresh_prefix_marks
+
+    fresh_prefix_marks(monkeypatch)
+    declare_media_prefix_marks()
+
+    async def _listed():
+        return ["inbound-media/x", "notes/b.txt"]
+
+    monkeypatch.setattr(manager, "list_resources", _listed)
+    resp = await router.list_templates(_req())
+    assert _data(resp)["data"] == ["notes/b.txt"]
 
 
 @pytest.mark.parametrize("bad", ["/abs.j2", "../escape.j2", "a/../../etc", "back\\slash"])
@@ -287,37 +347,6 @@ async def test_clear_cache(manager):
 # --- error mapping: 404 on missing, 400 on author error, 500 on infra --------
 
 
-async def test_get_missing_template_404(manager, monkeypatch):
-    async def _missing(template_id):
-        raise TemplateNotFoundError(f"Template '{template_id}' not found.")
-
-    monkeypatch.setattr(manager, "fetch_template", _missing)
-    resp = await router.get_template(_req({"template_id": "gone.j2"}))
-    assert resp.status_code == 404
-    assert "not found" in _data(resp)["error"]
-
-
-async def test_get_schema_call_missing_404(manager, monkeypatch):
-    # fetch_template succeeds, the schema call is what discovers the template is
-    # gone -> still a 404 (the second raise site is covered).
-    async def _missing_schema(content=None, template_id=None):
-        raise TemplateNotFoundError(f"Template '{template_id}' not found.")
-
-    monkeypatch.setattr(manager, "get_template_schema", _missing_schema)
-    resp = await router.get_template(_req({"template_id": "gone.j2"}))
-    assert resp.status_code == 404
-
-
-async def test_get_bad_jinja_400(manager, monkeypatch):
-    async def _broken(content=None, template_id=None):
-        raise TemplateSyntaxError("unexpected end of template", 1)
-
-    monkeypatch.setattr(manager, "get_template_schema", _broken)
-    resp = await router.get_template(_req({"template_id": "a.j2"}))
-    assert resp.status_code == 400
-    assert "template error" in _data(resp)["error"]
-
-
 async def test_render_missing_template_404(manager, monkeypatch):
     async def _missing(text, locale=None):
         raise TemplateNotFoundError(f"Template '{text.id}' not found.")
@@ -357,46 +386,35 @@ async def test_render_infra_error_propagates_as_500(manager, monkeypatch):
 # --- door-level: the REAL ResourceManager behind the route -------------------
 
 
-class _InMemoryStorage(Storage):
-    """Minimal Storage backend so the route can drive a real ResourceManager."""
-
-    def __init__(self):
-        self.items: dict[str, str] = {}
-
-    async def load(self, path: str) -> str:
-        try:
-            return self.items[path]
-        except KeyError as exc:
-            raise FileNotFoundError(path) from exc
-
-    async def list(self) -> list[str]:
-        return sorted(self.items)
-
-    async def upload(self, path: str, content: str) -> None:
-        self.items[path] = content
-
-    async def delete(self, path: str) -> None:
-        self.items.pop(path, None)
-
-    async def delete_dir(self, path: str) -> None:
-        prefix = path.rstrip("/") + "/"
-        for key in [k for k in self.items if k.startswith(prefix)]:
-            del self.items[key]
-
-
 @pytest.fixture
-def real_manager(monkeypatch):
-    """The route wired to a REAL ResourceManager over in-memory storage.
+def real_manager(monkeypatch) -> RecordingStorage:
+    """The route wired to a REAL ResourceManager over a recording in-memory provider.
 
     The fake manager above stubs ``get_template_schema``, so it can never catch a
-    schema-inference failure; this fixture drives the genuine inference path.
+    schema-inference failure; this fixture drives the genuine reader and inference path.
     """
-    registry = StorageRegistry()
-    registry.register_storage(_InMemoryStorage)
-    tm = ResourceManager(registry.provider, on_evicted=lambda _eviction: None)
+    provider = RecordingStorage()
+    monkeypatch.setattr(instance.app._storage_registry, "_provider", provider)
+    tm = ResourceManager(provider, on_evicted=lambda _eviction: None)
     monkeypatch.setattr(templates_ops, "tai42_app", SimpleNamespace(storage=SimpleNamespace(resource_manager=tm)))
     monkeypatch.setattr(instance.app, "_bus", FakeBus())
-    return tm
+    return provider
+
+
+async def _entry(template_id: str):
+    return await router.get_template(_req({"template_id": template_id}))
+
+
+async def test_get_answers_the_template_entry_shape(real_manager):
+    real_manager.put("a.j2", b"Hello {{ name }}", "text/plain")
+    resp = await _entry("a.j2")
+    assert resp.status_code == 200
+    body = _data(resp)["data"]
+    assert set(body) == {"kind", "id", "content_type", "size", "content", "schema", "schema_error"}
+    assert body["kind"] == "text"
+    assert body["content"] == "Hello {{ name }}"
+    assert body["schema"]["required"] == ["name"]
+    assert body["schema_error"] is None
 
 
 async def test_get_real_manager_uninferable_template_200_degraded(real_manager):
@@ -405,11 +423,11 @@ async def test_get_real_manager_uninferable_template_200_degraded(real_manager):
     upload = await router.upload_template(_req({"path": "d.j2", "content": "{{ {'a': 1} }}{{ who }}"}))
     assert upload.status_code == 200
 
-    resp = await router.get_template(_req({"template_id": "d.j2"}))
+    resp = await _entry("d.j2")
 
     assert resp.status_code == 200
     body = _data(resp)["data"]
-    assert body["template"] == "{{ {'a': 1} }}{{ who }}"
+    assert body["content"] == "{{ {'a': 1} }}{{ who }}"
     assert body["schema"]["x-tai42-inference"] == "partial"
     assert body["schema"]["properties"] == {"who": {"title": "who"}}
 
@@ -418,7 +436,7 @@ async def test_get_real_manager_inferable_template_200_rich(real_manager):
     """The enricher is untouched for a template jinja2schema understands."""
     await router.upload_template(_req({"path": "r.j2", "content": "{{ name }}"}))
 
-    resp = await router.get_template(_req({"template_id": "r.j2"}))
+    resp = await _entry("r.j2")
 
     assert resp.status_code == 200
     schema = _data(resp)["data"]["schema"]
@@ -426,11 +444,73 @@ async def test_get_real_manager_inferable_template_200_rich(real_manager):
     assert schema["required"] == ["name"]
 
 
-async def test_get_real_manager_broken_jinja_400(real_manager):
-    """Author-broken Jinja stays an honest 400 through the real inference path."""
-    await router.upload_template(_req({"path": "b.j2", "content": "{{ unclosed"}))
+async def test_get_broken_jinja_serves_the_content_with_the_schema_error(real_manager):
+    await router.upload_template(_req({"path": "b.j2", "content": "Hello {{ name }"}))
 
-    resp = await router.get_template(_req({"template_id": "b.j2"}))
+    resp = await _entry("b.j2")
 
-    assert resp.status_code == 400
-    assert "template error" in _data(resp)["error"]
+    assert resp.status_code == 200
+    body = _data(resp)["data"]
+    assert body["content"] == "Hello {{ name }"
+    assert body["schema"] is None
+    assert body["schema_error"] == "template error: unexpected '}'"
+
+
+async def test_get_missing_template_404(real_manager):
+    resp = await _entry("gone.j2")
+    assert resp.status_code == 404
+    assert _data(resp) == {"error": "resource 'gone.j2' not found"}
+
+
+async def test_get_sql_and_javascript_are_text_entries(real_manager):
+    real_manager.put("queries/lookup.sql", SQL)
+    real_manager.put("app/greet.js", JAVASCRIPT)
+    sql = _data(await _entry("queries/lookup.sql"))["data"]
+    assert (sql["kind"], sql["content"]) == ("text", SQL.decode())
+    assert list(sql["schema"]["properties"]) == ["account_id"]
+    script = _data(await _entry("app/greet.js"))["data"]
+    assert (script["kind"], script["content"]) == ("text", JAVASCRIPT.decode())
+
+
+async def test_get_empty_object_is_empty_text(real_manager):
+    real_manager.put("empty.j2", b"")
+    body = _data(await _entry("empty.j2"))["data"]
+    assert (body["kind"], body["content"]) == ("text", "")
+
+
+async def test_get_pdf_is_a_document_with_a_null_schema(real_manager):
+    real_manager.put("docs/notes.pdf", NOTES_PDF, "application/pdf")
+    body = _data(await _entry("docs/notes.pdf"))["data"]
+    assert body["kind"] == "document"
+    assert "Quarterly notes" in body["content"]
+    assert body["schema"] is None
+
+
+async def test_get_refusals_answer_400_with_their_text(real_manager):
+    real_manager.put("queries/latin.sql", SQL_LATIN1)
+    real_manager.put("docs/locked.pdf", locked_pdf())
+    real_manager.put("data/scores.csv", RAGGED_CSV)
+    latin = await _entry("queries/latin.sql")
+    assert latin.status_code == 400
+    assert _data(latin)["error"].startswith("resource 'queries/latin.sql' cannot be loaded: ")
+    locked = await _entry("docs/locked.pdf")
+    assert (locked.status_code, _data(locked)) == (
+        400,
+        {"error": f"resource 'docs/locked.pdf' cannot be loaded: {LOCKED_PDF_MESSAGE}"},
+    )
+    ragged = await _entry("data/scores.csv")
+    assert (ragged.status_code, _data(ragged)) == (
+        400,
+        {"error": f"resource 'data/scores.csv' cannot be loaded: {RAGGED_CSV_MESSAGE}"},
+    )
+
+
+@pytest.mark.usefixtures("files_extra_missing")
+async def test_get_without_the_files_extra_is_501_while_a_by_id_render_still_renders(real_manager):
+    real_manager.put("greet.j2", b"Hello {{ name }}")
+    resp = await _entry("greet.j2")
+    assert resp.status_code == 501
+    assert _data(resp) == {"error": FILES_INSTALL_LINE, "code": "files-not-configured"}
+    render = await router.render_template(_req({"text": {"id": "greet.j2", "kwargs": {"name": "Ada"}}}))
+    assert render.status_code == 200
+    assert _data(render)["data"]["rendered"] == "Hello Ada"

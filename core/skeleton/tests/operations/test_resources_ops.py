@@ -2,25 +2,43 @@
 
 ``get_resource_by_id`` backs both methods of ``/api/resources/get`` (the GET fetch
 door and the POST render door) and carries the route's typed error surface: it maps
-``FileNotFoundError`` / ``ValueError`` / ``UnsafeTemplatePathError`` to
+``FileNotFoundError`` / ``ContentNotLoadableError`` / ``UnsafeTemplatePathError`` to
 ``NotFoundError`` (404) and ``BadRequestError`` (400). A READ door: not destructive,
 projects normally.
 """
 
 from __future__ import annotations
 
+import mimetypes
 from types import SimpleNamespace
+from typing import ClassVar
 
 import pytest
 from fastmcp.utilities.types import Image
 from tai42_contract.manifest import ApiToolsConfig
+from tai42_contract.storage import ObjectStat, Storage
 from tai42_contract.template import TemplatedText
 
 import tai42_skeleton.operations.resources as resources_ops
-from tai42_skeleton.operations import BadRequestError, NotFoundError, OperationRegistry, operation_metadata_of
+from tai42_skeleton.operations import (
+    BadRequestError,
+    NotFoundError,
+    NotSupportedError,
+    OperationRegistry,
+    operation_metadata_of,
+)
 from tai42_skeleton.operations.projection import project_operations
 from tai42_skeleton.operations.resources import get_resource_by_id
 from tai42_skeleton.template.media import MediaBlock
+
+from .._fakes.content_fixtures import (
+    FILES_INSTALL_LINE,
+    LOCKED_PDF_MESSAGE,
+    RAGGED_CSV,
+    RAGGED_CSV_MESSAGE,
+    locked_pdf,
+)
+from .._fakes.recording_storage import RecordingStorage
 
 
 class _ResourceManager:
@@ -132,6 +150,109 @@ async def test_broken_jinja_is_bad_request(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setattr(manager, "render_templated_text", _broken)
     with pytest.raises(BadRequestError, match="template error"):
         await get_resource_by_id("t.j2", {})
+
+
+class _BytesStorage(Storage):
+    """A binary-native store: ``load_bytes`` serves the raw stored bytes."""
+
+    items: ClassVar[dict[str, bytes]] = {
+        # Latin-1 text: detected as text, but its bytes are not UTF-8.
+        "notes.txt": "Caf\u00e9 cr\u00e8me, na\u00efve r\u00e9sum\u00e9 d\u00e9j\u00e0 vu.\nSecond line.\n".encode(
+            "latin-1"
+        ),
+        "doc.rtf": "{\\rtf1\\ansi caf\u00e9}".encode("latin-1"),
+        # Bytes no loader handles.
+        "blob.bin": bytes(range(256)) * 4,
+    }
+
+    async def load_bytes(self, path: str) -> bytes:
+        try:
+            return self.items[path]
+        except KeyError as exc:
+            raise FileNotFoundError(path) from exc
+
+    async def load(self, path: str) -> str:
+        return (await self.load_bytes(path)).decode("utf-8")
+
+    async def list(self) -> list[str]:
+        return sorted(self.items)
+
+    async def upload(self, path: str, content: str) -> None:
+        raise NotImplementedError
+
+    async def delete(self, path: str) -> None:
+        raise NotImplementedError
+
+    async def delete_dir(self, path: str) -> None:
+        raise NotImplementedError
+
+    async def stat(self, path: str) -> ObjectStat:
+        content_type, _ = mimetypes.guess_type(path)
+        return ObjectStat(content_type=content_type, size=len(await self.load_bytes(path)))
+
+    async def load_range(self, path: str, start: int, length: int) -> bytes:
+        return (await self.load_bytes(path))[start : start + length]
+
+
+def _bind_real(monkeypatch: pytest.MonkeyPatch) -> None:
+    from tai42_skeleton.storage import StorageRegistry
+    from tai42_skeleton.template import ResourceManager
+
+    registry = StorageRegistry()
+    registry.register_storage(_BytesStorage)
+    manager = ResourceManager(registry.provider, on_evicted=lambda _eviction: None)
+    monkeypatch.setattr(resources_ops, "tai42_app", SimpleNamespace(storage=SimpleNamespace(resource_manager=manager)))
+
+
+@pytest.mark.parametrize("resource_id", ["notes.txt", "doc.rtf"])
+async def test_text_that_is_not_utf8_is_bad_request(monkeypatch: pytest.MonkeyPatch, resource_id: str) -> None:
+    _bind_real(monkeypatch)
+    with pytest.raises(BadRequestError, match=rf"{resource_id!r}.*not UTF-8"):
+        await get_resource_by_id(resource_id)
+
+
+async def test_unsupported_type_is_bad_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    _bind_real(monkeypatch)
+    with pytest.raises(BadRequestError, match="Unsupported file type"):
+        await get_resource_by_id("blob.bin")
+
+
+async def test_over_cap_is_bad_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    from tai42_skeleton.template import file_loading
+
+    _bind_real(monkeypatch)
+    monkeypatch.setattr(file_loading, "file_loading_settings", lambda: SimpleNamespace(max_bytes=8))
+    with pytest.raises(BadRequestError, match="FILE_LOADING_MAX_BYTES"):
+        await get_resource_by_id("notes.txt")
+
+
+def _bind_recording(monkeypatch: pytest.MonkeyPatch, objects: dict[str, bytes]) -> RecordingStorage:
+    from tai42_skeleton.template import ResourceManager
+
+    provider = RecordingStorage({key: (data, None) for key, data in objects.items()})
+    manager = ResourceManager(provider, on_evicted=lambda _eviction: None)
+    monkeypatch.setattr(resources_ops, "tai42_app", SimpleNamespace(storage=SimpleNamespace(resource_manager=manager)))
+    return provider
+
+
+async def test_an_extractors_failure_is_bad_request_with_its_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    _bind_recording(monkeypatch, {"docs/locked.pdf": locked_pdf(), "data/scores.csv": RAGGED_CSV})
+    with pytest.raises(BadRequestError) as locked:
+        await get_resource_by_id("docs/locked.pdf")
+    assert locked.value.message == f"resource 'docs/locked.pdf' cannot be loaded: {LOCKED_PDF_MESSAGE}"
+    with pytest.raises(BadRequestError) as ragged:
+        await get_resource_by_id("data/scores.csv")
+    assert ragged.value.message == f"resource 'data/scores.csv' cannot be loaded: {RAGGED_CSV_MESSAGE}"
+
+
+@pytest.mark.usefixtures("files_extra_missing")
+async def test_without_the_files_extra_is_not_supported(monkeypatch: pytest.MonkeyPatch) -> None:
+    provider = _bind_recording(monkeypatch, {"a.txt": b"hello"})
+    with pytest.raises(NotSupportedError) as caught:
+        await get_resource_by_id("a.txt")
+    assert caught.value.message == FILES_INSTALL_LINE
+    assert caught.value.extra == {"code": "files-not-configured"}
+    assert provider.calls == []
 
 
 def test_projects_as_a_read_tool() -> None:

@@ -32,6 +32,7 @@ ROUTE_TABLE_SHAPES: dict[tuple[str, str], RouteShape] = {
             "upstream_revoke_status",
             "removed_manifest_entries",
             "fanout",
+            "span_release_error",
         ),
     ),
     ("DELETE", "/api/conversations/persons/{person_id}"): RouteShape(
@@ -60,14 +61,15 @@ ROUTE_TABLE_SHAPES: dict[tuple[str, str], RouteShape] = {
         items_key=None, columns=("condition", "name", "description", "scopes", "base_tier", "allow_all", "grants")
     ),
     ("GET", "/api/auth/routes"): RouteShape(
-        items_key=None, columns=("path", "methods", "mapped", "tags", "summary", "action", "declared_public")
+        items_key=None,
+        columns=("path", "methods", "mapped", "tags", "summary", "action", "role_reach", "declared_public"),
     ),
     ("GET", "/api/auth/tokens-payload"): RouteShape(
         items_key=None,
         columns=("user_id", "description", "scopes", "policy_data", "condition", "principal", "orphaned"),
     ),
     ("GET", "/api/backup/sections"): RouteShape(items_key=None, columns=("name", "secret")),
-    ("GET", "/api/channels"): RouteShape(items_key="channels", columns=("value",)),
+    ("GET", "/api/channels"): RouteShape(items_key="channels", columns=("name", "identity_hint")),
     ("GET", "/api/config/env"): RouteShape(items_key="secret_keys", columns=("value",)),
     ("GET", "/api/config/profiles"): RouteShape(items_key=None, columns=("name", "description")),
     ("GET", "/api/config/profiles/{name}"): RouteShape(items_key=None, columns=("description", "env", "secret_keys")),
@@ -265,7 +267,7 @@ ROUTE_TABLE_SHAPES: dict[tuple[str, str], RouteShape] = {
             "updated_at",
         ),
     ),
-    ("GET", "/api/extensions"): RouteShape(items_key=None, columns=("name", "kind", "multiple")),
+    ("GET", "/api/extensions"): RouteShape(items_key=None, columns=("name", "kind", "multiple", "config_schema")),
     ("GET", "/api/fleet/workers"): RouteShape(
         items_key="workers",
         columns=("name", "kind", "pid", "generation", "joined_at", "beat_at", "state", "stale", "last_op"),
@@ -448,13 +450,17 @@ ROUTE_TABLE_SHAPES: dict[tuple[str, str], RouteShape] = {
             "extensions",
             "output_schema",
             "input_schema",
+            "input_map",
+            "output_map",
             "conflicted",
             "conflicted_reason",
             "uses",
             "used_by",
         ),
     ),
-    ("GET", "/api/presets/{name}/referees"): RouteShape(items_key=None, columns=("name", "referees")),
+    ("GET", "/api/presets/{name}/referees"): RouteShape(
+        items_key="holders", columns=("kind", "name", "locator", "summary")
+    ),
     ("GET", "/api/presets/{name}/versions"): RouteShape(
         items_key=None, columns=("version", "body", "tags", "created_at", "is_current")
     ),
@@ -534,6 +540,9 @@ ROUTE_TABLE_SHAPES: dict[tuple[str, str], RouteShape] = {
     ("GET", "/api/states/{name}/attachments/{template}"): RouteShape(
         items_key=None, columns=("template", "path", "parameters", "declarations", "state")
     ),
+    ("GET", "/api/states/{name}/attachments/{template}/referees"): RouteShape(
+        items_key="holders", columns=("kind", "name", "locator", "summary")
+    ),
     ("GET", "/api/states/{name}/consumers"): RouteShape(
         items_key=None, columns=("kind", "name", "detail", "link", "unavailable")
     ),
@@ -595,7 +604,9 @@ ROUTE_TABLE_SHAPES: dict[tuple[str, str], RouteShape] = {
     ("POST", "/api/marketplace/uninstall"): RouteShape(
         items_key=None, columns=("ref", "uninstalled", "reload", "notes")
     ),
-    ("POST", "/api/marketplace/upgrade-all"): RouteShape(items_key="results", columns=("ref", "outcome", "detail")),
+    ("POST", "/api/marketplace/upgrade-all"): RouteShape(
+        items_key="results", columns=("ref", "outcome", "detail", "span_release_error")
+    ),
     ("POST", "/api/mcp-config"): RouteShape(items_key="awaiting_respawn", columns=("name", "keys")),
     ("POST", "/api/mcp-config/entries"): RouteShape(items_key="awaiting_respawn", columns=("name", "keys")),
     ("POST", "/api/mcp-config/secret-env"): RouteShape(items_key="awaiting_respawn", columns=("name", "keys")),
@@ -627,6 +638,9 @@ ROUTE_TABLE_SHAPES: dict[tuple[str, str], RouteShape] = {
     ),
     ("PUT", "/api/conversations/persons/{person_id}/locale"): RouteShape(
         items_key="addresses", columns=("door", "routes", "channel", "our_identity", "address", "linked_at")
+    ),
+    ("PUT", "/api/mcp-config/entries/{title}/tool-filter"): RouteShape(
+        items_key="awaiting_respawn", columns=("name", "keys")
     ),
     ("PUT", "/api/presets/{name}/versions/{version}/tags"): RouteShape(
         items_key=None, columns=("name", "version", "tags")

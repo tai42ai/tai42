@@ -13,11 +13,22 @@ from .remote_harness import data_response, run_cli
 def test_manifest_show(monkeypatch: pytest.MonkeyPatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/api/manifest"
-        return data_response({"mcp": [], "user_tools": ["a"]})
+        return data_response(view)
 
+    view = {
+        "mcp": [],
+        "user_tools": ["a"],
+        "extension_settings": {
+            "extensions_modules": ["pkg.ext"],
+            "backend_module": None,
+            "tools": [{"title": "a", "extensions": {"echo": [[{"name": "first", "config": {"k": "!ENV ${KEY}"}}]]}}],
+            "mcp": [],
+            "api_tools": {},
+        },
+    }
     result = run_cli(monkeypatch, handler, ["manifest", "show"], json_output=True)
     assert result.exit_code == 0, result.output
-    assert json.loads(result.output) == {"mcp": [], "user_tools": ["a"]}
+    assert json.loads(result.output) == view
 
 
 def test_manifest_plugins(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -35,15 +35,17 @@ from opentelemetry.sdk.trace import ReadableSpan
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from pydantic import BaseModel, PrivateAttr
 from tai42_contract.app import tai42_app
-from tai42_contract.monitoring import MonitoringObservation, SpanKind, StepRole
+from tai42_contract.monitoring import MonitoringObservation, SpanKind, StepRole, TraceContext
 
 from tai42_kit.llm.monitoring_callbacks import MonitoringCallbackHandler, _shallow_members, declared_chain_payload
 from tai42_kit.llm.run_trace import bind_run_trace
-from tai42_kit.monitoring import encode_payload, is_payload_ref, resolve_refs
+from tai42_kit.monitoring import encode_payload, is_payload_ref, open_run_trace, resolve_refs
 from tai42_kit.monitoring.otel import OtelWriter
 from tai42_kit.monitoring.testing import InMemoryOtelReader, span_to_observation
 
 _FILLER = 4096
+_PARENT = "c" * 16
+_CONTEXT = TraceContext(trace_id="1" * 32, parent_span_id=_PARENT)
 
 
 def _answer(n: int) -> str:
@@ -125,7 +127,7 @@ def _cfg(config: dict[str, Any]) -> RunnableConfig:
 
 
 def _bound_config(writer: OtelWriter, **options: Any) -> tuple[RunnableConfig, _Capture]:
-    config = bind_run_trace({"configurable": {"thread_id": "t"}}, **options).config
+    config = bind_run_trace({"configurable": {"thread_id": "t"}}, _CONTEXT, **options)
     capture = _Capture(writer)
     config["callbacks"] = [*config["callbacks"], capture]
     return _cfg(config), capture
@@ -222,12 +224,12 @@ def test_synthetic_graph_parentage_current_span_grouping_and_producer_mode(
 ):
     current: dict[str, str | None] = {}
     graph = _synthetic_graph(writer, _ScriptedChatModel(turns=1), current)
-    config = bind_run_trace(grouping_nodes=frozenset({"a"}), chain_payloads="producer").config
+    config = bind_run_trace(None, _CONTEXT, grouping_nodes=frozenset({"a"}), chain_payloads="producer")
     graph.invoke({"value": "v", "seen": []}, _cfg(config))
     observations = _observations(writer, exporter)
     by_name = {o.name: o for o in observations}
     root = by_name["LangGraph"]
-    assert root.parent_id is None
+    assert root.parent_id == _PARENT
     for name in ("a", "b", "p1", "p2"):
         assert by_name[name].parent_id == root.id, name
         assert current[name] == by_name[name].id, name
@@ -252,10 +254,39 @@ def test_synthetic_graph_parentage_current_span_grouping_and_producer_mode(
 async def test_async_parallel_nodes_each_see_their_own_span(writer: OtelWriter, exporter: InMemorySpanExporter):
     current: dict[str, str | None] = {}
     graph = _synthetic_graph(writer, _ScriptedChatModel(turns=1), current)
-    await graph.ainvoke({"value": "v", "seen": []}, _cfg(bind_run_trace().config))
+    await graph.ainvoke({"value": "v", "seen": []}, _cfg(bind_run_trace(None, _CONTEXT)))
     by_name = {o.name: o for o in _observations(writer, exporter)}
     for name in ("a", "b", "p1", "p2"):
         assert current[name] == by_name[name].id, name
+
+
+def test_two_graph_runs_bound_in_one_run_trace_sit_under_its_run_span(
+    writer: OtelWriter, exporter: InMemorySpanExporter
+):
+    class S(TypedDict):
+        x: int
+
+    def inc(state: S) -> S:
+        return {"x": state["x"] + 1}
+
+    builder = StateGraph(S)
+    builder.add_node("inc", inc)
+    builder.add_edge(START, "inc")
+    graph = builder.compile()
+    with open_run_trace() as root:
+        graph.invoke({"x": 0}, _cfg(bind_run_trace(None, root.context)))
+        graph.invoke({"x": 1}, _cfg(bind_run_trace(None, root.context)))
+    spans = _spans(writer, exporter)
+    (run,) = [s for s in spans if s.name == "run"]
+    assert run.parent is None
+    assert run.context is not None
+    tops = [s for s in spans if s.name == "LangGraph"]
+    assert len(tops) == 2
+    for top in tops:
+        assert top.parent is not None
+        assert top.parent.span_id == run.context.span_id
+        assert top.context is not None
+        assert top.context.trace_id == run.context.trace_id
 
 
 def test_interrupt_ends_the_span_without_error(writer: OtelWriter, exporter: InMemorySpanExporter):
@@ -271,7 +302,7 @@ def test_interrupt_ends_the_span_without_error(writer: OtelWriter, exporter: InM
     builder.add_edge(START, "ask")
     builder.add_edge("ask", END)
     graph = builder.compile(checkpointer=InMemorySaver())
-    config = bind_run_trace({"configurable": {"thread_id": "i"}}).config
+    config = bind_run_trace({"configurable": {"thread_id": "i"}}, _CONTEXT)
     graph.invoke({"x": 0}, _cfg(config))
     ask_span = next(o for o in _observations(writer, exporter) if o.name == "ask")
     assert ask_span.level is None
@@ -291,7 +322,7 @@ def test_chain_error_is_recorded_at_error(writer: OtelWriter, exporter: InMemory
     builder.add_edge(START, "broken")
     graph = builder.compile()
     with pytest.raises(RuntimeError, match="node broke"):
-        graph.invoke({"x": 0}, _cfg(bind_run_trace().config))
+        graph.invoke({"x": 0}, _cfg(bind_run_trace(None, _CONTEXT)))
     node = next(o for o in _observations(writer, exporter) if o.name == "broken")
     assert (node.level, node.status_message) == ("ERROR", "node broke")
 
@@ -389,7 +420,7 @@ async def test_create_agent_records_rebound_messages_member_wise(writer: OtelWri
     generations = [o for o in observations if o.kind is SpanKind.LLM]
     tools = [o for o in observations if o.kind is SpanKind.TOOL]
     model_nodes = [o for o in chains if o.name == "model"]
-    root = next(o for o in chains if o.parent_id is None)
+    root = next(o for o in chains if o.parent_id == _PARENT)
     assert len(generations) == 3
     assert len(model_nodes) == 3
     assert {o.name for o in chains} <= {"probe-agent", "model", "tools"}
@@ -461,11 +492,11 @@ def test_declared_chain_payload_records_the_build_on_the_declared_run_only(
     builder.add_edge(START, "inc")
     graph = builder.compile()
     run_id = uuid.uuid4()
-    config = bind_run_trace(chain_payloads="producer").config
+    config = bind_run_trace(None, _CONTEXT, chain_payloads="producer")
     with declared_chain_payload(run_id, build):
         graph.invoke({"x": 1}, _cfg({**config, "run_id": run_id}))
     observations = _observations(writer, exporter)
-    root = next(o for o in observations if o.parent_id is None)
+    root = next(o for o in observations if o.parent_id == _PARENT)
     assert root.input == {"built": ["x"]}
     assert root.output == {"built": ["x"]}
     assert len(seen_current) == 2
@@ -485,9 +516,9 @@ def test_a_raising_build_records_the_failure_visibly(writer: OtelWriter, exporte
     graph = builder.compile()
     run_id = uuid.uuid4()
     with declared_chain_payload(run_id, build):
-        result = graph.invoke({"x": 1}, _cfg({**bind_run_trace().config, "run_id": run_id}))
+        result = graph.invoke({"x": 1}, _cfg({**bind_run_trace(None, _CONTEXT), "run_id": run_id}))
     assert result == {"x": 2}
-    root = next(o for o in _observations(writer, exporter) if o.parent_id is None)
+    root = next(o for o in _observations(writer, exporter) if o.parent_id == _PARENT)
     assert root.input == {"error_type": "ValueError", "message": "bad build"}
 
 
@@ -522,7 +553,7 @@ def test_a_str_is_never_stale():
 
 
 def test_a_dict_with_an_added_key_is_written_member_wise(writer: OtelWriter, exporter: InMemorySpanExporter):
-    handler = MonitoringCallbackHandler(writer, bind_run_trace().context)
+    handler = MonitoringCallbackHandler(writer, _CONTEXT)
     origin = {"big": "z" * 300, "small": 1}
     handler._register(origin, "a" * 16, "input", "/v")
     origin["added"] = [1, 2]

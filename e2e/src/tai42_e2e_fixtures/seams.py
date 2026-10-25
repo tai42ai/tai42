@@ -5,8 +5,10 @@
   content-change upgrade of the tagged version;
 * a **rename referee** (``register_rename_referee``) that reports a holder for a
   marked target (proving a plugin-declared reference blocks a rename and joins the
-  ``/referees`` union) plus a RAISING variant (proving a referee exception fails the
+  ``/referees`` rename preview) plus a RAISING variant (proving a referee exception fails the
   rename loudly);
+* a **composing tool** (``e2e_composer``) whose declared ``tool_refs`` extractor names each
+  ``steps`` entry as a composed tool, so a write naming an unserved step is refused;
 * an **invocation-seam probe** tool that reports the in-flight tool name
   ``current_tool_invocation()`` deposits for its own call, and the ``None`` a reader
   sees where no deposit is in scope;
@@ -19,11 +21,12 @@ boot/reload (the registries are reset each ``start()``). Generic vocab only."""
 from __future__ import annotations
 
 import os
+from typing import Any
 
 from tai42_contract.app import tai42_app
 from tai42_contract.presets import PresetSeed, PresetSeedToolMeta
 from tai42_contract.states import StateTemplateDocument
-from tai42_contract.tools import current_tool_invocation
+from tai42_contract.tools import ComposedToolRef, ReferenceHolder, current_tool_invocation
 
 # -- preset seed -------------------------------------------------------------
 
@@ -64,23 +67,42 @@ _REFEREE_RAISE_MARKER = "e2e_ref_raise"
 
 
 def _fixture_holder_text(old_name: str) -> str:
-    """The generic holder description the fixture referee returns for a marked
-    target — asserted verbatim on the blocked rename and in the referees union."""
+    """The generic holder summary the fixture referee returns for a marked
+    target — asserted verbatim on the blocked rename and in the rename preview."""
     return f"e2e fixture reference to {old_name!r}"
 
 
-async def _fixture_rename_referee(old_name: str) -> list[str]:
+async def _fixture_rename_referee(old_name: str) -> list[ReferenceHolder]:
     """Report a holder for a HOLD-marked target and RAISE for a RAISE-marked one; any
     other name draws no objection. A raising referee must fail the rename loudly, never
     a silent bypass."""
     if _REFEREE_RAISE_MARKER in old_name:
         raise RuntimeError(f"e2e fixture referee cannot read holders for {old_name!r}")
     if _REFEREE_HOLD_MARKER in old_name:
-        return [_fixture_holder_text(old_name)]
+        return [ReferenceHolder(kind="e2e fixture", name=old_name, summary=_fixture_holder_text(old_name))]
     return []
 
 
 tai42_app.tools.register_rename_referee(_fixture_rename_referee)
+
+
+# -- composing tool ----------------------------------------------------------
+
+
+def _composer_steps(fixed_kwargs: dict[str, Any]) -> list[ComposedToolRef]:
+    """One composed tool per ``steps`` entry, sited by its position; absent ``steps`` names none."""
+    steps = fixed_kwargs.get("steps")
+    if steps is None:
+        return []
+    if not isinstance(steps, list) or not all(isinstance(step, str) and step for step in steps):
+        raise ValueError("steps must be a list of tool names")
+    return [ComposedToolRef(name=step, site=f"step {index}") for index, step in enumerate(steps)]
+
+
+@tai42_app.tools.tool(tags={"e2e"}, tool_refs=_composer_steps)
+async def e2e_composer(steps: list[str] | None = None) -> list[str]:
+    """Answer the tool names its ``steps`` compose, in order."""
+    return list(steps or [])
 
 
 # -- invocation-seam probe ---------------------------------------------------

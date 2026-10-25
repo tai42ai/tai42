@@ -29,6 +29,7 @@ from tai42_contract.states import (
     StateSubject,
     TemplateJqReference,
     WriteOrigin,
+    binding_template_refs,
 )
 from tai42_contract.states.errors import (
     AttachConflictError,
@@ -46,7 +47,8 @@ from tai42_kit.utils.data import run_jq_first
 from tai42_kit.utils.data.jq_util import compile_check
 
 from tai42_skeleton.states.service.unit import current_state_unit
-from tai42_skeleton.template.resource_manager import TemplateLocaleNotFoundError, TemplateNotFoundError
+from tai42_skeleton.template.errors import TEMPLATE_RENDER_ERRORS, template_render_refusal
+from tai42_skeleton.template.references import assert_templates_stored
 
 if TYPE_CHECKING:
     from tai42_skeleton.app.server import TaiMCP
@@ -117,15 +119,14 @@ async def _render_slot(app: TaiMCP, slot: str, text: TemplatedText) -> str:
     """Render one binding jq slot's templated text to its jq program before it is compiled or evaluated.
 
     The render happens HERE at the door, never inside a contract model validator.
-    A slot given by ``id`` is fetched and rendered; a stored id that cannot be fetched is a
-    LOUD refusal naming the slot and the id, never a silent pass or a deferred surprise.
+    A slot given by ``id`` is fetched and rendered; a stored id that cannot be fetched, or a
+    body (stored or inline) that cannot be rendered, is a LOUD refusal naming the slot, never
+    a silent pass or a deferred surprise.
     """
     try:
         return await app.storage.resource_manager.render_templated_text(text)
-    except (TemplateNotFoundError, TemplateLocaleNotFoundError) as exc:
-        raise ValueValidationError(
-            f"state binding {slot} references stored id {text.id!r}, which could not be fetched: {exc}"
-        ) from exc
+    except TEMPLATE_RENDER_ERRORS as exc:
+        raise ValueValidationError(f"state binding {slot} {template_render_refusal(text, exc)}") from exc
 
 
 def merge_bindings(door: StateBinding | None, preset: StateBinding | None) -> StateBinding | None:
@@ -381,8 +382,9 @@ async def validate_and_attach_binding(app: TaiMCP, binding: StateBinding) -> Non
     every door/node that binds the state — IDEMPOTENTLY (an already-attached template is left
     as is; a second template at an occupied path is refused by ``attach``). An attach failure
     raises and the save fails. Then each authored slot (subject/scope exprs, custom
-    injection/update jqs, op-id exprs, adapters) is RENDERED to its jq program — a by-id slot
-    whose resource cannot be fetched fails the save loudly, naming the slot and the id — and
+    injection/update jqs, op-id exprs, adapters) is RENDERED to its jq program — a slot whose
+    resource cannot be fetched, or that cannot be rendered, fails the save loudly, naming the
+    slot — and
     the rendered program is compiled; every named ``template_jq`` referenced by an
     injection/update is resolved against the state's attachments with the right purpose — an
     unknown/ambiguous name, or a named update that names params but carries no adapter to fill
@@ -497,8 +499,10 @@ async def _validate_binding(app: TaiMCP, binding: StateBinding, *, do_attach: bo
     With ``do_attach`` the named templates are attached idempotently (the SAVE seam); without
     it they are only verified to exist (the dry-run seam) — the one difference between the two
     doors, so neither drifts from the other's verdict. Each attach's named ``template_jq``
-    references resolve in one batch call once its templates are attached (or verified).
+    references resolve in one batch call once its templates are attached (or verified). Every
+    stored id a slot names is checked first, before any attach or render.
     """
+    await assert_templates_stored(binding_template_refs(binding), ValueValidationError)
     for attach in binding.states:
         await _validate_templates(app, attach, do_attach=do_attach)
         compile_check(await _render_slot(app, f"subject_expr for state {attach.state!r}", attach.subject_expr))

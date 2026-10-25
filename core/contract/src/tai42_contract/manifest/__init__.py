@@ -389,7 +389,7 @@ class Manifest(BaseModel):
     tools_list: set[str] | None = Field(default_factory=set, exclude=True)
 
     # Derived attachment map (tool base-name -> extension combos), unioned from
-    # the ``extensions`` maps of ``tools`` + ``mcp`` after selection. The impl
+    # the ``extensions`` maps of ``tools``, ``mcp`` and ``api_tools`` after selection. The impl
     # builds it non-None in ``model_post_init``, mirroring ``tools_list``.
     tool_extensions: dict[str, list[list[ExtensionElement]]] | None = Field(default_factory=dict, exclude=True)
 

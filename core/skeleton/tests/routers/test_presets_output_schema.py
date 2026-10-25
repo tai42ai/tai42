@@ -167,10 +167,14 @@ def test_plain_tool_preset_validate_raises_on_constraint_violation(pg):
             }
             resp = await _create("wbad", "weather", output_schema=schema)
             assert resp.status_code == 200, _err(resp)
-            from tai42_kit.utils.data.json_schema_util import JsonSchemaValidationError
+            from fastmcp.exceptions import ToolError
 
-            with pytest.raises(JsonSchemaValidationError):
+            with pytest.raises(ToolError) as caught:
                 await instance.app.tools.run_tool("wbad", {"city": "paris"})
+            assert str(caught.value) == (
+                "preset 'wbad' output does not match its output_schema: "
+                "value does not match schema at $.units: 'metric' does not match '^imperial$'"
+            )
 
     asyncio.run(run())
 

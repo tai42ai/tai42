@@ -12,12 +12,16 @@ representative coverage by design, not a full reference sweep of every subcomman
 
 from __future__ import annotations
 
+import base64
+import json
+import subprocess
 import uuid
 from collections.abc import Callable
 from pathlib import Path
 
 import pytest
 
+from tai42_e2e.content_samples import SQL, locked_pdf, locked_pdf_message, not_loadable_prefix, png
 from tai42_e2e.stack import TaiStack
 
 from ._cli_support import cli_json, run_cli  # pyright: ignore[reportMissingImports]
@@ -185,3 +189,146 @@ def test_scopes_mutation(cli_stack: TaiStack, tmp_path: Path, uniq: Callable[[st
         assert url in listing.stdout, listing.stdout
     finally:
         run_cli(cli_stack, tmp_path, "scopes", "remove-url", url)
+
+
+# The seeded root key's id, the identity a hook registered by the root fires as.
+_ROOT_KEY_ID = "e2e-root"
+
+
+def _cli_upload(stack: TaiStack, cwd: Path, resource_id: str, *, text: str | None = None, data: bytes = b"") -> None:
+    content = ["--text", text] if text is not None else ["--base64", base64.b64encode(data).decode()]
+    uploaded = run_cli(stack, cwd, "storage", "upload", resource_id, *content)
+    assert uploaded.returncode == 0, uploaded.stderr
+
+
+def _cli_refusal(result: subprocess.CompletedProcess[str], status: int) -> str:
+    """The server text a refused command prints after ``Error (HTTP <status>): ``, once it exits 1 with no stdout."""
+    head = f"Error (HTTP {status}): "
+    assert result.returncode == 1, f"exit {result.returncode}; stdout:\n{result.stdout}"
+    assert result.stdout == ""
+    assert result.stderr.startswith(head), result.stderr
+    return result.stderr.removeprefix(head).rstrip("\n")
+
+
+@pytest.mark.needs("kind:storage")
+def test_the_listings_leave_out_inbound_media_and_list_an_object_beside_it(
+    cli_stack: TaiStack, tmp_path: Path, uniq: Callable[[str], str]
+) -> None:
+    media_key = f"inbound-media/{uniq('media')}"
+    text_id = f"cli/{uniq('beside')}.txt"
+    _cli_upload(cli_stack, tmp_path, media_key, data=png())
+    _cli_upload(cli_stack, tmp_path, text_id, text="beside the media")
+    try:
+        stored = cli_json(run_cli(cli_stack, tmp_path, "storage", "list"))["resources"]
+        templates = cli_json(run_cli(cli_stack, tmp_path, "templates", "list"))
+        assert text_id in stored
+        assert text_id in templates
+        assert media_key not in stored
+        assert media_key not in templates
+    finally:
+        run_cli(cli_stack, tmp_path, "storage", "delete", media_key)
+        run_cli(cli_stack, tmp_path, "storage", "delete", text_id)
+
+
+@pytest.mark.needs("kind:storage")
+def test_read_and_get_print_a_text_object_and_the_empty_object(
+    cli_stack: TaiStack, tmp_path: Path, uniq: Callable[[str], str]
+) -> None:
+    sql_id = f"{uniq('queries')}/lookup.sql"
+    empty_id = f"cli/{uniq('empty')}.txt"
+    _cli_upload(cli_stack, tmp_path, sql_id, text=SQL)
+    _cli_upload(cli_stack, tmp_path, empty_id, text="")
+    try:
+        for resource_id, content in ((sql_id, SQL), (empty_id, "")):
+            read = cli_json(run_cli(cli_stack, tmp_path, "storage", "read", resource_id))
+            got = cli_json(run_cli(cli_stack, tmp_path, "templates", "get", resource_id))
+            assert (read["kind"], read["content"]) == ("text", content)
+            assert (got["kind"], got["content"]) == ("text", content)
+    finally:
+        run_cli(cli_stack, tmp_path, "storage", "delete", sql_id)
+        run_cli(cli_stack, tmp_path, "storage", "delete", empty_id)
+
+
+@pytest.mark.needs("kind:storage")
+def test_read_of_a_locked_pdf_prints_the_refusal_and_exits_1(
+    cli_stack: TaiStack, tmp_path: Path, uniq: Callable[[str], str]
+) -> None:
+    resource_id = f"{uniq('docs')}/locked.pdf"
+    _cli_upload(cli_stack, tmp_path, resource_id, data=locked_pdf())
+    try:
+        refusal = _cli_refusal(run_cli(cli_stack, tmp_path, "storage", "read", resource_id, json_flag=False), 400)
+        assert refusal == not_loadable_prefix(resource_id) + locked_pdf_message(resource_id)
+    finally:
+        run_cli(cli_stack, tmp_path, "storage", "delete", resource_id)
+
+
+@pytest.mark.needs("kind:storage", "setting:tool:generate_uuid")
+def test_presets_create_with_a_missing_output_schema_id_prints_the_refusal(
+    cli_stack: TaiStack, tmp_path: Path, uniq: Callable[[str], str]
+) -> None:
+    name = uniq("cli-preset")
+    missing = f"{uniq('schemas')}/missing"
+    created = run_cli(
+        cli_stack,
+        tmp_path,
+        "presets",
+        "create",
+        name,
+        "--base-tool",
+        "generate_uuid",
+        "--description",
+        "CLI-authored preset",
+        "--output-schema",
+        json.dumps({"id": missing}),
+        json_flag=False,
+    )
+    assert _cli_refusal(created, 400) == f"stored id {missing!r} at output_schema is not a stored template"
+    listing = cli_json(run_cli(cli_stack, tmp_path, "presets", "list"))
+    assert all(row.get("name") != name for row in listing), listing
+
+
+@pytest.mark.needs("kind:storage", "setting:tool:generate_uuid")
+def test_hooks_register_with_a_missing_condition_id_prints_the_refusal(
+    cli_stack: TaiStack, tmp_path: Path, uniq: Callable[[str], str]
+) -> None:
+    missing = f"{uniq('jq')}/gate"
+    params = {
+        "name": uniq("cli-hook"),
+        "topic": uniq("events").replace("_", "-"),
+        "tool": "generate_uuid",
+        "execution_key": _ROOT_KEY_ID,
+        "condition": {"id": missing},
+    }
+    registered = run_cli(cli_stack, tmp_path, "hooks", "register", "--params", json.dumps(params), json_flag=False)
+    line = f"stored id {missing!r} at condition is not a stored template"
+    assert _cli_refusal(registered, 400) == f"invalid hook params: {line}"
+
+
+@pytest.mark.needs("kind:storage", "setting:tool:generate_uuid")
+def test_storage_delete_of_a_held_template_prints_the_refusal(
+    cli_stack: TaiStack, tmp_path: Path, uniq: Callable[[str], str]
+) -> None:
+    held = f"{uniq('jq')}/gate"
+    hook = uniq("cli-hook")
+    _cli_upload(cli_stack, tmp_path, held, text=".ok")
+    params = {
+        "name": hook,
+        "topic": uniq("events").replace("_", "-"),
+        "tool": "generate_uuid",
+        "execution_key": _ROOT_KEY_ID,
+        "condition": {"id": held},
+    }
+    registered = run_cli(cli_stack, tmp_path, "hooks", "register", "--params", json.dumps(params))
+    assert registered.returncode == 0, registered.stderr
+    try:
+        refusal = _cli_refusal(run_cli(cli_stack, tmp_path, "storage", "delete", held, json_flag=False), 409)
+        assert refusal == (
+            f"stored template {held!r} cannot be deleted — held by:\n"
+            f"- hook {hook!r} names {held!r} at condition\n"
+            "remove those references first"
+        )
+        assert cli_json(run_cli(cli_stack, tmp_path, "storage", "read", held))["content"] == ".ok"
+    finally:
+        run_cli(cli_stack, tmp_path, "hooks", "delete", hook)
+    deleted = run_cli(cli_stack, tmp_path, "storage", "delete", held)
+    assert deleted.returncode == 0, deleted.stderr

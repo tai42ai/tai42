@@ -11,21 +11,25 @@ from tai42_contract.states.errors import (
     TemplateExistsError,
     TemplateInUseError,
     TemplateValidationError,
+    ValueValidationError,
 )
 from tai42_contract.states.models import AttachBody, StateDeclaration, StateTemplateDocument
 from tai42_contract.template import TemplatedText
 from tai42_kit.utils.render import SchemaBodyError
 
+from tai42_skeleton.app import instance
 from tai42_skeleton.states import service as service_mod
 from tai42_skeleton.states.schema import _validate_schema
 from tai42_skeleton.states.service import StatesService
 
-from .fake_service_store import _STATE, FakeStatesStore, _FakeApp, _template_doc
+from .._fakes.recording_storage import MappedStorage
+from .fake_service_store import _CHECK_RESOURCES, _STATE, FakeStatesStore, _FakeApp, _template_doc
 
 
 @pytest.fixture
 def svc(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(service_mod, "states_store_configured", lambda: True)
+    monkeypatch.setattr(instance.app._storage_registry, "_provider", MappedStorage(_CHECK_RESOURCES))
     with tai42_app.bound(_FakeApp()):
         yield StatesService(store=FakeStatesStore())  # type: ignore[arg-type]
 
@@ -139,15 +143,17 @@ async def test_put_declaration_resolves_a_by_id_base_schema(svc: StatesService) 
     assert served["effective_schema"] == {"type": "object", "properties": {"n": {"type": "integer"}}}
 
 
-async def test_put_declaration_by_id_unfetchable_fails_loudly(svc: StatesService) -> None:
+async def test_put_declaration_naming_an_id_the_store_lacks_is_refused(svc: StatesService) -> None:
     decl = StateDeclaration(
         name="byid",
-        schema=TemplatedText(id="missing-schema"),
+        schema=TemplatedText(id="schemas/missing"),
         subject_kinds=["thread"],
         default_subject_kind="thread",
     )
-    with pytest.raises(SchemaBodyError, match="could not be rendered"):
+    with pytest.raises(ValueValidationError) as caught:
         await svc.put_declaration(decl)
+    assert str(caught.value) == "stored id 'schemas/missing' at schema is not a stored template"
+    assert await svc.get_declaration("byid") is None
 
 
 async def test_put_declaration_by_id_invalid_json_fails_loudly(svc: StatesService) -> None:
@@ -173,11 +179,39 @@ async def test_put_template_resolves_a_by_id_fragment_schema(svc: StatesService)
     assert got.schema_ == TemplatedText(id="stored-fragment-schema")
 
 
-async def test_put_template_by_id_unfetchable_fails_loudly(svc: StatesService) -> None:
+async def test_put_template_naming_ids_the_store_lacks_is_refused_with_every_site(svc: StatesService) -> None:
     doc = StateTemplateDocument.model_validate(
-        {"kind": "state-template", "name": "byidtpl", "schema": {"id": "missing-fragment"}}
+        {
+            "kind": "state-template",
+            "name": "byidtpl",
+            "schema": {"id": "missing-fragment"},
+            "declarations": {"schema": {"type": "object"}, "check": {"id": "jq/missing"}},
+            "template_jq": {"any_due": {"purpose": "input", "jq": {"id": "jq/due"}}},
+            "reconcile": {"orphans": {"id": "jq/orphans"}, "close": {"content": "[]"}, "resolutions": {"id": "jq/res"}},
+        }
     )
-    with pytest.raises(SchemaBodyError, match="could not be rendered"):
+    with pytest.raises(TemplateValidationError) as caught:
+        await svc.put_template(doc, replace=True)
+    assert str(caught.value).splitlines() == [
+        "stored id 'missing-fragment' at schema is not a stored template",
+        "stored id 'jq/missing' at declarations.check is not a stored template",
+        "stored id 'jq/due' at template_jq.any_due.jq is not a stored template",
+        "stored id 'jq/orphans' at reconcile.orphans is not a stored template",
+        "stored id 'jq/res' at reconcile.resolutions is not a stored template",
+    ]
+    assert await svc.get_template("byidtpl") is None
+
+
+async def test_put_template_naming_an_unsafe_id_is_refused_with_the_guard_line(svc: StatesService) -> None:
+    doc = StateTemplateDocument.model_validate(
+        {
+            "kind": "state-template",
+            "name": "byidtpl",
+            "schema": {"type": "object"},
+            "declarations": {"schema": {"type": "object"}, "check": {"id": "../x"}},
+        }
+    )
+    with pytest.raises(TemplateValidationError, match=r"^stored id '\.\./x' at declarations\.check: "):
         await svc.put_template(doc, replace=True)
 
 

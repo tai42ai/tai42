@@ -32,49 +32,55 @@ element, a typed model field, a ``dict[str, str]`` value) to its plain form so i
 passes the base tool's pydantic argument validation, while a value under a PERMISSIVE
 leaf (``Any`` / ``object``) stays wrapped.
 
-An author-set ``output_schema`` (an object JSON Schema) dispatches on the base's
-kind. When the base is an AGENT run tool, the schema is baked into the run tool's
-``response_format`` (a hidden, fixed constant; the contract's ``response_format`` rule
-requires a top-level ``title``, and the preset name — held to the preset-name law — is
-injected when absent) so the agent
-FORCES a structured output; the preset advertises the authored (title-free)
-schema. When the base is a plain tool, the schema is advertised as the bound
-tool's output schema and every result is validated against it at run time with
-tai42-kit's faithful draft-2020-12 validator, raising loudly on any mismatch — no
-forcing is possible for a non-LLM tool. A park is a suspend signal, not a result, and
-passes unvalidated (:func:`_is_park`).
+An ``input_map`` (a jq program, which requires an ``input_schema``) turns the caller's
+validated object into the base tool's arguments; ``$fixed`` reads the preset's fixed kwargs
+as stored, and the fixed kwargs are merged over the mapped arguments, never overridden by
+them (:func:`merge_fixed`).
+
+A preset's OUTPUT STAGE is its ``output_map`` (a jq program over the base's result) then
+its ``output_schema`` (an object JSON Schema the stage's result must match), applied by
+:func:`~tai42_skeleton.presets.output_stage.apply_output_stage_live` to every result that
+is neither a park nor an error. An agent run base with an ``output_schema`` and no
+``output_map`` runs no stage: the schema is baked into the run tool's ``response_format``
+(a hidden, fixed constant; the contract's ``response_format`` rule requires a top-level
+``title``, and the preset name — held to the preset-name law — is injected when absent) so
+the agent FORCES a structured output, and the preset advertises the authored (title-free)
+schema. The preset advertises the authored ``output_schema`` when one is set, nothing when an
+``output_map`` reshapes the result without one, and the base's own schema otherwise.
 """
 
 from __future__ import annotations
 
 import copy
+import logging
 from typing import TYPE_CHECKING, Any
 
+from fastmcp.exceptions import ToolError
 from fastmcp.exceptions import ValidationError as FastMCPValidationError
 from fastmcp.tools import Tool
 from fastmcp.tools.tool_transform import ArgTransform, forward, forward_raw
-from tai42_contract.interactions import ResumeBuffered, SuspendedInteraction
-from tai42_contract.secrets import SECRET_PLACEHOLDER, SecretValue, unwrap_secrets
+from tai42_contract.presets import PresetOutputStage
+from tai42_contract.secrets import SecretValue
 from tai42_contract.template import TemplatedText
-from tai42_kit.interactions.park_marker import read_resume_buffered_marker, read_suspended_interaction_marker
+from tai42_kit.utils.data import run_jq_first
 from tai42_kit.utils.data.json_schema_util import (
     JsonSchemaValidationError,
     validate_against_json_schema,
 )
 from tai42_kit.utils.render import resolve_schema_body
 
+from tai42_skeleton.presets.maps import resolve_preset_maps
+from tai42_skeleton.presets.output_stage import apply_output_stage_live
 from tai42_skeleton.presets.secret_refs import resolve_secret_refs
 from tai42_skeleton.tools.binding.secret_arguments import reveal_for_validation
-from tai42_skeleton.tools.reveal_gate import (
-    inprocess_reveal_gate,
-    secret_was_revealed,
-    stowed_park,
-    stowed_reveal_payload,
-)
+from tai42_skeleton.tools.binding.transformed_run import SchemaInputTool
+from tai42_skeleton.tools.stage_frames import stage_frame
 
 if TYPE_CHECKING:
     from mcp.types import ToolAnnotations
     from tai42_contract.app import TaiApp
+
+logger = logging.getLogger(__name__)
 
 
 async def preset_bind(
@@ -86,45 +92,77 @@ async def preset_bind(
     description: str = "",
     output_schema: TemplatedText | dict[str, Any] | None = None,
     input_schema: TemplatedText | dict[str, Any] | None = None,
+    input_map: TemplatedText | str | None = None,
+    output_map: TemplatedText | str | None = None,
 ) -> Tool:
     """Return a FastMCP tool transform of ``base_tool`` as the new named tool ``name``.
 
     Resolves the base ``Tool`` object (``app.tools.get_tool`` — hence async), then
     builds the transform in one call. Each ``fixed_kwargs`` key becomes a hidden,
     fixed constant; the remaining arguments keep the base tool's typed schema. An
-    ``output_schema`` dispatches on the base kind (agent → bake ``response_format``;
-    plain tool → advertise + validate-and-raise). An ``input_schema`` makes the exposed
-    tool advertise the AUTHORED schema as its own input contract and routes the caller's
-    validated object into the base tool's ``payload_arg`` (the base tool must have
-    registered ``PresetInputSchemaSupport``; without it this is a loud error — the
-    mechanism carries no base-tool knowledge).
+    ``input_map`` builds the arguments from the caller's object validated against the
+    authored ``input_schema`` (:func:`_bind_mapped_input`). Without one, an ``input_schema``
+    makes the exposed tool advertise the AUTHORED schema as its own input contract and routes
+    the caller's validated object into the base tool's ``payload_arg`` (the base tool must have
+    registered ``PresetInputSchemaSupport``; without it this is a loud error — the mechanism
+    carries no base-tool knowledge). The output stage is described in the module docstring.
 
-    Each schema is the ``TemplatedText | dict`` union: this bind is the single point every
+    Each schema and map is a ``TemplatedText`` union: this bind is the single point every
     preset builds its live tool through (the live rehydrate/reload AND the save-time dry-run
-    bake), so it is where a by-id schema is RESOLVED — rendered and parsed to its schema dict
-    — before use. An unfetchable stored id or a body that does not render to a JSON-object
-    schema fails LOUDLY here, so a bad by-id schema is a 400 at the save's dry-run bake, never
-    a live tool bound on an empty or unparsed schema.
+    bake), so it is where a by-id body is RESOLVED before use. An unfetchable stored id, a
+    schema body that does not render to a JSON-object schema, a map that does not compile and
+    an input map without an input schema fail LOUDLY here, so a bad body is a 400 at the
+    save's dry-run bake, never a live tool bound on it.
     """
     output_schema = await resolve_schema_body(f"preset {name!r} output_schema", output_schema)
     input_schema = await resolve_schema_body(f"preset {name!r} input_schema", input_schema)
+    input_map_text, output_map_text = await resolve_preset_maps(
+        name, input_map, output_map, has_input_schema=input_schema is not None
+    )
     base = await app.tools.get_tool(base_tool)
+    # ``$fixed`` reads the fixed kwargs as stored: a secret reference stays its marker text.
+    stored_fixed = copy.deepcopy(fixed_kwargs) if input_map_text is not None else {}
     # Materialise every ``!ENV ${VAR}`` secret reference from the process environment
-    # once, here at the shared chokepoint, so every bind path (plain, agent-forced,
-    # validated, input-schema) bakes the resolved value — a present var wrapped in
-    # ``SecretValue`` — while the STORE body keeps the marker verbatim. An absent
-    # required var raises loudly (a 400 at the save dry-run, a quarantine at rehydrate).
+    # once, here at the shared chokepoint, so every bind path bakes the resolved value —
+    # a present var wrapped in ``SecretValue`` — while the STORE body keeps the marker
+    # verbatim. An absent required var raises loudly (a 400 at the save dry-run, a
+    # quarantine at rehydrate).
     fixed_kwargs = resolve_secret_refs(fixed_kwargs)
     # Reveal a resolved reference sitting under a TYPED string leaf of the base tool's
     # schema — a top-level ``token: str``, a ``list[str]`` element, a typed model field,
     # a ``dict[str, str]`` value — so it survives the base tool's pydantic argument
     # validation and reaches the tool body; a reference under a PERMISSIVE leaf (``Any``
     # / ``object``) stays wrapped so a value that reaches a recording door is masked.
-    # Runs here at the chokepoint so every bind path (plain, agent-forced, validated,
-    # input-schema) bakes the reveal decision the base tool's own schema dictates.
     fixed_kwargs = reveal_for_validation(fixed_kwargs, base.parameters)
-    transform_args = {key: ArgTransform(hide=True, default=value) for key, value in fixed_kwargs.items()}
 
+    is_agent = base_tool in app.agents.all_agents()
+    # An agent base with a schema and no map forces the schema through ``response_format``
+    # instead of running a stage.
+    forced_schema = output_schema if is_agent and output_map_text is None else None
+    stage: PresetOutputStage | None = None
+    if output_map_text is not None or (output_schema is not None and forced_schema is None):
+        stage = PresetOutputStage(preset=name, output_map=output_map_text, output_schema=output_schema)
+    if output_schema is not None:
+        advertised_output_schema = output_schema
+    elif output_map_text is not None:
+        advertised_output_schema = None
+    else:
+        advertised_output_schema = base.output_schema
+
+    if input_map_text is not None:
+        assert input_schema is not None  # noqa: S101 resolve_preset_maps refuses an input map without one
+        return _bind_mapped_input(
+            base,
+            fixed_kwargs,
+            stored_fixed,
+            name=name,
+            description=description,
+            input_schema=input_schema,
+            input_map=input_map_text,
+            forced_schema=forced_schema,
+            stage=stage,
+            advertised_output_schema=advertised_output_schema,
+        )
     if input_schema is not None:
         return _bind_with_input_schema(
             app,
@@ -134,14 +172,17 @@ async def preset_bind(
             name=name,
             description=description,
             input_schema=input_schema,
-            output_schema=output_schema,
+            forced_schema=forced_schema,
+            stage=stage,
+            advertised_output_schema=advertised_output_schema,
         )
 
-    if output_schema is None:
-        return _bind_plain(base, name, description, transform_args)
-    if base_tool in app.agents.all_agents():
-        return _bind_agent_forced(base, name, description, transform_args, output_schema)
-    return _bind_validated(base, name, description, transform_args, output_schema)
+    transform_args = {key: ArgTransform(hide=True, default=value) for key, value in fixed_kwargs.items()}
+    if stage is not None:
+        return _bind_validated(base, name, description, transform_args, stage, advertised_output_schema)
+    if forced_schema is not None:
+        return _bind_agent_forced(base, name, description, transform_args, forced_schema)
+    return _bind_plain(base, name, description, transform_args)
 
 
 def _hints_of(base: Tool) -> ToolAnnotations | None:
@@ -154,29 +195,17 @@ def _hints_of(base: Tool) -> ToolAnnotations | None:
     return base.annotations.model_copy(update={"title": None})
 
 
-def _is_park(result: Any) -> bool:
-    """Whether a preset's forwarded ``result`` is a park signal rather than the tool's output.
-
-    In process the dispatch's reveal gate is armed: it stows the park object (a
-    ``SuspendedInteraction`` or a ``ResumeBuffered``) and ``result`` is only its flattened
-    projection, so the park is read off the gate by TYPE alone, and a result that merely looks
-    like a marker is the tool's output. On the MCP edge no gate is armed and the park rides
-    ``result.structured_content`` as its reserved marker. Either way the park is passed through
-    unvalidated: the run's real answer is validated when it resumes.
-    """
-    if inprocess_reveal_gate.get() is not None:
-        has_park, park = stowed_park()
-        return has_park and isinstance(park, (SuspendedInteraction, ResumeBuffered))
-    structured = getattr(result, "structured_content", None)
-    return (
-        read_suspended_interaction_marker(structured) is not None or read_resume_buffered_marker(structured) is not None
-    )
+def _forced_response_format(schema: dict[str, Any], name: str) -> dict[str, Any]:
+    """The ``response_format`` an agent base is forced with: ``schema`` with the preset name as its default title."""
+    response_format = dict(schema)
+    response_format.setdefault("title", name)
+    return response_format
 
 
 def _bind_plain(base: Tool, name: str, description: str, transform_args: dict[str, ArgTransform]) -> Tool:
-    """Transform ``base`` baking the hidden constants, with NO output schema.
+    """Transform ``base`` baking the hidden constants, with NO output stage.
 
-    The plain no-output-schema path (one ``Tool.from_tool``).
+    The plain path (one ``Tool.from_tool``).
     """
     return Tool.from_tool(
         base,
@@ -197,14 +226,10 @@ def _bind_agent_forced(
 ) -> Tool:
     """Force structured output by baking ``response_format`` from the authored schema.
 
-    The contract's ``response_format`` rule requires a top-level ``title``; when the author
-    left it off, the preset name is injected. The advertised output schema stays the authored
-    (title-free) value; the agent's own drain validates the forced result, so no
-    second validation wrapper is attached.
+    The advertised output schema stays the authored (title-free) value; the agent's own drain
+    validates the forced result, so the build has no transform and no output stage.
     """
-    baked_response_format = dict(output_schema)
-    baked_response_format.setdefault("title", name)
-    transform_args["response_format"] = ArgTransform(hide=True, default=baked_response_format)
+    transform_args["response_format"] = ArgTransform(hide=True, default=_forced_response_format(output_schema, name))
     return Tool.from_tool(
         base,
         name=name,
@@ -221,66 +246,15 @@ def _bind_validated(
     name: str,
     description: str,
     transform_args: dict[str, ArgTransform],
-    output_schema: dict[str, Any],
+    stage: PresetOutputStage,
+    advertised_output_schema: dict[str, Any] | None,
 ) -> Tool:
-    """Advertise the authored schema and validate every non-park result against it.
+    """Transform ``base`` baking the hidden constants and run ``stage`` over every result."""
 
-    A secret-bearing failure is redacted. The plain-tool declare-and-validate path: a non-LLM
-    tool cannot be forced, so every result is validated against ``output_schema`` at run time,
-    raising loudly on any mismatch — a park is a suspend signal, not a result, and passes
-    (:func:`_is_park`).
-    """
-
-    def _raise_redacted(caught: JsonSchemaValidationError) -> None:
-        # The placeholder-only failure: json_path kept, instance text replaced by the
-        # placeholder. MUST be invoked OUTSIDE the ``except`` and raise ``from None`` so
-        # neither ``__cause__`` nor ``__context__`` retains the caught error, whose
-        # message and ``offending_value`` embed the revealed secret verbatim and would
-        # otherwise ride a logged traceback.
-        raise JsonSchemaValidationError(
-            f"value does not match schema at {caught.json_path}: a secret-bearing "
-            f"result violates the schema ({SECRET_PLACEHOLDER} redacts the instance text)",
-            json_path=caught.json_path,
-            offending_value=SECRET_PLACEHOLDER,
-        ) from None
-
-    async def _enforce_output_schema(**kwargs: Any) -> Any:
-        result = await forward(**kwargs)
-        # A park is a SUSPEND signal, not the tool's output: it passes through
-        # unvalidated so the dispatch hands back the park intact on every door.
-        if _is_park(result):
-            return result
-        # Under the armed in-process reveal gate a secret-bearing return is stowed
-        # RAW while ``result.structured_content`` carries only the masked projection;
-        # validate the REVEALED value (an in-memory reveal for validation only —
-        # nothing recorded, nothing returned from here) so the guard checks the real
-        # result, not the placeholder. With no stowed payload the structured content
-        # is already the real value.
-        has_payload, payload = stowed_reveal_payload()
-        if has_payload:
-            revealed = unwrap_secrets(payload)
-            caught: JsonSchemaValidationError | None = None
-            try:
-                validate_against_json_schema(revealed, output_schema)
-            except JsonSchemaValidationError as exc:
-                caught = exc
-            if caught is not None:
-                _raise_redacted(caught)
-        else:
-            # Unarmed MCP edge: ``structured_content`` already carries the REVEALED
-            # value. A validation failure whose secret was revealed on this door
-            # (:func:`secret_was_revealed`) is redacted the same both-links-severed
-            # way; a non-secret preset re-raises untouched, keeping its instance-quoting.
-            caught = None
-            try:
-                validate_against_json_schema(result.structured_content, output_schema)
-            except JsonSchemaValidationError as exc:
-                if not secret_was_revealed():
-                    raise
-                caught = exc
-            if caught is not None:
-                _raise_redacted(caught)
-        return result
+    async def _apply_stage(**kwargs: Any) -> Any:
+        with stage_frame(stage) as frame:
+            result = await forward(**kwargs)
+        return await apply_output_stage_live(frame, result)
 
     return Tool.from_tool(
         base,
@@ -289,9 +263,110 @@ def _bind_validated(
         title=None,
         annotations=_hints_of(base),
         transform_args=transform_args,
-        output_schema=output_schema,
-        transform_fn=_enforce_output_schema,
+        output_schema=advertised_output_schema,
+        transform_fn=_apply_stage,
     )
+
+
+def merge_fixed(mapped: dict[str, Any], fixed: dict[str, Any], *, preset: str) -> dict[str, Any]:
+    """Merge the preset's ``fixed`` kwargs over the ``mapped`` arguments; a fixed value is never overridden.
+
+    Recurses where both sides hold a dict at a key; any other key on both sides raises
+    :class:`~fastmcp.exceptions.ToolError` naming its dotted path. Neither input is mutated:
+    ``fixed`` is a bind's shared constants reused across every call, so a fixed-only subtree is
+    copied into the result (:func:`_copy_baked_default`).
+    """
+    return _merge_fixed(mapped, fixed, preset=preset, path="")
+
+
+def _merge_fixed(mapped: dict[str, Any], fixed: dict[str, Any], *, preset: str, path: str) -> dict[str, Any]:
+    merged = dict(mapped)
+    for key, fixed_value in fixed.items():
+        dotted = f"{path}{key}"
+        if key not in mapped:
+            merged[key] = _copy_baked_default(fixed_value)
+            continue
+        mapped_value = mapped[key]
+        if isinstance(mapped_value, dict) and isinstance(fixed_value, dict):
+            merged[key] = _merge_fixed(mapped_value, fixed_value, preset=preset, path=f"{dotted}.")
+            continue
+        raise ToolError(
+            f"preset {preset!r} input map sets {dotted}, which the preset fixes; a fixed value cannot be overridden"
+        )
+    return merged
+
+
+def _validate_caller_object(caller_object: dict[str, Any], input_schema: dict[str, Any]) -> None:
+    """Validate the caller's object against the authored ``input_schema``.
+
+    A custom ``transform_fn`` bypasses FastMCP's own argument validation, so a mismatch is
+    re-raised as FastMCP's ValidationError: a client error, reaching the caller unmasked.
+    """
+    try:
+        validate_against_json_schema(caller_object, input_schema)
+    except JsonSchemaValidationError as exc:
+        raise FastMCPValidationError(f"caller input does not match the preset's input_schema: {exc}") from exc
+
+
+def _bind_mapped_input(
+    base: Tool,
+    fixed_kwargs: dict[str, Any],
+    stored_fixed: dict[str, Any],
+    *,
+    name: str,
+    description: str,
+    input_schema: dict[str, Any],
+    input_map: str,
+    forced_schema: dict[str, Any] | None,
+    stage: PresetOutputStage | None,
+    advertised_output_schema: dict[str, Any] | None,
+) -> Tool:
+    """Build the exposed tool whose arguments the ``input_map`` makes from the caller's object.
+
+    The tool advertises the authored ``input_schema``; ``_route`` validates the caller's object
+    against it, runs the map with ``$fixed`` bound to the stored fixed kwargs, merges the fixed
+    kwargs over the mapped arguments (:func:`merge_fixed`) and forwards them under the base's own
+    argument names; the base validates them. The map decides where the caller's data goes, so the
+    base needs no ``PresetInputSchemaSupport``. A ``forced_schema`` (an agent base with a schema
+    and no output map) is added as ``response_format``; a ``stage`` runs over the result.
+    """
+    forced_response_format = _forced_response_format(forced_schema, name) if forced_schema is not None else None
+
+    async def _route(**kwargs: Any) -> Any:
+        caller_object = dict(kwargs)
+        _validate_caller_object(caller_object, input_schema)
+        try:
+            mapped = await run_jq_first(input_map, caller_object, variables={"fixed": stored_fixed})
+        except (ValueError, TypeError, TimeoutError) as exc:
+            # The jq text can quote ``$fixed`` or the caller's values: it stays in the server log.
+            logger.warning("preset %r input map failed: %s", name, exc)
+            raise ToolError(f"preset {name!r} input map failed") from None
+        if not isinstance(mapped, dict):
+            raise ToolError(
+                f"preset {name!r} input map must produce an object of the base tool's arguments, "
+                f"got {type(mapped).__name__}"
+            )
+        fixed = fixed_kwargs
+        if forced_response_format is not None:
+            fixed = {**fixed_kwargs, "response_format": forced_response_format}
+        arguments = merge_fixed(mapped, fixed, preset=name)
+        if stage is None:
+            return await forward_raw(**arguments)
+        with stage_frame(stage) as frame:
+            result = await forward_raw(**arguments)
+        return await apply_output_stage_live(frame, result)
+
+    tool = SchemaInputTool.from_tool(
+        base,
+        name=name,
+        description=description,
+        title=None,
+        annotations=_hints_of(base),
+        output_schema=advertised_output_schema,
+        transform_fn=_route,
+    )
+    tool.parameters = input_schema
+    return tool
 
 
 def deep_merge(baked: dict[str, Any], caller: dict[str, Any]) -> dict[str, Any]:
@@ -360,7 +435,9 @@ def _bind_with_input_schema(
     name: str,
     description: str,
     input_schema: dict[str, Any],
-    output_schema: dict[str, Any] | None,
+    forced_schema: dict[str, Any] | None,
+    stage: PresetOutputStage | None,
+    advertised_output_schema: dict[str, Any] | None,
 ) -> Tool:
     """Build the exposed tool whose OWN advertised input schema is the authored ``input_schema``.
 
@@ -378,8 +455,8 @@ def _bind_with_input_schema(
     field is rejected LOUDLY as a caller (client) error, never routed raw into the base tool.
     The validated object is forwarded to the base under ``payload_arg`` alongside the baked
     ``fixed_kwargs`` (``forward_raw`` — the base's own arg names, bypassing the identity
-    transform). An ``output_schema`` is advertised and every result validated against it,
-    raising loudly on any mismatch.
+    transform). A ``forced_schema`` (an agent base with a schema and no output map) is added
+    as ``response_format``; a ``stage`` runs over the result.
 
     ONE ``fixed_kwargs`` key is special: the ``payload_arg`` itself. Baking it lets the
     author supply partial DEFAULTS for the payload rather than an absolute constant that
@@ -398,6 +475,8 @@ def _bind_with_input_schema(
             "(no PresetInputSchemaSupport is registered for it)"
         )
     payload_arg = support.payload_arg
+    if forced_schema is not None:
+        fixed_kwargs = {**fixed_kwargs, "response_format": _forced_response_format(forced_schema, name)}
 
     # When the preset bakes the PAYLOAD ARG itself, the baked value is a set of partial
     # DEFAULTS the caller deep-merges over — so it MUST be a JSON object. Reject a non-dict
@@ -417,18 +496,9 @@ def _bind_with_input_schema(
         baked_payload_defaults = raw_baked_payload
 
     async def _route(**kwargs: Any) -> Any:
-        # A custom transform_fn bypasses FastMCP's own argument validation, so the kernel
-        # validates against the authored input_schema HERE before forwarding, re-raising a
-        # mismatch as FastMCP's ValidationError so it surfaces as a client error (logged as
-        # a warning, reaching the caller unmasked) rather than a masked 500.
         caller_object = dict(kwargs)
-        # Step 1: validate the caller's OWN object. A caller mistake (missing-required,
-        # wrong-typed, or additionalProperties-forbidden field) surfaces VERBATIM as a
-        # client error, never routed raw into ``payload_arg``.
-        try:
-            validate_against_json_schema(caller_object, input_schema)
-        except JsonSchemaValidationError as exc:
-            raise FastMCPValidationError(f"caller input does not match the preset's input_schema: {exc}") from exc
+        # Step 1: validate the caller's OWN object, so a caller mistake surfaces verbatim.
+        _validate_caller_object(caller_object, input_schema)
         if baked_payload_present:
             # The baked payload is a set of DEFAULTS: deep-merge the caller OVER it,
             # caller-wins-per-key. The merged object is what the base tool actually sees.
@@ -443,28 +513,18 @@ def _bind_with_input_schema(
                     f"preset {name!r}'s baked payload defaults produce an input that does not "
                     f"match its input_schema: {exc}"
                 ) from exc
-            # Forward the MERGED payload under ``payload_arg``; spread ``fixed_kwargs`` first
-            # so the merged value overrides the baked payload key while EVERY other baked
-            # kwarg stays its absolute hidden constant.
-            result = await forward_raw(**{**fixed_kwargs, payload_arg: merged})
+            # Spread ``fixed_kwargs`` first so the merged value overrides the baked payload
+            # key while EVERY other baked kwarg stays its absolute hidden constant.
+            arguments = {**fixed_kwargs, payload_arg: merged}
         else:
-            result = await forward_raw(**{payload_arg: caller_object, **fixed_kwargs})
-        # A park is a SUSPEND signal, not the tool's output: it passes through
-        # unvalidated on every door. Non-parking results are still validated below.
-        if _is_park(result):
-            return result
-        if output_schema is not None:
-            validate_against_json_schema(result.structured_content, output_schema)
-        return result
+            arguments = {payload_arg: caller_object, **fixed_kwargs}
+        if stage is None:
+            return await forward_raw(**arguments)
+        with stage_frame(stage) as frame:
+            result = await forward_raw(**arguments)
+        return await apply_output_stage_live(frame, result)
 
-    # When the author declares NO output_schema, advertise the BASE tool's own output
-    # schema (its typed result — e.g. ``ExecResult``) so the exposed preset reconstructs to
-    # the same typed value the base does, matching the plain-preset path (which inherits it
-    # via FastMCP's fallback). A custom transform_fn otherwise defaults the exposed schema to
-    # nothing, leaving the caller a raw dict. The base's own result already conforms, so this
-    # is advertisement only — ``_route`` validates against the AUTHORED schema alone.
-    advertised_output_schema = output_schema if output_schema is not None else base.output_schema
-    tool = Tool.from_tool(
+    tool = SchemaInputTool.from_tool(
         base,
         name=name,
         description=description,
@@ -473,10 +533,7 @@ def _bind_with_input_schema(
         output_schema=advertised_output_schema,
         transform_fn=_route,
     )
-    # The exposed tool advertises the AUTHORED schema as its input contract. FastMCP does
-    # NOT validate the caller against ``.parameters`` for a custom transform_fn, so ``_route``
-    # validates the caller's object against ``input_schema`` itself and packs the validated
-    # object into ``payload_arg``. The base tool's own schema keys are supplied by the baked
-    # ``fixed_kwargs`` (the remaining non-``payload_arg`` keys) inside ``_route``.
+    # FastMCP does NOT validate the caller against ``.parameters`` for a custom
+    # transform_fn, so ``_route`` validates the caller's object itself.
     tool.parameters = input_schema
     return tool

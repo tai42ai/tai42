@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import AbstractContextManager, asynccontextmanager, contextmanager, nullcontext
 from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any
 
@@ -45,6 +45,7 @@ from tai42_skeleton.tools.attribution import (
     stamp_run_attribution,
 )
 from tai42_skeleton.tools.retry import dispatch_with_retry
+from tai42_skeleton.tools.stage_frames import run_stage_scope
 from tai42_skeleton.tools.state_binding import (
     apply_binding_injections,
     apply_binding_updates,
@@ -203,12 +204,15 @@ class DispatchScope:
         if self._run is not None:
             self._run.observe(result)
 
-    def observe_park(self, interaction_id: str) -> None:
-        """Record a park recognized from the MCP wire ``interaction_id`` — never a clean success."""
+    def observe_park(self, interaction_id: str, *, output: object) -> None:
+        """Record a park recognized from the MCP wire ``interaction_id`` — never a clean success.
+
+        ``output`` is the serialized result that carried the marker.
+        """
         # A park is not a clean output — no updates apply to a suspended run.
         self._succeeded = False
         if self._run is not None:
-            self._run.observe_park(interaction_id)
+            self._run.observe_park(interaction_id, output=output)
 
 
 # Armed for the span of a dispatch so a NESTED dispatch (a tool that itself dispatches a
@@ -286,6 +290,10 @@ async def dispatch_scope(
     own binding alone. A NESTED dispatch (the armed guard) applies nothing — a sub-preset's
     own binding never fires, and the door binding is never re-applied. Injections write
     ``arguments`` (in place) before the dispatch, updates apply after a clean success.
+
+    The OUTERMOST dispatch also opens the run's own empty preset output stage frame stack and
+    records its door face (:func:`~tai42_skeleton.tools.stage_frames.run_stage_scope`), so a
+    park inside the run sorts the frames it sits under and no stack leaks into another run.
     """
     scope = DispatchScope()
     prior = current_tool_invocation()
@@ -293,6 +301,7 @@ async def dispatch_scope(
     outermost_binding = not _binding_scope_armed.get()
     invocation_token = set_current_tool_invocation(ToolInvocation(tool_name=key, state_binding=door_binding))
     binding_token = _binding_scope_armed.set(True)
+    stage_scope: AbstractContextManager[None] = run_stage_scope() if outermost_binding else nullcontext()
     try:
         # The run entry waits for the outstanding pending saves of the door's subjects first,
         # outside the turn budget (the wait is an earlier save's, not this turn's work); a held
@@ -302,7 +311,11 @@ async def dispatch_scope(
             # start — the run-delivery identity and address (read off the completion the door
             # bound before this dispatch). ``continues_chain`` SETS the chain (a continuation
             # dispatch); otherwise the frame PUSHES ``key``.
-            with tool_call_frame(name=key, extras=extras, continues_chain=continues_chain), stamp_run_attribution():
+            with (
+                tool_call_frame(name=key, extras=extras, continues_chain=continues_chain),
+                stamp_run_attribution(),
+                stage_scope,
+            ):
                 async with turn_budget():
                     manager = app.preset_manager
                     is_preset = manager.is_registered(key)
@@ -322,7 +335,7 @@ async def dispatch_scope(
                             if not outermost_preset:
                                 yield scope
                                 return
-                            async with record_outermost_preset_run(key, version) as run:
+                            async with record_outermost_preset_run(key, version, arguments=arguments) as run:
                                 scope._run = run
                                 yield scope
     finally:
@@ -417,7 +430,7 @@ class DispatchScopeMiddleware(Middleware):
             # error carrying the refusal text, raised inside the scope so the row records ``error``.
             await _refuse_undeclared_mcp_park(self._app, name)
         if marker is not None:
-            scope.observe_park(marker["interaction_id"])
+            scope.observe_park(marker["interaction_id"], output=structured)
         elif buffered is not None:
             # A resume-buffered partial is observed as the object the in-process door observes,
             # so both doors record it alike.

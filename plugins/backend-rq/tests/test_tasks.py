@@ -11,6 +11,7 @@ from rq.exceptions import NoSuchJobError
 from tai42_contract.access_control import caller_may_read_secrets
 from tai42_contract.interactions import SuspendedInteraction
 from tai42_kit.backend import CallbackSchema
+from tai42_kit.settings import reset_all_settings
 from tai42_kit.utils.detached_util import in_detached_run
 from tai42_kit.utils.schedule_subject import (
     SCHEDULE_EXECUTION_FINGERPRINT_ARG,
@@ -328,10 +329,12 @@ def queue(monkeypatch) -> FakeQueue:
 async def test_enqueue_task_binds_the_settings_queue_name(queue, monkeypatch):
     """The enqueue queue name is the ``queue_name`` setting, so the enqueue side
     and the worker's consume side name the SAME per-stack queue."""
-    from tai42_backend_rq.settings import RqSettings
-
-    monkeypatch.setattr(tasks, "rq_settings", lambda: RqSettings(queue_name="tai42_e2e_abc123:default"))
-    await tasks.enqueue_task(a=1)
+    monkeypatch.setenv("RQ_QUEUE_NAME", "tai42_e2e_abc123:default")
+    reset_all_settings()
+    try:
+        await tasks.enqueue_task(a=1)
+    finally:
+        reset_all_settings()
     assert queue.name == "tai42_e2e_abc123:default"
 
 

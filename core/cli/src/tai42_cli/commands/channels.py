@@ -1,8 +1,9 @@
 """``tai channels`` — inspect the registered delivery channels.
 
-A thin wrapper over the authed ``GET /api/channels`` catalog route: the channel
-names ``ask(channel=...)`` can currently resolve. Registration itself is
-import-only (a manifest ``channel_modules`` entry), so this group is read-only.
+A thin wrapper over the authed ``GET /api/channels`` catalog route: the channels
+``ask(channel=...)`` can currently resolve and a conversation route can name,
+each with its hint for a route's identity. Registration itself is import-only
+(a manifest ``channel_modules`` entry), so this group is read-only.
 """
 
 from __future__ import annotations
@@ -21,7 +22,7 @@ app = typer.Typer(
 @app.command("list")
 @covers(("GET", "/api/channels"))
 def list_channels(ctx: typer.Context) -> None:
-    """List the registered channel names.
+    """List the registered channels and each one's hint for a route's identity.
 
     Example: ``tai channels list``
     """

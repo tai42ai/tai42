@@ -1,12 +1,14 @@
 """Read-only status of every pluggable kind — the introspection seam.
 
 :func:`collect_kind_status` reports one :class:`KindStatus` row per pluggable
-kind (identity, accounts, monitoring, storage, backend, channels, webhook
-verifiers, config, studio plugins), reading the live registries WITHOUT mutating
-any of them. Each row's ``state`` is ``active`` (a real plugin is registered),
-``default`` (a built-in fallback is serving — the NoOp monitoring recorder or the
-``file`` config provider), or ``off`` (nothing registered and the kind has no
-built-in fallback — a legal, reported state, never an error).
+kind (identity, accounts, monitoring, storage, files, backend, sandbox, channels,
+webhook verifiers, config, studio plugins), reading the live registries WITHOUT
+mutating any of them. ``files`` reports whether the skeleton's optional file-loading
+dependencies are installed, probed by importing the loader module. Each row's
+``state`` is ``active`` (a real plugin is registered), ``default`` (a built-in
+fallback is serving — the NoOp monitoring recorder or the ``file`` config provider),
+or ``off`` (nothing registered and the kind has no built-in fallback — a legal,
+reported state, never an error).
 
 The startup summary (:mod:`tai42_skeleton.app.lifecycle`) and the
 ``GET /api/system/kinds`` route both render these rows, so the module lives beside
@@ -20,6 +22,7 @@ registry surfaces loudly instead of as a silent partial table.
 
 from __future__ import annotations
 
+import importlib
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -38,10 +41,12 @@ from tai42_skeleton.db import SKELETON_COMPONENT
 from tai42_skeleton.interactions.settings import interactions_store_configured
 from tai42_skeleton.monitoring.noop import NoOpMonitoring
 from tai42_skeleton.monitoring.registry import get_monitoring_staged
+from tai42_skeleton.operations.errors import NotSupportedError
 from tai42_skeleton.plugins.registry import StudioPluginError, current_registry_staged
 from tai42_skeleton.routers.tool_runs_settings import tool_runs_store_configured
 from tai42_skeleton.settings.rate_limit import RateLimitSettings
 from tai42_skeleton.states.db import STATES_COMPONENT, states_store_configured
+from tai42_skeleton.template.errors import FILES_NOT_CONFIGURED_CODE
 
 if TYPE_CHECKING:
     from tai42_skeleton.app.facets import AdminFacet, StorageFacet
@@ -144,6 +149,18 @@ def _storage_row() -> KindStatus:
         )
     cls = type(provider)
     return KindStatus(kind="storage", state="active", plugin=cls.__module__, detail=cls.__qualname__)
+
+
+def _files_row() -> KindStatus:
+    # The probe is the loader module's own import, the refusal every content load meets.
+    # A refused import leaves no ``sys.modules`` entry, so each call probes again.
+    try:
+        importlib.import_module("tai42_skeleton.template.file_loading")
+    except NotSupportedError as exc:
+        if exc.extra.get("code") != FILES_NOT_CONFIGURED_CODE:
+            raise
+        return KindStatus(kind="files", state="off", plugin=None, detail=exc.message)
+    return KindStatus(kind="files", state="active", plugin=None, detail="file loading is installed (the 'files' extra)")
 
 
 def _backend_row() -> KindStatus:
@@ -346,20 +363,22 @@ def _connectors_row(feature: GatedFeature) -> KindStatus:
 def collect_kind_status() -> list[KindStatus]:
     """Snapshot every pluggable kind's live status, read-only.
 
-    Ten pluggable-kind rows (identity, accounts, monitoring, storage, backend,
+    Eleven pluggable-kind rows (identity, accounts, monitoring, storage, files, backend,
     sandbox, channels, webhook verifiers, config, studio plugins) plus one row per DB-backed
     gated feature (tool_runs, interactions, rate_limit, marketplace store, tool_meta,
     connectors, versioning) whose ``off`` state is the honest answer when no store is
     configured. Reads the process/app registries and the feature settings as they
-    stand; each row is ``active``, ``default``, or ``off``. The only swallowed error
-    is the documented not-built :class:`StudioPluginError` (reported as an ``off``
-    studio-plugins row); every other error propagates so a broken registry is loud.
+    stand; each row is ``active``, ``default``, or ``off``. Two documented errors become
+    ``off`` rows: the not-built :class:`StudioPluginError` (the studio-plugins row) and the
+    loader module's :class:`NotSupportedError` with code ``files-not-configured`` (the
+    ``files`` row); every other error propagates so a broken registry is loud.
     """
     return [
         _identity_row(),
         _accounts_row(),
         _monitoring_row(),
         _storage_row(),
+        _files_row(),
         _backend_row(),
         _sandbox_row(),
         _channels_row(),

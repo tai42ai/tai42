@@ -49,3 +49,21 @@ async def e2e_deferred_gate(key: str) -> str:
 async def e2e_deferred_gate_resumable(key: str) -> str:
     """The same gate, declared crash-resumable: a call a process exit interrupted is run again."""
     return await _record_and_wait(key)
+
+
+@tai42_app.tools.tool(tags={"e2e"})
+async def e2e_defer_after_reply(target: str) -> dict[str, str]:
+    """Defer ``target`` with no arguments in a states unit; return the live ``{"trace_id", "span_id"}``.
+
+    The unit stages nothing but the call and commits, so the call runs after the reply, in this
+    call's trace under the span live here.
+    """
+    writer = tai42_app.monitoring.active.writer
+    trace_id = writer.current_trace_id()
+    span_id = writer.current_span_id()
+    if trace_id is None or span_id is None:
+        raise RuntimeError("the defer probe ran with no live recorded span")
+    async with tai42_app.states.open_unit() as unit:
+        await unit.defer_call(target, {})
+        await unit.commit()
+    return {"trace_id": trace_id, "span_id": span_id}

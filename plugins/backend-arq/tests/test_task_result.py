@@ -12,7 +12,7 @@ from arq.jobs import JobStatus, ResultNotFound
 from tai42_backend_arq import pool, tools
 from tai42_backend_arq.settings import TaskFailedError
 
-from .conftest import lease_of
+from .conftest import handle_of, lease_of
 
 
 class _FakeJob:
@@ -39,7 +39,7 @@ async def _run(*, statuses: list[JobStatus], result: Any, timeout: float | None)
     job = _FakeJob(statuses=statuses, result=result)
     with (
         patch.object(pool, "arq_connection", lease_of(object())),
-        patch.object(tools, "Job", return_value=job),
+        patch.object(tools, "job_handle", handle_of(lambda *_: job)),
     ):
         return await tools.backend_task_result("task-1", timeout=timeout)
 
@@ -122,7 +122,7 @@ async def test_own_cancellation_propagates_never_reads_as_stored_abort() -> None
 
     with (
         patch.object(pool, "arq_connection", lease_of(object())),
-        patch.object(tools, "Job", return_value=_HangingJob()),
+        patch.object(tools, "job_handle", handle_of(lambda *_: _HangingJob())),
     ):
         task = asyncio.get_running_loop().create_task(tools.backend_task_result("task-1", timeout=5))
         await entered.wait()
@@ -135,6 +135,6 @@ async def test_task_status_returns_enum_value() -> None:
     job = _FakeJob(statuses=[JobStatus.queued], result=None)
     with (
         patch.object(pool, "arq_connection", lease_of(object())),
-        patch.object(tools, "Job", return_value=job),
+        patch.object(tools, "job_handle", handle_of(lambda *_: job)),
     ):
         assert await tools.backend_task_status("task-1") == "queued"

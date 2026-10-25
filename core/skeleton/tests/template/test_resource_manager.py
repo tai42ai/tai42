@@ -3,8 +3,10 @@ renders through a registered in-memory Storage provider."""
 
 from __future__ import annotations
 
+import mimetypes
+
 import pytest
-from tai42_contract.storage import Storage
+from tai42_contract.storage import ObjectStat, Storage
 from tai42_contract.template import TemplatedText
 
 from tai42_skeleton.storage import StorageRegistry
@@ -34,6 +36,13 @@ class _InMemoryStorage(Storage):
         prefix = path.rstrip("/") + "/"
         for key in [k for k in self.items if k.startswith(prefix)]:
             del self.items[key]
+
+    async def stat(self, path: str) -> ObjectStat:
+        content_type, _ = mimetypes.guess_type(path)
+        return ObjectStat(content_type=content_type, size=len(await self.load_bytes(path)))
+
+    async def load_range(self, path: str, start: int, length: int) -> bytes:
+        return (await self.load_bytes(path))[start : start + length]
 
 
 async def test_dead_by_default_raises_loudly() -> None:
@@ -111,6 +120,28 @@ async def test_load_accepts_clean_id() -> None:
     manager = ResourceManager(registry.provider, on_evicted=lambda _eviction: None)
     data, _mime = await manager.load("clean/name.j2", with_mime=False)
     assert data == b"hello"
+
+
+@pytest.mark.parametrize("key", ["./a", "a/../b", "a//b", "a/", "/a", ".", "a/.."])
+async def test_load_and_fetch_refuse_a_non_canonical_key_with_the_guard_message(key: str) -> None:
+    from tai42_skeleton.template.path_guard import UnsafeTemplatePathError
+
+    registry = StorageRegistry()
+
+    @registry.register_storage
+    class Provider(_InMemoryStorage):
+        def __init__(self) -> None:
+            super().__init__({"a": "x", "b": "y", "a/b.txt": "z"})
+
+    manager = ResourceManager(registry.provider, on_evicted=lambda _eviction: None)
+    message = f"non-canonical store key {key!r}: a key is '/'-separated names with no empty, '.' or '..' segment"
+    with pytest.raises(UnsafeTemplatePathError) as loaded:
+        await manager.load(key)
+    assert str(loaded.value) == message
+    with pytest.raises(UnsafeTemplatePathError) as fetched:
+        await manager.fetch_template(key)
+    assert str(fetched.value) == message
+    assert await manager.fetch_template("a/b.txt") == "z"
 
 
 async def test_resolve_image_rejects_traversal_id() -> None:

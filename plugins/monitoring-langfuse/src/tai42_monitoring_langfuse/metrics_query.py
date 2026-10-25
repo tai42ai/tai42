@@ -1,22 +1,15 @@
-"""The Metrics API query surface: ``query_metrics`` -> aggregated metric rows.
+"""The ``query_metrics`` read on Langfuse Metrics v2, the observations view.
 
-Maps the neutral contract vocabulary (:class:`Measure` / :class:`Dimension`) onto
-the Langfuse Metrics API: each neutral measure to a Langfuse measure + aggregation,
-the model dimension to Langfuse's ``providedModelName`` (a per-generation attribute,
-so a model grouping aggregates over the observations view), and the time bucket back
-off the response row. The backend declares what it serves through
-:meth:`metrics_capability`; a query for anything outside that raises
-``MonitoringReadNotSupportedError`` rather than returning a silent zero.
+An ungrouped query counts runs and averages their latency over the roots, and sums cost and tokens over every
+observation, then merges the two on the time bucket; a run counts in the bucket its root started in. A model
+grouping reads one query over every observation, since the model is a per-observation column.
 """
 
 from __future__ import annotations
 
-import asyncio
-import json
-import re
-from functools import partial
 from typing import Any
 
+import httpx
 from tai42_contract.monitoring import (
     Dimension,
     Measure,
@@ -24,124 +17,106 @@ from tai42_contract.monitoring import (
     MetricsQuery,
     MetricsResult,
     MetricsRow,
-    MonitoringReadNotSupportedError,
+    MonitoringError,
+    MonitoringReadNotServedError,
 )
 
-from tai42_monitoring_langfuse.filters import _environment_clause
-from tai42_monitoring_langfuse.measures import _measure_key, _measure_value
-from tai42_monitoring_langfuse.query_base import _LangfuseQuery
+from tai42_monitoring_langfuse.filters import ROOT_CLAUSE, Clause, environment_clause
+from tai42_monitoring_langfuse.measures import _measure_value
+from tai42_monitoring_langfuse.observation_query import ObservationQuery
 
-# Each neutral measure -> (Langfuse measure name, natural aggregation).
+# Each neutral measure -> (Langfuse measure, aggregation). Langfuse metrics latency is in milliseconds.
 _MEASURE_TO_LANGFUSE: dict[Measure, tuple[str, str]] = {
     Measure.COUNT: ("count", "count"),
     Measure.COST: ("totalCost", "sum"),
     Measure.TOKENS: ("totalTokens", "sum"),
     Measure.LATENCY: ("latency", "avg"),
 }
-
-# Each neutral dimension -> the Langfuse group-by field. The model attribute lives on
-# generations, so grouping by it reads the observations view.
-_DIMENSION_TO_LANGFUSE: dict[Dimension, str] = {
-    Dimension.MODEL: "providedModelName",
-}
-
-# A row's time-bucket column is not a stable key on the Langfuse response, so the
-# bucket is recovered as the row's first ISO-date-like value (the plugin owns this
-# Langfuse quirk — the platform never hunts a date).
-_ISO_LIKE = re.compile(r"\d{4}-\d{2}-\d{2}")
+# The measures an ungrouped query reads over the roots, one per run.
+_RUN_MEASURES = frozenset({Measure.COUNT, Measure.LATENCY})
+_DIMENSION_TO_LANGFUSE: dict[Dimension, str] = {Dimension.MODEL: "providedModelName"}
+_BUCKET_COLUMN = "time_dimension"
 
 
-class MetricsQueryRunner(_LangfuseQuery):
-    """Serves ``query_metrics`` from the Langfuse Metrics API."""
+def _column(measure: Measure) -> str:
+    name, aggregation = _MEASURE_TO_LANGFUSE[measure]
+    return f"{aggregation}_{name}"
+
+
+class MetricsQueryRunner(ObservationQuery):
+    """Serves ``query_metrics`` from Langfuse Metrics v2."""
 
     def metrics_capability(self) -> MetricsCapability:
-        """The neutral measures and dimensions this backend can aggregate / group by."""
-        return MetricsCapability(
-            measures=frozenset(_MEASURE_TO_LANGFUSE),
-            dimensions=frozenset(_DIMENSION_TO_LANGFUSE),
-        )
+        """The neutral measures and dimensions this backend aggregates and groups by."""
+        return MetricsCapability(measures=frozenset(_MEASURE_TO_LANGFUSE), dimensions=frozenset(_DIMENSION_TO_LANGFUSE))
 
     async def query_metrics(self, query: MetricsQuery) -> MetricsResult:
-        """Run ``query`` against the Langfuse Metrics API, scoped to this source's environment marker.
-
-        A measure or dimension the backend does not serve raises
-        ``MonitoringReadNotSupportedError`` before any request — never a silent zero.
-        """
+        """Run ``query`` scoped to the active source; an unserved measure or dimension raises before any request."""
         self._check_served(query)
         client = await self._active_client()
-        source = self._m.active_source()
+        base = [environment_clause(self._m.active_source())]
+        if query.dimensions:
+            rows = await self._run(client, query, query.measures, base)
+            return MetricsResult(rows=[self._to_row(raw, query, query.measures) for raw in rows])
+        run_measures = [m for m in query.measures if m in _RUN_MEASURES]
+        observation_measures = [m for m in query.measures if m not in _RUN_MEASURES]
+        merged: dict[str | None, MetricsRow] = {}
+        for measures, clauses in ((run_measures, [*base, ROOT_CLAUSE]), (observation_measures, base)):
+            if not measures:
+                continue
+            for raw in await self._run(client, query, measures, clauses):
+                row = self._to_row(raw, query, measures)
+                kept = merged.setdefault(row.bucket, MetricsRow(bucket=row.bucket))
+                kept.measures.update(row.measures)
+        for row in merged.values():
+            for measure in query.measures:
+                row.measures.setdefault(measure, None)
+        return MetricsResult(rows=sorted(merged.values(), key=lambda row: row.bucket or ""))
 
-        # The model attribute lives on generations, so a model grouping aggregates
-        # over the observations view; everything else over whole runs (traces).
-        view = "observations" if Dimension.MODEL in query.dimensions else "traces"
+    async def _run(
+        self, client: httpx.Client, query: MetricsQuery, measures: list[Measure], clauses: list[Clause]
+    ) -> list[dict[str, Any]]:
         langfuse_query: dict[str, Any] = {
-            "view": view,
-            "metrics": [self._metric_entry(m) for m in query.measures],
+            "view": "observations",
+            "metrics": [
+                {"measure": _MEASURE_TO_LANGFUSE[m][0], "aggregation": _MEASURE_TO_LANGFUSE[m][1]} for m in measures
+            ],
             "dimensions": [{"field": _DIMENSION_TO_LANGFUSE[d]} for d in query.dimensions],
-            # Scope every metrics query to our data via the environment marker.
-            "filters": [_environment_clause(source)],
+            "filters": clauses,
             "fromTimestamp": query.from_timestamp.isoformat(),
             "toTimestamp": query.to_timestamp.isoformat(),
         }
         if query.granularity:
             langfuse_query["timeDimension"] = {"granularity": query.granularity}
-
-        response = await asyncio.to_thread(
-            partial(
-                client.api.legacy.metrics_v1.metrics,
-                query=json.dumps(langfuse_query),
-                request_options=self._request_options(),
-            )
-        )
-        raw_rows: list[dict[str, Any]] = list(getattr(response, "data", []) or [])
-        rows = [self._to_row(raw, query) for raw in raw_rows]
-        return MetricsResult(rows=rows)
+        return await self._metrics(client, langfuse_query)
 
     @staticmethod
     def _check_served(query: MetricsQuery) -> None:
-        unsupported_measures = [m for m in query.measures if m not in _MEASURE_TO_LANGFUSE]
-        unsupported_dimensions = [d for d in query.dimensions if d not in _DIMENSION_TO_LANGFUSE]
-        if unsupported_measures or unsupported_dimensions:
-            raise MonitoringReadNotSupportedError(
+        unserved_measures = [m for m in query.measures if m not in _MEASURE_TO_LANGFUSE]
+        unserved_dimensions = [d for d in query.dimensions if d not in _DIMENSION_TO_LANGFUSE]
+        if unserved_measures or unserved_dimensions:
+            raise MonitoringReadNotServedError(
                 "Langfuse metrics query cannot serve "
-                f"measures={[m.value for m in unsupported_measures]} "
-                f"dimensions={[d.value for d in unsupported_dimensions]}"
+                f"measures={[m.value for m in unserved_measures]} "
+                f"dimensions={[d.value for d in unserved_dimensions]}"
             )
 
     @staticmethod
-    def _metric_entry(measure: Measure) -> dict[str, Any]:
-        langfuse_measure, aggregation = _MEASURE_TO_LANGFUSE[measure]
-        return {"measure": langfuse_measure, "aggregation": aggregation}
-
-    @classmethod
-    def _to_row(cls, raw: dict[str, Any], query: MetricsQuery) -> MetricsRow:
-        """Map one Langfuse result row onto the typed :class:`MetricsRow`.
-
-        A requested measure whose output column is absent from the row is a response
-        the backend cannot honour — it raises rather than reporting a silent zero.
-        """
-        measures: dict[Measure, float | None] = {}
-        for measure in query.measures:
-            langfuse_measure = _MEASURE_TO_LANGFUSE[measure][0]
-            key = _measure_key(raw, langfuse_measure)
-            if key is None:
-                raise MonitoringReadNotSupportedError(
-                    f"Langfuse metrics response carries no column for measure {measure.value!r}"
-                )
-            measures[measure] = _measure_value(raw[key])
-
+    def _to_row(raw: dict[str, Any], query: MetricsQuery, measures: list[Measure]) -> MetricsRow:
+        """One Langfuse result row as a :class:`MetricsRow`; a requested column missing from it raises."""
+        missing = [_column(m) for m in measures if _column(m) not in raw]
+        missing += [_DIMENSION_TO_LANGFUSE[d] for d in query.dimensions if _DIMENSION_TO_LANGFUSE[d] not in raw]
+        if query.granularity and _BUCKET_COLUMN not in raw:
+            missing.append(_BUCKET_COLUMN)
+        if missing:
+            raise MonitoringError(f"Langfuse metrics response row carries no {missing} column: {raw!r}")
         dimensions: dict[Dimension, str | None] = {}
         for dimension in query.dimensions:
-            value = raw.get(_DIMENSION_TO_LANGFUSE[dimension])
-            dimensions[dimension] = str(value) if value is not None else None
-
-        bucket = cls._extract_bucket(raw) if query.granularity else None
-        return MetricsRow(dimensions=dimensions, measures=measures, bucket=bucket)
-
-    @staticmethod
-    def _extract_bucket(raw: dict[str, Any]) -> str | None:
-        """The row's time-bucket label: its first ISO-date-like value, or ``None``."""
-        for value in raw.values():
-            if isinstance(value, str) and _ISO_LIKE.match(value):
-                return value
-        return None
+            value = raw[_DIMENSION_TO_LANGFUSE[dimension]]
+            dimensions[dimension] = None if value is None else str(value)
+        bucket = raw[_BUCKET_COLUMN] if query.granularity else None
+        return MetricsRow(
+            dimensions=dimensions,
+            measures={m: _measure_value(raw[_column(m)]) for m in measures},
+            bucket=None if bucket is None else str(bucket),
+        )

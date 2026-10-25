@@ -23,6 +23,7 @@ from typing import Any
 
 import pytest
 from tai42_contract.backend import SCHEDULE_CADENCE_KEY, CrontabCadence, IntervalCadence, ScheduleRecord
+from tai42_contract.tools import ReferenceHolder
 
 from tai42_skeleton.app.instance import app
 from tai42_skeleton.backup.sections import _export_schedules, _import_schedules
@@ -30,7 +31,7 @@ from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.operations import NotFoundError, OperationFailedError
 from tai42_skeleton.operations import schedules as schedules_ops
 from tai42_skeleton.operations import tools as tools_ops
-from tai42_skeleton.tools import platform_referees
+from tai42_skeleton.tools import holder_kinds, platform_referees
 
 _TOOLS_MODULE = "tests.app._fixtures.schedule_tools"
 _EXT_MODULE = "tests.app._fixtures.schedule_ext"
@@ -185,7 +186,7 @@ async def test_export_reads_the_tool_the_backend_splits_from_its_own_key():
     assert records == [
         ScheduleRecord(name="m", tool="demo_report", kwargs={"payload": "x"}, cadence=_CRON, enabled=True)
     ]
-    assert holders == ["schedule 'm'"]
+    assert holders == [ReferenceHolder(kind=holder_kinds.SCHEDULE, name="m", summary="schedule 'm'")]
     assert none == []
 
 

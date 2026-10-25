@@ -13,7 +13,7 @@ from arq.jobs import JobStatus
 
 from tai42_backend_arq import pool, scheduler, tools
 
-from .conftest import lease_of
+from .conftest import handle_of, lease_of
 
 
 class _FakeJob:
@@ -59,7 +59,7 @@ def _seed_schedule(redis: Any, *, name: str, schedule: dict[str, Any], kwargs: d
 async def _redis_bound(redis: Any, job_cls: type = _FakeJob) -> AsyncIterator[None]:
     with (
         patch.object(pool, "arq_connection", lease_of(redis)),
-        patch.object(scheduler, "Job", job_cls),
+        patch.object(scheduler, "job_handle", handle_of(job_cls)),
     ):
         yield
 

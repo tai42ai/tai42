@@ -87,8 +87,9 @@ class _FakeScheduleInteractions:
 
 
 @pytest.fixture
-def install(monkeypatch):
+def install(monkeypatch, serve_tools):
     def _install(fake_tools: _FakeTools):
+        serve_tools(*fake_tools._registered)
         monkeypatch.setattr(
             tai42_app,
             "_impl",
@@ -288,13 +289,13 @@ async def test_create_501_when_backend_absent(install):
     assert _json(resp) == {"error": "no installed backend exposes scheduling tools"}
 
 
-async def test_create_404_when_client_tool_unknown(install):
-    # Backend present, but the caller named a tool that is not registered: the
-    # binding's typed ``UnknownToolError`` becomes a 404, never a masked 500.
+async def test_create_400_when_client_tool_unknown(install):
+    # Backend present, but the caller named a tool that is not registered: the write
+    # door's reference check refuses it before anything is dispatched.
     install(_FakeTools(_MARKERS))
     resp = await router.create_schedule(_body_req(b'{"tool_name": "typo_tool"}'))
-    assert resp.status_code == 404
-    assert _json(resp) == {"error": "unknown tool: typo_tool"}
+    assert resp.status_code == 400
+    assert _json(resp) == {"error": "scheduled tool 'typo_tool' is not a registered tool"}
 
 
 async def test_create_maps_unknown_tool_raised_for_another_name_to_structured_500(install, monkeypatch):

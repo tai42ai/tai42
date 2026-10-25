@@ -9,6 +9,7 @@ import asyncio
 import logging
 import os
 import shutil
+import stat
 from collections.abc import Callable
 from pathlib import Path
 
@@ -140,6 +141,30 @@ class AsyncLocalDriver:
         _, target = await self._resolve_under_root(path)
         async with aiofiles.open(target, mode="rb") as f:
             return await f.read()
+
+    def _regular_file_size(self, target: Path, path: str) -> int:
+        """The byte size of ``target``, raising ``FileNotFoundError`` unless it is a regular file."""
+        info = os.stat(target)
+        if not stat.S_ISREG(info.st_mode):
+            raise FileNotFoundError(f"Object not found: {path}")
+        return info.st_size
+
+    async def stat_size(self, path: str) -> int:
+        """The byte size of the file at ``path``; a directory is not an object."""
+        _, target = await self._resolve_under_root(path)
+        return await asyncio.to_thread(self._regular_file_size, target, path)
+
+    async def read_range(self, path: str, start: int, length: int) -> bytes:
+        """At most ``length`` bytes of the file at ``path`` from byte ``start``; ``b""`` past the end."""
+        _, target = await self._resolve_under_root(path)
+
+        def _read() -> bytes:
+            self._regular_file_size(target, path)
+            with open(target, "rb") as f:
+                f.seek(start)
+                return f.read(length)
+
+        return await asyncio.to_thread(_read)
 
     async def write_bytes(self, path: str, data: bytes) -> None:
         """Write ``data`` bytes to ``path``, resolving id collisions."""

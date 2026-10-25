@@ -25,7 +25,7 @@ from tai42_skeleton.monitoring import NoOpReader, NoOpSpan, NoOpWriter
 
 
 def _ctx() -> TraceContext:
-    return TraceContext(trace_id="t-1")
+    return TraceContext(trace_id="t-1", parent_span_id="s-1")
 
 
 # --- span -------------------------------------------------------------------
@@ -68,6 +68,8 @@ def test_noop_writer_context_managers_yield() -> None:
         pass
     with writer.disable():
         pass
+    with writer.use_span(NoOpSpan()):
+        assert writer.current_span_id() is None
 
 
 def test_noop_writer_query_helpers_return_neutral_values() -> None:
@@ -113,6 +115,7 @@ async def test_noop_reader_returns_empty_results() -> None:
     assert result.rows == []
     assert await reader.list_spans_in_window(now, now) == []
     assert await reader.list_traces() == []
+    assert await reader.export_traces(max_rows=5000) == []
 
 
 async def test_noop_reader_holds_no_observation() -> None:

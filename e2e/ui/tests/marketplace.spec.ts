@@ -5,7 +5,9 @@
  * version honestly), then pins alpha `0.1.0` through the API — the arc the page
  * itself cannot select a non-latest version for — to exercise the advisory and
  * update affordances. Every effect is asserted through BOTH the UI and the API,
- * and the arc uninstalls everything so the shared venv is left clean.
+ * and the arc uninstalls everything so the shared venv is left clean. The beta
+ * install and uninstall receipts are also checked for their converged fleet
+ * reload, and their result card for a clean receipt with no fleet warning.
  *
  * The studio stack is MULTIWORKER(2): an install/uninstall/update response returns
  * only after the awaited fan-out collects the sibling worker's reload reply — but a
@@ -34,6 +36,17 @@ interface InstalledRow {
   readonly version: string;
 }
 
+interface FanoutRow {
+  readonly name: string;
+  readonly outcome: string;
+}
+
+interface ReloadReceipt {
+  readonly fanout: { readonly mode: string; readonly results?: readonly FanoutRow[] };
+  readonly recycle: unknown;
+  readonly awaiting_respawn: readonly unknown[];
+}
+
 /** The attribution inventory as `ref@version` strings, over the same-origin API. */
 async function installedRefs(request: APIRequestContext): Promise<string[]> {
   const res = await sendRepeatable(request, 'get', '/api/marketplace/installed', { headers: apiHeaders() });
@@ -54,8 +67,9 @@ async function apiToolNames(request: APIRequestContext): Promise<string[]> {
  *  which the detail page fires alongside them — is never mistaken for the mutation. */
 const MUTATION_PATH = /\/api\/marketplace\/(install|uninstall|update)$/;
 
-/** Confirm a mounted ConfirmDialog by its title, then wait for it to close. */
-async function confirmDialog(page: Page, title: string, confirmLabel: string): Promise<void> {
+/** Confirm a mounted ConfirmDialog by its title, wait for it to close, and return the
+ *  mutation's response body. */
+async function confirmDialog<T>(page: Page, title: string, confirmLabel: string): Promise<T> {
   const dialog = page.getByRole('dialog', { name: title });
   await expect(dialog).toBeVisible();
   // The dialog stays mounted until the mutation resolves, so its unmount is driven by
@@ -70,6 +84,32 @@ async function confirmDialog(page: Page, title: string, confirmLabel: string): P
   const response = await mutated;
   expect(response.ok(), await response.text()).toBeTruthy();
   await expect(dialog).toBeHidden();
+  return (await response.json()) as T;
+}
+
+/** A receipt's `reload` must be the converged fan-out over the stack's fleet (two serve
+ *  workers and the backend worker): every member applied, no recycle roll, no worker
+ *  awaiting a respawn — the input the result card renders as a clean receipt with no
+ *  fleet warning. */
+function expectConvergedReload(reload: ReloadReceipt | null): void {
+  expect(reload).not.toBeNull();
+  const r = reload as ReloadReceipt;
+  expect(r.fanout.mode).toBe('fleet');
+  expect((r.fanout.results ?? []).map((row) => row.outcome)).toEqual(['applied', 'applied', 'applied']);
+  expect(r.recycle).toBeNull();
+  expect(r.awaiting_respawn).toEqual([]);
+}
+
+/** The receipt card after a converged fan-out: the receipt line, and no fleet warning
+ *  (no alert panel, no restart notice, no "Worker recycle" section). */
+async function expectCleanReceipt(page: Page, line: string): Promise<void> {
+  const receipt = page.getByRole('status').filter({ hasText: line });
+  await expect(receipt).toBeVisible();
+  await expect(receipt.getByRole('alert')).toHaveCount(0);
+  await expect(
+    receipt.getByText(/did not converge|was not reached|a restart to apply some settings/),
+  ).toHaveCount(0);
+  await expect(receipt.getByRole('heading', { name: 'Worker recycle' })).toHaveCount(0);
 }
 
 test('browse, install beta via UI, then the API-pinned alpha advisory + update arc', async ({
@@ -116,8 +156,12 @@ test('browse, install beta via UI, then the API-pinned alpha advisory + update a
   await expect(page.getByRole('heading', { name: BETA_REF })).toBeVisible();
   await expect(page.getByText(BETA_TOOL)).toBeVisible();
   await page.getByRole('button', { name: 'Install', exact: true }).click();
-  await confirmDialog(page, 'Install plugin', 'Install');
+  const installed = await confirmDialog<{ data: { reload: ReloadReceipt } }>(page, 'Install plugin', 'Install');
   await expect(page.getByText('Installed v0.1.0')).toBeVisible();
+  // The receipt's reload is a converged fleet fan-out, and the result card shows it
+  // as a clean receipt: no fleet warning next to the install line.
+  expectConvergedReload(installed.data.reload);
+  await expectCleanReceipt(page, `Installed ${BETA_REF} 0.1.0`);
 
   // 5. API-side proof of the UI install, polled to convergence across workers.
   await expect
@@ -127,8 +171,16 @@ test('browse, install beta via UI, then the API-pinned alpha advisory + update a
 
   // Uninstall beta through the UI; the round-trip leaves nothing behind.
   await page.getByRole('button', { name: 'Uninstall', exact: true }).click();
-  await confirmDialog(page, 'Uninstall plugin', 'Uninstall');
+  const uninstalled = await confirmDialog<{ data: { reload: ReloadReceipt | null } }>(
+    page,
+    'Uninstall plugin',
+    'Uninstall',
+  );
   await expect(page.getByText('Installed v0.1.0')).toBeHidden();
+  // Beta's tool and extension are manifest entries, so the uninstall removes them and its
+  // receipt carries the reload; the result card shows that converged reload the same way.
+  expectConvergedReload(uninstalled.data.reload);
+  await expectCleanReceipt(page, `Uninstalled ${BETA_REF}`);
   await expect
     .poll(() => installedRefs(page.request), { timeout: 30_000 })
     .not.toContain(`${BETA_REF}@0.1.0`);

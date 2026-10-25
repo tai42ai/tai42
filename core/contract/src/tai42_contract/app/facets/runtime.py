@@ -139,6 +139,14 @@ class AppAdmin(Protocol):
         """Re-probe those of ``titles`` that failed to bind, bind the recovered ones, and return their statuses."""
         ...
 
+    async def advertised_mcp_tools(self, title: str) -> list[dict[str, Any]]:
+        """List every tool the live MCP server titled ``title`` advertises, before the manifest's selection.
+
+        Each row says why a selected tool is not bound (``unbound_reason``, from the binder's records).
+        Raises ``LookupError`` for a title not in the live manifest.
+        """
+        ...
+
     def list_failed_mcps(self) -> list[dict[str, Any]]:
         """List the MCPs that failed to bind."""
         ...

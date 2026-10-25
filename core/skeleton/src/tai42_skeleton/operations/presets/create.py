@@ -8,7 +8,8 @@ from __future__ import annotations
 
 import logging
 import sys
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Literal, overload
 
 from tai42_contract.agent import PRESET_NAME_PATTERN
 from tai42_contract.agent.base import PresetSpec
@@ -34,19 +35,25 @@ from tai42_skeleton.operations import (
     NotSupportedError,
     operation,
 )
+from tai42_skeleton.operations.errors import OperationFailedError
 from tai42_skeleton.operations.presets import fanout
 from tai42_skeleton.operations.presets.authoring import (
+    _assert_body_binds,
     _check_body_at_door,
-    _combo_registry_error,
-    _dry_run_bind_error,
     _enforce_registration_tier,
     _input_schema_authoring_error,
-    _output_schema_error,
     _write_validator_error,
 )
 from tai42_skeleton.operations.presets.models import PresetCreate
 from tai42_skeleton.operations.presets.views import _create_response
-from tai42_skeleton.operations.response_models_group_a import PresetCreateResult
+from tai42_skeleton.operations.reference_check import assert_references_resolve
+from tai42_skeleton.operations.reference_graph import (
+    _composed_origins,
+    assert_blob_references_resolve,
+    base_reference,
+    schema_references,
+)
+from tai42_skeleton.operations.response_models_group_presets import PresetCreateResult
 from tai42_skeleton.presets.manager import is_valid_preset_name
 
 logger = logging.getLogger(__name__)
@@ -93,16 +100,45 @@ async def _check_create_name(name: str, mgr: Any) -> None:
         raise ConflictError(f"preset {name!r} already exists")
 
 
-async def _check_create_base(base_tool: str, mgr: Any) -> None:
-    """A preset's base must be a registered NON-preset tool.
+@dataclass(frozen=True)
+class CreateCrossReferences:
+    """A created preset's ``uses`` / ``used_by``, read before its commit."""
 
-    A preset cannot be another preset's base — chaining would make rehydration
-    order-dependent. Raises the mapped 400.
+    uses: list[str]
+    used_by: list[str]
+
+
+class PresetSeedRefusedError(RuntimeError):
+    """A declared preset seed the create path refuses: startup and reload stop on it."""
+
+
+async def _check_create_base(base_tool: str, mgr: Any, output_schema: Any, input_schema: Any) -> None:
+    """A preset's base must be a registered tool that is neither a preset nor derived from one.
+
+    Neither another preset nor one of its extension branch tools can be a preset's base —
+    such a base exists only once that preset is bound, so chaining would make rehydration
+    order-dependent. The schema ids are checked with the base, before any render. Raises the
+    mapped 400.
     """
-    if base_tool in mgr.registered_names():
-        raise BadRequestError(f"base tool {base_tool!r} is itself a preset")
-    if base_tool not in await instance.app.tools.get_tools():
-        raise BadRequestError(f"base tool {base_tool!r} is not a registered tool")
+    refusal = mgr.base_refusal(base_tool)
+    if refusal is not None:
+        raise BadRequestError(refusal)
+    await assert_references_resolve([base_reference(base_tool), *schema_references(output_schema, input_schema)])
+
+
+async def _cross_references(name: str, own: set[str]) -> CreateCrossReferences:
+    """``uses`` / ``used_by`` of a preset about to be created, over the active population read now.
+
+    ``own`` is the tools the new body composes. A stored body the walk cannot read raises
+    here, before anything is written.
+    """
+    bodies = await instance.app.presets.list_active_bodies()
+    origins = {instance.app.tools.base_of(composed) for composed in own}
+    used_by: list[str] = []
+    for other, body in bodies.items():
+        if other != name and name in await _composed_origins(other, body):
+            used_by.append(other)
+    return CreateCrossReferences(uses=sorted((origins & set(bodies)) - {name}), used_by=sorted(used_by))
 
 
 async def _claim_preset_name(name: str, body: PresetBody, tags: list[str] | None) -> tuple[Any, dict[str, int] | None]:
@@ -155,6 +191,8 @@ async def _claim_preset_name(name: str, body: PresetBody, tags: list[str] | None
                 extensions=body.extensions,
                 output_schema=body.output_schema,
                 input_schema=body.input_schema,
+                input_map=body.input_map,
+                output_map=body.output_map,
                 state_binding=body.state_binding,
                 tags=tags,
             )
@@ -171,6 +209,8 @@ async def _claim_preset_name(name: str, body: PresetBody, tags: list[str] | None
                 body.description,
                 body.output_schema,
                 body.input_schema,
+                input_map=body.input_map,
+                output_map=body.output_map,
                 state_binding=body.state_binding,
                 version=record.active_version,
             )
@@ -191,6 +231,7 @@ async def _claim_preset_name(name: str, body: PresetBody, tags: list[str] | None
     return record, census
 
 
+@overload
 async def _create_preset_core(
     name: str,
     base_tool: str,
@@ -200,17 +241,65 @@ async def _create_preset_core(
     output_schema: TemplatedText | dict[str, Any] | None,
     input_schema: TemplatedText | dict[str, Any] | None = None,
     *,
+    input_map: TemplatedText | str | None = None,
+    output_map: TemplatedText | str | None = None,
     state_binding: StateBinding | None = None,
     tags: list[str] | None = None,
     enforce_tier: bool = True,
-) -> tuple[Any, FleetResult]:
+    cross_references: Literal[True] = True,
+) -> tuple[Any, FleetResult, CreateCrossReferences]: ...
+
+
+@overload
+async def _create_preset_core(
+    name: str,
+    base_tool: str,
+    description: str,
+    fixed_kwargs: dict[str, Any],
+    extensions: list[list[ExtensionElement]],
+    output_schema: TemplatedText | dict[str, Any] | None,
+    input_schema: TemplatedText | dict[str, Any] | None = None,
+    *,
+    input_map: TemplatedText | str | None = None,
+    output_map: TemplatedText | str | None = None,
+    state_binding: StateBinding | None = None,
+    tags: list[str] | None = None,
+    enforce_tier: bool = True,
+    cross_references: Literal[False],
+) -> tuple[Any, FleetResult, None]: ...
+
+
+async def _create_preset_core(
+    name: str,
+    base_tool: str,
+    description: str,
+    fixed_kwargs: dict[str, Any],
+    extensions: list[list[ExtensionElement]],
+    output_schema: TemplatedText | dict[str, Any] | None,
+    input_schema: TemplatedText | dict[str, Any] | None = None,
+    *,
+    input_map: TemplatedText | str | None = None,
+    output_map: TemplatedText | str | None = None,
+    state_binding: StateBinding | None = None,
+    tags: list[str] | None = None,
+    enforce_tier: bool = True,
+    cross_references: bool = True,
+) -> tuple[Any, FleetResult, CreateCrossReferences | None]:
     """The reusable create path shared by the create door and the seed applier.
 
     Ordered name pre-checks → base rule → agent-authoring → combo/schema/bind +
-    input-schema + write-validator validation → (optional) registration-tier fence
-    → the locked name claim (:func:`_claim_preset_name`: store write THEN register)
-    → one ``list_changed`` → the bus rebind fan-out. Returns the store record + the
-    per-worker fleet report.
+    input-schema + write-validator validation → reference check → (optional)
+    registration-tier fence → store check → (optional) the read of every other active
+    body for the record view → the document save rules, which attach the binding's
+    templates → the locked name claim (:func:`_claim_preset_name`: store write THEN
+    register) → one ``list_changed`` → the bus rebind fan-out. Returns the store record,
+    the per-worker fleet report and, when ``cross_references``, the record view's
+    ``uses`` / ``used_by``.
+
+    Every read and check up to the store check runs before the first write. The document
+    save rules attach the binding's templates (idempotently) first and run their own slot
+    checks after, so a refusal from a slot check or from the name claim leaves the
+    attachments in place, as a repeated save would.
 
     EVERY door that creates a preset flows through here — the HTTP create operation, the
     in-process facet ``instance.app.presets.create`` and the declared-seed applier — so
@@ -229,34 +318,15 @@ async def _create_preset_core(
     mgr = instance.app.preset_manager
     # Ordered name pre-checks (name safety + the collision cascade) and the base rule.
     await _check_create_name(name, mgr)
-    await _check_create_base(base_tool, mgr)
+    await _check_create_base(base_tool, mgr, output_schema, input_schema)
 
     # When the base is an agent tool, this is an authored agent: every baked field
-    # must be preset-bakeable for the agent and its baked spec must validate +
-    # resolve every reference. Read through the package object so a monkeypatch bites.
+    # must be preset-bakeable for the agent. Read through the package object so a
+    # monkeypatch bites.
     authoring_error = await _pkg._agent_authoring_error(base_tool, fixed_kwargs)
     if authoring_error is not None:
         raise BadRequestError(authoring_error)
 
-    # Validate-before-commit: reject an unknown/illegal extension combo and a body
-    # that cannot bake, BEFORE any store write, so a bad create is a 400 that never
-    # persists a row.
-    combo_error = _combo_registry_error(extensions)
-    if combo_error is not None:
-        raise BadRequestError(combo_error)
-    schema_error = await _output_schema_error(base_tool, output_schema, extensions)
-    if schema_error is not None:
-        raise BadRequestError(schema_error)
-    bind_error = await _dry_run_bind_error(
-        base_tool,
-        fixed_kwargs,
-        name=name,
-        description=description,
-        output_schema=output_schema,
-        input_schema=input_schema,
-    )
-    if bind_error is not None:
-        raise BadRequestError(bind_error)
     body = PresetBody(
         base_tool=base_tool,
         description=description,
@@ -264,8 +334,13 @@ async def _create_preset_core(
         extensions=extensions,
         output_schema=output_schema,
         input_schema=input_schema,
+        input_map=input_map,
+        output_map=output_map,
         state_binding=state_binding,
     )
+    # Validate-before-commit: reject an unknown/illegal extension combo and a body that cannot
+    # bake, BEFORE any store write, so a bad create is a 400 that never persists a row.
+    await _assert_body_binds(body, name=name)
     # An ``input_schema`` over a base tool with no registered support is a loud 400 that
     # never persists a row (never a silently-ignored schema).
     input_schema_error = _input_schema_authoring_error(body)
@@ -276,6 +351,10 @@ async def _create_preset_core(
     write_validator_error = await _write_validator_error(body)
     if write_validator_error is not None:
         raise BadRequestError(write_validator_error)
+    # Every name the body composes resolves, read after the base tool's validator vouched for its shape.
+    own = await assert_blob_references_resolve(
+        base_reference(base_tool), base_tool, fixed_kwargs, "fixed_kwargs", body_root=True
+    )
     # Registration-tier fence: a base tool declaring ``fenced``/``secret``
     # requires the caller clears the admin fence to author a preset over it. Skipped for
     # a platform seed (``enforce_tier=False``) — no caller to fence.
@@ -289,6 +368,12 @@ async def _create_preset_core(
     if not component_store_configured(SKELETON_COMPONENT):
         raise NotSupportedError(not_configured_message(_NOT_CONFIGURED_NOUN), extra={"code": _NOT_CONFIGURED_CODE})
 
+    # The record view's cross-references are read before the commit, so a stored row the walk
+    # cannot read refuses the create instead of failing it after the row is written.
+    cross = (
+        await _cross_references(name, {ref.name for ref in own if ref.registry == "tool"}) if cross_references else None
+    )
+
     # The preset document's save rules at SAVE (the write of the runnable definition): its
     # binding's named templates are attached idempotently and its expressions/adapters compiled,
     # so a bad body fails the create before any row.
@@ -301,7 +386,7 @@ async def _create_preset_core(
     # RELEASED — holding it here would queue every worker's create behind one confirmation
     # wait after the write it protects has landed.
     report = await fanout._fanout_reload(name, census)
-    return record, report
+    return record, report, cross
 
 
 @operation(
@@ -309,7 +394,7 @@ async def _create_preset_core(
     tags=["presets"],
     destructive=True,
     reload_gated=True,
-    errors=[BadRequestError, ConflictError, NotFoundError, NotSupportedError],
+    errors=[BadRequestError, ConflictError, NotFoundError, NotSupportedError, OperationFailedError],
     request_model=PresetCreate,
     response_model=PresetCreateResult,
 )
@@ -321,6 +406,8 @@ async def create_preset(
     extensions: list[list[ExtensionElement]],
     output_schema: TemplatedText | dict[str, Any] | None,
     input_schema: TemplatedText | dict[str, Any] | None = None,
+    input_map: TemplatedText | str | None = None,
+    output_map: TemplatedText | str | None = None,
     state_binding: StateBinding | None = None,
 ) -> dict[str, Any]:
     """Create a preset, atomically.
@@ -333,7 +420,7 @@ async def create_preset(
     A preset's NAME is its identity everywhere — it IS the live tool binding, and every
     reference keys on it deliberately; there are no surrogate ids.
     """
-    record, report = await _create_preset_core(
+    record, report, cross = await _create_preset_core(
         name,
         base_tool,
         description,
@@ -341,17 +428,22 @@ async def create_preset(
         extensions,
         output_schema,
         input_schema,
+        input_map=input_map,
+        output_map=output_map,
         state_binding=state_binding,
     )
-    return await _create_response(
+    return _create_response(
         name,
         base_tool,
         description,
         extensions,
         output_schema,
         input_schema,
+        input_map=input_map,
+        output_map=output_map,
         active_version=record.active_version,
         report=report,
+        cross=cross,
     )
 
 
@@ -387,21 +479,31 @@ async def _apply_seed_tool_meta(seed: PresetSeed) -> None:
 
 
 async def _seed_create(seed: PresetSeed) -> None:
-    """Create an absent seed through the shared create core (no caller fence).
+    """Create an absent seed through the shared create core (no caller fence, no record view).
 
+    A refusal the create path answers stops the applier as :class:`PresetSeedRefusedError`.
     Then apply its tool_meta where absent.
     """
-    await _create_preset_core(
-        seed.name,
-        seed.base_tool,
-        seed.description,
-        seed.fixed_kwargs,
-        [],
-        seed.output_schema,
-        seed.input_schema,
-        state_binding=seed.state_binding,
-        enforce_tier=False,
-    )
+    try:
+        await _create_preset_core(
+            seed.name,
+            seed.base_tool,
+            seed.description,
+            seed.fixed_kwargs,
+            [],
+            seed.output_schema,
+            seed.input_schema,
+            input_map=seed.input_map,
+            output_map=seed.output_map,
+            state_binding=seed.state_binding,
+            enforce_tier=False,
+            cross_references=False,
+        )
+    except BadRequestError as exc:
+        raise PresetSeedRefusedError(
+            f"preset seed {seed.name!r} cannot be created: preset {seed.name!r} over base tool "
+            f"{seed.base_tool!r} — {exc.message}"
+        ) from exc
     await _apply_seed_tool_meta(seed)
 
 

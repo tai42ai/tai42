@@ -94,7 +94,7 @@ async def test_tool_target_park_delivers_its_resumed_reply_back_to_the_conversat
     async with bridge.stack.mcp(port=bridge.stack.port_a, auth=bridge.root_token) as mcp:
         again = await mcp.call_tool(
             "e2e_tool_target_deliver",
-            {"interaction_id": interaction_id, "answer": answer, "reply_to": None, "params": None},
+            {"interaction_id": interaction_id, "ask_result": {"answer": answer, "reply_to": None, "params": None}},
         )
     assert again.data["result"]["answer"] == answer
 

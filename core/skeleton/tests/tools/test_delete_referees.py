@@ -5,16 +5,17 @@ is pinned in ``tests/operations/test_delete_referees_ops.py``."""
 from __future__ import annotations
 
 import pytest
+from tai42_contract.tools import ReferenceHolder
 
 from tai42_skeleton.tools.delete_referees import ToolDeleteRefereeRegistry
 
 
-async def _empty(_name: str) -> list[str]:
+async def _empty(_name: str) -> list[ReferenceHolder]:
     return []
 
 
-async def _holder(_name: str) -> list[str]:
-    return ["a node binding references it"]
+async def _holder(_name: str) -> list[ReferenceHolder]:
+    return [ReferenceHolder(kind="hook", name="h", summary="hook 'h'")]
 
 
 def test_registry_collects_and_snapshots() -> None:

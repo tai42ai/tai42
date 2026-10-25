@@ -370,7 +370,7 @@ def test_unknown_config_key_rejected_loudly():
         ask_external(make_url, "make_url", "desc", {"verfier": {"verifier": "github"}})
 
 
-@pytest.mark.parametrize("raw", [{"name": "github", "config": {}}, {"verifier": ""}, "github", ["github"]])
+@pytest.mark.parametrize("raw", [{"name": "github", "config": {}}, {"verifier": ""}, "github", ["github"], None])
 def test_a_verifier_of_another_shape_is_refused_at_wrap_time(raw):
     # The author-bound verifier is a ``{"verifier", "config"}`` binding; any other shape fails the
     # manifest load, never the first callback.
@@ -421,7 +421,7 @@ _ANSWER_SCHEMA_RESOURCES = {
 class _AnswerResourceManager:
     async def render_templated_text(self, text, locale=None):
         if text.id is not None:
-            from tai42_skeleton.template.resource_manager import TemplateNotFoundError
+            from tai42_skeleton.template.errors import TemplateNotFoundError
 
             if text.id not in _ANSWER_SCHEMA_RESOURCES:
                 raise TemplateNotFoundError(f"no stored resource {text.id!r}")
@@ -477,3 +477,99 @@ async def test_answer_schema_by_id_invalid_json_fails_loudly(monkeypatch) -> Non
     composed = ask_external(make_url, "make_url", "desc")
     with tai42_app.bound(_AnswerApp()), pytest.raises(SchemaBodyError, match="did not render to valid JSON"):
         await composed(question="Approve?", answer_schema=TemplatedText(id="not-json-answer"))
+
+
+def _external_manifest(element):
+    from tai42_skeleton.manifest import Manifest
+
+    return Manifest.model_validate(
+        {
+            "extensions_modules": [_BUILTIN_MODULE],
+            "tools": [
+                {
+                    "title": "fxt",
+                    "module": "tests.extensions._fixtures.tools_external",
+                    "include": ["make_signature"],
+                    "extensions": {"make_signature": [[element]]},
+                }
+            ],
+        }
+    )
+
+
+def test_declared_settings_schema_refuses_what_the_factory_refuses():
+    from tai42_skeleton.app.instance import app
+
+    refusals = [
+        ({"verfier": {"verifier": "github"}}, "at $: breaks the schema's 'additionalProperties' rule: false"),
+        ({"verifier": None}, "at $.verifier: breaks the schema's 'type' rule: 'object'"),
+        ({"verifier": {"config": {}}}, "at $.verifier: breaks the schema's 'required' rule: 'verifier'"),
+    ]
+
+    async def run() -> None:
+        async with app.app_context(_external_manifest("ask_external")):
+            registry = app._extension_registry
+            schema = registry.config_schema("ask_external")
+            assert schema is not None
+            assert schema["additionalProperties"] is False
+            registry.validate_config({"name": "ask_external", "config": {}})
+            registry.validate_config("ask_external")
+            registry.validate_config(
+                {"name": "ask_external", "config": {"verifier": {"verifier": "github", "config": {"k": "v"}}}}
+            )
+            for config, tail in refusals:
+                with pytest.raises(TaiValidationError) as caught:
+                    registry.validate_config({"name": "ask_external", "config": config})
+                assert str(caught.value) == (
+                    f"extension 'ask_external' config: value does not match schema {tail} (the value is not shown)"
+                )
+
+    asyncio.run(run())
+
+
+def test_settings_breaking_the_declared_schema_refuse_the_boot():
+    from tai42_skeleton.app.instance import app
+
+    manifest = _external_manifest({"name": "ask_external", "config": {"verifier": {"config": {}}}})
+
+    async def run() -> None:
+        async with app.app_context(manifest):
+            pass  # pragma: no cover — start() aborts before the body runs
+
+    with pytest.raises(
+        CorePluginBootError,
+        match=r"extension 'ask_external' config: value does not match schema at \$\.verifier: "
+        r"breaks the schema's 'required' rule: 'verifier' \(the value is not shown\)",
+    ):
+        asyncio.run(run())
+
+
+def test_a_manifest_write_attaching_it_to_a_tool_without_callback_url_is_refused():
+    from tai42_skeleton.app.instance import app
+    from tai42_skeleton.manifest import Manifest
+
+    from ..config.fake_pipeline import FakeConfigStore, _service
+
+    document = {
+        "extensions_modules": [_BUILTIN_MODULE],
+        "tools": [{"title": "a", "module": "tests.app._fixtures.tools_check", "include": ["echo"]}],
+    }
+
+    def attach(stored: dict[str, Any]) -> None:
+        stored["tools"][0]["extensions"] = {"echo": [["ask_external"]]}
+
+    async def run() -> None:
+        async with app.app_context(Manifest.model_validate(document)):
+            store = FakeConfigStore(manifest=dict(document))
+            service, admin, _bus = _service(store, combo_check=app.extensions.check_combo)
+            with pytest.raises(ValueError, match="must accept callback_url") as caught:
+                await service.apply_change(attach)
+            assert str(caught.value) == (
+                "tools[a].extensions[echo][0]: extension 'ask_external' on tool 'echo' cannot bind: "
+                "tool wrapped by ask_external must accept callback_url"
+            )
+            assert store.manifest == document
+            assert store.persisted == []
+            assert admin.calls == 0
+
+    asyncio.run(run())

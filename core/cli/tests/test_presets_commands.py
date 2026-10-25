@@ -7,7 +7,7 @@ import json
 import httpx
 import pytest
 
-from .remote_harness import Handler, data_response, run_cli, visible
+from .remote_harness import Handler, data_response, error_response, run_cli, visible
 
 
 def test_presets_create_body(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -486,12 +486,83 @@ def test_presets_rename(monkeypatch: pytest.MonkeyPatch) -> None:
     assert run_cli(monkeypatch, handler, ["presets", "rename", "old", "new"]).exit_code == 0
 
 
-def test_presets_referees(monkeypatch: pytest.MonkeyPatch) -> None:
+_HOLDERS_PREVIEW = {
+    "action": "rename",
+    "holders": [
+        {"kind": "preset", "name": "f", "locator": {}, "summary": "preset 'f'"},
+        {"kind": "schedule", "name": "nightly", "locator": {"id": "nightly"}, "summary": "schedule 'nightly'"},
+    ],
+}
+
+
+def test_presets_list_prints_an_unreadable_stored_row(monkeypatch: pytest.MonkeyPatch) -> None:
+    message = "stored preset 'bad': fixed_kwargs.tool_names must be a list of tool names"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, json={"error": message, "code": "stored-preset-unreadable", "preset": "bad"})
+
+    result = run_cli(monkeypatch, handler, ["presets", "list"])
+    assert result.exit_code == 1
+    assert visible(result.output) == f"Error (HTTP 500): {message}"
+
+
+def test_presets_rename_prints_every_holder_of_a_refusal(monkeypatch: pytest.MonkeyPatch) -> None:
+    message = "preset 'p' cannot be renamed — held by:\n- preset 'f'\nupdate those references first"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return error_response(message, 409)
+
+    result = run_cli(monkeypatch, handler, ["presets", "rename", "p", "q"])
+    assert result.exit_code == 1
+    assert result.output.splitlines() == [
+        "Error (HTTP 409): preset 'p' cannot be renamed — held by:",
+        "- preset 'f'",
+        "update those references first",
+    ]
+
+
+def test_presets_referees_prints_one_row_per_holder(monkeypatch: pytest.MonkeyPatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/api/presets/p/referees"
-        return data_response({"referees": []})
+        assert request.url.params["action"] == "rename"
+        return data_response(_HOLDERS_PREVIEW)
 
-    assert run_cli(monkeypatch, handler, ["presets", "referees", "p"]).exit_code == 0
+    result = run_cli(monkeypatch, handler, ["presets", "referees", "p", "--action", "rename"])
+    assert result.exit_code == 0, result.output
+    assert result.output.splitlines() == [
+        "kind      name     locator            summary           ",
+        "--------  -------  -----------------  ------------------",
+        "preset    f        {}                 preset 'f'        ",
+        'schedule  nightly  {"id": "nightly"}  schedule \'nightly\'',
+    ]
+
+
+def test_presets_referees_json_prints_the_raw_body(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.params["action"] == "delete"
+        return data_response({"action": "delete", "holders": []})
+
+    result = run_cli(monkeypatch, handler, ["presets", "referees", "p", "--action", "delete"], json_output=True)
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output) == {"action": "delete", "holders": []}
+
+
+def test_presets_referees_requires_the_action(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("no request is sent without --action")
+
+    result = run_cli(monkeypatch, handler, ["presets", "referees", "p"])
+    assert result.exit_code == 2
+    assert "Missing option '--action'" in visible(result.output)
+
+
+def test_presets_referees_refuses_an_unknown_action(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("no request is sent for an unknown action")
+
+    result = run_cli(monkeypatch, handler, ["presets", "referees", "p", "--action", "detach"])
+    assert result.exit_code == 2
+    assert "'detach' is not one of 'rename', 'delete'" in visible(result.output)
 
 
 def test_presets_validate_builds_body(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -556,3 +627,232 @@ def test_presets_kwargs_help_names_the_reference_convention(monkeypatch: pytest.
         text = visible(result.output)
         assert "!ENV" in text, text
         assert "secret reference" in text, text
+
+
+# -- body fields: schemas, state binding, input and output maps ---------------
+
+_COMMANDS = {
+    "create": (["presets", "create", "greet", "--base-tool", "echo", "--description", "d"], "/api/presets"),
+    "save-version": (["presets", "save-version", "greet"], "/api/presets/greet/versions"),
+    "validate": (["presets", "validate", "greet"], "/api/presets/validate"),
+}
+_CLEARING = ["save-version", "validate"]
+
+_SCHEMA = {"type": "object", "properties": {"x": {"type": "string"}}}
+_SCHEMA_REFERENCE = {"id": "schema_template", "kwargs": {"n": 1}}
+_STATE_BINDING = {
+    "states": [
+        {
+            "template": "counter",
+            "subject_expr": {"content": ".subject", "kwargs": {}},
+            "inject": [{"program": {"id": "inject_program", "kwargs": {}}}],
+        }
+    ]
+}
+
+
+def _capture(seen: dict, path: str) -> Handler:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert request.url.path == path
+        seen.update(json.loads(request.content))
+        return data_response({"name": "greet"})
+
+    return handler
+
+
+def _run(monkeypatch: pytest.MonkeyPatch, command: str, extra: list[str], *, stdin: str | None = None) -> dict:
+    args, path = _COMMANDS[command]
+    seen: dict = {}
+    result = run_cli(monkeypatch, _capture(seen, path), [*args, *extra], stdin=stdin)
+    assert result.exit_code == 0, result.output
+    return seen
+
+
+def _refused(monkeypatch: pytest.MonkeyPatch, command: str, extra: list[str], *, stdin: str | None = None) -> str:
+    args, _path = _COMMANDS[command]
+
+    def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover - never reached
+        raise AssertionError("a refused command sent a request")
+
+    result = run_cli(monkeypatch, handler, [*args, *extra], stdin=stdin)
+    assert result.exit_code != 0
+    return visible(result.output)
+
+
+@pytest.mark.parametrize("command", list(_COMMANDS))
+@pytest.mark.parametrize("field", ["output_schema", "input_schema"])
+@pytest.mark.parametrize("value", [_SCHEMA, _SCHEMA_REFERENCE], ids=["schema", "template-reference"])
+def test_a_schema_option_puts_the_object_on_the_wire_as_written(
+    monkeypatch: pytest.MonkeyPatch, command: str, field: str, value: dict
+) -> None:
+    option = "--" + field.replace("_", "-")
+    seen = _run(monkeypatch, command, [option, json.dumps(value)])
+    assert seen[field] == value
+
+
+@pytest.mark.parametrize("command", list(_COMMANDS))
+@pytest.mark.parametrize("field", ["output_schema", "input_schema"])
+def test_a_schema_file_option_reads_a_file_and_stdin(
+    monkeypatch: pytest.MonkeyPatch, tmp_path, command: str, field: str
+) -> None:
+    option = "--" + field.replace("_", "-") + "-file"
+    source = tmp_path / "schema.json"
+    source.write_text(json.dumps(_SCHEMA))
+    assert _run(monkeypatch, command, [option, str(source)])[field] == _SCHEMA
+    assert _run(monkeypatch, command, [option, "-"], stdin=json.dumps(_SCHEMA_REFERENCE))[field] == _SCHEMA_REFERENCE
+
+
+@pytest.mark.parametrize("command", list(_COMMANDS))
+def test_the_state_binding_option_carries_the_whole_object_unchanged(
+    monkeypatch: pytest.MonkeyPatch, tmp_path, command: str
+) -> None:
+    assert (
+        _run(monkeypatch, command, ["--state-binding", json.dumps(_STATE_BINDING)])["state_binding"] == _STATE_BINDING
+    )
+    source = tmp_path / "binding.json"
+    source.write_text(json.dumps(_STATE_BINDING))
+    assert _run(monkeypatch, command, ["--state-binding-file", str(source)])["state_binding"] == _STATE_BINDING
+    assert (
+        _run(monkeypatch, command, ["--state-binding-file", "-"], stdin=json.dumps(_STATE_BINDING))["state_binding"]
+        == _STATE_BINDING
+    )
+
+
+@pytest.mark.parametrize("command", list(_COMMANDS))
+@pytest.mark.parametrize("field", ["input_map", "output_map"])
+def test_a_map_is_sent_as_text_from_inline_file_and_stdin_and_as_an_object_from_its_template(
+    monkeypatch: pytest.MonkeyPatch, tmp_path, command: str, field: str
+) -> None:
+    option = "--" + field.replace("_", "-")
+    program = '{payload: (.text + ":" + .n)}\n'
+    assert _run(monkeypatch, command, [option, program])[field] == program
+    source = tmp_path / "program.jq"
+    source.write_text(program)
+    assert _run(monkeypatch, command, [f"{option}-file", str(source)])[field] == program
+    assert _run(monkeypatch, command, [f"{option}-file", "-"], stdin=program)[field] == program
+    reference = {"id": "stored_program", "kwargs": {"k": "v"}}
+    assert _run(monkeypatch, command, [f"{option}-template", json.dumps(reference)])[field] == reference
+
+
+@pytest.mark.parametrize("command", list(_COMMANDS))
+def test_an_omitted_field_is_not_sent(monkeypatch: pytest.MonkeyPatch, command: str) -> None:
+    seen = _run(monkeypatch, command, ["--description", "d2"] if command != "create" else [])
+    for field in ("output_schema", "input_schema", "state_binding", "input_map", "output_map"):
+        assert field not in seen
+
+
+@pytest.mark.parametrize("command", list(_COMMANDS))
+@pytest.mark.parametrize("option", ["--output-schema", "--input-schema", "--state-binding"])
+def test_both_of_a_pair_is_a_usage_error(monkeypatch: pytest.MonkeyPatch, tmp_path, command: str, option: str) -> None:
+    source = tmp_path / "value.json"
+    source.write_text("{}")
+    output = _refused(monkeypatch, command, [option, "{}", f"{option}-file", str(source)])
+    assert f"give only one of {option} or {option}-file" in output
+
+
+@pytest.mark.parametrize("command", list(_COMMANDS))
+@pytest.mark.parametrize("option", ["--input-map", "--output-map"])
+@pytest.mark.parametrize("pair", [("", "-file"), ("", "-template"), ("-file", "-template")])
+def test_two_of_a_maps_three_forms_is_a_usage_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path, command: str, option: str, pair: tuple[str, str]
+) -> None:
+    source = tmp_path / "program.jq"
+    source.write_text(".")
+    values = {"": ".", "-file": str(source), "-template": '{"id": "p"}'}
+    extra = [arg for suffix in pair for arg in (f"{option}{suffix}", values[suffix])]
+    output = _refused(monkeypatch, command, extra)
+    assert f"give only one of {option}, {option}-file or {option}-template" in output
+
+
+@pytest.mark.parametrize("command", list(_COMMANDS))
+@pytest.mark.parametrize(
+    "option",
+    ["--output-schema", "--input-schema", "--state-binding", "--input-map-template", "--output-map-template"],
+)
+def test_a_non_object_json_is_refused(monkeypatch: pytest.MonkeyPatch, command: str, option: str) -> None:
+    assert "must be a JSON object" in _refused(monkeypatch, command, [option, "[1]"])
+
+
+def test_two_options_reading_stdin_is_a_usage_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    output = _refused(
+        monkeypatch, "create", ["--input-schema-file", "-", "--input-map-file", "-"], stdin=json.dumps(_SCHEMA)
+    )
+    assert "only one option may read from stdin ('-')" in output
+
+
+@pytest.mark.parametrize("command", _CLEARING)
+@pytest.mark.parametrize("field", ["output_schema", "input_schema", "state_binding", "input_map", "output_map"])
+def test_a_clear_option_sends_null(monkeypatch: pytest.MonkeyPatch, command: str, field: str) -> None:
+    seen = _run(monkeypatch, command, ["--clear-" + field.replace("_", "-")])
+    assert field in seen
+    assert seen[field] is None
+
+
+@pytest.mark.parametrize("command", _CLEARING)
+@pytest.mark.parametrize(
+    ("set_args", "named"),
+    [
+        (["--output-schema", "{}"], "--output-schema"),
+        (["--output-schema-file", "-"], "--output-schema"),
+        (["--input-schema", "{}"], "--input-schema"),
+        (["--state-binding", "{}"], "--state-binding"),
+        (["--input-map", "."], "--input-map"),
+        (["--input-map-template", '{"id": "p"}'], "--input-map"),
+        (["--output-map-file", "-"], "--output-map"),
+    ],
+)
+def test_a_set_option_with_its_clear_is_a_usage_error(
+    monkeypatch: pytest.MonkeyPatch, command: str, set_args: list[str], named: str
+) -> None:
+    clear = "--clear-" + named.removeprefix("--")
+    output = _refused(monkeypatch, command, [*set_args, clear], stdin="{}")
+    assert f"pass either {named} or {clear}, not both" in output
+
+
+@pytest.mark.parametrize(
+    "clear",
+    [
+        "--clear-output-schema",
+        "--clear-input-schema",
+        "--clear-state-binding",
+        "--clear-input-map",
+        "--clear-output-map",
+    ],
+)
+def test_create_has_no_clear(monkeypatch: pytest.MonkeyPatch, clear: str) -> None:
+    assert "No such option" in _refused(monkeypatch, "create", [clear])
+
+
+def test_the_save_version_emptiness_refusal_names_every_option(monkeypatch: pytest.MonkeyPatch) -> None:
+    output = _refused(monkeypatch, "save-version", [])
+    assert (
+        "provide at least one of --kwargs, --description, --extensions, --output-schema, --input-schema, "
+        "--state-binding, --input-map, --output-map (or their -file / -template forms), or a --clear-* option"
+    ) in output
+
+
+def test_presets_create_prints_the_servers_stored_schema_refusal(monkeypatch: pytest.MonkeyPatch) -> None:
+    message = "stored id 'schemas/missing' at output_schema is not a stored template"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert json.loads(request.content)["output_schema"] == {"id": "schemas/missing"}
+        return httpx.Response(400, json={"error": message})
+
+    result = run_cli(
+        monkeypatch,
+        handler,
+        [
+            "presets",
+            "create",
+            "greet",
+            "--base-tool",
+            "echo",
+            "--description",
+            "d",
+            "--output-schema",
+            '{"id": "schemas/missing"}',
+        ],
+    )
+    assert result.exit_code == 1
+    assert result.stderr.strip() == f"Error (HTTP 400): {message}"

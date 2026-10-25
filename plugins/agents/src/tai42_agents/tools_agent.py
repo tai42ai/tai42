@@ -48,9 +48,11 @@ from tai42_contract.agent.events import (
     SuspendedFinal,
 )
 from tai42_contract.app import tai42_app
+from tai42_contract.monitoring import TraceContext
 from tai42_contract.template import TemplatedText
 from tai42_contract.tools import ClientTool, get_run_delivery_id
 from tai42_kit.llm.runtime import build_user_output, extract_structured_output
+from tai42_kit.monitoring import open_run_trace
 
 from tai42_agents._internal.append import require_thread_id, to_thread_messages
 from tai42_agents._internal.base_tool_agent import (
@@ -83,6 +85,7 @@ from tai42_agents._internal.recovery import _repair_dangling_tool_calls
 from tai42_agents._internal.reject import reject_blank_memory_keys, resolve_response_format
 from tai42_agents._internal.render import render_message
 from tai42_agents._internal.run_kwargs import guard_run_kwargs
+from tai42_agents._internal.run_record import run_input
 from tai42_agents._internal.stream_events import astream_tools_agent_events
 
 # The run kwargs that steer THIS run's own thread or checkpoint continuity.
@@ -673,6 +676,32 @@ class ToolsAgent(Agent):
         rebuild = dict(rebuild_kwargs)
         recursion_limit = rebuild.pop("recursion_limit", None)
         validated = ToolsAgentInput.model_validate(rebuild)
+        source = build_run_config(validated.langgraph_config, thread_id, None, recursion_limit)
+        with open_run_trace(source, input_=run_input(resume=resume_map)) as root:
+            result = await self._resume_park_in_lineage(
+                root.context,
+                validated=validated,
+                source=source,
+                rebuild_kwargs=rebuild_kwargs,
+                recursion_limit=recursion_limit,
+                thread_id=thread_id,
+                resume_map=resume_map,
+            )
+            root.record_output(result)
+            return result
+
+    async def _resume_park_in_lineage(
+        self,
+        context: TraceContext | None,
+        *,
+        validated: ToolsAgentInput,
+        source: dict[str, Any],
+        rebuild_kwargs: dict[str, Any],
+        recursion_limit: int | None,
+        thread_id: str,
+        resume_map: dict[str, dict[str, Any]],
+    ) -> Any:
+        """Drive one :meth:`aresume_park` inside its lineage ``context``."""
         resolved_response_format = await resolve_response_format("tools_agent", validated.response_format)
         graph = await tools_agent_graph(
             ToolsAgentGraphSpec(
@@ -689,9 +718,7 @@ class ToolsAgent(Agent):
         agent = graph.agent
         # The parked drive wrote its checkpoints after any checkpoint its run was pinned to, so the
         # resume continues from the thread's latest checkpoint.
-        config = thread_head_config(
-            init_langgraph_config(build_run_config(validated.langgraph_config, thread_id, None, recursion_limit)).config
-        )
+        config = thread_head_config(init_langgraph_config(source, context))
         await unmark_caller_thread(thread_id, provider=validated.checkpoint_provider)
         await _repair_dangling_tool_calls(agent, config)
         snapshot = await agent.aget_state(config, subgraphs=True)

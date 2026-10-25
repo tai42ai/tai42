@@ -31,7 +31,7 @@ from tai42_agents._internal.stream_events import aproject_agent_events
 from tai42_agents._internal.structured import structured_output_stack
 
 from ._graph_support import invoke_tools_agent, stream_tools_agent_events
-from .conftest import fake_run_trace
+from .conftest import fake_init_langgraph_config
 
 _SCHEMA = {
     "title": "TurnIntake",
@@ -104,7 +104,9 @@ def _patch_seams(monkeypatch: pytest.MonkeyPatch, model: BaseChatModel) -> None:
     monkeypatch.setattr(
         bta,
         "init_langgraph_config",
-        lambda config: fake_run_trace({"configurable": {"thread_id": "t"}, "recursion_limit": 50}),
+        lambda config, _context: fake_init_langgraph_config(
+            {"configurable": {"thread_id": "t"}, "recursion_limit": 50}
+        ),
     )
 
 

@@ -39,6 +39,7 @@ from tai42_skeleton.states.service.base import _StatesServiceBase
 from tai42_skeleton.states.service.catalog import TemplateEntry
 from tai42_skeleton.states.service.rendered import RenderedEntry, rendered_digest
 from tai42_skeleton.states.service.rows import _SCHEMA_BODY_ADAPTER, _resolve_state_schema
+from tai42_skeleton.states.template_refs import state_template_template_refs
 from tai42_skeleton.states.templates import (
     DECLARATIONS_CHECK_VARIABLES,
     MEMBER_JQ_VARIABLES,
@@ -50,7 +51,8 @@ from tai42_skeleton.states.templates import (
     template_jq_prelude,
     validate_template,
 )
-from tai42_skeleton.template.resource_manager import TemplateLocaleNotFoundError, TemplateNotFoundError
+from tai42_skeleton.template.errors import TEMPLATE_RENDER_ERRORS, template_render_refusal
+from tai42_skeleton.template.references import assert_templates_stored
 from tai42_skeleton.template.settings import template_cache_settings
 
 #: The ``version`` a rendered candidate (a document not stored) carries.
@@ -174,8 +176,8 @@ class _TemplateMixin(_StatesServiceBase):
         """Render and compile a by-id declarations ``check`` at the save door.
 
         The save door is the point that can fetch the stored resource an inline compile in
-        :func:`validate_template` cannot. An unfetchable id fails the save loudly, naming
-        the field and the id; a rendered jq that does not compile is the same loud template
+        :func:`validate_template` cannot. An id that cannot be fetched or rendered fails the
+        save loudly, naming the field and the id; a rendered jq that does not compile is the same loud template
         error validate raises for inline jq.
         """
         if template.declarations is None:
@@ -185,10 +187,9 @@ class _TemplateMixin(_StatesServiceBase):
             return
         try:
             rendered = await tai42_app.storage.resource_manager.render_templated_text(check)
-        except (TemplateNotFoundError, TemplateLocaleNotFoundError) as exc:
+        except TEMPLATE_RENDER_ERRORS as exc:
             raise TemplateValidationError(
-                f"template {template.name!r} declarations check references stored id {check.id!r}, "
-                f"which could not be fetched: {exc}"
+                f"template {template.name!r} declarations check {template_render_refusal(check, exc)}"
             ) from exc
         try:
             compile_check(rendered, variables=DECLARATIONS_CHECK_VARIABLES)
@@ -203,23 +204,22 @@ class _TemplateMixin(_StatesServiceBase):
         """Render one ``template_jq`` program body at the save door.
 
         The save door is the point that can fetch a stored resource an inline compile in
-        :func:`validate_template` cannot. An unfetchable id fails the save loudly naming
-        the program and the id.
+        :func:`validate_template` cannot. An id that cannot be fetched or rendered fails the
+        save loudly naming the program and the id.
         """
         try:
             return await tai42_app.storage.resource_manager.render_templated_text(text)
-        except (TemplateNotFoundError, TemplateLocaleNotFoundError) as exc:
+        except TEMPLATE_RENDER_ERRORS as exc:
             raise TemplateValidationError(
-                f"template {template.name!r} template_jq {program_name!r} references stored id {text.id!r}, "
-                f"which could not be fetched: {exc}"
+                f"template {template.name!r} template_jq {program_name!r} {template_render_refusal(text, exc)}"
             ) from exc
 
     async def _compile_by_id_template_jq(self, template: StateTemplate) -> None:
         """Render and compile a by-id ``template_jq`` program at the save door.
 
         When a program body is by-id, every program is rendered (the sibling prelude needs
-        each input body) and compiled over the full prelude; an unfetchable id fails the
-        save loudly naming the program and the id, and a rendered jq that does not compile
+        each input body) and compiled over the full prelude; an id that cannot be fetched or
+        rendered fails the save loudly naming the program and the id, and a rendered jq that does not compile
         is the same loud template error validate raises for inline jq. An all-inline
         section is already compiled by :func:`validate_template`, so this is a no-op for it.
         """
@@ -242,9 +242,9 @@ class _TemplateMixin(_StatesServiceBase):
         """Render and compile a by-id ``reconcile`` program at the save door.
 
         The save door is the point that can fetch a stored resource an inline compile in
-        :func:`validate_template` cannot. An unfetchable id fails the save loudly naming
-        the program and the id; a rendered jq that does not compile is the same loud
-        template error validate raises for inline jq. An inline program is already compiled
+        :func:`validate_template` cannot. An id that cannot be fetched or rendered fails the
+        save loudly naming the program and the id; a rendered jq that does not compile is the
+        same loud template error validate raises for inline jq. An inline program is already compiled
         by :func:`validate_template`.
         """
         if template.reconcile is None:
@@ -258,10 +258,9 @@ class _TemplateMixin(_StatesServiceBase):
                 continue
             try:
                 rendered = await tai42_app.storage.resource_manager.render_templated_text(text)
-            except (TemplateNotFoundError, TemplateLocaleNotFoundError) as exc:
+            except TEMPLATE_RENDER_ERRORS as exc:
                 raise TemplateValidationError(
-                    f"template {template.name!r} reconcile {label} references stored id {text.id!r}, "
-                    f"which could not be fetched: {exc}"
+                    f"template {template.name!r} reconcile {label} {template_render_refusal(text, exc)}"
                 ) from exc
             try:
                 compile_check(rendered, variables=RECONCILE_JQ_VARIABLES[label])
@@ -275,10 +274,12 @@ class _TemplateMixin(_StatesServiceBase):
 
         The fragment ``schema`` is the ``TemplatedText | dict`` union: a by-id fragment is resolved
         for structural validation and every by-id ``check`` / ``template_jq`` / ``reconcile`` body is
-        rendered and compiled here, the point a stored resource can be fetched (an unfetchable id
-        fails loudly, naming the template). The stored body is the canonical document carrying the
-        ORIGINAL union fragment, so a read serves a by-id reference back unchanged.
+        rendered and compiled here, the point a stored resource can be fetched (an id that cannot
+        be fetched or rendered fails loudly, naming the template). The stored body is the canonical
+        document carrying the ORIGINAL union fragment, so a read serves a by-id reference back unchanged.
+        Every id the document names that the store lacks raises :class:`TemplateValidationError` first.
         """
+        await assert_templates_stored(state_template_template_refs(doc), TemplateValidationError)
         body = doc.model_dump(by_alias=True)
         resolved_body, _by_id = await self._resolve_template_body(doc.name, body)
         template = validate_template(resolved_body)
@@ -355,10 +356,9 @@ class _TemplateMixin(_StatesServiceBase):
     async def _render_body(self, template: StateTemplate, where: str, text: TemplatedText) -> str:
         try:
             return await tai42_app.storage.resource_manager.render_templated_text(text)
-        except (TemplateNotFoundError, TemplateLocaleNotFoundError) as exc:
+        except TEMPLATE_RENDER_ERRORS as exc:
             raise TemplateValidationError(
-                f"template {template.name!r} {where} references stored id {text.id!r}, "
-                f"which could not be fetched: {exc}"
+                f"template {template.name!r} {where} {template_render_refusal(text, exc)}"
             ) from exc
 
     async def _render_entry(self, template: StateTemplate, version_prefix: str | None) -> RenderedEntry:

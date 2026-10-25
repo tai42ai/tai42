@@ -1,6 +1,8 @@
 """Focused tests for the manifest impl: load from an in-memory dict, derived-map
 building, and the include/exclude filter predicates."""
 
+import pytest
+
 from tai42_skeleton.manifest import Manifest
 
 
@@ -215,3 +217,37 @@ def test_live_manifest_serializes_user_facing_fields():
     assert "tools_list" not in dumped
     # the config sections round-trip.
     assert {t["module"] for t in dumped["tools"]} == {"pkg.math_tools", "pkg.text_tools"}
+
+
+# -- the include/exclude selection rule -------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("include", "exclude", "admitted"),
+    [
+        pytest.param([], [], {"acme_send", "acme_read", "acme_delete"}, id="every-tool"),
+        pytest.param(["acme_send"], [], {"acme_send"}, id="include"),
+        pytest.param([], ["acme_delete"], {"acme_send", "acme_read"}, id="exclude"),
+        pytest.param(["acme_send"], ["acme_send", "acme_read"], {"acme_send"}, id="include-ignores-exclude"),
+        pytest.param(["acme_gone"], [], set(), id="include-names-nothing-served"),
+    ],
+)
+def test_selection_admits_matches_the_manifest_mcp_filter(include, exclude, admitted):
+    from tai42_skeleton.manifest import selection_admits
+
+    served = ["acme_send", "acme_read", "acme_delete"]
+    manifest = Manifest.model_validate(
+        {
+            "mcp": [
+                {
+                    "title": "acme",
+                    "config": {"type": "streamable_http", "url": "https://example.com/mcp"},
+                    "include": include,
+                    "exclude": exclude,
+                }
+            ]
+        }
+    )
+
+    assert {name for name in served if selection_admits(name, include, exclude)} == admitted
+    assert {name for name in served if manifest.should_include_mcp_tool(name, "acme")} == admitted

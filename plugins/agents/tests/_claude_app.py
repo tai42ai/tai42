@@ -22,6 +22,7 @@ from tai42_contract.connectors.models import ResolvedConnectionAuth
 from tai42_contract.monitoring.models import SpanKind
 from tai42_contract.sandbox import Sandbox, SandboxPolicy
 from tai42_contract.template import TemplatedText
+from tai42_kit.monitoring.otel import OtelWriter
 
 from ._client_tool import FakeClientTool, client_tool
 from ._sandbox_fake import FakeSandbox, make_fake_sandbox, permissive_sandbox_policy
@@ -67,12 +68,12 @@ class RecordingWriter:
 
 
 class _Monitoring:
-    def __init__(self, writer: RecordingWriter) -> None:
+    def __init__(self, writer: RecordingWriter | OtelWriter) -> None:
         self.writer = writer
 
 
 class _MonitoringFacet:
-    def __init__(self, writer: RecordingWriter) -> None:
+    def __init__(self, writer: RecordingWriter | OtelWriter) -> None:
         self._backend = _Monitoring(writer)
 
     @property
@@ -118,6 +119,10 @@ class _InteractionsFacet:
     async def assert_resume_authorized(self, interaction_id: str) -> None:
         # Permissive in the local test app: the driver faces call it, and the real platform gates.
         return None
+
+    async def settle_chained_terminal(self, chain_key: str, result: Any) -> Any:
+        # No preset stages in the local test app: a chained terminal settles to itself.
+        return result
 
 
 class _ConnectorsFacet:
@@ -175,25 +180,41 @@ class _ToolsFacet:
 
 
 class _ResourceManager:
-    def __init__(self, templates: dict[str, str]) -> None:
+    """Stored objects keyed by id: text (``str``) or raw bytes (``bytes``), like a real store.
+
+    ``fetch_template`` is the strict text read — a stored object that is not UTF-8 text is
+    refused, as the real manager refuses it — and ``load`` is the raw byte read.
+    """
+
+    def __init__(self, templates: dict[str, str | bytes]) -> None:
         self.templates = templates
 
     async def list_resources(self) -> list[str]:
         return list(self.templates)
 
     async def fetch_template(self, key: str) -> str:
-        return self.templates[key]
+        stored = self.templates[key]
+        if isinstance(stored, str):
+            return stored
+        try:
+            return stored.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError(f"Template {key!r} is not a text template") from exc
+
+    async def load(self, source: str, *, with_mime: bool = True) -> tuple[bytes, str | None]:
+        stored = self.templates[source]
+        return (stored.encode("utf-8") if isinstance(stored, str) else stored), None
 
     async def render_templated_text(self, text: TemplatedText, locale: str | None = None) -> str:
         if text.content is not None:
             return text.content
         if text.id is None:
             raise ValueError("a TemplatedText sets exactly one of content or id")
-        return self.templates[text.id]
+        return await self.fetch_template(text.id)
 
 
 class _StorageFacet:
-    def __init__(self, templates: dict[str, str]) -> None:
+    def __init__(self, templates: dict[str, str | bytes]) -> None:
         self.resource_manager = _ResourceManager(templates)
 
 
@@ -221,8 +242,8 @@ class LocalApp:
         ask: Callable[..., Awaitable[Any]],
         resolver: Callable[[str, str, str], ResolvedConnectionAuth | None] | None,
         tool_runners: dict[str, Callable[..., Any]],
-        templates: dict[str, str],
-        writer: RecordingWriter,
+        templates: dict[str, str | bytes],
+        writer: RecordingWriter | OtelWriter,
         agents: dict[str, Any] | None = None,
     ) -> None:
         self.sandboxes = _SandboxesFacet(sandbox, policy)
@@ -245,8 +266,8 @@ def build_local_app(
     ask: Callable[..., Awaitable[Any]] | None = None,
     resolver: Callable[[str, str, str], ResolvedConnectionAuth | None] | None = None,
     tool_runners: dict[str, Callable[..., Any]] | None = None,
-    templates: dict[str, str] | None = None,
-    writer: RecordingWriter | None = None,
+    templates: dict[str, str | bytes] | None = None,
+    writer: RecordingWriter | OtelWriter | None = None,
     agents: dict[str, Any] | None = None,
 ) -> LocalApp:
     return LocalApp(

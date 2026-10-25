@@ -170,7 +170,7 @@ def test_a_chained_fire_that_returns_run_failed_is_raised_by_the_platform_face(
         chain_tool.reply = RunFailed(outcome={"caller": "failed too"})
 
         with pytest.raises(RunTerminalFailed) as raised:
-            await agent_resume_tool("i1", "the answer", None, None)
+            await agent_resume_tool("i1", "the answer")
 
         assert raised.value.outcome == {"caller": "failed too"}
         assert await _record(step) == ResolutionRecord("terminal", RunFailed(outcome={"caller": "failed too"}))
@@ -193,7 +193,7 @@ def test_an_unchained_provider_error_finalizes_failed_and_raises(
         assert await _record(step) == ResolutionRecord("terminal", RunFailed(outcome=PROVIDER_DOWN))
         # A lapped redelivery replays the stored failure on the platform face.
         with pytest.raises(RunTerminalFailed) as replayed:
-            await agent_resume_tool("i1", "late", None, None)
+            await agent_resume_tool("i1", "late")
         assert replayed.value.outcome == PROVIDER_DOWN
         assert agent.calls == 1
 
@@ -241,7 +241,7 @@ def test_a_run_terminal_failed_inside_the_resumed_run_keeps_its_reply(
         assert await _record(step) == ResolutionRecord("terminal", RunFailed(outcome={"k": "v"}, reply=reply))
         # A lapped redelivery replays the stored failure, reply included, on the platform face.
         with pytest.raises(RunTerminalFailed) as replayed:
-            await agent_resume_tool("i1", "late", None, None)
+            await agent_resume_tool("i1", "late")
         assert replayed.value.reply == reply
 
     asyncio.run(go())

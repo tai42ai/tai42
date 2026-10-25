@@ -1,9 +1,10 @@
 """Materialize the requested skills into a session's ``project/.claude/skills/`` tree.
 
 For each requested (charset-validated) skill NAME the whole ``skills/<name>/`` tree is copied
-DIRECTLY from the template store (``tai42_app.storage.resource_manager``) into the
-workspace-relative ``project/.claude/skills/<name>/`` — every key is already listable there, so
-this does not depend on the skills-backend widening. Inline skills become a single ``SKILL.md``.
+byte-for-byte (text files and binary assets alike) DIRECTLY from the template store
+(``tai42_app.storage.resource_manager``) into the workspace-relative
+``project/.claude/skills/<name>/`` — every key is already listable there, so this does not
+depend on the skills-backend widening. Inline skills become a single ``SKILL.md``.
 
 Every caller-supplied NAME used in a path is validated to the workspace-key charset
 (``[A-Za-z0-9_-]{1,64}``) at the door, and every write stays realpath-contained to its subtree
@@ -84,8 +85,9 @@ async def sync_skills(
                 raise ValueError(f"skill {name!r} has no files under {prefix!r} in the template store")
             for key in matched:
                 subpath = key[len(prefix) :]
-                content = await tai42_app.storage.resource_manager.fetch_template(key)
-                await session.put_file(_dest_path(name, subpath), content.encode("utf-8"))
+                # The raw bytes: a bundle holds binary assets as well as text files.
+                data, _mime = await tai42_app.storage.resource_manager.load(key, with_mime=False)
+                await session.put_file(_dest_path(name, subpath), data)
 
     for skill in inline_skills:
         name = validate_name("inline skill", skill["name"])

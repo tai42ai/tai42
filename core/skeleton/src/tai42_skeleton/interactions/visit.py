@@ -68,7 +68,8 @@ from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.redis import RedisClient
 
 from tai42_skeleton.interactions.answer_check import check_answer
-from tai42_skeleton.interactions.continuation import continuation_due_timing, drive_and_deliver
+from tai42_skeleton.interactions.continuation import drive_and_deliver
+from tai42_skeleton.interactions.continuation_dispatch import continuation_due_timing
 from tai42_skeleton.interactions.kill import kill_park
 from tai42_skeleton.interactions.reaction import (
     SubmittedCheckRejectedError,
@@ -449,6 +450,7 @@ async def _resume_one(
         deferred_binding=request.deferred_binding,
         run_input=request.run_input,
         door_id=request.door_id,
+        output_stages=request.deferred_output_stages,
     )
 
 

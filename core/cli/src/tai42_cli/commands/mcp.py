@@ -12,6 +12,7 @@ from typing import Annotated, Any
 import typer
 
 from tai42_cli.commands._common import app_context, covers, emit_result, seg
+from tai42_cli.render import print_json, print_records
 
 app = typer.Typer(
     name="mcp",
@@ -177,6 +178,67 @@ def reload_mcp(
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
         data = client.post(f"/api/mcp-status/{seg(title)}/reload", json=_targets_body(target))
+    emit_result(ctx_obj, data)
+
+
+_ADVERTISED_COLUMNS = ["name", "selected", "bound", "unbound_reason", "description"]
+
+
+@app.command("tools")
+@covers(("POST", "/api/mcp-status/{title}/advertised-tools"))
+def list_mcp_advertised_tools(
+    ctx: typer.Context,
+    title: Annotated[str, typer.Argument(help="MCP server title.")],
+) -> None:
+    """List every tool an MCP server advertises, with whether the entry picks it and whether it is bound.
+
+    The server is probed live with its stored credential, so this is a write-tier call.
+    Each row gives the tool's served name, whether the entry's selection picks it, whether
+    it is bound, why a picked tool is not bound, and its description. A name the entry's
+    selection lists that the server no longer advertises follows as a "not advertised" row.
+
+    Example: ``tai mcp tools my-server``
+    """
+    ctx_obj = app_context(ctx)
+    with ctx_obj.client() as client:
+        data = client.post(f"/api/mcp-status/{seg(title)}/advertised-tools")
+    if ctx_obj.json_output:
+        print_json(data)
+        return
+    rows: list[dict[str, Any]] = [
+        {column: tool.get(column) for column in _ADVERTISED_COLUMNS} for tool in data.get("tools", [])
+    ]
+    rows.extend({"name": name, "unbound_reason": "not advertised"} for name in data.get("unadvertised", []))
+    print_records(rows, _ADVERTISED_COLUMNS, json_output=False)
+
+
+@app.command("pick")
+@covers(("PUT", "/api/mcp-config/entries/{title}/tool-filter"))
+def pick_mcp_tools(
+    ctx: typer.Context,
+    title: Annotated[str, typer.Argument(help="MCP server title.")],
+    include: Annotated[
+        list[str] | None, typer.Option("--include", help="Mount only this served tool name (repeatable).")
+    ] = None,
+    exclude: Annotated[
+        list[str] | None, typer.Option("--exclude", help="Mount every tool but this served name (repeatable).")
+    ] = None,
+    pick_all: Annotated[bool, typer.Option("--all", help="Mount every tool the server advertises.")] = False,
+) -> None:
+    """Set which of an MCP server's tools are mounted: an include list, an exclude list, or all.
+
+    Exactly one of ``--include``, ``--exclude`` or ``--all`` is given. A pick that would
+    stop mounting a tool something still uses is refused, naming each holder.
+
+    Example: ``tai mcp pick my-server --include my-server_search``
+    """
+    modes = [bool(include), bool(exclude), pick_all]
+    if modes.count(True) != 1:
+        raise typer.BadParameter("give --include, --exclude or --all")
+    body = {"include": list(include or []), "exclude": list(exclude or [])}
+    ctx_obj = app_context(ctx)
+    with ctx_obj.client() as client:
+        data = client.put(f"/api/mcp-config/entries/{seg(title)}/tool-filter", json=body)
     emit_result(ctx_obj, data)
 
 

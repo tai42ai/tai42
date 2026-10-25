@@ -111,6 +111,13 @@ def test_importing_register_registers_channel_and_routes(stub_app):
         }
 
 
+def test_the_registered_channel_declares_an_identity_hint(stub_app):
+    with _freshly_registered(stub_app):
+        hint = getattr(stub_app.channels.registered["web"], "identity_hint", None)
+    assert isinstance(hint, str)
+    assert hint.strip()
+
+
 def test_registered_routes_match_the_plugin_spec_declarations(stub_app):
     # The runtime refuses to mount a route the item's ``tai-plugin.yml`` block does not
     # declare and resolves each door's auth from the declared ``public`` flag alone, so

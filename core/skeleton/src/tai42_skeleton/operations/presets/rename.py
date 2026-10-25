@@ -18,11 +18,14 @@ from tai42_skeleton.app import instance
 from tai42_skeleton.db import SKELETON_COMPONENT
 from tai42_skeleton.operations import BadRequestError, ConflictError, NotFoundError, operation
 from tai42_skeleton.operations._broadcast import fleet_fanout
+from tai42_skeleton.operations.errors import OperationFailedError
+from tai42_skeleton.operations.holders import bound_branches, delete_holders, holders_refusal, rename_holders
 from tai42_skeleton.operations.presets import fanout
 from tai42_skeleton.operations.presets.authoring import _enforce_registration_tier
 from tai42_skeleton.operations.presets.models import PresetRename
-from tai42_skeleton.operations.presets.references import _assert_no_bound_routes, _delete_referees, _rename_referees
-from tai42_skeleton.operations.response_models_group_a import PresetDeleteResult, PresetRenameResult
+from tai42_skeleton.operations.presets.read import require_preset
+from tai42_skeleton.operations.reference_graph import StoredPresets
+from tai42_skeleton.operations.response_models_group_presets import PresetDeleteResult, PresetRenameResult
 from tai42_skeleton.presets.manager import is_valid_preset_name
 
 logger = logging.getLogger(__name__)
@@ -52,12 +55,13 @@ async def _check_rename_target(mgr: Any, new_name: str) -> None:
         raise ConflictError(f"preset {new_name!r} already exists")
 
 
-async def _rebind_new_then_drop_old(mgr: Any, store: Any, name: str, new_name: str) -> Any:
+async def _rebind_new_then_drop_old(mgr: Any, store: Any, name: str, new_name: str, branches: list[str]) -> Any:
     """The local apply of a rename, NEW FIRST.
 
     Move the store key, bind ``new_name`` from the moved row's active body (compensating by re-pointing the
     store back on a re-register failure so store + live never diverge), tear the OLD binding down, then
-    re-key the tool_meta overlay. Returns the moved store record; raises the mapped 409s.
+    re-key the tool_meta overlay of ``name`` and of each of its extension ``branches``. Returns the moved
+    store record; raises the mapped 409s.
     """
     # Move the store key. The pre-checks make the typed conflicts race-window catches,
     # mapped exactly as create maps its post-write errors.
@@ -89,6 +93,7 @@ async def _rebind_new_then_drop_old(mgr: Any, store: Any, name: str, new_name: s
         if isinstance(reload_exc, PresetNameConflictError):
             raise ConflictError(f"preset name {new_name!r} collides with an existing tool") from reload_exc
         raise
+    new_branches = bound_branches(new_name)
 
     # Then tear the OLD binding down. A failure here leaves BOTH names bound (old is
     # stale-but-functional: its baked spec is in-memory and its base tool is untouched);
@@ -105,8 +110,14 @@ async def _rebind_new_then_drop_old(mgr: Any, store: Any, name: str, new_name: s
     # one (clean slate); a failure here raises loudly, leaving only a dangling old-name
     # row that the next claim reclaims. Guarded on the overlay store: with tool_meta
     # OFF the re-key is a no-op rather than a 500 opening an absent Postgres.
+    # The branch rows move with it: an extension names its branch from the name it is
+    # handed, so each old branch pairs with the new one at the same registration position
+    # (both bindings are built from the same active body; a length mismatch raises).
     if component_store_configured(SKELETON_COMPONENT):
-        await instance.app.tool_meta.store.rename_tool(name, new_name)
+        meta_store = instance.app.tool_meta.store
+        await meta_store.rename_tool(name, new_name)
+        for old_branch, new_branch in zip(branches, new_branches, strict=True):
+            await meta_store.rename_tool(old_branch, new_branch)
     return record
 
 
@@ -115,17 +126,18 @@ async def _rebind_new_then_drop_old(mgr: Any, store: Any, name: str, new_name: s
     tags=["presets"],
     destructive=True,
     reload_gated=True,
-    errors=[BadRequestError, ConflictError, NotFoundError],
+    errors=[BadRequestError, ConflictError, NotFoundError, OperationFailedError],
     request_model=PresetRename,
     response_model=PresetRenameResult,
 )
 async def rename_preset(name: str, new_name: str) -> dict[str, Any]:
     """Rename a preset, ATOMIC (a preset's name IS its live tool name).
 
-    Runs create's ordered name pre-checks on the NEW name, BLOCKS with a 409 listing every referee if any
-    live reference composes the current name, binds the new tool BEFORE tearing the old one down, fires one
-    ``list_changed``, and fans the rebind out NEW-first then the old removal. The response embeds the
-    primary rebind (new-name) fan-out report under ``fanout``; the old-name removal stays log-only.
+    Runs create's ordered name pre-checks on the NEW name, BLOCKS with a 409 listing every holder of
+    the current name or one of its extension branch tools, binds the new tool BEFORE tearing the old
+    one down, fires one ``list_changed``, and fans the rebind out NEW-first then the old removal. The
+    response embeds the primary rebind (new-name) fan-out report under ``fanout``; the old-name removal
+    stays log-only.
 
     A preset's NAME is its identity everywhere — it IS the live tool binding, and every
     reference (preset bodies, platform wiring, plugin holders) keys on it deliberately;
@@ -163,19 +175,17 @@ async def rename_preset(name: str, new_name: str) -> dict[str, Any]:
     # Registration-tier fence: the tier is the CURRENT preset's base tool, so
     # renaming a fenced base tool's preset is admin-fenced too. Runs BEFORE the store move.
     await _enforce_registration_tier(active_body.base_tool)
+    # The one read of the branch tools the rename moves; the gate and the overlay re-key share it.
+    branches = bound_branches(name)
 
     await _check_rename_target(mgr, new_name)
 
     # Referential integrity: BLOCK (never silently cascade-rewrite) a rename that would
-    # strand any live reference — the FULL union of preset-body referees + every
-    # registered referee (platform wiring: schedules/hooks/routes/extensions/parks, and
-    # plugin holders), listing every holder so the operator updates them first. A referee
-    # raising fails the rename loudly (no silent bypass).
-    referees = await _rename_referees(name)
-    if referees:
-        raise ConflictError(
-            f"preset {name!r} cannot be renamed — it is still referenced by: {referees}; update those references first"
-        )
+    # strand any live holder of the name or one of its branches, listing every holder so the
+    # operator updates them first. A referee raising fails the rename loudly.
+    holders = await rename_holders(name, branches, await StoredPresets.read())
+    if holders:
+        raise holders_refusal(f"preset {name!r} cannot be renamed", holders, "update those references first")
 
     # The pre-rename snapshot judges the RELOAD, and is the floor for the remove:
     # both halves are one rename, so a worker owed the rename from the start stays
@@ -183,7 +193,7 @@ async def rename_preset(name: str, new_name: str) -> dict[str, Any]:
     # assembled after the reload below.
     census = await fanout._census_at_start(fanout._RELOAD_OP)
 
-    record = await _rebind_new_then_drop_old(mgr, store, name, new_name)
+    record = await _rebind_new_then_drop_old(mgr, store, name, new_name, branches)
 
     # A rename changes the tool listing by definition (old gone, new present), so the
     # emit is unconditional — no wire-diff guard.
@@ -223,69 +233,70 @@ async def rename_preset(name: str, new_name: str) -> dict[str, Any]:
 async def delete_preset(name: str) -> dict[str, Any]:
     """Delete a preset.
 
-    A non-conflicted record is soft-deleted and its base + branch tools torn down (one ``list_changed``);
-    a conflicted record is removed store-side ONLY (HARD delete + drop the quarantine entry), touching no
-    registration and firing no emit. Both branches fan the removal out on the bus and embed the per-worker
-    fleet report under ``fanout``.
+    Order: existence → refuse with a 409 listing every holder of the preset or one of its
+    extension branch tools → every delete cascade for each of those names → removal → the
+    overlay rows of those names cleared. A non-conflicted record is soft-deleted and its base + branch
+    tools torn down (one ``list_changed``); a conflicted record is removed store-side ONLY (HARD delete +
+    drop the quarantine entry), touching no registration and firing no emit. Both branches fan the
+    removal out on the bus and embed the per-worker fleet report under ``fanout``.
     """
     mgr = instance.app.preset_manager
+    quarantined = mgr.is_quarantined(name)
+    await require_preset(name)
 
-    # Consult the delete referees FIRST (before any teardown): a referee cascades its own
-    # cleanup and returns empty, or vetoes with the references it will not let the delete
-    # strand. Any non-empty answer blocks the delete — nothing is torn down.
-    blockers = await _delete_referees(name)
-    if blockers:
-        raise ConflictError(f"preset {name!r} cannot be deleted — held by: {'; '.join(blockers)}")
-    # A conversation route bound to this preset as its target is stranded by a delete (the target
-    # vanishes), so a delete is refused naming those routes, the same way a rename is — the plugin
-    # referees above do not cover routes.
-    await _assert_no_bound_routes(name)
+    # The one read of the branch tools the delete removes; the gate, the cascades and the
+    # overlay cleanup all walk it.
+    removed = [name, *bound_branches(name)]
+    holders = await delete_holders(name, removed[1:])
+    if holders:
+        raise holders_refusal(f"preset {name!r} cannot be deleted", holders, "remove those references first")
+    # Cleanup runs only once nothing holds the name, and before the record is removed; a
+    # cascade raising fails the delete with the preset intact.
+    for cascade in instance.app.tools.delete_cascades():
+        for tool_name in removed:
+            await cascade(tool_name)
 
-    if mgr.is_quarantined(name):
+    if quarantined:
         # A conflicted record was never registered — remove ONLY the stored
         # document (HARD delete, so no ghost/version history lingers), drop the
         # quarantine entry immediately, and touch NO registration (the name may be
         # owned by a foreign tool) and fire NO emit. The removal still fans out so a
         # sibling's in-memory quarantine entry is cleared too. A quarantine entry only
-        # ever arises from a store-backed preset (rehydrate or reconcile of a created
-        # preset — both require a configured store), so the hard-delete here always has
-        # a store to talk to; the store-config guard below is only for the
-        # non-quarantined path.
+        # ever arises from a store-backed preset, so the hard-delete here always has
+        # a store to talk to.
         census = await fanout._census_at_start(fanout._REMOVE_OP)
         try:
             await instance.app.versioning.store.delete("preset", name)
         except Exception:
             logger.exception("failed to hard-delete conflicted preset record %r", name)
             raise
-        # Cascade the overlay row: the tool is gone, so its organizational
-        # metadata goes with it. A no-op when the preset never got a row, and skipped
-        # entirely when the overlay store is OFF (no absent-Postgres open).
-        if component_store_configured(SKELETON_COMPONENT):
-            await instance.app.tool_meta.store.delete_meta(name)
+        await _clear_overlay_rows(removed)
         mgr.drop_quarantine(name)
         report = await fanout._fanout_remove(name, census)
         # Embed the per-worker removal fan-out report (mirrors the template writers): a
         # deployer reads it as proof the teardown reached every serving worker.
         return {"name": name, "deleted": True, "fanout": fleet_fanout(report)}
 
-    # A store-less deploy (no versioned store configured) can hold no preset, so a
-    # name that is not quarantined is a genuine 404 without a Postgres read.
-    if not component_store_configured(SKELETON_COMPONENT):
-        raise NotFoundError(f"preset {name!r} not found")
     census = await fanout._census_at_start(fanout._REMOVE_OP)
     try:
         await instance.app.presets.store.soft_delete(name)
     except PresetNotFoundError as exc:
         raise NotFoundError(f"preset {name!r} not found") from exc
     await mgr.remove(name)
-    # Cascade the overlay row once the preset is soft-deleted and torn down.
-    # Keyed by tool name, so the soft-delete ghost in ``versioned_documents`` is
-    # irrelevant; a no-op when the preset never got a row, and skipped entirely when
-    # the overlay store is OFF (no absent-Postgres open).
-    if component_store_configured(SKELETON_COMPONENT):
-        await instance.app.tool_meta.store.delete_meta(name)
+    await _clear_overlay_rows(removed)
     await instance.app.emit_list_changed("tool")
     report = await fanout._fanout_remove(name, census)
     # Embed the per-worker removal fan-out report (mirrors the template writers): a
     # deployer reads it as proof the teardown reached every serving worker.
     return {"name": name, "deleted": True, "fanout": fleet_fanout(report)}
+
+
+async def _clear_overlay_rows(names: list[str]) -> None:
+    """Clear the tool_meta overlay row of each removed tool: the tool is gone, so its organization goes with it.
+
+    Keyed by tool name, so a soft-delete ghost is irrelevant; a no-op for a name with no row, and
+    skipped when the overlay store is OFF (no absent-Postgres open).
+    """
+    if component_store_configured(SKELETON_COMPONENT):
+        for tool_name in names:
+            await instance.app.tool_meta.store.delete_meta(tool_name)

@@ -37,9 +37,12 @@ from tai42_contract.states.errors import (
 )
 from tai42_contract.template import TemplatedText
 
+from tai42_skeleton.app import instance
 from tai42_skeleton.states.service.subjects import _SubjectMixin
 from tai42_skeleton.states.service.template_jq import select_template_jq
-from tai42_skeleton.template.resource_manager import TemplateNotFoundError
+from tai42_skeleton.storage import StorageRegistry
+from tai42_skeleton.template import ResourceManager
+from tai42_skeleton.template.errors import TemplateNotFoundError
 from tai42_skeleton.tools.state_binding import (
     apply_binding_injections,
     apply_binding_updates,
@@ -47,6 +50,9 @@ from tai42_skeleton.tools.state_binding import (
     validate_and_attach_binding,
     validate_binding,
 )
+
+from .._fakes.recording_storage import RecordingStorage
+from ..template.test_resource_manager import _InMemoryStorage
 
 _DECL = StateDeclaration(
     name="status", schema={"type": "object"}, subject_kinds=["thread"], default_subject_kind="thread"
@@ -950,14 +956,35 @@ async def test_save_refuses_at_the_first_failing_slot_in_slot_order(
 
 
 # -- by-id slots: render-then-compile at save --------------------------------
-async def test_by_id_slot_that_cannot_be_fetched_fails_the_save_loudly() -> None:
-    # A slot supplied by ``id`` is fetched and rendered at save before its jq is compiled; a
-    # referenced resource that does not exist is a LOUD refusal naming the slot and the id,
-    # never a silent pass or a deferred surprise.
+@pytest.fixture(autouse=True)
+def _stored_ids(monkeypatch: pytest.MonkeyPatch) -> RecordingStorage:
+    """The storage provider the stored-id check asks, holding the ids the by-id slots below name."""
+    provider = RecordingStorage(dict.fromkeys(("subj", "scope", "inj", "upd", "op", "broken-expr"), (b".", None)))
+    monkeypatch.setattr(instance.app._storage_registry, "_provider", provider)
+    return provider
+
+
+@pytest.mark.parametrize("check", [validate_and_attach_binding, validate_binding])
+async def test_a_slot_naming_an_id_the_store_lacks_is_refused_before_any_render(check: Any) -> None:
+    # The stored-id check runs first and reads every slot, so a missing id is refused with
+    # its site even where the render would answer something else.
     states = FakeStates(attached={"status": []}, templates={})
-    b = StateBinding(states=[StateAttach(state="status", subject_expr=TemplatedText(id="ghost-expr"))])
-    with pytest.raises(ValueValidationError, match=r"subject_expr.*'ghost-expr'"):
-        await validate_and_attach_binding(_app(states, resources={}), b)
+    b = StateBinding(
+        states=[
+            StateAttach(
+                state="status",
+                subject_expr=TemplatedText(id="jq/subject"),
+                updates=[StateUpdate(jq=TemplatedText(content="[]"), op_id=TemplatedText(id="jq/op"))],
+            )
+        ]
+    )
+    with pytest.raises(ValueValidationError) as caught:
+        await check(_app(states, resources={"jq/subject": ".id", "jq/op": ".id"}), b)
+    assert str(caught.value) == (
+        "stored id 'jq/subject' at states[0].subject_expr is not a stored template\n"
+        "stored id 'jq/op' at states[0].updates[0].op_id is not a stored template"
+    )
+    assert states.attached_now == []
 
 
 async def test_by_id_slots_resolve_and_compile_at_save() -> None:
@@ -984,3 +1011,42 @@ async def test_by_id_slots_resolve_and_compile_at_save() -> None:
     )
     await validate_and_attach_binding(_app(states, resources=resources), b)
     assert states.attached_now == []
+
+
+def _real_resource_manager(resources: dict[str, str]) -> ResourceManager:
+    """A real resource manager over an in-memory store holding ``resources``."""
+
+    class _Store(_InMemoryStorage):
+        def __init__(self) -> None:
+            super().__init__(resources)
+
+    registry = StorageRegistry()
+    registry.register_storage(_Store)
+    return ResourceManager(registry.provider, on_evicted=lambda _eviction: None)
+
+
+async def test_by_id_slot_whose_stored_body_cannot_be_rendered_fails_the_save_loudly() -> None:
+    # A stored slot body with broken Jinja fails its render at save: a LOUD refusal naming the
+    # slot and the id, never an unmapped template-engine error.
+    states = FakeStates(attached={"status": []}, templates={})
+    b = StateBinding(states=[StateAttach(state="status", subject_expr=TemplatedText(id="broken-expr"))])
+    app: Any = SimpleNamespace(
+        states=states, storage=SimpleNamespace(resource_manager=_real_resource_manager({"broken-expr": "{{ oops"}))
+    )
+    with pytest.raises(
+        ValueValidationError,
+        match=r"state binding subject_expr for state 'status' references stored id 'broken-expr', "
+        r"which could not be rendered",
+    ):
+        await validate_and_attach_binding(app, b)
+
+
+async def test_inline_slot_that_cannot_be_rendered_fails_the_save_loudly() -> None:
+    states = FakeStates(attached={"status": []}, templates={})
+    b = StateBinding(states=[StateAttach(state="status", subject_expr=TemplatedText(content='"{{ oops"'))])
+    app: Any = SimpleNamespace(states=states, storage=SimpleNamespace(resource_manager=_real_resource_manager({})))
+    with pytest.raises(
+        ValueValidationError,
+        match=r"state binding subject_expr for state 'status' is not a renderable template",
+    ):
+        await validate_and_attach_binding(app, b)

@@ -6,15 +6,16 @@ adopted) and its retired client pools, resets the settings caches, and arms the 
 certification
 (:func:`~tai42_skeleton.app.retired_generations.arm_retired_generation_certification`).
 
-The drain budget bounds the work that can finish on its own. Work that drives or waits on the
-reload gate (recorded on the generation by
-:class:`~tai42_skeleton.app.reload_gate.GateParty`) cannot finish before the gate is released,
-which happens only after the retire returns: it is never counted against the budget and never
-severed. When the generation has such work — from the start, or as soon as a request starts
-waiting on the gate during the synchronous drain — the retire leaves the transports open and
-hands the drain and the close to a background tail that lets the gate turn over, drains the
-ordinary work within the budget, waits for every driver to answer, repeats while work of the
-generation still waits on the gate, and only then closes. A call of an SSE session is a
+The drain budget bounds the work that can finish on its own. Work that drives the reload gate,
+or waits on it or on another lock whose holder may drive the retire (a recorded lock, recorded
+on the generation by :class:`~tai42_skeleton.app.reload_gate.GateParty`), cannot finish before
+that holder releases, which may happen only after the retire returns: it is never counted
+against the budget and never severed. When the generation has such work — from the start, or
+as soon as a request starts waiting on a recorded lock during the synchronous drain — the
+retire leaves the transports open and hands the drain and the close to a background tail that
+lets the gate turn over, drains the ordinary work within the budget, waits for every driver to
+answer, and, while work of the generation still waits on a recorded lock, waits for those
+waits to end and repeats; only then does it close. A call of an SSE session is a
 request of its own here, counted until its reply is handed to the transport, so closing the
 transports — which ends the generation's SSE sessions — never overtakes a driver's answer.
 """
@@ -168,9 +169,10 @@ async def _deferred_drain_and_close(old: Epoch, retired: int, budget: float) -> 
     ordinary in-flight work again). Then drains the ordinary in-flight requests within the
     drain budget (loud past it) and waits for every request and supervisor driving a gated
     body of this generation to finish — their responses flush on the still-live
-    transports, and their own bounds bound the wait. Work of this generation that started
-    waiting on the gate meanwhile (behind another reload) turns the gate over again, until
-    none waits; only then are the transports closed and the retired generation's
+    transports, and their own bounds bound the wait. While work of this generation still
+    waits on a recorded lock (the gate behind another reload, or a lock whose holder is no
+    work of this generation), the tail waits for those waits to end, without holding the loop,
+    and repeats; only then are the transports closed and the retired generation's
     certification armed. Runs on the serving loop (the lifespans' owner loop), so the close
     stays loop-correct.
     """
@@ -184,6 +186,7 @@ async def _deferred_drain_and_close(old: Epoch, retired: int, budget: float) -> 
             await old._wait_driving()
             if not old.gate_waiters:
                 break
+            await old._wait_gate_waiters()
     finally:
         try:
             await old.close_transports()

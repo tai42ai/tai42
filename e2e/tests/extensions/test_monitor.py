@@ -43,3 +43,48 @@ async def test_monitor_emits_a_tool_span_for_a_standalone_call(
     span = matching[0]
     assert span["name"] == "e2e_echo", f"monitor span did not name the wrapped tool: {span}"
     assert span["kind"] == "TOOL", f"monitor span was not a TOOL span: {span}"
+
+
+@pytest.mark.needs("mutable")
+async def test_monitor_span_input_holds_only_the_arguments_the_caller_supplied(
+    extensions_stack: TaiStack, uniq: Callable[[str], str]
+) -> None:
+    name = uniq("monitored_preset")
+    created = await extensions_stack.api().request_raw(
+        "POST",
+        "/api/presets",
+        json={
+            "name": name,
+            "base_tool": "e2e_echo",
+            "description": "echo of text and an optional suffix",
+            "input_schema": {
+                "type": "object",
+                "properties": {"text": {"type": "string"}, "suffix": {"type": "string"}},
+                "required": ["text"],
+                "additionalProperties": False,
+            },
+            "input_map": '{payload: (.text + ":" + (.suffix // "none"))}',
+            "extensions": [["monitor"]],
+        },
+    )
+    assert created.status_code == 200, created.text
+
+    marker = uniq("monitored")
+    async with extensions_stack.mcp() as mcp:
+        result = await mcp.call_tool(f"{name}_monitor", {"text": marker})
+    assert result.data == f"{marker}:none"
+
+    def _matching() -> list[dict]:
+        spans = [json.loads(rec) for rec in extensions_stack.records("monitor_spans")]
+        return [s for s in spans if marker in s.get("input", "")]
+
+    async def emitted() -> bool:
+        return len(_matching()) >= 1
+
+    await wait_for_async(emitted, deadline=5.0, message="monitor extension never emitted a span for the preset call")
+    matching = _matching()
+    assert len(matching) == 1, f"monitor emitted the wrong number of spans: {matching}"
+    span = matching[0]
+    assert span["name"] == name, f"monitor span did not name the preset: {span}"
+    assert span["kind"] == "TOOL", f"monitor span was not a TOOL span: {span}"
+    assert json.loads(span["input"]) == {"args": [], "kwargs": {"text": marker}}, span

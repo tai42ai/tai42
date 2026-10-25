@@ -38,6 +38,7 @@ from tai42_contract.tools import RunDelivery, get_run_delivery, get_run_delivery
 
 from tai42_skeleton.interactions import authorization, giveup_delivery
 from tai42_skeleton.interactions import continuation as continuation_module
+from tai42_skeleton.interactions import continuation_dispatch as continuation_dispatch_module
 from tai42_skeleton.interactions.run_completion import run_completion_id
 from tai42_skeleton.interactions.store import ContinuationDue, serde
 from tai42_skeleton.runs.chokepoint import delivery_fire, resume_origin
@@ -806,7 +807,7 @@ async def test_persist_denormalizes_delivery_and_the_redelivery_fastpath_reads_i
 
     # Resolve the ask, then the reaper's retry-claim reconstructs a due record carrying both.
     now = datetime.now(UTC)
-    due_ttl, first_attempt = continuation_module.continuation_due_timing(wired.settings)
+    due_ttl, first_attempt = continuation_dispatch_module.continuation_due_timing(wired.settings)
     claimed = await wired.store.record_answer(
         wired.fake,
         InteractionResponse(interaction_id="iid-p", answer="go", answered_by="u1", answered_at=now),

@@ -234,34 +234,11 @@ class PostgresVersionedStore(VersionedStore):
             for row_kind, row_name, active_version, is_active, created_at in rows
         ]
 
-    async def list_active_bodies(self, kind: str) -> dict[str, dict[str, Any]]:
-        """Return every active document body of ``kind``, keyed by name.
-
-        The batched read that replaces a per-record ``get_active_body`` round-trip (the list
-        route + rehydrate N+1). One JOIN on ``version = active_version``.
-
-        Concrete-only (not on the ``VersionedStore`` protocol): callers reach it
-        through the concretely-typed ``_versioned_store`` accessor.
-        """
-        async with (
-            client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
-            read_connection(pool) as conn,
-            conn.cursor() as cur,
-        ):
-            await cur.execute(
-                "SELECT d.name, v.body FROM versioned_documents d "
-                "JOIN versioned_document_versions v ON v.document_id = d.id AND v.version = d.active_version "
-                "WHERE d.kind = %s AND d.is_active ORDER BY d.name",
-                (kind,),
-            )
-            rows = await cur.fetchall()
-        return dict(rows)
-
     async def list_active_versioned_bodies(self, kind: str) -> dict[str, tuple[int, dict[str, Any]]]:
         """Every active document's ``(active_version, body)`` of ``kind``, keyed by name.
 
-        The version-aware sibling of :meth:`list_active_bodies`: the active version
-        pointer and its body are read TOGETHER in one JOIN statement, so a consumer
+        The batched read that replaces a per-record ``get_active_body`` round-trip: the active
+        version pointer and its body are read TOGETHER in one JOIN statement, so a consumer
         that must retain the version beside the body (the preset engine's rehydration)
         can never pair a body with a version from a skewed second read. Concrete-only
         (not on the ``VersionedStore`` protocol): reached through the concretely-typed

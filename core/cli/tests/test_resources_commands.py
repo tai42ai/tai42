@@ -83,3 +83,32 @@ def test_resources_render_rejects_both_kwargs_and_file(monkeypatch: pytest.Monke
     )
     assert result.exit_code != 0
     assert "--kwargs-file" in result.output
+
+
+FILES_INSTALL_LINE = (
+    "tai42-skeleton 'files' resource loading requires the 'files' optional "
+    "dependencies (magika, pandas, langchain-community, pypdf, docx2txt, "
+    "openpyxl, tabulate, beautifulsoup4, python-pptx, striprtf, odfpy, "
+    "ebooklib). Install them with: pip install 'tai42-skeleton[files]'"
+)
+
+
+def test_resources_get_without_the_files_extra_prints_the_install_line(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(501, json={"error": FILES_INSTALL_LINE, "code": "files-not-configured"})
+
+    result = run_cli(monkeypatch, handler, ["resources", "get", "notes/todo.txt"])
+    assert result.exit_code == 1
+    assert result.stderr.strip() == f"Error (HTTP 501): {FILES_INSTALL_LINE}"
+
+
+def test_resources_get_prints_an_extractors_refusal(monkeypatch: pytest.MonkeyPatch) -> None:
+    message = (
+        "resource 'docs/locked.pdf' cannot be loaded: 'docs/locked.pdf' could not be extracted as pdf: "
+        "FileNotDecryptedError: File has not been decrypted"
+    )
+    result = run_cli(
+        monkeypatch, lambda r: httpx.Response(400, json={"error": message}), ["resources", "get", "docs/locked.pdf"]
+    )
+    assert result.exit_code == 1
+    assert result.stderr.strip() == f"Error (HTTP 400): {message}"

@@ -31,8 +31,8 @@ from tai42_contract.agent.events import (
     StructuredOutputUnresolvedFinal,
 )
 from tai42_contract.app import tai42_app
+from tai42_contract.monitoring import TraceContext
 from tai42_contract.template import TemplatedText
-from tai42_kit.llm import resolve_trace_context
 from tai42_kit.llm.checkpoint import mark_threads_finished
 from tai42_kit.llm.checkpoint.checkpoint_registry import checkpoint_registry
 from tai42_kit.llm.middleware import history_middlewares
@@ -42,6 +42,7 @@ from tai42_kit.llm.models import get_llm_async
 from tai42_kit.llm.runtime import build_agent_input, build_system_message, build_user_output
 from tai42_kit.llm.settings import llm_provider_settings, llm_settings
 from tai42_kit.logging.settings import logging_settings
+from tai42_kit.monitoring import begin_run_trace
 
 from tai42_agents._internal.cache_mark import default_system_cache_mark
 from tai42_agents._internal.config_util import (
@@ -52,10 +53,12 @@ from tai42_agents._internal.config_util import (
 )
 from tai42_agents._internal.lc_tools import structured_tools
 from tai42_agents._internal.outcomes import outcome_for_drive_error
+from tai42_agents._internal.park import bind_resume_per_step
 from tai42_agents._internal.recovery import _repair_dangling_tool_calls, _tool_error_middleware
 from tai42_agents._internal.reject import resolve_response_format
 from tai42_agents._internal.render import render_message
 from tai42_agents._internal.run_kwargs import guard_run_kwargs
+from tai42_agents._internal.run_record import TerminalEvents, run_input
 from tai42_agents._internal.stream_events import aproject_agent_events
 from tai42_agents._internal.structured import structured_output_stack
 from tai42_agents.refine_agent.prompt import (
@@ -151,6 +154,7 @@ async def _run_refine_loop(
     critic_llm_kwargs: dict[str, Any] | None,
     evaluator_config: dict[str, Any] | None,
     critic_config: dict[str, Any] | None,
+    run_context: TraceContext | None,
     response_format: Any = None,
     user_content_kwargs: dict[str, Any] | None = None,
 ) -> tuple[Any, dict[str, Any], dict[str, Any], Any, list[str]]:
@@ -162,6 +166,10 @@ async def _run_refine_loop(
     ``minted_threads`` the role threads this run minted, which the caller marks finished at
     the run's end. A caller-supplied role thread leaves the checkpoint finished-thread
     ledger before the loop runs on it.
+
+    ``run_context`` is the refine run's one trace lineage (its run-trace root's context): every
+    role's config carries it, so the evaluator, the critic and the final pass all nest under the
+    one run.
 
     ``user_content_kwargs`` (e.g. ``cache_control``) carries content-block keys onto
     the evaluator's first user turn — the run's primary caller-supplied message —
@@ -213,15 +221,13 @@ async def _run_refine_loop(
         is_enabled_for_debug=is_enabled_for_debug,
     )
 
-    # One trace per refine run: resolve the run's lineage once (the evaluator config is the
-    # lead role's carrier), then derive every role's config from it so the evaluator, the
-    # critic, and the final structured pass all nest under the ONE run trace rather than
-    # each minting a fresh root. Each role still gets its own thread_id and callbacks.
-    run_context = resolve_trace_context(evaluator_config)
+    # One trace per refine run: every role's config is derived from the run's one lineage, so the
+    # evaluator, the critic, and the final structured pass all nest under the one run. Each role
+    # still gets its own thread_id and callbacks.
     evaluator_source = with_run_trace_lineage(evaluator_config, run_context)
     critic_source = with_run_trace_lineage(critic_config, run_context)
-    evaluator_config = init_langgraph_config(evaluator_source).config
-    critic_config = init_langgraph_config(critic_source).config
+    evaluator_config = init_langgraph_config(evaluator_source, run_context)
+    critic_config = init_langgraph_config(critic_source, run_context)
     minted_threads = [
         minted
         for minted in (
@@ -285,9 +291,19 @@ async def _run_refine_loop(
         structured_rail=structured_rail,
     )
     final_input = {"messages": [*history, {"role": "user", "content": "Critic Approved."}]}
-    final_config = init_langgraph_config(with_run_trace_lineage(None, run_context)).config
+    final_config = init_langgraph_config(with_run_trace_lineage(None, run_context), run_context)
     minted_threads.append(final_config["configurable"]["thread_id"])
     return structured_evaluator, final_input, final_config, strategy, minted_threads
+
+
+def _require_structured_result(response_format: Any, *, saw_structured: bool, saw_outcome: bool) -> None:
+    """Fail loudly when a requested ``response_format`` produced no ``StructuredFinal``.
+
+    Checked after the stream drains. A run that ended on a typed non-fatal outcome (re-prompt cap or
+    recursion limit) has that outcome as its result and passes.
+    """
+    if response_format is not None and not saw_structured and not saw_outcome:
+        raise RuntimeError("agent run requested a response_format but produced no structured output")
 
 
 class RefineAgentInput(BaseModel):
@@ -431,49 +447,75 @@ class RefineAgent(Agent):
             },
             _UNHONORED_REASONS,
         )
-        response_format = await resolve_response_format("refine_agent", response_format)
-        resolved_tools = structured_tools(await tai42_app.tools.get_client_tools(tool_names) if tool_names else [])
+        # The run's one trace root: current only inside each step (the loop, and each step of the final
+        # pass's stream), never across a yield. It records the evaluator and critic messages, and the
+        # terminal events when the stream ends.
+        root = begin_run_trace(
+            evaluator_langgraph_config,
+            input_=run_input(evaluator_message=evaluator_message, critic_message=critic_message),
+        )
+        terminals = TerminalEvents()
         try:
-            # The loop mints the structured-output strategy at the final evaluator pass
-            # (keyed on its model) and returns it; the same object is bound into both the
-            # final pass and the projection, so the synthetic tool names match by identity.
-            final_agent, final_input, final_config, strategy, minted_threads = await _run_refine_loop(
-                tools=resolved_tools,
-                evaluator_message=evaluator_message,
-                critic_message=critic_message,
-                max_iterations=max_iterations,
-                evaluator_llm_provider=evaluator_llm_provider,
-                critic_llm_provider=critic_llm_provider,
-                checkpoint_provider=checkpoint_provider,
-                evaluator_llm_kwargs=evaluator_llm_kwargs,
-                critic_llm_kwargs=critic_llm_kwargs,
-                evaluator_config=evaluator_langgraph_config,
-                critic_config=critic_langgraph_config,
-                response_format=response_format,
-                user_content_kwargs=user_content_kwargs,
-            )
-        except GraphRecursionError as exc:
-            # A recursion trip in an evaluator/critic turn ends the loop with the named,
-            # non-fatal outcome instead of a generic failure. Any other error propagates.
-            outcome = outcome_for_drive_error(exc, None)
-            if outcome is None:
-                raise
-            yield outcome
-            return
-        saw_structured = False
-        saw_outcome = False
-        async for event in aproject_agent_events(
-            final_agent, final_input, final_config, response_format=response_format, structured_strategy=strategy
-        ):
-            if isinstance(event, StructuredFinal):
-                saw_structured = True
-            elif isinstance(event, StructuredOutputUnresolvedFinal | RecursionLimitFinal):
-                saw_outcome = True
-            yield event
-        # A requested response_format that produced no StructuredFinal fails loudly
-        # after the stream drains — unless the run ended on a typed non-fatal outcome
-        # (re-prompt cap or recursion limit), which IS its result.
-        if response_format is not None and not saw_structured and not saw_outcome:
-            raise RuntimeError("agent run requested a response_format but produced no structured output")
-        # The run reached its terminal: every role thread it minted is finished.
-        await mark_threads_finished(minted_threads, provider=checkpoint_provider)
+            outcome = None
+            with root.step():
+                response_format = await resolve_response_format("refine_agent", response_format)
+                resolved_tools = structured_tools(
+                    await tai42_app.tools.get_client_tools(tool_names) if tool_names else []
+                )
+                try:
+                    # The loop mints the structured-output strategy at the final evaluator pass
+                    # (keyed on its model) and returns it; the same object is bound into both the
+                    # final pass and the projection, so the synthetic tool names match by identity.
+                    final_agent, final_input, final_config, strategy, minted_threads = await _run_refine_loop(
+                        tools=resolved_tools,
+                        evaluator_message=evaluator_message,
+                        critic_message=critic_message,
+                        max_iterations=max_iterations,
+                        evaluator_llm_provider=evaluator_llm_provider,
+                        critic_llm_provider=critic_llm_provider,
+                        checkpoint_provider=checkpoint_provider,
+                        evaluator_llm_kwargs=evaluator_llm_kwargs,
+                        critic_llm_kwargs=critic_llm_kwargs,
+                        evaluator_config=evaluator_langgraph_config,
+                        critic_config=critic_langgraph_config,
+                        run_context=root.context,
+                        response_format=response_format,
+                        user_content_kwargs=user_content_kwargs,
+                    )
+                except GraphRecursionError as exc:
+                    # A recursion trip in an evaluator/critic turn ends the loop with the named,
+                    # non-fatal outcome instead of a generic failure. Any other error propagates.
+                    outcome = outcome_for_drive_error(exc, None)
+                    if outcome is None:
+                        raise
+            if outcome is not None:
+                yield terminals.note(outcome)
+                root.record_output(terminals.events)
+                return
+            saw_structured = False
+            saw_outcome = False
+            async for event in bind_resume_per_step(
+                root.step,
+                aproject_agent_events(
+                    final_agent,
+                    final_input,
+                    final_config,
+                    response_format=response_format,
+                    structured_strategy=strategy,
+                ),
+            ):
+                if isinstance(event, StructuredFinal):
+                    saw_structured = True
+                elif isinstance(event, StructuredOutputUnresolvedFinal | RecursionLimitFinal):
+                    saw_outcome = True
+                yield terminals.note(event)
+            _require_structured_result(response_format, saw_structured=saw_structured, saw_outcome=saw_outcome)
+            # The run reached its terminal: every role thread it minted is finished.
+            with root.step():
+                await mark_threads_finished(minted_threads, provider=checkpoint_provider)
+            root.record_output(terminals.events)
+        except Exception as exc:
+            root.fail(exc)
+            raise
+        finally:
+            root.end()

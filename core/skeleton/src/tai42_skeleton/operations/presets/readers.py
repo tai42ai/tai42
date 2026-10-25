@@ -1,6 +1,6 @@
 """Structural body readers that raise the byte-stable 400 before any store write.
 
-They reject malformed nested combo / output-schema / state-binding payloads.
+They reject malformed nested combo / schema / map / state-binding payloads.
 """
 
 from __future__ import annotations
@@ -94,6 +94,33 @@ def read_output_schema(value: Any) -> TemplatedText | dict[str, Any] | None:
 def read_input_schema(value: Any) -> TemplatedText | dict[str, Any] | None:
     """The optional author-set input schema from a request value (see :func:`_read_schema_body`)."""
     return _read_schema_body("input_schema", value)
+
+
+def _read_map(field: str, value: Any) -> TemplatedText | str | None:
+    """An optional author-set jq map — the ``TemplatedText | str`` union — from a request value.
+
+    ``null`` → ``None``; a string → the program itself; a ``{content|id, kwargs}`` object → the
+    parsed :class:`~tai42_contract.template.TemplatedText`; anything else → a loud 400. The program
+    is rendered and compiled at the save-time document check, not here.
+    """
+    if value is None or isinstance(value, str):
+        return value
+    if not isinstance(value, dict):
+        raise BadRequestError(f"'{field}' must be a jq program string or a stored-body reference")
+    try:
+        return TemplatedText.model_validate(value)
+    except ValidationError as exc:
+        raise BadRequestError(f"invalid '{field}': {exc.errors(include_url=False)}") from exc
+
+
+def read_input_map(value: Any) -> TemplatedText | str | None:
+    """The optional author-set input map from a request value (see :func:`_read_map`)."""
+    return _read_map("input_map", value)
+
+
+def read_output_map(value: Any) -> TemplatedText | str | None:
+    """The optional author-set output map from a request value (see :func:`_read_map`)."""
+    return _read_map("output_map", value)
 
 
 def read_state_binding(value: Any) -> StateBinding | None:

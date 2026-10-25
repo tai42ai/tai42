@@ -50,6 +50,7 @@ async def test_update_manifest_persists_through_and_reloads(monkeypatch: pytest.
         "fanout": {"mode": "local-only", "note": "no worker bus configured; only this worker reloaded"},
         "recycle": None,
         "awaiting_respawn": [],
+        "span_release_error": None,
     }
 
 

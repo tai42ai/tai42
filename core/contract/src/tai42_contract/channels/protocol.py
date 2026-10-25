@@ -98,6 +98,13 @@ class Channel(Protocol):
     neither (and has no override) is a loud config error at send, never a silent unbounded or
     truncated send.
 
+    A channel MAY also declare an OPTIONAL ``ClassVar identity_hint: str`` — one plain sentence
+    telling an operator what to enter as a conversation route's ``our_identity`` on this channel
+    (which address of the medium clients message). The same documented-member convention, NOT a
+    Protocol member, read with ``getattr(channel, "identity_hint", None)``. Absent means the
+    channel offers no hint. A declared value must be a non-blank string; registering a channel
+    that declares anything else is refused.
+
     A channel MAY also declare the OPTIONAL "working-on-it" (typing) signal — the
     same documented-member convention as ``validate_form_schema``
     and the capability flags, NOT Protocol members (so declaring them never tightens

@@ -313,6 +313,7 @@ class FakeRedis:
         self._kv: dict[str, str] = {}
         self._job_ids = (f"job-{n}" for n in itertools.count())
         self.enqueued: list[tuple[Any, ...]] = []
+        self.enqueued_opts: list[dict[str, Any]] = []
 
     @staticmethod
     def _skey(key: Any) -> str:
@@ -376,6 +377,7 @@ class FakeRedis:
 
     async def enqueue_job(self, *args: Any, **kwargs: Any) -> Any:
         self.enqueued.append(args)
+        self.enqueued_opts.append(kwargs)
         job_id = kwargs.get("_job_id") or next(self._job_ids)
         return type("_Job", (), {"job_id": job_id})()
 
@@ -506,3 +508,50 @@ def redis_url(monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
         server.server_close()
         thread.join()
         settings_module.arq_settings.cache_clear()
+
+
+def handle_of(job_factory: Callable[..., Any]) -> Callable[[Any, str], Any]:
+    """A stand-in for a module's ``job_handle`` building each handle with ``job_factory(job_id, redis)``."""
+
+    async def _handle(redis: Any, job_id: str) -> Any:
+        return job_factory(job_id, redis)
+
+    return _handle
+
+
+#: The settings queue (``ARQ_QUEUE_NAME``) the :func:`arq_redis` fixture runs under.
+SETTINGS_QUEUE = "ns-1:arq:queue"
+
+
+@pytest.fixture
+def settings_queue(monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
+    """Set ``ARQ_QUEUE_NAME`` to :data:`SETTINGS_QUEUE` for every module reading the settings."""
+    from tai42_kit.settings import reset_all_settings
+
+    monkeypatch.setenv("ARQ_QUEUE_NAME", SETTINGS_QUEUE)
+    reset_all_settings()
+    try:
+        yield SETTINGS_QUEUE
+    finally:
+        reset_all_settings()
+
+
+@pytest.fixture
+def arq_redis(settings_queue: str, bind_pool: Callable[[Any], None]) -> Any:
+    """An ``ArqRedis`` over an in-memory fakeredis server on :func:`settings_queue`, bound as the enqueue lease."""
+    import fakeredis
+    from arq.connections import ArqRedis
+    from redis.asyncio import ConnectionPool
+
+    from tai42_backend_arq.settings import job_deserializer, job_serializer
+
+    pool = fakeredis.FakeAsyncRedis(server=fakeredis.FakeServer()).connection_pool
+    assert isinstance(pool, ConnectionPool)
+    redis = ArqRedis(
+        pool_or_conn=pool,
+        job_serializer=job_serializer,
+        job_deserializer=job_deserializer,
+        default_queue_name=settings_queue,
+    )
+    bind_pool(redis)
+    return redis

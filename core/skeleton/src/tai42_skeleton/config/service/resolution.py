@@ -1,7 +1,8 @@
 """Manifest/env resolution and the secret seal.
 
 Materialize a PRESERVED document's ``!ENV`` markers for validation and the seal, read the persisted
-manifest/env, and derive the effective env a change or profile replace would produce.
+manifest/env, and derive the env the store converges a worker to and the effective env a change or
+profile replace would produce.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ from pyaml_env import parse_config
 from tai42_kit.settings import env_file_reads_suspended
 from tai42_kit.utils.data import dump_manifest
 
+from tai42_skeleton.app.epoch import applied_env_keys
 from tai42_skeleton.config.boundary import x_band_env_keys
 from tai42_skeleton.config.file_manager import FileConfigManager
 from tai42_skeleton.config.secret_seal import seal_resolved_secrets
@@ -65,18 +67,30 @@ class _ResolutionMixin(_ConfigServiceBase):
         except FileNotFoundError:
             return {}
 
+    def _converged_env(self, stored: Mapping[str, str]) -> dict[str, str]:
+        """The env a reload from the ``stored`` env leaves this process with.
+
+        The reload's removed-key reconciliation, applied to a stored env this process may not
+        have applied yet: a key the last env apply set that ``stored`` no longer holds is
+        dropped, ``stored`` overlays the rest, and process env the store never owned stays. Every
+        worker sharing the store converges to this env at its next reload, so a change that
+        validates against it holds on every worker.
+        """
+        gone = applied_env_keys() - stored.keys()
+        return {key: value for key, value in os.environ.items() if key not in gone} | dict(stored)
+
     def effective_env(self, changes: Mapping[str, str]) -> dict[str, str]:
         """The effective env an :meth:`ConfigService.apply_env_change` produces, as the reloaded process sees it.
 
         The stored env is merged with ``changes`` (empties are dropped — the store
-        filters them), then overlaid onto the current process env, which a reload
-        applies with ``os.environ.update``. A key the change empties is treated as
-        removed so a bus-removing change is visible to the invariant.
+        filters them), then overlaid onto the env the stored env converges this process to
+        (:meth:`_converged_env`). A key the change empties is treated as removed so a
+        bus-removing change is visible to the invariant.
         """
         stored = self._read_stored_env()
         removed = {key for key, value in changes.items() if value == ""}
         merged = {key: value for key, value in {**stored, **changes}.items() if value != ""}
-        effective = {key: value for key, value in os.environ.items() if key not in removed}
+        effective = {key: value for key, value in self._converged_env(stored).items() if key not in removed}
         effective.update(merged)
         return effective
 
@@ -85,14 +99,15 @@ class _ResolutionMixin(_ConfigServiceBase):
 
         The profile env becomes the WHOLE stored env — keys the profile omits are
         DELETED — while the deployment X band is carried untouched from the current
-        process env (X keys never enter a profile). So the old stored keys drop out,
-        the profile keys overlay, and the carried X band overlays last; system env the
-        store never owned is left in place.
+        process env (X keys never enter a profile). Starting from the env the stored env
+        converges this process to (:meth:`_converged_env`), the stored keys drop out, the
+        profile keys overlay, and the carried X band overlays last; system env the store
+        never owned is left in place.
         """
         stored = self._read_stored_env()
         x_band = x_band_env_keys()
         carried = {key: value for key, value in os.environ.items() if key in x_band}
-        effective = {key: value for key, value in os.environ.items() if key not in stored}
+        effective = {key: value for key, value in self._converged_env(stored).items() if key not in stored}
         effective.update(profile_env)
         effective.update(carried)
         return effective

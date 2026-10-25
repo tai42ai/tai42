@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
+import pytest
 from tai42_contract.agent.base import PresetSpec
 from tai42_contract.presets import PresetBody
 
@@ -36,49 +37,6 @@ def test_rehydrate_reregisters_only_store_backed_presets(pg: FakeVersioningPg):
             assert "unbacked" not in tools
             assert set(mgr.registered_names()) == {"ver"}  # only the store-backed one rebuilt
             assert await app.tools.run_tool("ver", {"city": "x"}) == {"city": "x", "units": "v"}
-
-    asyncio.run(run())
-
-
-def test_rehydrate_skips_record_whose_active_body_is_absent(pg: FakeVersioningPg, monkeypatch, caplog):
-    async def run():
-        async with app.app_context(_manifest()):
-            mgr = app.preset_manager
-            # Two persisted presets. ``list_presets`` and ``list_active_versioned_bodies``
-            # are two separate store reads, so a delete landing between them leaves a
-            # record whose active body is already gone. Model that read-skew: both
-            # records survive in ``list_presets`` while ``absent`` is dropped from
-            # the active version+body map.
-            await _create_versioned("present", "weather", {"units": "v"}, [])
-            await _create_versioned("absent", "weather", {"units": "g"}, [])
-
-            # Simulate reload_config wiping every runtime preset before rehydrate.
-            for name in ("present", "absent"):
-                await mgr.remove(name)
-
-            real_bodies = app.presets.list_active_versioned_bodies
-
-            async def _bodies_without_absent():
-                bodies = await real_bodies()
-                bodies.pop("absent", None)
-                return bodies
-
-            monkeypatch.setattr(app.presets, "list_active_versioned_bodies", _bodies_without_absent)
-
-            # A record with no active body must be SKIPPED, never a bare
-            # ``bodies[rec.name]`` KeyError that aborts the whole boot/reload.
-            with caplog.at_level(logging.WARNING, logger="tai42_skeleton.presets.manager"):
-                await mgr.rehydrate()
-
-            # The skipped record is neither registered nor quarantined — just dropped.
-            assert not mgr.is_registered("absent")
-            assert not mgr.is_quarantined("absent")
-            assert "absent" not in await app.tools.get_tools()
-            # The present-body preset rebuilt normally and stays runnable.
-            assert mgr.is_registered("present")
-            assert await app.tools.run_tool("present", {"city": "x"}) == {"city": "x", "units": "v"}
-            # The skip was logged loudly for the missing name.
-            assert "absent" in caplog.text
 
     asyncio.run(run())
 
@@ -138,6 +96,40 @@ def test_rehydrate_quarantines_preset_owned_base(pg: FakeVersioningPg):
             assert mgr.is_registered("base_preset")  # the legitimate one rebuilt
             assert mgr.is_quarantined("chained")  # the preset-on-preset rejected
             assert not mgr.is_registered("chained")
+
+    asyncio.run(run())
+
+
+def test_rehydrate_quarantines_a_base_derived_from_a_preset_in_every_load_order(pg: FakeVersioningPg):
+    expected = "its base tool 'mid_exta' is derived from preset 'mid'"
+
+    async def run():
+        async with app.app_context(_manifest()):
+            mgr = app.preset_manager
+            # ``mid`` binds the ``mid_exta`` branch; two stored presets sit on that branch, one
+            # loading before ``mid`` and one after it.
+            await _create_versioned("mid", "weather", {"units": "v"}, [["exta"]])
+            for name in ("aa_chained", "zz_chained"):
+                await app.presets.store.create_preset(
+                    PresetSpec(name=name, description="d", base_tool="mid_exta", fixed_kwargs={}), extensions=[]
+                )
+
+            # A reload rehydrate, with ``mid`` and its branch still bound.
+            await mgr.rehydrate()
+            assert mgr.is_registered("mid")
+            assert {n: mgr.quarantine_reason(n) for n in ("aa_chained", "zz_chained")} == {
+                "aa_chained": expected,
+                "zz_chained": expected,
+            }
+
+            # A cold rehydrate, with nothing bound beforehand.
+            await mgr.remove("mid")
+            await mgr.rehydrate()
+            assert mgr.is_registered("mid")
+            assert {n: mgr.quarantine_reason(n) for n in ("aa_chained", "zz_chained")} == {
+                "aa_chained": expected,
+                "zz_chained": expected,
+            }
 
     asyncio.run(run())
 
@@ -292,5 +284,42 @@ def test_rehydrate_quarantines_an_output_schema_beside_a_shape_declaring_extensi
                 "declare the output shape in exactly one place"
             )
             assert "twice" not in await app.tools.get_tools()
+
+    asyncio.run(run())
+
+
+_OPEN_SCHEMA = {"type": "object", "properties": {"where": {"type": "string"}}, "required": ["where"]}
+
+
+@pytest.mark.parametrize(
+    ("over", "reason"),
+    [
+        (
+            {"input_schema": _OPEN_SCHEMA, "extensions": [["exta"]]},
+            'input_schema cannot be presented to the preset\'s extensions: the schema must set "additionalProperties": '
+            "false",
+        ),
+        ({"input_map": "{payload: .}"}, "an input map needs an input schema that describes what the caller sends"),
+        ({"output_map": "{"}, "output_map does not compile: "),
+        ({"output_map": {"id": "no-such-program"}}, "preset 'stored' output_map"),
+    ],
+)
+def test_rehydrate_quarantines_a_stored_body_its_input_or_output_rules_refuse(
+    pg: FakeVersioningPg, caplog, over, reason
+):
+    # A stored body (a restored backup, say) the preset's input and output rules refuse is
+    # quarantined with the rule's own text, never bound.
+    async def run():
+        async with app.app_context(_manifest()):
+            mgr = app.preset_manager
+            body = PresetBody(base_tool="payload_echo", description="d", fixed_kwargs={"tag": "t1"}, **over)
+            await app.versioning.store.create("preset", "stored", body.model_dump())
+            with caplog.at_level(logging.ERROR, logger="tai42_skeleton.presets.manager"):
+                await mgr.rehydrate()
+
+            assert mgr.is_quarantined("stored")
+            assert (mgr.quarantine_reason("stored") or "").startswith(reason)
+            assert not mgr.is_registered("stored")
+            assert "stored" not in await app.tools.get_tools()
 
     asyncio.run(run())

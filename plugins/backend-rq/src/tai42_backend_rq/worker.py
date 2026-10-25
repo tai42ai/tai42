@@ -45,6 +45,7 @@ from tai42_kit.clients.impl.redis import KitSyncRedis, redis_from_url_kwargs
 from tai42_kit.fork_gate import fork_gate
 
 from tai42_backend_rq.queue import TaskBudgetQueue
+from tai42_backend_rq.queues import check_queue_label, derived_queue
 from tai42_backend_rq.settings import rq_client_kwargs, rq_settings
 
 logger = logging.getLogger(__name__)
@@ -417,13 +418,16 @@ def _build_worker(
     name: str | None,
     results_ttl: int,
     pool: str,
+    label: str | None,
 ) -> tuple[CustomRQWorker | CustomRQSimpleWorker, Redis]:
     """Build the RQ worker for the selected pool, returning it with its dedicated connection.
 
     The caller closes the returned connection after the worker exits.
     ``prefork`` (default) forks a monitored work-horse per job; ``solo`` and
     ``gevent`` run jobs in-process. ``results_ttl`` is the default result TTL; a
-    ``name`` of ``None`` lets RQ auto-generate a unique per-process name.
+    ``name`` of ``None`` lets RQ auto-generate a unique per-process name. The worker
+    serves one queue: ``<RQ_QUEUE_NAME>.<label>``, or ``RQ_QUEUE_NAME`` for no label,
+    read from the settings here at build time.
 
     Every pool installs the after-fork child hook here: even the non-forking pools spawn
     the ``rq-scheduler`` child, which inherits the same unusable monitoring writer and
@@ -441,7 +445,7 @@ def _build_worker(
         prepare_forking_worker()
 
     redis_conn = rq_redis_connection(redis_url)
-    queue = TaskBudgetQueue(rq_settings().queue_name, connection=redis_conn)
+    queue = TaskBudgetQueue(derived_queue(label), connection=redis_conn)
     worker = worker_class([queue], name=name, connection=redis_conn, default_result_ttl=results_ttl)
     return worker, redis_conn
 
@@ -488,6 +492,7 @@ class RqWorkerRuntime(BackendRuntime):
             self._params["name"],
             self._params["results_ttl"],
             self._params["pool"],
+            self._params["queue"],
         )
 
     def run_blocking(self) -> None:
@@ -556,6 +561,7 @@ def start_rq_worker(
     burst: bool,
     results_ttl: int,
     pool: str,
+    queue: str | None,
 ) -> None:
     """Build and run the RQ worker inline, blocking the calling thread.
 
@@ -565,11 +571,20 @@ def start_rq_worker(
     ``launch`` path drives :class:`RqWorkerRuntime` instead, where the host owns
     them.)
     """
-    worker, redis_conn = _build_worker(redis_url, name, results_ttl, pool)
+    worker, redis_conn = _build_worker(redis_url, name, results_ttl, pool, queue)
     try:
         worker.work(burst=burst, logging_level=loglevel.upper(), with_scheduler=True)
     finally:
         redis_conn.close()
+
+
+def _queue_label_option(ctx: click.Context, param: click.Parameter, value: str | None) -> str | None:
+    if value is None:
+        return None
+    try:
+        return check_queue_label(value)
+    except ValueError as exc:
+        raise click.BadParameter(str(exc), ctx=ctx, param=param) from exc
 
 
 @click.command("tai42-backend-rq-worker")
@@ -591,6 +606,20 @@ def start_rq_worker(
     default="prefork",
     help="Pool type: prefork (forking), solo (no fork), gevent (green threads)",
 )
-def main(redis_url: str | None, name: str | None, loglevel: str, burst: bool, results_ttl: int, pool: str) -> None:
+@click.option(
+    "--queue",
+    default=None,
+    callback=_queue_label_option,
+    help="Queue label: serve <RQ_QUEUE_NAME>.<label> instead of RQ_QUEUE_NAME",
+)
+def main(
+    redis_url: str | None,
+    name: str | None,
+    loglevel: str,
+    burst: bool,
+    results_ttl: int,
+    pool: str,
+    queue: str | None,
+) -> None:
     """Run an RQ worker; ``launch(["worker", ...])`` parses its args here."""
-    start_rq_worker(redis_url, name, loglevel, burst, results_ttl, pool)
+    start_rq_worker(redis_url, name, loglevel, burst, results_ttl, pool, queue)

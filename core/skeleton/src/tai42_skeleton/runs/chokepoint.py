@@ -14,17 +14,22 @@ write error logs and is swallowed. The ``current_trace_id()`` sample is a guard 
 configured the chokepoint is a clean no-op — the runs index is simply OFF, like the
 rest of the durable-store surface.
 
-TRACE ID — a root opened where none is ambient
-----------------------------------------------
-``trace_id`` deep-links to the monitoring trace. When a root already exists at START
-(a hook, a flow, an agent parent opened one), the row nests under it — that id is
-sampled and stored. When NONE is ambient — a direct/agent-less registration — a ROOT
-span is opened here so the run gets its own trace and deep link, and its context is
-propagated through the generic ambient carrier so a consumer the preset runs (an agent,
-a flow) nests under it rather than minting a fresh, orphaned trace. A backend that
-cannot record (noop/none) leaves ``trace_id`` NULL — the row is still fully enumerable
-by ``run_id`` and its attribution, only without a deep link. Whatever the START id, the
-terminal write backfills it only when START missed it.
+TRACE ID — the lineage the kit's run-trace opener gives
+-------------------------------------------------------
+``trace_id`` deep-links to the monitoring trace. The START write, the dispatch and the
+terminal write run inside the kit's :func:`~tai42_kit.monitoring.open_run_trace`: a run
+under an ambient lineage (a deferred call's span, a flow's deposit) keeps it and opens
+nothing; otherwise one ``run`` span opens, a child of the live span or the root of a new
+trace, and its pair is deposited so a consumer the preset runs nests under it. The row is
+stamped with that lineage's trace. A backend that cannot record (noop/none) leaves
+``trace_id`` NULL — the row is still fully enumerable by ``run_id`` and its attribution,
+only without a deep link. Whatever the START id, the terminal write backfills it only when
+START missed it.
+
+The ``run`` span records the dispatch arguments as its input and, when the run ends without
+an escape, the observed result as its output (a run that raises keeps its input and records
+the error, no output). A result the MCP edge observed after it revealed a secret is plaintext
+there, so that output is recorded as the secret placeholder.
 
 LIFECYCLE CORRELATION — the ``interaction_id`` column
 -----------------------------------------------------
@@ -49,24 +54,22 @@ from __future__ import annotations
 import asyncio
 import logging
 import secrets
-from collections.abc import AsyncIterator, Iterator, Sequence
+from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
 from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from datetime import UTC, datetime
+from typing import Any
 
 from tai42_contract.interactions import ResumeBuffered, SuspendedInteraction
-from tai42_contract.monitoring import (
-    RUN_ATTRIBUTION_TRACE_NAME,
-    SpanKind,
-    TraceContext,
-    ambient_trace_context,
-)
+from tai42_contract.secrets import SECRET_PLACEHOLDER
 from tai42_kit.db import component_store_configured
+from tai42_kit.monitoring import RunTraceRoot, open_run_trace
 
 from tai42_skeleton.db import SKELETON_COMPONENT
 from tai42_skeleton.runs.models import RunOutcome
 from tai42_skeleton.runs.store import get_run_index_store
 from tai42_skeleton.tools.attribution import get_run_attribution
+from tai42_skeleton.tools.reveal_gate import secret_was_revealed
 
 logger = logging.getLogger(__name__)
 
@@ -219,42 +222,6 @@ def _safe_trace_id() -> str | None:
         return None
 
 
-@asynccontextmanager
-async def _run_trace_root(ambient_trace_id: str | None) -> AsyncIterator[str | None]:
-    """Yield the trace id the run row is stamped with, opening a ROOT when none is ambient.
-
-    A non-``None`` ``ambient_trace_id`` means a root already exists (a hook / flow /
-    agent parent opened one) — nest under it, yielding it unchanged. ``None`` means a
-    direct/agent-less registration with no root: open one via ``start_span`` so the run
-    gets a trace (and deep link), then deposit that trace's context through the GENERIC
-    ambient carrier so a consumer the preset runs (an agent, a flow) reads it and nests
-    under this root instead of minting a fresh, orphaned trace. A backend that cannot
-    record (noop/none) yields ``None`` — the row's ``trace_id`` is legitimately NULL.
-
-    Fail-safe by construction: ``start_span`` catches + logs (never raises),
-    ``current_trace_id`` is a returns-``None`` guard, and the carrier deposit is a plain
-    ContextVar set/reset — so opening the root can never break a run.
-
-    Agnostic by construction: it opens a generic root and propagates the standard trace
-    context every traced consumer already reads. It inspects NOTHING about what the
-    preset wraps (no agent/flow/consumer concept) — whatever the preset runs nests by the
-    generic convention.
-    """
-    if ambient_trace_id is not None:
-        yield ambient_trace_id
-        return
-    from tai42_skeleton.monitoring import get_monitoring
-
-    writer = get_monitoring().writer
-    with writer.start_span(name=RUN_ATTRIBUTION_TRACE_NAME, kind=SpanKind.CHAIN) as span:
-        trace_id = writer.current_trace_id()
-        if trace_id is None:
-            yield None
-            return
-        with ambient_trace_context(TraceContext(trace_id=trace_id, parent_span_id=span.id)):
-            yield trace_id
-
-
 class RunRecord:
     """A live run row's handle.
 
@@ -267,13 +234,20 @@ class RunRecord:
     """
 
     def __init__(self) -> None:
-        """Start unrecorded, with a ``success`` outcome and no interaction id."""
+        """Start unrecorded, with a ``success`` outcome, no interaction id and no observed output."""
         self.recorded = False
         self.outcome: RunOutcome = "success"
         self.interaction_id: str | None = None
+        self.observed = False
+        self.output: object = None
 
     def observe(self, result: object) -> None:
-        """Record the outcome from a dispatch ``result``: ``parked`` on a park signal, else ``success``."""
+        """Record the outcome from a dispatch ``result``: ``parked`` on a park signal, else ``success``.
+
+        ``result`` is the run's output.
+        """
+        self.observed = True
+        self.output = result
         if isinstance(result, SuspendedInteraction):
             self.outcome = "parked"
             self.interaction_id = result.interaction_id
@@ -284,18 +258,31 @@ class RunRecord:
             self.outcome = "success"
             self.interaction_id = None
 
-    def observe_park(self, interaction_id: str) -> None:
+    def observe_park(self, interaction_id: str, *, output: object) -> None:
         """Record a park recognized from a SERIALIZED dispatch result, by its interaction id.
 
-        Used at the MCP wire marker, where the sentinel type is not available.
+        Used at the MCP wire marker, where the sentinel type is not available; ``output`` is the
+        serialized result that carried the marker, the run's output.
         """
+        self.observed = True
+        self.output = output
         self.outcome = "parked"
         self.interaction_id = interaction_id
 
 
+def _record_run_output(root: RunTraceRoot, record: RunRecord) -> None:
+    """Record ``record``'s observed output on ``root``: the placeholder when the MCP edge revealed a secret in it."""
+    if record.observed:
+        root.record_output(SECRET_PLACEHOLDER if secret_was_revealed() else record.output)
+
+
 @asynccontextmanager
-async def record_outermost_preset_run(preset_name: str, version: int) -> AsyncIterator[RunRecord]:
+async def record_outermost_preset_run(
+    preset_name: str, version: int, *, arguments: Mapping[str, Any] | None
+) -> AsyncIterator[RunRecord]:
     """Write one runs-index row around an outermost registered-preset dispatch.
+
+    ``arguments`` are the dispatch's arguments, the input of the run's ``run`` span (``None`` records none).
 
     On enter: mint a ``run_id``, read the ambient attribution's ``user_id`` /
     ``session_id`` and the ambient resume origin (the parked interaction id when this
@@ -323,10 +310,12 @@ async def record_outermost_preset_run(preset_name: str, version: int) -> AsyncIt
     session_id = attribution.session_id if attribution is not None else None
     started = datetime.now(UTC)
 
-    # Open the run's trace root (or nest under an ambient one) BEFORE the START write,
-    # so the row is stamped with the trace it deep-links to and the dispatch runs inside
-    # that root. ``_run_trace_root`` is fail-safe, so this can never break a run.
-    async with _run_trace_root(_safe_trace_id()) as start_trace_id:
+    # Enter the run's lineage BEFORE the START write, so the row is stamped with the trace
+    # it deep-links to and the dispatch runs inside it. The opener is fail-safe for a run
+    # with no config, so this can never break a run.
+    with open_run_trace(input_=arguments) as root:
+        lineage = root.context
+        start_trace_id = lineage.trace_id if lineage is not None else None
         started_ok = False
         try:
             await store.insert_start(
@@ -355,6 +344,7 @@ async def record_outermost_preset_run(preset_name: str, version: int) -> AsyncIt
             # be chained onto it as ``__context__`` — corrupting the run's error (and its
             # secret-redaction invariants). Recording nothing terminal for an unrecorded run.
             yield record
+            _record_run_output(root, record)
             return
 
         record.recorded = True
@@ -377,6 +367,8 @@ async def record_outermost_preset_run(preset_name: str, version: int) -> AsyncIt
                 # this run — recorded before the exception propagates.
                 escape_outcome = "error"
                 raise
+            else:
+                _record_run_output(root, record)
             finally:
                 outcome: RunOutcome = escape_outcome if escape_outcome is not None else record.outcome
                 ended = datetime.now(UTC)

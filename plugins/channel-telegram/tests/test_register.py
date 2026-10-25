@@ -39,6 +39,14 @@ def test_import_registers_channel_route_and_hook(stub_app):
     assert len(stub_app.lifecycle.startup_hooks) == 1
 
 
+def test_the_registered_channel_declares_an_identity_hint(stub_app):
+    _import_register_module(stub_app)
+
+    hint = getattr(stub_app.channels.registered["telegram"], "identity_hint", None)
+    assert isinstance(hint, str)
+    assert hint.strip()
+
+
 def test_reimport_fires_registration_again(stub_app):
     # A live reload re-imports the module (popped from sys.modules first) and
     # must re-fire all three registrations against the fresh registries.

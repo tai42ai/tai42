@@ -26,7 +26,6 @@ ALLOWED_THIRD_PARTY = frozenset(
     {
         "annotated_types",
         "anyio",
-        "backoff",
         "certifi",
         "charset_normalizer",
         "click",
@@ -39,7 +38,6 @@ ALLOWED_THIRD_PARTY = frozenset(
         "jsonpointer",
         "langchain",
         "langchain_core",
-        "langfuse",
         "langgraph",
         "langsmith",
         "opentelemetry",

@@ -9,15 +9,16 @@ every preset builds through, so these guarantees reach every preset.
 
 from __future__ import annotations
 
+import inspect
 from typing import Any, cast
 
 import pytest
+from fastmcp.exceptions import ToolError
 from fastmcp.tools import Tool
 from mcp.types import Icon, ToolAnnotations
 from tai42_contract.app import TaiApp, tai42_app
 from tai42_contract.secrets import SecretValue, mask_secrets
 from tai42_contract.template import TemplatedText
-from tai42_kit.utils.data.json_schema_util import JsonSchemaValidationError
 from tai42_kit.utils.render import SchemaBodyError
 
 from tai42_skeleton.presets.bind import deep_merge, preset_bind
@@ -33,7 +34,7 @@ _SCHEMA_RESOURCES = {
 class _ByIdResourceManager:
     async def render_templated_text(self, text: TemplatedText, locale: str | None = None) -> str:
         if text.id is not None:
-            from tai42_skeleton.template.resource_manager import TemplateNotFoundError
+            from tai42_skeleton.template.errors import TemplateNotFoundError
 
             if text.id not in _SCHEMA_RESOURCES:
                 raise TemplateNotFoundError(f"no stored resource {text.id!r}")
@@ -211,27 +212,31 @@ async def test_baked_kwarg_is_fixed_and_rejected_when_passed():
         await tool.run({"city": "paris", "units": "metric"})
 
 
-async def test_baked_partial_binds_positional_through_presented_signature():
+async def test_the_branch_runner_binds_positional_through_its_presented_signature():
     # A baked MIDDLE arg: base ``(a, b, c)`` with ``b`` baked presents ``(a, c)``.
     # A positional call must map each value to the param it names in the PRESENTED
-    # signature (1->a, 3->c), never onto the hidden baked slot.
+    # signature (1->a, 3->c), never onto the hidden baked slot; the runner awaits the
+    # preset's own run, which applies the baked constant.
+    from fastmcp import FastMCP
     from fastmcp.tools.tool_transform import TransformedTool
 
-    from tai42_skeleton.tools.binding.baked_partial import _baked_partial
+    from tai42_skeleton.tools.binding.transformed_run import transformed_tool_runner
 
     def base(a: int, b: int = 0, c: int = 0) -> dict:
         """base"""
         return {"a": a, "b": b, "c": c}
 
     tool = await preset_bind(_app(Tool.from_function(base, name="base")), "base", {"b": 99}, name="baked")
+    server = FastMCP("runner")
     # ``preset_bind`` returns a ``TransformedTool`` at runtime (typed as ``Tool``).
-    partial = _baked_partial(cast(TransformedTool, tool))
+    runner = transformed_tool_runner(cast(TransformedTool, tool), lambda: server)
 
-    assert partial(1, 3) == {"a": 1, "b": 99, "c": 3}
-    assert partial(a=1, c=3) == {"a": 1, "b": 99, "c": 3}
-    # Passing the baked key is still rejected.
+    assert list(inspect.signature(runner).parameters) == ["a", "c"]
+    assert await runner(1, 3) == {"a": 1, "b": 99, "c": 3}
+    assert await runner(a=1, c=3) == {"a": 1, "b": 99, "c": 3}
+    # The baked key is not a parameter of the runner.
     with pytest.raises(TypeError):
-        partial(1, b=5)
+        await runner(1, b=5)
 
 
 # -- output_schema front-door: plain-tool DECLARE + VALIDATE -----------------
@@ -261,7 +266,7 @@ async def test_plain_tool_output_schema_violation_raises_on_constraint_keyword()
         "required": ["temp"],
     }
     tool = await preset_bind(_app(_dict_base_tool()), "report", {}, name="r", output_schema=schema)
-    with pytest.raises(JsonSchemaValidationError):
+    with pytest.raises(ToolError, match=r"^preset 'r' output does not match its output_schema: .*minimum of 100"):
         await tool.run({"city": "paris"})
 
 

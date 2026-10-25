@@ -15,7 +15,6 @@ from typing import Any
 import pytest
 from fastmcp import Client
 from tai42_contract.app import tai42_app
-from tai42_contract.conversations import ReplyTo
 from tai42_contract.errors import UnavailableError
 from tai42_contract.interactions import RunResultAnswer
 from tai42_contract.states import StateSubject
@@ -253,11 +252,9 @@ def test_a_detached_continuation_and_a_form_reaction_drain_at_dispatch_scope(mon
         async with app.app_context(Manifest.model_validate({})):
 
             @app.tools.tool(force=True)
-            async def probe_resume(
-                interaction_id: str, answer: Any, reply_to: ReplyTo | None, params: dict[str, str] | None
-            ) -> str:
+            async def probe_resume(interaction_id: str, ask_result: Any) -> str:
                 """The continuation a park resumes."""
-                seen.append(f"resume:{answer}")
+                seen.append(f"resume:{ask_result['answer']}")
                 return "resumed"
 
             @app.tools.tool(force=True)

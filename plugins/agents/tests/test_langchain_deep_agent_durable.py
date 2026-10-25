@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import importlib.util
+import sys
 from collections.abc import AsyncIterator
 from pathlib import Path
 from types import SimpleNamespace
@@ -436,6 +437,9 @@ def test_import_without_creds_succeeds_and_full_validation_still_raises_at_run(
     assert spec is not None
     assert spec.loader is not None
     fresh = importlib.util.module_from_spec(spec)
+    # The fresh copy is registered under its own name while its body runs, as an import does, so the
+    # dataclasses it defines resolve their string annotations against it.
+    monkeypatch.setitem(sys.modules, spec.name, fresh)
     try:
         # Executing the module body runs the decorator with NO operator env present; it must NOT
         # raise, and the crash_resume meta defaults to False when unset.
