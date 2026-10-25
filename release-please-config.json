@@ -7,7 +7,6 @@
     "core/contract": {
       "package-name": "tai42-contract",
       "component": "tai42-contract",
-      "release-as": "24.0.0",
       "skip-changelog": true,
       "extra-files": [
         {
@@ -23,7 +22,6 @@
     "core/kit": {
       "package-name": "tai42-kit",
       "component": "tai42-kit",
-      "release-as": "13.0.0",
       "skip-changelog": true,
       "exclude-paths": [
         "core/kit/tests"
@@ -32,7 +30,6 @@
     "core/cli": {
       "package-name": "tai42-cli",
       "component": "tai42-cli",
-      "release-as": "17.0.0",
       "skip-changelog": true,
       "exclude-paths": [
         "core/cli/tests"
@@ -41,7 +38,6 @@
     "core/skeleton": {
       "package-name": "tai42-skeleton",
       "component": "tai42-skeleton",
-      "release-as": "30.0.0",
       "skip-changelog": true,
       "extra-files": [
         {
@@ -58,7 +54,6 @@
     "plugins/accounts-postgres": {
       "package-name": "tai42-accounts-postgres",
       "component": "tai42-accounts-postgres",
-      "release-as": "6.0.2",
       "skip-changelog": true,
       "extra-files": [
         {
@@ -79,7 +74,6 @@
     "plugins/agents": {
       "package-name": "tai42-agents",
       "component": "tai42-agents",
-      "release-as": "14.0.0",
       "skip-changelog": true,
       "extra-files": [
         {
@@ -100,7 +94,6 @@
     "plugins/backend-arq": {
       "package-name": "tai42-backend-arq",
       "component": "tai42-backend-arq",
-      "release-as": "8.0.0",
       "skip-changelog": true,
       "extra-files": [
         {
@@ -121,7 +114,6 @@
     "plugins/backend-celery": {
       "package-name": "tai42-backend-celery",
       "component": "tai42-backend-celery",
-      "release-as": "7.0.2",
       "skip-changelog": true,
       "extra-files": [
         {
@@ -142,7 +134,6 @@
     "plugins/backend-rq": {
       "package-name": "tai42-backend-rq",
       "component": "tai42-backend-rq",
-      "release-as": "8.0.0",
       "skip-changelog": true,
       "extra-files": [
         {
@@ -163,7 +154,6 @@
     "plugins/channel-slack": {
       "package-name": "tai42-channel-slack",
       "component": "tai42-channel-slack",
-      "release-as": "8.1.0",
       "skip-changelog": true,
       "extra-files": [
         {
@@ -184,7 +174,6 @@
     "plugins/channel-telegram": {
       "package-name": "tai42-channel-telegram",
       "component": "tai42-channel-telegram",
-      "release-as": "8.1.0",
       "skip-changelog": true,
       "extra-files": [
         {
@@ -205,7 +194,6 @@
     "plugins/channel-twilio": {
       "package-name": "tai42-channel-twilio",
       "component": "tai42-channel-twilio",
-      "release-as": "9.1.0",
       "skip-changelog": true,
       "extra-files": [
         {
@@ -226,7 +214,6 @@
     "plugins/channel-web": {
       "package-name": "tai42-channel-web",
       "component": "tai42-channel-web",
-      "release-as": "9.1.0",
       "skip-changelog": true,
       "extra-files": [
         {
@@ -252,7 +239,6 @@
     "plugins/channel-whatsapp": {
       "package-name": "tai42-channel-whatsapp",
       "component": "tai42-channel-whatsapp",
-      "release-as": "13.1.0",
       "skip-changelog": true,
       "extra-files": [
         {
@@ -273,7 +259,6 @@
     "plugins/connector-atlassian": {
       "package-name": "tai42-connector-atlassian",
       "component": "tai42-connector-atlassian",
-      "release-as": "3.3.2",
       "release-type": "simple",
       "skip-changelog": true,
       "extra-files": [
@@ -287,7 +272,6 @@
     "plugins/connector-google": {
       "package-name": "tai42-connector-google",
       "component": "tai42-connector-google",
-      "release-as": "3.3.2",
       "release-type": "simple",
       "skip-changelog": true,
       "extra-files": [
@@ -301,7 +285,6 @@
     "plugins/connector-github": {
       "package-name": "tai42-connector-github",
       "component": "tai42-connector-github",
-      "release-as": "2.3.2",
       "release-type": "simple",
       "skip-changelog": true,
       "extra-files": [
@@ -315,7 +298,6 @@
     "plugins/connector-slack": {
       "package-name": "tai42-connector-slack",
       "component": "tai42-connector-slack",
-      "release-as": "2.3.2",
       "release-type": "simple",
       "skip-changelog": true,
       "extra-files": [
@@ -329,7 +311,6 @@
     "plugins/identity-redis": {
       "package-name": "tai42-identity-redis",
       "component": "tai42-identity-redis",
-      "release-as": "5.0.2",
       "skip-changelog": true,
       "extra-files": [
         {
@@ -350,7 +331,6 @@
     "plugins/monitoring-langfuse": {
       "package-name": "tai42-monitoring-langfuse",
       "component": "tai42-monitoring-langfuse",
-      "release-as": "6.0.0",
       "skip-changelog": true,
       "extra-files": [
         {
@@ -371,7 +351,6 @@
     "plugins/sandbox-docker": {
       "package-name": "tai42-sandbox-docker",
       "component": "tai42-sandbox-docker",
-      "release-as": "3.0.2",
       "skip-changelog": true,
       "extra-files": [
         {
@@ -392,7 +371,6 @@
     "plugins/sandbox-local": {
       "package-name": "tai42-sandbox-local",
       "component": "tai42-sandbox-local",
-      "release-as": "2.3.2",
       "skip-changelog": true,
       "extra-files": [
         {
@@ -413,7 +391,6 @@
     "plugins/storage-github": {
       "package-name": "tai42-storage-github",
       "component": "tai42-storage-github",
-      "release-as": "2.0.0",
       "skip-changelog": true,
       "extra-files": [
         {
@@ -435,7 +412,6 @@
     "plugins/storage-local": {
       "package-name": "tai42-storage-local",
       "component": "tai42-storage-local",
-      "release-as": "3.0.0",
       "skip-changelog": true,
       "extra-files": [
         {
@@ -456,7 +432,6 @@
     "plugins/storage-s3": {
       "package-name": "tai42-storage-s3",
       "component": "tai42-storage-s3",
-      "release-as": "3.0.0",
       "skip-changelog": true,
       "extra-files": [
         {
@@ -477,7 +452,6 @@
     "plugins/toolbox": {
       "package-name": "tai42-toolbox",
       "component": "tai42-toolbox",
-      "release-as": "6.1.0",
       "skip-changelog": true,
       "extra-files": [
         {
@@ -498,7 +472,6 @@
     "plugins/tools-github": {
       "package-name": "tai42-tools-github",
       "component": "tai42-tools-github",
-      "release-as": "2.0.2",
       "skip-changelog": true,
       "extra-files": [
         {
@@ -519,7 +492,6 @@
     "plugins/tools-stripe": {
       "package-name": "tai42-tools-stripe",
       "component": "tai42-tools-stripe",
-      "release-as": "3.0.2",
       "skip-changelog": true,
       "extra-files": [
         {
@@ -540,7 +512,6 @@
     "plugins/tools-twilio": {
       "package-name": "tai42-tools-twilio",
       "component": "tai42-tools-twilio",
-      "release-as": "2.0.2",
       "skip-changelog": true,
       "extra-files": [
         {
@@ -561,7 +532,6 @@
     "plugins/tools-whatsapp": {
       "package-name": "tai42-tools-whatsapp",
       "component": "tai42-tools-whatsapp",
-      "release-as": "2.0.2",
       "skip-changelog": true,
       "extra-files": [
         {
@@ -582,7 +552,6 @@
     "plugins/webhook-verifier-github": {
       "package-name": "tai42-webhook-verifier-github",
       "component": "tai42-webhook-verifier-github",
-      "release-as": "1.6.2",
       "skip-changelog": true,
       "extra-files": [
         {
@@ -603,7 +572,6 @@
     "plugins/webhook-verifier-stripe": {
       "package-name": "tai42-webhook-verifier-stripe",
       "component": "tai42-webhook-verifier-stripe",
-      "release-as": "1.6.2",
       "skip-changelog": true,
       "extra-files": [
         {
@@ -624,7 +592,6 @@
     "e2e": {
       "package-name": "tai42-e2e",
       "component": "tai42-e2e",
-      "release-as": "23.0.0",
       "skip-changelog": true,
       "exclude-paths": [
         "e2e/tests"
