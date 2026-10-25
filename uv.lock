@@ -4429,7 +4429,7 @@ wheels = [
 [[package]]
 name = "reference-plugin"
 version = "0.1.0"
-source = { git = "https://github.com/tai42ai/tai-studio?subdirectory=e2e%2Freference-plugin&rev=99a44ca89ac71d239c4f40adde3a27428986350a#99a44ca89ac71d239c4f40adde3a27428986350a" }
+source = { git = "https://github.com/tai42ai/tai-studio?subdirectory=e2e%2Freference-plugin#820ac4e71b66cce6d26fe887c2a6b5f7349625b4" }
 dependencies = [
     { name = "tai42-contract" },
 ]
@@ -5710,7 +5710,7 @@ capture = [
 dev = [
     { name = "pyright", specifier = ">=1.1.389" },
     { name = "pytest-split", specifier = ">=0.10" },
-    { name = "reference-plugin", git = "https://github.com/tai42ai/tai-studio?subdirectory=e2e%2Freference-plugin&rev=99a44ca89ac71d239c4f40adde3a27428986350a" },
+    { name = "reference-plugin", git = "https://github.com/tai42ai/tai-studio?subdirectory=e2e%2Freference-plugin" },
     { name = "ruff", specifier = ">=0.6" },
 ]
 
