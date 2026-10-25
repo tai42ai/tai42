@@ -16,9 +16,24 @@ import asyncio
 import contextvars
 
 from sse_starlette import EventSourceResponse
-from starlette.types import Message
+from starlette.types import Message, Scope
 
 __all__ = ["start_stream_shutdown_watch"]
+
+# A complete ASGI HTTP request scope for a GET, carrying no ``app``: the response library
+# reads request keys such as ``method`` before it streams.
+_WATCH_SCOPE: Scope = {
+    "type": "http",
+    "asgi": {"version": "3.0", "spec_version": "2.4"},
+    "http_version": "1.1",
+    "method": "GET",
+    "scheme": "http",
+    "path": "/",
+    "raw_path": b"/",
+    "query_string": b"",
+    "root_path": "",
+    "headers": [],
+}
 
 
 class _NoEvents:
@@ -46,7 +61,7 @@ async def _serve_one_response_to_a_departed_client() -> None:
     async def send(_message: Message) -> None:
         return None
 
-    await EventSourceResponse(_NoEvents(client_gone))({"type": "http"}, receive, send)
+    await EventSourceResponse(_NoEvents(client_gone))(dict(_WATCH_SCOPE), receive, send)
 
 
 async def start_stream_shutdown_watch() -> None:
