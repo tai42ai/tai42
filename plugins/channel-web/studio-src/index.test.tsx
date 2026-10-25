@@ -34,6 +34,7 @@ function recordingContext(mounts: Record<string, string>) {
     registerToolPanel: refuse,
     registerSettingsTab: refuse,
     registerNavEntry: refuse,
+    registerHolderLink: refuse,
     registerRoutePanel: (contribution) => {
       panels.push(contribution);
     },
