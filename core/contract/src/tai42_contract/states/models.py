@@ -617,8 +617,8 @@ class ConsumerLink(BaseModel):
 class ConsumerRow(BaseModel):
     """One thing that binds a state, as the Consumers tab reads it.
 
-    Its ``kind`` (hook / schedule / agent / a consumer plugin's own kind), ``name``, human
-    ``detail`` and optional ``link``. ``unavailable`` (mutually exclusive with the rest) marks a
+    Its ``kind`` (hook / schedule / agent / preset / a consumer plugin's own kind), ``name``,
+    human ``detail`` and optional ``link``. ``unavailable`` (mutually exclusive with the rest) marks a
     consumer family that cannot be listed on this deployment (e.g. no scheduling backend), surfaced
     as a muted line — never swallowed.
     """

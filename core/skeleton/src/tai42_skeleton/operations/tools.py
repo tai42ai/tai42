@@ -260,7 +260,7 @@ async def run_tool(tool_name: str, arguments: dict[str, object], subject: StateS
         raise NotFoundError(f"unknown tool: {tool_name}") from exc
 
     # A synchronous door call carries no execution identity, so an async-parking tool
-    # (a flow/agent whose ask parks) could never rebind its continuation and
+    # (a composed tool or agent whose ask parks) could never rebind its continuation and
     # 500'd instead of parking. Bind the caller's OWN key for the dispatch — the same
     # live-grants rebuild the crash-resume re-drive and the background submit use; a
     # caller whose key carries no authority binds nothing and behaves exactly as

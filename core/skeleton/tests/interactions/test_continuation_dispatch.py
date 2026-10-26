@@ -546,10 +546,10 @@ async def test_concurrent_same_group_parks_never_shrink_shared_ttls(monkeypatch,
     assert len(captured) == 1
 
 
-async def test_due_record_is_flow_blind_and_cleared_on_return(wired, monkeypatch):
+async def test_due_record_is_consumer_agnostic_and_cleared_on_return(wired, monkeypatch):
     # The durable continuation-due record carries ONLY a registered tool NAME, the
     # generic {answer}, the stored identity, the key fingerprint, and an attempt count
-    # — nothing flow/session/engine specific. A leak here is a platform layering
+    # — nothing consumer/session/engine specific. A leak here is a platform layering
     # violation. The fire clears the record once ``run_tool`` returns.
     release = asyncio.Event()
 
@@ -578,7 +578,7 @@ async def test_due_record_is_flow_blind_and_cleared_on_return(wired, monkeypatch
     assert await ops.answer_interaction("fb1", "yes") == {"interaction_id": "fb1", "status": "answered"}
     await drain()
 
-    # While the fire is in flight the record stands and is flow-blind.
+    # While the fire is in flight the record stands and is consumer-agnostic.
     raw = await wired.fake.hgetall(wired.store.continuation_due_key("fb1"))
     assert set(raw.keys()) == {"tool", "identity", "fingerprint", "answer", "attempts"}
     assert raw["tool"] == "resume_tool"

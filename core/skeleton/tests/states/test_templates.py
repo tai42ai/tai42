@@ -45,7 +45,7 @@ def test_validate_minimal_template() -> None:
 
 def test_wrong_kind_refused() -> None:
     with pytest.raises(TemplateValidationError, match="template kind"):
-        validate_template(_doc(kind="flow"))
+        validate_template(_doc(kind="plugin_consumer"))
 
 
 def test_bad_name_refused() -> None:
@@ -68,7 +68,7 @@ def test_template_name_accepts_a_single_internal_hyphen() -> None:
 @pytest.mark.parametrize("key", ["loop", "bogus", "widgets", "predicates"])
 def test_unknown_key_refused_plainly(key: str) -> None:
     # Any key outside the platform set is refused, naming what a state-template document
-    # holds (template_jq/reconcile are IN the set; a flow concept like ``loop`` is not).
+    # holds (template_jq/reconcile are IN the set; a consumer's own key like ``loop`` is not).
     with pytest.raises(TemplateValidationError, match=f"{key}\n  Extra inputs are not permitted"):
         validate_template(_doc(**{key: {}}))
 

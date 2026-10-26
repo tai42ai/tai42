@@ -22,7 +22,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
-#: The builtin tool an agent/flow lists to ask its CALLER mid-run — a caller ask IS the ``ask`` tool
+#: The builtin tool an agent or composed tool lists to ask its CALLER mid-run — a caller ask IS the ``ask`` tool
 #: with ``to="caller"``. Named here so the landing rule, the seam's refusal and each door's fail-fast
 #: all agree on the one tool the landing governs.
 CALLER_ASK_TOOL = "ask"

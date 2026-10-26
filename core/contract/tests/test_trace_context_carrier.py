@@ -2,7 +2,7 @@
 
 Pin the ContextVar deposit's default (``None``), the set/reset round-trip, the
 :func:`ambient_trace_context` context manager's deposit + ``finally`` restore (including
-nesting), and the task-copy inheritance a detached nested run relies on — both a flows/agents
+nesting), and the task-copy inheritance a detached nested run relies on — both a consumer or agent
 driver (writer) and a run-config builder (reader) reach through this one shared channel.
 """
 

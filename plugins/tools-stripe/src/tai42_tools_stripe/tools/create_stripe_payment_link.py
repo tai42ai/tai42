@@ -31,7 +31,7 @@ async def create_stripe_payment_link(
     """Create a Stripe Checkout Session and return its hosted payment link and session id.
 
     Security:
-        Deployment-fenced to deterministic flow callers only. This tool is never exposed on any
+        Deployment-fenced to deterministic (non-model) callers only. This tool is never exposed on any
         agent or user toolset -- its money-facing arguments (``amount``, ``currency``,
         ``success_url``, ``cancel_url``) are all caller-supplied, so a prompt-injected agent could
         charge any amount or redirect the payer.

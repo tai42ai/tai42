@@ -765,7 +765,7 @@ def _bridge_with_params() -> InboundBridge:
 
 async def test_bridge_params_forward_to_the_door_alongside_the_answer(wired, monkeypatch):
     # On the FORWARD arm the enrichment params ride to the callback door beside the answer,
-    # landing on InteractionResponse.params for the asking flow.
+    # landing on InteractionResponse.params for the asking run.
     store = FakeStore(_entry())
     forward_calls = _stub_forward(monkeypatch, httpx.Response(200))
 

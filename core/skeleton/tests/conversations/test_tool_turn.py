@@ -160,7 +160,7 @@ def _asks_record(route):
 
 
 async def test_a_tool_caller_ask_with_no_reply_or_resume_parks_nowhere(env, monkeypatch):
-    # A non-agent tool (a flow) that caller-asks under a tool route
+    # A non-agent tool (a composed tool) that caller-asks under a tool route
     # with NO reply/resume. What the tool turn does with that caller-ask: the
     # ask surfaces as an ``asks`` outcome and, with no ``reply_expr``, is dropped SILENTLY — the
     # question never reaches the user. With no ``resume_expr`` the door has no path to resume the
@@ -255,7 +255,7 @@ async def test_tool_target_parked_bound_as_jq_has_no_null_keys(env, monkeypatch)
 
 
 async def test_tool_target_kwargs_carry_the_turn_thread_id(env, monkeypatch):
-    # Composed accept→turn→dispatch: the routed flow/tool's received kwargs carry the thread_id
+    # Composed accept→turn→dispatch: the routed tool's received kwargs carry the thread_id
     # matching the thread this turn ran under — the same opaque id the thread doors address.
     channel = FakeChannel()
     route = _tool_channel_route(start_expr="{tid: .thread_id}")
@@ -739,7 +739,7 @@ async def test_tool_target_start_expr_our_identity_and_channel_are_null_on_the_a
 
 
 async def test_tool_target_start_expr_reads_the_route_name(env, monkeypatch):
-    # The name of the route the turn entered through reaches the tool through start_expr, so a flow
+    # The name of the route the turn entered through reaches the tool through start_expr, so a tool
     # bound to several routes can tell them apart.
     route = _tool_channel_route(route_name="line-a", start_expr="{r: .route}")
     _wire(monkeypatch, FakeManager(route), FakeChannel())

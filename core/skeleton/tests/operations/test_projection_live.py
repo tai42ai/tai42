@@ -466,8 +466,8 @@ def test_get_me_is_caller_context_tier1_never_projectable(caplog):
 
 def test_user_tools_curation_coexists_with_api_tools():
     """``api_tools`` decides what is REGISTERED (projection); ``user_tools`` is the
-    read-time flow-builder view filter, carried in the live manifest and exposed to
-    the flow-builder surface. Both apply: the projected op is registered AND the
+    read-time user-facing tool view filter, carried in the live manifest and exposed
+    to the tool-picking surface. Both apply: the projected op is registered AND the
     curated ``user_tools`` subset is preserved."""
 
     async def run():
@@ -488,7 +488,7 @@ def test_user_tools_curation_coexists_with_api_tools():
             assert "list_hooks" in live
             assert len(live) == 189
 
-            # user_tools curation is preserved and surfaced to the flow builder (the
+            # user_tools curation is preserved and surfaced to the tool-picking surface (the
             # read-time view over the registered set). It lives on the LIVE in-process
             # manifest — asserted via ``live_manifest_typed`` here, NOT via ``get_manifest``:
             # ``GET /api/manifest`` serves the PERSISTED store view (markers intact, no secret

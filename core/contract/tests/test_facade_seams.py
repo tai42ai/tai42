@@ -71,7 +71,7 @@ def test_attribute_run_returns_the_wrapping_cm_without_entering_it():
     from tai42_contract.monitoring.writer import RUN_ATTRIBUTION_TRACE_NAME, MonitoringWriter
 
     writer = _RecordingWriter("trace-1")
-    attribution = RunAttribution(tags=["flow"], metadata={"k": "v"}, user_id="u1", session_id="s1")
+    attribution = RunAttribution(tags=["plugin_consumer"], metadata={"k": "v"}, user_id="u1", session_id="s1")
     # attribute_run is a free function composing over trace_attributes; the double
     # implements only the two methods the helper reads.
     cm = attribute_run(cast(MonitoringWriter, writer), attribution)
@@ -82,7 +82,7 @@ def test_attribute_run_returns_the_wrapping_cm_without_entering_it():
     assert writer.trace_attr_calls == [
         {
             "name": RUN_ATTRIBUTION_TRACE_NAME,
-            "tags": ["flow"],
+            "tags": ["plugin_consumer"],
             "metadata": {"k": "v"},
             "user_id": "u1",
             "session_id": "s1",

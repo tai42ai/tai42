@@ -557,7 +557,7 @@ def test_a_failed_awaited_outcome_substitutes_a_model_visible_tool_error() -> No
 
     key = "tai42:chained-park:k1"
     messages = [
-        AIMessage(content="", tool_calls=[{"id": "c1", "name": "flow", "args": {}}]),
+        AIMessage(content="", tool_calls=[{"id": "c1", "name": "composed", "args": {}}]),
         ToolMessage(
             content=json.dumps(
                 suspended_interaction_marker(
@@ -565,7 +565,7 @@ def test_a_failed_awaited_outcome_substitutes_a_model_visible_tool_error() -> No
                 )
             ),
             tool_call_id="c1",
-            name="flow",
+            name="composed",
             id="m1",
         ),
     ]
@@ -640,7 +640,7 @@ def test_the_claim_point_claims_a_chained_park_like_any_other() -> None:
 
     key = "tai42:chained-park:k1"
     messages = [
-        AIMessage(content="", tool_calls=[{"id": "c1", "name": "flow", "args": {}}]),
+        AIMessage(content="", tool_calls=[{"id": "c1", "name": "composed", "args": {}}]),
         ToolMessage(
             content=json.dumps(
                 suspended_interaction_marker(
@@ -648,7 +648,7 @@ def test_the_claim_point_claims_a_chained_park_like_any_other() -> None:
                 )
             ),
             tool_call_id="c1",
-            name="flow",
+            name="composed",
             id="m1",
         ),
     ]
@@ -670,7 +670,7 @@ def test_the_claim_point_still_refuses_a_park_owned_elsewhere() -> None:
     from tai42_agents._internal.park.middleware import _park_or_resume
 
     messages = [
-        AIMessage(content="", tool_calls=[{"id": "c1", "name": "flow", "args": {}}]),
+        AIMessage(content="", tool_calls=[{"id": "c1", "name": "composed", "args": {}}]),
         ToolMessage(
             content=json.dumps(
                 suspended_interaction_marker(
@@ -678,7 +678,7 @@ def test_the_claim_point_still_refuses_a_park_owned_elsewhere() -> None:
                 )
             ),
             tool_call_id="c1",
-            name="flow",
+            name="composed",
             id="m1",
         ),
     ]

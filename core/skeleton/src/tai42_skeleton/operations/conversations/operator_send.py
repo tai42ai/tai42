@@ -178,7 +178,7 @@ async def send_conversation_thread_message(
     message) and ``schema`` (an ask-less form's
     answer schema — the channel renders ``text`` as the form's prompt, and the participant's
     submission enters the conversation as an ordinary inbound message) are OPTIONAL
-    richer-send forms — FULL parity with the flow answer path's ``AnswerPart`` vocabulary —
+    richer-send forms — FULL parity with the turn answer path's ``AnswerPart`` vocabulary —
     delivered ALONGSIDE ``text`` — the message is then stored and delivered as one rich
     part, exactly as a produced rich answer is, including the delivery machine's capability
     gate (a channel that does not advertise the matching ``supports_*_notifications`` flag

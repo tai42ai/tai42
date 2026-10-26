@@ -1,7 +1,7 @@
 """The atomic answer claim and the durable continuation-due outbox enqueue.
 
 Claim-and-record an answer under WATCH/MULTI, and — for an async park — enqueue the durable,
-flow-blind continuation-due record in the same transaction.
+consumer-agnostic continuation-due record in the same transaction.
 """
 
 from __future__ import annotations
@@ -96,7 +96,7 @@ class _StoreAnswerWrites(_StoreWritesBase):
 
         DURABLE CONTINUATION OUTBOX: when the resolved interaction is an async park
         (its denormalized ``continuation_tool`` field is present), the SAME MULTI also
-        writes the durable, FLOW-BLIND continuation-due record + its next-attempt index
+        writes the durable, CONSUMER-AGNOSTIC continuation-due record + its next-attempt index
         member. The enqueue commits together with the ``answered`` state change, so a
         crash can never leave a claimed answer with no due-record. Every resolution door
         funnels through this claim, so all three (authenticated answer, callback answer,

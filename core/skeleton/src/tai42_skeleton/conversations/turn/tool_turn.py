@@ -131,7 +131,7 @@ def _tool_payload(
 
     Carries the message/sender/route/event/person fields, the optional structured fields of
     :func:`_structured_inbound`, plus the generic ``turn`` block. ``route`` is the name of the
-    conversation route the turn entered through — a required non-blank string on every door, so a flow
+    conversation route the turn entered through — a required non-blank string on every door, so a tool
     bound to several routes can tell them apart. An event turn nulls
     ``message``/``sender`` and carries its structured ``event``; the person and
     the optional structured fields ride only when present. Under ``deliver="all"``
@@ -221,7 +221,7 @@ async def _drive_visit(
             # AND a resume turn alike. The declared caller-ask landing wraps the dispatch so a caller
             # ask an AGENT the run resolves (a direct agent run tool, or one beneath a preset) is
             # judged by THIS route's reply/resume fact — the run-tool face's fail-fast reads the same
-            # fact. A plain tool/flow target makes NO claim (``None``): it binds its own resume
+            # fact. A plain or composed tool target makes NO claim (``None``): it binds its own resume
             # continuation and delivers back through the park-completion binding, so a missing
             # ``resume_expr`` must not refuse its legitimate caller-ask park — matching the create-time
             # bind check, which governs only an agent target.
@@ -298,7 +298,7 @@ async def _run_tool_turn(
     result maps to the reply (``reply_expr`` or a null/string pass-through). The payload
     always carries ``thread_id`` — this turn's canonical thread id, the same opaque string the
     thread doors address (``DELETE /api/conversations/{route_name}/thread?thread_id=``) — so a
-    ``start_expr`` can thread the conversation id through to the tool/flow kwargs. The payload
+    ``start_expr`` can thread the conversation id through to the tool's kwargs. The payload
     carries ``person_id`` and ``person_addresses`` IFF the target has multichannel on;
     ``sender`` stays the sending address either way. Non-empty ``params`` nest under a
     ``params`` key (never merged into the root); ``None``/empty leave the payload unchanged.
@@ -408,7 +408,7 @@ def _default_tool_kwargs(payload: dict[str, object]) -> dict[str, object]:
     The set is ``{message, sender, our_identity, channel, route, turn}`` (plus ``event``
     on an event turn). ``our_identity`` and ``channel`` are the line the turn arrived on (both null on
     the api door, which carries no line); ``route`` is the conversation route's name,
-    a non-blank string on every door — so a flow with no custom mapping still sees
+    a non-blank string on every door — so a tool with no custom mapping still sees
     which line and route the turn entered through.
     """
     kwargs: dict[str, object] = {

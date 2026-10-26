@@ -89,7 +89,7 @@ vocabulary as real UI:
 A notification's `options` renders a **tappable option list** (at most 10). Options are typed:
 a **reply** chip sends its own text through the message door as an ordinary visitor message —
 so it enters the conversation exactly as if the visitor had typed it — and, when the author set
-an `id`, that id rides the send as `params.reply_id` so the flow reads which option was chosen;
+an `id`, that id rides the send as `params.reply_id` so the target reads which option was chosen;
 a reply's optional `description` renders as a secondary line. A **link** option is a
 button-styled action that opens its URL in a new tab (`rel="noopener"`) and submits nothing —
 visually distinct from a reply chip. The sectioned alternative, `sections`, renders titled
@@ -239,7 +239,7 @@ beside the answer.
 
 <Warning>
 A link parameter is **transport, nothing more** — no signature, no expiry, no
-interpretation. When a flow must *trust* a value, it issues its own secret token,
+interpretation. When a tool must *trust* a value, it issues its own secret token,
 delivers it in the link, and checks it in its own store. jq gating in
 `start_expr` runs before the tool does:
 

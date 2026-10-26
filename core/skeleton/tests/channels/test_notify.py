@@ -447,7 +447,7 @@ async def test_media_and_template_mutually_exclusive_on_sink(sink_redis):
     assert await notifications_sink.read_notifications() == []
 
 
-# -- location / sections / header / footer: full flow-path vocabulary parity ---------
+# -- location / sections / header / footer: full answer-path vocabulary parity ---------
 
 
 _LOCATION = LocationElement(latitude=51.5074, longitude=-0.1278, name="London HQ")

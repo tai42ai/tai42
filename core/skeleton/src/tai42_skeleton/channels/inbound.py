@@ -506,7 +506,7 @@ async def handle_inbound_answer(
     ``correlation_key`` is the channel's opaque key for this address; ``answer`` is
     the value forwarded to the door as ``{"answer": answer}`` (plus ``"params"`` when the
     reply carried channel enrichment on ``bridge.params``, landing on
-    :attr:`~tai42_contract.interactions.models.InteractionResponse.params` for the asking flow);
+    :attr:`~tai42_contract.interactions.models.InteractionResponse.params` for the asking run);
     ``bridge.medium_message_id`` rides the callback body as ``medium_message_id`` and the bridge
     arm's ``accept`` the same way.
     ``store`` is the channel's :class:`~tai42_contract.channels.CorrelationStore`; ``bridge``

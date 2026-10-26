@@ -56,7 +56,7 @@ class InboundBridge(BaseModel):
     button payload, a referral. The ladder threads it BOTH
     ways with the same seam symmetry — forwarded to the ask's callback door alongside the answer
     (landing on :class:`~tai42_contract.interactions.models.InteractionResponse.params`, read by
-    the asking flow beside ``answer``) AND, when the reply is instead BRIDGED as a fresh turn,
+    the asking run beside ``answer``) AND, when the reply is instead BRIDGED as a fresh turn,
     passed to ``accept`` as its ``params`` — so enrichment is never dropped on either arm. The
     SAME transport vocabulary (:func:`~tai42_contract.entry_params.validate_entry_params`) bounds
     it; the platform attaches no meaning and NO TRUST. ``None`` means no enrichment.

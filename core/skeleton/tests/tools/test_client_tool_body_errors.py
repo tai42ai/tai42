@@ -296,11 +296,11 @@ def test_tool_body_failed_terminal_renders_the_whole_outcome_as_text():
         async with app.app_context(Manifest.model_validate({})):
 
             @app.tools.tool(force=True)
-            async def flow() -> str:
+            async def composed() -> str:
                 """A driver whose body raises a failed terminal carrying a whole outcome."""
                 raise RunTerminalFailed(outcome)
 
-            handle = await _handle("flow")
+            handle = await _handle("composed")
 
             with pytest.raises(ClientToolError) as caught:
                 await handle.invoke({})

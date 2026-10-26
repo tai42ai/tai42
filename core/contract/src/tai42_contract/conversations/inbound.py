@@ -79,7 +79,7 @@ class ConversationMessage(BaseModel):
         description=(
             "The end user's BCP 47 language tag (e.g. ``he-IL``). Captured onto the turn's "
             "subject so the platform's rendering layer resolves every template and list format "
-            "against it — the caller states the language, the flow never selects one. ``null`` "
+            "against it — the caller states the language, the run never selects one. ``null`` "
             "means none supplied (no silent default)."
         ),
     )

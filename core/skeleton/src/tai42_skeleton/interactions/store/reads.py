@@ -122,7 +122,7 @@ class _StoreReads(_StoreKeys):
         """A read-only admin audit of the currently-parked async asks.
 
         Every member of the per-interaction expiry index (``pending:expiry``),
-        soonest deadline first, as a flat per-item mapping a watchdog flow can
+        soonest deadline first, as a flat per-item mapping a scheduled watchdog tool can
         inspect natively.
 
         Reads the index by rank WITHOUT mutating it — no claim, no TTL change, no drop

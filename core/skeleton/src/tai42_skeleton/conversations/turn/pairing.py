@@ -39,7 +39,7 @@ logger = logging.getLogger("tai42_skeleton.conversations.turn")
 _MintedCode = tuple[str, datetime]
 
 # Fixed, generic pairing-turn replies — no channel names, no links (operators who want
-# richer wording compose it from the pairing tool + their own flow).
+# richer wording compose it from the pairing tool + their own tools).
 _LINKED_TEXT = "Done — this conversation is now linked to your other one."
 _UNLINKED_TEXT = "Done — this conversation is no longer linked."
 _NOT_LINKED_TEXT = "This conversation is not linked to anything, so there is nothing to unlink."

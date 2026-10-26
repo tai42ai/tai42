@@ -3,7 +3,7 @@
 The overlay is an UNVERSIONED organizational layer keyed by tool name, separate
 from any tool's behavior: a per-tool row (:class:`ToolMetaRecord`) plus a tree of
 real folder entities (:class:`FolderRecord`). It applies to ANY tool in the
-namespace — native plugin tools, presets, flows alike — never a preset-only
+namespace — native plugin tools, presets, composed tools alike — never a preset-only
 concern. This module holds the SHAPES only; the concrete store that persists and
 enforces them (cycle prevention, empty-folder deletes, clean-slate name reclaim)
 lives in the skeleton — a contract holds models, never logic.

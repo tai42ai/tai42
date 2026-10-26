@@ -10,7 +10,7 @@ The three pieces behind a park-capable agent run that async-parks on an ``ask``:
 * the :mod:`~tai42_agents._internal.park.capability`, :mod:`~tai42_agents._internal.park.persist`,
   :mod:`~tai42_agents._internal.park.drive`, and :mod:`~tai42_agents._internal.park.resume`
   modules — park capability, the persist seam, the drive-side finalizer, and the
-  ``agent_resume`` continuation the flow-blind platform fires.
+  ``agent_resume`` continuation the consumer-agnostic platform fires.
 * the :mod:`~tai42_agents._internal.park.chain` delivery tool — the other end of a CHAINED
   park: a nested run's terminal, reversed through the same barrier back into the loop.
 

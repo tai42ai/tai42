@@ -33,7 +33,7 @@ function formItem(overrides: Partial<FormCardItem> = {}): FormCardItem {
 }
 
 /** A form card carrying an explicit schema plus the per-send prefill/steps — the
- * enrichment a flow reply part rides onto the `chat.form` frame. */
+ * enrichment a tool's reply part rides onto the `chat.form` frame. */
 function enrichedItem(
   schema: JsonSchema,
   formData: FormPrefill | null,

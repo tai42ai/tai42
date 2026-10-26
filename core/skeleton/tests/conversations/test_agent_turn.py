@@ -321,7 +321,7 @@ async def test_a_routed_channel_that_is_not_registered_is_a_loud_failure(env, mo
 async def test_channel_locale_composes_through_the_turn_into_a_rendered_variant(env, monkeypatch):
     """The composed participant path: a channel accepts a message with the participant's locale, the turn
     carries it onto the subject block AND the ambient state context, and the rendering layer
-    resolves the per-locale template variant off that same locale — the flow selects no
+    resolves the per-locale template variant off that same locale — the run selects no
     language. Without a variant (and no default) the render refuses loudly."""
     from tai42_contract.storage import ObjectStat, Storage
 

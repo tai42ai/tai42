@@ -185,7 +185,7 @@ def test_route_exprs_carry_the_jq_expression_annotation(field: str):
 
 def test_start_expr_catalogue_documents_the_route_key():
     # The start_expr input catalogue documents ``route`` — the name of the conversation route the
-    # turn entered through — so a schema-driven UI offers it and a flow bound to several routes can
+    # turn entered through — so a schema-driven UI offers it and a tool bound to several routes can
     # tell them apart. It sits right after ``channel`` in the key order.
     from tai42_contract.template import EXPRESSION_ANNOTATION_KEY
 

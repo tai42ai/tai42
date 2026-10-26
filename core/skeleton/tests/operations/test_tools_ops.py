@@ -385,10 +385,10 @@ async def test_run_tool_failed_terminal_delivers_the_outcome_whole_as_data(
     from tai42_contract.interactions import RunTerminalFailed
 
     outcome = {"status": "error", "detail": "graceful-surface-GRACE123"}
-    tools = _Tools({"flow"}, run_exc=RunTerminalFailed(outcome))
+    tools = _Tools({"composed"}, run_exc=RunTerminalFailed(outcome))
     _install(monkeypatch, tools=tools)
     with caplog.at_level(logging.ERROR, logger=tools_ops.logger.name), pytest.raises(OperationFailedError) as caught:
-        await tools_ops.run_tool("flow", {})
+        await tools_ops.run_tool("composed", {})
     assert caught.value.status == 500
     # The message is plain; the outcome rides WHOLE as data, untouched and equal to what was raised.
     assert "graceful-surface-GRACE123" not in caught.value.message
@@ -405,7 +405,7 @@ async def test_run_tool_failed_terminal_delivers_the_outcome_whole_as_data(
 async def test_run_tool_failed_terminal_delivers_a_large_nested_outcome_untruncated(
     monkeypatch: pytest.MonkeyPatch, caplog
 ) -> None:
-    # A real graceful outcome (a flow's on-error surface) is BOTH larger than the 200-char record cap
+    # A real graceful outcome (a composed tool's on-error surface) is BOTH larger than the 200-char record cap
     # AND nested: the marker sits well past where ``failed_outcome_detail`` would clip the recorded
     # repr. The caller delivery must carry it WHOLE — the deep nested marker present and untruncated
     # under ``outcome`` — proving the door delivers data, not a capped repr in the message.
@@ -427,10 +427,10 @@ async def test_run_tool_failed_terminal_delivers_a_large_nested_outcome_untrunca
     assert "DEEP_MARKER_PAST_200" not in capped
     assert len(capped) <= len("tool run failed: ") + FAILED_OUTCOME_DETAIL_LIMIT + len("…(truncated)")
 
-    tools = _Tools({"flow"}, run_exc=RunTerminalFailed(outcome))
+    tools = _Tools({"composed"}, run_exc=RunTerminalFailed(outcome))
     _install(monkeypatch, tools=tools)
     with caplog.at_level(logging.ERROR, logger=tools_ops.logger.name), pytest.raises(OperationFailedError) as caught:
-        await tools_ops.run_tool("flow", {})
+        await tools_ops.run_tool("composed", {})
     assert caught.value.status == 500
     body = {"error": caught.value.message, **caught.value.extra}
     # The deep nested marker is present and whole in the delivered body under ``outcome``.
@@ -453,13 +453,13 @@ async def test_run_tool_failed_terminal_unencodable_outcome_is_a_502_bad_tool_ou
     from tai42_skeleton.operations.errors import UpstreamError
 
     outcome = {"status": "error", "detail": f"lone-{chr(0xD83D)}"}
-    tools = _Tools({"flow"}, run_exc=RunTerminalFailed(outcome))
+    tools = _Tools({"composed"}, run_exc=RunTerminalFailed(outcome))
     _install(monkeypatch, tools=tools)
     with caplog.at_level(logging.WARNING, logger=tools_ops.logger.name), pytest.raises(UpstreamError) as excinfo:
-        await tools_ops.run_tool("flow", {})
+        await tools_ops.run_tool("composed", {})
     assert excinfo.value.status == 502
-    assert excinfo.value.extra == {"tool": "flow", "path": "$.detail"}
-    assert "flow" in excinfo.value.message
+    assert excinfo.value.extra == {"tool": "composed", "path": "$.detail"}
+    assert "composed" in excinfo.value.message
     assert "$.detail" in excinfo.value.message
     # The mapped refusal's own body encodes cleanly — the un-encodable value never reaches the wire.
     json.dumps({"error": excinfo.value.message, **excinfo.value.extra}).encode("utf-8")
@@ -546,14 +546,14 @@ async def test_reload_tool_untargeted_applies_locally_and_broadcasts(monkeypatch
     admin = _Admin(reload_result={"status": "ok"})
     bus = _install(monkeypatch, admin=admin)
 
-    result = await tools_ops.reload_tool("flow", "f1")
+    result = await tools_ops.reload_tool("composed", "f1")
 
     # Local apply ran, then the op broadcast untargeted with the local result as the
     # self-entry payload.
-    assert admin.reload_calls == [("flow", "reload", "f1")]
+    assert admin.reload_calls == [("composed", "reload", "f1")]
     assert bus.publish_calls == [
         (
-            {"op": "reload_tool", "kind": "flow", "name": "f1"},
+            {"op": "reload_tool", "kind": "composed", "name": "f1"},
             None,
             LocalApplyResult(outcome=OpOutcome.applied, payload={"status": "ok"}),
         )
@@ -567,12 +567,12 @@ async def test_reload_tool_targeted_to_remote_skips_local_apply(monkeypatch: pyt
     admin = _Admin(reload_result={"status": "ok"})
     bus = _install(monkeypatch, admin=admin, bus=FakeBus(remotes=["serve-w1"]))
 
-    result = await tools_ops.reload_tool("flow", "f1", ["serve-w1"])
+    result = await tools_ops.reload_tool("composed", "f1", ["serve-w1"])
 
     # Targets exclude this worker → no local apply, broadcast to the named worker.
     assert admin.reload_calls == []
     assert bus.validate_calls == [["serve-w1"]]
-    assert bus.publish_calls == [({"op": "reload_tool", "kind": "flow", "name": "f1"}, ["serve-w1"], None)]
+    assert bus.publish_calls == [({"op": "reload_tool", "kind": "composed", "name": "f1"}, ["serve-w1"], None)]
     assert {r["name"]: r["outcome"] for r in result["results"]} == {"serve-w1": "applied"}
 
 
@@ -581,7 +581,7 @@ async def test_reload_tool_unknown_target_raises_before_apply(monkeypatch: pytes
     bus = _install(monkeypatch, admin=admin)
 
     with pytest.raises(BadRequestError, match="unknown fleet targets"):
-        await tools_ops.reload_tool("flow", "f1", ["ghost"])
+        await tools_ops.reload_tool("composed", "f1", ["ghost"])
     # Validation precedes side effects: nothing applied, nothing broadcast.
     assert admin.reload_calls == []
     assert bus.publish_calls == []
@@ -591,12 +591,12 @@ async def test_remove_tool_untargeted_applies_locally_and_broadcasts(monkeypatch
     admin = _Admin(reload_result={"status": "removed"})
     bus = _install(monkeypatch, admin=admin)
 
-    result = await tools_ops.remove_tool("flow", "f1")
+    result = await tools_ops.remove_tool("composed", "f1")
 
-    assert admin.reload_calls == [("flow", "remove", "f1")]
+    assert admin.reload_calls == [("composed", "remove", "f1")]
     assert bus.publish_calls == [
         (
-            {"op": "remove_tool", "kind": "flow", "name": "f1"},
+            {"op": "remove_tool", "kind": "composed", "name": "f1"},
             None,
             LocalApplyResult(outcome=OpOutcome.applied, payload={"status": "removed"}),
         )
@@ -611,7 +611,7 @@ async def test_reload_tool_local_apply_raise_aborts_broadcast(monkeypatch: pytes
 
     bus = _install(monkeypatch, admin=_FailAdmin())
     with pytest.raises(RuntimeError, match="reload failed"):
-        await tools_ops.reload_tool("flow", "f1")
+        await tools_ops.reload_tool("composed", "f1")
     # Abort-before-publish: a failed local apply broadcasts nothing.
     assert bus.publish_calls == []
 

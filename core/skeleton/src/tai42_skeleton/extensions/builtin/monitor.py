@@ -34,7 +34,7 @@ def monitor(func: Callable[..., Any], name: str, description: str) -> Callable[.
     A WRAPPER tool extension: it presents the wrapped tool's input signature
     unchanged (re-presented with ``makefun`` so the branch is schema-identical to
     the original) and branches it to a new ``<name>_monitor`` tool. The span times
-    the call live, so it carries real wall-clock latency. When a flow/agent trace
+    the call live, so it carries real wall-clock latency. When a consumer or agent trace
     is already active its own seam owns the tool span, so this suppresses itself
     and just runs the tool — it emits only for a genuinely standalone invocation.
     Errors propagate in both the emitting and the suppressed path; on error the

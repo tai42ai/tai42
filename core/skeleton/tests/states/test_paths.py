@@ -194,15 +194,15 @@ def test_ops_batch_larger_than_the_cap_changes_nothing():
 
 
 def test_guard_passes_equality_mismatch_missing_and_null_expected():
-    doc = {"writer": "flowA", "n": 3}
+    doc = {"writer": "writerA", "n": 3}
     # EQUAL → passes.
-    assert guard_passes(doc, {"path": ["writer"], "expected": "flowA"})
+    assert guard_passes(doc, {"path": ["writer"], "expected": "writerA"})
     # MISMATCH → fails.
-    assert not guard_passes(doc, {"path": ["writer"], "expected": "flowB"})
+    assert not guard_passes(doc, {"path": ["writer"], "expected": "writerB"})
     # MISSING path with a null expected → passes (absent reads as null).
     assert guard_passes(doc, {"path": ["unclaimed"], "expected": None})
     # MISSING path with a non-null expected → fails.
-    assert not guard_passes(doc, {"path": ["unclaimed"], "expected": "flowA"})
+    assert not guard_passes(doc, {"path": ["unclaimed"], "expected": "writerA"})
     # A stored null also satisfies a null expectation.
     assert guard_passes({"writer": None}, {"path": ["writer"], "expected": None})
 

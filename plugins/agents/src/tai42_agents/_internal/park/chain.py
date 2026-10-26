@@ -9,12 +9,12 @@ it finally reaches a terminal, which reverses the chained key through the SAME s
 barrier every answered park resumes through and re-enters the agent loop with that terminal as
 the tool's result.
 
-The whole chain, for a flow called inside an agent turn::
+The whole chain, for a composed tool called inside an agent turn::
 
     the human answers -> the driver's resume -> the nested run's terminal -> deliver_chained_park
                       -> agent_resume -> the agent loop -> the agent's own completion
 
-Nothing here knows what a flow is. It reads the contract-generic completion payload — the bound
+Nothing here knows what the calling driver is. It reads the contract-generic completion payload — the bound
 context merged with ``{result, completion_id, status}`` — so ANY driver that fires completions
 that way chains, and the agents plugin names none of them.
 

@@ -173,7 +173,7 @@ async def _record_callback_answer(
     A lost race maps to the same idempotent 200 already_answered. ``params`` is the
     OPTIONAL channel enrichment the inbound-answer ladder forwarded alongside the answer
     (the answer-seam counterpart of a bridged turn's entry params); it rides the stored
-    :class:`InteractionResponse.params` for the asking flow to read beside ``answer``.
+    :class:`InteractionResponse.params` for the asking run to read beside ``answer``.
     ``None`` keeps the envelope byte-identical to a plain answer. ``medium_message_id`` is
     the id the medium gave the reply, when it gave one, and ``reply_to_medium_message_id`` the
     medium's id of the message the reply quoted, when it quoted one; both ride the stored

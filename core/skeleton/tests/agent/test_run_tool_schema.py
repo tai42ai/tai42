@@ -528,10 +528,10 @@ def test_run_tool_injects_the_ambient_session_thread_when_caller_pins_none():
     async def run() -> None:
         async with app.app_context(_thread_recorder_manifest()):
             _thread_recorder_seen().clear()
-            with agent_session_thread("flow:run-1:node-a"):
+            with agent_session_thread("consumer:run-1:step-a"):
                 answer = await app.tools.run_tool("thread_recorder", {"text": "hi"})
-            assert answer == "flow:run-1:node-a"
-            assert _thread_recorder_seen() == ["flow:run-1:node-a"]
+            assert answer == "consumer:run-1:step-a"
+            assert _thread_recorder_seen() == ["consumer:run-1:step-a"]
 
     asyncio.run(run())
 
@@ -555,7 +555,7 @@ def test_a_caller_pinned_thread_wins_over_the_ambient_deposit():
     async def run() -> None:
         async with app.app_context(_thread_recorder_manifest()):
             _thread_recorder_seen().clear()
-            with agent_session_thread("flow:run-1:node-a"):
+            with agent_session_thread("consumer:run-1:step-a"):
                 answer = await app.tools.run_tool("thread_recorder", {"text": "hi", "thread_id": "caller-pinned"})
             assert answer == "caller-pinned"
             assert _thread_recorder_seen() == ["caller-pinned"]
@@ -571,7 +571,7 @@ def test_a_reported_thread_pin_also_wins_over_the_ambient_deposit():
     async def run() -> None:
         async with app.app_context(_thread_recorder_manifest()):
             _thread_recorder_seen().clear()
-            with agent_session_thread("flow:run-1:node-a"):
+            with agent_session_thread("consumer:run-1:step-a"):
                 answer = await app.tools.run_tool(
                     "thread_recorder",
                     {"text": "hi", "engine_options": {"scope": {"thread": "cfg-pinned"}}},

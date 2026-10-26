@@ -21,7 +21,7 @@ Doors:
 * ``POST /api/interactions/{interaction_id}/cancel`` — the authenticated cancel
   door: WITHDRAW one pending ask without answering it and without deleting its
   thread. Status-gated (a pending/parked question cancels; an answered one is a
-  409, a gone/expired one a 404), fires NO continuation (a parked flow never
+  409, a gone/expired one a 404), fires NO continuation (a parked run never
   resumes), and emits the removed event tagged ``reason="cancelled"``. Same
   audience gate as the answer door.
 * ``POST /api/interactions/{interaction_id}/react`` — the AUTHENTICATED in-app

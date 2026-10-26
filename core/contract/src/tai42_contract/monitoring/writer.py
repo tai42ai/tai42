@@ -6,7 +6,7 @@ The EMIT methods (``open_span``, ``start_span``, ``record_span``, ``create_event
 ``update_current_span``, ``trace_attributes``) and the ``Span``-handle methods
 (``Span.update``, ``Span.set_trace_metadata``, ``Span.end``) catch their own errors —
 they MUST NOT raise into application code. A monitoring outage cannot be allowed to
-break a flow, so call sites need NO ``try/except`` around them. Fail-safe never means
+break a run, so call sites need NO ``try/except`` around them. Fail-safe never means
 silent: every caught failure is logged at ERROR and counted in
 ``export_health().records_failed``. (The one precondition that DOES raise is
 ``record_span`` with no ``trace_id`` — a caller bug, not a backend outage.) The

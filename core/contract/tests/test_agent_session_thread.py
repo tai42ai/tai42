@@ -24,9 +24,9 @@ def test_set_then_reset_round_trips():
         set_agent_session_thread,
     )
 
-    token = set_agent_session_thread("flow:run-1:node-a")
+    token = set_agent_session_thread("consumer:run-1:step-a")
     try:
-        assert get_agent_session_thread() == "flow:run-1:node-a"
+        assert get_agent_session_thread() == "consumer:run-1:step-a"
     finally:
         reset_agent_session_thread(token)
     assert get_agent_session_thread() is None
@@ -36,12 +36,12 @@ def test_context_manager_deposits_and_restores():
     from tai42_contract.agent import agent_session_thread, get_agent_session_thread
 
     assert get_agent_session_thread() is None
-    with agent_session_thread("flow:run-1:node-a"):
-        assert get_agent_session_thread() == "flow:run-1:node-a"
+    with agent_session_thread("consumer:run-1:step-a"):
+        assert get_agent_session_thread() == "consumer:run-1:step-a"
         # Nesting restores the OUTER deposit on inner exit, not None.
-        with agent_session_thread("flow:run-1:node-b"):
-            assert get_agent_session_thread() == "flow:run-1:node-b"
-        assert get_agent_session_thread() == "flow:run-1:node-a"
+        with agent_session_thread("consumer:run-1:step-b"):
+            assert get_agent_session_thread() == "consumer:run-1:step-b"
+        assert get_agent_session_thread() == "consumer:run-1:step-a"
     assert get_agent_session_thread() is None
 
 
@@ -51,7 +51,7 @@ def test_deposit_inherited_by_a_task_on_a_copy():
     async def run() -> str | None:
         # A task created INSIDE the block runs on a context copy carrying the deposit, so a
         # detached run stays threaded even after the depositing block exits.
-        with agent_session_thread("flow:run-1:node-a"):
+        with agent_session_thread("consumer:run-1:step-a"):
             task = asyncio.ensure_future(_read_after_yield())
         return await task
 
@@ -59,4 +59,4 @@ def test_deposit_inherited_by_a_task_on_a_copy():
         await asyncio.sleep(0)
         return get_agent_session_thread()
 
-    assert asyncio.run(run()) == "flow:run-1:node-a"
+    assert asyncio.run(run()) == "consumer:run-1:step-a"

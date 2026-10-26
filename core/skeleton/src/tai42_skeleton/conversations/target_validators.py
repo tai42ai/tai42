@@ -99,8 +99,8 @@ async def caller_ask_landing_for_tool_route(route: ConversationRoute) -> CallerA
     create-time bind check (:func:`_platform_target_lines`) applies, which names ONLY an agent target.
     So this resolves the tool target's owner exactly as the bind check does: when the target resolves
     to an agent (a direct agent run tool, or a preset over one) the route's landing governs its
-    caller-ask and is declared; when it resolves to a plain tool/flow the door makes NO claim
-    (``None``). A plain tool/flow that asks its caller binds its OWN resume continuation and delivers
+    caller-ask and is declared; when it resolves to a plain or composed tool the door makes NO claim
+    (``None``). A plain or composed tool that asks its caller binds its OWN resume continuation and delivers
     the answer back through the door's park-completion binding, so the route's ``resume_expr`` is not
     its landing path and a missing one must not refuse its legitimate park. Keeping the run-time
     declaration resolution-aligned with the create-time check is what stops a route allowed at create

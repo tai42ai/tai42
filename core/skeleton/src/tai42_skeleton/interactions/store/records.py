@@ -1,6 +1,6 @@
 """The durable continuation-due record model.
 
-The flow-blind hash written when an async park resolves and read back for redelivery, plus the
+The consumer-agnostic hash written when an async park resolves and read back for redelivery, plus the
 terminal-drop marker and the waiting-outcome record a resumed run's terminal parks for its subject.
 """
 
@@ -42,7 +42,7 @@ def iter_subject_keys(descriptor: dict[str, Any]) -> list[tuple[ConversationTarg
 
 @dataclass(frozen=True)
 class ContinuationDue:
-    """A durable continuation-due record read back for redelivery — self-contained and FLOW-BLIND.
+    """A durable continuation-due record read back for redelivery — self-contained and CONSUMER-AGNOSTIC.
 
     Carries a registered tool NAME, the generic answer the continuation runs with (the answer, the
     medium id of the message the answering reply quoted and the answer's ``params``), and the
@@ -138,7 +138,7 @@ def _continuation_due_mapping(
     params: dict[str, str] | None = None,
     deferred_output_stages: str | None = None,
 ) -> dict[str, str]:
-    """The flow-blind continuation-due record fields.
+    """The consumer-agnostic continuation-due record fields.
 
     Carries a registered tool NAME, the stored execution identity + key fingerprint, the generic
     answer (JSON-encoded so any answer shape — a scalar, the expiry sentinel, a form object —

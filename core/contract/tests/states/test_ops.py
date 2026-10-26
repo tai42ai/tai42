@@ -143,7 +143,7 @@ def test_json_equal_is_strict_on_bool_vs_int():
 # compare-and-set guard — validate_guard / validate_op guard shape            #
 # --------------------------------------------------------------------------- #
 def test_validate_guard_accepts_a_well_formed_guard_including_null_expected():
-    assert validate_guard({"path": ["writer"], "expected": "flowA"}) == {"path": ["writer"], "expected": "flowA"}
+    assert validate_guard({"path": ["writer"], "expected": "writerA"}) == {"path": ["writer"], "expected": "writerA"}
     assert validate_guard({"path": ["writer"], "expected": None}) == {"path": ["writer"], "expected": None}
 
 
@@ -165,7 +165,7 @@ def test_validate_guard_refuses_unknown_keys():
 
 
 def test_validate_op_accepts_a_guarded_op_and_validates_its_shape():
-    op = {"op": "set", "path": ["x"], "value": 1, "guard": {"path": ["writer"], "expected": "flowA"}}
+    op = {"op": "set", "path": ["x"], "value": 1, "guard": {"path": ["writer"], "expected": "writerA"}}
     assert validate_op(op) == op
     # A malformed guard on an otherwise-valid op is refused loudly.
     with pytest.raises(InvalidPathError, match="requires an 'expected'"):

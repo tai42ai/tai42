@@ -30,7 +30,7 @@ The `SANDBOX_LOCAL_` env group.
 This provider gives **no isolation**. `isolation="none"` means arbitrary session
 code runs on the host with the host's filesystem, network, and any host-reachable
 secrets in reach. That is the accepted price of the direct mode: fine for a
-**trusted, single-tenant box** the operator controls, **not** for untrusted flows.
+**trusted, single-tenant box** the operator controls, **not** for untrusted workloads.
 For enforced isolation, install a container provider instead.
 
 - **Isolation floor.** Only `isolation="none"` is accepted. A `container` / `vm`

@@ -486,7 +486,7 @@ def list_state_writes(
 @app.command("consumers")
 @covers(("GET", "/api/states/{name}/consumers"))
 def state_consumers(ctx: typer.Context, name: Annotated[str, typer.Argument(help="The state name.")]) -> None:
-    """List everything that binds a state — flows, hooks, schedules, agents."""
+    """List everything that binds a state — hooks, schedules, agents, presets and plugin consumers."""
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
         emit_result(ctx_obj, client.get(f"/api/states/{seg(name)}/consumers"))

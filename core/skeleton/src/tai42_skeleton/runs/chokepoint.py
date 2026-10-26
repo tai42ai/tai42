@@ -18,7 +18,7 @@ TRACE ID — the lineage the kit's run-trace opener gives
 -------------------------------------------------------
 ``trace_id`` deep-links to the monitoring trace. The START write, the dispatch and the
 terminal write run inside the kit's :func:`~tai42_kit.monitoring.open_run_trace`: a run
-under an ambient lineage (a deferred call's span, a flow's deposit) keeps it and opens
+under an ambient lineage (a deferred call's span, a consumer's deposit) keeps it and opens
 nothing; otherwise one ``run`` span opens, a child of the live span or the root of a new
 trace, and its pair is deposited so a consumer the preset runs nests under it. The row is
 stamped with that lineage's trace. A backend that cannot record (noop/none) leaves

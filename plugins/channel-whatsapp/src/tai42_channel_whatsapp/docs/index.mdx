@@ -47,8 +47,8 @@ delivery statuses (configured in the Meta App dashboard):
 On subscribe, Meta sends a `GET` with `hub.challenge`; the door echoes it as a
 `text/plain` body only when the verify token matches. Inbound messages and delivery statuses then arrive
 as signed `POST`s on the same URL. A delivery status for a **bridge** message
-updates its answer record (a `failed` ends it `failed`); a status for a **flow
-send** (`notify_user`, which runs no bridge record) is instead posted as a
+updates its answer record (a `failed` ends it `failed`); a status for a
+**notification send** (`notify_user`, which runs no bridge record) is instead posted as a
 `delivery_receipt` event onto that send's monitoring trace — `failed` as an
 `ERROR`. A status neither owns is acknowledged and ignored.
 
@@ -334,7 +334,7 @@ tai conversations failed
 
 The channel tracks that window per pair (`phone_number_id`, `wa_id`) and reports
 it on every bridged turn as `turn.reply_window` (`{state, closes_at}`), so a
-route's `start_expr`, `reply_expr` or flow can choose a template before Meta
+route's `start_expr`, `reply_expr` or tool can choose a template before Meta
 refuses a freeform reply:
 
 - every client message (text, media, reaction, an interactive tap, a Flow reply,

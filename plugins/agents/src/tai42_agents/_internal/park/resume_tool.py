@@ -1,6 +1,6 @@
 """The hidden ``agent_resume`` continuation tool, its idempotent binding, and the kill teardown.
 
-``register_agent_resume_tool()`` binds the ``agent_resume`` driver continuation a flow-blind
+``register_agent_resume_tool()`` binds the ``agent_resume`` driver continuation a consumer-agnostic
 platform fires when an async ``ask`` a park-capable run parked on is answered (or expires): it
 carries the generic ``{interaction_id, ask_result}`` and hands the parked run ``ask_result``
 unchanged, the value a sync ``ask`` returns. The agents plugin's own durable park index reverses

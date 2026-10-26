@@ -22,18 +22,18 @@ def _extractor(kwargs: dict[str, Any]) -> list[TemplateRef]:
 
 def test_the_registry_answers_the_extractor_per_tool_name_and_resets() -> None:
     registry = TemplateRefsRegistry()
-    registry.register("flowish", _extractor)
-    assert registry.get("flowish") is _extractor
+    registry.register("composed", _extractor)
+    assert registry.get("composed") is _extractor
     assert registry.get("other") is None
     registry.reset()
-    assert registry.get("flowish") is None
+    assert registry.get("composed") is None
 
 
 def test_a_duplicate_registration_raises() -> None:
     registry = TemplateRefsRegistry()
-    registry.register("flowish", _extractor)
-    with pytest.raises(ValueError, match=r"^template-references extractor for tool 'flowish' is already registered$"):
-        registry.register("flowish", _extractor)
+    registry.register("composed", _extractor)
+    with pytest.raises(ValueError, match=r"^template-references extractor for tool 'composed' is already registered$"):
+        registry.register("composed", _extractor)
 
 
 def _binding(monkeypatch: pytest.MonkeyPatch, *, included: bool) -> tuple[ToolBinding, TemplateRefsRegistry]:
@@ -49,30 +49,30 @@ def _binding(monkeypatch: pytest.MonkeyPatch, *, included: bool) -> tuple[ToolBi
 def test_the_decorator_registers_under_the_bound_name(monkeypatch: pytest.MonkeyPatch) -> None:
     binding, registry = _binding(monkeypatch, included=True)
 
-    @binding.tool(template_refs=_extractor, name="flowish")
-    def flowish_impl() -> int:
+    @binding.tool(template_refs=_extractor, name="composed")
+    def composed_impl() -> int:
         return 1
 
-    assert registry.get("flowish") is _extractor
-    assert binding.template_refs_extractor("flowish") is _extractor
+    assert registry.get("composed") is _extractor
+    assert binding.template_refs_extractor("composed") is _extractor
 
 
 def test_a_manifest_excluded_tool_registers_no_extractor(monkeypatch: pytest.MonkeyPatch) -> None:
     binding, registry = _binding(monkeypatch, included=False)
 
-    @binding.tool(template_refs=_extractor, name="flowish")
-    def flowish_impl() -> int:
+    @binding.tool(template_refs=_extractor, name="composed")
+    def composed_impl() -> int:
         return 1
 
-    assert registry.get("flowish") is None
+    assert registry.get("composed") is None
 
 
 def test_start_resets_the_registry_and_the_facet_reads_it() -> None:
     async def run() -> None:
         async with app.app_context(Manifest.model_validate({})):
-            app._template_refs_registry.register("flowish", _extractor)
-            assert app.tools.template_refs_extractor("flowish") is _extractor
+            app._template_refs_registry.register("composed", _extractor)
+            assert app.tools.template_refs_extractor("composed") is _extractor
         async with app.app_context(Manifest.model_validate({})):
-            assert app.tools.template_refs_extractor("flowish") is None
+            assert app.tools.template_refs_extractor("composed") is None
 
     asyncio.run(run())

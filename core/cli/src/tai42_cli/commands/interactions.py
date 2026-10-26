@@ -111,7 +111,7 @@ def cancel_interaction(
 ) -> None:
     """Cancel a pending interaction — withdraw the ask without answering it.
 
-    The parked flow is never resumed and the interaction's thread is left intact; a
+    The parked run is never resumed and the interaction's thread is left intact; a
     question that is already answered is a conflict and a gone/expired one is not found.
 
     Example: ``tai interactions cancel i_123``

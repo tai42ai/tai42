@@ -426,7 +426,7 @@ class AppStates(Protocol):
 
     # --- Consumers ---
     def register_consumer_lister(self, kind: str, lister: ConsumerLister) -> None:
-        """Register a lister for consumer ``kind`` (flow / hook / schedule / agent).
+        """Register a lister for consumer ``kind`` (``hook`` / ``schedule`` / ``agent`` / ``preset`` / a plugin's own).
 
         A plugin calls this through the ``tai42_app`` handle when its module loads;
         ``consumers`` unions every registered lister. Registering two listers for one

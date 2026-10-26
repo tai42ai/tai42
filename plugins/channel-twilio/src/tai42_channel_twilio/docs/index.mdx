@@ -103,7 +103,7 @@ more rows.
 WhatsApp delivers a freeform reply only inside a 24-hour window opened by the
 client's last message. For a `whatsapp:` pair the channel tracks that window and
 reports it on every bridged turn as `turn.reply_window` (`{state, closes_at}`), so
-a route's `start_expr`, `reply_expr` or flow can see it before replying:
+a route's `start_expr`, `reply_expr` or tool can see it before replying:
 
 - each new inbound message on the pair opens the window for 24 hours from the
   moment the webhook first receives it; a redelivered `MessageSid` keeps that

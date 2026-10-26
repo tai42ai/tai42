@@ -224,11 +224,11 @@ async def test_explicit_full_subject_overrides_context(app, svc: StatesService) 
         await builtin_states.state_merge(
             "notes",
             {"n": 3},
-            subject={"target_kind": "tool", "target_name": "flowX", "kind": "session", "key": "sess-explicit"},
+            subject={"target_kind": "tool", "target_name": "toolX", "kind": "session", "key": "sess-explicit"},
         )
     # written under the explicit subject, not the ambient thread one
     explicit = await svc.read(
-        "notes", StateSubject(target_kind="tool", target_name="flowX", kind="session", key="sess-explicit")
+        "notes", StateSubject(target_kind="tool", target_name="toolX", kind="session", key="sess-explicit")
     )
     ambient = await svc.read("notes", StateSubject(target_kind="agent", target_name="a", kind="thread", key="t-1"))
     assert explicit is not None

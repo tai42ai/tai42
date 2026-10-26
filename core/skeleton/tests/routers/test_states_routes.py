@@ -246,7 +246,7 @@ class _FakeStates:
                 WriteEntry(
                     seq=2.0,
                     at=datetime(2026, 1, 2, tzinfo=UTC),
-                    origin=CompletedOrigin(consumer="flow", op_id="op-2", door="tool"),
+                    origin=CompletedOrigin(consumer="plugin_consumer", op_id="op-2", door="tool"),
                     paths=[["a"], ["b", 0]],
                 ),
                 WriteEntry(
@@ -315,7 +315,7 @@ def test_writes_listing_pages_through_the_fake(monkeypatch: pytest.MonkeyPatch) 
     assert out["next_cursor"] == "17"
     items = out["items"]
     assert [e["seq"] for e in items] == [2.0, 1.0]
-    assert items[0]["origin"]["consumer"] == "flow"
+    assert items[0]["origin"]["consumer"] == "plugin_consumer"
     assert items[0]["origin"]["door"] == "tool"
     assert items[0]["paths"] == [["a"], ["b", 0]]
     assert items[1]["origin"]["door"] == "api"

@@ -1,5 +1,5 @@
 """``ToolBinding.run_tool`` is pure dispatch — it opens NO span. Tool spans
-are owned by the flow interrupt-resume seam and the agent callbacks; a plain
+are owned by a consumer's interrupt-resume seam and the agent callbacks; a plain
 ``run_tool`` (standalone / hook / worker) is untraced unless a tool opts into
 the ``:monitor`` extension.
 

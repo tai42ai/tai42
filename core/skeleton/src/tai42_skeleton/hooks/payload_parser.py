@@ -86,7 +86,7 @@ async def parse_any_payload(request: Request, include_query: bool = True) -> dic
     """Parse a webhook request into the payload dict hooks run on.
 
     A body that contradicts its declared Content-Type raises ``ValueError`` —
-    firing hooks on a partially-salvaged payload would run flows on wrong
+    firing hooks on a partially-salvaged payload would run tools on wrong
     data. Bodies with no declared type pass through explicitly: text as
     ``raw_body``, binary as ``raw_body_base64`` — never dropped.
 

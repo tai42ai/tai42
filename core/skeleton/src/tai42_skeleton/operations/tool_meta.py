@@ -1,7 +1,7 @@
 """Tool-metadata operations — the folder tree + the per-tool organizational overlay.
 
 The overlay is UNVERSIONED metadata over ANY tool in the namespace (native plugin
-tools, presets, flows), keyed by tool name: a ``display_name``, a folder placement,
+tools, presets, composed tools), keyed by tool name: a ``display_name``, a folder placement,
 user ``tags``, a tri-state ``hidden`` override, and informational ``badges``. These
 operations are the single
 source of truth for the surface; the HTTP routes in ``routers/tool_meta.py`` are

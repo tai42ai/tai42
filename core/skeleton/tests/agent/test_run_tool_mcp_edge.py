@@ -396,16 +396,16 @@ def test_mcp_edge_failed_terminal_delivers_the_outcome_whole_and_records_error(m
         async with app.app_context(Manifest.model_validate({})):
 
             @app.tools.tool(force=True)
-            async def flow():
+            async def composed():
                 """Raise a failed terminal carrying a whole opaque outcome."""
                 raise RunTerminalFailed(outcome)
 
-            await app.preset_manager.register("flow_preset", "flow", {}, [], "Flow preset")
+            await app.preset_manager.register("composed_preset", "composed", {}, [], "Composed preset")
             try:
                 async with Client(app._fast_mcp) as client:
-                    result = await client.call_tool("flow_preset", {}, raise_on_error=False)
+                    result = await client.call_tool("composed_preset", {}, raise_on_error=False)
             finally:
-                await app.preset_manager.remove("flow_preset")
+                await app.preset_manager.remove("composed_preset")
             assert result.is_error
             assert result.structured_content is not None
             # The whole nested outcome is delivered as data — deep marker present and untruncated.
@@ -431,15 +431,15 @@ def test_mcp_edge_failed_terminal_unencodable_outcome_is_a_named_tool_error():
         async with app.app_context(Manifest.model_validate({})):
 
             @app.tools.tool(force=True)
-            async def flow():
+            async def composed():
                 """Raise a failed terminal whose outcome cannot be JSON-encoded."""
                 raise RunTerminalFailed(outcome)
 
             async with Client(app._fast_mcp) as client:
                 with pytest.raises(ToolError) as caught:
-                    await client.call_tool("flow", {})
+                    await client.call_tool("composed", {})
             message = str(caught.value)
-            assert "flow" in message
+            assert "composed" in message
             assert "$.detail" in message
             assert "cannot be JSON-encoded" in message
 

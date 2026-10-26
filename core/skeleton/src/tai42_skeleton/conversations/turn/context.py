@@ -60,7 +60,7 @@ def _turn_block(
 
     Carries the turn id (the record's ``message_id``, no new mint), the inbound
     descriptor (``inbound.id`` / ``inbound.kind`` message/event /
-    ``inbound.source``), and the ``subject`` block a flow's ``subject_expr``
+    ``inbound.source``), and the ``subject`` block a state binding's ``subject_expr``
     reads — the target scope plus the ``person`` id (null off a non-multichannel
     target) and the resolved ``thread`` id, the same candidates the ambient state
     context carries. ``reply_window`` is the pair's window as the channel reported it

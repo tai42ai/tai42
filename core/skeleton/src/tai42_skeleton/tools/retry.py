@@ -7,7 +7,7 @@ INSIDE the runs-index record and the attribution stamp and AFTER the
 execution-identity authorization and the tool resolution — so a retried call is
 ONE logical dispatch: one run-index row (its terminal outcome is the FINAL
 result), one authorization decision, one resolved target re-fired per attempt.
-Every consumer of the seam (flows, agents-as-tools, hooks, backend workers,
+Every consumer of the seam (composed tools, agents-as-tools, hooks, backend workers,
 direct calls) shares the behavior because they all dispatch through
 ``run_tool``. A client-tool handle's ``invoke`` (an in-process agent's own tool
 call, ``get_client_tools``) sits deliberately OUTSIDE this seam: there a tool

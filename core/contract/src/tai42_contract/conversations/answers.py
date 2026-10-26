@@ -177,7 +177,7 @@ with warnings.catch_warnings():
         @model_validator(mode="after")
         def _check_composition(self) -> AnswerPart:
             # The SAME shared cross-field rules ChannelNotification enforces (including the per-send
-            # ``wording`` admission), so the flow-message authoring surface and the delivery frame
+            # ``wording`` admission), so the answer-authoring surface and the delivery frame
             # can never drift.
             check_interactive_composition(
                 message=self.message,

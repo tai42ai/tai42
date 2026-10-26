@@ -1,7 +1,7 @@
 """``tai tool-meta`` — manage the tool-metadata overlay (folders + per-tool rows).
 
 Thin wrappers over the ``/api/tool-meta*`` routes. The overlay is unversioned
-organizational metadata over ANY tool (native, preset, flow): a display name, a
+organizational metadata over ANY tool (native, preset, or any other kind): a display name, a
 folder placement, user tags, a tri-state visibility, and informational capability
 badges. The per-tool ``set`` command mirrors the API's MERGE-PATCH: only the flags
 you pass are sent, so a field you omit is left unchanged. A CLEAR flag sends the

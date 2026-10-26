@@ -86,7 +86,7 @@ def test_webhook_fires_registered_hook_tool(monkeypatch: pytest.MonkeyPatch):
                 HookParams(
                     name="on-event",
                     topic="events",
-                    tool="run_event_flow",
+                    tool="run_event_tool",
                     execution_key="k-fire",
                     execution_key_fingerprint="fp-fire",
                     start_expr=TemplatedText(content=".payload"),
@@ -101,7 +101,7 @@ def test_webhook_fires_registered_hook_tool(monkeypatch: pytest.MonkeyPatch):
             run_tool.assert_awaited_once()
             assert run_tool.await_args is not None
             args, kwargs = run_tool.await_args
-            assert args == ("run_event_flow", {"id": 7, "source": "webhook"})
+            assert args == ("run_event_tool", {"id": 7, "source": "webhook"})
             assert (kwargs["offload_sync"], kwargs["continues_chain"]) == (True, None)
             assert set(kwargs["extras"]) == {TOOL_EXTRA_IDEMPOTENCY_KEY}
             assert (await manager.list_hook_runs(None, 200, None)).items == ()

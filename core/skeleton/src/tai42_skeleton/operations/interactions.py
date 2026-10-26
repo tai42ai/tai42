@@ -584,7 +584,7 @@ class PendingInteractionsQuery(BaseModel):
 async def list_pending_interactions(limit: int = DEFAULT_PENDING_INTERACTIONS_LIMIT) -> dict:
     """A read-only admin audit of the parked async asks awaiting an answer.
 
-    The native surface a scheduled watchdog flow reads to spot parks nearing (or past) their
+    The native surface a scheduled watchdog tool reads to spot parks nearing (or past) their
     expiry.
 
     An UNRESTRICTED operator sees the whole cross-audience set — exactly the reach the

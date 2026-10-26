@@ -131,7 +131,7 @@ class RecursionLimitFinal(StreamEvent):
     """The run hit the graph's step (``recursion_limit``) ceiling before it finished. Terminal, non-fatal.
 
     A runaway loop that exhausts the super-step budget ends with this typed,
-    readable outcome instead of a generic failure, so a flow or route can branch
+    readable outcome instead of a generic failure, so a caller or route can branch
     on it. ``limit`` is the super-step ceiling that was hit; ``steps`` is what is
     known of the step count when the graph reports it, else ``None``.
     """
@@ -157,7 +157,7 @@ class SuspendedFinal(StreamEvent):
     caller/user partition; ``expiry_at`` is the step's deadline — the latest of its parks'
     deadlines (ISO-8601, or ``None`` when no park carried one); ``thread_id`` is the parked run's thread. The
     vocabulary is generic — it names no driver, engine, or resume state, only the parked
-    interaction ids the flow-blind platform already holds.
+    interaction ids the consumer-agnostic platform already holds.
     """
 
     type: Literal["suspended_final"] = "suspended_final"  # pyright: ignore[reportIncompatibleVariableOverride]

@@ -212,7 +212,7 @@ with warnings.catch_warnings():
         )
 
         # The new rich fields reuse AnswerPart's/ChannelNotification's SAME field validators, so
-        # the operator send surface bounds each shape identically to the flow answer path — never
+        # the operator send surface bounds each shape identically to the turn answer path — never
         # a second, drift-prone rule set.
         @field_validator("sections")
         @classmethod
@@ -338,7 +338,7 @@ async def notify_user(
     alternative), ``header``/``footer`` (a media header / trailing line composing an interactive
     message) and ``schema`` (an ask-less form's answer schema — the channel renders the
     message as the form's prompt, and a submission enters the conversation as a message from
-    the person) are OPTIONAL richer-send forms — FULL parity with the flow answer path's
+    the person) are OPTIONAL richer-send forms — FULL parity with the turn answer path's
     ``AnswerPart`` vocabulary. The contract's shared composition matrix is enforced on this
     request model identically: ``options`` XOR ``sections`` (one choice surface); ``schema``
     excludes both; ``header``/``footer`` require a choice surface; ``template`` is the standalone

@@ -39,7 +39,7 @@ class MonitoringLevel(StrEnum):
 
 
 # The level applied to an event/span when the caller passes none. ``create_event``
-# uses this as its default (the flows iterate events pass no level).
+# uses this as its default (a caller that emits events passes no level).
 DEFAULT_LEVEL = MonitoringLevel.DEFAULT
 
 
@@ -124,7 +124,7 @@ class Span(Protocol):
 
     Every method is FAIL-SAFE: it catches its own errors and logs them at ERROR, and the
     writer counts them in ``export_health().records_failed`` — it never raises into
-    application code (a monitoring outage must not break a flow).
+    application code (a monitoring outage must not break a run).
     """
 
     @property

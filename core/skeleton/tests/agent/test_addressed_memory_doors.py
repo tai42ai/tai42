@@ -119,7 +119,7 @@ def test_the_deposited_session_thread_yields_to_a_thread_the_agent_reports():
     async def run() -> None:
         async with app.app_context(_manifest()):
             _run_seen().clear()
-            with agent_session_thread("flow:run-1:node-a"):
+            with agent_session_thread("consumer:run-1:step-a"):
                 answer = await app.tools.run_tool(
                     "scoped_memory", {"text": "hi", "engine_options": {"scope": {"key": "own-thread"}}}
                 )
