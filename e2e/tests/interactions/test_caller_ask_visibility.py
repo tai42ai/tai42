@@ -122,7 +122,7 @@ async def test_caller_asks_carry_a_separate_concurrency_cap_from_user_asks(
 
     # A user ask is bound by its OWN (default-high) cap, not the caller cap: it is admitted
     # while the caller cap is full.
-    user = await _submit(api_b, "e2e_async_park_flow", {"question": uniq("uq"), "expiry_seconds": 3600})
+    user = await _submit(api_b, "e2e_async_park_driver", {"question": uniq("uq"), "expiry_seconds": 3600})
     await _await_status(api_a, user, "succeeded")
 
 
@@ -150,7 +150,7 @@ async def test_a_caller_ask_never_reaches_the_live_stream(replicas_stack: TaiSta
         # Both asks are raised AFTER the tail cursor is captured, so each is a live-tail add: the
         # user ask must stream, the caller ask must be filtered off it.
         await _submit(api_a, "held_run", {"marker": caller_marker}, subj)
-        await _submit(api_a, "e2e_async_park_flow", {"question": user_question, "expiry_seconds": 3600})
+        await _submit(api_a, "e2e_async_park_driver", {"question": user_question, "expiry_seconds": 3600})
 
         async def _read_to_user_ask() -> bool:
             buffer = ""

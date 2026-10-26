@@ -1,7 +1,7 @@
 """The shared driving context manager the park/caller/door probe tools drive an ``ask`` under.
 
 A driving probe binds a resume continuation tool around an ``ask`` that parks, so the park stores
-that tool as the run's resumer; a stand-in flow driver also binds a synthetic execution identity
+that tool as the run's resumer; a stand-in consumer driver also binds a synthetic execution identity
 the park stores as its ``continuation_identity`` so a resume that rebinds it is provable.
 ``driving_as`` binds the continuation tool and, when the caller supplies one, the synthetic
 identity, and resets both when the block exits so a driver's binding never leaks past its ``ask``.
@@ -23,7 +23,7 @@ def driving_as(*, continuation: str, identity: CallerIdentity | None = None) -> 
     """Bind ``continuation`` as the run's resume continuation tool for the duration of the block,
     optionally binding ``identity`` as the execution identity the park stores, resetting both on exit.
 
-    Pass ``identity`` to bind a synthetic execution identity (a stand-in flow driver that owns its
+    Pass ``identity`` to bind a synthetic execution identity (a stand-in consumer driver that owns its
     identity, or a consumer that has decided to bind one because the stack has none); leave it
     ``None`` to drive under whatever identity is already bound (an agent turn's route execution
     key, or none on an auth-off stack). Both tokens are reset in ``finally``, so the binding is

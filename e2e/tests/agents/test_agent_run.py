@@ -30,8 +30,8 @@ pytestmark = [
 ]
 
 
-# The kwarg set the flows engine's agent holder passes on the call each turn. When a flow node
-# holds ``tools_agent`` (or a preset over it), the engine builds the call arguments from the
+# The kwarg set a consumer that holds an agent passes on the call each turn. When a consumer
+# holds ``tools_agent`` (or a preset over it), it builds the call arguments from the
 # holder's baked ``tool_kwargs`` merged with the turn's message and hands that dict to the held
 # tool — the system/user messages, the client tool list, the LLM provider and its model kwargs,
 # and any forced structured-output schema all ride as CALL arguments, not as the preset's own

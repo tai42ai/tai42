@@ -1,4 +1,4 @@
-"""Async-park probe tools: the flow-driver parks, the shared multi-park super-step
+"""Async-park probe tools: the consumer-driver parks, the shared multi-park super-step
 barrier, the agent async-park leg, and a pausing tool that ends on a resume-buffered partial.
 Each registers at import via ``@tai42_app.tools.tool`` and exposes an ``e2e_record`` Redis
 observable or its return value."""
@@ -39,7 +39,7 @@ def _on_expiry_policy(value: str) -> Literal["kill", "resume"]:
 
 
 @tai42_app.tools.tool(tags={"e2e"})
-async def e2e_async_park_flow(
+async def e2e_async_park_driver(
     question: str,
     expiry_seconds: float,
     on_expiry: str = "kill",
@@ -100,7 +100,7 @@ async def e2e_async_park_flow(
 async def e2e_chained_park(question: str, expiry_seconds: float) -> object:
     """Park an async ``ask`` under this probe's own resume continuation and RETURN the park.
 
-    The same park ``e2e_async_park_flow`` raises (resumed by ``e2e_async_resume`` as the synthetic
+    The same park ``e2e_async_park_driver`` raises (resumed by ``e2e_async_resume`` as the synthetic
     stand-in identity), but the ``SuspendedInteraction`` itself is returned, so a run that calls this
     from a chained dispatch — an agent's tool call — waits on the CALL: it parks on the chained
     resume key and the ask is a park of a run nested under it."""
@@ -117,7 +117,7 @@ async def e2e_chained_park(question: str, expiry_seconds: float) -> object:
 
 @tai42_app.tools.tool(tags={"e2e"})
 async def e2e_async_resume(interaction_id: str, ask_result: Any) -> dict:
-    """The generic resume continuation an async park fires ONCE — the stand-in flow
+    """The generic resume continuation an async park fires ONCE — the stand-in consumer
     driver's resume seam.
 
     Runs as the park's stored identity with ``{interaction_id, ask_result}``: the ANSWER branch
@@ -163,7 +163,7 @@ async def e2e_async_resume(interaction_id: str, ask_result: Any) -> dict:
 # The N-park super-step barrier the multi-suspend leg drives. Three async parks are
 # minted in ONE driver call (one logical super-step); each fires the shared
 # ``e2e_async_multipark_resume`` continuation on whichever worker resolves it. The
-# continuation receives only ``{interaction_id, ask_result}`` (flow-blind), so the driver
+# continuation receives only ``{interaction_id, ask_result}`` (consumer-agnostic), so the driver
 # routes each park's interaction id to its barrier slot on the probe channel.
 _MULTIPARK_ROUTE_KEY = "e2e:multipark:route"
 
@@ -177,7 +177,7 @@ def _multipark_minted_key(super_step_id: str) -> str:
 
 
 @tai42_app.tools.tool(tags={"e2e"})
-async def e2e_async_multipark_flow(
+async def e2e_async_multipark_driver(
     super_step_id: str,
     expiry_seconds: list[float],
     slow_slot: int = -1,
@@ -193,7 +193,7 @@ async def e2e_async_multipark_flow(
     A slot left to expiry fires its continuation with the expiry marker under
     ``on_expiry="resume"``, or tears the chain down under ``on_expiry="kill"``. It routes each
     park's ``interaction_id`` to its ``{super_step_id, slot, n, slow}`` on the probe channel
-    so the flow-blind continuation can recover its barrier slot from the interaction id
+    so the consumer-agnostic continuation can recover its barrier slot from the interaction id
     alone. ``slow_slot`` marks one slot whose continuation sleeps ``slow_seconds`` before
     applying, holding its due-record in flight past the reaper interval so a redelivery laps
     the original fire — the concurrent-redelivery hazard the barrier's idempotent apply must
@@ -295,7 +295,7 @@ async def e2e_async_multipark_resume(interaction_id: str, ask_result: Any) -> di
     return {"slot": slot}
 
 
-# The AGENT async-park leg. Unlike the flow-driver probes above, the AGENT is the
+# The AGENT async-park leg. Unlike the consumer-driver probes above, the AGENT is the
 # consumer: its own park machinery binds the ``agent_resume`` continuation around the
 # drive, so these tools bind NO continuation. ``e2e_agent_async_ask`` supplies only the
 # execution identity ``ask`` needs, and only when the stack has not already bound one

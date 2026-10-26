@@ -213,7 +213,7 @@ async def test_system_prompt_is_per_run_never_checkpointed_across_replicas(
     into the restored history.
 
     This leg pins the per-run *configuration* seam only. It does NOT exercise
-    ``SystemPurgeMiddleware``: the tools_agent flow never writes a system message into
+    ``SystemPurgeMiddleware``: the tools_agent run never writes a system message into
     thread state, so no stored ``SystemMessage`` exists for the middleware to strip and
     this leg would stay green with the middleware removed. The purge of a
     ``SystemMessage`` already sitting in stored history is a state-level concern that no

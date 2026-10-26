@@ -21,7 +21,7 @@ This is the unified park-completion binding's core new path, end to end on the r
   notice — not a mapped reply, not silence.
 
 Generic throughout: the capability under test is the ask / tool-target / deliver-back seam,
-never a flow or engine.
+never a consumer or engine.
 """
 
 from __future__ import annotations

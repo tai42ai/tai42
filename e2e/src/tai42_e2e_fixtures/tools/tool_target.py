@@ -16,14 +16,14 @@ from tai42_e2e_fixtures.tools.basic import _E2eProbeRedisSettings
 from tai42_e2e_fixtures.tools.driving import driving_as
 from tai42_e2e_fixtures.tools.park import _on_expiry_policy
 
-# The tool-target async-park leg (the unified park-completion binding). Unlike the flow-driver
+# The tool-target async-park leg (the unified park-completion binding). Unlike the consumer-driver
 # and agent probes above, THIS pair rides the CONVERSATION door's OWN park-completion binding:
 # ``_run_tool_turn`` binds the generic ``deliver_tool_completion`` continuation (carrying the
 # turn's thread as the opaque delivery address AND the originating route name) around a tool
 # dispatch, so a tool that async-parks captures that binding and its resumer fires it to deliver
 # the deferred outcome back into the conversation. ``e2e_tool_target_park`` is the parking
 # tool-target; ``e2e_tool_target_deliver`` is its stored resume continuation, fired once out of
-# band on whichever worker resolves the park. Generic: no flow/engine state, only the opaque
+# band on whichever worker resolves the park. Generic: no consumer/engine state, only the opaque
 # park-completion binding the door produced and the parked interaction id.
 
 # Far enough out that a driven answer always resolves the park first — an expiry leg forces the

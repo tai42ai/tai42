@@ -180,7 +180,7 @@ async def _call_tool(bridge: BridgeHarness, name: str, arguments: dict[str, Any]
 async def _park(bridge: BridgeHarness, question: str, **delivery: str) -> str:
     """Park an async ask of ``question`` (on ``delivery``'s channel and recipient) and return its id."""
     result = await _call_tool(
-        bridge, "e2e_async_park_flow", {"question": question, "expiry_seconds": _PARK_SECONDS, **delivery}
+        bridge, "e2e_async_park_driver", {"question": question, "expiry_seconds": _PARK_SECONDS, **delivery}
     )
     return cast("dict[str, Any]", result.data)["interaction_id"]
 

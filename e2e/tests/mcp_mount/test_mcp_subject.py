@@ -5,7 +5,7 @@ direct run-tool doors deposit, so a tool whose ``ask(mode="async")`` parks over 
 the named subject. A malformed subject is refused loudly at the edge, never silently dropped.
 
 Over ``replicas_stack`` (the app ``/mcp`` edge, the async-park probe tools, access control off):
-the probe ``e2e_async_park_flow`` dispatched over MCP with a subject in ``_meta`` parks a user ask;
+the probe ``e2e_async_park_driver`` dispatched over MCP with a subject in ``_meta`` parks a user ask;
 ``list_parked`` on the SAME subject (read through the run-tool HTTP door) lists that park, and on a
 DIFFERENT subject lists nothing. A ``_meta`` subject that cannot validate errors the call.
 """
@@ -49,7 +49,7 @@ async def test_mcp_call_edge_carries_subject(replicas_stack: TaiStack, uniq: Cal
 
     async with replicas_stack.mcp(port=replicas_stack.port_a) as mcp:
         result = await mcp.call_tool(
-            "e2e_async_park_flow",
+            "e2e_async_park_driver",
             {"question": marker, "expiry_seconds": _PARK_EXPIRY_SECONDS},
             meta={"tai42/subject": subject},
             retry_on_reloading=True,
@@ -67,7 +67,7 @@ async def test_mcp_malformed_subject_meta_is_refused(replicas_stack: TaiStack, u
         # A partial subject (no target) can never validate — the edge raises rather than
         # dropping the subject and running the tool with no context.
         result = await mcp.call_tool(
-            "e2e_async_park_flow",
+            "e2e_async_park_driver",
             {"question": marker, "expiry_seconds": _PARK_EXPIRY_SECONDS},
             meta={"tai42/subject": {"kind": "job", "key": "j1"}},
             raise_on_error=False,

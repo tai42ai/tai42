@@ -241,8 +241,8 @@ def build_replicas_stack(res: StackResources, variants: Variants) -> StackConfig
 def build_async_park_stack(res: StackResources, variants: Variants) -> StackConfig:
     """REPLICAS, NO backend worker — the async ``ask`` park lifecycle home.
 
-    Two replicas give the cross-worker park/resume boundary: a flow parks on replica A
-    (the ``e2e_async_park_flow`` driver MCP-dispatched there binds a resume continuation
+    Two replicas give the cross-worker park/resume boundary: a run parks on replica A
+    (the ``e2e_async_park_driver`` driver MCP-dispatched there binds a resume continuation
     and calls ``ask(mode="async")``), and the park is resumed on replica B — either
     by an answer through B's ``/answer`` door (which fires the stored continuation once it
     claims) or by B's expiry reaper. ``e2e_async_resume`` (the stored continuation) runs on

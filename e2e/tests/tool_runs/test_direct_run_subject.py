@@ -8,7 +8,7 @@ the named subject and a later run on that same subject finds it, while a run on 
 subject does not.
 
 Over ``replicas_stack`` (both doors mounted, the async-park probe tools present, access control
-off): the probe ``e2e_async_park_flow`` parks a user ask as a side effect and returns the parked
+off): the probe ``e2e_async_park_driver`` parks a user ask as a side effect and returns the parked
 ``interaction_id``; ``list_parked`` run on the SAME subject lists that park (keyed by its question
 marker), and run on a DIFFERENT subject lists nothing — the subject scoping the door deposits.
 """
@@ -66,7 +66,7 @@ async def test_sync_run_tool_door_carries_subject(replicas_stack: TaiStack, uniq
     marker = uniq("sync-park")
 
     parked = await _run_tool(
-        api, "e2e_async_park_flow", {"question": marker, "expiry_seconds": _PARK_EXPIRY_SECONDS}, subject
+        api, "e2e_async_park_driver", {"question": marker, "expiry_seconds": _PARK_EXPIRY_SECONDS}, subject
     )
     interaction_id = parked["interaction_id"]
 
@@ -90,7 +90,7 @@ async def test_background_submit_door_carries_subject(replicas_stack: TaiStack, 
     submitted = await api.post(
         "/api/tool-runs",
         json={
-            "tool_name": "e2e_async_park_flow",
+            "tool_name": "e2e_async_park_driver",
             "arguments": {"question": marker, "expiry_seconds": _PARK_EXPIRY_SECONDS},
             "subject": subject,
         },

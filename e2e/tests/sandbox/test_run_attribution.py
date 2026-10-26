@@ -90,7 +90,7 @@ async def test_attribution_stamps_the_runs_own_span(fresh_stack, llm_stub: LlmSt
     # A run under a deposited attribution: its OWN generation span is recorded STAMPED with the
     # attribution's tags/metadata — proving the span opened inside the scope.
     tag = uniq("attr")
-    metadata = {"origin": uniq("flow")}
+    metadata = {"origin": uniq("origin")}
     spans = [s for s in await _drive_attributed(stack, [tag], metadata) if s["name"] == _GENERATION_SPAN]
     assert len(spans) == 1, spans
     attribution = spans[0]["attribution"]
