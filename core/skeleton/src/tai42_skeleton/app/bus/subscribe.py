@@ -303,9 +303,11 @@ class WorkerBusSubscribeMixin:
                 # Advertise ``resyncing`` before the resync, then ``ready`` after — both
                 # renew-gated (skipped on a miss; the heartbeat's own miss raises
                 # SlotLostError to route the re-mint). Presence is written BEFORE the
-                # resync converges, so a mid-resync row is visible-but-excluded by the
-                # freshness/state gate, not hidden. The channel is already subscribed, so
-                # an op broadcast during the resync is buffered and applied below.
+                # resync converges, so a mid-resync row is visible, not hidden. The channel
+                # is already subscribed, so an op broadcast during the resync is buffered
+                # and applied below; the publisher's gate therefore excludes the row for an
+                # op its own resync re-reads, and expects it for an op that declares
+                # ``awaited_mid_resync``.
                 await self._resync(r, presence_key, self._presence, on_ready)
                 logger.info("worker bus: subscription live as %s", identity.name)
                 while True:

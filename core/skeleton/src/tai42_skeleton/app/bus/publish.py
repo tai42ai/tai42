@@ -128,6 +128,9 @@ class WorkerBusPublishMixin:
         without ever having expected it. Every name carried in stays expected at its
         snapshot generation, so it is either collected or given an honest computed
         verdict. See :meth:`_carry_expected` for what it does NOT override.
+
+        An op whose type declares ``awaited_mid_resync`` also awaits each fresh ``resyncing``
+        worker (see :meth:`_classify_workers`).
         """
         op_name = op.op
         self._validate_local_targets(local, targets)
@@ -136,7 +139,13 @@ class WorkerBusPublishMixin:
             return self._local_publish(op_name, targets, local)
 
         try:
-            fleet = await self._broadcast(op_name, fleet_op_wire(op), targets, expected_at_start)
+            fleet = await self._broadcast(
+                op_name,
+                fleet_op_wire(op),
+                targets,
+                expected_at_start,
+                await_resyncing=type(op).awaited_mid_resync,
+            )
         except TRANSPORT_ERRORS as exc:
             logger.error("worker bus: publish of %r failed — bus unreachable", op_name, exc_info=True)
             return FleetResult(op=op_name, reachable=False, error=f"{type(exc).__name__}: {exc}")
@@ -152,13 +161,17 @@ class WorkerBusPublishMixin:
         op: dict[str, Any],
         targets: list[str] | None,
         expected_at_start: dict[str, int] | None = None,
+        *,
+        await_resyncing: bool,
     ) -> list[WorkerResult]:
         op_id = uuid.uuid4().hex
         reply_channel = f"{self._settings.reply_prefix}{op_id}"
         identity = self.identity
         async with _pkg.client_ctx(RedisClient, self._settings.redis) as conn:
             r: Any = conn
-            expected, gaps = await self._classify_workers(r, targets, expected_at_start)
+            expected, gaps, mid_resync = await self._classify_workers(
+                r, targets, expected_at_start, await_resyncing=await_resyncing
+            )
             # ``r.pubsub()`` is a non-I/O constructor, bound BEFORE the try so pubsub is
             # never unbound in the finally. A raising subscribe still reaches the finally,
             # which unsubscribes then ALWAYS closes the pub/sub (the aclose runs even if
@@ -182,7 +195,7 @@ class WorkerBusPublishMixin:
                     _OP_PAYLOAD_KEY: op,
                 }
                 await r.publish(self._settings.channel, json.dumps(wire))
-                collected = await self._collect(r, pubsub, link, expected, gaps, op_id, op_name)
+                collected = await self._collect(r, pubsub, link, expected, gaps, mid_resync, op_id, op_name)
             finally:
                 try:
                     await pubsub.unsubscribe(reply_channel)
@@ -191,18 +204,26 @@ class WorkerBusPublishMixin:
         return list(collected.values())
 
     async def _classify_workers(
-        self, r: Any, targets: list[str] | None, expected_at_start: dict[str, int] | None = None
-    ) -> tuple[dict[str, int | None], dict[str, WorkerResult]]:
+        self,
+        r: Any,
+        targets: list[str] | None,
+        expected_at_start: dict[str, int] | None = None,
+        *,
+        await_resyncing: bool = False,
+    ) -> tuple[dict[str, int | None], dict[str, WorkerResult], set[str]]:
         """Split the live fleet into the EXPECTED set and the GAP set.
 
         EXPECTED is keyed name → generation, awaited for a reply; GAP is keyed name → its
-        actual-condition result. A gap row fails the ready+fresh gate, so it is not an expected worker; rather
-        than being dropped it is landed as its own condition (``resyncing`` /
-        ``recycling`` / ``stale``). Whole-fleet: expected = the READY rows past the
-        freshness gate, minus self; every other row is a gap. Targeted: each named
-        target minus self — a ready+fresh target is expected, a target present-but-gap
-        carries its gap outcome, and a target absent from the census stays expected with
-        generation ``None`` so it is reported ``departed`` at the cut.
+        actual-condition result. An expected row is a ready+fresh row, plus, when
+        ``await_resyncing`` (the op declares ``awaited_mid_resync``), a fresh ``resyncing``
+        row: that worker subscribed to the op channel before it wrote its row, so the op is
+        buffered on its subscription and applied once its resync returns. Every other row is
+        a gap; rather than being dropped it is landed as its own condition (``resyncing`` /
+        ``recycling`` / ``stale``). Whole-fleet: every row minus self is classified so.
+        Targeted: each named target minus self — a present target is classified so, and a
+        target absent from the census stays expected with generation ``None`` so it is
+        reported ``departed`` at the cut. The third set names the expected workers admitted
+        while resyncing.
 
         This census runs at publish time; ``expected_at_start`` re-admits what the
         caller's earlier op-start census saw — see :meth:`_carry_expected`.
@@ -212,14 +233,11 @@ class WorkerBusPublishMixin:
         self_name = self.identity.name
         expected: dict[str, int | None] = {}
         gaps: dict[str, WorkerResult] = {}
+        mid_resync: set[str] = set()
         if targets is None:
             for name, row in by_name.items():
-                if name == self_name:
-                    continue
-                if self._is_ready_fresh(row):
-                    expected[name] = row.generation
-                else:
-                    gaps[name] = self._gap_result(row)
+                if name != self_name:
+                    self._place_row(row, expected, gaps, mid_resync, await_resyncing=await_resyncing)
         else:
             # Targets are NOT re-validated here (the caller validated); an absent target
             # is reported as departed at the cut, a present-but-gap target as its gap
@@ -230,12 +248,27 @@ class WorkerBusPublishMixin:
                 row = by_name.get(name)
                 if row is None:
                     expected[name] = None
-                elif self._is_ready_fresh(row):
-                    expected[name] = row.generation
                 else:
-                    gaps[name] = self._gap_result(row)
+                    self._place_row(row, expected, gaps, mid_resync, await_resyncing=await_resyncing)
         self._carry_expected(expected, gaps, targets, expected_at_start)
-        return expected, gaps
+        return expected, gaps, mid_resync
+
+    def _place_row(
+        self,
+        row: WorkerRow,
+        expected: dict[str, int | None],
+        gaps: dict[str, WorkerResult],
+        mid_resync: set[str],
+        *,
+        await_resyncing: bool,
+    ) -> None:
+        """Land one present row as expected (named in ``mid_resync`` when admitted resyncing) or as its gap."""
+        if self._is_expected(row, await_resyncing=await_resyncing):
+            expected[row.name] = row.generation
+            if row.state == WorkerState.resyncing:
+                mid_resync.add(row.name)
+        else:
+            gaps[row.name] = self._gap_result(row)
 
     def _carry_expected(
         self,
@@ -280,8 +313,22 @@ class WorkerBusPublishMixin:
         """The ready+fresh gate: a row is expected only when it advertises ``ready`` and its PTTL clears the bound."""
         return row.state == WorkerState.ready and presence_fresh(row.pttl_ms, self._settings.heartbeat_ttl)
 
+    def _is_expected(self, row: WorkerRow, *, await_resyncing: bool) -> bool:
+        """Whether a census row owes a reply: ready+fresh, or fresh ``resyncing`` when ``await_resyncing``.
+
+        A ``recycling`` row is departing, and a decayed row (a worker that died mid-resync
+        among them) carries no promise, so both stay gaps.
+        """
+        if self._is_ready_fresh(row):
+            return True
+        return (
+            await_resyncing
+            and row.state == WorkerState.resyncing
+            and presence_fresh(row.pttl_ms, self._settings.heartbeat_ttl)
+        )
+
     def _gap_result(self, row: WorkerRow) -> WorkerResult:
-        """Classify a gap row (one that fails the ready+fresh gate) as its actual condition.
+        """Classify a gap row (one :meth:`_is_expected` does not admit) as its actual condition.
 
         A decayed row is ``stale`` regardless of its written state — a worker that died
         mid-resync/mid-recycle carries no convergence promise; a fresh resyncing/recycling
@@ -306,6 +353,7 @@ class WorkerBusPublishMixin:
         link: _ReplyLink,
         expected: dict[str, int | None],
         gaps: dict[str, WorkerResult],
+        mid_resync: set[str],
         op_id: str,
         op_name: str,
     ) -> dict[str, WorkerResult]:
@@ -316,7 +364,7 @@ class WorkerBusPublishMixin:
         terminal, acked, transport_error = await self._collect_replies(
             pubsub, link, expected, op_id, op_name, ack_deadline, apply_deadline
         )
-        return await self._finalize_verdicts(r, expected, gaps, terminal, acked, transport_error)
+        return await self._finalize_verdicts(r, expected, gaps, mid_resync, terminal, acked, transport_error)
 
     async def _collect_replies(
         self,
@@ -431,6 +479,7 @@ class WorkerBusPublishMixin:
         r: Any,
         expected: dict[str, int | None],
         gaps: dict[str, WorkerResult],
+        mid_resync: set[str],
         terminal: dict[str, WorkerResult],
         acked: set[str],
         transport_error: str | None,
@@ -444,9 +493,11 @@ class WorkerBusPublishMixin:
         for name in expected:
             verdict = terminal.get(name)
             if verdict is None:
-                verdict = await self._computed_verdict(r, name, expected[name], name in acked, transport_error)
+                verdict = await self._computed_verdict(
+                    r, name, expected[name], name in acked, transport_error, admitted_mid_resync=name in mid_resync
+                )
             results[name] = verdict
-        # Gap rows (failing the ready+fresh gate) were never expected to reply; land
+        # Gap rows were never expected to reply; land
         # each as its own actual condition (resyncing/recycling/stale) rather than
         # dropping it. Disjoint from ``expected`` by construction.
         results.update(gaps)
@@ -458,7 +509,14 @@ class WorkerBusPublishMixin:
         return WorkerResult(name=name, outcome=outcome, payload=frame.get("payload"), error=frame.get("error"))
 
     async def _computed_verdict(
-        self, r: Any, name: str, expected_gen: int | None, acked: bool, transport_error: str | None
+        self,
+        r: Any,
+        name: str,
+        expected_gen: int | None,
+        acked: bool,
+        transport_error: str | None,
+        *,
+        admitted_mid_resync: bool = False,
     ) -> WorkerResult:
         """Classify a worker that holds no terminal reply, re-checking presence.
 
@@ -466,9 +524,11 @@ class WorkerBusPublishMixin:
         one expected at publish, the target's life ended and a replacement took its slot
         mid-apply — ``departed`` (the reply gate already discarded the stale life's
         replies). An absent key is ``departed``; a still-live same-life key is
-        ``timed_out`` (acked) or ``missing`` (never acked).
+        ``timed_out`` (acked) or ``missing`` (never acked). A never-acked worker admitted
+        mid-resync whose presence still reads ``resyncing`` has not read the op yet, and
+        its ``missing`` detail says so.
         """
-        status, current_gen = await self._recheck_presence(r, name)
+        status, current_gen, current_state = await self._recheck_presence(r, name)
         if status == "alive" and expected_gen is not None and current_gen is not None and current_gen > expected_gen:
             return WorkerResult(
                 name=name,
@@ -496,35 +556,45 @@ class WorkerBusPublishMixin:
                 outcome=OpOutcome.departed,
                 detail="no reply and presence key expired — worker departed",
             )
-        detail = "no received-ack within the ack timeout while presence stayed live — worker missing (alive but silent)"
+        if admitted_mid_resync and current_state == WorkerState.resyncing:
+            detail = (
+                "no received-ack: the worker was resyncing at publish and applies this op after its resync, "
+                "which outlasted the apply timeout"
+            )
+        else:
+            detail = (
+                "no received-ack within the ack timeout while presence stayed live — worker missing (alive but silent)"
+            )
         if transport_error is not None:
             detail = f"{detail} (reply collection transport error: {transport_error})"
         return WorkerResult(name=name, outcome=OpOutcome.missing, detail=detail)
 
-    async def _recheck_presence(self, r: Any, name: str) -> tuple[str, int | None]:
+    async def _recheck_presence(self, r: Any, name: str) -> tuple[str, int | None, WorkerState | None]:
         """Re-read a worker's presence key at the report cut.
 
-        Returns ``("absent",
-        None)`` when the key is gone, ``("alive", generation)`` when it is present (the
-        generation parsed from the value, ``None`` if the value does not parse), or
-        ``("unreachable", None)`` when the check itself could not reach Redis (the caller
-        degrades to a loud missing/timed_out). The generation lets the verdict see a
-        replacement that took the slot mid-apply.
+        Returns ``("absent", None, None)`` when the key is gone, ``("alive", generation,
+        state)`` when it is present (the generation and state parsed from the value, both
+        ``None`` if the value does not parse), or ``("unreachable", None, None)`` when the
+        check itself could not reach Redis (the caller degrades to a loud
+        missing/timed_out). The generation lets the verdict see a replacement that took the
+        slot mid-apply; the state, a worker that is still resyncing.
         """
         try:
             raw = await r.get(self._settings.presence_key(name))
         except TRANSPORT_ERRORS:
             logger.error("worker bus: presence re-check for %s failed", name, exc_info=True)
-            return ("unreachable", None)
+            return ("unreachable", None, None)
         if raw is None:
-            return ("absent", None)
+            return ("absent", None, None)
         try:
             text = raw.decode() if isinstance(raw, bytes) else raw
-            generation = int(json.loads(text)["generation"])
+            meta = json.loads(text)
+            generation = int(meta["generation"])
+            state = WorkerState(meta["state"])
         except (ValueError, TypeError, KeyError):
             logger.warning("worker bus: presence value for %s is unparseable at the report cut", name, exc_info=True)
-            return ("alive", None)
-        return ("alive", generation)
+            return ("alive", None, None)
+        return ("alive", generation, state)
 
     def _self_result(self, local: LocalApplyResult) -> WorkerResult:
         return WorkerResult(
@@ -605,7 +675,7 @@ class WorkerBusPublishMixin:
         Reading membership here, before the side effect, makes the apply part of the
         op's window rather than a blind spot.
 
-        Applies the SAME ready+fresh gate :meth:`_classify_workers` expects workers by,
+        Applies the ready+fresh gate :meth:`_classify_workers` expects every op's workers by,
         with self excluded (a publisher reports itself from its own local result). Gap
         rows are left out on purpose: they already carry no confirmation promise, so
         carrying one back in would turn a worker that announced its own departure into a
