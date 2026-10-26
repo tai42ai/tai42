@@ -401,7 +401,7 @@ CREATE TABLE IF NOT EXISTS marketplace_installs (
 -- Tool metadata overlay — folders + per-tool organizational row
 -- ============================================================
 -- An UNVERSIONED organizational layer over ANY tool in the namespace (native
--- plugin tools, presets, flows alike), kept separate from tool behavior.
+-- plugin tools, presets and composed tools alike), kept separate from tool behavior.
 -- `tool_folders` is a tree of real folder entities (endless nesting via
 -- `parent_id`); `tool_meta` is a per-tool row keyed by tool name carrying a
 -- display name, a folder placement, user tags, and a tri-state hidden override.
