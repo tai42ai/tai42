@@ -331,13 +331,23 @@ def test_build_manifest_mounts_core_and_consumer_surface():
     assert manifest["routers_modules"][: len(gate._CORE_ROUTERS)] == list(gate._CORE_ROUTERS)
     assert "pkg.routes" in manifest["routers_modules"]
     assert manifest["lifecycle_modules"] == ["id_plugin.provider", "pkg.life"]
-    assert manifest["tools"] == [{"title": "pkg.tools", "module": "pkg.tools"}]
-    assert manifest["api_tools"] == {"enabled": False}
+    assert manifest["tools"] == [
+        *({"title": module, "module": module} for module in gate._CORE_TOOLS),
+        {"title": "pkg.tools", "module": "pkg.tools"},
+    ]
+    assert "api_tools" not in manifest
 
 
-def test_build_manifest_omits_tools_when_none_declared():
+def test_build_manifest_mounts_only_the_core_tools_when_none_declared():
     manifest = gate.build_manifest(gate.Provides(routers=["pkg.routes"]), _identity())
-    assert "tools" not in manifest
+    assert [entry["module"] for entry in manifest["tools"]] == list(gate._CORE_TOOLS)
+
+
+def test_core_tools_are_every_skeleton_builtin_module():
+    builtin = Path(__file__).resolve().parents[2] / "core/skeleton/src/tai42_skeleton/tools/builtin"
+    modules = (path.stem for path in builtin.glob("*.py") if path.stem != "__init__")
+    shipped = sorted(f"tai42_skeleton.tools.builtin.{stem}" for stem in modules)
+    assert sorted(gate._CORE_TOOLS) == shipped
 
 
 # --------------------------------------------------- exclusive-slot consumers
