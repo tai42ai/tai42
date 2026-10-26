@@ -16,6 +16,7 @@ from tai42_cli import api_gate  # re-exported so a caller can patch consumer_boo
 from _consumer_boot_gate.boot import (
     _BOOT_PLACEHOLDER_ENV,
     _CORE_ROUTERS,
+    _CORE_TOOLS,
     IdentityFixture,
     Infra,
     _boot_env,
@@ -68,6 +69,7 @@ from _consumer_boot_gate.versioning import break_is_accepted
 __all__ = [
     "_BOOT_PLACEHOLDER_ENV",
     "_CORE_ROUTERS",
+    "_CORE_TOOLS",
     "_KIT_EXTRAS",
     "BootFailure",
     "Candidate",

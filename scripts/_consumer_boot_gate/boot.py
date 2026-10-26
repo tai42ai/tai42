@@ -93,9 +93,23 @@ _CORE_ROUTERS = (
     "tai42_skeleton.routers.login",
 )
 
+# Every builtin tool module the skeleton ships, so a consumer composing a core tool finds it served.
+_CORE_TOOLS = (
+    "tai42_skeleton.tools.builtin.doors",
+    "tai42_skeleton.tools.builtin.file_loader",
+    "tai42_skeleton.tools.builtin.get_pairing_code",
+    "tai42_skeleton.tools.builtin.interactions",
+    "tai42_skeleton.tools.builtin.sandbox_exec",
+    "tai42_skeleton.tools.builtin.set_conversation_mode",
+    "tai42_skeleton.tools.builtin.states",
+)
+
 
 def build_manifest(provides: Provides, identity: IdentityFixture) -> dict:
-    """The serve manifest for one consumer: the core routers plus the consumer's declared surface.
+    """The serve manifest for one consumer: the core surface plus the consumer's declared surface.
+
+    The core surface is the core routers, every skeleton builtin tool module, and the operation
+    projection at its platform default (``api_tools`` left unset).
 
     The additive modules (routers, tools, channels, extensions, lifecycle) AND the exclusive
     slots it selects (``backend_module`` / ``storage_module`` / ``sandbox_module`` /
@@ -109,10 +123,8 @@ def build_manifest(provides: Provides, identity: IdentityFixture) -> dict:
         "default_routers": "none",
         "lifecycle_modules": lifecycle,
         "routers_modules": routers,
-        "api_tools": {"enabled": False},
+        "tools": [{"title": module, "module": module} for module in dict.fromkeys([*_CORE_TOOLS, *provides.tools])],
     }
-    if provides.tools:
-        manifest["tools"] = [{"title": module, "module": module} for module in provides.tools]
     if provides.channels:
         manifest["channel_modules"] = [module for _name, module in provides.channels]
     if provides.extensions:
