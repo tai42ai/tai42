@@ -4,7 +4,7 @@ Two tools, one per platform door that runs its turn AS the ROUTE's own execution
 in-process caller needs no key: the MESSAGE door (:func:`send_conversation_message`) and the
 EVENT door (:func:`send_conversation_event`). Each is the in-process face of an HTTP door that
 also serves external callers — a DISTINCT surface: the deployment self-submitting under its own
-identity, with no HTTP request and no route key handed to the flow.
+identity, with no HTTP request and no route key handed to the caller.
 
 Each tool (a) refuses a run with no accountable execution identity, (b) applies the door route's
 OWN authorization — ``authz.check`` over the door route's registered template, the same decision

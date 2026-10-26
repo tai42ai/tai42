@@ -141,11 +141,11 @@ the answer. The widget has no reply action, so a visitor message never quotes an
 
 A link parameter is **transport, nothing more**. The platform carries, nests, caps,
 and never logs it, but attaches **no** trust: no signature, no expiry, no
-interpretation. A param is text anyone can put in a URL. A flow that must *trust* a
+interpretation. A param is text anyone can put in a URL. A tool that must *trust* a
 value issues its **own** secret token, delivers it in the link, and checks it in its
 **own** store — where expiry, single-use, and revocation live — from the tool the
 route dispatches (gated in `start_expr` before the tool runs, or inside the tool
-itself). The platform never verifies a param on the flow's behalf.
+itself). The platform never verifies a param on the tool's behalf.
 
 ## Entry gate
 
@@ -193,7 +193,7 @@ rotate when one is present.
 
 The gate says only **"someone holding a live code"** — never **who**. Forwarding the
 link forwards entry: anyone who receives the URL enters. It is not identity; identity
-remains the pairing's or the flow's own.
+remains the pairing's or the tool's own.
 
 **Revocation cuts new entries only.** Revoking a code (or letting it expire) stops it
 from admitting the **next** visitor, but an already-admitted session stays valid
@@ -621,7 +621,7 @@ notification is refused loudly — a template is a vendor construct this channel
 | Bounded re-answering | One question is restored at most `MAX_ANSWER_RESTORES` times; after that it is left dropped and resolves by its own timeout |
 | Cookie-bound conversation | A visitor who clears cookies (or opens another browser) starts a new conversation; there is no account to resume from — an invite link (`?tai_pair=`) re-pairs them in one load |
 | Invite links | The chat URL accepts `?tai_pair=<LINK-code>`; the page submits it once as the first message and strips it. A `tai_pair` value that is not a well-formed code is ignored |
-| Link parameters | The chat URL's query params are captured and delivered to a **tool** target under `params` (jq-reachable); over a bound (16 / key 64 / value 512 / 2KB) is a refused page. `tai_pair`/`tai_entry` are reserved. The platform attaches no trust — a flow checks its own token in its own store |
+| Link parameters | The chat URL's query params are captured and delivered to a **tool** target under `params` (jq-reachable); over a bound (16 / key 64 / value 512 / 2KB) is a refused page. `tai_pair`/`tai_entry` are reserved. The platform attaches no trust — a tool checks its own token in its own store |
 | Entry gate | A route can require a live `?tai_entry=` code to serve its page; refusal is uniform (no oracle) and guess-throttled. The gate admits a code-**bearer**, not a person; revocation cuts new entries only |
 | One route per session | A session serves the web route it was minted on; a visitor who opens a second route's chat page holds a second, separate conversation |
 | No plugin-side flood control | Abuse control on these public doors is the platform limiter's and the operator's ingress; the plugin caps only concurrent SSE streams |

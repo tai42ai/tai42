@@ -715,7 +715,7 @@ async def test_preset_target_sees_turn_and_event_under_its_payload_arg(env, monk
     }
     assert received["event"] == {"id": "evt-1", "kind": "provider.update", "payload": {"n": 1}}
     assert received["message"] is None
-    # The reply mapped .echo.turn.id back through, proving the id round-tripped the flow.
+    # The reply mapped .echo.turn.id back through, proving the id round-tripped the turn.
     record = await _store().get_record(result.message_id)
     assert record is not None
     assert record.answer == result.message_id

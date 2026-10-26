@@ -226,7 +226,7 @@ async def test_operator_send_with_media_stores_a_rich_part_and_delivers_it(env, 
 
 
 async def test_operator_send_with_full_vocabulary_stores_a_rich_part_and_delivers_it(env, monkeypatch):
-    # Full parity with the flow answer path: an operator send carrying location/sections/
+    # Full parity with the turn answer path: an operator send carrying location/sections/
     # header/footer stores ONE rich AnswerPart and the delivery machine hands the whole
     # vocabulary to the channel on the part's final chunk.
     from tai42_contract.channels import OptionSection, ReplyOption

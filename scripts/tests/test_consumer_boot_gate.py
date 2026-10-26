@@ -200,8 +200,8 @@ def test_break_is_accepted_only_for_major(bump: str, accepted: bool):
 
 
 def test_wheel_name_version_parses_hyphenated_name():
-    assert gate.wheel_name_version(Path("some_consumer_flows-0.42.1-py3-none-any.whl")) == (
-        "some-consumer-flows",
+    assert gate.wheel_name_version(Path("some_consumer_tools-0.42.1-py3-none-any.whl")) == (
+        "some-consumer-tools",
         "0.42.1",
     )
 
@@ -526,10 +526,10 @@ def test_parse_boot_failure_names_handlers_and_route():
 
 
 def test_parse_boot_failure_without_lifecycle_line_keeps_error_detail():
-    log = "Traceback (most recent call last):\nRuntimeError: the flow payload store is not configured\n"
+    log = "Traceback (most recent call last):\nRuntimeError: the consumer payload store is not configured\n"
     failure = gate.parse_boot_failure(log)
     assert failure.handlers == ()
-    assert "flow payload store is not configured" in failure.detail
+    assert "consumer payload store is not configured" in failure.detail
 
 
 def test_boot_failure_summary_lists_routes_then_handlers():
@@ -641,7 +641,7 @@ def test_mixed_connection_and_guard_failure_is_not_external_service():
 
 def test_non_lifecycle_failure_is_not_external_service():
     # No structured lifecycle line (an import/migrate failure): never install-only.
-    failure = gate.parse_boot_failure("RuntimeError: the flow payload store is not configured\n")
+    failure = gate.parse_boot_failure("RuntimeError: the consumer payload store is not configured\n")
     assert gate.is_external_service_only(failure) is False
 
 

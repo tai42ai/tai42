@@ -806,7 +806,7 @@ async def test_a_store_that_opens_a_resource_of_another_name_is_refused_and_clos
 # ormsgpack encodes an integer natively only within [-2**63, 2**64-1]; an integer
 # past that has no msgpack integer encoding and aborts the serializer. These are
 # the checkpoint doors the schema-level int64 injection cannot reach — a plain
-# tool-call argument and a tool result routed into flow state.
+# tool-call argument and a tool result routed into graph state.
 _OVERSIZED_INT = 2**64
 
 
@@ -828,14 +828,14 @@ def test_guard_tool_call_args_overflow_raises_typed_error_naming_path():
     assert str(_OVERSIZED_INT) in message
 
 
-def test_guard_tool_result_into_flow_state_overflow_raises_typed_error_naming_path():
-    # The tool-result-into-flow-state door: an oversized integer inside a tool
-    # result routed onto a flow-state channel aborts msgpack; the guard names it.
+def test_guard_tool_result_into_graph_state_overflow_raises_typed_error_naming_path():
+    # The tool-result-into-graph-state door: an oversized integer inside a tool
+    # result routed onto a graph-state channel aborts msgpack; the guard names it.
     serde = _guarded_memory_serde()
-    value = {"flow_state": {"result": [0, {"total": -(2**63) - 1}]}}
+    value = {"graph_state": {"result": [0, {"total": -(2**63) - 1}]}}
     with pytest.raises(cp.CheckpointSerializationError) as excinfo:
         serde.dumps_typed(value)
-    assert "['flow_state']['result'][1]['total']" in str(excinfo.value)
+    assert "['graph_state']['result'][1]['total']" in str(excinfo.value)
 
 
 def test_guard_passes_through_in_range_values():

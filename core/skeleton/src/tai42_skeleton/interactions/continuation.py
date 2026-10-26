@@ -3,7 +3,7 @@
 An async park stores a generic ``continuation_tool`` and the ``continuation_identity``
 to run it as. When the park resolves — a human/callback ANSWER, or the expiry
 reaper — the continuation runs bound to the stored identity (never the answerer's),
-carrying only ``{interaction_id, ask_result}``. The seam is flow-blind: it runs
+carrying only ``{interaction_id, ask_result}``. The seam is consumer-agnostic: it runs
 a registered tool name under a rebound execution identity and knows nothing of the
 driver's resume state. Firing the drive once per resolving claim, and redelivering it
 from the durable continuation-due record, lives in

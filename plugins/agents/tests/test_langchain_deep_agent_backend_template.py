@@ -70,14 +70,14 @@ def test_als_lists_skill_dirs_for_middleware(fake_tm: _FakeResourceManager) -> N
 
     async def go() -> tuple[Any, Any]:
         await fake_tm.upload_template("skills/jq/SKILL.md", "x")
-        await fake_tm.upload_template("skills/flow/SKILL.md", "y")
+        await fake_tm.upload_template("skills/notes/SKILL.md", "y")
         backend = build_backend()
         whole = await backend.als(SKILLS_ROOT)
         single = await backend.als(f"{SKILLS_ROOT}jq/")
         return whole, single
 
     whole, single = asyncio.run(go())
-    assert {e["path"] for e in whole.entries} == {f"{SKILLS_ROOT}jq/", f"{SKILLS_ROOT}flow/"}
+    assert {e["path"] for e in whole.entries} == {f"{SKILLS_ROOT}jq/", f"{SKILLS_ROOT}notes/"}
     assert all(e["is_dir"] for e in whole.entries)
     # The per-skill source lists its own dir (is_dir, for middleware discovery)
     # plus its direct children (here just SKILL.md).
@@ -279,12 +279,12 @@ def test_template_aglob_globstar_is_recursive(fake_tm: _FakeResourceManager) -> 
 
     async def go() -> Any:
         await fake_tm.upload_template("skills/jq/SKILL.md", "x")
-        await fake_tm.upload_template("skills/flow/SKILL.md", "y")
+        await fake_tm.upload_template("skills/notes/SKILL.md", "y")
         skills = build_backend().routes[SKILLS_ROOT]
         return await skills.aglob("**/*.md")
 
     result = asyncio.run(go())
-    assert {m["path"] for m in result.matches} == {"/jq/SKILL.md", "/flow/SKILL.md"}
+    assert {m["path"] for m in result.matches} == {"/jq/SKILL.md", "/notes/SKILL.md"}
 
 
 def test_template_aglob_brace_expansion(fake_tm: _FakeResourceManager) -> None:
@@ -322,7 +322,7 @@ def test_template_aglob_exact_file_base(fake_tm: _FakeResourceManager) -> None:
 
     async def go() -> Any:
         await fake_tm.upload_template("skills/jq/SKILL.md", "x")
-        await fake_tm.upload_template("skills/flow/SKILL.md", "y")
+        await fake_tm.upload_template("skills/notes/SKILL.md", "y")
         skills = build_backend().routes[SKILLS_ROOT]
         return await skills.aglob("SKILL.md", path="/jq/SKILL.md")
 
@@ -337,14 +337,14 @@ def test_template_aglob_directory_base_with_and_without_trailing_slash(fake_tm: 
 
     async def go() -> tuple[Any, Any]:
         await fake_tm.upload_template("skills/jq/SKILL.md", "x")
-        await fake_tm.upload_template("skills/flow/SKILL.md", "y")
+        await fake_tm.upload_template("skills/notes/SKILL.md", "y")
         skills = build_backend().routes[SKILLS_ROOT]
         no_slash = await skills.aglob("*.md", path="/jq")
         with_slash = await skills.aglob("*.md", path="/jq/")
         return no_slash, with_slash
 
     no_slash, with_slash = asyncio.run(go())
-    # Only the /jq dir is in scope — /flow is filtered out by the directory prefix.
+    # Only the /jq dir is in scope — /notes is filtered out by the directory prefix.
     assert {m["path"] for m in no_slash.matches} == {"/jq/SKILL.md"}
     assert {m["path"] for m in with_slash.matches} == {"/jq/SKILL.md"}
 

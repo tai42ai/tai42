@@ -61,7 +61,7 @@ async def test_tool_kwargs_survive_roundtrip_and_merge(store) -> None:
         topic="t",
         name="k",
         ttl_seconds=None,
-        tool_kwargs={"flow": {"x": 1}},
+        tool_kwargs={"composed": {"x": 1}},
         execution_key="k-fire",
         execution_key_fingerprint="fp",
         require_api_key=False,
@@ -70,7 +70,7 @@ async def test_tool_kwargs_survive_roundtrip_and_merge(store) -> None:
     doc = await webhooks_section._export_webhooks()
     _wipe(store)
     await webhooks_section._import_webhooks(doc)
-    assert (await resolve_trigger_token(link["token"])).tool_kwargs == {"flow": {"x": 1}}
+    assert (await resolve_trigger_token(link["token"])).tool_kwargs == {"composed": {"x": 1}}
 
 
 # -- tombstone durability -----------------------------------------------------

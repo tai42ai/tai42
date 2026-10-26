@@ -3,7 +3,7 @@ paths by TYPE — the direct FunctionTool run (``_serialize_result``) and the pr
 (``TransformedTool``) run — never flattened to a plain dict.
 
 If the preset path flattened it, the turn engine's type-based park recognition would
-fail: the flow would proceed UN-parked while the delivered question's later answer
+fail: the run would proceed UN-parked while the delivered question's later answer
 stranded (no park entry was ever written) — a silent lost-park.
 """
 

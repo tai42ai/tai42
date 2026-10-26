@@ -64,7 +64,7 @@ async def test_answer_forwards_the_session_link_params_beside_the_answer(
     # The reporter's path: a session created with link params (a ``GET /chat?ref=spring&n=3``
     # captured on the registration) answers a pending ask through the ANSWER door. The
     # forwarded body must carry those params BESIDE ``answer`` — the same enrichment a
-    # MESSAGE turn from this session delivers — so a flow reading ``InteractionResponse.params``
+    # MESSAGE turn from this session delivers — so a tool reading ``InteractionResponse.params``
     # sees them on an answer too, not only on messages.
     register(fake_redis, SESSION_TOKEN, VISITOR_ID, IDENTITY, {"ref": "spring", "n": "3"})
     await _seed_question()

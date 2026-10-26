@@ -193,7 +193,7 @@ async def test_import_reports_refused_entity_and_lands_the_rest(run_token: str) 
         "version": 1,
         "templates": [
             {"kind": "state-template", "name": good_module, "schema": _MODULE_SCHEMA},
-            # a flow-side key the platform module document forbids: refused, reported, skipped
+            # a key outside the platform module document's set: refused, reported, skipped
             {"kind": "state-template", "name": bad_module, "schema": {"type": "object"}, "views": {}},
         ],
         "declarations": [

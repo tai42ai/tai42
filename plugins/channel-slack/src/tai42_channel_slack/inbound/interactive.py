@@ -598,7 +598,7 @@ async def _handle_view_submission(payload: dict[str, Any]) -> Response:
         # A bridge-policy ask KEPT the correlation (still parked) and bridged this
         # submission as a fresh turn — a digression, not the answer, carrying no participant
         # notice. Closing the modal with an empty body is the accurate ack: the reply was
-        # consumed as a turn (the flow replies in-thread) and the parked ask stays
+        # consumed as a turn (the turn replies in-thread) and the parked ask stays
         # answerable via its original message. The expired notice would be a lie — the ask
         # is not gone.
         logger.info("slack interactive: form %s reply bridged as a fresh turn; ask kept parked", interaction_id)

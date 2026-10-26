@@ -260,7 +260,7 @@ async function readData<T>(response: Response, what: string): Promise<T> {
  *
  * `replyId` is the authored id of the reply OPTION the visitor tapped, when this
  * message is a chip tap carrying one; the door threads it onto the turn as
- * `params.reply_id` so the flow reads which option was chosen. Omitted from the body
+ * `params.reply_id` so the target reads which option was chosen. Omitted from the body
  * when `null`, so a typed message's request is byte-identical to before.
  */
 export async function sendMessage(

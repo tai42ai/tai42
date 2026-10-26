@@ -70,7 +70,7 @@ class _StoreKeys:
     def continuation_due_key(self, interaction_id: str) -> str:
         """The durable continuation-due record for one async park.
 
-        A self-contained, flow-blind hash (tool NAME, execution identity, key fingerprint, generic answer,
+        A self-contained, consumer-agnostic hash (tool NAME, execution identity, key fingerprint, generic answer,
         attempt count) written when the park resolves and cleared when its continuation's ``run_tool``
         returns. Its presence past a healthy fire's window is the reaper's signal to redeliver.
         """

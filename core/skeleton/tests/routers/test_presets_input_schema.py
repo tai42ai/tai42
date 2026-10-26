@@ -374,20 +374,20 @@ def test_fixed_kwargs_input_schema_channel_unaffected(pg):
     async def run():
         async with instance.app.app_context(_manifest()):
             _declare_support()
-            # The studio's flow presets carry an ``input_schema`` as a plain ``fixed_kwargs``
-            # arg of a flow tool — a baked kwarg, NOT the top-level door field. A save that
+            # A preset over a tool that takes an ``input_schema`` arg bakes it as a plain
+            # ``fixed_kwargs`` value — a baked kwarg, NOT the top-level door field. A save that
             # only touches fixed_kwargs must leave the baked value intact and never engage the
             # top-level input-schema authoring gate. ``payload`` is the base tool's own arg, so
             # baking ``input_schema`` under it stands in for that channel.
             baked = {"payload": {"input_schema": {"type": "object"}}}
-            assert (await _create("flow", _SUPPORTED_BASE, fixed_kwargs=baked)).status_code == 200
+            assert (await _create("composed", _SUPPORTED_BASE, fixed_kwargs=baked)).status_code == 200
             # A description-only save carries the baked fixed_kwargs forward untouched, and the
             # top-level input_schema stays absent (None) — the two channels never cross.
             resp = await router.save_version(
-                _request("POST", "/api/presets/flow/versions", body={"description": "edited"}, name="flow")
+                _request("POST", "/api/presets/composed/versions", body={"description": "edited"}, name="composed")
             )
             assert resp.status_code == 200, _err(resp)
-            got = _data(await router.get_preset(_request("GET", "/api/presets/flow", name="flow")))
+            got = _data(await router.get_preset(_request("GET", "/api/presets/composed", name="composed")))
             assert got["fixed_kwargs"] == baked
             assert got["input_schema"] is None
 

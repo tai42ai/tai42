@@ -33,7 +33,7 @@ host with the standard library only.
 
 This provider gives **no isolation**: `isolation="none"` means arbitrary session
 code runs on the host with the host's filesystem, network, and secrets in reach.
-It is for a **trusted, single-tenant box**, not untrusted flows. It accepts only
+It is for a **trusted, single-tenant box**, not untrusted workloads. It accepts only
 what it can honestly enforce and rejects the rest loudly:
 
 - `isolation="none"` accepted; `container` / `vm` rejected. The operator isolation

@@ -405,7 +405,7 @@ def test_declaration_served_updated_at_is_optional_and_refused_shape_stays_forbi
 
 
 def test_consumer_row_allows_an_unavailable_marker():
-    assert ConsumerRow(kind="flow", name="planner", detail="binds thread").name == "planner"
+    assert ConsumerRow(kind="plugin_consumer", name="planner", detail="binds thread").name == "planner"
     assert ConsumerRow(kind="schedule", unavailable="no scheduling backend").unavailable
 
 

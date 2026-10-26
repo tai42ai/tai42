@@ -313,7 +313,7 @@ async def notify_user(
     path. A blank value is rejected.
 
     ``media``, ``template``, ``options``, ``location``, ``sections``, ``header`` and
-    ``footer`` are OPTIONAL richer-send forms — FULL parity with the flow answer path's
+    ``footer`` are OPTIONAL richer-send forms — FULL parity with the turn answer path's
     ``AnswerPart``/``ChannelNotification`` vocabulary. The contract's shared
     ``check_interactive_composition`` enforces the same matrix (``options`` XOR ``sections``;
     ``schema`` excludes both; ``header``/``footer`` require a choice surface; ``template`` is

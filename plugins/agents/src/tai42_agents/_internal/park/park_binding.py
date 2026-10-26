@@ -1,6 +1,6 @@
 """The agents plugin's binding of the kit park index: its namespace, its Redis, and its live-thread filter.
 
-When an async ``ask`` parks a park-capable agent run, the flow-blind platform keeps only the
+When an async ``ask`` parks a park-capable agent run, the consumer-agnostic platform keeps only the
 interaction id. The agents plugin reverses that id to the parked run through the kit's park index
 (:mod:`tai42_kit.interactions.park_index`) under the namespace ``agent:park``, in the plugin's OWN
 Redis (``TAI_AGENTS_REDIS_URL``, falling back to ``TAI_DEFAULT_REDIS_URL``) — independent of the

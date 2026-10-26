@@ -7,7 +7,7 @@ fires the continuation.
 
 Delivery is DURABLE and AT-LEAST-ONCE, via a transactional outbox. Firing is a detached task, so a
 worker crash after the claim but before ``run_tool`` returns would otherwise lose the resume
-forever. To close that with ZERO window, the durable, self-contained, FLOW-BLIND continuation-due
+forever. To close that with ZERO window, the durable, self-contained, CONSUMER-AGNOSTIC continuation-due
 record (tool NAME + the answer, the quoted message's medium id and the params + stored identity +
 fingerprint) is enqueued in the SAME atomic MULTI as the resolving claim
 (``InteractionStore.record_answer``) — so a claimed answer can never exist without its due-record.

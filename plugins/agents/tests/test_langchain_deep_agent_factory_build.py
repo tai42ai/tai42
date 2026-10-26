@@ -132,7 +132,7 @@ def test_validate_accepts_clean_config() -> None:
     spec = ResolvedSubAgentSpec(
         name="b", description="d", system_prompt=TemplatedText(content="p"), skills=[f"{SKILLS_ROOT}jq/"]
     )
-    _validate([_tool("search")], [spec], [f"{SKILLS_ROOT}flow/"])  # no raise
+    _validate([_tool("search")], [spec], [f"{SKILLS_ROOT}notes/"])  # no raise
 
 
 def test_build_deep_agent_runs_validation_before_create(monkeypatch: pytest.MonkeyPatch) -> None:

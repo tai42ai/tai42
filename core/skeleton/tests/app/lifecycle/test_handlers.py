@@ -56,27 +56,27 @@ def test_run_handlers_swallows_for_shutdown_but_raises_when_asked(caplog):
 def test_tool_reloader_sync_and_default_result():
     m = _Mixin()
 
-    @m._tool_reloader("flow")
+    @m._tool_reloader("plugin_consumer")
     def _reload(action, name):
         return None  # falsy -> default result dict synthesized
 
-    out = asyncio.run(m._run_tool_reload("flow", "reload", "f1"))
-    assert out == {"kind": "flow", "action": "reload", "name": "f1", "status": "ok"}
+    out = asyncio.run(m._run_tool_reload("plugin_consumer", "reload", "f1"))
+    assert out == {"kind": "plugin_consumer", "action": "reload", "name": "f1", "status": "ok"}
 
 
 def test_tool_reloader_async_passthrough_result():
     m = _Mixin()
 
-    @m._tool_reloader("flow")
+    @m._tool_reloader("plugin_consumer")
     async def _reload(action, name):
         return {"custom": True}
 
-    assert asyncio.run(m._run_tool_reload("flow", "remove", "f1")) == {"custom": True}
+    assert asyncio.run(m._run_tool_reload("plugin_consumer", "remove", "f1")) == {"custom": True}
 
 
 def test_run_tool_reload_unknown_kind_and_bad_action_raise():
     m = _Mixin()
     with pytest.raises(ValueError, match="delete"):
-        asyncio.run(m._run_tool_reload("flow", "delete", "x"))
+        asyncio.run(m._run_tool_reload("plugin_consumer", "delete", "x"))
     with pytest.raises(RuntimeError, match="no_such_kind"):
         asyncio.run(m._run_tool_reload("no_such_kind", "reload", "x"))

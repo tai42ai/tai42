@@ -45,7 +45,7 @@ async def operator_send(
     ``media``, ``template``, ``options``, ``location``, ``sections``, ``header``, ``footer``
     and ``schema`` (an ask-less form's answer schema —
     the participant's submission enters the conversation as an ordinary inbound message) are
-    OPTIONAL richer-send forms — FULL parity with the flow answer path's :class:`AnswerPart`
+    OPTIONAL richer-send forms — FULL parity with the turn answer path's :class:`AnswerPart`
     vocabulary: when any is set
     the reply is stored as a single rich :class:`AnswerPart` (``message=text`` carrying the
     rich fields), so the delivery machine sends the operator's message with

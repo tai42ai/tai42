@@ -16,7 +16,7 @@
  * external tiles, so nothing is fetched cross-origin under the page's CSP.
  *
  * A reply tap sends the chip's own text as a regular visitor message through the
- * composer's send door, carrying the option's authored id (when set) so the flow
+ * composer's send door, carrying the option's authored id (when set) so the target
  * reads WHICH option was chosen. A link tap opens the URL and submits nothing. The
  * controls carry no per-tap claimed or settled state, so they stay tappable across
  * every backlog replay — except when the page is `locked` (an ended session), where
@@ -43,7 +43,7 @@ const SUGGESTED_REPLIES_LABEL = 'Suggested replies';
 
 /** Sends one reply's text as a regular visitor message — the same send door the
  * composer uses. `replyId` rides the send as the tapped option's authored id when
- * present, so the flow reads which option was chosen (`params.reply_id`). */
+ * present, so the target reads which option was chosen (`params.reply_id`). */
 export type SendReply = (text: string, replyId?: string | null) => void;
 
 export interface MediaCardProps {

@@ -18,7 +18,7 @@ draft-2020-12 vocabulary allows — most importantly a nullable ``"type"`` array
   agrees with validation against the original.
 
 The rewrite is derived at the model-binding chokepoint and never stored — the authored
-schema in the flow node, the preset and the stored template keep their original shape.
+schema in the declaring tool, the preset and the stored template keep their original shape.
 
 :func:`check_native_representable` reports whether a schema (as it will be sent) is one
 the native grammars can carry at all, and :func:`native_representability_reason` names

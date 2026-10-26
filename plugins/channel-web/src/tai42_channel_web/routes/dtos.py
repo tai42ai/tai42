@@ -139,7 +139,7 @@ class MessageBody(IdentityBody):
     # The author-set id of the reply OPTION the visitor tapped, when this message is a
     # chip tap (a media card's reply option carrying an ``id``). It rides the turn as
     # opaque enrichment under ``params.reply_id`` — the SAME convention every channel
-    # keeps for a tapped reply id — so the flow reads which option was chosen, not only
+    # keeps for a tapped reply id — so the target reads which option was chosen, not only
     # its echoed text. Absent on a typed message. Bounded by the contract's option-id
     # cap and shaped as a single-line token (it becomes an entry-param value).
     reply_id: str | None = None

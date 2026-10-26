@@ -84,8 +84,8 @@ async def test_thread_delete_erases_the_thread_subject_state(wired, record_redis
 
 
 async def test_thread_delete_leaves_person_subject_state_untouched(wired, record_redis, checkpoint_saver, states_pg):
-    # A single-thread reset clears only the thread's OWN (thread-subject) memory; state a flow
-    # scoped to the person (cross-thread memory) is the "Erase person" door's to clear.
+    # A single-thread reset clears only the thread's OWN (thread-subject) memory; state a binding
+    # scopes to the person (cross-thread memory) is the "Erase person" door's to clear.
     await ops.create_conversation_route(
         route_name="chat",
         door="api",

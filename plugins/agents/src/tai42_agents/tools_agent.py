@@ -98,8 +98,8 @@ class ToolsAgentInput(BaseModel):
     Live ``tools`` are absent from this JSON schema — they carry live objects a
     JSON caller cannot express. Both in-process faces (:meth:`ToolsAgent.run` and
     :meth:`ToolsAgent.astream`) accept them directly. ``presets`` bind base tools
-    to fixed kwargs and are exposed to the model as callable tools (e.g. a flow
-    graph).
+    to fixed kwargs and are exposed to the model as callable tools (e.g. a composed
+    tool).
 
     The schema advertises exactly the composable spec fields this agent's runtime
     honors — ``system_prompt``, ``tool_names``, ``presets``, ``response_format`` —
@@ -126,7 +126,7 @@ class ToolsAgentInput(BaseModel):
     tool_names: list[str] = Field(default_factory=list, description="Client tool names to load.")
     presets: list[PresetSpec] | None = Field(
         default=None,
-        description="Base tools bound to fixed kwargs, exposed as callable tools (e.g. a flow graph).",
+        description="Base tools bound to fixed kwargs, exposed as callable tools (e.g. a composed tool).",
     )
     system_prompt: TemplatedText | None = Field(
         default=None,
@@ -289,7 +289,7 @@ class ToolsAgent(Agent):
         (recognised by TYPE) instead of an answer and resumes out of
         band. This face captures the AMBIENT park completion (in parity with
         :meth:`astream`): when a door bound one around the dispatch (a conversation
-        agent turn, a flow node chaining a continuation), the park carries that
+        agent turn, a holder chaining a continuation), the park carries that
         delivery leg, so the resumed run's final answer fires it out of band to
         whatever bound it. With none bound the park's ``completion_tool`` stays
         ``None`` and the resumed run's final text is delivered nowhere — its side
@@ -346,7 +346,7 @@ class ToolsAgent(Agent):
         #
         # Capture the AMBIENT park completion the same way the ``astream`` face does — read
         # HERE, in the caller's context, before any tool dispatch clears the binding. When a
-        # door bound one (a conversation agent turn, a flow node chaining a continuation), the
+        # door bound one (a conversation agent turn, a holder chaining a continuation), the
         # run-face park carries the delivery leg, so a resumed run's final answer fires it out
         # of band to whatever bound it. Unlike ``astream`` this face still binds the park when
         # NONE is bound (``completion_tool`` stays ``None``): the run's async ask is resumable

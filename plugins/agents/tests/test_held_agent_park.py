@@ -1,6 +1,6 @@
 """Every agent kind that declares it parks can park under a holder and send its caller ask up.
 
-A neutral holder driver here does on the agent side exactly what a holding flow's visit does: it
+A neutral holder driver here does on the agent side exactly what a holding consumer's visit does: it
 binds a chained resume routing (a delivery tool and a fresh chained key) and its own resume
 continuation, then starts the kind's run face with ``tool_names=["ask"]``, where ``ask`` is a
 synthetic parking tool that parks a ``to="caller"`` ask. For each parking kind (``tools_agent``,
@@ -110,7 +110,7 @@ def _proxied_caller_ask(**_arguments: Any) -> SuspendedInteraction:
 
 @contextlib.contextmanager
 def _holder_bindings() -> Iterator[str]:
-    """Bind what a holding flow's visit binds around the held run: its continuation and a chained routing."""
+    """Bind what a holding consumer's visit binds around the held run: its continuation and a chained routing."""
     chain_key = new_chained_park_key()
     continuation = set_resume_continuation_tool(_HOLDER_CONTINUATION)
     routing = set_chained_resume(ChainedResume(delivery_tool=_DELIVERY_TOOL, chain_key=chain_key, asked_by=()))

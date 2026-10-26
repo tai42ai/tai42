@@ -14,7 +14,7 @@ this call, the chain-delivery tool that re-enters this loop, and the ancestor's 
 nested driver that parks under it captures that routing, so when it reaches its terminal it fires
 the chain's delivery tool, which re-enters this loop with that terminal as the tool's result. The
 agent parks on the CALL — a park of its own, owned by its own resume continuation — while the
-nested run keeps its park and its resume. This is what lets an agent wait on a flow (or another
+nested run keeps its park and its resume. This is what lets an agent wait on a composed tool (or another
 agent) that has to ask a human.
 
 CLEARED — the dispatch of a run that cannot park. Nothing here could wait on a nested terminal,

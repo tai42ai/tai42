@@ -37,7 +37,7 @@ a run that cannot produce a conforming or bounded answer ends readably instead o
 failing generically. Each surfaces exactly like a normal terminal — the streaming
 faces emit it as a terminal event, `run` returns it as the run's value, the agent
 run route emits it as one SSE frame, and a conversation route surfaces it to the
-turn's reply — so a flow or route branches on its `type`:
+turn's reply — so a caller or route branches on its `type`:
 
 | Outcome (`type`) | Raised when | Fields |
 | --- | --- | --- |
@@ -91,8 +91,8 @@ delivered as a failed outcome.
 A resumed run that **fails** — its graph raises, for example a model or provider error that
 outlasts the model client's own retries — ends as a failed terminal instead of being retried:
 an outermost run's address receives a failed outcome, and a run nested under another run (a
-flow holding the agent, an agent calling it) reaches that caller as a **failure**, so the
-caller's own error handling runs (a flow holder's `on_error`). The same holds when the
+consumer holding the agent, an agent calling it) reaches that caller as a **failure**, so the
+caller's own error handling runs (for example a holder's `on_error`). The same holds when the
 platform gives up on a park whose resume could not be driven at all within the redelivery
 horizon, or when a preset's output map refuses the answer the parked run resumes with: the
 caller the parked run was nested under is told it failed rather than waiting out its own

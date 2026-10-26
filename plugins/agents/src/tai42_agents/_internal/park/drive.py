@@ -44,7 +44,7 @@ logger = logging.getLogger(__name__)
 def park_continuation(park: ParkIdentity | None) -> Iterator[None]:
     """Bind the resume continuation for the duration of a park-capable run's drive.
 
-    A flow-blind platform ``ask(async)`` raised by a tool this run drives reads the
+    A consumer-agnostic platform ``ask(async)`` raised by a tool this run drives reads the
     bound continuation to stamp ``continuation_tool`` onto the parked interaction, so a
     later answer re-enters through ``agent_resume``. The resume tool name is bound only when
     the run is park-capable AND its face delivers the resume (``bind``); otherwise ``None`` is

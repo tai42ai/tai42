@@ -379,7 +379,7 @@ class AppChannels(Protocol):
         ``params``. The ladder threads it BOTH ways so enrichment is never dropped on either arm:
         the answer is forwarded to the ask's callback door as ``{"answer": answer, "params":
         params}`` (params present only when set), landing on
-        :attr:`~tai42_contract.interactions.models.InteractionResponse.params` for the asking flow
+        :attr:`~tai42_contract.interactions.models.InteractionResponse.params` for the asking run
         to read beside ``answer``; and on the BRIDGE arm the same ``params`` are passed to
         ``accept`` as its entry ``params``. ``bridge.medium_message_id`` rides both arms the same
         way: in the callback body as ``medium_message_id`` (landing on
@@ -526,7 +526,7 @@ class AppConversations(Protocol):
 
         ``locale`` is the participant's BCP 47 language tag the channel resolved from its native
         inbound (a per-message language hint), captured onto the turn's subject so the
-        rendering layer resolves every text template and list format against it — flows and
+        rendering layer resolves every text template and list format against it — tools and
         state templates never select a language. It seeds a first-contact person's stored
         locale and, absent a stored operator override, is the turn's resolved locale;
         ``None`` means the channel supplied none (no silent default to any language).

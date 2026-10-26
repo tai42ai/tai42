@@ -1,6 +1,6 @@
 """The conversation turn carries the subject's locale onto the payload's subject block and
 the ambient state context, resolving person-stored over channel-supplied over the route's
-operator-declared default over none — so the rendering layer resolves a language the flow
+operator-declared default over none — so the rendering layer resolves a language the run
 never selects."""
 
 from __future__ import annotations

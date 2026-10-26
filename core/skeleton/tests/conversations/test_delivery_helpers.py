@@ -166,7 +166,7 @@ def test_part_notification_form_tag_rides_the_final_chunk_only():
 
 
 def test_reply_part_bad_prefill_is_refused_loudly():
-    # A flow's tool reply array whose form part carries a prefill value that fails the
+    # A tool's reply array whose form part carries a prefill value that fails the
     # schema is refused at the parse seam, so a partly filled form is never stored or sent.
     from tai42_skeleton.conversations.turn.tool_turn import _checked_reply_parts
 

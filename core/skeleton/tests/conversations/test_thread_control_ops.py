@@ -267,7 +267,7 @@ async def test_send_schema_threads_through_to_operator_send(wired, monkeypatch):
 
 
 async def test_send_full_vocabulary_threads_through_to_operator_send(wired, monkeypatch):
-    # Full parity with the flow answer path: location/sections/header/footer are coerced to the
+    # Full parity with the turn answer path: location/sections/header/footer are coerced to the
     # typed contract models and handed to operator_send alongside the earlier rich fields.
     calls = _capture_operator_send(monkeypatch)
 

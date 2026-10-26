@@ -489,7 +489,7 @@ async def test_notify_user_forwards_schema(monkeypatch: pytest.MonkeyPatch) -> N
 
 
 async def test_notify_user_forwards_full_vocabulary(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Full parity with the flow answer path: location/sections/header/footer are forwarded
+    # Full parity with the turn answer path: location/sections/header/footer are forwarded
     # verbatim to the channels helper alongside the earlier rich fields.
     helper = _RecordingHelper()
     monkeypatch.setattr(notifications_ops, "_notify_user", helper)
@@ -590,7 +590,7 @@ def test_notify_user_projected_tool_carries_form_data_and_pages() -> None:
 def test_notifyuser_model_enforces_composition_matrix() -> None:
     # The composition matrix is enforced ON the operator request model itself (the shared
     # check_interactive_composition, reused not duplicated), so a bad combination is a clean
-    # request-boundary ValidationError → 400 — parity with the flow AnswerPart.
+    # request-boundary ValidationError → 400 — parity with the turn AnswerPart.
     section = OptionSection(title="Pick", rows=[ReplyOption(text="A")])
     header = MediaItem(kind=MediaKind.IMAGE, url="https://example.com/h.png")
 

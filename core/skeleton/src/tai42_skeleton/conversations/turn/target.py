@@ -66,7 +66,7 @@ async def _target_outcome(
     The run's generic attribution is deposited HERE — the single seam both the tool and
     agent target turns route through — so whichever run chokepoint the target reaches (the
     tool ``run_tool`` seam or the agent ``drive_live_caller_astream`` seam) stamps its
-    trace with this conversation's identity. tai42 stays flow-agnostic: it deposits only
+    trace with this conversation's identity. tai42 stays consumer-agnostic: it deposits only
     generic dimensions (a person-or-address user, the resolved thread as session, the
     route as a tag, the channel/our_identity as metadata) and interprets none of them.
 

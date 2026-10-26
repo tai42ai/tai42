@@ -284,8 +284,8 @@ async def delete_conversation_thread(route_name: str, thread_id: str) -> dict[st
         # before any teardown, never left to run after the delete and re-create the checkpoint.
         if await store.thread_has_live_intake(thread_id):
             raise ConflictError(in_flight_409)
-        # The thread's own declared-state memory goes last (``thread``-subject only; state a flow
-        # scoped to the ``person`` is cross-thread memory that an "Erase person" clears).
+        # The thread's own declared-state memory goes last (``thread``-subject only; state a binding
+        # scopes to the ``person`` is cross-thread memory that an "Erase person" clears).
         removed, states_erased = await _tear_down_thread(route_names, thread_id, reason="thread_deleted")
     return {"removed": removed, "route_name": route_name, "thread_id": thread_id, "states_erased": states_erased}
 

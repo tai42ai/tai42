@@ -531,7 +531,7 @@ async def test_messages_pass_none_when_no_params(web_env, stub_app, registered_s
 
 async def test_messages_thread_a_tapped_reply_id_as_params_reply_id(web_env, stub_app, registered_session: FakeRedis):
     # A media-card reply chip carrying an authored id sends that id back on the message
-    # POST; the door threads it as ``params.reply_id`` so the flow reads WHICH option was
+    # POST; the door threads it as ``params.reply_id`` so the target reads WHICH option was
     # chosen, not only its echoed text (the same convention every channel keeps).
     await _handler(stub_app, _MESSAGES)(
         build_request(json_body={"identity": IDENTITY, "text": "Item A", "reply_id": "opt-a"}, token=SESSION_TOKEN)

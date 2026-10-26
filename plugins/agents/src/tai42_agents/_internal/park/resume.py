@@ -1,4 +1,4 @@
-"""The ``agent_resume`` continuation the flow-blind platform fires, and the outcome conversion.
+"""The ``agent_resume`` continuation the consumer-agnostic platform fires, and the outcome conversion.
 
 :func:`agent_resume` buffers one answer into its super-step barrier and, when the barrier is
 complete, wins the single drive lease and drives the parked run to its next outcome. At a clean
@@ -49,7 +49,7 @@ from tai42_agents._internal.park.park_binding import agents_park_index
 logger = logging.getLogger(__name__)
 
 # Registered name of the hidden tool that resumes an async-parked agent run. Bound as the
-# driver continuation (``set_resume_continuation_tool``) so a flow-blind platform
+# driver continuation (``set_resume_continuation_tool``) so a consumer-agnostic platform
 # ``ask(async)`` stamps it onto the parked interaction and later invokes it with
 # ``{interaction_id, ask_result}`` to resume auto-pilot. Must equal the bound tool name.
 AGENT_RESUME_TOOL_NAME: Final[str] = "agent_resume"
@@ -115,7 +115,7 @@ async def agent_resume(interaction_id: str, answer: Any) -> Any:
     """Buffer one answer into its super-step barrier and, at the LAST of the M answers, drive it once.
 
     Drives the parked run to its next OUTCOME — exactly once — and returns it. This is the driver
-    continuation the flow-blind platform invokes when an async ``ask`` is answered (or expires): it
+    continuation the consumer-agnostic platform invokes when an async ``ask`` is answered (or expires): it
     carries ``{interaction_id, ask_result}`` and buffers whatever value it is given; an ask's
     value arrives as the ``AskAnswer`` JSON the platform composed. The park index
     reverses the id to the parked thread, the super-step, and the interrupt the answers target.

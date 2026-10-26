@@ -708,7 +708,7 @@ def test_consumers_lists_the_binders(monkeypatch: pytest.MonkeyPatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "GET"
         assert request.url.path == "/api/states/status/consumers"
-        return data_response({"flows": [], "hooks": [], "schedules": [], "agents": []})
+        return data_response([{"kind": "hook", "name": "nightly", "detail": "binds thread"}])
 
     result = run_cli(monkeypatch, handler, ["states", "consumers", "status"])
     assert result.exit_code == 0, result.output

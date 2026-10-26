@@ -137,8 +137,8 @@ def _agent() -> tools_mod.ToolsAgent:
 
 
 class _NestedDriverTool:
-    """A tool standing in for a FOREIGN parking driver reached through the agent (a flow preset,
-    say): its body reads the chain routing (and the door address) exactly as such a driver would
+    """A tool standing in for a FOREIGN parking driver reached through the agent (a composed
+    preset, say): its body reads the chain routing (and the door address) exactly as such a driver would
     when deciding how it re-enters the waiting agent at its terminal."""
 
     def __init__(self) -> None:

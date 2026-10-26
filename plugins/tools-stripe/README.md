@@ -49,7 +49,7 @@ uv add --editable ../tai42/plugins/tools-stripe
 | `create_stripe_checkout` | Creates a Stripe Checkout Session and returns its hosted payment URL, usable directly as the `link` builder for an external ask. |
 | `confirm_stripe_payment` | Webhook bridge: answers a paid checkout ask from a projected Stripe event. Not a user/agent tool — it holds the bridge secret. |
 | `reconcile_stripe_payments` | Recovery layer: re-answers paid sessions the webhook path lost, re-derived from Stripe's own session list. Not a user/agent tool. |
-| `create_stripe_payment_link` | Flexible-amount, non-blocking: mints a hosted payment link with no callback and returns its URL and session id. Deployment-fenced to deterministic flow callers. |
+| `create_stripe_payment_link` | Flexible-amount, non-blocking: mints a hosted payment link with no callback and returns its URL and session id. Deployment-fenced to deterministic (non-model) callers. |
 | `expire_stripe_checkout` | Expires an `open` Checkout Session early and returns its id and post-expire status; a non-open (completed/expired) session raises Stripe's 400. |
 | `create_stripe_webhook_endpoint` | Provisions a Stripe webhook endpoint and returns its id and one-time signing secret (returned to the caller, never persisted here). |
 | `list_stripe_webhook_endpoints` | Lists the account's webhook endpoints (id, url, status, events); Stripe never returns signing secrets post-creation. |
@@ -174,7 +174,7 @@ the configured key's mode. Its `Idempotency-Key` is a canonical hash of every ar
 distinct payments must differ in at least one argument, and a distinct `metadata` entry (e.g.
 `external_ref` or `channel_user`) is the natural discriminator.
 
-**Exposure.** This tool is **deployment-fenced to deterministic flow callers only** — its
+**Exposure.** This tool is **deployment-fenced to deterministic (non-model) callers only** — its
 money-facing arguments are all caller-supplied, so it must never be exposed on any agent or user
 toolset.
 

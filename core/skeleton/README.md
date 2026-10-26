@@ -268,7 +268,7 @@ the tool's kwargs with a `start_expr` (jq) and the result to the reply with a
 `reply_expr` (jq). The payload the expr runs over is
 `{message, sender, our_identity, channel, route}` — `our_identity` and `channel`
 are the route's, `route` is the name of the route the turn entered through (so a
-flow bound to several routes can tell them apart), `sender` is the conversation
+tool bound to several routes can tell them apart), `sender` is the conversation
 address — with the run's parked interactions bound as `$parked`. Map those onto the
 tool's own parameter names and pull `.code` out of the result:
 

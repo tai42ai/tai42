@@ -342,7 +342,7 @@ async def test_direct_registration_opens_a_root_and_stores_its_trace_id(recordin
 
 async def test_direct_registration_deposits_the_ambient_carrier(recording_backend, monkeypatch):
     # The root-open ALSO deposits the ambient trace context through the generic carrier,
-    # so a consumer the preset runs (agent/flow) nests under this root instead of
+    # so a consumer the preset runs (an agent or composed tool) nests under this root instead of
     # minting a fresh, orphaned trace. Read the carrier from INSIDE the dispatch body.
     _store_on(monkeypatch, _SpyStore())
     seen = {}

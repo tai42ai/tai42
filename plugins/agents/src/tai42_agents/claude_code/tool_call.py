@@ -33,7 +33,7 @@ async def run_proxied_tool_call(
     unresumable park.
 
     A park this run does not OWN is refused the same way: a tool that drove a nested run
-    (a flow, another agent) surfaces a park resumed on THAT run's path, so parking this
+    (a composed tool, another agent) surfaces a park resumed on THAT run's path, so parking this
     session on it would suspend the session with nothing to resume it
     (:func:`assert_park_adoptable`). This seam claims a park from the SENTINEL only — it
     never reads a wire-form marker off a tool result — so the check here is the whole

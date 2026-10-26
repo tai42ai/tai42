@@ -22,9 +22,9 @@ output stage of every preset the park sits under between the driver's call and t
 parked asker reads what a synchronous asker reads. On expiry its ``answer`` is
 :data:`EXPIRY_ANSWER` and its ``reply_to`` and ``params`` are null; no output stage maps it.
 
-Both context variables are a generic platform mechanism that never names a flow, a session, or
+Both context variables are a generic platform mechanism that never names a consumer, a session, or
 any engine state — the address's ``context`` is fully opaque to this contract (it carries no
-route/flow/thread meaning here) and MUST be JSON-serializable, since a durable resume path
+route/consumer/thread meaning here) and MUST be JSON-serializable, since a durable resume path
 round-trips it. A resume name of ``None`` (the default) means no resuming
 driver is bound, and an async ask raised there fails loudly.
 

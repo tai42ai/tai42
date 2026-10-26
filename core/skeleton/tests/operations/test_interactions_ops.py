@@ -246,7 +246,7 @@ async def test_list_pending_interactions_hides_caller_ask(wired):
 
 async def test_cancel_async_park_fires_no_continuation(wired):
     # Cancel tears the park down via ``prune_pending``, which NEVER enqueues a
-    # continuation: the parked flow can never resume. Proof: a late answer claims
+    # continuation: the parked run can never resume. Proof: a late answer claims
     # nothing and the expiry reaper has nothing to fire.
     await wired.store.add(wired.fake, _async_park(wired.store), idle_ttl=86400, continuation_fingerprint="fp")
     assert await ops.cancel_interaction("ap") == {"interaction_id": "ap", "status": "cancelled"}
