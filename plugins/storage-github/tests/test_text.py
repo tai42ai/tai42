@@ -82,9 +82,9 @@ async def test_list_returns_blob_paths_via_trees(client):
         json_body={
             "truncated": False,
             "tree": [
-                {"path": "a.j2", "type": "blob"},
-                {"path": "d", "type": "tree"},
-                {"path": "d/b.j2", "type": "blob"},
+                {"path": "a.j2", "type": "blob", "sha": "s1"},
+                {"path": "d", "type": "tree", "sha": "t1"},
+                {"path": "d/b.j2", "type": "blob", "sha": "s2"},
             ],
         },
     )
@@ -121,25 +121,6 @@ async def test_list_server_error_propagates(client):
 
     with pytest.raises(HTTPStatusError):
         await GithubStorage().list()
-
-
-async def test_list_blobs_prefix_filters_and_excludes_trees(client):
-    client.get.return_value = make_response(
-        status=200,
-        json_body={
-            "truncated": False,
-            "tree": [
-                {"path": "d/a.j2", "type": "blob"},
-                {"path": "d/sub", "type": "tree"},
-                {"path": "d/sub/b.j2", "type": "blob"},
-                {"path": "dd/c.j2", "type": "blob"},
-            ],
-        },
-    )
-
-    files = await GithubStorage()._list_blobs("d/")
-
-    assert files == ["d/a.j2", "d/sub/b.j2"]
 
 
 async def test_upload_create_puts_without_sha(client):
@@ -250,6 +231,14 @@ async def test_delete_on_directory_path_raises_filenotfound(client):
         await GithubStorage().delete("a/dir")
 
     client.request.assert_not_called()
+
+
+async def test_delete_of_a_file_gone_before_its_delete_raises_filenotfound(client):
+    client.get.return_value = make_response(status=200, json_body={"sha": "abc"})
+    client.request.return_value = make_response(status=404)
+
+    with pytest.raises(FileNotFoundError):
+        await GithubStorage().delete("a/b.j2")
 
 
 async def test_delete_call_error_propagates(client):

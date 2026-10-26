@@ -13,7 +13,7 @@ from __future__ import annotations
 import base64
 import logging
 import mimetypes
-from typing import Final
+from typing import Final, NamedTuple
 
 import httpx
 from tai42_contract.app import tai42_app
@@ -33,6 +33,13 @@ MAX_UPLOAD_BYTES = 1024 * 1024
 _OBJECT_FORM: Final = "application/vnd.github.object+json"
 _RAW_FORM: Final = "application/vnd.github.raw+json"
 _JSON: Final = "application/json"
+
+
+class _Blob(NamedTuple):
+    """A file in the branch's tree: its path and the blob sha a write or delete names."""
+
+    path: str
+    sha: str
 
 
 def _join(base: str, path: str) -> str:
@@ -234,13 +241,14 @@ class GithubStorage(Storage):
 
     async def list(self) -> list[str]:
         """Every blob path in the repo."""
-        return await self._list_blobs("")
+        return [blob.path for blob in await self._blobs("")]
 
-    async def _list_blobs(self, prefix: str) -> list[str]:
-        """Every blob path in the repo, optionally filtered to ``prefix``.
+    async def _blobs(self, prefix: str) -> list[_Blob]:
+        """Every blob in the repo with its blob sha, optionally filtered to ``prefix``.
 
         Uses the recursive Git Trees API (one request); its ``truncated`` flag is
-        raised on loudly rather than acting on a partial listing.
+        raised on loudly rather than acting on a partial listing, and so is a blob
+        entry carrying no sha.
         """
         settings = _configured_settings()
         url = settings.trees_api_url.format(username=settings.username, repo=settings.repo, branch=settings.branch)
@@ -252,13 +260,18 @@ class GithubStorage(Storage):
                 raise RuntimeError(f"Expected a tree object from {url}, got {type(data).__name__}")  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
             if data.get("truncated"):
                 raise RuntimeError(f"GitHub tree listing was truncated; the tree is too large to list safely: {url}")
-            return [
-                item["path"]
-                for item in data.get("tree", [])
-                if isinstance(item, dict)
-                and item.get("type") == "blob"
-                and (not prefix or item["path"].startswith(prefix))
-            ]
+            blobs: list[_Blob] = []
+            for item in data.get("tree", []):
+                if not isinstance(item, dict) or item.get("type") != "blob":
+                    continue
+                path = item["path"]
+                if prefix and not path.startswith(prefix):
+                    continue
+                sha = item.get("sha")
+                if not isinstance(sha, str) or not sha:
+                    raise RuntimeError(f"GitHub tree listing at {url} carries no blob sha for {path}.")
+                blobs.append(_Blob(path, sha))
+            return blobs
 
     async def upload(self, path: str, content: str) -> None:
         """Write ``content`` (UTF-8) to ``path`` via the Contents API."""
@@ -326,28 +339,41 @@ class GithubStorage(Storage):
             if not sha:
                 raise RuntimeError(f"GitHub Contents API returned no blob sha for {path}; cannot delete it.")
 
-            payload = {"message": f"Delete {path}", "sha": sha, "branch": settings.branch}
-            resp = await client.request("DELETE", url, headers=headers, json=payload)
-            _raise_for_status(resp, "deleting", path, url)
+            await self._delete_blob(client, settings, path, sha)
 
     async def delete_dir(self, path: str) -> None:
         """Delete every file under ``path`` sequentially (GitHub has no bulk delete).
 
-        A failure mid-loop raises immediately; the partial deletion surfaces loudly.
+        The one tree listing supplies each file's blob sha, so each file costs one
+        DELETE. A file already gone is skipped; a file changed since the listing
+        answers 409, which raises like every other failure mid-loop, so a partial
+        deletion surfaces loudly.
         """
         assert_not_root(path)
         prefix = path if path.endswith("/") else f"{path}/"
-        files = await self._list_blobs(prefix)
-        if not files:
+        blobs = await self._blobs(prefix)
+        if not blobs:
             raise FileNotFoundError(f"Directory not found or empty: {path}")
 
-        for file_path in files:
-            try:
-                await self.delete(file_path)
-            except FileNotFoundError:
-                # Already gone (concurrent delete); the delete is idempotent. A
-                # real DELETE failure raises HTTPStatusError and is not caught here.
-                logger.info("Object %s already gone during dir delete of %s; skipping", file_path, path)
+        settings = _configured_settings()
+        async with tai42_app.clients.client_ctx(GithubHttpxClient) as client:
+            for blob in blobs:
+                try:
+                    await self._delete_blob(client, settings, blob.path, blob.sha)
+                except FileNotFoundError:
+                    # Already gone (concurrent delete); the delete is idempotent. A
+                    # real DELETE failure raises HTTPStatusError and is not caught here.
+                    logger.info("Object %s already gone during dir delete of %s; skipping", blob.path, path)
+
+    @staticmethod
+    async def _delete_blob(client: httpx.AsyncClient, settings: GithubStorageSettings, path: str, sha: str) -> None:
+        """Delete the file at ``path`` holding blob ``sha``; a missing object raises ``FileNotFoundError``."""
+        url = _contents_url(settings, path)
+        payload = {"message": f"Delete {path}", "sha": sha, "branch": settings.branch}
+        resp = await client.request("DELETE", url, headers=_api_headers(settings), json=payload)
+        if resp.status_code == 404:
+            raise FileNotFoundError(f"Object not found: {path}")
+        _raise_for_status(resp, "deleting", path, url)
 
 
 __all__ = ["GithubStorage"]
