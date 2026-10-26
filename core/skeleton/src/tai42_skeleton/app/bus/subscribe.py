@@ -26,6 +26,7 @@ from tai42_skeleton.app.bus.models import (
     _PresenceValue,
     _utcnow_iso,
 )
+from tai42_skeleton.config.deployment_env import published_deployment_keys, published_env_readers
 from tai42_skeleton.utils.redis_typing import eval_script
 
 if TYPE_CHECKING:
@@ -291,6 +292,8 @@ class WorkerBusSubscribeMixin:
                     joined_at=self._joined_at if self._joined_at is not None else _utcnow_iso(),
                     beat_at=_utcnow_iso(),
                     state=WorkerState.resyncing,
+                    deployment_keys=published_deployment_keys(),
+                    env_readers=published_env_readers().digest,
                     last_op=None,
                 )
                 # Heartbeat FIRST (renew-gated, its own thread), BEFORE on_ready: the
@@ -462,9 +465,23 @@ class WorkerBusSubscribeMixin:
         # The presence write and the index membership land in ONE transaction, so a
         # presence key never exists without its index member: the census reads the index
         # (SMEMBERS) and then GET/PTTLs each member's key, so a member missing while its
-        # key was live would drop a live worker from the fleet.
+        # key was live would drop a live worker from the fleet. Every write carries the digest
+        # of this process's env readers as they stand now, so a reader described after the
+        # join reaches the fleet with the next write, within one heartbeat interval. The
+        # description lands in the same transaction under its digest, which every worker
+        # sharing the description shares as its key. A write leaves the key at least twice
+        # this row's TTL to live and never shortens it (PEXPIRE GT, Redis 7.0), so a worker
+        # with a shorter heartbeat TTL never cuts the life another worker's row needs: the
+        # description outlives every live row that names it.
+        readers = published_env_readers()
+        presence.deployment_keys = published_deployment_keys()
+        presence.env_readers = readers.digest
+        row_ttl_ms = int(self._settings.heartbeat_ttl * 1000)
+        body_key = self._settings.env_readers_key(readers.digest)
         pipe = r.pipeline(transaction=True)
-        pipe.set(presence_key, presence.model_dump_json(), px=int(self._settings.heartbeat_ttl * 1000))
+        pipe.set(body_key, readers.body, px=2 * row_ttl_ms, nx=True)
+        pipe.pexpire(body_key, 2 * row_ttl_ms, gt=True)
+        pipe.set(presence_key, presence.model_dump_json(), px=row_ttl_ms)
         pipe.sadd(self._settings.presence_index, self.identity.name)
         await pipe.execute()
 

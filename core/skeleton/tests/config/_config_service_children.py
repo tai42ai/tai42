@@ -36,8 +36,11 @@ class _EnvPersistSignallingManager(FileConfigManager):
 
 
 def _worker_service(config_dir: str, manager: FileConfigManager) -> Any:
-    """Boot a busless worker over ``config_dir``: apply the stored env, bind the app, build its ``ConfigService``."""
-    for key in ("TAI_BUS_REDIS_URL", "TAI_SUPERVISED", "TAI_MANIFEST_PATH"):
+    """Boot a busless worker over ``config_dir`` and build its ``ConfigService``.
+
+    It captures the deployment env, applies the stored env and binds the app, as a boot does.
+    """
+    for key in ("TAI_BUS_REDIS_URL", "TAI_MANIFEST_PATH"):
         os.environ.pop(key, None)
     os.environ["TAI_CONFIG_DIR_PATH"] = config_dir
     os.environ["M_SYSTEM"] = "m_c"
@@ -46,10 +49,12 @@ def _worker_service(config_dir: str, manager: FileConfigManager) -> Any:
     from tests.config.fake_pipeline import ComboChecks, FakeReloadAdmin
 
     from tai42_skeleton.app import instance
-    from tai42_skeleton.app.epoch import apply_env_and_reset_settings
+    from tai42_skeleton.app.applied_env import apply_env_and_reset_settings
+    from tai42_skeleton.config.deployment_env import DeploymentOwnership, capture_deployment_env
     from tai42_skeleton.config.service import ConfigService
 
-    apply_env_and_reset_settings(manager.read_env())
+    capture_deployment_env()
+    apply_env_and_reset_settings(manager.read_env(), DeploymentOwnership())
     tai42_app.bind(instance.build_app())
 
     async def list_active_bodies(_facet: Any) -> dict[str, Any]:
@@ -73,10 +78,11 @@ def profile_dropping_a_key(
     span, which this apply holds through its build and its persist.
     """
     from tai42_skeleton.app.epoch import Epoch
+    from tai42_skeleton.config.deployment_env import DeploymentOwnership
 
     service = _worker_service(config_dir, _EnvPersistSignallingManager(config_dir, persisted))
 
-    async def build(_env: dict[str, str]) -> Epoch:
+    async def build(_env: dict[str, str], *, ownership: DeploymentOwnership) -> Epoch:
         in_build.set()
         if not await asyncio.to_thread(other_writing.wait, EVENT_BOUND_S):
             raise TimeoutError("the other worker never started its write")

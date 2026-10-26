@@ -21,12 +21,12 @@ import pytest
 from tai42_contract.presets import PresetBody
 
 from tai42_skeleton.app import admission as admission_mod
-from tai42_skeleton.app import epoch as epoch_mod
-from tai42_skeleton.app import instance
+from tai42_skeleton.app import applied_env, instance
 from tai42_skeleton.app.admission import RequestAdmission
 from tai42_skeleton.app.bus import FleetResult, LocalApplyResult
 from tai42_skeleton.app.bus.ops import FleetOp
 from tai42_skeleton.app.epoch import Epoch
+from tai42_skeleton.config.deployment_env import DeploymentOwnership
 from tai42_skeleton.config.service import ConfigService
 
 from .._fakes.bus import FakeBus
@@ -91,7 +91,6 @@ class _World:
 
     def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _no_bus(monkeypatch)
-        monkeypatch.delenv("TAI_SUPERVISED", raising=False)
         monkeypatch.setenv("M_PICK", "m_a")
         monkeypatch.setenv("M_GONE", "1")
         self.monkeypatch = monkeypatch
@@ -119,7 +118,7 @@ class _World:
     def build(self, *, entered: asyncio.Event | None = None, release: asyncio.Event | None = None) -> Any:
         """A build that records its env, optionally blocks, then applies it to the process env."""
 
-        async def build(env: dict[str, str]) -> Epoch:
+        async def build(env: dict[str, str], *, ownership: DeploymentOwnership) -> Epoch:
             self.builds.append(dict(env))
             if entered is not None:
                 entered.set()
@@ -207,9 +206,9 @@ async def test_a_profile_apply_waits_for_a_write_inside_its_listing(monkeypatch:
     profiler = world.service()
     validate_replace = profiler._validate_replace
 
-    def logged_validate_replace(env: dict[str, str]) -> None:
+    def logged_validate_replace(env: dict[str, str], ownership: DeploymentOwnership) -> None:
         world.log.append("validate_replace")
-        validate_replace(env)
+        validate_replace(env, ownership)
 
     monkeypatch.setattr(profiler, "_validate_replace", logged_validate_replace)
     profile: list[asyncio.Task[Any]] = []
@@ -451,9 +450,9 @@ def _stale_world(monkeypatch: pytest.MonkeyPatch, manifest: dict[str, Any]) -> _
     """
     world = _World(monkeypatch)
     monkeypatch.setenv("M_SYSTEM", "m_c")
-    monkeypatch.setattr(epoch_mod, "_loaded_env_keys", set())
-    epoch_mod._apply_env({"M_PICK": "m_a", "M_GONE": "1"})
-    assert "M_GONE" in epoch_mod.applied_env_keys()
+    monkeypatch.setattr(applied_env, "_loaded_env_keys", set())
+    applied_env._apply_env({"M_PICK": "m_a", "M_GONE": "1"}, DeploymentOwnership())
+    assert "M_GONE" in applied_env.applied_env_keys()
     world.store.manifest = manifest
     world.store.env = {"M_PICK": "m_a"}
     return world

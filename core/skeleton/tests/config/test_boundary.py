@@ -21,7 +21,7 @@ Three refusals guard every env / manifest writer:
   and is refused pre-persist, naming the var and its json-pointer.
 
 The union-covers-inventory oracle imports the core settings groups so half (a)
-is populated, then asserts ``x_band_env_keys()`` covers every design-listed X
+is populated, then asserts ``EnvKeyClasses.x_band`` covers every design-listed X
 row. An externally-installed config provider's ``excluded`` group registers only
 where that plugin is imported, so its coverage is pinned in that plugin's own
 suite; the registry-driven mechanism test here proves any ``excluded`` field is
@@ -46,20 +46,20 @@ import tai42_skeleton.routers.metrics_settings
 import tai42_skeleton.settings.settings  # noqa: F401
 from tai42_skeleton.config.boundary import (
     X_BAND_EXTRA,
-    excluded_env_var_names,
-    key_material_env_keys,
+    EnvKeyClasses,
     refuse_dangling_env_markers,
     refuse_incomplete_admin_pair,
     refuse_key_material,
+    refuse_unrecyclable_env_change,
     refuse_unresolved_env,
     refuse_unset_connector_env,
     refuse_x_band,
-    registered_env_var_names,
-    x_band_env_keys,
 )
+from tai42_skeleton.config.deployment_env import DeploymentOwnership
 from tai42_skeleton.config.recycle_policy import X_CLASSIFIED_DEPLOYMENT_BARE_READS
 from tai42_skeleton.config.service import ConfigService
 
+from .._helpers import recapture_deployment_env
 from .fake_pipeline import ComboChecks, FakeConfigStore, FakeReloadAdmin, RecordingBus, _oauth_descriptor
 
 if TYPE_CHECKING:
@@ -87,15 +87,15 @@ def _service(store: FakeConfigStore) -> tuple[ConfigService, FakeReloadAdmin, Re
 # TAI_MANIFEST_PATH = redundant: registry-excluded AND listed in X_BAND_EXTRA.
 # TAI_RUN_MODE     = half (b), a boot-identity bare read no settings class declares.
 # TAI_SERVE_WORKERS = half (b), the worker count ``tai serve`` stamps for its workers.
-# TAI_SUPERVISED / TAI_SUPERVISED_PINNED_KEYS / TAI_READY_SENTINEL_PATH = the three deployment keys.
+# TAI_READY_SENTINEL_PATH = the deployment-infra bare read.
+# APP_ARGS_TIMEOUT_GRACEFUL_SHUTDOWN = half (a), a server option the ``tai serve`` launcher reads.
 _X_KEYS = [
     "TAI_CONFIG_MODE",
     "TAI_MANIFEST_PATH",
     "TAI_RUN_MODE",
     "TAI_SERVE_WORKERS",
-    "TAI_SUPERVISED",
-    "TAI_SUPERVISED_PINNED_KEYS",
     "TAI_READY_SENTINEL_PATH",
+    "APP_ARGS_TIMEOUT_GRACEFUL_SHUTDOWN",
 ]
 
 
@@ -122,14 +122,14 @@ def test_validate_replace_refuses_x_band_key(x_key: str) -> None:
     service, _admin, _bus = _service(store)
 
     with pytest.raises(ValueError, match=x_key):
-        service._validate_replace({x_key: "carried-value"})
+        service._validate_replace({x_key: "carried-value"}, DeploymentOwnership())
 
 
 def test_refuse_x_band_names_every_offender() -> None:
-    with pytest.raises(ValueError, match="TAI_SUPERVISED") as exc:
-        refuse_x_band(["TAI_SUPERVISED", "OK_KEY", "TAI_RUN_MODE"])
+    with pytest.raises(ValueError, match="TAI_READY_SENTINEL_PATH") as exc:
+        refuse_x_band(["TAI_READY_SENTINEL_PATH", "OK_KEY", "TAI_RUN_MODE"])
     message = str(exc.value)
-    assert "TAI_SUPERVISED" in message
+    assert "TAI_READY_SENTINEL_PATH" in message
     assert "TAI_RUN_MODE" in message
     assert "OK_KEY" not in message
 
@@ -143,7 +143,7 @@ def test_validate_replace_allows_a_plain_profile_env() -> None:
     # backend registered passes without a bus configured.
     store = FakeConfigStore(manifest={}, env={"OLD": "1"})
     service, _admin, _bus = _service(store)
-    service._validate_replace({"NEW_KEY": "v"})  # no raise
+    service._validate_replace({"NEW_KEY": "v"}, DeploymentOwnership())  # no raise
 
 
 # ---------------------------------------------------------------------------
@@ -161,9 +161,16 @@ def test_key_material_keys_are_registered_and_not_x_band() -> None:
     # The premise the refusal exists for: these ARE key material and are NOT caught by
     # the X band (they are hot-class), so without the dedicated refusal a profile could
     # bulk-set a KEK.
-    km = key_material_env_keys()
-    assert set(_KEY_MATERIAL_KEYS) <= km
-    assert not (km & x_band_env_keys())
+    classes = EnvKeyClasses()
+    assert all(classes.key_material(key) for key in _KEY_MATERIAL_KEYS)
+    key_material = [
+        name
+        for info in registered_settings()
+        for field in info.fields
+        if field.key_material
+        for name in field.accepted_env_vars
+    ]
+    assert not [name for name in key_material if classes.x_band(name)]
 
 
 @pytest.mark.parametrize("km_key", _KEY_MATERIAL_KEYS)
@@ -211,7 +218,7 @@ def test_validate_replace_refuses_changed_key_material_key(km_key: str) -> None:
     service, _admin, _bus = _service(store)
 
     with pytest.raises(ValueError, match=km_key):
-        service._validate_replace({km_key: "rotated-value", "EXISTING": "1"})
+        service._validate_replace({km_key: "rotated-value", "EXISTING": "1"}, DeploymentOwnership())
 
 
 @pytest.mark.parametrize("km_key", _KEY_MATERIAL_KEYS)
@@ -221,7 +228,7 @@ def test_validate_replace_allows_unchanged_key_material_carry(km_key: str) -> No
     store = FakeConfigStore(manifest={}, env={km_key: "provisioned", "EXISTING": "1"})
     service, _admin, _bus = _service(store)
 
-    service._validate_replace({km_key: "provisioned", "EXISTING": "1"})  # no raise
+    service._validate_replace({km_key: "provisioned", "EXISTING": "1"}, DeploymentOwnership())  # no raise
 
 
 def test_refuse_key_material_names_offenders_and_the_rotation_path() -> None:
@@ -305,7 +312,7 @@ def test_validate_replace_refuses_half_set_admin_pair() -> None:
     service, _admin, _bus = _service(store)
 
     with pytest.raises(ValueError, match="TAI_DATABASE_DEFAULT_PG_ADMIN_PASSWORD"):
-        service._validate_replace({"TAI_DATABASE_DEFAULT_PG_ADMIN_USER": "migrator"})
+        service._validate_replace({"TAI_DATABASE_DEFAULT_PG_ADMIN_USER": "migrator"}, DeploymentOwnership())
 
 
 def test_validate_replace_allows_complete_admin_pair() -> None:
@@ -313,23 +320,24 @@ def test_validate_replace_allows_complete_admin_pair() -> None:
     service, _admin, _bus = _service(store)
 
     service._validate_replace(
-        {"TAI_DATABASE_DEFAULT_PG_ADMIN_USER": "m", "TAI_DATABASE_DEFAULT_PG_ADMIN_PASSWORD": "pw"}
+        {"TAI_DATABASE_DEFAULT_PG_ADMIN_USER": "m", "TAI_DATABASE_DEFAULT_PG_ADMIN_PASSWORD": "pw"},
+        DeploymentOwnership(),
     )  # no raise
 
 
 # ---------------------------------------------------------------------------
-# registered_env_var_names — the generated-key shadow-avoidance source
+# EnvKeyClasses.sets_a_field — the generated-key shadow-avoidance source
 # ---------------------------------------------------------------------------
 
 
-def test_registered_env_var_names_covers_x_band_and_a_known_hot_var() -> None:
-    # The set the generated secret key is made unique against: it must be a SUPERSET of the X
-    # band (the excluded fields) AND carry non-excluded (hot/recycle) vars the X band omits —
-    # this is exactly what the X band alone would miss for shadow-avoidance.
-    names = registered_env_var_names()
-    assert excluded_env_var_names() <= names  # every excluded field's env_var is present
-    assert "CONNECTORS_KEK" in names  # a registered, NON-excluded var (hot key-material field)
-    assert "CONNECTORS_KEK" not in x_band_env_keys()  # which the X band does not carry
+def test_a_name_that_sets_a_field_covers_the_excluded_fields_and_a_known_hot_var() -> None:
+    # What the generated secret key is made unique against: every excluded field's name AND the
+    # non-excluded (hot/recycle) vars the X band omits — exactly what the X band alone would
+    # miss for shadow-avoidance.
+    classes = EnvKeyClasses()
+    assert all(classes.sets_a_field(key) for key in _CORE_EXCLUDED_INVENTORY)
+    assert classes.sets_a_field("CONNECTORS_KEK")  # a registered, NON-excluded var (hot key-material field)
+    assert not classes.x_band("CONNECTORS_KEK")  # which the X band does not carry
 
 
 # ---------------------------------------------------------------------------
@@ -357,16 +365,17 @@ _CORE_EXCLUDED_INVENTORY = frozenset(
 
 
 def test_union_covers_the_design_listed_x_inventory() -> None:
-    union = x_band_env_keys()
+    classes = EnvKeyClasses()
     inventory = _CORE_EXCLUDED_INVENTORY | X_BAND_EXTRA | X_CLASSIFIED_DEPLOYMENT_BARE_READS
-    missing = inventory - union
+    missing = {key for key in inventory if not classes.x_band(key)}
     assert not missing, f"X-band union is missing inventory rows: {sorted(missing)}"
 
 
 def test_core_excluded_fields_are_registered_after_boot() -> None:
     # The booted core registers exactly the design's half (a) core fields — a drift
     # (a field losing its ``excluded`` reload_class) drops it here.
-    assert excluded_env_var_names() >= _CORE_EXCLUDED_INVENTORY
+    classes = EnvKeyClasses()
+    assert all(classes.reload_class(key) == "excluded" for key in _CORE_EXCLUDED_INVENTORY)
 
 
 def test_every_registered_excluded_field_is_in_the_union() -> None:
@@ -374,10 +383,11 @@ def test_every_registered_excluded_field_is_in_the_union() -> None:
     # ``excluded`` (with a non-empty env_var) is folded into the X band. This is the
     # mechanism that picks up an externally-installed provider's group the moment its
     # settings module is imported.
+    classes = EnvKeyClasses()
     for info in registered_settings():
         for field in info.fields:
             if field.reload_class == "excluded" and field.env_var:
-                assert field.env_var in x_band_env_keys()
+                assert classes.x_band(field.env_var)
 
 
 # ---------------------------------------------------------------------------
@@ -516,7 +526,7 @@ def test_validate_replace_allows_omitting_a_connector_cred_live_in_process_env(
     )
     service, _admin, _bus = _service(store)
 
-    service._validate_replace({"APP_FLAG": "v"})  # no raise
+    service._validate_replace({"APP_FLAG": "v"}, DeploymentOwnership())  # no raise
 
 
 def test_validate_replace_refuses_a_connector_cred_unset_in_every_source(
@@ -534,7 +544,7 @@ def test_validate_replace_refuses_a_connector_cred_unset_in_every_source(
     service, _admin, _bus = _service(store)
 
     with pytest.raises(ValueError, match="ACME_CLIENT_SECRET") as exc:
-        service._validate_replace({"APP_FLAG": "v"})
+        service._validate_replace({"APP_FLAG": "v"}, DeploymentOwnership())
     message = str(exc.value)
     assert "/connectors/0/client_secret_env" in message
     # The set credential is not named.
@@ -578,7 +588,7 @@ def test_validate_replace_dropping_a_referenced_key_is_refused(monkeypatch: pyte
     service, _admin, _bus = _service(store)
 
     with pytest.raises(ValueError, match="SECRET_TOKEN"):
-        service._validate_replace({"OTHER": "v"})
+        service._validate_replace({"OTHER": "v"}, DeploymentOwnership())
 
 
 # ---------------------------------------------------------------------------
@@ -626,3 +636,37 @@ async def test_backup_import_setting_key_material_is_refused(monkeypatch: pytest
     assert store.env == {"EXISTING": "1"}
     assert admin.calls == 0
     assert bus.publish_calls == []
+
+
+async def test_backup_import_setting_a_key_the_deployment_sets_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Backup restore drives apply_env_change directly, so a backup that sets a key the deployment
+    # sets to a value other than the stored one is refused by the shared validator; nothing lands.
+    monkeypatch.setenv("TAI_BUS_REDIS_URL", "redis://localhost:6379/0")
+    monkeypatch.setenv("DEPLOYED_KEY", "from-deployment")
+    recapture_deployment_env()
+    reset_all_settings()
+    store = FakeConfigStore(manifest={"mcp": []}, env={"EXISTING": "1"})
+    service, admin, bus = _service(store)
+
+    with pytest.raises(ValueError, match="set by the deployment: DEPLOYED_KEY"):
+        await service.apply_env_change({"DEPLOYED_KEY": "from-backup", "EXISTING": "1"})
+
+    assert store.env_writes == []
+    assert admin.calls == 0
+    assert bus.publish_calls == []
+
+
+def test_removing_or_carrying_a_dead_copy_is_not_a_change(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The deployment sets the bus URL and a recycle-class key; their stored copies never count, so
+    # dropping one and carrying the other is no hot key, no recycle key and no bus-key refusal.
+    monkeypatch.setenv("TAI_BUS_REDIS_URL", "redis://deployment.invalid/0")
+    monkeypatch.setenv("TAI_BUS_NAMESPACE", "from-deployment")
+    recapture_deployment_env()
+    stored = {"TAI_BUS_REDIS_URL": "redis://stale.invalid/0", "TAI_BUS_NAMESPACE": "stale"}
+
+    assert refuse_unrecyclable_env_change(
+        stored, {"TAI_BUS_NAMESPACE": "stale"}, DeploymentOwnership(), change="this change"
+    ) == ([], [])
+    assert refuse_unrecyclable_env_change(
+        stored, {"TAI_BUS_REDIS_URL": "redis://stale.invalid/0"}, DeploymentOwnership(), change="this change"
+    ) == ([], [])

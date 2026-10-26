@@ -149,7 +149,11 @@ async def served(
     # ``sse_starlette`` ends every SSE response once it has seen a uvicorn server exit, through
     # a process-wide flag it never clears; each served app starts with it cleared.
     monkeypatch.setattr(AppStatus, "should_exit", False)
-    monkeypatch.setattr(app.lifecycle, "read_boot_manifest", lambda: boot_manifest)
+
+    async def read_boot_manifest() -> Manifest:
+        return boot_manifest
+
+    monkeypatch.setattr(app.lifecycle, "read_boot_manifest", read_boot_manifest)
     monkeypatch.setattr(app.config.config_manager, "read_manifest", lambda: manifest_body)
     platform = asgi.create_app(transport=transport, stateless_http=stateless_http)
     if prefix:

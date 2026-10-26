@@ -162,9 +162,10 @@ async def readiness_check(request: Request) -> JSONResponse:
             ready = False
 
     # A perpetual background task that died (a subscription/re-probe/reaper that
-    # stopped) marks the live app; surface it as a named readiness failure so this
-    # worker drains. The process also requests its own graceful exit when the task
-    # dies, so this window is the pre-exit truth.
+    # stopped), or a bus subscription that learned this process's bus is not the
+    # deployment's, marks the live app; surface it as a named readiness failure so
+    # this worker drains. The process also requests its own graceful exit then, so
+    # this window is the pre-exit truth.
     dead = app.dead_perpetual_task()
     if dead is not None:
         name, reason = dead

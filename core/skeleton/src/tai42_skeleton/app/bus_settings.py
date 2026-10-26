@@ -31,7 +31,7 @@ from pydantic_settings import SettingsConfigDict
 from tai42_contract.access_control.identity import ReadinessTarget
 from tai42_kit.clients import RedisConnectionSettings
 from tai42_kit.clients.impl.redis import RedisClient
-from tai42_kit.settings import ReloadClass, TaiBaseSettings, settings_cache
+from tai42_kit.settings import ReloadClass, TaiBaseSettings, registered_settings, settings_cache
 
 
 class BusRedisSettings(RedisConnectionSettings):
@@ -65,8 +65,15 @@ class BusSettings(TaiBaseSettings):
     # Prefixes every bus key — the control channel, every reply channel, the
     # per-worker presence keys and their index, the slot-claim keys, and the
     # generation counters — so co-tenant stacks on one server-global pub/sub Redis
-    # do not cross-deliver.
-    namespace: str = "tai"
+    # do not cross-deliver. It locates the census the recycle roll reads, so no config
+    # change or profile may change it (``bus_reaching_keys``).
+    namespace: str = Field(
+        default="tai",
+        description=(
+            "Prefixes every worker-bus key. Set it in the deployment's environment: a config change or "
+            "settings profile that changes it is refused."
+        ),
+    )
 
     # Short liveness deadline: reaching it only ends the brief ack wait — the
     # collector stops waiting on the fast ``received`` acks and budgets the rest of
@@ -98,6 +105,16 @@ class BusSettings(TaiBaseSettings):
     def enabled(self) -> bool:
         """True when a Redis URL is configured; False means the bus is off."""
         return bool(self.redis.redis_url)
+
+    @property
+    def fleet(self) -> tuple[str | None, str]:
+        """The values that locate the fleet's census: the bus Redis URL and the namespace.
+
+        Two settings with the same ``fleet`` reach the same census, whatever their heartbeat,
+        timeouts or connection knobs; ``(None, namespace)`` is the busless process. Every env
+        name that sets one of these values is in :func:`fleet_env_names`.
+        """
+        return (self.redis.redis_url, self.namespace)
 
     @property
     def channel(self) -> str:
@@ -147,11 +164,45 @@ class BusSettings(TaiBaseSettings):
         """The monotonic generation counter for the slot ``name``."""
         return f"{self.gen_prefix}{name}"
 
+    def env_readers_key(self, digest: str) -> str:
+        """The key holding the env-reader description a presence row names by ``digest``."""
+        return f"{self.namespace}:env-readers:{digest}"
+
 
 @settings_cache
 def bus_settings() -> BusSettings:
     """Return the process-wide :class:`BusSettings`, cached after first load."""
     return BusSettings()
+
+
+# The settings fields whose values make up :attr:`BusSettings.fleet`, by their group.
+_FLEET_FIELDS: dict[type[TaiBaseSettings], frozenset[str]] = {
+    BusSettings: frozenset({"redis", "namespace"}),
+    BusRedisSettings: frozenset({"redis_url"}),
+}
+
+
+def fleet_env_names() -> frozenset[str]:
+    """Every env name the settings layer reads for a value of :attr:`BusSettings.fleet`, upper-cased.
+
+    Read from the settings registry: each field's accepted env names plus its
+    default-namespace fallback. Raises ``RuntimeError`` when a bus settings group, or one of
+    those fields, is not registered.
+    """
+    infos = {info.qualname: info for info in registered_settings()}
+    names: set[str] = set()
+    for cls, fields in _FLEET_FIELDS.items():
+        info = infos.get(f"{cls.__module__}.{cls.__qualname__}")
+        if info is None:
+            raise RuntimeError(f"the bus settings group {cls.__qualname__} is not registered")
+        found = [field for field in info.fields if field.name in fields]
+        if {field.name for field in found} != fields:
+            raise RuntimeError(f"the bus settings group {cls.__qualname__} does not register all of {sorted(fields)}")
+        for field in found:
+            names.update(name.upper() for name in field.accepted_env_vars)
+            if field.default_namespace_var is not None:
+                names.add(field.default_namespace_var.upper())
+    return frozenset(names)
 
 
 def readiness_targets() -> list[ReadinessTarget]:

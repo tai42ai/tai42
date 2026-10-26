@@ -11,7 +11,8 @@ layer could.
 ``_meta`` token value and every value inside a logged ``headers``/``env`` object —
 with the kit's record factory (``tai42_kit.logging.register_record_redactor``); the
 app and the CLI entrypoints install that factory at their scope
-(``tai42_kit.logging.install_record_redaction``).
+(``tai42_kit.logging.install_record_redaction``). :func:`follow_connector_meta_token_key`
+registers it again on every settings reset, so the rule follows the key the current env names.
 """
 
 from __future__ import annotations
@@ -20,7 +21,7 @@ import re
 
 from tai42_kit.logging import register_record_redactor
 
-from tai42_skeleton.connectors.settings import connector_adapter_settings
+from tai42_skeleton.connectors.settings import ConnectorAdapterSettings, connector_adapter_settings
 
 _REDACTION = "**********"
 
@@ -212,3 +213,15 @@ def register_connector_log_redaction(meta_key: str | None = None) -> None:
         markers=(key, *_HEADERS_ENV_MARKERS),
         redact=lambda text: _redact_text(text, key, pattern),
     )
+
+
+def follow_connector_meta_token_key() -> None:
+    """Register the connector-secret rule again on the key the current env names; a settings-reset hook.
+
+    Every env apply resets the settings (the boot env bridge, a reload's build, a discarded
+    build's restore), so from each reset on the rule masks the key the connectors write tokens
+    under. The key is read from a fresh ``ConnectorAdapterSettings``, never the cached accessor:
+    an instance cached here is built before a reload build's settings mark and so carries the
+    epoch the build replaces. A malformed key raises here, failing the env apply that named it.
+    """
+    register_connector_log_redaction(ConnectorAdapterSettings().meta_token_key)

@@ -3,8 +3,7 @@ worker bus, and the refusal is loud and NAMES ``TAI_BUS_REDIS_URL``; it also ref
 bus-enabled config whose fleet apply window is below the retire's drain floor, naming
 both settings and the floor, and a multi-worker server with no shared sub-MCP
 registration store, naming ``SUB_MCP_REDIS_URL``, or no shared hooks registry, naming
-``HOOKS_REDIS_URL``, including when the config-dir ``.env`` empties the bus or a store
-URL the process env sets; and a config that registers a task backend over an in-memory hooks
+``HOOKS_REDIS_URL``; and a config that registers a task backend over an in-memory hooks
 registry, naming ``HOOKS_REDIS_URL``, from both ``tai serve`` and ``tai backend worker``.
 
 Each refusal spawns a REAL entrypoint (``tai serve`` / ``tai backend worker`` / a
@@ -12,11 +11,15 @@ factory-string ``uvicorn``) and asserts a nonzero exit whose stderr names the re
 setting — driven through :func:`spawn_expect_refusal`, which runs the process OUTSIDE
 the stack readiness framework (a process that serves instead of refusing is the
 failure). The busless refusals run with no ``TAI_BUS_REDIS_URL`` (:func:`_busless_env`);
-the other refusals configure a bus URL that is never dialled (:func:`_bus_env`), since
-each fires before the process joins the bus. The one supported busless shape — a
+the other refusals configure a bus URL nothing listens on (:func:`_bus_env`): the boot
+env bridge's one census read on it fails with a warning, and each refusal fires before the
+process joins the bus. The one supported busless shape — a
 single-worker, file-mode, no-backend server — is the positive control and boots through
 the normal stack path. A multi-worker server whose bus and stores are kept only in the
-config-dir ``.env`` boots too, since each worker reads its boot rules under the stored env.
+config-dir ``.env`` boots too, since each worker reads its boot rules under the stored env;
+and one whose process env sets them boots on those values even when the ``.env`` sets them
+empty, since a key the deployment sets wins over its stored copy. A config-dir ``.env`` that
+carries a deployment / boot-identity (X-band) key refuses the boot, naming the key.
 
 Backend-agnostic: no scenario runs a backend worker or exercises a backend seam, so
 the whole module is ``backendless``.
@@ -102,16 +105,16 @@ def _busless_env(
     return env
 
 
-# A bus URL no test dials: every rule that :func:`_bus_env` serves fires before the
-# process joins the bus.
-_UNDIALLED_REDIS = "redis://127.0.0.1:1/0"
+# A bus URL nothing listens on: the boot env bridge's census read on it fails with a warning,
+# and every rule that :func:`_bus_env` serves fires before the process joins the bus.
+_UNREACHABLE_REDIS = "redis://127.0.0.1:1/0"
 
 
 def _bus_env(tmp_path: Path, config_dir: Path, manifest: Path) -> dict[str, str]:
-    """The :func:`_busless_env` child env plus a ``TAI_BUS_REDIS_URL`` that is never
-    dialled, for the refusals that need the bus rules satisfied to reach their own."""
+    """The :func:`_busless_env` child env plus a ``TAI_BUS_REDIS_URL`` nothing listens on,
+    for the refusals that need the bus rules satisfied to reach their own."""
     env = _busless_env(tmp_path, config_dir, manifest)
-    env[_BUS_VAR] = _UNDIALLED_REDIS
+    env[_BUS_VAR] = _UNREACHABLE_REDIS
     return env
 
 
@@ -237,8 +240,7 @@ def test_apply_window_below_the_drain_floor_refuses(tmp_path: Path) -> None:
     """A6: ``tai serve`` with the bus configured, a 20 s fleet apply window and the default
     10 s drain budget refuses nonzero: a reload's retire may legally spend three drains
     (30 s), so the refusal names both settings and the floor. The rule fires at the
-    ``app_context`` seam before the process joins the bus, so the configured bus URL is
-    never dialled."""
+    ``app_context`` seam before the process joins the bus."""
     config_dir, manifest = _seed_config(tmp_path, backend=False)
     env = _bus_env(tmp_path, config_dir, manifest)
     env["TAI_BUS_APPLY_TIMEOUT"] = "20"
@@ -273,7 +275,7 @@ def test_multiworker_serve_without_sub_mcp_store_refuses(tmp_path: Path) -> None
     store refuses nonzero, naming ``SUB_MCP_REDIS_URL``: the in-memory store is
     per-process, so a sub-MCP app registered through one worker would not be served by
     its siblings. Each worker refuses at its boot, after the stored env is applied and
-    before it joins the bus, so the configured bus URL is never dialled, and the master
+    before it joins the bus, so no worker ever joins the configured bus, and the master
     exits with the workers' startup-failure status."""
     config_dir, manifest = _seed_config(tmp_path, backend=False)
     env = _bus_env(tmp_path, config_dir, manifest)
@@ -308,10 +310,10 @@ def test_multiworker_serve_without_hooks_store_refuses(tmp_path: Path) -> None:
     registry refuses nonzero, naming ``HOOKS_REDIS_URL``: the in-memory registry is
     per-process, so a hook registered through one worker would not run for the events its
     siblings accept. Each worker refuses at its boot, before it joins the bus or opens a
-    store, so no configured Redis URL is ever dialled."""
+    store."""
     config_dir, manifest = _seed_config(tmp_path, backend=False)
     env = _bus_env(tmp_path, config_dir, manifest)
-    env["SUB_MCP_REDIS_URL"] = _UNDIALLED_REDIS
+    env["SUB_MCP_REDIS_URL"] = _UNREACHABLE_REDIS
     argv = [
         tai_bin(),
         "serve",
@@ -330,89 +332,29 @@ def test_multiworker_serve_without_hooks_store_refuses(tmp_path: Path) -> None:
     assert "4 workers" in stderr, stderr
 
 
-@pytest.mark.parametrize(
-    ("store_var", "other_store_var"),
-    [
-        pytest.param("SUB_MCP_REDIS_URL", "HOOKS_REDIS_URL", id="sub-mcp"),
-        pytest.param("HOOKS_REDIS_URL", "SUB_MCP_REDIS_URL", id="hooks"),
-    ],
-)
-@pytest.mark.needs("no-stack", "process", "cli", "files", "setting:TAI_DEFAULT_REDIS_URL=unset")
-def test_multiworker_serve_refuses_a_store_url_the_stored_env_empties(
-    tmp_path: Path, store_var: str, other_store_var: str
+@pytest.mark.needs("no-stack", "process", "cli", "files", "setting:TAI_BUS_REDIS_URL=unset")
+def test_a_stored_env_carrying_an_x_band_key_refuses_the_boot(tmp_path: Path) -> None:
+    """``tai serve`` whose config-dir ``.env`` carries ``TAI_CONFIG_MODE`` refuses nonzero,
+    naming the key: the config mode is deployment identity no stored env carries, and the boot
+    env bridge refuses the stored env before applying any of it."""
+    config_dir, manifest = _seed_config(tmp_path, backend=False)
+    (config_dir / ".env").write_text("TAI_CONFIG_MODE=file\n", encoding="utf-8")
+    env = _busless_env(tmp_path, config_dir, manifest)
+    argv = [tai_bin(), "serve", "--host", "127.0.0.1", "--port", "0", "--manifest-path", str(manifest)]
+    stderr = spawn_expect_refusal(argv, env, config_dir)
+    assert "X-band) keys no profile or editor may set: TAI_CONFIG_MODE." in stderr, stderr
+
+
+def _serve_two_workers_until_both_join(
+    tmp_path: Path, infra: Infra, db: int, env: dict[str, str], manifest: Path
 ) -> None:
-    """``tai serve -w 2`` whose process env sets a store URL that the config-dir ``.env``
-    sets empty refuses nonzero, naming the setting: the stored env overrides the process
-    env at each worker's boot, so the store the workers would open is in-memory. Each
-    worker refuses before it joins the bus or opens a store, so no configured Redis URL
-    is ever dialled."""
-    config_dir, manifest = _seed_config(tmp_path, backend=False)
-    (config_dir / ".env").write_text(f"{store_var}=\n", encoding="utf-8")
-    env = _bus_env(tmp_path, config_dir, manifest)
-    env[store_var] = _UNDIALLED_REDIS
-    env[other_store_var] = _UNDIALLED_REDIS
-    argv = [
-        tai_bin(),
-        "serve",
-        "--host",
-        "127.0.0.1",
-        "--port",
-        "0",
-        "--workers",
-        "2",
-        "--stateless-http",
-        "--manifest-path",
-        str(manifest),
-    ]
-    stderr = spawn_expect_refusal(argv, env, config_dir)
-    assert store_var in stderr, stderr
-    assert "2 workers" in stderr, stderr
+    """Run ``tai serve -w 2`` under ``env`` until both workers hold a bus presence key on
+    Redis logical DB ``db``, then confirm it serves ``/health``; stop it either way.
 
-
-@pytest.mark.needs("no-stack", "process", "cli", "files", "setting:TAI_DEFAULT_REDIS_URL=unset")
-def test_multiworker_serve_refuses_a_bus_url_the_stored_env_empties(tmp_path: Path) -> None:
-    """``tai serve -w 2`` whose process env sets the bus URL that the config-dir ``.env``
-    sets empty refuses nonzero, naming the setting: the stored env overrides the process
-    env at each worker's boot, so every worker would come up on its own local bus. Each
-    worker refuses before it joins a bus or opens a store, so no configured Redis URL is
-    ever dialled."""
-    config_dir, manifest = _seed_config(tmp_path, backend=False)
-    (config_dir / ".env").write_text(f"{_BUS_VAR}=\n", encoding="utf-8")
-    env = _bus_env(tmp_path, config_dir, manifest)
-    env["SUB_MCP_REDIS_URL"] = _UNDIALLED_REDIS
-    env["HOOKS_REDIS_URL"] = _UNDIALLED_REDIS
-    argv = [
-        tai_bin(),
-        "serve",
-        "--host",
-        "127.0.0.1",
-        "--port",
-        "0",
-        "--workers",
-        "2",
-        "--stateless-http",
-        "--manifest-path",
-        str(manifest),
-    ]
-    stderr = spawn_expect_refusal(argv, env, config_dir)
-    assert _BUS_VAR in stderr, stderr
-    assert "2 workers" in stderr, stderr
-
-
-@pytest.mark.needs("process", "cli", "files", "store:redis", "setting:TAI_DEFAULT_REDIS_URL=unset")
-def test_multiworker_serve_boots_with_its_bus_only_in_the_stored_env(tmp_path: Path, infra: Infra) -> None:
-    """``tai serve -w 2`` whose process env carries no bus and no store URL, with all
-    three kept only in the config-dir ``.env``, boots and serves: each worker applies the
-    stored env before its boot rules, so both workers join the bus the stored env names."""
-    config_dir, manifest = _seed_config(tmp_path, backend=False)
-    db = infra.redis.allocate_db()
+    It runs from a directory with no ``.env``: ``tai serve`` loads a ``.env`` from its working
+    directory into its own env, which would make the stored keys deployment keys."""
     port = allocate_port()
     try:
-        url = infra.redis.url_for(db)
-        (config_dir / ".env").write_text(
-            f"{_BUS_VAR}={url}\nSUB_MCP_REDIS_URL={url}\nHOOKS_REDIS_URL={url}\n", encoding="utf-8"
-        )
-        env = _busless_env(tmp_path, config_dir, manifest, extra={"ACCESS_CONTROL_ENABLE": "false"})
         argv = [
             tai_bin(),
             "serve",
@@ -426,8 +368,6 @@ def test_multiworker_serve_boots_with_its_bus_only_in_the_stored_env(tmp_path: P
             "--manifest-path",
             str(manifest),
         ]
-        # Run from a directory with no ``.env``: ``tai serve`` loads a ``.env`` from its working
-        # directory into its own env, which would hand the bus to the master too.
         run_dir = tmp_path / "run"
         run_dir.mkdir()
         log_path = tmp_path / "serve.log"
@@ -443,7 +383,7 @@ def test_multiworker_serve_boots_with_its_bus_only_in_the_stored_env(tmp_path: P
                 presences = _presence_keys(infra, db)
                 return presences if presences == 2 else None
 
-            wait_for(joined, deadline=60.0, message="both workers never joined the bus the stored env names")
+            wait_for(joined, deadline=60.0, message="both workers never joined the bus")
             health = httpx.get(f"http://127.0.0.1:{port}/health", timeout=5.0)
             assert health.status_code == 200, f"{health.status_code} {health.text}"
             assert health.text.strip() == "OK"
@@ -457,6 +397,48 @@ def test_multiworker_serve_boots_with_its_bus_only_in_the_stored_env(tmp_path: P
                 proc.wait(timeout=5.0)
     finally:
         release_port(port)
+
+
+@pytest.mark.needs("process", "cli", "files", "store:redis", "setting:TAI_DEFAULT_REDIS_URL=unset")
+def test_multiworker_serve_keeps_the_deployment_bus_and_stores_the_stored_env_empties(
+    tmp_path: Path, infra: Infra
+) -> None:
+    """``tai serve -w 2`` whose process env sets the bus and both store URLs, with the
+    config-dir ``.env`` setting each of them empty, boots and serves on the deployment's
+    values: a key the deployment sets wins over its stored copy, so each worker reads its
+    boot rules with the bus and the stores the process env names and joins that bus."""
+    config_dir, manifest = _seed_config(tmp_path, backend=False)
+    (config_dir / ".env").write_text(f"{_BUS_VAR}=\nSUB_MCP_REDIS_URL=\nHOOKS_REDIS_URL=\n", encoding="utf-8")
+    db = infra.redis.allocate_db()
+    try:
+        url = infra.redis.url_for(db)
+        env = _busless_env(
+            tmp_path,
+            config_dir,
+            manifest,
+            extra={"ACCESS_CONTROL_ENABLE": "false", "SUB_MCP_REDIS_URL": url, "HOOKS_REDIS_URL": url},
+        )
+        env[_BUS_VAR] = url
+        _serve_two_workers_until_both_join(tmp_path, infra, db, env, manifest)
+    finally:
+        infra.redis.release_db(db)
+
+
+@pytest.mark.needs("process", "cli", "files", "store:redis", "setting:TAI_DEFAULT_REDIS_URL=unset")
+def test_multiworker_serve_boots_with_its_bus_only_in_the_stored_env(tmp_path: Path, infra: Infra) -> None:
+    """``tai serve -w 2`` whose process env carries no bus and no store URL, with all
+    three kept only in the config-dir ``.env``, boots and serves: each worker applies the
+    stored env before its boot rules, so both workers join the bus the stored env names."""
+    config_dir, manifest = _seed_config(tmp_path, backend=False)
+    db = infra.redis.allocate_db()
+    try:
+        url = infra.redis.url_for(db)
+        (config_dir / ".env").write_text(
+            f"{_BUS_VAR}={url}\nSUB_MCP_REDIS_URL={url}\nHOOKS_REDIS_URL={url}\n", encoding="utf-8"
+        )
+        env = _busless_env(tmp_path, config_dir, manifest, extra={"ACCESS_CONTROL_ENABLE": "false"})
+        _serve_two_workers_until_both_join(tmp_path, infra, db, env, manifest)
+    finally:
         infra.redis.release_db(db)
 
 
@@ -510,7 +492,7 @@ def test_backend_manifest_without_hooks_store_refuses(tmp_path: Path, argv_tail:
     ``app_context`` seam) and ``tai backend`` (the post-manifest-read check). The backend
     process matches the events it raises against its own registry, and an in-memory one
     holds none of the hooks registered through the server. The rule fires before the bus
-    is joined, so the configured bus URL is never dialled."""
+    is joined."""
     config_dir, manifest = _seed_config(tmp_path, backend=True)
     env = _bus_env(tmp_path, config_dir, manifest)
     argv = [tai_bin(), *argv_tail, "--manifest-path", str(manifest)]

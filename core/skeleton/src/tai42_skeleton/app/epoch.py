@@ -8,7 +8,9 @@ mutation of the live epoch and the process env restored exactly, so the old epoc
 keeps serving. The one build has two endings: a bus member swaps it in
 (:func:`build_and_swap_epoch`); a process that is not a bus member (a job child a
 backend worker forked) has no serving surface to swap into and discards the proven
-build (:func:`build_and_discard_epoch`), so the env is proven to build there too.
+build (:func:`build_and_discard_epoch`), so the env is proven to build there too. The
+stored env a build applies and a discard restores is kept by
+:mod:`~tai42_skeleton.app.applied_env`.
 
 The process spine stays process-lifetime and is deliberately NOT rebuilt per epoch:
 the ``TaiMCP`` identity, the worker bus + subscription, ``reload_gate``, the boot
@@ -47,6 +49,12 @@ from tai42_kit.settings import reset_all_settings, unbind_respawn_class_env
 from tai42_kit.settings.cache_registry import restamp_settings_born_after, settings_birth_mark
 
 from tai42_skeleton.app import epoch_defaults
+from tai42_skeleton.app.applied_env import (
+    applied_env_keys,
+    apply_env_and_reset_settings,
+    clear_applied_env,
+    restore_env,
+)
 from tai42_skeleton.app.epoch_retire import retire_epoch
 from tai42_skeleton.app.retired_generations import detach_retired_generations
 
@@ -56,6 +64,7 @@ if TYPE_CHECKING:
     from tai42_skeleton.app.admission import RequestAdmission
     from tai42_skeleton.app.server import ServingCore
     from tai42_skeleton.app.sub_mcp_app import SubAppLifespan
+    from tai42_skeleton.config.deployment_env import DeploymentOwnership
 
 logger = logging.getLogger(__name__)
 
@@ -357,11 +366,6 @@ _boot_stateless_http: bool | None = None
 # live ``_current`` during the build.
 _building_epoch: Epoch | None = None
 
-# The env keys the last successful build loaded, so the next build can drop a key
-# that the proposed env removed rather than leaving its stale value in os.environ —
-# mirrors ``_loaded_env_keys`` in the in-place reload path.
-_loaded_env_keys: set[str] = set()
-
 
 def current_epoch() -> Epoch:
     """The live serving generation, or a loud error before the worker lifespan installs the boot epoch.
@@ -424,10 +428,10 @@ def install_boot_core(core: ServingCore) -> Epoch:
     (:func:`attach_boot_serving_app`); an embedded / pure-``app_context`` caller
     needs no serving app. The boot epoch's number is the current client epoch.
     """
-    # ``_loaded_env_keys`` is owned by the cold-boot env bridge, which ran BEFORE this
-    # and populated it with the stored-env keys it applied; a later reload's removed-key
-    # reconciliation depends on those keys, so this must NOT reset it. Between contexts
-    # in one process ``clear_epoch`` clears it at teardown.
+    # The applied stored-env set (``applied_env.applied_env_keys``) is owned by the cold-boot
+    # env bridge, which ran BEFORE this and populated it with the stored-env keys it applied;
+    # a later reload's removed-key reconciliation depends on those keys, so this must NOT
+    # reset it. Between contexts in one process ``clear_epoch`` clears it at teardown.
     global _current
     _current = Epoch(number=current_client_epoch(), core=core)
     return _current
@@ -480,7 +484,7 @@ async def clear_epoch() -> None:
     Terminating its transports so a later lifespan in the same process starts
     from a clean slate.
     """
-    global _current, _serving_slot, _serving_app_builder, _boot_stateless_http, _loaded_env_keys
+    global _current, _serving_slot, _serving_app_builder, _boot_stateless_http
     current = _current
     if current is not None:
         await current.close_transports()
@@ -488,56 +492,9 @@ async def clear_epoch() -> None:
     _serving_slot = None
     _serving_app_builder = epoch_defaults.default_streamable_http_app
     _boot_stateless_http = None
-    _loaded_env_keys = set()
+    clear_applied_env()
     unbind_respawn_class_env()
     detach_retired_generations()
-
-
-def _apply_env(proposed: Mapping[str, str]) -> None:
-    """Apply the proposed env to ``os.environ``, dropping any previously loaded key it removed.
-
-    Removed-key reconciliation. Only keys a prior build loaded are dropped —
-    unrelated process env (PATH, the launcher's boot identity) is untouched.
-    """
-    global _loaded_env_keys
-    for key in _loaded_env_keys - set(proposed):
-        os.environ.pop(key, None)
-    os.environ.update(proposed)
-    _loaded_env_keys = set(proposed)
-
-
-def apply_env_and_reset_settings(proposed: Mapping[str, str]) -> None:
-    """Apply ``proposed`` to ``os.environ`` (removed-key reconciled) and clear the settings accessor caches.
-
-    So the next settings read resolves under it. The apply-then-reset pair the
-    epoch build and the cold-boot env bridge both cross — one authority, so boot
-    and reload resolve settings under the stored env identically (stored env
-    OVERRIDES container env on both, via ``_apply_env``'s ``os.environ.update``).
-    """
-    _apply_env(proposed)
-    reset_all_settings()
-
-
-def applied_env_keys() -> frozenset[str]:
-    """The names the last env apply set in ``os.environ``.
-
-    The stored env the boot bridge applied, or the proposed env an epoch build applied (a
-    failed build restores the previous set).
-    """
-    return frozenset(_loaded_env_keys)
-
-
-def _restore_env(snapshot: Mapping[str, str], loaded: set[str]) -> None:
-    """Restore ``os.environ`` exactly to ``snapshot`` on the failure branch.
-
-    The restore-on-failure ONLY counterpart of ``_apply_env`` (never a
-    with-block, which would restore on success too and defeat the stays-live
-    contract).
-    """
-    global _loaded_env_keys
-    os.environ.clear()
-    os.environ.update(snapshot)
-    _loaded_env_keys = loaded
 
 
 def _swap(new_epoch: Epoch) -> Epoch:
@@ -586,6 +543,7 @@ class _EpochBuild:
 
 async def _build_epoch(
     proposed_env: Mapping[str, str],
+    ownership: DeploymentOwnership,
     rebuild: Callable[[], Any] | None,
     build_serving_app: Callable[[Epoch], Awaitable[ASGIApp]] | None,
 ) -> _EpochBuild:
@@ -603,13 +561,13 @@ async def _build_epoch(
     build_serving_app = build_serving_app or epoch_defaults.default_build_serving_app
 
     snapshot = dict(os.environ)
-    loaded_before = set(_loaded_env_keys)
+    loaded_before = set(applied_env_keys())
 
     global _building_epoch
     new_epoch = Epoch(number=current_client_epoch())
     _building_epoch = new_epoch
     try:
-        apply_env_and_reset_settings(proposed_env)
+        apply_env_and_reset_settings(proposed_env, ownership)
         # Every settings instance read from here on is read under the proposed env for the
         # generation being built; the mark lets a commit stamp them with its epoch.
         settings_mark = settings_birth_mark()
@@ -637,11 +595,11 @@ async def _discard_build(new_epoch: Epoch, snapshot: dict[str, str], loaded_befo
     """Discard a generation built off to the side; the live epoch keeps serving with zero mutation.
 
     Drops every staged generation and re-derives the process caches from the untouched
-    committed state: the staged registrations are discarded, the env is restored exactly, the
-    settings accessor cache is cleared, and the route index is re-derived from the live route
-    registry (a partial reimport may have added routes — the spine route registry dedups and is
-    never rolled back). A lifespan the build entered belongs to the discarded generation and is
-    closed with it.
+    committed state: the staged registrations are discarded, the env is restored
+    (:func:`~tai42_skeleton.app.applied_env.restore_env`), the settings accessor cache is cleared,
+    and the route index is re-derived from the live route registry (a partial reimport may have
+    added routes — the spine route registry dedups and is never rolled back). A lifespan the
+    build entered belongs to the discarded generation and is closed with it.
     """
     from tai42_skeleton.access_control.role_gate import reset_route_index
     from tai42_skeleton.app.registry_staging import abort_staging_all
@@ -651,7 +609,7 @@ async def _discard_build(new_epoch: Epoch, snapshot: dict[str, str], loaded_befo
     # The discarded build's core is dropped, so the listed tool set reverts to the live
     # core's: a cache filled from the building core during the build never matches again.
     bump_tool_surface_generation()
-    _restore_env(snapshot, loaded_before)
+    restore_env(snapshot, loaded_before)
     reset_all_settings()
     reset_route_index()
     await new_epoch.close_transports()
@@ -660,6 +618,7 @@ async def _discard_build(new_epoch: Epoch, snapshot: dict[str, str], loaded_befo
 async def build_and_discard_epoch(
     proposed_env: Mapping[str, str],
     *,
+    ownership: DeploymentOwnership,
     rebuild: Callable[[], Any] | None = None,
     build_serving_app: Callable[[Epoch], Awaitable[ASGIApp]] | None = None,
 ) -> None:
@@ -671,7 +630,7 @@ async def build_and_discard_epoch(
     env is proven to build before the caller persists it. A failure is discarded, logged at
     ERROR and re-raised; a success is logged at INFO.
     """
-    build = await _build_epoch(proposed_env, rebuild, build_serving_app)
+    build = await _build_epoch(proposed_env, ownership, rebuild, build_serving_app)
     await _discard_build(build.epoch, build.env_snapshot, build.loaded_before)
     logger.info("epoch built under the proposed env and discarded: this process is not a bus member and swaps nothing")
 
@@ -679,6 +638,7 @@ async def build_and_discard_epoch(
 async def build_and_swap_epoch(
     proposed_env: Mapping[str, str],
     *,
+    ownership: DeploymentOwnership,
     bring_credentials_up_to_date: Callable[[], Awaitable[Any]] | None = None,
     rebuild: Callable[[], Any] | None = None,
     build_serving_app: Callable[[Epoch], Awaitable[ASGIApp]] | None = None,
@@ -722,7 +682,7 @@ async def build_and_swap_epoch(
     await (bring_credentials_up_to_date or epoch_defaults.default_bring_credentials_up_to_date)()
 
     establish_background_loops = establish_background_loops or epoch_defaults.default_establish_background_loops
-    build = await _build_epoch(proposed_env, rebuild, build_serving_app)
+    build = await _build_epoch(proposed_env, ownership, rebuild, build_serving_app)
     new_epoch, serving_app, settings_mark = build.epoch, build.serving_app, build.settings_mark
 
     retired = advance_client_epoch()

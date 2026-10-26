@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from tai42_skeleton.app.bus import WorkerKind
+
 from .base import _Facet
 
 if TYPE_CHECKING:
@@ -56,13 +58,14 @@ class LifecycleFacet(_Facet):
         """Block until the app has finished starting up."""
         await self._app._wait_until_ready()
 
-    def read_boot_manifest(self) -> ManifestImpl:
-        """Bridge the persisted env store into ``os.environ`` and read + validate the boot manifest under it.
+    async def read_boot_manifest(self, *, kind: WorkerKind = WorkerKind.serve) -> ManifestImpl:
+        """Build the worker bus, bridge the persisted env store into ``os.environ``, read + validate the boot manifest.
 
-        Names any still-dangling ``!ENV`` marker — the one cold-boot manifest
-        read every serving/backend entrypoint crosses.
+        ``kind`` is the worker kind this process joins the bus as. Names any still-dangling
+        ``!ENV`` marker — the one cold-boot manifest read every serving/backend entrypoint
+        crosses, and the call that must precede ``app_context``.
         """
-        return self._app._read_boot_manifest()
+        return await self._app._read_boot_manifest(kind=kind)
 
 
 class AdminFacet(_Facet):

@@ -281,22 +281,26 @@ async def test_skip_import_preserves_conversation_secret_and_token(
     assert ac["errors"] == [], ac
 
 
+# A deployment X-band key: the readiness sentinel path the launcher reads from the process env.
+_X_BAND_KEY = "TAI_READY_SENTINEL_PATH"
+
+
 @pytest.mark.needs("process")
 async def test_backup_import_env_x_band_key_is_refused(fresh_stack: Callable[..., TaiStack]) -> None:
-    """A crafted backup whose env section carries a deployment X-band key (``TAI_SUPERVISED``)
-    is REFUSED loudly: backup env restore rides ``apply_env_change`` (``backup/sections.py``),
-    so the shared boundary validator fires there with no backup-specific code. The
-    section report carries the error naming the offending key, and nothing lands — the X-band
-    value never reaches the store, nor does the sibling key in the same (atomically refused)
-    section (validate-before-write)."""
+    """A crafted backup whose env section carries a deployment X-band key
+    (``TAI_READY_SENTINEL_PATH``) is REFUSED loudly: backup env restore rides
+    ``apply_env_change`` (``backup/sections.py``), so the shared boundary validator fires
+    there with no backup-specific code. The section report carries the error naming the
+    offending key, and nothing lands — the X-band value never reaches the store, nor does the
+    sibling key in the same (atomically refused) section (validate-before-write)."""
     target = fresh_stack(build_backup_source_stack)
     api = target.api()
     before = (await api.get("/api/config/env", retry_on_reloading=True))["env"]
-    assert "TAI_SUPERVISED" not in before
+    assert _X_BAND_KEY not in before
 
     document = {
         "version": 1,
-        "sections": {"env": {"E2E_BACKUP_OK": "harmless", "TAI_SUPERVISED": "spoofed-shape"}},
+        "sections": {"env": {"E2E_BACKUP_OK": "harmless", _X_BAND_KEY: "spoofed-sentinel"}},
         "errors": {},
     }
     result = await api.post(
@@ -305,11 +309,11 @@ async def test_backup_import_env_x_band_key_is_refused(fresh_stack: Callable[...
     assert result["ok"] is False, f"an X-band backup env import must not report ok: {result}"
     errors = result["sections"]["env"]["errors"]
     assert errors, f"the env section report carried no error: {result}"
-    assert any("TAI_SUPERVISED" in str(err) for err in errors), f"the refusal did not name the X-band key: {errors}"
+    assert any(_X_BAND_KEY in str(err) for err in errors), f"the refusal did not name the X-band key: {errors}"
 
     # Nothing landed — the whole section was refused before any write.
     after = (await api.get("/api/config/env", retry_on_reloading=True))["env"]
-    assert "TAI_SUPERVISED" not in after, f"the X-band value leaked into the stored env: {after}"
+    assert _X_BAND_KEY not in after, f"the X-band value leaked into the stored env: {after}"
     assert after.get("E2E_BACKUP_OK") != "harmless", f"a refused section still wrote a sibling key: {after}"
 
 

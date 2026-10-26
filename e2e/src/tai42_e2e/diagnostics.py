@@ -1,6 +1,6 @@
 """Failure diagnostics: on a failed test that used a stack, attach the tail of
-each process log, the rendered manifest, the masked env map, and the port table
-so the failure is actionable from a CI page without a re-run."""
+each process log, the rendered manifest, the masked deployment and stored env maps,
+and the port table so the failure is actionable from a CI page without a re-run."""
 
 from __future__ import annotations
 
@@ -49,8 +49,15 @@ def _mask(key: str, value: str) -> str:
 def _stack_report(stack: TaiStack) -> str:
     lines = [f"=== stack {stack.config.name!r} ({stack.config.topology.value}) ==="]
     lines.append(f"app_ports={stack.app_ports} metrics_port={stack.metrics_port} metrics_dir={stack.metrics_dir}")
-    lines.append("env:")
+    lines.append("deployment env:")
     for key, value in sorted(stack.config.env.items()):
+        lines.append(f"  {key}={_mask(key, value)}")
+    for process, env in sorted(stack.config.process_env.items()):
+        lines.append(f"deployment env of {process} only:")
+        for key, value in sorted(env.items()):
+            lines.append(f"  {key}={_mask(key, value)}")
+    lines.append("stored env (seed):")
+    for key, value in sorted(stack.config.stored_env.items()):
         lines.append(f"  {key}={_mask(key, value)}")
     lines.append("manifest:")
     lines.append("  " + repr(stack.config.manifest))

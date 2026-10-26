@@ -26,7 +26,7 @@ from tai42_contract.settings_profiles import SettingsProfileBody
 # ``bus_settings`` is imported for its registration side effect — the apply's recycle
 # classification reflects only IMPORTED settings classes, and TAI_BUS_* are recycle-class.
 import tai42_skeleton.app.bus_settings  # noqa: F401
-from tai42_skeleton.app import epoch as epoch_mod
+from tai42_skeleton.app import applied_env
 from tai42_skeleton.app.bus import WorkerRow
 from tai42_skeleton.app.epoch import Epoch
 from tai42_skeleton.app.instance import app
@@ -39,6 +39,7 @@ from tai42_skeleton.app.recycle import (
     RecycleTimeoutError,
     orchestrate_recycle,
 )
+from tai42_skeleton.config.deployment_env import DeploymentOwnership
 from tai42_skeleton.config.service import ConfigService, ProfileApplyOutcome
 from tai42_skeleton.operations import config as config_ops
 
@@ -91,18 +92,19 @@ def _process_state_restored(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     yield
     os.environ.clear()
     os.environ.update(snapshot)
-    epoch_mod._loaded_env_keys = set()
+    applied_env._loaded_env_keys = set()
 
 
 class _ProfileStore:
     async def get_active_body(self, name: str) -> SettingsProfileBody:
         assert name == PROFILE
-        return SettingsProfileBody(env={"TAI_BUS_NAMESPACE": "new"}, secret_keys=[])
+        return SettingsProfileBody(env={"TAI_BUS_ACK_TIMEOUT": "7"}, secret_keys=[])
 
 
 class _DroppingBus(FakeBus):
-    """A fake bus that answers the census once (the apply's pre-swap read) and then drops:
-    every later census read raises the transport error a refused connection gives."""
+    """A fake bus that answers the apply's two census reads before the swap (the deployment
+    ownership and the expected membership) and then drops: every later census read raises
+    the transport error a refused connection gives."""
 
     def __init__(self) -> None:
         super().__init__(origin="serve-applier")
@@ -110,7 +112,7 @@ class _DroppingBus(FakeBus):
 
     async def census(self) -> list[WorkerRow]:
         self._reads += 1
-        if self._reads > 1:
+        if self._reads > 2:
             raise RedisConnectionError("Error 111 connecting to redis:6379. Connection refused.")
         return await super().census()
 
@@ -131,12 +133,12 @@ class _Pipeline(ConfigService):
     """The real apply pipeline over fakes; the ``@previous`` snapshot and the build do
     nothing. The roll either stops at ``backend-1`` after recycling ``backend-0``, exactly
     as the orchestration raises, or (``outage``) is the REAL orchestration over a bus that
-    drops after the apply's pre-swap census read."""
+    drops after the apply's census reads before the swap."""
 
     applied: list[ProfileApplyOutcome]
 
     async def apply_replace_env(self, profile_env: dict[str, str], **kwargs: Any) -> ProfileApplyOutcome:
-        async def swap(env: dict[str, str]) -> Epoch:
+        async def swap(env: dict[str, str], *, ownership: DeploymentOwnership) -> Epoch:
             return Epoch(number=0)
 
         async def save_previous(_stored: dict[str, str]) -> None:
@@ -155,12 +157,11 @@ def _install_pipeline(
     monkeypatch: pytest.MonkeyPatch, *, outage: bool = False
 ) -> tuple[list[FakeConfigStore], list[ProfileApplyOutcome]]:
     """Each door's apply gets a fresh store holding the old env, so every apply carries the recycle-class diff."""
-    monkeypatch.setenv("TAI_SUPERVISED", "harness")
     stores: list[FakeConfigStore] = []
     applied: list[ProfileApplyOutcome] = []
 
     def from_app(_cls: type[ConfigService]) -> ConfigService:
-        store = FakeConfigStore(env={"TAI_BUS_NAMESPACE": "old"})
+        store = FakeConfigStore(env={"TAI_BUS_ACK_TIMEOUT": "5"})
         stores.append(store)
         bus = _DroppingBus() if outage else FakeBus(origin="serve-applier")
         pipeline = _Pipeline(
@@ -225,7 +226,7 @@ async def test_a_stopped_roll_answers_200_with_its_report_on_every_door(monkeypa
     assert len(applied) == 3
     assert all(outcome.self_exit_armed is False for outcome in applied)
     # Every door's env persisted before its roll ran.
-    assert [store.env for store in stores] == [{"TAI_BUS_NAMESPACE": "new"}] * 3
+    assert [store.env for store in stores] == [{"TAI_BUS_ACK_TIMEOUT": "7"}] * 3
 
 
 def _assert_outage_report(report: dict[str, Any]) -> None:
@@ -261,4 +262,4 @@ async def test_a_bus_outage_during_the_roll_answers_200_with_the_stop_on_every_d
 
     assert len(applied) == 3
     assert all(outcome.self_exit_armed is False for outcome in applied)
-    assert [store.env for store in stores] == [{"TAI_BUS_NAMESPACE": "new"}] * 3
+    assert [store.env for store in stores] == [{"TAI_BUS_ACK_TIMEOUT": "7"}] * 3

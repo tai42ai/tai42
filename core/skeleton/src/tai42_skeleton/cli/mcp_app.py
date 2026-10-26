@@ -12,7 +12,8 @@ from typing import Any, cast
 
 import click
 import uvicorn
-from dotenv import load_dotenv
+from dotenv import find_dotenv
+from tai42_cli.boot_env import load_boot_dotenv
 from tai42_kit.logging import install_record_redaction, logging_settings, setup_logging
 from tai42_kit.utils.runtime.uvicorn_util import parse_and_validate_uvicorn_args
 
@@ -68,10 +69,12 @@ def create_app():
 
     assert_multiproc_value_class()
 
-    # This CLI-configured worker keeps its root logger in sync across config
-    # reloads. The public factory registers nothing, so an embedded host's root
-    # logger stays untouched.
-    instance.register_cli_logging_reload()
+    # This CLI-configured worker keeps its root logger on the applied env: once the
+    # boot env bridge has applied the stored env, and across config reloads; fastmcp's
+    # settings are read again once the bridge has applied it. The public factory
+    # registers nothing, so an embedded host's root logger and fastmcp settings stay
+    # untouched.
+    instance.register_cli_process_state()
 
     # This CLI-owned worker owns its whole logging surface, so the connector-secret
     # redactor covers every record in the process, not just the tai logger family.
@@ -113,8 +116,10 @@ async def run_stdio():
     assert_multiproc_value_class()
 
     app = instance.build_app()
-    # This CLI-configured process keeps its root logger in sync across config reloads.
-    instance.register_cli_logging_reload()
+    # This CLI-configured process keeps its root logger on the applied env: once the
+    # boot env bridge has applied the stored env, and across config reloads; fastmcp's
+    # settings are read again once the bridge has applied it.
+    instance.register_cli_process_state()
     # stdio has no swappable serving surface and no fleet, so a profile apply / reload
     # is refused loudly rather than silently applied to a surface it cannot swap.
     app.lifecycle.on_reload(_refuse_stdio_profile_apply)
@@ -122,10 +127,10 @@ async def run_stdio():
     # redactor covers every record in the process, not just the tai logger family.
     register_connector_log_redaction()
     install_record_redaction(scope="process")
-    # Bridge the persisted env store into ``os.environ`` and resolve the manifest
-    # under it in one seam, so a store-only ``!ENV ${VAR}`` marker resolves to its
-    # real value before ``start()`` probes any mount.
-    manifest = app.lifecycle.read_boot_manifest()
+    # Build the worker bus, bridge the persisted env store into ``os.environ`` and
+    # resolve the manifest under it in one seam, so a store-only ``!ENV ${VAR}``
+    # marker resolves to its real value before ``start()`` probes any mount.
+    manifest = await app.lifecycle.read_boot_manifest()
     async with app.app_context(manifest):
         await app.run_async(transport="stdio")
     return 0
@@ -528,13 +533,13 @@ def cli(
 def main() -> None:
     """The process entry point: bootstrap env and logging, then run the ``tai serve`` CLI."""
     if config_mode() == ConfigMode.file:
-        load_dotenv()
+        load_boot_dotenv(find_dotenv())
 
     # Configure the root logger at process start, right after the env bootstrap, so
     # ``TAI_LOG_LEVEL`` from a local ``.env`` takes effect. Covers the master process,
     # the ``stdio`` path (``run_stdio``), and the debug path (``run_debug``);
     # ``basicConfig``'s default handler writes to stderr, never the stdout protocol
-    # stream. In a non-file config mode ``load_dotenv`` is skipped but this still runs
+    # stream. In a non-file config mode the ``.env`` load is skipped but this still runs
     # — the settings read the environment directly.
     setup_logging(logging_settings())
 

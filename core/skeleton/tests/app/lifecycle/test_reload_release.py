@@ -8,20 +8,24 @@ import logging
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Any, cast
 
 import fakeredis
 import pytest
+from tai42_contract.errors import ClientDisconnectedError
 from tai42_kit.llm.checkpoint.checkpoint_registry import checkpoint_registry
 from tai42_kit.llm.store.store_registry import store_registry
 from tai42_kit.settings import bind_respawn_class_env
 
 import tai42_skeleton.app.bus as bus_module
+from tai42_skeleton.app import applied_env
 from tai42_skeleton.app import epoch as epoch_mod
 from tai42_skeleton.app.bus import SlotLostError, WorkerBus, WorkerKind
 from tai42_skeleton.app.bus_settings import BusRedisSettings, BusSettings
 from tai42_skeleton.app.reload_gate import reload_gate
+from tai42_skeleton.config.deployment_env import DeploymentOwnership, fleet_deployment_ownership
 
+from ..._fakes.bus import FakeBus
 from ..._fakes.kit_redis import KitFakeRedis
 from ._doubles import _Mixin
 
@@ -51,11 +55,12 @@ async def test_the_reload_closes_the_store_when_the_checkpoint_close_fails(monke
     await store_registry()._get_or_init_resource("k", _store_resource)
     built: list[dict[str, str]] = []
 
-    async def _build(env: dict[str, str]) -> Any:
+    async def _build(env: dict[str, str], *, ownership: DeploymentOwnership) -> Any:
         built.append(env)
 
     monkeypatch.setattr(epoch_mod, "build_and_swap_epoch", _build)
     mixin = _Mixin()
+    mixin._bus = cast("Any", FakeBus(origin="serve-1"))
     mixin._config_manager = _EnvConfig()  # pyright: ignore[reportAttributeAccessIssue]
     mixin._serving_loop = asyncio.get_running_loop()
 
@@ -71,17 +76,59 @@ async def test_the_reload_releases_then_builds(monkeypatch: pytest.MonkeyPatch) 
     async def _release(**kwargs: Any) -> None:
         order.append("release")
 
-    async def _build(env: dict[str, str]) -> Any:
+    async def _build(env: dict[str, str], *, ownership: DeploymentOwnership) -> Any:
         order.append("build")
 
     monkeypatch.setattr("tai42_skeleton.app.lifecycle.release_loop_bound_resources", _release)
     monkeypatch.setattr(epoch_mod, "build_and_swap_epoch", _build)
     mixin = _Mixin()
+    mixin._bus = cast("Any", FakeBus(origin="serve-1"))
     mixin._config_manager = _EnvConfig()  # pyright: ignore[reportAttributeAccessIssue]
     mixin._serving_loop = asyncio.get_running_loop()
 
     assert await asyncio.to_thread(mixin._reload_config) == {"status": "ok", "env_keys": 1, "awaiting_respawn": []}
     assert order == ["release", "build"]
+
+
+class _OutageBus(FakeBus):
+    """A bus that answers until ``down`` is set, then fails its census the way a severed bus does."""
+
+    down = False
+
+    async def census(self) -> list[Any]:
+        if self.down:
+            raise ClientDisconnectedError("bus down")
+        return await super().census()
+
+
+async def test_a_reload_while_the_bus_cannot_answer_applies_by_the_names_last_read(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    owned: list[bool] = []
+
+    async def _release(**kwargs: Any) -> None:
+        return None
+
+    async def _build(env: dict[str, str], *, ownership: DeploymentOwnership) -> Any:
+        owned.append(ownership.owns("RELOAD_TEST_SIBLING_ONLY"))
+
+    monkeypatch.setattr("tai42_skeleton.app.lifecycle.release_loop_bound_resources", _release)
+    monkeypatch.setattr(epoch_mod, "build_and_swap_epoch", _build)
+    bus = _OutageBus(origin="serve-1", remotes=["backend-1"])
+    bus.rows[1].deployment_keys = ["RELOAD_TEST_SIBLING_ONLY"]
+    await fleet_deployment_ownership(bus)
+    bus.down = True
+    mixin = _Mixin()
+    mixin._bus = cast("Any", bus)
+    mixin._config_manager = _EnvConfig()  # pyright: ignore[reportAttributeAccessIssue]
+    mixin._serving_loop = asyncio.get_running_loop()
+
+    with caplog.at_level(logging.WARNING):
+        result = await asyncio.to_thread(mixin._reload_config)
+
+    assert result["status"] == "ok"
+    assert owned == [True]
+    assert any("'reload_config'" in r.getMessage() for r in caplog.records if r.levelno == logging.WARNING)
 
 
 async def test_a_gated_reload_that_blocks_the_serving_loop_keeps_the_bus_slot(
@@ -106,7 +153,7 @@ async def test_a_gated_reload_that_blocks_the_serving_loop_keeps_the_bus_slot(
     async def _release(**kwargs: Any) -> None:
         return None
 
-    async def _blocking_build(env: dict[str, str]) -> Any:
+    async def _blocking_build(env: dict[str, str], *, ownership: DeploymentOwnership) -> Any:
         time.sleep(ttl * 2.5)
 
     monkeypatch.setattr("tai42_skeleton.app.lifecycle.release_loop_bound_resources", _release)
@@ -121,6 +168,7 @@ async def test_a_gated_reload_that_blocks_the_serving_loop_keeps_the_bus_slot(
         reconnect_backoff_initial=0.02,
         reconnect_backoff_max=0.05,
     )
+    mixin._bus = bus
     readies: list[str] = []
 
     async def _apply(_op: dict, *, deadline: float) -> None:
@@ -171,12 +219,13 @@ async def test_the_reload_states_the_recycle_class_keys_moved_off_their_bound_va
     monkeypatch.setenv("LOG_LEVEL", "info")
     bind_respawn_class_env()
 
-    async def _build(env: dict[str, str]) -> Any:
-        epoch_mod.apply_env_and_reset_settings(env)
+    async def _build(env: dict[str, str], *, ownership: DeploymentOwnership) -> Any:
+        applied_env.apply_env_and_reset_settings(env, ownership)
 
     monkeypatch.setattr(epoch_mod, "build_and_swap_epoch", _build)
-    monkeypatch.setattr(epoch_mod, "_loaded_env_keys", set())
+    monkeypatch.setattr(applied_env, "_loaded_env_keys", set())
     mixin = _Mixin()
+    mixin._bus = cast("Any", FakeBus(origin="serve-1"))
     mixin._config_manager = _RecycleEnvConfig()  # pyright: ignore[reportAttributeAccessIssue]
     mixin._serving_loop = asyncio.get_running_loop()
 

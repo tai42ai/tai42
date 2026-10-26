@@ -16,11 +16,12 @@ from tai42_kit.settings import cache_registry
 from tai42_kit.settings.cache_registry import register_settings_reset
 from tai42_kit.utils import worker_secret_capability as gate_state
 
+from tai42_skeleton.app import applied_env, registry_staging
 from tai42_skeleton.app import epoch as epoch_mod
-from tai42_skeleton.app import registry_staging
 from tai42_skeleton.app.epoch import Epoch, build_and_swap_epoch, current_epoch
 from tai42_skeleton.app.instance import build_app
 from tai42_skeleton.app.route_registry import route_registry
+from tai42_skeleton.config.deployment_env import DeploymentOwnership
 from tai42_skeleton.connectors.providers import registry as connector_registry
 from tai42_skeleton.monitoring import registry as monitoring_registry
 from tai42_skeleton.operations.registry import operation_registry
@@ -44,16 +45,16 @@ class _StagingRefusedError(RuntimeError):
 def _isolated_epoch() -> Iterator[None]:
     """A boot epoch to keep serving, and the spine globals restored after."""
     saved = {name: getattr(epoch_mod, name) for name in ("_current", "_serving_slot")}
-    loaded_before = set(epoch_mod._loaded_env_keys)
+    loaded_before = set(applied_env._loaded_env_keys)
     epoch_mod._current = Epoch(number=current_client_epoch(), serving_app=None)
     epoch_mod._serving_slot = {}
-    epoch_mod._loaded_env_keys = {"TAI_EPOCH_ENV_RESTORE_LOADED"}
+    applied_env._loaded_env_keys = {"TAI_EPOCH_ENV_RESTORE_LOADED"}
     try:
         yield
     finally:
         for name, value in saved.items():
             setattr(epoch_mod, name, value)
-        epoch_mod._loaded_env_keys = loaded_before
+        applied_env._loaded_env_keys = loaded_before
 
 
 def _no_open_staged_generation() -> bool:
@@ -78,14 +79,16 @@ async def _never_built(_epoch: Epoch) -> ASGIApp:  # pragma: no cover - the buil
 async def _assert_restored_after(proposed: dict[str, str], error: type[Exception]) -> None:
     live = current_epoch()
     env_before = dict(os.environ)
-    loaded_before = set(epoch_mod._loaded_env_keys)
+    loaded_before = set(applied_env._loaded_env_keys)
 
     with pytest.raises(error):
-        await build_and_swap_epoch(proposed, rebuild=lambda: None, build_serving_app=_never_built)
+        await build_and_swap_epoch(
+            proposed, rebuild=lambda: None, build_serving_app=_never_built, ownership=DeploymentOwnership()
+        )
 
     assert dict(os.environ) == env_before
     assert _MARKER not in os.environ
-    assert epoch_mod._loaded_env_keys == loaded_before
+    assert applied_env._loaded_env_keys == loaded_before
     assert current_epoch() is live
     assert _no_open_staged_generation()
 

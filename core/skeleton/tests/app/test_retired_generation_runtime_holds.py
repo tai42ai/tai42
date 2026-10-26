@@ -26,6 +26,7 @@ import pytest
 import uvloop
 from sse_starlette import EventSourceResponse
 
+from tai42_skeleton.app import applied_env
 from tai42_skeleton.app import epoch as epoch_mod
 from tai42_skeleton.app.instance import app
 from tai42_skeleton.app.reload_gate import reload_gate
@@ -84,7 +85,7 @@ def _served_process(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     yield
     os.environ.clear()
     os.environ.update(snapshot)
-    epoch_mod._loaded_env_keys = set()
+    applied_env._loaded_env_keys = set()
     reset_all_settings()
 
 

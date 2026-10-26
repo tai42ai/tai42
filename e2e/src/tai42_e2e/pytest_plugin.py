@@ -186,6 +186,7 @@ def fresh_stack(infra: Infra, tmp_path_factory: pytest.TempPathFactory) -> Itera
         *,
         cwd_overrides: dict[str, str] | None = None,
         env_overrides: dict[str, str] | None = None,
+        process_env_overrides: dict[str, dict[str, str]] | None = None,
         resource_kwargs: dict[str, Any] | None = None,
         relays: Sequence[TcpRelay] | None = None,
         allocate_checkpoint_db: bool = False,
@@ -205,11 +206,23 @@ def fresh_stack(infra: Infra, tmp_path_factory: pytest.TempPathFactory) -> Itera
             for relay in owned_relays:
                 relay.stop()
             raise
-        if cwd_overrides or env_overrides:
+        if cwd_overrides or env_overrides or process_env_overrides:
             from dataclasses import replace
 
+            # ``env_overrides`` joins the deployment env: each key reaches every process of the
+            # stack through its process env, set by the deployment. ``process_env_overrides``
+            # joins one named process's deployment env only.
             new_env = {**config.env, **(env_overrides or {})}
-            config = replace(config, env=new_env, cwd_overrides=cwd_overrides or config.cwd_overrides)
+            new_process_env = {
+                name: {**config.process_env.get(name, {}), **overrides}
+                for name, overrides in (process_env_overrides or {}).items()
+            }
+            config = replace(
+                config,
+                env=new_env,
+                process_env={**config.process_env, **new_process_env},
+                cwd_overrides=cwd_overrides or config.cwd_overrides,
+            )
         stack = TaiStack(config, infra, resources, root)
         for relay in owned_relays:
             stack.attach_relay(relay)

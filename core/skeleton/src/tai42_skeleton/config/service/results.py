@@ -13,13 +13,14 @@ from tai42_skeleton.app.bus.ops import FleetOp
 from tai42_skeleton.operations._broadcast import fleet_fanout
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
     from contextlib import AbstractContextManager
 
     from tai42_contract.app.responses import AwaitingWorker
     from tai42_contract.manifest import TaiMCPConfig
+    from tai42_kit.settings import EnvReader
 
-    from tai42_skeleton.app.bus import FleetResult, LocalApplyResult, WorkerIdentity
+    from tai42_skeleton.app.bus import FleetResult, LocalApplyResult, WorkerIdentity, WorkerRow
     from tai42_skeleton.app.recycle import RecycleReport
 
 
@@ -75,13 +76,17 @@ class _ReloadAdmin(Protocol):
 
 
 class _FleetPublisher(Protocol):
-    """The worker-bus publish surface the pipeline broadcasts through, plus the op-start census it reads.
+    """The worker-bus surface the pipeline publishes through, and the census and env-reader reads it judges by.
 
     The census is read BEFORE each local apply — ``publish`` censuses only when it is called, so the
     membership a report is judged against is captured through ``expected_at_start`` and handed back in.
     """
 
     async def expected_at_start(self) -> dict[str, int]: ...
+
+    async def census(self) -> list[WorkerRow]: ...
+
+    async def env_readers(self, digests: Sequence[str]) -> dict[str, tuple[EnvReader, ...]]: ...
 
     async def publish(
         self,

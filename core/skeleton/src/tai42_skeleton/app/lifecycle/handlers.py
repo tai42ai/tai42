@@ -16,8 +16,8 @@ logger = logging.getLogger(__name__)
 class LifecycleHandlersMixin(LifecycleState):
     """Registries and runners for the app's lifecycle handlers.
 
-    Holds the startup, reload, post-swap, fleet-op-applied, template-evicted, shutdown, and
-    tool-reloader registries and the runners that fire each set at the right phase.
+    Holds the startup, reload, post-swap, fleet-op-applied, template-evicted, boot-env, shutdown,
+    and tool-reloader registries and the runners that fire each set at the right phase.
     """
 
     def _on_startup(self, func: Callable):
@@ -56,6 +56,22 @@ class LifecycleHandlersMixin(LifecycleState):
             raise TypeError(f"template eviction handler {func.__qualname__!r} must be synchronous")
         self._template_evicted_handlers[f"{func.__module__}.{func.__qualname__}"] = func
         return func
+
+    def _on_boot_env_applied(self, func: Callable[[], Any]) -> Callable[[], Any]:
+        """Register a synchronous handler fired once the cold-boot env bridge has applied the stored env.
+
+        Keyed by qualified name so a repeat registration replaces rather than accumulates. A
+        coroutine function is refused: the bridge calls it inline.
+        """
+        if inspect.iscoroutinefunction(func):
+            raise TypeError(f"boot env handler {func.__qualname__!r} must be synchronous")
+        self._boot_env_handlers[f"{func.__module__}.{func.__qualname__}"] = func
+        return func
+
+    def _fire_boot_env_applied(self) -> None:
+        """Call every boot env handler, in registration order; a raising handler propagates."""
+        for handler in list(self._boot_env_handlers.values()):
+            handler()
 
     def _fire_template_evicted(self, eviction: TemplateEviction) -> None:
         """Call every template eviction handler, in registration order; a raising handler propagates."""

@@ -265,6 +265,8 @@ async def test_recycle_dispatch_writes_recycling_state_before_arming(monkeypatch
         joined_at=now,
         beat_at=now,
         state=WorkerState.ready,
+        deployment_keys=(),
+        env_readers="",
     )
     await client.aclose()
 

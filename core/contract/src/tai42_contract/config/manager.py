@@ -19,9 +19,10 @@ independent of the active config mode.
 
 from __future__ import annotations
 
+import os
 import re
 from abc import ABC, abstractmethod
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager
 from typing import Any, Final
 
@@ -34,6 +35,25 @@ FILE_CONFIG_MODE: Final = "file"
 CONFIG_MODE_PATTERN: Final = re.compile(r"[a-z][a-z0-9_]*")
 """A mode name (fullmatch): any mode but ``file`` resolves to the module ``tai42_config_<mode>.manager``,
 so it must be a valid module-name segment; the pattern also fixes the canonical lowercase spelling."""
+
+CONFIG_DIR_ENV: Final = "TAI_CONFIG_DIR_PATH"
+"""The env name of the ``file`` provider's config dir, which holds its stored env and its manifest."""
+
+DEFAULT_CONFIG_DIR: Final = "/app"
+"""The ``file`` provider's config dir when ``TAI_CONFIG_DIR_PATH`` is unset or blank."""
+
+FILE_STORED_ENV_NAME: Final = ".env"
+"""The ``file`` provider's stored env: the file of this name in its config dir."""
+
+
+def file_config_dir(environ: Mapping[str, str]) -> str:
+    """The ``file`` provider's config dir under ``environ``: ``TAI_CONFIG_DIR_PATH`` stripped, else ``/app``."""
+    return environ.get(CONFIG_DIR_ENV, "").strip() or DEFAULT_CONFIG_DIR
+
+
+def file_stored_env_path(environ: Mapping[str, str]) -> str:
+    """The ``file`` provider's stored env under ``environ``: ``.env`` in :func:`file_config_dir`."""
+    return os.path.join(file_config_dir(environ), FILE_STORED_ENV_NAME)
 
 
 class ConfigManager(ABC):

@@ -129,7 +129,7 @@ async def fleet_reload_config(targets: list[str] | None) -> FleetResult:
     recycle-class keys whose value now differs from the one that worker bound (at boot, or when the
     plugin that declares them was loaded) — the soft
     restart carries every hot key in place, and those keys take effect only when the worker is
-    respawned through the deployment's supervisor (on a bare deployment, a server restart). This
+    respawned through the deployment's supervisor. This
     operation ERROR-logs one line naming every such worker and its keys.
     """
     # ``targets`` is validated at the HTTP edge (the route's ``_reload_targets``

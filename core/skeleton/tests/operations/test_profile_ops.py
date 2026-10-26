@@ -12,12 +12,15 @@ pipeline's ordering / failure contract is oracled in ``tests/config/test_profile
 from __future__ import annotations
 
 import copy
+import logging
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from tai42_contract.app import tai42_app
+from tai42_contract.errors import ClientDisconnectedError
 from tai42_contract.settings_profiles import SettingsProfileBody
+from tai42_contract.settings_profiles.errors import SettingsProfileNotFoundError
 from tai42_contract.versioning import VersionedStore
 from tai42_contract.versioning.errors import (
     DocumentExistsError,
@@ -27,8 +30,9 @@ from tai42_contract.versioning.errors import (
 from tai42_contract.versioning.models import DocumentRecord, DocumentVersion
 
 from tai42_skeleton.app import graceful_exit, instance
+from tai42_skeleton.app.bus import WorkerRow
 from tai42_skeleton.app.recycle import RECYCLED, TIMED_OUT, RecycleReport, RecycleRow, RecycleStop
-from tai42_skeleton.config.recycle_policy import CapabilityReport, Shape
+from tai42_skeleton.config.deployment_env import fleet_deployment_ownership
 from tai42_skeleton.config.service import ConfigService, ProfileApplyOutcome
 from tai42_skeleton.operations import BadRequestError, NotFoundError, NotSupportedError, OperationResponse
 from tai42_skeleton.operations import config as config_ops
@@ -37,6 +41,7 @@ from tai42_skeleton.settings_profiles.store import SettingsProfileStoreView
 from .._fakes.bus import FakeBus
 from .._fakes.combo_check_app import CHECK_DOCUMENT, booted_check_app, clean_server
 from .._fakes.write_span import ExclusiveWriteStore
+from .._helpers import recapture_deployment_env
 from ..config.fake_pipeline import ComboChecks
 
 
@@ -142,13 +147,15 @@ def view() -> SettingsProfileStoreView:
 def _wire(monkeypatch: pytest.MonkeyPatch, view: SettingsProfileStoreView) -> None:
     monkeypatch.setattr(config_ops, "component_store_configured", lambda _component: True)
     monkeypatch.setattr(config_ops, "settings_profile_store", lambda: view)
-    # ``put_profile`` runs the shared boundary validator; wire it to an empty
-    # deployment so only an X-band / dangling payload is refused.
+    # ``put_profile`` and ``diff_profile`` judge ownership over this process's own deployment,
+    # a one-worker fleet, so only an X-band, deployment-set or dangling payload is refused.
+    bus = FakeBus()
+    monkeypatch.setattr(instance.app, "_bus", bus)
     monkeypatch.setattr(
         config_ops.ConfigService,
         "from_app",
         classmethod(
-            lambda cls: ConfigService(config_manager=_FakeManager(), admin=None, bus=None, combo_check=ComboChecks())  # type: ignore[arg-type]
+            lambda cls: ConfigService(config_manager=_FakeManager(), admin=None, bus=bus, combo_check=ComboChecks())  # type: ignore[arg-type]
         ),
     )
 
@@ -205,10 +212,10 @@ async def test_put_rejects_reserved_at_prefixed_name() -> None:
 
 
 async def test_put_refuses_an_x_band_key_naming_it() -> None:
-    # A profile carrying a deployment X-band key (the supervision marker) is refused at
+    # A profile carrying a deployment X-band key (the readiness sentinel path) is refused at
     # save time, naming the key — never persisted.
-    with pytest.raises(BadRequestError, match="TAI_SUPERVISED"):
-        await config_ops.put_profile("p", **_body(env={"TAI_SUPERVISED": "compose"}, secret_keys=[]))
+    with pytest.raises(BadRequestError, match="TAI_READY_SENTINEL_PATH"):
+        await config_ops.put_profile("p", **_body(env={"TAI_READY_SENTINEL_PATH": "/tmp/ready"}, secret_keys=[]))
 
 
 async def test_put_refuses_a_dangling_env_marker(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -222,11 +229,25 @@ async def test_put_refuses_a_dangling_env_marker(monkeypatch: pytest.MonkeyPatch
         config_ops.ConfigService,
         "from_app",
         classmethod(
-            lambda cls: ConfigService(config_manager=_Manager(), admin=None, bus=None, combo_check=ComboChecks())  # type: ignore[arg-type]
+            lambda cls: ConfigService(config_manager=_Manager(), admin=None, bus=FakeBus(), combo_check=ComboChecks())  # type: ignore[arg-type]
         ),
     )
     with pytest.raises(BadRequestError, match="NEEDED"):
         await config_ops.put_profile("p", **_body(env={"OTHER": "1"}, secret_keys=[]))
+
+
+async def test_put_refuses_a_key_the_deployment_sets_naming_it(
+    monkeypatch: pytest.MonkeyPatch, view: SettingsProfileStoreView
+) -> None:
+    # The deployment's value wins over a stored one, so a profile that would set a key the
+    # deployment sets could never apply: it is refused at save time and never persisted.
+    monkeypatch.setenv("PROFILE_PUT_DEPLOYED", "deployed")
+    recapture_deployment_env()
+
+    with pytest.raises(BadRequestError, match=r"set by the deployment: PROFILE_PUT_DEPLOYED"):
+        await config_ops.put_profile("p", **_body(env={"PROFILE_PUT_DEPLOYED": "profile"}, secret_keys=[]))
+    with pytest.raises(SettingsProfileNotFoundError):
+        await view.get_profile("p")
 
 
 # -- get / list / delete -----------------------------------------------------
@@ -263,22 +284,98 @@ async def test_diff_reports_added_removed_changed_recycle_and_refused(
     monkeypatch: pytest.MonkeyPatch, view: SettingsProfileStoreView
 ) -> None:
     await view.create_profile(
-        "p", SettingsProfileBody(description="d", env={"KEEP": "1", "CH": "new", "ADD": "a"}, secret_keys=[])
+        "p",
+        SettingsProfileBody(
+            description="d",
+            env={
+                "KEEP": "1",
+                "CH": "new",
+                "ADD": "a",
+                "TAI_BUS_REDIS_URL": "redis://bus.invalid/1",
+                "TAI_BUS_NAMESPACE": "other-fleet",
+                "DEPLOYED_SET": "from-profile",
+                "DEPLOYED_CARRIED": "same",
+            },
+            secret_keys=[],
+        ),
     )
-    monkeypatch.setattr(config_ops, "_stored_env", lambda: {"KEEP": "1", "CH": "old", "GONE": "g"})
-    # Deterministic classification: CH is a recycle-class key; GONE is refused upfront.
-    monkeypatch.setattr(config_ops, "_reload_class_by_env_var", lambda: {"CH": "recycle", "KEEP": "hot"})
+    monkeypatch.setenv("DEPLOYED_SET", "from-deployment")
+    monkeypatch.setenv("DEPLOYED_CARRIED", "from-deployment")
+    monkeypatch.setenv("DEPLOYED_DROPPED", "from-deployment")
+    monkeypatch.delenv("TAI_BUS_NAMESPACE", raising=False)
+    recapture_deployment_env()
     monkeypatch.setattr(
         config_ops,
-        "capability_report",
-        lambda: CapabilityReport(shape=Shape.compose, recycle_supported=True, refused_keys=["GONE"], census_kinds=[]),
+        "_stored_env",
+        lambda: {
+            "KEEP": "1",
+            "CH": "old",
+            "GONE": "g",
+            "TAI_BUS_REDIS_URL": "redis://bus.invalid/0",
+            "DEPLOYED_CARRIED": "same",
+            "DEPLOYED_DROPPED": "stale",
+        },
+    )
+    # Deterministic classification: CH is a recycle-class key.
+    monkeypatch.setattr(config_ops, "_recycle_class_keys", lambda keys: sorted(key for key in keys if key == "CH"))
+    diff = await config_ops.diff_profile("p")
+    assert diff["added"] == ["ADD", "DEPLOYED_SET", "TAI_BUS_NAMESPACE"]
+    assert diff["removed"] == ["DEPLOYED_DROPPED", "GONE"]
+    assert diff["changed"] == [
+        {"key": "CH", "old": "old", "new": "new"},
+        {"key": "TAI_BUS_REDIS_URL", "old": "redis://bus.invalid/0", "new": "redis://bus.invalid/1"},
+    ]
+    assert diff["recycle_keys"] == ["CH"]
+    # The bus URL and namespace are refused on every deployment, and a key the deployment sets is
+    # refused when the profile sets it; dropping or carrying a stored copy of one is not.
+    assert diff["refused_keys"] == ["DEPLOYED_SET", "TAI_BUS_NAMESPACE", "TAI_BUS_REDIS_URL"]
+
+
+async def test_diff_classifies_a_key_under_any_spelling_the_settings_layer_reads(
+    monkeypatch: pytest.MonkeyPatch, view: SettingsProfileStoreView
+) -> None:
+    # The settings layer reads env names case-insensitively, and a nested group under its JSON
+    # name: each is the same setting as its upper-case field name.
+    import tai42_skeleton.app.bus_settings  # noqa: F401  — registers the bus settings groups
+
+    await view.create_profile(
+        "p",
+        SettingsProfileBody(
+            description="d",
+            env={
+                "tai_bus_namespace": "other-fleet",
+                "TAI_BUS_REDIS": '{"redis_url": "redis://bus.invalid/3"}',
+                "tai_bus_redis_max_connections": "9",
+            },
+            secret_keys=[],
+        ),
+    )
+    monkeypatch.delenv("TAI_BUS_NAMESPACE", raising=False)
+    monkeypatch.delenv("TAI_BUS_REDIS", raising=False)
+    monkeypatch.delenv("TAI_BUS_REDIS_MAX_CONNECTIONS", raising=False)
+    recapture_deployment_env()
+    monkeypatch.setattr(config_ops, "_stored_env", dict)
+    diff = await config_ops.diff_profile("p")
+    assert diff["recycle_keys"] == ["TAI_BUS_REDIS", "tai_bus_namespace", "tai_bus_redis_max_connections"]
+    assert diff["refused_keys"] == ["TAI_BUS_REDIS", "tai_bus_namespace"]
+
+
+async def test_diff_classifies_a_dropped_dead_copy_as_no_recycle(
+    monkeypatch: pytest.MonkeyPatch, view: SettingsProfileStoreView
+) -> None:
+    # The deployment sets a recycle-class key whose stale copy the profile drops: the row is
+    # removed, but the reload produces no change, so nothing recycles and nothing is refused.
+    await view.create_profile("p", SettingsProfileBody(description="d", env={"KEEP": "1"}, secret_keys=[]))
+    monkeypatch.setenv("DEPLOYED_RECYCLE", "from-deployment")
+    recapture_deployment_env()
+    monkeypatch.setattr(config_ops, "_stored_env", lambda: {"KEEP": "1", "DEPLOYED_RECYCLE": "stale"})
+    monkeypatch.setattr(
+        config_ops, "_recycle_class_keys", lambda keys: sorted(key for key in keys if key == "DEPLOYED_RECYCLE")
     )
     diff = await config_ops.diff_profile("p")
-    assert diff["added"] == ["ADD"]
-    assert diff["removed"] == ["GONE"]
-    assert diff["changed"] == [{"key": "CH", "old": "old", "new": "new"}]
-    assert diff["recycle_keys"] == ["CH"]
-    assert diff["refused_keys"] == ["GONE"]
+    assert diff["removed"] == ["DEPLOYED_RECYCLE"]
+    assert diff["recycle_keys"] == []
+    assert diff["refused_keys"] == []
 
 
 async def test_diff_previews_the_marks_the_apply_writes(
@@ -291,12 +388,7 @@ async def test_diff_previews_the_marks_the_apply_writes(
         "more", SettingsProfileBody(description="d", env={"FOO": "x"}, secret_keys=["FOO", "BAR"])
     )
     monkeypatch.setattr(config_ops, "_stored_env", lambda: {"FOO": "x", "TAI_ENV_SECRET_KEYS": "FOO"})
-    monkeypatch.setattr(config_ops, "_reload_class_by_env_var", dict)
-    monkeypatch.setattr(
-        config_ops,
-        "capability_report",
-        lambda: CapabilityReport(shape=Shape.bare, recycle_supported=False, refused_keys=[], census_kinds=[]),
-    )
+    monkeypatch.setattr(config_ops, "_recycle_class_keys", lambda keys: [])
     same = await config_ops.diff_profile("same")
     assert (same["added"], same["removed"], same["changed"]) == ([], [], [])
     more = await config_ops.diff_profile("more")
@@ -532,7 +624,7 @@ async def test_apply_maps_refusal_to_400(monkeypatch: pytest.MonkeyPatch, view: 
 
     class _Svc:
         async def apply_replace_env(self, env, *, save_previous):  # type: ignore[no-untyped-def]
-            raise ValueError("Refusing to apply: SUB_MCP_REDIS_URL is deployment-pinned.")
+            raise ValueError("Refusing to apply: SUB_MCP_REDIS_URL is set by the deployment.")
 
     monkeypatch.setattr(config_ops.ConfigService, "from_app", classmethod(lambda cls: _Svc()))
     with pytest.raises(BadRequestError, match="SUB_MCP_REDIS_URL"):
@@ -587,6 +679,11 @@ class _MarkedManager(ExclusiveWriteStore):
 
 
 def _live_check_service(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Serve the booted check app's combo check through a service over a one-worker fleet.
+
+    The booted app joins the bus its boot builds; the service judges ownership over its own.
+    """
+    monkeypatch.setattr(instance.app, "_bus", None)
     monkeypatch.setattr(
         config_ops.ConfigService,
         "from_app",
@@ -594,7 +691,7 @@ def _live_check_service(monkeypatch: pytest.MonkeyPatch) -> None:
             lambda cls: ConfigService(
                 config_manager=_MarkedManager(),  # type: ignore[arg-type]
                 admin=None,  # type: ignore[arg-type]
-                bus=None,  # type: ignore[arg-type]
+                bus=FakeBus(),  # type: ignore[arg-type]
                 combo_check=instance.app.extensions.check_combo,
             )
         ),
@@ -624,3 +721,61 @@ async def test_apply_profile_refuses_an_env_the_combo_check_refuses(
         with pytest.raises(BadRequestError) as caught:
             await config_ops.apply_profile("p")
         assert str(caught.value) == _REFUSAL
+
+
+# -- the bus cannot answer ------------------------------------------------------
+
+
+class _OutageBus(FakeBus):
+    """A bus that answers until ``down`` is set, then fails its census the way a severed bus does."""
+
+    down = False
+
+    async def census(self) -> list[WorkerRow]:
+        if self.down:
+            raise ClientDisconnectedError("bus down")
+        return await super().census()
+
+
+async def _sibling_read_then_outage(monkeypatch: pytest.MonkeyPatch, key: str) -> None:
+    bus = _OutageBus(origin="serve-x", remotes=["backend-1"])
+    bus.rows[1].deployment_keys = [key]
+    await fleet_deployment_ownership(bus)
+    bus.down = True
+    monkeypatch.setattr(instance.app, "_bus", bus)
+    monkeypatch.setattr(
+        config_ops.ConfigService,
+        "from_app",
+        classmethod(
+            lambda cls: ConfigService(config_manager=_FakeManager(), admin=None, bus=bus, combo_check=ComboChecks())  # type: ignore[arg-type]
+        ),
+    )
+
+
+async def test_diff_during_an_outage_refuses_a_key_last_read_as_a_sibling_s(
+    monkeypatch: pytest.MonkeyPatch, view: SettingsProfileStoreView, caplog: pytest.LogCaptureFixture
+) -> None:
+    await view.create_profile(
+        "p", SettingsProfileBody(description="d", env={"KEEP": "1", "SIBLING_SET": "v"}, secret_keys=[])
+    )
+    await _sibling_read_then_outage(monkeypatch, "SIBLING_SET")
+    monkeypatch.setattr(config_ops, "_stored_env", lambda: {"KEEP": "1"})
+    monkeypatch.setattr(config_ops, "_recycle_class_keys", lambda keys: [])
+
+    with caplog.at_level(logging.WARNING):
+        diff = await config_ops.diff_profile("p")
+
+    assert diff["added"] == ["SIBLING_SET"]
+    assert diff["refused_keys"] == ["SIBLING_SET"]
+    assert any("'diff_profile'" in r.getMessage() for r in caplog.records if r.levelno == logging.WARNING)
+
+
+async def test_put_during_an_outage_refuses_a_key_last_read_as_a_sibling_s(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    await _sibling_read_then_outage(monkeypatch, "SIBLING_SET")
+
+    with caplog.at_level(logging.WARNING), pytest.raises(BadRequestError, match="set by the deployment: SIBLING_SET"):
+        await config_ops.put_profile("p", **_body(env={"SIBLING_SET": "v"}, secret_keys=[]))
+
+    assert any("'put_profile'" in r.getMessage() for r in caplog.records if r.levelno == logging.WARNING)

@@ -55,7 +55,7 @@ async def test_a_reload_after_a_hand_edit_names_the_recycle_class_key_until_the_
     before = _kinds(stack)
 
     # The out-of-band edit: the stored .env gains a new value for a recycle-class key.
-    stack.config.env[_RECYCLE_VAR] = uniq("handedit").upper()
+    stack.config.stored_env[_RECYCLE_VAR] = uniq("handedit").upper()
     child_env.render_env_file(stack)
 
     report = await api.post("/api/fleet/reload-config", json={"targets": None}, retry_on_reloading=True)

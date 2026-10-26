@@ -12,11 +12,12 @@ import httpx
 
 from tai42_e2e.binaries import _probe_tolerating_reloading
 from tai42_e2e.child_env import needs_bus
-from tai42_e2e.waiting import wait_for, wait_for_async
+from tai42_e2e.waiting import WaitTimeoutError, wait_for, wait_for_async
 
 if TYPE_CHECKING:
-    from collections.abc import Collection, Coroutine, Mapping
+    from collections.abc import Awaitable, Callable, Collection, Coroutine, Mapping
 
+    from tai42_e2e.procs import ProcessHandle
     from tai42_e2e.stack import TaiStack
 
 
@@ -150,9 +151,24 @@ async def drain_gate_coro(stack: TaiStack, app_ports: list[int], deadline: float
     # A profile that carries no ``e2e_worker_info`` probe never fires an immediate
     # gated tool call in its tests, so its gate needs no draining here — the
     # full-census wait is that profile's convergence.
-    async with stack.mcp(auth=stack.auth_token) as client:
-        if "e2e_worker_info" not in await client.tool_names():
-            return
+    names: list[str] = []
+
+    async def list_tools() -> list[str]:
+        async with stack.mcp(auth=stack.auth_token) as client:
+            return await client.tool_names()
+
+    async def listed() -> bool:
+        got = await _probe_tolerating_reloading(
+            lambda: _unless_its_process_exits(stack, stack.app_ports[0], list_tools)
+        )
+        if got is None:
+            return False
+        names.extend(got)
+        return True
+
+    await wait_for_async(listed, deadline=deadline, message="the serve fleet never answered its tool list")
+    if "e2e_worker_info" not in names:
+        return
     # Positive confirmation the boot self-resync gate has cleared: each serve worker
     # answers a real ``e2e_worker_info`` call non-``reloading`` before the fixture
     # returns, so a test firing a gated request the instant the stack is ready never
@@ -167,9 +183,86 @@ async def drain_gate_coro(stack: TaiStack, app_ports: list[int], deadline: float
         await stack.wait_workers(workers, port=port, deadline=deadline * max(1, workers))
 
 
-def early_exit_detail(stack: TaiStack) -> str | None:
-    for handle in stack._procs.values():
+async def _unless_its_process_exits[T](stack: TaiStack, port: int, call: Callable[[], Awaitable[T]]) -> T | None:
+    """Await one probe ``call`` against the process serving ``port``, or ``None`` when that
+    process is not up to answer it.
+
+    A supervised worker can be recycled while the fleet boots. A server that stops
+    mid-request never answers the request it held, and the MCP client would wait out its
+    whole read bound, so the call is cancelled the moment its process exits; a respawned
+    process is polled only once its ``/health`` answers. A graceful stop closes the
+    listener before the process exits, so a call that fails while its process still runs
+    counts as the process going away when it stops answering ``/health``
+    (:func:`_going_away`); a call that fails while its process keeps answering raises.
+    Either way the enclosing wait polls again. A process that exited and stays down raises
+    its early-exit detail."""
+    handle = stack.process_on_port(port)
+    if not await _health_ok(stack, port):
+        _raise_on_early_exit(stack, port)
+        return None
+    task = asyncio.ensure_future(call())
+    while True:
+        done, _ = await asyncio.wait({task}, timeout=0.2)
+        if done:
+            if task.exception() is not None and await _going_away(stack, port, handle):
+                # The call failed because its process went away under it.
+                _raise_on_early_exit(stack, port)
+                return None
+            return task.result()
         if not handle.is_running():
+            task.cancel()
+            await asyncio.wait({task})
+            _raise_on_early_exit(stack, port)
+            return None
+
+
+# How long a probe call that failed waits for its still-running process to show it is going
+# away. A server stopping gracefully (uvicorn on SIGTERM) closes its listener on its main
+# loop's next tick, a tenth of a second, and drains before the process exits; the window
+# covers that tick many times over.
+_GOING_AWAY_WINDOW = 1.0
+
+
+async def _going_away(stack: TaiStack, port: int, handle: ProcessHandle) -> bool:
+    """Whether the process ``handle`` a probe call failed against is going away.
+
+    It is when it has exited or, within :data:`_GOING_AWAY_WINDOW`, its ``/health`` on
+    ``port`` stops answering; a process that keeps answering for the whole window is up,
+    so the call's failure is its own."""
+
+    async def gone() -> bool:
+        return not handle.is_running() or not await _health_ok(stack, port)
+
+    try:
+        await wait_for_async(gone, deadline=_GOING_AWAY_WINDOW, message=f"the process on port {port} stays up")
+    except WaitTimeoutError:
+        return False
+    return True
+
+
+async def _health_ok(stack: TaiStack, port: int) -> bool:
+    try:
+        async with httpx.AsyncClient(timeout=2.0) as client:
+            return (await client.get(f"{stack.base_url(port)}/health")).status_code == 200
+    except httpx.HTTPError:
+        return False
+
+
+def _raise_on_early_exit(stack: TaiStack, port: int) -> None:
+    early = early_exit_detail(stack)
+    if early is not None:
+        raise RuntimeError(f"probe on port {port}: {early}")
+
+
+def early_exit_detail(stack: TaiStack) -> str | None:
+    """The first process that exited and stays down, with its log tail, or ``None``.
+
+    A supervised process the supervisor is bringing back (``TaiStack._supervisor_respawns``)
+    is churn, not a failure."""
+    with stack._supervisor_lock:
+        for handle in stack._procs.values():
+            if handle.is_running() or stack._supervisor_respawns(handle):
+                continue
             return f"process {handle.name!r} exited early (code {handle.poll()}):\n{handle.log_tail()}"
     return None
 
@@ -276,7 +369,9 @@ async def wait_workers(stack: TaiStack, n: int, *, port: int | None = None, dead
         # self-resync gate (the client raises before a session exists, so the tool
         # call's own ``retry_on_reloading`` cannot cover it); treat that envelope as
         # "not ready yet" and keep polling.
-        data = await _probe_tolerating_reloading(worker_info)
+        data = await _probe_tolerating_reloading(
+            lambda: _unless_its_process_exits(stack, port if port is not None else stack.app_ports[0], worker_info)
+        )
         if data is None:
             return False
         seen[int(data["pid"])] = str(data["state_digest"])

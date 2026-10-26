@@ -40,7 +40,7 @@ def _restore_process_env():
     """A successful build+swap leaves its applied env live in ``os.environ``. Snapshot
     and restore it around each test, and drop any route the reload added to the
     process-global route registry so it never leaks into another suite's gates."""
-    from tai42_skeleton.app import epoch as epoch_mod
+    from tai42_skeleton.app import applied_env
     from tai42_skeleton.app.route_registry import route_registry
 
     snapshot = dict(os.environ)
@@ -48,7 +48,7 @@ def _restore_process_env():
     yield
     os.environ.clear()
     os.environ.update(snapshot)
-    epoch_mod._loaded_env_keys = set()
+    applied_env._loaded_env_keys = set()
     reset_all_settings()
     for key in list(route_registry._routes):
         if key not in routes_before:

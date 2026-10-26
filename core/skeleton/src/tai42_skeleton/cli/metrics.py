@@ -7,9 +7,10 @@ network policy, never via in-process auth.
 
 import click
 import uvicorn
-from dotenv import load_dotenv
+from dotenv import find_dotenv
 from fastapi import FastAPI
 from fastapi.responses import Response
+from tai42_cli.boot_env import load_boot_dotenv
 from tai42_kit.logging import logging_settings, setup_logging
 
 from tai42_skeleton.config.config_mode import ConfigMode, config_mode
@@ -49,7 +50,7 @@ def create_app() -> FastAPI:
 def main(host: str | None, port: int | None):
     """Serve the Prometheus metrics endpoint."""
     if config_mode() == ConfigMode.file:
-        load_dotenv()
+        load_boot_dotenv(find_dotenv())
 
     # Configure the root logger at process start, right after the env bootstrap, so
     # ``TAI_LOG_LEVEL`` takes effect; the metrics server runs in-process here, so

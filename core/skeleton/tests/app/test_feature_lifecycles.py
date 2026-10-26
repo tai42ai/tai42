@@ -86,13 +86,13 @@ def test_the_served_read_is_scoped_to_the_booting_generation(poll_starts: list[b
 @pytest.fixture
 def _restore_process_env():
     """A successful build+swap leaves its applied env live; restore it and the settings caches after."""
-    from tai42_skeleton.app import epoch as epoch_mod
+    from tai42_skeleton.app import applied_env
 
     snapshot = dict(os.environ)
     yield
     os.environ.clear()
     os.environ.update(snapshot)
-    epoch_mod._loaded_env_keys = set()
+    applied_env._loaded_env_keys = set()
     reset_all_settings()
 
 

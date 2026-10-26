@@ -27,6 +27,7 @@ from tai42_kit.settings.cache_registry import (
 )
 
 from tai42_skeleton.app import admission as admission_mod
+from tai42_skeleton.app import applied_env
 from tai42_skeleton.app import epoch as epoch_mod
 from tai42_skeleton.app import epoch_retire as epoch_retire_mod
 from tai42_skeleton.app import retired_generations as retired_mod
@@ -40,6 +41,7 @@ from tai42_skeleton.app.epoch import (
 from tai42_skeleton.app.instance import build_app
 from tai42_skeleton.app.lifecycle import TaiMCPLifecycleMixin
 from tai42_skeleton.app.reload_gate import hold_recorded, reload_gate
+from tai42_skeleton.config.deployment_env import DeploymentOwnership
 
 from ._served_app import RELOAD_SWAP_BOUND_S
 
@@ -102,13 +104,13 @@ def _reset_epoch_state() -> Iterator[None]:
     the suite-wide ``_preserve_generation_globals`` fixture restores them after each test."""
     for name in ("_current", "_serving_slot"):
         setattr(epoch_mod, name, None)
-    epoch_mod._loaded_env_keys = set()
+    applied_env._loaded_env_keys = set()
     try:
         yield
     finally:
         for name in ("_current", "_serving_slot", "_building_epoch"):
             setattr(epoch_mod, name, None)
-        epoch_mod._loaded_env_keys = set()
+        applied_env._loaded_env_keys = set()
         retired_mod.detach_retired_generations()
 
 
@@ -142,6 +144,7 @@ async def test_failed_build_keeps_old_surface_and_restores_env_and_raises_loudly
             {"TAI_EPOCH_TEST_KEY": "proposed"},
             rebuild=_rebuild,
             build_serving_app=_serve("should-not-build"),
+            ownership=DeploymentOwnership(),
         )
 
     # Old surface still serving: the slot + the current-epoch pointer are untouched.
@@ -163,6 +166,7 @@ async def test_failed_build_does_not_advance_the_live_epoch_pointer() -> None:
             {"K": "v"},
             rebuild=lambda: (_ for _ in ()).throw(ValueError("boom")),
             build_serving_app=_serve("x"),
+            ownership=DeploymentOwnership(),
         )
 
     assert current_epoch().number == boot_number
@@ -215,6 +219,7 @@ async def test_route_audit_failure_in_rebuild_keeps_old_epoch_serving(monkeypatc
             {"K": "v"},
             rebuild=_rebuild,
             build_serving_app=_serve("should-not-build"),
+            ownership=DeploymentOwnership(),
         )
 
     # Old surface still serving: the slot and the current-epoch pointer are untouched.
@@ -233,6 +238,7 @@ async def test_successful_build_flips_slot_and_epoch_pointer() -> None:
         {"TAI_EPOCH_LIVE": "yes"},
         rebuild=lambda: None,
         build_serving_app=_serve("new-app"),
+        ownership=DeploymentOwnership(),
     )
 
     assert current_epoch() is new
@@ -250,6 +256,7 @@ async def test_env_applied_on_build_stays_live_on_success() -> None:
         {"TAI_EPOCH_STAYS": "live-value"},
         rebuild=lambda: None,
         build_serving_app=_serve("new-app"),
+        ownership=DeploymentOwnership(),
     )
 
     assert os.environ["TAI_EPOCH_STAYS"] == "live-value"
@@ -264,6 +271,7 @@ async def test_removed_key_reconciled_across_builds() -> None:
         {"TAI_EPOCH_DROPPED": "first"},
         rebuild=lambda: None,
         build_serving_app=_serve("a"),
+        ownership=DeploymentOwnership(),
     )
     assert os.environ["TAI_EPOCH_DROPPED"] == "first"
 
@@ -272,6 +280,7 @@ async def test_removed_key_reconciled_across_builds() -> None:
         {"TAI_EPOCH_OTHER": "second"},
         rebuild=lambda: None,
         build_serving_app=_serve("b"),
+        ownership=DeploymentOwnership(),
     )
     assert "TAI_EPOCH_DROPPED" not in os.environ
     assert os.environ["TAI_EPOCH_OTHER"] == "second"
@@ -317,6 +326,7 @@ async def test_retire_cancels_periodic_loops_and_calls_drain_epoch(monkeypatch: 
         rebuild=lambda: None,
         build_serving_app=_serve("new-app"),
         drain_deadline=0.01,
+        ownership=DeploymentOwnership(),
     )
 
     assert app_state["app"].name == "new-app"
@@ -392,6 +402,7 @@ async def test_a_retire_whose_three_drains_each_use_most_of_the_budget_fits_the_
             rebuild=lambda: None,
             build_serving_app=_serve("new-app"),
             drain_deadline=budget,
+            ownership=DeploymentOwnership(),
         )
     await asyncio.gather(*finishers)
 
@@ -469,6 +480,7 @@ async def test_a_drain_exempt_stream_does_not_block_the_retire_drain(monkeypatch
         rebuild=lambda: None,
         build_serving_app=_serve("new-app"),
         drain_deadline=5.0,
+        ownership=DeploymentOwnership(),
     )
     # The retire's drain read the generation idle (the exempt slot was released) and returned
     # well inside its budget; a still-counted in-flight request would instead be WAITED for
@@ -507,6 +519,7 @@ async def test_a_non_exempt_in_flight_request_is_drained_before_aclose() -> None
         rebuild=lambda: None,
         build_serving_app=_serve("new-app"),
         drain_deadline=5.0,
+        ownership=DeploymentOwnership(),
     )
     await finisher
     assert order == ["released", "aclose"], f"a non-exempt request was not drained before aclose: {order}"
@@ -671,6 +684,7 @@ async def test_reload_over_session_manager_defers_supervisor_close(monkeypatch: 
                 rebuild=lambda: None,
                 build_serving_app=_serve("new-app"),
                 drain_deadline=_DEFERRED_DRAIN_BUDGET_S,
+                ownership=DeploymentOwnership(),
             )
         swapped.set()
         await answer.wait()
@@ -724,6 +738,7 @@ async def test_a_driver_answering_past_the_drain_budget_keeps_its_transport(capl
                 rebuild=lambda: None,
                 build_serving_app=_serve("new-app"),
                 drain_deadline=budget,
+                ownership=DeploymentOwnership(),
             )
         await asyncio.sleep(budget * 10)  # the fleet wait, ten drain budgets long
         log.append("answered")
@@ -759,7 +774,13 @@ async def test_a_request_waiting_on_the_gate_is_never_severed() -> None:
         request = _served_request(boot, _waiter)
         while not boot.waiting:
             await asyncio.sleep(0)
-        await build_and_swap_epoch({}, rebuild=lambda: None, build_serving_app=_serve("new-app"), drain_deadline=0.05)
+        await build_and_swap_epoch(
+            {},
+            rebuild=lambda: None,
+            build_serving_app=_serve("new-app"),
+            drain_deadline=0.05,
+            ownership=DeploymentOwnership(),
+        )
         assert log == [], "the retire closed (or let run) before the gate turned over"
     await request
     async with asyncio.timeout(2.0):
@@ -790,7 +811,11 @@ async def test_a_request_waiting_on_a_recorded_lock_held_outside_the_generation_
             while not boot.waiting:
                 await asyncio.sleep(0)
             await build_and_swap_epoch(
-                {}, rebuild=lambda: None, build_serving_app=_serve("new-app"), drain_deadline=0.05
+                {},
+                ownership=DeploymentOwnership(),
+                rebuild=lambda: None,
+                build_serving_app=_serve("new-app"),
+                drain_deadline=0.05,
             )
         for _ in range(20):
             await asyncio.sleep(0)
@@ -830,7 +855,11 @@ async def test_a_pass_through_waiter_is_ordinary_work_once_the_gate_turns_over(
             while not boot.waiting:
                 await asyncio.sleep(0)
             await build_and_swap_epoch(
-                {}, rebuild=lambda: None, build_serving_app=_serve("new-app"), drain_deadline=budget
+                {},
+                rebuild=lambda: None,
+                build_serving_app=_serve("new-app"),
+                drain_deadline=budget,
+                ownership=DeploymentOwnership(),
             )
         if held_past_budget:
             async with asyncio.timeout(2.0):
@@ -862,7 +891,11 @@ async def test_the_supervised_run_driving_a_reload_survives_its_own_retire() -> 
         await reload_gate.run(lambda: None, reimports=False)  # an unrelated gated body first
         async with reload_gate.driving():
             await build_and_swap_epoch(
-                {}, rebuild=lambda: None, build_serving_app=_serve("new-app"), drain_deadline=0.5
+                {},
+                rebuild=lambda: None,
+                build_serving_app=_serve("new-app"),
+                drain_deadline=0.5,
+                ownership=DeploymentOwnership(),
             )
         await asyncio.sleep(0)  # the reload's tail (its fleet wait) runs after the swap
         outcome.append("completed")
@@ -929,6 +962,7 @@ async def test_retire_closes_the_previous_generations_serving_lifespan() -> None
         rebuild=lambda: None,
         build_serving_app=_serve("new-app"),
         drain_deadline=0.01,
+        ownership=DeploymentOwnership(),
     )
 
     # The retired generation's serving lifespan was closed (its transports terminated).
@@ -968,7 +1002,12 @@ async def test_a_reload_cancelled_after_the_build_finished_closes_the_new_genera
         return _Serving("new-app")
 
     reload = asyncio.create_task(
-        build_and_swap_epoch({"TAI_EPOCH_CANCELLED": "v"}, rebuild=lambda: None, build_serving_app=_build)
+        build_and_swap_epoch(
+            {"TAI_EPOCH_CANCELLED": "v"},
+            rebuild=lambda: None,
+            build_serving_app=_build,
+            ownership=DeploymentOwnership(),
+        )
     )
     await built.wait()
     reload.cancel()
@@ -995,7 +1034,9 @@ async def test_a_build_failing_after_its_lifespan_entered_closes_that_lifespan()
         raise RuntimeError("deliberate failure after the lifespan entered")
 
     with pytest.raises(RuntimeError, match="after the lifespan entered"):
-        await build_and_swap_epoch({"K": "v"}, rebuild=lambda: None, build_serving_app=_build)
+        await build_and_swap_epoch(
+            {"K": "v"}, rebuild=lambda: None, build_serving_app=_build, ownership=DeploymentOwnership()
+        )
 
     assert closed == ["closed"]
     assert app_state["app"].name == "boot-app"
@@ -1012,7 +1053,7 @@ async def test_a_proven_build_is_discarded_with_the_live_epoch_untouched(caplog:
     client_epoch = current_client_epoch()
     os.environ["TAI_EPOCH_TEST_EXISTING"] = "old"
     env_before = dict(os.environ)
-    loaded_before = set(epoch_mod._loaded_env_keys)
+    loaded_before = set(applied_env._loaded_env_keys)
     seen: list[str] = []
     closed: list[str] = []
 
@@ -1028,14 +1069,19 @@ async def test_a_proven_build_is_discarded_with_the_live_epoch_untouched(caplog:
         return _Serving("proven")
 
     with caplog.at_level("ERROR"):
-        await build_and_discard_epoch({"TAI_EPOCH_TEST_KEY": "proposed"}, rebuild=_rebuild, build_serving_app=_build)
+        await build_and_discard_epoch(
+            {"TAI_EPOCH_TEST_KEY": "proposed"},
+            rebuild=_rebuild,
+            build_serving_app=_build,
+            ownership=DeploymentOwnership(),
+        )
 
     assert seen == ["proposed"]
     assert app_state["app"].name == "boot-app"
     assert current_epoch() is boot_epoch
     assert current_client_epoch() == client_epoch
     assert dict(os.environ) == env_before
-    assert epoch_mod._loaded_env_keys == loaded_before
+    assert applied_env._loaded_env_keys == loaded_before
     assert epoch_mod._building_epoch is None
     assert closed == ["closed"]
     assert [r for r in caplog.records if r.levelname == "ERROR"] == []
@@ -1057,7 +1103,10 @@ async def test_a_proof_build_that_fails_raises_and_discards_like_the_swap_form(
 
     with caplog.at_level("ERROR"), pytest.raises(RuntimeError, match="deliberate proof failure"):
         await build_and_discard_epoch(
-            {"TAI_EPOCH_TEST_KEY": "proposed"}, rebuild=_rebuild, build_serving_app=_serve("x")
+            {"TAI_EPOCH_TEST_KEY": "proposed"},
+            rebuild=_rebuild,
+            build_serving_app=_serve("x"),
+            ownership=DeploymentOwnership(),
         )
 
     assert app_state["app"].name == "boot-app"
@@ -1079,6 +1128,7 @@ async def test_a_clean_build_and_swap_cycle_leaves_no_stale_settings() -> None:
         {"K": "v"},
         rebuild=lambda: None,
         build_serving_app=_serve("new-app"),
+        ownership=DeploymentOwnership(),
     )
     assert sweep_stale_settings(retired_number) == []
 
@@ -1150,6 +1200,7 @@ async def test_reloads_with_access_control_on_report_no_stale_settings(caplog: p
                 rebuild=_serving_core_rebuild,
                 build_serving_app=_record_built_core,
                 drain_deadline=0.1,
+                ownership=DeploymentOwnership(),
             )
     # Each generation's settings carry its own epoch, so the live generation's adapter chain
     # and identity provider are never reported as holders of the generation it replaced.
@@ -1165,6 +1216,7 @@ async def _reload_access_control_generation() -> None:
         rebuild=_serving_core_rebuild,
         build_serving_app=_record_built_core,
         drain_deadline=0.1,
+        ownership=DeploymentOwnership(),
     )
 
 
@@ -1289,10 +1341,14 @@ async def test_a_surface_collected_on_another_thread_is_certified_on_the_serving
     async def _build(_epoch: Epoch) -> _Serving:
         return _Serving("new-app")
 
-    await build_and_swap_epoch({}, rebuild=lambda: None, build_serving_app=_build, drain_deadline=0.1)
+    await build_and_swap_epoch(
+        {}, rebuild=lambda: None, build_serving_app=_build, drain_deadline=0.1, ownership=DeploymentOwnership()
+    )
     retired = current_epoch().number
     held.append(current_epoch().serving_app)
-    await build_and_swap_epoch({}, rebuild=lambda: None, build_serving_app=_build, drain_deadline=0.1)
+    await build_and_swap_epoch(
+        {}, rebuild=lambda: None, build_serving_app=_build, drain_deadline=0.1, ownership=DeploymentOwnership()
+    )
     assert [generation.surface_alive for generation in _pending(retired)] == [True]
 
     collector = threading.Thread(target=held.clear)
@@ -1313,10 +1369,22 @@ def test_no_certification_is_scheduled_on_a_closed_loop() -> None:
 
 async def test_clear_epoch_disarms_the_pending_certifications() -> None:
     _install_boot("boot-app")
-    await build_and_swap_epoch({}, rebuild=lambda: None, build_serving_app=_serve("served-app"), drain_deadline=0.1)
+    await build_and_swap_epoch(
+        {},
+        rebuild=lambda: None,
+        build_serving_app=_serve("served-app"),
+        drain_deadline=0.1,
+        ownership=DeploymentOwnership(),
+    )
     surface = current_epoch().serving_app
     retired = current_epoch().number
-    await build_and_swap_epoch({}, rebuild=lambda: None, build_serving_app=_serve("new-app"), drain_deadline=0.1)
+    await build_and_swap_epoch(
+        {},
+        rebuild=lambda: None,
+        build_serving_app=_serve("new-app"),
+        drain_deadline=0.1,
+        ownership=DeploymentOwnership(),
+    )
     assert [generation.number for generation in retired_mod.retired_generations()] == [retired]
 
     await epoch_mod.clear_epoch()
@@ -1343,7 +1411,13 @@ async def _door_reload_with_a_concurrent_request(release_within_budget: bool) ->
     answer and the transport close.
     """
     _install_boot("boot-app")
-    await build_and_swap_epoch({}, rebuild=lambda: None, build_serving_app=_serve("served-app"), drain_deadline=0.1)
+    await build_and_swap_epoch(
+        {},
+        rebuild=lambda: None,
+        build_serving_app=_serve("served-app"),
+        drain_deadline=0.1,
+        ownership=DeploymentOwnership(),
+    )
     boot = current_epoch()
     order: list[str] = []
     boot.supervisor = _ClosingSupervisor(order)  # type: ignore[assignment]
@@ -1368,6 +1442,7 @@ async def _door_reload_with_a_concurrent_request(release_within_budget: bool) ->
                 rebuild=lambda: None,
                 build_serving_app=_serve("new-app"),
                 drain_deadline=0.5,
+                ownership=DeploymentOwnership(),
             )
         swapped.set()
         await driver_answers.wait()
@@ -1467,6 +1542,7 @@ async def test_a_door_driven_reload_starts_the_new_generations_tasks_outside_the
                     build_serving_app=_build,
                     establish_background_loops=_establish,
                     drain_deadline=1.0,
+                    ownership=DeploymentOwnership(),
                 )
         finally:
             os.environ.pop("TAI_EPOCH_DOOR_RELOAD", None)
@@ -1561,7 +1637,9 @@ async def test_is_epoch_rebuild_in_progress_true_only_during_a_build() -> None:
     def _rebuild() -> None:
         seen.append(epoch_mod.is_epoch_rebuild_in_progress())
 
-    await build_and_swap_epoch({"K": "v"}, rebuild=_rebuild, build_serving_app=_serve("new-app"))
+    await build_and_swap_epoch(
+        {"K": "v"}, rebuild=_rebuild, build_serving_app=_serve("new-app"), ownership=DeploymentOwnership()
+    )
     assert seen == [True]  # True while the build populated the new generation
     assert epoch_mod.is_epoch_rebuild_in_progress() is False  # cleared once the swap completed
 

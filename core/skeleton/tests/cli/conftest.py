@@ -112,7 +112,7 @@ class _FakeInnerApp:
 
 class _FakeLifecycle:
     """Records reload-handler registrations by their ``module.qualname`` key, so a
-    test can assert ``register_cli_logging_reload`` wired ``apply_logging_settings``,
+    test can assert ``register_cli_process_state`` wired ``apply_logging_settings`` on reload,
     and stands in for the cold-boot manifest read the door delegates here — mirroring
     the real seam, it reads through the config manager so a failing read still
     propagates."""
@@ -125,7 +125,7 @@ class _FakeLifecycle:
         self.reload_handlers[f"{func.__module__}.{func.__qualname__}"] = func
         return func
 
-    def read_boot_manifest(self):
+    async def read_boot_manifest(self, *, kind=None):
         self._config_manager.read_manifest()
         return SimpleNamespace()
 
@@ -138,10 +138,16 @@ class _FakeApp:
         # The CLI seams register the root-logger reload handler through the app's
         # lifecycle; the recorder captures it without a real lifecycle.
         self.lifecycle = _FakeLifecycle(self.config.config_manager)
+        # The boot env handlers, recorded by their ``module.qualname`` key like the reload ones.
+        self.boot_env_handlers: dict[str, object] = {}
         self.http_called = False
         self.http_stateless: bool | None = None
         self.sse_called = False
         self.run_async_transport: str | None = None
+
+    def _on_boot_env_applied(self, func):
+        self.boot_env_handlers[f"{func.__module__}.{func.__qualname__}"] = func
+        return func
 
     @asynccontextmanager
     async def app_context(self, manifest):

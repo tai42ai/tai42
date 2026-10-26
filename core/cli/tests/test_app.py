@@ -272,9 +272,9 @@ def test_tai_group_translates_abort(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _probe_group(monkeypatch: pytest.MonkeyPatch, calls: list[int]) -> click.Group:
-    """A slim tree with ``load_dotenv`` stubbed to record calls, plus a no-op leaf
+    """A slim tree with ``load_boot_dotenv`` stubbed to record calls, plus a no-op leaf
     so the root callback runs."""
-    monkeypatch.setattr(app_module, "load_dotenv", lambda: calls.append(1))
+    monkeypatch.setattr(app_module, "load_boot_dotenv", lambda path: calls.append(1))
     group = _slim(monkeypatch)
 
     @click.command("probe")

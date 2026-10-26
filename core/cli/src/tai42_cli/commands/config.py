@@ -31,7 +31,7 @@ app = typer.Typer(
     no_args_is_help=True,
 )
 
-env_app = typer.Typer(name="env", help="Read and update the stored env overrides.", no_args_is_help=True)
+env_app = typer.Typer(name="env", help="Read and update the stored env.", no_args_is_help=True)
 app.add_typer(env_app, name="env")
 
 profile_app = typer.Typer(name="profile", help="Manage versioned settings profiles.", no_args_is_help=True)
@@ -41,7 +41,10 @@ app.add_typer(profile_app, name="profile")
 @env_app.command("get")
 @covers(("GET", "/api/config/env"))
 def get_env(ctx: typer.Context) -> None:
-    """Read the stored env config and the operator's secret-key marks.
+    """Read the stored env config, the operator's secret-key marks and the stored keys the deployment sets.
+
+    A stored key the deployment sets (``deployment_keys``) keeps the deployment's value; a write
+    may remove it, never set it to a new value.
 
     Example: ``tai config env get``
     """
@@ -56,7 +59,8 @@ def get_env(ctx: typer.Context) -> None:
 def set_env(
     ctx: typer.Context,
     assignment: Annotated[
-        list[str] | None, typer.Argument(help="KEY=VALUE env overrides to merge (composable with --env-file/--stdin).")
+        list[str] | None,
+        typer.Argument(help="KEY=VALUE pairs to merge into the stored env (composable with --env-file/--stdin)."),
     ] = None,
     env_file: Annotated[
         Path | None,
@@ -83,13 +87,18 @@ def set_env(
         ),
     ] = False,
 ) -> None:
-    """Merge KEY=VALUE env overrides and reload the fleet.
+    """Merge KEY=VALUE pairs into the stored env and reload the fleet.
 
     A hot-class key is re-read in place. A recycle-class key rolls a worker
-    recycle across the fleet on a supervised deployment (the response carries the
-    recycle rows; the worker that took the write recycles itself after replying),
-    and is refused on a bare deployment, naming the key. The bus URL and a key the
-    deployment pins are refused on every shape.
+    recycle across the fleet (the response carries the recycle rows; the worker
+    that took the write recycles itself after replying, and its supervisor starts
+    it again). A key that locates the worker bus (a bus URL or the bus
+    namespace), a deployment / boot-identity (X-band) key and a key the
+    deployment sets are refused under any spelling of their names, naming the
+    key: a bus key or a key the deployment sets changes in the deployment's
+    environment. A write whose resulting stored env would set one name under two
+    spellings is refused, naming both: to rename a spelling, remove the old one in
+    the same write.
 
     Values may come from command-line KEY=VALUE arguments, ``--env-file``, and
     ``--stdin`` combined; at least one assignment is required. The same key from
@@ -141,7 +150,7 @@ def reload_config(
     Each worker's row names the recycle-class keys awaiting a respawn
     (``awaiting_respawn``): the soft restart carries every hot key in place, and
     those keys take effect only when that worker is respawned through the
-    deployment's supervisor (on a bare deployment, a server restart).
+    deployment's supervisor.
 
     Example: ``tai config reload``
     """

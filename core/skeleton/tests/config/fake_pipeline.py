@@ -13,16 +13,28 @@ from typing import TYPE_CHECKING, Any, cast
 import pytest
 from tai42_kit.settings import reset_all_settings
 
-from tai42_skeleton.app.bus import FleetResult, LocalApplyResult, OpOutcome, WorkerIdentity, WorkerKind, WorkerResult
+from tai42_skeleton.app.bus import (
+    FleetResult,
+    LocalApplyResult,
+    OpOutcome,
+    WorkerIdentity,
+    WorkerKind,
+    WorkerResult,
+    WorkerRow,
+)
 from tai42_skeleton.app.bus.ops import FleetOp, fleet_op_wire
 from tai42_skeleton.app.recycle import RECYCLED, FreshLife, RecycleError, RecycleReport, RecycleRow, orchestrate_recycle
+from tai42_skeleton.config.deployment_env import published_deployment_keys, published_env_readers
 from tai42_skeleton.config.service import ConfigService
 from tai42_skeleton.tools.binding.errors import ExtensionComboRefusedError
+
+from .._fakes.bus import _row
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterator, Sequence
 
     from tai42_contract.manifest import ExtensionElement
+    from tai42_kit.settings import EnvReader
 
     from tai42_skeleton.config.file_manager import FileConfigManager
 
@@ -190,7 +202,12 @@ class RecordingBus:
     ``live`` is the mutable census behind ``expected_at_start``: dropping a name from it
     mid-apply is a worker's presence fading, and ``census_error`` makes the op-start
     census itself raise. Each publish's snapshot is recorded in
-    ``expected_at_start_calls``, separately from the ``publish_calls`` triples."""
+    ``expected_at_start_calls``, separately from the ``publish_calls`` triples.
+
+    ``census`` returns a ready row per worker: this process's, publishing its own deployment
+    names, then one per remote, publishing none. Every row names this process's env-reader
+    digest, as siblings running the same build do, and ``env_readers`` answers with this
+    process's own body."""
 
     def __init__(
         self,
@@ -218,6 +235,19 @@ class RecordingBus:
         if self._census_error is not None:
             raise self._census_error
         return dict.fromkeys(sorted(self.live), 1)
+
+    async def census(self) -> list[WorkerRow]:
+        digest = published_env_readers().digest
+        own = _row(self.identity.name, self.identity.kind, pid=1, generation=1, pttl_ms=15000)
+        own.deployment_keys = list(published_deployment_keys())
+        remotes = [_row(name, WorkerKind.serve, pid=2, generation=1, pttl_ms=15000) for name in self._remotes]
+        for row in (own, *remotes):
+            row.env_readers = digest
+        return [own, *remotes]
+
+    async def env_readers(self, digests: Sequence[str]) -> dict[str, tuple[EnvReader, ...]]:
+        own = published_env_readers()
+        return {own.digest: own.readers} if own.digest in digests else {}
 
     async def publish(
         self,

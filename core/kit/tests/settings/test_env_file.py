@@ -576,3 +576,97 @@ def test_a_thread_started_inside_the_block_reads_the_suspended_file(
         thread.join()
 
     assert names == ["from-file"]
+
+
+# ---------------------------------------------------------------------------
+# the file provider's stored env (``.env`` in the config dir) is never a settings source
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A ``file``-mode config dir holding a stored env, the working directory of the process."""
+    directory = tmp_path / "config"
+    directory.mkdir()
+    _write(
+        directory / ".env", "SAMPLE_NAME=from-store\nSAMPLE_SIZE=7\nTAI_DEFAULT_REDIS_URL=redis://from-store:6379/0\n"
+    )
+    monkeypatch.delenv("TAI_CONFIG_MODE", raising=False)
+    monkeypatch.setenv("TAI_CONFIG_DIR_PATH", str(directory))
+    monkeypatch.delenv("TAI_DEFAULT_REDIS_URL", raising=False)
+    monkeypatch.chdir(directory)
+    return directory
+
+
+def test_a_construction_in_the_config_dir_reads_no_stored_env(
+    config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SAMPLE_SIZE", "3")
+
+    settings = SampleSettings()
+
+    assert (settings.name, settings.size) == ("unset", 3)
+
+
+def test_a_default_namespace_fallback_reads_no_stored_env(config_dir: Path) -> None:
+    class FallbackSettings(RedisConnectionSettings):
+        registry_exclude: ClassVar[bool] = True
+        model_config = SettingsConfigDict(env_prefix="FALLBACK_")
+
+    assert FallbackSettings().redis_url is None
+
+
+def test_the_stored_env_reached_through_a_symlink_is_not_read(
+    config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "run").mkdir()
+    (tmp_path / "run" / ".env").symlink_to(config_dir / ".env")
+    monkeypatch.chdir(tmp_path / "run")
+
+    assert SampleSettings().name == "unset"
+
+
+def test_a_relative_config_dir_resolves_against_the_working_directory(
+    config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("TAI_CONFIG_DIR_PATH", "config")
+
+    class StoreFileSettings(SampleSettings):
+        tai_env_file: ClassVar[str | Path | None] = "config/.env"
+
+    assert StoreFileSettings().name == "unset"
+
+
+def test_a_thread_reads_no_stored_env(config_dir: Path) -> None:
+    names: list[str] = []
+
+    thread = threading.Thread(target=lambda: names.append(SampleSettings().name))
+    thread.start()
+    thread.join()
+
+    assert names == ["unset"]
+
+
+def test_a_dotenv_outside_the_config_dir_is_read(
+    config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "run").mkdir()
+    _write(tmp_path / "run" / ".env", "SAMPLE_NAME=from-run\n")
+    monkeypatch.chdir(tmp_path / "run")
+
+    assert SampleSettings().name == "from-run"
+
+
+def test_the_config_dir_dotenv_is_read_under_another_config_mode(
+    config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("TAI_CONFIG_MODE", "external")
+
+    assert SampleSettings().name == "from-store"
+
+
+def test_the_stored_env_is_not_in_effect(config_dir: Path) -> None:
+    assert env_file_module.env_file_in_effect(DEFAULT_ENV_FILE) is None
+    assert env_file_module.env_file_in_effect(config_dir / ".env") is None
+    assert env_file_module.env_file_in_effect(config_dir / "other.env") == config_dir / "other.env"

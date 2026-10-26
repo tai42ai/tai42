@@ -17,6 +17,7 @@ import pytest
 
 from tai42_skeleton.app.epoch import Epoch, build_and_swap_epoch
 from tai42_skeleton.app.instance import app
+from tai42_skeleton.config.deployment_env import DeploymentOwnership
 from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.tools.binding.surface import add_surface_tool, tool_surface_generation
 
@@ -154,7 +155,9 @@ def test_a_failed_profile_apply_build_moves_the_generation() -> None:
                 raise AssertionError("never reached")
 
             with pytest.raises(RuntimeError, match="deliberate build failure"):
-                await build_and_swap_epoch({}, rebuild=rebuild, build_serving_app=build_serving_app)
+                await build_and_swap_epoch(
+                    {}, rebuild=rebuild, build_serving_app=build_serving_app, ownership=DeploymentOwnership()
+                )
 
             assert app.tools.surface_generation() > built_under[0]
             assert "second_probe" not in await app.tools.get_tools()

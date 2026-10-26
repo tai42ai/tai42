@@ -30,6 +30,7 @@ import tai42_skeleton.app.bus as bus_module
 from tai42_skeleton.app.bus import WorkerBus, WorkerIdentity, WorkerKind, WorkerState
 from tai42_skeleton.app.bus.subscribe import OpApplier
 from tai42_skeleton.app.bus_settings import BusRedisSettings, BusSettings
+from tai42_skeleton.config.deployment_env import published_env_readers
 
 from ..._fakes.kit_redis import KitFakeRedis
 
@@ -159,7 +160,16 @@ async def _register_bare_presence(
     client: Any = aioredis.FakeRedis(server=server, decode_responses=True)
     now = "2026-01-01T00:00:00+00:00"
     value = json.dumps(
-        {"kind": kind.value, "pid": 4, "generation": 1, "joined_at": now, "beat_at": now, "state": state.value}
+        {
+            "kind": kind.value,
+            "pid": 4,
+            "generation": 1,
+            "joined_at": now,
+            "beat_at": now,
+            "state": state.value,
+            "deployment_keys": [],
+            "env_readers": published_env_readers().digest,
+        }
     )
     if ttl_ms is None:
         await client.set(settings.presence_key(name), value)

@@ -31,6 +31,7 @@ from tai42_skeleton.tools.binding.errors import ExtensionComboRefusedError
 
 from .._fakes.bus import FakeBus
 from .._fakes.combo_check_app import booted_check_app, clean_server, factory_calls
+from .._helpers import recapture_deployment_env
 from .fake_pipeline import (
     ComboChecks,
     FakeConfigStore,
@@ -385,6 +386,34 @@ async def test_apply_replace_refuses_a_combo_the_check_refuses(monkeypatch: pyte
     assert store.persisted == []
     assert admin.calls == 0
     assert bus.publish_calls == []
+
+
+@pytest.mark.parametrize("door", ["apply_change", "apply_replace"])
+async def test_a_manifest_write_resolves_a_marker_on_a_key_the_deployment_sets_to_the_deployment_s_value(
+    monkeypatch: pytest.MonkeyPatch, door: str
+) -> None:
+    # The store still holds a copy of a key the deployment sets; a reload keeps the deployment's
+    # value, so the new marker resolves to it and the combo binds as every worker will bind it.
+    _with_bus(monkeypatch)
+    monkeypatch.setenv("EXT_L", "ok")
+    recapture_deployment_env()
+    store = FakeConfigStore(manifest=copy.deepcopy(_CHECK_DOCUMENT), env={"EXT_L": "x"})
+    checks = ComboChecks(refuse="x")
+    service, admin, _bus = _service(store, combo_check=checks)
+    attach = _attach("tools", 0, "echo", [[{"name": "labelled", "config": {"label": "!ENV ${EXT_L}"}}]])
+
+    if door == "apply_change":
+        await service.apply_change(attach)
+    else:
+        document = copy.deepcopy(_CHECK_DOCUMENT)
+        attach(document)
+        await service.apply_replace(document)
+
+    assert checks.calls == [("echo", [{"name": "labelled", "config": {"label": "ok"}}])]
+    assert store.manifest["tools"][0]["extensions"] == {
+        "echo": [[{"name": "labelled", "config": {"label": "!ENV ${EXT_L}"}}]]
+    }
+    assert admin.calls == 1
 
 
 class _ConcurrentWriteStore(FakeConfigStore):

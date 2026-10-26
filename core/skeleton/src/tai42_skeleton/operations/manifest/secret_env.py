@@ -6,11 +6,11 @@ from collections.abc import Callable
 from typing import Any, cast
 
 from tai42_contract.app.responses import ApplyResponse
-from tai42_kit.settings import unknown_owned_env_keys
+from tai42_kit.settings import fold_env_name, unknown_owned_env_keys
 from tai42_kit.utils.data.env_markers import format_env_marker
 
 from tai42_skeleton.app.boot_rules import translate_config_invariants
-from tai42_skeleton.config.boundary import registered_env_var_names, x_band_env_keys
+from tai42_skeleton.config.boundary import EnvKeyClasses
 from tai42_skeleton.config.file_manager import ENV_KEY_RE
 from tai42_skeleton.config.service import ConfigService
 from tai42_skeleton.operations import BadRequestError, ConflictError, OperationResponse, UpstreamError, operation
@@ -45,12 +45,13 @@ def _parse_manifest_pointer(pointer: str) -> list[str]:
 _GENERATED_KEY_ROOT = "SECRET"
 
 
-def _derive_secret_env_key(key_hint: str, taken: frozenset[str]) -> str:
+def _derive_secret_env_key(key_hint: str, taken: Callable[[str], bool]) -> str:
     """Derive a valid, unique, writable env KEY from ``key_hint`` (a key_hint-based name).
 
     The hint is uppercased and reduced to the shell-identifier charset; an empty or
     non-identifier result falls back to ``SECRET``. The name is then made unique against
-    ``taken`` (stored env keys, the X band and the registered settings names) by appending
+    ``taken`` (it holds a stored env key, an X-band key and every name that sets a registered
+    settings field, all compared folded, as the settings layer matches names) by appending
     ``_2``, ``_3``, … — so a generated key never clobbers an existing key nor collides with a
     deployment X-band name. A name the owned-prefix audit would refuse (under an owned settings
     prefix, accepted by no group) is minted under ``SECRET_`` instead; when that is refused too,
@@ -72,11 +73,11 @@ def _derive_secret_env_key(key_hint: str, taken: frozenset[str]) -> str:
     return candidate
 
 
-def _unique_env_key(base: str, taken: frozenset[str]) -> str:
-    """``base``, or the first ``base_<n>`` (n from 2) not in ``taken``."""
+def _unique_env_key(base: str, taken: Callable[[str], bool]) -> str:
+    """``base``, or the first ``base_<n>`` (n from 2) ``taken`` does not hold."""
     candidate = base
     suffix = 2
-    while candidate in taken:
+    while taken(candidate):
         candidate = f"{base}_{suffix}"
         suffix += 1
     return candidate
@@ -90,7 +91,7 @@ def _resolve_secret_env_key(explicit: str | None, hint: str | None, value: str, 
     ``ValueError`` → 400) and REFUSED if it collides with an existing stored key holding a
     DIFFERENT value (never a silent overwrite of a live secret; an identical value is an
     idempotent re-send, no collision). A generated key is made unique against the stored keys,
-    the X band, AND every registered settings ``env_var``, so it never clobbers a stored key
+    the X band, AND every name that sets a registered settings field, so it never clobbers a stored key
     nor SHADOWS a registered var, and lies outside every owned settings prefix so the env write
     accepts it. Raises ``ValueError`` (the op maps it to a 400).
     """
@@ -105,7 +106,12 @@ def _resolve_secret_env_key(explicit: str | None, hint: str | None, value: str, 
                 "different value — refusing to silently overwrite a live secret"
             )
         return explicit
-    taken = frozenset(stored) | x_band_env_keys() | registered_env_var_names()
+    stored_names = frozenset(fold_env_name(key) for key in stored)
+    classes = EnvKeyClasses()
+
+    def taken(key: str) -> bool:
+        return fold_env_name(key) in stored_names or classes.x_band(key) or classes.sets_a_field(key)
+
     return _derive_secret_env_key(cast("str", hint), taken)
 
 

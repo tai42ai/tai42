@@ -141,8 +141,8 @@ processes, so that is deliberate.
 - `CELERY_MANIFEST_KEY` and `CELERY_TOOL_NAME_ARG` pin wiring built at boot — a
   forked child reads the env key it was given and a queued job carries the kwarg
   name its producer used — so a change to either converges through a process
-  recycle rather than in place. A profile change touching one is refused on an
-  unsupervised (`bare`) deployment shape, which has no way to recycle.
+  recycle rather than in place: the recycled process exits and the deployment's
+  supervisor starts it again.
 - On macOS, prefer the `solo` or `threads` pool — forking around the system
   resolver deadlocks.
 - `backend_list_failed_tasks` is not implemented: Celery keeps no queryable

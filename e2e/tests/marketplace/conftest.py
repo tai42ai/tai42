@@ -285,7 +285,7 @@ def marketplace_supervised_stack(
     package_index: FixturePackageIndex,
     fixture_artifacts: FixtureArtifacts,
 ) -> Iterator[TaiStack]:
-    """The marketplace stack on a supervised shape with a backend sibling, its registry also
+    """The supervised marketplace stack with a backend sibling, its registry also
     carrying the lambda listing (a plugin whose tool module defines a recycle-class settings
     group)."""
     asyncio.run(seed_lambda_listing(marketplace_service, package_index, fixture_artifacts))

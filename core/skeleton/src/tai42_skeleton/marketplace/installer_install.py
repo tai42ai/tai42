@@ -58,6 +58,7 @@ class _InstallFlow(_InstallerBase):
         resolved = await self._registry.resolve(ns, name, version)
         spec, _source = resolve.prepare_resolved(resolved)
         pinned_version = resolve.require(resolved, "version")
+        svc = self._svc()
         return route_preflight.build_route_preview(
             spec,
             pinned_version,
@@ -65,7 +66,7 @@ class _InstallFlow(_InstallerBase):
             existing,
             owned_routes=self._owned_routes,
             reserved_prefixes=self._reserved_prefixes,
-            effective_env=self._svc().effective_env({}),
+            effective_env=svc.effective_env({}, await svc.deployment_ownership("marketplace_install_preview")),
         )
 
     # -- install ------------------------------------------------------------

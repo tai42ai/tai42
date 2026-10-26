@@ -34,7 +34,7 @@ from .conftest import (  # noqa: F401
     _stale_uds_socket,
 )
 
-_LOGGING_RELOAD_KEY = "tai42_skeleton.app.instance.apply_logging_settings"
+_LOGGING_KEY = "tai42_skeleton.app.instance.apply_logging_settings"
 
 
 @pytest.fixture(autouse=True)
@@ -327,19 +327,18 @@ async def test_run_debug_serves_create_app_result(patch_app_seam, monkeypatch: p
     assert fake_uvicorn.served is True
 
 
-# --- CLI-seam logging-reload registration ---------------------------------
+# --- CLI-seam logging registration ----------------------------------------
 
 
-def test_wrapper_registers_cli_logging_reload(
-    patch_app_seam, root_logger_restored, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_wrapper_registers_cli_logging(patch_app_seam, root_logger_restored, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("TAI_TRANSPORT", "http")
     monkeypatch.delenv("TAI_STATELESS_HTTP", raising=False)
     app = patch_app_seam(_FakeApp(_FakeInnerApp()))
 
     mcp_app.create_app()
 
-    assert _LOGGING_RELOAD_KEY in app.lifecycle.reload_handlers
+    assert _LOGGING_KEY in app.lifecycle.reload_handlers
+    assert _LOGGING_KEY in app.boot_env_handlers
 
 
 def test_wrapper_enables_the_fault_handler(
@@ -359,21 +358,23 @@ def test_wrapper_enables_the_fault_handler(
     assert enabled == [{"file": mcp_app.sys.stderr, "all_threads": True}]
 
 
-async def test_run_stdio_registers_cli_logging_reload(patch_app_seam) -> None:
+async def test_run_stdio_registers_cli_logging(patch_app_seam) -> None:
     app = patch_app_seam(_FakeApp(_FakeInnerApp()))
 
     await mcp_app.run_stdio()
 
-    assert _LOGGING_RELOAD_KEY in app.lifecycle.reload_handlers
+    assert _LOGGING_KEY in app.lifecycle.reload_handlers
+    assert _LOGGING_KEY in app.boot_env_handlers
 
 
-async def test_run_debug_registers_cli_logging_reload(patch_app_seam, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_run_debug_registers_cli_logging(patch_app_seam, monkeypatch: pytest.MonkeyPatch) -> None:
     app = patch_app_seam(_FakeApp(_FakeInnerApp()))
     monkeypatch.setattr(mcp_app, "uvicorn", _FakeUvicorn())
 
     await mcp_app.run_debug({"host": "127.0.0.1", "port": 8000})
 
-    assert _LOGGING_RELOAD_KEY in app.lifecycle.reload_handlers
+    assert _LOGGING_KEY in app.lifecycle.reload_handlers
+    assert _LOGGING_KEY in app.boot_env_handlers
 
 
 def test_wrapper_installs_process_scope_redactor(

@@ -100,13 +100,13 @@ def _flush_identity_records(stack: TaiStack) -> list[str]:
 
 def _run_tai(stack: TaiStack, argv: list[str]) -> subprocess.CompletedProcess[str]:
     """Run the real ``tai`` console script against the deployment through the harness's own
-    child-env seam — the SAME env the served processes get (the feature env plus the
+    child-env seam — the SAME env the served processes get (the deployment env plus the
     config-dir/manifest bindings and PATH/HOME, never an ``os.environ`` passthrough) — with
     the config dir as the working directory."""
     config_dir = str(stack._config_dir)
     return subprocess.run(
         [tai_bin(), *argv],
-        env=child_env(stack, str(stack.root), config_dir),
+        env=child_env(stack, str(stack.root), "cli"),
         cwd=config_dir,
         capture_output=True,
         text=True,

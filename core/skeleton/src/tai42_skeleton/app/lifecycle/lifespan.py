@@ -17,12 +17,10 @@ from tai42_skeleton.app.boot_rules import (
     require_hooks_store_for_workers,
     require_sub_mcp_store_for_workers,
 )
-from tai42_skeleton.app.bus import WorkerKind
 from tai42_skeleton.app.graceful_exit import request_graceful_exit
 from tai42_skeleton.app.lifecycle.state import LifecycleState
 from tai42_skeleton.app.readiness_sentinel import remove_ready_sentinel
 from tai42_skeleton.app.reload_gate import reload_gate
-from tai42_skeleton.config.recycle_policy import require_supervision_declared
 from tai42_skeleton.connectors.runtime import refresh_owner
 from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.settings.owned_settings import require_known_owned_settings
@@ -34,8 +32,14 @@ class LifespanMixin(LifecycleState):
     """Process startup/shutdown hooks and the long-lived background reapers mixed into the app."""
 
     @asynccontextmanager
-    async def app_context(self, manifest: Manifest, *, kind: WorkerKind = WorkerKind.serve):
-        """The process lifespan for ``manifest`` — start background tasks on enter, tear everything down on exit."""
+    async def app_context(self, manifest: Manifest):
+        """The process lifespan for ``manifest`` — start background tasks on enter, tear everything down on exit.
+
+        Joins the worker bus the boot manifest read built (``read_boot_manifest``), so that read
+        comes first: entering without it raises.
+        """
+        if self._bus is None:
+            raise RuntimeError("read_boot_manifest builds the worker bus; call it first")
         # Bus/boot invariant at the one seam both `tai serve` and `tai backend`
         # cross: a process with a registered backend, or a shared-config deployment,
         # must have the worker bus configured — otherwise sibling workers or instances
@@ -53,9 +57,6 @@ class LifespanMixin(LifecycleState):
         # A bus-enabled process's fleet apply window must cover the retire's drain floor, so
         # a worker draining real work answers inside it.
         require_apply_window_covers_drain()
-        # A supervised marker must arrive with the deployment's pinned set, so the recycle
-        # refusal never runs on a guessed list.
-        require_supervision_declared()
         from tai42_skeleton.app.epoch import clear_epoch, current_epoch_or_none, install_boot_core
 
         try:
@@ -95,11 +96,9 @@ class LifespanMixin(LifecycleState):
             # raises loudly on a failed establisher (never a healthy-looking half-start).
             # A reload re-establishes them post-swap through the build+swap primitive.
             await self._run_post_swap_handlers(raise_on_error=True)
-            # Join the worker bus: construct this process's one bus (worker kind
-            # ``serve`` or ``backend``) and open its single long-lived subscription.
-            # The subscription registers presence and self-resyncs (reload_config)
-            # through on_ready on every (re)connect.
-            self._bus = self._build_bus(kind)
+            # Join the worker bus: open the single long-lived subscription on the one bus
+            # the boot manifest read built. The subscription registers presence and
+            # self-resyncs through on_ready on every (re)connect.
             self._spawn_bus_subscription()
             # Start the failed-MCP re-probe task so a server that failed its boot
             # probe self-heals on an exponential backoff without a manual reload.

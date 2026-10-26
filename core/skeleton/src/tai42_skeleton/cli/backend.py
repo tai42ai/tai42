@@ -6,7 +6,8 @@ import os
 import signal
 
 import click
-from dotenv import load_dotenv
+from dotenv import find_dotenv
+from tai42_cli.boot_env import load_boot_dotenv
 from tai42_contract.backend import CONSUMING_RUNTIME
 from tai42_kit.logging import install_record_redaction, logging_settings, setup_logging
 from tai42_kit.signals import signal_chain
@@ -48,27 +49,29 @@ async def run_backend(extra_args):
     # the bus var rather than failing first on the external provider's connection.
     require_bus_for_shared_config()
 
-    # Obtained after ``main``'s env bootstrap so access-control settings reflect
-    # a local ``.env`` rather than a pre-bootstrap default.
     app = instance.build_app()
-    # This CLI-configured backend process keeps its root logger in sync across
-    # config reloads; the public factory registers nothing, so an embedded host's
-    # root logger stays untouched.
-    instance.register_cli_logging_reload()
+    # This CLI-configured backend process keeps its root logger on the applied env:
+    # once the boot env bridge has applied the stored env, and across config reloads;
+    # fastmcp's settings are read again once the bridge has applied it. The public
+    # factory registers nothing, so an embedded host's root logger and fastmcp
+    # settings stay untouched.
+    instance.register_cli_process_state()
     # This CLI-owned process owns its whole logging surface, so the connector-secret
     # redactor covers every record in the process, not just the tai logger family.
     register_connector_log_redaction()
     install_record_redaction(scope="process")
-    # Only the key NAME is needed below, and this coroutine frame is suspended for the
-    # process lifetime: holding the settings MODEL here would keep a boot-epoch instance
-    # reachable past every reload's cache reset, which the stale-settings sweep reports
-    # (truthfully) as a leak. Retain the plain string instead.
-    manifest_key = base_backend_settings().manifest_key
     logger.info("Configuration mode: %s", config_mode())
-    # Bridge the persisted env store into ``os.environ`` and resolve the manifest
-    # under it in one seam, so a store-only ``!ENV ${VAR}`` marker resolves to its
-    # real value — including in the resolved manifest dumped below for fork children.
-    manifest = app.lifecycle.read_boot_manifest()
+    # Build the backend's worker bus, bridge the persisted env store into ``os.environ``
+    # and resolve the manifest under it in one seam, so a store-only ``!ENV ${VAR}``
+    # marker resolves to its real value — including in the resolved manifest dumped
+    # below for fork children.
+    manifest = await app.lifecycle.read_boot_manifest(kind=WorkerKind.backend)
+    # Read after the bridge, so the key is the one the applied env names, as the forked
+    # children read it. Only the key NAME is needed below, and this coroutine frame is
+    # suspended for the process lifetime: holding the settings MODEL here would keep a
+    # boot-epoch instance reachable past every reload's cache reset, which the
+    # stale-settings sweep reports (truthfully) as a leak. Retain the plain string instead.
+    manifest_key = base_backend_settings().manifest_key
 
     # A dedicated backend runtime always registers a task backend, so it requires the
     # worker bus (the backend-runtime and server processes must converge on config
@@ -97,7 +100,7 @@ async def run_backend(extra_args):
     # ``launch`` — on the worker path and the non-worker (beat/flower-style) path
     # alike. Importing the plugin module outside the context would hit the
     # unbound handle and crash.
-    async with app.app_context(manifest=manifest, kind=WorkerKind.backend):
+    async with app.app_context(manifest=manifest):
         await app.run_backend(extra_args)
 
 
@@ -127,7 +130,7 @@ def main(ctx, manifest_path, extra_args):
     through the server, so a backend over it is refused at boot and on reload.
     """  # noqa: D301 - a plain backslash-b is Click's no-rewrap marker
     if config_mode() == ConfigMode.file:
-        load_dotenv()
+        load_boot_dotenv(find_dotenv())
 
     # Configure the root logger at process start, right after the env bootstrap, so
     # ``TAI_LOG_LEVEL`` (from a local ``.env`` or the environment) takes effect for

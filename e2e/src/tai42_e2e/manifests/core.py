@@ -352,17 +352,17 @@ def build_caller_sweep_stack(res: StackResources, variants: Variants) -> StackCo
 
 
 def build_recycle_stack(res: StackResources, variants: Variants) -> StackConfig:
-    """SUPERVISED MULTIWORKER(1) + backend — the settings-profile RECYCLE leg.
+    """MULTIWORKER(1) + backend, SUPERVISED — the settings-profile RECYCLE leg.
 
     One serve worker (the applier) plus one backend runtime on the bus, carrying the
     skeleton component store (profiles) and the sync-task probe branch (an observably
-    in-flight backend job). ``supervised=True`` stamps ``TAI_SUPERVISED=harness`` into every
-    child (a recycle-supported shape) and runs the harness respawn-on-exit supervisor, so a
-    recycle self-exit (the applier's own deferred exit AND each orchestrated sibling) is
+    in-flight backend job). ``supervised=True`` runs the harness respawn-on-exit supervisor, so
+    a recycle self-exit (the applier's own deferred exit AND each orchestrated sibling) is
     re-launched and rejoins the census under a fresh origin.
 
     ``BACKEND_MANIFEST_KEY`` / ``BACKEND_TOOL_NAME_ARG`` are the recycle-class fields the flip
-    test diffs (``reload_class="recycle"``, not in any refused tier on the ``harness`` shape).
+    test diffs (``reload_class="recycle"``): neither is in the deployment env, so the app may
+    change them through its config doors.
     The recycle step budget is widened so a real worker RESPAWN boot fits inside the per-step
     census wait ``orchestrate_recycle`` allows the replacement. The backup router is mounted so
     a backup ``env`` restore — an env write — rolls the same recycle.

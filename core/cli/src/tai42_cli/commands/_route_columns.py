@@ -71,7 +71,6 @@ ROUTE_TABLE_SHAPES: dict[tuple[str, str], RouteShape] = {
     ),
     ("GET", "/api/backup/sections"): RouteShape(items_key=None, columns=("name", "secret")),
     ("GET", "/api/channels"): RouteShape(items_key="channels", columns=("name", "identity_hint")),
-    ("GET", "/api/config/env"): RouteShape(items_key="secret_keys", columns=("value",)),
     ("GET", "/api/config/profiles"): RouteShape(items_key=None, columns=("name", "description")),
     ("GET", "/api/config/profiles/{name}"): RouteShape(items_key=None, columns=("description", "env", "secret_keys")),
     ("GET", "/api/config/profiles/{name}/versions"): RouteShape(

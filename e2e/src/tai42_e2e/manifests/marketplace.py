@@ -63,12 +63,11 @@ def build_marketplace_stack(res: StackResources, variants: Variants) -> StackCon
 
 
 def build_marketplace_supervised_stack(res: StackResources, variants: Variants) -> StackConfig:
-    """The marketplace stack on a SUPERVISED shape with one backend runtime on the bus.
+    """The marketplace stack, SUPERVISED, with one backend runtime on the bus.
 
-    ``supervised=True`` stamps ``TAI_SUPERVISED=harness`` into every child and runs the
-    harness respawn-on-exit supervisor, so an env change of a recycle-class key an install
-    loaded rolls a real recycle (the backend sibling recycled, the serve writer's own exit
-    respawned). The recycle step budget is widened so a respawned worker's boot fits the
+    ``supervised=True`` runs the harness respawn-on-exit supervisor, so an env change of a
+    recycle-class key an install loaded rolls a real recycle (the backend sibling recycled,
+    the serve writer's own exit respawned). The recycle step budget is widened so a respawned worker's boot fits the
     per-step census wait, as on the recycle stack, and the fleet apply window covers the
     retire's drain floor at that budget (3 x 90 s) plus the reload's own 60 s, as there."""
     from dataclasses import replace

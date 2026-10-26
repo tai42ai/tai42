@@ -17,6 +17,7 @@ from tai42_contract.backend import FleetOpEffect
 __all__ = [
     "FLEET_OP_ADAPTER",
     "ClearTemplateCache",
+    "DeploymentKeysChanged",
     "DeregisterMcp",
     "EvictTemplate",
     "FleetOp",
@@ -128,6 +129,20 @@ class Recycle(_FleetOp):
     effects: ClassVar[frozenset[FleetOpEffect]] = _NONE
 
 
+class DeploymentKeysChanged(_FleetOp):
+    """A worker joined the bus: withdraw the applied stored keys the fleet's deployment now owns.
+
+    Carries no names: each receiver re-reads the census, so it judges by every row as it stands.
+    A receiver that withdrew a key rebuilds its serving generation through the config reload it
+    applies (that reload carries the registry effect), and replies with the withdrawn names and
+    the recycle-class ones among them it still runs on. The op itself changes nothing, so it
+    declares no effects; its reload does.
+    """
+
+    op: Literal["deployment_keys_changed"]
+    effects: ClassVar[frozenset[FleetOpEffect]] = _NONE
+
+
 FleetOp = Annotated[
     ReloadConfig
     | ReloadMcp
@@ -139,7 +154,8 @@ FleetOp = Annotated[
     | ListFailedMcps
     | EvictTemplate
     | ClearTemplateCache
-    | Recycle,
+    | Recycle
+    | DeploymentKeysChanged,
     Field(discriminator="op"),
 ]
 

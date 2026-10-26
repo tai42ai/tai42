@@ -28,12 +28,13 @@ from typing import Any, cast
 
 import click
 import typer
-from dotenv import load_dotenv
+from dotenv import find_dotenv
 from tai42_contract.config.manager import CONFIG_MODE_ENV, CONFIG_MODE_PATTERN, FILE_CONFIG_MODE
 from typer.core import TyperGroup, TyperOption
 from typer.main import get_command
 
 from tai42_cli import completion, version
+from tai42_cli.boot_env import load_boot_dotenv
 from tai42_cli.client import ApiError
 from tai42_cli.commands import (
     agents,
@@ -227,6 +228,7 @@ def main(
     # normalization) to stay in step with the server's provider-naming convention.
     # Only the built-in ``file`` mode reads a local ``.env``; any external provider
     # injects env directly and a local ``.env`` must not shadow it, so the load is skipped.
+    # The ``file`` provider's own stored env is never loaded here (``load_boot_dotenv``).
     config_mode = os.environ.get(CONFIG_MODE_ENV, FILE_CONFIG_MODE)
     if CONFIG_MODE_PATTERN.fullmatch(config_mode) is None:
         raise typer.BadParameter(
@@ -235,7 +237,7 @@ def main(
             param_hint=CONFIG_MODE_ENV,
         )
     if config_mode == FILE_CONFIG_MODE:
-        load_dotenv()
+        load_boot_dotenv(find_dotenv())
     ctx.obj = AppContext(
         json_output=json_output,
         server_override=server,

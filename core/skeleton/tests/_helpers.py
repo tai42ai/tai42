@@ -7,6 +7,17 @@ import asyncio
 from tai42_contract.channels import ChannelAddress, ChannelDelivery, ChannelNotification, SendOutcome
 from tai42_contract.template import TemplatedText
 
+from tai42_skeleton.config.deployment_env import capture_deployment_env, reset_deployment_env
+
+
+def recapture_deployment_env() -> None:
+    """Capture the current ``os.environ`` as the deployment env, replacing the test's own first capture.
+
+    A test that models a name the deployment sets sets it, then calls this.
+    """
+    reset_deployment_env()
+    capture_deployment_env()
+
 
 def inline_templated_text(text: TemplatedText) -> str:
     """The inline body of ``text``, for a renderer fake that resolves nothing stored.

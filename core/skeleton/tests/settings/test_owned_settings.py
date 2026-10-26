@@ -71,14 +71,14 @@ def _clean_cwd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.fixture
 def _restore_applied_env() -> Iterator[None]:
     """Restore ``os.environ`` and the applied-env tracker after a test that boots or reloads."""
-    from tai42_skeleton.app import epoch as epoch_mod
+    from tai42_skeleton.app import applied_env
 
     snapshot = dict(os.environ)
-    loaded_before = set(epoch_mod._loaded_env_keys)
+    loaded_before = set(applied_env._loaded_env_keys)
     yield
     os.environ.clear()
     os.environ.update(snapshot)
-    epoch_mod._loaded_env_keys = loaded_before
+    applied_env._loaded_env_keys = loaded_before
     reset_all_settings()
 
 
@@ -121,6 +121,16 @@ def test_boot_refuses_an_unknown_name_in_the_dotenv_file(tmp_path: Path) -> None
     _write_dotenv(tmp_path, {"ACCESS_CONTROL_ENABEL": "true"})
     with pytest.raises(UnknownOwnedSettingError, match=r"^boot \(\.env file\): .*ACCESS_CONTROL_ENABEL"):
         require_known_owned_settings()
+
+
+def test_boot_leaves_the_stored_env_in_the_working_directory_to_the_applied_env_audit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("TAI_CONFIG_MODE", raising=False)
+    monkeypatch.setenv("TAI_CONFIG_DIR_PATH", str(tmp_path))
+    _write_dotenv(tmp_path, {"ACCESS_CONTROL_ENABEL": "true"})
+
+    require_known_owned_settings()
 
 
 def test_the_applied_env_refuses_an_unknown_name() -> None:
@@ -245,13 +255,16 @@ def test_the_channel_settings_read_their_own_prefix(monkeypatch: pytest.MonkeyPa
 def test_boot_refuses_an_unknown_name_in_the_stored_env_of_a_non_file_manager(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from tai42_skeleton.app.bus import WorkerKind
     from tai42_skeleton.app.instance import app
     from tai42_skeleton.manifest import Manifest
 
     monkeypatch.setattr(app, "_config_manager", _StandInManager({"ACCESS_CONTROL_ENABEL": "true"}))
+    # The boot env bridge builds the process's bus; it is dropped again after the test.
+    monkeypatch.setattr(app, "_bus", None)
 
     async def boot() -> None:
-        app._apply_stored_env_at_boot()
+        await app._apply_stored_env_at_boot(kind=WorkerKind.serve)
         async with app.app_context(Manifest.model_validate({})):
             pass
 

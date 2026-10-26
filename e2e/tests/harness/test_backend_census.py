@@ -10,6 +10,8 @@ a controllable census, no infra."""
 
 from __future__ import annotations
 
+import threading
+
 import pytest
 
 from tai42_e2e.stack import TaiStack
@@ -28,6 +30,8 @@ def _stack(census: list[BusWorker]) -> TaiStack:
     is a no-op (no live processes to inspect)."""
     stack = object.__new__(TaiStack)
     stack._procs = {}  # type: ignore[attr-defined]
+    stack._supervisor_lock = threading.RLock()  # type: ignore[attr-defined]
+    stack._supervised_names = set()  # type: ignore[attr-defined]
     stack.census = lambda: census  # type: ignore[method-assign]
     return stack
 

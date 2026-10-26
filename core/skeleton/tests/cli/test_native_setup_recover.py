@@ -10,6 +10,7 @@ at import, proving the command binds the deployment's app for the imports and th
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import sys
@@ -41,8 +42,9 @@ def fake_deployment(monkeypatch: pytest.MonkeyPatch) -> dict:
     seen: dict = {"imported": []}
 
     class _FakeLifecycle:
-        def read_boot_manifest(self) -> SimpleNamespace:
+        async def read_boot_manifest(self) -> SimpleNamespace:
             seen["manifest_env"] = os.environ.get("TAI_MANIFEST_PATH")
+            seen["bridge_loop"] = asyncio.get_running_loop()
             return SimpleNamespace(lifecycle_modules=["deployment.lifecycle.module"])
 
     monkeypatch.setattr(instance, "app", SimpleNamespace(lifecycle=_FakeLifecycle()))
@@ -70,6 +72,29 @@ def test_recover_renders_the_result_as_json(monkeypatch: pytest.MonkeyPatch, fak
     # The path was stamped BEFORE the manifest read, and the manifest's lifecycle modules imported.
     assert fake_deployment["manifest_env"] == "/deploy/manifest.yaml"
     assert fake_deployment["imported"] == ["deployment.lifecycle.module"]
+
+
+def test_recover_runs_the_bridge_and_the_recovery_on_one_event_loop(
+    monkeypatch: pytest.MonkeyPatch, fake_deployment: dict
+) -> None:
+    """The boot bridge is awaited first, and the recovery runs on the loop the bridge ran on."""
+    seen: dict = {}
+
+    async def _fake_recover(setup_token: str, *, key_user_id: str | None, key_description: str) -> dict:
+        seen["bridged_first"] = "bridge_loop" in fake_deployment
+        seen["recover_loop"] = asyncio.get_running_loop()
+        return _RESULT
+
+    monkeypatch.setattr(setup_recover, "recover_owner_key", _fake_recover)
+
+    result = CliRunner().invoke(
+        app_module.app,
+        ["--json", "setup", "--recover", "--token", "t", "--manifest-path", "/deploy/manifest.yaml"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert seen["bridged_first"] is True
+    assert seen["recover_loop"] is fake_deployment["bridge_loop"]
 
 
 def test_recover_activates_the_prefix_before_importing_lifecycle_modules(
@@ -167,9 +192,11 @@ def test_recover_binds_the_app_for_lifecycle_modules_and_the_recovery(monkeypatc
     recovery itself runs with that app bound, and the handle is unbound again afterwards.
     """
     server = TaiMCP(name="recover-under-test")
-    monkeypatch.setattr(
-        server, "_read_boot_manifest", lambda: SimpleNamespace(lifecycle_modules=[_SHARED_SECRET_MODULE])
-    )
+
+    async def _read_boot_manifest(*, kind: object) -> SimpleNamespace:
+        return SimpleNamespace(lifecycle_modules=[_SHARED_SECRET_MODULE])
+
+    monkeypatch.setattr(server, "_read_boot_manifest", _read_boot_manifest)
     monkeypatch.setattr(instance, "app", server)
     # A fresh import, so the module's import-time registration runs inside this command.
     monkeypatch.delitem(sys.modules, _SHARED_SECRET_MODULE, raising=False)

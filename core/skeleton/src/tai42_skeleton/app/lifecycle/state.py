@@ -106,6 +106,9 @@ class LifecycleState(ABC):
         # backend but never tears down and rejoins the subscription.
         self._bus: WorkerBus | None = None
         self._bus_subscription_task: asyncio.Task[None] | None = None
+        # The recycle roll a join starts over the workers whose withdraw left recycle-class
+        # keys running; tracked until it ends, and cancelled at shutdown.
+        self._deployment_keys_recycle_tasks: set[asyncio.Task[None]] = set()
         # Latched once this process's first boot self-resync completes: the tool
         # registry is then fully built and stable for the run. A forking/consuming
         # backend runtime awaits this (``wait_until_ready``) before its work loop
@@ -124,7 +127,9 @@ class LifecycleState(ABC):
         # where the reason is the exception TYPE name or the literal ``"returned"``.
         # ``/ready`` reads it through :meth:`dead_perpetual_task` and 503s naming
         # the task; the done-callback that sets it also requests this process's
-        # graceful exit.
+        # graceful exit. The bus subscription also sets it, naming itself, when a
+        # withdraw takes away a value locating this process's bus
+        # (``BusNotDeploymentGivenError``), and requests the exit the same way.
         self._dead_perpetual_task: tuple[str, str] | None = None
 
         # Handlers fired with the OP NAME after every applied bus op AND after the
@@ -137,6 +142,12 @@ class LifecycleState(ABC):
         # Handlers fired, synchronously, with every ``TemplateEviction`` the resource
         # manager applies. Keyed by qualified name, like the fleet-op registry.
         self._template_evicted_handlers: dict[str, Callable[[TemplateEviction], Any]] = {}
+
+        # Handlers fired, synchronously, once the cold-boot env bridge has applied the stored
+        # env: each re-applies a process-wide effect its owner set up from settings read
+        # before the bridge (the root logger level, fastmcp's settings), so the
+        # effect follows the applied env. Keyed by qualified name, like the registries above.
+        self._boot_env_handlers: dict[str, Callable[[], Any]] = {}
 
         # Lifespan-owned exponential-backoff task that re-probes failed-at-boot
         # MCP servers so a deploy-order race (the MCP pod comes up after the
@@ -178,6 +189,9 @@ class LifecycleState(ABC):
     def dead_perpetual_task(self) -> tuple[str, str] | None:
         """The ``(task name, reason)`` of a perpetual task that died, or ``None``.
 
+        The bus subscription also names itself here, with ``BusNotDeploymentGivenError`` as the
+        reason, once it learns this process's bus is not the deployment's.
+
         ``/ready`` reads it here rather than the private attribute so a dead
         perpetual task surfaces as a named readiness failure.
         """
@@ -213,10 +227,13 @@ class LifecycleState(ABC):
         async def _run_post_swap_handlers(self, *, raise_on_error: bool) -> None: ...
         async def _run_fleet_op_applied_handlers(self, applied: FleetOpApplied) -> None: ...
         def _fire_template_evicted(self, eviction: TemplateEviction) -> None: ...
+        def _fire_boot_env_applied(self) -> None: ...
         def _epoch_handlers(self) -> list[Callable]: ...
         def _refresh_manifest_mcp(self) -> None: ...
         def _require_live_manifest(self) -> "Manifest": ...
         def _on_perpetual_task_done(self, task: asyncio.Task[Any]) -> None: ...
+        @staticmethod
+        def _log_task_exception(task: asyncio.Task[Any]) -> bool: ...
         def _build_bus(self, kind: WorkerKind) -> WorkerBus: ...
         def _spawn_bus_subscription(self) -> None: ...
         async def _cancel_bus_subscription(self) -> None: ...
