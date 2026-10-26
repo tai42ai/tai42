@@ -71,6 +71,7 @@ import tai42_skeleton.runs.store as runs_store
 import tai42_skeleton.states.db as states_db
 import tai42_skeleton.tool_meta.store as tool_meta_store
 import tai42_skeleton.versioning.store as versioning_store
+from tai42_skeleton.access_control.request_scopes import reset_request_is_admin, set_request_is_admin
 from tai42_skeleton.app.bus import WorkerKind
 from tai42_skeleton.app.lifecycle.lifespan import LifespanMixin
 from tai42_skeleton.config.deployment_env import capture_deployment_env, reset_deployment_env
@@ -93,6 +94,16 @@ def fake_redis() -> FakeRedis:
 
 
 @pytest.fixture
+def admin_caller() -> Iterator[None]:
+    """Bind an admin as the request-scope caller, so every holder a gate or a preview renders reads by name."""
+    token = set_request_is_admin(True)
+    try:
+        yield
+    finally:
+        reset_request_is_admin(token)
+
+
+@pytest.fixture
 def fake_client_ctx(fake_redis: FakeRedis):
     """A drop-in for ``tai42_kit.clients.client_ctx`` that yields the shared fake
     for any client class, ignoring pool/fresh."""
@@ -108,19 +119,25 @@ def fake_client_ctx(fake_redis: FakeRedis):
 def serve_tools(monkeypatch: pytest.MonkeyPatch) -> Callable[..., None]:
     """Make the process app's tool registry also serve the given names, for this test.
 
-    A write door checks every tool name it stores against ``instance.app.tools.get_tools()``;
+    A write door looks every tool name it stores up through ``instance.app.tools.has_tool``;
     a test whose door stores a name its fakes run calls ``serve_tools("name", ...)`` first.
+    The full listing ``get_tools`` serves the same names.
     """
     from tai42_skeleton.app import instance
 
     tools = instance.build_app().tools
-    real = tools.get_tools
+    real_get_tools = tools.get_tools
+    real_has_tool = tools.has_tool
     served: dict[str, object] = {}
 
     async def _get_tools() -> dict[str, object]:
-        return {**await real(), **served}
+        return {**await real_get_tools(), **served}
+
+    async def _has_tool(key: str) -> bool:
+        return key in served or await real_has_tool(key)
 
     monkeypatch.setattr(tools, "get_tools", _get_tools)
+    monkeypatch.setattr(tools, "has_tool", _has_tool)
 
     def _serve(*names: str) -> None:
         served.update({name: object() for name in names})

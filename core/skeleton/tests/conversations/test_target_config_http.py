@@ -27,6 +27,9 @@ class _FakeTools:
     async def get_tools(self) -> dict[str, object]:
         return {}
 
+    async def has_tool(self, key: str) -> bool:
+        return False
+
 
 class _FakeApp:
     agents = _FakeAgents()

@@ -72,15 +72,18 @@ def _fixture_holder_text(old_name: str) -> str:
     return f"e2e fixture reference to {old_name!r}"
 
 
-async def _fixture_rename_referee(old_name: str) -> list[ReferenceHolder]:
-    """Report a holder for a HOLD-marked target and RAISE for a RAISE-marked one; any
-    other name draws no objection. A raising referee must fail the rename loudly, never
+async def _fixture_rename_referee(old_names: frozenset[str]) -> dict[str, list[ReferenceHolder]]:
+    """Report a holder for each HOLD-marked target and RAISE when any target is RAISE-marked;
+    any other name draws no objection. A raising referee must fail the rename loudly, never
     a silent bypass."""
-    if _REFEREE_RAISE_MARKER in old_name:
-        raise RuntimeError(f"e2e fixture referee cannot read holders for {old_name!r}")
-    if _REFEREE_HOLD_MARKER in old_name:
-        return [ReferenceHolder(kind="e2e fixture", name=old_name, summary=_fixture_holder_text(old_name))]
-    return []
+    raising = sorted(name for name in old_names if _REFEREE_RAISE_MARKER in name)
+    if raising:
+        raise RuntimeError(f"e2e fixture referee cannot read holders for {raising[0]!r}")
+    return {
+        name: [ReferenceHolder(kind="e2e fixture", tag="tools", name=name, summary=_fixture_holder_text(name))]
+        for name in sorted(old_names)
+        if _REFEREE_HOLD_MARKER in name
+    }
 
 
 tai42_app.tools.register_rename_referee(_fixture_rename_referee)

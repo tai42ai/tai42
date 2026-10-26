@@ -319,6 +319,9 @@ class _OpsFakeTools:
     async def get_tools(self) -> dict[str, Any]:
         return dict(self._tools)
 
+    async def has_tool(self, key: str) -> bool:
+        return key in self._tools
+
     def branches_of(self, base: str) -> list[str]:
         # No tool in this registry carries extension branches.
         return []

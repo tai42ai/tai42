@@ -7,6 +7,7 @@ stored, whatever locale variants sit beside it.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable, Iterable
 
 from tai42_contract.tools import TemplateRef
@@ -39,17 +40,22 @@ async def _id_fault(resource_id: str) -> str | None:
 async def template_fault_lines(refs: Iterable[TemplateRef]) -> dict[TemplateRef, str]:
     """The fault line of each reference that does not resolve, keyed by reference, in input order.
 
-    De-duplicated by (id, site); each distinct id is checked once.
+    De-duplicated by (id, site); each distinct id is checked once, every check in flight at
+    once in one task group. A provider failure cancels the checks still in flight and
+    propagates: a lone failure as itself, failures that landed together as their
+    ``ExceptionGroup``.
     """
-    faults: dict[str, str | None] = {}
-    lines: dict[TemplateRef, str] = {}
-    for ref in dict.fromkeys(refs):
-        if ref.id not in faults:
-            faults[ref.id] = await _id_fault(ref.id)
-        fault = faults[ref.id]
-        if fault is not None:
-            lines[ref] = f"stored id {ref.id!r} at {ref.site}{fault}"
-    return lines
+    unique = list(dict.fromkeys(refs))
+    ids = list(dict.fromkeys(ref.id for ref in unique))
+    try:
+        async with asyncio.TaskGroup() as group:
+            checks = [group.create_task(_id_fault(resource_id)) for resource_id in ids]
+    except ExceptionGroup as failed:
+        if len(failed.exceptions) == 1:
+            raise failed.exceptions[0] from None
+        raise
+    faults = {resource_id: check.result() for resource_id, check in zip(ids, checks, strict=True)}
+    return {ref: f"stored id {ref.id!r} at {ref.site}{faults[ref.id]}" for ref in unique if faults[ref.id] is not None}
 
 
 async def template_reference_faults(refs: Iterable[TemplateRef]) -> list[str]:

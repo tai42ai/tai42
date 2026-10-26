@@ -63,8 +63,7 @@ async def submit_run(tool_name: str, arguments: dict[str, object], subject: Stat
     # unknown tool is a loud 404 up front, so a typo'd name never earns a
     # ``running`` record that the supervisor would only later fail — keeping a
     # real runtime failure distinguishable from a bad request and the store clean.
-    tools = await tai42_app.tools.get_tools()
-    if tool_name not in tools:
+    if not await tai42_app.tools.has_tool(tool_name):
         raise NotFoundError(f"unknown tool: {tool_name}")
 
     # The run detaches from this request, so this is the ONLY edge the inner tool reaches:

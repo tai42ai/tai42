@@ -60,13 +60,18 @@ class ReferenceHolder(BaseModel):
     """One live holder of a name: what it is, which one, where inside it, and a one-line description.
 
     ``kind`` is the holder's kind (``"hook"``, ``"preset version"``; a plugin declares its own),
-    ``name`` the holder's own name, ``locator`` the fields that place the reference inside the
-    holder (a version, a node id), and ``summary`` the line a person reads.
+    ``tag`` the feature tag the holder's own doors are registered under (the tag a role's grant
+    map names), ``name`` the holder's own name, ``locator`` the fields that place the reference
+    inside the holder (a version, a node id), and ``summary`` the line a person reads. A caller
+    whose role may not read ``tag`` reads the holders of one kind as a single count holder:
+    ``kind`` and ``tag`` as above, ``name`` the tag, ``locator`` only ``count``, and a ``summary``
+    that names no holder.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     kind: str = Field(min_length=1)
+    tag: str = Field(min_length=1)
     name: str = Field(min_length=1)
     locator: dict[str, str | int] = Field(default_factory=dict)
     summary: str = Field(min_length=1)
@@ -123,24 +128,27 @@ class TemplateRef(BaseModel):
 #: fault naming the base tool.
 TemplateRefsExtractor = Callable[[dict[str, Any]], Iterable[TemplateRef]]
 
-#: A rename referee: given a tool name about to be renamed, returns one
-#: :class:`ReferenceHolder` per live reference the rename would strand (empty = no
-#: objection). It answers holders and has no side effect: the rename preview calls it. A
-#: rename moves the tool and every extension branch tool bound off it, so the referee is
-#: asked once for each of those names. A referee raising is a hard failure of the rename —
-#: never a silent bypass. The platform gathers every registered referee's answers and
-#: blocks the rename when any is non-empty.
-ToolRenameReferee = Callable[[str], Awaitable[list[ReferenceHolder]]]
+#: A rename referee: given the set of tool names a rename moves — the renamed tool and every
+#: extension branch tool bound off it, or every tool one check moves at once — answers, keyed
+#: by asked name, one :class:`ReferenceHolder` per live reference the rename would strand. A
+#: name it holds nothing on is left out or maps to an empty list (no objection); a key that was
+#: not asked is the referee's bug and fails the rename. It answers holders and has no side
+#: effect: the rename preview calls it. It is asked once per gather, for all of those names
+#: together. A referee raising is a hard failure of the rename — never a silent bypass. The
+#: platform gathers every registered referee's answers and blocks the rename when any holds.
+ToolRenameReferee = Callable[[frozenset[str]], Awaitable[dict[str, list[ReferenceHolder]]]]
 
-#: A delete referee: given a tool name a delete is about to remove, returns one
-#: :class:`ReferenceHolder` per live reference it will not let the delete strand (empty =
-#: allow, non-empty = VETO). It answers holders and has no side effect: the delete preview
-#: calls it. It is asked once for each tool the delete removes — the preset and every
-#: extension branch tool bound off it — and a holder's summary names the name it holds.
-#: Cleanup belongs in a :data:`ToolDeleteCascade`. A referee raising is a hard failure of the
-#: delete — never a silent bypass. The platform gathers every registered referee's answers
-#: and blocks the delete when any is non-empty.
-ToolDeleteReferee = Callable[[str], Awaitable[list[ReferenceHolder]]]
+#: A delete referee: given the set of tool names a delete is about to remove — the preset and
+#: every extension branch tool bound off it — answers, keyed by asked name, one
+#: :class:`ReferenceHolder` per live reference it will not let the delete strand (nothing held
+#: = allow, any holder = VETO). A name it holds nothing on is left out or maps to an empty list;
+#: a key that was not asked is the referee's bug and fails the delete. It answers holders and
+#: has no side effect: the delete preview calls it. It is asked once per gather, for all of
+#: those names together, and a holder's summary names the name it holds. Cleanup belongs in a
+#: :data:`ToolDeleteCascade`. A referee raising is a hard failure of the delete — never a
+#: silent bypass. The platform gathers every registered referee's answers and blocks the
+#: delete when any holds.
+ToolDeleteReferee = Callable[[frozenset[str]], Awaitable[dict[str, list[ReferenceHolder]]]]
 
 #: A delete cascade: given a tool name a delete removes, cleans up what its owner holds
 #: against that name. The platform calls it once for each tool the delete removes (the
@@ -287,6 +295,10 @@ class AppTools(Protocol):
         """Return the assembled tool registered under ``key``."""
         ...
 
+    async def has_tool(self, key: str) -> bool:
+        """Whether a tool is registered under ``key``, answered by a lookup of that one name."""
+        ...
+
     async def get_tools(self) -> dict[str, Tool]:
         """Return every assembled tool keyed by name."""
         ...
@@ -406,10 +418,10 @@ class AppTools(Protocol):
         """Register a :data:`ToolRenameReferee` consulted before a tool rename.
 
         A plugin holding tool-name references calls this through the ``tai42_app``
-        handle when its module loads. Every registered referee is asked for the
-        old name, and for each extension branch tool bound off it, on a rename and
-        on the rename preview; it answers holders and has no side effect. Any
-        non-empty answer blocks the rename and the holders are named. Registering
+        handle when its module loads. Every registered referee is asked once, with the
+        old name and every extension branch tool bound off it together, on a rename and
+        on the rename preview; it answers holders keyed by asked name and has no side
+        effect. Any holder blocks the rename and the holders are named. Registering
         the same provider object twice raises loudly — a double registration is a
         plugin bug, never a silent duplicate consult.
         """
@@ -419,13 +431,13 @@ class AppTools(Protocol):
         """Register a :data:`ToolDeleteReferee` consulted before a preset delete.
 
         A plugin holding resources keyed on a preset/tool name calls this through the
-        ``tai42_app`` handle when its module loads. Every registered referee is asked once
-        for each tool the delete removes — the preset and every extension branch tool bound
-        off it — on a delete and on the delete preview; it answers holders and has no side
-        effect. Any non-empty answer VETOES the delete and the holders are named. Cleanup
-        belongs in a delete cascade (:meth:`register_delete_cascade`). Registering the same
-        provider object twice raises loudly — a double registration is a plugin bug, never
-        a silent duplicate consult.
+        ``tai42_app`` handle when its module loads. Every registered referee is asked once,
+        with every tool the delete removes together — the preset and every extension branch
+        tool bound off it — on a delete and on the delete preview; it answers holders keyed
+        by asked name and has no side effect. Any holder VETOES the delete and the holders
+        are named. Cleanup belongs in a delete cascade (:meth:`register_delete_cascade`).
+        Registering the same provider object twice raises loudly — a double registration is
+        a plugin bug, never a silent duplicate consult.
         """
         ...
 

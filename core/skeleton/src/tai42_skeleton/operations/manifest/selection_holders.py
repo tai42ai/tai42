@@ -16,7 +16,7 @@ from tai42_contract.tools import ReferenceHolder
 from tai42_skeleton.app import instance
 from tai42_skeleton.manifest import selection_admits
 from tai42_skeleton.operations.errors import UpstreamError
-from tai42_skeleton.operations.holders import holders_refusal, rename_holders
+from tai42_skeleton.operations.holders import holders_refusal, rename_holders_by_tool
 from tai42_skeleton.operations.reference_graph import StoredPresets
 from tai42_skeleton.tools import holder_kinds
 from tai42_skeleton.tools.mcp_health import redact_probe_error
@@ -30,22 +30,29 @@ if TYPE_CHECKING:
 _TAIL = "remove those references first, or keep those tools picked"
 
 
-async def unpick_holders(name: str, stored: StoredPresets) -> list[ReferenceHolder]:
-    """Who still uses the tool ``name``, each summary naming the tool.
+async def unpick_holders(names: Sequence[str], stored: StoredPresets) -> dict[str, list[ReferenceHolder]]:
+    """Who still uses each tool in ``names``, keyed by tool, each summary naming the tool.
 
-    Every preset in ``stored`` whose ``base_tool`` is ``name``, then everything
-    ``rename_holders`` names for ``name`` and the extension branches this worker has bound off
-    it over ``stored``. A holder both legs name is listed once.
+    For each tool: every preset in ``stored`` whose ``base_tool`` is that tool, then everything
+    :func:`rename_holders_by_tool` names for it and the extension branches this worker has bound
+    off it over ``stored``; a holder both legs name is listed once. Every rename referee is
+    asked once, for all of ``names`` together.
     """
-    holders = [
-        ReferenceHolder(kind=holder_kinds.PRESET, name=preset, summary=f"preset {preset!r}")
-        for preset, body in sorted(stored.bodies.items())
-        if body.base_tool == name
-    ]
-    for holder in await rename_holders(name, instance.app.tools.branches_of(name), stored):
-        if holder not in holders:
-            holders.append(holder)
-    return [holder.model_copy(update={"summary": f"{holder.summary}, which uses {name!r}"}) for holder in holders]
+    renamed = await rename_holders_by_tool({name: instance.app.tools.branches_of(name) for name in names}, stored)
+    by_tool: dict[str, list[ReferenceHolder]] = {}
+    for name in names:
+        holders = [
+            holder_kinds.PRESET.holder(name=preset, summary=f"preset {preset!r}")
+            for preset, body in sorted(stored.bodies.items())
+            if body.base_tool == name
+        ]
+        for holder in renamed[name]:
+            if holder not in holders:
+                holders.append(holder)
+        by_tool[name] = [
+            holder.model_copy(update={"summary": f"{holder.summary}, which uses {name!r}"}) for holder in holders
+        ]
+    return by_tool
 
 
 def _listed_names(entry: TaiMCPConfig) -> list[str]:
@@ -94,10 +101,9 @@ async def _blocked_unpicks(
         leaving |= {name for name in served if leaves(name)}
 
     held: dict[str, list[ReferenceHolder]] = {}
-    for name in sorted(leaving):
-        holders = await unpick_holders(name, await stored.get())
-        if holders:
-            held[name] = holders
+    if leaving:
+        unpicked = await unpick_holders(sorted(leaving), await stored.get())
+        held = {name: holders for name, holders in unpicked.items() if holders}
     if not held:
         return {}
     if served is None:
@@ -119,7 +125,7 @@ async def refuse_held_unpicks(
     plus, when ``before`` picks by exclusion and ``after`` by an include list, the served names
     it turns so (``served_names`` lists ``before``'s entry for that). The stored presets' active
     bodies are read once, at the first leaving name, each walked at most once for the whole
-    check, and each leaving name is put to :func:`unpick_holders` over them. When a leaving
+    check, and the leaving names are put to :func:`unpick_holders` over them together. When a leaving
     name has a holder, the server is listed (once per title): a held name it does not serve is
     not bound through this entry and does not refuse, a served one that a stored preset owns is
     dropped (the binder binds no MCP tool under a stored preset's name), and any other refuses.
@@ -140,4 +146,4 @@ async def refuse_held_unpicks(
             for holders in blocked.values():
                 refusing.extend(holders)
     if heads:
-        raise holders_refusal("; ".join(heads), refusing, _TAIL)
+        raise await holders_refusal("; ".join(heads), refusing, _TAIL)

@@ -13,6 +13,7 @@ from pydantic import TypeAdapter, ValidationError
 from tai42_skeleton.app import instance
 from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.operations.reference_graph import kwargs_references
+from tai42_skeleton.tools.binding.surface import add_surface_tool, remove_surface_tool
 from tai42_skeleton.tools.template_slots import annotated_template_ids, tool_input_annotations
 
 _MANIFEST = {
@@ -89,12 +90,12 @@ def test_a_tool_with_no_python_function_answers_none() -> None:
     async def body() -> None:
         fast_mcp = instance.app._fast_mcp
         view = TransformedTool.from_tool(await instance.app.tools.get_tool("render_items"), name="render_items_view")
-        fast_mcp.add_tool(view)
+        add_surface_tool(fast_mcp, view)
         try:
             assert await tool_input_annotations("render_items_view") is None
             assert await annotated_template_ids("render_items_view", {"items": [{"id": "t/one"}]}) == []
         finally:
-            fast_mcp.local_provider.remove_tool("render_items_view")
+            remove_surface_tool(fast_mcp, "render_items_view")
 
     _within_app(body)
 

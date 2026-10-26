@@ -185,7 +185,7 @@ async def rename_preset(name: str, new_name: str) -> dict[str, Any]:
     # operator updates them first. A referee raising fails the rename loudly.
     holders = await rename_holders(name, branches, await StoredPresets.read())
     if holders:
-        raise holders_refusal(f"preset {name!r} cannot be renamed", holders, "update those references first")
+        raise await holders_refusal(f"preset {name!r} cannot be renamed", holders, "update those references first")
 
     # The pre-rename snapshot judges the RELOAD, and is the floor for the remove:
     # both halves are one rename, so a worker owed the rename from the start stays
@@ -249,7 +249,7 @@ async def delete_preset(name: str) -> dict[str, Any]:
     removed = [name, *bound_branches(name)]
     holders = await delete_holders(name, removed[1:])
     if holders:
-        raise holders_refusal(f"preset {name!r} cannot be deleted", holders, "remove those references first")
+        raise await holders_refusal(f"preset {name!r} cannot be deleted", holders, "remove those references first")
     # Cleanup runs only once nothing holds the name, and before the record is removed; a
     # cascade raising fails the delete with the preset intact.
     for cascade in instance.app.tools.delete_cascades():

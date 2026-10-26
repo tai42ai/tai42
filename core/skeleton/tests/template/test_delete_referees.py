@@ -17,7 +17,7 @@ from ..app._fixtures.reload import reload_with
 
 
 def _holder(name: str) -> ReferenceHolder:
-    return ReferenceHolder(kind="hook", name=name, summary=f"hook {name!r} names 'jq/gate' at condition")
+    return ReferenceHolder(kind="hook", tag="hooks", name=name, summary=f"hook {name!r} names 'jq/gate' at condition")
 
 
 async def _first(ids: frozenset[str]) -> list[ReferenceHolder]:

@@ -65,6 +65,9 @@ class _FakeTools:
     async def get_tools(self) -> dict:
         return {name: SimpleNamespace(name=name) for name in self._registered}
 
+    async def has_tool(self, key: str) -> bool:
+        return key in self._registered
+
     async def run_tool(self, key: str, arguments: dict, *, offload_sync: bool = False, extras: object = None) -> object:
         if self._run_exc is not None:
             raise self._run_exc

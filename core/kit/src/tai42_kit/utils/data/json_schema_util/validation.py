@@ -5,10 +5,14 @@ every keyword is enforced. The schema is checked first against the JSON Schema
 rules (:func:`~tai42_kit.utils.data.json_schema_util.schema_rules.check_schema_rules`:
 its meta-schema, and every reference resolving inside it), so a malformed schema
 fails loudly instead of silently mis-validating. References resolve through
-:data:`SCHEMA_REFS`, so no schema is ever fetched.
+:data:`SCHEMA_REFS`, so no schema is ever fetched. A schema that JSON text can spell
+exactly is checked and compiled on its first use, and the validator is kept (for the 256
+most recently used schemas) for every later instance; any other schema is checked and
+compiled on each call.
 """
 
 import json
+from functools import lru_cache
 from typing import Any, cast
 
 from jsonschema import Draft202012Validator
@@ -99,6 +103,31 @@ def _redacted_refusal(error: ValidationError) -> JsonSchemaValidationError:
     return JsonSchemaValidationError(message, json_path=error.json_path, offending_value=None)
 
 
+@lru_cache(maxsize=256)
+def _compiled_from_text(schema_text: str) -> Draft202012Validator:
+    # Keyed by the schema's canonical JSON text; the validator is built over its own parsed copy,
+    # so no caller's later change to its dict reaches it. A refused schema raises and is not kept.
+    schema = json.loads(schema_text)
+    check_json_schema(schema)
+    return Draft202012Validator(schema, registry=SCHEMA_REFS)
+
+
+def _compiled(schema: dict[str, Any]) -> Draft202012Validator:
+    """The checked validator for ``schema``: the kept one when JSON text spells ``schema`` exactly.
+
+    Any other schema the rules admit (a ``Decimal`` bound, say) has no exact JSON text to key it,
+    so it is checked and compiled for this call alone.
+    """
+    try:
+        text = json.dumps(schema, sort_keys=True, allow_nan=False)
+    except (TypeError, ValueError):
+        text = None
+    if text is not None and json.loads(text) == schema:
+        return _compiled_from_text(text)
+    check_json_schema(schema)
+    return Draft202012Validator(schema, registry=SCHEMA_REFS)
+
+
 def validate_against_json_schema(instance: Any, schema: dict[str, Any], *, redact_value: bool = False) -> None:
     """Validate ``instance`` against ``schema`` (JSON Schema draft 2020-12).
 
@@ -116,11 +145,10 @@ def validate_against_json_schema(instance: Any, schema: dict[str, Any], *, redac
     ``offending_value`` is ``None`` and nothing is chained.
 
     Every JSON-Schema keyword is enforced (the faithful path that the
-    signature-bound converters cannot fully express).
+    signature-bound converters cannot fully express). The rules check and the compiled
+    validator are kept per schema, so a schema validated again is not checked again.
     """
-    check_json_schema(schema)
-
-    error = best_match(Draft202012Validator(schema, registry=SCHEMA_REFS).iter_errors(instance))
+    error = best_match(_compiled(schema).iter_errors(instance))
     if error is None:
         return
     if redact_value:

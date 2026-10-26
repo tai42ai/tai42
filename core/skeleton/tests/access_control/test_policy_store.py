@@ -74,7 +74,7 @@ class _MemStore(VersionedStore):
             if k == kind
         ]
 
-    async def list_active_versioned_bodies(self, kind) -> dict[str, tuple[int, dict[str, Any]]]:
+    async def list_active_version_and_body(self, kind) -> dict[str, tuple[int, dict[str, Any]]]:
         # Each active body paired with its active version in one read, mirroring the
         # concrete store's single-JOIN read the preset population reads rely on.
         return {n: (d["active"], dict(d["versions"][d["active"]][0])) for (k, n), d in self.docs.items() if k == kind}

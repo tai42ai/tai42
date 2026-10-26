@@ -459,7 +459,7 @@ ROUTE_TABLE_SHAPES: dict[tuple[str, str], RouteShape] = {
         ),
     ),
     ("GET", "/api/presets/{name}/referees"): RouteShape(
-        items_key="holders", columns=("kind", "name", "locator", "summary")
+        items_key="holders", columns=("kind", "tag", "name", "locator", "summary")
     ),
     ("GET", "/api/presets/{name}/versions"): RouteShape(
         items_key=None, columns=("version", "body", "tags", "created_at", "is_current")
@@ -541,7 +541,7 @@ ROUTE_TABLE_SHAPES: dict[tuple[str, str], RouteShape] = {
         items_key=None, columns=("template", "path", "parameters", "declarations", "state")
     ),
     ("GET", "/api/states/{name}/attachments/{template}/referees"): RouteShape(
-        items_key="holders", columns=("kind", "name", "locator", "summary")
+        items_key="holders", columns=("kind", "tag", "name", "locator", "summary")
     ),
     ("GET", "/api/states/{name}/consumers"): RouteShape(
         items_key=None, columns=("kind", "name", "detail", "link", "unavailable")

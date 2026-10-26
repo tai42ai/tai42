@@ -10,12 +10,12 @@ from tai42_contract.tools import ReferenceHolder
 from tai42_skeleton.tools.delete_referees import ToolDeleteRefereeRegistry
 
 
-async def _empty(_name: str) -> list[ReferenceHolder]:
-    return []
+async def _empty(_names: frozenset[str]) -> dict[str, list[ReferenceHolder]]:
+    return {}
 
 
-async def _holder(_name: str) -> list[ReferenceHolder]:
-    return [ReferenceHolder(kind="hook", name="h", summary="hook 'h'")]
+async def _holder(names: frozenset[str]) -> dict[str, list[ReferenceHolder]]:
+    return {name: [ReferenceHolder(kind="hook", tag="hooks", name="h", summary="hook 'h'")] for name in names}
 
 
 def test_registry_collects_and_snapshots() -> None:

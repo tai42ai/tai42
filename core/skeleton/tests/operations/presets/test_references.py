@@ -108,6 +108,7 @@ def test_get_row_carries_same_references_as_list_row(pg) -> None:
     asyncio.run(run())
 
 
+@pytest.mark.usefixtures("admin_caller")
 def test_used_by_matches_referees_op(pg) -> None:
     async def run() -> None:
         async with instance.app.app_context(_manifest()):
@@ -144,6 +145,7 @@ def test_declared_refs_feed_uses_and_used_by(pg) -> None:
     asyncio.run(run())
 
 
+@pytest.mark.usefixtures("admin_caller")
 def test_declared_referee_blocks_rename_and_lists_in_referees(pg) -> None:
     async def run() -> None:
         async with instance.app.app_context(_manifest()):
@@ -158,7 +160,9 @@ def test_declared_referee_blocks_rename_and_lists_in_referees(pg) -> None:
             )
 
             holders = (await preset_ops.preset_referees(name="leaf", action="rename"))["holders"]
-            assert holders == [{"kind": "preset", "name": "comp", "locator": {}, "summary": "preset 'comp'"}]
+            assert holders == [
+                {"kind": "preset", "tag": "presets", "name": "comp", "locator": {}, "summary": "preset 'comp'"}
+            ]
             # The rename guard now sees the declared reference too.
             with pytest.raises(ConflictError, match="cannot be renamed"):
                 await preset_ops.rename_preset(name="leaf", new_name="leaf2")

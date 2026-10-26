@@ -234,7 +234,7 @@ class PostgresVersionedStore(VersionedStore):
             for row_kind, row_name, active_version, is_active, created_at in rows
         ]
 
-    async def list_active_versioned_bodies(self, kind: str) -> dict[str, tuple[int, dict[str, Any]]]:
+    async def list_active_version_and_body(self, kind: str) -> dict[str, tuple[int, dict[str, Any]]]:
         """Every active document's ``(active_version, body)`` of ``kind``, keyed by name.
 
         The batched read that replaces a per-record ``get_active_body`` round-trip: the active
@@ -257,6 +257,31 @@ class PostgresVersionedStore(VersionedStore):
             )
             rows = await cur.fetchall()
         return {name: (active_version, body) for name, active_version, body in rows}
+
+    async def list_every_version_body(self, kind: str) -> dict[str, list[tuple[int, dict[str, Any]]]]:
+        """Every version's ``(version, body)`` of every active document of ``kind``, keyed by name.
+
+        One JOIN statement over the whole population, each document's versions oldest first, for a
+        reader that must see every version a rollback could re-activate. Concrete-only (not on the
+        ``VersionedStore`` protocol): reached through the concretely-typed ``_versioned_store``
+        accessor.
+        """
+        async with (
+            client_ctx(PostgresClient, component_store_settings(SKELETON_COMPONENT)) as pool,
+            read_connection(pool) as conn,
+            conn.cursor() as cur,
+        ):
+            await cur.execute(
+                "SELECT d.name, v.version, v.body FROM versioned_documents d "
+                "JOIN versioned_document_versions v ON v.document_id = d.id "
+                "WHERE d.kind = %s AND d.is_active ORDER BY d.name, v.version",
+                (kind,),
+            )
+            rows = await cur.fetchall()
+        versions: dict[str, list[tuple[int, dict[str, Any]]]] = {}
+        for name, version, body in rows:
+            versions.setdefault(name, []).append((version, body))
+        return versions
 
     async def get_active_version_and_body(self, kind: str, name: str) -> tuple[int, dict[str, Any]]:
         """The active ``(version, body)`` of one document, read TOGETHER in one JOIN.

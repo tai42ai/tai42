@@ -488,6 +488,7 @@ _DELETES = [
 
 
 @pytest.mark.parametrize(("delete", "refusal", "head"), _DELETES)
+@pytest.mark.usefixtures("admin_caller")
 async def test_a_held_delete_is_refused_and_changes_nothing(
     monkeypatch: pytest.MonkeyPatch, held_store: SimpleNamespace, delete, refusal: str, head: str
 ) -> None:

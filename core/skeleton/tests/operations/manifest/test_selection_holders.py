@@ -29,7 +29,11 @@ from tai42_skeleton.operations.manifest.selection_holders import refuse_held_unp
 from tai42_skeleton.operations.reference_graph import StoredPresets
 
 from ..._fakes.bus import FakeBus
+from ..._fakes.caller_reach import bound_caller
 from ...config.fake_pipeline import FakeConfigStore, FakeReloadAdmin, _service, _with_bus
+
+# Every door here is exercised for an admin caller, who reads each holder by name.
+pytestmark = pytest.mark.usefixtures("admin_caller")
 
 _URL = "https://example.com/mcp"
 _TAIL = "remove those references first, or keep those tools picked"
@@ -86,13 +90,15 @@ class _World:
         return next(entry for entry in self.store.manifest["mcp"] if entry["title"] == title)
 
     def referee(self, tool: str, kind: str, name: str) -> None:
-        async def referee(candidate: str) -> list[ReferenceHolder]:
-            if candidate != tool:
-                return []
-            return [ReferenceHolder(kind=kind, name=name, summary=f"{kind} {name!r}")]
+        async def referee(candidates: frozenset[str]) -> dict[str, list[ReferenceHolder]]:
+            if tool not in candidates:
+                return {}
+            return {tool: [ReferenceHolder(kind=kind, tag=_TAGS[kind], name=name, summary=f"{kind} {name!r}")]}
 
         instance.app.tools.register_rename_referee(referee)
 
+
+_TAGS = {"schedule": "schedules", "preset": "presets"}
 
 _WORKERS = ("bound", "failed", "deregistered")
 
@@ -245,8 +251,27 @@ async def test_a_registered_rename_referee_refuses_the_unpick(world: _World) -> 
     assert world.stored()["include"] == []
 
 
+async def test_a_role_member_reads_the_holders_its_role_reads_and_a_count_of_the_others(
+    world: _World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    world.bodies = {"notify": _body("acme_send")}
+    world.referee("acme_send", "schedule", "nightly")
+
+    with bound_caller(monkeypatch, {"presets": "read"}), pytest.raises(ConflictError) as caught:
+        await _tool_filter(world, _entry(include=["acme_read"]))
+
+    assert caught.value.message == (
+        "tool selection of 'acme' cannot unpick 'acme_send' — held by:\n"
+        "- preset 'notify', which uses 'acme_send'\n"
+        "- schedule: 1 not readable with your role\n"
+        f"{_TAIL}; the others need someone with access to 'schedules'"
+    )
+    assert "nightly" not in caught.value.message + repr(caught.value.extra)
+    assert world.store.persisted == []
+
+
 async def test_a_raising_referee_propagates_and_nothing_is_written(world: _World) -> None:
-    async def boom(_tool: str) -> list[ReferenceHolder]:
+    async def boom(_tools: frozenset[str]) -> dict[str, list[ReferenceHolder]]:
         raise RuntimeError("referee store unreadable")
 
     instance.app.tools.register_rename_referee(boom)
@@ -263,16 +288,16 @@ async def test_the_states_referee_refuses_a_tool_held_only_by_state_records(
     from tai42_skeleton.states.store import PostgresStatesStore
     from tai42_skeleton.tools import platform_referees
 
-    async def count(_store: Any, kind: str, name: str) -> int:
-        return 3 if (kind, name) == ("tool", "acme_send") else 0
+    async def count(_store: Any, kind: str, names: list[str]) -> dict[str, int]:
+        return {"acme_send": 3} if kind == "tool" and "acme_send" in names else {}
 
-    async def outstanding(_store: Any, _key: str) -> list:
+    async def outstanding(_store: Any, _keys: list[str]) -> list:
         return []
 
     monkeypatch.setattr(states_db, "states_store_configured", lambda: True)
     monkeypatch.setattr(PostgresStatesStore, "__init__", lambda self: None)
-    monkeypatch.setattr(PostgresStatesStore, "count_records_for_target", count)
-    monkeypatch.setattr(PostgresStatesStore, "outbox_outstanding_on_target", outstanding)
+    monkeypatch.setattr(PostgresStatesStore, "count_records_for_targets", count)
+    monkeypatch.setattr(PostgresStatesStore, "outbox_outstanding_on_targets", outstanding)
     instance.app.tools.register_rename_referee(platform_referees._states_referee)
 
     with pytest.raises(ConflictError) as caught:
@@ -571,9 +596,9 @@ def test_each_selection_write_door_declares_409_and_502(op: Any) -> None:
 async def test_unpick_holders_lists_a_preset_once_when_both_legs_name_it(world: _World) -> None:
     world.referee("acme_send", "preset", "notify")
 
-    holders = await unpick_holders("acme_send", StoredPresets({"notify": _body("acme_send")}))
+    holders = await unpick_holders(["acme_send"], StoredPresets({"notify": _body("acme_send")}))
 
-    assert [(h.kind, h.name, h.summary) for h in holders] == [
+    assert [(h.kind, h.name, h.summary) for h in holders["acme_send"]] == [
         ("preset", "notify", "preset 'notify', which uses 'acme_send'")
     ]
 
@@ -610,6 +635,32 @@ async def test_a_check_over_many_leaving_names_reads_and_walks_each_stored_body_
     assert caught.value.message == _NOTIFY_MESSAGE
     assert len(reads) == 1
     assert sorted(walks) == ["n2", "n3", "notify"]
+
+
+async def test_a_check_over_many_leaving_names_asks_each_referee_once(world: _World) -> None:
+    from tai42_skeleton.manifest import Manifest
+
+    world.served["acme"] = ["acme_send", "acme_read", "acme_a", "acme_b", "acme_c"]
+    asked: list[frozenset[str]] = []
+
+    async def referee(names: frozenset[str]) -> dict[str, list[ReferenceHolder]]:
+        asked.append(names)
+        return {
+            "acme_b": [ReferenceHolder(kind="schedule", tag="schedules", name="nightly", summary="schedule 'nightly'")]
+        }
+
+    instance.app.tools.register_rename_referee(referee)
+    before = Manifest.model_validate({"mcp": [_entry()]})
+    after = Manifest.model_validate({"mcp": [_entry(include=["acme_read"])]})
+
+    with pytest.raises(ConflictError) as caught:
+        await refuse_held_unpicks(before, after, world.admin.served_mcp_names)
+
+    assert caught.value.message == (
+        "tool selection of 'acme' cannot unpick 'acme_b' — held by:\n"
+        "- schedule 'nightly', which uses 'acme_b'\n" + _TAIL
+    )
+    assert asked == [frozenset({"acme_send", "acme_a", "acme_b", "acme_c"})]
 
 
 async def test_refuse_held_unpicks_joins_every_refusing_title(world: _World) -> None:

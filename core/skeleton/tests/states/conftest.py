@@ -526,10 +526,17 @@ def _count_records(cur, pg, norm, params):
     cur._one = {"n": sum(1 for r in pg.records.values() if r["state"] == state)}
 
 
-@_on(r"SELECT count\(\*\) AS n FROM state_records WHERE target_kind = %s AND target_name = %s$")
-def _count_for_target(cur, pg, norm, params):
-    tk, tn = params
-    cur._one = {"n": sum(1 for r in pg.records.values() if r["target_kind"] == tk and r["target_name"] == tn)}
+@_on(
+    r"SELECT target_name, count\(\*\) AS n FROM state_records "
+    r"WHERE target_kind = %s AND target_name = ANY\(%s\) GROUP BY target_name$"
+)
+def _count_for_targets(cur, pg, norm, params):
+    tk, names = params
+    counts: dict[str, int] = {}
+    for r in pg.records.values():
+        if r["target_kind"] == tk and r["target_name"] in names:
+            counts[r["target_name"]] = counts.get(r["target_name"], 0) + 1
+    cur._all = [{"target_name": name, "n": n} for name, n in counts.items()]
 
 
 @_on(
@@ -1501,15 +1508,15 @@ def _outbox_outstanding_on_subjects(cur, pg, norm, params):
 
 
 @_exact(
-    "SELECT id, status, subject_keys FROM state_outbox WHERE targets @> ARRAY[%s]::text[] "
+    "SELECT id, status, subject_keys, targets FROM state_outbox WHERE targets && %s::text[] "
     "AND status IN ('pending', 'calls', 'running', 'failed') ORDER BY id"
 )
-def _outbox_outstanding_on_target(cur, pg, norm, params):
-    (target,) = params
+def _outbox_outstanding_on_targets(cur, pg, norm, params):
+    (targets,) = params
     cur._all = [
-        {"id": o["id"], "status": o["status"], "subject_keys": list(o["subject_keys"])}
+        {"id": o["id"], "status": o["status"], "subject_keys": list(o["subject_keys"]), "targets": list(o["targets"])}
         for _i, o in sorted(pg.outbox.items())
-        if _outstanding(o) and target in o["targets"]
+        if _outstanding(o) and _overlaps(o["targets"], targets)
     ]
 
 

@@ -7,10 +7,7 @@ feature is off answers ``[]`` without reading a store; a row it cannot read rais
 
 Each holder: locator ``{"template": <id>, "site": <site>}`` plus the kind's own fields,
 summary ``<kind> '<name>' names '<id>' at <site>``; one holder per (row, id, site), in the
-row's read order. The identity referees (api keys, principals, roles) answer that way a
-caller who may read the admin-only identity lists (``caller_may_read_secrets``); any other
-caller reads one count holder per (kind, id, site) instead: name the id, locator
-``{"template", "site", "count"}``, summary ``<n> <kind>(s) name(s) '<id>' at <site>``.
+row's read order. Each holder carries its kind's feature tag (:mod:`~tai42_skeleton.tools.holder_kinds`).
 """
 
 from __future__ import annotations
@@ -22,53 +19,24 @@ from tai42_contract.app import tai42_app
 from tai42_contract.tools import ReferenceHolder, TemplateDeleteReferee, TemplateRef
 
 from tai42_skeleton.tools import holder_kinds
+from tai42_skeleton.tools.holder_kinds import HolderKind
 
 
 def _holders(
-    kind: str, name: str, refs: Iterable[TemplateRef], ids: frozenset[str], **locator: Any
+    kind: HolderKind, name: str, refs: Iterable[TemplateRef], ids: frozenset[str], **locator: Any
 ) -> list[ReferenceHolder]:
     holders: list[ReferenceHolder] = []
     for ref in dict.fromkeys(refs):
         if ref.id not in ids:
             continue
         holders.append(
-            ReferenceHolder(
-                kind=kind,
+            kind.holder(
                 name=name,
                 locator={"template": ref.id, "site": ref.site, **locator},
-                summary=f"{kind} {name!r} names {ref.id!r} at {ref.site}",
+                summary=f"{kind.kind} {name!r} names {ref.id!r} at {ref.site}",
             )
         )
     return holders
-
-
-def _for_caller(holders: list[ReferenceHolder]) -> list[ReferenceHolder]:
-    """Identity ``holders`` as the caller may read them.
-
-    As they are for a caller who may read the admin-only identity lists
-    (``caller_may_read_secrets``); for any other caller, one count holder per (kind, id, site)
-    in first-seen order, naming no identity.
-    """
-    from tai42_contract.access_control.context import caller_may_read_secrets
-
-    if caller_may_read_secrets():
-        return holders
-    counts: dict[tuple[str, str, str], int] = {}
-    for holder in holders:
-        key = (holder.kind, str(holder.locator["template"]), str(holder.locator["site"]))
-        counts[key] = counts.get(key, 0) + 1
-    withheld: list[ReferenceHolder] = []
-    for (kind, template, site), count in counts.items():
-        noun, verb = (f"{kind}s", "name") if count > 1 else (kind, "names")
-        withheld.append(
-            ReferenceHolder(
-                kind=kind,
-                name=template,
-                locator={"template": template, "site": site, "count": count},
-                summary=f"{count} {noun} {verb} {template!r} at {site}",
-            )
-        )
-    return withheld
 
 
 def _skeleton_store_configured() -> bool:
@@ -235,7 +203,7 @@ async def _access_control_referee(ids: frozenset[str]) -> list[ReferenceHolder]:
     for user_id, body in await access_control_store().list_conditioned_policies():
         kind = holder_kinds.API_KEY if is_minted_policy(body) else holder_kinds.PRINCIPAL
         holders += _holders(kind, user_id, condition_template_refs(body.get("condition")), ids)
-    return _for_caller(holders)
+    return holders
 
 
 async def _role_referee(ids: frozenset[str]) -> list[ReferenceHolder]:
@@ -247,7 +215,7 @@ async def _role_referee(ids: frozenset[str]) -> list[ReferenceHolder]:
     holders: list[ReferenceHolder] = []
     for role in sorted(await role_store().list_roles(), key=lambda r: r["name"]):
         holders += _holders(holder_kinds.ROLE, role["name"], condition_template_refs(role.get("condition")), ids)
-    return _for_caller(holders)
+    return holders
 
 
 def settings_env_var(cls: type, field: str) -> str:

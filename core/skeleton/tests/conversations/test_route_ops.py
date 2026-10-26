@@ -1458,7 +1458,13 @@ async def test_a_route_bound_to_the_preset_is_a_delete_holder(wired, monkeypatch
 
     holders = await delete_holders("echo-preset", [])
     assert [holder.model_dump() for holder in holders] == [
-        {"kind": "conversation route", "name": "r1", "locator": {}, "summary": "conversation route 'r1'"}
+        {
+            "kind": "conversation route",
+            "tag": "conversations",
+            "name": "r1",
+            "locator": {},
+            "summary": "conversation route 'r1'",
+        }
     ]
     # A preset no route targets has no route holder.
     assert await delete_holders("other-preset", []) == []

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 from tai42_contract.tools import TemplateRef
 
@@ -88,3 +90,62 @@ async def test_assert_raises_the_callers_error_with_every_line(store: RecordingS
 
 async def test_assert_is_silent_when_every_id_is_stored(store: RecordingStorage) -> None:
     await assert_templates_stored([TemplateRef(id="schemas/out", site="output_schema")], LookupError)
+
+
+async def test_the_distinct_ids_are_checked_concurrently(
+    store: RecordingStorage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Each stat waits until every distinct id's stat is in flight: a check that asks one id
+    # after another never gets there and times out.
+    ids = [f"jq/t{i}" for i in range(5)]
+    in_flight: set[str] = set()
+    all_in_flight = asyncio.Event()
+
+    async def _stat(path: str) -> None:
+        in_flight.add(path)
+        if in_flight == set(ids):
+            all_in_flight.set()
+        await asyncio.wait_for(all_in_flight.wait(), timeout=2)
+        raise FileNotFoundError(path)
+
+    monkeypatch.setattr(store, "stat", _stat)
+    refs = [TemplateRef(id=resource_id, site="system_prompt") for resource_id in [*ids, ids[0]]]
+    assert await template_reference_faults(refs) == [
+        f"stored id {resource_id!r} at system_prompt is not a stored template" for resource_id in ids
+    ]
+
+
+async def test_a_provider_failure_cancels_the_checks_still_in_flight(
+    store: RecordingStorage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    failure = OSError("store unreachable")
+    cancelled: list[str] = []
+
+    async def _stat(path: str) -> None:
+        if path == "jq/fails":
+            raise failure
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.append(path)
+            raise
+
+    monkeypatch.setattr(store, "stat", _stat)
+    refs = [TemplateRef(id=resource_id, site="system_prompt") for resource_id in ("jq/slow", "jq/fails")]
+    with pytest.raises(OSError, match=r"^store unreachable$") as caught:
+        await asyncio.wait_for(template_reference_faults(refs), timeout=2)
+    assert caught.value is failure
+    assert cancelled == ["jq/slow"]
+
+
+async def test_failures_that_land_together_propagate_as_their_group(
+    store: RecordingStorage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def _stat(path: str) -> None:
+        raise OSError(f"{path} unreachable")
+
+    monkeypatch.setattr(store, "stat", _stat)
+    refs = [TemplateRef(id=resource_id, site="system_prompt") for resource_id in ("jq/a", "jq/b")]
+    with pytest.raises(ExceptionGroup) as caught:
+        await template_reference_faults(refs)
+    assert sorted(str(error) for error in caught.value.exceptions) == ["jq/a unreachable", "jq/b unreachable"]

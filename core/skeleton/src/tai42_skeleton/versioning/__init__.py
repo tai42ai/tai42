@@ -22,7 +22,7 @@ def versioned_store() -> PostgresVersionedStore:
 
     Typed as the concrete :class:`PostgresVersionedStore` (not the
     ``VersionedStore`` protocol) so the concrete-only batched
-    ``list_active_versioned_bodies`` accessor resolves through the ``_versioned_store``
+    ``list_active_version_and_body`` accessor resolves through the ``_versioned_store``
     reference; every protocol-typed surface accepts the concrete subtype.
     """
     return PostgresVersionedStore()

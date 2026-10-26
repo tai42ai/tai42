@@ -77,6 +77,9 @@ class _FakeTools:
     async def get_tools(self) -> dict[str, Any]:
         return self._tools
 
+    async def has_tool(self, key: str) -> bool:
+        return key in self._tools
+
 
 # -- reject_response shape ---------------------------------------------------
 

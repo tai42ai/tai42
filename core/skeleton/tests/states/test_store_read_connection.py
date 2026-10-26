@@ -48,7 +48,7 @@ _READS: dict[str, Callable[[PostgresStatesStore], Awaitable[Any]]] = {
     "get_declaration": lambda s: s.get_declaration("alerts"),
     "list_declarations": lambda s: s.list_declarations(),
     "count_records": lambda s: s.count_records("alerts"),
-    "count_records_for_target": lambda s: s.count_records_for_target("agent", "a"),
+    "count_records_for_targets": lambda s: s.count_records_for_targets("agent", ["a"]),
     "field_stats": lambda s: s.field_stats("alerts"),
     "get_template": lambda s: s.get_template("tpl"),
     "list_templates": lambda s: s.list_templates(),

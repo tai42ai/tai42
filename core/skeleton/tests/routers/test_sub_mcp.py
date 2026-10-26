@@ -63,6 +63,9 @@ class _FakeTools:
     async def get_tools(self):
         return {name: SimpleNamespace(name=name) for name in self._registered}
 
+    async def has_tool(self, key):
+        return key in self._registered
+
 
 @pytest.fixture
 def install(monkeypatch, serve_tools, bind_sub_mcp_router):

@@ -103,10 +103,9 @@ async def role_level_decision_for_route(
       non-admin owner's broad owned key inherits the owner's jq base and is denied — so a
       non-admin can never delegate fence access by minting a broad owned key. The fence is
       never grantable.
-    * On a grantable route the GOVERNING role is the OWNER's for an owned key (keys
-      inherit the owner's role grant map — no per-key grant), else the caller's own
-      policy. An ``allow_all``/admin governing role skips the pass entirely (admin is
-      everything, un-lockable).
+    * On a grantable route the GOVERNING role (:func:`governing_grants`) decides. An
+      ``allow_all``/admin governing role skips the pass entirely (admin is everything,
+      un-lockable).
     * Otherwise the route is grantable. A governing role with NO pointer is not
       level-governed (its reach is the jq base); a pointer naming a MISSING/deleted role
       is a fail-closed DENY. A route declared ``self_service`` is not level-governed
@@ -125,27 +124,37 @@ async def role_level_decision_for_route(
             return True, None
         return False, DenialCause.HARD_FENCE
 
-    # On a grantable route the GOVERNING role is the OWNER's for an owned key, else the
-    # caller's own — always a TOP-LEVEL principal, so it carries no owner policy of its own.
+    try:
+        grants = await governing_grants(policy, owner_policy, version)
+    except DocumentNotFoundError:
+        # The pointer names a role that no longer exists — deny fail-closed (LIVE:
+        # deleting a role denies its holders on their next request).
+        return False, DenialCause.LEVEL_MISS
+    if grants is None or meta.self_service:
+        return True, None
+    return grant_map_admits(meta, method, grants)
+
+
+async def governing_grants(policy: AccessPolicy, owner_policy: AccessPolicy | None, version: int) -> RoleGrants | None:
+    """The grant map of the role that governs a principal's per-tag levels, or ``None`` when no level governs it.
+
+    The GOVERNING role is the OWNER's for an owned key (keys inherit the owner's role grant
+    map — no per-key grant), else the principal's own — always a TOP-LEVEL principal, so it
+    carries no owner policy of its own. ``None`` for an ``allow_all``/admin governing role
+    (admin is everything) and for a governing policy with no role pointer (its reach is the
+    jq base). Raises ``DocumentNotFoundError`` when the pointer names a missing/deleted role;
+    the caller denies on it.
+    """
     governing = owner_policy if owner_policy is not None else policy
     if is_admin_policy(governing, None):
-        return True, None
+        return None
 
     from tai42_skeleton.access_control.roles import ROLE_POINTER_KEY
 
     role_name = governing.policy_data.get(ROLE_POINTER_KEY)
     if role_name is None:
-        return True, None
-
-    try:
-        grants = await resolve_role_grants(role_name, version)
-    except DocumentNotFoundError:
-        # The pointer names a role that no longer exists — deny fail-closed (LIVE:
-        # deleting a role denies its holders on their next request).
-        return False, DenialCause.LEVEL_MISS
-    if meta.self_service:
-        return True, None
-    return grant_map_admits(meta, method, grants)
+        return None
+    return await resolve_role_grants(role_name, version)
 
 
 async def role_level_decision(

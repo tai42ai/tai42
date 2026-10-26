@@ -241,8 +241,28 @@ class PresetsFacet(_Facet):
 
         if not component_store_configured(SKELETON_COMPONENT):
             return {}
-        raw = await self._app._versioned_store.list_active_versioned_bodies("preset")
+        raw = await self._app._versioned_store.list_active_version_and_body("preset")
         return {name: (version, stored_preset_body(name, body)) for name, (version, body) in raw.items()}
+
+    async def list_version_bodies(self) -> dict[str, list[tuple[int, PresetBody]]]:
+        """Every version's ``(version, body)`` of every stored preset, keyed by name, oldest first — one read.
+
+        Every version a rollback could re-activate, read in one batched JOIN. A deployment with no
+        skeleton database has no stored presets, so it answers ``{}`` and opens no store; a configured
+        store that cannot be read raises. Reached through the concrete ``_versioned_store``.
+        """
+        from tai42_kit.db import component_store_configured
+
+        from tai42_skeleton.db import SKELETON_COMPONENT
+        from tai42_skeleton.presets.store import stored_preset_body
+
+        if not component_store_configured(SKELETON_COMPONENT):
+            return {}
+        raw = await self._app._versioned_store.list_every_version_body("preset")
+        return {
+            name: [(version, stored_preset_body(name, body)) for version, body in versions]
+            for name, versions in raw.items()
+        }
 
     async def get_active_versioned_body(self, name: str) -> tuple[int, PresetBody]:
         """One preset's ``(active_version, active_body)``, read TOGETHER in one JOIN.

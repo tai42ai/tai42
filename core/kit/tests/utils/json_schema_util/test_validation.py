@@ -6,6 +6,8 @@ that the validator enforces oneOf-XOR and 'not' the converters collapse.
 import json
 import re
 import threading
+from collections.abc import Iterator
+from decimal import Decimal
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
@@ -15,6 +17,7 @@ from tai42_kit.utils.data.json_schema_util import (
     JsonSchemaValidationError,
     check_json_schema,
     validate_against_json_schema,
+    validation,
 )
 
 
@@ -330,3 +333,59 @@ def test_redacted_mode_still_refuses_a_broken_schema_first() -> None:
 
 def test_redacted_mode_passes_a_conforming_instance() -> None:
     assert validate_against_json_schema({"label": "ok"}, _LABELLED, redact_value=True) is None
+
+
+@pytest.fixture
+def checked(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[object]]:
+    """Every schema the rules check is asked about, from an empty validator cache."""
+    seen: list[object] = []
+    real = validation.check_schema_rules
+
+    def _count(schema: object, *args: object, **kwargs: object) -> None:
+        seen.append(schema)
+        real(schema, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(validation, "check_schema_rules", _count)
+    validation._compiled_from_text.cache_clear()
+    try:
+        yield seen
+    finally:
+        validation._compiled_from_text.cache_clear()
+
+
+def test_a_schema_validated_again_is_not_checked_again(checked: list[object]) -> None:
+    for value in ("a", "b", "c"):
+        validate_against_json_schema(
+            {"kept_once": value}, {"type": "object", "properties": {"kept_once": {"type": "string"}}}
+        )
+    assert len(checked) == 1
+    with pytest.raises(JsonSchemaValidationError):
+        validate_against_json_schema(
+            {"kept_once": 1}, {"type": "object", "properties": {"kept_once": {"type": "string"}}}
+        )
+    assert len(checked) == 1
+
+
+def test_a_changed_schema_is_checked_and_validated_as_it_now_is(checked: list[object]) -> None:
+    schema: dict = {"type": "object", "properties": {"changed_later": {"type": "string"}}}
+    validate_against_json_schema({"changed_later": "x"}, schema)
+    schema["properties"]["changed_later"]["type"] = "integer"
+    with pytest.raises(JsonSchemaValidationError):
+        validate_against_json_schema({"changed_later": "x"}, schema)
+    assert len(checked) == 2
+
+
+def test_a_refused_schema_is_refused_on_every_call(checked: list[object]) -> None:
+    for _ in range(2):
+        with pytest.raises(InvalidJsonSchemaError):
+            validate_against_json_schema({}, {"type": "not-a-type-refused-each-time"})
+    assert len(checked) == 2
+
+
+def test_a_schema_with_no_exact_json_text_is_checked_and_validated_on_every_call(checked: list[object]) -> None:
+    schema = {"type": "object", "properties": {"decimal_bound": {"type": "number", "maximum": Decimal("1.5")}}}
+    for value in (0, 1):
+        validate_against_json_schema({"decimal_bound": value}, schema)
+    with pytest.raises(JsonSchemaValidationError):
+        validate_against_json_schema({"decimal_bound": 2}, schema)
+    assert len(checked) == 3

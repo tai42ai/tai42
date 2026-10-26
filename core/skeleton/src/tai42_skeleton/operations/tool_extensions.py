@@ -230,8 +230,7 @@ async def get_tool_extensions(name: str) -> dict:
 
     The combos are served as stored, ``!ENV`` markers intact; no resolved value leaves on the wire.
     """
-    tools = await instance.app.tools.get_tools()
-    if name not in tools:
+    if not await instance.app.tools.has_tool(name):
         raise NotFoundError(f"tool {name!r} is not a registered tool")
     combos = _stored_tool_combos(read_preserved_document(), name)
     return {"combos": combos, "available": instance.app.extensions.available_extensions()}
@@ -329,8 +328,7 @@ async def modify_tool_extension_combos(
     if not add and not remove:
         raise BadRequestError("at least one of 'add' or 'remove' must carry a combo")
 
-    tools = await instance.app.tools.get_tools()
-    if name not in tools:
+    if not await instance.app.tools.has_tool(name):
         raise NotFoundError(f"tool {name!r} is not a registered tool")
 
     manifest = _live_manifest()

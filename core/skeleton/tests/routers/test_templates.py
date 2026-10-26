@@ -9,16 +9,23 @@ from typing import cast
 
 import pytest
 from jinja2 import TemplateSyntaxError
+from starlette.applications import Starlette
 from starlette.requests import Request
+from starlette.routing import Route
+from starlette.testclient import TestClient
+from tai42_contract.access_control import KEY_FINGERPRINT_CLAIM
+from tai42_kit.settings import reset_all_settings
 
+import tai42_skeleton.access_control.store as ac_store_module
 import tai42_skeleton.operations.templates as templates_ops
 import tai42_skeleton.routers.templates as router
 import tai42_skeleton.template.path_guard as path_guard
 from tai42_skeleton.app import instance
-from tai42_skeleton.template import ResourceManager, TemplateNotFoundError
+from tai42_skeleton.template import ResourceManager, TemplateNotFoundError, platform_referees
 from tai42_skeleton.template.path_guard import UnsafeTemplatePathError
 
 from .._fakes.bus import FakeBus
+from .._fakes.caller_reach import bound_caller
 from .._fakes.content_fixtures import (
     FILES_INSTALL_LINE,
     JAVASCRIPT,
@@ -31,7 +38,13 @@ from .._fakes.content_fixtures import (
     locked_pdf,
 )
 from .._fakes.recording_storage import RecordingStorage
-from .._fakes.template_holders import HELD_DIRECTORY_REFUSAL, HELD_HOLDERS, HELD_TEMPLATE_REFUSAL, hold_jq_gate
+from .._fakes.template_holders import (
+    HELD_DIRECTORY_REFUSAL,
+    HELD_HOLDERS,
+    HELD_TEMPLATE_REFUSAL,
+    fresh_referees,
+    hold_jq_gate,
+)
 
 
 def _req(body=None) -> Request:
@@ -151,6 +164,7 @@ async def test_upload_directory_id_collision_is_409(manager, monkeypatch):
     ],
     ids=["file", "dir"],
 )
+@pytest.mark.usefixtures("admin_caller")
 async def test_a_held_delete_is_409_naming_its_holders(monkeypatch, handler, path, refusal):
     provider = RecordingStorage({"jq/gate": (b".a", None)})
     fake_app = SimpleNamespace(
@@ -164,6 +178,74 @@ async def test_a_held_delete_is_409_naming_its_holders(monkeypatch, handler, pat
     resp = await handler(_req({"path": path}))
     assert resp.status_code == 409
     assert _data(resp) == {"error": refusal, "holders": HELD_HOLDERS}
+    assert list(provider.objects) == ["jq/gate"]
+
+
+_POLICY_ROWS = [
+    ("alice", {"condition": {"id": "jq/gate"}, "policy_data": {}}),
+    ("key-1", {"condition": {"id": "jq/gate"}, "policy_data": {KEY_FINGERPRINT_CLAIM: "fp"}}),
+]
+
+
+def _identities_name_jq_gate(monkeypatch) -> RecordingStorage:
+    """A stored ``jq/gate`` that principal ``alice`` and api key ``key-1`` name, read by the
+    platform's access-control referee as the only template-delete referee."""
+    provider = RecordingStorage({"jq/gate": (b".a", None)})
+    fake_app = SimpleNamespace(
+        storage=SimpleNamespace(
+            resource_manager=ResourceManager(provider, on_evicted=instance.app._fire_template_evicted)
+        )
+    )
+    monkeypatch.setattr(templates_ops, "tai42_app", fake_app)
+    monkeypatch.setattr(instance.app, "_bus", FakeBus())
+
+    async def policies():
+        return _POLICY_ROWS
+
+    monkeypatch.setattr(platform_referees, "_skeleton_store_configured", lambda: True)
+    monkeypatch.setattr(
+        ac_store_module, "access_control_store", lambda: SimpleNamespace(list_conditioned_policies=policies)
+    )
+    fresh_referees(monkeypatch).register(platform_referees._access_control_referee)
+    return provider
+
+
+async def test_a_role_member_refused_delete_counts_the_identities_and_reads_who_removes_them(monkeypatch):
+    provider = _identities_name_jq_gate(monkeypatch)
+    with bound_caller(monkeypatch, {"templates": "write"}):
+        resp = await router.delete_template(_req({"path": "jq/gate"}))
+    assert resp.status_code == 409
+    body = _data(resp)
+    assert body["error"] == (
+        "stored template 'jq/gate' cannot be deleted — held by:\n"
+        "- principal: 1 not readable with your role\n"
+        "- api key: 1 not readable with your role\n"
+        "ask someone with access to 'access-control' to remove those references first"
+    )
+    assert not any(user in json.dumps(body) for user in ("alice", "key-1"))
+    assert list(provider.objects) == ["jq/gate"]
+
+
+def test_with_access_control_off_a_refused_delete_over_http_names_the_identities(monkeypatch):
+    monkeypatch.setenv("ACCESS_CONTROL_ENABLE", "false")
+    reset_all_settings()
+    provider = _identities_name_jq_gate(monkeypatch)
+    app = Starlette(
+        routes=[Route("/api/delete-template", router.delete_template, methods=["POST"])],
+        middleware=instance.app._base_middleware(None, stream_path="/mcp"),
+    )
+    try:
+        with TestClient(app) as client:
+            resp = client.post("/api/delete-template", json={"path": "jq/gate"})
+    finally:
+        reset_all_settings()
+    assert resp.status_code == 409
+    assert resp.json()["error"] == (
+        "stored template 'jq/gate' cannot be deleted — held by:\n"
+        "- principal 'alice' names 'jq/gate' at condition\n"
+        "- api key 'key-1' names 'jq/gate' at condition\n"
+        "remove those references first"
+    )
     assert list(provider.objects) == ["jq/gate"]
 
 

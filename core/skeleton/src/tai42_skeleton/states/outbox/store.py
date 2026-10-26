@@ -317,16 +317,20 @@ class _OutboxStore(_StoreBase):
             )
             return [(int(r["id"]), r["status"], list(r["subject_keys"])) for r in await cur.fetchall()]
 
-    async def outbox_outstanding_on_target(self, target: str) -> list[tuple[int, str, list[str]]]:
-        """``(id, status, subject_keys)`` of every outstanding row under the target key ``target``, in id order."""
+    async def outbox_outstanding_on_targets(
+        self, targets: Sequence[str]
+    ) -> list[tuple[int, str, list[str], list[str]]]:
+        """``(id, status, subject_keys, targets)`` of every outstanding row under one of ``targets``, in id order."""
         async with self._read_cursor(None) as cur:
             await cur.execute(
-                "SELECT id, status, subject_keys FROM state_outbox WHERE targets @> ARRAY[%s]::text[] "  # noqa: S608 constant column list and status predicates, no input
+                "SELECT id, status, subject_keys, targets FROM state_outbox WHERE targets && %s::text[] "  # noqa: S608 constant column list and status predicates, no input
                 f"AND {_OUTSTANDING} "
                 "ORDER BY id",
-                (target,),
+                (list(targets),),
             )
-            return [(int(r["id"]), r["status"], list(r["subject_keys"])) for r in await cur.fetchall()]
+            return [
+                (int(r["id"]), r["status"], list(r["subject_keys"]), list(r["targets"])) for r in await cur.fetchall()
+            ]
 
     async def outbox_blocker(self, row_id: int, subject_keys: Sequence[str]) -> tuple[int, str, list[str]] | None:
         """The oldest outstanding row older than ``row_id`` sharing a subject key: what its calls claim waits on."""

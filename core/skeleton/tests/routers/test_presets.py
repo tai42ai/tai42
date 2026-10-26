@@ -43,6 +43,7 @@ from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.operations import presets as preset_ops
 from tai42_skeleton.routers import presets as router
 from tai42_skeleton.tools.binding import UnknownToolError
+from tai42_skeleton.tools.binding.surface import remove_surface_tool
 
 from .._fakes.recording_storage import RecordingStorage
 from ..versioning.conftest import FakeVersioningPg
@@ -142,7 +143,7 @@ def _reset_preset_registry():
             await mgr.remove(name)
         provider = instance.app._fast_mcp.local_provider
         for tool in list(await provider.list_tools()):
-            provider.remove_tool(tool.name)
+            remove_surface_tool(instance.app._fast_mcp, tool.name)
 
     asyncio.run(_clear())
     for name in list(mgr.quarantined_names()):
@@ -1562,6 +1563,7 @@ def test_rename_onto_agent_tool_name_400(pg, emit, monkeypatch):
     asyncio.run(run())
 
 
+@pytest.mark.usefixtures("admin_caller")
 def test_rename_blocked_by_referencing_presets_409_lists_all_sorted(pg, emit):
     async def run():
         async with instance.app.app_context(_manifest()):
@@ -2171,7 +2173,13 @@ def test_conflicted_reason_null_when_healthy(pg, emit):
 
 # -- referees door -----------------------------------------------------------
 
-_COMPOSER_HOLDER = {"kind": "preset", "name": "composer", "locator": {}, "summary": "preset 'composer'"}
+_COMPOSER_HOLDER = {
+    "kind": "preset",
+    "tag": "presets",
+    "name": "composer",
+    "locator": {},
+    "summary": "preset 'composer'",
+}
 
 
 def _referees_request(name: str, action: str) -> Request:
@@ -2189,6 +2197,7 @@ def test_referees_empty(pg, emit):
     asyncio.run(run())
 
 
+@pytest.mark.usefixtures("admin_caller")
 def test_referees_lists_referencing_presets(pg, emit):
     async def run():
         async with instance.app.app_context(_manifest()):
@@ -2206,6 +2215,7 @@ def test_referees_lists_referencing_presets(pg, emit):
     asyncio.run(run())
 
 
+@pytest.mark.usefixtures("admin_caller")
 def test_referees_lists_presets_composing_a_branch_of_the_preset(pg, emit):
     async def run():
         async with instance.app.app_context(_manifest()):
@@ -2256,11 +2266,12 @@ def test_referees_refuses_a_missing_or_unknown_action(pg, emit):
     asyncio.run(run())
 
 
+@pytest.mark.usefixtures("admin_caller")
 def test_referees_delete_lists_the_delete_vetoes_the_gate_refuses_on(pg, emit):
-    holder = ReferenceHolder(kind="fixture holder", name="n1", summary="node 'n1' binding references it")
+    holder = ReferenceHolder(kind="fixture holder", tag="tools", name="n1", summary="node 'n1' binding references it")
 
-    async def _veto(name: str) -> list[ReferenceHolder]:
-        return [holder] if name == "ver" else []
+    async def _veto(names: frozenset[str]) -> dict[str, list[ReferenceHolder]]:
+        return {name: [holder] for name in names if name == "ver"}
 
     async def run():
         async with instance.app.app_context(_manifest()):

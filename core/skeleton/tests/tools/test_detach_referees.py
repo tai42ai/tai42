@@ -16,7 +16,7 @@ async def _empty(_state: str, _template: str) -> list[ReferenceHolder]:
 
 
 async def _holder(_state: str, _template: str) -> list[ReferenceHolder]:
-    return [ReferenceHolder(kind="preset version", name="p", summary="preset 'p' version 1")]
+    return [ReferenceHolder(kind="preset version", tag="presets", name="p", summary="preset 'p' version 1")]
 
 
 def test_registry_collects_and_snapshots() -> None:

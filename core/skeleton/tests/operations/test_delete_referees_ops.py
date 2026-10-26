@@ -24,7 +24,9 @@ from tai42_skeleton.app import instance
 from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.operations import ConflictError
 from tai42_skeleton.operations import presets as preset_ops
+from tai42_skeleton.tools.binding.surface import remove_surface_tool
 
+from .._fakes.caller_reach import bound_caller
 from ..versioning.conftest import FakeVersioningPg
 
 _MANIFEST = {
@@ -62,7 +64,7 @@ def _reset_preset_registry():
             await mgr.remove(name)
         provider = instance.app._fast_mcp.local_provider
         for tool in list(await provider.list_tools()):
-            provider.remove_tool(tool.name)
+            remove_surface_tool(instance.app._fast_mcp, tool.name)
 
     asyncio.run(_clear())
     for name in list(mgr.quarantined_names()):
@@ -87,18 +89,18 @@ async def _create(name: str, base_tool: str = "echo", **over: Any) -> None:
     )
 
 
-_NODE_HOLDER = ReferenceHolder(kind="fixture holder", name="n1", summary="node 'n1' binding references it")
+_NODE_HOLDER = ReferenceHolder(kind="fixture holder", tag="tools", name="n1", summary="node 'n1' binding references it")
 
 
-async def _blocks(_name: str) -> list[ReferenceHolder]:
-    return [_NODE_HOLDER]
+async def _blocks(names: frozenset[str]) -> dict[str, list[ReferenceHolder]]:
+    return {name: [_NODE_HOLDER] for name in names}
 
 
-async def _allows(_name: str) -> list[ReferenceHolder]:
-    return []
+async def _allows(_names: frozenset[str]) -> dict[str, list[ReferenceHolder]]:
+    return {}
 
 
-async def _boom(_name: str) -> list[ReferenceHolder]:
+async def _boom(_names: frozenset[str]) -> dict[str, list[ReferenceHolder]]:
     raise RuntimeError("referee store unreadable")
 
 
@@ -134,6 +136,7 @@ def test_facet_registers_lists_and_rejects_duplicate(pg) -> None:
     asyncio.run(run())
 
 
+@pytest.mark.usefixtures("admin_caller")
 def test_a_vetoing_referee_blocks_the_delete_and_names_the_holder(pg) -> None:
     async def run() -> None:
         async with instance.app.app_context(_manifest()):
@@ -174,6 +177,7 @@ def test_a_raising_referee_fails_the_delete_loudly(pg) -> None:
     asyncio.run(run())
 
 
+@pytest.mark.usefixtures("admin_caller")
 def test_the_refusal_lists_each_holder_and_carries_them(pg) -> None:
     async def run() -> None:
         async with instance.app.app_context(_manifest()):
@@ -191,9 +195,38 @@ def test_the_refusal_lists_each_holder_and_carries_them(pg) -> None:
     asyncio.run(run())
 
 
+def test_a_role_member_refused_delete_counts_the_holders_its_role_cannot_read(pg, monkeypatch) -> None:
+    async def run() -> None:
+        async with instance.app.app_context(_manifest()):
+            await _create("p")
+            instance.app.tools.register_delete_referee(_blocks)
+            with pytest.raises(ConflictError) as caught:
+                await preset_ops.delete_preset("p")
+            assert caught.value.message == (
+                "preset 'p' cannot be deleted — held by:\n"
+                "- fixture holder: 1 not readable with your role\n"
+                "ask someone with access to 'tools' to remove those references first"
+            )
+            assert caught.value.extra == {
+                "holders": [
+                    {
+                        "kind": "fixture holder",
+                        "tag": "tools",
+                        "name": "tools",
+                        "locator": {"count": 1},
+                        "summary": "fixture holder: 1 not readable with your role",
+                    }
+                ]
+            }
+            assert instance.app.preset_manager.is_registered("p")
+
+    with bound_caller(monkeypatch, {"presets": "write"}):
+        asyncio.run(run())
+
+
 def test_a_referee_answering_anything_but_holders_fails_the_delete_naming_it(pg) -> None:
-    async def _strings(_name: str) -> list[str]:
-        return ["a plain line"]
+    async def _strings(names: frozenset[str]) -> dict[str, list[str]]:
+        return {name: ["a plain line"] for name in names}
 
     async def run() -> None:
         async with instance.app.app_context(_manifest()):
@@ -206,6 +239,7 @@ def test_a_referee_answering_anything_but_holders_fails_the_delete_naming_it(pg)
     asyncio.run(run())
 
 
+@pytest.mark.usefixtures("admin_caller")
 def test_refused_delete_runs_no_cleanup(pg, monkeypatch) -> None:
     cleaned: list[str] = []
 
@@ -258,15 +292,16 @@ def test_a_raising_cascade_fails_the_delete_and_keeps_the_preset(pg) -> None:
     asyncio.run(run())
 
 
+@pytest.mark.usefixtures("admin_caller")
 def test_a_veto_holding_a_branch_of_the_preset_blocks_the_delete(pg) -> None:
-    asked: list[str] = []
+    asked: list[frozenset[str]] = []
     branch_holder = ReferenceHolder(
-        kind="fixture holder", name="relay", summary="fixture holder 'relay' names 'alerts_exta'"
+        kind="fixture holder", tag="tools", name="relay", summary="fixture holder 'relay' names 'alerts_exta'"
     )
 
-    async def _branch_veto(name: str) -> list[ReferenceHolder]:
-        asked.append(name)
-        return [branch_holder] if name == "alerts_exta" else []
+    async def _branch_veto(names: frozenset[str]) -> dict[str, list[ReferenceHolder]]:
+        asked.append(names)
+        return {name: [branch_holder] for name in names if name == "alerts_exta"}
 
     async def run() -> None:
         async with instance.app.app_context(_manifest()):
@@ -279,7 +314,8 @@ def test_a_veto_holding_a_branch_of_the_preset_blocks_the_delete(pg) -> None:
                 "- fixture holder 'relay' names 'alerts_exta'\n"
                 "remove those references first"
             )
-            assert asked == ["alerts", "alerts_exta"]
+            # The veto is asked once, for the preset and its branch together.
+            assert asked == [frozenset({"alerts", "alerts_exta"})]
             assert instance.app.preset_manager.is_registered("alerts")
             assert "alerts_exta" in await instance.app.tools.get_tools()
 

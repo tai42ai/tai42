@@ -22,6 +22,7 @@ import pytest
 
 from tai42_skeleton.app import instance
 from tai42_skeleton.manifest import Manifest
+from tai42_skeleton.tools.binding.surface import remove_surface_tool
 
 _MEDIA_MODULE = "tests.app._fixtures.media_tools"
 _PNG_B64 = base64.b64encode(b"\x89PNG\r\n\x1a\n").decode()
@@ -44,7 +45,7 @@ def _manifest() -> dict:
 async def _clear_server() -> None:
     provider = instance.app._fast_mcp.local_provider
     for tool in list(await provider.list_tools()):
-        provider.remove_tool(tool.name)
+        remove_surface_tool(instance.app._fast_mcp, tool.name)
 
 
 @pytest.fixture(autouse=True)

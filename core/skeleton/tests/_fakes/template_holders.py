@@ -8,17 +8,16 @@ from tai42_contract.tools import ReferenceHolder
 from tai42_skeleton.app import instance
 from tai42_skeleton.operations import OperationFailedError
 from tai42_skeleton.template.delete_referees import TemplateDeleteRefereeRegistry
+from tai42_skeleton.tools import holder_kinds
 
 HELD_ID = "jq/gate"
 
-HOOK_HOLDER = ReferenceHolder(
-    kind="hook",
+HOOK_HOLDER = holder_kinds.HOOK.holder(
     name="h",
     locator={"template": HELD_ID, "site": "condition"},
     summary="hook 'h' names 'jq/gate' at condition",
 )
-PRESET_HOLDER = ReferenceHolder(
-    kind="preset",
+PRESET_HOLDER = holder_kinds.PRESET.holder(
     name="p",
     locator={"template": HELD_ID, "site": "system_prompt"},
     summary="preset 'p' names 'jq/gate' at system_prompt",

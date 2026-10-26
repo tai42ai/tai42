@@ -89,7 +89,7 @@ class TaiUser(AuthenticatedUser):
         return self.token.client_id
 
 
-def _acting_principal() -> tuple[str | None, Mapping[str, Any] | None, bool]:
+def acting_principal() -> tuple[str | None, Mapping[str, Any] | None, bool]:
     """``(own id, claims, is_admin)`` of the principal ACTING at the current dispatch.
 
     A bound execution identity takes PRECEDENCE, never a fallback: a fire dispatched as a
@@ -124,7 +124,7 @@ def restricted_identity() -> str | None:
     An ADMIN caller is NEVER restricted: under identity-first every api key carries an owner
     claim, so the owner's own ADMIN key would otherwise be confined to its slice. Admin is
     the enforcement's own verdict (:func:`is_admin_policy` on the owner-attenuated effective
-    policy), read off :func:`_acting_principal` — so it holds for both a request-scope caller
+    policy), read off :func:`acting_principal` — so it holds for both a request-scope caller
     and a fire-bound execution identity, and it is never re-derived from policies here.
 
     A NON-admin caller is restricted iff its claims carry ``OWNER_USER_ID_CLAIM`` — a
@@ -138,12 +138,12 @@ def restricted_identity() -> str | None:
     claim), and the unauthenticated / gate-off cases where no caller is bound. This helper
     is the one definition of "restricted" the whole codebase shares.
 
-    The deciding facts come from :func:`_acting_principal`, so a fire is isolated to the key
+    The deciding facts come from :func:`acting_principal`, so a fire is isolated to the key
     it is authorized as rather than to whoever triggered it, and no Starlette ``Request`` is
     needed — the flat-argument operation doors can enforce isolation without one. With the
     gate off no claims are bound, so the result is ``None``.
     """
-    own, claims, is_admin = _acting_principal()
+    own, claims, is_admin = acting_principal()
     if is_admin:
         return None
     if claims is None or claims.get(OWNER_USER_ID_CLAIM) is None:
@@ -205,7 +205,7 @@ def clamp_write_audience(audience: str | None) -> str | None:
 def request_identity() -> tuple[str | None, str | None]:
     """``(user_id, restricted)`` for the current caller, resolved once so a door never re-derives it.
 
-    ``user_id`` is the acting principal's own id (:func:`_acting_principal`), so a fire's
+    ``user_id`` is the acting principal's own id (:func:`acting_principal`), so a fire's
     writes are attributed to the KEY rather than to whoever triggered it. The second
     element is the ISOLATION identity (:func:`restricted_identity`) — the caller's OWN id
     when restricted, else ``None`` (unrestricted → full view). ``restricted is not None``
@@ -213,4 +213,4 @@ def request_identity() -> tuple[str | None, str | None]:
     still binds its key, so only the isolation half is ``None`` there. When restricted,
     the two are the SAME id.
     """
-    return _acting_principal()[0], restricted_identity()
+    return acting_principal()[0], restricted_identity()

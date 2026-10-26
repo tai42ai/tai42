@@ -658,7 +658,7 @@ class TaiMCP(TaiMCPLifecycleMixin):
     @property
     def _versioned_store(self) -> "PostgresVersionedStore":
         # Concretely typed (not the ``VersionedStore`` protocol) so the batched
-        # ``list_active_versioned_bodies`` accessor — a concrete-only method — resolves
+        # ``list_active_version_and_body`` accessor — a concrete-only method — resolves
         # through this reference. The ``app.versioning.store`` facet re-narrows to
         # the protocol for the contract surface.
         from tai42_skeleton.versioning import versioned_store

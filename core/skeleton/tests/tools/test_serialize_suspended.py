@@ -22,6 +22,7 @@ from tai42_kit.interactions.park_marker import read_suspended_interaction_marker
 from tai42_skeleton.app import instance
 from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.tools.binding.result import _serialize_result
+from tai42_skeleton.tools.binding.surface import remove_surface_tool
 
 _MOD = "tests.app._fixtures.suspend_tool"
 
@@ -72,7 +73,7 @@ def _manifest() -> dict:
 async def _clear_server() -> None:
     provider = instance.app._fast_mcp.local_provider
     for tool in list(await provider.list_tools()):
-        provider.remove_tool(tool.name)
+        remove_surface_tool(instance.app._fast_mcp, tool.name)
 
 
 @pytest.fixture(autouse=True)

@@ -27,6 +27,7 @@ from tai42_skeleton.interactions import helper as helper_module
 from tai42_skeleton.interactions import visit as visit_module
 from tai42_skeleton.interactions.settings import InteractionsSettings
 from tai42_skeleton.manifest import Manifest
+from tai42_skeleton.tools.binding.surface import remove_surface_tool
 
 _MOD = "tests.app._fixtures.resume_tool"
 _INTEGER = {"type": "integer"}
@@ -57,7 +58,7 @@ def settings(monkeypatch, fake_redis, fake_client_ctx) -> InteractionsSettings:
 async def _clear_server() -> None:
     provider = instance.app._fast_mcp.local_provider
     for tool in list(await provider.list_tools()):
-        provider.remove_tool(tool.name)
+        remove_surface_tool(instance.app._fast_mcp, tool.name)
 
 
 @pytest.fixture(autouse=True)

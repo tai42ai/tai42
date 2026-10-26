@@ -120,6 +120,9 @@ class _FakeTools:
     async def get_tools(self):
         return {name: SimpleNamespace(name=name, meta=None) for name in self._registered}
 
+    async def has_tool(self, key):
+        return key in self._registered
+
     async def get_tool(self, key):
         if key not in self._registered:
             raise UnknownToolError(key)

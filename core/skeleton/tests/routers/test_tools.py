@@ -66,6 +66,9 @@ class _FakeTools:
     async def get_tools(self):
         return self._tools
 
+    async def has_tool(self, key):
+        return key in self._tools
+
     async def get_tool(self, key):
         tool = self._tools.get(key)
         if tool is None:

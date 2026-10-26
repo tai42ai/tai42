@@ -312,10 +312,11 @@ class _DeclarationStore(_StoreBase):
             row = await cur.fetchone()
             return 0 if row is None else int(row["n"])
 
-    async def count_records_for_target(self, target_kind: str, target_name: str) -> int:
-        """Records addressed under one conversation target ``(target_kind, target_name)`` across every state.
+    async def count_records_for_targets(self, target_kind: str, target_names: Sequence[str]) -> dict[str, int]:
+        """Records addressed under each conversation target ``(target_kind, <name>)`` across every state.
 
-        The rename referee's evidence that renaming a ``tool`` target would strand its
+        One count per name in ``target_names`` that has records; a name with none is absent.
+        The rename referee's evidence that renaming those ``tool`` targets would strand their
         subject records.
         """
         async with (
@@ -324,11 +325,11 @@ class _DeclarationStore(_StoreBase):
             conn.cursor(row_factory=dict_row) as cur,
         ):
             await cur.execute(
-                "SELECT count(*) AS n FROM state_records WHERE target_kind = %s AND target_name = %s",
-                (target_kind, target_name),
+                "SELECT target_name, count(*) AS n FROM state_records "
+                "WHERE target_kind = %s AND target_name = ANY(%s) GROUP BY target_name",
+                (target_kind, list(target_names)),
             )
-            row = await cur.fetchone()
-            return 0 if row is None else int(row["n"])
+            return {row["target_name"]: int(row["n"]) for row in await cur.fetchall()}
 
     async def field_stats(self, state: str) -> tuple[int, dict[str, int], dict[str, int]]:
         """``(record_count, per_field, per_kind)`` for the listing/stats dialog.

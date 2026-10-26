@@ -358,6 +358,9 @@ async def test_schedulable_via_create_schedule(monkeypatch: pytest.MonkeyPatch, 
         async def get_tools(self) -> dict:
             return {name: SimpleNamespace(name=name) for name in self._registered}
 
+        async def has_tool(self, key: str) -> bool:
+            return key in self._registered
+
         async def run_tool(self, key: str, arguments: dict) -> object:
             if key not in self._registered:
                 raise UnknownToolError(key)

@@ -45,6 +45,10 @@ class ToolsFacet(_Facet):
         """The registered :class:`Tool` for ``key``."""
         return await self._app._tool_binding.get_tool(key)
 
+    async def has_tool(self, key: str) -> bool:
+        """Whether a tool is registered under ``key``, by a lookup of that one name."""
+        return await self._app._tool_binding.has_tool(key)
+
     async def get_tools(self) -> dict[str, Tool]:
         """Every registered tool keyed by name."""
         return await self._app._tool_binding.get_tools()
