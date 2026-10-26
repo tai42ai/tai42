@@ -54,6 +54,9 @@ class _FakeAccounts(AccountsProvider):
             )
         ]
 
+    def display_name(self) -> str:
+        return "Alpha"
+
     async def list_members(self) -> MemberListing:
         return MemberListing(members=[], invites=[])
 
@@ -77,6 +80,9 @@ def test_abstract_provider_cannot_instantiate_directly():
 
 
 class _MissingLoginMethods(AccountsProvider):
+    def display_name(self) -> str:
+        return "Alpha"
+
     async def validate_token(self, token: str) -> AuthIdentity | None:
         return None
 
@@ -88,6 +94,9 @@ class _MissingLoginMethods(AccountsProvider):
 
 
 class _MissingRevokeSession(AccountsProvider):
+    def display_name(self) -> str:
+        return "Alpha"
+
     async def validate_token(self, token: str) -> AuthIdentity | None:
         return None
 
@@ -99,6 +108,9 @@ class _MissingRevokeSession(AccountsProvider):
 
 
 class _MissingValidateToken(AccountsProvider):
+    def display_name(self) -> str:
+        return "Alpha"
+
     def login_methods(self) -> list[LoginMethod]:
         return []
 
@@ -110,6 +122,9 @@ class _MissingValidateToken(AccountsProvider):
 
 
 class _MissingListMembers(AccountsProvider):
+    def display_name(self) -> str:
+        return "Alpha"
+
     async def validate_token(self, token: str) -> AuthIdentity | None:
         return None
 
@@ -127,6 +142,9 @@ class _MissingListMembers(AccountsProvider):
 
 
 class _MissingMemberActions(AccountsProvider):
+    def display_name(self) -> str:
+        return "Alpha"
+
     async def validate_token(self, token: str) -> AuthIdentity | None:
         return None
 
@@ -144,6 +162,9 @@ class _MissingMemberActions(AccountsProvider):
 
 
 class _MissingInvokeMemberAction(AccountsProvider):
+    def display_name(self) -> str:
+        return "Alpha"
+
     async def validate_token(self, token: str) -> AuthIdentity | None:
         return None
 
@@ -160,6 +181,26 @@ class _MissingInvokeMemberAction(AccountsProvider):
         return []
 
 
+class _MissingDisplayName(AccountsProvider):
+    async def validate_token(self, token: str) -> AuthIdentity | None:
+        return None
+
+    def login_methods(self) -> list[LoginMethod]:
+        return []
+
+    async def list_members(self) -> MemberListing:
+        return MemberListing(members=[], invites=[])
+
+    def member_actions(self) -> list[MemberAction]:
+        return []
+
+    async def invoke_member_action(self, action_id: str, *, target: str | None, payload: BaseModel) -> BaseModel:
+        raise ValueError(action_id)
+
+    async def revoke_session(self, token: str) -> bool:
+        return False
+
+
 @pytest.mark.parametrize(
     "cls",
     [
@@ -169,6 +210,7 @@ class _MissingInvokeMemberAction(AccountsProvider):
         _MissingListMembers,
         _MissingMemberActions,
         _MissingInvokeMemberAction,
+        _MissingDisplayName,
     ],
 )
 def test_subclass_missing_any_abstract_method_cannot_instantiate(cls: type[AccountsProvider]):
@@ -182,6 +224,7 @@ def test_full_subclass_instantiates_and_inherits_concrete_members():
         # The abstract members answer.
         methods = provider.login_methods()
         assert len(methods) == 1
+        assert provider.display_name() == "Alpha"
         assert await provider.revoke_session("tai-sess-ok") is True
         assert await provider.revoke_session("foreign") is False
         assert await provider.validate_token("tai-sess-ok") == AuthIdentity(user_id="u1", claims={})

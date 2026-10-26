@@ -13,9 +13,11 @@ out of the resolution chain fails the boot rather than minting dead sessions.
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 
 from tai42_contract.access_control.identity import IdentityProvider
+from tai42_contract.accounts import AccountsProvider
 from tai42_kit.access_control.registry import get_identity_provider_factory_staged
 from tai42_kit.accounts.registry import iter_accounts_provider_factories_staged
 from tai42_kit.utils.worker_secret_capability import set_access_control_gate_state
@@ -47,7 +49,8 @@ async def probe_identity_provider() -> None:
     ``app.record_auth_provider`` so a later request never re-instantiates it nor reads a
     plugin module holder, validates the authorization servers each one declares (an invalid
     declaration fails the build; a declaring provider on a deployment with no
-    ``ACCESS_CONTROL_PUBLIC_BASE_URL`` logs one warning), then awaits each provider's
+    ``ACCESS_CONTROL_PUBLIC_BASE_URL`` logs one warning) and the display name each accounts
+    provider declares (an invalid one fails the build), then awaits each provider's
     ``healthcheck()``. A provider whose storage needs no boot probe inherits the
     contract's default no-op; a key-minting provider probes its own record store. ANY
     provider's failure propagates, so a deployment against a backend a provider cannot
@@ -70,8 +73,34 @@ async def probe_identity_provider() -> None:
         app.record_auth_provider(name, provider)
         providers.append((name, provider))
     validate_declared_authorization_servers(providers)
+    validate_declared_display_names(providers)
     for _name, provider in providers:
         await provider.healthcheck()
+
+
+def validate_declared_display_names(providers: Iterable[tuple[str, IdentityProvider]]) -> None:
+    """Refuse an accounts provider whose declared display name is not one non-blank line.
+
+    Run once per build over the providers it just instantiated. Each accounts provider's
+    ``display_name()`` must be a ``str`` that is not blank and carries no line break, else
+    ``RuntimeError`` naming the provider's registry name and the value — a bad declaration
+    fails the build, it is never replaced by another name.
+    """
+    for name, provider in providers:
+        if not isinstance(provider, AccountsProvider):
+            continue
+        value: object = provider.display_name()
+        if not isinstance(value, str):
+            reason = "it is not a string"
+        elif not value.strip():
+            reason = "it is blank"
+        elif value.splitlines() != [value]:
+            reason = "it must be a single line"
+        else:
+            continue
+        raise RuntimeError(
+            f"accounts provider {name!r} declares the display name {value!r}, which is invalid: {reason}"
+        )
 
 
 async def seed_roles() -> None:

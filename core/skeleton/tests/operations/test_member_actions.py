@@ -80,9 +80,12 @@ class _NeutralActionsProvider(AccountsProvider):
     seam.
     """
 
-    def __init__(self, listing: MemberListing, *, invoke_error: Exception | None = None) -> None:
+    def __init__(
+        self, listing: MemberListing, *, invoke_error: Exception | None = None, display_name: str = "Alpha"
+    ) -> None:
         self._listing = listing
         self._invoke_error = invoke_error
+        self._display_name = display_name
         self.invoked: list[tuple[str, str | None, BaseModel]] = []
 
     async def validate_token(self, token: str) -> AuthIdentity | None:  # pragma: no cover - unused
@@ -90,6 +93,9 @@ class _NeutralActionsProvider(AccountsProvider):
 
     def login_methods(self) -> list[LoginMethod]:  # pragma: no cover - unused
         return []
+
+    def display_name(self) -> str:
+        return self._display_name
 
     async def list_members(self) -> MemberListing:
         return self._listing
@@ -212,6 +218,7 @@ async def test_catalog_lists_declared_actions_with_opaque_keys_and_schemas(monke
     # The label is the provider's inline content, resolved by the REAL resource manager — the
     # content= path a real plugin uses (a plugin cannot seed a stored id=).
     assert ping.label == "Ping the member"
+    assert ping.provider_name == "Alpha"
     assert ping.scope == "page"
     assert ping.destructive is False
     assert ping.input_schema["properties"]["note"]["type"] == "string"
@@ -221,6 +228,28 @@ async def test_catalog_lists_declared_actions_with_opaque_keys_and_schemas(monke
     assert poke.label == "Poke member 2"
     assert poke.scope == "member_row"
     assert poke.destructive is True
+
+
+async def test_catalog_tells_apart_same_labelled_actions_by_each_providers_declared_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _as_admin(monkeypatch, member_actions_ops)
+    _register("first-registry-name", _NeutralActionsProvider(_empty(), display_name="Alpha"))
+    _register("second-registry-name", _NeutralActionsProvider(_empty(), display_name="Beta"))
+
+    catalog = await member_actions_ops.list_member_actions()
+
+    pings = {_decode_action_key(d.key)[0]: d for d in catalog.actions if _decode_action_key(d.key)[1] == "ping"}
+    # Both providers declare the same label; each descriptor carries its own provider's
+    # declared name, never the registry name the platform routes by.
+    assert {registry: d.label for registry, d in pings.items()} == {
+        "first-registry-name": "Ping the member",
+        "second-registry-name": "Ping the member",
+    }
+    assert {registry: d.provider_name for registry, d in pings.items()} == {
+        "first-registry-name": "Alpha",
+        "second-registry-name": "Beta",
+    }
 
 
 async def test_directory_rows_carry_handle_and_matching_action_keys(

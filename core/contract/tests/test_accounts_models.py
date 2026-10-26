@@ -399,6 +399,7 @@ def test_member_action_descriptor_carries_opaque_key_and_rendered_schemas():
     descriptor = MemberActionDescriptor(
         key="opaque-key",
         label="Resend invite",
+        provider_name="Alpha",
         scope="invite_row",
         destructive=False,
         input_schema=_ActionInput.model_json_schema(),
@@ -406,7 +407,22 @@ def test_member_action_descriptor_carries_opaque_key_and_rendered_schemas():
     )
     catalog = MemberActionCatalog(actions=[descriptor])
     assert catalog.actions[0].key == "opaque-key"
+    assert catalog.actions[0].provider_name == "Alpha"
     assert catalog.actions[0].input_schema["properties"]["note"]["type"] == "string"
+
+
+@pytest.mark.parametrize("missing_or_empty", [{}, {"provider_name": ""}])
+def test_member_action_descriptor_requires_a_provider_name(missing_or_empty: dict[str, str]):
+    with pytest.raises(ValidationError):
+        MemberActionDescriptor(
+            key="opaque-key",
+            label="Resend invite",
+            scope="invite_row",
+            destructive=False,
+            input_schema={},
+            result_schema={},
+            **missing_or_empty,  # pyright: ignore[reportArgumentType]
+        )
 
 
 def test_member_row_carries_joined_principals_and_opaque_tokens():

@@ -1,7 +1,8 @@
 """The access-control startup checks (``access_control.startup``).
 
-``probe_identity_provider`` resolves EVERY configured provider through the registry
-and awaits each ``healthcheck()`` (any failure fails the boot loudly);
+``probe_identity_provider`` resolves EVERY configured provider through the registry,
+refuses an accounts provider whose declared display name is not one non-blank line, and
+awaits each ``healthcheck()`` (any failure fails the boot loudly);
 ``check_accounts_providers_configured`` refuses to boot when a registered accounts
 provider is left out of the resolution chain; ``check_always_public_routes`` enumerates
 the always-public login surface and refuses an authed mount beneath it.
@@ -29,6 +30,7 @@ from tai42_skeleton.access_control.startup import (
     check_spa_shell_public,
     probe_identity_provider,
     seed_roles,
+    validate_declared_display_names,
 )
 
 # -- provider healthcheck probe ----------------------------------------------
@@ -50,7 +52,7 @@ class _SpyProvider(IdentityProvider):
             raise self._fail
 
 
-def _bind_providers(monkeypatch: pytest.MonkeyPatch, providers: dict[str, _SpyProvider], names: list[str]) -> None:
+def _bind_providers(monkeypatch: pytest.MonkeyPatch, providers: dict[str, IdentityProvider], names: list[str]) -> None:
     # Point the configured chain at the given spies and reset the settings cache so the
     # probe resolves them. The autouse registry fixture restores the baseline afterwards.
     for name, spy in providers.items():
@@ -111,14 +113,18 @@ async def test_provider_probe_raises_when_no_identity_provider_registered(monkey
 
 
 class _FakeAccountsProvider(AccountsProvider):
-    def __init__(self, settings) -> None:
+    def __init__(self, settings, *, display_name: object = "Alpha") -> None:
         self.settings = settings
+        self._display_name = display_name
 
     async def validate_token(self, token: str) -> AuthIdentity | None:
         return None
 
     def login_methods(self) -> list[LoginMethod]:
         return []
+
+    def display_name(self) -> str:
+        return self._display_name  # pyright: ignore[reportReturnType]  a bad declaration is under test
 
     async def list_members(self) -> MemberListing:
         return MemberListing(members=[], invites=[])
@@ -156,6 +162,48 @@ async def test_configured_accounts_provider_passes(monkeypatch: pytest.MonkeyPat
     finally:
         accounts_registry._PROVIDERS._generation.committed().pop("acct", None)
         reset_all_settings()
+
+
+# -- declared display names --------------------------------------------------
+
+
+async def test_provider_probe_refuses_a_blank_display_name_naming_the_registry_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    blank = _FakeAccountsProvider(None, display_name="")
+    _bind_providers(monkeypatch, {"neutral-accounts": blank}, ["neutral-accounts"])
+    try:
+        with pytest.raises(RuntimeError, match="'neutral-accounts' declares the display name '', which is invalid"):
+            await probe_identity_provider()
+    finally:
+        reset_all_settings()
+
+
+@pytest.mark.parametrize(
+    ("value", "reason"),
+    [
+        ("   ", "it is blank"),
+        ("Alpha\nBeta", "it must be a single line"),
+        ("Alpha\n", "it must be a single line"),
+        (None, "it is not a string"),
+    ],
+)
+def test_display_name_validation_refuses_each_invalid_declaration(value: object, reason: str) -> None:
+    providers: list[tuple[str, IdentityProvider]] = [
+        ("neutral-accounts", _FakeAccountsProvider(None, display_name=value))
+    ]
+    with pytest.raises(RuntimeError, match=f"'neutral-accounts' declares the display name .*: {reason}"):
+        validate_declared_display_names(providers)
+
+
+def test_display_name_validation_passes_single_line_names_and_skips_plain_identity_providers() -> None:
+    validate_declared_display_names(
+        [
+            ("first", _FakeAccountsProvider(None, display_name="Alpha")),
+            ("second", _FakeAccountsProvider(None, display_name="Beta")),
+            ("identity-only", _SpyProvider(None)),
+        ]
+    )  # no raise
 
 
 # -- role seeding gate -------------------------------------------------------

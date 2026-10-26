@@ -57,6 +57,9 @@ class _NeutralAccounts(AccountsProvider):
             raise RuntimeError("provider store down")
         return self._listing
 
+    def display_name(self) -> str:
+        return "Alpha"
+
     def member_actions(self) -> list[MemberAction]:  # pragma: no cover - unused
         return []
 

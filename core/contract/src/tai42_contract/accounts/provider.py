@@ -130,6 +130,18 @@ class AccountsProvider(IdentityProvider):
         ...
 
     @abstractmethod
+    def display_name(self) -> str:
+        """The human-readable name of this provider.
+
+        Shown wherever the platform must tell this provider's accounts and actions apart from
+        another provider's (the Members page labels each page-level action with it). One
+        non-empty line; static, config-derived metadata, cheap and side-effect free (sync by
+        contract, like ``login_methods``). A provider fronting several external identity
+        providers names the one its actions act through.
+        """
+        ...
+
+    @abstractmethod
     async def list_members(self) -> MemberListing:
         """List the people this provider owns and the invitations it holds.
 

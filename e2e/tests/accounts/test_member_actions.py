@@ -42,6 +42,11 @@ async def test_catalog_renders_invoke_happy_and_error_and_admin_only(
         assert descriptor["scope"] in _SCOPES, descriptor
         assert isinstance(descriptor["input_schema"], dict), descriptor
         assert isinstance(descriptor["result_schema"], dict), descriptor
+        assert isinstance(descriptor["provider_name"], str), descriptor
+        assert descriptor["provider_name"].strip(), descriptor
+    # One accounts provider owns every action here, so every descriptor carries its one
+    # declared name.
+    assert len({d["provider_name"] for d in actions}) == 1, actions
 
     catalog_keys = {d["key"] for d in actions}
     # The page-scoped action creates a new account; identify it by its generic scope,

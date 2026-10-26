@@ -143,20 +143,23 @@ async def list_member_actions() -> MemberActionCatalog:
 
     Each registered accounts provider's :meth:`member_actions` declarations are serialized
     into opaque-keyed :class:`MemberActionDescriptor` rows, the label resolved through the
-    resource manager and the input/result schemas rendered generically. The platform reads
-    no action field.
+    resource manager and the input/result schemas rendered generically. The provider's
+    declared :meth:`display_name` rides on every descriptor it owns. The platform reads no
+    action field.
     """
     caller = await resolve_caller()
     require_admin(caller)
     resource_manager = tai42_app.storage.resource_manager
     descriptors: list[MemberActionDescriptor] = []
     for name, provider in _active_accounts_provider_items():
+        provider_name = provider.display_name()
         for action in provider.member_actions():
             label = await resource_manager.render_templated_text(action.label)
             descriptors.append(
                 MemberActionDescriptor(
                     key=_encode_action_key(name, action.id),
                     label=label,
+                    provider_name=provider_name,
                     scope=action.scope,
                     destructive=action.destructive,
                     input_schema=action.input_model.model_json_schema(),

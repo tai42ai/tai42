@@ -9070,7 +9070,7 @@
       },
       "MemberActionDescriptor": {
         "additionalProperties": false,
-        "description": "One declared member action, serialized for the catalog wire.\n\n``key`` is the opaque catalog key the platform mints for (provider, action) — a caller\njoins and echoes it, never parses it. ``label`` is the resolved wording (the\ndeclaration's :class:`TemplatedText` rendered at the door). ``input_schema`` and\n``result_schema`` are the declared models' ``model_json_schema()`` — a caller renders\na form and a read-only result view from them generically, with no provider field name\nknown to the platform.",
+        "description": "One declared member action, serialized for the catalog wire.\n\n``key`` is the opaque catalog key the platform mints for (provider, action) — a caller\njoins and echoes it, never parses it. ``label`` is the resolved wording (the\ndeclaration's :class:`TemplatedText` rendered at the door). ``provider_name`` is the\ndisplay name the owning provider declares (never the platform's registry name) — the\ncaller shows it next to the label so actions of different providers read apart.\n``input_schema`` and ``result_schema`` are the declared models' ``model_json_schema()``\n— a caller renders a form and a read-only result view from them generically, with no\nprovider field name known to the platform.",
         "properties": {
           "destructive": {
             "title": "Destructive",
@@ -9088,6 +9088,11 @@
           },
           "label": {
             "title": "Label",
+            "type": "string"
+          },
+          "provider_name": {
+            "minLength": 1,
+            "title": "Provider Name",
             "type": "string"
           },
           "result_schema": {
@@ -9108,6 +9113,7 @@
         "required": [
           "key",
           "label",
+          "provider_name",
           "scope",
           "destructive",
           "input_schema",
@@ -22634,7 +22640,7 @@
     },
     "/api/auth/member-actions": {
       "get": {
-        "description": "The deployment-wide catalog of declared member actions (admin only).\n\nEach registered accounts provider's :meth:`member_actions` declarations are serialized\ninto opaque-keyed :class:`MemberActionDescriptor` rows, the label resolved through the\nresource manager and the input/result schemas rendered generically. The platform reads\nno action field.",
+        "description": "The deployment-wide catalog of declared member actions (admin only).\n\nEach registered accounts provider's :meth:`member_actions` declarations are serialized\ninto opaque-keyed :class:`MemberActionDescriptor` rows, the label resolved through the\nresource manager and the input/result schemas rendered generically. The provider's\ndeclared :meth:`display_name` rides on every descriptor it owns. The platform reads no\naction field.",
         "operationId": "get_api_auth_member_actions",
         "responses": {
           "200": {

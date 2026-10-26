@@ -189,6 +189,7 @@ def test_member_actions_list_renders_the_catalog(monkeypatch: pytest.MonkeyPatch
                     {
                         "key": "k-invite",
                         "label": "Invite a member",
+                        "provider_name": "Alpha",
                         "scope": "page",
                         "destructive": False,
                         "input_schema": {"type": "object"},
@@ -200,14 +201,21 @@ def test_member_actions_list_renders_the_catalog(monkeypatch: pytest.MonkeyPatch
 
     result = run_cli(monkeypatch, handler, ["auth", "member-actions", "list"])
     assert result.exit_code == 0, result.output
-    # The catalog rows render by their opaque key and label.
+    # The catalog rows render by their opaque key, label and the owning provider's name.
     assert "k-invite" in result.output
     assert "Invite a member" in result.output
+    assert "Alpha" in result.output
 
 
 def test_member_actions_list_json_parses(monkeypatch: pytest.MonkeyPatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
-        return data_response({"actions": [{"key": "k-1", "label": "L", "scope": "member_row", "destructive": True}]})
+        return data_response(
+            {
+                "actions": [
+                    {"key": "k-1", "label": "L", "provider_name": "Alpha", "scope": "member_row", "destructive": True}
+                ]
+            }
+        )
 
     result = run_cli(monkeypatch, handler, ["auth", "member-actions", "list"], json_output=True)
     assert result.exit_code == 0, result.output

@@ -107,6 +107,10 @@ class PostgresAccountsProvider(LoginAttachingProvider):
             claims={"email": row["email"], "kind": "session"},
         )
 
+    def display_name(self) -> str:
+        """The name the platform shows beside this provider's accounts and actions."""
+        return "Postgres"
+
     def login_methods(self) -> list[LoginMethod]:
         """The login methods the sign-in UI renders: password sign-in and invite acceptance."""
         # Static config-derived metadata. Submit paths resolve through the login
