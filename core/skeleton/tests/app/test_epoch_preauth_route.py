@@ -23,6 +23,7 @@ from tai42_kit.settings import reset_all_settings
 from tai42_skeleton.app.epoch import current_epoch
 from tai42_skeleton.app.instance import app
 from tai42_skeleton.app.reload_gate import reload_gate
+from tai42_skeleton.config.deployment_env import DeploymentOwnership
 from tai42_skeleton.manifest import Manifest
 
 # Referenced by string (not imported at collection time): the fixture registers a
@@ -40,7 +41,7 @@ def _restore_process_env_and_routes():
     drop the fixture's identity-provider registration so neither leaks into another suite."""
     from tai42_kit.access_control import registry as identity_registry
 
-    from tai42_skeleton.app import epoch as epoch_mod
+    from tai42_skeleton.app import applied_env
     from tai42_skeleton.app.route_registry import route_registry
 
     snapshot = dict(os.environ)
@@ -48,7 +49,7 @@ def _restore_process_env_and_routes():
     yield
     os.environ.clear()
     os.environ.update(snapshot)
-    epoch_mod._loaded_env_keys = set()
+    applied_env._loaded_env_keys = set()
     reset_all_settings()
     for key in list(route_registry._routes):
         if key not in routes_before:
@@ -96,13 +97,12 @@ def test_preauth_route_stays_non_500_across_a_failed_build_and_a_success(monkeyp
     good = {"default_routers": "none", "routers_modules": [_ROUTER]}
     broken = {"default_routers": "none", "storage_module": "totally_bogus_pkg_xyz"}
     # The fake provider is the configured chain, so the real per-epoch probe records it into
-    # each generation's ServingCore. Access control's request gate is left OFF so the
-    # dispatch exercises the provider-resolution path only, not the verifier's own store —
-    # the probe (a registered lifecycle handler) records the provider regardless of the gate.
-    auth_env = {"ACCESS_CONTROL_ENABLE": "false", "ACCESS_CONTROL_AUTH_PROVIDERS": f'["{PROVIDER_NAME}"]'}
+    # each generation's ServingCore. The probe runs only while the access-control gate is
+    # enabled, so the gate is on; the pre-auth route needs no credential to dispatch.
+    auth_env = {"ACCESS_CONTROL_ENABLE": "true", "ACCESS_CONTROL_AUTH_PROVIDERS": f'["{PROVIDER_NAME}"]'}
 
     async def run() -> None:
-        monkeypatch.setenv("ACCESS_CONTROL_ENABLE", "false")
+        monkeypatch.setenv("ACCESS_CONTROL_ENABLE", "true")
         monkeypatch.setenv("ACCESS_CONTROL_AUTH_PROVIDERS", f'["{PROVIDER_NAME}"]')
         reset_all_settings()
         async with app.app_context(Manifest.model_validate(good)):
@@ -165,10 +165,10 @@ def test_request_path_resolves_live_provider_during_an_in_flight_build(monkeypat
     from tai42_skeleton.app import epoch as epoch_mod
 
     good = {"default_routers": "none", "routers_modules": [_ROUTER]}
-    auth_env = {"ACCESS_CONTROL_ENABLE": "false", "ACCESS_CONTROL_AUTH_PROVIDERS": f'["{PROVIDER_NAME}"]'}
+    auth_env = {"ACCESS_CONTROL_ENABLE": "true", "ACCESS_CONTROL_AUTH_PROVIDERS": f'["{PROVIDER_NAME}"]'}
 
     async def run() -> None:
-        monkeypatch.setenv("ACCESS_CONTROL_ENABLE", "false")
+        monkeypatch.setenv("ACCESS_CONTROL_ENABLE", "true")
         monkeypatch.setenv("ACCESS_CONTROL_AUTH_PROVIDERS", f'["{PROVIDER_NAME}"]')
         reset_all_settings()
         async with app.app_context(Manifest.model_validate(good)):
@@ -198,7 +198,10 @@ def test_request_path_resolves_live_provider_during_an_in_flight_build(monkeypat
 
             _patch_reload(monkeypatch, manifest=good, env=auth_env)
             with pytest.raises(Exception, match="totally_bogus_pkg_xyz"):
-                await epoch_mod.build_and_swap_epoch(dict(os.environ), build_serving_app=_capture_then_fail)
+                # The proposed env is the stored env, as every reload hands it.
+                await epoch_mod.build_and_swap_epoch(
+                    dict(auth_env), build_serving_app=_capture_then_fail, ownership=DeploymentOwnership()
+                )
 
             # The build DID instantiate a distinct new-generation provider (available to leak)...
             assert seen["built"] is not None

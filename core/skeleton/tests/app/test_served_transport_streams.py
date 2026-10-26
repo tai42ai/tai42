@@ -28,6 +28,7 @@ from mcp.client.streamable_http import streamable_http_client
 from mcp.shared.exceptions import McpError
 from tests.app import _reload_drive_state
 
+from tai42_skeleton.app import applied_env
 from tai42_skeleton.app import epoch as epoch_mod
 from tai42_skeleton.app import epoch_retire as epoch_retire_mod
 from tai42_skeleton.app.epoch import current_epoch
@@ -86,7 +87,7 @@ def _process_state_restored(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     yield
     os.environ.clear()
     os.environ.update(snapshot)
-    epoch_mod._loaded_env_keys = set()
+    applied_env._loaded_env_keys = set()
 
 
 @asynccontextmanager

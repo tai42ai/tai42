@@ -24,6 +24,7 @@ import contextlib
 import logging
 import os
 import shutil
+import signal
 import threading
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -90,6 +91,8 @@ class TaiStack:
         self._supervisor_stop = threading.Event()
         self._supervisor_thread: threading.Thread | None = None
         self._supervised_names: set[str] = set()
+        # Set once boot has converged; before it the supervisor respawns only a graceful exit.
+        self._booted = False
 
     # ---- lifecycle -------------------------------------------------------
 
@@ -139,12 +142,15 @@ class TaiStack:
 
         spawning.spawn_all(self, manifest_path, family_dirs)
         self._ensure_own_ports()
-        readiness.wait_ready(self)
-        # Only after the fleet is ready: a supervised stack now respawns any serve/backend
-        # process that self-exits (a recycle). Before readiness, an early exit is a boot
-        # failure surfaced by ``_early_exit_detail``, never a recycle — so the supervisor
-        # must not start until boot has converged.
+        # A supervised stack runs its supervisor from the first spawn, like the process
+        # manager of a deployment: a worker can be recycled while the fleet boots (a
+        # worker joining the bus rolls a recycle over the workers that ran a stored copy of
+        # a key its deployment sets). Until boot has converged the supervisor respawns only
+        # a graceful exit; a failed exit stays down so readiness surfaces it.
         self._start_supervisor()
+        readiness.wait_ready(self)
+        with self._supervisor_lock:
+            self._booted = True
 
     # ---- port-ownership heal ---------------------------------------------
 
@@ -279,16 +285,17 @@ class TaiStack:
                 argv[i + 1] = str(new_port)
                 break
         # The port-derived env (origin allowlist, own-origin, replica-B origin — see
-        # ``child_env.dynamic_env``) was baked from the OLD port into every spec and the
-        # rendered ``.env`` the reload path reads. Re-derive it now so neither this process
-        # nor any already-running sibling that inherited a port-derived value advertises or
-        # allows the seized port; the freshly-terminated target then respawns with it.
+        # ``child_env.dynamic_env``) was baked from the OLD port into every spec's process
+        # env. Re-derive it now so neither this process nor any already-running sibling that
+        # inherited a port-derived value advertises or allows the seized port; the
+        # freshly-terminated target then respawns with it.
         self._refresh_port_derived_env(target=name)
         spawning.spawn(self, self._specs[name])
 
     def _refresh_port_derived_env(self, *, target: str) -> None:
-        """Re-derive the port-keyed env into every spec and the ``.env``, respawning each
-        RUNNING process whose port-derived values changed.
+        """Re-derive the port-keyed env into every spec, respawning each RUNNING process
+        whose port-derived values changed (they are deployment env, so a process takes a
+        new value only at its spawn).
 
         One seam over ``child_env.dynamic_env`` (no per-profile branch): bus keys do not
         depend on a port so they never trigger a respawn; only a profile that carries a
@@ -297,7 +304,6 @@ class TaiStack:
         with the updated spec, so it is not respawned here even if still winding down.
         """
         fresh = child_env.dynamic_env(self)
-        child_env.render_env_file(self)
         for pname, spec in list(self._specs.items()):
             if all(spec.env.get(key) == value for key, value in fresh.items()):
                 continue
@@ -504,15 +510,14 @@ class TaiStack:
     def restart_with_env(self, changes: Mapping[str, str | None]) -> None:
         """Apply env ``changes`` (``None`` removes a key) to every serve replica and the backend, then restart them.
 
-        Models an operator changing a deployment setting: the rendered ``.env`` file carries the
-        change too, so a restarted process boots with it.
+        Models an operator changing a deployment setting: the keys are deployment env, so the
+        change reaches each process through its process env at the restart.
         """
         for key, value in changes.items():
             if value is None:
                 self.config.env.pop(key, None)
             else:
                 self.config.env[key] = value
-        child_env.render_env_file(self)
         for name in [n for n in self._specs if n.startswith("serve") or n == "backend"]:
             env = self._specs[name].env
             for key, value in changes.items():
@@ -522,6 +527,31 @@ class TaiStack:
                     env[key] = value
             self.restart(name)
 
+    def respawn_with_process_env(self, name: str, changes: Mapping[str, str | None]) -> None:
+        """Apply env ``changes`` (``None`` removes a key) to one supervised process, then let the supervisor respawn it.
+
+        Models an operator changing one process's deployment env on a supervised deployment:
+        the process's spec gains the changes, the process is stopped, and the respawn-on-exit
+        supervisor starts it again from that spec. Returns once the fresh life is ready.
+        """
+        if not self.config.supervised:
+            raise RuntimeError(f"respawn_with_process_env({name!r}) needs a supervised stack; use restart_with_env")
+        with self._supervisor_lock:
+            if name not in self._supervised_names:
+                raise RuntimeError(f"respawn_with_process_env({name!r}): the supervisor does not watch {name!r}")
+            handle = self._procs[name]
+            before, replaced = self._restart_baseline(name, handle)
+            env = self._specs[name].env
+            for key, value in changes.items():
+                if value is None:
+                    env.pop(key, None)
+                else:
+                    env[key] = value
+            # Stopped under the supervisor lock, so the supervisor's next pass respawns it from
+            # the changed spec.
+            handle.terminate()
+        self._wait_after_restart(name, before, replaced)
+
     def rotate_connectors_kek(self, *, new_kek: str, previous: list[str]) -> None:
         """Rotate ``CONNECTORS_KEK`` across every serve replica and the backend worker.
 
@@ -529,15 +559,13 @@ class TaiStack:
         then restarts it so the new keys take effect — modelling an operator rotating the
         deployment's KEK. An empty ``previous`` clears ``CONNECTORS_KEK_PREVIOUS`` (the old
         key retired after the re-encrypt sweep converged)."""
-        # The app reads the KEK from the rendered ``.env`` file (TaiBaseSettings' env_file),
-        # so the shared ``config.env`` — the .env source — must carry the rotated keys too;
-        # updating only each process env leaves a restarted replica booting the stale .env.
+        # The KEK is deployment env: ``config.env`` carries the rotated keys so a process the
+        # harness spawns later boots with them too.
         self.config.env["CONNECTORS_KEK"] = new_kek
         if previous:
             self.config.env["CONNECTORS_KEK_PREVIOUS"] = ",".join(previous)
         else:
             self.config.env.pop("CONNECTORS_KEK_PREVIOUS", None)
-        child_env.render_env_file(self)
         for name in [n for n in self._specs if n.startswith("serve") or n == "backend"]:
             env = self._specs[name].env
             env["CONNECTORS_KEK"] = new_kek
@@ -558,6 +586,14 @@ class TaiStack:
         if name == "metrics" and self.metrics_port is not None:
             return [self.metrics_port]
         return []
+
+    def process_on_port(self, port: int) -> ProcessHandle:
+        """The process currently serving the loopback ``port``."""
+        with self._supervisor_lock:
+            for name, handle in self._procs.items():
+                if port in self._ports_for(name):
+                    return handle
+        raise RuntimeError(f"stack {self.config.name!r}: no process serves port {port}")
 
     def kill(self, name: str) -> None:
         """SIGKILL one process immediately without respawning (dead-worker
@@ -625,10 +661,14 @@ class TaiStack:
         elif name == "backend":
             self._wait_fresh_lives("backend", deadline, before=before, replaced=replaced)
 
-    # ---- respawn-on-exit supervisor (opt-in supervised shape) ------------
+    # ---- respawn-on-exit supervisor (opt-in ``config.supervised``) --------
+
+    # A graceful stop ends with status 0, or with the SIGTERM that started it when the
+    # server re-raises the signal after its shutdown completes (uvicorn does).
+    _GRACEFUL_EXIT_CODES = frozenset({0, -signal.SIGTERM})
 
     def _start_supervisor(self) -> None:
-        """Start the respawn-on-exit supervisor once the fleet is ready. Only the
+        """Start the respawn-on-exit supervisor once every process is spawned. Only the
         recyclable kinds (serve + backend) are watched — metrics is not a recycle
         target and joins no bus census."""
         if not self.config.supervised:
@@ -656,8 +696,17 @@ class TaiStack:
                     return
                 for name in list(self._supervised_names):
                     handle = self._procs.get(name)
-                    if handle is not None and handle.poll() is not None:
+                    if handle is not None and self._supervisor_respawns(handle):
                         self._respawn_supervised(name)
+
+    def _supervisor_respawns(self, handle: ProcessHandle) -> bool:
+        """Whether the supervisor brings this exited handle back: a watched process that
+        exited — any exit once boot has converged, a graceful exit (a recycle) while the
+        fleet boots. The caller holds ``_supervisor_lock``."""
+        code = handle.poll()
+        if code is None or handle.name not in self._supervised_names:
+            return False
+        return self._booted or code in self._GRACEFUL_EXIT_CODES
 
     def _respawn_supervised(self, name: str) -> None:
         """Re-launch a self-exited supervised process from its saved spec — the external
@@ -694,7 +743,7 @@ class TaiStack:
             name, base_gen = kind_or_name, baseline
 
             def one_probe() -> bool:
-                early = self._early_exit_detail_supervised()
+                early = readiness.early_exit_detail(self)
                 if early is not None:
                     raise RuntimeError(f"generation-bump wait: {early}")
                 row = next((w for w in self.census() if w.name == name), None)
@@ -709,7 +758,7 @@ class TaiStack:
         kind, targets = kind_or_name, dict(baseline)
 
         def fleet_probe() -> bool:
-            early = self._early_exit_detail_supervised()
+            early = readiness.early_exit_detail(self)
             if early is not None:
                 raise RuntimeError(f"generation-bump wait: {early}")
             rows = {w.name: w for w in self.census() if w.kind == kind}
@@ -725,16 +774,3 @@ class TaiStack:
         )
         rows = {w.name: w for w in self.census() if w.kind == kind}
         return {name: rows[name] for name in targets if name in rows}
-
-    def _early_exit_detail_supervised(self) -> str | None:
-        """Like ``readiness.early_exit_detail`` but tolerant of the supervised churn: a
-        serve/backend handle momentarily exited is being respawned by the supervisor, not a
-        failure. Only a NON-supervised process that exited (or a supervised one with no
-        respawn thread) is a real early exit worth surfacing."""
-        with self._supervisor_lock:
-            for handle in self._procs.values():
-                if handle.name in self._supervised_names:
-                    continue
-                if not handle.is_running():
-                    return f"process {handle.name!r} exited early (code {handle.poll()}):\n{handle.log_tail()}"
-        return None

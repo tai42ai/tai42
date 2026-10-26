@@ -340,12 +340,18 @@ async def test_secret_env_generated_key_never_shadows_registered_env_var(fake):
     # shadow-avoidance: even with the stored env FREE of the candidate, a generated key that
     # would match a REGISTERED settings env_var is skipped — the generator mints a fresh,
     # non-shadowing key the env write accepts. Uses a REAL registered, non-X-band var as the
-    # target so the op must consult registered_env_var_names() (the X band alone would not carry it).
-    from tai42_kit.settings import unknown_owned_env_keys
+    # target so the op must consult the names that set a field (the X band alone would not carry it).
+    from tai42_kit.settings import registered_settings, unknown_owned_env_keys
 
-    from tai42_skeleton.config.boundary import registered_env_var_names, x_band_env_keys
+    from tai42_skeleton.config.boundary import EnvKeyClasses
 
-    target = sorted(registered_env_var_names() - x_band_env_keys())[0]
+    classes = EnvKeyClasses()
+    target = sorted(
+        field.env_var
+        for info in registered_settings()
+        for field in info.fields
+        if field.env_var and not classes.x_band(field.env_var)
+    )[0]
     fake.cm._env = {}  # the stored env does NOT hold the target — only the registry does
     fake.cm._manifest = {"mcp": [{"title": "gh", "config": {"url": "https://x", "headers": {}}}]}
     resp = await router.set_mcp_secret_env(
@@ -360,18 +366,24 @@ async def test_secret_env_generated_key_never_shadows_registered_env_var(fake):
     assert resp.status_code == 200
     assert target not in fake.cm._env  # the registered var is NOT shadowed
     minted = next(key for key, value in fake.cm._env.items() if value == "fresh-secret")
-    assert minted not in registered_env_var_names()  # a fresh, non-shadowing key was minted
+    assert not classes.sets_a_field(minted)  # a fresh, non-shadowing key was minted
     assert unknown_owned_env_keys([minted]) == []  # and the owned-prefix audit accepts it
     assert fake.cm._manifest["mcp"][0]["config"]["headers"]["Authorization"] == f"!ENV ${{{minted}}}"
 
 
 async def test_secret_env_generated_key_suffixes_a_registered_name_outside_owned_prefixes(fake):
-    from tai42_kit.settings import owned_env_prefixes
+    from tai42_kit.settings import owned_env_prefixes, registered_settings
 
-    from tai42_skeleton.config.boundary import registered_env_var_names, x_band_env_keys
+    from tai42_skeleton.config.boundary import EnvKeyClasses
 
+    classes = EnvKeyClasses()
     owned = tuple(owned_env_prefixes())
-    target = sorted(v for v in registered_env_var_names() - x_band_env_keys() if not v.startswith(owned))[0]
+    target = sorted(
+        field.env_var
+        for info in registered_settings()
+        for field in info.fields
+        if field.env_var and not classes.x_band(field.env_var) and not field.env_var.startswith(owned)
+    )[0]
     fake.cm._env = {}
     fake.cm._manifest = {"mcp": [{"title": "gh", "config": {"url": "https://x", "headers": {}}}]}
     resp = await router.set_mcp_secret_env(

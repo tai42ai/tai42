@@ -147,7 +147,24 @@ class StackConfig:
     name: str
     topology: Topology
     manifest: dict
+    # The DEPLOYMENT env: every key here is set in each child's process env and never
+    # written to the stored ``.env``, as a container or unit file would set it. The app
+    # treats a non-empty process-env key as set by the deployment: its value wins at boot
+    # and at reload, and a write that sets it through the app is refused. Infrastructure
+    # (store and bus URLs, paths, the tokens and keys a feature needs to boot) and the
+    # after-boot port fills of ``child_env.dynamic_env`` belong here.
     env: dict[str, str]
+    # Per-process DEPLOYMENT env, keyed by process name (``serve``, ``serve-a``, ``backend``,
+    # ``metrics``, ...): layered over ``env`` in that one process's env only, as a deployment
+    # sets a key in one service's environment and not the others'. Never written to the
+    # stored ``.env``. A name the stack does not spawn fails the boot.
+    process_env: dict[str, dict[str, str]] = field(default_factory=dict)
+    # The STORED env seeded into ``<config>/.env`` at boot: the keys the app may change
+    # through its own config doors (env writes, profile applies, backup imports). Empty on
+    # every profile, so the store starts empty as on a fresh deployment and each test
+    # writes the keys it changes; a test that models a hand edit of the store sets it here
+    # and re-renders with ``child_env.render_env_file``.
+    stored_env: dict[str, str] = field(default_factory=dict)
     # A verbatim manifest document seeded to disk BYTE-for-byte instead of
     # ``yaml.safe_dump(manifest)`` — the comment-preservation scenario seeds a
     # ruamel-normalized commented manifest this way (``safe_dump`` cannot carry
@@ -174,19 +191,17 @@ class StackConfig:
     path_prefix: str = ""
     # The MCP transport the ``tai serve`` fleet runs (``tai serve --transport``).
     transport: str = "http"
-    # Opt-in SUPERVISED shape: stamp ``TAI_SUPERVISED=<supervision_marker>`` into every
-    # child's env (so the SUT resolves a recycle-supported shape,
-    # ``recycle_policy.detect_shape``) AND run a respawn-on-exit supervisor that re-launches a
-    # serve/backend process the instant it self-exits — the external supervisor a graceful
-    # recycle self-exit assumes (the applier's own deferred self-exit and each orchestrated
-    # sibling recycle). Off by default (bare): a recycle-class profile apply is then refused
-    # at the API, which is itself a test.
+    # Run a respawn-on-exit supervisor that re-launches a serve/backend process the instant
+    # it exits — the process manager a deployment runs the app under, which a recycle-class
+    # change relies on: the applier and each sibling it recycles exit gracefully and the
+    # supervisor starts them again. It runs from the first spawn; while the fleet boots it
+    # brings back only a graceful exit, so a boot failure stays down and is reported. Off
+    # by default: a stack without it does not bring an exited process back.
     supervised: bool = False
-    # The supervision marker a supervised stack stamps (``harness``, or a deployment shape).
-    supervision_marker: str = "harness"
-    # The pinned set a ``k8s``/``compose``-marked stack declares
-    # (``TAI_SUPERVISED_PINNED_KEYS``, stamped as a JSON list); ``None`` stamps nothing.
-    supervised_pinned_keys: list[str] | None = None
+    # Keep the worker bus URL in the stored ``.env`` instead of the deployment env: no process is
+    # started with ``TAI_BUS_REDIS_URL``, and each reaches the bus through the stored copy the
+    # harness seeds (``child_env.stored_bus_env``). The bus namespace stays in the deployment env.
+    bus_url_stored: bool = False
     # Per-process CWD overrides, keyed by process name (the shared-dir test launches
     # the three kinds from three different working directories).
     cwd_overrides: dict[str, str] = field(default_factory=dict)

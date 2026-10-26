@@ -129,7 +129,6 @@ def test_boot_reallocates_off_a_foreign_listener(
         seize.close()
 
 
-@pytest.mark.needs("files")
 def test_heal_refreshes_the_origin_allowlist_to_the_new_port(
     fresh_stack: Callable[..., TaiStack], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -142,10 +141,10 @@ def test_heal_refreshes_the_origin_allowlist_to_the_new_port(
         seized_origin = f"http://{stack.host}:{seize.port}"
         # The serve process was (re)spawned advertising its NEW origin, never the seized one.
         assert stack._specs["serve"].env[_ALLOWLIST_KEY] == new_origin, stack._specs["serve"].env[_ALLOWLIST_KEY]
-        # The reload path reads .env, which must carry the same refreshed origin.
-        env_text = (stack._config_dir / ".env").read_text()
-        assert f'{_ALLOWLIST_KEY}="{new_origin}"' in env_text, env_text
-        assert seized_origin not in env_text, env_text
+        # No value in its process env (the deployment env, which wins at every reload) names
+        # the seized port.
+        stale = {key: value for key, value in stack._specs["serve"].env.items() if seized_origin in value}
+        assert not stale, stale
     finally:
         seize.close()
 

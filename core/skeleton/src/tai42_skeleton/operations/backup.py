@@ -106,7 +106,7 @@ async def import_backup(document: dict[str, Any], sections: list[str], mode: Bac
     ``mode`` is the per-record policy (``skip`` or ``overwrite``). A ``version`` other than 1
     raises ``BadRequestError``; an unknown, absent, or failing section carries its error in
     the report and makes ``ok`` false. A section whose restore rolled a worker recycle (an env
-    section changing a recycle-class key on a supervised deployment) carries the roll in its
+    section changing a recycle-class key) carries the roll in its
     ``recycle``; when that roll converged, this worker recycles itself after replying.
     """
     # The envelope shape is validated at the HTTP edge; the document CONTENT (version,

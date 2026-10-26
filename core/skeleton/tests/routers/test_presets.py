@@ -1680,6 +1680,8 @@ class _RecordingBus:
             joined_at=now,
             beat_at=now,
             state=WorkerState.ready,
+            deployment_keys=[],
+            env_readers="",
             # Fresh against ``heartbeat_ttl`` below, so this row clears the same
             # ready+fresh gate the publisher's op-start census applies.
             pttl_ms=15_000,

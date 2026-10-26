@@ -33,6 +33,7 @@ from tai42_skeleton.app.bus import (
 from tai42_skeleton.app.bus.models import _OP_PAYLOAD_KEY
 from tai42_skeleton.app.bus.ops import ReloadConfig, ReloadMcp
 from tai42_skeleton.app.bus.subscribe import _HeartbeatThread
+from tai42_skeleton.config.deployment_env import published_env_readers
 
 from ..._fakes.kit_redis import KitFakeRedis
 from .conftest import _noop_op, _RecordingRedis, _spawn_subscriber, _stop, _until, make_bus
@@ -762,6 +763,8 @@ async def test_teardown_deliberate_swallows_a_release_transport_blip(
             joined_at="2026-01-01T00:00:00+00:00",
             beat_at="2026-01-01T00:00:00+00:00",
             state=WorkerState.ready,
+            deployment_keys=(),
+            env_readers="",
         )
         pubsub = client.pubsub()
         await pubsub.subscribe(bus._settings.channel)
@@ -858,6 +861,8 @@ async def test_presence_writes_are_skipped_on_a_lost_claim(wire_bus_client: None
             joined_at=now,
             beat_at=now,
             state=WorkerState.ready,
+            deployment_keys=(),
+            env_readers="",
         )
         # Steal the claim so every renew misses.
         await client.set(bus._settings.slot_key(name), "foreign-token", px=30000)
@@ -1113,17 +1118,55 @@ async def test_set_presence_writes_key_and_index_member_in_one_pipeline(server) 
         joined_at="2026-01-01T00:00:00+00:00",
         beat_at="2026-01-01T00:00:00+00:00",
         state=WorkerState.ready,
+        deployment_keys=(),
+        env_readers="",
     )
     key = bus._settings.presence_key(bus.identity.name)
 
     await bus._set_presence(recording, key, presence)
 
-    # The SET and the index SADD ride ONE pipeline, in that order — a presence key never
-    # exists without its index member.
+    # The reader body and its life, the row and the index SADD ride ONE pipeline, in that order —
+    # a presence key never exists without its index member or without the body its digest names.
     assert len(recording.pipelines) == 1
-    assert recording.pipelines[0].commands == ["set", "sadd"]
+    assert recording.pipelines[0].commands == ["set", "pexpire", "set", "sadd"]
     assert bus.identity.name in await inner.smembers(bus._settings.presence_index)
-    assert await inner.get(key) is not None
+    row = json.loads(await inner.get(key))
+    readers = published_env_readers()
+    assert row["env_readers"] == readers.digest
+    body_key = bus._settings.env_readers_key(readers.digest)
+    assert await inner.get(body_key) == readers.body
+    row_ttl_ms = int(bus._settings.heartbeat_ttl * 1000)
+    # A lone write leaves the body twice the row's TTL to live.
+    assert row_ttl_ms < await inner.pttl(body_key) <= 2 * row_ttl_ms
+    assert 0 < await inner.pttl(key) <= row_ttl_ms
+    await inner.aclose()
+
+
+async def test_a_beat_with_a_short_ttl_never_cuts_a_shared_reader_body_below_a_longer_row(server) -> None:
+    # Two workers with one reader set and different heartbeat TTLs share one body key: the
+    # short-TTL worker's beat after the long-TTL worker's leaves the body outliving the long row.
+    long_bus = make_bus(kind=WorkerKind.serve, heartbeat_ttl=45.0)
+    short_bus = make_bus(kind=WorkerKind.serve, heartbeat_ttl=1.0)
+    inner: Any = aioredis.FakeRedis(server=server, decode_responses=True)
+
+    def presence() -> _PresenceValue:
+        return _PresenceValue(
+            kind=WorkerKind.serve,
+            pid=1,
+            generation=1,
+            joined_at="2026-01-01T00:00:00+00:00",
+            beat_at="2026-01-01T00:00:00+00:00",
+            state=WorkerState.ready,
+            deployment_keys=(),
+            env_readers="",
+        )
+
+    long_key = long_bus._settings.presence_key(long_bus.identity.name)
+    await long_bus._set_presence(inner, long_key, presence())
+    await short_bus._set_presence(inner, short_bus._settings.presence_key(short_bus.identity.name), presence())
+
+    body_key = long_bus._settings.env_readers_key(published_env_readers().digest)
+    assert await inner.pttl(body_key) > 45_000 >= await inner.pttl(long_key)
     await inner.aclose()
 
 

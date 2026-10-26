@@ -1,10 +1,9 @@
-"""Child-process env construction for the boot engine: the clean per-child env,
-the rendered ``.env`` file, and the after-boot origin/bus fills a profile names
-but only the booted stack can resolve to concrete ports."""
+"""Child-process env construction for the boot engine: the clean per-child env (the
+deployment env), the rendered stored ``.env`` file, and the after-boot origin/bus fills
+a profile names but only the booted stack can resolve to concrete ports."""
 
 from __future__ import annotations
 
-import json
 import os
 import sys
 from pathlib import Path
@@ -34,10 +33,20 @@ def bus_env(config: StackConfig, resources: StackResources) -> dict[str, str]:
     cross-count each other's census."""
     if not needs_bus(config):
         return {}
+    if config.bus_url_stored:
+        return {"TAI_BUS_NAMESPACE": resources.bus_namespace}
     return {
         "TAI_BUS_REDIS_URL": resources.bus_redis_url,
         "TAI_BUS_NAMESPACE": resources.bus_namespace,
     }
+
+
+def stored_bus_env(config: StackConfig, resources: StackResources) -> dict[str, str]:
+    """The stored copy of this stack's bus URL a ``bus_url_stored`` stack reaches the bus
+    through, seeded into the rendered ``.env`` (:func:`render_env_file`); empty otherwise."""
+    if not (needs_bus(config) and config.bus_url_stored):
+        return {}
+    return {"TAI_BUS_REDIS_URL": resources.bus_redis_url}
 
 
 def origin_allowlist_env(config: StackConfig, host: str, app_ports: list[int]) -> dict[str, str]:
@@ -134,10 +143,13 @@ def dynamic_env(stack: TaiStack) -> dict[str, str]:
     }
 
 
-def child_env(stack: TaiStack, tmpdir: str, cwd_override: str | None) -> dict[str, str]:
-    """A clean child env built from scratch: PATH/HOME/venv-bin, the stack's feature
-    env, and TMPDIR for the run-family metrics dir. Never an ``os.environ`` passthrough,
-    and never ``PROMETHEUS_MULTIPROC_DIR`` (the entrypoint stamps that itself)."""
+def child_env(stack: TaiStack, tmpdir: str, process: str) -> dict[str, str]:
+    """A clean child env built from scratch: PATH/HOME/venv-bin, the stack's deployment
+    env, the deployment env of the one ``process`` it is for (``StackConfig.process_env``),
+    the after-boot fills, and TMPDIR for the run-family metrics dir. Never an
+    ``os.environ`` passthrough, and never ``PROMETHEUS_MULTIPROC_DIR`` (the entrypoint
+    stamps that itself). The config dir's stored ``.env`` is not part of it: the entry
+    points' boot ``.env`` load skips that file, and the server applies its keys itself."""
     venv_bin = str(Path(sys.executable).parent)
     env: dict[str, str] = {
         "PATH": os.pathsep.join([venv_bin, "/usr/local/bin", "/usr/bin", "/bin"]),
@@ -148,24 +160,13 @@ def child_env(stack: TaiStack, tmpdir: str, cwd_override: str | None) -> dict[st
         "TAI_MANIFEST_PATH": str(stack._config_dir / "manifest.yml"),
     }
     env.update(stack.config.env)
+    env.update(stack.config.process_env.get(process, {}))
     env.update(dynamic_env(stack))
-    # The supervision marker and its pinned set are PROCESS-env-only shape signals (never
-    # written to ``.env``): they are X-band, so a profile may not carry them, and keeping
-    # them out of the store means a profile built from the stored env never trips the
-    # X-band refusal — yet ``detect_shape`` reads them off ``os.environ`` on every
-    # (re)spawned child.
-    if stack.config.supervised:
-        env["TAI_SUPERVISED"] = stack.config.supervision_marker
-        if stack.config.supervised_pinned_keys is not None:
-            env["TAI_SUPERVISED_PINNED_KEYS"] = json.dumps(stack.config.supervised_pinned_keys)
     if "PROMETHEUS_MULTIPROC_DIR" in env:
         raise RuntimeError(
             "the harness must never set PROMETHEUS_MULTIPROC_DIR in a child env; "
             "the metrics dir is controlled via TMPDIR so the entrypoint stamps it"
         )
-    # A per-process CWD override still needs load_dotenv to find .env, so the env
-    # carries the config dir explicitly.
-    _ = cwd_override
     return env
 
 
@@ -180,10 +181,10 @@ def _env_file_literal(value: str) -> str:
 
 
 def render_env_file(stack: TaiStack) -> None:
-    """Render the feature env map to ``<config>/.env`` so the admin reload
-    path (which re-reads ``.env``) sees the same values the process env
-    does. TMPDIR is deliberately NOT written here — it is per-process, which
-    is how REPLICAS get per-replica metrics dirs from one shared .env."""
-    merged = {**stack.config.env, **dynamic_env(stack)}
-    lines = [f"{key}={_env_file_literal(value)}" for key, value in sorted(merged.items())]
-    (stack._config_dir / ".env").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    """Render the stack's stored env (``StackConfig.stored_env``, plus the stored bus URL of a
+    ``bus_url_stored`` stack, :func:`stored_bus_env`) to ``<config>/.env``, the store the app's
+    config doors read and write. The deployment env never lands here: it reaches each child
+    through its process env only (:func:`child_env`)."""
+    stored = {**stored_bus_env(stack.config, stack.resources), **stack.config.stored_env}
+    lines = [f"{key}={_env_file_literal(value)}" for key, value in sorted(stored.items())]
+    (stack._config_dir / ".env").write_text("".join(f"{line}\n" for line in lines), encoding="utf-8")

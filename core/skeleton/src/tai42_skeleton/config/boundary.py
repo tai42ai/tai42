@@ -6,12 +6,18 @@ X-band refusal
     An env write may never carry a deployment / boot-identity key: the registry's
     ``excluded`` fields together with a central bare-read list. These keys are written by the
     launcher / deployment substrate and have no reload path, so a profile- or
-    editor-carried value is at best an inert no-op and at worst spoofs shape
-    detection (a self-exit on an unsupervised host) or relocates the readiness
+    editor-carried value is at best an inert no-op and at worst relocates the readiness
     sentinel. The refusal reads the WRITER'S PAYLOAD keys, NEVER the post-carry
     effective env — a profile apply legitimately CARRIES the whole X band across
     ``replace_env``, so refusing the effective env would reject the applier's own
     carry.
+
+Deployment-owned refusal (CHANGE-aware)
+    A key the deployment env sets (:mod:`tai42_skeleton.config.deployment_env`) keeps the
+    deployment's value at every boot and reload, so a stored value for it never takes effect.
+    An env write may not SET such a key to a value other than its stored one; the deployment
+    changes it in its own environment and restarts. Removing a stored copy, and carrying one
+    unchanged, are allowed.
 
 Key-material refusal (CHANGE-aware)
     An env write may never CHANGE a ``key_material`` field (a KEK, a signing/HMAC key) to a
@@ -38,16 +44,19 @@ Unset connector-env refusal
     that leaves either var absent from the effective env is refused, naming the
     ``(VAR, json-pointer)`` pairs exactly like the marker refusal.
 
+Colliding-spelling refusal
+    An env may not set one name under two spellings (``TAI_LOG_LEVEL`` and ``tai_log_level``):
+    the settings layer reads names folded, so which value a process reads is not fixed by the
+    env. Every writer judges the env it would store, and the stored-env apply judges the env it
+    applies.
+
 Unrecyclable-change refusal
     A ``recycle``-class key takes effect only when its worker is respawned, so a change
-    to one must be carried by a recycle. A change the deployment shape cannot carry is
-    refused, naming the keys: a key the shape pins (a stored copy would override the
-    deployment's value at every boot and reload, or the key reaches the worker bus
-    itself) on every shape, and any
-    ``recycle``-class key on a bare deployment, which has no supervisor to respawn a
-    worker under the new value. :func:`refuse_unrecyclable_env_change` diffs the stored
-    env against the env the write would store, so a key carried unchanged is never
-    refused.
+    to one is carried by a recycle. A change no recycle can carry is refused, naming the
+    keys: a bus-reaching key, which reaches the worker bus itself.
+    :func:`refuse_unrecyclable_env_change` diffs the stored env against the env the write
+    would store, both without the keys the deployment sets, so a key carried unchanged and a
+    stored copy of a deployment key, removed or carried, are never refused.
 
 The single-call authority :func:`refuse_unresolved_env` runs BOTH the dangling
 ``!ENV`` and the unset connector-env refusals — every config-pipeline writer and
@@ -58,18 +67,21 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable, Mapping
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from tai42_kit.settings import registered_settings
+from tai42_kit.settings import SettingsFieldRef, fold_env_name, registered_settings, settings_fields_set_by
 from tai42_kit.utils.data.env_markers import scan_env_marker_refs
 
+from tai42_skeleton.config.deployment_env import DeploymentOwnership
 from tai42_skeleton.config.recycle_policy import (
     X_CLASSIFIED_DEPLOYMENT_BARE_READS,
     _refuse_unrecyclable,
     _replace_diff_keys,
-    capability_report,
 )
 from tai42_skeleton.connectors.manifest_env import connector_client_env_refs
+
+if TYPE_CHECKING:
+    from tai42_kit.settings import ReloadClass, SettingsFieldInfo
 
 # Boot-identity + manifest-path bare reads that NO settings class in the
 # registered-settings inventory (``registered_settings()``) marks as an ``excluded``
@@ -90,100 +102,115 @@ X_BAND_EXTRA: frozenset[str] = frozenset(
 )
 
 
-def excluded_env_var_names() -> frozenset[str]:
-    """Half (a): every registered ``excluded``-``reload_class`` field carrying a non-empty ``env_var``.
+# The reload classes from the least to the most restrictive.
+_RELOAD_CLASS_RANK: dict[ReloadClass, int] = {"hot": 0, "recycle": 1, "excluded": 2}
 
-    Sourced from :func:`~tai42_kit.settings.registered_settings`, so it reflects
-    only the settings classes IMPORTED into the process — a caller that needs the
-    full set (including an externally-installed provider's ``excluded`` group) must
-    boot / import the settings modules first.
+
+class EnvKeyClasses:
+    """The classes of env key names, by every registered settings field each name sets.
+
+    An env name sets the fields it is an accepted name of (a nested-group reference's JSON
+    name included) and every field the settings layer reads under it: each field of a nested
+    group under the group's JSON name, and the field a delimited name names
+    (:func:`~tai42_kit.settings.settings_fields_set_by`). Names compare folded
+    (:func:`~tai42_kit.settings.fold_env_name`), as the settings layer matches them. Read once
+    from the live registry at construction, so it reflects only the settings classes IMPORTED
+    into the process: a caller that needs an externally-installed provider's groups imports
+    their settings modules first.
     """
-    return frozenset(
-        field.env_var
-        for info in registered_settings()
-        for field in info.fields
-        if field.reload_class == "excluded" and field.env_var
-    )
+
+    def __init__(self) -> None:
+        """Index every registered field by its folded accepted names and by its reference."""
+        self._named: dict[str, list[SettingsFieldInfo]] = {}
+        self._by_ref: dict[SettingsFieldRef, SettingsFieldInfo] = {}
+        for info in registered_settings():
+            for field in info.fields:
+                self._by_ref[SettingsFieldRef(info.qualname, field.name)] = field
+                for name in field.accepted_env_vars:
+                    self._named.setdefault(fold_env_name(name), []).append(field)
+
+    def fields_set_by(self, key: str) -> list[SettingsFieldInfo]:
+        """The registered fields ``key`` names or sets; empty when it reaches none."""
+        named = self._named.get(fold_env_name(key), [])
+        return [*named, *(self._by_ref[ref] for ref in settings_fields_set_by(key))]
+
+    def sets_a_field(self, key: str) -> bool:
+        """Whether ``key`` names or sets any registered field."""
+        return bool(self.fields_set_by(key))
+
+    def reload_class(self, key: str) -> ReloadClass:
+        """The most restrictive ``reload_class`` of the fields ``key`` sets, as a change to it reaches them all.
+
+        ``hot`` for a key that sets no registered field.
+        """
+        classes: list[ReloadClass] = [field.reload_class for field in self.fields_set_by(key)]
+        return max(classes, key=_RELOAD_CLASS_RANK.__getitem__) if classes else "hot"
+
+    def x_band(self, key: str) -> bool:
+        """Whether ``key`` is X band: it sets an ``excluded`` field, or is a bare read or an extra.
+
+        The deployment bare reads and the boot-identity extras compare folded, as the excluded
+        fields' names do.
+        """
+        if fold_env_name(key) in X_CLASSIFIED_DEPLOYMENT_BARE_READS | X_BAND_EXTRA:
+            return True
+        return any(field.reload_class == "excluded" for field in self.fields_set_by(key))
+
+    def key_material(self, key: str) -> bool:
+        """Whether ``key`` sets a ``key_material`` field (the kit ``KeyMaterial`` type)."""
+        return any(field.key_material for field in self.fields_set_by(key))
 
 
-def registered_env_var_names() -> frozenset[str]:
-    """Every registered field's non-empty ``env_var``, across ALL reload classes.
+def counting_diff_keys(
+    stored: Mapping[str, str], proposed: Mapping[str, str], ownership: DeploymentOwnership
+) -> set[str]:
+    """The env key names a whole-env write from ``stored`` to ``proposed`` changes in the env a reload produces.
 
-    Reflects only IMPORTED settings classes. Used to keep a GENERATED secret key from
-    SHADOWING any registered settings env var — not just the X band, which covers
-    only the ``excluded`` subset.
+    Both sides are taken without the keys ``ownership`` names
+    (:meth:`~tai42_skeleton.config.deployment_env.DeploymentOwnership.counting`): their stored
+    copies are never applied, so adding, removing or changing one changes nothing a reload
+    produces. A write that sets an owned key is refused before this diff
+    (:func:`refuse_deployment_owned`). Names only.
     """
-    return frozenset(field.env_var for info in registered_settings() for field in info.fields if field.env_var)
-
-
-def reload_class_by_env_var() -> dict[str, str]:
-    """Map each registered field's ``env_var`` to its resolved ``reload_class``.
-
-    Reflects only IMPORTED settings classes (the running kit + skeleton + manifest
-    plugin modules), so a caller diffing env keys against it (the profile diff / apply
-    recycle classification) sees exactly the live registry's classes. A key absent from
-    the map has no registered field and is treated as the ``hot`` default by callers.
-    """
-    mapping: dict[str, str] = {}
-    for info in registered_settings():
-        for field in info.fields:
-            if field.env_var:
-                mapping[field.env_var] = field.reload_class
-    return mapping
+    return _replace_diff_keys(ownership.counting(stored), ownership.counting(proposed))
 
 
 def refuse_unrecyclable_env_change(
-    stored: Mapping[str, str], proposed: Mapping[str, str], *, change: str
+    stored: Mapping[str, str], proposed: Mapping[str, str], ownership: DeploymentOwnership, *, change: str
 ) -> tuple[list[str], list[str]]:
-    """Refuse an env change this deployment shape cannot carry; return its ``(hot, recycle)`` keys.
+    """Refuse an env change no recycle can carry; return its ``(hot, recycle)`` keys.
 
-    ``proposed`` is the WHOLE env the write would store. The keys it adds, removes or
-    changes against ``stored`` are classified by the live registry: a key the shape pins
-    is refused on every shape, and a ``recycle``-class key is refused on a bare
-    deployment, each a :class:`ValueError` naming ``change`` and the keys. Otherwise the
-    changed ``hot``-class keys (a key with no registered field counts as ``hot``) and the
-    changed ``recycle``-class keys are returned, sorted. Names only.
+    ``proposed`` is the WHOLE env the write would store. The diff is the change the reload
+    really produces (:func:`counting_diff_keys`): a key the deployment sets is never part of
+    it, so removing or carrying a stored copy of one is no change. The diff keys are
+    classified by the fields each sets in the live registry (:class:`EnvKeyClasses`): a
+    bus-reaching key is refused, a :class:`ValueError` naming ``change`` and the keys.
+    Otherwise the changed ``hot``-class keys (a key that sets no registered field counts as
+    ``hot``) and the changed ``recycle``-class keys are returned, sorted. Names only.
     """
-    diff_keys = _replace_diff_keys(stored, proposed)
-    reload_classes = reload_class_by_env_var()
-    hot = sorted(key for key in diff_keys if reload_classes.get(key, "hot") == "hot")
-    recycle = sorted(key for key in diff_keys if reload_classes.get(key) == "recycle")
-    _refuse_unrecyclable(diff_keys, recycle, capability_report(), change=change)
+    diff_keys = counting_diff_keys(stored, proposed, ownership)
+    classes = EnvKeyClasses()
+    hot = sorted(key for key in diff_keys if classes.reload_class(key) == "hot")
+    recycle = sorted(key for key in diff_keys if classes.reload_class(key) == "recycle")
+    _refuse_unrecyclable(diff_keys, change=change)
     return hot, recycle
-
-
-def x_band_env_keys() -> frozenset[str]:
-    """The full X band: ``excluded`` fields, deployment bare-reads, and boot-identity extras, unioned.
-
-    The single source of truth for X refusal.
-    """
-    return excluded_env_var_names() | X_CLASSIFIED_DEPLOYMENT_BARE_READS | X_BAND_EXTRA
 
 
 def refuse_x_band(written_keys: Iterable[str]) -> None:
     """Refuse an env write whose PAYLOAD carries any X-band key.
 
     ``written_keys`` is the writer's declared payload — the keys it intends to
-    write — NEVER the post-carry effective env. Raises :class:`ValueError` naming
-    every offender (names only) — the operations layer maps it to a 400.
+    write — NEVER the post-carry effective env. A key is X band by :meth:`EnvKeyClasses.x_band`.
+    Raises :class:`ValueError` naming every offender (names only) — the operations layer maps it
+    to a 400.
     """
-    offenders = sorted(set(written_keys) & x_band_env_keys())
+    classes = EnvKeyClasses()
+    offenders = sorted({key for key in written_keys if classes.x_band(key)})
     if offenders:
         raise ValueError(
             "Refusing an env write carrying deployment / boot-identity (X-band) keys "
             f"no profile or editor may set: {', '.join(offenders)}."
         )
-
-
-def key_material_env_keys() -> frozenset[str]:
-    """Every registered field flagged ``key_material`` (the kit ``KeyMaterial`` type) with a non-empty ``env_var``.
-
-    Reflects only IMPORTED settings classes, so a key-material field only enters the set once its settings
-    module is loaded.
-    """
-    return frozenset(
-        field.env_var for info in registered_settings() for field in info.fields if field.key_material and field.env_var
-    )
 
 
 def refuse_key_material(written: Mapping[str, str], current: Mapping[str, str]) -> None:
@@ -196,7 +223,7 @@ def refuse_key_material(written: Mapping[str, str], current: Mapping[str, str]) 
     unavoidable for a read-modify-write round-trip or a profile snapshotted from the stored
     env — so the refusal is CHANGE-AWARE: a key-material key is refused only when its written
     value DIFFERS from its ``current`` value (a new value, or a newly introduced key), never
-    when it is carried unchanged.
+    when it is carried unchanged. A key is key material by :meth:`EnvKeyClasses.key_material`.
 
     ``current`` is the current stored env — the REAL values ``GET /api/config/env`` returns
     and the editor reads back — so a round-trip that re-sends the same value compares equal
@@ -205,8 +232,8 @@ def refuse_key_material(written: Mapping[str, str], current: Mapping[str, str]) 
     read-modify-write contract these editors use holds.) Raises :class:`ValueError` naming
     every offender and the rotation path (names only) — the operations layer maps it to 400.
     """
-    key_material = key_material_env_keys()
-    offenders = sorted(key for key, value in written.items() if key in key_material and value != current.get(key))
+    classes = EnvKeyClasses()
+    offenders = sorted(key for key, value in written.items() if classes.key_material(key) and value != current.get(key))
     if offenders:
         raise ValueError(
             "Refusing an env write that CHANGES key-material keys — rotate these out of band "
@@ -214,9 +241,53 @@ def refuse_key_material(written: Mapping[str, str], current: Mapping[str, str]) 
         )
 
 
+def refuse_colliding_spellings(env: Mapping[str, str], *, source: str) -> None:
+    """Refuse an env that sets one env name under more than one spelling.
+
+    The settings layer reads env names folded (:func:`~tai42_kit.settings.fold_env_name`), so of
+    two spellings of one name only one is read, and which one depends on the process: two
+    workers of one fleet could each run on a different value. ``env`` is the whole env that would
+    be stored or applied; an empty value is absent. ``source`` names it in the refusal. Raises
+    :class:`ValueError` naming every spelling of each such name (names only) — the operations
+    layer maps it to a 400.
+    """
+    spellings: dict[str, list[str]] = {}
+    for key, value in env.items():
+        if value != "":
+            spellings.setdefault(fold_env_name(key), []).append(key)
+    collisions = sorted(sorted(keys) for keys in spellings.values() if len(keys) > 1)
+    if collisions:
+        named = "; ".join(" and ".join(keys) for keys in collisions)
+        raise ValueError(
+            f"Refusing {source} that sets one env name under several spellings: {named}. Env names are "
+            "read case-insensitively, so keep one spelling of each name."
+        )
+
+
+def refuse_deployment_owned(
+    written: Mapping[str, str], current: Mapping[str, str], ownership: DeploymentOwnership
+) -> None:
+    """Refuse an env write that SETS a key the deployment sets to a value other than its stored one.
+
+    The deployment's value wins over a stored copy at every boot and reload, so such a write
+    would never take effect. ``written`` is the writer's payload (an empty value removes its
+    key); ``current`` is the current stored env; ``ownership`` is the fleet's
+    (:func:`~tai42_skeleton.config.deployment_env.resolve_deployment_ownership`). Removing a stored
+    copy and carrying one unchanged are allowed. Raises :class:`ValueError` naming every offender (names only) — the
+    operations layer maps it to a 400.
+    """
+    offenders = ownership.changed_writes(written, current)
+    if offenders:
+        raise ValueError(
+            f"Refusing an env write setting keys set by the deployment: {', '.join(offenders)}. The deployment's "
+            "value wins over a stored one, so change them in the deployment's environment and restart."
+        )
+
+
 # Per-database admin (migrator) identity, both-or-neither per NAME. Mirrors the kit db
 # registry's env layout (``db/registry.py`` ``TAI_DATABASE_<NAME>_PG_ADMIN_USER`` /
-# ``_PG_ADMIN_PASSWORD``): group 1 is the (uppercased) database name, group 2 the half.
+# ``_PG_ADMIN_PASSWORD``): matched on the folded name, as the settings layer reads it; group 1 is
+# the (uppercased) database name, group 2 the half.
 _ADMIN_PAIR_RE = re.compile(r"^TAI_DATABASE_(.+)_PG_ADMIN_(USER|PASSWORD)$")
 
 
@@ -236,7 +307,7 @@ def refuse_incomplete_admin_pair(effective_env: Mapping[str, str]) -> None:
     """
     halves: dict[str, set[str]] = {}
     for key, value in effective_env.items():
-        match = _ADMIN_PAIR_RE.match(key)
+        match = _ADMIN_PAIR_RE.match(fold_env_name(key))
         if match and value != "":
             halves.setdefault(match.group(1), set()).add(match.group(2))
     incomplete = sorted(name for name, present in halves.items() if len(present) == 1)

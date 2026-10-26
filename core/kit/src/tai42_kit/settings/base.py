@@ -24,11 +24,28 @@ KeyMaterial = Annotated[SecretStr, Field(json_schema_extra={"key_material": True
 ENV_IGNORE_EMPTY: Final = True
 
 
+def fold_env_name(name: str) -> str:
+    """``name`` as the settings layer matches env names: upper-cased.
+
+    A settings group reads env names case-insensitively (pydantic-settings' default), so
+    ``app_args_port`` and ``APP_ARGS_PORT`` set the same field; the registry records each name
+    upper-cased. A test of an env name against a set of settings names folds both sides here.
+    """
+    return name.upper()
+
+
 def present_env_value(env: Mapping[str, str], var: str) -> str | None:
-    """The value the settings layer reads for ``var``: ``None`` when absent or empty, the kit's empty-is-absent rule."""
-    value = env.get(var)
-    if value is None or (ENV_IGNORE_EMPTY and value == ""):
-        return None
+    """The value the settings layer reads for ``var``; ``None`` when absent or empty.
+
+    Every spelling of ``var`` in ``env`` counts (:func:`fold_env_name`): an empty one is absent
+    (the kit's empty-is-absent rule) and of the others the last one wins, as the settings
+    layer's env source reads them.
+    """
+    folded = fold_env_name(var)
+    value: str | None = None
+    for key, candidate in env.items():
+        if fold_env_name(key) == folded and not (ENV_IGNORE_EMPTY and candidate == ""):
+            value = candidate
     return value
 
 
@@ -36,8 +53,9 @@ class TaiBaseSettings(BaseSettings):
     """Base for env-configurable settings groups; concrete subclasses self-register.
 
     A settings class reads the env file named by its ``tai_env_file`` class attribute
-    (default ``.env``); the file is parsed once per file identity. A subclass that sets
-    ``model_config['env_file']`` is refused at import.
+    (default ``.env``), unless that file is the ``file`` config mode's stored env; the file
+    is parsed once per file identity. A subclass that sets ``model_config['env_file']`` is
+    refused at import.
     """
 
     # The env file is named by ``tai_env_file`` and read by the kit's dotenv source,
@@ -55,7 +73,7 @@ class TaiBaseSettings(BaseSettings):
 
     # The env file this group reads, relative to the working directory; ``None``
     # reads none. Read only if it exists (absent under K8s, where the cluster
-    # injects env vars).
+    # injects env vars) and is not the stored env (``env_file_in_effect``).
     tai_env_file: ClassVar[str | Path | None] = DEFAULT_ENV_FILE
 
     # Group-level reload disposition, read with inheriting ``getattr`` semantics
@@ -80,8 +98,8 @@ class TaiBaseSettings(BaseSettings):
     ) -> tuple[PydanticBaseSettingsSource, ...]:
         """Put the kit's cached dotenv source in the dotenv slot.
 
-        The source reads ``tai_env_file``, or no file when its reads are suspended
-        (:func:`~tai42_kit.settings.env_file.env_file_reads_suspended`). Every other option of
+        The source reads ``tai_env_file``, or no file when that file is the stored env or
+        its reads are suspended (:func:`~tai42_kit.settings.env_file.env_file_in_effect`). Every other option of
         the source is read from ``settings_cls.model_config``, as the framework's own source
         reads it.
         """

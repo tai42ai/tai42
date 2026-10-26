@@ -20,7 +20,7 @@ from typing import Any, cast
 from dotenv import dotenv_values
 from pyaml_env import parse_config
 from ruamel.yaml.comments import CommentedMap
-from tai42_contract.config.manager import ConfigManager
+from tai42_contract.config.manager import FILE_STORED_ENV_NAME, ConfigManager, file_config_dir
 from tai42_kit.utils.data import (
     load_manifest,
     merge_and_dump_manifest,
@@ -139,12 +139,12 @@ class FileConfigManager(ConfigManager):
         # ``TAI_CONFIG_DIR_PATH`` is a bootstrap path read here directly; it is
         # classified excluded on ``ConfigModeSettings.config_dir_path`` so the
         # reload boundary refuses any profile that tries to carry it.
-        self._config_dir_path = config_dir_path or os.environ.get("TAI_CONFIG_DIR_PATH", "").strip() or "/app"
+        self._config_dir_path = config_dir_path or file_config_dir(os.environ)
 
     @property
     def env_path(self) -> str:
         """The stored env file this manager reads and writes: ``.env`` in the config dir."""
-        return os.path.join(self._config_dir_path, ".env")
+        return os.path.join(self._config_dir_path, FILE_STORED_ENV_NAME)
 
     @property
     def manifest_path(self) -> str:

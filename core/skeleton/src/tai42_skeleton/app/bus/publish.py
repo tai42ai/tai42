@@ -10,6 +10,7 @@ import uuid
 from typing import TYPE_CHECKING, Any
 
 from tai42_kit.clients.impl.redis import RedisClient
+from tai42_kit.settings import decode_env_readers
 
 from tai42_skeleton.app.bus.models import (
     _OP_PAYLOAD_KEY,
@@ -29,9 +30,14 @@ from tai42_skeleton.app.bus.models import (
     presence_fresh,
 )
 from tai42_skeleton.app.bus.ops import FleetOp, fleet_op_wire
+from tai42_skeleton.config.deployment_env import published_env_readers
 from tai42_skeleton.utils.redis_typing import eval_script
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from tai42_kit.settings import EnvReader
+
     from tai42_skeleton.app.bus.models import WorkerIdentity
     from tai42_skeleton.app.bus_settings import BusSettings
 
@@ -569,6 +575,24 @@ class WorkerBusPublishMixin:
         async with _pkg.client_ctx(RedisClient, self._settings.redis) as conn:
             return await self._indexed_workers(conn)
 
+    async def env_readers(self, digests: Sequence[str]) -> dict[str, tuple[EnvReader, ...]]:
+        """The env-reader descriptions the bus holds under ``digests``, by digest, read in one round trip.
+
+        A digest the bus holds no description under is left out. The busless variant holds this
+        process's own description only. On an outage it raises one of :data:`TRANSPORT_ERRORS`;
+        a value that is not a description raises.
+        """
+        if not digests:
+            return {}
+        if self._local:
+            own = published_env_readers()
+            return {own.digest: own.readers} if own.digest in digests else {}
+        async with _pkg.client_ctx(RedisClient, self._settings.redis) as conn:
+            bodies = await conn.mget([self._settings.env_readers_key(digest) for digest in digests])
+        return {
+            digest: decode_env_readers(body) for digest, body in zip(digests, bodies, strict=True) if body is not None
+        }
+
     async def expected_at_start(self) -> dict[str, int]:
         """The siblings owed a confirmation right now, as ``{name: generation}``.
 
@@ -661,6 +685,8 @@ class WorkerBusPublishMixin:
             joined_at=meta["joined_at"],
             beat_at=meta["beat_at"],
             state=WorkerState(meta["state"]),
+            deployment_keys=list(meta["deployment_keys"]),
+            env_readers=meta["env_readers"],
             last_op=LastOp(**last_op_raw) if last_op_raw is not None else None,
             pttl_ms=int(pttl_ms) if pttl_ms is not None else None,
         )

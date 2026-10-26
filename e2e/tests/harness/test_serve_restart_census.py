@@ -10,6 +10,7 @@ lives only after a few reads and a ``/health`` that answers at once, no infra.""
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Coroutine
 from types import SimpleNamespace
 from typing import Any
@@ -46,6 +47,8 @@ class _Census:
 def _stack(census: _Census, *, topology: Topology, workers: int, ports: int) -> TaiStack:
     stack = object.__new__(TaiStack)
     stack._procs = {}  # type: ignore[attr-defined]
+    stack._supervisor_lock = threading.RLock()  # type: ignore[attr-defined]
+    stack._supervised_names = set()  # type: ignore[attr-defined]
     stack.census = census  # type: ignore[method-assign]
     stack.host = "127.0.0.1"  # type: ignore[attr-defined]
     stack.app_ports = [40001 + i for i in range(ports)]  # type: ignore[attr-defined]

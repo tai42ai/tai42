@@ -1,23 +1,22 @@
 """The settings-profile RECYCLE leg.
 
-A profile whose diff carries a RECYCLE-class key on a SUPERVISED shape rolls a fleet
-recycle (``config/service.py::apply_replace_env`` STEP 5 → ``orchestrate_recycle``): each
-targeted sibling replies ``applied`` then gracefully self-exits, an external supervisor
-respawns it, and its replacement rejoins the bus census under the SAME stable slot name at
-a bumped generation. Recycle is confirmed on REALITY: each recycled row carries its
-pre-recycle ``generation_before``, the recycled targets' old lives leave presence, and the
-response ``fresh`` list counts NEW READY capacity per kind. The applying serve worker's OWN
-recycle is a deferred post-response self-exit it reports as ``self-deferred``. On a BARE
-(unsupervised) shape the same apply is refused upfront at the API, naming the recycle-class
-key. The env-write door follows the same policy: on a supervised shape an env write of a
-recycle-class key rolls the same recycle and answers its rows under ``recycle`` (the writer
-self-defers), on a bare shape it is refused, and the bus URL is refused on every shape, each
-refusal naming the key with nothing written.
+A profile whose diff carries a RECYCLE-class key rolls a fleet recycle
+(``config/service.py::apply_replace_env`` STEP 5 → ``orchestrate_recycle``): each targeted
+sibling replies ``applied`` then gracefully self-exits, its supervisor respawns it, and its
+replacement rejoins the bus census under the SAME stable slot name at a bumped generation.
+Recycle is confirmed on REALITY: each recycled row carries its pre-recycle
+``generation_before``, the recycled targets' old lives leave presence, and the response
+``fresh`` list counts NEW READY capacity per kind. The applying serve worker's OWN recycle is
+a deferred post-response self-exit it reports as ``self-deferred``. The env-write door follows
+the same policy: an env write of a recycle-class key rolls the same recycle and answers its
+rows under ``recycle`` (the writer self-defers). Two writes are refused upfront, naming the
+key with nothing written: one that sets a key the deployment sets (its value wins over a
+stored one, so the write could never take effect), on a profile save and an env write alike;
+and one that changes a bus-reaching URL, which no recycle can carry.
 
-Validated locally against the isolated infra: the harness ``supervised`` mode stamps
-``TAI_SUPERVISED=harness`` and runs the respawn-on-exit supervisor, so a recycled/self-exited
-worker actually comes back. ``BACKEND_MANIFEST_KEY`` is a recycle-class field (``reload_class
-= "recycle"``) not in any refused tier on the ``harness`` shape.
+The harness ``supervised`` mode runs the respawn-on-exit supervisor, so a recycled or
+self-exited worker actually comes back. ``BACKEND_MANIFEST_KEY`` is a recycle-class field
+(``reload_class = "recycle"``) that the deployment env does not set.
 """
 
 from __future__ import annotations
@@ -27,28 +26,22 @@ import os
 import subprocess
 import sys
 from collections.abc import Callable
-from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import pytest
 
 from tai42_e2e import wait_for_async
 from tai42_e2e.binaries import tai_bin
 from tai42_e2e.llmstub import LlmStub
-from tai42_e2e.manifests import build_recycle_stack
 from tai42_e2e.settings import HarnessSettings
 from tai42_e2e.stack import TaiStack
-from tai42_e2e.topology import StackConfig, StackResources
 from tai42_e2e.waiting import wait_for
-
-if TYPE_CHECKING:
-    from tai42_e2e.variants import Variants
 
 pytestmark = pytest.mark.needs("kind:backend")
 
-# A recycle-class field on the loaded backend (env ``BACKEND_MANIFEST_KEY``), not in the
-# harness shape's refused set — so a diff on it rolls a recycle rather than being refused.
+# A recycle-class field on the loaded backend (env ``BACKEND_MANIFEST_KEY``) the deployment env
+# does not set — so a diff on it rolls a recycle rather than being refused.
 _RECYCLE_VAR = "BACKEND_MANIFEST_KEY"
 
 
@@ -60,9 +53,8 @@ def _lives(stack: TaiStack, kind: str) -> dict[str, int]:
 
 
 async def _profile_from_stored(stack: TaiStack, changes: dict[str, str], name: str) -> None:
-    """Save a profile that is the CURRENT stored env plus ``changes`` — so every
-    deployment-pinned / recycle key stays at its current value (zero diff, no refusal) and
-    the only diff is ``changes``."""
+    """Save a profile that is the CURRENT stored env plus ``changes`` — so every stored key
+    stays at its current value (zero diff) and the only diff is ``changes``."""
     stored = (await stack.api().get("/api/config/env"))["env"]
     await stack.api().put(f"/api/config/profiles/{name}", json={"env": {**stored, **changes}}, retry_on_reloading=True)
 
@@ -73,7 +65,6 @@ async def _profile_from_stored(stack: TaiStack, changes: dict[str, str], name: s
     "store:redis",
     "process",
     "topology:supervised",
-    "setting:TAI_SUPERVISED=harness",
     "setting:TAI_TOOL_RUNS_SHUTDOWN_DRAIN_SECONDS=90",
     "setting:TAI_BUS_APPLY_TIMEOUT=330",
 )
@@ -92,7 +83,7 @@ async def test_recycle_apply_rolls_the_fleet_and_self_defers_applier(
     # The apply blocks through the orchestrated backend recycle (self-exit → respawn →
     # rejoin) before it returns, so give the client room.
     applied = await api.post(f"/api/config/profiles/{name}/apply", retry_on_reloading=True, timeout=200.0)
-    assert applied["refused"] == [], f"a recycle apply on a supervised shape refused a key: {applied}"
+    assert applied["refused"] == [], f"a recycle apply on a supervised stack refused a key: {applied}"
     assert applied["recycle_stopped"] is None, f"the recycle roll stopped: {applied}"
     assert applied["awaiting_respawn"] == [], f"a converged apply named a worker awaiting a respawn: {applied}"
 
@@ -169,7 +160,6 @@ async def test_recycle_apply_rolls_the_fleet_and_self_defers_applier(
     "store:redis",
     "process",
     "topology:supervised",
-    "setting:TAI_SUPERVISED=harness",
     "setting:extension:sync_task",
 )
 async def test_recycle_drains_in_flight_backend_job(recycle_stack: TaiStack, uniq: Callable[[str], str]) -> None:
@@ -226,85 +216,68 @@ async def test_recycle_drains_in_flight_backend_job(recycle_stack: TaiStack, uni
     await wait_for_async(serves_again, deadline=60.0, message="the respawned applier never served /health again")
 
 
-# The synthetic key a compose-marked stack declares pinned.
-_PINNED_SAMPLE = "E2E_PINNED_SAMPLE"
+# A settings key the replicas stack's deployment env sets (the interactions keyspace prefix):
+# the deployment's value wins over a stored one, so a write that sets it is refused.
+_DEPLOYMENT_VAR = "INTERACTIONS_KEY_PREFIX"
+_DEPLOYMENT_REFUSAL = "Refusing an env write setting keys set by the deployment"
 
 
-def _build_compose_marked_recycle_stack(res: StackResources, variants: Variants) -> StackConfig:
-    """The recycle stack under the ``compose`` marker with a declared synthetic pinned set."""
-    return replace(
-        build_recycle_stack(res, variants),
-        name="recycle-compose",
-        supervision_marker="compose",
-        supervised_pinned_keys=[_PINNED_SAMPLE],
-    )
-
-
-@pytest.mark.timeout(300)
-@pytest.mark.needs("mutable", "store:redis", "process", "topology:supervised")
-async def test_declared_pinned_key_refuses_a_profile_changing_it(
-    fresh_stack: Callable[..., TaiStack], uniq: Callable[[str], str], llm_stub: LlmStub
-) -> None:
-    """On a ``compose``-marked deployment the keys it declares in ``TAI_SUPERVISED_PINNED_KEYS``
-    are refused upfront at the API, naming the key: a stored copy would override the deployment's
-    value on every restart."""
-    stack = fresh_stack(_build_compose_marked_recycle_stack, resource_kwargs={"llm_base_url": llm_stub.base_url})
-    api = stack.api()
-    name = uniq("pinned")
-    await _profile_from_stored(stack, {_PINNED_SAMPLE: uniq("value")}, name)
-    resp = await api.request_raw("POST", f"/api/config/profiles/{name}/apply")
-    assert resp.status_code == 400, resp.text
-    error = resp.json()["error"]
-    assert "'compose' deployment" in error, error
-    assert _PINNED_SAMPLE in error, error
-
-
-@pytest.mark.needs("setting:TAI_SUPERVISED=unset")
-async def test_bare_shape_refuses_recycle_class_apply(replicas_stack: TaiStack, uniq: Callable[[str], str]) -> None:
-    """On a BARE (unsupervised) shape a recycle-class diff is refused UPFRONT at the API,
-    naming the key — no supervisor exists to respawn a recycled worker."""
-    api = replicas_stack.api(port=replicas_stack.port_a)
-    name = uniq("barerecycle")
-    stored = (await api.get("/api/config/env"))["env"]
-    await api.put(
-        f"/api/config/profiles/{name}",
-        json={"env": {**stored, _RECYCLE_VAR: uniq("mkey").upper()}},
-        retry_on_reloading=True,
-    )
-    resp = await api.request_raw("POST", f"/api/config/profiles/{name}/apply")
-    assert resp.status_code == 400, resp.text
-    assert "bare" in resp.json()["error"].lower(), resp.json()
-
-
-@pytest.mark.needs("mutable", "setting:TAI_SUPERVISED=unset")
-async def test_bare_shape_refuses_a_recycle_class_env_write(
+@pytest.mark.needs("mutable", f"setting:{_DEPLOYMENT_VAR}")
+async def test_a_profile_setting_a_deployment_key_is_refused_at_save(
     replicas_stack: TaiStack, uniq: Callable[[str], str]
 ) -> None:
-    """On a BARE shape the env-write door refuses a recycle-class key UPFRONT, naming it, and
-    stores nothing — never an ``applied`` reply while the running workers keep the boot value."""
+    """A profile that sets a key the deployment sets could never apply, so saving it is refused
+    at the API, naming the key: the profile is not stored and the stored env is unchanged."""
     api = replicas_stack.api(port=replicas_stack.port_a)
-    before = (await api.get("/api/config/env"))["env"]
-    resp = await api.request_raw("POST", "/api/config/env", json={"env": {_RECYCLE_VAR: uniq("mkey").upper()}})
+    name = uniq("deploymentkey")
+    stored = (await api.get("/api/config/env"))["env"]
+    resp = await api.request_raw(
+        "PUT", f"/api/config/profiles/{name}", json={"env": {**stored, _DEPLOYMENT_VAR: f"{uniq('prefix')}:"}}
+    )
     assert resp.status_code == 400, resp.text
     error = resp.json()["error"]
-    assert "bare" in error.lower(), error
-    assert _RECYCLE_VAR in error, error
+    assert _DEPLOYMENT_REFUSAL in error, error
+    assert _DEPLOYMENT_VAR in error, error
+    got = await api.request_raw("GET", f"/api/config/profiles/{name}")
+    assert got.status_code == 404, f"a refused save stored the profile: {got.text}"
+    assert (await api.get("/api/config/env"))["env"] == stored, "a refused save changed the stored env"
+
+
+@pytest.mark.needs("mutable", f"setting:{_DEPLOYMENT_VAR}")
+async def test_an_env_write_setting_a_deployment_key_is_refused(
+    replicas_stack: TaiStack, uniq: Callable[[str], str]
+) -> None:
+    """The env-write door refuses a key the deployment sets UPFRONT, naming it, and stores
+    nothing — never an ``applied`` reply for a value the running workers would not take."""
+    api = replicas_stack.api(port=replicas_stack.port_a)
+    before = (await api.get("/api/config/env"))["env"]
+    resp = await api.request_raw("POST", "/api/config/env", json={"env": {_DEPLOYMENT_VAR: f"{uniq('prefix')}:"}})
+    assert resp.status_code == 400, resp.text
+    error = resp.json()["error"]
+    assert _DEPLOYMENT_REFUSAL in error, error
+    assert _DEPLOYMENT_VAR in error, error
     assert (await api.get("/api/config/env"))["env"] == before, "a refused env write changed the stored env"
 
 
+# A bus-reaching key the deployment env of the recycle stack does not set, so the write reaches
+# the bus refusal rather than the deployment refusal.
+_BUS_REACHING_VAR = "TAI_DEFAULT_REDIS_URL"
+
+
 @pytest.mark.timeout(300)
-@pytest.mark.needs("mutable", "store:redis", "process", "topology:supervised", "setting:TAI_SUPERVISED=harness")
-async def test_supervised_shape_refuses_a_bus_url_env_write(recycle_stack: TaiStack) -> None:
-    """The bus URL reaches the worker bus itself, so no recycle can carry it: the env-write door
-    refuses it on a supervised shape too, naming the key, and stores nothing."""
+@pytest.mark.needs("mutable", "store:redis", "process", "topology:supervised", f"setting:{_BUS_REACHING_VAR}=unset")
+async def test_a_supervised_stack_refuses_a_bus_reaching_env_write(recycle_stack: TaiStack) -> None:
+    """A bus-reaching URL reaches the worker bus itself, so no recycle can carry it: the
+    env-write door refuses it even where a supervisor would respawn the recycled workers,
+    naming the key, and stores nothing."""
+    assert _BUS_REACHING_VAR not in recycle_stack.config.env, "the bus refusal needs a key the deployment does not set"
     api = recycle_stack.api()
     before = (await api.get("/api/config/env"))["env"]
-    resp = await api.request_raw(
-        "POST", "/api/config/env", json={"env": {"TAI_BUS_REDIS_URL": "redis://127.0.0.1:1/0"}}
-    )
+    resp = await api.request_raw("POST", "/api/config/env", json={"env": {_BUS_REACHING_VAR: "redis://127.0.0.1:1/0"}})
     assert resp.status_code == 400, resp.text
     error = resp.json()["error"]
-    assert "TAI_BUS_REDIS_URL" in error, error
+    assert "bus-reaching key(s)" in error, error
+    assert _BUS_REACHING_VAR in error, error
     assert (await api.get("/api/config/env"))["env"] == before, "a refused env write changed the stored env"
 
 
@@ -348,14 +321,13 @@ async def _assert_roll_converged_and_writer_respawns(
     "process",
     "cli",
     "topology:supervised",
-    "setting:TAI_SUPERVISED=harness",
     "setting:TAI_TOOL_RUNS_SHUTDOWN_DRAIN_SECONDS=90",
     "setting:TAI_BUS_APPLY_TIMEOUT=330",
 )
 async def test_an_env_write_of_a_recycle_class_key_rolls_the_fleet_and_self_defers_the_writer(
     recycle_stack: TaiStack, uniq: Callable[[str], str], tmp_path: Path
 ) -> None:
-    """``POST /api/config/env`` of a recycle-class key on a supervised shape rolls the same
+    """``POST /api/config/env`` of a recycle-class key on a supervised stack rolls the same
     recycle a profile apply rolls and answers its rows under ``recycle``; ``tai config env set``
     over the CLI prints the rows of the next one."""
     api = recycle_stack.api()
@@ -397,7 +369,6 @@ _SUPERVISED_RECYCLE_NEEDS = (
     "store:redis",
     "process",
     "topology:supervised",
-    "setting:TAI_SUPERVISED=harness",
     "setting:TAI_TOOL_RUNS_SHUTDOWN_DRAIN_SECONDS=90",
     "setting:TAI_BUS_APPLY_TIMEOUT=330",
 )

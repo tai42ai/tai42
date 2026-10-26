@@ -29,6 +29,7 @@ from tai42_skeleton.app.boot_rules import (
 )
 from tai42_skeleton.app.bus import OpOutcome
 from tai42_skeleton.app.epoch import Epoch
+from tai42_skeleton.config.deployment_env import DeploymentOwnership
 from tai42_skeleton.config.file_manager import FileConfigManager
 from tai42_skeleton.operations._broadcast import FleetBroadcastError
 
@@ -948,7 +949,7 @@ async def test_profile_replace_over_a_live_working_directory_env_file_is_allowed
     async def save_previous(env: dict[str, str]) -> None:
         return None
 
-    async def build_and_swap(env: dict[str, str]) -> Epoch:
+    async def build_and_swap(env: dict[str, str], *, ownership: DeploymentOwnership) -> Epoch:
         swapped.append(env)
         return Epoch(number=0)
 

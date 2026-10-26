@@ -35,7 +35,7 @@ def _restore_process_env():
     caller persists it in production). Snapshot and restore it around each test so a
     reload's proposed env (e.g. ``ACCESS_CONTROL_ENABLE=false``) never leaks into the
     next test, and reset the epoch env-tracking + settings caches with it."""
-    from tai42_skeleton.app import epoch as epoch_mod
+    from tai42_skeleton.app import applied_env
     from tai42_skeleton.app.route_registry import route_registry
 
     snapshot = dict(os.environ)
@@ -43,7 +43,7 @@ def _restore_process_env():
     yield
     os.environ.clear()
     os.environ.update(snapshot)
-    epoch_mod._loaded_env_keys = set()
+    applied_env._loaded_env_keys = set()
     reset_all_settings()
     # The process-global route registry dedups and is never cleared, so drop the
     # headline fixture route the reload added — else it leaks into the CLI-parity and

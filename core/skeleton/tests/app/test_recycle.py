@@ -58,6 +58,8 @@ def _row(
         joined_at=_NOW,
         beat_at=_NOW,
         state=state,
+        deployment_keys=[],
+        env_readers="",
         pttl_ms=pttl_ms,
     )
 
@@ -712,3 +714,29 @@ async def test_a_bus_fault_that_is_not_an_outage_passes_through() -> None:
     with pytest.raises(RedisResponseError) as excinfo:
         await _run(fake, excluded_name="serve-1", kinds=[WorkerKind.backend], deferred=False)
     assert excinfo.value is fault
+
+
+async def test_a_pinned_only_roll_recycles_the_pinned_names_and_leaves_the_other_rows_of_the_kind() -> None:
+    fake = _ScriptedBus(
+        [
+            _row("backend-1", WorkerKind.backend),
+            _row("backend-2", WorkerKind.backend),
+            _row("serve-1", WorkerKind.serve),
+        ]
+    )
+    report = await orchestrate_recycle(
+        _bus(fake),
+        excluded_name="serve-1",
+        applier_generation=7,
+        target_kinds=[WorkerKind.backend],
+        applier_self_deferred=False,
+        step_timeout=1.0,
+        expected={"backend-2": (WorkerKind.backend, 1)},
+        pinned_only=True,
+        poll_interval=0.001,
+    )
+
+    assert [(r.name, r.status) for r in report.rows] == [("backend-2", RECYCLED)]
+    assert fake.published == [("recycle", ("backend-2",))]
+    # The unpinned worker of the kind is neither recycled nor counted as a new life.
+    assert [(f.name, f.generation) for f in report.fresh] == [("backend-2", 2)]

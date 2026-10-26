@@ -92,6 +92,7 @@ class AppArgsSettings(TaiBaseSettings):
     # completes in-flight requests within this window instead of waiting
     # indefinitely, so the lifespan teardown always runs. A shipped
     # ``--timeout-graceful-shutdown`` CLI extra-arg overrides this default. Must
-    # be positive. Boot-read, so it converges via respawn (env is bootstrapped
-    # before the read) — recycle, not excluded.
-    timeout_graceful_shutdown: int = Field(default=10, gt=0, json_schema_extra={"reload": "recycle"})
+    # be positive. The ``tai serve`` launcher reads it once to build the uvicorn
+    # config it hands to every worker it spawns or respawns, so only a launcher
+    # restart changes it — excluded, like the bind fields.
+    timeout_graceful_shutdown: int = Field(default=10, gt=0, json_schema_extra={"reload": "excluded"})

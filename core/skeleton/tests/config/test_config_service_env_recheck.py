@@ -18,6 +18,7 @@ from tai42_contract.presets import PresetBody
 from tai42_skeleton.app import epoch as epoch_module
 from tai42_skeleton.app import instance
 from tai42_skeleton.app.epoch import Epoch
+from tai42_skeleton.config.deployment_env import DeploymentOwnership
 from tai42_skeleton.config.service import ConfigService
 from tai42_skeleton.tools.binding.errors import ExtensionComboRefusedError
 
@@ -54,7 +55,6 @@ class _World:
 
     def __init__(self, monkeypatch: pytest.MonkeyPatch, combo_check: Any = None) -> None:
         _no_bus(monkeypatch)
-        monkeypatch.delenv("TAI_SUPERVISED", raising=False)
         monkeypatch.setenv("M_PICK", "m_a")
         monkeypatch.setenv("M_SYSTEM", "m_c")
         monkeypatch.setenv("M_GONE", "1")
@@ -86,7 +86,7 @@ class _World:
             if self.on_save_previous is not None:
                 self.on_save_previous()
 
-        async def build(build_env: dict[str, str]) -> Epoch:
+        async def build(build_env: dict[str, str], *, ownership: DeploymentOwnership) -> Epoch:
             self.builds.append(dict(build_env))
             return Epoch(number=0)
 

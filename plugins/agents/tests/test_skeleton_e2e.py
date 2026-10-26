@@ -66,6 +66,7 @@ from tai42_kit.registry.staged import StagedGeneration
 # (unlike the routers, which are imported only after the skeleton app is bound).
 from tai42_kit.settings import reset_all_settings
 from tai42_skeleton.app import instance, lifecycle
+from tai42_skeleton.app.bus import WorkerKind
 from tai42_skeleton.manifest import Manifest
 
 from tai42_agents._internal.lc_tools import resolve_tools
@@ -225,7 +226,11 @@ def skeleton(monkeypatch: pytest.MonkeyPatch) -> Any:
 
     monkeypatch.setattr(instance, "_app", None)
     reset_all_settings()
-    tai42_app.bind(instance.build_app())
+    app = instance.build_app()
+    # The boot read (``read_boot_manifest``) builds the worker bus ``app_context`` joins; these
+    # tests enter ``app_context`` on an in-code manifest, so the bus is built as that read does.
+    app._bus = app._build_bus(WorkerKind.serve)
+    tai42_app.bind(app)
     from tai42_skeleton.routers import agents as agents_router
     from tai42_skeleton.routers import presets as presets_router
 

@@ -15,7 +15,7 @@ from collections.abc import Iterator
 
 import pytest
 
-from tai42_skeleton.app import epoch as epoch_mod
+from tai42_skeleton.app import applied_env
 from tai42_skeleton.app.instance import app
 
 from ._served_app import (
@@ -63,7 +63,7 @@ def _process_state_restored(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     yield
     os.environ.clear()
     os.environ.update(snapshot)
-    epoch_mod._loaded_env_keys = set()
+    applied_env._loaded_env_keys = set()
 
 
 SSE_HEADERS = {"Accept": "text/event-stream"}

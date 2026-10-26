@@ -6,10 +6,10 @@ A subclass self-registers through ``TaiBaseSettings.__pydantic_init_subclass__``
 (base.py). This module holds the storage and the extraction that turns a model's
 ``model_fields`` into JSON-safe field metadata.
 
-It also keeps the env a respawn-class value (``recycle`` / ``excluded``) is bound under: while
-a lifespan has bound it (:func:`bind_respawn_class_env`), each such env var holds the value it
-had when its group first registered in this lifespan, or at the bind for a group registered
-before it; nothing but a bind or the process end re-binds it.
+It also keeps the env a respawn-class field (``recycle`` / ``excluded``) is bound under: while
+a lifespan has bound it (:func:`bind_respawn_class_env`), each such field is bound under the
+process env as it was when its group first registered in this lifespan, or at the bind for a
+group registered before it; nothing but a bind or the process end re-binds it.
 """
 
 import enum
@@ -18,14 +18,17 @@ import json
 import os
 import types
 from collections.abc import Callable, Mapping
-from typing import Any, Union, cast, get_args, get_origin
+from typing import TYPE_CHECKING, Any, NamedTuple, Union, cast, get_args, get_origin
 
-from pydantic import AliasChoices, BaseModel, SecretBytes, SecretStr, TypeAdapter
+from pydantic import AliasChoices, BaseModel, PrivateAttr, SecretBytes, SecretStr, TypeAdapter
 from pydantic.fields import FieldInfo
 from pydantic_settings import BaseSettings
 
-from tai42_kit.settings.base import ReloadClass, present_env_value
+from tai42_kit.settings.base import ReloadClass
 from tai42_kit.settings.default_namespace import TAI_DEFAULT_ENV_PREFIX
+
+if TYPE_CHECKING:
+    from tai42_kit.settings.reader_descriptions import EnvReader
 
 
 class SettingsFieldInfo(BaseModel):
@@ -66,6 +69,8 @@ class SettingsClassInfo(BaseModel):
     env_prefix: str
     # Whether the group declares its ``env_prefix`` owned (``TaiBaseSettings.env_prefix_owned``).
     env_prefix_owned: bool
+    # The group's env-reader description, made at the extraction; never part of the plain data.
+    _env_reader: "EnvReader | None" = PrivateAttr(default=None)
 
 
 # Keyed by qualified name (``module.__qualname__``) so a module re-import
@@ -73,10 +78,21 @@ class SettingsClassInfo(BaseModel):
 # rationale as ``cache_registry.py``.
 _REGISTRY: dict[str, SettingsClassInfo] = {}
 
-# The value each respawn-class env var of a registered group is bound under in this lifespan
-# (``None`` for a var the settings layer reads as absent), keyed by env var; ``None`` while no
-# lifespan has bound it.
-_BOUND_ENV: dict[str, str | None] | None = None
+
+class _BoundField(NamedTuple):
+    """A respawn-class field and the process env it was bound under."""
+
+    group: str
+    field: SettingsFieldInfo
+    env: Mapping[str, str]
+
+
+# Each respawn-class field of a registered group bound in this lifespan, keyed by its env var;
+# ``None`` while no lifespan has bound it.
+_BOUND_ENV: dict[str, _BoundField] | None = None
+
+# Called with each group's registration, in subscription order (see :func:`on_settings_registered`).
+_REGISTRATION_LISTENERS: list[Callable[[SettingsClassInfo], None]] = []
 
 
 def _qualname(cls: type) -> str:
@@ -406,7 +422,7 @@ def _extract(cls: type[BaseSettings]) -> SettingsClassInfo:
                 accepted_env_vars=_accepted_env_vars(name, field_info, env_prefix, case_sensitive),
             )
         )
-    return SettingsClassInfo(
+    info = SettingsClassInfo(
         name=cls.__name__,
         module=cls.__module__,
         qualname=_qualname(cls),
@@ -415,21 +431,57 @@ def _extract(cls: type[BaseSettings]) -> SettingsClassInfo:
         env_prefix=env_prefix,
         env_prefix_owned=prefix_owned,
     )
+    # Imported here: the env-reader module reads this module's helpers at load.
+    from tai42_kit.settings.reader_descriptions import _describe
+
+    types_by_name = {field.name: field.type for field in fields if field.nested_group is None}
+    info._env_reader = _describe(cls, lambda name, _field_info: types_by_name[name])
+    return info
+
+
+def _env_reader_of(info: SettingsClassInfo) -> "EnvReader":
+    """The env-reader description of a registered group; raises for an info no extraction made."""
+    if info._env_reader is None:
+        raise RuntimeError(f"settings group {info.qualname} carries no env-reader description")
+    return info._env_reader
 
 
 def _register(cls: type[BaseSettings]) -> None:
     """Register (or replace) a settings class in the registry by qualified name.
 
-    While the respawn-class env is bound, each respawn-class env var of ``cls`` not yet bound is
-    bound to the value the settings layer reads for it now; a var already bound (a re-import's
-    re-registration, a second class naming the same var) keeps its first value.
+    Every :func:`on_settings_registered` listener is then called with the registration, and every
+    :func:`~tai42_kit.settings.on_env_reader_described` listener with the group's env-reader
+    description, before the respawn-class bind below reads the env, so a listener that edits the
+    process env edits what the bind reads. A listener's exception propagates out of the class
+    definition.
+    While the respawn-class env is bound, each respawn-class field of ``cls`` whose env var is not
+    yet bound is bound under the process env as it is now; a var already bound (a re-import's
+    re-registration, a second class naming the same var) keeps its first binding.
     """
     info = _extract(cls)
     _REGISTRY[_qualname(cls)] = info
+    for listener in _REGISTRATION_LISTENERS:
+        listener(info.model_copy(deep=True))
+    from tai42_kit.settings.reader_descriptions import _notify
+
+    _notify(_env_reader_of(info))
     if _BOUND_ENV is not None:
-        for var in _respawn_env_vars(info):
-            if var not in _BOUND_ENV:
-                _BOUND_ENV[var] = present_env_value(os.environ, var)
+        env = dict(os.environ)
+        for field in _respawn_fields(info):
+            if field.env_var not in _BOUND_ENV:
+                _BOUND_ENV[field.env_var] = _BoundField(info.qualname, field, env)
+
+
+def on_settings_registered(listener: Callable[[SettingsClassInfo], None]) -> Callable[[SettingsClassInfo], None]:
+    """Subscribe ``listener`` to every settings group registered from now on; returns ``listener``.
+
+    The listener is called with a copy of each registration (a re-import's re-registration
+    included), once the group is in :func:`registered_settings` and before any value of it is
+    read. Subscribing the same listener again does nothing.
+    """
+    if listener not in _REGISTRATION_LISTENERS:
+        _REGISTRATION_LISTENERS.append(listener)
+    return listener
 
 
 def _clear_registry() -> None:
@@ -442,6 +494,11 @@ def _clear_registry() -> None:
 def _registered_infos() -> list[SettingsClassInfo]:
     """The live registrations, uncopied — for kit-internal read-only scans."""
     return list(_REGISTRY.values())
+
+
+def _registered_readers() -> list["EnvReader"]:
+    """The env-reader description of every registered group, in registration order."""
+    return [_env_reader_of(info) for info in _REGISTRY.values()]
 
 
 def registered_settings() -> list[SettingsClassInfo]:
@@ -485,25 +542,28 @@ def changes_only_by_respawn(cls: type[BaseSettings]) -> bool:
     return _changes_only_by_respawn(cls, frozenset())
 
 
-def _respawn_env_vars(info: SettingsClassInfo) -> list[str]:
-    """The env vars of ``info``'s respawn-class fields (a nested-group reference carries none)."""
+def _respawn_fields(info: SettingsClassInfo) -> list[SettingsFieldInfo]:
+    """``info``'s respawn-class fields with an env var (a nested-group reference carries none)."""
     return [
-        field.env_var
+        field
         for field in info.fields
         if field.nested_group is None and field.env_var and field.reload_class in _RESPAWN_CLASSES
     ]
 
 
 def bind_respawn_class_env() -> None:
-    """Bind every registered respawn-class env var to the value the settings layer reads for it now.
+    """Bind every registered respawn-class field under the process env as it is now.
 
     Called once a lifespan applied its env, before it builds the resources behind those values:
-    a group registered later binds its own vars at its registration. Overwrites every value an
-    earlier bind recorded.
+    a group registered later binds its own fields at its registration. Overwrites every binding
+    an earlier bind recorded.
     """
     global _BOUND_ENV
+    env = dict(os.environ)
     _BOUND_ENV = {
-        var: present_env_value(os.environ, var) for info in _REGISTRY.values() for var in _respawn_env_vars(info)
+        field.env_var: _BoundField(info.qualname, field, env)
+        for info in _REGISTRY.values()
+        for field in _respawn_fields(info)
     }
 
 
@@ -514,10 +574,21 @@ def unbind_respawn_class_env() -> None:
 
 
 def respawn_class_env_drift() -> frozenset[str]:
-    """The bound respawn-class env vars whose value the settings layer reads now differs from the bound one.
+    """The env vars of the bound respawn-class fields whose value now differs from the value they were bound under.
 
-    Such a value takes effect only in a respawned process. Empty while nothing is bound.
+    Each value is read as the settings layer reads it, under every name that sets the field
+    (:func:`~tai42_kit.settings.settings_field_env_value`): the field's own names, its nested
+    groups' JSON names and its delimited names, from the process env now and from the env the
+    field was bound under. Such a value takes effect only in a respawned process. Empty while
+    nothing is bound.
     """
+    from tai42_kit.settings.env_names import settings_field_env_value
+
     if _BOUND_ENV is None:
         return frozenset()
-    return frozenset(var for var, bound in _BOUND_ENV.items() if present_env_value(os.environ, var) != bound)
+    return frozenset(
+        var
+        for var, bound in _BOUND_ENV.items()
+        if settings_field_env_value(os.environ, bound.group, bound.field)
+        != settings_field_env_value(bound.env, bound.group, bound.field)
+    )

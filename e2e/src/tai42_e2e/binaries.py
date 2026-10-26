@@ -73,8 +73,11 @@ def spawn_expect_refusal(argv: list[str], env: dict[str, str], cwd: str | Path, 
         # master forks worker children) and fail loudly.
         with contextlib.suppress(ProcessLookupError):
             os.killpg(proc.pid, signal.SIGKILL)
-        proc.wait(timeout=5.0)
-        raise RuntimeError(f"process did not refuse to boot within {timeout}s (it served): {argv!r}") from exc
+        # Reaps the process and reads both pipes to their end, which closes them.
+        _, stderr = proc.communicate(timeout=5.0)
+        raise RuntimeError(
+            f"process did not refuse to boot within {timeout}s (it served): {argv!r}\nstderr:\n{stderr}"
+        ) from exc
     if proc.returncode == 0:
         raise RuntimeError(f"process was expected to refuse to boot but exited 0: {argv!r}\nstderr:\n{stderr}")
     return stderr

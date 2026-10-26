@@ -28,6 +28,7 @@ from tai42_contract.plugins import PluginSpec
 
 from tai42_skeleton.app.bus import FleetResult
 from tai42_skeleton.config.boundary import refuse_dangling_env_markers
+from tai42_skeleton.config.deployment_env import DeploymentOwnership
 from tai42_skeleton.config.service import ApplyResult, OrphanEnvWriteError
 from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.marketplace.errors import InstallEnvError, InstallStateError, InstallUnwindError
@@ -154,10 +155,14 @@ class _FakeSvc:
         self._cm._manifest = document
         return ApplyResult(fleet=_fleet_report(), local={"reloaded": True}, document=document)
 
-    def effective_env(self, changes: dict[str, str]) -> dict[str, str]:
+    async def deployment_ownership(self, op_name: str) -> DeploymentOwnership:
+        return DeploymentOwnership()
+
+    def effective_env(self, changes: dict[str, str], ownership: DeploymentOwnership) -> dict[str, str]:
         import os
 
-        return {**os.environ, **self._cm.read_env(), **changes}
+        stored = {**self._cm.read_env(), **changes}
+        return {**os.environ, **{key: value for key, value in stored.items() if not ownership.owns(key)}}
 
     async def apply_env_change(self, changes: dict[str, str]) -> ApplyResult:
         # Counted so a test can assert the unwind fired NO env change (no fleet broadcast)

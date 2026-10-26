@@ -5309,7 +5309,7 @@
       },
       "EnvUpdate": {
         "additionalProperties": false,
-        "description": "An env write: overrides merged into the stored env, and optionally the whole set of secret marks.\n\n``env`` maps names to string values (``\"\"`` deletes a name). ``secret_keys`` absent or\n``null`` leaves the stored marks untouched; a list REPLACES them (``[]`` deletes them).",
+        "description": "An env write: changes merged into the stored env, and optionally the whole set of secret marks.\n\n``env`` maps names to string values (``\"\"`` deletes a name). ``secret_keys`` absent or\n``null`` leaves the stored marks untouched; a list REPLACES them (``[]`` deletes them).",
         "properties": {
           "env": {
             "additionalProperties": {
@@ -5341,8 +5341,15 @@
         "type": "object"
       },
       "EnvView": {
-        "description": "The stored env map plus the operator's masked-key marks.\n\n``env`` values are verbatim (masking is display-side, never on the wire); ``secret_keys`` names which\nkeys the UI masks.",
+        "description": "The stored env map plus the operator's masked-key marks and the stored keys the deployment sets.\n\n``env`` values are verbatim (masking is display-side, never on the wire); ``secret_keys`` names which\nkeys the UI masks; ``deployment_keys`` names the stored keys the deployment sets, which a write may\nremove or carry unchanged but never set to a new value.",
         "properties": {
+          "deployment_keys": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Deployment Keys",
+            "type": "array"
+          },
           "env": {
             "additionalProperties": {
               "type": "string"
@@ -5360,7 +5367,8 @@
         },
         "required": [
           "env",
-          "secret_keys"
+          "secret_keys",
+          "deployment_keys"
         ],
         "title": "EnvView",
         "type": "object"
@@ -15714,15 +15722,137 @@
         "title": "SetMcpSecretEnv",
         "type": "object"
       },
+      "SettingsFieldView": {
+        "description": "One settings field: its registered metadata, the value it resolves to, and the layer that supplied it.\n\n``value_source``: ``\"deployment\"`` (the deployment env sets the field; it is locked, and a save that\nsets it is refused), ``\"stored\"`` (the stored env), ``\"default_namespace\"`` (a ``TAI_DEFAULT_*``\nfallback), ``\"field_default\"`` (the bare field default), or ``null`` for a nested-group reference,\nwhich carries no value of its own.",
+        "properties": {
+          "accepted_env_vars": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Accepted Env Vars",
+            "type": "array"
+          },
+          "default": {
+            "anyOf": [
+              {},
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Default"
+          },
+          "default_namespace_var": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Default Namespace Var"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Description"
+          },
+          "env_var": {
+            "title": "Env Var",
+            "type": "string"
+          },
+          "key_material": {
+            "default": false,
+            "title": "Key Material",
+            "type": "boolean"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "nested_group": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Nested Group"
+          },
+          "reload_class": {
+            "default": "hot",
+            "enum": [
+              "hot",
+              "recycle",
+              "excluded"
+            ],
+            "title": "Reload Class",
+            "type": "string"
+          },
+          "required": {
+            "title": "Required",
+            "type": "boolean"
+          },
+          "secret": {
+            "title": "Secret",
+            "type": "boolean"
+          },
+          "type": {
+            "title": "Type",
+            "type": "string"
+          },
+          "value": {
+            "$ref": "#/components/schemas/JsonValue"
+          },
+          "value_source": {
+            "anyOf": [
+              {
+                "enum": [
+                  "deployment",
+                  "stored",
+                  "default_namespace",
+                  "field_default"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Value Source"
+          }
+        },
+        "required": [
+          "name",
+          "env_var",
+          "type",
+          "required",
+          "secret",
+          "accepted_env_vars",
+          "value",
+          "value_source"
+        ],
+        "title": "SettingsFieldView",
+        "type": "object"
+      },
       "SettingsGroupView": {
-        "description": "One registered settings group.\n\n``fields`` rows are each a settings-field's dumped metadata extended with the resolved ``value`` and its\n``value_source`` layer — an open per-field metadata map, so it is typed as such rather than reshaped.",
+        "description": "One registered settings group with each field's resolved value.",
         "properties": {
           "fields": {
             "items": {
-              "additionalProperties": {
-                "$ref": "#/components/schemas/JsonValue"
-              },
-              "type": "object"
+              "$ref": "#/components/schemas/SettingsFieldView"
             },
             "title": "Fields",
             "type": "array"
@@ -24538,7 +24668,7 @@
     },
     "/api/backup/import": {
       "post": {
-        "description": "Import each SELECTED section of ``document`` in registration order and return a per-section report.\n\n``mode`` is the per-record policy (``skip`` or ``overwrite``). A ``version`` other than 1\nraises ``BadRequestError``; an unknown, absent, or failing section carries its error in\nthe report and makes ``ok`` false. A section whose restore rolled a worker recycle (an env\nsection changing a recycle-class key on a supervised deployment) carries the roll in its\n``recycle``; when that roll converged, this worker recycles itself after replying.",
+        "description": "Import each SELECTED section of ``document`` in registration order and return a per-section report.\n\n``mode`` is the per-record policy (``skip`` or ``overwrite``). A ``version`` other than 1\nraises ``BadRequestError``; an unknown, absent, or failing section carries its error in\nthe report and makes ``ok`` false. A section whose restore rolled a worker recycle (an env\nsection changing a recycle-class key) carries the roll in its\n``recycle``; when that roll converged, this worker recycles itself after replying.",
         "operationId": "post_api_backup_import",
         "requestBody": {
           "content": {
@@ -24821,7 +24951,7 @@
     },
     "/api/config/env": {
       "get": {
-        "description": "Return the stored env map alongside the operator's secret-key marks.\n\n``data.env`` is the stored env key-value map (a never-written store yields\nan empty map). ``data.secret_keys`` is the DERIVED masked-key set\n(:func:`~tai42_skeleton.settings.env_secret_marks.effective_secret_keys`): the\noperator's stored ``TAI_ENV_SECRET_KEYS`` marks UNIONED with every live\n``connectors[*].client_secret_env``, so an oauth connector's client secret is\nmasked on display even with no operator mark.",
+        "description": "Return the stored env map alongside the operator's secret-key marks and the deployment-set keys.\n\n``data.env`` is the stored env key-value map (a never-written store yields\nan empty map). ``data.secret_keys`` is the DERIVED masked-key set\n(:func:`~tai42_skeleton.settings.env_secret_marks.effective_secret_keys`): the\noperator's stored ``TAI_ENV_SECRET_KEYS`` marks UNIONED with every live\n``connectors[*].client_secret_env``, so an oauth connector's client secret is\nmasked on display even with no operator mark. ``data.deployment_keys`` names the\nstored keys the deployment sets on any worker of the fleet, sorted: a key a worker's\ndeployment env sets, or an accepted name of a settings field set under any of its names. Such\na stored copy never takes effect (the deployment's value wins); a write may remove\nit or carry it unchanged, never set it to a new value. A deployment key with no\nstored copy is not named.",
         "operationId": "get_api_config_env",
         "responses": {
           "200": {
@@ -24858,13 +24988,13 @@
             "ApiKeyAuth": []
           }
         ],
-        "summary": "Read the stored env config and secret-key marks",
+        "summary": "Read the stored env config, secret-key marks and the stored keys the deployment sets",
         "tags": [
           "config"
         ]
       },
       "post": {
-        "description": "Merge env overrides into the stored config and reload this worker and the fleet.\n\nA hot-class key is re-read in place. A recycle-class key rolls a worker recycle across the\nfleet on a supervised deployment: the response's ``recycle`` carries the roll's rows (``null``\nwhen the change carried no recycle-class key), and when the roll converged this worker\nrecycles itself after replying — on the HTTP edge and on every projected tool door alike (a\npost-reply graceful self-exit its supervisor respawns).\nA change the deployment cannot carry is refused with a 400 before anything is written, naming\nthe key: a recycle-class key on a bare (unsupervised) deployment, and the bus URL or a key the\ndeployment pins on every shape.\n\n``secret_keys`` (when not ``None``) replaces the operator's secret marks in the same write;\nthe marks variable itself is never accepted as an ``env`` key.\nAn ``mcp`` selection list whose ``!ENV`` marker would resolve so that a tool something still\nuses stops being picked is refused with a 409 naming the holders, or a 502 when the server\ncannot list its tools for that check, before anything is written.\n\nCalled over MCP, the reload answers on the session that called it and then retires that session with\nthe generation it ran on: a later call on the same session fails (streamable HTTP answers it 404,\nand an SSE session's stream closes), so the client starts a new session to go on.",
+        "description": "Merge env changes into the stored env and reload this worker and the fleet.\n\nA hot-class key is re-read in place. A recycle-class key rolls a worker recycle across the\nfleet: the response's ``recycle`` carries the roll's rows (``null`` when the change carried no\nrecycle-class key), and when the roll converged this worker recycles itself after replying —\non the HTTP edge and on every projected tool door alike (a post-reply graceful self-exit its\nsupervisor respawns).\nA change that cannot take effect is refused with a 400 before anything is written, naming\nthe key, under any spelling of its name: a key that locates the worker bus (a bus URL or the\nbus namespace), a deployment / boot-identity (X-band) key no editor may set, and a key the\ndeployment sets (set it in the deployment's environment and restart; removing its stored\ncopy is allowed).\n\n``secret_keys`` (when not ``None``) replaces the operator's secret marks in the same write;\nthe marks variable itself is never accepted as an ``env`` key.\nAn ``mcp`` selection list whose ``!ENV`` marker would resolve so that a tool something still\nuses stops being picked is refused with a 409 naming the holders, or a 502 when the server\ncannot list its tools for that check, before anything is written.\n\nCalled over MCP, the reload answers on the session that called it and then retires that session with\nthe generation it ran on: a later call on the same session fails (streamable HTTP answers it 404,\nand an SSE session's stream closes), so the client starts a new session to go on.",
         "operationId": "post_api_config_env",
         "requestBody": {
           "content": {
@@ -24959,7 +25089,7 @@
             "ApiKeyAuth": []
           }
         ],
-        "summary": "Merge env overrides and reload the fleet",
+        "summary": "Merge env changes into the stored env and reload the fleet",
         "tags": [
           "config"
         ],
@@ -25205,7 +25335,7 @@
         ]
       },
       "put": {
-        "description": "Create the profile, or append a new version when it exists (whole-body replace).\n\nReturns ``{ok: true, version}`` — NEVER the stored body, so a secret never re-emits on the write path.\nA reserved ``@``-prefixed name is a loud 400. The profile's DECLARED env is run through the shared\nboundary validator (``ConfigService._validate_replace``): a payload carrying an X-band key or leaving\na manifest ``!ENV`` marker dangling is refused at save time, naming the key.",
+        "description": "Create the profile, or append a new version when it exists (whole-body replace).\n\nReturns ``{ok: true, version}`` — NEVER the stored body, so a secret never re-emits on the write path.\nA reserved ``@``-prefixed name is a loud 400. The profile's DECLARED env is run through the shared\nboundary validator (``ConfigService._validate_replace``): a payload carrying an X-band key, setting a\nkey the deployment sets to a value other than its stored one, or leaving a manifest ``!ENV`` marker\ndangling is refused at save time, naming the key.",
         "operationId": "put_api_config_profiles_name",
         "parameters": [
           {
@@ -25290,7 +25420,7 @@
     },
     "/api/config/profiles/{name}/apply": {
       "post": {
-        "description": "Apply the profile's active env as the WHOLE stored env band and reload the fleet.\n\nThe profile's ``secret_keys`` are written as the stored secret marks in the same replace.\n\nA key the profile omits is deleted, save the carried deployment X band; build+swap a fresh serving\nepoch under it, persist env-write-LAST, broadcast the reload, and recycle the fleet for recycle-class\ndiffs. NO request body.\n\nThe response is the dedicated ``profileApplyResponse`` ``{hot, recycle:[{name, kind, status,\ngeneration_before, detail}], fresh:[{name, kind, generation}], refused:[],\nrecycle_stopped:{kind, name, detail} | null, awaiting_respawn:[{name, keys}], span_release_error, fanout}``\n— key names + worker identities only,\nnever env values. ``recycle`` is one line per sibling the roll reached (plus the applier's\nown deferred self-exit line when it is armed). A ``recycled`` line is confirmed on reality;\nthe roll stops at the first line that is not: ``timed-out`` (its old life did not go, fresh\ncapacity did not boot, or it never returned to ready, within the step budget) or ``failed``\n(the worker refused the op, or the bus could not be reached while it was in hand), its\n``detail`` naming why — or when the bus could not be read before a target was reached.\n``recycle_stopped`` names where the roll stopped and why (``null`` when it ran to its end; a\n``null`` name when no target was in hand). Later siblings and the applier's own recycle are\nthen not attempted, and the call still answers with the report: the env is persisted and the\nfleet reloaded. ``fresh`` is the per-kind new ready lives observed since the pre-apply\nsnapshot, capacity evidence never claimed as any target's successor. ``refused`` is ``[]``:\na refusal (X-band key, dangling ``!ENV``, a recycle-class diff the deployment shape cannot\ncarry) aborts upfront with a loud 400 naming the key, before anything is snapshotted, built,\nor persisted. ``awaiting_respawn`` names the workers (name + keys) still awaiting a respawn\nafter the roll — empty when it converged. ``span_release_error`` is ``null`` when the config\nstore released its exclusive write span after the env persisted, otherwise the store's error:\nthe env is persisted and the broadcast and roll reported here still ran, but the store may still\nhold its write span until this worker exits. When the diff carries serve-affecting recycle keys\nand the roll converged, the applier's OWN recycle is armed as a post-reply graceful self-exit\n— after the HTTP body flushes, or once a projected tool call (MCP, ``tai tools run``, an\nagent, a preset, a schedule, a hook) returned — and its supervisor respawns it on the new\nenv. 404 for an absent name.\nAn ``mcp`` selection list whose ``!ENV`` marker would resolve so that a tool something still\nuses stops being picked is refused with a 409 naming the holders, or a 502 when the server\ncannot list its tools for that check, before anything is snapshotted.\n\nCalled over MCP, the reload answers on the session that called it and then retires that session with\nthe generation it ran on: a later call on the same session fails (streamable HTTP answers it 404,\nand an SSE session's stream closes), so the client starts a new session to go on.",
+        "description": "Apply the profile's active env as the WHOLE stored env band and reload the fleet.\n\nThe profile's ``secret_keys`` are written as the stored secret marks in the same replace.\n\nA key the profile omits is deleted, save the carried deployment X band; build+swap a fresh serving\nepoch under it, persist env-write-LAST, broadcast the reload, and recycle the fleet for recycle-class\ndiffs. NO request body.\n\nThe response is the dedicated ``profileApplyResponse`` ``{hot, recycle:[{name, kind, status,\ngeneration_before, detail}], fresh:[{name, kind, generation}], refused:[],\nrecycle_stopped:{kind, name, detail} | null, awaiting_respawn:[{name, keys}], span_release_error, fanout}``\n— key names + worker identities only,\nnever env values. ``recycle`` is one line per sibling the roll reached (plus the applier's\nown deferred self-exit line when it is armed). A ``recycled`` line is confirmed on reality;\nthe roll stops at the first line that is not: ``timed-out`` (its old life did not go, fresh\ncapacity did not boot, or it never returned to ready, within the step budget) or ``failed``\n(the worker refused the op, or the bus could not be reached while it was in hand), its\n``detail`` naming why — or when the bus could not be read before a target was reached.\n``recycle_stopped`` names where the roll stopped and why (``null`` when it ran to its end; a\n``null`` name when no target was in hand). Later siblings and the applier's own recycle are\nthen not attempted, and the call still answers with the report: the env is persisted and the\nfleet reloaded. ``fresh`` is the per-kind new ready lives observed since the pre-apply\nsnapshot, capacity evidence never claimed as any target's successor. ``refused`` is ``[]``:\na refusal (X-band key, a key the deployment sets, dangling ``!ENV``, a bus-reaching key no\nrecycle can carry) aborts upfront with a loud 400 naming the key, before anything is snapshotted, built,\nor persisted. ``awaiting_respawn`` names the workers (name + keys) still awaiting a respawn\nafter the roll — empty when it converged. ``span_release_error`` is ``null`` when the config\nstore released its exclusive write span after the env persisted, otherwise the store's error:\nthe env is persisted and the broadcast and roll reported here still ran, but the store may still\nhold its write span until this worker exits. When the diff carries serve-affecting recycle keys\nand the roll converged, the applier's OWN recycle is armed as a post-reply graceful self-exit\n— after the HTTP body flushes, or once a projected tool call (MCP, ``tai tools run``, an\nagent, a preset, a schedule, a hook) returned — and its supervisor respawns it on the new\nenv. 404 for an absent name.\nAn ``mcp`` selection list whose ``!ENV`` marker would resolve so that a tool something still\nuses stops being picked is refused with a 409 naming the holders, or a 502 when the server\ncannot list its tools for that check, before anything is snapshotted.\n\nCalled over MCP, the reload answers on the session that called it and then retires that session with\nthe generation it ran on: a later call on the same session fails (streamable HTTP answers it 404,\nand an SSE session's stream closes), so the client starts a new session to go on.",
         "operationId": "post_api_config_profiles_name_apply",
         "parameters": [
           {
@@ -25414,7 +25544,7 @@
     },
     "/api/config/profiles/{name}/diff": {
       "post": {
-        "description": "The saved profile's env vs the CURRENT stored env, with REAL values (the UI masks) — a preview, not a report.\n\n``added`` / ``removed`` are key names, ``changed`` is ``[{key, old, new}]``. ``recycle_keys`` are the\ndiff keys whose registry ``reload_class`` is ``recycle``; ``refused_keys`` are the diff keys the\nrecycle policy refuses upfront on this deployment shape\n(``recycle_policy.capability_report().refused_keys``), named. 404 for an absent name.",
+        "description": "The saved profile's env vs the CURRENT stored env, with REAL values (the UI masks) — a preview, not a report.\n\n``added`` / ``removed`` are key names, ``changed`` is ``[{key, old, new}]``: the stored-row diff,\na stored copy of a key the deployment sets included. ``recycle_keys`` and the bus-reaching part of\n``refused_keys`` are read from the change the reload really produces, as the apply classifies it\n(a key the deployment sets is never part of it): ``recycle_keys`` are the changed keys whose\nregistry ``reload_class`` is ``recycle``; ``refused_keys`` are the keys the apply would refuse\nupfront, named: the changed bus-reaching keys, and the keys the deployment sets that the profile\nsets to a value other than the stored one. 404 for an absent name.",
         "operationId": "post_api_config_profiles_name_diff",
         "parameters": [
           {
@@ -25742,7 +25872,7 @@
     },
     "/api/config/reload": {
       "post": {
-        "description": "Soft-restart the process from its manifest, in-process with no pod restart.\n\nRefreshes env from the config manager, resets every settings cache, and re-initializes from the\nmanifest. Applied on this worker (when it is a target) and broadcast to the fleet (all workers, or only\n``targets``); the response embeds the per-worker fleet report.\n\nHeavy (a full re-init); meant for env/config saves, not tool edits. A convergence\nop: its whole purpose is aligning siblings to persisted state, so a failed local\nreload still broadcasts and then re-raises with the fleet report attached.\n\nCalled over MCP on a worker the reload applies to (no ``targets``, or ``targets`` naming that\nworker), the reload answers on the session that called it and then retires that session with the\ngeneration it ran on: a later call on the same session fails (streamable HTTP answers it 404, and an\nSSE session's stream closes), so the client starts a new session to go on. When ``targets`` leave\nthat worker out, nothing reloads there and the session keeps working.\n\nEach worker's payload is ``{status, env_keys, awaiting_respawn}``: ``awaiting_respawn`` names the\nrecycle-class keys whose value now differs from the one that worker bound (at boot, or when the\nplugin that declares them was loaded) — the soft\nrestart carries every hot key in place, and those keys take effect only when the worker is\nrespawned through the deployment's supervisor (on a bare deployment, a server restart). This\noperation ERROR-logs one line naming every such worker and its keys.",
+        "description": "Soft-restart the process from its manifest, in-process with no pod restart.\n\nRefreshes env from the config manager, resets every settings cache, and re-initializes from the\nmanifest. Applied on this worker (when it is a target) and broadcast to the fleet (all workers, or only\n``targets``); the response embeds the per-worker fleet report.\n\nHeavy (a full re-init); meant for env/config saves, not tool edits. A convergence\nop: its whole purpose is aligning siblings to persisted state, so a failed local\nreload still broadcasts and then re-raises with the fleet report attached.\n\nCalled over MCP on a worker the reload applies to (no ``targets``, or ``targets`` naming that\nworker), the reload answers on the session that called it and then retires that session with the\ngeneration it ran on: a later call on the same session fails (streamable HTTP answers it 404, and an\nSSE session's stream closes), so the client starts a new session to go on. When ``targets`` leave\nthat worker out, nothing reloads there and the session keeps working.\n\nEach worker's payload is ``{status, env_keys, awaiting_respawn}``: ``awaiting_respawn`` names the\nrecycle-class keys whose value now differs from the one that worker bound (at boot, or when the\nplugin that declares them was loaded) — the soft\nrestart carries every hot key in place, and those keys take effect only when the worker is\nrespawned through the deployment's supervisor. This\noperation ERROR-logs one line naming every such worker and its keys.",
         "operationId": "post_api_config_reload",
         "requestBody": {
           "content": {
@@ -25816,7 +25946,7 @@
     },
     "/api/config/settings-schema": {
       "get": {
-        "description": "Return every registered settings group with per-field current values.\n\nEach group carries the settings class' field metadata plus a ``value`` per\nfield, resolved with pydantic-settings precedence: ``os.environ`` wins (in\na non-file config mode an external provider injects vars the dotenv store never sees), then\nthe stored env override, then the shared ``TAI_DEFAULT_*`` namespace, then the\nfield default. Nested-group reference fields (``env_var == \"\"``) are non-editable\nand report ``value: null``. Secret fields report their real value — this authed\nsurface round-trips values through the editor; masking is display-side only,\nnever on the wire.\n\nEach field also carries ``value_source`` naming which layer supplied its\nresolved ``value`` so a UI can badge provenance (notably \"from default\" for a\n``TAI_DEFAULT_*`` fallback): ``\"env\"`` (process env), ``\"stored\"`` (the dotenv\noverride), ``\"default_namespace\"`` (a ``TAI_DEFAULT_*`` fallback, from process\nenv or the store), ``\"field_default\"`` (the bare field default), or ``null``\nfor a non-editable nested-group reference.\n\nOnly IMPORTED settings classes appear: in a running skeleton the kit,\nskeleton, and manifest-loaded plugin modules — the intended scope.",
+        "description": "Return every registered settings group with per-field current values.\n\nEach group carries the settings class' field metadata plus a ``value`` per\nfield, resolved as the answering process resolves it. Each layer reads a field under every\nname that sets it: its accepted names, the JSON name of a nested group it is in, and its\ndelimited names. A field the deployment sets on any worker of the fleet, under any such\nname, keeps the deployment's value (its value in this process's env, then the shared\n``TAI_DEFAULT_*`` namespace, then the field default — a stored copy never applies); a\nworker whose deployment does not set it runs that fallback. Every other field resolves from\nthe stored env, then the shared ``TAI_DEFAULT_*`` namespace (process env, then the store),\nthen the field default.\nNested-group reference fields (``env_var == \"\"``) are non-editable and report\n``value: null``. Secret fields report their real value — this authed surface\nround-trips values through the editor; masking is display-side only, never on the wire.\n\nEach field also carries ``value_source`` naming which layer supplied its\nresolved ``value`` so a UI can badge provenance: ``\"deployment\"`` (the field is\nset by the deployment env; it is locked, and a save that sets it is refused),\n``\"stored\"`` (the stored env), ``\"default_namespace\"`` (a ``TAI_DEFAULT_*``\nfallback, from process env or the store), ``\"field_default\"`` (the bare field\ndefault), or ``null`` for a non-editable nested-group reference.\n\nOnly IMPORTED settings classes appear: in a running skeleton the kit,\nskeleton, and manifest-loaded plugin modules — the intended scope.",
         "operationId": "get_api_config_settings_schema",
         "responses": {
           "200": {
@@ -29400,7 +29530,7 @@
     },
     "/api/fleet/reload-config": {
       "post": {
-        "description": "Soft-restart the worker fleet, optionally restricted to the named ``targets``.\n\nCalled over MCP on a worker the reload applies to (no ``targets``, or ``targets`` naming that\nworker), the reload answers on the session that called it and then retires that session with the\ngeneration it ran on: a later call on the same session fails (streamable HTTP answers it 404, and an\nSSE session's stream closes), so the client starts a new session to go on. When ``targets`` leave\nthat worker out, nothing reloads there and the session keeps working.\n\nEach worker's payload is ``{status, env_keys, awaiting_respawn}``: ``awaiting_respawn`` names the\nrecycle-class keys whose value now differs from the one that worker bound (at boot, or when the\nplugin that declares them was loaded) — the soft\nrestart carries every hot key in place, and those keys take effect only when the worker is\nrespawned through the deployment's supervisor (on a bare deployment, a server restart). This\noperation ERROR-logs one line naming every such worker and its keys.",
+        "description": "Soft-restart the worker fleet, optionally restricted to the named ``targets``.\n\nCalled over MCP on a worker the reload applies to (no ``targets``, or ``targets`` naming that\nworker), the reload answers on the session that called it and then retires that session with the\ngeneration it ran on: a later call on the same session fails (streamable HTTP answers it 404, and an\nSSE session's stream closes), so the client starts a new session to go on. When ``targets`` leave\nthat worker out, nothing reloads there and the session keeps working.\n\nEach worker's payload is ``{status, env_keys, awaiting_respawn}``: ``awaiting_respawn`` names the\nrecycle-class keys whose value now differs from the one that worker bound (at boot, or when the\nplugin that declares them was loaded) — the soft\nrestart carries every hot key in place, and those keys take effect only when the worker is\nrespawned through the deployment's supervisor. This\noperation ERROR-logs one line naming every such worker and its keys.",
         "operationId": "post_api_fleet_reload_config",
         "requestBody": {
           "content": {

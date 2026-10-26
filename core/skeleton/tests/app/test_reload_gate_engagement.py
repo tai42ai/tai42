@@ -20,6 +20,7 @@ from tai42_skeleton.app import epoch_retire as epoch_retire_mod
 from tai42_skeleton.app.admission import admit_session_call, mark_current_request_drain_exempt
 from tai42_skeleton.app.epoch import build_and_swap_epoch, current_epoch
 from tai42_skeleton.app.reload_gate import reload_gate
+from tai42_skeleton.config.deployment_env import DeploymentOwnership
 
 from .test_epoch import (  # noqa: F401 - _reset_epoch_state is the autouse fixture these cases need
     _ClosingSupervisor,
@@ -56,7 +57,11 @@ async def test_a_supervised_run_whose_tool_call_runs_in_a_child_task_survives_it
     async def _tool_call() -> None:
         async with reload_gate.driving():
             await build_and_swap_epoch(
-                {}, rebuild=lambda: None, build_serving_app=_serve("new-app"), drain_deadline=0.5
+                {},
+                rebuild=lambda: None,
+                build_serving_app=_serve("new-app"),
+                drain_deadline=0.5,
+                ownership=DeploymentOwnership(),
             )
         await asyncio.sleep(0)  # the reload's fleet wait runs after the swap
         outcome.append("tool call completed")
@@ -157,7 +162,11 @@ async def test_a_request_reaching_the_gate_during_a_synchronous_drain_is_not_cou
             loop.call_later(0.01, go.set)
             start = loop.time()
             await build_and_swap_epoch(
-                {}, rebuild=lambda: None, build_serving_app=_serve("new-app"), drain_deadline=DRAIN_BUDGET_S
+                {},
+                rebuild=lambda: None,
+                build_serving_app=_serve("new-app"),
+                drain_deadline=DRAIN_BUDGET_S,
+                ownership=DeploymentOwnership(),
             )
             took = loop.time() - start
             assert log == [], "the retire closed under a request waiting on the gate"
@@ -218,7 +227,11 @@ async def test_a_gate_waiter_giving_up_after_the_synchronous_drain_ended_leaves_
         async with reload_gate.synchronized():  # the bus-delivered reload holds the gate
             loop.call_later(0.02, _waiter_arrives_then_leaves)
             await build_and_swap_epoch(
-                {}, rebuild=lambda: None, build_serving_app=_serve("new-app"), drain_deadline=budget
+                {},
+                rebuild=lambda: None,
+                build_serving_app=_serve("new-app"),
+                drain_deadline=budget,
+                ownership=DeploymentOwnership(),
             )
         await asyncio.gather(ordinary, waiter, return_exceptions=True)
         await _deferred_tails_finished()
@@ -242,7 +255,11 @@ async def test_a_request_waiting_on_the_gate_after_the_tail_turned_over_is_never
     async def _driver() -> None:
         async with reload_gate.driving():
             await build_and_swap_epoch(
-                {}, rebuild=lambda: None, build_serving_app=_serve("new-app"), drain_deadline=0.05
+                {},
+                rebuild=lambda: None,
+                build_serving_app=_serve("new-app"),
+                drain_deadline=0.05,
+                ownership=DeploymentOwnership(),
             )
         await driver_answers.wait()
         log.append("driver answered")
@@ -328,7 +345,11 @@ async def test_a_session_call_driving_a_reload_answers_before_the_close(
         async with reload_gate.driving():
             start = loop.time()
             await build_and_swap_epoch(
-                {}, rebuild=lambda: None, build_serving_app=_serve("new-app"), drain_deadline=DRAIN_BUDGET_S
+                {},
+                rebuild=lambda: None,
+                build_serving_app=_serve("new-app"),
+                drain_deadline=DRAIN_BUDGET_S,
+                ownership=DeploymentOwnership(),
             )
             took.append(loop.time() - start)
         await answer.wait()

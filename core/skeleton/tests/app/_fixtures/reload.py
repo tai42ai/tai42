@@ -16,6 +16,7 @@ from typing import Any
 
 from tai42_skeleton.app import epoch as epoch_mod
 from tai42_skeleton.app.epoch import Epoch
+from tai42_skeleton.config.deployment_env import DeploymentOwnership
 
 
 class _SentinelServingApp:
@@ -43,4 +44,6 @@ async def reload_with(app: Any, manifest: Any, env: Mapping[str, str] | None = N
             app._building = None
         return _SentinelServingApp()
 
-    return await epoch_mod.build_and_swap_epoch(env or {}, rebuild=_rebuild, build_serving_app=_build_serving_app)
+    return await epoch_mod.build_and_swap_epoch(
+        env or {}, rebuild=_rebuild, build_serving_app=_build_serving_app, ownership=DeploymentOwnership()
+    )

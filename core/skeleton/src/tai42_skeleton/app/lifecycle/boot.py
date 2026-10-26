@@ -13,6 +13,7 @@ from tai42_contract.app import tai42_app
 from tai42_kit.accounts.registry import reset_registry as reset_accounts_registry
 
 from tai42_skeleton.app import lifecycle as _lifecycle
+from tai42_skeleton.app.applied_env import applied_env_keys
 from tai42_skeleton.app.boot_rules import (
     require_apply_window_covers_drain,
     require_bus_for_backend,
@@ -21,7 +22,6 @@ from tai42_skeleton.app.boot_rules import (
     require_hooks_store_for_workers,
     require_sub_mcp_store_for_workers,
 )
-from tai42_skeleton.app.epoch import applied_env_keys
 from tai42_skeleton.app.kind_status import warn_if_noop_monitoring
 from tai42_skeleton.app.lifecycle.off_loop import run_blocking
 from tai42_skeleton.app.lifecycle.state import LifecycleState

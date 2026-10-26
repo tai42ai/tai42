@@ -132,3 +132,27 @@ def test_a_primitive_value_is_cached_unstamped() -> None:
 
     assert primitive("none") is None
     assert primitive("text") == "text"
+
+
+def test_a_rewritten_stored_env_in_the_config_dir_rebuilds_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("TAI_CONFIG_MODE", raising=False)
+    monkeypatch.setenv("TAI_CONFIG_DIR_PATH", str(tmp_path))
+    calls: list[str] = []
+
+    @keyed_settings_cache
+    def accessor(key: str) -> _PrefixedSettings:
+        calls.append(key)
+        return _PrefixedSettings()
+
+    (tmp_path / ".env").write_text("KEYED_VALUE=stored-1\n")
+    first = accessor("one")
+
+    staged = tmp_path / ".env.staged"
+    staged.write_text("KEYED_VALUE=stored-2\n")
+    os.replace(staged, tmp_path / ".env")
+
+    assert accessor("one") is first
+    assert first.value == "unset"
+    assert calls == ["one"]

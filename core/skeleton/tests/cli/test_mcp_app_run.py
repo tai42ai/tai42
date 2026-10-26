@@ -637,7 +637,7 @@ def test_main_bootstraps_env_in_file_mode(monkeypatch: pytest.MonkeyPatch) -> No
     called: list[bool] = []
     monkeypatch.setattr(mcp_app, "cli", lambda: None)
     monkeypatch.setattr(mcp_app, "config_mode", lambda: "file")
-    monkeypatch.setattr(mcp_app, "load_dotenv", lambda: called.append(True))
+    monkeypatch.setattr(mcp_app, "load_boot_dotenv", lambda path: called.append(True))
 
     mcp_app.main()
 
@@ -648,7 +648,7 @@ def test_main_skips_env_bootstrap_in_a_non_file_mode(monkeypatch: pytest.MonkeyP
     called: list[bool] = []
     monkeypatch.setattr(mcp_app, "cli", lambda: None)
     monkeypatch.setattr(mcp_app, "config_mode", lambda: "external")
-    monkeypatch.setattr(mcp_app, "load_dotenv", lambda: called.append(True))
+    monkeypatch.setattr(mcp_app, "load_boot_dotenv", lambda path: called.append(True))
 
     mcp_app.main()
 

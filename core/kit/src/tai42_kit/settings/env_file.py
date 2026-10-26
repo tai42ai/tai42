@@ -8,6 +8,12 @@ size) and the variables its values interpolate (``${NAME}``) keep their
 exactly what a fresh parse returns. A path that is not a regular file (a FIFO) is
 read on every call.
 
+In the ``file`` config mode no settings construction ever reads the ``file`` provider's stored
+env (``.env`` in the config dir, see :func:`~tai42_contract.config.manager.file_stored_env_path`),
+whatever the working directory: the server applies the stored keys into ``os.environ`` itself,
+keeping those the deployment sets, so a settings class naming that file as its env file reads
+none. Every other env file is read.
+
 Inside :func:`env_file_reads_suspended` no settings construction reads the env file at the
 given path, so a block that models an env in ``os.environ`` already carrying that file's
 post-change contents does not read the file's current contents over it.
@@ -28,6 +34,7 @@ from dotenv.main import DotEnv, resolve_variables
 from dotenv.variables import Variable, parse_variables
 from pydantic_settings import DotEnvSettingsSource
 from pydantic_settings.sources.utils import parse_env_vars
+from tai42_contract.config.manager import CONFIG_MODE_ENV, FILE_CONFIG_MODE, file_stored_env_path
 
 __all__ = [
     "DEFAULT_ENV_FILE",
@@ -74,15 +81,29 @@ def env_file_reads_suspended(path: str | os.PathLike[str]) -> Iterator[None]:
         _SUSPENDED_ENV_FILES.reset(token)
 
 
-def env_file_in_effect[F: str | os.PathLike[str]](declared: F | None) -> F | None:
-    """The env file a settings construction reads: ``declared``, or none when its reads are suspended.
+def _stored_env_file() -> str | None:
+    """The resolved stored env of the ``file`` config mode, or ``None`` under any other mode.
 
-    See :func:`env_file_reads_suspended`.
+    The mode and the config dir are read from ``os.environ`` on every call, as the ``file``
+    provider reads its config dir.
     """
-    suspended = _SUSPENDED_ENV_FILES.get()
-    if declared is None or not suspended or _resolved(declared) not in suspended:
-        return declared
-    return None
+    if os.environ.get(CONFIG_MODE_ENV, FILE_CONFIG_MODE) != FILE_CONFIG_MODE:
+        return None
+    return _resolved(file_stored_env_path(os.environ))
+
+
+def env_file_in_effect[F: str | os.PathLike[str]](declared: F | None) -> F | None:
+    """The env file a settings construction reads: ``declared``, or none when it is not read.
+
+    ``declared`` is not read when it resolves to the ``file`` config mode's stored env, or
+    when its reads are suspended (:func:`env_file_reads_suspended`).
+    """
+    if declared is None:
+        return None
+    resolved = _resolved(declared)
+    if resolved == _stored_env_file() or resolved in _SUSPENDED_ENV_FILES.get():
+        return None
+    return declared
 
 
 @dataclass(frozen=True)

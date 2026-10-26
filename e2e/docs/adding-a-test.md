@@ -48,6 +48,18 @@ env shape no profile has — and add it to `_ALL_BUILDERS` in
 `tests/harness/test_stack_lifecycle.py`, which sweeps EVERY profile for the metrics-dir
 rule.
 
+A profile's env is split as a shipped deployment's is. `StackConfig.env` (and
+`fresh_stack(env_overrides=...)`) is the deployment env: it reaches every process
+through its process env, never the stored `.env`. The app treats each of those keys as
+set by the deployment, so its value wins over a stored copy and a write that sets it is
+refused. Put infrastructure there (store and bus URLs, paths, the keys a feature needs
+to boot). `StackConfig.process_env` (and `fresh_stack(process_env_overrides=...)`) is
+the deployment env of one named process only (`serve`, `backend`, ...), as a deployment
+sets a key in one service's environment. `StackConfig.stored_env` seeds the stored
+`.env` and is empty on every profile: a key a test changes through the app (an env
+write, a profile, a backup import) must stay out of `env`, and the test writes it
+itself.
+
 ## 2b. Respect the variant dimensions
 
 A stack is rendered through a plugin-variant triple (`TAI_E2E_BACKEND` /

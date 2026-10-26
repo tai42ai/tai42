@@ -21,6 +21,7 @@ from tai42_contract.plugins import PluginSpec
 from tai42_kit.utils.data import dump_manifest
 
 from tai42_skeleton.app.bus import FleetResult
+from tai42_skeleton.config.deployment_env import DeploymentOwnership
 from tai42_skeleton.config.service import ApplyResult
 from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.marketplace import installer as installer_module
@@ -272,11 +273,14 @@ class FakeConfigService:
         resolved = parse_config(data=dump_manifest(cast("Any", document))) or {}
         Manifest.model_validate(resolved)
 
-    def effective_env(self, changes: dict[str, str]) -> dict[str, str]:
+    async def deployment_ownership(self, op_name: str) -> DeploymentOwnership:
+        return DeploymentOwnership()
+
+    def effective_env(self, changes: dict[str, str], ownership: DeploymentOwnership) -> dict[str, str]:
         # The preview's missing-env computation reads the effective env through this
-        # seam (stored env overlaid on the process env). The fake tracks no env store,
-        # so the process env plus any ``changes`` stands in.
-        return {**os.environ, **changes}
+        # seam (the stored keys the deployment does not set, overlaid on the process env).
+        # The fake tracks no env store, so the process env plus any ``changes`` stands in.
+        return {**os.environ, **{key: value for key, value in changes.items() if not ownership.owns(key)}}
 
     async def reapply_manifest(
         self, *, continues: ApplyResult | None = None, recycle_keys: Sequence[str] = ()

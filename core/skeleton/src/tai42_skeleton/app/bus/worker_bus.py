@@ -23,6 +23,7 @@ from tai42_skeleton.app.bus.models import (
 from tai42_skeleton.app.bus.publish import WorkerBusPublishMixin
 from tai42_skeleton.app.bus.subscribe import WorkerBusSubscribeMixin, _HeartbeatThread
 from tai42_skeleton.app.bus_settings import BusSettings
+from tai42_skeleton.config.deployment_env import published_deployment_keys, published_env_readers
 
 logger = logging.getLogger(__name__)
 
@@ -153,6 +154,11 @@ class WorkerBus(WorkerBusPublishMixin, WorkerBusSubscribeMixin):
         return cls(BusSettings(), kind=kind, local=True)
 
     @property
+    def settings(self) -> BusSettings:
+        """The bus settings this bus was built under: the fleet it is a member of (:attr:`BusSettings.fleet`)."""
+        return self._settings
+
+    @property
     def heartbeat_ttl(self) -> float:
         """This bus's presence-key TTL, the freshness cadence :func:`presence_fresh` gates against.
 
@@ -243,6 +249,9 @@ class WorkerBus(WorkerBusPublishMixin, WorkerBusSubscribeMixin):
             joined_at=joined_at,
             beat_at=_utcnow_iso(),
             state=WorkerState.ready,
+            # With no bus the fleet is this process: its own names and readers are the fleet's.
+            deployment_keys=list(published_deployment_keys()),
+            env_readers=published_env_readers().digest,
             last_op=None,
             # The lone busless worker is this live process — always fresh, so it clears
             # the same freshness predicate every other row is judged by (never stale).

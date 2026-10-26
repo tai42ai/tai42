@@ -24,6 +24,7 @@ from tai42_contract.manifest import ExtensionElement
 from tai42_contract.settings_profiles import SettingsProfileBody
 from tai42_contract.tool_meta import FolderRecord, ToolMetaRecord
 from tai42_contract.versioning import DocumentVersion
+from tai42_kit.settings import SettingsFieldInfo
 
 from tai42_skeleton.hooks.trigger_auth import TriggerAuth
 from tai42_skeleton.operations.response_models_group_c import ExtensionView
@@ -32,14 +33,16 @@ from tai42_skeleton.operations.response_models_group_c import ExtensionView
 
 
 class EnvView(BaseModel):
-    """The stored env map plus the operator's masked-key marks.
+    """The stored env map plus the operator's masked-key marks and the stored keys the deployment sets.
 
     ``env`` values are verbatim (masking is display-side, never on the wire); ``secret_keys`` names which
-    keys the UI masks.
+    keys the UI masks; ``deployment_keys`` names the stored keys the deployment sets, which a write may
+    remove or carry unchanged but never set to a new value.
     """
 
     env: dict[str, str]
     secret_keys: list[str]
+    deployment_keys: list[str]
 
 
 class ConfigModeView(BaseModel):
@@ -48,17 +51,26 @@ class ConfigModeView(BaseModel):
     config_mode: str
 
 
-class SettingsGroupView(BaseModel):
-    """One registered settings group.
+class SettingsFieldView(SettingsFieldInfo):
+    """One settings field: its registered metadata, the value it resolves to, and the layer that supplied it.
 
-    ``fields`` rows are each a settings-field's dumped metadata extended with the resolved ``value`` and its
-    ``value_source`` layer — an open per-field metadata map, so it is typed as such rather than reshaped.
+    ``value_source``: ``"deployment"`` (the deployment env sets the field; it is locked, and a save that
+    sets it is refused), ``"stored"`` (the stored env), ``"default_namespace"`` (a ``TAI_DEFAULT_*``
+    fallback), ``"field_default"`` (the bare field default), or ``null`` for a nested-group reference,
+    which carries no value of its own.
     """
+
+    value: JsonValue
+    value_source: Literal["deployment", "stored", "default_namespace", "field_default"] | None
+
+
+class SettingsGroupView(BaseModel):
+    """One registered settings group with each field's resolved value."""
 
     name: str
     module: str
     qualname: str
-    fields: list[dict[str, JsonValue]]
+    fields: list[SettingsFieldView]
 
 
 class SettingsSchemaView(BaseModel):

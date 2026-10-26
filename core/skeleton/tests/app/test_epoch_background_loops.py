@@ -31,13 +31,13 @@ from tai42_skeleton.marketplace import advisories as advisories_module
 def _restore_process_env():
     """A successful build+swap leaves its applied env live in ``os.environ``. Snapshot and
     restore it around each test, and reset the epoch's loaded-key set + the settings cache."""
-    from tai42_skeleton.app import epoch as epoch_mod
+    from tai42_skeleton.app import applied_env
 
     snapshot = dict(os.environ)
     yield
     os.environ.clear()
     os.environ.update(snapshot)
-    epoch_mod._loaded_env_keys = set()
+    applied_env._loaded_env_keys = set()
     reset_all_settings()
 
 

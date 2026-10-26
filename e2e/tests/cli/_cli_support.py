@@ -89,8 +89,8 @@ def run_cli(stack: TaiStack, cwd: Path, *args: str, json_flag: bool = True) -> s
 
     Auth rides ``TAI_API_KEY`` (the stack's seeded root token) — the CLI's env-var
     key path. A clean child env (venv-first PATH, no inherited config) and a neutral
-    cwd keep the invocation reproducible; the CLI's own ``load_dotenv`` finds no
-    ``.env`` there, so only ``--server`` and the key resolve."""
+    cwd keep the invocation reproducible; the CLI's boot ``.env`` load
+    (``load_boot_dotenv``) finds no ``.env`` there, so only ``--server`` and the key resolve."""
     assert stack.auth_token is not None, "the CLI stack must be seeded with a root token"
     venv_bin = str(Path(sys.executable).parent)
     env = {

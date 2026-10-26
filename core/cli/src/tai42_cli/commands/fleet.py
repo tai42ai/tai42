@@ -123,7 +123,7 @@ def reload_config(
     Each worker's row names the recycle-class keys awaiting a respawn
     (``awaiting_respawn``): the soft restart carries every hot key in place, and
     those keys take effect only when that worker is respawned through the
-    deployment's supervisor (on a bare deployment, a server restart).
+    deployment's supervisor.
 
     Example: ``tai fleet reload-config --target serve-1``
     """

@@ -15,8 +15,9 @@ from pyaml_env import parse_config
 from tai42_kit.settings import env_file_reads_suspended
 from tai42_kit.utils.data import dump_manifest
 
-from tai42_skeleton.app.epoch import applied_env_keys
-from tai42_skeleton.config.boundary import x_band_env_keys
+from tai42_skeleton.app.applied_env import applied_env_keys
+from tai42_skeleton.config.boundary import EnvKeyClasses
+from tai42_skeleton.config.deployment_env import DeploymentOwnership, deployment_env_value
 from tai42_skeleton.config.file_manager import FileConfigManager
 from tai42_skeleton.config.secret_seal import seal_resolved_secrets
 from tai42_skeleton.config.service.base import _ConfigServiceBase
@@ -67,48 +68,58 @@ class _ResolutionMixin(_ConfigServiceBase):
         except FileNotFoundError:
             return {}
 
-    def _converged_env(self, stored: Mapping[str, str]) -> dict[str, str]:
-        """The env a reload from the ``stored`` env leaves this process with.
+    def _converged_env(self, stored: Mapping[str, str], ownership: DeploymentOwnership) -> dict[str, str]:
+        """The env a reload from the ``stored`` env under ``ownership`` leaves this process with.
 
-        The reload's removed-key reconciliation, applied to a stored env this process may not
-        have applied yet: a key the last env apply set that ``stored`` no longer holds is
-        dropped, ``stored`` overlays the rest, and process env the store never owned stays. Every
-        worker sharing the store converges to this env at its next reload, so a change that
-        validates against it holds on every worker.
+        The reload's apply, made on a stored env this process may not have applied yet: a key
+        the last env apply set that the reload no longer applies (``stored`` no longer holds it,
+        or ``ownership`` names it) returns to its deployment value when the deployment env
+        carried one and is dropped otherwise, the stored keys ``ownership`` does not name
+        overlay the rest, and process env the store never owned stays. Every worker sharing the
+        store converges to this env at its next reload, so a change that validates against it
+        holds on every worker.
         """
-        gone = applied_env_keys() - stored.keys()
-        return {key: value for key, value in os.environ.items() if key not in gone} | dict(stored)
+        applied = {key: value for key, value in stored.items() if not ownership.owns(key)}
+        effective = _without_stored_keys(os.environ, set(applied_env_keys() - applied.keys()))
+        effective.update(applied)
+        return effective
 
-    def effective_env(self, changes: Mapping[str, str]) -> dict[str, str]:
+    def effective_env(self, changes: Mapping[str, str], ownership: DeploymentOwnership) -> dict[str, str]:
         """The effective env an :meth:`ConfigService.apply_env_change` produces, as the reloaded process sees it.
 
         The stored env is merged with ``changes`` (empties are dropped — the store
-        filters them), then overlaid onto the env the stored env converges this process to
-        (:meth:`_converged_env`). A key the change empties is treated as removed so a
-        bus-removing change is visible to the invariant.
+        filters them), then applied onto the env the stored env converges this process to
+        (:meth:`_converged_env`) the way a reload applies it: a key the deployment sets keeps
+        the deployment's value, and a key the change empties is treated as removed (returning
+        to its deployment value when the deployment env carried one), so a bus-removing change
+        is visible to the invariant.
         """
         stored = self._read_stored_env()
-        removed = {key for key, value in changes.items() if value == ""}
+        removed = {key for key, value in changes.items() if value == "" and not ownership.owns(key)}
         merged = {key: value for key, value in {**stored, **changes}.items() if value != ""}
-        effective = {key: value for key, value in self._converged_env(stored).items() if key not in removed}
-        effective.update(merged)
+        effective = _without_stored_keys(self._converged_env(stored, ownership), removed)
+        effective.update({key: value for key, value in merged.items() if not ownership.owns(key)})
         return effective
 
-    def _effective_replace_env(self, profile_env: dict[str, str]) -> dict[str, str]:
+    def _effective_replace_env(self, profile_env: dict[str, str], ownership: DeploymentOwnership) -> dict[str, str]:
         """The effective env a profile REPLACE produces, as the reloaded process would see it.
 
         The profile env becomes the WHOLE stored env — keys the profile omits are
         DELETED — while the deployment X band is carried untouched from the current
         process env (X keys never enter a profile). Starting from the env the stored env
-        converges this process to (:meth:`_converged_env`), the stored keys drop out, the
-        profile keys overlay, and the carried X band overlays last; system env the store
-        never owned is left in place.
+        converges this process to (:meth:`_converged_env`), the old stored keys drop out
+        (returning to their deployment value when the deployment env carried one), the
+        profile keys the deployment does not set overlay, and the carried X band overlays
+        last; a key the deployment sets keeps the deployment's value, and system env the
+        store never owned is left in place.
         """
         stored = self._read_stored_env()
-        x_band = x_band_env_keys()
-        carried = {key: value for key, value in os.environ.items() if key in x_band}
-        effective = {key: value for key, value in self._converged_env(stored).items() if key not in stored}
-        effective.update(profile_env)
+        classes = EnvKeyClasses()
+        carried = {key: value for key, value in os.environ.items() if classes.x_band(key)}
+        effective = _without_stored_keys(
+            self._converged_env(stored, ownership), {key for key in stored if not ownership.owns(key)}
+        )
+        effective.update({key: value for key, value in profile_env.items() if not ownership.owns(key)})
         effective.update(carried)
         return effective
 
@@ -123,6 +134,19 @@ class _ResolutionMixin(_ConfigServiceBase):
         """The file the stored env is kept in, or ``None`` when the config manager keeps it elsewhere."""
         manager = self._config_manager
         return manager.env_path if isinstance(manager, FileConfigManager) else None
+
+
+def _without_stored_keys(env: Mapping[str, str], keys: set[str]) -> dict[str, str]:
+    """``env`` with the applied stored ``keys`` undone, as a reload's removed-key reconciliation undoes them.
+
+    A key returns to its deployment value when the deployment env carried one, and is dropped otherwise.
+    """
+    effective = {key: value for key, value in env.items() if key not in keys}
+    for key in keys:
+        deployed = deployment_env_value(key)
+        if deployed is not None:
+            effective[key] = deployed
+    return effective
 
 
 @contextmanager

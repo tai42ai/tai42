@@ -1,4 +1,4 @@
-"""The ``tai`` root callback calls ``load_dotenv()``, which writes process
+"""The ``tai`` root callback loads a local ``.env``, which writes process
 environment variables directly — a real write outside ``monkeypatch`` that would
 otherwise leak into the rest of the suite. This autouse fixture snapshots and
 restores ``os.environ`` around every CLI test to keep them hermetic.

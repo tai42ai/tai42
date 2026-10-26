@@ -1,11 +1,11 @@
 """Recycle orchestration — the rolling per-kind recycle loop.
 
-Called from the profile-apply pipeline when the diff carries recycle-class keys on a
-supervised shape. It recycles the fleet ONE worker at a time per kind, and confirms
-each step on REALITY rather than on a successor's identity: after publishing the
-recycle op to a target it awaits two facts — the target's OLD life is gone, and enough
-NEW READY capacity of that kind has joined to cover the recycled targets so far. Rolling
-one kind at a time keeps the fleet from losing every worker of a kind at once.
+Called from the profile-apply pipeline when the diff carries recycle-class keys. It
+recycles the fleet ONE worker at a time per kind, and confirms each step on REALITY
+rather than on a successor's identity: after publishing the recycle op to a target it
+awaits two facts — the target's OLD life is gone, and enough NEW READY capacity of that
+kind has joined to cover the recycled targets so far. Rolling one kind at a time keeps
+the fleet from losing every worker of a kind at once.
 
 A worker's WIRE terminal is an answer: ``applied`` is confirmed on reality, ``failed``
 records the target :data:`FAILED` with the worker's error. A verdict the publisher
@@ -204,6 +204,7 @@ async def orchestrate_recycle(
     applier_self_deferred: bool,
     step_timeout: float,
     expected: Mapping[str, tuple[WorkerKind, int]] | None = None,
+    pinned_only: bool = False,
     poll_interval: float = 0.2,
 ) -> RecycleReport:
     """Roll a recycle across the fleet, kind by kind, excluding ``excluded_name``.
@@ -211,7 +212,9 @@ async def orchestrate_recycle(
     ``expected`` is the membership pinned at the apply's start, ``name -> (kind,
     generation)``, applier excluded. For each targeted kind, snapshot the live lives
     (``name -> generation``) and take as targets the pinned names of the kind unioned
-    with the census rows of the kind (applier excluded); then recycle them one at a
+    with the census rows of the kind (applier excluded) — or, with ``pinned_only``, the
+    pinned names of the kind alone: the other census rows of the kind are not recycled,
+    and, being in the snapshot, never count as fresh capacity; then recycle them one at a
     time: a target not ready+fresh (a gap row, or a pinned worker absent from the
     census) is first waited to ``ready`` on its own budget, the recycle op is published
     to the single target, and convergence is awaited — the target's old life gone AND
@@ -252,9 +255,14 @@ async def orchestrate_recycle(
             for name, (pinned_kind, generation) in pinned.items()
             if pinned_kind is kind and name != excluded_name and name not in snapshot
         ]
-        # Roll-time targets: every row of this kind except the applier, captured as
-        # (name, generation) so a replacement taking over the freed name is a distinct life.
-        present = [(row.name, row.generation) for row in rows if row.name != excluded_name]
+        # Roll-time targets: every row of this kind except the applier (only the pinned ones
+        # with ``pinned_only``), captured as (name, generation) so a replacement taking over
+        # the freed name is a distinct life.
+        present = [
+            (row.name, row.generation)
+            for row in rows
+            if row.name != excluded_name and (not pinned_only or row.name in pinned)
+        ]
         for index, (name, generation) in enumerate([*absent, *present]):
             # A target not ready+fresh is first waited to ready on its OWN per-phase
             # budget, so a slow ready-wait never starves the convergence await. The

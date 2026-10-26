@@ -16,8 +16,8 @@ from __future__ import annotations
 import asyncio
 import importlib
 import os
-from collections.abc import Iterator
-from contextlib import contextmanager
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Any
 
 import click
@@ -38,12 +38,13 @@ def _pg_target() -> str:
     return f"{settings.pg_host}:{settings.pg_port}/{settings.pg_db}"
 
 
-@contextmanager
-def _deployment(manifest_path: str | None) -> Iterator[None]:
+@asynccontextmanager
+async def _deployment(manifest_path: str | None) -> AsyncIterator[None]:
     """Load the deployment's manifest and lifecycle modules and keep its app bound for the block.
 
     Stamps the resolved manifest path so the one boot-manifest read finds it, reads and
-    validates the manifest under the bridged stored env, activates the configured plugin
+    validates the manifest under the bridged stored env (the read builds the worker bus and
+    reads its census on the running loop, the same loop the re-mint runs on), activates the configured plugin
     prefix so a prefix-installed lifecycle module imports, then binds the process app onto
     ``tai42_app`` and imports each named lifecycle module — the side effect that registers the
     identity/accounts providers this command re-mints through. A lifecycle module may
@@ -59,7 +60,7 @@ def _deployment(manifest_path: str | None) -> Iterator[None]:
     from tai42_skeleton.app.instance import app
     from tai42_skeleton.marketplace.prefix import activate_prefix
 
-    manifest = app.lifecycle.read_boot_manifest()
+    manifest = await app.lifecycle.read_boot_manifest()
     # Put the configured plugin prefix on sys.path before importing any manifest module, so a
     # prefix-installed lifecycle module (a marketplace-installed identity/accounts provider)
     # imports here exactly as it does at serving boot. A no-op when no prefix is configured;
@@ -78,15 +79,25 @@ def recover(
     """Re-mint the owner's key on this deployment and return the result payload.
 
     The one door of the recovery behaviour: it runs in a process holding the deployment's env,
-    so no HTTP route exists. The deployment's app stays bound on ``tai42_app`` from the
-    lifecycle-module imports through the re-mint. Maps a recovery refusal and a store connection
-    failure to a loud, credential-free :class:`click.ClickException` (the root group renders
-    ``Error: …`` and exits non-zero); the plaintext key rides in the returned payload, never a
-    log line.
+    so no HTTP route exists. The deployment read and the re-mint run on ONE event loop, so a
+    pooled client the boot-manifest read opens is used on the loop that created it. The
+    deployment's app stays bound on ``tai42_app`` from the lifecycle-module imports through the
+    re-mint. Maps a recovery refusal and a store connection failure to a loud, credential-free
+    :class:`click.ClickException` (the root group renders ``Error: …`` and exits non-zero); the
+    plaintext key rides in the returned payload, never a log line.
     """
-    with _deployment(manifest_path):
+    return asyncio.run(
+        _recover(setup_token, key_user=key_user, key_description=key_description, manifest_path=manifest_path)
+    )
+
+
+async def _recover(
+    setup_token: str, *, key_user: str | None, key_description: str, manifest_path: str | None
+) -> dict[str, Any]:
+    """Load the deployment and re-mint the owner's key on the running loop, mapping its failures."""
+    async with _deployment(manifest_path):
         try:
-            return asyncio.run(recover_owner_key(setup_token, key_user_id=key_user, key_description=key_description))
+            return await recover_owner_key(setup_token, key_user_id=key_user, key_description=key_description)
         except SetupRecoveryError as exc:
             raise click.ClickException(str(exc)) from exc
         except psycopg.OperationalError as exc:

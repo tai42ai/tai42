@@ -16,10 +16,10 @@ def awaiting_respawn() -> list[str]:
     """
     from tai42_kit.settings import respawn_class_env_drift
 
-    from tai42_skeleton.config.boundary import reload_class_by_env_var
+    from tai42_skeleton.config.boundary import EnvKeyClasses
 
-    classes = reload_class_by_env_var()
-    return sorted(key for key in respawn_class_env_drift() if classes.get(key) == "recycle")
+    classes = EnvKeyClasses()
+    return sorted(key for key in respawn_class_env_drift() if classes.reload_class(key) == "recycle")
 
 
 class ConfigReloadMixin(LifecycleState):
@@ -46,17 +46,27 @@ class ConfigReloadMixin(LifecycleState):
         soft restart carries every hot key in place, and a pooled resource of this process still
         runs on the bound value of those keys. The operation that started the reload judges the
         fact — it alone knows whether a respawn follows.
+
+        The env is applied under the fleet's deployment ownership, read from the bus census on
+        the serving loop (a census the bus cannot answer is judged by the fleet's names last read,
+        logged): a stored key any worker's deployment sets is not applied.
         """
         env = self._config_manager.read_env()
 
         from tai42_skeleton.app.epoch import build_and_swap_epoch
+        from tai42_skeleton.config.deployment_env import resolve_deployment_ownership
+
+        bus = self._bus
+        if bus is None:
+            raise RuntimeError("reload_config ran before the worker bus was built")
 
         async def _swap() -> dict[str, Any]:
             # Release the loop-bound kit resources before the build's settings reset
             # drops their per-loop registries — it refuses to drop a registry still
             # holding live resources on a running loop.
+            ownership = await resolve_deployment_ownership(bus, "reload_config")
             await _lifecycle.release_loop_bound_resources()
-            await build_and_swap_epoch(env)
+            await build_and_swap_epoch(env, ownership=ownership)
             return {"status": "ok", "env_keys": len(env), "awaiting_respawn": awaiting_respawn()}
 
         loop = self._serving_loop

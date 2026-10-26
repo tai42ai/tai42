@@ -10,6 +10,11 @@ validate-before-apply order is exercised, and ``publish`` records each call's
 ``expected_at_start`` snapshot so the same ordering is assertable for the publisher's
 op-start census (taken from ``census``, so mutating a row mid-apply is observable).
 
+Every census row names env readers: this process's own row names the digest this process
+publishes, and a remote row left at ``""`` names the same digest, as a sibling running the same
+build does. ``env_readers`` answers with the bodies in ``reader_bodies`` plus this process's own,
+recording each requested digest list in ``env_reader_calls``.
+
 ``census`` (and the ``rows`` accessor) synthesizes full :class:`WorkerRow` rows
 (identity fields + presence value) with a SETTABLE per-row PTTL, so a test can drive
 fresh/decayed rows through the real :func:`~tai42_skeleton.app.bus.presence_fresh`
@@ -25,7 +30,7 @@ explicit list — empty included — models a configured bus with those siblings
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from tai42_skeleton.app.bus import (
     FleetResult,
@@ -40,6 +45,13 @@ from tai42_skeleton.app.bus import (
     presence_fresh,
 )
 from tai42_skeleton.app.bus.ops import FleetOp, fleet_op_wire
+from tai42_skeleton.app.bus_settings import BusSettings
+from tai42_skeleton.config.deployment_env import published_deployment_keys, published_env_readers
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from tai42_kit.settings import EnvReader
 
 
 def _row(name: str, kind: WorkerKind, *, pid: int, generation: int, pttl_ms: int) -> WorkerRow:
@@ -52,13 +64,19 @@ def _row(name: str, kind: WorkerKind, *, pid: int, generation: int, pttl_ms: int
         joined_at=now,
         beat_at=now,
         state=WorkerState.ready,
+        deployment_keys=[],
+        env_readers="",
         last_op=None,
         pttl_ms=pttl_ms,
     )
 
 
 class FakeBus:
-    def __init__(self, *, origin: str = "serve-test", remotes: list[str] | None = None) -> None:
+    def __init__(
+        self, *, origin: str = "serve-test", remotes: list[str] | None = None, settings: BusSettings | None = None
+    ) -> None:
+        # The settings the bus was built under, as ``WorkerBus.settings`` carries them.
+        self.settings = settings if settings is not None else BusSettings()
         # A heartbeat TTL the census rows are fresh against; a test can set a row's
         # ``pttl_ms`` low to drive the real ``presence_fresh`` gate to decayed.
         self.ttl = 15.0
@@ -75,6 +93,9 @@ class FakeBus:
         # SEPARATELY from ``publish_calls`` so the op/targets/local triples stay
         # assertable as-is.
         self.expected_at_start_calls: list[dict[str, int] | None] = []
+        # Reader bodies the bus holds besides this process's own, by digest.
+        self.reader_bodies: dict[str, tuple[EnvReader, ...]] = {}
+        self.env_reader_calls: list[list[str]] = []
 
     @property
     def identity(self) -> WorkerIdentity:
@@ -98,7 +119,20 @@ class FakeBus:
         return [self._self_row, *self._remote_rows]
 
     async def census(self) -> list[WorkerRow]:
-        return [self._self_row, *self._remote_rows]
+        # This process's own row publishes its own names, as the real presence write does.
+        own = published_env_readers().digest
+        self._self_row.deployment_keys = list(published_deployment_keys())
+        self._self_row.env_readers = own
+        return [
+            self._self_row,
+            *(row if row.env_readers else row.model_copy(update={"env_readers": own}) for row in self._remote_rows),
+        ]
+
+    async def env_readers(self, digests: Sequence[str]) -> dict[str, tuple[EnvReader, ...]]:
+        self.env_reader_calls.append(list(digests))
+        own = published_env_readers()
+        held = {**self.reader_bodies, own.digest: own.readers}
+        return {digest: held[digest] for digest in digests if digest in held}
 
     async def expected_at_start(self) -> dict[str, int]:
         """The real bus's op-start snapshot: the census past the ready+fresh gate, self

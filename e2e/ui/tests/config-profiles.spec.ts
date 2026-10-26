@@ -4,19 +4,17 @@
  * (`tests/config_profiles/*`, `operations/test_profile_ops.py`); here the browser
  * drives the tab end to end and asserts through BOTH the UI and the API.
  *
- * Two independent, idempotent tests — split because the browser e2e stack is a BARE
- * (unsupervised) deployment (`TAI_SUPERVISED` unset ⇒ `Shape.bare`):
+ * Two independent, idempotent tests — split because the browser e2e stack runs no
+ * supervisor, so a recycle (whose workers exit for their supervisor to start again)
+ * would leave them down:
  *
  *  1. CREATE → EDIT → DIFF. A profile carrying a user-secret-marked key AND a
- *     recycle-class key (`TAI_BUS_ACK_TIMEOUT`, a `TAI_BUS_*` field), plus the
- *     stack's stored bus and shared-store keys at their stored values (a profile
- *     save is validated as a whole-env replace, so a profile dropping them is
- *     refused). The diff preview masks EVERY value (`••••••`) and surfaces the
- *     recycle callout. This
- *     test never applies the profile and never touches the live env band — a
- *     recycle-class diff CANNOT be applied on a bare shape (refused wholesale), so
- *     the recycle callout is asserted on the diff alone.
- *  2. APPLY → REVERT. A hot-only profile (safe to apply on bare) seeded via the API
+ *     recycle-class key (`TAI_BUS_ACK_TIMEOUT`, a `TAI_BUS_*` field). The stack's bus
+ *     and shared-store URLs are set by the deployment, so the profile needs no copy of
+ *     them. The diff preview masks EVERY value (`••••••`) and surfaces the recycle
+ *     callout. This test never applies the profile and never touches the live env
+ *     band, so the recycle callout is asserted on the diff alone.
+ *  2. APPLY → REVERT. A hot-only profile (safe to apply with no supervisor) seeded via the API
  *     as `{...baseline, MARKER}` — a SUPERSET of the current stored env, because
  *     apply FULL-REPLACES the stored band (a key the profile omits is deleted), so a
  *     superset makes apply purely additive and `@previous` restores the exact
@@ -38,30 +36,16 @@ import {
 } from './helpers';
 import { needs, test } from './needs';
 
-needs('mutable', 'setting:bare-shape');
+needs('mutable', 'setting:TAI_BUS_ACK_TIMEOUT=unset');
 
 /** The client-side mask ProfilesTab renders for a masked value (6 bullets). */
 const MASK = '••••••';
 
-/** A `TAI_BUS_*` field (`BusSettings.ack_timeout`): recycle-class on every shape — and,
- *  crucially, `BusSettings` is imported on every worker (core bus infra), so the serve
- *  worker that classifies the diff reliably resolves it as `recycle`. Never in the
- *  bare-shape refused set (only the two bus URLs are), so a diff carrying it shows the
- *  recycle callout without a refusal. */
+/** A `TAI_BUS_*` field (`BusSettings.ack_timeout`): recycle-class — and, crucially,
+ *  `BusSettings` is imported on every worker (core bus infra), so the serve worker that
+ *  classifies the diff reliably resolves it as `recycle`. Neither a bus URL nor set by the
+ *  deployment, so a diff carrying it shows the recycle callout without a refusal. */
 const RECYCLE_KEY = 'TAI_BUS_ACK_TIMEOUT';
-
-/** The worker-bus and shared-store keys a whole-env replace must keep on this stack. A
- *  profile save validates the profile as the WHOLE stored env: the backend and the
- *  multi-worker fleet need the bus (`TAI_BUS_REDIS_URL`, or the `TAI_DEFAULT_REDIS_URL`
- *  fallback) and the shared hooks / sub-MCP stores, so a profile that drops the stored
- *  copies is refused. */
-const INFRA_KEYS = [
-  'TAI_BUS_REDIS_URL',
-  'TAI_BUS_NAMESPACE',
-  'TAI_DEFAULT_REDIS_URL',
-  'HOOKS_REDIS_URL',
-  'SUB_MCP_REDIS_URL',
-] as const;
 
 /** The stored env map GET /api/config/env exposes under `data.env`. */
 async function storedEnv(request: APIRequestContext): Promise<Record<string, string>> {
@@ -120,7 +104,6 @@ test.afterEach(async ({ request }) => {
 
 test('create, edit, and diff a profile — diff masks secrets and surfaces the recycle callout', async ({
   page,
-  request,
 }) => {
   const name = uniq('e2e_prof');
   const secretKey = uniq('E2E_SECRET').toUpperCase();
@@ -152,15 +135,6 @@ test('create, edit, and diff a profile — diff masks secrets and surfaces the r
   await createDialog.getByRole('textbox', { name: /^Value of new variable/ }).fill('5.0');
   await createDialog.getByRole('textbox', { name: /^Name of new variable/ }).fill(RECYCLE_KEY);
 
-  // The stored bus and shared-store keys, each at its stored value, entered the same way as
-  // row 2 — the save validates the profile as the whole stored env, so it must keep them.
-  const stored = await storedEnv(request);
-  for (const key of INFRA_KEYS.filter((k) => k in stored)) {
-    await createDialog.getByRole('button', { name: 'Add variable' }).click();
-    await createDialog.getByRole('textbox', { name: /^Value of new variable/ }).fill(stored[key]);
-    await createDialog.getByRole('textbox', { name: /^Name of new variable/ }).fill(key);
-  }
-
   await createDialog.getByRole('button', { name: 'Create profile' }).click();
   const row = page.getByTestId(`profile-row-${name}`);
   await expect(row).toBeVisible();
@@ -173,11 +147,9 @@ test('create, edit, and diff a profile — diff masks secrets and surfaces the r
   await expect(row).toContainText('edited desc');
 
   // DIFF: the preview masks EVERY value and names the recycle-class key in its recycle
-  // callout. The profile carries the stack's bus and shared-store keys at their stored
-  // values, so it saves; it is otherwise SPARSE and `apply_replace_env` is a full REPLACE,
-  // so the diff still REMOVES every other baseline key. The bus URLs the recycle policy
-  // refuses (`TAI_BUS_REDIS_URL`, `TAI_DEFAULT_REDIS_URL`) are carried unchanged, so no
-  // refused callout appears: the RECYCLE key routes to the recycle callout and is NEVER
+  // callout. The profile is SPARSE and `apply_replace_env` is a full REPLACE, so the diff
+  // REMOVES every other stored key. It sets no bus URL and no key the deployment sets, so
+  // no refused callout appears: the RECYCLE key routes to the recycle callout and is NEVER
   // classified refused.
   await page.getByRole('button', { name: `Diff profile ${name}` }).click();
   const diffDialog = page.getByRole('dialog', { name: `Diff — ${name}` });
@@ -202,12 +174,20 @@ test('apply a hot-only profile then revert via @previous — round-trips the sto
   const name = uniq('e2e_apply');
   const marker = uniq('E2E_UI_PROFILE_MARKER').toUpperCase();
   const markerVal = uniq('applied');
+  const kept = uniq('E2E_UI_PROFILE_KEPT').toUpperCase();
   createdProfiles.add(name);
   createdEnvKeys.add(marker);
+  createdEnvKeys.add(kept);
+
+  // Seed one plain key the revert must keep, so the baseline is never empty.
+  const seeded = await postConfig(request, '/api/config/env', { env: { [kept]: 'kept' } });
+  expect(seeded.status(), await seeded.text()).toBe(200);
+  await waitForReloadSettle(request);
 
   // Snapshot the live band, then seed the profile as baseline ∪ {marker} so apply is
   // purely additive (no baseline key deleted) and @previous restores exactly baseline.
   const baseline = await storedEnv(request);
+  expect(baseline[kept]).toBe('kept');
   const put = await request.put(`/api/config/profiles/${name}`, {
     headers: apiHeaders(),
     data: { description: 'apply e2e', env: { ...baseline, [marker]: markerVal }, secret_keys: [] },

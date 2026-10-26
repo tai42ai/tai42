@@ -18,6 +18,7 @@ from tai42_skeleton.app import epoch as epoch_mod
 from tai42_skeleton.app import retired_generations as retired_mod
 from tai42_skeleton.app.epoch import Epoch, build_and_swap_epoch
 from tai42_skeleton.app.instance import app
+from tai42_skeleton.config.deployment_env import DeploymentOwnership
 from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.tools.binding.errors import UnknownToolError
 from tai42_skeleton.tools.binding.surface import add_surface_tool, bump_tool_surface_generation
@@ -199,7 +200,11 @@ def test_two_coexisting_cores_each_answer_with_their_own_tool(asked: list[str]) 
             return None
 
         await build_and_swap_epoch(
-            {}, rebuild=rebuild, build_serving_app=build_serving_app, establish_background_loops=no_loops
+            {},
+            rebuild=rebuild,
+            build_serving_app=build_serving_app,
+            establish_background_loops=no_loops,
+            ownership=DeploymentOwnership(),
         )
 
         assert seen["building"] is not seen["live"]
@@ -229,7 +234,9 @@ def test_a_discarded_build_never_answers_for_the_live_core(asked: list[str]) -> 
                 app._building = None
 
         with pytest.raises(RuntimeError, match="deliberate build failure"):
-            await build_and_swap_epoch({}, rebuild=rebuild, build_serving_app=build_serving_app)
+            await build_and_swap_epoch(
+                {}, rebuild=rebuild, build_serving_app=build_serving_app, ownership=DeploymentOwnership()
+            )
 
         assert await app.tools.get_tool("probe") is live_tool
 

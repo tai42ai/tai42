@@ -32,7 +32,7 @@ from tai42_kit.signals import signal_chain
 
 import tai42_skeleton.cli.backend as backend
 
-_LOGGING_RELOAD_KEY = "tai42_skeleton.app.instance.apply_logging_settings"
+_LOGGING_KEY = "tai42_skeleton.app.instance.apply_logging_settings"
 
 
 @pytest.fixture(autouse=True)
@@ -63,7 +63,7 @@ class _FakeManifest:
 
 class _FakeLifecycle:
     """Records reload-handler registrations by their ``module.qualname`` key, so a
-    test can assert ``register_cli_logging_reload`` wired ``apply_logging_settings``,
+    test can assert ``register_cli_process_state`` wired ``apply_logging_settings``,
     and stands in for the cold-boot manifest read the launcher delegates here."""
 
     def __init__(self) -> None:
@@ -73,7 +73,11 @@ class _FakeLifecycle:
         self.reload_handlers[f"{func.__module__}.{func.__qualname__}"] = func
         return func
 
-    def read_boot_manifest(self) -> _FakeManifest:
+    # The worker kind the boot manifest read built the bus for.
+    kind = None
+
+    async def read_boot_manifest(self, *, kind) -> _FakeManifest:
+        self.kind = kind
         return _FakeManifest()
 
 
@@ -84,20 +88,26 @@ class _FakeApp:
         # ``run_backend`` registers the root-logger reload handler through the app's
         # lifecycle; the recorder captures it without a real lifecycle.
         self.lifecycle = _FakeLifecycle()
+        # The boot env handlers, recorded by their ``module.qualname`` key like the reload ones.
+        self.boot_env_handlers: dict[str, object] = {}
         self.run_backend_args: list = []
         self.context_entered = False
         # The env as it stands the moment the context opens. A worker forks job
         # children that inherit the resolved manifest, so the launcher must publish it
         # BEFORE the context opens (start() imports the backend module inside it).
         self.manifest_env_at_entry: str | None = None
-        # The worker kind the launcher joined the worker bus under: a backend runtime
-        # subscribes as ``backend``, not ``serve``.
+        # The worker kind the launcher's boot manifest read built the worker bus for, as the
+        # context opens: a backend runtime joins as ``backend``, not ``serve``.
         self.kind_at_entry = None
 
+    def _on_boot_env_applied(self, func):
+        self.boot_env_handlers[f"{func.__module__}.{func.__qualname__}"] = func
+        return func
+
     @asynccontextmanager
-    async def app_context(self, manifest, *, kind=None):
+    async def app_context(self, manifest):
         self.context_entered = True
-        self.kind_at_entry = kind
+        self.kind_at_entry = self.lifecycle.kind
         settings = backend.base_backend_settings()
         self.manifest_env_at_entry = os.environ.get(settings.manifest_key)
         yield
@@ -178,12 +188,46 @@ async def test_run_backend_worker_publishes_manifest_and_enters_context(
     assert os.environ[key] == '{"backend_module": "my.backend.module"}'
 
 
-async def test_run_backend_registers_cli_logging_reload(fake_app: _FakeApp) -> None:
-    # This CLI-configured backend process keeps its root logger in sync across config
-    # reloads, so ``run_backend`` registers the reload handler through the lifecycle.
+async def test_run_backend_publishes_the_manifest_under_the_key_the_boot_bridge_applied(
+    fake_app: _FakeApp, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tai42_kit.settings import reset_all_settings
+
+    stored_key = "BACKEND_TEST_STORED_MANIFEST_KEY"
+    default_key = backend.base_backend_settings().manifest_key
+    monkeypatch.delenv("BACKEND_MANIFEST_KEY", raising=False)
+    monkeypatch.delenv(default_key, raising=False)
+    monkeypatch.delenv(stored_key, raising=False)
+    read = fake_app.lifecycle.read_boot_manifest
+
+    async def bridge_then_read(*, kind) -> _FakeManifest:
+        # The boot bridge applies a stored ``BACKEND_MANIFEST_KEY`` into the process env
+        # and resets the settings caches, as the real bridge does.
+        os.environ["BACKEND_MANIFEST_KEY"] = stored_key
+        reset_all_settings()
+        return await read(kind=kind)
+
+    monkeypatch.setattr(fake_app.lifecycle, "read_boot_manifest", bridge_then_read)
+    try:
+        await backend.run_backend(["worker"])
+
+        # The forked children read the key the applied env names, so the manifest is there.
+        assert os.environ.get(stored_key) == '{"backend_module": "my.backend.module"}'
+        assert default_key not in os.environ
+    finally:
+        os.environ.pop("BACKEND_MANIFEST_KEY", None)
+        os.environ.pop(stored_key, None)
+        os.environ.pop(default_key, None)
+        reset_all_settings()
+
+
+async def test_run_backend_registers_cli_logging(fake_app: _FakeApp) -> None:
+    # This CLI-configured backend process keeps its root logger on the applied env, so
+    # ``run_backend`` registers the re-apply after the boot env bridge and on reload.
     await backend.run_backend(["worker"])
 
-    assert _LOGGING_RELOAD_KEY in fake_app.lifecycle.reload_handlers
+    assert _LOGGING_KEY in fake_app.lifecycle.reload_handlers
+    assert _LOGGING_KEY in fake_app.boot_env_handlers
 
 
 async def test_run_backend_installs_process_scope_redactor(fake_app: _FakeApp, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -208,6 +252,8 @@ async def test_run_backend_beat_reaches_import_registered_backend(monkeypatch: p
     from tai42_skeleton.app import instance
 
     real_app = instance.build_app()
+    # The boot manifest read builds the process's bus on the app; the test's own ends with it.
+    monkeypatch.setattr(real_app, "_bus", None)
     saved_backend = real_app._backend_holder._backend
     real_app._backend_holder._backend = None
     # ``run_backend`` registers the CLI root-logger reload handler on the process app.
@@ -294,7 +340,7 @@ def test_main_falls_back_to_asyncio_when_uvloop_missing(monkeypatch: pytest.Monk
 def test_main_bootstraps_env_in_file_mode(monkeypatch: pytest.MonkeyPatch) -> None:
     called: list[bool] = []
     monkeypatch.setattr(backend, "config_mode", lambda: "file")
-    monkeypatch.setattr(backend, "load_dotenv", lambda: called.append(True))
+    monkeypatch.setattr(backend, "load_boot_dotenv", lambda path: called.append(True))
     monkeypatch.setattr(backend, "run_backend", lambda args: _noop_coro())
 
     import uvloop
@@ -310,7 +356,7 @@ def test_main_bootstraps_env_in_file_mode(monkeypatch: pytest.MonkeyPatch) -> No
 def test_main_skips_env_bootstrap_in_a_non_file_mode(monkeypatch: pytest.MonkeyPatch) -> None:
     called: list[bool] = []
     monkeypatch.setattr(backend, "config_mode", lambda: "external")
-    monkeypatch.setattr(backend, "load_dotenv", lambda: called.append(True))
+    monkeypatch.setattr(backend, "load_boot_dotenv", lambda path: called.append(True))
     monkeypatch.setattr(backend, "run_backend", lambda args: _noop_coro())
 
     import uvloop
@@ -405,8 +451,11 @@ async def test_run_backend_sigterm_cancels_main_and_runs_teardown(monkeypatch: p
             self.config = SimpleNamespace(config_manager=_FakeConfigManager())
             self.lifecycle = _FakeLifecycle()
 
+        def _on_boot_env_applied(self, func):
+            return func
+
         @asynccontextmanager
-        async def app_context(self, manifest, *, kind=None):
+        async def app_context(self, manifest):
             try:
                 yield
             finally:
@@ -520,8 +569,11 @@ async def test_run_backend_sigterm_drains_the_backend_and_still_runs_teardown(
             self.lifecycle = _ReadyLifecycle()
             self.torn_down = False
 
+        def _on_boot_env_applied(self, func):
+            return func
+
         @asynccontextmanager
-        async def app_context(self, manifest, *, kind=None):
+        async def app_context(self, manifest):
             try:
                 yield
             finally:

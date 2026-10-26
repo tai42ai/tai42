@@ -78,7 +78,7 @@ def test_class_level_default_stays_hot() -> None:
         ("AppArgsSettings", "host", "excluded"),
         ("AppArgsSettings", "port", "excluded"),
         ("AppArgsSettings", "uds", "excluded"),
-        ("AppArgsSettings", "timeout_graceful_shutdown", "recycle"),
+        ("AppArgsSettings", "timeout_graceful_shutdown", "excluded"),
         ("MetricsSettings", "backend_metrics_host", "excluded"),
         ("MetricsSettings", "backend_metrics_port", "excluded"),
         ("MetricsSettings", "prometheus_multiproc_dir", "excluded"),

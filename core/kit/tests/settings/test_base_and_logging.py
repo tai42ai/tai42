@@ -186,3 +186,24 @@ def test_present_env_value_follows_the_empty_is_absent_rule() -> None:
     assert present_env_value(env, "SET") == "v"
     assert present_env_value(env, "EMPTY") is None
     assert present_env_value(env, "ABSENT") is None
+
+
+def test_present_env_value_reads_a_name_as_the_settings_layer_does(monkeypatch: pytest.MonkeyPatch) -> None:
+    import os
+
+    from pydantic_settings import SettingsConfigDict
+
+    from tai42_kit.settings import fold_env_name, present_env_value
+
+    class CaseProbeSettings(TaiBaseSettings):
+        model_config = SettingsConfigDict(env_prefix="CASE_PROBE_")
+
+        value: str = "default"
+
+    assert fold_env_name("case_probe_value") == "CASE_PROBE_VALUE"
+    monkeypatch.setenv("case_probe_value", "lower")
+    assert CaseProbeSettings().value == "lower"
+    assert present_env_value(os.environ, "CASE_PROBE_VALUE") == "lower"
+    # Of several spellings an empty one is absent and the last other one wins, as the settings layer reads them.
+    env = {"CASE_PROBE_VALUE": "upper", "case_probe_value": "lower", "Case_Probe_Value": ""}
+    assert present_env_value(env, "CASE_PROBE_VALUE") == "lower"

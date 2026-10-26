@@ -192,10 +192,10 @@ async def _worker_lifespan(
     try:
         app = instance.build_app()
         logger.info("Configuration mode: %s", config_mode())
-        # Bridge the persisted env store into ``os.environ`` and resolve the
-        # manifest under it in one seam, so a store-only ``!ENV ${VAR}`` marker
-        # resolves to its real value before ``start()`` probes any mount.
-        manifest = app.lifecycle.read_boot_manifest()
+        # Build the worker bus, bridge the persisted env store into ``os.environ`` and
+        # resolve the manifest under it in one seam, so a store-only ``!ENV ${VAR}``
+        # marker resolves to its real value before ``start()`` probes any mount.
+        manifest = await app.lifecycle.read_boot_manifest()
         async with app.app_context(manifest):
             # The boot serving app is handed straight to the dispatch slot: this frame stays
             # suspended for the whole process, so it keeps no reference to a generation a

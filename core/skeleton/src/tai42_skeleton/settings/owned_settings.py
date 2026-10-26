@@ -10,10 +10,9 @@ import importlib
 import os
 from collections.abc import Iterable
 from pathlib import Path
-from typing import Final
 
 from dotenv import dotenv_values
-from tai42_kit.settings import refuse_unknown_owned_env
+from tai42_kit.settings import TaiBaseSettings, env_file_in_effect, refuse_unknown_owned_env
 
 # The modules whose settings groups own an env prefix. Importing one registers its groups.
 OWNED_SETTINGS_MODULES: tuple[str, ...] = (
@@ -24,9 +23,6 @@ OWNED_SETTINGS_MODULES: tuple[str, ...] = (
     "tai42_skeleton.conversations.settings",
     "tai42_skeleton.plugins.settings",
 )
-
-# The ``.env`` file ``TaiBaseSettings`` reads (its ``env_file``), relative to the working directory.
-_DOTENV_FILE: Final = ".env"
 
 
 def register_owned_settings_groups() -> None:
@@ -59,12 +55,14 @@ def refuse_unknown_owned_applied_env(keys: Iterable[str]) -> None:
 def require_known_owned_settings() -> None:
     """Refuse boot when the process's own env inputs name an unknown setting under an owned prefix.
 
-    Audits the ``.env`` file in the working directory when it exists, then the process
-    environment, each as its own source so the message names where the key was read. Only the
-    process environment gets the Kubernetes service-link exception: nothing injects service
-    links into the file.
+    Audits the env file ``TaiBaseSettings`` reads (``.env`` in the working directory) when it
+    exists, then the process environment, each as its own source so the message names where the
+    key was read. The stored env is not such a file: settings never read it, and the keys applied
+    from it are audited as the applied env. Only the process environment gets the Kubernetes
+    service-link exception: nothing injects service links into the file.
     """
     register_owned_settings_groups()
-    if Path(_DOTENV_FILE).is_file():
-        refuse_unknown_owned_env(dotenv_values(_DOTENV_FILE), source="boot (.env file)")
+    env_file = env_file_in_effect(TaiBaseSettings.tai_env_file)
+    if env_file is not None and Path(env_file).is_file():
+        refuse_unknown_owned_env(dotenv_values(env_file), source="boot (.env file)")
     refuse_unknown_owned_env(os.environ, source="boot (process environment)", service_link_env=os.environ)

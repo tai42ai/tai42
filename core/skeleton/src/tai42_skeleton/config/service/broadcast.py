@@ -12,6 +12,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any, cast
 
 from tai42_skeleton.app.bus import (
+    TRANSPORT_ERRORS,
     FleetResult,
     LocalApplyResult,
     OpOutcome,
@@ -47,14 +48,29 @@ class _BroadcastMixin(_ConfigServiceBase):
 
     _orchestrate: Callable[..., Awaitable[RecycleReport]]
 
-    async def _pin_recycle_targets(self, identity: WorkerIdentity) -> dict[str, tuple[WorkerKind, int]]:
+    async def _pin_recycle_targets(self, identity: WorkerIdentity, *, change: str) -> dict[str, tuple[WorkerKind, int]]:
         """The recycle targets, read from the census BEFORE the local apply can age a sibling out of it.
 
         A sibling whose presence faded across the slow local rebuild (or whose slot was lost and
         is re-minting) would otherwise never be targeted by the roll, and the roll would report
         converged without it.
+
+        Best-effort against the bus, as the op-start membership snapshot is: a census the bus
+        cannot answer (one of its transport errors) pins nothing and is logged at WARNING naming
+        ``change``; the roll then reads the census itself and stops on the outage with its
+        ``recycle_stopped`` report. Any other error raises.
         """
-        return _pinned_recycle_targets(await cast("WorkerBus", self._bus).census(), identity.name)
+        try:
+            rows = await cast("WorkerBus", self._bus).census()
+        except TRANSPORT_ERRORS:
+            logger.warning(
+                "recycle targets for %r: the census could not be read before the local apply — no target "
+                "pinned, the roll reports the bus as unreachable",
+                change,
+                exc_info=True,
+            )
+            return {}
+        return _pinned_recycle_targets(rows, identity.name)
 
     async def _roll_recycle(
         self,
@@ -220,7 +236,7 @@ class _BroadcastMixin(_ConfigServiceBase):
             # The writer is the member this process acts for (a forked job child writes on
             # behalf of the worker that forked it): the roll excludes it, the reply reports it.
             identity = bus.member_identity
-            pinned = await self._pin_recycle_targets(identity)
+            pinned = await self._pin_recycle_targets(identity, change="this env change")
         local, local_result, local_failure = await self._local_reload(bus)
 
         try:

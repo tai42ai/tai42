@@ -77,7 +77,7 @@ class _FakeLifecycle:
         self.reload_handlers[f"{func.__module__}.{func.__qualname__}"] = func
         return func
 
-    def read_boot_manifest(self):
+    async def read_boot_manifest(self):
         return SimpleNamespace()
 
 
@@ -94,6 +94,9 @@ class _FakeApp:
         # ``TAI_MANIFEST_PATH`` as seen when the app context is entered — proves the
         # lifespan stamp is live by then.
         self.manifest_env_at_context: list[str | None] = []
+
+    def _on_boot_env_applied(self, func):
+        return func
 
     @asynccontextmanager
     async def app_context(self, manifest):

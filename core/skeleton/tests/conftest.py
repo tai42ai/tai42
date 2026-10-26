@@ -55,8 +55,9 @@ if str(Path(__file__).resolve().parent.parent) not in sys.path:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import logging
-from collections.abc import Callable, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager
+from typing import Any
 
 import pytest
 from tai42_kit.clients.base import advance_client_epoch
@@ -70,6 +71,9 @@ import tai42_skeleton.runs.store as runs_store
 import tai42_skeleton.states.db as states_db
 import tai42_skeleton.tool_meta.store as tool_meta_store
 import tai42_skeleton.versioning.store as versioning_store
+from tai42_skeleton.app.bus import WorkerKind
+from tai42_skeleton.app.lifecycle.lifespan import LifespanMixin
+from tai42_skeleton.config.deployment_env import capture_deployment_env, reset_deployment_env
 
 from ._fakes.advisory_locks import FakeAdvisoryLocks
 from ._fakes.hook_runs import HookRunsHarness, fresh_runtime
@@ -193,6 +197,57 @@ def _preserve_generation_globals() -> Iterator[None]:
     state and one made after it is undone with the test."""
     with preserved_staged_generations():
         yield
+
+
+# ``app_context`` as the app defines it: it joins the bus the boot manifest read built.
+_APP_CONTEXT_REQUIRING_THE_BOOT_READ = LifespanMixin.app_context
+
+
+@pytest.fixture(autouse=True)
+def _bus_built_as_the_boot_read_does(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Build the worker bus a test's ``app_context`` joins, as the boot manifest read does, when nothing built one.
+
+    A serving entrypoint enters ``app_context`` after ``read_boot_manifest``, which builds the
+    process's one bus. Most tests enter the lifespan directly, so an app with no bus gets the
+    one ``_build_bus`` makes for a serve worker, and loses it again when the lifespan exits; a
+    bus the test placed itself stays. ``app_context_requiring_the_boot_read`` turns this off.
+    """
+    real = _APP_CONTEXT_REQUIRING_THE_BOOT_READ
+
+    @asynccontextmanager
+    async def app_context(self: Any, manifest: Any) -> AsyncIterator[Any]:
+        built = self._bus is None
+        if built:
+            self._bus = self._build_bus(WorkerKind.serve)
+        try:
+            async with real(self, manifest) as entered:
+                yield entered
+        finally:
+            if built:
+                self._bus = None
+
+    monkeypatch.setattr(LifespanMixin, "app_context", app_context)
+
+
+@pytest.fixture
+def app_context_requiring_the_boot_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``app_context`` as the app defines it: entering without the bus the boot manifest read builds raises."""
+    monkeypatch.setattr(LifespanMixin, "app_context", _APP_CONTEXT_REQUIRING_THE_BOOT_READ)
+
+
+@pytest.fixture(autouse=True)
+def _deployment_env_of_its_own() -> Iterator[None]:
+    """Capture the deployment env afresh for each test, and forget it afterwards.
+
+    A deployed process captures its deployment env once, at its first stored-env apply. The
+    suite runs many boots in one process, so each test starts from a capture of the env it
+    begins with: a name the test itself sets afterwards is not set by the deployment unless
+    the test captures again (``tests._helpers.recapture_deployment_env``).
+    """
+    reset_deployment_env()
+    capture_deployment_env()
+    yield
+    reset_deployment_env()
 
 
 @pytest.fixture(autouse=True)

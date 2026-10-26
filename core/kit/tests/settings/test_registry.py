@@ -3,6 +3,7 @@ as a plain-data group. Extraction honors aliases, marks secrets, skips
 non-JSON-safe defaults, and references nested settings as their own group."""
 
 import enum
+import json
 from typing import Annotated, ClassVar, cast
 
 import pytest
@@ -14,11 +15,14 @@ from tai42_kit.clients.settings import RedisConnectionSettings
 from tai42_kit.settings import (
     KeyMaterial,
     ReloadClass,
+    SettingsClassInfo,
     TaiBaseSettings,
     bind_respawn_class_env,
+    on_settings_registered,
     registered_settings,
     registry,
     respawn_class_env_drift,
+    settings_field_env_value,
     unbind_respawn_class_env,
 )
 from tai42_kit.settings.registry import (
@@ -668,6 +672,60 @@ def _bound_group(prefix: str = "BOUNDPOOL_") -> type[TaiBaseSettings]:
     return BoundPoolSettings
 
 
+def _bound_values() -> dict[str, str | None]:
+    """The value each bound env var was bound under, read as the settings layer reads it."""
+    assert registry._BOUND_ENV is not None
+    return {
+        var: settings_field_env_value(bound.env, bound.group, bound.field) for var, bound in registry._BOUND_ENV.items()
+    }
+
+
+def _nesting_group(delimiter: str | None = None) -> type[TaiBaseSettings]:
+    """A hot group that nests the recycle-class pool group under ``BOUNDHOLDER_POOL``."""
+
+    class BoundHeldPoolSettings(TaiBaseSettings):
+        model_config = SettingsConfigDict(env_prefix="BOUNDHOLDER_POOL_")
+        reload_class: ClassVar[ReloadClass] = "recycle"
+
+        url: str = ""
+
+    class BoundHolderSettings(TaiBaseSettings):
+        model_config = SettingsConfigDict(env_prefix="BOUNDHOLDER_", env_nested_delimiter=delimiter)
+
+        pool: BoundHeldPoolSettings = Field(default_factory=BoundHeldPoolSettings)
+
+    return BoundHolderSettings
+
+
+def test_a_value_changed_under_the_nesting_group_s_json_name_is_in_the_drift(monkeypatch):
+    holder = _nesting_group()
+    bind_respawn_class_env()
+
+    monkeypatch.setenv("BOUNDHOLDER_POOL", json.dumps({"url": "redis://b"}))
+
+    assert holder().model_dump()["pool"]["url"] == "redis://b"
+    assert respawn_class_env_drift() == frozenset({"BOUNDHOLDER_POOL_URL"})
+
+
+def test_a_value_changed_under_a_delimited_name_is_in_the_drift(monkeypatch):
+    holder = _nesting_group(delimiter="__")
+    bind_respawn_class_env()
+
+    monkeypatch.setenv("BOUNDHOLDER_POOL__URL", "redis://b")
+
+    assert holder().model_dump()["pool"]["url"] == "redis://b"
+    assert respawn_class_env_drift() == frozenset({"BOUNDHOLDER_POOL_URL"})
+
+
+def test_a_nesting_group_registered_after_its_nested_group_drifts_nothing(monkeypatch):
+    monkeypatch.setenv("BOUNDHOLDER_POOL", json.dumps({"url": "redis://a"}))
+    bind_respawn_class_env()
+
+    _nesting_group()
+
+    assert respawn_class_env_drift() == frozenset()
+
+
 def test_a_group_registered_before_the_bind_is_bound_to_the_bind_s_value(monkeypatch):
     monkeypatch.delenv("BOUNDPOOL_URL", raising=False)
     _bound_group()
@@ -695,6 +753,17 @@ def test_a_value_changed_after_it_was_bound_is_in_the_drift(monkeypatch):
     bind_respawn_class_env()
 
     monkeypatch.setenv("BOUNDPOOL_URL", "redis://b")
+
+    assert respawn_class_env_drift() == frozenset({"BOUNDPOOL_URL"})
+
+
+def test_a_value_set_under_another_spelling_of_its_name_is_in_the_drift(monkeypatch):
+    monkeypatch.setenv("BOUNDPOOL_URL", "redis://a")
+    _bound_group()
+    bind_respawn_class_env()
+
+    # Set after the upper-case spelling, the lower-case one is the value the settings layer reads.
+    monkeypatch.setenv("boundpool_url", "redis://b")
 
     assert respawn_class_env_drift() == frozenset({"BOUNDPOOL_URL"})
 
@@ -787,7 +856,7 @@ def test_a_hot_field_is_never_bound(monkeypatch):
     monkeypatch.setenv("BOUNDHOT_FLAG", "2")
 
     assert respawn_class_env_drift() == frozenset()
-    assert registry._BOUND_ENV == {}
+    assert _bound_values() == {}
 
 
 def test_a_field_overridden_excluded_on_a_hot_group_is_bound(monkeypatch):
@@ -800,7 +869,7 @@ def test_a_field_overridden_excluded_on_a_hot_group_is_bound(monkeypatch):
         mode: str = Field(default="", json_schema_extra={"reload": "excluded"})
         live: str = ""
 
-    assert registry._BOUND_ENV == {"BOUNDPINNED_MODE": "a"}
+    assert _bound_values() == {"BOUNDPINNED_MODE": "a"}
 
 
 def test_a_nested_group_reference_binds_no_var_of_its_own(monkeypatch):
@@ -817,7 +886,7 @@ def test_a_nested_group_reference_binds_no_var_of_its_own(monkeypatch):
 
         child: BoundHotChildSettings | None = None
 
-    assert registry._BOUND_ENV == {}
+    assert _bound_values() == {}
 
 
 def test_while_unbound_the_drift_is_empty_and_a_registration_binds_nothing(monkeypatch):
@@ -849,3 +918,62 @@ def test_a_second_bind_overwrites_every_bound_value(monkeypatch):
     bind_respawn_class_env()
 
     assert respawn_class_env_drift() == frozenset()
+
+
+@pytest.fixture
+def _no_registration_listeners(monkeypatch):
+    """Run the test with only the registration listeners it subscribes itself."""
+    monkeypatch.setattr(registry, "_REGISTRATION_LISTENERS", [])
+
+
+@pytest.mark.usefixtures("_no_registration_listeners")
+def test_a_listener_is_called_with_each_registration_once_the_group_is_registered():
+    seen: list[tuple[str, bool]] = []
+
+    def listener(info: SettingsClassInfo) -> None:
+        seen.append((info.name, any(group.qualname == info.qualname for group in registered_settings())))
+
+    on_settings_registered(listener)
+    _bound_group()
+    _bound_group()
+
+    assert seen == [("BoundPoolSettings", True), ("BoundPoolSettings", True)]
+
+
+@pytest.mark.usefixtures("_no_registration_listeners")
+def test_a_listener_is_subscribed_once():
+    calls: list[str] = []
+
+    def listener(info: SettingsClassInfo) -> None:
+        calls.append(info.name)
+
+    assert on_settings_registered(listener) is listener
+    on_settings_registered(listener)
+    _bound_group()
+
+    assert calls == ["BoundPoolSettings"]
+
+
+@pytest.mark.usefixtures("_no_registration_listeners")
+def test_a_listener_edits_the_env_the_registration_binds(monkeypatch):
+    monkeypatch.setenv("BOUNDPOOL_URL", "redis://stored")
+    bind_respawn_class_env()
+
+    def listener(info: SettingsClassInfo) -> None:
+        monkeypatch.setenv("BOUNDPOOL_URL", "redis://deployment")
+
+    on_settings_registered(listener)
+    _bound_group()
+
+    assert _bound_values() == {"BOUNDPOOL_URL": "redis://deployment"}
+
+
+@pytest.mark.usefixtures("_no_registration_listeners")
+def test_a_listener_failure_fails_the_class_definition():
+    def listener(info: SettingsClassInfo) -> None:
+        raise RuntimeError("listener failed")
+
+    on_settings_registered(listener)
+
+    with pytest.raises(RuntimeError, match="listener failed"):
+        _bound_group()

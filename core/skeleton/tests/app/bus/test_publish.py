@@ -27,8 +27,10 @@ from tai42_skeleton.app.bus import (
 )
 from tai42_skeleton.app.bus.ops import ReloadConfig
 from tai42_skeleton.app.bus.publish import _ReplyLink
+from tai42_skeleton.config.deployment_env import published_deployment_keys, published_env_readers
 
 from ..._fakes.kit_redis import KitFakeRedis
+from ..._helpers import recapture_deployment_env
 from .conftest import (
     _drop_presence,
     _FramePubsub,
@@ -70,6 +72,50 @@ async def test_census_lists_registered_workers(wire_bus_client: None) -> None:
         assert by_name[backend_id.name].generation == 1
     finally:
         await _stop(t1, t2)
+
+
+async def test_a_presence_row_carries_the_names_its_deployment_sets(
+    wire_bus_client: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Each worker publishes the names its deployment sets (names only, never values), and the
+    # census reads them back, so a sibling judges ownership by the whole fleet.
+    monkeypatch.setenv("BUS_PRESENCE_TEST_DEPLOYED", "deployment-value")
+    recapture_deployment_env()
+    bus = make_bus(kind=WorkerKind.backend)
+
+    async def noop(_op: dict, *, deadline: float) -> None:
+        return None
+
+    task, identity = await _spawn_subscriber(bus, noop)
+    try:
+        rows = {row.name: row for row in await make_bus().census()}
+        assert "BUS_PRESENCE_TEST_DEPLOYED" in rows[identity.name].deployment_keys
+        assert rows[identity.name].deployment_keys == list(published_deployment_keys())
+        assert "deployment-value" not in rows[identity.name].model_dump_json()
+        assert rows[identity.name].env_readers == published_env_readers().digest
+    finally:
+        await _stop(task)
+
+
+async def test_the_bus_answers_the_env_reader_bodies_it_holds_in_one_read(wire_bus_client: None) -> None:
+    # A worker's presence write leaves its reader description on the bus under the digest its
+    # row names; a reader of the census fetches the bodies it lacks by digest, and a digest the
+    # bus holds nothing under is left out of the answer.
+    bus = make_bus(kind=WorkerKind.backend)
+
+    async def noop(_op: dict, *, deadline: float) -> None:
+        return None
+
+    task, identity = await _spawn_subscriber(bus, noop)
+    try:
+        reader = make_bus()
+        digest = {row.name: row for row in await reader.census()}[identity.name].env_readers
+        missing = "0" * 64
+
+        assert await reader.env_readers([digest, missing]) == {digest: published_env_readers().readers}
+        assert await reader.env_readers([]) == {}
+    finally:
+        await _stop(task)
 
 
 async def test_census_drops_and_prunes_a_member_whose_key_expired(wire_bus_client: None, server) -> None:
@@ -476,7 +522,16 @@ async def test_targeted_worker_replaced_mid_apply_is_departed(
         client = aioredis.FakeRedis(server=server, decode_responses=True)
         now = "2026-01-01T00:00:00+00:00"
         value = json.dumps(
-            {"kind": "backend", "pid": 9, "generation": 2, "joined_at": now, "beat_at": now, "state": "ready"}
+            {
+                "kind": "backend",
+                "pid": 9,
+                "generation": 2,
+                "joined_at": now,
+                "beat_at": now,
+                "state": "ready",
+                "deployment_keys": [],
+                "env_readers": published_env_readers().digest,
+            }
         )
         await client.set(settings.presence_key("backend-1"), value, px=5000)
         await client.aclose()
@@ -822,6 +877,11 @@ async def test_local_variant(wire_bus_client: None) -> None:
     dumped = row.model_dump()
     assert "stale" not in dumped  # stale lives at the API layer only
     assert "pttl_ms" not in dumped  # the freshness measurement never leaks
+    # With no bus the fleet is the process: its row carries the names this deployment sets.
+    assert row.deployment_keys == list(published_deployment_keys())
+    assert row.env_readers == published_env_readers().digest
+    own = published_env_readers()
+    assert await bus.env_readers([own.digest, "0" * 64]) == {own.digest: own.readers}
 
     await bus.validate_targets([bus.identity.name])
     with pytest.raises(ValueError, match="cannot reach"):

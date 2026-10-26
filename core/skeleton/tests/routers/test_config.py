@@ -4,16 +4,20 @@ settings-schema surface with per-field current-value overlay."""
 from __future__ import annotations
 
 import json
+import logging
 from types import SimpleNamespace
 from typing import cast
 
 import pytest
-from pydantic import SecretStr
+from pydantic import AliasChoices, Field, SecretStr
+from pydantic_settings import SettingsConfigDict
 from starlette.requests import Request
 from tai42_contract.app import tai42_app
+from tai42_contract.errors import ClientDisconnectedError
 from tai42_kit.settings import SettingsClassInfo, SettingsFieldInfo, TaiBaseSettings
 
 from tai42_skeleton.app import instance
+from tai42_skeleton.config.deployment_env import fleet_deployment_ownership
 from tai42_skeleton.operations import config as config_ops
 from tai42_skeleton.routers import config as router
 from tai42_skeleton.settings.env_secret_marks import env_secret_marks_settings
@@ -21,6 +25,18 @@ from tai42_skeleton.settings.env_secret_marks import env_secret_marks_settings
 from .._fakes.bus import FakeBus
 from .._fakes.mcp_listing import no_mcp_listing
 from .._fakes.write_span import ExclusiveWriteStore
+from .._helpers import recapture_deployment_env
+
+
+class _AliasedEnvDemoSettings(TaiBaseSettings):
+    """Registered at import time — one field read under two env names, so the env route can be
+    checked to name a stored alias of a field the deployment sets under its other name."""
+
+    model_config = SettingsConfigDict(env_prefix="READ_ENV_ALIAS_")
+
+    endpoint: str | None = Field(
+        default=None, validation_alias=AliasChoices("READ_ENV_ALIAS_ENDPOINT", "READ_ENV_ALIAS_URL")
+    )
 
 
 class _SecretDemoSettings(TaiBaseSettings):
@@ -151,7 +167,9 @@ async def test_read_env(install, monkeypatch):
     env_secret_marks_settings.cache_clear()
     resp = await router.read_env(_req())
     assert resp.status_code == 200
-    assert _json(resp) == {"data": {"env": {"API_KEY": "abc", "DEBUG": "1"}, "secret_keys": ["API_KEY"]}}
+    assert _json(resp) == {
+        "data": {"env": {"API_KEY": "abc", "DEBUG": "1"}, "secret_keys": ["API_KEY"], "deployment_keys": []}
+    }
 
 
 async def test_read_env_derives_connector_secret_key_from_live_manifest(install, monkeypatch):
@@ -170,6 +188,27 @@ async def test_read_env_derives_connector_secret_key_from_live_manifest(install,
     assert _json(resp)["data"]["secret_keys"] == ["ACME_CLIENT_SECRET", "API_KEY"]
 
 
+async def test_read_env_names_the_stored_keys_the_deployment_sets(install, monkeypatch):
+    # The stored keys a save may not set: a stored copy of a key the deployment sets, and a stored
+    # alias of a settings field the deployment sets under another accepted name. A stored key the
+    # deployment leaves alone is the store's, and a deployment key with no stored copy is not named.
+    install(
+        {
+            "READ_ENV_DEPLOYED": "stale",
+            "READ_ENV_ALIAS_ENDPOINT": "stale",
+            "READ_ENV_STORE_ONLY": "v",
+        }
+    )
+    monkeypatch.setenv("READ_ENV_DEPLOYED", "from-deployment")
+    monkeypatch.setenv("READ_ENV_ALIAS_URL", "https://deployment.invalid")
+    monkeypatch.setenv("READ_ENV_CONTAINER_ONLY", "c")
+    monkeypatch.delenv("READ_ENV_STORE_ONLY", raising=False)
+    recapture_deployment_env()
+    resp = await router.read_env(_req())
+    assert resp.status_code == 200
+    assert _json(resp)["data"]["deployment_keys"] == ["READ_ENV_ALIAS_ENDPOINT", "READ_ENV_DEPLOYED"]
+
+
 async def test_read_env_missing_file_yields_empty_env(monkeypatch):
     class _Missing:
         def read_env(self):
@@ -178,10 +217,11 @@ async def test_read_env_missing_file_yields_empty_env(monkeypatch):
     admin = SimpleNamespace(live_manifest={})
     impl = SimpleNamespace(config=SimpleNamespace(config_manager=_Missing()), admin=admin)
     monkeypatch.setattr(tai42_app, "_impl", impl)
+    monkeypatch.setattr(instance.app, "_bus", FakeBus(origin="serve-x"))
     monkeypatch.delenv("TAI_ENV_SECRET_KEYS", raising=False)
     resp = await router.read_env(_req())
     assert resp.status_code == 200
-    assert _json(resp) == {"data": {"env": {}, "secret_keys": []}}
+    assert _json(resp) == {"data": {"env": {}, "secret_keys": [], "deployment_keys": []}}
 
 
 # -- GET /api/config/settings-schema -----------------------------------------
@@ -225,12 +265,23 @@ async def test_settings_schema_shape(install, monkeypatch):
     assert field["value_source"] == "field_default"
 
 
+async def test_settings_schema_reports_the_graceful_shutdown_timeout_as_launcher_set(install):
+    import tai42_skeleton.settings.settings  # noqa: F401  (registers AppArgsSettings)
+
+    install({})
+    resp = await router.read_settings_schema(_req())
+    groups = {group["name"]: group for group in _json(resp)["data"]["groups"]}
+    fields = {field["name"]: field for field in groups["AppArgsSettings"]["fields"]}
+    assert fields["timeout_graceful_shutdown"]["reload_class"] == "excluded"
+
+
 async def test_settings_schema_value_overlay(install, monkeypatch):
-    # PROC_WINS is in BOTH the store and process env — process must win.
+    # PROC_WINS is in BOTH the store and the deployment env — the deployment wins.
     install({"STORE_ONLY": "from_store", "PROC_WINS": "store_value"})
     monkeypatch.setenv("PROC_WINS", "proc_value")
     monkeypatch.delenv("STORE_ONLY", raising=False)
     monkeypatch.delenv("DEFAULT_ONLY", raising=False)
+    recapture_deployment_env()
     info = SettingsClassInfo(
         name="Demo",
         module="mod",
@@ -247,7 +298,7 @@ async def test_settings_schema_value_overlay(install, monkeypatch):
     monkeypatch.setattr(config_ops, "registered_settings", lambda: [info])
     resp = await router.read_settings_schema(_req())
     fields = {f["name"]: f for f in _json(resp)["data"]["groups"][0]["fields"]}
-    assert fields["proc"]["value"] == "proc_value"  # process env wins over store
+    assert fields["proc"]["value"] == "proc_value"  # the deployment env wins over the store
     assert fields["store"]["value"] == "from_store"  # store-only
     assert fields["dflt"]["value"] == "the_default"  # neither -> default
     assert fields["nested"]["value"] is None  # nested reference: non-editable
@@ -283,13 +334,15 @@ async def test_settings_schema_resolves_through_tai_default_namespace(install, m
 
 
 async def test_settings_schema_empty_exported_var_reports_the_next_layer(install, monkeypatch):
-    # The settings layer reads an empty variable as absent, so an exported empty value
-    # reports the value and source of the next layer, as the field actually resolves.
+    # The settings layer reads an empty variable as absent, so an empty deployment value
+    # leaves the field to the store and reports the value and source of the next layer,
+    # as the field actually resolves.
     install({"EMPTY_PROC": "from_store", "EMPTY_DEFAULT_OWN": "", "STORE_EMPTY": ""})
     monkeypatch.setenv("EMPTY_PROC", "")
     monkeypatch.setenv("EMPTY_DEFAULT", "")
     monkeypatch.delenv("STORE_EMPTY", raising=False)
     monkeypatch.delenv("EMPTY_DEFAULT_OWN", raising=False)
+    recapture_deployment_env()
     info = SettingsClassInfo(
         name="Demo",
         module="mod",
@@ -312,14 +365,18 @@ async def test_settings_schema_empty_exported_var_reports_the_next_layer(install
 
 async def test_settings_schema_value_source_marks_provenance(install, monkeypatch):
     # Each field names which layer supplied its resolved value so a UI can badge provenance
-    # (notably "from default" for a TAI_DEFAULT_* fallback, distinct from an explicit set).
-    install({"STORE_ONLY": "from_store", "STORE_DEFAULT": "from_store_default"})
+    # (a field set by the deployment is locked; "from default" marks a TAI_DEFAULT_* fallback,
+    # distinct from an explicit set).
+    install({"STORE_ONLY": "from_store", "STORE_DEFAULT": "from_store_default", "PROC_WINS": "stale"})
     monkeypatch.setenv("PROC_WINS", "proc_value")
     monkeypatch.setenv("TAI_DEFAULT_REDIS_URL", "redis://proc-default")
     monkeypatch.delenv("STORE_ONLY", raising=False)
     monkeypatch.delenv("DEFAULT_ONLY", raising=False)
     monkeypatch.delenv("OWN_VAR", raising=False)
     monkeypatch.delenv("OTHER_VAR", raising=False)
+    recapture_deployment_env()
+    # A stored key applied into the process after the capture stays the store's.
+    monkeypatch.setenv("STORE_ONLY", "from_store")
     info = SettingsClassInfo(
         name="Demo",
         module="mod",
@@ -338,8 +395,8 @@ async def test_settings_schema_value_source_marks_provenance(install, monkeypatc
     monkeypatch.setattr(config_ops, "registered_settings", lambda: [info])
     resp = await router.read_settings_schema(_req())
     fields = {f["name"]: f for f in _json(resp)["data"]["groups"][0]["fields"]}
-    assert fields["proc"]["value_source"] == "env"
-    assert fields["store"]["value_source"] == "stored"
+    assert (fields["proc"]["value"], fields["proc"]["value_source"]) == ("proc_value", "deployment")
+    assert (fields["store"]["value"], fields["store"]["value_source"]) == ("from_store", "stored")
     # Both TAI_DEFAULT_* fallbacks (process-env and store-side) are one "from default" source.
     assert fields["proc_dflt"]["value_source"] == "default_namespace"
     assert fields["store_dflt"]["value_source"] == "default_namespace"
@@ -347,10 +404,34 @@ async def test_settings_schema_value_source_marks_provenance(install, monkeypatc
     assert fields["nested"]["value_source"] is None
 
 
+async def test_settings_schema_reports_a_field_the_deployment_sets_under_another_name(install, monkeypatch):
+    # A field the deployment sets under any accepted name, in any case, is the deployment's:
+    # its stored copy is not what the field resolves to.
+    install({"ALIAS_PRIMARY": "from_store"})
+    monkeypatch.delenv("ALIAS_PRIMARY", raising=False)
+    monkeypatch.setenv("alias_secondary", "from_deployment")
+    recapture_deployment_env()
+    field = _field("aliased", "ALIAS_PRIMARY", default="d")
+    field.accepted_env_vars = ["ALIAS_PRIMARY", "ALIAS_SECONDARY"]
+    info = SettingsClassInfo(
+        name="Demo",
+        module="mod",
+        qualname="mod.Demo",
+        env_prefix="",
+        env_prefix_owned=False,
+        fields=[field],
+    )
+    monkeypatch.setattr(config_ops, "registered_settings", lambda: [info])
+    resp = await router.read_settings_schema(_req())
+    reported = _json(resp)["data"]["groups"][0]["fields"][0]
+    assert (reported["value"], reported["value_source"]) == ("from_deployment", "deployment")
+
+
 async def test_settings_schema_secret_value_unmasked(install, monkeypatch):
     # Drive the REAL registry so the registered secret-bearing class appears.
     install({})
     monkeypatch.setenv("DEMO_SECRET", "supersecret")
+    recapture_deployment_env()
     resp = await router.read_settings_schema(_req())
     groups = {g["name"]: g for g in _json(resp)["data"]["groups"]}
     assert "_SecretDemoSettings" in groups
@@ -367,6 +448,7 @@ async def test_settings_schema_missing_env_is_empty_not_500(monkeypatch):
 
     impl = SimpleNamespace(config=SimpleNamespace(config_manager=_Missing()), admin=None)
     monkeypatch.setattr(tai42_app, "_impl", impl)
+    monkeypatch.setattr(instance.app, "_bus", FakeBus(origin="serve-x"))
     monkeypatch.delenv("DEFAULT_X", raising=False)
     info = SettingsClassInfo(
         name="Demo",
@@ -539,3 +621,99 @@ async def test_read_mode(install, monkeypatch):
     resp = await router.read_mode(_req())
     assert resp.status_code == 200
     assert _json(resp) == {"data": {"config_mode": "external"}}
+
+
+# -- a key only a sibling worker's deployment sets ------------------------------
+
+
+async def test_settings_schema_reports_a_field_only_a_sibling_sets_as_deployment(install, monkeypatch):
+    # The fleet's names count: a field another worker's deployment sets is locked here too,
+    # and its value is this worker's own resolution (the stored copy is never applied).
+    install({"SIBLING_ONLY_FIELD": "stored-copy"})
+    sibling = FakeBus(origin="serve-x", remotes=["backend-1"])
+    sibling.rows[1].deployment_keys = ["SIBLING_ONLY_FIELD"]
+    monkeypatch.setattr(instance.app, "_bus", sibling)
+    monkeypatch.delenv("SIBLING_ONLY_FIELD", raising=False)
+    info = SettingsClassInfo(
+        name="Demo",
+        module="mod",
+        qualname="mod.Demo",
+        env_prefix="",
+        env_prefix_owned=False,
+        fields=[_field("sibling", "SIBLING_ONLY_FIELD", default="the_default")],
+    )
+    monkeypatch.setattr(config_ops, "registered_settings", lambda: [info])
+
+    resp = await router.read_settings_schema(_req())
+
+    field = _json(resp)["data"]["groups"][0]["fields"][0]
+    assert field["value_source"] == "deployment"
+    assert field["value"] == "the_default"
+
+
+async def test_read_env_names_a_stored_key_only_a_sibling_sets(install, monkeypatch):
+    install({"SIBLING_ONLY_KEY": "stored-copy", "OTHER": "1"})
+    sibling = FakeBus(origin="serve-x", remotes=["backend-1"])
+    sibling.rows[1].deployment_keys = ["SIBLING_ONLY_KEY"]
+    monkeypatch.setattr(instance.app, "_bus", sibling)
+
+    resp = await router.read_env(_req())
+
+    assert _json(resp)["data"]["deployment_keys"] == ["SIBLING_ONLY_KEY"]
+
+
+# -- the bus cannot answer ------------------------------------------------------
+
+
+class _OutageBus(FakeBus):
+    """A bus that answers until ``down`` is set, then fails its census the way a severed bus does."""
+
+    down = False
+
+    async def census(self):
+        if self.down:
+            raise ClientDisconnectedError("bus down")
+        return await super().census()
+
+
+async def _sibling_read_then_outage(monkeypatch, key):
+    bus = _OutageBus(origin="serve-x", remotes=["backend-1"])
+    bus.rows[1].deployment_keys = [key]
+    await fleet_deployment_ownership(bus)
+    bus.down = True
+    monkeypatch.setattr(instance.app, "_bus", bus)
+
+
+async def test_read_env_during_an_outage_names_the_keys_last_read(install, monkeypatch, caplog):
+    install({"SIBLING_ONLY_KEY": "stored-copy", "OTHER": "1"})
+    await _sibling_read_then_outage(monkeypatch, "SIBLING_ONLY_KEY")
+
+    with caplog.at_level(logging.WARNING):
+        resp = await router.read_env(_req())
+
+    assert _json(resp)["data"]["deployment_keys"] == ["SIBLING_ONLY_KEY"]
+    assert any("'read_env'" in r.getMessage() for r in caplog.records if r.levelno == logging.WARNING)
+
+
+async def test_settings_schema_during_an_outage_locks_a_field_last_read_as_the_deployment_s(
+    install, monkeypatch, caplog
+):
+    install({"SIBLING_ONLY_FIELD": "stored-copy"})
+    await _sibling_read_then_outage(monkeypatch, "SIBLING_ONLY_FIELD")
+    monkeypatch.delenv("SIBLING_ONLY_FIELD", raising=False)
+    info = SettingsClassInfo(
+        name="Demo",
+        module="mod",
+        qualname="mod.Demo",
+        env_prefix="",
+        env_prefix_owned=False,
+        fields=[_field("sibling", "SIBLING_ONLY_FIELD", default="the_default")],
+    )
+    monkeypatch.setattr(config_ops, "registered_settings", lambda: [info])
+
+    with caplog.at_level(logging.WARNING):
+        resp = await router.read_settings_schema(_req())
+
+    field = _json(resp)["data"]["groups"][0]["fields"][0]
+    assert field["value_source"] == "deployment"
+    assert any("'read_settings_schema'" in r.getMessage() for r in caplog.records if r.levelno == logging.WARNING)

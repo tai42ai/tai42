@@ -20,6 +20,7 @@ import pytest
 import tai42_skeleton.app.bus_settings  # noqa: F401
 from tai42_skeleton.app.bus import FleetResult, WorkerIdentity, WorkerKind
 from tai42_skeleton.app.epoch import Epoch
+from tai42_skeleton.config.deployment_env import DeploymentOwnership
 from tai42_skeleton.config.service import ApplyResult, OrphanEnvWriteError, ProfileApplyOutcome
 from tai42_skeleton.operations._broadcast import FleetBroadcastError, apply_response, profile_apply_response
 
@@ -95,8 +96,7 @@ async def test_a_write_whose_span_fails_to_release_returns_its_result_after_its_
 async def test_a_profile_apply_whose_span_fails_to_release_still_saves_previous_and_rolls_the_recycle(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    monkeypatch.setenv("TAI_SUPERVISED", "harness")
-    store = FakeConfigStore(env={"TAI_BUS_NAMESPACE": "old"}, fail_exit=_release_failure())
+    store = FakeConfigStore(env={"TAI_BUS_ACK_TIMEOUT": "5"}, fail_exit=_release_failure())
     bus = FakeBus(origin="serve-applier", remotes=["serve-b"])
     orchestrate, seen = _orchestrate_spy()
     service, _admin, _bus = _service(store, bus=bus, orchestrate=orchestrate)
@@ -105,16 +105,16 @@ async def test_a_profile_apply_whose_span_fails_to_release_still_saves_previous_
     async def save_previous(env: dict[str, str]) -> None:
         saved.append(dict(env))
 
-    async def build_and_swap(_env: dict[str, str]) -> Epoch:
+    async def build_and_swap(_env: dict[str, str], *, ownership: DeploymentOwnership) -> Epoch:
         return Epoch(number=0)
 
     with caplog.at_level(logging.ERROR, logger=_EXCLUSION_LOGGER):
         outcome = await service.apply_replace_env(
-            {"TAI_BUS_NAMESPACE": "new"}, save_previous=save_previous, build_and_swap=build_and_swap
+            {"TAI_BUS_ACK_TIMEOUT": "7"}, save_previous=save_previous, build_and_swap=build_and_swap
         )
 
-    assert saved == [{"TAI_BUS_NAMESPACE": "old"}]
-    assert store.env == {"TAI_BUS_NAMESPACE": "new"}
+    assert saved == [{"TAI_BUS_ACK_TIMEOUT": "5"}]
+    assert store.env == {"TAI_BUS_ACK_TIMEOUT": "7"}
     assert [wire["op"] for wire, _targets, _local in bus.publish_calls] == ["reload_config"]
     assert seen["excluded_name"] == "serve-applier"
     assert outcome.recycle is not None

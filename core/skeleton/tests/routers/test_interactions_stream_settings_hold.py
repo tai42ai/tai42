@@ -21,6 +21,7 @@ from starlette.requests import Request
 from tai42_kit.clients.base import advance_client_epoch
 from tai42_kit.settings import reset_all_settings, sweep_stale_settings
 
+from tai42_skeleton.config.deployment_env import DeploymentOwnership
 from tai42_skeleton.interactions.settings import interactions_settings
 from tai42_skeleton.routers import interactions as router
 from tai42_skeleton.routers.interactions.stream import _CONNECT_FRAME, stream
@@ -136,7 +137,9 @@ async def test_an_inbox_stream_open_across_a_reload_leaves_nothing_reported_whil
         return _GenerationSurface(interactions_settings())
 
     async def _reload() -> None:
-        await build_and_swap_epoch(env, rebuild=lambda: None, build_serving_app=_build, drain_deadline=0.1)
+        await build_and_swap_epoch(
+            env, rebuild=lambda: None, build_serving_app=_build, drain_deadline=0.1, ownership=DeploymentOwnership()
+        )
 
     gate: asyncio.Future[None] = asyncio.get_running_loop().create_future()
     redis = _TailRedis(gate)

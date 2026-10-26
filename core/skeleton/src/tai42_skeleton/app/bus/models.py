@@ -138,6 +138,12 @@ class WorkerRow(BaseModel):
     an internal freshness measurement, excluded from ``model_dump`` so it never leaks
     into an API payload, and never part of the presence value on Redis. Staleness is
     NOT stored here: it is computed from ``pttl_ms`` by :func:`presence_fresh`.
+
+    ``deployment_keys`` are the names the worker's deployment env sets (names only, never
+    values) and ``env_readers`` is the digest of the description of the worker's env readers,
+    kept on the bus under that digest (names and shapes only, never values); every worker reads
+    both to judge ownership across the fleet
+    (:func:`tai42_skeleton.config.deployment_env.fleet_deployment_ownership`).
     """
 
     name: str
@@ -147,6 +153,8 @@ class WorkerRow(BaseModel):
     joined_at: str
     beat_at: str
     state: WorkerState
+    deployment_keys: list[str]
+    env_readers: str
     last_op: LastOp | None = None
     pttl_ms: int | None = Field(default=None, exclude=True)
 
@@ -189,6 +197,8 @@ class _PresenceValue(BaseModel):
     joined_at: str
     beat_at: str
     state: WorkerState
+    deployment_keys: tuple[str, ...]
+    env_readers: str
     last_op: LastOp | None = None
 
 

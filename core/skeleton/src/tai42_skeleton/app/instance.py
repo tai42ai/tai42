@@ -1,10 +1,15 @@
 """The process app singleton and its startup/reload handlers."""
 
+import functools
+import inspect
 import logging
+from collections.abc import Callable
 from contextlib import asynccontextmanager
+from typing import Any
 
 from tai42_kit.db import component_binding, component_store_configured, database_password_env
 from tai42_kit.logging import install_record_redaction, logging_settings, setup_logging
+from tai42_kit.settings import register_settings_reset
 
 from tai42_skeleton import tool_meta, versioning
 from tai42_skeleton.access_control import management
@@ -25,9 +30,13 @@ from tai42_skeleton.access_control.startup import (
 )
 from tai42_skeleton.access_control.verifier import reset_registered_reserved_paths
 from tai42_skeleton.app import bus_settings
+from tai42_skeleton.app.fastmcp_settings import apply_fastmcp_logging, apply_fastmcp_settings
 from tai42_skeleton.app.server import TaiMCP
 from tai42_skeleton.connectors import settings as connectors_readiness
-from tai42_skeleton.connectors.meta_log_redactor import register_connector_log_redaction
+from tai42_skeleton.connectors.meta_log_redactor import (
+    follow_connector_meta_token_key,
+    register_connector_log_redaction,
+)
 from tai42_skeleton.conversations import settings as conversations_readiness
 from tai42_skeleton.conversations.lifecycle import (
     redrive_pending_conversations,
@@ -176,30 +185,60 @@ async def _apply_preset_tool_reload(action: str, name: str) -> None:
 
 
 def apply_logging_settings() -> None:
-    """Reload handler: re-apply the root logger config from the fresh settings.
+    """Re-apply the root logger config from the fresh settings.
 
-    A config reload runs ``reset_all_settings()`` before the reload handlers, so
-    ``logging_settings()`` re-reads the current ``TAI_LOG_LEVEL`` and
-    ``setup_logging``'s ``force=True`` swaps the root handler config to the new
-    level without a process restart. A sync handler — ``_run_handlers`` supports
-    those. Registered as a reload handler only from the CLI entrypoints (via
-    :func:`register_cli_logging_reload`), which own their process's root logger; an
-    embedded app leaves the host's logging untouched. No ``on_startup``
-    counterpart: process start is covered by the CLI entrypoints' own
-    ``setup_logging`` call.
+    The cold-boot env bridge and a config reload both reset the settings caches before their
+    handlers run, so ``logging_settings()`` re-reads the current ``TAI_LOG_LEVEL`` and
+    ``setup_logging``'s ``force=True`` swaps the root handler config to that level without a
+    process restart. Registered only from the CLI entrypoints (via :func:`register_cli_process_state`),
+    which own their process's root logger; an embedded app leaves the host's logging untouched.
     """
     setup_logging(logging_settings())
 
 
-def register_cli_logging_reload() -> None:
-    """Register the root-logger re-apply as a config-reload handler.
+def register_cli_process_state() -> None:
+    """Keep a CLI process's process-wide state on the applied env: its root logger and fastmcp's settings.
 
-    Called only from the CLI entrypoints — a process whose root logger the CLI
-    configured keeps it in sync across reloads; an embedded app never touches the
-    host's logging. Idempotent: handlers are keyed by their ``module.qualname``, so
-    a repeat registration replaces the same entry.
+    Called only from the CLI entrypoints, which own their process. The root logger, configured
+    before the bridge applies the stored env, is configured again once the bridge has applied it
+    and after every config reload. fastmcp's settings, which fastmcp reads when it is imported,
+    are read again once the bridge has applied the stored env
+    (:func:`~tai42_skeleton.app.fastmcp_settings.apply_fastmcp_settings`), and fastmcp's logger is
+    configured again from them. An embedded app touches neither the host's logging nor the
+    host's fastmcp settings. Idempotent: handlers are keyed by their ``module.qualname``, so a
+    repeat registration replaces the same entry.
     """
-    build_app().lifecycle.on_reload(apply_logging_settings)
+    app = build_app()
+    app._on_boot_env_applied(apply_logging_settings)
+    app._on_boot_env_applied(apply_fastmcp_settings)
+    app._on_boot_env_applied(apply_fastmcp_logging)
+    app.lifecycle.on_reload(apply_logging_settings)
+
+
+def _when_access_control_enabled(handler: Callable[[], Any]) -> Callable[[], Any]:
+    """``handler``, run only while the access-control gate is enabled as the epoch builds.
+
+    The gate's setting is read when the handler runs, so the stored env the boot bridge applied
+    and every reload decide it, never the env at the app's build. Keeps ``handler``'s name, its
+    registry key, and whether it is a coroutine function.
+    """
+    if inspect.iscoroutinefunction(handler):
+
+        @functools.wraps(handler)
+        async def gated_async() -> Any:
+            if access_control_settings().enable:
+                return await handler()
+            return None
+
+        return gated_async
+
+    @functools.wraps(handler)
+    def gated() -> Any:
+        if access_control_settings().enable:
+            return handler()
+        return None
+
+    return gated
 
 
 @asynccontextmanager
@@ -293,13 +332,19 @@ def _register_storage_lifecycles(app: TaiMCP) -> None:
     app.lifecycle.on_startup(declare_media_prefix_marks)
 
 
+def _install_connector_log_redaction() -> None:
+    """Register the connector-secret log rule, keep it on the key each settings reset names, install the redaction."""
+    register_connector_log_redaction()
+    register_settings_reset(follow_connector_meta_token_key)
+    install_record_redaction()
+
+
 def build_app() -> TaiMCP:
     """Build (once) the process app singleton.
 
-    Reads access-control settings, so the CLI entrypoints call this from
-    ``main()`` AFTER the env bootstrap (``load_dotenv``); the settings cache then
-    captures the post-``.env`` value rather than a pre-bootstrap default. Mirrors
-    ``cli.metrics.create_app`` — construction is deferred out of import time.
+    Construction is deferred out of import time, mirroring ``cli.metrics.create_app``. The
+    access-control handlers read the gate's setting as each epoch builds, never at this build,
+    so the stored env the boot env bridge applies decides whether they run.
 
     Idempotent: the first call builds the app singleton; later calls return the
     same app. Provider descriptors come from the code-built registry — each
@@ -307,20 +352,22 @@ def build_app() -> TaiMCP:
     boot/reload registration — so the resolver's sync ``get_provider`` needs no
     per-boot Postgres read.
 
-    The root-logger re-apply on config reload is NOT wired here: it is a CLI-seam
-    concern registered via :func:`register_cli_logging_reload`, so an embedded app
-    that builds this singleton never reconfigures the host's root logger.
+    The root-logger re-apply and fastmcp's settings re-read are NOT wired here:
+    they are a CLI-seam concern registered via :func:`register_cli_process_state`,
+    so an embedded app that builds this singleton never reconfigures the host's
+    root logger or the host's fastmcp settings.
     The connector-secret log rule is registered and the kit's record redaction
     installed here regardless of caller, at its default ``"tai"`` scope: the
     fail-closed redaction covers tai's own log records in embed mode too, while a
-    host app's own records pass through untouched. The CLI entrypoints widen it to
-    process scope beside their logging-reload registration.
+    host app's own records pass through untouched. The rule is registered again on
+    every settings reset (:func:`follow_connector_meta_token_key`), so after each env
+    apply — the boot env bridge, a reload, a discarded reload's restore — it masks the
+    connector-meta token key that env names. The CLI entrypoints widen the redaction to
+    process scope beside their logging registration.
     """
     global _app
     if _app is None:
-        register_connector_log_redaction()
-        install_record_redaction()
-        settings = access_control_settings()
+        _install_connector_log_redaction()
         # No ``auth=`` here: each epoch's ``ServingCore`` reads the access-control
         # adapter FRESH from settings, so a profile that flips ACCESS_CONTROL_*
         # rebuilds the adapter + verifier chain rather than pinning the boot one.
@@ -331,55 +378,60 @@ def build_app() -> TaiMCP:
         app.lifecycle.on_startup(declare_gate_state_to_kit)
         _register_states_lifecycles(app)
         _register_generation_checks(app)
-        if settings.enable:
-            # The configured identity providers probe their OWN record stores once at
-            # startup, so a deployment against a backend a provider cannot use fails
-            # LOUDLY at boot instead of on the first authenticated request.
-            app.lifecycle.on_startup(probe_identity_provider)
-            # The control-plane role templates (admin/editor/viewer) are seeded before
-            # traffic, so a bootstrap ``apply_role`` can never KeyError on a fresh deploy.
-            app.lifecycle.on_startup(seed_roles)
-            # The route table is read once per epoch build: a row stored in a form no request
-            # path reduces to fails the boot loudly, naming the rows to correct or delete.
-            app.lifecycle.on_startup(check_route_rows_canonical)
-            # The setup token is fixed once (SET NX on the shared AC Redis) and logged once
-            # by the winner while no principal exists, so a fresh deployment can initialize
-            # itself through the public POST /api/setup door. Runs after the providers are
-            # probed and roles seeded so the serviceability check can resolve the mint
-            # provider and the mint path is ready.
-            app.lifecycle.on_startup(ensure_setup_token)
-            # The pre-auth surface is enumerated (visible at every boot) and an
-            # authenticated route on it fails the boot closed.
-            app.lifecycle.on_startup(check_always_public_routes)
-            # The route surface outside the control plane is audited on every method: the
-            # derived reserved set is printed, an unacknowledged public-by-declaration route
-            # there (any method) fails the boot closed, and the control-plane terminal-deny
-            # invariant is confirmed. Also on reload: a reload can add an authed GET route
-            # outside the control plane while the HTTP-edge verifier outlives it, so a stale reserved set would
-            # serve that route the anonymous shell. The reset must run AFTER the reimport.
-            app.lifecycle.on_startup(check_spa_shell_public)
-            app.lifecycle.on_reload(check_spa_shell_public)
-            app.lifecycle.on_reload(reset_registered_reserved_paths)
-            # Every gated route must resolve to an authorization action-class
-            # (read/write/fenced/secret) — an unclassifiable route fails the boot closed,
-            # so allow-by-omission can never reach the enforcement path.
-            app.lifecycle.on_startup(check_route_actions)
-            # Every registered fenced/secret route must resolve back to itself through the
-            # gate's resolver, so the admin-only fence can never silently fail open. Also on
-            # reload, which can mount a new fenced route: the audit rebuilds the route index
-            # against the re-imported surface, so a reload-added fence that resolves
-            # elsewhere fails the reload loudly instead of failing open until a restart.
-            app.lifecycle.on_startup(check_fenced_routes_resolvable)
-            app.lifecycle.on_reload(check_fenced_routes_resolvable)
-            # Every raw-path-matched route (the record doors) must resolve back to itself
-            # under an encoded-slash key, so a missing ``use_raw_path_key`` mark can never
-            # silently make an encoded-slash record request read as the public SPA shell.
-            # Also on reload: a reload re-imports the routers and re-marks the family.
-            app.lifecycle.on_startup(check_raw_path_routes_resolvable)
-            app.lifecycle.on_reload(check_raw_path_routes_resolvable)
-            # A registered accounts provider left out of the resolution chain would mint
-            # sessions that never authenticate — refuse to boot instead.
-            app.lifecycle.on_startup(check_accounts_providers_configured)
+        # The access-control handlers run only while the gate is enabled, read as each epoch
+        # builds: the stored env the boot bridge applied and every reload decide it.
+
+        # The configured identity providers probe their OWN record stores once at
+        # startup, so a deployment against a backend a provider cannot use fails
+        # LOUDLY at boot instead of on the first authenticated request.
+        app.lifecycle.on_startup(_when_access_control_enabled(probe_identity_provider))
+        # The control-plane role templates (admin/editor/viewer) are seeded before
+        # traffic, so a bootstrap ``apply_role`` can never KeyError on a fresh deploy.
+        app.lifecycle.on_startup(_when_access_control_enabled(seed_roles))
+        # The route table is read once per epoch build: a row stored in a form no request
+        # path reduces to fails the boot loudly, naming the rows to correct or delete.
+        app.lifecycle.on_startup(_when_access_control_enabled(check_route_rows_canonical))
+        # The setup token is fixed once (SET NX on the shared AC Redis) and logged once
+        # by the winner while no principal exists, so a fresh deployment can initialize
+        # itself through the public POST /api/setup door. Runs after the providers are
+        # probed and roles seeded so the serviceability check can resolve the mint
+        # provider and the mint path is ready.
+        app.lifecycle.on_startup(_when_access_control_enabled(ensure_setup_token))
+        # The pre-auth surface is enumerated (visible at every boot) and an
+        # authenticated route on it fails the boot closed.
+        app.lifecycle.on_startup(_when_access_control_enabled(check_always_public_routes))
+        # The route surface outside the control plane is audited on every method: the
+        # derived reserved set is printed, an unacknowledged public-by-declaration route
+        # there (any method) fails the boot closed, and the control-plane terminal-deny
+        # invariant is confirmed. Also on reload: a reload can add an authed GET route
+        # outside the control plane while the HTTP-edge verifier outlives it, so a stale reserved set would
+        # serve that route the anonymous shell. The reset must run AFTER the reimport.
+        spa_shell_audit = _when_access_control_enabled(check_spa_shell_public)
+        app.lifecycle.on_startup(spa_shell_audit)
+        app.lifecycle.on_reload(spa_shell_audit)
+        app.lifecycle.on_reload(_when_access_control_enabled(reset_registered_reserved_paths))
+        # Every gated route must resolve to an authorization action-class
+        # (read/write/fenced/secret) — an unclassifiable route fails the boot closed,
+        # so allow-by-omission can never reach the enforcement path.
+        app.lifecycle.on_startup(_when_access_control_enabled(check_route_actions))
+        # Every registered fenced/secret route must resolve back to itself through the
+        # gate's resolver, so the admin-only fence can never silently fail open. Also on
+        # reload, which can mount a new fenced route: the audit rebuilds the route index
+        # against the re-imported surface, so a reload-added fence that resolves
+        # elsewhere fails the reload loudly instead of failing open until a restart.
+        fenced_route_audit = _when_access_control_enabled(check_fenced_routes_resolvable)
+        app.lifecycle.on_startup(fenced_route_audit)
+        app.lifecycle.on_reload(fenced_route_audit)
+        # Every raw-path-matched route (the record doors) must resolve back to itself
+        # under an encoded-slash key, so a missing ``use_raw_path_key`` mark can never
+        # silently make an encoded-slash record request read as the public SPA shell.
+        # Also on reload: a reload re-imports the routers and re-marks the family.
+        raw_path_route_audit = _when_access_control_enabled(check_raw_path_routes_resolvable)
+        app.lifecycle.on_startup(raw_path_route_audit)
+        app.lifecycle.on_reload(raw_path_route_audit)
+        # A registered accounts provider left out of the resolution chain would mint
+        # sessions that never authenticate — refuse to boot instead.
+        app.lifecycle.on_startup(_when_access_control_enabled(check_accounts_providers_configured))
         # The Studio-plugin registry is a config-derived catalog built at startup
         # AND rebuilt on reload (both with ``raise_on_error``, so a listed package
         # missing its ``studio/`` dist fails the boot/op loudly), so a reload that

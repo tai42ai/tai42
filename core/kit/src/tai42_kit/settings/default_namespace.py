@@ -97,8 +97,8 @@ class DefaultNamespaceDotEnvSource(_DefaultNamespaceSource):
     Process env is NOT consulted here — :class:`DefaultNamespaceEnvSource` covers
     it and sits above this source. The file is read through the kit's env-file
     cache, so this source and the class's dotenv source share one parse; an absent
-    file, and a file whose reads are suspended
-    (:func:`~tai42_kit.settings.env_file.env_file_reads_suspended`), contributes nothing.
+    file, and a file settings do not read (the stored env, or a file whose reads are
+    suspended: :func:`~tai42_kit.settings.env_file.env_file_in_effect`), contributes nothing.
     """
 
     def _values(self) -> Mapping[str, str | None]:

@@ -1,7 +1,8 @@
 """Validation on the resolved projection of a manifest / env / profile-replace change.
 
 Covers the pydantic ``Manifest`` schema, the boundary refusals (X-band, unknown owned-prefix
-settings, key material, an unrecyclable change, dangling ``!ENV``, incomplete admin pair), the
+settings, key material, a key the deployment sets, an unrecyclable change, dangling ``!ENV``,
+incomplete admin pair), the
 backend-needs-bus and backend-needs-hooks-store invariants in both directions, the
 workers-need-shared-stores invariants (a multi-worker server keeps its sub-MCP registration
 store and hooks registry shared), and the apply-window invariant (a bus-enabled config's fleet
@@ -27,6 +28,8 @@ from tai42_skeleton.app.boot_rules import (
 from tai42_skeleton.app.bus_settings import BusSettings, bus_settings
 from tai42_skeleton.app.epoch import Epoch, current_epoch_or_none
 from tai42_skeleton.config.boundary import (
+    refuse_colliding_spellings,
+    refuse_deployment_owned,
     refuse_incomplete_admin_pair,
     refuse_key_material,
     refuse_unrecyclable_env_change,
@@ -46,16 +49,27 @@ if TYPE_CHECKING:
 
     from tai42_contract.manifest import ExtensionElement
 
+    from tai42_skeleton.config.deployment_env import DeploymentOwnership
 
-def _refuse_unrecyclable_merge(stored: Mapping[str, str], changes: Mapping[str, str]) -> list[str]:
-    """Refuse an env override merge the deployment shape cannot carry by a recycle; return its recycle-class keys.
 
-    The env the merge would store is ``stored`` overlaid with ``changes``, an empty value
-    removing its key (the store drops empties). The returned keys are the ones the merge
-    changes that only a worker recycle carries, sorted.
+def _stored_after(stored: Mapping[str, str], changes: Mapping[str, str]) -> dict[str, str]:
+    """The env a merge of ``changes`` into ``stored`` would store.
+
+    An empty value removes its key (the store drops empties).
     """
-    proposed = {key: value for key, value in {**stored, **changes}.items() if value != ""}
-    _hot, recycle = refuse_unrecyclable_env_change(stored, proposed, change="this env change")
+    return {key: value for key, value in {**stored, **changes}.items() if value != ""}
+
+
+def _refuse_unrecyclable_merge(
+    stored: Mapping[str, str], changes: Mapping[str, str], ownership: DeploymentOwnership
+) -> list[str]:
+    """Refuse an env merge no recycle can carry; return its recycle-class keys.
+
+    The env the merge would store is :func:`_stored_after`. The returned keys are the ones the
+    merge changes that only a worker recycle carries, sorted.
+    """
+    proposed = _stored_after(stored, changes)
+    _hot, recycle = refuse_unrecyclable_env_change(stored, proposed, ownership, change="this env change")
     return recycle
 
 
@@ -157,7 +171,7 @@ class _ValidationMixin(_ConfigServiceBase):
     The resolved projection of a change is validated here before it is persisted.
     """
 
-    def _validate_manifest(self, document: Mapping[str, Any]) -> None:
+    def _validate_manifest(self, document: Mapping[str, Any], ownership: DeploymentOwnership) -> None:
         """Validate the resolved projection of a manifest change.
 
         Refuses any ``!ENV`` marker left dangling first, so it is named as dangling before the
@@ -165,12 +179,13 @@ class _ValidationMixin(_ConfigServiceBase):
         pydantic ``Manifest`` schema and the extension combos, then the backend-needs-bus,
         backend-needs-hooks-store, workers-need-bus and workers-need-shared-stores invariants.
         Markers and the projection resolve against the env a reload applies from the store
-        (:meth:`_converged_env` of the stored env), not this process's env alone: the write holds
-        the store's exclusive span, so that env is the one every worker converges to. A manifest
-        mutation leaves the env unchanged, so the invariants read the current bus and store
-        configuration, after the projection.
+        (:meth:`_converged_env` of the stored env under ``ownership``, the fleet's deployment
+        ownership), not this process's env alone: the write holds the store's exclusive span, so
+        that env is the one every worker converges to. A manifest mutation leaves the env
+        unchanged, so the invariants read the current bus and store configuration, after the
+        projection.
         """
-        env = self._converged_env(self._read_stored_env())
+        env = self._converged_env(self._read_stored_env(), ownership)
         refuse_unresolved_env(document, env)
         with _environ(env, stored_env_file=self._stored_env_file()):
             manifest = self._validated_projection(document)
@@ -180,7 +195,9 @@ class _ValidationMixin(_ConfigServiceBase):
         )
         _check_store_invariants(backend_module=manifest.backend_module, workers=workers)
 
-    def _validate_manifest_noting_inputs(self, document: Mapping[str, Any]) -> _ManifestValidationInputs:
+    def _validate_manifest_noting_inputs(
+        self, document: Mapping[str, Any], ownership: DeploymentOwnership
+    ) -> _ManifestValidationInputs:
         """Validate ``document`` as :meth:`_validate_manifest` does; return the inputs it was validated against.
 
         The inputs are taken before the validation reads them, so a change landing while it runs
@@ -188,7 +205,7 @@ class _ValidationMixin(_ConfigServiceBase):
         document and :meth:`_ManifestValidationInputs.unchanged` both still hold.
         """
         inputs = _ManifestValidationInputs.now()
-        self._validate_manifest(document)
+        self._validate_manifest(document, ownership)
         return inputs
 
     def _env_validation_inputs(self) -> _EnvValidationInputs:
@@ -207,12 +224,13 @@ class _ValidationMixin(_ConfigServiceBase):
             and self._read_preserved_manifest() == inputs.manifest
         )
 
-    def _validate_env(self, changes: dict[str, str]) -> list[str]:
+    def _validate_env(self, changes: dict[str, str], ownership: DeploymentOwnership) -> list[str]:
         """Validate the effective config an env change produces; return the recycle-class keys it changes.
 
-        Refuses an X-band key in the change PAYLOAD and a change the deployment shape cannot carry
-        by a recycle, resolves the persisted manifest's ``!ENV``
-        markers against the post-change env (so a marker that materializes a backend participates,
+        Refuses an X-band key in the change PAYLOAD, a stored env that would set one name under two
+        spellings, a change that sets a key the deployment sets, and a change no recycle can
+        carry, resolves the persisted manifest's ``!ENV`` markers against the post-change env (so
+        a marker that materializes a backend participates,
         and a dropped reference is caught as dangling), and evaluates the backend-needs-bus and
         backend-needs-hooks-store invariants against the post-change bus and hooks-store
         configuration (so removing either while a backend remains is rejected too), the
@@ -222,11 +240,15 @@ class _ValidationMixin(_ConfigServiceBase):
         refuse_x_band(changes.keys())
         refuse_unknown_owned_env_write([key for key, value in changes.items() if value != ""])
         stored = self._read_stored_env()
+        refuse_colliding_spellings(_stored_after(stored, changes), source="an env write")
         # Change-aware: refuse a key-material key only when the payload SETS it to a value
         # different from the current stored value (rotation-via-editor), never an unchanged
         # carry — the stored env is the real values a read-modify-write round-trip re-sends.
         refuse_key_material(changes, stored)
-        effective = self.effective_env(changes)
+        # Change-aware the same way: a key the deployment sets keeps the deployment's value, so
+        # a write that sets it to a new value is refused; removing or carrying its stored copy is not.
+        refuse_deployment_owned(changes, stored, ownership)
+        effective = self.effective_env(changes, ownership)
         refuse_incomplete_admin_pair(effective)
         workers = serve_workers()
         with _environ(effective, stored_env_file=self._stored_env_file()):
@@ -245,14 +267,17 @@ class _ValidationMixin(_ConfigServiceBase):
             _check_store_invariants(backend_module=manifest.backend_module, workers=workers)
         _check_apply_window(effective, stored_env_file=self._stored_env_file())
         # Last, so a change the bus invariants refuse is named by their rule.
-        return _refuse_unrecyclable_merge(stored, changes)
+        return _refuse_unrecyclable_merge(stored, changes, ownership)
 
-    def _validate_env_and_manifest(self, changes: dict[str, str], document: Mapping[str, Any]) -> list[str]:
+    def _validate_env_and_manifest(
+        self, changes: dict[str, str], document: Mapping[str, Any], ownership: DeploymentOwnership
+    ) -> list[str]:
         """Validate a combined env-write + manifest-mutate before it persists; return the recycle-class keys it changes.
 
-        Refuses an X-band key in the env change PAYLOAD and a change the deployment shape cannot
-        carry by a recycle, resolves the MUTATED manifest's
-        ``!ENV`` markers against the post-change effective env (so the marker the mutator
+        Refuses an X-band key in the env change PAYLOAD, a stored env that would set one name under
+        two spellings, a change that sets a key the deployment sets, and a change no recycle can
+        carry, resolves the MUTATED manifest's ``!ENV`` markers against the post-change effective
+        env (so the marker the mutator
         just wrote resolves against the value the env write supplies, and a dropped
         reference is caught as dangling), validates the resolved projection, and
         evaluates backend-needs-bus, backend-needs-hooks-store, workers-need-bus,
@@ -261,10 +286,13 @@ class _ValidationMixin(_ConfigServiceBase):
         refuse_x_band(changes.keys())
         refuse_unknown_owned_env_write([key for key, value in changes.items() if value != ""])
         stored = self._read_stored_env()
+        refuse_colliding_spellings(_stored_after(stored, changes), source="an env write")
         # Change-aware key-material refusal (see :meth:`_validate_env`): a CHANGE to a KEK /
-        # signing key is refused, an unchanged carry is allowed.
+        # signing key is refused, an unchanged carry is allowed. A key the deployment sets is
+        # refused the same change-aware way.
         refuse_key_material(changes, stored)
-        effective = self.effective_env(changes)
+        refuse_deployment_owned(changes, stored, ownership)
+        effective = self.effective_env(changes, ownership)
         refuse_incomplete_admin_pair(effective)
         workers = serve_workers()
         with _environ(effective, stored_env_file=self._stored_env_file()):
@@ -275,27 +303,34 @@ class _ValidationMixin(_ConfigServiceBase):
             )
             _check_store_invariants(backend_module=manifest.backend_module, workers=workers)
         _check_apply_window(effective, stored_env_file=self._stored_env_file())
-        return _refuse_unrecyclable_merge(stored, changes)
+        return _refuse_unrecyclable_merge(stored, changes, ownership)
 
-    def _validate_replace(self, profile_env: dict[str, str]) -> None:
+    def _validate_replace(self, profile_env: dict[str, str], ownership: DeploymentOwnership) -> None:
         """Validate a whole-env REPLACE (a settings-profile apply) before it persists.
 
         The apply's validate-before-persist entry, mirroring :meth:`ConfigService.apply_replace`.
 
         Refuses any X-band key in the profile's DECLARED payload (NEVER the post-carry
         effective env — the applier legitimately CARRIES the whole X band across
-        ``replace_env``), refuses a change that leaves a manifest ``!ENV`` marker
+        ``replace_env``), refuses a profile that sets one name under two spellings, refuses a
+        profile that sets a key the deployment sets to a value other
+        than its stored one, refuses a change that leaves a manifest ``!ENV`` marker
         dangling against the replace-effective env, and evaluates the backend-needs-bus,
         backend-needs-hooks-store, workers-need-bus, workers-need-shared-stores and apply-window
         invariants against that same env.
         """
         refuse_x_band(profile_env.keys())
+        refuse_colliding_spellings(profile_env, source="a profile")
         refuse_unknown_owned_env_write([key for key, value in profile_env.items() if value != ""])
         # Change-aware key-material refusal: a profile snapshotted from the stored env carries
         # the KEK unchanged (allowed); only a profile that would SET key material to a new
         # value is refused (see :meth:`_validate_env`).
-        refuse_key_material(profile_env, self._read_stored_env())
-        effective = self._effective_replace_env(profile_env)
+        stored = self._read_stored_env()
+        refuse_key_material(profile_env, stored)
+        # A profile may drop or carry unchanged a stored copy of a key the deployment sets, never
+        # set one to a new value.
+        refuse_deployment_owned(profile_env, stored, ownership)
+        effective = self._effective_replace_env(profile_env, ownership)
         refuse_incomplete_admin_pair(effective)
         workers = serve_workers()
         # A connector reads its client-credential env STRAIGHT from ``os.environ`` at connect

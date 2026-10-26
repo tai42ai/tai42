@@ -86,15 +86,17 @@ async def test_replace_env_is_whole_map_and_deletes_omitted_keys(
 ) -> None:
     api = replicas_stack.api(port=replicas_stack.port_a)
 
-    # Seed one plain HOT marker key, then read the FULL stored env back (GET returns real
-    # values). Building the profile as "current stored env MINUS the marker" keeps every
-    # deployment-pinned / recycle-class stored key (e.g. TAI_BUS_REDIS_URL) at its current
-    # value — a zero diff on them, so a BARE stack does not refuse the apply — while the
-    # whole-map replace deletes ONLY the omitted hot marker.
+    # Seed one plain HOT marker key and one plain kept key, then read the FULL stored env
+    # back (GET returns real values). Building the profile as "current stored env MINUS the
+    # marker" keeps every other stored key at its current value — a zero diff on them —
+    # while the whole-map replace deletes ONLY the omitted hot marker. The kept key makes
+    # the preserved set non-empty whatever else the store holds.
     marker = uniq("E2E_REPL_MARKER").upper()
-    await _write_env(api, {marker: "seeded"})
+    kept = uniq("E2E_REPL_KEPT").upper()
+    await _write_env(api, {marker: "seeded", kept: "kept"})
     baseline = (await api.get("/api/config/env"))["env"]
     assert marker in baseline, baseline
+    assert baseline.get(kept) == "kept", baseline
 
     profile_env = {key: value for key, value in baseline.items() if key != marker}
     name = uniq("replace")
@@ -105,4 +107,5 @@ async def test_replace_env_is_whole_map_and_deletes_omitted_keys(
     # the omitted hot marker deleted, every preserved key intact.
     stored = (await api.get("/api/config/env"))["env"]
     assert marker not in stored, f"whole-map replace did not delete the omitted key: {stored}"
+    assert stored.get(kept) == "kept", f"whole-map replace dropped a key the profile kept: {stored}"
     assert stored == profile_env, f"replace_env did not write the whole profile map atomically: {stored}"

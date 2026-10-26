@@ -6,6 +6,7 @@ not here.
 
 from __future__ import annotations
 
+import inspect
 import logging
 from contextlib import asynccontextmanager
 
@@ -33,34 +34,60 @@ def test_rehydrate_presets_wired_as_startup_and_reload():
     assert instance.rehydrate_versioned_presets_if_store_in_use in instance.app._reload_handlers.values()
 
 
-def test_access_control_probe_wired_as_startup_when_enabled():
-    # The process app singleton is built with access control enabled (the default), so
-    # the active identity provider's healthcheck must be registered as a startup
-    # handler: it is THE boot probe. Dropping it silently re-opens the boot trap (a
-    # broken backend boots clean and dies on the first authenticated request), so this
-    # pins the wiring, not just the probe function.
+def _unwrapped(handlers) -> list:
+    """The handlers as registered, each access-control handler seen through its gate."""
+    return [getattr(handler, "__wrapped__", handler) for handler in handlers]
+
+
+def test_access_control_probe_wired_as_startup():
+    # The active identity provider's healthcheck is registered as a startup handler,
+    # run while the gate is enabled: it is THE boot probe. Dropping it silently
+    # re-opens the boot trap (a broken backend boots clean and dies on the first
+    # authenticated request), so this pins the wiring, not just the probe function.
     from tai42_skeleton.access_control.startup import probe_identity_provider
 
-    startup_handlers = instance.app._startup_handlers.values()
-    assert probe_identity_provider in startup_handlers
+    assert probe_identity_provider in _unwrapped(instance.app._startup_handlers.values())
 
 
-def test_fenced_route_audit_wired_as_startup_and_reload_when_enabled():
+def test_fenced_route_audit_wired_as_startup_and_reload():
     # A reload can mount a new fenced route, so the fence-resolvability audit must run
     # on reload as well as at boot — otherwise a reload-added fenced route fails open
     # until restart. Both registrations are pinned.
     from tai42_skeleton.access_control.startup import check_fenced_routes_resolvable
 
-    assert check_fenced_routes_resolvable in instance.app._startup_handlers.values()
-    assert check_fenced_routes_resolvable in instance.app._reload_handlers.values()
+    assert check_fenced_routes_resolvable in _unwrapped(instance.app._startup_handlers.values())
+    assert check_fenced_routes_resolvable in _unwrapped(instance.app._reload_handlers.values())
 
 
-def test_route_row_audit_wired_as_startup_when_enabled():
+def test_route_row_audit_wired_as_startup():
     # A route row stored in a form no request path reduces to must fail the boot, so the
     # canonical-row audit is a startup handler of the access-control build.
     from tai42_skeleton.access_control.startup import check_route_rows_canonical
 
-    assert check_route_rows_canonical in instance.app._startup_handlers.values()
+    assert check_route_rows_canonical in _unwrapped(instance.app._startup_handlers.values())
+
+
+@pytest.mark.parametrize("enable", ["true", "false"])
+def test_an_access_control_handler_runs_only_while_the_gate_is_enabled(monkeypatch, enable):
+    # The gate's setting is read as the handler runs, so the env the epoch builds under
+    # decides it; a sync handler stays sync and keeps its registry key.
+    calls: list[str] = []
+
+    def check_something() -> None:
+        calls.append("ran")
+
+    gated = instance._when_access_control_enabled(check_something)
+    monkeypatch.setenv("ACCESS_CONTROL_ENABLE", enable)
+    reset_all_settings()
+    try:
+        assert gated() is None
+    finally:
+        monkeypatch.delenv("ACCESS_CONTROL_ENABLE")
+        reset_all_settings()
+
+    assert calls == (["ran"] if enable == "true" else [])
+    assert (gated.__module__, gated.__qualname__) == (check_something.__module__, check_something.__qualname__)
+    assert not inspect.iscoroutinefunction(gated)
 
 
 def test_mount_change_listener_invalidates_the_policy_cache():
@@ -151,22 +178,43 @@ async def test_rehydrate_runs_when_versioning_store_env_present(monkeypatch):
 
 
 def test_apply_logging_wired_only_by_cli_seam_registration(monkeypatch):
-    # A bare ``build_app()`` does NOT register the root-logger reload handler — an
-    # embedded app never reconfigures the host's logging. The CLI seams register it
-    # explicitly via ``register_cli_logging_reload``, and only as a reload handler
-    # (never a startup handler; process start is covered by the CLI's own
-    # ``setup_logging`` call). The singleton is reset first so a prior CLI-seam
-    # registration on the process singleton (e.g. from the backend beat test) cannot
-    # spuriously FAIL the absence assertion by collection-order luck.
+    # A bare ``build_app()`` does NOT register the root-logger re-apply nor fastmcp's settings
+    # re-read — an embedded app never reconfigures the host's logging or the host's fastmcp
+    # settings. The CLI seams register them explicitly
+    # via ``register_cli_process_state``: after the boot env bridge and on reload, never as a
+    # startup handler. The singleton is reset first so a prior CLI-seam registration on
+    # the process singleton (e.g. from the backend beat test) cannot spuriously FAIL the
+    # absence assertion by collection-order luck.
     monkeypatch.setattr(instance, "_app", None)
 
     app = instance.build_app()
     assert instance.apply_logging_settings not in app._reload_handlers.values()
+    assert instance.apply_logging_settings not in app._boot_env_handlers.values()
     assert instance.apply_logging_settings not in app._startup_handlers.values()
+    assert instance.apply_fastmcp_settings not in app._boot_env_handlers.values()
 
-    instance.register_cli_logging_reload()
+    instance.register_cli_process_state()
     assert instance.apply_logging_settings in app._reload_handlers.values()
+    assert instance.apply_logging_settings in app._boot_env_handlers.values()
     assert instance.apply_logging_settings not in app._startup_handlers.values()
+    boot_env_handlers = list(app._boot_env_handlers.values())
+    # fastmcp's logger is configured from the settings read again just before it.
+    assert boot_env_handlers.index(instance.apply_fastmcp_settings) < boot_env_handlers.index(
+        instance.apply_fastmcp_logging
+    )
+
+
+def test_build_app_registers_the_connector_log_rule_again_on_every_settings_reset(monkeypatch):
+    # The rule masks the connector-meta token key the applied env names, so the build
+    # registers it again on every settings reset, the step every env apply ends with.
+    from tai42_kit.settings import cache_registry
+
+    monkeypatch.setattr(instance, "_app", None)
+    monkeypatch.setattr(cache_registry, "_RESET_HOOKS", {})
+
+    instance.build_app()
+
+    assert instance.follow_connector_meta_token_key in cache_registry._RESET_HOOKS.values()
 
 
 def test_build_app_installs_redactor_at_tai_scope(monkeypatch):

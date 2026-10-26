@@ -50,7 +50,7 @@ def spawn_all(stack: TaiStack, manifest_path: Path, family_dirs: list[str]) -> N
                 name=name,
                 argv=[tai, "backend", "worker", "--manifest-path", str(manifest_path)],
                 cwd=cwd,
-                env=child_env(stack, family_dirs[0], cwd_override),
+                env=child_env(stack, family_dirs[0], name),
                 log_path=stack._logs_dir / "backend.log",
             ),
         )
@@ -71,7 +71,7 @@ def spawn_all(stack: TaiStack, manifest_path: Path, family_dirs: list[str]) -> N
                     name=extra_name,
                     argv=[tai, "backend", *extra_args, "--manifest-path", str(manifest_path)],
                     cwd=Path(extra_cwd) if extra_cwd else stack._config_dir,
-                    env=child_env(stack, family_dirs[0], extra_cwd),
+                    env=child_env(stack, family_dirs[0], extra_name),
                     log_path=stack._logs_dir / f"{extra_name}.log",
                 ),
             )
@@ -86,9 +86,15 @@ def spawn_all(stack: TaiStack, manifest_path: Path, family_dirs: list[str]) -> N
                 name=name,
                 argv=[tai, "metrics", "--host", stack.host, "--port", str(stack.metrics_port)],
                 cwd=cwd,
-                env=child_env(stack, family_dirs[0], cwd_override),
+                env=child_env(stack, family_dirs[0], name),
                 log_path=stack._logs_dir / "metrics.log",
             ),
+        )
+    unknown = sorted(set(stack.config.process_env) - set(stack._specs))
+    if unknown:
+        raise RuntimeError(
+            f"process_env names processes the {stack.config.name!r} stack does not spawn: {unknown}; "
+            f"it spawns {sorted(stack._specs)}"
         )
 
 
@@ -133,7 +139,7 @@ def spawn_serve_fleet(stack: TaiStack, tai: str, manifest_path: Path, family_dir
                 name=name,
                 argv=argv,
                 cwd=cwd,
-                env=child_env(stack, family_dirs[i], cwd_override),
+                env=child_env(stack, family_dirs[i], name),
                 log_path=stack._logs_dir / f"{name}.log",
             ),
         )
@@ -163,7 +169,7 @@ def spawn_embed_host(stack: TaiStack, family_dir: str) -> None:
             name=name,
             argv=argv,
             cwd=cwd,
-            env=child_env(stack, family_dir, cwd_override),
+            env=child_env(stack, family_dir, name),
             log_path=stack._logs_dir / f"{name}.log",
         ),
     )

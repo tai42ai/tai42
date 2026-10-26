@@ -36,6 +36,7 @@ from tai42_skeleton.app.sub_mcp_app import (
     sub_mcp_access_pattern,
     sub_mcp_mount_url,
 )
+from tai42_skeleton.config.deployment_env import DeploymentOwnership
 
 
 class _FakeLifespan(SubAppLifespan):
@@ -292,7 +293,9 @@ async def test_a_mount_session_driving_a_reload_keeps_its_lifespan_until_it_answ
     async def _driver() -> None:
         async with reload_gate.driving():
             # The rebuild resets the sub-MCP router, as ``start()`` does.
-            await epoch_mod.build_and_swap_epoch({}, rebuild=r.reset, build_serving_app=_build, drain_deadline=0.05)
+            await epoch_mod.build_and_swap_epoch(
+                {}, rebuild=r.reset, build_serving_app=_build, drain_deadline=0.05, ownership=DeploymentOwnership()
+            )
         await asyncio.sleep(0.2)  # the reload's fleet wait, past the drain budget
         order.append("driver answered")
 

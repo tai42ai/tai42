@@ -16,24 +16,33 @@ runs on ``WorkerBus.local``.
 A bus-enabled config whose fleet apply window (``TAI_BUS_APPLY_TIMEOUT``) is below the
 retire's drain floor (three drains of the declared drain budget) refuses at boot and on
 every reload, naming both settings and the floor.
+
+A process that reaches its bus only through a stored copy of a key another worker's
+deployment sets refuses, naming the keys that locate the bus (its Redis URL or its
+namespace); a withdraw that moves only how a member takes part (its heartbeat, its two
+timeouts) is allowed.
 """
 
 from __future__ import annotations
 
 import os
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 import pytest
 from tai42_kit.settings import reset_all_settings
 
-from tai42_skeleton.app import boot_rules
-from tai42_skeleton.app import epoch as epoch_mod
+from tai42_skeleton.app import applied_env, boot_rules
+from tai42_skeleton.app.bus import WorkerKind
+from tai42_skeleton.app.bus_settings import BusRedisSettings, BusSettings
 from tai42_skeleton.app.lifecycle import TaiMCPLifecycleMixin, lifespan
 from tai42_skeleton.app.server import ServingCore
 from tai42_skeleton.cli import mcp_app
 from tai42_skeleton.manifest import Manifest as ConcreteManifest
+
+from .._fakes.bus import FakeBus
+from .._helpers import recapture_deployment_env
 
 if TYPE_CHECKING:
     from tai42_skeleton.manifest import Manifest
@@ -425,6 +434,92 @@ def test_translate_config_invariants_is_silent_without_an_error() -> None:
         boot_rules.check_backend_needs_bus(backend_module="pkg.backend", bus_configured=True)
 
 
+# -- the bus stays the deployment's ----------------------------------------------
+
+
+def _bus(
+    fields: Mapping[str, object] | None = None, *, redis_url: str | None = "redis://127.0.0.1:6379/0"
+) -> BusSettings:
+    return BusSettings.model_validate({"redis": BusRedisSettings(redis_url=redis_url), **(fields or {})})
+
+
+def test_a_withdraw_that_takes_away_the_bus_url_is_refused_naming_the_key_not_its_value() -> None:
+    with pytest.raises(boot_rules.BusNotDeploymentGivenError) as exc:
+        boot_rules.check_bus_stays_deployment_given(
+            member=_bus(),
+            before=_bus(),
+            after=_bus(redis_url=None),
+            withdrawn=["TAI_BUS_HEARTBEAT_TTL", "TAI_BUS_REDIS_URL"],
+        )
+    message = str(exc.value)
+    assert "TAI_BUS_REDIS_URL" in message
+    # Only the keys that locate the bus are named; never a value.
+    assert "TAI_BUS_HEARTBEAT_TTL" not in message
+    assert "redis://" not in message
+    assert isinstance(exc.value, boot_rules.ConfigInvariantError)
+
+
+def test_a_withdraw_that_moves_the_bus_to_another_url_is_refused() -> None:
+    with pytest.raises(boot_rules.BusNotDeploymentGivenError, match="TAI_DEFAULT_REDIS_URL"):
+        boot_rules.check_bus_stays_deployment_given(
+            member=_bus(),
+            before=_bus(),
+            after=_bus(redis_url="redis://127.0.0.1:6380/0"),
+            withdrawn=["TAI_DEFAULT_REDIS_URL"],
+        )
+
+
+def test_a_withdraw_that_moves_the_namespace_is_refused_naming_it() -> None:
+    with pytest.raises(boot_rules.BusNotDeploymentGivenError, match="TAI_BUS_NAMESPACE"):
+        boot_rules.check_bus_stays_deployment_given(
+            member=_bus({"namespace": "other"}),
+            before=_bus({"namespace": "other"}),
+            after=_bus(),
+            withdrawn=["TAI_BUS_NAMESPACE"],
+        )
+
+
+def test_a_withdraw_that_moves_the_bus_off_a_namespace_saved_since_the_build_is_refused_naming_the_key() -> None:
+    # The process runs on the bus it was built on, a saved namespace waits for the respawn,
+    # and the withdraw takes away the bus URL the process reaches its bus through.
+    with pytest.raises(boot_rules.BusNotDeploymentGivenError, match="TAI_BUS_REDIS_URL"):
+        boot_rules.check_bus_stays_deployment_given(
+            member=_bus(),
+            before=_bus({"namespace": "saved"}),
+            after=_bus({"namespace": "saved"}, redis_url=None),
+            withdrawn=["TAI_BUS_REDIS_URL"],
+        )
+
+
+def test_a_withdraw_that_leaves_the_location_where_it_was_is_allowed() -> None:
+    # A namespace saved since the bus was built waits for the respawn; the withdraw of an
+    # unrelated key does not move the bus settings, so it leaves the process on its bus.
+    boot_rules.check_bus_stays_deployment_given(
+        member=_bus(),
+        before=_bus({"namespace": "saved"}),
+        after=_bus({"namespace": "saved"}),
+        withdrawn=["SOME_UNRELATED_KEY"],
+    )
+
+
+def test_a_withdraw_that_returns_the_location_to_the_bus_the_process_runs_on_is_allowed() -> None:
+    boot_rules.check_bus_stays_deployment_given(
+        member=_bus(), before=_bus({"namespace": "saved"}), after=_bus(), withdrawn=["TAI_BUS_NAMESPACE"]
+    )
+
+
+@pytest.mark.parametrize(
+    ("fields", "key"),
+    [
+        ({"heartbeat_ttl": 21.0}, "TAI_BUS_HEARTBEAT_TTL"),
+        ({"ack_timeout": 3.0}, "TAI_BUS_ACK_TIMEOUT"),
+        ({"apply_timeout": 120.0}, "TAI_BUS_APPLY_TIMEOUT"),
+    ],
+)
+def test_a_withdraw_that_moves_only_how_a_member_takes_part_is_allowed(fields: dict[str, float], key: str) -> None:
+    boot_rules.check_bus_stays_deployment_given(member=_bus(fields), before=_bus(fields), after=_bus(), withdrawn=[key])
+
+
 # -- apply-window rule ----------------------------------------------------------
 
 
@@ -535,7 +630,7 @@ def test_a_reload_refuses_a_backend_without_hooks_store_before_rebuilding(monkey
 
 
 class _BootRulesPassedError(Exception):
-    """Raised in place of the supervision check, the boot step that follows every boot rule."""
+    """Raised once the last boot rule passed, in place of the boot steps that follow it."""
 
 
 class _StoredEnv:
@@ -551,13 +646,18 @@ class _StoredEnv:
 def _booting_lifecycle(monkeypatch: pytest.MonkeyPatch, stored_env: dict[str, str]) -> _Lifecycle:
     """A lifecycle over ``stored_env`` whose boot stops with :class:`_BootRulesPassedError` after its boot rules."""
 
+    last_rule = lifespan.require_apply_window_covers_drain
+
     def booted() -> None:
+        last_rule()
         raise _BootRulesPassedError
 
-    monkeypatch.setattr(lifespan, "require_supervision_declared", booted)
+    monkeypatch.setattr(lifespan, "require_apply_window_covers_drain", booted)
+    # The container env the test arranged is the deployment env this boot captures.
+    recapture_deployment_env()
     # The boot env bridge drops every key the last apply loaded that ``stored_env`` lacks, so it
     # starts from no loaded keys, and each stored key is restored after the test.
-    monkeypatch.setattr(epoch_mod, "_loaded_env_keys", set())
+    monkeypatch.setattr(applied_env, "_loaded_env_keys", set())
     for name in stored_env:
         if name in os.environ:
             monkeypatch.setenv(name, os.environ[name])
@@ -565,6 +665,8 @@ def _booting_lifecycle(monkeypatch: pytest.MonkeyPatch, stored_env: dict[str, st
             _unset(monkeypatch, name)
     lifecycle = _Lifecycle()
     lifecycle._config_manager = cast("object", _StoredEnv(stored_env))  # type: ignore[assignment]
+    # The boot env bridge builds the worker bus and reads the fleet's names on it.
+    monkeypatch.setattr(lifecycle, "_build_bus", lambda kind: FakeBus(remotes=[]))
     return lifecycle
 
 
@@ -579,24 +681,18 @@ def _shared_stores_only_in(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
 async def test_a_worker_boots_with_its_shared_stores_only_in_the_stored_env(monkeypatch: pytest.MonkeyPatch) -> None:
     _serve_workers(monkeypatch, 2)
     lifecycle = _booting_lifecycle(monkeypatch, _shared_stores_only_in(monkeypatch))
-    lifecycle._apply_stored_env_at_boot()
+    await lifecycle._apply_stored_env_at_boot(kind=WorkerKind.serve)
     with pytest.raises(_BootRulesPassedError):
         async with lifecycle.app_context(ConcreteManifest()):
             pytest.fail("the boot stops after its boot rules")
 
 
-@pytest.mark.parametrize(
-    ("emptied", "error"),
-    [
-        ("SUB_MCP_REDIS_URL", boot_rules.WorkersNeedSubMcpStoreError),
-        ("HOOKS_REDIS_URL", boot_rules.WorkersNeedHooksStoreError),
-    ],
-)
-async def test_a_worker_refuses_a_stored_empty_store_url_over_the_container_value(
-    monkeypatch: pytest.MonkeyPatch, emptied: str, error: type[Exception]
+@pytest.mark.parametrize("emptied", ["SUB_MCP_REDIS_URL", "HOOKS_REDIS_URL"])
+async def test_a_worker_keeps_the_container_store_url_over_a_stored_empty_value(
+    monkeypatch: pytest.MonkeyPatch, emptied: str
 ) -> None:
-    # The container env shares both stores; the stored env, which wins at the worker's boot,
-    # empties one of them, so that store comes up in-memory in every worker.
+    # The container env shares both stores; the deployment's value wins at the worker's boot,
+    # so a stored empty value for one of them is ignored and the store stays shared.
     _with_bus(monkeypatch)
     _serve_workers(monkeypatch, 2)
     _unset(monkeypatch, "TAI_DEFAULT_REDIS_URL")
@@ -604,10 +700,11 @@ async def test_a_worker_refuses_a_stored_empty_store_url_over_the_container_valu
     monkeypatch.setenv("HOOKS_REDIS_URL", "redis://localhost:6379/2")
     reset_all_settings()
     lifecycle = _booting_lifecycle(monkeypatch, {emptied: ""})
-    lifecycle._apply_stored_env_at_boot()
-    with pytest.raises(error, match=f"{emptied}.*2 workers|2 workers.*{emptied}"):
+    await lifecycle._apply_stored_env_at_boot(kind=WorkerKind.serve)
+    with pytest.raises(_BootRulesPassedError):
         async with lifecycle.app_context(ConcreteManifest()):
-            pytest.fail("the worker booted over an in-memory store")
+            pytest.fail("the boot stops after its boot rules")
+    assert os.environ[emptied]
     assert lifecycle.started_with is None
 
 
@@ -617,7 +714,7 @@ async def test_a_single_worker_boots_over_in_memory_stores(monkeypatch: pytest.M
     _no_sub_mcp_store(monkeypatch)
     _no_hooks_store(monkeypatch)
     lifecycle = _booting_lifecycle(monkeypatch, {})
-    lifecycle._apply_stored_env_at_boot()
+    await lifecycle._apply_stored_env_at_boot(kind=WorkerKind.serve)
     with pytest.raises(_BootRulesPassedError):
         async with lifecycle.app_context(ConcreteManifest()):
             pytest.fail("the boot stops after its boot rules")
@@ -659,26 +756,26 @@ async def test_a_worker_boots_with_its_bus_only_in_the_stored_env(monkeypatch: p
     _busless(monkeypatch)
     _shared_stores(monkeypatch)
     lifecycle = _booting_lifecycle(monkeypatch, {"TAI_BUS_REDIS_URL": "redis://localhost:6379/0"})
-    lifecycle._apply_stored_env_at_boot()
+    await lifecycle._apply_stored_env_at_boot(kind=WorkerKind.serve)
     with pytest.raises(_BootRulesPassedError):
         async with lifecycle.app_context(ConcreteManifest()):
             pytest.fail("the boot stops after its boot rules")
 
 
-async def test_a_worker_refuses_a_stored_empty_bus_url_over_the_container_value(
+async def test_a_worker_keeps_the_container_bus_url_over_a_stored_empty_value(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # The container env configures the bus; the stored env, which wins at the worker's boot,
-    # empties it, so every worker would come up on its own local bus.
+    # The container env configures the bus; the deployment's value wins at the worker's boot,
+    # so a stored empty value is ignored and every worker joins the one bus.
     _serve_workers(monkeypatch, 2)
     _with_bus(monkeypatch)
     _shared_stores(monkeypatch)
     lifecycle = _booting_lifecycle(monkeypatch, {"TAI_BUS_REDIS_URL": ""})
-    lifecycle._apply_stored_env_at_boot()
-    with pytest.raises(RuntimeError, match=r"2 workers with no worker bus.*TAI_BUS_REDIS_URL"):
+    await lifecycle._apply_stored_env_at_boot(kind=WorkerKind.serve)
+    with pytest.raises(_BootRulesPassedError):
         async with lifecycle.app_context(ConcreteManifest()):
-            pytest.fail("the worker booted with no bus")
-    assert lifecycle.started_with is None
+            pytest.fail("the boot stops after its boot rules")
+    assert os.environ["TAI_BUS_REDIS_URL"]
 
 
 def test_a_reload_refuses_a_busless_multi_worker_server_before_rebuilding(monkeypatch: pytest.MonkeyPatch) -> None:

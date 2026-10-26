@@ -50,6 +50,14 @@ retire's drain floor — three drains of the declared drain budget
 (:func:`~tai42_skeleton.app.epoch_retire.retire_drain_floor_seconds`) — so a worker draining
 real work answers inside the window. The window and the budget are checked against the
 resolved config at boot, at every reload, and at mutation time.
+
+A process stays on the worker bus its deployment gives it. When withdrawing the stored copies
+of keys another worker's deployment sets moves a value that locates the bus off the bus this
+process is a member of (:attr:`~tai42_skeleton.app.bus_settings.BusSettings.fleet`: the bus
+Redis URL or ``TAI_BUS_NAMESPACE``), the process reaches that bus only through a copy that
+does not count, and it can neither stay on that bus nor run without it: the boot env bridge
+refuses to start, and a join, a join announcement or a reconnect ends the process
+(:func:`check_bus_stays_deployment_given`).
 """
 
 from __future__ import annotations
@@ -58,15 +66,18 @@ import os
 from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
-from tai42_skeleton.app.bus_settings import bus_settings
+from tai42_kit.settings import fold_env_name
+
+from tai42_skeleton.app.bus_settings import bus_settings, fleet_env_names
 from tai42_skeleton.app.epoch_retire import retire_drain_floor_seconds
 from tai42_skeleton.config.config_mode import ConfigMode, config_mode
 from tai42_skeleton.hooks.settings import HooksSettings
 from tai42_skeleton.sub_mcp.settings import sub_mcp_settings
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Callable, Iterator, Sequence
 
+    from tai42_skeleton.app.bus_settings import BusSettings
     from tai42_skeleton.app.lifecycle.drain import DrainBudgetRegistry
     from tai42_skeleton.manifest import Manifest
 
@@ -144,6 +155,16 @@ class ApplyWindowBelowDrainError(ConfigInvariantError):
 
     A reload's retire may legally spend three drains of the declared drain budget; a window
     shorter than that would report a worker still draining real work as ``timed_out``.
+    """
+
+
+class BusNotDeploymentGivenError(ConfigInvariantError):
+    """A withdraw of stored keys another worker's deployment sets moved the bus this process is a member of.
+
+    The process reaches its bus only through a stored copy that does not count, so it can
+    neither stay on that bus nor run without it. Raised by the boot env bridge, which then
+    refuses to start, and at every door that learns the fleet's deployment names, which then
+    ends the process.
     """
 
 
@@ -352,6 +373,31 @@ def check_apply_window_covers_drain(*, bus_enabled: bool, apply_timeout: float, 
             f"Set {_APPLY_WINDOW_VAR} to at least {floor:g} s plus the reload's own build and post-apply time, "
             "or lower the drain budget."
         )
+
+
+def check_bus_stays_deployment_given(
+    *, member: BusSettings, before: BusSettings, after: BusSettings, withdrawn: Sequence[str]
+) -> None:
+    """Raise when a withdraw moved the bus settings off the bus a process is a member of.
+
+    ``member`` is the bus settings the process's bus was built under; ``before`` and ``after``
+    are the effective bus settings just before and just after the withdraw of ``withdrawn``.
+    Only the values that locate the fleet's census
+    (:attr:`~tai42_skeleton.app.bus_settings.BusSettings.fleet`) count, and only a move the
+    withdraw itself made: a withdraw that moves the heartbeat or a timeout, one that leaves the
+    location where it was (a namespace saved since the bus was built still waits for the
+    respawn), and one that returns the location to the bus the process runs on all leave the
+    process on its bus. The refusal names the withdrawn keys that locate the bus, never a value.
+    """
+    if before.fleet == after.fleet or member.fleet == after.fleet:
+        return
+    locating = fleet_env_names()
+    keys = sorted(key for key in withdrawn if fold_env_name(key) in locating)
+    raise BusNotDeploymentGivenError(
+        f"Refusing to run on a worker bus this process reaches only through a stored copy of {', '.join(keys)}: "
+        "another worker's deployment sets them and the stored copy does not count. "
+        "Set them in this process's environment too, or in no worker's."
+    )
 
 
 def declared_drain_budgets() -> DrainBudgetRegistry:

@@ -8,6 +8,7 @@ infra."""
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 
 import pytest
@@ -56,6 +57,8 @@ def _stack(census: list[BusWorker]) -> TaiStack:
         "backend": _Running("backend", _BACKEND_PID),
         "backend-queue-b": _Running("backend-queue-b", _QUEUE_WORKER_PID),
     }
+    stack._supervisor_lock = threading.RLock()  # type: ignore[attr-defined]
+    stack._supervised_names = set()  # type: ignore[attr-defined]
     stack.census = lambda: census  # type: ignore[method-assign]
     return stack
 
