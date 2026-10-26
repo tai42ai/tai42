@@ -15,6 +15,8 @@ from tai42_skeleton.storage import StorageRegistry
 from tai42_skeleton.template import ResourceManager
 from tai42_skeleton.template.errors import TemplateLocaleNotFoundError, TemplateNotFoundError
 
+from .._fakes.listing import keys_under
+
 
 class _InMemoryStorage(Storage):
     def __init__(self, items: dict[str, str] | None = None) -> None:
@@ -26,8 +28,8 @@ class _InMemoryStorage(Storage):
         except KeyError as exc:
             raise FileNotFoundError(path) from exc
 
-    async def list(self) -> list[str]:
-        return sorted(self.items)
+    async def list(self, directory: str | None = None) -> list[str]:
+        return keys_under(sorted(self.items), directory)
 
     async def upload(self, path: str, content: str) -> None:
         self.items[path] = content

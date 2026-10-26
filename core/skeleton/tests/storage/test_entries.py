@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import inspect
 from types import SimpleNamespace
 
@@ -191,16 +192,22 @@ async def test_a_provider_boundary_value_error_is_a_400(store: RecordingStorage,
         await read_stored_entry("a.txt")
 
 
-@pytest.mark.parametrize(("method", "data"), [("load_range", b"hello"), ("load_bytes", b"hello\n" * 2000)])
-async def test_a_genuine_provider_failure_propagates(
-    store: RecordingStorage, monkeypatch, method: str, data: bytes
-) -> None:
+@pytest.mark.parametrize("data", [b"hello", b"hello\n" * 2000], ids=["sample-read", "whole-read"])
+async def test_a_genuine_provider_failure_propagates(store: RecordingStorage, monkeypatch, data: bytes) -> None:
     store.put("a.txt", data)
+    reads = 0
+    real_load_range = store.load_range
 
-    async def _fail(path: str, *_: int) -> bytes:
+    async def _fail_last_read(path: str, start: int, length: int) -> bytes:
+        nonlocal reads
+        reads += 1
+        # The small object fails on its one sample read; the large one passes its sample
+        # read and fails on the whole read that follows it.
+        if reads == 1 and len(data) > length:
+            return await real_load_range(path, start, length)
         raise RuntimeError("upstream 502")
 
-    monkeypatch.setattr(store, method, _fail)
+    monkeypatch.setattr(store, "load_range", _fail_last_read)
     with pytest.raises(RuntimeError, match="upstream 502"):
         await read_stored_entry("a.txt")
 
@@ -267,15 +274,43 @@ async def test_a_text_object_past_two_windows_is_sampled_read_whole_once_and_cla
         ("stat", "notes/long.txt"),
         ("load_range", "notes/long.txt", 0, 4096),
         ("load_range", "notes/long.txt", size - 4096, 4096),
-        ("load_bytes", "notes/long.txt"),
+        ("load_range", "notes/long.txt", 0, 25 * 1024 * 1024 + 1),
     ]
     assert detections == [data[:4096] + data[-4096:]]
 
 
+async def test_an_object_grown_past_the_cap_after_its_stat_is_refused_on_the_bytes_read(
+    store: RecordingStorage, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(file_loading, "file_loading_settings", lambda: SimpleNamespace(max_bytes=10_000))
+    stated = b"line of plain text for the reader\n" * 270
+    store.put("notes/grown.txt", stated * 20, "text/plain")
+    real_stat = store.stat
+
+    async def _stale_stat(path: str):
+        # The stat reports the object's size before it grew to twenty times that.
+        return (await real_stat(path)).model_copy(update={"size": len(stated)})
+
+    monkeypatch.setattr(store, "stat", _stale_stat)
+    with pytest.raises(BadRequestError) as caught:
+        await read_stored_entry("notes/grown.txt")
+    assert caught.value.message == _not_loadable(
+        "notes/grown.txt", "document is over the 10000-byte FILE_LOADING_MAX_BYTES cap"
+    )
+    assert _reads(store)[-1] == ("load_range", "notes/grown.txt", 0, 10_001)
+    assert ("load_bytes", "notes/grown.txt") not in store.calls
+
+
 def test_the_reader_decides_through_the_shared_classifier_alone() -> None:
     source = inspect.getsource(entries)
-    assert "classify" in source
-    assert "load_classified" in source
+    # The reader runs the classifier off the event loop: ``asyncio.to_thread(classify, ...)``.
+    thread_calls = [
+        node
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "to_thread"
+    ]
+    called = {arg.id for call in thread_calls for arg in call.args[:1] if isinstance(arg, ast.Name)}
+    assert {"classify", "load_classified"} <= called
     assert ".decode(" not in source
 
 

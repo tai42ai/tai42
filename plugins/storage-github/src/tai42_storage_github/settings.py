@@ -24,8 +24,9 @@ class GithubStorageSettings(TaiBaseSettings):
     # defaulting to the real GitHub hosts. Overridable (like ``S3Settings.endpoint``)
     # so a test can point the plugin at a hermetic stand-in. Each carries
     # ``{username}``/``{repo}`` placeholders the provider fills per request; the ref
-    # and trees templates also ``{branch}``, and the raw template ``{commit}``, the
-    # branch head commit a ranged read resolves first.
+    # and trees templates also ``{branch}`` (the trees template's is the tree read: the
+    # branch, or ``branch:directory`` for a directory listing), and the raw template
+    # ``{commit}``, the branch head commit a ranged read resolves first.
     raw_base_url: str = "https://raw.githubusercontent.com/{username}/{repo}/{commit}"
     contents_api_url: str = "https://api.github.com/repos/{username}/{repo}/contents"
     ref_api_url: str = "https://api.github.com/repos/{username}/{repo}/git/ref/heads/{branch}"

@@ -18,6 +18,7 @@ from tai42_skeleton.operations.templates import list_templates
 from tai42_skeleton.storage.prefix_marks import PrefixMarkRegistry
 from tai42_skeleton.template import ResourceManager
 
+from .._fakes.listing import keys_under
 from .._fakes.prefix_marks import fresh_prefix_marks
 from ..app._fixtures.reload import reload_with
 
@@ -29,8 +30,8 @@ class _MemoryStorage(Storage):
     async def load(self, path: str) -> str:
         return self.objects[path].decode("utf-8")
 
-    async def list(self) -> list[str]:
-        return sorted(self.objects)
+    async def list(self, directory: str | None = None) -> list[str]:
+        return keys_under(sorted(self.objects), directory)
 
     async def upload(self, path: str, content: str) -> None:
         self.objects[path] = content.encode("utf-8")

@@ -6,7 +6,7 @@ A GitHub-backed `Storage` provider for the TAI ecosystem. It stores content as
 files in a GitHub repository and serves the full `tai42_contract.storage.Storage`
 surface — the text methods (`load` / `list` / `upload` / `delete` / `delete_dir`)
 plus the metadata read `stat`, the bounded read `load_range` and the binary
-methods (`load_bytes` / `upload_bytes`).
+methods (`load_bytes` / `upload_bytes` / `load_object`).
 
 ## The TAI ecosystem
 
@@ -72,11 +72,12 @@ a log line, repr, or error message.
 
 ## Reads and writes
 
-- **Reads** (`load`, `load_bytes`) are one Contents API call each at the
+- **Reads** (`load`, `load_bytes`, `load_object`) are one Contents API call each at the
   configured branch, asking for the raw form
   (`Accept: application/vnd.github.raw+json`), which serves every byte of a file
   of any size. A directory answers its JSON listing and reads as
-  `FileNotFoundError`.
+  `FileNotFoundError`. `load_object` infers the content type from the path suffix,
+  as `stat` does.
 - **Ranged reads** (`load_range`) resolve the branch's head commit through the
   Git refs API, then read `raw.githubusercontent.com` at that commit with a
   `Range` header and `Accept-Encoding: identity` (the raw host compresses, and a
@@ -92,7 +93,11 @@ a log line, repr, or error message.
   are capped conservatively at 1 MiB. A larger payload raises `ValueError` before
   the request rather than truncating; the API's own `422` is the backstop.
 - **Listing** uses the recursive Git Trees API (one request) and raises loudly on
-  a `truncated` response rather than acting on a partial listing.
+  a `truncated` response rather than acting on a partial listing. `list(directory)`
+  reads the tree of that directory alone (`<branch>:<directory>`), so it grows with
+  the directory, not the repository; a directory that does not exist answers `[]`
+  once the branch is confirmed to exist. `delete_dir` lists the directory the same
+  way.
 - **`stat`** is one Contents API call asking for the object form
   (`Accept: application/vnd.github.object+json`): it answers the file's `size`,
   and infers `content_type` from the path suffix — GitHub stores no per-object

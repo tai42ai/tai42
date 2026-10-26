@@ -6,6 +6,7 @@ round-trip (``rt``) pipeline for exactly that, while keeping ``!ENV`` tags alive
 as ``"!ENV <value>"`` marker strings so a resolved value never bakes to disk.
 """
 
+from dataclasses import dataclass
 from io import StringIO
 
 from ruamel.yaml import YAML
@@ -151,6 +152,43 @@ def dump_manifest(document: CommentedMap) -> str:
     stream = StringIO()
     _make_yaml().dump(document, stream)
     return stream.getvalue()
+
+
+# ---------------------------------------------------------------------------
+# Parse once per text
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _ParsedManifest:
+    """One manifest text and the document :func:`load_manifest` parsed from it."""
+
+    text: str
+    document: CommentedMap
+
+
+class ManifestParseCache:
+    """Serve the parsed document of a manifest text, parsing each distinct text once.
+
+    A store's read hands every text it reads to :meth:`load`; a text equal to the last
+    one parsed is served the SAME document, so the document is shared by every reader of
+    that text and is read-only to them. The key is the text itself, so any change to the
+    stored content, by whatever writer, is a new parse. Only the last text is kept.
+    """
+
+    def __init__(self) -> None:
+        """Start with nothing parsed."""
+        self._last: _ParsedManifest | None = None
+
+    def load(self, text: str) -> CommentedMap:
+        """The document parsed from ``text``, as :func:`load_manifest` parses it; raises as it does."""
+        last = self._last
+        if last is not None and last.text == text:
+            return last.document
+        document = load_manifest(text)
+        # One attribute assignment: a concurrent reader sees the old or the new pair, never a mix.
+        self._last = _ParsedManifest(text, document)
+        return document
 
 
 # ---------------------------------------------------------------------------

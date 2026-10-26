@@ -149,6 +149,9 @@ class _FakeSvc:
         self.fail_persist = False
         self.env_change_calls = 0
 
+    def read_manifest_document(self) -> dict[str, Any]:
+        return copy.deepcopy(self._cm.read_manifest_preserved())
+
     async def apply_change(self, mutator: Any) -> ApplyResult:
         document = copy.deepcopy(self._cm._manifest)
         mutator(document)

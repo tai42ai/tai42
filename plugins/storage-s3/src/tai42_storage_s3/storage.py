@@ -2,7 +2,9 @@
 
 S3 stores bytes and content-types natively; ``stat`` reports the stored
 ``ContentType`` and ``ContentLength`` and maps a missing object to
-``FileNotFoundError``; ``load_range`` reads a byte range with a ranged ``get_object``.
+``FileNotFoundError``; ``load_object`` answers the bytes with the stored ``ContentType``
+from one ``get_object``; ``load_range`` reads a byte range with a ranged ``get_object``;
+``list`` of a directory pages only the keys under its prefix.
 """
 
 from __future__ import annotations
@@ -12,7 +14,14 @@ from typing import Any, Final
 
 from botocore.exceptions import ClientError
 from tai42_contract.app import tai42_app
-from tai42_contract.storage import ObjectStat, Storage, StoragePathConflictError, assert_not_root
+from tai42_contract.storage import (
+    ObjectStat,
+    Storage,
+    StoragePathConflictError,
+    StoredObject,
+    assert_not_root,
+    directory_prefix,
+)
 
 from tai42_storage_s3.client import S3Client
 from tai42_storage_s3.settings import s3_settings
@@ -44,6 +53,18 @@ def _ancestor_keys(path: str) -> list[str]:
     """
     segments = [s for s in path.split("/") if s]
     return ["/".join(segments[:i]) for i in range(1, len(segments))]
+
+
+async def _list_keys(client: Any, bucket: str, prefix: str | None) -> list[str]:
+    """Every key in ``bucket``, or only those starting with ``prefix``, read page by page."""
+    paginator = client.get_paginator("list_objects_v2")
+    page_kwargs: dict[str, str] = {"Bucket": bucket}
+    if prefix is not None:
+        page_kwargs["Prefix"] = prefix
+    keys: list[str] = []
+    async for page in paginator.paginate(**page_kwargs):
+        keys.extend(obj["Key"] for obj in page.get("Contents", []))
+    return keys
 
 
 def _bucket() -> str:
@@ -79,6 +100,13 @@ class S3Storage(Storage):
 
     async def load_bytes(self, path: str) -> bytes:
         """Load ``path``'s raw bytes, raising ``FileNotFoundError`` when absent."""
+        return (await self.load_object(path)).data
+
+    async def load_object(self, path: str) -> StoredObject:
+        """The raw bytes and the stored ``ContentType`` of ``path`` in one ``get_object``.
+
+        Raises ``FileNotFoundError`` when the object does not exist.
+        """
         bucket = _bucket()
         async with tai42_app.clients.client_ctx(S3Client) as client:
             try:
@@ -89,17 +117,14 @@ class S3Storage(Storage):
                 raise
             async with resp["Body"] as stream:
                 data: bytes = await stream.read()
-                return data
+            return StoredObject(data=data, content_type=resp.get("ContentType"))
 
-    async def list(self) -> list[str]:
-        """Every object key in the bucket."""
+    async def list(self, directory: str | None = None) -> list[str]:
+        """Every object key in the bucket, or only those beneath ``directory``, listed by its key prefix."""
+        prefix = None if directory is None else directory_prefix(directory)
         bucket = _bucket()
         async with tai42_app.clients.client_ctx(S3Client) as client:
-            paginator = client.get_paginator("list_objects_v2")
-            keys: list[str] = []
-            async for page in paginator.paginate(Bucket=bucket):
-                keys.extend(obj["Key"] for obj in page.get("Contents", []))
-            return keys
+            return await _list_keys(client, bucket, prefix)
 
     async def upload(self, path: str, content: str) -> None:
         """Upload ``content`` as UTF-8 text at ``path``."""
@@ -130,10 +155,7 @@ class S3Storage(Storage):
         an ancestor id is itself a stored key (``path`` would be nested under a
         file), naming the conflicting ids.
         """
-        paginator = client.get_paginator("list_objects_v2")
-        under: list[str] = []
-        async for page in paginator.paginate(Bucket=bucket, Prefix=f"{path}/"):
-            under.extend(obj["Key"] for obj in page.get("Contents", []))
+        under = await _list_keys(client, bucket, f"{path}/")
         if under:
             raise StoragePathConflictError(path, sorted(under))
         for ancestor in _ancestor_keys(path):
@@ -164,16 +186,12 @@ class S3Storage(Storage):
         """Delete every object under the ``path`` directory prefix, raising ``FileNotFoundError`` when none."""
         assert_not_root(path)
 
-        # Treat the path as a directory prefix so a bare "d" can't match sibling
-        # keys like "d2/x.j2".
-        prefix = path if path.endswith("/") else f"{path}/"
+        # The path is a directory prefix, so a bare "d" can't match sibling keys like "d2/x.j2".
+        prefix = directory_prefix(path)
         bucket = _bucket()
 
         async with tai42_app.clients.client_ctx(S3Client) as client:
-            paginator = client.get_paginator("list_objects_v2")
-            keys: list[dict[str, str]] = []
-            async for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
-                keys.extend({"Key": obj["Key"]} for obj in page.get("Contents", []))
+            keys = [{"Key": key} for key in await _list_keys(client, bucket, prefix)]
 
             if not keys:
                 raise FileNotFoundError(f"Object directory not found or empty: {path}")

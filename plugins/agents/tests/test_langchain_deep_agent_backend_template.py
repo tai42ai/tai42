@@ -273,6 +273,22 @@ def test_template_aglob_star_is_non_recursive(fake_tm: _FakeResourceManager) -> 
     assert result.matches == []
 
 
+def test_a_folder_marker_key_is_not_served(fake_tm: _FakeResourceManager) -> None:
+    """A store that holds an empty ``skills/`` folder-marker object (as S3 tools create)
+    lists that key under the prefix; it names no file, so the mount does not serve it
+    and a root glob still finds every skill file."""
+
+    async def go() -> Any:
+        await fake_tm.upload_template("skills/", "")
+        await fake_tm.upload_template("skills/jq/SKILL.md", "x")
+        await fake_tm.upload_template("skills/jq/ref.md", "y")
+        skills = build_backend().routes[SKILLS_ROOT]
+        return await skills.aglob("**/*")
+
+    result = asyncio.run(go())
+    assert {m["path"] for m in result.matches} == {"/jq/SKILL.md", "/jq/ref.md"}
+
+
 def test_template_aglob_globstar_is_recursive(fake_tm: _FakeResourceManager) -> None:
     """``**`` crosses ``/`` (explicit recursion): ``**/*.md`` matches nested
     skill files."""

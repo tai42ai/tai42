@@ -4,11 +4,15 @@ from __future__ import annotations
 
 from collections.abc import MutableMapping
 
-from tai42_contract.storage import ObjectStat, Storage
+from tai42_contract.storage import ObjectStat, Storage, StoredObject
+
+from .listing import keys_under
 
 
 class RecordingStorage(Storage):
-    """Holds ``{id: (bytes, content_type)}`` and appends each read to ``calls``.
+    """Holds ``{id: (bytes, content_type)}`` and appends each read and listing to ``calls``.
+
+    Binary-native: ``load_object`` answers the bytes and the stored type in one read.
 
     A missing id raises ``FileNotFoundError`` on every read, as a real provider does.
     """
@@ -42,8 +46,13 @@ class RecordingStorage(Storage):
         data = self._data(path)
         return ObjectStat(content_type=self.objects[path][1], size=len(data))
 
-    async def list(self) -> list[str]:
-        return sorted(self.objects)
+    async def load_object(self, path: str) -> StoredObject:
+        self.calls.append(("load_object", path))
+        return StoredObject(data=self._data(path), content_type=self.objects[path][1])
+
+    async def list(self, directory: str | None = None) -> list[str]:
+        self.calls.append(("list", directory))
+        return keys_under(sorted(self.objects), directory)
 
     async def upload(self, path: str, content: str) -> None:
         self.objects[path] = (content.encode("utf-8"), None)
@@ -81,5 +90,10 @@ class MappedStorage(RecordingStorage):
         self.calls.append(("stat", path))
         return ObjectStat(content_type=None, size=len(self._data(path)))
 
-    async def list(self) -> list[str]:
-        return sorted(self.items)
+    async def load_object(self, path: str) -> StoredObject:
+        self.calls.append(("load_object", path))
+        return StoredObject(data=self._data(path), content_type=None)
+
+    async def list(self, directory: str | None = None) -> list[str]:
+        self.calls.append(("list", directory))
+        return keys_under(sorted(self.items), directory)

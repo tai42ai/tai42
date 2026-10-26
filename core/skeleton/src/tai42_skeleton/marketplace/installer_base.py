@@ -84,8 +84,9 @@ class _InstallerBase:
     def _cm(self) -> Any:
         """The live config manager (read seam), or the injected fake.
 
-        Reached live per use because a reload swaps app internals; only for pre-flight manifest
-        READS — every WRITE crosses :meth:`_svc`.
+        Reached live per use because a reload swaps app internals; only for stored-env READS —
+        a manifest preview reads :meth:`ConfigService.read_manifest_document` and every WRITE
+        crosses :meth:`_svc`.
         """
         if self._config_manager is not None:
             return self._config_manager

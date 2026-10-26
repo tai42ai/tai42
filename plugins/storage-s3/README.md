@@ -6,8 +6,8 @@ An S3 `Storage` backend for the TAI ecosystem. It stores text, binary, and media
 content in an S3 bucket, implementing the full `tai42_contract.storage.Storage`
 surface — the five text methods (`load` / `list` / `upload` / `delete` /
 `delete_dir`) plus the metadata read `stat`, the bounded read `load_range` and the
-binary/media methods (`load_bytes` / `upload_bytes`). S3 stores bytes natively, so
-the binary methods are true reads/writes rather than the text bridge.
+binary/media methods (`load_bytes` / `upload_bytes` / `load_object`). S3 stores bytes
+natively, so the binary methods are true reads/writes rather than the text bridge.
 
 ## The TAI ecosystem
 
@@ -86,6 +86,11 @@ Settings are read from the `STORAGE_S3_` environment group (see
   `size`) via `head_object`, mapping a missing object (404) to
   `FileNotFoundError` — no raw `ClientError` or metadata leaks. `stat` on a text
   object reports `text/plain; charset=utf-8`.
+- `load_object` is one `get_object`: it answers the bytes with the object's stored
+  `ContentType`, so a caller wanting both makes no `head_object` call.
+- `list(directory)` lists only the keys under `<directory>/` (a `Prefix` on
+  `list_objects_v2`); `delete_dir` and the upload path-conflict check list the same
+  way.
 - `load_range` is one `get_object` with a `Range: bytes=start-end` header: it
   answers fewer bytes at the object's end and `b""` at or past it (S3's
   `InvalidRange`), raises `FileNotFoundError` for a missing object, and sends no

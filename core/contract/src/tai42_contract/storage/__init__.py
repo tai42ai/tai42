@@ -4,11 +4,13 @@
 :mod:`tai42_contract.template` ("what we do with it", the render mixins). The store
 exposes the text surface ``load`` / ``list`` / ``upload`` / ``delete`` /
 ``delete_dir``, the metadata read ``stat`` (content type and byte size), the bounded
-read ``load_range`` and the binary surface ``load_bytes`` / ``upload_bytes``, with the
+read ``load_range``, the binary surface ``load_bytes`` / ``upload_bytes`` and the
+whole-object read ``load_object`` (the bytes with their content type), with the
 module-level ``assert_not_root`` guarding deletes against the store root. ``stat`` and
 ``load_range`` are abstract: only the backend knows an object's size and how to read a
 slice of it without reading all of it. ``load_bytes`` / ``upload_bytes`` ship
-text-bridging defaults; binary-native backends override.
+text-bridging defaults and ``load_object`` a default built on ``load_bytes`` and
+``stat``; binary-native backends override them.
 """
 
 from __future__ import annotations
@@ -75,6 +77,19 @@ class ObjectStat(BaseModel):
     size: int = Field(ge=0)
 
 
+class StoredObject(BaseModel):
+    """A stored object's bytes and its content type, returned by :meth:`Storage.load_object`.
+
+    ``content_type`` is the same MIME type :meth:`Storage.stat` reports. Frozen: a read
+    object is a value, not a mutable handle.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    data: bytes
+    content_type: str | None
+
+
 def assert_not_root(path: str) -> None:
     """Reject a directory path that resolves to the storage root.
 
@@ -89,6 +104,18 @@ def assert_not_root(path: str) -> None:
     normalized = posixpath.normpath(path.strip())
     if normalized in (".", "/", "//") or normalized == ".." or normalized.startswith(("../", "/../")):
         raise ValueError("Refusing to delete the storage root; a directory path is required.")
+
+
+def directory_prefix(directory: str) -> str:
+    """The key prefix every object beneath ``directory`` starts with: the directory and one ``/``.
+
+    Surrounding slashes are dropped (``"a/b/"`` and ``"/a/b"`` are ``"a/b/"``). A blank
+    ``directory`` (``""``, ``"/"``) names no directory and raises ``ValueError``.
+    """
+    name = directory.strip("/")
+    if not name.strip():
+        raise ValueError("A directory path is required; a blank path names no directory.")
+    return f"{name}/"
 
 
 class Storage(ABC):
@@ -113,8 +140,15 @@ class Storage(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    async def list(self) -> builtins.list[str]:
-        """Return every stored object path, in no guaranteed order."""
+    async def list(self, directory: str | None = None) -> builtins.list[str]:
+        """Return stored object paths, in no guaranteed order.
+
+        With no ``directory``, every object in the store. With a ``directory``, only the
+        objects beneath it (the paths starting with :func:`directory_prefix` of it), read
+        from the backend by that prefix rather than by listing the whole store; a
+        directory holding no objects answers ``[]``. A blank ``directory`` raises
+        ``ValueError``.
+        """
         raise NotImplementedError
 
     @abstractmethod
@@ -156,6 +190,18 @@ class Storage(ABC):
         """
         return (await self.load(path)).encode("utf-8")
 
+    async def load_object(self, path: str) -> StoredObject:
+        """Return the bytes and the content type of the object at ``path``.
+
+        Raises ``FileNotFoundError`` when the object does not exist, as :meth:`load` does.
+
+        Default: :meth:`load_bytes` for the bytes and :meth:`stat` for the type, two
+        backend reads. A backend that answers both in one read (e.g. S3, whose object
+        read carries its stored type) overrides, so a caller wanting both makes one call.
+        """
+        data = await self.load_bytes(path)
+        return StoredObject(data=data, content_type=(await self.stat(path)).content_type)
+
     async def upload_bytes(self, path: str, data: bytes, content_type: str | None = None) -> None:
         """Store raw ``data`` at ``path``, optionally tagging ``content_type``.
 
@@ -188,4 +234,4 @@ class Storage(ABC):
         raise NotImplementedError
 
 
-__all__ = ["ObjectStat", "Storage", "StoragePathConflictError", "assert_not_root"]
+__all__ = ["ObjectStat", "Storage", "StoragePathConflictError", "StoredObject", "assert_not_root", "directory_prefix"]

@@ -1,43 +1,38 @@
-"""Fetch, render, schema-infer, and cache stored (and inline) templates."""
+"""Fetch, render, schema-infer, and cache stored (and inline) templates.
+
+:class:`ResourceManager` is the resource feature's one entry point. It renders, caches and writes
+here, and composes content and image loading (:mod:`~tai42_skeleton.template.sources`) and
+input-schema inference (:mod:`~tai42_skeleton.template.input_schema`).
+"""
 
 import asyncio
 import itertools
 import logging
-import mimetypes
 import threading
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from functools import lru_cache
 from typing import Any, cast
-from urllib.parse import urlsplit
 
 from async_lru import alru_cache
 from babel.core import Locale, UnknownLocaleError
 from babel.lists import format_list
-from jinja2 import FunctionLoader, meta, pass_context
+from jinja2 import FunctionLoader, pass_context
 from jinja2 import Template as JinjaTemplate
-from jinja2schema import JSONSchemaDraft4Encoder, infer, to_json_schema
-from tai42_contract.storage import Storage
+from tai42_contract.storage import Storage, assert_not_root
 from tai42_contract.template import ImageReference, TemplatedText, TemplateEviction
 from tai42_kit.clients import shutdown_all_clients
-from tai42_kit.net import fetch_url
 
 from tai42_skeleton.template.absent_ids import AbsentTemplateIds
-from tai42_skeleton.template.data_uri import assert_image, data_uri, decode_data_uri
 from tai42_skeleton.template.errors import TemplateLocaleNotFoundError, TemplateNotFoundError, TemplateNotTextError
+from tai42_skeleton.template.input_schema import template_input_schema, undeclared_variables
 from tai42_skeleton.template.media import MediaBlock
 from tai42_skeleton.template.path_guard import safe_template_path
 from tai42_skeleton.template.reads import RecordingEnvironment, record_template_read
 from tai42_skeleton.template.settings import template_cache_settings
+from tai42_skeleton.template.sources import SourceLoader
 
 logger = logging.getLogger(__name__)
-
-# Vendor marker stamped on a schema that carries variable NAMES without inferred
-# types, so a consumer can tell a fully inferred schema from a degraded one
-# instead of reading the missing types as "this template takes no typed input".
-_INFERENCE_MARKER_KEY = "x-tai42-inference"
-_PARTIAL_INFERENCE = "partial"
-
 
 #: The reserved render-context key the rendering layer stamps the subject's locale onto,
 #: read by :func:`_list_format` — never a template author's variable (a collision raises).
@@ -93,6 +88,7 @@ class ResourceManager:
         """
         self._provider = provider
         self._on_evicted = on_evicted
+        self._sources = SourceLoader(lambda: self.provider)
         self.epoch: int = next(_EPOCHS)
         self.generation: int = 0
         # Sandboxed engine: template text is an authoring surface (hook
@@ -305,116 +301,39 @@ class ResourceManager:
             raise TemplateNotFoundError(f"Template '{template_id}' not found.") from exc
 
     async def load(self, source: str, *, with_mime: bool = True) -> tuple[bytes, str | None]:
-        """Resolve ``source`` to ``(bytes, mime)`` — the unified content resolver.
+        """Resolve ``source`` — an ``http(s)`` URL, a ``data:`` URI or a bare storage id — to ``(bytes, mime)``.
 
-        The source kind is disambiguated UP FRONT by ``urlsplit(source).scheme``,
-        never by a try/fallback (which would swallow storage's loud
-        ``FileNotFoundError``):
-
-        - ``http`` / ``https`` -> fetched over the SSRF-pinned :func:`fetch_url`.
-        - ``data`` -> the inline ``data:`` URI is decoded (no network/storage).
-        - empty scheme -> a storage ``id``/path (``Storage.load_bytes`` for the
-          bytes, ``Storage.stat`` for the mime). The empty-scheme branch runs the
-          bare id through :func:`safe_template_path` first, enforcing root
-          containment on the id (an ``UnsafeTemplatePathError`` propagates loudly),
-          so every read that funnels here is guarded at this one seam.
-
-        Any other scheme (``file:``, ``ftp:``) or an id containing ``://`` is
-        ambiguous and raises loudly rather than being guessed. Each branch's own
-        errors propagate.
-
-        ``with_mime=False`` skips the storage ``Storage.stat`` lookup and returns
-        ``mime`` as ``None`` for a storage id — for a caller that re-detects the
-        type itself (:meth:`load_file` via Magika), so a metadata-bearing backend
-        (e.g. S3, whose ``stat`` is a ``head_object`` round-trip) makes no extra
-        call. http/data sources carry their mime inline, so the flag is a no-op
-        for them.
+        The source kind is decided by its scheme, never by a fallback; any other scheme or an
+        id containing ``://`` raises. A storage id is root-contained before it reaches the
+        provider. ``with_mime=False`` reads only the bytes and returns ``None`` for a storage
+        id's mime. See :meth:`SourceLoader.load <tai42_skeleton.template.sources.SourceLoader.load>`.
         """
-        scheme = urlsplit(source).scheme
-        if scheme in ("http", "https"):
-            return await fetch_url(source)
-        if scheme == "data":
-            return decode_data_uri(source)
-        if scheme == "" and "://" not in source:
-            return await self.load_stored(source, with_mime=with_mime)
-        raise ValueError(
-            f"Cannot resolve source {source!r}: only http(s) URLs, data URIs, and bare "
-            "storage ids are supported (a file:/ftp: scheme or an embedded '://' is rejected)."
-        )
+        return await self._sources.load(source, with_mime=with_mime)
 
     async def load_stored(self, path: str, *, with_mime: bool = True) -> tuple[bytes, str | None]:
-        """Read the stored object at storage id ``path`` as ``(bytes, mime)``.
+        """Read the stored object at storage id ``path`` as ``(bytes, mime)``, root-contained.
 
-        ``path`` is always a storage id, never a URL, whatever characters it holds.
-        A storage id is a caller-supplied logical key, so root containment is
-        enforced before it reaches the provider (an ``UnsafeTemplatePathError``
-        propagates); every storage read, including :meth:`load`'s storage branch,
-        is guarded at this one seam. ``with_mime`` is as in :meth:`load`.
+        ``path`` is always a storage id, never a URL; ``with_mime`` is as in :meth:`load`.
         """
-        safe_template_path(path)
-        data = await self.provider.load_bytes(path)
-        mime = (await self.provider.stat(path)).content_type if with_mime else None
-        return data, mime
+        return await self._sources.load_stored(path, with_mime=with_mime)
 
     async def load_file(self, source: str) -> str | MediaBlock:
         """Load ``source`` and decode it to extracted text OR a ``MediaBlock``.
 
-        Resolves the bytes via :meth:`load` (``with_mime=False`` — the type is
-        re-detected here with Magika, so the storage mime lookup is skipped),
-        then dispatches through the type registry (the opt-in ``files`` extra).
-        Bytes of an unknown type, over the size cap, detected as text but not
-        UTF-8, or refused by their extractor raise :class:`ContentNotLoadableError`.
-        Without the ``files`` extra it raises the ``501`` ``NotSupportedError``
-        before any read.
+        Bytes that cannot be loaded raise :class:`ContentNotLoadableError`; without the
+        ``files`` extra it raises the ``501`` ``NotSupportedError`` before any read. See
+        :meth:`SourceLoader.load_file <tai42_skeleton.template.sources.SourceLoader.load_file>`.
         """
-        from tai42_skeleton.template.file_loading import load_content
-
-        data, _mime = await self.load(source, with_mime=False)
-        return await asyncio.to_thread(load_content, data, source)
+        return await self._sources.load_file(source)
 
     async def resolve_image(self, source: str | bytes) -> ImageReference:
-        """Resolve an image reference to an addressable image with its asserted mime.
+        """Resolve an image reference to an addressable image with its asserted ``image/*`` mime.
 
-        Image-only: the resolved mime must be ``image/*`` or it raises. Per source
-        kind, without a wasteful download:
-
-        - a public ``http(s)`` URL is passed through unchanged (the model
-          dereferences it) with its suffix mime; a non-``image/*`` URL suffix raises
-          here, an indeterminable one passes through with no mime.
-        - a ``data:`` URI's mediatype is asserted ``image/*`` and passed through.
-        - a storage ``id`` (or raw ``bytes``) is loaded and emitted as a base64
-          ``data:`` URI that always carries a resolved image mime.
+        A public URL or a ``data:`` URI passes through; a storage id or raw ``bytes`` becomes a
+        base64 ``data:`` URI. A non-image raises. See
+        :meth:`SourceLoader.resolve_image <tai42_skeleton.template.sources.SourceLoader.resolve_image>`.
         """
-        if isinstance(source, bytes):
-            from tai42_skeleton.template.file_loading import detect_mime
-
-            mime = detect_mime(source)
-            assert_image(mime, "<bytes>")
-            if mime is None:
-                raise AssertionError
-            return ImageReference(url=data_uri(source, mime), mime=mime)
-
-        parts = urlsplit(source)
-        scheme = parts.scheme
-        if scheme in ("http", "https"):
-            mime, _ = mimetypes.guess_type(parts.path)
-            if mime is not None and not mime.startswith("image/"):
-                raise ValueError(
-                    f"resolve_image requires an image resource; URL suffix mime is {mime!r} for {source!r}"
-                )
-            return ImageReference(url=source, mime=mime)
-        if scheme == "data":
-            mediatype = source[len("data:") :].partition(",")[0]
-            mime = mediatype.split(";", 1)[0] or None
-            assert_image(mime, source)
-            return ImageReference(url=source, mime=mime)
-
-        # Storage id (empty scheme) or a bad scheme -> load() validates and raises.
-        data, mime = await self.load(source)
-        assert_image(mime, source)
-        if mime is None:
-            raise AssertionError
-        return ImageReference(url=data_uri(data, mime), mime=mime)
+        return await self._sources.resolve_image(source)
 
     def _evict_engine_cache(self, matches: Callable[[str], bool]) -> None:
         """Drop every engine-cached dependency template whose name ``matches``.
@@ -628,104 +547,40 @@ class ResourceManager:
 
         return await asyncio.to_thread(_parse_and_render)
 
-    def _variables_only_schema(self, content: str) -> dict[str, Any]:
-        """Build the degraded, names-only input schema for ``content``.
+    async def _template_source(self, content: str | None, template_id: str | None) -> str:
+        """The template source a read inspects: inline ``content``, or the stored ``template_id``.
 
-        The template is parsed by the app's OWN sandboxed environment — the one
-        that renders it, so every registered filter and extension is known — and
-        each undeclared variable becomes an untyped property. Nothing is marked
-        required: the shapes are unknown here, not known-optional.
-
-        Author-broken Jinja raises ``TemplateError`` out of ``parse`` rather than
-        degrading to an empty schema: this environment is the authority on whether
-        the template PARSES. (Renderability is a stronger property — e.g. an
-        unknown Jinja *test* resolves only at render time — and belongs to the
-        render door, not to a schema read.)
-        """
-        names = sorted(meta.find_undeclared_variables(self._env.parse(content)))
-        return {
-            "type": "object",
-            "properties": {name: {"title": name} for name in names},
-            "required": [],
-            _INFERENCE_MARKER_KEY: _PARTIAL_INFERENCE,
-        }
-
-    async def get_template_schema(self, content: str | None = None, template_id: str | None = None) -> dict[str, Any]:
-        """Return the JSON-Schema description of a template's inputs.
-
-        Reading a renderable template never fails. ``jinja2schema`` is the
-        enricher: when it can infer the template it returns typed, required-aware
-        properties. It supports only a subset of Jinja, though, and rejects plenty
-        of valid, renderable templates (dict literals, ``{% with %}``/``{% set %}``
-        blocks, ``{% include %}``, filters it does not know) with errors that are
-        NOT ``jinja2.TemplateError`` — so any failure of that call degrades to
-        :meth:`_variables_only_schema`, which carries the variable names and the
-        ``x-tai42-inference: partial`` marker.
-
-        Raises ``TemplateNotFoundError`` for a missing ``template_id`` and
-        ``jinja2.TemplateError`` only when the template itself is broken (the app's
-        own environment refuses to parse it) — an author error, not a read failure.
+        Exactly one of the two must be given. A missing ``template_id`` raises
+        ``TemplateNotFoundError``; a present-but-empty stored template is a valid (empty)
+        source rather than rejected.
         """
         if content is not None and template_id is not None:
             raise ValueError("Provide either 'content' OR 'template_id', not both.")
+        if content is not None:
+            return content
+        if template_id is None:
+            raise ValueError("You must provide either a template or a template_id.")
+        try:
+            return await self._load_by_id(template_id)
+        except FileNotFoundError as exc:
+            raise TemplateNotFoundError(f"Template '{template_id}' not found.") from exc
 
-        if content is None:
-            if template_id is None:
-                raise ValueError("You must provide either a template or a template_id.")
-            try:
-                content = await self._load_by_id(template_id)
-            except FileNotFoundError as exc:
-                # Missing -> raise clearly; present-but-empty is a valid (empty)
-                # template, inferred as an empty schema rather than rejected.
-                raise TemplateNotFoundError(f"Template '{template_id}' not found.") from exc
+    async def get_template_schema(self, content: str | None = None, template_id: str | None = None) -> dict[str, Any]:
+        """Return the JSON-Schema description of a template's inputs, from ``content`` or a stored ``template_id``.
 
-        def _infer_schema() -> dict[str, Any]:
-            # ``Storage.load`` contractually returns ``str``, and the block above
-            # raised on a missing template, so ``content`` is a real string here.
-            if content is None:
-                raise AssertionError
-            try:
-                return to_json_schema(infer(content), jsonschema_encoder=JSONSchemaDraft4Encoder)
-            except Exception as exc:
-                # Broad ON PURPOSE and scoped to this one call: jinja2schema signals
-                # an unsupported construct as InferException, a bare ``Exception``
-                # ("stmt visitor ... not found"), or a ValueError from its own
-                # loader. None of those say the template is broken, so none may fail
-                # the read — they only mean "no types available".
-                logger.debug(
-                    "jinja2schema could not infer this template (%s: %s); degrading to a variables-only schema.",
-                    type(exc).__name__,
-                    exc,
-                )
-            return self._variables_only_schema(content)
-
-        return await asyncio.to_thread(_infer_schema)
+        The schema is :func:`~tai42_skeleton.template.input_schema.template_input_schema` over this
+        manager's rendering environment: reading a renderable template never fails. Raises
+        ``TemplateNotFoundError`` for a missing ``template_id`` and ``jinja2.TemplateError`` only when
+        the template itself is broken (the app's own environment refuses to parse it) — an author
+        error, not a read failure.
+        """
+        source = await self._template_source(content, template_id)
+        return await asyncio.to_thread(template_input_schema, self._env, source)
 
     async def find_undeclared_variables(self, content: str | None = None, template_id: str | None = None) -> set[str]:
         """The undeclared variables in a template, from inline ``content`` or a stored ``template_id``."""
-        if content is not None and template_id is not None:
-            raise ValueError("Provide either 'content' OR 'template_id', not both.")
-
-        if content is None:
-            if template_id is None:
-                raise ValueError("You must provide either a template or a template_id.")
-            try:
-                content = await self._load_by_id(template_id)
-            except FileNotFoundError as exc:
-                # Missing -> raise clearly; present-but-empty is a valid (empty)
-                # template with no undeclared variables rather than rejected.
-                raise TemplateNotFoundError(f"Template '{template_id}' not found.") from exc
-
-        def _find_vars():
-            # ``Storage.load`` contractually returns ``str`` (present-but-empty is
-            # ""), and the block above raised on a missing template, so ``content``
-            # is a real string here.
-            if content is None:
-                raise AssertionError
-            ast = self._env.parse(content)
-            return meta.find_undeclared_variables(ast)
-
-        return await asyncio.to_thread(_find_vars)
+        source = await self._template_source(content, template_id)
+        return await asyncio.to_thread(undeclared_variables, self._env, source)
 
     async def upload_template(self, path: str, content: str) -> None:
         """Store ``content`` at ``path`` and evict its compiled entry.
@@ -747,9 +602,13 @@ class ResourceManager:
         await self.provider.upload_bytes(path, data, content_type)
         self.evict_compiled(path)
 
-    async def list_resources(self) -> list[str]:
-        """List every stored resource path in the storage provider."""
-        return await self.provider.list()
+    async def list_resources(self, directory: str | None = None) -> list[str]:
+        """List every stored resource path in the storage provider, or only those beneath ``directory``.
+
+        A ``directory`` is listed by the provider itself (``Storage.list(directory)``), so
+        only that directory's objects are read; a blank one raises ``ValueError``.
+        """
+        return await self.provider.list(directory)
 
     async def delete_object(self, path: str) -> None:
         """Delete the stored object at ``path`` unless a stored object still names it.
@@ -783,12 +642,15 @@ class ResourceManager:
     async def delete_template_dir(self, path: str) -> None:
         """Delete every stored template under ``path/`` and evict their compiled entries.
 
+        A ``path`` naming the store root raises ``ValueError`` before any read. Only the
+        directory's objects are listed (``Storage.list(path)``), never the whole store.
         Refused, deleting and evicting nothing, when a stored object names any object under
         ``path/``. Eviction runs even on a partial-delete failure.
         """
         from tai42_skeleton.operations.holders import refuse_held_templates  # operations sit above this layer
 
-        ids = frozenset(key for key in await self.provider.list() if key.startswith(path + "/"))
+        assert_not_root(path)
+        ids = frozenset(await self.provider.list(path))
         await refuse_held_templates(ids, head=f"directory '{path}' cannot be deleted")
         try:
             return await self.provider.delete_dir(path)

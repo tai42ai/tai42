@@ -16,7 +16,9 @@ the payload bytes verbatim after the header, and the text surface is UTF-8 on to
 of them. (The contract's text-bridge defaults would STRICT-decode UTF-8 and so
 could not hold arbitrary bytes.) ``stat`` answers the payload size (the header
 excluded) and infers the content type from the path suffix — the filesystem stores
-no content-type metadata. ``load_range`` reads the payload window after the header.
+no content-type metadata; ``load_object`` answers the payload with that inferred type
+in one file read. ``load_range`` reads the payload window after the header. ``list``
+of a directory walks only that directory's subtree.
 """
 
 from __future__ import annotations
@@ -31,7 +33,7 @@ from typing import BinaryIO
 
 from pydantic_settings import SettingsConfigDict
 from tai42_contract.app import tai42_app
-from tai42_contract.storage import ObjectStat, Storage, assert_not_root
+from tai42_contract.storage import ObjectStat, Storage, StoredObject, assert_not_root, directory_prefix
 from tai42_kit.settings import TaiBaseSettings, settings_cache
 
 logger = logging.getLogger(__name__)
@@ -98,6 +100,10 @@ class FixtureStorage(Storage):
 
         return await asyncio.to_thread(_read)
 
+    async def load_object(self, path: str) -> StoredObject:
+        content_type, _ = mimetypes.guess_type(path)
+        return StoredObject(data=await self.load_bytes(path), content_type=content_type)
+
     async def upload_bytes(self, path: str, data: bytes, content_type: str | None = None) -> None:
         # The filesystem keeps no MIME metadata, so ``content_type`` is accepted for
         # contract parity but not stored; ``stat`` re-infers it from the path suffix.
@@ -135,12 +141,15 @@ class FixtureStorage(Storage):
     async def upload(self, path: str, content: str) -> None:
         await self.upload_bytes(path, content.encode("utf-8"))
 
-    async def list(self) -> list[str]:
+    async def list(self, directory: str | None = None) -> list[str]:
         def _walk() -> list[str]:
             base = (_root() / _OBJECTS_SUBDIR).resolve()
-            if not base.exists():
+            start = base if directory is None else _resolve(directory_prefix(directory).rstrip("/"))
+            if directory is not None and start == base:
+                raise ValueError(f"Directory {directory} resolves to the storage root")
+            if not start.is_dir():
                 return []
-            return [str(p.relative_to(base)) for p in base.rglob("*") if p.is_file()]
+            return [p.relative_to(base).as_posix() for p in start.rglob("*") if p.is_file()]
 
         return await asyncio.to_thread(_walk)
 

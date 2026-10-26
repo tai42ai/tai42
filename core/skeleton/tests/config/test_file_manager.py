@@ -442,6 +442,72 @@ def test_read_manifest_preserved_missing_raises(tmp_path) -> None:
         mgr.read_manifest_preserved()
 
 
+def _count_manifest_parses(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Record the text of every manifest parse the preserved read makes."""
+    import tai42_kit.utils.data.yaml_util as yaml_util
+
+    parsed: list[str] = []
+    real = yaml_util.load_manifest
+
+    def counting(text: str):
+        parsed.append(text)
+        return real(text)
+
+    monkeypatch.setattr(yaml_util, "load_manifest", counting)
+    return parsed
+
+
+def test_read_manifest_preserved_parses_unchanged_content_once(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    parsed = _count_manifest_parses(monkeypatch)
+    (tmp_path / "manifest.yml").write_text("a: 1\n", encoding="utf-8")
+    mgr = FileConfigManager(config_dir_path=str(tmp_path))
+
+    first = mgr.read_manifest_preserved()
+    second = mgr.read_manifest_preserved()
+
+    assert first == {"a": 1}
+    assert second is first
+    assert parsed == ["a: 1\n"]
+
+
+def test_read_manifest_preserved_serves_a_rewrite_of_equal_length_and_timestamp(tmp_path) -> None:
+    path = tmp_path / "manifest.yml"
+    path.write_text("a: 1\n", encoding="utf-8")
+    before = os.stat(path)
+    mgr = FileConfigManager(config_dir_path=str(tmp_path))
+    assert mgr.read_manifest_preserved() == {"a": 1}
+
+    with open(path, "r+", encoding="utf-8") as fh:
+        fh.write("a: 2\n")
+    os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+    after = os.stat(path)
+    assert (after.st_ino, after.st_size, after.st_mtime_ns) == (before.st_ino, before.st_size, before.st_mtime_ns)
+
+    assert mgr.read_manifest_preserved() == {"a": 2}
+
+
+def test_read_manifest_preserved_serves_the_file_after_a_mutate(tmp_path) -> None:
+    (tmp_path / "manifest.yml").write_text("a: 1\n", encoding="utf-8")
+    mgr = FileConfigManager(config_dir_path=str(tmp_path))
+    assert mgr.read_manifest_preserved() == {"a": 1}
+
+    mgr.mutate_manifest(lambda doc: doc.__setitem__("a", 2))
+
+    assert mgr.read_manifest_preserved() == {"a": 2}
+
+
+def test_read_manifest_preserved_follows_a_changed_manifest_path(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    (tmp_path / "first.yml").write_text("a: 1\n", encoding="utf-8")
+    (tmp_path / "second.yml").write_text("b: 2\n", encoding="utf-8")
+    mgr = FileConfigManager(config_dir_path=str(tmp_path))
+    monkeypatch.setenv("TAI_MANIFEST_PATH", str(tmp_path / "first.yml"))
+    assert mgr.read_manifest_preserved() == {"a": 1}
+
+    monkeypatch.setenv("TAI_MANIFEST_PATH", str(tmp_path / "second.yml"))
+
+    assert mgr.read_manifest_preserved() == {"b": 2}
+
+
 def test_manifest_preserved_export_import_fresh_host_round_trip(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     # Fresh-host restore: the preserved view exported from one host imports into an
     # EMPTY config dir as a raw ``!ENV`` tag (not the baked secret), and the runtime
@@ -590,6 +656,7 @@ def test_mutate_manifest_creates_manifest_when_absent(tmp_path) -> None:
 def test_mutate_manifest_mutator_exception_aborts_with_nothing_written(tmp_path) -> None:
     (tmp_path / "manifest.yml").write_text("a: 1\n", encoding="utf-8")
     mgr = FileConfigManager(config_dir_path=str(tmp_path))
+    assert mgr.read_manifest_preserved() == {"a": 1}
 
     def boom(doc: dict) -> None:
         doc["a"] = 2
@@ -597,8 +664,9 @@ def test_mutate_manifest_mutator_exception_aborts_with_nothing_written(tmp_path)
 
     with pytest.raises(ValueError, match="mutator failed"):
         mgr.mutate_manifest(boom)
-    # Nothing was written: the original content is intact.
+    # Nothing was written: the original content is intact, and so is what a read serves.
     assert (tmp_path / "manifest.yml").read_text(encoding="utf-8") == "a: 1\n"
+    assert mgr.read_manifest_preserved() == {"a": 1}
 
 
 def test_mutate_manifest_reads_preserved_view_and_keeps_secret_tagged(

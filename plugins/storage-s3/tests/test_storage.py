@@ -12,7 +12,7 @@ from typing import Any
 
 import pytest
 from botocore.exceptions import ClientError
-from tai42_contract.storage import ObjectStat, Storage
+from tai42_contract.storage import ObjectStat, Storage, StoredObject
 
 from tai42_storage_s3 import S3Storage
 
@@ -103,6 +103,23 @@ async def test_load_bytes_returns_raw_bytes(s3_client: Any) -> None:
     assert result == payload
 
 
+async def test_load_object_answers_the_bytes_and_stored_type_from_one_get_object(s3_client: Any) -> None:
+    s3_client.get_object.return_value = {"Body": FakeBody(b"\x89PNG"), "ContentType": "image/png"}
+
+    stored = await S3Storage().load_object("img/a.png")
+
+    assert stored == StoredObject(data=b"\x89PNG", content_type="image/png")
+    s3_client.get_object.assert_awaited_once_with(Bucket="b", Key="img/a.png")
+    s3_client.head_object.assert_not_awaited()
+
+
+async def test_load_object_missing_raises_filenotfound(s3_client: Any) -> None:
+    s3_client.get_object.side_effect = not_found_error("GetObject")
+
+    with pytest.raises(FileNotFoundError):
+        await S3Storage().load_object("missing.bin")
+
+
 async def test_load_missing_raises_filenotfound(s3_client: Any) -> None:
     s3_client.get_object.side_effect = ClientError({"Error": {"Code": "NoSuchKey", "Message": "missing"}}, "GetObject")
 
@@ -137,6 +154,30 @@ async def test_list_collects_keys_across_pages(s3_client: Any) -> None:
     keys = await S3Storage().list()
 
     assert keys == ["a.j2", "b.j2", "c.j2"]
+
+
+async def test_list_unscoped_pages_the_whole_bucket(s3_client: Any) -> None:
+    paginator = FakePaginator([{}])
+    s3_client.get_paginator.return_value = paginator
+
+    await S3Storage().list()
+
+    assert paginator.paginate_kwargs == {"Bucket": "b"}
+
+
+@pytest.mark.parametrize("directory", ["d/e", "d/e/"])
+async def test_list_of_a_directory_pages_only_its_prefix(s3_client: Any, directory: str) -> None:
+    paginator = FakePaginator([{"Contents": [{"Key": "d/e/a.j2"}, {"Key": "d/e/f/b.j2"}]}])
+    s3_client.get_paginator.return_value = paginator
+
+    assert await S3Storage().list(directory) == ["d/e/a.j2", "d/e/f/b.j2"]
+    assert paginator.paginate_kwargs == {"Bucket": "b", "Prefix": "d/e/"}
+
+
+async def test_list_of_a_blank_directory_is_refused_before_any_call(s3_client: Any) -> None:
+    with pytest.raises(ValueError, match="A directory path is required"):
+        await S3Storage().list("/")
+    s3_client.get_paginator.assert_not_called()
 
 
 async def test_list_empty_bucket_returns_empty(s3_client: Any) -> None:

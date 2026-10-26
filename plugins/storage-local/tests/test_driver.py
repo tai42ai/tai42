@@ -200,6 +200,48 @@ async def test_list_recursive_missing_root_returns_empty(tmp_path):
     assert await driver.list_recursive() == []
 
 
+async def test_list_recursive_of_a_directory_walks_only_its_subtree(tmp_path, monkeypatch):
+    (tmp_path / "a.txt").write_text("a")
+    (tmp_path / "d" / "e").mkdir(parents=True)
+    (tmp_path / "d" / "b.txt").write_text("b")
+    (tmp_path / "d" / "e" / "c.txt").write_text("c")
+    (tmp_path / "other").mkdir()
+    (tmp_path / "other" / "x.txt").write_text("x")
+    walked: list[str] = []
+    real_walk = os.walk
+
+    def _walk(top, *args, **kwargs):
+        walked.append(str(top))
+        return real_walk(top, *args, **kwargs)
+
+    monkeypatch.setattr(driver_module.os, "walk", _walk)
+    assert sorted(await _driver(tmp_path).list_recursive("d/")) == ["d/b.txt", "d/e/c.txt"]
+    assert walked == [str((tmp_path / "d").resolve())]
+
+
+@pytest.mark.parametrize("directory", ["absent", "a.txt"])
+async def test_list_recursive_of_a_directory_holding_no_objects_is_empty(tmp_path, directory):
+    (tmp_path / "a.txt").write_text("a")
+    assert await _driver(tmp_path).list_recursive(directory) == []
+
+
+@pytest.mark.parametrize("directory", ["../outside", "d/../.."])
+async def test_list_recursive_refuses_a_directory_outside_the_root(tmp_path, directory):
+    with pytest.raises(ValueError, match="outside the storage root"):
+        await _driver(tmp_path).list_recursive(directory)
+
+
+@pytest.mark.parametrize("directory", ["d/..", "."])
+async def test_list_recursive_refuses_a_directory_resolving_to_the_root(tmp_path, directory):
+    with pytest.raises(ValueError, match="resolves to the storage root"):
+        await _driver(tmp_path).list_recursive(directory)
+
+
+async def test_list_recursive_refuses_a_blank_directory(tmp_path):
+    with pytest.raises(ValueError, match="A directory path is required"):
+        await _driver(tmp_path).list_recursive("/")
+
+
 # --- file/directory id collisions + empty-parent pruning --------------------
 
 

@@ -21,6 +21,8 @@ from tai42_skeleton.operations import BadRequestError
 from tai42_skeleton.storage import StorageRegistry
 from tai42_skeleton.template import ResourceManager, TemplateNotTextError
 
+from .._fakes.listing import keys_under
+
 # A PNG signature: the 0x89 lead byte is not valid UTF-8.
 _PNG = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
 
@@ -40,8 +42,8 @@ class _BytesStorage(Storage):
     async def load(self, path: str) -> str:
         return (await self.load_bytes(path)).decode("utf-8")
 
-    async def list(self) -> list[str]:
-        return sorted(self.items)
+    async def list(self, directory: str | None = None) -> list[str]:
+        return keys_under(sorted(self.items), directory)
 
     async def upload(self, path: str, content: str) -> None:
         self.items[path] = content.encode("utf-8")

@@ -51,6 +51,21 @@ def test_copies_the_whole_skill_tree_including_scripts_and_references() -> None:
     assert not any("other" in path for path in files)
 
 
+def test_each_requested_skill_lists_only_its_own_directory() -> None:
+    session = _RecordingSession()
+    app = build_local_app(templates=dict(_TEMPLATES))
+    with tai42_app.bound(app):
+        asyncio.run(sync_skills(session, skill_names=["jq", "other"], inline_skills=[]))  # type: ignore[arg-type]
+    assert app.storage.resource_manager.listed == ["skills/jq/", "skills/other/"]
+    assert sorted(session.files) == [
+        "project/.claude/skills/jq/SKILL.md",
+        "project/.claude/skills/jq/assets/logo.png",
+        "project/.claude/skills/jq/references/guide.md",
+        "project/.claude/skills/jq/scripts/run.sh",
+        "project/.claude/skills/other/SKILL.md",
+    ]
+
+
 def test_inline_skill_becomes_a_skill_md() -> None:
     files = _run_sync([], [{"name": "inline1", "content": "# inline body"}])
     assert files["project/.claude/skills/inline1/SKILL.md"] == b"# inline body"

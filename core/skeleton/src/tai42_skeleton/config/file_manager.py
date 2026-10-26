@@ -22,6 +22,7 @@ from pyaml_env import parse_config
 from ruamel.yaml.comments import CommentedMap
 from tai42_contract.config.manager import FILE_STORED_ENV_NAME, ConfigManager, file_config_dir
 from tai42_kit.utils.data import (
+    ManifestParseCache,
     load_manifest,
     merge_and_dump_manifest,
 )
@@ -140,6 +141,9 @@ class FileConfigManager(ConfigManager):
         # classified excluded on ``ConfigModeSettings.config_dir_path`` so the
         # reload boundary refuses any profile that tries to carry it.
         self._config_dir_path = config_dir_path or file_config_dir(os.environ)
+        # The preserved read's parse of the manifest text. The write transactions parse their own
+        # private document, so a raising mutator never reaches what a read serves.
+        self._preserved_parse = ManifestParseCache()
 
     @property
     def env_path(self) -> str:
@@ -388,12 +392,16 @@ class FileConfigManager(ConfigManager):
     def read_manifest_preserved(self) -> dict:
         """Read ``manifest.yml`` with ``!ENV`` tags PRESERVED as ``"!ENV <expr>"`` marker strings (round-trip view).
 
-        No secret values are resolved.
+        No secret values are resolved. The file is read on every call and its text parsed once per
+        distinct content, so a write by any process or a hand edit is served on the next read. The
+        document is shared with every later read of the same content and is read-only: an edit goes
+        through :meth:`mutate_manifest`, or onto a copy the caller makes.
         """
         path = self.manifest_path
         if not os.path.exists(path):
             raise FileNotFoundError(f"Manifest not found: {path}")
-        return self._load_yaml_preserved(path)
+        with open(path) as fh:
+            return self._preserved_parse.load(fh.read())
 
     def read_defaults_manifest(self) -> dict:
         """Read template defaults with ``!ENV`` tags EXPANDED (runtime view).

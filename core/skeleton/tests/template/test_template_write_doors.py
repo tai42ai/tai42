@@ -35,6 +35,7 @@ from tai42_skeleton.template import ResourceManager
 from tai42_skeleton.template.errors import TemplateNotFoundError
 
 from .._fakes.bus import FakeBus
+from .._fakes.listing import keys_under
 
 
 class _Store(Storage):
@@ -52,8 +53,8 @@ class _Store(Storage):
         except KeyError as exc:
             raise FileNotFoundError(path) from exc
 
-    async def list(self) -> list[str]:
-        return sorted(self.items)
+    async def list(self, directory: str | None = None) -> list[str]:
+        return keys_under(sorted(self.items), directory)
 
     async def upload(self, path: str, content: str) -> None:
         self.items[path] = content.encode("utf-8")

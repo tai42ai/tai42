@@ -14,7 +14,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 import aiofiles
-from tai42_contract.storage import StoragePathConflictError
+from tai42_contract.storage import StoragePathConflictError, directory_prefix
 
 logger = logging.getLogger(__name__)
 
@@ -203,19 +203,30 @@ class AsyncLocalDriver:
 
         await asyncio.to_thread(_remove)
 
-    async def list_recursive(self) -> list[str]:
-        """List every stored file, as root-relative paths."""
+    async def list_recursive(self, directory: str | None = None) -> list[str]:
+        """List every stored file as root-relative paths, or only those beneath ``directory``.
+
+        A ``directory`` is resolved under the root first (an escape or a path resolving
+        to the root itself raises ``ValueError``) and only its subtree is walked; a
+        directory that does not exist, or names a file, holds no objects and answers ``[]``.
+        """
 
         def _walk() -> list[str]:
             root = Path(self.root_path).resolve()
+            if directory is None:
+                start = root
+            else:
+                root, start = self._resolve(directory_prefix(directory).rstrip("/"))
+                if start == root:
+                    raise ValueError(f"Directory {directory} resolves to the storage root")
             results: list[str] = []
-            if not root.exists():
+            if not start.is_dir():
                 return results
-            for dirpath, _, files in os.walk(root):
+            for dirpath, _, files in os.walk(start):
                 for file in files:
                     full_path = Path(dirpath) / file
                     rel_path = full_path.relative_to(root)
-                    results.append(str(rel_path))
+                    results.append(rel_path.as_posix())
             return results
 
         return await asyncio.to_thread(_walk)

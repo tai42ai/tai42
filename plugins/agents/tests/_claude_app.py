@@ -21,6 +21,7 @@ from typing import Any
 from tai42_contract.connectors.models import ResolvedConnectionAuth
 from tai42_contract.monitoring.models import SpanKind
 from tai42_contract.sandbox import Sandbox, SandboxPolicy
+from tai42_contract.storage import directory_prefix
 from tai42_contract.template import TemplatedText
 from tai42_kit.monitoring.otel import OtelWriter
 
@@ -184,13 +185,20 @@ class _ResourceManager:
 
     ``fetch_template`` is the strict text read — a stored object that is not UTF-8 text is
     refused, as the real manager refuses it — and ``load`` is the raw byte read.
+    ``list_resources`` answers only the keys beneath a ``directory`` when one is given,
+    and records each ``directory`` asked in ``listed``.
     """
 
     def __init__(self, templates: dict[str, str | bytes]) -> None:
         self.templates = templates
+        self.listed: list[str | None] = []
 
-    async def list_resources(self) -> list[str]:
-        return list(self.templates)
+    async def list_resources(self, directory: str | None = None) -> list[str]:
+        self.listed.append(directory)
+        if directory is None:
+            return list(self.templates)
+        prefix = directory_prefix(directory)
+        return [key for key in self.templates if key.startswith(prefix)]
 
     async def fetch_template(self, key: str) -> str:
         stored = self.templates[key]

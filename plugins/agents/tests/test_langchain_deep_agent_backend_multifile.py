@@ -46,6 +46,22 @@ async def _seed_multi_file_skill(fake_tm: _FakeResourceManager) -> None:
     await fake_tm.upload_template("skills/jq/scripts/run.sh", "#!/bin/sh\njq .\n")
 
 
+def test_skill_keys_are_listed_from_the_skills_directory_alone(fake_tm: _FakeResourceManager) -> None:
+    async def go() -> list[str]:
+        await _seed_multi_file_skill(fake_tm)
+        await fake_tm.upload_template("templates/other.j2", "not a skill")
+        skills = build_backend().routes[SKILLS_ROOT]
+        result = await skills.aglob("**/*")
+        assert result.matches is not None, result.error
+        return [match["path"] for match in result.matches]
+
+    paths = asyncio.run(go())
+    assert "/jq/references/cheatsheet.md" in paths
+    assert all("other.j2" not in path for path in paths)
+    assert fake_tm.listed
+    assert set(fake_tm.listed) == {"skills/"}
+
+
 def test_multi_file_skill_ls_read_glob_grep_see_all_files(fake_tm: _FakeResourceManager) -> None:
     """A skill bundle's reference files and scripts are served, not only SKILL.md:
     ``als`` lists the subdirs, a nested read returns raw content, ``aglob`` finds

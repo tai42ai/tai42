@@ -1,4 +1,4 @@
-"""yaml_util: comment-preserving round-trip load/dump + the merge helper."""
+"""yaml_util: comment-preserving round-trip load/dump, the parse-once cache + the merge helper."""
 
 import copy
 import threading
@@ -6,7 +6,9 @@ from pathlib import Path
 
 import pytest
 
+import tai42_kit.utils.data.yaml_util as yaml_util
 from tai42_kit.utils.data.yaml_util import (
+    ManifestParseCache,
     dump_manifest,
     load_manifest,
     merge_and_dump_manifest,
@@ -175,3 +177,50 @@ def test_loads_and_dumps_from_concurrent_threads():
         thread.join()
     assert errors == []
     assert outputs == [src] * 100
+
+
+def _counted_parses(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    parsed: list[str] = []
+    real = yaml_util.load_manifest
+
+    def counting(text: str):
+        parsed.append(text)
+        return real(text)
+
+    monkeypatch.setattr(yaml_util, "load_manifest", counting)
+    return parsed
+
+
+def test_the_parse_cache_serves_one_document_per_text(monkeypatch: pytest.MonkeyPatch):
+    parsed = _counted_parses(monkeypatch)
+    cache = ManifestParseCache()
+
+    first = cache.load("a: !ENV A\n")
+    second = cache.load("a: !ENV A\n")
+
+    assert first == {"a": "!ENV A"}
+    assert second is first
+    assert parsed == ["a: !ENV A\n"]
+
+
+def test_the_parse_cache_parses_a_changed_text(monkeypatch: pytest.MonkeyPatch):
+    parsed = _counted_parses(monkeypatch)
+    cache = ManifestParseCache()
+
+    assert cache.load("a: 1\n") == {"a": 1}
+    assert cache.load("a: 2\n") == {"a": 2}
+    assert cache.load("a: 1\n") == {"a": 1}
+
+    assert parsed == ["a: 1\n", "a: 2\n", "a: 1\n"]
+
+
+def test_the_parse_cache_raises_a_bad_text_and_keeps_the_last_good_one(monkeypatch: pytest.MonkeyPatch):
+    parsed = _counted_parses(monkeypatch)
+    cache = ManifestParseCache()
+    good = cache.load("a: 1\n")
+
+    with pytest.raises(TypeError):
+        cache.load("- a\n")
+
+    assert cache.load("a: 1\n") is good
+    assert parsed == ["a: 1\n", "- a\n"]

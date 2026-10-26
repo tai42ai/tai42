@@ -11,7 +11,7 @@ import logging
 import mimetypes
 
 from tai42_contract.app import tai42_app
-from tai42_contract.storage import ObjectStat, Storage, assert_not_root
+from tai42_contract.storage import ObjectStat, Storage, StoredObject, assert_not_root
 
 from tai42_storage_local.driver import AsyncLocalDriver
 from tai42_storage_local.settings import storage_settings
@@ -46,9 +46,9 @@ class LocalStorage(Storage):
             # Re-raise with the relative path so the absolute root isn't leaked.
             raise FileNotFoundError(f"Object not found: {path}") from e
 
-    async def list(self) -> list[str]:
-        """Every object path in the store, listed recursively."""
-        return await self._driver().list_recursive()
+    async def list(self, directory: str | None = None) -> list[str]:
+        """Every object path in the store, or only those beneath ``directory``, walking only that subtree."""
+        return await self._driver().list_recursive(directory)
 
     async def upload(self, path: str, content: str) -> None:
         """Write ``content`` as the text object at ``path``."""
@@ -75,6 +75,12 @@ class LocalStorage(Storage):
             return await self._driver().read_bytes(path)
         except FileNotFoundError as e:
             raise FileNotFoundError(f"Object not found: {path}") from e
+
+    async def load_object(self, path: str) -> StoredObject:
+        """The bytes at ``path`` with the content type :meth:`stat` infers from the path, in one file read."""
+        data = await self.load_bytes(path)
+        content_type, _ = mimetypes.guess_type(path)
+        return StoredObject(data=data, content_type=content_type)
 
     async def upload_bytes(self, path: str, data: bytes, content_type: str | None = None) -> None:
         """Write ``data`` as the binary object at ``path`` (``content_type`` is accepted but not stored)."""

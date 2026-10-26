@@ -132,8 +132,7 @@ class _InstallFlow(_InstallerBase):
         # Early, readable env pre-check before any pip work: a required var neither
         # supplied, stored, nor in the process env fails now, naming it.
         env_apply.precheck_required_env(self._cm(), spec, env)
-        cm = self._cm()
-        found = collisions(dict(cm.read_manifest_preserved()), spec)
+        found = collisions(self._svc().read_manifest_document(), spec)
         if found:
             raise ManifestCollisionError("; ".join(found))
 
@@ -366,9 +365,8 @@ class _InstallFlow(_InstallerBase):
             # plugin (``spec.package is None``) removes no package, so needs no pip.
             ensure_pip_available()
 
-        cm = self._cm()
         reload_result: ApplyResult | None
-        changed = remove_provides(dict(cm.read_manifest_preserved()), spec)
+        changed = remove_provides(self._svc().read_manifest_document(), spec)
         if changed or provides.has_manifest_provides(spec):
             # Converge the live registration to the stripped manifest BEFORE removing
             # the package. The apply runs even when nothing changed now but the spec

@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 
 import pytest
-from tai42_contract.storage import ObjectStat, Storage
+from tai42_contract.storage import ObjectStat, Storage, StoredObject
 
 from tai42_storage_local.settings import storage_settings
 from tai42_storage_local.storage import LocalStorage
@@ -48,6 +48,15 @@ async def test_list(storage):
     await storage.upload("a.txt", "a")
     await storage.upload("d/b.txt", "b")
     assert sorted(await storage.list()) == ["a.txt", os.path.join("d", "b.txt")]
+
+
+async def test_list_a_directory_answers_only_the_objects_beneath_it(storage):
+    await storage.upload("a.txt", "a")
+    await storage.upload("d/b.txt", "b")
+    await storage.upload("d/e/c.txt", "c")
+    await storage.upload("dd/x.txt", "x")
+    assert sorted(await storage.list("d")) == ["d/b.txt", "d/e/c.txt"]
+    assert await storage.list("absent") == []
 
 
 async def test_delete(storage, storage_root):
@@ -98,6 +107,33 @@ async def test_upload_bytes_load_bytes_round_trip_identical(storage):
 async def test_upload_bytes_ignores_content_type(storage, storage_root):
     await storage.upload_bytes("img.png", b"\x89PNG\r\n", content_type="image/png")
     assert (storage_root / "img.png").read_bytes() == b"\x89PNG\r\n"
+
+
+async def test_load_object_answers_the_bytes_and_the_path_type_in_one_file_read(storage, monkeypatch):
+    await storage.upload_bytes("img.png", b"\x89PNG\r\n")
+    driver_reads: list[str] = []
+    real_driver = storage._driver
+
+    def _recording_driver():
+        driver = real_driver()
+        for name in ("read_bytes", "read_file", "stat_size", "read_range"):
+            real = getattr(driver, name)
+
+            async def _record(*args, _name=name, _real=real):
+                driver_reads.append(_name)
+                return await _real(*args)
+
+            setattr(driver, name, _record)
+        return driver
+
+    monkeypatch.setattr(storage, "_driver", _recording_driver)
+    assert await storage.load_object("img.png") == StoredObject(data=b"\x89PNG\r\n", content_type="image/png")
+    assert driver_reads == ["read_bytes"]
+
+
+async def test_load_object_missing_raises_file_not_found(storage):
+    with pytest.raises(FileNotFoundError, match="Object not found"):
+        await storage.load_object("nope.bin")
 
 
 async def test_load_bytes_missing_raises_file_not_found(storage):
@@ -220,7 +256,9 @@ def unconfigured(monkeypatch: pytest.MonkeyPatch, tmp_path):
         ("upload", ("a.txt", "text")),
         ("delete", ("a.txt",)),
         ("delete_dir", ("dir",)),
+        ("list", ("dir",)),
         ("load_bytes", ("a.txt",)),
+        ("load_object", ("a.txt",)),
         ("upload_bytes", ("a.bin", b"\x00")),
         ("stat", ("a.png",)),
         ("load_range", ("a.bin", 0, 4)),

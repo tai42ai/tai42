@@ -195,9 +195,8 @@ class FakeStore:
 
 
 class FakeCM:
-    """The read seam the installer drives for its pre-flights (collision check and
-    the update's remove-then-collide preview). Writes never go through here — they cross the
-    :class:`FakeConfigService` pipeline, which mutates ``_manifest`` in place."""
+    """The store behind the pipeline: ``_manifest`` is the persisted document. Writes never go
+    through here — they cross the :class:`FakeConfigService` pipeline, which replaces ``_manifest``."""
 
     def __init__(self, events: list[str], manifest: dict[str, Any] | None = None) -> None:
         self._events = events
@@ -256,6 +255,11 @@ class FakeConfigService:
         self.fail_broadcast_on: set[int] = set()
         self.raise_on_validate: Exception | None = None
         self.reapply_calls: list[dict[str, Any]] = []
+
+    def read_manifest_document(self) -> dict[str, Any]:
+        """The preview read the installer's pre-flights take (collision check, the update's
+        remove-then-collide preview, the uninstall probe): a copy the caller owns."""
+        return copy.deepcopy(self._cm.read_manifest_preserved())
 
     async def apply_change(self, mutator: Any) -> ApplyResult:
         document = copy.deepcopy(self._cm._manifest)

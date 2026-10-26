@@ -101,11 +101,13 @@ def test_the_platform_referees_are_the_ten_stored_shapes_in_order() -> None:
 def presets(monkeypatch: pytest.MonkeyPatch) -> dict[str, PresetBody]:
     rows: dict[str, PresetBody] = {}
 
-    async def _bodies() -> dict[str, PresetBody]:
+    async def _bodies(_facet: Any) -> dict[str, PresetBody]:
         return rows
 
     monkeypatch.setattr(platform_referees, "_skeleton_store_configured", lambda: True)
-    monkeypatch.setattr(instance.app._presets_facet, "list_active_bodies", _bodies)
+    # Patched on the facet's class: undoing a patch on the shared facet instance would leave the
+    # bound method in its ``__dict__``, shadowing every later test's class-level patch.
+    monkeypatch.setattr(type(instance.app._presets_facet), "list_active_bodies", _bodies)
     return rows
 
 
@@ -137,12 +139,12 @@ def test_the_preset_referee_answers_a_schema_id_a_fixed_kwargs_id_and_a_binding_
 
 async def test_the_preset_referee_with_no_store_reads_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(platform_referees, "_skeleton_store_configured", lambda: False)
-    monkeypatch.setattr(instance.app._presets_facet, "list_active_bodies", _never)
+    monkeypatch.setattr(type(instance.app._presets_facet), "list_active_bodies", _never)
     assert await platform_referees._preset_referee(GATE) == []
 
 
 async def test_the_preset_referee_propagates_a_store_fault(presets, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(instance.app._presets_facet, "list_active_bodies", _boom)
+    monkeypatch.setattr(type(instance.app._presets_facet), "list_active_bodies", _boom)
     with pytest.raises(RuntimeError, match="store read failed"):
         await platform_referees._preset_referee(GATE)
 

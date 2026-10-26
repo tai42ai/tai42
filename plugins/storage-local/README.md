@@ -70,12 +70,14 @@ it mounts.
 
 ## Contract surface
 
-`LocalStorage` implements the full nine-method `Storage` contract:
+`LocalStorage` implements the full ten-method `Storage` contract:
 
 - **Text:** `load` (raises `FileNotFoundError` when missing), `list`, `upload`,
-  `delete`, `delete_dir`.
+  `delete`, `delete_dir`. `list(directory)` walks only that directory's subtree; a
+  directory that does not exist answers `[]`.
 - **Binary/media:** `load_bytes` / `upload_bytes` read and write raw bytes
-  directly (no encoding).
+  directly (no encoding); `load_object` answers the bytes with the content type
+  inferred from the path suffix, in one file read.
 - **Metadata and bounded reads:** `stat` answers the file's size from `os.stat`
   and infers the content type from the path suffix, since the local filesystem
   stores no content-type metadata; `load_range` seeks to `start` and reads at most

@@ -117,7 +117,7 @@ async def test_apply_replace_reads_back(tmp_path: Path, monkeypatch: pytest.Monk
     manager = _manager(tmp_path, monkeypatch, stored=_BLANK_BEFORE_SEQUENCES)
     service, _admin, _bus = _service(manager)
 
-    document = manager.read_manifest_preserved()
+    document = service.read_manifest_document()
     document["mcp"] = [*document["mcp"], {"title": "replaced", "config": {"url": "http://replaced"}}]
     await service.apply_replace(document)
 

@@ -4,7 +4,7 @@
 kind (identity, accounts, monitoring, storage, files, backend, sandbox, channels,
 webhook verifiers, config, studio plugins), reading the live registries WITHOUT
 mutating any of them. ``files`` reports whether the skeleton's optional file-loading
-dependencies are installed, probed by importing the loader module. Each row's
+dependencies are installed, probed by locating them without importing them. Each row's
 ``state`` is ``active`` (a real plugin is registered), ``default`` (a built-in
 fallback is serving — the NoOp monitoring recorder or the ``file`` config provider),
 or ``off`` (nothing registered and the kind has no built-in fallback — a legal,
@@ -22,7 +22,6 @@ registry surfaces loudly instead of as a silent partial table.
 
 from __future__ import annotations
 
-import importlib
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -41,12 +40,11 @@ from tai42_skeleton.db import SKELETON_COMPONENT
 from tai42_skeleton.interactions.settings import interactions_store_configured
 from tai42_skeleton.monitoring.noop import NoOpMonitoring
 from tai42_skeleton.monitoring.registry import get_monitoring_staged
-from tai42_skeleton.operations.errors import NotSupportedError
 from tai42_skeleton.plugins.registry import StudioPluginError, current_registry_staged
 from tai42_skeleton.routers.tool_runs_settings import tool_runs_store_configured
 from tai42_skeleton.settings.rate_limit import RateLimitSettings
 from tai42_skeleton.states.db import STATES_COMPONENT, states_store_configured
-from tai42_skeleton.template.errors import FILES_NOT_CONFIGURED_CODE
+from tai42_skeleton.template.files_extra import files_extra_installed, files_not_configured
 
 if TYPE_CHECKING:
     from tai42_skeleton.app.facets import AdminFacet, StorageFacet
@@ -152,14 +150,10 @@ def _storage_row() -> KindStatus:
 
 
 def _files_row() -> KindStatus:
-    # The probe is the loader module's own import, the refusal every content load meets.
-    # A refused import leaves no ``sys.modules`` entry, so each call probes again.
-    try:
-        importlib.import_module("tai42_skeleton.template.file_loading")
-    except NotSupportedError as exc:
-        if exc.extra.get("code") != FILES_NOT_CONFIGURED_CODE:
-            raise
-        return KindStatus(kind="files", state="off", plugin=None, detail=exc.message)
+    # Locating the extra's packages answers without importing the loader or any of them,
+    # so a process that reports this row pays no import cost for an extra it may not use.
+    if not files_extra_installed():
+        return KindStatus(kind="files", state="off", plugin=None, detail=files_not_configured().message)
     return KindStatus(kind="files", state="active", plugin=None, detail="file loading is installed (the 'files' extra)")
 
 
@@ -368,10 +362,11 @@ def collect_kind_status() -> list[KindStatus]:
     gated feature (tool_runs, interactions, rate_limit, marketplace store, tool_meta,
     connectors, versioning) whose ``off`` state is the honest answer when no store is
     configured. Reads the process/app registries and the feature settings as they
-    stand; each row is ``active``, ``default``, or ``off``. Two documented errors become
-    ``off`` rows: the not-built :class:`StudioPluginError` (the studio-plugins row) and the
-    loader module's :class:`NotSupportedError` with code ``files-not-configured`` (the
-    ``files`` row); every other error propagates so a broken registry is loud.
+    stand; each row is ``active``, ``default``, or ``off``. The ``files`` row is ``off``
+    when a package of the ``files`` extra cannot be found, with the install line as its
+    detail. One documented error becomes an ``off`` row: the not-built
+    :class:`StudioPluginError` (the studio-plugins row); every other error propagates so a
+    broken registry is loud.
     """
     return [
         _identity_row(),
