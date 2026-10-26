@@ -139,6 +139,13 @@ class RecordingWriter(NoOpWriter):
             yield
 
     @contextmanager
+    def use_trace_context(self, trace_context: TraceContext) -> Iterator[None]:
+        assert trace_context.trace_id, trace_context
+        assert trace_context.parent_span_id, trace_context
+        with self._held(RecordingSpan(trace_context.parent_span_id, trace_context.trace_id)):
+            yield
+
+    @contextmanager
     def start_span(
         self,
         *,

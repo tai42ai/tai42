@@ -157,6 +157,11 @@ class NoOpWriter:
         yield
 
     @contextmanager
+    def use_trace_context(self, trace_context: TraceContext) -> Iterator[None]:
+        """Change nothing; a no-op writer has no current span."""
+        yield
+
+    @contextmanager
     def trace_attributes(
         self,
         *,

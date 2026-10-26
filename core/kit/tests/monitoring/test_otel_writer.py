@@ -536,6 +536,105 @@ def test_all_ended_activations_fall_back_to_what_was_current_before(writer: Otel
     assert writer.current_trace_id() is None
 
 
+def test_a_span_ended_inside_its_use_span_block_gives_way_to_the_live_span_around_it(
+    writer: OtelWriter, exporter: InMemorySpanExporter
+):
+    outer = writer.open_span(name="outer", kind=SpanKind.CHAIN, activate=True)
+    used = writer.open_span(name="used", kind=SpanKind.CHAIN)
+    with writer.use_span(used):
+        used.end()
+        assert writer.current_span_id() == outer.id
+        writer.open_span(name="sibling", kind=SpanKind.CHAIN).end()
+    outer.end()
+    by_name = {s.name: s for s in finished(writer, exporter)}
+    assert by_name["sibling"].parent is not None
+    assert format(by_name["sibling"].parent.span_id, "016x") == outer.id
+
+
+def test_a_used_span_reads_its_own_context_not_the_one_that_activated_it(writer: OtelWriter):
+    outer = writer.open_span(name="outer", kind=SpanKind.CHAIN, activate=True)
+    shared = writer.open_span(name="shared", kind=SpanKind.CHAIN, activate=True)
+
+    def elsewhere() -> str | None:
+        with writer.use_span(shared):
+            shared.end()
+            return writer.current_span_id()
+
+    assert contextvars.Context().run(elsewhere) is None
+    assert writer.current_span_id() == outer.id
+    outer.end()
+
+
+def test_activated_spans_ended_out_of_order_leave_the_open_one_current(
+    writer: OtelWriter, exporter: InMemorySpanExporter
+):
+    first = writer.open_span(name="first", kind=SpanKind.CHAIN, activate=True)
+    second = writer.open_span(name="second", kind=SpanKind.CHAIN, activate=True)
+    first.end()
+    assert writer.current_span_id() == second.id
+    writer.open_span(name="child", kind=SpanKind.CHAIN).end()
+    second.end()
+    assert writer.current_span_id() is None
+    assert not otel_trace.get_current_span().get_span_context().is_valid
+    by_name = {s.name: s for s in finished(writer, exporter)}
+    assert by_name["child"].parent is not None
+    assert format(by_name["child"].parent.span_id, "016x") == second.id
+
+
+def test_a_span_activated_in_a_lineage_block_and_ended_after_it_leaves_nothing_current(writer: OtelWriter):
+    with writer.use_trace_context(TraceContext(trace_id=_TRACE, parent_span_id=_PARENT)):
+        inner = writer.open_span(name="inner", kind=SpanKind.CHAIN, activate=True)
+    assert (writer.current_trace_id(), writer.current_span_id()) == (None, None)
+    inner.end()
+    assert (writer.current_trace_id(), writer.current_span_id()) == (None, None)
+    assert not otel_trace.get_current_span().get_span_context().is_valid
+
+
+def test_a_span_activated_in_a_use_span_block_and_ended_after_it_gives_way_to_the_span_before_the_block(
+    writer: OtelWriter,
+):
+    outer = writer.open_span(name="outer", kind=SpanKind.CHAIN, activate=True)
+    used = writer.open_span(name="used", kind=SpanKind.CHAIN)
+    with writer.use_span(used):
+        inner = writer.open_span(name="inner", kind=SpanKind.CHAIN, activate=True)
+    assert writer.current_span_id() == outer.id
+    inner.end()
+    assert writer.current_span_id() == outer.id
+    used.end()
+    outer.end()
+    assert writer.current_span_id() is None
+
+
+def test_use_trace_context_makes_the_named_span_the_parent_for_the_block(
+    writer: OtelWriter, exporter: InMemorySpanExporter
+):
+    outer = writer.open_span(name="outer", kind=SpanKind.CHAIN, activate=True)
+    with writer.use_trace_context(TraceContext(trace_id=_TRACE, parent_span_id=_PARENT)):
+        assert (writer.current_trace_id(), writer.current_span_id()) == (_TRACE, _PARENT)
+        writer.update_current_span(output="to no span")
+        writer.open_span(name="child", kind=SpanKind.CHAIN).end()
+    assert writer.current_span_id() == outer.id
+    outer.end()
+    by_name = {s.name: s for s in finished(writer, exporter)}
+    child = by_name["child"]
+    assert child.parent is not None
+    assert (format(child.parent.trace_id, "032x"), format(child.parent.span_id, "016x")) == (_TRACE, _PARENT)
+    assert attr.OUTPUT_VALUE not in attrs(by_name["outer"])
+
+
+def test_use_trace_context_naming_no_valid_span_counts_a_failure_and_changes_nothing(
+    writer: OtelWriter, caplog: pytest.LogCaptureFixture
+):
+    with writer.start_span(name="outer", kind=SpanKind.CHAIN) as outer:
+        with (
+            caplog.at_level(logging.ERROR),
+            writer.use_trace_context(TraceContext(trace_id="0" * 32, parent_span_id=_PARENT)),
+        ):
+            assert writer.current_span_id() == outer.id
+        assert "use_trace_context" in caplog.text
+    assert writer.export_health().records_failed == 1
+
+
 def test_update_current_span_sets_input_and_output(writer: OtelWriter, exporter: InMemorySpanExporter):
     with writer.start_span(name="n", kind=SpanKind.CHAIN):
         writer.update_current_span(input_={"in": 1}, output={"out": 2}, level=MonitoringLevel.ERROR, status_message="x")

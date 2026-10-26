@@ -35,7 +35,7 @@ from tai42_kit.monitoring import (
 from tai42_kit.monitoring.otel import OtelWriter
 from tai42_kit.monitoring.otel import attributes as attr
 
-from .conftest import attrs, finished
+from .conftest import attrs, decoded, finished
 
 AMBIENT = "a" * 32
 ANCHOR = "b" * 16
@@ -248,14 +248,44 @@ async def _end(root: Any) -> None:
     root.end()
 
 
-def test_begin_keeps_a_lineage_in_the_config(bound: OtelWriter, exporter: InMemorySpanExporter) -> None:
+def test_begin_keeps_a_lineage_in_the_config_current_and_deposited_in_each_step(
+    bound: OtelWriter, exporter: InMemorySpanExporter
+) -> None:
+    lineage = TraceContext(trace_id=T1, parent_span_id=PARENT)
     root = begin_run_trace({"configurable": {MONITORING_TRACE_ID_KEY: T1, MONITORING_PARENT_SPAN_ID_KEY: PARENT}})
-    assert root.context == TraceContext(trace_id=T1, parent_span_id=PARENT)
+    assert root.context == lineage
+    assert bound.current_span_id() is None
     with root.step():
-        assert bound.current_span_id() is None
-        assert get_ambient_trace_context() is None
+        assert (bound.current_trace_id(), bound.current_span_id()) == (T1, PARENT)
+        assert get_ambient_trace_context() == lineage
+        with open_run_trace() as nested:
+            assert nested.context == lineage
+        bound.open_span(name="inside", kind=SpanKind.CHAIN).end()
+    assert bound.current_span_id() is None
+    assert get_ambient_trace_context() is None
     root.end()
-    assert finished(bound, exporter) == []
+    spans = _by_name(bound, exporter)
+    assert list(spans) == ["inside"]
+    assert _hex(spans["inside"])[0] == T1
+    assert _parent(spans["inside"]) == PARENT
+
+
+def test_a_lineage_in_the_config_that_is_the_live_span_keeps_that_span_current(
+    bound: OtelWriter, exporter: InMemorySpanExporter
+) -> None:
+    with open_run_trace() as outer:
+        assert outer.context is not None
+        config = {
+            "configurable": {
+                MONITORING_TRACE_ID_KEY: outer.context.trace_id,
+                MONITORING_PARENT_SPAN_ID_KEY: outer.context.parent_span_id,
+            }
+        }
+        root = begin_run_trace(config)
+        with root.step():
+            bound.update_current_span(metadata={"reached": "the run span"})
+        root.end()
+    assert decoded(_by_name(bound, exporter)["run"], attr.METADATA) == {"reached": "the run span"}
 
 
 @pytest.mark.parametrize("live", [False, True])

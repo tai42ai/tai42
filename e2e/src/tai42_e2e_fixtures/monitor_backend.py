@@ -64,9 +64,10 @@ _ACTIVE_TRACE_ENV = "E2E_MONITOR_ACTIVE_TRACE"
 # entered; a span open stamps it onto each span record opened inside the block. A ContextVar
 # (not a plain stack) so concurrent runs never cross-attribute.
 _active_attribution: ContextVar[dict[str, Any] | None] = ContextVar("tai42_e2e_active_attribution", default=None)
-# The activated spans of the current task; an open one IS an active trace. An ended span stays
-# listed (an end in another context cannot restore this one) but no longer counts.
-_open_spans: ContextVar[tuple[_RecordingSpan, ...]] = ContextVar("tai42_e2e_open_spans", default=())
+# The activated spans and the lineages made current (``use_trace_context``) of the current task;
+# an open span or a lineage IS an active trace. An ended span stays listed (an end in another
+# context cannot restore this one) but no longer counts.
+_activations: ContextVar[tuple[_RecordingSpan | TraceContext, ...]] = ContextVar("tai42_e2e_activations", default=())
 
 
 def _push(key: str, record: dict[str, Any]) -> None:
@@ -82,7 +83,7 @@ def _truthy(value: str | None) -> bool:
 
 
 def _span_active() -> bool:
-    return any(not span.ended for span in _open_spans.get())
+    return any(isinstance(entry, TraceContext) or not entry.ended for entry in _activations.get())
 
 
 class _RecordingSpan(NoOpSpan):
@@ -92,14 +93,14 @@ class _RecordingSpan(NoOpSpan):
         self._name = name
         self._kind = kind
         self.ended = False
-        self._token: Token[tuple[_RecordingSpan, ...]] | None = None
+        self._token: Token[tuple[_RecordingSpan | TraceContext, ...]] | None = None
 
     @property
     def id(self) -> str:
         return _RECORDING_SPAN_ID
 
     def activate(self) -> None:
-        self._token = _open_spans.set((*_open_spans.get(), self))
+        self._token = _activations.set((*_activations.get(), self))
 
     def update(
         self,
@@ -120,7 +121,7 @@ class _RecordingSpan(NoOpSpan):
         if token is not None:
             # Ended in another context than the one that activated it: ``ended`` keeps it inert.
             with contextlib.suppress(ValueError):
-                _open_spans.reset(token)
+                _activations.reset(token)
 
 
 class _RecordingWriter(NoOpWriter):
@@ -185,11 +186,19 @@ class _RecordingWriter(NoOpWriter):
         if not isinstance(span, _RecordingSpan):
             yield
             return
-        token = _open_spans.set((*_open_spans.get(), span))
+        token = _activations.set((*_activations.get(), span))
         try:
             yield
         finally:
-            _open_spans.reset(token)
+            _activations.reset(token)
+
+    @contextmanager
+    def use_trace_context(self, trace_context: TraceContext) -> Iterator[None]:
+        token = _activations.set((*_activations.get(), trace_context))
+        try:
+            yield
+        finally:
+            _activations.reset(token)
 
     @contextmanager
     def trace_attributes(

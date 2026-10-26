@@ -11,7 +11,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 from tai42_contract.monitoring import MonitoringExportHealth, SpanKind
 
 from tai42_kit.monitoring.otel import OtelWriter
-from tai42_kit.monitoring.otel import writer as writer_module
+from tai42_kit.monitoring.otel._span import OtelSpan
 
 
 def _raise(*_: Any, **__: Any) -> None:
@@ -53,14 +53,14 @@ def test_a_failing_create_event_returns_none(writer: OtelWriter, monkeypatch: py
 
 def test_a_failing_current_input_is_counted(writer: OtelWriter, monkeypatch: pytest.MonkeyPatch):
     with writer.start_span(name="n", kind=SpanKind.CHAIN):
-        monkeypatch.setattr(writer_module._OtelSpan, "set_input", _raise)
+        monkeypatch.setattr(OtelSpan, "set_input", _raise)
         writer.update_current_span(input_={"x": 1}, output={"y": 2})
     assert writer.export_health().records_failed == 1
 
 
 def test_a_failing_attribution_stamp_is_counted(writer: OtelWriter, monkeypatch: pytest.MonkeyPatch):
     with writer.start_span(name="n", kind=SpanKind.CHAIN):
-        monkeypatch.setattr(writer_module._OtelSpan, "stamp_attribution", _raise)
+        monkeypatch.setattr(OtelSpan, "stamp_attribution", _raise)
         with writer.trace_attributes(name="t"):
             pass
     assert writer.export_health().records_failed == 1

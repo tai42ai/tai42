@@ -5,7 +5,9 @@
   It never mints one.
 * :func:`begin_run_trace` keeps that lineage, or opens one ``run`` span (a child of the live
   span, or the root of a new trace) and returns a :class:`RunTraceRoot` whose ``step()`` makes
-  it current and deposits it for one step of the run.
+  it current and deposits it for one step of the run. A lineage the config names is made
+  current and deposited the same way; one inherited from the ambient deposit stays deposited
+  and is made current by nothing here.
 * :func:`open_run_trace` holds a run kept in one block inside its lineage.
 * :func:`open_lineage_span` opens one named span continuing a lineage handed over explicitly.
 
@@ -61,6 +63,19 @@ def resolve_trace_context(config: dict[str, Any] | None = None) -> TraceContext 
     without a parent, or a parent with no trace to pair with is refused with :class:`InvalidRunTraceError`. An empty
     explicit trace id reads as absent.
     """
+    configured = _configured_trace_context(config)
+    if configured is not None:
+        return configured
+    return _ambient_lineage()
+
+
+def _ambient_lineage() -> TraceContext | None:
+    ambient = get_ambient_trace_context()
+    return ambient if ambient is not None and ambient.trace_id else None
+
+
+def _configured_trace_context(config: dict[str, Any] | None) -> TraceContext | None:
+    """The lineage ``config`` names: its explicit pair, or its explicit parent paired with the ambient trace."""
     configurable = (config or {}).get("configurable", {})
     trace_id = configurable.get(MONITORING_TRACE_ID_KEY)
     parent_span_id = configurable.get(MONITORING_PARENT_SPAN_ID_KEY)
@@ -89,38 +104,43 @@ def resolve_trace_context(config: dict[str, Any] | None = None) -> TraceContext 
                 f"configurable[{MONITORING_TRACE_ID_KEY!r}] beside it"
             )
         return TraceContext(trace_id=ambient.trace_id, parent_span_id=parent_span_id)
-    if ambient is not None and ambient.trace_id:
-        return ambient
     return None
 
 
 class RunTraceRoot:
     """A run's lineage and the ``run`` span it opened, if any.
 
-    ``step()`` makes the span current and deposits the lineage for one step of the run; enter and exit it in the
-    same context, never across a ``yield`` a consumer drives. ``record_output()`` records the run's output and
-    ``end()`` ends the span.
+    ``step()`` makes the span (with no span, the lineage) current and deposits the lineage for one step of the run;
+    enter and exit it in the same context, never across a ``yield`` a consumer drives. ``record_output()`` records
+    the run's output and ``end()`` ends the span.
     """
 
     __slots__ = ("_ended", "_span", "_writer", "context")
 
     def __init__(self, context: TraceContext | None, span: Span | None, writer: MonitoringWriter | None) -> None:
-        """Hold ``context`` and the ``span`` that ``writer`` opened for it; both ``None`` when no span was opened."""
+        """Hold ``context`` and the ``span`` that ``writer`` opened for it.
+
+        ``span`` is ``None`` when none was opened; ``writer`` is ``None`` when the step makes nothing current.
+        """
         self.context = context
         self._span = span
         self._writer = writer
         self._ended = False
 
     def step(self) -> AbstractContextManager[None]:
-        """The block in which the held span is current and the lineage deposited; a no-op when no span is held."""
-        if self._span is None or self._writer is None or self.context is None:
+        """The block in which the held span, else the lineage, is current and the lineage deposited.
+
+        A no-op for a lineage inherited from the ambient deposit: it stays deposited and nothing is made current.
+        """
+        if self._writer is None or self.context is None:
             return nullcontext()
         return self._held_step(self._writer, self._span, self.context)
 
     @staticmethod
     @contextmanager
-    def _held_step(writer: MonitoringWriter, span: Span, context: TraceContext) -> Iterator[None]:
-        with writer.use_span(span), ambient_trace_context(context):
+    def _held_step(writer: MonitoringWriter, span: Span | None, context: TraceContext) -> Iterator[None]:
+        current = writer.use_trace_context(context) if span is None else writer.use_span(span)
+        with current, ambient_trace_context(context):
             yield
 
     def record_output(self, output: Any) -> None:
@@ -157,13 +177,18 @@ def _open_root(name: str, trace_context: TraceContext | None, input_: Any) -> Ru
 def begin_run_trace(config: dict[str, Any] | None = None, *, input_: Any = None) -> RunTraceRoot:
     """Begin a run's one lineage without making anything current.
 
-    A lineage the config or the ambient deposit already names is kept unchanged. Otherwise one ``run`` span opens
-    with ``input_`` as its input, a child of the live span or, with none live, the root of a new trace, and is
-    current only inside :meth:`RunTraceRoot.step`. ``context`` is ``None`` when nothing records.
+    A lineage the config or the ambient deposit already names is kept: one the config names is current and
+    deposited only inside :meth:`RunTraceRoot.step`, one inherited from the ambient deposit is left as it is.
+    Otherwise one ``run`` span opens with ``input_`` as its input, a child of the live span or, with none live, the
+    root of a new trace, and is current only inside :meth:`RunTraceRoot.step`. ``context`` is ``None`` when nothing
+    records.
     """
-    lineage = resolve_trace_context(config)
-    if lineage is not None:
-        return RunTraceRoot(lineage, None, None)
+    configured = _configured_trace_context(config)
+    if configured is not None:
+        return RunTraceRoot(configured, None, tai42_app.monitoring.active.writer)
+    ambient = _ambient_lineage()
+    if ambient is not None:
+        return RunTraceRoot(ambient, None, None)
     return _open_root(RUN_ATTRIBUTION_TRACE_NAME, None, input_)
 
 
