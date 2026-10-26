@@ -138,7 +138,7 @@ dev = [
     # The Studio reference/fixture plugin the browser-e2e studio_stack names in its
     # manifest (studio_plugins + reference_plugin.tools) and serves to the ``ui/``
     # suite. A boot prerequisite of the studio leg, not imported by harness code;
-    # pinned to one tai-studio commit by the source's ``rev`` below. Kept out of
+    # floated at the tai-studio checkout by the source override below. Kept out of
     # [project.dependencies] so the published wheel carries no bare, unresolvable
     # reference-plugin Requires-Dist.
     "reference-plugin",
@@ -216,7 +216,7 @@ tai42-channel-twilio = { workspace = true }
 tai42-channel-whatsapp = { workspace = true }
 tai42-channel-web = { workspace = true }
 tai42-monitoring-langfuse = { workspace = true }
-reference-plugin = { git = "https://github.com/tai42ai/tai-studio", rev = "99a44ca89ac71d239c4f40adde3a27428986350a", subdirectory = "e2e/reference-plugin" }
+reference-plugin = { git = "https://github.com/tai42ai/tai-studio", subdirectory = "e2e/reference-plugin" }
 
 [tool.ruff]
 src = ["src", "tests"]
