@@ -121,7 +121,7 @@ async def test_correlated_question_reply_fires_read_receipt(
 async def test_read_receipt_delivery_failure_is_logged_and_batch_survives(
     handler, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx, caplog: pytest.LogCaptureFixture
 ):
-    # A 5xx on the read-receipt send is classified by `_send` into ChannelDeliveryError,
+    # A 5xx on the read-receipt send is classified by `send_request` into ChannelDeliveryError,
     # caught, and logged at WARNING — the inbound still 200-acks (never a 5xx that
     # would make Meta redeliver the whole batch) and the message still bridges.
     fake_httpx.typing_response = response(500, text="messages endpoint down")

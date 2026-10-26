@@ -3,9 +3,9 @@
 None of these can answer a pending ask — each bridges as a fresh conversation turn.
 
 INBOUND MEDIA: WhatsApp media arrives as a Graph media ``id``. The channel looks up the object's
-short-lived, Bearer-authenticated lookaside url (:func:`~tai42_channel_whatsapp.client.fetch_media_metadata`),
+short-lived, Bearer-authenticated lookaside url (:func:`~tai42_channel_whatsapp.media_download.fetch_media_metadata`),
 downloads the bytes in a single Bearer-authenticated request
-(:func:`~tai42_channel_whatsapp.client.open_media_download`; redirects are not followed — a redirect
+(:func:`~tai42_channel_whatsapp.media_download.open_media_download`; redirects are not followed — a redirect
 answer is a permanent fetch fault), and ingests them through the platform's ``app.media.ingest_media``
 chokepoint, which caps, sniffs,
 stores, and mints a served ``{MEDIA_ROUTE_PREFIX}{id}`` reference. The bridged turn then carries
@@ -36,10 +36,10 @@ from tai42_kit.conversations.inbound_media import build_inbound_media_params, in
 from tai42_kit.net import MediaFetchError
 from tai42_kit.net.media_faults import MEDIA_FETCH_AND_INGEST_FAULTS, media_fault_is_transient, media_rejection_reason
 
-from tai42_channel_whatsapp.client import fetch_media_metadata, media_endpoint_host, open_media_download
 from tai42_channel_whatsapp.correlation import already_seen, mark_seen
 from tai42_channel_whatsapp.inbound.answers import _bridge_inbound
 from tai42_channel_whatsapp.inbound.params import _merged_params, _MessageContext
+from tai42_channel_whatsapp.media_download import fetch_media_metadata, media_endpoint_host, open_media_download
 
 logger = logging.getLogger(__name__)
 

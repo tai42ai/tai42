@@ -302,7 +302,7 @@ async def test_send_document_video_audio_location_builders(fake_redis: FakeRedis
 
 async def test_mark_read_rides_send_and_posts_read_only_body(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
     # The read receipt answers {"success": true} with NO messages[].id, so it rides
-    # `_send` (which `_post`'s id-guard would reject) and posts the read-only Graph
+    # `send_request` (which `_post`'s id-guard would reject) and posts the read-only Graph
     # v23.0 body (no typing_indicator) to /{phone_number_id}/messages.
     fake_httpx.typing_response = response(200, json={"success": True})
     await mark_read(PHONE_NUMBER_ID, "wamid.IN")
@@ -320,7 +320,7 @@ async def test_mark_read_rides_send_and_posts_read_only_body(fake_redis: FakeRed
 
 
 async def test_mark_read_raises_channel_delivery_error_on_rejection(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
-    # `_send` classifies a non-2xx into ChannelDeliveryError; the inbound caller is
+    # `send_request` classifies a non-2xx into ChannelDeliveryError; the inbound caller is
     # the one that swallows it, so the client function itself still raises loudly.
     fake_httpx.typing_response = response(500, text="messages endpoint down")
     with pytest.raises(ChannelDeliveryError):
@@ -329,7 +329,7 @@ async def test_mark_read_raises_channel_delivery_error_on_rejection(fake_redis: 
 
 async def test_mark_read_typing_rides_send_and_tolerates_no_message_id(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
     # Meta's combined mark-as-read + typing-indicator send answers {"success": true}
-    # with NO messages[].id. It must ride `_send` (which `_post`'s id-guard would
+    # with NO messages[].id. It must ride `send_request` (which `_post`'s id-guard would
     # reject) and post the exact Graph v23.0 body to /{phone_number_id}/messages.
     fake_httpx.typing_response = response(200, json={"success": True})
     await mark_read_typing(PHONE_NUMBER_ID, "wamid.IN")
@@ -349,7 +349,7 @@ async def test_mark_read_typing_rides_send_and_tolerates_no_message_id(fake_redi
 async def test_mark_read_typing_raises_channel_delivery_error_on_rejection(
     fake_redis: FakeRedis, fake_httpx: FakeHttpx
 ):
-    # `_send` classifies a non-2xx into ChannelDeliveryError; the inbound caller is
+    # `send_request` classifies a non-2xx into ChannelDeliveryError; the inbound caller is
     # the one that swallows it, so the client function itself still raises loudly.
     fake_httpx.typing_response = response(500, text="typing endpoint down")
     with pytest.raises(ChannelDeliveryError):

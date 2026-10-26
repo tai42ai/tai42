@@ -29,7 +29,8 @@ from tai42_kit.settings import reset_all_settings
 from tai42_channel_slack.blocks import (
     SELECT_ACTION_PREFIX,
 )
-from tai42_channel_slack.channel import SlackChannel, _deliver_form, open_modal_view
+from tai42_channel_slack.channel import SlackChannel, _deliver_form
+from tai42_channel_slack.client import open_modal_view
 from tai42_channel_slack.correlation import remaining_seconds
 from tai42_channel_slack.forms import build_message_blocks
 

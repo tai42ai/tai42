@@ -7,7 +7,7 @@ reload re-registers cleanly against a freshly reset registry.
 
 from __future__ import annotations
 
-from tai42_contract.states.models import AttachReconciler, AttachValidator, ConsumerLister
+from tai42_contract.states.consumer_seams import AttachReconciler, AttachValidator, ConsumerLister
 
 
 class StatesAttachValidatorRegistry:

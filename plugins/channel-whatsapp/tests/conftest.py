@@ -377,13 +377,13 @@ class FakeHttpx:
         self.calls: list[dict[str, Any]] = []
         self.typing_calls: list[dict[str, Any]] = []
         self.responses: list[httpx.Response | Exception] = []
-        # The inbound media-metadata lookup (``client.fetch_media_metadata``) is a GET; its
+        # The inbound media-metadata lookup (``media_download.fetch_media_metadata``) is a GET; its
         # calls and queued responses ride their own channels so they never disturb the
         # message-send POST queue under test.
         self.get_calls: list[dict[str, Any]] = []
         self.get_responses: list[httpx.Response | Exception] = []
         # Override to exercise the typing-signal failure law (e.g. a 5xx that
-        # `_send` classifies into ChannelDeliveryError, or a raised transport error).
+        # `send_request` classifies into ChannelDeliveryError, or a raised transport error).
         self.typing_response: httpx.Response | Exception | None = None
         self.events = events if events is not None else []
 

@@ -15,9 +15,9 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from psycopg import AsyncConnection
+    from tai42_contract.states.consumer_seams import AttachReconciler
     from tai42_contract.states.models import (
         ApplyResult,
-        AttachReconciler,
         CompletedOrigin,
         ConsumerRow,
         StateBatchWrite,

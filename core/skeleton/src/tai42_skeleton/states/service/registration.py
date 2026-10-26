@@ -11,15 +11,14 @@ from __future__ import annotations
 from typing import Any, Literal
 
 from psycopg import AsyncConnection
-from tai42_contract.states.errors import TemplateValidationError
-from tai42_contract.states.models import (
+from tai42_contract.states.consumer_seams import (
     AttachReconcileContext,
     AttachReconciler,
     AttachValidator,
     ConsumerLister,
-    ConsumerRow,
-    StateTemplateDocument,
 )
+from tai42_contract.states.errors import TemplateValidationError
+from tai42_contract.states.models import ConsumerRow, StateTemplateDocument
 
 from tai42_skeleton.states.service.base import _StatesServiceBase
 from tai42_skeleton.states.service.reconcile_support import _AttachReconcileRecords

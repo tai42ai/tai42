@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from typing import NamedTuple
 
-from tai42_channel_whatsapp.client import set_business_public_key
+from tai42_channel_whatsapp.flow_assets import set_business_public_key
 from tai42_channel_whatsapp.flow_crypto import load_private_key, public_key_pem
 from tai42_channel_whatsapp.settings import require_delivery_secret, require_delivery_setting, whatsapp_settings
 

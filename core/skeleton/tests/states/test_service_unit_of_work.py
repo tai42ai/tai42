@@ -34,9 +34,9 @@ from tai42_contract.states.models import (
     StateDeclaration,
     StateSubject,
     StateTemplateDocument,
-    StateUnitClosedError,
     WriteOrigin,
 )
+from tai42_contract.states.unit import StateUnitClosedError
 from tai42_contract.template import TemplatedText
 
 from tai42_skeleton.app.root_task import spawn_root_task

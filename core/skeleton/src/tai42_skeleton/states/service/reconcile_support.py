@@ -10,14 +10,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from tai42_contract.states.consumer_seams import AttachReconcileContext
 from tai42_contract.states.errors import ValueValidationError
-from tai42_contract.states.models import (
-    ApplyResult,
-    AttachReconcileContext,
-    StateRecord,
-    StateSubject,
-    WriteOrigin,
-)
+from tai42_contract.states.models import ApplyResult, StateRecord, StateSubject, WriteOrigin
 
 if TYPE_CHECKING:
     from psycopg import AsyncConnection

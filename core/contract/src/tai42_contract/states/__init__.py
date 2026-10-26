@@ -15,6 +15,13 @@ from tai42_contract.states.binding import (
     StateUpdate,
     binding_template_refs,
 )
+from tai42_contract.states.consumer_seams import (
+    AttachReconcileContext,
+    AttachReconciler,
+    AttachReconcileRecords,
+    AttachValidator,
+    ConsumerLister,
+)
 from tai42_contract.states.errors import (
     AttachConflictError,
     DeclarationInUseError,
@@ -45,13 +52,8 @@ from tai42_contract.states.models import (
     TEMPLATE_NAME_RE,
     ApplyResult,
     AttachBody,
-    AttachReconcileContext,
-    AttachReconciler,
-    AttachReconcileRecords,
-    AttachValidator,
     CompletedOrigin,
     ConsumerLink,
-    ConsumerLister,
     ConsumerRow,
     PathSegment,
     RegimeName,
@@ -68,8 +70,6 @@ from tai42_contract.states.models import (
     StateTemplateParameter,
     StateTemplateReconcile,
     StateTemplateTrace,
-    StateUnit,
-    StateUnitClosedError,
     SubjectCandidates,
     TemplateJqApplyResult,
     TemplateJqResult,
@@ -107,6 +107,7 @@ from tai42_contract.states.rendered import (
     ResolvedTemplateJq,
     TemplateJqReference,
 )
+from tai42_contract.states.unit import StateUnit, StateUnitClosedError
 from tai42_contract.states.validation import (
     RecordCheckItem,
     RecordValidation,

@@ -14,11 +14,11 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from tai42_contract.interactions.caller_ask_landing import CallerAskLanding
 from tai42_contract.interactions.continuation import DeliveryAddress
 from tai42_contract.interactions.models.form_dates import check_form_date_rules
+from tai42_contract.interactions.models.form_reactions import FormReactions
 from tai42_contract.interactions.models.formats import AnswerFormat, AnswerMismatchPolicy
 from tai42_contract.interactions.models.forms import (
     FormData,
     FormPage,
-    FormReactions,
     check_form_data,
     check_form_pages,
     check_form_property_names,

@@ -22,7 +22,7 @@ from starlette.responses import JSONResponse, Response
 from tai42_contract.app import tai42_app
 from tai42_contract.channels import ChannelDeliveryError
 
-from tai42_channel_whatsapp.client import set_business_public_key
+from tai42_channel_whatsapp.flow_assets import set_business_public_key
 from tai42_channel_whatsapp.provisioning import flow_encryption_material
 
 logger = logging.getLogger(__name__)

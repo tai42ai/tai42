@@ -24,7 +24,7 @@ from tai42_contract.interactions import FieldChangedEvent, FormReactionError, Su
 from tai42_kit.utils.data.form_text import render_form_text
 
 from tai42_channel_slack.blocks import decode_reply_value, is_option_tap, is_reply_action
-from tai42_channel_slack.channel import open_modal_view, update_modal_view
+from tai42_channel_slack.client import open_modal_view, update_modal_view
 from tai42_channel_slack.correlation import get_form_record, slack_form_correlation_store
 from tai42_channel_slack.form_blocks import FormSchemaError
 from tai42_channel_slack.forms import (

@@ -18,26 +18,26 @@ from tai42_contract.interactions.models.form_dates import (
     TIME_OF_KEY,
     check_form_date_rules,
 )
+from tai42_contract.interactions.models.form_reactions import (
+    FieldChangedEvent,
+    FormReactionEvent,
+    FormReactionEventBody,
+    FormReactionEventKind,
+    FormReactions,
+    PageAdvancedEvent,
+    SubmittedEvent,
+)
+from tai42_contract.interactions.models.form_shape_errors import SHAPE_KEYWORDS, FormShapeError, FormShapeKind
 from tai42_contract.interactions.models.formats import CALLBACK_LINK_FORMATS, AnswerFormat, AnswerMismatchPolicy
 from tai42_contract.interactions.models.forms import (
     FORM_TAG_MAX_CHARS,
     FORM_TAG_RE,
-    SHAPE_KEYWORDS,
     DisplayBlock,
-    FieldChangedEvent,
     FormControl,
     FormData,
     FormInputMode,
     FormOption,
     FormPage,
-    FormReactionEvent,
-    FormReactionEventBody,
-    FormReactionEventKind,
-    FormReactions,
-    FormShapeError,
-    FormShapeKind,
-    PageAdvancedEvent,
-    SubmittedEvent,
     check_form_data,
     check_form_pages,
     check_form_property_names,
