@@ -23,6 +23,7 @@ from tai42_skeleton.conversations.turn import agent_turn as agent_turn_module
 from tai42_skeleton.operations.errors import PermissionDeniedError
 from tai42_skeleton.states.context import current_state_context
 
+from .._fakes.listing import keys_under
 from .conftest import (
     EchoAgent,
     FakeChannel,
@@ -372,8 +373,8 @@ async def test_channel_locale_composes_through_the_turn_into_a_rendered_variant(
             except KeyError as exc:
                 raise FileNotFoundError(path) from exc
 
-        async def list(self) -> list[str]:
-            return sorted(self.items)
+        async def list(self, directory: str | None = None) -> list[str]:
+            return keys_under(sorted(self.items), directory)
 
         async def upload(self, path: str, content: str) -> None:
             self.items[path] = content

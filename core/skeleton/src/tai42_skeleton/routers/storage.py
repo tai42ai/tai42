@@ -151,8 +151,7 @@ async def download_resource(request: Request) -> Response:
     if provider is None:
         return _error(NO_PROVIDER_MESSAGE, 501)
     try:
-        data = await provider.load_bytes(resource_id)
-        content_type = (await provider.stat(resource_id)).content_type or "application/octet-stream"
+        stored = await provider.load_object(resource_id)
     except FileNotFoundError:
         return _error(f"resource {resource_id!r} not found", 404)
     except ValueError as exc:
@@ -160,7 +159,7 @@ async def download_resource(request: Request) -> Response:
         return _error(str(exc), 400)
     filename = posixpath.basename(resource_id)
     return Response(
-        content=data,
-        media_type=content_type,
+        content=stored.data,
+        media_type=stored.content_type or "application/octet-stream",
         headers={"Content-Disposition": _content_disposition(filename)},
     )

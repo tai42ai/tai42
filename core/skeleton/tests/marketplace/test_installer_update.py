@@ -230,6 +230,27 @@ async def test_update_genuine_collision_refuses_before_pip(monkeypatch: pytest.M
     _assert_no_pip(h)
 
 
+async def test_a_refused_update_preview_leaves_the_stores_shared_document_untouched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The store may serve one shared document to every reader; the remove-then-collide
+    # preview works on a copy it owns, so the document stays as stored.
+    monkeypatch.setattr(importlib.metadata, "version", lambda name: "0.1.0")
+    old = make_spec(version="1.0.0", provides=_tool_provides("pkg.old"))
+    new = make_spec(version="2.0.0", provides=_tool_provides("pkg.foreign"))
+    stored_tools = [{"title": "pkg.old", "module": "pkg.old"}, {"title": "other-plugin", "module": "pkg.foreign"}]
+    h = Harness(manifest={"tools": [dict(entry) for entry in stored_tools]})
+    shared = h.cm._manifest
+    monkeypatch.setattr(h.cm, "read_manifest_preserved", lambda: shared)
+    h.store.preload(old, version="1.0.0")
+    h.registry.resolved = make_resolved(new, version="2.0.0")
+
+    with pytest.raises(ManifestCollisionError, match=r"pkg\.foreign"):
+        await h.installer().update("tai42/toolbox")
+
+    assert shared == {"tools": stored_tools}
+
+
 # -- update: unwind escalation -----------------------------------------------
 
 

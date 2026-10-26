@@ -134,8 +134,7 @@ class _UpdateFlow(_InstallerBase):
 
         # Early, readable env pre-check before any pip work (mirrors install).
         env_apply.precheck_required_env(self._cm(), new_spec, env)
-        cm = self._cm()
-        preview = dict(cm.read_manifest_preserved())
+        preview = self._svc().read_manifest_document()
         remove_provides(preview, old_spec)
         found = collisions(preview, new_spec)
         if found:

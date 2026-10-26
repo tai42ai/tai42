@@ -24,6 +24,9 @@ from tai42_skeleton.backup import sections
 from tai42_skeleton.backup.registry import import_mode
 from tai42_skeleton.template import ResourceManager
 
+from .._fakes.listing import keys_under
+from .._fakes.recording_storage import RecordingStorage
+
 _PNG = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01"
 
 
@@ -43,8 +46,8 @@ class _MemoryStorage(Storage):
         except KeyError:
             raise FileNotFoundError(path) from None
 
-    async def list(self) -> builtins.list[str]:
-        return sorted(self.objects)
+    async def list(self, directory: str | None = None) -> builtins.list[str]:
+        return keys_under(sorted(self.objects), directory)
 
     async def upload(self, path: str, content: str) -> None:
         await self.upload_bytes(path, content.encode("utf-8"), "text/plain; charset=utf-8")
@@ -82,8 +85,8 @@ class _TextOnlyStorage(Storage):
         except KeyError:
             raise FileNotFoundError(path) from None
 
-    async def list(self) -> builtins.list[str]:
-        return sorted(self.texts)
+    async def list(self, directory: str | None = None) -> builtins.list[str]:
+        return keys_under(sorted(self.texts), directory)
 
     async def upload(self, path: str, content: str) -> None:
         self.texts[path] = content
@@ -122,6 +125,16 @@ def _bound(manager: object, *, not_backed_up: frozenset[str] = frozenset(), unli
 def _manager(store: Storage, evictions: list[TemplateEviction] | None = None) -> ResourceManager:
     sink = evictions if evictions is not None else []
     return ResourceManager(store, on_evicted=sink.append)
+
+
+async def test_export_reads_each_object_with_its_type_in_one_provider_read() -> None:
+    store = RecordingStorage({"greeting.j2": (b"hello", "text/plain"), "assets/logo": (_PNG, "image/png")})
+
+    with _bound(_manager(store)):
+        await sections._export_storage()
+
+    reads = [call for call in store.calls if call[0] != "list"]
+    assert sorted(reads) == [("load_object", "assets/logo"), ("load_object", "greeting.j2")]
 
 
 async def test_export_carries_text_as_text_and_other_bytes_as_base64_with_the_stored_type() -> None:

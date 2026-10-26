@@ -38,6 +38,7 @@ from .._fakes.content_fixtures import (
     RAGGED_CSV_MESSAGE,
     locked_pdf,
 )
+from .._fakes.listing import keys_under
 from .._fakes.recording_storage import RecordingStorage
 
 
@@ -174,8 +175,8 @@ class _BytesStorage(Storage):
     async def load(self, path: str) -> str:
         return (await self.load_bytes(path)).decode("utf-8")
 
-    async def list(self) -> list[str]:
-        return sorted(self.items)
+    async def list(self, directory: str | None = None) -> list[str]:
+        return keys_under(sorted(self.items), directory)
 
     async def upload(self, path: str, content: str) -> None:
         raise NotImplementedError

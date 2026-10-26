@@ -1,4 +1,4 @@
-"""Binary/media surface: load_bytes / upload_bytes / stat / load_range, plus the size caps.
+"""Binary/media surface: load_bytes / load_object / upload_bytes / stat / load_range, plus the size caps.
 
 Whole reads and ``stat`` are one Contents API call at the branch (the raw form serves
 every byte, the object form the size); a ranged read resolves the branch head and
@@ -11,7 +11,7 @@ import base64
 
 import pytest
 from httpx import HTTPStatusError
-from tai42_contract.storage import ObjectStat
+from tai42_contract.storage import ObjectStat, StoredObject
 
 from tai42_storage_github import GithubStorage
 from tai42_storage_github.storage import MAX_UPLOAD_BYTES
@@ -67,6 +67,23 @@ async def test_load_bytes_large_file_is_read_whole(client):
     assert loaded == big
     for call in client.get.call_args_list:
         assert "raw.githubusercontent.com" not in call.args[0]
+
+
+async def test_load_object_is_one_raw_read_with_the_path_type(client):
+    client.get.return_value = make_response(status=200, content=b"\x89PNG", headers=RAW_FORM_HEADERS)
+
+    stored = await GithubStorage().load_object("img/a.png")
+
+    assert stored == StoredObject(data=b"\x89PNG", content_type="image/png")
+    client.get.assert_awaited_once()
+    assert client.get.call_args.kwargs["headers"]["Accept"] == RAW_FORM
+
+
+async def test_load_object_missing_raises_filenotfound(client):
+    client.get.return_value = make_response(status=404)
+
+    with pytest.raises(FileNotFoundError):
+        await GithubStorage().load_object("missing.bin")
 
 
 async def test_load_bytes_missing_raises_filenotfound(client):

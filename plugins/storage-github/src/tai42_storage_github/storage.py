@@ -1,11 +1,13 @@
 """GitHub-backed :class:`~tai42_contract.storage.Storage` provider.
 
-``stat``, ``load`` and ``load_bytes`` are one Contents API call each at the
-configured branch: the object form answers the size, the raw form every byte of
-the file. ``load_range`` resolves the branch's head commit through the Git refs API
-and reads the raw host at that commit with a ``Range`` header, so a ranged read
-answers the branch's current bytes. Writes use the Contents API (base64) and are
-capped below the API limit, raising before the request rather than truncating.
+``stat``, ``load``, ``load_bytes`` and ``load_object`` are one Contents API call each
+at the configured branch: the object form answers the size, the raw form every byte
+of the file (GitHub stores no content type, so it is inferred from the path).
+``list`` of a directory reads only that directory's tree. ``load_range`` resolves the
+branch's head commit through the Git refs API and reads the raw host at that
+commit with a ``Range`` header, so a ranged read answers the branch's current
+bytes. Writes use the Contents API (base64) and are capped below the API limit,
+raising before the request rather than truncating.
 """
 
 from __future__ import annotations
@@ -14,10 +16,18 @@ import base64
 import logging
 import mimetypes
 from typing import Final, NamedTuple
+from urllib.parse import quote
 
 import httpx
 from tai42_contract.app import tai42_app
-from tai42_contract.storage import ObjectStat, Storage, StoragePathConflictError, assert_not_root
+from tai42_contract.storage import (
+    ObjectStat,
+    Storage,
+    StoragePathConflictError,
+    StoredObject,
+    assert_not_root,
+    directory_prefix,
+)
 
 from tai42_storage_github.client import GithubHttpxClient
 from tai42_storage_github.settings import GithubStorageSettings, github_storage_settings
@@ -42,17 +52,22 @@ class _Blob(NamedTuple):
     sha: str
 
 
-def _join(base: str, path: str) -> str:
-    """Join ``path`` onto ``base``, dropping empty and stray-slash segments.
+def _path_segments(path: str) -> list[str]:
+    """The segments of storage ``path``, dropping empty and stray-slash segments.
 
     A ``..`` segment is rejected loudly: preserved, it would climb out of the
     configured repo/branch base and let a caller-supplied path reach an arbitrary
-    raw/contents URL (path traversal).
+    raw/contents/tree URL (path traversal).
     """
     segments = [segment for segment in path.split("/") if segment]
     if ".." in segments:
         raise ValueError(f"path traversal ('..') is not allowed in storage path: {path!r}")
-    joined = "/".join(segments)
+    return segments
+
+
+def _join(base: str, path: str) -> str:
+    """Join the :func:`_path_segments` of ``path`` onto ``base``."""
+    joined = "/".join(_path_segments(path))
     base = base.rstrip("/")
     return f"{base}/{joined}" if joined else base
 
@@ -159,6 +174,12 @@ class GithubStorage(Storage):
                 raise FileNotFoundError(f"Object not found: {path}")
             raise RuntimeError(f"GitHub answered an unexpected Content-Type {media_type!r} loading {path!r} at {url}.")
 
+    async def load_object(self, path: str) -> StoredObject:
+        """Every byte of ``path`` (as :meth:`load_bytes` reads them) with the content type :meth:`stat` infers."""
+        data = await self.load_bytes(path)
+        content_type, _ = mimetypes.guess_type(path)
+        return StoredObject(data=data, content_type=content_type)
+
     async def stat(self, path: str) -> ObjectStat:
         """The byte size from the Contents API object form and the path-inferred content type.
 
@@ -239,34 +260,50 @@ class GithubStorage(Storage):
             raise RuntimeError(f"GitHub answered no head commit sha for the branch at {url}.")
         return sha
 
-    async def list(self) -> list[str]:
-        """Every blob path in the repo."""
-        return [blob.path for blob in await self._blobs("")]
+    async def list(self, directory: str | None = None) -> list[str]:
+        """Every blob path in the repo, or only those beneath ``directory``, read from that directory's tree.
 
-    async def _blobs(self, prefix: str) -> list[_Blob]:
-        """Every blob in the repo with its blob sha, optionally filtered to ``prefix``.
+        A directory is listed through the Git Trees API at ``branch:directory``, so only
+        its subtree is read. A directory that does not exist on the branch, or names a
+        file, answers ``[]``; the branch itself is confirmed first, so a missing branch
+        or repo still raises.
+        """
+        return [blob.path for blob in await self._blobs(None if directory is None else directory_prefix(directory))]
 
-        Uses the recursive Git Trees API (one request); its ``truncated`` flag is
-        raised on loudly rather than acting on a partial listing, and so is a blob
-        entry carrying no sha.
+    async def _blobs(self, prefix: str | None) -> list[_Blob]:
+        """Every blob in the repo, or in the directory ``prefix`` names (``"a/b/"``), with its blob sha.
+
+        Uses the recursive Git Trees API (one request) at the branch, or at
+        ``branch:directory`` for a ``prefix``, whose paths are relative to the directory
+        and are answered with ``prefix`` in front; the ``truncated`` flag is raised on
+        loudly rather than acting on a partial listing, and so is a blob entry carrying
+        no sha.
         """
         settings = _configured_settings()
-        url = settings.trees_api_url.format(username=settings.username, repo=settings.repo, branch=settings.branch)
+        segments = [] if prefix is None else _path_segments(prefix)
+        tree = settings.branch if prefix is None else f"{settings.branch}:{quote('/'.join(segments), safe='/')}"
+        url = settings.trees_api_url.format(username=settings.username, repo=settings.repo, branch=tree)
         async with tai42_app.clients.client_ctx(GithubHttpxClient) as client:
             resp = await client.get(url, headers=_api_headers(settings), params={"recursive": "1"})
+            if prefix is not None and resp.status_code in (404, 422):
+                # 404: no such path on the branch; 422: the path names a blob, not a tree.
+                # A 404 also answers a missing branch or repo, so the branch is resolved
+                # first and its own failure raises.
+                if resp.status_code == 404:
+                    await self._head_commit(client, settings, prefix)
+                return []
             _raise_for_status(resp, "listing", prefix or "/", url)
             data = resp.json()
             if not isinstance(data, dict):
                 raise RuntimeError(f"Expected a tree object from {url}, got {type(data).__name__}")  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
             if data.get("truncated"):
                 raise RuntimeError(f"GitHub tree listing was truncated; the tree is too large to list safely: {url}")
+            base = "".join(f"{segment}/" for segment in segments)
             blobs: list[_Blob] = []
             for item in data.get("tree", []):
                 if not isinstance(item, dict) or item.get("type") != "blob":
                     continue
-                path = item["path"]
-                if prefix and not path.startswith(prefix):
-                    continue
+                path = f"{base}{item['path']}"
                 sha = item.get("sha")
                 if not isinstance(sha, str) or not sha:
                     raise RuntimeError(f"GitHub tree listing at {url} carries no blob sha for {path}.")
@@ -350,8 +387,7 @@ class GithubStorage(Storage):
         deletion surfaces loudly.
         """
         assert_not_root(path)
-        prefix = path if path.endswith("/") else f"{path}/"
-        blobs = await self._blobs(prefix)
+        blobs = await self._blobs(directory_prefix(path))
         if not blobs:
             raise FileNotFoundError(f"Directory not found or empty: {path}")
 

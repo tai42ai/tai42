@@ -47,6 +47,7 @@ from .._fakes.content_fixtures import (
     locked_pdf,
     png,
 )
+from .._fakes.listing import keys_under
 from .._fakes.prefix_marks import fresh_prefix_marks
 from .._fakes.recording_storage import RecordingStorage
 from .._fakes.template_holders import (
@@ -69,8 +70,8 @@ class _FakeStorage(Storage):
     async def load(self, path: str) -> str:
         return self.objects[path][0].decode("utf-8")
 
-    async def list(self) -> list[str]:
-        return list(self.objects)
+    async def list(self, directory: str | None = None) -> list[str]:
+        return keys_under(list(self.objects), directory)
 
     async def upload(self, path: str, content: str) -> None:
         content_type, _ = mimetypes.guess_type(path)

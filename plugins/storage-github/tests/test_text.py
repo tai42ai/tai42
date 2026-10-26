@@ -123,6 +123,76 @@ async def test_list_server_error_propagates(client):
         await GithubStorage().list()
 
 
+TREES = "https://api.github.com/repos/acme/content/git/trees"
+REF_URL = "https://api.github.com/repos/acme/content/git/ref/heads/dev"
+
+
+@pytest.mark.parametrize("directory", ["d/sub", "d/sub/", "/d/sub"])
+async def test_list_of_a_directory_reads_only_its_tree_and_answers_full_paths(client, directory):
+    client.get.return_value = make_response(
+        status=200,
+        json_body={
+            "truncated": False,
+            "tree": [
+                {"path": "a.j2", "type": "blob", "sha": "s1"},
+                {"path": "e", "type": "tree", "sha": "t1"},
+                {"path": "e/b.j2", "type": "blob", "sha": "s2"},
+            ],
+        },
+    )
+
+    files = await GithubStorage().list(directory)
+
+    assert files == ["d/sub/a.j2", "d/sub/e/b.j2"]
+    assert client.get.await_count == 1
+    assert client.get.call_args.args[0] == f"{TREES}/dev:d/sub"
+    assert client.get.call_args.kwargs["params"] == {"recursive": "1"}
+
+
+async def test_list_of_a_directory_quotes_its_path_into_the_tree(client):
+    client.get.return_value = make_response(status=200, json_body={"truncated": False, "tree": []})
+
+    await GithubStorage().list("my dir/#1")
+
+    assert client.get.call_args.args[0] == f"{TREES}/dev:my%20dir/%231"
+
+
+async def test_list_of_a_missing_directory_confirms_the_branch_and_is_empty(client):
+    client.get.side_effect = [
+        make_response(status=404),
+        make_response(status=200, json_body={"object": {"sha": "abc123"}}),
+    ]
+
+    assert await GithubStorage().list("absent") == []
+    assert [call.args[0] for call in client.get.call_args_list] == [f"{TREES}/dev:absent", REF_URL]
+
+
+async def test_list_of_a_directory_on_a_missing_branch_raises(client):
+    client.get.side_effect = [make_response(status=404), make_response(status=404)]
+
+    with pytest.raises(HTTPStatusError):
+        await GithubStorage().list("d")
+
+
+async def test_list_of_a_path_naming_a_file_is_empty(client):
+    client.get.return_value = make_response(status=422)
+
+    assert await GithubStorage().list("a.j2") == []
+
+
+async def test_list_of_a_directory_server_error_propagates(client):
+    client.get.return_value = make_response(status=500)
+
+    with pytest.raises(HTTPStatusError):
+        await GithubStorage().list("d")
+
+
+async def test_list_of_a_directory_with_a_parent_segment_is_refused_before_any_call(client):
+    with pytest.raises(ValueError, match="path traversal"):
+        await GithubStorage().list("d/../e")
+    client.get.assert_not_called()
+
+
 async def test_upload_create_puts_without_sha(client):
     client.get.return_value = make_response(status=404)
     client.put.return_value = make_response(status=200)

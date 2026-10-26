@@ -174,16 +174,18 @@ class TemplateSkillsBackend(BackendProtocol):
     """
 
     async def _list_skill_keys(self) -> list[str]:
-        """Return every served skill-bundle key under ``skills/`` in the provider.
+        """Return every served skill-bundle key under ``skills/``, listing only that directory of the provider.
 
         Serving is not ``SKILL.md``-gated: a bundle's reference files and scripts
         are served under their real keys too (a file under a directory that lacks
         ``SKILL.md`` is still listed, never silently dropped). The narrower
         "which directories are skills" question stays ``SKILL.md``-gated and is
-        answered where it is asked (:meth:`als`'s skill-directory self entry).
+        answered where it is asked (:meth:`als`'s skill-directory self entry). A key
+        equal to the prefix itself (an empty ``skills/`` folder-marker object) names
+        no file and is not served.
         """
-        keys = await tai42_app.storage.resource_manager.list_resources()
-        return [key for key in keys if key.startswith(_SKILLS_KEY_PREFIX) and len(key) > len(_SKILLS_KEY_PREFIX)]
+        keys = await tai42_app.storage.resource_manager.list_resources(_SKILLS_KEY_PREFIX)
+        return [key for key in keys if len(key) > len(_SKILLS_KEY_PREFIX)]
 
     async def als(self, path: str) -> LsResult:
         """List the DIRECT children of ``path`` across the served skill bundles.

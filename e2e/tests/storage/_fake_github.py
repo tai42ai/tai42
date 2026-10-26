@@ -1,9 +1,10 @@
 """A threaded fake of the GitHub surfaces the ``storage-github`` plugin speaks —
 the Contents API (object, raw and default forms; base64 writes keyed by blob sha),
 the Git refs API for the branch head, the raw host at a commit (with ``Range``), and
-the recursive Git Trees listing — so the github storage-axis leg is hermetic (no
-real GitHub). In-process on a fixed port of the pytest process, exactly like the
-other harness net fixtures; the SUT worker processes reach it over loopback.
+the recursive Git Trees listing (at the branch or at ``branch:directory``) — so the
+github storage-axis leg is hermetic (no real GitHub). In-process on a fixed port of
+the pytest process, exactly like the other harness net fixtures; the SUT worker
+processes reach it over loopback.
 
 Single repo and branch, one in-memory object map guarded by a lock (the leg's
 stacks share one fake and key objects by per-test-unique paths). A blob sha is the
@@ -25,6 +26,7 @@ import hashlib
 import re
 import threading
 from typing import Any
+from urllib.parse import unquote
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response
@@ -187,13 +189,24 @@ class FakeGithub:
                 head = self._commit()
             return JSONResponse({"commit": {"sha": head}})
 
-        @app.get("/api/repos/{username}/{repo}/git/trees/{branch}")
-        async def trees(username: str, repo: str, branch: str, recursive: str | None = None) -> JSONResponse:
+        @app.get("/api/repos/{username}/{repo}/git/trees/{tree_ish:path}")
+        async def trees(username: str, repo: str, tree_ish: str, recursive: str | None = None) -> JSONResponse:
+            # A ``branch:directory`` tree-ish lists only that directory, with paths relative
+            # to it; a path that names a blob is a 422 and a missing path a 404, as the real
+            # Trees API answers.
+            _, _, directory = tree_ish.partition(":")
+            directory = unquote(directory).strip("/")
+            prefix = f"{directory}/" if directory else ""
             with self._lock:
+                if directory in self._objects:
+                    return JSONResponse({"message": "Invalid tree"}, status_code=422)
                 tree = [
-                    {"path": p, "type": "blob", "mode": "100644", "sha": _blob_sha(self._objects[p])}
+                    {"path": p[len(prefix) :], "type": "blob", "mode": "100644", "sha": _blob_sha(self._objects[p])}
                     for p in sorted(self._objects)
+                    if p.startswith(prefix)
                 ]
+            if directory and not tree:
+                return JSONResponse({"message": "Not Found"}, status_code=404)
             return JSONResponse({"sha": _blob_sha(b""), "truncated": False, "tree": tree})
 
         return app

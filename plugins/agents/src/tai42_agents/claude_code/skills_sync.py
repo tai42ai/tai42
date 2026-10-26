@@ -75,19 +75,17 @@ async def sync_skills(
     Idempotent: each turn re-authors the same files. Raises loudly on an invalid name or a
     store key that escapes its skill subtree — never a silent skip.
     """
-    if skill_names:
-        keys = await tai42_app.storage.resource_manager.list_resources()
-        for name in skill_names:
-            validate_name("skill", name)
-            prefix = f"{_STORE_SKILLS_PREFIX}{name}/"
-            matched = [key for key in keys if key.startswith(prefix)]
-            if not matched:
-                raise ValueError(f"skill {name!r} has no files under {prefix!r} in the template store")
-            for key in matched:
-                subpath = key[len(prefix) :]
-                # The raw bytes: a bundle holds binary assets as well as text files.
-                data, _mime = await tai42_app.storage.resource_manager.load(key, with_mime=False)
-                await session.put_file(_dest_path(name, subpath), data)
+    for name in skill_names:
+        validate_name("skill", name)
+        prefix = f"{_STORE_SKILLS_PREFIX}{name}/"
+        matched = await tai42_app.storage.resource_manager.list_resources(prefix)
+        if not matched:
+            raise ValueError(f"skill {name!r} has no files under {prefix!r} in the template store")
+        for key in matched:
+            subpath = key[len(prefix) :]
+            # The raw bytes: a bundle holds binary assets as well as text files.
+            data, _mime = await tai42_app.storage.resource_manager.load(key, with_mime=False)
+            await session.put_file(_dest_path(name, subpath), data)
 
     for skill in inline_skills:
         name = validate_name("inline skill", skill["name"])

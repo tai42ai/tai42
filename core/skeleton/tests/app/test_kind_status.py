@@ -6,6 +6,7 @@ process only when NoOp is the active recorder."""
 from __future__ import annotations
 
 import logging
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -19,6 +20,7 @@ from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.monitoring.noop import NoOpMonitoring
 from tai42_skeleton.monitoring.registry import init_monitoring, reset_monitoring
 from tai42_skeleton.plugins.registry import StudioPluginError
+from tai42_skeleton.template import files_extra
 
 from .._helpers import DeliverOnlyChannel
 
@@ -415,14 +417,19 @@ def test_files_active_when_the_extra_is_installed(bound_app) -> None:
     )
 
 
-def test_a_broken_files_install_fails_the_summary(bound_app, monkeypatch: pytest.MonkeyPatch) -> None:
-    real_import = ks.importlib.import_module
+def test_the_files_row_imports_neither_the_loader_nor_the_extra(bound_app, monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in ("tai42_skeleton.template.file_loading", "magika", "pandas"):
+        monkeypatch.delitem(sys.modules, name, raising=False)
+    assert _row("files").state == "active"
+    assert "tai42_skeleton.template.file_loading" not in sys.modules
+    assert "magika" not in sys.modules
+    assert "pandas" not in sys.modules
 
-    def _import(name: str, package: str | None = None):
-        if name == "tai42_skeleton.template.file_loading":
-            raise RuntimeError("broken install")
-        return real_import(name, package)
 
-    monkeypatch.setattr(ks.importlib, "import_module", _import)
-    with pytest.raises(RuntimeError, match="broken install"):
+def test_a_failing_files_probe_fails_the_summary(bound_app, monkeypatch: pytest.MonkeyPatch) -> None:
+    def _find_spec(name: str, package: str | None = None):
+        raise ValueError(f"{name}.__spec__ is None")
+
+    monkeypatch.setattr(files_extra, "find_spec", _find_spec)
+    with pytest.raises(ValueError, match="__spec__ is None"):
         collect_kind_status()

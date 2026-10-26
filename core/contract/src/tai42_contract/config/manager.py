@@ -141,6 +141,10 @@ class ConfigManager(ABC):
         no secret values are read. The marker strings are plain (JSON-safe)
         strings.
 
+        The returned document may be shared with the store and with other
+        readers: callers treat it as read-only. An edit belongs in
+        :meth:`mutate_manifest`, or on a copy the caller makes.
+
         Raises:
             FileNotFoundError: If the manifest does not exist.
         """

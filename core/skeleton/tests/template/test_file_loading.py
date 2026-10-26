@@ -199,7 +199,7 @@ def test_short_utf8_text_the_detector_cannot_name_is_text(text: str) -> None:
 
 
 def _undetected(monkeypatch: pytest.MonkeyPatch) -> None:
-    detection = fl._Detection("unknown", "application/octet-stream", "", False)
+    detection = fl.Detection("unknown", "application/octet-stream", "", False)
     monkeypatch.setattr(fl, "_identify", lambda data, source: detection)
 
 
@@ -225,7 +225,7 @@ def test_undetected_text_cut_where_its_two_windows_join_is_text(monkeypatch: pyt
 
 
 def test_a_text_label_with_no_handler_takes_the_text_path_for_both_functions(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(fl, "_identify", lambda data, source: fl._Detection("toml", "application/toml", ".toml", True))
+    monkeypatch.setattr(fl, "_identify", lambda data, source: fl.Detection("toml", "application/toml", ".toml", True))
     assert fl.classify(b"a = 1", "c.toml").kind == "text"
     assert fl.load_content(b"a = 1", "c.toml") == "a = 1"
 
@@ -257,7 +257,7 @@ def test_an_html_template_labelled_twig_loads_its_source_as_text() -> None:
 def test_an_extracting_handler_is_a_document_unless_the_bytes_are_text(
     monkeypatch: pytest.MonkeyPatch, is_text: bool, kind: str
 ) -> None:
-    monkeypatch.setattr(fl, "_identify", lambda data, source: fl._Detection("pdf", "application/pdf", ".pdf", is_text))
+    monkeypatch.setattr(fl, "_identify", lambda data, source: fl.Detection("pdf", "application/pdf", ".pdf", is_text))
     assert fl.classify(b"%PDF", "a.pdf").kind == kind
 
 
@@ -295,7 +295,7 @@ def _patch_pdf_loader(monkeypatch: pytest.MonkeyPatch, error: BaseException) -> 
         raise error
 
     registry = tuple(
-        fl._Handler(h.labels, h.mime_substrings, h.extensions, _raise, h.kind) if "pdf" in h.labels else h
+        fl.Handler(h.labels, h.mime_substrings, h.extensions, _raise, h.kind) if "pdf" in h.labels else h
         for h in fl._REGISTRY
     )
     monkeypatch.setattr(fl, "_REGISTRY", registry)

@@ -21,6 +21,8 @@ from tai42_contract.storage import ObjectStat, Storage
 from tai42_skeleton.app import instance
 from tai42_skeleton.routers import storage_presence as router
 
+from .._fakes.listing import keys_under
+
 
 class _FakeStorage(Storage):
     """A minimal in-memory content store — enough for the presence read to report
@@ -32,8 +34,8 @@ class _FakeStorage(Storage):
     async def load(self, path: str) -> str:
         return self.objects[path].decode("utf-8")
 
-    async def list(self) -> list[str]:
-        return list(self.objects)
+    async def list(self, directory: str | None = None) -> list[str]:
+        return keys_under(list(self.objects), directory)
 
     async def upload(self, path: str, content: str) -> None:
         self.objects[path] = content.encode("utf-8")

@@ -23,6 +23,7 @@ from tai42_kit.utils.data.mcp_output_util import (
 from tai42_kit.utils.data.string_util import makefun_func_name, snake_to_pascal, text_to_md5
 from tai42_kit.utils.data.url_util import build_url
 from tai42_kit.utils.data.yaml_util import (
+    ManifestParseCache,
     dump_manifest,
     load_manifest,
     merge_and_dump_manifest,
@@ -33,6 +34,7 @@ __all__ = [
     "ENV_REF",
     "EnvMarkerRef",
     "EnvRef",
+    "ManifestParseCache",
     "build_url",
     "dump_manifest",
     "escape_json_pointer_token",

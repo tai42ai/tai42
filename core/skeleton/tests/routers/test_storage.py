@@ -38,6 +38,8 @@ from .._fakes.content_fixtures import (
     locked_pdf,
     png,
 )
+from .._fakes.listing import keys_under
+from .._fakes.recording_storage import RecordingStorage
 from .._fakes.template_holders import HELD_DIRECTORY_REFUSAL, HELD_HOLDERS, HELD_TEMPLATE_REFUSAL, hold_jq_gate
 
 
@@ -53,8 +55,8 @@ class _FakeStorage(Storage):
     async def load(self, path: str) -> str:
         return self._get(path)[0].decode("utf-8")
 
-    async def list(self) -> list[str]:
-        return list(self.objects)
+    async def list(self, directory: str | None = None) -> list[str]:
+        return keys_under(list(self.objects), directory)
 
     async def upload(self, path: str, content: str) -> None:
         content_type, _ = mimetypes.guess_type(path)
@@ -219,6 +221,13 @@ async def test_download_octet_stream_fallback(install):
     fake.objects = {"blob": (b"\x00\x01", None)}
     resp = await router.download_resource(_req(resource_id="blob"))
     assert resp.headers["content-type"] == "application/octet-stream"
+
+
+async def test_download_is_one_provider_read(install):
+    store = cast(RecordingStorage, install(RecordingStorage({"docs/report.pdf": (b"%PDF-bytes", "application/pdf")})))
+    resp = await router.download_resource(_req(resource_id="docs/report.pdf"))
+    assert resp.headers["content-type"] == "application/pdf"
+    assert store.calls == [("load_object", "docs/report.pdf")]
 
 
 async def test_download_404_missing(install):

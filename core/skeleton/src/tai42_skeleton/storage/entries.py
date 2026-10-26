@@ -6,7 +6,7 @@ on the object's sample, and a text or document entry's content is what
 ``load_classified`` loads through that decision: no other code here decides. A binary
 object is classified from its stat and at most two detection windows, never read
 whole. An object within two windows is sampled whole, so its sample is its bytes; a
-larger text or document object is read whole once more.
+larger text or document object is read whole once more, bounded by the content cap.
 """
 
 from __future__ import annotations
@@ -52,11 +52,16 @@ async def _load_whole(provider: Storage, resource_id: str, size: int, sample: by
     """The whole object's bytes, read once the classifier keeps it as text or a document.
 
     A sample of ``size`` bytes is the whole object already and is returned as it is.
+    Otherwise the read is bounded by ``FILE_LOADING_MAX_BYTES``, so an object that grew
+    past the cap after its stat is refused on the bytes actually read and is never read
+    whole.
     """
     if len(sample) == size:
         return sample
+    from tai42_skeleton.template.file_loading import read_within_cap
+
     try:
-        return await provider.load_bytes(resource_id)
+        return await read_within_cap(provider, resource_id)
     except FileNotFoundError as exc:
         raise _not_found(resource_id) from exc
 

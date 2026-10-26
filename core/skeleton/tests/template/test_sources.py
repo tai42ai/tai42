@@ -1,4 +1,4 @@
-"""ResourceManager unified content faces: ``load`` (scheme-disambiguated resolver,
+"""Content sources, through their resource manager: ``load`` (scheme-disambiguated resolver,
 no silent fallback), ``load_file`` (text vs MediaBlock), and ``resolve_image``
 (an addressable image with its mime). Storage is an in-memory binary-native double."""
 
@@ -13,8 +13,10 @@ from tai42_contract.template import ImageReference
 
 from tai42_skeleton.storage import StorageRegistry
 from tai42_skeleton.template import ResourceManager
-from tai42_skeleton.template import resource_manager as rm_mod
+from tai42_skeleton.template import sources as sources_mod
 from tai42_skeleton.template.media import MediaBlock
+
+from .._fakes.listing import keys_under
 
 # A 1x1 transparent PNG — real bytes so Magika classifies it as an image.
 _PNG = base64.b64decode(
@@ -34,8 +36,8 @@ class _BinStorage(Storage):
         except KeyError as exc:
             raise FileNotFoundError(path) from exc
 
-    async def list(self) -> list[str]:
-        return sorted(self.items)
+    async def list(self, directory: str | None = None) -> list[str]:
+        return keys_under(sorted(self.items), directory)
 
     async def upload(self, path: str, content: str) -> None:
         self.items[path] = content.encode("utf-8")
@@ -79,7 +81,7 @@ async def test_load_http_routes_to_fetch_url(monkeypatch: pytest.MonkeyPatch) ->
         assert url == "https://example.com/a.bin"
         return b"remote-bytes", "application/octet-stream"
 
-    monkeypatch.setattr(rm_mod, "fetch_url", fake_fetch)
+    monkeypatch.setattr(sources_mod, "fetch_url", fake_fetch)
     manager = _manager()
     assert await manager.load("https://example.com/a.bin") == (b"remote-bytes", "application/octet-stream")
 

@@ -33,8 +33,10 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import Literal
 
-from tai42_skeleton.operations.errors import NotSupportedError
-from tai42_skeleton.template.errors import FILES_NOT_CONFIGURED_CODE, ContentNotLoadableError
+from tai42_contract.storage import Storage
+
+from tai42_skeleton.template.errors import ContentNotLoadableError
+from tai42_skeleton.template.files_extra import files_not_configured
 from tai42_skeleton.template.media import MediaBlock
 from tai42_skeleton.template.settings import file_loading_settings
 
@@ -52,13 +54,7 @@ try:
     from pptx import Presentation
     from striprtf.striprtf import rtf_to_text
 except ImportError as exc:
-    raise NotSupportedError(
-        "tai42-skeleton 'files' resource loading requires the 'files' optional "
-        "dependencies (magika, pandas, langchain-community, pypdf, docx2txt, "
-        "openpyxl, tabulate, beautifulsoup4, python-pptx, striprtf, odfpy, "
-        "ebooklib). Install them with: pip install 'tai42-skeleton[files]'",
-        extra={"code": FILES_NOT_CONFIGURED_CODE},
-    ) from exc
+    raise files_not_configured() from exc
 
 # Magika reads at most this many bytes from each end of its input (the model's
 # ``block_size``), so the first and last window of an object classify it as the whole does.
@@ -72,7 +68,7 @@ def _magika_client() -> Magika:
 
 
 @dataclass(frozen=True)
-class _Detection:
+class Detection:
     """Magika's answer for some bytes: label, mime, extension (with its dot, lowercased) and whether it is text."""
 
     label: str
@@ -81,7 +77,7 @@ class _Detection:
     is_text: bool
 
 
-def _identify(data: bytes, source: str | None) -> _Detection:
+def _identify(data: bytes, source: str | None) -> Detection:
     """Inspect ``data`` with Magika; ``source``'s own suffix is the extension hint when Magika cannot classify it."""
     output = _magika_client().identify_bytes(data).output
     label = output.label
@@ -98,7 +94,7 @@ def _identify(data: bytes, source: str | None) -> _Detection:
         if url_ext:
             ext = url_ext
 
-    return _Detection(label=label, mime=mime, ext=ext.lower(), is_text=bool(output.is_text))
+    return Detection(label=label, mime=mime, ext=ext.lower(), is_text=bool(output.is_text))
 
 
 def detect(data: bytes, source: str | None) -> tuple[str, str, str]:
@@ -221,7 +217,7 @@ def _load_audio(data: bytes, mime: str | None, source: str | None) -> MediaBlock
 
 
 @dataclass(frozen=True)
-class _Handler:
+class Handler:
     """One registry entry: the labels, mime substrings and extensions it matches, its loader and its kind.
 
     The loader turns the bytes into text or a ``MediaBlock``. ``kind`` is ``"text"`` for the
@@ -236,7 +232,7 @@ class _Handler:
     kind: Literal["text", "extracted", "media"]
 
 
-_TEXT_HANDLER = _Handler(
+_TEXT_HANDLER = Handler(
     ("txt", "markdown", "json", "xml", "yaml"),
     ("text/", "json", "xml", "yaml"),
     (".txt", ".md", ".json", ".xml", ".yaml", ".yml"),
@@ -245,29 +241,29 @@ _TEXT_HANDLER = _Handler(
 )
 
 # Order matters for the mime/extension fallback passes: an earlier entry wins.
-_REGISTRY: tuple[_Handler, ...] = (
-    _Handler(("pdf",), ("pdf",), (".pdf",), _load_pdf, "extracted"),
-    _Handler(("docx",), ("wordprocessingml.document",), (".docx", ".doc"), _load_docx, "extracted"),
-    _Handler(("xlsx",), ("spreadsheetml.sheet", "ms-excel"), (".xlsx", ".xls"), _load_xlsx, "extracted"),
-    _Handler(("csv",), ("csv",), (".csv",), _load_csv, "extracted"),
-    _Handler(("pptx",), ("presentationml.presentation", "ms-powerpoint"), (".pptx", ".ppt"), _load_pptx, "extracted"),
-    _Handler(("odt",), ("opendocument.text",), (".odt",), _load_odt, "extracted"),
-    _Handler(("epub",), ("epub",), (".epub",), _load_epub, "extracted"),
-    _Handler(("html", "xhtml"), ("html",), (".html", ".htm"), _load_html, "extracted"),
-    _Handler(("rtf",), ("rtf",), (".rtf",), _load_rtf, "extracted"),
+_REGISTRY: tuple[Handler, ...] = (
+    Handler(("pdf",), ("pdf",), (".pdf",), _load_pdf, "extracted"),
+    Handler(("docx",), ("wordprocessingml.document",), (".docx", ".doc"), _load_docx, "extracted"),
+    Handler(("xlsx",), ("spreadsheetml.sheet", "ms-excel"), (".xlsx", ".xls"), _load_xlsx, "extracted"),
+    Handler(("csv",), ("csv",), (".csv",), _load_csv, "extracted"),
+    Handler(("pptx",), ("presentationml.presentation", "ms-powerpoint"), (".pptx", ".ppt"), _load_pptx, "extracted"),
+    Handler(("odt",), ("opendocument.text",), (".odt",), _load_odt, "extracted"),
+    Handler(("epub",), ("epub",), (".epub",), _load_epub, "extracted"),
+    Handler(("html", "xhtml"), ("html",), (".html", ".htm"), _load_html, "extracted"),
+    Handler(("rtf",), ("rtf",), (".rtf",), _load_rtf, "extracted"),
     _TEXT_HANDLER,
-    _Handler(
+    Handler(
         ("png", "jpeg", "gif", "webp"),
         ("image/",),
         (".png", ".jpg", ".jpeg", ".gif", ".webp"),
         _load_image,
         "media",
     ),
-    _Handler(("mp3", "wav"), ("audio/",), (".mp3", ".wav"), _load_audio, "media"),
+    Handler(("mp3", "wav"), ("audio/",), (".mp3", ".wav"), _load_audio, "media"),
 )
 
 
-def _find_handler(label: str, mime: str | None, ext: str) -> _Handler | None:
+def _find_handler(label: str, mime: str | None, ext: str) -> Handler | None:
     """Resolve a handler by Magika label, then mime substring, then extension; ``None`` when none matches."""
     for handler in _REGISTRY:
         if label in handler.labels:
@@ -285,13 +281,13 @@ def _find_handler(label: str, mime: str | None, ext: str) -> _Handler | None:
 class Classified:
     """The handler bytes load through (``None``: unsupported), the detection behind it, and the entry kind."""
 
-    handler: _Handler | None
-    detection: _Detection
+    handler: Handler | None
+    detection: Detection
     kind: Literal["text", "document", "binary"]
 
 
 # Magika's own answer for empty bytes, given without loading the model.
-_EMPTY_DETECTION = _Detection(label="empty", mime="inode/x-empty", ext="", is_text=False)
+_EMPTY_DETECTION = Detection(label="empty", mime="inode/x-empty", ext="", is_text=False)
 
 
 def classify(data: bytes, source: str | None) -> Classified:
@@ -357,13 +353,27 @@ def check_within_cap(size: int) -> None:
         raise ContentNotLoadableError(f"document is {size} bytes, over the {cap}-byte FILE_LOADING_MAX_BYTES cap")
 
 
+async def read_within_cap(provider: Storage, path: str) -> bytes:
+    """Read the object at ``path`` whole, refusing it once it is over ``FILE_LOADING_MAX_BYTES``.
+
+    The read asks for one byte past the cap, so the bound holds on the bytes actually
+    read: an object over the cap is refused without being read whole, whatever size a
+    stat reported for it before. ``FileNotFoundError`` propagates.
+    """
+    cap = file_loading_settings().max_bytes
+    data = await provider.load_range(path, 0, cap + 1)
+    if len(data) > cap:
+        raise ContentNotLoadableError(f"document is over the {cap}-byte FILE_LOADING_MAX_BYTES cap")
+    return data
+
+
 def load_content(data: bytes, source: str | None) -> str | MediaBlock:
     """Classify ``data`` and load it into text or a ``MediaBlock``.
 
     ``source`` (the originating url/path, when known) supplies the suffix fallback
     for content Magika cannot classify. Raises :class:`ContentNotLoadableError` for
     bytes over the ``FILE_LOADING_MAX_BYTES`` cap (checked BEFORE any detection or
-    parse; a storage-id source bypasses ``fetch_url``'s download cap), an unsupported
+    parse, whatever read produced the bytes), an unsupported
     type, text bytes that are not UTF-8, and an extracting handler's failure on the
     bytes (an encrypted or truncated PDF, a ragged CSV); the parser's error is the
     cause. A host fault during extraction (``OSError``, ``MemoryError``) propagates.
@@ -407,10 +417,13 @@ def _load(data: bytes, classified: Classified, source: str | None) -> str | Medi
 __all__ = [
     "DETECTION_WINDOW_BYTES",
     "Classified",
+    "Detection",
+    "Handler",
     "check_within_cap",
     "classify",
     "detect",
     "detect_mime",
     "load_classified",
     "load_content",
+    "read_within_cap",
 ]

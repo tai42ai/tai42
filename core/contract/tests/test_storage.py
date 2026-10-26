@@ -21,7 +21,7 @@ import pytest
 
 from tai42_contract.app import AppStorage
 from tai42_contract.manifest import Manifest
-from tai42_contract.storage import ObjectStat, Storage
+from tai42_contract.storage import ObjectStat, Storage, StoredObject, directory_prefix
 
 
 class _MemoryTextStorage(Storage):
@@ -36,8 +36,11 @@ class _MemoryTextStorage(Storage):
             raise FileNotFoundError(path)
         return self._store[path]
 
-    async def list(self) -> builtins.list[str]:
-        return sorted(self._store)
+    async def list(self, directory: str | None = None) -> builtins.list[str]:
+        if directory is None:
+            return sorted(self._store)
+        prefix = directory_prefix(directory)
+        return sorted(key for key in self._store if key.startswith(prefix))
 
     async def upload(self, path: str, content: str) -> None:
         self._store[path] = content
@@ -147,6 +150,37 @@ def test_load_bytes_missing_raises_file_not_found():
     store = _MemoryTextStorage()
     with pytest.raises(FileNotFoundError):
         asyncio.run(store.load_bytes("nope.txt"))
+
+
+def test_load_object_answers_the_bytes_with_the_stat_content_type():
+    store = _MemoryTextStorage()
+    asyncio.run(store.upload("greeting.txt", "héllo"))
+    assert asyncio.run(store.load_object("greeting.txt")) == StoredObject(
+        data="héllo".encode(), content_type="text/plain"
+    )
+
+
+def test_load_object_missing_raises_file_not_found():
+    store = _MemoryTextStorage()
+    with pytest.raises(FileNotFoundError):
+        asyncio.run(store.load_object("nope.txt"))
+
+
+def test_stored_object_is_frozen():
+    stored = StoredObject(data=b"x", content_type=None)
+    with pytest.raises(pydantic.ValidationError):
+        stored.data = b"y"  # pyright: ignore[reportAttributeAccessIssue]
+
+
+@pytest.mark.parametrize(("directory", "prefix"), [("a/b", "a/b/"), ("a/b/", "a/b/"), ("/a", "a/")])
+def test_directory_prefix_is_the_directory_and_one_slash(directory: str, prefix: str):
+    assert directory_prefix(directory) == prefix
+
+
+@pytest.mark.parametrize("directory", ["", "/", "//", " "])
+def test_directory_prefix_refuses_a_blank_directory(directory: str):
+    with pytest.raises(ValueError, match="A directory path is required"):
+        directory_prefix(directory)
 
 
 def test_upload_bytes_bridges_through_upload():
