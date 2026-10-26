@@ -32,7 +32,7 @@ from tai42_contract.backend import (
 from tai42_kit.utils.runtime.schedule_util import normalize_schedule
 
 from tai42_backend_arq import pool
-from tai42_backend_arq.jobs import job_handle, known_queues
+from tai42_backend_arq.jobs import in_progress_handle, job_handle, known_queues
 from tai42_backend_arq.records import (
     derive_cron_or_interval,
     next_run_after,
@@ -212,7 +212,7 @@ async def backend_active_tasks() -> dict[str, Any]:
             job_ids.append(raw[len(in_progress_key_prefix) :])
         tasks: dict[str, Any] = {}
         for job_id in job_ids:
-            status = await (await job_handle(arq_redis, job_id)).status()
+            status = await in_progress_handle(arq_redis, job_id).status()
             if status == JobStatus.in_progress:
                 tasks[job_id] = {"status": status.value}
         return tasks

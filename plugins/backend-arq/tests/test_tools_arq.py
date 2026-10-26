@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock
 
 import orjson
 import pytest
+from arq.constants import in_progress_key_prefix, result_key_prefix
 from arq.jobs import JobResult, JobStatus, SerializationError
 
 from tai42_backend_arq import scheduler, tasks, tools
@@ -73,16 +74,37 @@ class _StatusJob:
 # -- task tools -------------------------------------------------------------------
 
 
-async def test_active_tasks_lists_only_in_progress(fake_redis, monkeypatch, bind_pool) -> None:
-    bind_pool(fake_redis)
-    # in-progress marker keys live in the hash store the fake scan() walks.
-    fake_redis._store["arq:in-progress:job-a"] = {}
-    fake_redis._store["arq:in-progress:job-b"] = {}
-    monkeypatch.setattr(
-        tools, "job_handle", handle_of(_StatusJob({"job-a": JobStatus.in_progress, "job-b": JobStatus.complete}))
-    )
+async def test_active_tasks_lists_only_in_progress(arq_redis) -> None:
+    """A running job on a derived queue is listed; a finished one whose in-progress key lingers is not."""
+    running = await tasks.enqueue_task(arq_redis, queue="gpu", backend_tool_name="t")
+    await arq_redis.set(in_progress_key_prefix + running.job_id, b"1")
+    await arq_redis.set(in_progress_key_prefix + "finished", b"1")
+    await arq_redis.set(result_key_prefix + "finished", b"1")
 
-    assert await tools.backend_active_tasks() == {"job-a": {"status": "in_progress"}}
+    assert await tools.backend_active_tasks() == {running.job_id: {"status": "in_progress"}}
+
+
+async def test_active_tasks_reads_each_job_in_one_round_trip(arq_redis, monkeypatch) -> None:
+    await register_queue(arq_redis, f"{SETTINGS_QUEUE}.gpu")
+    for job_id in ("job-a", "job-b", "job-c"):
+        await arq_redis.set(in_progress_key_prefix + job_id, b"1")
+    trips: list[str] = []
+    command, pipeline = arq_redis.execute_command, arq_redis.pipeline
+
+    async def _command(*args: Any, **kwargs: Any) -> Any:
+        if args[0] != "SCAN":
+            trips.append(args[0])
+        return await command(*args, **kwargs)
+
+    def _pipeline(*args: Any, **kwargs: Any) -> Any:
+        trips.append("pipeline")
+        return pipeline(*args, **kwargs)
+
+    monkeypatch.setattr(arq_redis, "execute_command", _command)
+    monkeypatch.setattr(arq_redis, "pipeline", _pipeline)
+
+    assert len(await tools.backend_active_tasks()) == 3
+    assert trips == ["pipeline"] * 3
 
 
 async def test_reserved_and_scheduled_tasks_span_every_known_queue(arq_redis) -> None:
