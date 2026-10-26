@@ -1,5 +1,7 @@
 """yaml_util: comment-preserving round-trip load/dump + the merge helper."""
 
+import copy
+import threading
 from pathlib import Path
 
 import pytest
@@ -111,3 +113,65 @@ def test_dump_manifest_preserves_env_marker_export_convention():
     exported = load_manifest(dump_manifest(doc))
     assert exported["a"] == "!ENV ONE"
     assert exported["b"]["c"] == "!ENV TWO"
+
+
+# A blank line between a key and its block sequence is a comment token that the key and
+# the sequence share; a writer holds a deep copy of the loaded document.
+_BLANK_BEFORE_SEQUENCE = "plugins:\n\n- title: a\n"
+_BLANK_BEFORE_SEQUENCE_DUMPED = "plugins:\n\n  - title: a\n"
+
+
+def test_dump_manifest_twice_gives_the_same_text():
+    document = copy.deepcopy(load_manifest(_BLANK_BEFORE_SEQUENCE))
+    first = dump_manifest(document)
+    second = dump_manifest(document)
+    assert first == _BLANK_BEFORE_SEQUENCE_DUMPED
+    assert second == first
+
+
+def test_merge_and_dump_after_a_dump_of_the_same_document_reloads():
+    # A write dumps the document it validated (resolving it) and then merges and dumps it.
+    defaults = load_manifest(_BLANK_BEFORE_SEQUENCE)
+    document = copy.deepcopy(defaults)
+    document["mcp"] = [{"title": "server"}]
+    dump_manifest(document)
+    out = merge_and_dump_manifest(defaults, document, {})
+    assert out == _BLANK_BEFORE_SEQUENCE_DUMPED + "mcp:\n  - title: server\n"
+    assert load_manifest(out)["plugins"] == [{"title": "a"}]
+
+
+def test_dump_manifest_twice_through_a_plain_container_gives_the_same_text():
+    document = copy.deepcopy(load_manifest("top:\n  inner:\n    tags:\n\n    - t\n"))
+    document["top"] = dict(document["top"])
+    first = dump_manifest(document)
+    assert first == "top:\n  inner:\n    tags:\n\n      - t\n"
+    assert dump_manifest(document) == first
+
+
+def test_dump_manifest_twice_behind_a_merge_key_gives_the_same_text():
+    source = "entries:\n- &base\n  title: a\n  tags:\n\n  - t\n- <<: *base\n  title: b\n"
+    document = copy.deepcopy(load_manifest(source))
+    first = dump_manifest(document)
+    assert dump_manifest(document) == first
+    assert [entry["tags"] for entry in load_manifest(first)["entries"]] == [["t"], ["t"]]
+
+
+def test_loads_and_dumps_from_concurrent_threads():
+    src = _FIXTURE.read_text()
+    errors: list[BaseException] = []
+    outputs: list[str] = []
+
+    def work() -> None:
+        try:
+            for _ in range(25):
+                outputs.append(dump_manifest(load_manifest(src)))
+        except Exception as exc:  # collected for the assertion below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=work) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert errors == []
+    assert outputs == [src] * 100
