@@ -28,11 +28,11 @@ dependencies = [
     # own ranges predate the current fleet, so the published harness stays resolvable
     # even where a member floor still admits an older patch.
     # The workspace sources in [tool.uv.sources] float them at their checkouts.
-    "tai42-contract>=24.0,<25",
+    "tai42-contract>=25.0,<26",
     # The hosted LLM providers' extras: the real ``llm`` leg runs against whichever one
     # REAL_E2E_LLM_PROVIDER selects, in this process and in the stack it boots.
     "tai42-kit[llm,anthropic,google,mistral,xai,jq,uvicorn,redis,postgres,curl,monitoring]>=13.0,<14",
-    "tai42-skeleton[toolbox,files]>=30.0,<31",
+    "tai42-skeleton[toolbox,files]>=31.0,<32",
     "tai42-toolbox[http,prometheus,chain,embeddings,proxy,classifier]>=6.1,<7",
     # The Stripe payment tools plugin (split out of toolbox); its curl backing
     # dependency for the REST calls is unconditional.
@@ -47,7 +47,7 @@ dependencies = [
     "tai42-identity-redis>=5.0,<6",
     # The Postgres-backed accounts provider (password login, sessions, invites) the
     # accounts auth stacks load.
-    "tai42-accounts-postgres>=6.0,<7",
+    "tai42-accounts-postgres>=7.0,<8",
     # The Backend plugins the matrix legs run — one per TAI_E2E_BACKEND value.
     "tai42-backend-arq>=8.0,<9",
     "tai42-backend-celery>=7.0,<8",
