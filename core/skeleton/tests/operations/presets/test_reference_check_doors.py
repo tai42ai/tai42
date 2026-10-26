@@ -378,6 +378,7 @@ def test_sites_chain_through_inline_presets_and_nested_steps(pg) -> None:
     asyncio.run(run())
 
 
+@pytest.mark.usefixtures("admin_caller")
 def test_a_stored_preset_named_deep_inside_a_body_is_held(pg) -> None:
     async def run() -> None:
         async with instance.app.app_context(_manifest()):

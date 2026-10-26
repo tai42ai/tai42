@@ -1,11 +1,11 @@
 """The process-wide tool-rename referee registry behind ``app.tools.register_rename_referee``.
 
 A holder of tool-name references (a plugin, or a platform-internal wiring surface)
-registers an async referee that, given a tool name about to be renamed, answers one
-``ReferenceHolder`` per live reference that name still has, and changes nothing (the rename
-preview calls it too). The rename gate consults EVERY registered referee for the old name
-and each extension branch tool bound off it, and blocks the rename when any answer is
-non-empty; a referee raising fails the rename loudly (never a silent bypass).
+registers an async referee that, given the set of tool names a rename moves, answers, keyed
+by name, one ``ReferenceHolder`` per live reference each name still has, and changes nothing
+(the rename preview calls it too). The rename gate asks EVERY registered referee once, for the
+old name and each extension branch tool bound off it together, and blocks the rename when any
+answer holds; a referee raising fails the rename loudly (never a silent bypass).
 
 Reset on every ``start()`` (like the write-validator registry) so a reload re-imports
 the tool modules and re-registers cleanly, and the platform-internal referees re-arm

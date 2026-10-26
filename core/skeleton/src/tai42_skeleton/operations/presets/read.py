@@ -13,7 +13,7 @@ from tai42_skeleton.app import instance
 from tai42_skeleton.db import SKELETON_COMPONENT
 from tai42_skeleton.operations import BadRequestError, NotFoundError, ValidationRejectedError, operation
 from tai42_skeleton.operations.errors import OperationFailedError
-from tai42_skeleton.operations.holders import bound_branches, delete_holders, rename_holders
+from tai42_skeleton.operations.holders import bound_branches, delete_holders, holders_preview, rename_holders
 from tai42_skeleton.operations.presets.models import PresetRefereesQuery
 from tai42_skeleton.operations.presets.views import _store_record_view
 from tai42_skeleton.operations.reference_graph import StoredPresets, _reference_maps
@@ -193,4 +193,4 @@ async def preset_referees(name: str, action: Literal["rename", "delete"]) -> dic
         holders = await rename_holders(name, branches, await StoredPresets.read())
     else:
         holders = await delete_holders(name, branches)
-    return {"action": action, "holders": [holder.model_dump() for holder in holders]}
+    return await holders_preview(action, holders)

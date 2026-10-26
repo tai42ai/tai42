@@ -58,6 +58,9 @@ class _FakeTools:
     async def get_tools(self):
         return {name: SimpleNamespace(name=name) for name in self._registered}
 
+    async def has_tool(self, key):
+        return key in self._registered
+
     async def run_tool(self, key, arguments, *, offload_sync=False, extras=None):
         from tai42_kit.utils.state_context import current_state_context
 

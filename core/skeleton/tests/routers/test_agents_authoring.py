@@ -29,6 +29,7 @@ from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.operations import presets as preset_ops
 from tai42_skeleton.routers import agents as agents_router
 from tai42_skeleton.routers import presets as presets_router
+from tai42_skeleton.tools.binding.surface import remove_surface_tool
 
 from ..versioning.conftest import FakeVersioningPg
 
@@ -183,7 +184,7 @@ def _reset_preset_registry():
             await mgr.remove(name)
         provider = instance.app._fast_mcp.local_provider
         for tool in list(await provider.list_tools()):
-            provider.remove_tool(tool.name)
+            remove_surface_tool(instance.app._fast_mcp, tool.name)
 
     asyncio.run(_clear())
     for name in list(mgr.quarantined_names()):

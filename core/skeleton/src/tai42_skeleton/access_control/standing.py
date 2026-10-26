@@ -37,6 +37,17 @@ class StandingDenyReason(StrEnum):
     OWNER_NO_POLICY = "owner_no_policy"
 
 
+# The refusal each standing defect answers to the caller it was resolved for. A fingerprint
+# mismatch has none here: the tool edge answers it with the execution-key refusal.
+STANDING_REFUSALS = {
+    StandingDenyReason.NO_POLICY: "access denied: principal has no policy",
+    StandingDenyReason.DISABLED: "access denied: principal is disabled",
+    StandingDenyReason.OWNER_MISMATCH: "access denied: owner claim does not match the stored owner",
+    StandingDenyReason.OWNER_DISABLED: "access denied: owner is disabled",
+    StandingDenyReason.OWNER_NO_POLICY: "access denied: owner has no policy",
+}
+
+
 class StandingDenied(Exception):  # noqa: N818 (a refusal outcome each door maps onto its own error)
     """A principal (or its owner) cannot carry authority. ``subject`` is the user id the defect is on."""
 

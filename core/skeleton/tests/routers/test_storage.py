@@ -326,6 +326,7 @@ async def test_delete_dir(install):
     ],
     ids=["file", "dir"],
 )
+@pytest.mark.usefixtures("admin_caller")
 async def test_a_held_delete_is_409_naming_its_holders(install, monkeypatch, handler, params, refusal):
     fake = cast(_FakeStorage, install(_FakeStorage()))
     fake.objects = {"jq/gate": (b".a", None)}

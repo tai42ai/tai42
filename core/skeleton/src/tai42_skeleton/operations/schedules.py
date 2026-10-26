@@ -48,6 +48,7 @@ anonymous/system, so creation is the only edge the inner tool reaches.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from collections.abc import Awaitable, Callable
@@ -144,8 +145,7 @@ async def _resolve_schedule_dispatch(
     if cadence is None:
         return tool_name, {**tool_kwargs}
     branch_name = f"{tool_name}{SCHEDULE_BRANCH_SUFFIX}"
-    tools = await tai42_app.tools.get_tools()
-    if branch_name not in tools:
+    if not await tai42_app.tools.has_tool(branch_name):
         raise NotFoundError(
             f"tool {tool_name!r} cannot be scheduled: its schedule vehicle is not registered — "
             f"the tool must carry the backend's {SCHEDULE_EXTENSION!r} extension"
@@ -159,8 +159,7 @@ async def _resolve_schedule_dispatch(
 
 async def _scheduling_backend_present() -> bool:
     """Whether an installed backend registers the scheduling marker tools."""
-    tools = await tai42_app.tools.get_tools()
-    return all(name in tools for name in SCHEDULE_MARKER_TOOLS)
+    return all(await asyncio.gather(*(tai42_app.tools.has_tool(name) for name in SCHEDULE_MARKER_TOOLS)))
 
 
 @operation(

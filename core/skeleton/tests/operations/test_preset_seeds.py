@@ -38,6 +38,7 @@ from tai42_skeleton.operations.presets.create import PresetSeedRefusedError
 from tai42_skeleton.presets.seeds import PresetSeedRegistry
 from tai42_skeleton.presets.store import PresetStoreView
 from tai42_skeleton.tool_meta.store import PostgresToolMetaStore
+from tai42_skeleton.tools.binding.surface import remove_surface_tool
 
 from .._fakes.advisory_locks import FakeAdvisoryLocks
 from ..versioning.conftest import FakeVersioningPg
@@ -111,7 +112,7 @@ def _reset_preset_registry():
             await mgr.remove(name)
         provider = instance.app._fast_mcp.local_provider
         for tool in list(await provider.list_tools()):
-            provider.remove_tool(tool.name)
+            remove_surface_tool(instance.app._fast_mcp, tool.name)
 
     asyncio.run(_clear())
     for name in list(mgr.quarantined_names()):

@@ -60,7 +60,7 @@ def test_acting_principal_is_not_admin_when_unbound(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(user_module, "get_request_identity_claims", lambda: None)
     monkeypatch.setattr(user_module, "get_request_is_admin", lambda: False)
     assert get_execution_identity() is None
-    own, claims, is_admin = user_module._acting_principal()
+    own, claims, is_admin = user_module.acting_principal()
     assert own is None
     assert claims is None
     assert is_admin is False

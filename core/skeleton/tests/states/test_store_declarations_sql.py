@@ -162,13 +162,14 @@ async def test_count_records(pg: FakeStatesPg, store: PostgresStatesStore) -> No
     assert await store.count_records("alerts") == 2
 
 
-async def test_count_records_for_target(pg: FakeStatesPg, store: PostgresStatesStore) -> None:
+async def test_count_records_for_targets(pg: FakeStatesPg, store: PostgresStatesStore) -> None:
     pg.seed_declaration("alerts")
     pg.seed_declaration("status")
     pg.seed_record("alerts", "tool", "weather", "thread", "t1", {"n": 1})
     pg.seed_record("status", "tool", "weather", "thread", "t1", {"n": 2})
     pg.seed_record("alerts", "tool", "echo", "thread", "t1", {"n": 3})
-    assert await store.count_records_for_target("tool", "weather") == 2
+    pg.seed_record("alerts", "agent", "weather", "thread", "t1", {"n": 4})
+    assert await store.count_records_for_targets("tool", ["weather", "echo", "unused"]) == {"weather": 2, "echo": 1}
 
 
 async def test_field_stats(pg: FakeStatesPg, store: PostgresStatesStore) -> None:

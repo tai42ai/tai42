@@ -7,6 +7,7 @@ stored template id, resolved by the storage provider.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Literal
@@ -44,27 +45,36 @@ def reference_refusal(missing: Sequence[RegistryReference]) -> str:
 
 
 async def _unresolved_names(refs: list[RegistryReference]) -> set[RegistryReference]:
-    """The tool, agent and channel refs the live registries do not serve."""
-    tools: set[str] | None = None
+    """The tool, agent and channel refs the live registries do not serve.
+
+    A tool is looked up by its name, each distinct name once; the agent and channel registries
+    are read whole, at most once each.
+    """
+    tool_names = list(dict.fromkeys(ref.name for ref in refs if ref.registry == "tool"))
+    served_tools = dict(
+        zip(
+            tool_names,
+            await asyncio.gather(*(instance.app.tools.has_tool(name) for name in tool_names)),
+            strict=True,
+        )
+    )
     agents: set[str] | None = None
     channels: set[str] | None = None
     missing: set[RegistryReference] = set()
     for ref in refs:
         if ref.registry == "tool":
-            if tools is None:
-                tools = set(await instance.app.tools.get_tools())
-            served = tools
+            served = served_tools[ref.name]
         elif ref.registry == "agent":
             if agents is None:
                 agents = set(instance.app.agents.all_agents())
-            served = agents
+            served = ref.name in agents
         elif ref.registry == "channel":
             if channels is None:
                 channels = set(instance.app.channels.names())
-            served = channels
+            served = ref.name in channels
         else:
             continue
-        if ref.name not in served:
+        if not served:
             missing.add(ref)
     return missing
 

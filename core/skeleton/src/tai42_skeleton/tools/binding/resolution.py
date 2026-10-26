@@ -103,6 +103,14 @@ class _ResolutionMixin(_ToolBindingBase):
         index.store(key, mcp_tool, generation)
         return mcp_tool
 
+    async def has_tool(self, key: str) -> bool:
+        """Whether a tool is bound to ``key``: the one-name lookup :meth:`get_tool` answers, never a full listing."""
+        try:
+            await self.get_tool(key)
+        except UnknownToolError:
+            return False
+        return True
+
     async def _resolve_run_target(self, key: str) -> Tool:
         """Resolve ``key`` to its bound tool for a RUN, waiting out an in-flight reload.
 

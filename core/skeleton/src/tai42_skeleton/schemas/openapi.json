@@ -13396,7 +13396,7 @@
       },
       "ReferenceHolder": {
         "additionalProperties": false,
-        "description": "One live holder of a name: what it is, which one, where inside it, and a one-line description.\n\n``kind`` is the holder's kind (``\"hook\"``, ``\"preset version\"``; a plugin declares its own),\n``name`` the holder's own name, ``locator`` the fields that place the reference inside the\nholder (a version, a node id), and ``summary`` the line a person reads.",
+        "description": "One live holder of a name: what it is, which one, where inside it, and a one-line description.\n\n``kind`` is the holder's kind (``\"hook\"``, ``\"preset version\"``; a plugin declares its own),\n``tag`` the feature tag the holder's own doors are registered under (the tag a role's grant\nmap names), ``name`` the holder's own name, ``locator`` the fields that place the reference\ninside the holder (a version, a node id), and ``summary`` the line a person reads. A caller\nwhose role may not read ``tag`` reads the holders of one kind as a single count holder:\n``kind`` and ``tag`` as above, ``name`` the tag, ``locator`` only ``count``, and a ``summary``\nthat names no holder.",
         "properties": {
           "kind": {
             "minLength": 1,
@@ -13426,10 +13426,16 @@
             "minLength": 1,
             "title": "Summary",
             "type": "string"
+          },
+          "tag": {
+            "minLength": 1,
+            "title": "Tag",
+            "type": "string"
           }
         },
         "required": [
           "kind",
+          "tag",
           "name",
           "summary"
         ],

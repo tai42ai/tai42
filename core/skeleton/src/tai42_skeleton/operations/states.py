@@ -66,7 +66,7 @@ from tai42_skeleton.operations import (
     ValidationRejectedError,
     operation,
 )
-from tai42_skeleton.operations.holders import detach_holders, holders_refusal
+from tai42_skeleton.operations.holders import detach_holders, holders_preview, holders_refusal
 from tai42_skeleton.operations.response_models_group_a import HoldersPreview
 from tai42_skeleton.operations.response_models_group_states import (
     AttachAck,
@@ -341,7 +341,7 @@ async def state_template_referees(name: str, template: str) -> dict[str, Any]:
     """
     await _require_attachment(name, template)
     holders = await detach_holders(name, template)
-    return {"action": "detach", "holders": [holder.model_dump() for holder in holders]}
+    return await holders_preview("detach", holders)
 
 
 @operation(
@@ -361,7 +361,7 @@ async def detach_state_template(name: str, template: str) -> dict[str, Any]:
     await _require_attachment(name, template)
     holders = await detach_holders(name, template)
     if holders:
-        raise holders_refusal(
+        raise await holders_refusal(
             f"template {template!r} on state {name!r} cannot be detached", holders, "change those bindings first"
         )
     with _states_door():

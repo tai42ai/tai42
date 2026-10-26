@@ -29,7 +29,9 @@ from tai42_skeleton.app import instance
 from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.operations import ConflictError
 from tai42_skeleton.operations import presets as preset_ops
+from tai42_skeleton.tools.binding.surface import remove_surface_tool
 
+from .._fakes.caller_reach import bound_caller, level_route
 from ..versioning.conftest import FakeVersioningPg
 
 _MANIFEST = {
@@ -79,7 +81,7 @@ def _reset_preset_registry():
             await mgr.remove(name)
         provider = instance.app._fast_mcp.local_provider
         for tool in list(await provider.list_tools()):
-            provider.remove_tool(tool.name)
+            remove_surface_tool(instance.app._fast_mcp, tool.name)
 
     asyncio.run(_clear())
     for name in list(mgr.quarantined_names()):
@@ -111,18 +113,18 @@ async def _seed_body(name: str, base_tool: str, fixed_kwargs: dict[str, Any]) ->
     await instance.app.versioning.store.create("preset", name, body.model_dump())
 
 
-_SCHEDULE_HOLDER = ReferenceHolder(kind="schedule", name="echo", summary="schedule 'echo' fires it")
+_SCHEDULE_HOLDER = ReferenceHolder(kind="schedule", tag="schedules", name="echo", summary="schedule 'echo' fires it")
 
 
-async def _echo_holder(_name: str) -> list[ReferenceHolder]:
-    return [_SCHEDULE_HOLDER]
+async def _echo_holder(names: frozenset[str]) -> dict[str, list[ReferenceHolder]]:
+    return {name: [_SCHEDULE_HOLDER] for name in names}
 
 
-async def _no_holders(_name: str) -> list[ReferenceHolder]:
-    return []
+async def _no_holders(_names: frozenset[str]) -> dict[str, list[ReferenceHolder]]:
+    return {}
 
 
-async def _boom_referee(_name: str) -> list[ReferenceHolder]:
+async def _boom_referee(_names: frozenset[str]) -> dict[str, list[ReferenceHolder]]:
     raise RuntimeError("referee store unreadable")
 
 
@@ -147,6 +149,7 @@ def test_facet_registers_lists_and_rejects_duplicate(pg) -> None:
 # -- registered referee blocks / proceeds / raises ---------------------------
 
 
+@pytest.mark.usefixtures("admin_caller")
 def test_registered_referee_nonempty_blocks_rename_and_names_holder(pg) -> None:
     async def run() -> None:
         async with instance.app.app_context(_manifest()):
@@ -170,14 +173,15 @@ def test_registered_referee_nonempty_blocks_rename_and_names_holder(pg) -> None:
     asyncio.run(run())
 
 
+@pytest.mark.usefixtures("admin_caller")
 def test_referee_holding_a_branch_of_the_preset_blocks_rename(pg) -> None:
-    asked: list[str] = []
+    asked: list[frozenset[str]] = []
 
-    relay = ReferenceHolder(kind="hook", name="relay", summary="hook 'relay' targets it")
+    relay = ReferenceHolder(kind="hook", tag="hooks", name="relay", summary="hook 'relay' targets it")
 
-    async def _branch_holder(name: str) -> list[ReferenceHolder]:
-        asked.append(name)
-        return [relay] if name == "alerts_exta" else []
+    async def _branch_holder(names: frozenset[str]) -> dict[str, list[ReferenceHolder]]:
+        asked.append(names)
+        return {name: [relay] for name in names if name == "alerts_exta"}
 
     async def run() -> None:
         async with instance.app.app_context(_manifest()):
@@ -192,7 +196,8 @@ def test_referee_holding_a_branch_of_the_preset_blocks_rename(pg) -> None:
             with pytest.raises(ConflictError, match="cannot be renamed") as ei:
                 await preset_ops.rename_preset(name="alerts", new_name="alerts2")
             assert "hook 'relay' targets it" in str(ei.value)
-            assert sorted(set(asked)) == ["alerts", "alerts_exta"]
+            # The referee is asked once per gather, for the preset and its branch together.
+            assert asked == [frozenset({"alerts", "alerts_exta"})] * 2
             assert instance.app.preset_manager.is_registered("alerts")
             assert "alerts_exta" in await instance.app.tools.get_tools()
 
@@ -236,6 +241,7 @@ def test_referee_that_raises_fails_rename_loudly(pg) -> None:
 # -- preview door returns the union ------------------------------------------
 
 
+@pytest.mark.usefixtures("admin_caller")
 def test_preview_door_returns_union_of_presets_and_referees(pg) -> None:
     async def run() -> None:
         async with instance.app.app_context(_manifest()):
@@ -249,7 +255,7 @@ def test_preview_door_returns_union_of_presets_and_referees(pg) -> None:
             # The full union: the referencing preset (preset-body leg) PLUS the registered
             # referee's holder.
             assert holders == [
-                {"kind": "preset", "name": "composer", "locator": {}, "summary": "preset 'composer'"},
+                {"kind": "preset", "tag": "presets", "name": "composer", "locator": {}, "summary": "preset 'composer'"},
                 _SCHEDULE_HOLDER.model_dump(),
             ]
 
@@ -273,8 +279,8 @@ def test_the_preview_reports_exactly_the_holders_the_rename_gate_refuses_on(pg) 
 
 
 def test_a_referee_answering_anything_but_holders_fails_the_rename_naming_it(pg) -> None:
-    async def _strings(_name: str) -> list[str]:
-        return ["a plain line"]
+    async def _strings(names: frozenset[str]) -> dict[str, list[str]]:
+        return {name: ["a plain line"] for name in names}
 
     async def run() -> None:
         async with instance.app.app_context(_manifest()):
@@ -282,14 +288,97 @@ def test_a_referee_answering_anything_but_holders_fails_the_rename_naming_it(pg)
             instance.app.tools.register_rename_referee(_strings)  # type: ignore[arg-type]
             await _create("alerts")
 
-            with pytest.raises(TypeError, match=r"_strings answered \['a plain line'\]"):
+            with pytest.raises(TypeError, match=r"_strings answered \{'alerts': \['a plain line'\]\}"):
                 await preset_ops.rename_preset(name="alerts", new_name="alerts2")
-            with pytest.raises(TypeError, match="a referee answers a list of ReferenceHolder"):
+            with pytest.raises(TypeError, match="a referee answers a dict from asked tool names"):
                 await preset_ops.preset_referees(name="alerts", action="rename")
             assert instance.app.preset_manager.is_registered("alerts")
             assert not instance.app.preset_manager.is_registered("alerts2")
 
     asyncio.run(run())
+
+
+async def _unasked_key(_names: frozenset[str]) -> dict[str, list[ReferenceHolder]]:
+    return {"never-asked": [_SCHEDULE_HOLDER]}
+
+
+async def _non_string_key(_names: frozenset[str]) -> dict[Any, list[ReferenceHolder]]:
+    return {7: [_SCHEDULE_HOLDER]}
+
+
+@pytest.mark.parametrize(("referee", "answered"), [(_unasked_key, "'never-asked'"), (_non_string_key, "7")])
+def test_a_referee_answering_a_name_it_was_not_asked_fails_the_rename_naming_it(
+    pg, referee: Any, answered: str
+) -> None:
+    async def run() -> None:
+        async with instance.app.app_context(_manifest()):
+            instance.app._rename_referee_registry.reset()
+            instance.app.tools.register_rename_referee(referee)
+            await _create("alerts")
+
+            with pytest.raises(TypeError, match=rf"{referee.__name__} answered \{{{answered}: "):
+                await preset_ops.rename_preset(name="alerts", new_name="alerts2")
+            with pytest.raises(TypeError, match=r"for \['alerts'\]; a referee answers a dict from asked tool names"):
+                await preset_ops.preset_referees(name="alerts", action="rename")
+            assert instance.app.preset_manager.is_registered("alerts")
+
+    asyncio.run(run())
+
+
+# -- the caller's view of the holders ------------------------------------------
+
+_WIDGET_HOLDER = ReferenceHolder(
+    kind="widget", tag="widgets", name="secret-widget", summary="widget 'secret-widget' composes it"
+)
+_WIDGET_COUNT = ReferenceHolder(
+    kind="widget", tag="widgets", name="widgets", locator={"count": 1}, summary="widget: 1 not readable with your role"
+)
+
+
+async def _widget_holder(names: frozenset[str]) -> dict[str, list[ReferenceHolder]]:
+    return {name: [_WIDGET_HOLDER] for name in names}
+
+
+def _rename_and_preview(
+    monkeypatch: pytest.MonkeyPatch, grants: dict[str, str]
+) -> tuple[ConflictError, dict[str, Any]]:
+    async def run() -> tuple[ConflictError, dict[str, Any]]:
+        async with instance.app.app_context(_manifest()):
+            instance.app._rename_referee_registry.reset()
+            instance.app.tools.register_rename_referee(_widget_holder)
+            await _create("alerts")
+            preview = await preset_ops.preset_referees(name="alerts", action="rename")
+            with pytest.raises(ConflictError) as refused:
+                await preset_ops.rename_preset(name="alerts", new_name="alerts2")
+            assert instance.app.preset_manager.is_registered("alerts")
+            return refused.value, preview
+
+    with level_route("widgets"), bound_caller(monkeypatch, grants):
+        return asyncio.run(run())
+
+
+def test_a_holder_under_a_tag_the_role_cannot_read_is_a_count_in_the_rename_refusal_and_preview(
+    pg, monkeypatch
+) -> None:
+    refused, preview = _rename_and_preview(monkeypatch, {"presets": "write"})
+    assert str(refused) == (
+        "preset 'alerts' cannot be renamed — held by:\n"
+        "- widget: 1 not readable with your role\n"
+        "ask someone with access to 'widgets' to update those references first"
+    )
+    assert refused.extra == {"holders": [_WIDGET_COUNT.model_dump()]}
+    assert preview == {"action": "rename", "holders": [_WIDGET_COUNT.model_dump()]}
+    assert "secret-widget" not in str(refused) + repr(preview)
+
+
+def test_a_holder_under_a_tag_the_role_reads_is_named_in_the_rename_refusal_and_preview(pg, monkeypatch) -> None:
+    refused, preview = _rename_and_preview(monkeypatch, {"presets": "write", "widgets": "read"})
+    assert str(refused) == (
+        "preset 'alerts' cannot be renamed — held by:\n"
+        "- widget 'secret-widget' composes it\n"
+        "update those references first"
+    )
+    assert preview == {"action": "rename", "holders": [_WIDGET_HOLDER.model_dump()]}
 
 
 # -- tool_meta moves on a successful rename ----------------------------------

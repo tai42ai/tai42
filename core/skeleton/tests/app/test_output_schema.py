@@ -14,6 +14,7 @@ import pytest
 
 from tai42_skeleton.app.instance import app
 from tai42_skeleton.manifest import Manifest
+from tai42_skeleton.tools.binding.surface import remove_surface_tool
 
 
 @pytest.fixture(autouse=True)
@@ -25,7 +26,7 @@ def _clean_server():
     async def _clear() -> None:
         provider = app._fast_mcp.local_provider
         for tool in list(await provider.list_tools()):
-            provider.remove_tool(tool.name)
+            remove_surface_tool(app._fast_mcp, tool.name)
 
     asyncio.run(_clear())
     yield

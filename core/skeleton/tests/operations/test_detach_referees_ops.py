@@ -19,10 +19,12 @@ from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.operations import ConflictError, NotFoundError
 from tai42_skeleton.operations import states as states_ops
 
+from .._fakes.caller_reach import bound_caller
+
 _VERSION_HOLDER = ReferenceHolder(
-    kind="preset version", name="p", locator={"version": 1}, summary="preset 'p' version 1"
+    kind="preset version", tag="presets", name="p", locator={"version": 1}, summary="preset 'p' version 1"
 )
-_HOOK_HOLDER = ReferenceHolder(kind="hook", name="status-hook", summary="hook 'status-hook'")
+_HOOK_HOLDER = ReferenceHolder(kind="hook", tag="hooks", name="status-hook", summary="hook 'status-hook'")
 
 
 def _manifest() -> Manifest:
@@ -87,6 +89,7 @@ def test_facet_registers_lists_and_rejects_duplicate() -> None:
     asyncio.run(run())
 
 
+@pytest.mark.usefixtures("admin_caller")
 def test_a_vetoing_referee_blocks_the_detach_and_names_the_holder(monkeypatch) -> None:
     async def run() -> None:
         async with instance.app.app_context(_manifest()):
@@ -132,6 +135,7 @@ def test_a_raising_referee_fails_the_detach_loudly(monkeypatch) -> None:
     asyncio.run(run())
 
 
+@pytest.mark.usefixtures("admin_caller")
 def test_the_preview_reports_exactly_the_holders_the_gate_refuses_on(monkeypatch) -> None:
     async def run() -> None:
         async with instance.app.app_context(_manifest()):
@@ -149,6 +153,38 @@ def test_the_preview_reports_exactly_the_holders_the_gate_refuses_on(monkeypatch
             assert refused.value.extra == {"holders": preview["holders"]}
 
     asyncio.run(run())
+
+
+def test_a_role_member_reads_the_holders_its_role_reads_and_a_count_of_the_others(monkeypatch) -> None:
+    withheld = {
+        "kind": "preset version",
+        "tag": "presets",
+        "name": "presets",
+        "locator": {"count": 1},
+        "summary": "preset version: 1 not readable with your role",
+    }
+
+    async def run() -> None:
+        async with instance.app.app_context(_manifest()):
+            instance.app._detach_referee_registry.reset()
+            detached = _patch_detach(monkeypatch)
+            instance.app.tools.register_detach_referee(_blocks)
+            instance.app.tools.register_detach_referee(_blocks_too)
+            preview = await states_ops.state_template_referees("status", "t1")
+            assert preview == {"action": "detach", "holders": [withheld, _HOOK_HOLDER.model_dump()]}
+            with pytest.raises(ConflictError) as refused:
+                await states_ops.detach_state_template("status", "t1")
+            assert str(refused.value) == (
+                "template 't1' on state 'status' cannot be detached — held by:\n"
+                "- preset version: 1 not readable with your role\n"
+                "- hook 'status-hook'\n"
+                "change those bindings first; the others need someone with access to 'presets'"
+            )
+            assert refused.value.extra == {"holders": preview["holders"]}
+            assert detached == []
+
+    with bound_caller(monkeypatch, {"hooks": "read", "states": "write"}):
+        asyncio.run(run())
 
 
 def test_the_preview_of_an_unheld_attachment_is_empty(monkeypatch) -> None:

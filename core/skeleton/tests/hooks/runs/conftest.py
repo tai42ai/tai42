@@ -46,6 +46,7 @@ from tai42_skeleton.hooks.managers.redis_hooks_manager import RedisHooksManager
 from tai42_skeleton.hooks.runs import runtime
 from tai42_skeleton.hooks.runs.models import HookRun
 from tai42_skeleton.hooks.settings import HooksSettings
+from tai42_skeleton.tools.binding.surface import remove_surface_tool
 
 from ..._fakes.interactions_redis import FakeRedis as InteractionsFakeRedis
 from ..._fakes.tool_runs_redis import FakeRedis as ToolRunsFakeRedis
@@ -544,7 +545,7 @@ async def real_world(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[RealWorld
     async def _clear() -> None:
         provider = instance.app._fast_mcp.local_provider
         for tool in list(await provider.list_tools()):
-            provider.remove_tool(tool.name)
+            remove_surface_tool(instance.app._fast_mcp, tool.name)
 
     await _clear()
     monkeypatch.setattr(tai42_app, "_impl", _RealApp(instance.app))

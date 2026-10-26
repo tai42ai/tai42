@@ -282,7 +282,7 @@ async def test_list_returns_active_only(pg, store):
     assert [r.name for r in await store.list("preset")] == ["live"]
 
 
-async def test_list_active_versioned_bodies_batched_read(pg, store):
+async def test_list_active_version_and_body_batched_read(pg, store):
     # Active versions and bodies of one kind, name-keyed, from a SINGLE JOIN read in
     # place of a per-record get_active_body round-trip. Only active rows of the
     # requested kind, at their active version.
@@ -294,7 +294,7 @@ async def test_list_active_versioned_bodies_batched_read(pg, store):
     await store.soft_delete("preset", "ghost")  # inactive — excluded
     pg.executed.clear()
 
-    bodies = await store.list_active_versioned_bodies("preset")
+    bodies = await store.list_active_version_and_body("preset")
     assert bodies == {"alpha": (2, {"n": 2}), "beta": (1, {"m": 1})}
 
     # One batched JOIN read, never a per-row get_active_body.
@@ -304,6 +304,26 @@ async def test_list_active_versioned_bodies_batched_read(pg, store):
     per_row = [s for s in pg.executed if s.startswith("SELECT v.body FROM versioned_documents d")]
     assert len(batched) == 1
     assert per_row == []
+
+
+async def test_list_every_version_body_reads_every_version_in_one_statement(pg, store):
+    # Every version of every active document of one kind, oldest first, name-keyed, in one read.
+    await store.create("preset", "alpha", {"n": 1})
+    await store.save_version("preset", "alpha", {"n": 2})
+    await store.rollback("preset", "alpha", 1)  # the active pointer trails MAX: both versions stay
+    await store.create("preset", "beta", {"m": 1})
+    await store.create("other", "gamma", {"k": 1})  # different kind — excluded
+    await store.create("preset", "ghost", {"g": 1})
+    await store.soft_delete("preset", "ghost")  # inactive — excluded
+    pg.executed.clear()
+
+    versions = await store.list_every_version_body("preset")
+    assert versions == {"alpha": [(1, {"n": 1}), (2, {"n": 2})], "beta": [(1, {"m": 1})]}
+    assert pg.executed == [
+        "SELECT d.name, v.version, v.body FROM versioned_documents d "
+        "JOIN versioned_document_versions v ON v.document_id = d.id "
+        "WHERE d.kind = %s AND d.is_active ORDER BY d.name, v.version"
+    ]
 
 
 async def test_get_version_and_missing(pg, store):

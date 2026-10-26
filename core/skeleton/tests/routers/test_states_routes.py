@@ -442,10 +442,11 @@ class _AttachedOnce:
         return [_ATTACHMENT_ROW] if (state, template) == ("alerts", "tagmod") else []
 
 
+@pytest.mark.usefixtures("admin_caller")
 def test_the_attachment_referees_route_serves_the_detach_preview(monkeypatch: pytest.MonkeyPatch) -> None:
     from tai42_contract.tools import ReferenceHolder
 
-    holder = ReferenceHolder(kind="hook", name="on-alert", summary="hook 'on-alert'")
+    holder = ReferenceHolder(kind="hook", tag="hooks", name="on-alert", summary="hook 'on-alert'")
 
     async def _gather(state: str, template: str) -> list[ReferenceHolder]:
         return [holder] if (state, template) == ("alerts", "tagmod") else []

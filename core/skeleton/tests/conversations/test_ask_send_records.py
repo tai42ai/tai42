@@ -41,6 +41,7 @@ from tai42_skeleton.interactions.ask.timing import DeadlineWindow
 from tai42_skeleton.interactions.settings import InteractionsSettings
 from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.operations import interactions as interaction_ops
+from tai42_skeleton.tools.binding.surface import remove_surface_tool
 
 from .conftest import LuaEnv, _channel_route, create_record, keys_naming
 
@@ -740,7 +741,7 @@ async def _resume_tool_app():
     async def _clear() -> None:
         provider = instance.app._fast_mcp.local_provider
         for tool in list(await provider.list_tools()):
-            provider.remove_tool(tool.name)
+            remove_surface_tool(instance.app._fast_mcp, tool.name)
 
     await _clear()
     try:

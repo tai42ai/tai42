@@ -66,7 +66,13 @@ async def test_delete_preview_lists_a_bound_route(bridge: BridgeHarness, uniq: C
         route_name=route, tool=preset, execution_key=exec_key, callback_url=_UNREACHABLE_CALLBACK
     )
 
-    holder = {"kind": "conversation route", "name": route, "locator": {}, "summary": f"conversation route {route!r}"}
+    holder = {
+        "kind": "conversation route",
+        "tag": "conversations",
+        "name": route,
+        "locator": {},
+        "summary": f"conversation route {route!r}",
+    }
     assert await api.get(f"/api/presets/{preset}/referees?action=delete") == {"action": "delete", "holders": [holder]}
 
     refused = await api.request_raw("DELETE", f"/api/presets/{preset}")

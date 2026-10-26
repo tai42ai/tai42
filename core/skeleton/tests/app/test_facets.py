@@ -46,7 +46,7 @@ from tai42_skeleton.exceptions.exceptions import TaiValidationError
 def _app() -> MagicMock:
     app = MagicMock()
     # Async collaborator methods must be awaitable.
-    for name in ("get_tool", "get_tools", "get_client_tools", "run_tool"):
+    for name in ("get_tool", "has_tool", "get_tools", "get_client_tools", "run_tool"):
         setattr(app._tool_binding, name, AsyncMock(return_value=f"{name}-result"))
     app._run_tool_reload = AsyncMock(return_value="_run_tool_reload-result")
     return app
@@ -124,6 +124,8 @@ async def test_tools_facet_async_forwarding():
     f = ToolsFacet(app)
     assert await f.get_tool("k") == "get_tool-result"
     app._tool_binding.get_tool.assert_awaited_once_with("k")
+    assert await f.has_tool("k") == "has_tool-result"
+    app._tool_binding.has_tool.assert_awaited_once_with("k")
     assert await f.get_tools() == "get_tools-result"
     assert await f.get_client_tools(["a"]) == "get_client_tools-result"
     app._tool_binding.get_client_tools.assert_awaited_once_with(["a"])
@@ -246,12 +248,12 @@ async def test_presets_facet_list_active_bodies_validates_each_raw_body(monkeypa
         ),
     }
     app._versioned_store = MagicMock()
-    app._versioned_store.list_active_versioned_bodies = AsyncMock(return_value=raw)
+    app._versioned_store.list_active_version_and_body = AsyncMock(return_value=raw)
     f = PresetsFacet(app)
     bodies = await f.list_active_bodies()
     # The body-only projection of the one batched versioned read for the "preset" kind,
     # each raw body validated into a typed PresetBody.
-    app._versioned_store.list_active_versioned_bodies.assert_awaited_once_with("preset")
+    app._versioned_store.list_active_version_and_body.assert_awaited_once_with("preset")
     assert set(bodies) == {"a"}
     assert isinstance(bodies["a"], PresetBody)
     assert bodies["a"].base_tool == "echo"

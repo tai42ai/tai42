@@ -41,6 +41,7 @@ from tai42_skeleton.middleware.body_limit import BodyLimitMiddleware
 from tai42_skeleton.middleware.rate_limit import RateLimitMiddleware
 from tai42_skeleton.monitoring import registry as monitoring_registry
 from tai42_skeleton.tools.binding import ToolBinding, UnknownToolError
+from tai42_skeleton.tools.binding.surface import remove_surface_tool
 
 if TYPE_CHECKING:
     from tai42_skeleton.template import ResourceManager
@@ -73,7 +74,7 @@ def _clean_server():
     async def _clear() -> None:
         provider = app._fast_mcp.local_provider
         for tool in list(await provider.list_tools()):
-            provider.remove_tool(tool.name)
+            remove_surface_tool(app._fast_mcp, tool.name)
 
     asyncio.run(_clear())
     yield

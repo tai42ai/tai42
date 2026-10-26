@@ -29,6 +29,7 @@ from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.marketplace.compat import CorePluginBootError
 from tai42_skeleton.operations import BadRequestError
 from tai42_skeleton.routers import tool_extensions as router
+from tai42_skeleton.tools.binding.surface import remove_surface_tool
 
 from .._fakes.bus import FakeBus
 
@@ -192,7 +193,7 @@ def _clean_server():
     async def _clear() -> None:
         provider = instance.app._fast_mcp.local_provider
         for tool in list(await provider.list_tools()):
-            provider.remove_tool(tool.name)
+            remove_surface_tool(instance.app._fast_mcp, tool.name)
 
     asyncio.run(_clear())
     yield

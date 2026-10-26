@@ -67,7 +67,7 @@ async def test_modify_combos_multiple_owners_is_bad_request(monkeypatch):
     # owner-resolution refuses (400) before any membership or write, exactly as the
     # set door does (this branch is unreachable at route level: two configs binding
     # one name collide at boot).
-    monkeypatch.setattr(instance.app.tools, "get_tools", AsyncMock(return_value={"shout"}))
+    monkeypatch.setattr(instance.app.tools, "has_tool", AsyncMock(return_value=True))
     monkeypatch.setattr(ops, "_live_manifest", lambda: SimpleNamespace())
     monkeypatch.setattr(ops, "_owning_configs", lambda _manifest, _name: [("tools", "a"), ("mcp", "b")])
     with pytest.raises(BadRequestError, match="provided by multiple configs"):
@@ -145,7 +145,7 @@ async def test_modify_combos_backend_without_bus_maps_to_400(monkeypatch):
     monkeypatch.delenv("TAI_BUS_REDIS_URL", raising=False)
     reset_all_settings()
     try:
-        monkeypatch.setattr(instance.app.tools, "get_tools", AsyncMock(return_value={"shout"}))
+        monkeypatch.setattr(instance.app.tools, "has_tool", AsyncMock(return_value=True))
         monkeypatch.setattr(ops, "_live_manifest", lambda: SimpleNamespace())
         monkeypatch.setattr(ops, "_owning_configs", lambda _manifest, _name: [("tools", "mod")])
         monkeypatch.setattr(ops, "_other_mappers", lambda _manifest, _name, _owner: [])

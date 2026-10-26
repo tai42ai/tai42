@@ -415,7 +415,9 @@ async def drain_target(service: _StatesServiceBase, target_kind: str, target_nam
     poll = states_settings().outbox_drain_poll_seconds
     lines: list[str] = []
     where = f"target {target_kind}/{target_name}"
-    for row_id, status, row_keys in await store.outbox_outstanding_on_target(target_key(target_kind, target_name)):
+    for row_id, status, row_keys, _targets in await store.outbox_outstanding_on_targets(
+        [target_key(target_kind, target_name)]
+    ):
         if applying is not None and (row_id == applying.save_id or _waits_on(applying, row_id, row_keys)):
             continue
         current: str | None = status

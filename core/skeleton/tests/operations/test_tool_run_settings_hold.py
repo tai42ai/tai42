@@ -44,6 +44,9 @@ class _Tools:
     async def get_tools(self) -> dict[str, SimpleNamespace]:
         return {"alpha": SimpleNamespace(name="alpha", meta=None)}
 
+    async def has_tool(self, key: str) -> bool:
+        return key == "alpha"
+
     async def get_tool(self, key: str) -> SimpleNamespace:
         return SimpleNamespace(name=key, meta=None)
 

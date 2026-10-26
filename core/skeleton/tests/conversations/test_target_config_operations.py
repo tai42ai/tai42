@@ -36,6 +36,9 @@ class _FakeTools:
     async def get_tools(self) -> dict[str, object]:
         return {name: object() for name in self._names}
 
+    async def has_tool(self, key: str) -> bool:
+        return key in self._names
+
 
 class _FakeApp:
     def __init__(self, agents: set[str], tools: set[str]) -> None:

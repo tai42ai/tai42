@@ -35,6 +35,7 @@ from tai42_skeleton.access_control.role_gate import resolve_route_meta
 from tai42_skeleton.access_control.role_grants import role_level_decision_for_route
 from tai42_skeleton.access_control.settings import access_control_settings
 from tai42_skeleton.access_control.standing import (
+    STANDING_REFUSALS,
     Standing,
     StandingDenied,
     StandingDenyReason,
@@ -327,17 +328,6 @@ class _PinnedPrincipal:
     claims: dict[str, Any]
 
 
-# The refusal each standing defect answers at the tool edge. A fingerprint mismatch answers
-# the execution-key refusal instead (see ``_resolve_principal_policies``).
-_STANDING_REFUSALS = {
-    StandingDenyReason.NO_POLICY: "access denied: principal has no policy",
-    StandingDenyReason.DISABLED: "access denied: principal is disabled",
-    StandingDenyReason.OWNER_MISMATCH: "access denied: owner claim does not match the stored owner",
-    StandingDenyReason.OWNER_DISABLED: "access denied: owner is disabled",
-    StandingDenyReason.OWNER_NO_POLICY: "access denied: owner has no policy",
-}
-
-
 async def _read_pinned_policy_version(enforcer: PolicyEnforcer, user_id: str) -> int:
     """Read the single policy version every downstream layer is pinned to; a read fault denies fail-closed."""
     try:
@@ -406,7 +396,7 @@ async def _resolve_principal_policies(
             from tai42_skeleton.authz.execution import execution_key_refusal
 
             raise execution_key_refusal(user_id, denied) from denied
-        raise PermissionDeniedError(_STANDING_REFUSALS[denied.reason]) from denied
+        raise PermissionDeniedError(STANDING_REFUSALS[denied.reason]) from denied
     except Exception as exc:
         logger.warning("authz: policy/context fetch failed for %s — denying", user_id, exc_info=True)
         raise PermissionDeniedError("access denied") from exc

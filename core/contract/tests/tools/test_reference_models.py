@@ -10,29 +10,39 @@ from tai42_contract.tools import ComposedToolRef, ReferenceHolder
 
 
 def test_reference_holder_round_trips():
-    holder = ReferenceHolder(kind="preset version", name="p", locator={"version": 2}, summary="preset 'p' version 2")
+    holder = ReferenceHolder(
+        kind="preset version", tag="presets", name="p", locator={"version": 2}, summary="preset 'p' version 2"
+    )
     assert ReferenceHolder.model_validate(holder.model_dump()) == holder
     assert ReferenceHolder.model_validate_json(holder.model_dump_json()) == holder
 
 
 def test_reference_holder_locator_defaults_empty():
-    assert ReferenceHolder(kind="hook", name="h", summary="hook 'h'").locator == {}
+    assert ReferenceHolder(kind="hook", tag="hooks", name="h", summary="hook 'h'").locator == {}
 
 
-@pytest.mark.parametrize("field", ["kind", "name", "summary"])
+@pytest.mark.parametrize("field", ["kind", "tag", "name", "summary"])
 def test_reference_holder_refuses_an_empty_field(field: str):
-    values = {"kind": "hook", "name": "h", "summary": "hook 'h'", field: ""}
+    values = {"kind": "hook", "tag": "hooks", "name": "h", "summary": "hook 'h'", field: ""}
+    with pytest.raises(ValidationError):
+        ReferenceHolder.model_validate(values)
+
+
+@pytest.mark.parametrize("field", ["kind", "tag", "name", "summary"])
+def test_reference_holder_requires_every_field_but_the_locator(field: str):
+    values = {"kind": "hook", "tag": "hooks", "name": "h", "summary": "hook 'h'"}
+    del values[field]
     with pytest.raises(ValidationError):
         ReferenceHolder.model_validate(values)
 
 
 def test_reference_holder_refuses_an_unknown_key():
     with pytest.raises(ValidationError):
-        ReferenceHolder.model_validate({"kind": "hook", "name": "h", "summary": "hook 'h'", "extra": 1})
+        ReferenceHolder.model_validate({"kind": "hook", "tag": "hooks", "name": "h", "summary": "hook 'h'", "extra": 1})
 
 
 def test_reference_holder_is_frozen():
-    holder = ReferenceHolder(kind="hook", name="h", summary="hook 'h'")
+    holder = ReferenceHolder(kind="hook", tag="hooks", name="h", summary="hook 'h'")
     with pytest.raises(ValidationError):
         holder.name = "other"  # type: ignore[misc]
 

@@ -20,6 +20,7 @@ from tai42_skeleton.app.instance import app
 from tai42_skeleton.exceptions.exceptions import TaiValidationError
 from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.marketplace.compat import CorePluginBootError
+from tai42_skeleton.tools.binding.surface import remove_surface_tool
 from tai42_skeleton.tools.registry import ToolRegistry
 
 _TOOLS_B = "tests.app._fixtures.tools_b"
@@ -30,7 +31,7 @@ _EXT_KINDS = "tests.app._fixtures.ext_kinds"  # marka/markb wrappers, backendx/b
 async def _clear_server() -> None:
     provider = app._fast_mcp.local_provider
     for tool in list(await provider.list_tools()):
-        provider.remove_tool(tool.name)
+        remove_surface_tool(app._fast_mcp, tool.name)
 
 
 @pytest.fixture(autouse=True)

@@ -4,14 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Iterator
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from pydantic import ValidationError
 from tai42_contract.access_control import KEY_FINGERPRINT_CLAIM
-from tai42_contract.access_control.context import reset_request_secret_capability, set_request_secret_capability
 from tai42_contract.backend import CrontabCadence
 from tai42_contract.backend.scheduling import ScheduleRecord
 from tai42_contract.conversations import ApiConversationRoute
@@ -35,6 +33,10 @@ from tai42_skeleton.operations import NotSupportedError
 from tai42_skeleton.operations.errors import ConflictError
 from tai42_skeleton.template import platform_referees
 from tai42_skeleton.template.platform_referees import PLATFORM_TEMPLATE_REFEREES
+from tai42_skeleton.tools import holder_kinds
+from tai42_skeleton.tools.holder_kinds import HolderKind
+
+from .._fakes.caller_reach import bound_caller
 
 GATE = frozenset({"jq/gate"})
 OTHER = frozenset({"jq/other"})
@@ -49,12 +51,11 @@ _MANIFEST = {
 }
 
 
-def _holder(kind: str, name: str, site: str, **locator: Any) -> ReferenceHolder:
-    return ReferenceHolder(
-        kind=kind,
+def _holder(kind: HolderKind, name: str, site: str, **locator: Any) -> ReferenceHolder:
+    return kind.holder(
         name=name,
         locator={"template": "jq/gate", "site": site, **locator},
-        summary=f"{kind} {name!r} names 'jq/gate' at {site}",
+        summary=f"{kind.kind} {name!r} names 'jq/gate' at {site}",
     )
 
 
@@ -125,9 +126,9 @@ def test_the_preset_referee_answers_a_schema_id_a_fixed_kwargs_id_and_a_binding_
             state_binding=_binding(_INLINE),
         )
         assert await platform_referees._preset_referee(GATE) == [
-            _holder("preset", "p", "output_schema"),
-            _holder("preset", "p", "jq_expression"),
-            _holder("preset", "p", "states[0].subject_expr"),
+            _holder(holder_kinds.PRESET, "p", "output_schema"),
+            _holder(holder_kinds.PRESET, "p", "jq_expression"),
+            _holder(holder_kinds.PRESET, "p", "states[0].subject_expr"),
         ]
         assert await platform_referees._preset_referee(OTHER) == []
 
@@ -164,7 +165,7 @@ async def test_the_hook_referee_answers_the_hook_naming_the_id(monkeypatch: pyte
     rows = {"h": _hook("h", _BY_ID), "i": _hook("i", _INLINE)}
     manager = SimpleNamespace(list_hooks=lambda: _answer(rows))
     monkeypatch.setattr(hooks_cache, "get_hooks_manager", lambda: manager)
-    assert await platform_referees._hook_referee(GATE) == [_holder("hook", "h", "condition")]
+    assert await platform_referees._hook_referee(GATE) == [_holder(holder_kinds.HOOK, "h", "condition")]
     assert await platform_referees._hook_referee(OTHER) == []
 
 
@@ -186,7 +187,7 @@ def test_the_hook_referee_reads_the_tool_arguments_at_the_site_the_walk_names(mo
         )
         manager = SimpleNamespace(list_hooks=lambda: _answer({"h": hook}))
         monkeypatch.setattr(hooks_cache, "get_hooks_manager", lambda: manager)
-        assert await platform_referees._hook_referee(GATE) == [_holder("hook", "h", "jq_expression")]
+        assert await platform_referees._hook_referee(GATE) == [_holder(holder_kinds.HOOK, "h", "jq_expression")]
 
     _within_app(body)
 
@@ -210,7 +211,9 @@ async def test_the_schedule_referee_answers_the_schedule_naming_the_id(monkeypat
         _schedule("t", {SCHEDULE_STATE_BINDING_ARG: _binding(_INLINE).model_dump(mode="json")}),
     ]
     monkeypatch.setattr(schedules_ops, "export_schedules_raw", lambda: _answer(rows))
-    assert await platform_referees._schedule_referee(GATE) == [_holder("schedule", "s", "states[0].subject_expr")]
+    assert await platform_referees._schedule_referee(GATE) == [
+        _holder(holder_kinds.SCHEDULE, "s", "states[0].subject_expr")
+    ]
     assert await platform_referees._schedule_referee(OTHER) == []
 
 
@@ -252,7 +255,7 @@ async def test_the_route_referee_answers_the_route_naming_the_id(monkeypatch: py
     routes = {"r": _route("r", _BY_ID), "s": _route("s", _INLINE)}
     _conversations(monkeypatch, list_routes=lambda: _answer((routes, 0)))
     assert await platform_referees._conversation_route_referee(GATE) == [
-        _holder("conversation route", "r", "reply_expr")
+        _holder(holder_kinds.CONVERSATION_ROUTE, "r", "reply_expr")
     ]
     assert await platform_referees._conversation_route_referee(OTHER) == []
 
@@ -283,7 +286,7 @@ async def test_the_config_referee_answers_the_config_naming_the_id(monkeypatch: 
     store = SimpleNamespace(list=lambda: _answer((configs, 0)))
     _conversations(monkeypatch, durable=True, target_configs=store)
     assert await platform_referees._conversation_config_referee(GATE) == [
-        _holder("conversation config", "echo", "states[0].subject_expr", target_kind="tool")
+        _holder(holder_kinds.CONVERSATION_CONFIG, "echo", "states[0].subject_expr", target_kind="tool")
     ]
     assert await platform_referees._conversation_config_referee(OTHER) == []
 
@@ -318,7 +321,7 @@ async def test_the_declaration_referee_answers_the_declaration_naming_the_id(mon
     rows = [_declaration("status", _BY_ID), _declaration("plain", _INLINE)]
     _states(monkeypatch, list_declarations=lambda: _answer(rows))
     assert await platform_referees._state_declaration_referee(GATE) == [
-        _holder("state declaration", "status", "schema")
+        _holder(holder_kinds.STATE_DECLARATION, "status", "schema")
     ]
     assert await platform_referees._state_declaration_referee(OTHER) == []
 
@@ -337,7 +340,9 @@ async def test_the_declaration_referee_propagates_a_store_fault(monkeypatch: pyt
 async def test_the_state_template_referee_answers_the_template_naming_the_id(monkeypatch: pytest.MonkeyPatch) -> None:
     rows = [StateTemplateDocument(name="t", schema=_BY_ID), StateTemplateDocument(name="u", schema=_INLINE)]
     _states(monkeypatch, list_templates=lambda: _answer(rows))
-    assert await platform_referees._state_template_referee(GATE) == [_holder("state template", "t", "schema")]
+    assert await platform_referees._state_template_referee(GATE) == [
+        _holder(holder_kinds.STATE_TEMPLATE, "t", "schema")
+    ]
     assert await platform_referees._state_template_referee(OTHER) == []
 
 
@@ -355,25 +360,6 @@ async def test_the_state_template_referee_propagates_a_store_fault(monkeypatch: 
 # -- access control and roles ------------------------------------------------------------------
 
 
-@pytest.fixture
-def as_admin() -> Iterator[None]:
-    token = set_request_secret_capability(True)
-    try:
-        yield
-    finally:
-        reset_request_secret_capability(token)
-
-
-def _withheld(kind: str, count: int, site: str = "condition") -> ReferenceHolder:
-    noun, verb = (f"{kind}s", "name") if count > 1 else (kind, "names")
-    return ReferenceHolder(
-        kind=kind,
-        name="jq/gate",
-        locator={"template": "jq/gate", "site": site, "count": count},
-        summary=f"{count} {noun} {verb} 'jq/gate' at {site}",
-    )
-
-
 def _policies(monkeypatch: pytest.MonkeyPatch, *, configured: bool = True, rows: Any = None) -> None:
     monkeypatch.setattr(platform_referees, "_skeleton_store_configured", lambda: configured)
     reader = rows if callable(rows) else (lambda: _answer(rows))
@@ -381,45 +367,16 @@ def _policies(monkeypatch: pytest.MonkeyPatch, *, configured: bool = True, rows:
     monkeypatch.setattr(ac_store_module, "access_control_store", lambda: store)
 
 
-@pytest.mark.usefixtures("as_admin")
 async def test_the_access_control_referee_answers_an_api_key_and_a_principal(monkeypatch: pytest.MonkeyPatch) -> None:
     minted = {"condition": {"id": "jq/gate"}, "policy_data": {KEY_FINGERPRINT_CLAIM: "fp"}}
     principal = {"condition": {"id": "jq/gate"}, "policy_data": {}}
     inline = {"condition": {"content": ".a"}, "policy_data": {}}
     _policies(monkeypatch, rows=[("alice", principal), ("key-1", minted), ("bob", inline)])
     assert await platform_referees._access_control_referee(GATE) == [
-        _holder("principal", "alice", "condition"),
-        _holder("api key", "key-1", "condition"),
+        _holder(holder_kinds.PRINCIPAL, "alice", "condition"),
+        _holder(holder_kinds.API_KEY, "key-1", "condition"),
     ]
     assert await platform_referees._access_control_referee(OTHER) == []
-
-
-async def test_the_access_control_referee_answers_a_non_admin_counts_naming_no_identity(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    minted = {"condition": {"id": "jq/gate"}, "policy_data": {KEY_FINGERPRINT_CLAIM: "fp"}}
-    principal = {"condition": {"id": "jq/gate"}, "policy_data": {}}
-    rows = [("alice", principal), ("key-1", minted), ("bob", principal)]
-    _policies(monkeypatch, rows=rows)
-    holders = await platform_referees._access_control_referee(GATE)
-    assert holders == [_withheld("principal", 2), _withheld("api key", 1)]
-    assert not any(user in repr(holders) for user in ("alice", "bob", "key-1"))
-
-
-async def test_a_refused_delete_names_no_identity_to_a_non_admin(monkeypatch: pytest.MonkeyPatch) -> None:
-    from tai42_skeleton.operations import holders as holders_module
-
-    principal = {"condition": {"id": "jq/gate"}, "policy_data": {}}
-    _policies(monkeypatch, rows=[("alice", principal)])
-    monkeypatch.setattr(holders_module, "template_delete_holders", platform_referees._access_control_referee)
-    with pytest.raises(ConflictError) as refused:
-        await holders_module.refuse_held_templates(GATE, head="stored template 'jq/gate' cannot be deleted")
-    assert str(refused.value) == (
-        "stored template 'jq/gate' cannot be deleted — held by:\n"
-        "- 1 principal names 'jq/gate' at condition\n"
-        "remove those references first"
-    )
-    assert "alice" not in repr(refused.value.extra)
 
 
 async def test_the_access_control_referee_with_no_store_reads_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -433,25 +390,52 @@ async def test_the_access_control_referee_propagates_a_store_fault(monkeypatch: 
         await platform_referees._access_control_referee(GATE)
 
 
+async def _refused_template_delete(monkeypatch: pytest.MonkeyPatch) -> ConflictError:
+    from tai42_skeleton.operations import holders as holders_module
+
+    minted = {"condition": {"id": "jq/gate"}, "policy_data": {KEY_FINGERPRINT_CLAIM: "fp"}}
+    principal = {"condition": {"id": "jq/gate"}, "policy_data": {}}
+    _policies(monkeypatch, rows=[("alice", principal), ("key-1", minted), ("bob", principal)])
+    monkeypatch.setattr(holders_module, "template_delete_holders", platform_referees._access_control_referee)
+    with pytest.raises(ConflictError) as refused:
+        await holders_module.refuse_held_templates(GATE, head="stored template 'jq/gate' cannot be deleted")
+    return refused.value
+
+
+async def test_a_refused_template_delete_counts_identities_a_role_cannot_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    with bound_caller(monkeypatch, {"states": "write"}):
+        refused = await _refused_template_delete(monkeypatch)
+    assert str(refused) == (
+        "stored template 'jq/gate' cannot be deleted — held by:\n"
+        "- principal: 2 not readable with your role\n"
+        "- api key: 1 not readable with your role\n"
+        "ask someone with access to 'access-control' to remove those references first"
+    )
+    assert not any(user in repr(refused.extra) for user in ("alice", "bob", "key-1"))
+
+
+async def test_a_refused_template_delete_names_the_identities_to_an_admin(monkeypatch: pytest.MonkeyPatch) -> None:
+    with bound_caller(monkeypatch, admin=True):
+        refused = await _refused_template_delete(monkeypatch)
+    assert str(refused) == (
+        "stored template 'jq/gate' cannot be deleted — held by:\n"
+        "- principal 'alice' names 'jq/gate' at condition\n"
+        "- api key 'key-1' names 'jq/gate' at condition\n"
+        "- principal 'bob' names 'jq/gate' at condition\n"
+        "remove those references first"
+    )
+
+
 def _roles(monkeypatch: pytest.MonkeyPatch, *, configured: bool = True, reader: Any) -> None:
     monkeypatch.setattr(platform_referees, "_skeleton_store_configured", lambda: configured)
     monkeypatch.setattr(roles_module, "role_store", lambda: SimpleNamespace(list_roles=reader))
 
 
-@pytest.mark.usefixtures("as_admin")
 async def test_the_role_referee_answers_the_role_naming_the_id(monkeypatch: pytest.MonkeyPatch) -> None:
     rows = [{"name": "viewer", "condition": {"id": "jq/gate"}}, {"name": "editor", "condition": {"content": ".a"}}]
     _roles(monkeypatch, reader=lambda: _answer(rows))
-    assert await platform_referees._role_referee(GATE) == [_holder("role", "viewer", "condition")]
+    assert await platform_referees._role_referee(GATE) == [_holder(holder_kinds.ROLE, "viewer", "condition")]
     assert await platform_referees._role_referee(OTHER) == []
-
-
-async def test_the_role_referee_answers_a_non_admin_a_count_naming_no_role(monkeypatch: pytest.MonkeyPatch) -> None:
-    rows = [{"name": "viewer", "condition": {"id": "jq/gate"}}, {"name": "editor", "condition": {"content": ".a"}}]
-    _roles(monkeypatch, reader=lambda: _answer(rows))
-    holders = await platform_referees._role_referee(GATE)
-    assert holders == [_withheld("role", 1)]
-    assert "viewer" not in repr(holders)
 
 
 async def test_the_role_referee_with_no_store_reads_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -468,7 +452,7 @@ async def test_the_role_referee_propagates_a_store_fault(monkeypatch: pytest.Mon
 # -- setting -----------------------------------------------------------------------------------
 
 _PROMPT_ENV = "SUMMARIZATION_MIDDLEWARE_SUMMARY_PROMPT"
-_SETTING = _holder("setting", _PROMPT_ENV, "summary_prompt")
+_SETTING = _holder(holder_kinds.SETTING, _PROMPT_ENV, "summary_prompt")
 
 
 @pytest.mark.parametrize(

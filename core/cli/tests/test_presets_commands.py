@@ -489,8 +489,14 @@ def test_presets_rename(monkeypatch: pytest.MonkeyPatch) -> None:
 _HOLDERS_PREVIEW = {
     "action": "rename",
     "holders": [
-        {"kind": "preset", "name": "f", "locator": {}, "summary": "preset 'f'"},
-        {"kind": "schedule", "name": "nightly", "locator": {"id": "nightly"}, "summary": "schedule 'nightly'"},
+        {"kind": "preset", "tag": "presets", "name": "f", "locator": {}, "summary": "preset 'f'"},
+        {
+            "kind": "schedule",
+            "tag": "schedules",
+            "name": "nightly",
+            "locator": {"id": "nightly"},
+            "summary": "schedule 'nightly'",
+        },
     ],
 }
 
@@ -530,10 +536,10 @@ def test_presets_referees_prints_one_row_per_holder(monkeypatch: pytest.MonkeyPa
     result = run_cli(monkeypatch, handler, ["presets", "referees", "p", "--action", "rename"])
     assert result.exit_code == 0, result.output
     assert result.output.splitlines() == [
-        "kind      name     locator            summary           ",
-        "--------  -------  -----------------  ------------------",
-        "preset    f        {}                 preset 'f'        ",
-        'schedule  nightly  {"id": "nightly"}  schedule \'nightly\'',
+        "kind      tag        name     locator            summary           ",
+        "--------  ---------  -------  -----------------  ------------------",
+        "preset    presets    f        {}                 preset 'f'        ",
+        'schedule  schedules  nightly  {"id": "nightly"}  schedule \'nightly\'',
     ]
 
 

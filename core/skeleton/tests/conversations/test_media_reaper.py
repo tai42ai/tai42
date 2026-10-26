@@ -317,7 +317,7 @@ async def test_a_blob_a_stored_object_names_is_kept_until_the_holder_is_removed(
 
     async def _referee(ids: frozenset[str]) -> list[ReferenceHolder]:
         return [
-            ReferenceHolder(kind="hook", name="h", summary=f"hook 'h' names {blob!r} at condition")
+            ReferenceHolder(kind="hook", tag="hooks", name="h", summary=f"hook 'h' names {blob!r} at condition")
             for blob in sorted(ids & held)
         ]
 
@@ -328,7 +328,9 @@ async def test_a_blob_a_stored_object_names_is_kept_until_the_holder_is_removed(
     assert await store.get("held") is not None
     assert await store.score("held") == 1000.0
     assert events == [(media_reaper.MEDIA_REAP_FAILED_EVENT_TOPIC, {"media_id": "held"})]
-    assert "hook 'h' names 'inbound-media/held' at condition" in caplog.text
+    # The reaper runs with no caller bound, so its refusal reads the fail-closed view: a count, never a name.
+    assert "- hook: 1 not readable with your role\nask someone with access to 'hooks'" in caplog.text
+    assert "hook 'h'" not in caplog.text
 
     held.clear()
     assert await media_reaper.reap_expired_media_once() == 1

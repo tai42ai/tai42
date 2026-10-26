@@ -368,7 +368,7 @@ async def test_a_channel_delivery_suspended_in_its_send_holds_no_retired_setting
             [],
         ),
         (
-            lambda: referees_module._parked_interaction_referee("t"),
+            lambda: referees_module._parked_interaction_referee(frozenset({"t"})),
             InteractionStore,
             "parked_continuation_tools",
             [],

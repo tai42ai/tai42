@@ -1,11 +1,11 @@
 """The process-wide preset-delete referee registry — the body behind ``app.tools.register_delete_referee``.
 
-A holder of resources keyed on a preset/tool name registers an async referee that, given a
-name a delete removes, VETOES by answering one ``ReferenceHolder`` per reference it will not let
-the delete strand, and changes nothing (the delete preview calls it too); cleanup belongs in a
-delete cascade. The delete gate consults EVERY registered referee for the preset and each
-extension branch tool bound off it, and blocks the delete when any answer is non-empty; a
-referee raising fails the delete loudly (never a silent bypass).
+A holder of resources keyed on a preset/tool name registers an async referee that, given the
+set of names a delete removes, VETOES by answering, keyed by name, one ``ReferenceHolder`` per
+reference it will not let the delete strand, and changes nothing (the delete preview calls it
+too); cleanup belongs in a delete cascade. The delete gate asks EVERY registered referee once,
+for the preset and each extension branch tool bound off it together, and blocks the delete when
+any answer holds; a referee raising fails the delete loudly (never a silent bypass).
 
 Reset on every ``start()`` (like the rename-referee registry) so a reload re-imports the
 tool modules and re-registers cleanly. Registering the same provider object twice raises

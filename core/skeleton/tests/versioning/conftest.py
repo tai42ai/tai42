@@ -228,6 +228,18 @@ class _FakeCursor:
                 if ver is not None:
                     versioned_rows.append((doc["name"], doc["active_version"], ver["body"]))
             self._all = versioned_rows
+        elif norm.startswith("SELECT d.name, v.version, v.body FROM versioned_documents d"):
+            (kind,) = params
+            version_rows: list[tuple[str, int, Any]] = []
+            for doc in sorted(pg.documents, key=lambda d: d["name"]):
+                if doc["kind"] != kind or not doc["is_active"]:
+                    continue
+                version_rows.extend(
+                    (doc["name"], v["version"], v["body"])
+                    for v in sorted(pg.versions, key=lambda v: v["version"])
+                    if v["document_id"] == doc["id"]
+                )
+            self._all = version_rows
         elif norm.startswith("SELECT d.name, v.body FROM versioned_documents d"):
             (kind,) = params
             rows: list[tuple[str, Any]] = []

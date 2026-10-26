@@ -274,7 +274,7 @@ class PresetManager:
         """
         if name in self._specs:
             return False
-        return name in await self._app.tools.get_tools()
+        return await self._app.tools.has_tool(name)
 
     # -- register one ---------------------------------------------------------
 
@@ -356,7 +356,7 @@ class PresetManager:
         """
         if name in self._specs:
             raise PresetExistsError(name)
-        if name in await self._app.tools.get_tools():
+        if await self._app.tools.has_tool(name):
             raise PresetNameConflictError(name)
         tool_obj = await self._app.presets.bind(
             base_tool,

@@ -22,7 +22,7 @@ from types import SimpleNamespace
 import pytest
 from tai42_contract.backend import IntervalCadence, ScheduleRecord
 from tai42_contract.interactions import AnswerFormat, InteractionRequest
-from tai42_contract.tools import ReferenceHolder
+from tai42_contract.tools import ReferenceHolder, ToolRenameReferee
 from tai42_kit.settings import reset_all_settings
 
 from tai42_skeleton.app import instance
@@ -34,12 +34,19 @@ from tai42_skeleton.tools.rename_referees import ToolRenameRefereeRegistry
 # -- registry ----------------------------------------------------------------
 
 
-async def _empty(_name: str) -> list[ReferenceHolder]:
-    return []
+async def _empty(_names: frozenset[str]) -> dict[str, list[ReferenceHolder]]:
+    return {}
 
 
-async def _holder(_name: str) -> list[ReferenceHolder]:
-    return [ReferenceHolder(kind="hook", name="h", summary="hook 'h'")]
+async def _holder(names: frozenset[str]) -> dict[str, list[ReferenceHolder]]:
+    return {name: [ReferenceHolder(kind="hook", tag="hooks", name="h", summary="hook 'h'")] for name in names}
+
+
+async def _ask(referee: ToolRenameReferee, name: str) -> list[ReferenceHolder]:
+    """``referee``'s holders of ``name`` alone; a name it leaves out has none."""
+    answer = await referee(frozenset({name}))
+    assert set(answer) <= {name}
+    return answer.get(name, [])
 
 
 def test_registry_collects_and_snapshots() -> None:
@@ -108,11 +115,29 @@ async def test_schedule_referee_blocks_on_operator_named_schedule(monkeypatch) -
     import tai42_skeleton.operations.schedules as schedules_mod
 
     monkeypatch.setattr(schedules_mod, "export_schedules_raw", fake_export)
-    holders = await platform_referees._schedule_referee("echo")
+    holders = await _ask(platform_referees._schedule_referee, "echo")
     assert holders == [
-        ReferenceHolder(kind="schedule", name="nightly-cleanup", summary="schedule 'nightly-cleanup'"),
-        ReferenceHolder(kind="schedule", name="weekly-digest", summary="schedule 'weekly-digest'"),
+        ReferenceHolder(kind="schedule", tag="schedules", name="nightly-cleanup", summary="schedule 'nightly-cleanup'"),
+        ReferenceHolder(kind="schedule", tag="schedules", name="weekly-digest", summary="schedule 'weekly-digest'"),
     ]
+
+
+async def test_schedule_referee_answers_every_asked_name_from_one_export(monkeypatch) -> None:
+    exports: list[None] = []
+
+    async def fake_export() -> list[ScheduleRecord]:
+        exports.append(None)
+        return [_record("nightly", "echo"), _record("hourly", "alerts"), _record("weekly", "other")]
+
+    import tai42_skeleton.operations.schedules as schedules_mod
+
+    monkeypatch.setattr(schedules_mod, "export_schedules_raw", fake_export)
+    answer = await platform_referees._schedule_referee(frozenset({"echo", "alerts", "unused"}))
+    assert answer == {
+        "echo": [ReferenceHolder(kind="schedule", tag="schedules", name="nightly", summary="schedule 'nightly'")],
+        "alerts": [ReferenceHolder(kind="schedule", tag="schedules", name="hourly", summary="schedule 'hourly'")],
+    }
+    assert len(exports) == 1
 
 
 async def test_schedule_referee_reads_the_tool_field_whatever_the_backend_key(monkeypatch) -> None:
@@ -128,8 +153,8 @@ async def test_schedule_referee_reads_the_tool_field_whatever_the_backend_key(mo
     import tai42_skeleton.operations.schedules as schedules_mod
 
     monkeypatch.setattr(schedules_mod, "export_schedules_raw", fake_export)
-    assert await platform_referees._schedule_referee("echo") == [
-        ReferenceHolder(kind="schedule", name="nightly", summary="schedule 'nightly'")
+    assert await _ask(platform_referees._schedule_referee, "echo") == [
+        ReferenceHolder(kind="schedule", tag="schedules", name="nightly", summary="schedule 'nightly'")
     ]
 
 
@@ -140,7 +165,7 @@ async def test_schedule_referee_empty_when_no_match(monkeypatch) -> None:
     import tai42_skeleton.operations.schedules as schedules_mod
 
     monkeypatch.setattr(schedules_mod, "export_schedules_raw", fake_export)
-    assert await platform_referees._schedule_referee("echo") == []
+    assert await _ask(platform_referees._schedule_referee, "echo") == []
 
 
 async def test_schedule_referee_feature_off_is_empty(monkeypatch) -> None:
@@ -152,7 +177,7 @@ async def test_schedule_referee_feature_off_is_empty(monkeypatch) -> None:
     import tai42_skeleton.operations.schedules as schedules_mod
 
     monkeypatch.setattr(schedules_mod, "export_schedules_raw", fake_export)
-    assert await platform_referees._schedule_referee("echo") == []
+    assert await _ask(platform_referees._schedule_referee, "echo") == []
 
 
 async def test_schedule_referee_raises_when_export_tool_absent_with_markers_present(monkeypatch) -> None:
@@ -168,7 +193,7 @@ async def test_schedule_referee_raises_when_export_tool_absent_with_markers_pres
 
     monkeypatch.setattr(schedules_mod, "export_schedules_raw", fake_export)
     with pytest.raises(RuntimeError, match="registers no 'backend_export_schedules'"):
-        await platform_referees._schedule_referee("echo")
+        await _ask(platform_referees._schedule_referee, "echo")
 
 
 async def test_schedule_referee_propagates_an_unreadable_export(monkeypatch) -> None:
@@ -183,7 +208,7 @@ async def test_schedule_referee_propagates_an_unreadable_export(monkeypatch) -> 
 
     monkeypatch.setattr(schedules_mod, "export_schedules_raw", fake_export)
     with pytest.raises(OperationFailedError):
-        await platform_referees._schedule_referee("echo")
+        await _ask(platform_referees._schedule_referee, "echo")
 
 
 # -- platform referee: hooks -------------------------------------------------
@@ -201,8 +226,8 @@ async def test_hook_referee_blocks_on_matching_tool(monkeypatch) -> None:
     import tai42_skeleton.hooks.cache as hooks_cache
 
     monkeypatch.setattr(hooks_cache, "get_hooks_manager", lambda: SimpleNamespace(list_hooks=fake_list_hooks))
-    holders = await platform_referees._hook_referee("echo")
-    assert holders == [ReferenceHolder(kind="hook", name="alerts-hook", summary="hook 'alerts-hook'")]
+    holders = await _ask(platform_referees._hook_referee, "echo")
+    assert holders == [ReferenceHolder(kind="hook", tag="hooks", name="alerts-hook", summary="hook 'alerts-hook'")]
 
 
 # -- platform referee: conversation routes -----------------------------------
@@ -223,11 +248,13 @@ async def test_conversation_route_referee_blocks_on_tool_target(monkeypatch) -> 
     monkeypatch.setattr(
         conversations_mod, "get_conversations_manager", lambda: SimpleNamespace(list_routes=fake_list_routes)
     )
-    holders = await platform_referees._conversation_route_referee("echo")
+    holders = await _ask(platform_referees._conversation_route_referee, "echo")
     # Only the tool-kind route targeting the name blocks; an agent-kind route with the
     # same target_name does not.
     assert holders == [
-        ReferenceHolder(kind="conversation route", name="acme-route", summary="conversation route 'acme-route'")
+        ReferenceHolder(
+            kind="conversation route", tag="conversations", name="acme-route", summary="conversation route 'acme-route'"
+        )
     ]
 
 
@@ -240,14 +267,16 @@ def _fake_app_with_extensions(tool_extensions: dict[str, object]):
 
 async def test_tool_extensions_referee_blocks_on_map_entry(monkeypatch) -> None:
     monkeypatch.setattr(instance, "app", _fake_app_with_extensions({"echo": [["ext-a"]]}), raising=False)
-    assert await platform_referees._tool_extensions_referee("echo") == [
-        ReferenceHolder(kind="tool extensions", name="echo", summary="tool-extensions map entry for 'echo'")
+    assert await _ask(platform_referees._tool_extensions_referee, "echo") == [
+        ReferenceHolder(
+            kind="tool extensions", tag="extensions", name="echo", summary="tool-extensions map entry for 'echo'"
+        )
     ]
 
 
 async def test_tool_extensions_referee_empty_when_absent(monkeypatch) -> None:
     monkeypatch.setattr(instance, "app", _fake_app_with_extensions({"alerts": [["ext-a"]]}), raising=False)
-    assert await platform_referees._tool_extensions_referee("echo") == []
+    assert await _ask(platform_referees._tool_extensions_referee, "echo") == []
 
 
 # -- platform referee: parked interactions -----------------------------------
@@ -321,17 +350,18 @@ async def test_parked_referee_walks_full_index_beyond_list_pending_cap(fake_redi
         yield fake_redis
 
     monkeypatch.setattr(kit_clients, "client_ctx", fake_client_ctx)
-    holders = await platform_referees._parked_interaction_referee("echo")
+    holders = await _ask(platform_referees._parked_interaction_referee, "echo")
     assert holders == [
         ReferenceHolder(
             kind="parked interactions",
+            tag="interactions",
             name="echo",
             locator={"count": 1},
             summary="1 parked interaction park resuming into 'echo'",
         )
     ]
     # A name no park resumes into draws no objection.
-    assert await platform_referees._parked_interaction_referee("alerts") == []
+    assert await _ask(platform_referees._parked_interaction_referee, "alerts") == []
 
 
 async def test_parked_referee_blocks_on_answered_continuation_awaiting_redelivery(fake_redis, monkeypatch) -> None:
@@ -364,17 +394,18 @@ async def test_parked_referee_blocks_on_answered_continuation_awaiting_redeliver
         yield fake_redis
 
     monkeypatch.setattr(kit_clients, "client_ctx", fake_client_ctx)
-    holders = await platform_referees._parked_interaction_referee("echo")
+    holders = await _ask(platform_referees._parked_interaction_referee, "echo")
     assert holders == [
         ReferenceHolder(
             kind="answered continuations",
+            tag="interactions",
             name="echo",
             locator={"count": 1},
             summary="1 answered continuation awaiting redelivery into 'echo'",
         )
     ]
     # A name no continuation resumes into draws no objection.
-    assert await platform_referees._parked_interaction_referee("alerts") == []
+    assert await _ask(platform_referees._parked_interaction_referee, "alerts") == []
 
 
 async def test_continuation_due_tools_raises_on_torn_record(fake_redis, monkeypatch) -> None:
@@ -400,71 +431,94 @@ async def test_parked_referee_feature_off_is_empty(monkeypatch) -> None:
     monkeypatch.delenv("INTERACTIONS_REDIS_URL", raising=False)
     monkeypatch.delenv("TAI_DEFAULT_REDIS_URL", raising=False)
     reset_all_settings()
-    assert await platform_referees._parked_interaction_referee("echo") == []
+    assert await _ask(platform_referees._parked_interaction_referee, "echo") == []
 
 
 # -- states referee ----------------------------------------------------------
 
 
-def _outstanding(monkeypatch, rows: list[tuple[int, str]]) -> list[str]:
-    """Patch the store's outstanding-save read: it answers ``rows`` and records the target keys asked."""
+def _outstanding(monkeypatch, rows: list[tuple[int, str]]) -> list[list[str]]:
+    """Patch the store's outstanding-save read: ``rows`` sit under ``tool/echo``; records each ask's target keys."""
     import tai42_skeleton.states.store as states_store
     from tai42_skeleton.states.outbox.keys import target_key
 
-    asked: list[str] = []
+    asked: list[list[str]] = []
+    echo = target_key("tool", "echo")
 
-    async def _read(self, target: str) -> list[tuple[int, str, list[str]]]:
-        asked.append(target)
-        return [(row_id, status, ["k"]) for row_id, status in rows] if target == target_key("tool", "echo") else []
+    async def _read(self, targets: list[str]) -> list[tuple[int, str, list[str], list[str]]]:
+        asked.append(list(targets))
+        return [(row_id, status, ["k"], [echo]) for row_id, status in rows] if echo in targets else []
 
-    monkeypatch.setattr(states_store.PostgresStatesStore, "outbox_outstanding_on_target", _read)
+    monkeypatch.setattr(states_store.PostgresStatesStore, "outbox_outstanding_on_targets", _read)
+    return asked
+
+
+def _counts(monkeypatch, counts: dict[str, int]) -> list[list[str]]:
+    """Patch the store's record count: ``counts`` per ``tool`` target name; records each ask's names."""
+    import tai42_skeleton.states.store as states_store
+
+    asked: list[list[str]] = []
+
+    async def _count(self, target_kind: str, target_names: list[str]) -> dict[str, int]:
+        assert target_kind == "tool"
+        asked.append(list(target_names))
+        return {name: counts[name] for name in target_names if name in counts}
+
+    monkeypatch.setattr(states_store.PostgresStatesStore, "count_records_for_targets", _count)
     return asked
 
 
 async def test_states_referee_blocks_on_records_under_the_tool_target(monkeypatch) -> None:
     import tai42_skeleton.states.db as states_db
-    import tai42_skeleton.states.store as states_store
 
     monkeypatch.setattr(states_db, "states_store_configured", lambda: True)
-    asked = _outstanding(monkeypatch, [])
-
-    async def _count(self, target_kind: str, target_name: str) -> int:
-        assert target_kind == "tool"
-        return 3 if target_name == "echo" else 0
-
-    monkeypatch.setattr(states_store.PostgresStatesStore, "count_records_for_target", _count)
-    holders = await platform_referees._states_referee("echo")
+    _outstanding(monkeypatch, [])
+    _counts(monkeypatch, {"echo": 3})
+    holders = await _ask(platform_referees._states_referee, "echo")
     assert holders == [
         ReferenceHolder(
-            kind="state records", name="echo", locator={"count": 3}, summary="3 state records under target tool/echo"
+            kind="state records",
+            tag="states",
+            name="echo",
+            locator={"count": 3},
+            summary="3 state records under target tool/echo",
         )
     ]
-    assert await platform_referees._states_referee("other") == []
+    assert await _ask(platform_referees._states_referee, "other") == []
+
+
+async def test_states_referee_reads_every_asked_name_in_two_statements(monkeypatch) -> None:
+    import tai42_skeleton.states.db as states_db
     from tai42_skeleton.states.outbox.keys import target_key
 
-    assert asked == [target_key("tool", "echo"), target_key("tool", "other")]
+    monkeypatch.setattr(states_db, "states_store_configured", lambda: True)
+    outstanding_asks = _outstanding(monkeypatch, [(4, "pending")])
+    count_asks = _counts(monkeypatch, {"alerts": 2})
+    answer = await platform_referees._states_referee(frozenset({"echo", "alerts", "other"}))
+    assert {name: [holder.summary for holder in holders] for name, holders in answer.items()} == {
+        "alerts": ["2 state records under target tool/alerts"],
+        "echo": ["pending state save 4 under target tool/echo is not applied yet"],
+    }
+    assert outstanding_asks == [[target_key("tool", name) for name in ("alerts", "echo", "other")]]
+    assert count_asks == [["alerts", "echo", "other"]]
 
 
 async def test_states_referee_names_each_outstanding_save_and_applies_none(monkeypatch) -> None:
     """Each outstanding save under the target is a ``pending save`` holder worded by its status; the
     referee only reads, so nothing is drained or applied."""
     import tai42_skeleton.states.db as states_db
-    import tai42_skeleton.states.store as states_store
 
     monkeypatch.setattr(states_db, "states_store_configured", lambda: True)
     _outstanding(monkeypatch, [(4, "failed"), (7, "pending"), (9, "calls"), (12, "running")])
-
-    async def _count(self, target_kind: str, target_name: str) -> int:
-        return 0
+    _counts(monkeypatch, {})
 
     async def _no_drain(*_args: object) -> None:
         raise AssertionError("a referee never drains a target")
 
-    monkeypatch.setattr(states_store.PostgresStatesStore, "count_records_for_target", _count)
     monkeypatch.setattr(
         instance, "app", SimpleNamespace(states=SimpleNamespace(drain_target_saves=_no_drain)), raising=False
     )
-    holders = await platform_referees._states_referee("echo")
+    holders = await _ask(platform_referees._states_referee, "echo")
     assert [(holder.kind, holder.name, holder.locator) for holder in holders] == [
         ("pending save", "4", {"status": "failed"}),
         ("pending save", "7", {"status": "pending"}),
@@ -484,22 +538,18 @@ async def test_states_referee_raises_on_an_unknown_save_status(monkeypatch) -> N
 
     monkeypatch.setattr(states_db, "states_store_configured", lambda: True)
     _outstanding(monkeypatch, [(5, "mystery")])
+    _counts(monkeypatch, {})
     with pytest.raises(ValueError, match="unknown status 'mystery'"):
-        await platform_referees._states_referee("echo")
+        await _ask(platform_referees._states_referee, "echo")
 
 
 async def test_states_referee_singular_record_wording(monkeypatch) -> None:
     import tai42_skeleton.states.db as states_db
-    import tai42_skeleton.states.store as states_store
 
     monkeypatch.setattr(states_db, "states_store_configured", lambda: True)
     _outstanding(monkeypatch, [])
-
-    async def _count(self, target_kind: str, target_name: str) -> int:
-        return 1
-
-    monkeypatch.setattr(states_store.PostgresStatesStore, "count_records_for_target", _count)
-    holders = await platform_referees._states_referee("echo")
+    _counts(monkeypatch, {"echo": 1})
+    holders = await _ask(platform_referees._states_referee, "echo")
     assert [holder.summary for holder in holders] == ["1 state record under target tool/echo"]
 
 
@@ -507,7 +557,7 @@ async def test_states_referee_feature_off_is_empty(monkeypatch) -> None:
     import tai42_skeleton.states.db as states_db
 
     monkeypatch.setattr(states_db, "states_store_configured", lambda: False)
-    assert await platform_referees._states_referee("echo") == []
+    assert await _ask(platform_referees._states_referee, "echo") == []
 
 
 def test_states_referee_is_registered(monkeypatch) -> None:

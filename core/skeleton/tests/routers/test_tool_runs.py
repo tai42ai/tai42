@@ -130,6 +130,9 @@ class _FakeTools:
     async def get_tools(self):
         return {name: SimpleNamespace(name=name) for name in self._registered}
 
+    async def has_tool(self, key):
+        return key in self._registered
+
     async def get_tool(self, key):
         # The submit door resolves the tool's registration meta (the crash-resume flag) through
         # this facet method, as the real ``tai42_app.tools`` does.

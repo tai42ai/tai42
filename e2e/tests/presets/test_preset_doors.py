@@ -70,7 +70,9 @@ async def test_referees_lists_composing_presets(agents_stack: TaiStack, uniq: Ca
     preview = await api.get(f"/api/presets/{base}/referees?action=rename")
     assert preview == {
         "action": "rename",
-        "holders": [{"kind": "preset", "name": composer, "locator": {}, "summary": f"preset {composer!r}"}],
+        "holders": [
+            {"kind": "preset", "tag": "presets", "name": composer, "locator": {}, "summary": f"preset {composer!r}"}
+        ],
     }
 
     # A rename of the referenced preset is blocked, naming the referee.
