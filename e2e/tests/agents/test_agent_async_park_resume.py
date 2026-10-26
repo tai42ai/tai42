@@ -7,7 +7,7 @@ resolution on replica B — an answer through B's ``/answer`` door, or B's expir
 fires the hidden ``agent_resume`` continuation, which rebuilds the same graph on the other
 worker (the shared redis checkpoint) and drives it to its final answer.
 
-Two legs, mirroring the flow-driver ``interactions/test_async_park_resume`` legs:
+Two legs, mirroring the consumer-driver ``interactions/test_async_park_resume`` legs:
 
 * park -> answer -> resume: an answer through replica B fires ``agent_resume`` on B.
 * park -> expiry -> resume: no answer arrives; the park is brought to its deadline and the 1s

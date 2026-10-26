@@ -166,7 +166,7 @@ async def test_direct_run_tool_of_a_preset_opens_a_trace_root_and_populates_the_
     api = monitoring_stack.api()
     name = uniq("dlpreset")
     # ``e2e_echo_monitor`` opens a TOOL span of its own; under the chokepoint root it nests
-    # (one trace) rather than minting its own — the generic-carrier nesting the flow/agent
+    # (one trace) rather than minting its own — the generic-carrier nesting the consumer/agent
     # cases rely on, exercised here without an LLM.
     await _create_preset(api, name, "e2e_echo_monitor", {"payload": uniq("p")})
 

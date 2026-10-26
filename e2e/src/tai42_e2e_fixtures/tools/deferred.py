@@ -1,4 +1,4 @@
-"""Gate probes for the deferred-call legs: a tool a flow calls after the reply.
+"""Gate probes for the deferred-call legs: a tool a run calls after the reply.
 
 Each records ``{key, idempotency_key, pid}`` on ``e2e:rec:{key}`` — the idempotency key the
 platform hands a deferred call in its tool extras, and the process that ran it — then blocks

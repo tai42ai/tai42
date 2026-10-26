@@ -281,7 +281,7 @@ async def test_web_form_card_submit_resubmit_foreign_404_and_no_schema_validatio
     "kind:channels:web", "probe-tools", "setting:conversations", "setting:seeded-access-control", "store:redis"
 )
 async def test_web_form_reply_part_opens_the_card_prefilled(bridge: BridgeHarness, uniq: Callable[[str], str]) -> None:
-    # A flow's reply part IS a form: a tool route replies with a form AnswerPart carrying
+    # A tool's reply part IS a form: a tool route replies with a form AnswerPart carrying
     # per-send ``data`` (prefill values + option lists) and ``pages``, and the whole seam —
     # AnswerPart -> delivery -> ChannelNotification -> web notify -> chat.form card — forwards
     # them, so the participant's card opens ALREADY FILLED IN.

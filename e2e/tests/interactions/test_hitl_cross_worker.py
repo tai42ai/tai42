@@ -1,6 +1,6 @@
 """A human-in-the-loop ``ask`` blocks its caller on replica A, the
 pending interaction is observed and answered via replica B, and the waiter wakes
-across workers (Redis blpop/rpush). The first flow raises the ask INSIDE a background
+across workers (Redis blpop/rpush). The first leg raises the ask INSIDE a background
 tool run, so its add frame carries the submitting run id as ``origin`` (no
 recipient/audience passed, so both keys are absent), and the run reaches its terminal
 state on B once answered. The external-callback variant proves the single-use answer

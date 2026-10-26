@@ -1,7 +1,7 @@
 """The async ``ask`` park lifecycle end to end, across a worker
 boundary.
 
-A flow driver (the ``e2e_async_park_flow`` probe) binds a resume continuation tool
+A consumer driver (the ``e2e_async_park_driver`` probe) binds a resume continuation tool
 plus a synthetic execution identity and calls ``ask(mode="async", expiry_at=...)``
 on replica A. The ask PARKS — it returns a ``SuspendedInteraction`` at once, never
 blocking — and the stored generic continuation (``e2e_async_resume``) fires exactly
@@ -70,7 +70,7 @@ async def _park(stack: TaiStack, question: str, expiry_seconds: float, on_expiry
     ``reloading``."""
     async with stack.mcp(port=stack.port_a) as mcp:
         result = await mcp.call_tool(
-            "e2e_async_park_flow",
+            "e2e_async_park_driver",
             {"question": question, "expiry_seconds": expiry_seconds, "on_expiry": on_expiry},
             retry_on_reloading=True,
         )
@@ -102,7 +102,7 @@ async def test_async_multipark_super_step_resolves_once(async_park_stack: TaiSta
     super_step_id = uniq("superstep")
     async with async_park_stack.mcp(port=async_park_stack.port_a) as mcp:
         result = await mcp.call_tool(
-            "e2e_async_multipark_flow",
+            "e2e_async_multipark_driver",
             {
                 "super_step_id": super_step_id,
                 "expiry_seconds": [2.0, 3600.0, 3600.0],

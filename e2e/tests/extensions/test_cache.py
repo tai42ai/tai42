@@ -71,7 +71,7 @@ async def test_different_arguments_are_a_cache_miss(extensions_stack: TaiStack, 
 async def test_branch_over_a_typing_name_hint_runs_by_name(extensions_stack: TaiStack) -> None:
     """A tool declared under postponed annotations carries string hints such as
     ``"dict[str, Any]"``. The cache branch presents them from makefun's namespace, so
-    the run-by-name door (the ``run_tool`` probe dispatches in-process, the way flows
+    the run-by-name door (the ``run_tool`` probe dispatches in-process, the way composed tools
     and presets do) must resolve them in the tool's own module and run the branch."""
     payload = {"k": "v"}
 

@@ -2,7 +2,7 @@
 
 Every inbound turn payload carries ``route`` — the name of the conversation route the turn
 entered through — beside ``our_identity`` and ``channel``. It is a required non-blank string
-on every door, so a flow bound to several routes can tell them apart from the payload alone.
+on every door, so a tool bound to several routes can tell them apart from the payload alone.
 This leg drives both doors against ``target_kind=tool`` routes whose ``start_expr`` reads
 ``.route`` and records what the tool actually received, so the assertion is on the delivered
 payload and not on any intermediate.
@@ -56,7 +56,7 @@ async def test_channel_route_start_expr_reads_its_own_route_name(
     bridge: BridgeHarness, uniq: Callable[[str], str]
 ) -> None:
     """A web channel route's ``start_expr`` reads ``.route`` and it is the route's own name — the
-    key that lets a flow bound to several channel routes tell them apart."""
+    key that lets a tool bound to several channel routes tell them apart."""
     probe = uniq("rk-ch")
     route_name = uniq("rk-ch-route").replace("_", "-")
     identity = uniq("rk-ch-site").replace("_", "-")
@@ -84,7 +84,7 @@ async def test_api_routes_sharing_a_tool_are_told_apart_by_the_route_key(
     bridge: BridgeHarness, uniq: Callable[[str], str]
 ) -> None:
     """Two api routes bound to the SAME tool each deliver their own name under ``.route``, so one
-    flow fronting several api routes tells them apart from the payload alone."""
+    tool fronting several api routes tells them apart from the payload alone."""
     probe = uniq("rk-api")
     exec_key = uniq("rk-api-exec")
     await bridge.mint_key(user_id=exec_key, scopes=["e2e-all"])

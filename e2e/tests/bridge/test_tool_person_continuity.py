@@ -2,9 +2,9 @@
 
 One TOOL target (``e2e_record``) reachable on two channel routes (twilio + whatsapp), keyed on
 ``person_id``: ``start_expr`` maps each inbound to ``{key: person_id, value: message}``, so
-the tool writes its flow state under the person the turn ran as. A multichannel tool target's
+the tool writes its state under the person the turn ran as. A multichannel tool target's
 payload carries ``person_id`` (stable from first contact; the merge survivor's id after a
-``/link``), so the probe list keyed on it IS the flow state the second channel joins.
+``/link``), so the probe list keyed on it IS the state the second channel joins.
 
 Before pairing the two channels are two provisional persons — two different keys. A ``/link``
 on twilio mints a code that redeems from whatsapp into a merge; after it, a message from EITHER

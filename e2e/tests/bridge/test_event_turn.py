@@ -9,7 +9,7 @@ second turn and adds no transcript entry.
 The web channel is the medium here because it has no vendor: the visitor's own SSE stream is
 the client-side surface an event's reply either does or does not reach. The route's tool
 echoes the surfaced ``turn``/``event`` payload keys back as a JSON reply, so the
-participant's transcript is proof the keys reached the flow with the event's own inbound identity.
+participant's transcript is proof the keys reached the tool with the event's own inbound identity.
 """
 
 from __future__ import annotations
