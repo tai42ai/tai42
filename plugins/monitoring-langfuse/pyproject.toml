@@ -26,10 +26,10 @@ dependencies = [
     # The pure interface contract the plugin registers through — the Monitoring
     # protocols, the neutral data models, and the tai42_app handle.
     # The contract floor is rewritten by scripts/range_sync.py at release.
-    "tai42-contract>=26.0,<27",
+    "tai42-contract>=27.0,<28",
     # TaiBaseSettings + the settings cache registry, and the monitoring feature's
     # OpenTelemetry writer every record is written through (the monitoring extra).
-    "tai42-kit[monitoring]>=14.0,<15",
+    "tai42-kit[monitoring]>=15.0,<16",
     # The HTTP client the reader queries Langfuse's public REST API through.
     "httpx>=0.28",
     # Decodes the REST answers and the recorded ``tai42.metadata`` attribute.
