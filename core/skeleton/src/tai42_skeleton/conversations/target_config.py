@@ -33,7 +33,7 @@ _NO_BACKEND = "conversation target config requires the redis conversations backe
 # The per-config key write and the name-index add must be ONE atomic unit, or an upsert
 # racing a delete of the same key leaves the row keyed but unindexed, or indexed but
 # keyless. The map's write token is set in the same unit. Every key is passed in from
-# ``ConversationsSettings``.
+# ``ConversationsKeyspace``.
 #
 # put: KEYS[1]=names index, KEYS[2]=the config's own key, KEYS[3]=the map's version key;
 # ARGV = member, config_json, token. Returns 1 when the row already existed (a replace), 0
@@ -71,7 +71,7 @@ def _as_str(value: Any) -> str:
 def _member(target_kind: str, target_name: str) -> str:
     """The index member for a config key — the row-key suffix.
 
-    Appending it to :attr:`ConversationsSettings.target_config_key_prefix` rebuilds the
+    Appending it to :attr:`ConversationsKeyspace.target_config_key_prefix` rebuilds the
     row key it names.
     """
     return f"{target_kind}:{target_name}"
@@ -105,9 +105,9 @@ class ConversationTargetConfigStore:
                 r,
                 _PUT_LUA,
                 3,
-                self.settings.target_config_names_key,
-                self.settings.target_config_key(config.target_kind, config.target_name),
-                self.settings.target_config_version_key,
+                self.settings.keyspace.target_config_names_key,
+                self.settings.keyspace.target_config_key(config.target_kind, config.target_name),
+                self.settings.keyspace.target_config_version_key,
                 _member(config.target_kind, config.target_name),
                 config.model_dump_json(),
                 new_write_token(),
@@ -124,7 +124,7 @@ class ConversationTargetConfigStore:
         snapshot = await self._load_configs()
         if _member(target_kind, target_name) in snapshot.unreadable:
             async with client_ctx(RedisClient, self.settings.redis) as r:
-                raw = await awaited(r.get(self.settings.target_config_key(target_kind, target_name)))
+                raw = await awaited(r.get(self.settings.keyspace.target_config_key(target_kind, target_name)))
             if raw is None:
                 return None
             return TargetConversationConfig.model_validate_json(_as_str(raw))
@@ -140,9 +140,9 @@ class ConversationTargetConfigStore:
                 r,
                 _DELETE_LUA,
                 3,
-                self.settings.target_config_names_key,
-                self.settings.target_config_key(target_kind, target_name),
-                self.settings.target_config_version_key,
+                self.settings.keyspace.target_config_names_key,
+                self.settings.keyspace.target_config_key(target_kind, target_name),
+                self.settings.keyspace.target_config_version_key,
                 _member(target_kind, target_name),
                 new_write_token(),
             )
@@ -164,14 +164,14 @@ class ConversationTargetConfigStore:
         snapshot tagged with the older token, so the next read loads again.
         """
         async with client_ctx(RedisClient, self.settings.redis) as r:
-            token = await awaited(r.get(self.settings.target_config_version_key))
+            token = await awaited(r.get(self.settings.keyspace.target_config_version_key))
             token = None if token is None else _as_str(token)
             held = self._snapshot
             if held is not None and held.token == token:
                 return held
-            members = await awaited(r.smembers(self.settings.target_config_names_key))
+            members = await awaited(r.smembers(self.settings.keyspace.target_config_names_key))
             member_list = sorted(_as_str(member) for member in members)
-            prefix = self.settings.target_config_key_prefix
+            prefix = self.settings.keyspace.target_config_key_prefix
             raws = await awaited(r.mget([f"{prefix}{member}" for member in member_list])) if member_list else []
         configs: dict[tuple[str, str], TargetConversationConfig] = {}
         unreadable: set[str] = set()

@@ -410,7 +410,7 @@ async def test_delete_thread_door_answers_503_when_a_foreign_worker_holds_the_le
     monkeypatch.setenv("CONVERSATIONS_SYNC_DOOR_WAIT_SECONDS", "0.1")
     caps_module._CAPS_CACHE.clear()
 
-    key = ConversationsSettings().thread_lease_key(_DELETE_THREAD)
+    key = ConversationsSettings().keyspace.thread_lease_key(_DELETE_THREAD)
     tl = importlib.import_module("tai42_skeleton.conversations.thread_lease")
     async with tl.client_ctx(object, None) as r:
         await r.set(key, "foreign-token", px=120_000, nx=True)
@@ -490,8 +490,8 @@ async def test_delete_person_door_answers_the_409_naming_the_absorbing_person(pe
     # An id a link absorbed: the door's 409 body carries the message and the survivor's id.
     client, saver, fake = person_delete_client
     settings = ConversationsSettings()
-    fake._strings[settings.person_key("s-1")] = "{}"
-    fake._strings[settings.person_absorbed_into_key("p-absorbed")] = "s-1"
+    fake._strings[settings.keyspace.person_key("s-1")] = "{}"
+    fake._strings[settings.keyspace.person_absorbed_into_key("p-absorbed")] = "s-1"
 
     response = client.delete("/api/conversations/persons/p-absorbed")
 
@@ -517,7 +517,7 @@ async def test_delete_person_door_answers_the_409_for_a_write_that_landed_while_
     erase = ConversationPersonStore.erase
 
     async def _with_a_late_write(self, person, absorbed_ids, visited):
-        fake._sadd(settings.writer_threads_key("p-1"), late_thread)
+        fake._sadd(settings.keyspace.writer_threads_key("p-1"), late_thread)
         return await erase(self, person, absorbed_ids, visited)
 
     monkeypatch.setattr(ConversationPersonStore, "erase", _with_a_late_write)
@@ -529,5 +529,5 @@ async def test_delete_person_door_answers_the_409_for_a_write_that_landed_while_
         "error": f"a write by 'p-1' in the thread {late_thread!r} landed while the erase of 'p-1' ran; "
         "retry the erase, which clears that thread too",
     }
-    assert fake._strings.get(settings.person_key("p-1")) is not None
-    assert fake._strings.get(settings.person_erasing_key("p-1")) is not None
+    assert fake._strings.get(settings.keyspace.person_key("p-1")) is not None
+    assert fake._strings.get(settings.keyspace.person_erasing_key("p-1")) is not None

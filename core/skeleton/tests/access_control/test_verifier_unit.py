@@ -449,14 +449,15 @@ async def test_route_repoint_visible_to_warm_cache_after_version_bump(monkeypatc
     """A route re-point via management is visible to a second reader the instant
     the policy version is bumped, WITHOUT waiting out the cache ttl — the verifier
     route cache is version-aware, mirroring the policy cache."""
-    from tai42_skeleton.access_control import management
+    from tai42_skeleton.access_control import api_key_lifecycle, management, policy_version
 
     settings = AccessControlSettings()
     pg = FakeAccessControlPg()
     redis = FakeRedis(strings={})
     monkeypatch.setattr(store_module, "client_ctx", make_pg_ctx(pg))
     monkeypatch.setattr(policy_module, "client_ctx", make_client_ctx(redis))
-    monkeypatch.setattr(management, "client_ctx", make_client_ctx(redis))
+    monkeypatch.setattr(api_key_lifecycle, "client_ctx", make_client_ctx(redis))
+    monkeypatch.setattr(policy_version, "client_ctx", make_client_ctx(redis))
 
     await management.add_url_to_scope("weak", "/admin")
     v = _verifier(settings)
@@ -477,14 +478,15 @@ async def test_route_repoint_visible_to_warm_cache_after_version_bump(monkeypatc
 async def test_dynamic_pattern_change_visible_after_version_bump(monkeypatch):
     """The dynamic-pattern cache is version-aware too: a pattern registered after
     the cache warmed is visible once the version is bumped, without the ttl."""
-    from tai42_skeleton.access_control import management
+    from tai42_skeleton.access_control import api_key_lifecycle, policy_version
 
     settings = AccessControlSettings()
     pg = FakeAccessControlPg()
     redis = FakeRedis(strings={})
     monkeypatch.setattr(store_module, "client_ctx", make_pg_ctx(pg))
     monkeypatch.setattr(policy_module, "client_ctx", make_client_ctx(redis))
-    monkeypatch.setattr(management, "client_ctx", make_client_ctx(redis))
+    monkeypatch.setattr(api_key_lifecycle, "client_ctx", make_client_ctx(redis))
+    monkeypatch.setattr(policy_version, "client_ctx", make_client_ctx(redis))
 
     v = _verifier(settings)
     # Warm the dynamic-pattern cache while empty.
@@ -497,7 +499,7 @@ async def test_dynamic_pattern_change_visible_after_version_bump(monkeypatch):
 
     # Bump the version → both the route and the dynamic-pattern caches miss and
     # re-read, so the new pattern-scoped route resolves.
-    await management.bump_policy_version()
+    await policy_version.bump_policy_version()
     assert await v.resolve_resource_ids("/dyn/7") == ["dynroute"]
 
 

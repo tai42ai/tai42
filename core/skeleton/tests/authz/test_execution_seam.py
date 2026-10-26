@@ -22,7 +22,7 @@ from tai42_contract.app import tai42_app
 from tai42_contract.hooks import HookParams
 
 import tai42_skeleton.versioning as versioning_module
-from tai42_skeleton.access_control import management
+from tai42_skeleton.access_control import api_key_lifecycle, policy_version
 from tai42_skeleton.access_control import policy as policy_module
 from tai42_skeleton.access_control import role_grants as role_grants_module
 from tai42_skeleton.access_control import store as store_module
@@ -117,8 +117,10 @@ def ac(monkeypatch: pytest.MonkeyPatch) -> FakeAccessControlPg:
     monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "test")
     monkeypatch.setattr(store_module, "client_ctx", make_pg_ctx(pg))
     monkeypatch.setattr(policy_module, "client_ctx", make_client_ctx(redis))
-    # Management writes reach redis through its own binding; same fake => one version counter.
-    monkeypatch.setattr(management, "client_ctx", make_client_ctx(redis))
+    # The key lifecycle and the version bump reach redis through their own bindings; same fake => one
+    # version counter.
+    monkeypatch.setattr(api_key_lifecycle, "client_ctx", make_client_ctx(redis))
+    monkeypatch.setattr(policy_version, "client_ctx", make_client_ctx(redis))
     # Route index and grant cache are process-global; rebuild against this test's registry.
     reset_route_index()
     role_grants_module.reset_role_grants_cache()
@@ -556,7 +558,7 @@ def test_de_scoping_the_owner_denies_the_next_fire(ac) -> None:
             assert await _run_as("k-owned", _GRANTABLE_OP, _GRANTABLE_ARGS) == "read:m"
 
             ac.policy("owner")["scopes"] = [_KEPT_SCOPE]
-            await management.bump_policy_version()
+            await policy_version.bump_policy_version()
 
             with pytest.raises(PermissionDeniedError, match="insufficient scope"):
                 await _run_as("k-owned", _GRANTABLE_OP, _GRANTABLE_ARGS)
@@ -607,7 +609,7 @@ def test_de_scoping_the_key_denies_the_next_dispatch_of_a_fire_already_running(a
             assert await app.tools.run_tool(_GRANTABLE_OP, _GRANTABLE_ARGS) == "read:m"
 
             ac.policy("k-scoped")["scopes"] = [_KEPT_SCOPE]
-            await management.bump_policy_version()
+            await policy_version.bump_policy_version()
 
             with pytest.raises(PermissionDeniedError, match="insufficient scope"):
                 await app.tools.run_tool(_GRANTABLE_OP, _GRANTABLE_ARGS)
@@ -622,7 +624,7 @@ def test_de_scoping_the_owner_denies_the_next_dispatch_of_a_fire_already_running
             assert await app.tools.run_tool(_GRANTABLE_OP, _GRANTABLE_ARGS) == "read:m"
 
             ac.policy("owner")["scopes"] = [_KEPT_SCOPE]
-            await management.bump_policy_version()
+            await policy_version.bump_policy_version()
 
             with pytest.raises(PermissionDeniedError, match="insufficient scope"):
                 await app.tools.run_tool(_GRANTABLE_OP, _GRANTABLE_ARGS)
@@ -636,7 +638,7 @@ def test_disabling_the_key_denies_the_next_fire(ac) -> None:
             assert await _run_as("k-scoped", _GRANTABLE_OP, _GRANTABLE_ARGS) == "read:m"
 
             ac.policy("k-scoped")["policy_data"] = {"disabled": True}
-            await management.bump_policy_version()
+            await policy_version.bump_policy_version()
 
             with pytest.raises(PermissionDeniedError, match="is disabled"):
                 await _run_as("k-scoped", _GRANTABLE_OP, _GRANTABLE_ARGS)
@@ -652,7 +654,7 @@ def test_deleting_the_key_denies_the_next_dispatch_of_a_fire_already_running(ac)
             assert await app.tools.run_tool(_GRANTABLE_OP, _GRANTABLE_ARGS) == "read:m"
 
             ac.policies.remove(ac.policy("k-scoped"))
-            await management.bump_policy_version()
+            await policy_version.bump_policy_version()
 
             with pytest.raises(PermissionDeniedError, match="principal has no policy"):
                 await app.tools.run_tool(_GRANTABLE_OP, _GRANTABLE_ARGS)
@@ -668,7 +670,7 @@ def test_deleting_the_key_denies_the_next_CAPABILITY_dispatch_too(ac) -> None:
             assert await app.tools.run_tool(_CAPABILITY_TOOL, {"text": "hi"}) == "hi"
 
             ac.policies.remove(ac.policy("k-scoped"))
-            await management.bump_policy_version()
+            await policy_version.bump_policy_version()
 
             with pytest.raises(PermissionDeniedError, match="execution key 'k-scoped' has no policy"):
                 await app.tools.run_tool(_CAPABILITY_TOOL, {"text": "hi"})
@@ -683,7 +685,7 @@ def test_disabling_the_key_denies_the_next_CAPABILITY_dispatch_too(ac) -> None:
             assert await app.tools.run_tool(_CAPABILITY_TOOL, {"text": "hi"}) == "hi"
 
             ac.policy("k-scoped")["policy_data"] = {"disabled": True}
-            await management.bump_policy_version()
+            await policy_version.bump_policy_version()
 
             with pytest.raises(PermissionDeniedError, match="execution key 'k-scoped' is disabled"):
                 await app.tools.run_tool(_CAPABILITY_TOOL, {"text": "hi"})
@@ -703,7 +705,7 @@ def test_reminting_the_key_denies_the_next_OPERATION_dispatch_of_a_running_fire(
             # The same user_id, reminted: a new fingerprint and admin grants.
             ac.policy("k-scoped")["scopes"] = ["*"]
             ac.policy("k-scoped")["policy_data"] = {KEY_FINGERPRINT_CLAIM: "fp-k-scoped-2"}
-            await management.bump_policy_version()
+            await policy_version.bump_policy_version()
 
             with pytest.raises(PermissionDeniedError, match="no longer matches the bound key identity"):
                 await app.tools.run_tool(_FENCED_OP, _FENCED_ARGS)
@@ -727,7 +729,7 @@ def test_dropping_the_governing_roles_grant_denies_the_next_fire(monkeypatch: py
 
             # The version bump is required: the grant cache is version-keyed.
             await role_store().update("ops", _role_body(tags, "none"))
-            await management.bump_policy_version()
+            await policy_version.bump_policy_version()
 
             with pytest.raises(PermissionDeniedError, match=f"GET {_GRANTABLE_PATH} is not permitted"):
                 await _run_as("k-owned", _GRANTABLE_OP, _GRANTABLE_ARGS)
@@ -802,7 +804,7 @@ def test_a_policy_edit_with_its_version_bump_lands_on_the_next_decision(ac) -> N
             )
 
             ac.policy("k-scoped")["scopes"] = [_KEPT_SCOPE]
-            await management.bump_policy_version()
+            await policy_version.bump_policy_version()
 
             with pytest.raises(PermissionDeniedError, match="insufficient scope"):
                 await app.tools.run_tool(_GRANTABLE_OP, _GRANTABLE_ARGS)

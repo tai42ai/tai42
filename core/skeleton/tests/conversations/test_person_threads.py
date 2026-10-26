@@ -147,7 +147,7 @@ def fake(monkeypatch) -> FakeRecordRedis:
 
 
 def _seed_person(fake: FakeRecordRedis, person: Person) -> None:
-    fake._strings[ConversationsSettings().person_key(person.person_id)] = person.model_dump_json()
+    fake._strings[ConversationsSettings().keyspace.person_key(person.person_id)] = person.model_dump_json()
 
 
 def _as_caller(monkeypatch, caller: _Caller) -> None:
@@ -289,10 +289,10 @@ async def test_aggregated_read_skips_a_missing_or_corrupt_row_keeping_the_total(
     )
     await create_record(store, _person_record("a1", "line-a", door="channel", created_at=10.0))
     settings = ConversationsSettings()
-    thread_key = settings.thread_index_key("line-a", _THREAD)
+    thread_key = settings.keyspace.thread_index_key("line-a", _THREAD)
     fake._zsets.setdefault(thread_key, {})["missing"] = 20.0  # indexed, no row
     fake._zsets[thread_key]["corrupt"] = 30.0
-    fake.seed_hash(settings.record_key("corrupt"), {"data": "{}"})  # indexed, unparseable row
+    fake.seed_hash(settings.keyspace.record_key("corrupt"), {"data": "{}"})  # indexed, unparseable row
 
     page, unreadable = await store.list_person_thread_records(["line-a"], _THREAD, offset=0, limit=10)
     assert [r.message_id for r in page.records] == ["a1"]

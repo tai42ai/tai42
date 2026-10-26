@@ -31,7 +31,7 @@ class RecordQueryMixin(RecordStoreBase):
         The membership check a door takes before entering a thread it did not itself just create.
         """
         async with _records.client_ctx(RedisClient, self.settings.redis) as r:
-            score = await awaited(r.zscore(self.settings.route_threads_key(route_name), thread_id))
+            score = await awaited(r.zscore(self.settings.keyspace.route_threads_key(route_name), thread_id))
         return score is not None
 
     async def accepted_after(
@@ -55,7 +55,7 @@ class RecordQueryMixin(RecordStoreBase):
         (a follower an earlier decision merged or superseded, or one whose turn completed) is not
         returned. A member whose row is gone or unparseable is logged and skipped by the shared loader.
         """
-        thread_key = self.settings.thread_index_key(route_name, thread_id)
+        thread_key = self.settings.keyspace.thread_index_key(route_name, thread_id)
         depth = self.settings.thread_queue_depth
         records: list[ConversationRecord] = []
         counted = 0
@@ -92,7 +92,7 @@ class RecordQueryMixin(RecordStoreBase):
         ends. ``None`` when the thread has no such readable record — a member whose row is gone or
         unparseable is logged and skipped by the shared loader, never a silent empty result.
         """
-        thread_key = self.settings.thread_index_key(route_name, thread_id)
+        thread_key = self.settings.keyspace.thread_index_key(route_name, thread_id)
         depth = self.settings.thread_queue_depth
         start = 0
         async with _records.client_ctx(RedisClient, self.settings.redis) as r:
@@ -128,7 +128,7 @@ class RecordQueryMixin(RecordStoreBase):
         the number of matches the scan found and it may report ``truncated`` (see
         :meth:`_filter_route_threads`).
         """
-        key = self.settings.route_threads_key(route_name)
+        key = self.settings.keyspace.route_threads_key(route_name)
         async with _records.client_ctx(RedisClient, self.settings.redis) as r:
             if status is None and address is None:
                 # Read the total the page is cut from BEFORE the page, so ``next_page`` can
@@ -208,7 +208,7 @@ class RecordQueryMixin(RecordStoreBase):
         A gone or unparseable row is logged LOUDLY and left for the prune pass, never a silent skip. The
         shared read a text search's bounded scan takes for each candidate id.
         """
-        hashed = await awaited(r.hgetall(self.settings.record_key(message_id)))
+        hashed = await awaited(r.hgetall(self.settings.keyspace.record_key(message_id)))
         if not hashed:
             logger.warning(
                 "conversations: record %r is indexed but has no row; skipped in the search, left for the prune pass",
@@ -252,7 +252,7 @@ class RecordQueryMixin(RecordStoreBase):
         match reads as an empty page, told from an unknown thread by the empty-index short
         circuit above.
         """
-        thread_key = self.settings.thread_index_key(route_name, thread_id)
+        thread_key = self.settings.keyspace.thread_index_key(route_name, thread_id)
         async with _records.client_ctx(RedisClient, self.settings.redis) as r:
             total = int(await awaited(r.zcard(thread_key)))
             if total == 0:
@@ -341,7 +341,7 @@ class RecordQueryMixin(RecordStoreBase):
         up to the same candidate budget. ``total`` is then the number of matches found and the
         page is the ``offset``/``limit`` slice of them.
         """
-        thread_keys = [self.settings.thread_index_key(route_name, thread_id) for route_name in route_names]
+        thread_keys = [self.settings.keyspace.thread_index_key(route_name, thread_id) for route_name in route_names]
         scored: list[tuple[float, str]] = []
         async with _records.client_ctx(RedisClient, self.settings.redis) as r:
             total = 0
@@ -434,7 +434,7 @@ class RecordQueryMixin(RecordStoreBase):
         a silent cut.
         """
         needle = q.lower()
-        route_key = self.settings.route_threads_key(route_name)
+        route_key = self.settings.keyspace.route_threads_key(route_name)
         matched: list[ConversationRecord] = []
         examined = 0
         threads_examined = 0
@@ -484,7 +484,7 @@ class RecordQueryMixin(RecordStoreBase):
         examined, whether the budget ran out before the thread was exhausted, and how many members were
         unreadable (row gone or unparseable, logged LOUDLY by the shared loader).
         """
-        thread_key = self.settings.thread_index_key(route_name, thread_id)
+        thread_key = self.settings.keyspace.thread_index_key(route_name, thread_id)
         matches: list[ConversationRecord] = []
         examined = 0
         unreadable = 0
@@ -521,10 +521,10 @@ class RecordQueryMixin(RecordStoreBase):
         by — passed in so the row shown and the order it is shown in can never disagree.
         Reads nothing back into the index.
         """
-        thread_key = self.settings.thread_index_key(route_name, thread_id)
+        thread_key = self.settings.keyspace.thread_index_key(route_name, thread_id)
         for member in await awaited(r.zrevrange(thread_key, 0, _records._THREAD_SUMMARY_SCAN - 1)):
             message_id = _member(member)
-            hashed = await awaited(r.hgetall(self.settings.record_key(message_id)))
+            hashed = await awaited(r.hgetall(self.settings.keyspace.record_key(message_id)))
             if not hashed:
                 continue
             try:

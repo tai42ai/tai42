@@ -29,11 +29,8 @@ import jsonschema
 from tai42_contract.interactions import AnswerFormat, FormShapeError, FormShapeKind, QuestionFormat
 from tai42_kit.interactions.form_vocabulary import FORMAT_PATTERNS, hidden_fields
 
-from tai42_skeleton.interactions.form_schema import (
-    check_form_schema_rules,
-    date_constraint_errors,
-    effective_answer_schema,
-)
+from tai42_skeleton.interactions.form_answer_rules import date_constraint_errors, effective_answer_schema
+from tai42_skeleton.interactions.form_schema import check_form_schema_rules
 from tai42_skeleton.interactions.form_shape_words import shape_sentence
 from tai42_skeleton.interactions.schema_rules import answer_validator
 

@@ -325,7 +325,7 @@ class _Linked:
                 message_id
                 for route_name in (self.route_tw, self.route_wa)
                 for message_id in cast(
-                    "list[str]", client.zrange(settings.thread_index_key(route_name, thread_id), 0, -1)
+                    "list[str]", client.zrange(settings.keyspace.thread_index_key(route_name, thread_id), 0, -1)
                 )
             }
         finally:
@@ -518,9 +518,9 @@ async def test_erasing_a_person_reaches_a_route_an_unlink_took_off_it(
         settings = ConversationsSettings(prefix=bridge.stack.config.env["CONVERSATIONS_PREFIX"])
         client = redis.Redis.from_url(bridge.stack.resources.redis_url, decode_responses=True)
         try:
-            assert not client.exists(settings.thread_index_key(linked.route_wa, person_thread))
-            assert client.zscore(settings.route_threads_key(linked.route_wa), person_thread) is None
-            assert not client.exists(settings.person_thread_routes_key(p))
+            assert not client.exists(settings.keyspace.thread_index_key(linked.route_wa, person_thread))
+            assert client.zscore(settings.keyspace.route_threads_key(linked.route_wa), person_thread) is None
+            assert not client.exists(settings.keyspace.person_thread_routes_key(p))
         finally:
             client.close()
         needles = [*_needles(person_items), *person_records]

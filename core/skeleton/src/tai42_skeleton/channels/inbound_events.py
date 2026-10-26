@@ -1,6 +1,6 @@
 """The inbound seam's platform-event emits, and its media-ingestion telemetry.
 
-:func:`_emit_event` is the one best-effort emit every inbound emitter shares. The two
+:func:`emit_event` is the one best-effort emit every inbound emitter shares. The two
 media-ingestion topics and their emitters are the served-media ingestion chokepoint's
 (``AppMedia.ingest_media``) operator record of one ingest attempt.
 """
@@ -19,20 +19,21 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "INBOUND_MEDIA_INGESTED_EVENT_TOPIC",
     "INBOUND_MEDIA_REJECTED_EVENT_TOPIC",
+    "emit_event",
     "emit_inbound_media_ingested",
     "emit_inbound_media_rejected",
 ]
 
 # The seam's INGESTION-telemetry topics, emitted by the served-media ingestion chokepoint
 # (``AppMedia.ingest_media``): one on success, one before a raise. DISTINCT from the
-# participant-notice topic in ``inbound.py`` — these are the operator/ops record of an ingest ATTEMPT (its
-# outcome, size and hashes), never the record that a participant was told. The payload NEVER
-# carries the ingested bytes or a vendor credential.
+# participant-notice topic in ``inbound_rejection.py`` — these are the operator/ops record of an
+# ingest ATTEMPT (its outcome, size and hashes), never the record that a participant was told.
+# The payload NEVER carries the ingested bytes or a vendor credential.
 INBOUND_MEDIA_INGESTED_EVENT_TOPIC = "conversations_inbound_media_ingested"
 INBOUND_MEDIA_REJECTED_EVENT_TOPIC = "conversations_inbound_media_rejected"
 
 
-async def _emit_event(topic: str, payload: dict[str, Any], *, failure_desc: str) -> None:
+async def emit_event(topic: str, payload: dict[str, Any], *, failure_desc: str) -> None:
     """Emit ``topic`` with ``payload`` on the hooks manager, best-effort.
 
     The one seam the inbound emitters share: the hooks-manager lookup and the
@@ -76,7 +77,7 @@ async def emit_inbound_media_ingested(
         "mime": mime,
         "pending": pending,
     }
-    await _emit_event(
+    await emit_event(
         INBOUND_MEDIA_INGESTED_EVENT_TOPIC,
         payload,
         failure_desc=f"for an ingested media on channel {channel_id!r}",
@@ -105,7 +106,7 @@ async def emit_inbound_media_rejected(
         "kind": kind,
         "reason": reason.value,
     }
-    await _emit_event(
+    await emit_event(
         INBOUND_MEDIA_REJECTED_EVENT_TOPIC,
         payload,
         failure_desc=f"for a rejected media on channel {channel_id!r}",

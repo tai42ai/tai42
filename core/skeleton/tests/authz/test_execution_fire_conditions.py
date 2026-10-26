@@ -19,7 +19,7 @@ from tai42_contract.app import tai42_app
 from tai42_contract.template import TemplatedText
 
 import tai42_skeleton.versioning as versioning_module
-from tai42_skeleton.access_control import management
+from tai42_skeleton.access_control import api_key_lifecycle, policy_version
 from tai42_skeleton.access_control.policy import PolicyEnforcer
 from tai42_skeleton.access_control.settings import AccessControlSettings
 from tai42_skeleton.authz.check import check
@@ -278,11 +278,12 @@ def test_a_condition_that_no_longer_renders_denies_the_fire(ac_env, renderer, pr
 
 def _wire_edit_door(monkeypatch: pytest.MonkeyPatch, ac_env) -> None:
     """Wire the real ``edit_api_key`` door over the faked policy store: an admin caller, the
-    management redis the version bump writes to, and a versioned store for the history."""
+    Redis the key lifecycle and the version bump write to, and a versioned store for the history."""
     ac_env.add_policy("root", scopes=["*"])
     monkeypatch.setattr(authority, "access_control_settings", lambda: AccessControlSettings(enable=True))
     monkeypatch.setattr(authority, "get_current_user_id", lambda: "root")
-    monkeypatch.setattr(management, "client_ctx", make_client_ctx(FakeRedis(strings={})))
+    monkeypatch.setattr(api_key_lifecycle, "client_ctx", make_client_ctx(FakeRedis(strings={})))
+    monkeypatch.setattr(policy_version, "client_ctx", make_client_ctx(FakeRedis(strings={})))
     store = _MemStore()
     monkeypatch.setattr(versioning_module, "versioned_store", lambda: store)
     monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "secret")

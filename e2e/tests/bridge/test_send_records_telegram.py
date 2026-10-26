@@ -104,7 +104,7 @@ async def test_a_notify_to_a_handle_is_recorded_under_the_numeric_chat(
     assert (await bridge.api().get(f"/api/conversations/{route_name}/threads"))["total"] == 1
 
     settings = ConversationsSettings(prefix=bridge.stack.config.env["CONVERSATIONS_PREFIX"])
-    ref_key = settings.message_ref_key("telegram", identity, chat, str(sent["message_id"]))
+    ref_key = settings.keyspace.message_ref_key("telegram", identity, chat, str(sent["message_id"]))
     client = redis.Redis.from_url(bridge.stack.resources.redis_url, decode_responses=True)
     try:
         assert client.lrange(ref_key, 0, -1) == [send["message_id"]]

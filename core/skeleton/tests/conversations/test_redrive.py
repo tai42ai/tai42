@@ -443,7 +443,7 @@ async def test_redrive_isolates_a_failing_record_and_resolves_the_rest(env, monk
 
     async def _strand(message_id: str, provider_message_id: str) -> None:
         await create_record(store, _intake_record(message_id, provider_message_id), intake_token="dead-worker")
-        key = ConversationsSettings().record_key(message_id)
+        key = ConversationsSettings().keyspace.record_key(message_id)
         env.seed_hash(key, (await env.hgetall(key)) | {"intake_claim": f"dead-worker:{time.time() - 1}"})
 
     # list_by_status orders by member, so "bad" is reached before "good".
@@ -497,7 +497,7 @@ def _accepted_event_record(message_id: str, event_id: str = "evt-1") -> Conversa
 
 async def _strand_event_record(store: ConversationRecordStore, fake: FakeRecordRedis, record) -> None:
     await create_record(store, record, intake_token="dead-worker")
-    key = ConversationsSettings().record_key(record.message_id)
+    key = ConversationsSettings().keyspace.record_key(record.message_id)
     fields = await fake.hgetall(key)
     fake.seed_hash(key, fields | {"intake_claim": f"dead-worker:{time.time() - 1}"})
 

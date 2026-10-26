@@ -23,7 +23,7 @@ from tai42_contract.conversations import (
 from tests._helpers import AddressingChannel
 
 from tai42_skeleton.app.instance import app
-from tai42_skeleton.channels.inbound import INBOUND_REJECTED_EVENT_TOPIC, notify_inbound_rejected
+from tai42_skeleton.channels.inbound_rejection import INBOUND_REJECTED_EVENT_TOPIC, notify_inbound_rejected
 from tai42_skeleton.conversations import cache as conversations_cache
 from tai42_skeleton.conversations.managers.in_memory_conversations_manager import InMemoryConversationsManager
 from tai42_skeleton.conversations.settings import ConversationsSettings
@@ -242,7 +242,7 @@ async def test_an_identity_with_no_route_warns_and_sends_the_built_in_notice(
     monkeypatch.setattr(hooks_cache, "get_hooks_manager", lambda: hooks)
     route_table.routes = {"line-a": _line(_ROUTE_WORDS, our_identity="op-2")}
 
-    with caplog.at_level("WARNING", logger="tai42_skeleton.channels.inbound"):
+    with caplog.at_level("WARNING", logger="tai42_skeleton.channels.inbound_rejection"):
         await notify_inbound_rejected(
             channel_id="fakechan",
             recipient="+15550001111",
@@ -267,7 +267,7 @@ async def test_a_deployment_without_a_routing_store_warns_and_sends_the_built_in
     manager = InMemoryConversationsManager(ConversationsSettings())
     monkeypatch.setattr(conversations_cache, "get_conversations_manager", lambda: manager)
 
-    with caplog.at_level("WARNING", logger="tai42_skeleton.channels.inbound"):
+    with caplog.at_level("WARNING", logger="tai42_skeleton.channels.inbound_rejection"):
         await notify_inbound_rejected(
             channel_id="fakechan",
             recipient="+15550001111",

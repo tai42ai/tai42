@@ -100,7 +100,9 @@ async def test_list_counts_an_indexed_member_with_no_row(wired):
     # reports a shorter page as a truthful count and never a silent cut.
     await ops.set_conversation_config("agent", "assistant")
     wired.seed_member(
-        ConversationsSettings().target_config_names_key, "tool:ghost", ConversationsSettings().target_config_version_key
+        ConversationsSettings().keyspace.target_config_names_key,
+        "tool:ghost",
+        ConversationsSettings().keyspace.target_config_version_key,
     )
     listed = await ops.list_conversation_configs()
     assert listed["total"] == 1

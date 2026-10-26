@@ -781,7 +781,7 @@ async def test_a_locked_source_does_not_burn_a_valid_code_and_leaks_no_oracle(en
     assert set(replies) == {pairing_module._INVALID_CODE_TEXT}  # no oracle: every reply identical
 
     # ...and the valid code was NOT consumed — the lock refused before the code store.
-    assert ConversationsSettings().pair_code_key(hash_api_key(good_code)) in env._strings
+    assert ConversationsSettings().keyspace.pair_code_key(hash_api_key(good_code)) in env._strings
 
 
 async def test_api_redeem_throttle_keys_on_the_caller_not_the_rotatable_external_user_id(env, monkeypatch):
@@ -820,7 +820,7 @@ async def test_api_redeem_throttle_keys_on_the_caller_not_the_rotatable_external
     await _settle()
     assert locked.answer is not None
     assert locked.answer.answer == pairing_module._INVALID_CODE_TEXT
-    assert ConversationsSettings().pair_code_key(hash_api_key(good_code)) in env._strings
+    assert ConversationsSettings().keyspace.pair_code_key(hash_api_key(good_code)) in env._strings
 
 
 async def test_first_contact_link_greeting_and_reply_share_one_live_code(env, monkeypatch):
@@ -1280,7 +1280,7 @@ async def test_no_greeting_is_owed_when_none_is_due(env, monkeypatch):
     await _settle()
     assert (await _answer_of(second)) == "ok"
     # No owed-greeting key was ever written for the thread.
-    assert ConversationsSettings().owed_greeting_key("bridge:tool-line:+2000") not in env._strings
+    assert ConversationsSettings().keyspace.owed_greeting_key("bridge:tool-line:+2000") not in env._strings
 
 
 async def test_the_owed_greeting_is_read_from_the_shared_store_cross_worker(env, monkeypatch):
@@ -1299,7 +1299,7 @@ async def test_the_owed_greeting_is_read_from_the_shared_store_cross_worker(env,
 
     # A sibling worker's superseded first-contact turn parked an owed greeting on the thread.
     thread_id = "bridge:line-a:+2000"
-    env._strings[ConversationsSettings().owed_greeting_key(thread_id)] = "Carried!"
+    env._strings[ConversationsSettings().keyspace.owed_greeting_key(thread_id)] = "Carried!"
 
     # This worker's next turn (past first contact) reads and burns it from the shared store.
     nxt = await turn_module.accept(
@@ -1307,7 +1307,7 @@ async def test_the_owed_greeting_is_read_from_the_shared_store_cross_worker(env,
     )
     await _settle()
     assert (await _answer_of(nxt)) == "Carried!\n\necho: again"
-    assert ConversationsSettings().owed_greeting_key(thread_id) not in env._strings  # burned once
+    assert ConversationsSettings().keyspace.owed_greeting_key(thread_id) not in env._strings  # burned once
 
 
 async def test_a_lost_persist_guard_leaves_the_greeting_owed_for_the_successor(env, monkeypatch):
@@ -1329,7 +1329,7 @@ async def test_a_lost_persist_guard_leaves_the_greeting_owed_for_the_successor(e
         # as a re-drive that resolved it would, so this worker's guarded write loses.
         if owed_greeting_thread_id is not None and not resolved_elsewhere["done"]:
             resolved_elsewhere["done"] = True
-            env._hashes[ConversationsSettings().record_key(message_id)]["delivery_status"] = "pending_delivery"
+            env._hashes[ConversationsSettings().keyspace.record_key(message_id)]["delivery_status"] = "pending_delivery"
         try:
             return await real_persist(completed, message_id, owed_greeting_thread_id=owed_greeting_thread_id)
         except RuntimeError as exc:
@@ -1347,7 +1347,7 @@ async def test_a_lost_persist_guard_leaves_the_greeting_owed_for_the_successor(e
     assert len(raised) == 1  # the persist lost its guard and raised loudly
     assert "no longer at intake" in str(raised[0])
     # The greeting was read, never burned, so it is still owed on the thread.
-    assert env._strings[ConversationsSettings().owed_greeting_key(thread_id)] == "Welcome!"
+    assert env._strings[ConversationsSettings().keyspace.owed_greeting_key(thread_id)] == "Welcome!"
 
     # The next delivering turn prepends and burns it — a greeting once due is never dropped.
     second = await turn_module.accept(
@@ -1355,7 +1355,7 @@ async def test_a_lost_persist_guard_leaves_the_greeting_owed_for_the_successor(e
     )
     await _settle()
     assert (await _answer_of(second)) == "Welcome!\n\necho: again"
-    assert ConversationsSettings().owed_greeting_key(thread_id) not in env._strings
+    assert ConversationsSettings().keyspace.owed_greeting_key(thread_id) not in env._strings
 
 
 async def test_the_owed_greeting_is_burned_after_the_persist(env, monkeypatch):
@@ -1387,7 +1387,7 @@ async def test_the_owed_greeting_is_burned_after_the_persist(env, monkeypatch):
 
     assert order == ["complete_turn", "burn_owed_greeting"]  # burned after the persist, not before
     assert (await _answer_of(first)) == "Welcome!\n\necho: hi"
-    assert ConversationsSettings().owed_greeting_key(thread_id) not in env._strings
+    assert ConversationsSettings().keyspace.owed_greeting_key(thread_id) not in env._strings
 
 
 async def test_a_carried_greeting_code_is_still_live_and_redeemable(env, monkeypatch):

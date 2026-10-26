@@ -99,8 +99,8 @@ async def test_a_send_ending_after_its_route_was_deleted_stands_in_no_thread_ind
     settings = lua_env.store.settings
     assert record.delivery_status is status
     assert record.route_missing is True
-    assert await lua_env.redis.exists(settings.thread_index_key("line", _THREAD)) == 0
-    assert await lua_env.redis.exists(settings.route_threads_key("line")) == 0
+    assert await lua_env.redis.exists(settings.keyspace.thread_index_key("line", _THREAD)) == 0
+    assert await lua_env.redis.exists(settings.keyspace.route_threads_key("line")) == 0
     assert any(
         record.message_id in message and "line" in message and "deleted" in message for message in caplog.messages
     )
@@ -126,5 +126,5 @@ async def test_a_send_ending_with_its_route_standing_writes_both_thread_indexes(
     settings = lua_env.store.settings
     assert record.delivery_status is status
     assert record.route_missing is False
-    assert await lua_env.redis.zrange(settings.thread_index_key("line", _THREAD), 0, -1) == [record.message_id]
-    assert await lua_env.redis.zrange(settings.route_threads_key("line"), 0, -1) == [_THREAD]
+    assert await lua_env.redis.zrange(settings.keyspace.thread_index_key("line", _THREAD), 0, -1) == [record.message_id]
+    assert await lua_env.redis.zrange(settings.keyspace.route_threads_key("line"), 0, -1) == [_THREAD]

@@ -386,7 +386,7 @@ async def test_sync_door_bound_refuses_a_foreign_cross_worker_lease(fake_lease):
     # A sibling worker holds the thread's Redis lease under its own token. A bounded acquisition
     # refuses with ThreadBusyError WITHIN the bound, and the foreign lease key is left untouched.
     fake, settings = fake_lease
-    key = settings.thread_lease_key("T")
+    key = settings.keyspace.thread_lease_key("T")
     await fake.set(key, "foreign-token", px=120_000, nx=True)
 
     caps = TurnCaps(lambda: settings)
@@ -603,7 +603,7 @@ async def test_hold_thread_holds_the_threads_fifo_lock(small_settings):
 
 async def test_hold_thread_holds_the_threads_cross_worker_lease(fake_lease):
     fake, settings = fake_lease
-    key = settings.thread_lease_key("T")
+    key = settings.keyspace.thread_lease_key("T")
     caps = TurnCaps(lambda: settings)
 
     async with caps.hold_thread("T", acquire_timeout_seconds=0.5):
@@ -614,7 +614,7 @@ async def test_hold_thread_holds_the_threads_cross_worker_lease(fake_lease):
 
 async def test_hold_thread_waits_out_a_foreign_lease_only_to_its_bound(fake_lease):
     fake, settings = fake_lease
-    key = settings.thread_lease_key("T")
+    key = settings.keyspace.thread_lease_key("T")
     await fake.set(key, "foreign-token", px=120_000, nx=True)
     caps = TurnCaps(lambda: settings)
 

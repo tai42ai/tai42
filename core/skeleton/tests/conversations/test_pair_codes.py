@@ -60,7 +60,7 @@ async def test_mint_returns_well_formed_code_and_expiry(monkeypatch):
     code, _expires_at = await store.mint(_conversation())
     assert _CODE_RE.match(code)
     settings = ConversationsSettings()
-    assert fake.ttl_ms[settings.pair_code_key(hash_api_key(code))] == settings.pair_code_ttl_seconds * 1000
+    assert fake.ttl_ms[settings.keyspace.pair_code_key(hash_api_key(code))] == settings.pair_code_ttl_seconds * 1000
 
 
 @pytest.mark.asyncio
@@ -178,7 +178,7 @@ async def test_mint_raises_after_two_entropy_collisions(monkeypatch):
     # Pin every generated code to one already present in the keyspace, so both mint attempts
     # collide and the store raises rather than looping.
     monkeypatch.setattr(pair_codes_module, "_generate_code", lambda: "LINK-CCCCCCCC")
-    fake._strings[settings.pair_code_key(hash_api_key("LINK-CCCCCCCC"))] = "{}"
+    fake._strings[settings.keyspace.pair_code_key(hash_api_key("LINK-CCCCCCCC"))] = "{}"
 
     with pytest.raises(RuntimeError):
         await store.mint(_conversation())

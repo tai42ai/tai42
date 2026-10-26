@@ -61,7 +61,7 @@ async def line(lua_env: LuaEnv) -> LuaEnv:
 
 async def _map(line: LuaEnv, address: str, person_id: str | None) -> None:
     """Point the index field of ``address`` at ``person_id``, or remove it."""
-    index_key = line.store.settings.person_index_key("agent", "echo")
+    index_key = line.store.settings.keyspace.person_index_key("agent", "echo")
     if person_id is None:
         await line.redis.hdel(index_key, dak(address))
     else:
@@ -97,7 +97,7 @@ async def test_a_create_by_an_address_a_person_holds_stamps_the_person(line):
     await create(line, inbound("in-1", T_A))
 
     assert await writers(line) == {"p"}
-    assert await stamps(line) == {line.store.settings.writer_threads_key("p"): {T_A}}
+    assert await stamps(line) == {line.store.settings.keyspace.writer_threads_key("p"): {T_A}}
 
 
 async def test_a_create_keeps_its_writer_on_the_row(line):
@@ -110,7 +110,7 @@ async def test_a_create_keeps_its_writer_on_the_row(line):
 
 
 async def test_a_create_with_its_route_missing_still_stamps(line):
-    await line.redis.delete(line.store.settings.route_key("line"))
+    await line.redis.delete(line.store.settings.keyspace.route_key("line"))
 
     await create(line, inbound("in-1", T_A))
 
@@ -128,7 +128,7 @@ async def test_a_create_in_a_person_thread_stamps_nothing(line):
 
 
 async def test_a_dedupe_hit_and_a_re_run_stamp_one_writer(line):
-    claim = line.store.settings.dedupe_key("twilio", "PID-1")
+    claim = line.store.settings.keyspace.dedupe_key("twilio", "PID-1")
     first = inbound("in-1", T_A, provider_message_id="PID-1")
     assert await create(line, first, claim_key=claim) == "in-1"
 
@@ -136,14 +136,14 @@ async def test_a_dedupe_hit_and_a_re_run_stamp_one_writer(line):
     assert await create(line, first, claim_key=claim) == "in-1"
 
     assert await writers(line) == {door(A)}
-    assert await line.redis.exists(line.store.settings.record_key("in-2")) == 0
+    assert await line.redis.exists(line.store.settings.keyspace.record_key("in-2")) == 0
 
 
 async def test_a_record_whose_retention_expires_and_a_thread_drop_leave_the_visit_list(line):
     await create(line, inbound("in-1", T_A))
     await create(line, inbound("in-2", T_A))
 
-    await line.redis.delete(line.store.settings.record_key("in-1"))
+    await line.redis.delete(line.store.settings.keyspace.record_key("in-1"))
     await line.store.drop_thread("line", T_A)
 
     assert await writers(line) == set()
@@ -159,7 +159,7 @@ async def test_a_begin_stamps_its_thread_and_keeps_its_door_on_the_row(line):
 
 
 async def test_a_begin_with_the_routing_row_gone_still_stamps(line):
-    await line.redis.delete(line.store.settings.route_key("line"))
+    await line.redis.delete(line.store.settings.keyspace.route_key("line"))
 
     await begin(line, send("send-1", T_A))
 
@@ -244,14 +244,14 @@ async def test_a_send_whose_thread_was_forgotten_is_deleted_and_stamps_nothing_o
     placement = await end_send(line, "end", record)
 
     assert (placement.code, placement.detail) == (-1, "forgotten")
-    assert await line.redis.exists(line.store.settings.record_key("send-1")) == 0
+    assert await line.redis.exists(line.store.settings.keyspace.record_key("send-1")) == 0
     assert (await threads_of(line, door(A)), await threads_of(line, "p")) == ({T_A}, set())
 
 
 async def test_a_send_landing_while_its_route_is_gone_stamps_its_landing(line):
     record = send("send-1", T_A)
     await begin(line, record)
-    await line.redis.delete(line.store.settings.route_key("line"))
+    await line.redis.delete(line.store.settings.keyspace.route_key("line"))
     await seed(line, "p", channel_address(A))
 
     placement = await end_send(line, "end", record)
@@ -307,7 +307,7 @@ async def test_an_existing_person_adopts_a_stamp_its_door_left_while_unheld(line
 
     assert (person.person_id, created) == ("p", False)
     assert await writers(line) == {"p"}
-    assert await stamps(line) == {line.store.settings.writer_threads_key("p"): {T_A}}
+    assert await stamps(line) == {line.store.settings.keyspace.writer_threads_key("p"): {T_A}}
 
 
 async def test_an_erasing_person_adopts_nothing(line):
@@ -315,7 +315,7 @@ async def test_an_erasing_person_adopts_nothing(line):
     await _map(line, A, None)
     await create(line, inbound("in-1", T_A))
     await _map(line, A, "p")
-    await line.redis.set(line.store.settings.person_erasing_key("p"), "1")
+    await line.redis.set(line.store.settings.keyspace.person_erasing_key("p"), "1")
 
     with pytest.raises(PersonErasingError):
         await line.manager.persons.ensure_provisional(_TARGET, channel_address(A))
@@ -330,7 +330,7 @@ async def test_an_erasing_person_adopts_nothing(line):
 async def test_a_link_records_every_absorbed_id_on_the_survivor_and_leaves_the_stamps(line, first):
     await seed(line, "p", channel_address(A), age_days=2)
     await seed(line, "q", channel_address(B), age_days=1)
-    await line.redis.sadd(line.store.settings.person_absorbed_key("q"), "r")
+    await line.redis.sadd(line.store.settings.keyspace.person_absorbed_key("q"), "r")
     await point(line, "r", "q")
     await create(line, inbound("in-1", T_B, B))
     before = await stamps(line)
@@ -341,8 +341,8 @@ async def test_a_link_records_every_absorbed_id_on_the_survivor_and_leaves_the_s
     assert await absorbed(line, "p") == {"q", "r"}
     assert await absorbed(line, "q") == set()
     assert (await into(line, "q"), await into(line, "r")) == ("p", "p")
-    assert await line.redis.exists(line.store.settings.person_key("q")) == 0
-    assert await stamps(line) == before == {line.store.settings.writer_threads_key("q"): {T_B}}
+    assert await line.redis.exists(line.store.settings.keyspace.person_key("q")) == 0
+    assert await stamps(line) == before == {line.store.settings.keyspace.writer_threads_key("q"): {T_B}}
     assert await writers(line, T_B) == {"q"}
 
 
@@ -363,10 +363,10 @@ async def test_a_refused_link_leaves_the_absorbed_ids_and_pointers(line, refusal
         q_addresses.append(channel_address(A))
     await seed(line, "p", channel_address(A), age_days=2)
     await seed(line, "q", *q_addresses, age_days=1, target_name="echo-2" if refusal == "cross_target" else "echo")
-    await line.redis.sadd(settings.person_absorbed_key("q"), "r")
+    await line.redis.sadd(settings.keyspace.person_absorbed_key("q"), "r")
     await point(line, "r", "q")
     if refusal.endswith("_marked"):
-        await line.redis.set(settings.person_erasing_key(refusal[0]), "1")
+        await line.redis.set(settings.keyspace.person_erasing_key(refusal[0]), "1")
 
     with pytest.raises(raised):
         await line.manager.persons.merge("p", "nobody" if refusal == "unknown" else "q")
@@ -439,14 +439,14 @@ async def test_the_erase_removes_the_visit_lists_of_its_ids_and_leaves_every_rec
 
     door_a, door_b = thread_door(ROUTE, T_A) or "", thread_door(ROUTE, T_B) or ""
     assert await stamps(line) == {
-        line.store.settings.writer_threads_key("x"): {T_B},
-        line.store.settings.writer_threads_key(door_a): {T_A},
-        line.store.settings.writer_threads_key(door_b): {T_B},
+        line.store.settings.keyspace.writer_threads_key("x"): {T_B},
+        line.store.settings.keyspace.writer_threads_key(door_a): {T_A},
+        line.store.settings.keyspace.writer_threads_key(door_b): {T_B},
     }
     assert [await row_field(line, mid, "writer") for mid in ("in-1", "in-2", "in-3")] == ["p", "q", "x"]
     assert (await absorbed(line, "p"), await into(line, "q")) == (set(), None)
-    assert await line.redis.exists(line.store.settings.person_key("p")) == 0
-    assert await line.redis.exists(line.store.settings.person_erasing_key("p")) == 0
+    assert await line.redis.exists(line.store.settings.keyspace.person_key("p")) == 0
+    assert await line.redis.exists(line.store.settings.keyspace.person_erasing_key("p")) == 0
 
 
 async def test_the_erase_refuses_a_thread_its_ids_wrote_in_after_its_read_with_nothing_removed(line):
@@ -464,23 +464,23 @@ async def test_the_erase_refuses_a_thread_its_ids_wrote_in_after_its_read_with_n
         await persons.erase(read.person, read.absorbed_ids, read.route_threads)
 
     assert await stamps(line) == before
-    assert await line.redis.exists(line.store.settings.person_key("p")) == 1
-    assert await line.redis.exists(line.store.settings.person_erasing_key("p")) == 1
+    assert await line.redis.exists(line.store.settings.keyspace.person_key("p")) == 1
+    assert await line.redis.exists(line.store.settings.keyspace.person_erasing_key("p")) == 1
 
 
 # -- a person thread's recorded routes ------------------------------------------------------------
 
 
 async def _recorded(line: LuaEnv, person_id: str) -> set[str]:
-    return await line.redis.smembers(line.store.settings.person_thread_routes_key(person_id))
+    return await line.redis.smembers(line.store.settings.keyspace.person_thread_routes_key(person_id))
 
 
 async def test_the_recorded_routes_are_read_with_the_addresses_and_left_by_every_step_but_the_erase(line):
     persons, settings = line.manager.persons, line.store.settings
     await seed(line, "p", channel_address(A), channel_address(C), age_days=2)
     await seed(line, "q", channel_address(B), age_days=1)
-    await line.redis.sadd(settings.person_thread_routes_key("p"), "line-x")
-    await line.redis.sadd(settings.person_thread_routes_key("q"), "line-y")
+    await line.redis.sadd(settings.keyspace.person_thread_routes_key("p"), "line-x")
+    await line.redis.sadd(settings.keyspace.person_thread_routes_key("q"), "line-y")
     await persons.merge("p", "q")
     assert (await _recorded(line, "p"), await _recorded(line, "q")) == ({"line-x"}, {"line-y"})
 

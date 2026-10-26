@@ -267,7 +267,7 @@ async def _accept_for_turn(
             intake,
             route=route,
             intake_token=intake_token,
-            claim_key=store.settings.dedupe_key(channel, provider_message_id),
+            claim_key=store.settings.keyspace.dedupe_key(channel, provider_message_id),
             refresh_mode=True,
         )
     except asyncio.CancelledError:
@@ -349,7 +349,7 @@ async def _shed_with_reply(
             intake,
             route=route,
             intake_token=intake_token,
-            claim_key=store.settings.dedupe_key(channel, provider_message_id),
+            claim_key=store.settings.keyspace.dedupe_key(channel, provider_message_id),
         )
     except asyncio.CancelledError:
         _spawn_intake_resolution(message_id)
@@ -414,7 +414,7 @@ async def _shed_silently(
     owner = await store.create_record(
         record,
         route=route,
-        claim_key=store.settings.dedupe_key(channel, provider_message_id),
+        claim_key=store.settings.keyspace.dedupe_key(channel, provider_message_id),
     )
     if owner != message_id:
         return owner

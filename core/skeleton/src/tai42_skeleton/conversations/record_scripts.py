@@ -104,7 +104,7 @@ end
 
 
 # Who wrote into a route-keyed thread. A script that stamps it decodes the key prefixes
-# (``ConversationsSettings.writer_prefixes``) into ``W`` before it calls these helpers, and builds
+# (``ConversationsKeyspace.writer_prefixes``) into ``W`` before it calls these helpers, and builds
 # every key in-script under the store's single-node Redis assumption. A door is the JSON
 # ``[target_kind, target_name, door_address_key]`` of the route a record was written under; its
 # writer is the person the target's person index names for it, or the door itself while the index

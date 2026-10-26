@@ -306,13 +306,13 @@ async def test_the_cancel_marker_is_set_only_for_a_cancel_message_route(env, mon
     _wire(monkeypatch, FakeManager(_agent_route(OverlapPolicy())), FakeChannel())
     await _accept("hi", "P1")
     await _settle()
-    assert env._strings.get(settings.overlap_cancel_key(f"bridge:line:{_ADDR}")) is None
+    assert env._strings.get(settings.keyspace.overlap_cancel_key(f"bridge:line:{_ADDR}")) is None
 
     # A cancel route sets it to the accepted message.
     caps_module._CAPS_CACHE.clear()
     _wire(monkeypatch, FakeManager(_agent_route(OverlapPolicy(running="cancel"))), FakeChannel())
     mid = await _accept("hey", "P2")
-    marker = env._strings.get(settings.overlap_cancel_key(f"bridge:line:{_ADDR}"))
+    marker = env._strings.get(settings.keyspace.overlap_cancel_key(f"bridge:line:{_ADDR}"))
     assert marker is not None
     import json
 
@@ -407,7 +407,7 @@ async def test_an_event_turn_is_never_merged_superseded_or_a_canceller(env, monk
     _wire_tool(monkeypatch, lambda kw: "seed")
     await _accept("hello", "SEED")
     await _settle()
-    env._strings.pop(settings.overlap_cancel_key(thread_id), None)
+    env._strings.pop(settings.keyspace.overlap_cancel_key(thread_id), None)
 
     tools = _wire_tool(monkeypatch, lambda kw: "ok")
     submission = ConversationEventSubmission(
@@ -421,7 +421,7 @@ async def test_an_event_turn_is_never_merged_superseded_or_a_canceller(env, monk
     assert record.delivery_status not in (DeliveryStatus.MERGED, DeliveryStatus.SUPERSEDED)
     # An event turn carries no ``messages`` key and set no cancel marker.
     assert "messages" not in tools.calls[-1]["arguments"]
-    assert env._strings.get(settings.overlap_cancel_key(thread_id)) is None
+    assert env._strings.get(settings.keyspace.overlap_cancel_key(thread_id)) is None
 
 
 class _BlockingTools:
@@ -475,7 +475,7 @@ async def test_an_event_turn_on_a_cancel_route_arms_no_watcher_and_survives_a_ne
     _wire_tool(monkeypatch, lambda kw: "seed")
     await _accept("hello", "SEED")
     await _settle()
-    env._strings.pop(settings.overlap_cancel_key(thread_id), None)
+    env._strings.pop(settings.keyspace.overlap_cancel_key(thread_id), None)
     watched_leads.clear()
 
     tools = _BlockingTools()
@@ -490,7 +490,7 @@ async def test_an_event_turn_on_a_cancel_route_arms_no_watcher_and_survives_a_ne
     # A newer participant message: its accept writes a strictly-newer cancel marker while the event
     # turn is still running. An armed event watcher would read this marker and supersede the event.
     newer_id = await _accept("newer", "PNEW")
-    marker = await overlap_module._read_cancel_marker(settings, settings.overlap_cancel_key(thread_id))
+    marker = await overlap_module._read_cancel_marker(settings, settings.keyspace.overlap_cancel_key(thread_id))
     assert marker is not None
     assert marker.message_id == newer_id
     await asyncio.sleep(0.1)  # several poll intervals: an armed watcher would have fired by now
@@ -774,7 +774,7 @@ async def test_a_marker_a_sibling_worker_set_cancels_the_running_turn(env, monke
     import json
 
     settings = ConversationsSettings()
-    key = settings.overlap_cancel_key(f"bridge:line:{_ADDR}")
+    key = settings.keyspace.overlap_cancel_key(f"bridge:line:{_ADDR}")
     env._strings[key] = json.dumps({"message_id": "sibling-newer", "created_at": time.time() + 10})
 
     await _poll_until(lambda: _record_is(id1, DeliveryStatus.SUPERSEDED))

@@ -41,7 +41,7 @@ class RecordGreetingMixin(RecordStoreBase):
         ttl_seconds = (
             self.settings.pair_code_ttl_seconds if carries_pair_code else self.settings.owed_greeting_ttl_seconds
         )
-        key = self.settings.owed_greeting_key(thread_id)
+        key = self.settings.keyspace.owed_greeting_key(thread_id)
         async with _records.client_ctx(RedisClient, self.settings.redis) as r:
             await awaited(r.set(key, greeting, px=ttl_seconds * 1000))
 
@@ -52,7 +52,7 @@ class RecordGreetingMixin(RecordStoreBase):
         lost to a re-drive, or the turn superseded) leaves it owed for the successor. The delivering
         turn burns it with :meth:`burn_owed_greeting` only after its persist succeeds.
         """
-        key = self.settings.owed_greeting_key(thread_id)
+        key = self.settings.keyspace.owed_greeting_key(thread_id)
         async with _records.client_ctx(RedisClient, self.settings.redis) as r:
             raw = await awaited(r.get(key))
         if raw is None:
@@ -65,6 +65,6 @@ class RecordGreetingMixin(RecordStoreBase):
         A plain ``DEL``, run only after the delivering turn's guarded persist succeeded, so exactly
         one turn ever both delivers and burns; every later turn reads ``None`` and prepends nothing.
         """
-        key = self.settings.owed_greeting_key(thread_id)
+        key = self.settings.keyspace.owed_greeting_key(thread_id)
         async with _records.client_ctx(RedisClient, self.settings.redis) as r:
             await awaited(r.delete(key))

@@ -51,8 +51,8 @@ class Store:
         self, message_id: str, writer: str | None, *, door: str | None = _DOOR, score: float = 1.0
     ) -> None:
         """A record of ``_THREAD`` written by ``writer`` through ``door``; no field for a ``None``."""
-        await self.client.zadd(self.settings.thread_index_key("line", _THREAD), {message_id: score})
-        key = self.settings.record_key(message_id)
+        await self.client.zadd(self.settings.keyspace.thread_index_key("line", _THREAD), {message_id: score})
+        key = self.settings.keyspace.record_key(message_id)
         await self.client.hset(key, "message_id", message_id)
         if door is not None:
             await self.client.hset(key, "writer_door", door)
@@ -61,19 +61,19 @@ class Store:
 
     async def indexed_only(self, message_id: str) -> None:
         """A member of ``_THREAD``'s index whose record row is gone."""
-        await self.client.zadd(self.settings.thread_index_key("line", _THREAD), {message_id: 9.0})
+        await self.client.zadd(self.settings.keyspace.thread_index_key("line", _THREAD), {message_id: 9.0})
 
     async def row(self, person_id: str) -> None:
-        await self.client.set(self.settings.person_key(person_id), "{}")
+        await self.client.set(self.settings.keyspace.person_key(person_id), "{}")
 
     async def mark(self, person_id: str) -> None:
-        await self.client.set(self.settings.person_erasing_key(person_id), "1")
+        await self.client.set(self.settings.keyspace.person_erasing_key(person_id), "1")
 
     async def pointer(self, person_id: str, survivor: str) -> None:
-        await self.client.set(self.settings.person_absorbed_into_key(person_id), survivor)
+        await self.client.set(self.settings.keyspace.person_absorbed_into_key(person_id), survivor)
 
     async def visits(self, writer: str, *threads: str) -> None:
-        key = self.settings.writer_threads_key(writer)
+        key = self.settings.keyspace.writer_threads_key(writer)
         if isinstance(self.client, FakeRecordRedis):
             for thread in threads:
                 self.client._sadd(key, thread)
@@ -212,10 +212,10 @@ async def test_the_final_step_refuses_while_a_visit_list_names_a_thread_the_eras
     with pytest.raises(ConflictError, match=re.escape(unvisited)):
         await store.persons.erase(_person(_P), [_Q], [_THREAD])
 
-    assert await store.client.exists(store.settings.person_key(_P)) == 1
-    assert await store.client.exists(store.settings.person_erasing_key(_P)) == 1
-    assert await store.client.exists(store.settings.person_absorbed_into_key(_Q)) == 1
-    assert await store.client.smembers(store.settings.writer_threads_key(_Q)) == {_OTHER}
+    assert await store.client.exists(store.settings.keyspace.person_key(_P)) == 1
+    assert await store.client.exists(store.settings.keyspace.person_erasing_key(_P)) == 1
+    assert await store.client.exists(store.settings.keyspace.person_absorbed_into_key(_Q)) == 1
+    assert await store.client.smembers(store.settings.keyspace.writer_threads_key(_Q)) == {_OTHER}
 
 
 async def test_the_final_step_removes_the_visit_lists_of_every_visited_thread(store):
@@ -228,11 +228,11 @@ async def test_the_final_step_removes_the_visit_lists_of_every_visited_thread(st
     assert await store.persons.erase(_person(_P), [_Q], [_OTHER, _THREAD]) == (True, 0)
 
     for key in (
-        store.settings.person_key(_P),
-        store.settings.person_erasing_key(_P),
-        store.settings.person_absorbed_into_key(_Q),
-        store.settings.writer_threads_key(_P),
-        store.settings.writer_threads_key(_Q),
+        store.settings.keyspace.person_key(_P),
+        store.settings.keyspace.person_erasing_key(_P),
+        store.settings.keyspace.person_absorbed_into_key(_Q),
+        store.settings.keyspace.writer_threads_key(_P),
+        store.settings.keyspace.writer_threads_key(_Q),
     ):
         assert await store.client.exists(key) == 0
 
@@ -254,11 +254,11 @@ async def test_the_final_step_adds_each_visited_thread_holding_an_erased_write_t
     assert await store.persons.erase(_person(_P), [_Q], [_OTHER, _THREAD]) == (True, 0)
 
     handed = set() if kept_by_a_standing_writer else {_THREAD}
-    assert await store.client.smembers(store.settings.writer_threads_key(_DOOR)) == handed
-    assert await store.client.smembers(store.settings.writer_threads_key(_DOOR_B)) == handed
-    assert await store.client.exists(store.settings.writer_threads_key(_DOOR_C)) == 0
+    assert await store.client.smembers(store.settings.keyspace.writer_threads_key(_DOOR)) == handed
+    assert await store.client.smembers(store.settings.keyspace.writer_threads_key(_DOOR_B)) == handed
+    assert await store.client.exists(store.settings.keyspace.writer_threads_key(_DOOR_C)) == 0
     for message_id, writer in (("m-p", _P), ("m-q", _Q), ("m-x", _X)):
-        assert await store.client.hget(store.settings.record_key(message_id), "writer") == writer
+        assert await store.client.hget(store.settings.keyspace.record_key(message_id), "writer") == writer
 
 
 async def test_the_final_step_refuses_an_erased_write_without_its_door(store):
@@ -269,4 +269,4 @@ async def test_the_final_step_refuses_an_erased_write_without_its_door(store):
     with pytest.raises(store.torn, match="carries no writer_door"):
         await store.persons.erase(_person(_P), [], [_THREAD])
 
-    assert await store.client.exists(store.settings.person_key(_P)) == 1
+    assert await store.client.exists(store.settings.keyspace.person_key(_P)) == 1

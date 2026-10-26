@@ -65,15 +65,15 @@ class RecordWriteMixin(RecordStoreBase):
         by one that touches no thread index; ``route_row`` is taken only by the create, which decides
         against it whether the route still routes.
         """
-        keys = [self.settings.record_key(message_id)]
-        keys.extend(self.settings.status_index_key(status.value) for status in _INDEXED_STATUSES)
+        keys = [self.settings.keyspace.record_key(message_id)]
+        keys.extend(self.settings.keyspace.status_index_key(status.value) for status in _INDEXED_STATUSES)
         if target is not None:
-            keys.append(self.settings.status_index_key(target.value))
+            keys.append(self.settings.keyspace.status_index_key(target.value))
         if thread is not None:
-            keys.append(self.settings.thread_index_key(thread.route_name, thread.thread_id))
-            keys.append(self.settings.route_threads_key(thread.route_name))
+            keys.append(self.settings.keyspace.thread_index_key(thread.route_name, thread.thread_id))
+            keys.append(self.settings.keyspace.route_threads_key(thread.route_name))
             if route_row:
-                keys.append(self.settings.route_key(thread.route_name))
+                keys.append(self.settings.keyspace.route_key(thread.route_name))
         return keys
 
     def _index_score(self, status: DeliveryStatus, now: float) -> str:
@@ -118,9 +118,9 @@ class RecordWriteMixin(RecordStoreBase):
         if person_id is None:
             return []
         return [
-            self.settings.person_key(person_id),
-            self.settings.person_erasing_key(person_id),
-            self.settings.person_thread_routes_key(person_id),
+            self.settings.keyspace.person_key(person_id),
+            self.settings.keyspace.person_erasing_key(person_id),
+            self.settings.keyspace.person_thread_routes_key(person_id),
         ]
 
     def _inbound_ref_key(self, record: ConversationRecord) -> str | None:
@@ -132,7 +132,7 @@ class RecordWriteMixin(RecordStoreBase):
                 f"record {record.message_id!r} carries inbound_message_id {record.inbound_message_id!r} "
                 "but no channel and our_identity to key its message ref by"
             )
-        return self.settings.message_ref_key(
+        return self.settings.keyspace.message_ref_key(
             record.channel, record.our_identity, record.client_address, record.inbound_message_id
         )
 
@@ -192,7 +192,7 @@ class RecordWriteMixin(RecordStoreBase):
         if claim_key is not None:
             keys.append(claim_key)
         if refresh_mode:
-            keys.append(self.settings.mode_key(record.thread_id))
+            keys.append(self.settings.keyspace.mode_key(record.thread_id))
         person_keys = self._person_thread_keys(record.thread_id)
         keys.extend(person_keys)
         ref_key = self._inbound_ref_key(record)
@@ -221,7 +221,7 @@ class RecordWriteMixin(RecordStoreBase):
                 record.route_name,
                 self.settings.answer_retention_ttl_seconds * 1000 if ref_key is not None else "",
                 thread_door(route, record.thread_id) or "",
-                self.settings.writer_prefixes(),
+                self.settings.keyspace.writer_prefixes(),
             )
         indexed, owner = int(reply[0]), reply[1]
         owner = owner.decode() if isinstance(owner, bytes) else str(owner)
@@ -354,7 +354,7 @@ class RecordWriteMixin(RecordStoreBase):
                     r,
                     _CLAIM_INTAKE_LUA,
                     1,
-                    self.settings.record_key(message_id),
+                    self.settings.keyspace.record_key(message_id),
                     now,
                     lease_seconds,
                     token,
@@ -383,7 +383,7 @@ class RecordWriteMixin(RecordStoreBase):
     async def get_record(self, message_id: str) -> ConversationRecord | None:
         """The record for ``message_id``, or ``None`` when no such record exists."""
         async with _records.client_ctx(RedisClient, self.settings.redis) as r:
-            hashed = await awaited(r.hgetall(self.settings.record_key(message_id)))
+            hashed = await awaited(r.hgetall(self.settings.keyspace.record_key(message_id)))
         if not hashed:
             return None
         return self._from_hash(hashed)

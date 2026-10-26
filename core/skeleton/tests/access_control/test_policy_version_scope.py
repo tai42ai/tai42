@@ -20,7 +20,7 @@ from tai42_identity_redis import redis_api_key_provider as provider_module
 from tai42_identity_redis.settings import redis_identity_settings
 from tai42_kit.utils.data.string_util import hash_api_key
 
-from tai42_skeleton.access_control import management as management_module
+from tai42_skeleton.access_control import api_key_lifecycle, policy_version
 from tai42_skeleton.access_control import policy as policy_module
 from tai42_skeleton.access_control import store as store_module
 from tai42_skeleton.access_control.adapter import AuthAdapter
@@ -79,7 +79,8 @@ def fake(monkeypatch: pytest.MonkeyPatch) -> _CountingRedis:
     )
     ctx = make_client_ctx(redis)
     monkeypatch.setattr(policy_module, "client_ctx", ctx)
-    monkeypatch.setattr(management_module, "client_ctx", ctx)
+    monkeypatch.setattr(api_key_lifecycle, "client_ctx", ctx)
+    monkeypatch.setattr(policy_version, "client_ctx", ctx)
     monkeypatch.setattr(provider_module, "client_ctx", ctx)
     return redis
 
@@ -158,7 +159,7 @@ async def test_a_bump_inside_the_scope_updates_the_memo(fake: _CountingRedis) ->
 
     with policy_version_scope():
         assert await enforcer.current_policy_version() == 3
-        assert await management_module.bump_policy_version() == 4
+        assert await policy_version.bump_policy_version() == 4
         assert await enforcer.current_policy_version() == 4
 
     assert fake.version_gets == 1
@@ -168,7 +169,7 @@ async def test_a_bump_inside_the_scope_before_any_read_is_served_from_the_memo(f
     enforcer = policy_enforcer(access_control_settings())
 
     with policy_version_scope():
-        assert await management_module.bump_policy_version() == 4
+        assert await policy_version.bump_policy_version() == 4
         assert await enforcer.current_policy_version() == 4
 
     assert fake.version_gets == 0
@@ -185,7 +186,7 @@ async def test_a_closed_scope_reads_live_every_time(fake: _CountingRedis) -> Non
         assert await enforcer.current_policy_version() == 5
         assert await enforcer.current_policy_version() == 5
         # A bump after the close is not remembered either: the next read is live.
-        await management_module.bump_policy_version()
+        await policy_version.bump_policy_version()
         assert await enforcer.current_policy_version() == 6
 
     assert fake.version_gets == 4

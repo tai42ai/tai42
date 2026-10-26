@@ -55,7 +55,7 @@ def store(fake: FakeRecordRedis) -> ConversationRecordStore:
 
 def _claim(fake: FakeRecordRedis, message_id: str) -> tuple[str, float]:
     """The record's live lease as ``(token, expiry)``; an empty token when it is free."""
-    raw = fake._hashes[ConversationsSettings().record_key(message_id)]["claim"]
+    raw = fake._hashes[ConversationsSettings().keyspace.record_key(message_id)]["claim"]
     if not raw:
         return "", 0.0
     token, expiry = raw.split(":", 1)
@@ -64,7 +64,7 @@ def _claim(fake: FakeRecordRedis, message_id: str) -> tuple[str, float]:
 
 def _expire_claim(fake: FakeRecordRedis, message_id: str) -> None:
     """Age the record's lease out — what the passage of time does to a dead worker's."""
-    key = ConversationsSettings().record_key(message_id)
+    key = ConversationsSettings().keyspace.record_key(message_id)
     token = fake._hashes[key]["claim"].split(":", 1)[0]
     fake._hashes[key]["claim"] = f"{token}:{time.time() - 1}"
 

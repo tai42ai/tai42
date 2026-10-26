@@ -100,7 +100,7 @@ def test_mount_change_listener_invalidates_the_policy_cache():
 
 
 async def test_invalidate_policy_cache_bumps_the_policy_version(monkeypatch):
-    from tai42_skeleton.access_control import management
+    from tai42_skeleton.access_control import policy_version
 
     bumps: list[int] = []
 
@@ -108,7 +108,7 @@ async def test_invalidate_policy_cache_bumps_the_policy_version(monkeypatch):
         bumps.append(1)
         return len(bumps)
 
-    monkeypatch.setattr(management, "bump_policy_version", _bump)
+    monkeypatch.setattr(policy_version, "bump_policy_version", _bump)
     await instance._invalidate_policy_cache()
     assert bumps == [1]
 

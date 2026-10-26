@@ -99,49 +99,49 @@ def _s() -> ConversationsSettings:
 
 async def test_every_route_write_sets_a_fresh_token(lua_redis):
     manager = _manager()
-    assert await lua_redis.get(_s().route_version_key) is None
+    assert await lua_redis.get(_s().keyspace.route_version_key) is None
 
     await manager.put_route(_route())
-    after_put = await lua_redis.get(_s().route_version_key)
+    after_put = await lua_redis.get(_s().keyspace.route_version_key)
     assert after_put is not None
 
     await manager.put_route(_route(target_name="other"))
-    after_replace = await lua_redis.get(_s().route_version_key)
+    after_replace = await lua_redis.get(_s().keyspace.route_version_key)
     assert after_replace not in (None, after_put)
 
     await manager.delete_route("chat")
-    after_delete = await lua_redis.get(_s().route_version_key)
+    after_delete = await lua_redis.get(_s().keyspace.route_version_key)
     assert after_delete not in (None, after_replace)
 
     # A delete of an absent row still sets a token.
     await manager.delete_route("chat")
-    assert await lua_redis.get(_s().route_version_key) not in (None, after_delete)
+    assert await lua_redis.get(_s().keyspace.route_version_key) not in (None, after_delete)
 
 
 async def test_a_refused_door_flip_writes_nothing_and_sets_no_token(lua_redis):
     manager = _manager()
     await manager.put_route(_route())
-    token = await lua_redis.get(_s().route_version_key)
-    await lua_redis.zadd(_s().route_threads_key("chat"), {"t1": 1.0})
+    token = await lua_redis.get(_s().keyspace.route_version_key)
+    await lua_redis.zadd(_s().keyspace.route_threads_key("chat"), {"t1": 1.0})
 
     with pytest.raises(base_module.DoorFlipRefusedError):
         await manager.put_route(
             _route(door="channel", channel="web", our_identity="me", callback_url=None, callback_secret=None)
         )
 
-    assert await lua_redis.get(_s().route_version_key) == token
+    assert await lua_redis.get(_s().keyspace.route_version_key) == token
 
 
 async def test_every_config_write_sets_a_fresh_token(lua_redis):
     store = ConversationTargetConfigStore(_s())
-    assert await lua_redis.get(_s().target_config_version_key) is None
+    assert await lua_redis.get(_s().keyspace.target_config_version_key) is None
 
     await store.upsert(_config())
-    after_put = await lua_redis.get(_s().target_config_version_key)
+    after_put = await lua_redis.get(_s().keyspace.target_config_version_key)
     assert after_put is not None
 
     await store.delete("agent", "assistant")
-    assert await lua_redis.get(_s().target_config_version_key) not in (None, after_put)
+    assert await lua_redis.get(_s().keyspace.target_config_version_key) not in (None, after_put)
 
 
 # -- the snapshot read ------------------------------------------------------------------------
@@ -229,9 +229,9 @@ async def test_unreadable_members_are_counted_and_read_live(lua_redis):
     manager = _manager()
     await manager.put_route(_route())
     # Hand-written corruption under the store's keys; the version key moved with it.
-    await lua_redis.sadd(_s().route_names_key, "ghost", "broken")
-    await lua_redis.set(_s().route_key("broken"), "{not json")
-    await lua_redis.set(_s().route_version_key, "hand-written")
+    await lua_redis.sadd(_s().keyspace.route_names_key, "ghost", "broken")
+    await lua_redis.set(_s().keyspace.route_key("broken"), "{not json")
+    await lua_redis.set(_s().keyspace.route_version_key, "hand-written")
 
     routes, unreadable = await manager.list_routes()
     assert set(routes) == {"chat"}
@@ -241,16 +241,16 @@ async def test_unreadable_members_are_counted_and_read_live(lua_redis):
         await manager.get_route("broken")
 
     # The live read of an unreadable member follows the row as it is now.
-    await lua_redis.set(_s().route_key("broken"), _route("broken").model_dump_json())
+    await lua_redis.set(_s().keyspace.route_key("broken"), _route("broken").model_dump_json())
     assert await manager.get_route("broken") == _route("broken")
 
 
 async def test_unreadable_config_members_are_counted_and_read_live(lua_redis):
     store = ConversationTargetConfigStore(_s())
     await store.upsert(_config())
-    await lua_redis.sadd(_s().target_config_names_key, "agent:broken")
-    await lua_redis.set(_s().target_config_key("agent", "broken"), "{not json")
-    await lua_redis.set(_s().target_config_version_key, "hand-written")
+    await lua_redis.sadd(_s().keyspace.target_config_names_key, "agent:broken")
+    await lua_redis.set(_s().keyspace.target_config_key("agent", "broken"), "{not json")
+    await lua_redis.set(_s().keyspace.target_config_version_key, "hand-written")
 
     configs, unreadable = await store.list()
     assert set(configs) == {("agent", "assistant")}
@@ -301,4 +301,4 @@ async def test_a_deleted_route_is_refused_by_the_record_create_while_a_reader_ho
         updated_at=now,
     )
     await create_record(ConversationRecordStore(_s()), record)
-    assert await lua_redis.zcard(_s().route_threads_key("line")) == 0
+    assert await lua_redis.zcard(_s().keyspace.route_threads_key("line")) == 0

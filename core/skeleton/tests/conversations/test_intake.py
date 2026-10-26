@@ -373,7 +373,7 @@ async def test_a_shed_reply_that_loses_its_claim_writes_nothing_deliverable(env,
     )
     await _settle()
     # The concurrent attempt committed between this one's fast-path read and its create.
-    await env.set(ConversationsSettings().dedupe_key("twilio", "PID2"), first)
+    await env.set(ConversationsSettings().keyspace.dedupe_key("twilio", "PID2"), first)
 
     async def _no_owner_yet(self, channel_name, provider_message_id):
         return None

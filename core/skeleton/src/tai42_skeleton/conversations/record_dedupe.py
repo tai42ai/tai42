@@ -45,21 +45,21 @@ class RecordDedupeMixin(RecordStoreBase):
 
     async def get_inbound_owner(self, channel: str, provider_message_id: str) -> str | None:
         """Return the ``message_id`` owning ``(channel, provider_message_id)``, or ``None`` — the channel fast path."""
-        return await self._dedupe_owner(self.settings.dedupe_key(channel, provider_message_id))
+        return await self._dedupe_owner(self.settings.keyspace.dedupe_key(channel, provider_message_id))
 
     async def claim_inbound(self, channel: str, provider_message_id: str, message_id: str) -> str:
         """Claim ``(channel, provider_message_id)`` for ``message_id`` in the channel dedupe family.
 
         Returns the owning ``message_id``.
         """
-        return await self._claim_dedupe(self.settings.dedupe_key(channel, provider_message_id), message_id)
+        return await self._claim_dedupe(self.settings.keyspace.dedupe_key(channel, provider_message_id), message_id)
 
     async def get_event_owner(self, route_name: str, event_id: str) -> str | None:
         """Return the ``message_id`` owning ``(route_name, event_id)``, or ``None`` when unclaimed.
 
         The event door's redelivery fast path, over the event dedupe family.
         """
-        return await self._dedupe_owner(self.settings.event_dedupe_key(route_name, event_id))
+        return await self._dedupe_owner(self.settings.keyspace.event_dedupe_key(route_name, event_id))
 
     async def claim_event(self, route_name: str, event_id: str, message_id: str) -> str:
         """Claim ``(route_name, event_id)`` for ``message_id`` in the event dedupe family; return the owner.
@@ -67,4 +67,4 @@ class RecordDedupeMixin(RecordStoreBase):
         Runs the SAME claim as :meth:`claim_inbound` over its own key family, so a channel
         dedupe and an event dedupe of the same id are distinct markers.
         """
-        return await self._claim_dedupe(self.settings.event_dedupe_key(route_name, event_id), message_id)
+        return await self._claim_dedupe(self.settings.keyspace.event_dedupe_key(route_name, event_id), message_id)

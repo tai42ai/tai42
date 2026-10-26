@@ -22039,7 +22039,7 @@
     },
     "/api/auth/api-keys/{user_id}": {
       "delete": {
-        "description": "Revoke a key (immediate: next request fails to auth).\n\nDeletes the key record, its enforced policy row, and its live context; the user's ``ac_policy`` version\nhistory is deliberately NOT touched (it belongs to the identity, so a key later re-created\nfor the same ``user_id`` resumes that history).\n\nNo version bump here, unlike every other mutation on this surface: revocation's\ncache-buster is atomic with the policy-row delete inside\n:func:`~tai42_skeleton.access_control.management.revoke_api_key`, so no fault in the\nsteps behind it can leave the revoked key's authority live in a warm cache slot.",
+        "description": "Revoke a key (immediate: next request fails to auth).\n\nDeletes the key record, its enforced policy row, and its live context; the user's ``ac_policy`` version\nhistory is deliberately NOT touched (it belongs to the identity, so a key later re-created\nfor the same ``user_id`` resumes that history).\n\nNo version bump here, unlike every other mutation on this surface: revocation's\ncache-buster is atomic with the policy-row delete inside\n:func:`~tai42_skeleton.access_control.api_key_lifecycle.revoke_api_key`, so no fault in the\nsteps behind it can leave the revoked key's authority live in a warm cache slot.",
         "operationId": "delete_api_auth_api_keys_user_id",
         "parameters": [
           {

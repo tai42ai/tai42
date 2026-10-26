@@ -546,7 +546,9 @@ async def test_operator_send_append_failure_raises_and_creates_no_record(env, mo
 
     # Order is append -> create: a failed append leaves nothing in the store and sends nothing.
     assert channel.sends == []
-    assert env._hashes == {} or all(not key.startswith(ConversationsSettings().record_key("")) for key in env._hashes)
+    assert env._hashes == {} or all(
+        not key.startswith(ConversationsSettings().keyspace.record_key("")) for key in env._hashes
+    )
 
 
 async def test_operator_send_memoryless_agent_appends_nothing_and_delivers(env, monkeypatch):
@@ -664,7 +666,7 @@ async def test_operator_send_refuses_503_when_a_foreign_worker_holds_the_lease(e
     _wire(monkeypatch, FakeManager(route), agent, channel)
     thread_id = "bridge:line:+15550002222"
 
-    key = ConversationsSettings().thread_lease_key(thread_id)
+    key = ConversationsSettings().keyspace.thread_lease_key(thread_id)
     await env.set(key, "foreign-token", px=120_000, nx=True)
 
     with pytest.raises(ThreadBusyError, match="busy with an in-flight turn"):

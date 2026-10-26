@@ -16,7 +16,7 @@ from tai42_contract.access_control import OWNER_USER_ID_CLAIM
 from tai42_contract.access_control.context import reset_request_user_id, set_request_user_id
 from tai42_contract.access_control.models import AccessPolicy
 
-from tai42_skeleton.access_control import management
+from tai42_skeleton.access_control import api_key_lifecycle, management
 from tai42_skeleton.access_control.settings import AccessControlSettings
 from tai42_skeleton.operations import _authority as authority
 from tai42_skeleton.operations import api_keys as ops
@@ -102,7 +102,7 @@ async def test_revoke_api_key_value_error_maps_to_bad_request(monkeypatch):
     async def _boom(_user_id):
         raise ValueError("revoke failed")
 
-    monkeypatch.setattr(management, "revoke_api_key", _boom)
+    monkeypatch.setattr(api_key_lifecycle, "revoke_api_key", _boom)
     with pytest.raises(BadRequestError, match="revoke failed"):
         await ops.revoke_api_key("k1")
 
@@ -147,7 +147,7 @@ def _install_scope_store(monkeypatch, stored_body):
         captured["recorded"] = _body
 
     monkeypatch.setattr(management, "get_policy_body", _body)
-    monkeypatch.setattr(management, "edit_user_payload", _edit)
+    monkeypatch.setattr(api_key_lifecycle, "edit_user_payload", _edit)
     monkeypatch.setattr(ops, "_record_policy_version", _record)
     return captured
 

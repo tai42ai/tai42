@@ -30,7 +30,7 @@ async def test_pair_code_greeting_is_bounded_by_the_code_lifetime(monkeypatch):
     fake = FakeRecordRedis()
     store = _store(monkeypatch, fake)
     settings = ConversationsSettings()
-    key = settings.owed_greeting_key("t1")
+    key = settings.keyspace.owed_greeting_key("t1")
 
     await store.record_owed_greeting("t1", "Welcome, code {code}", carries_pair_code=True)
 
@@ -42,7 +42,7 @@ async def test_no_code_greeting_outlives_the_pair_code_lifetime(monkeypatch):
     fake = FakeRecordRedis()
     store = _store(monkeypatch, fake)
     settings = ConversationsSettings()
-    key = settings.owed_greeting_key("t2")
+    key = settings.keyspace.owed_greeting_key("t2")
 
     await store.record_owed_greeting("t2", "Welcome!", carries_pair_code=False)
 

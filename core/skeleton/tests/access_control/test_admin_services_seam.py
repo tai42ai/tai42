@@ -16,7 +16,7 @@ from tai42_contract.accounts import AccountsAdminServices
 from tai42_contract.accounts.errors import LastAdminError
 
 import tai42_skeleton.versioning as versioning_module
-from tai42_skeleton.access_control import management
+from tai42_skeleton.access_control import api_key_lifecycle, policy_version
 from tai42_skeleton.access_control.adapter import AuthAdapter
 from tai42_skeleton.access_control.roles import ROLE_POINTER_KEY, seed_default_roles
 from tai42_skeleton.access_control.settings import AccessControlSettings
@@ -51,7 +51,8 @@ def _wire(monkeypatch: pytest.MonkeyPatch) -> None:
     mem = _MemStore()
     monkeypatch.setattr(versioning_module, "versioned_store", lambda: mem)
     monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "secret")
-    monkeypatch.setattr(management, "client_ctx", make_client_ctx(FakeRedis(strings={})))
+    monkeypatch.setattr(api_key_lifecycle, "client_ctx", make_client_ctx(FakeRedis(strings={})))
+    monkeypatch.setattr(policy_version, "client_ctx", make_client_ctx(FakeRedis(strings={})))
     from tai42_kit.access_control import registry
 
     spy = _SpyProvider()

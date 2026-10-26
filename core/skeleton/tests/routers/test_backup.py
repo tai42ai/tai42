@@ -413,7 +413,7 @@ async def test_secret_section_absent_from_export_unless_requested(monkeypatch):
 async def test_access_control_roundtrip_mints_new_keys(monkeypatch):
     from tai42_identity_redis import redis_api_key_provider as provider_module
 
-    from tai42_skeleton.access_control import management
+    from tai42_skeleton.access_control import api_key_lifecycle, management, policy_version
     from tai42_skeleton.access_control import store as store_module
 
     from ..access_control.conftest import FakeAccessControlPg, FakeRedis, make_client_ctx, make_pg_ctx
@@ -424,11 +424,12 @@ async def test_access_control_roundtrip_mints_new_keys(monkeypatch):
     # The policy store resolves its Postgres through the registry; the fake transport models a configured deployment.
     monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "test")
     monkeypatch.setattr(store_module, "client_ctx", make_pg_ctx(source_pg))
-    monkeypatch.setattr(management, "client_ctx", make_client_ctx(source_redis))
+    monkeypatch.setattr(api_key_lifecycle, "client_ctx", make_client_ctx(source_redis))
+    monkeypatch.setattr(policy_version, "client_ctx", make_client_ctx(source_redis))
     monkeypatch.setattr(provider_module, "client_ctx", make_client_ctx(source_redis))
     source_pg.add_principal("owner1")
     await management.add_url_to_scope("scope-a", "/api/x")
-    await management.add_user_api_key("user1", "first key", ["scope-a"], owner_user_id="owner1")
+    await api_key_lifecycle.add_user_api_key("user1", "first key", ["scope-a"], owner_user_id="owner1")
 
     _install(monkeypatch)
     doc = _json(await export_backup(_post_req({"sections": ["access_control"]})))
@@ -442,7 +443,8 @@ async def test_access_control_roundtrip_mints_new_keys(monkeypatch):
     # The policy store resolves its Postgres through the registry; the fake transport models a configured deployment.
     monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "test")
     monkeypatch.setattr(store_module, "client_ctx", make_pg_ctx(target_pg))
-    monkeypatch.setattr(management, "client_ctx", make_client_ctx(target_redis))
+    monkeypatch.setattr(api_key_lifecycle, "client_ctx", make_client_ctx(target_redis))
+    monkeypatch.setattr(policy_version, "client_ctx", make_client_ctx(target_redis))
     monkeypatch.setattr(provider_module, "client_ctx", make_client_ctx(target_redis))
     data = _json(await import_backup(_post_req({"document": doc, "sections": ["access_control"]})))["data"]
     assert data["ok"] is True
@@ -493,7 +495,7 @@ async def test_sub_mcp_restore_bumps_the_policy_version_once_per_restored_slug(m
     # A restored mount is a reachable surface: the sub-MCP write chokepoint announces each
     # durable mount change to the listener the composition root wires, so warm capability
     # projections re-read the restored mount set.
-    from tai42_skeleton.access_control import management
+    from tai42_skeleton.access_control import api_key_lifecycle, policy_version
     from tai42_skeleton.access_control.settings import access_control_settings
     from tai42_skeleton.sub_mcp import service as sub_mcp_service
     from tai42_skeleton.sub_mcp import store as sub_mcp_store
@@ -501,7 +503,8 @@ async def test_sub_mcp_restore_bumps_the_policy_version_once_per_restored_slug(m
     from ..access_control.conftest import FakeRedis, make_client_ctx
 
     redis = FakeRedis(strings={})
-    monkeypatch.setattr(management, "client_ctx", make_client_ctx(redis))
+    monkeypatch.setattr(api_key_lifecycle, "client_ctx", make_client_ctx(redis))
+    monkeypatch.setattr(policy_version, "client_ctx", make_client_ctx(redis))
     monkeypatch.setattr(sub_mcp_service, "_mount_change_listeners", [])
     sub_mcp_service.on_mount_changed(instance._invalidate_policy_cache)
     monkeypatch.setattr(sub_mcp_store, "_IN_MEMORY_STORE", sub_mcp_store.InMemorySubMcpStore())
@@ -525,7 +528,7 @@ def _wire_access_control_restore(monkeypatch):
     """A fresh fake policy store and Redis behind the access-control section; returns the Redis."""
     from tai42_identity_redis import redis_api_key_provider as provider_module
 
-    from tai42_skeleton.access_control import management
+    from tai42_skeleton.access_control import api_key_lifecycle, policy_version
     from tai42_skeleton.access_control import store as store_module
 
     from ..access_control.conftest import FakeAccessControlPg, FakeRedis, make_client_ctx, make_pg_ctx
@@ -533,7 +536,8 @@ def _wire_access_control_restore(monkeypatch):
     monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "test")
     monkeypatch.setattr(store_module, "client_ctx", make_pg_ctx(FakeAccessControlPg()))
     redis = FakeRedis(strings={})
-    monkeypatch.setattr(management, "client_ctx", make_client_ctx(redis))
+    monkeypatch.setattr(api_key_lifecycle, "client_ctx", make_client_ctx(redis))
+    monkeypatch.setattr(policy_version, "client_ctx", make_client_ctx(redis))
     monkeypatch.setattr(provider_module, "client_ctx", make_client_ctx(redis))
     _install(monkeypatch)
     return redis
@@ -828,7 +832,7 @@ async def test_export_absent_subsystem_records_section_error_not_500(monkeypatch
 async def test_access_control_pattern_scoped_route_round_trips(monkeypatch):
     from tai42_identity_redis import redis_api_key_provider as provider_module
 
-    from tai42_skeleton.access_control import management
+    from tai42_skeleton.access_control import api_key_lifecycle, management, policy_version
     from tai42_skeleton.access_control import store as store_module
 
     from ..access_control.conftest import FakeAccessControlPg, FakeRedis, make_client_ctx, make_pg_ctx
@@ -837,7 +841,8 @@ async def test_access_control_pattern_scoped_route_round_trips(monkeypatch):
     monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "test")
     monkeypatch.setattr(store_module, "client_ctx", make_pg_ctx(FakeAccessControlPg()))
     source = FakeRedis()
-    monkeypatch.setattr(management, "client_ctx", make_client_ctx(source))
+    monkeypatch.setattr(api_key_lifecycle, "client_ctx", make_client_ctx(source))
+    monkeypatch.setattr(policy_version, "client_ctx", make_client_ctx(source))
     # The export enumerates tokens through the provider, so point it at the fake too.
     monkeypatch.setattr(provider_module, "client_ctx", make_client_ctx(source))
     await management.add_url_to_scope("scope-a", "/events/{id}", pattern=r"/events/\d+")
@@ -854,7 +859,8 @@ async def test_access_control_pattern_scoped_route_round_trips(monkeypatch):
     monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "test")
     monkeypatch.setattr(store_module, "client_ctx", make_pg_ctx(FakeAccessControlPg()))
     target = FakeRedis()
-    monkeypatch.setattr(management, "client_ctx", make_client_ctx(target))
+    monkeypatch.setattr(api_key_lifecycle, "client_ctx", make_client_ctx(target))
+    monkeypatch.setattr(policy_version, "client_ctx", make_client_ctx(target))
     monkeypatch.setattr(provider_module, "client_ctx", make_client_ctx(target))
     data = _json(await import_backup(_post_req({"document": doc, "sections": ["access_control"]})))["data"]
     assert data["ok"] is True
@@ -865,7 +871,7 @@ async def test_access_control_pattern_scoped_route_round_trips(monkeypatch):
 async def test_access_control_public_route_round_trips(monkeypatch):
     from tai42_identity_redis import redis_api_key_provider as provider_module
 
-    from tai42_skeleton.access_control import management
+    from tai42_skeleton.access_control import api_key_lifecycle, management, policy_version
     from tai42_skeleton.access_control import store as store_module
 
     from ..access_control.conftest import FakeAccessControlPg, FakeRedis, make_client_ctx, make_pg_ctx
@@ -874,7 +880,8 @@ async def test_access_control_public_route_round_trips(monkeypatch):
     monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "test")
     monkeypatch.setattr(store_module, "client_ctx", make_pg_ctx(FakeAccessControlPg()))
     source = FakeRedis()
-    monkeypatch.setattr(management, "client_ctx", make_client_ctx(source))
+    monkeypatch.setattr(api_key_lifecycle, "client_ctx", make_client_ctx(source))
+    monkeypatch.setattr(policy_version, "client_ctx", make_client_ctx(source))
     # The export enumerates tokens through the provider, so point it at the fake too.
     monkeypatch.setattr(provider_module, "client_ctx", make_client_ctx(source))
     from tai42_skeleton.access_control.settings import access_control_settings
@@ -895,7 +902,8 @@ async def test_access_control_public_route_round_trips(monkeypatch):
     monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "test")
     monkeypatch.setattr(store_module, "client_ctx", make_pg_ctx(FakeAccessControlPg()))
     target = FakeRedis()
-    monkeypatch.setattr(management, "client_ctx", make_client_ctx(target))
+    monkeypatch.setattr(api_key_lifecycle, "client_ctx", make_client_ctx(target))
+    monkeypatch.setattr(policy_version, "client_ctx", make_client_ctx(target))
     monkeypatch.setattr(provider_module, "client_ctx", make_client_ctx(target))
     data = _json(await import_backup(_post_req({"document": doc, "sections": ["access_control"]})))["data"]
     assert data["ok"] is True
@@ -905,7 +913,7 @@ async def test_access_control_public_route_round_trips(monkeypatch):
 async def test_access_control_import_marker_mapping_lands_via_pin_route_public(monkeypatch):
     # A restored marker-valued mapping restores through the dedicated ``pin_route_public``
     # writer, never ``add_url_to_scope`` — the marker is a column value, not a scope.
-    from tai42_skeleton.access_control import management
+    from tai42_skeleton.access_control import api_key_lifecycle, management, policy_version
     from tai42_skeleton.access_control import store as store_module
     from tai42_skeleton.access_control.settings import access_control_settings
 
@@ -915,7 +923,8 @@ async def test_access_control_import_marker_mapping_lands_via_pin_route_public(m
     # The policy store resolves its Postgres through the registry; the fake transport models a configured deployment.
     monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "test")
     monkeypatch.setattr(store_module, "client_ctx", make_pg_ctx(pg))
-    monkeypatch.setattr(management, "client_ctx", make_client_ctx(FakeRedis()))
+    monkeypatch.setattr(api_key_lifecycle, "client_ctx", make_client_ctx(FakeRedis()))
+    monkeypatch.setattr(policy_version, "client_ctx", make_client_ctx(FakeRedis()))
     marker = access_control_settings().public_resource_id
 
     pinned: list[tuple[str, str | None]] = []
@@ -958,12 +967,13 @@ async def test_access_control_import_marker_mapping_lands_via_pin_route_public(m
 
 
 async def test_access_control_import_rejects_blank_user_id(monkeypatch):
-    from tai42_skeleton.access_control import management
+    from tai42_skeleton.access_control import api_key_lifecycle, policy_version
 
     from ..access_control.conftest import FakeRedis, make_client_ctx
 
     target = FakeRedis()
-    monkeypatch.setattr(management, "client_ctx", make_client_ctx(target))
+    monkeypatch.setattr(api_key_lifecycle, "client_ctx", make_client_ctx(target))
+    monkeypatch.setattr(policy_version, "client_ctx", make_client_ctx(target))
     _install(monkeypatch)
 
     document = {
@@ -1439,7 +1449,7 @@ async def test_import_storage_existing_path_skipped_by_default(monkeypatch):
 
 
 async def test_import_access_control_scope_failure_is_per_token_skip(monkeypatch):
-    from tai42_skeleton.access_control import management
+    from tai42_skeleton.access_control import api_key_lifecycle, policy_version
     from tai42_skeleton.access_control import store as store_module
 
     from ..access_control.conftest import FakeAccessControlPg, FakeRedis, make_client_ctx, make_pg_ctx
@@ -1448,7 +1458,8 @@ async def test_import_access_control_scope_failure_is_per_token_skip(monkeypatch
     monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "test")
     monkeypatch.setattr(store_module, "client_ctx", make_pg_ctx(FakeAccessControlPg()))
     target = FakeRedis()
-    monkeypatch.setattr(management, "client_ctx", make_client_ctx(target))
+    monkeypatch.setattr(api_key_lifecycle, "client_ctx", make_client_ctx(target))
+    monkeypatch.setattr(policy_version, "client_ctx", make_client_ctx(target))
     _install(monkeypatch)
 
     # A token referencing a scope that was never provisioned: ``add_user_api_key``
@@ -1478,7 +1489,7 @@ async def test_import_access_control_existing_token_is_clean_skip(monkeypatch):
     # (``skipped_existing``), never a re-mint and never an error — the live key stands.
     from tai42_identity_redis import redis_api_key_provider as provider_module
 
-    from tai42_skeleton.access_control import management
+    from tai42_skeleton.access_control import api_key_lifecycle, policy_version
     from tai42_skeleton.access_control import store as store_module
 
     from ..access_control.conftest import FakeAccessControlPg, FakeRedis, make_client_ctx, make_pg_ctx
@@ -1488,11 +1499,12 @@ async def test_import_access_control_existing_token_is_clean_skip(monkeypatch):
     # The policy store resolves its Postgres through the registry; the fake transport models a configured deployment.
     monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "test")
     monkeypatch.setattr(store_module, "client_ctx", make_pg_ctx(pg))
-    monkeypatch.setattr(management, "client_ctx", make_client_ctx(redis))
+    monkeypatch.setattr(api_key_lifecycle, "client_ctx", make_client_ctx(redis))
+    monkeypatch.setattr(policy_version, "client_ctx", make_client_ctx(redis))
     monkeypatch.setattr(provider_module, "client_ctx", make_client_ctx(redis))
     # Provision a genuine live key: both storage homes populated.
     pg.add_principal("owner1")
-    await management.add_user_api_key("u1", "d", ["*"], owner_user_id="owner1")
+    await api_key_lifecycle.add_user_api_key("u1", "d", ["*"], owner_user_id="owner1")
     fingerprint = pg.policy_body("u1")["policy_data"][KEY_FINGERPRINT_CLAIM]
     _install(monkeypatch)
 
@@ -1524,7 +1536,7 @@ async def test_import_access_control_existing_token_not_reminted_under_overwrite
     # branches, the token branch does not consult mode — the live key stands.
     from tai42_identity_redis import redis_api_key_provider as provider_module
 
-    from tai42_skeleton.access_control import management
+    from tai42_skeleton.access_control import api_key_lifecycle, policy_version
     from tai42_skeleton.access_control import store as store_module
 
     from ..access_control.conftest import FakeAccessControlPg, FakeRedis, make_client_ctx, make_pg_ctx
@@ -1534,11 +1546,12 @@ async def test_import_access_control_existing_token_not_reminted_under_overwrite
     # The policy store resolves its Postgres through the registry; the fake transport models a configured deployment.
     monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "test")
     monkeypatch.setattr(store_module, "client_ctx", make_pg_ctx(pg))
-    monkeypatch.setattr(management, "client_ctx", make_client_ctx(redis))
+    monkeypatch.setattr(api_key_lifecycle, "client_ctx", make_client_ctx(redis))
+    monkeypatch.setattr(policy_version, "client_ctx", make_client_ctx(redis))
     monkeypatch.setattr(provider_module, "client_ctx", make_client_ctx(redis))
     # Provision a genuine live key: both storage homes populated.
     pg.add_principal("owner1")
-    await management.add_user_api_key("u1", "d", ["*"], owner_user_id="owner1")
+    await api_key_lifecycle.add_user_api_key("u1", "d", ["*"], owner_user_id="owner1")
     fingerprint = pg.policy_body("u1")["policy_data"][KEY_FINGERPRINT_CLAIM]
     _install(monkeypatch)
 

@@ -50,9 +50,9 @@ async def _unlinked_on_line_b(world, person_id: str, first: str, second: str, *,
 async def _thread_gone(world, thread: str, *route_names: str) -> None:  # noqa: F811
     settings = world.settings
     for route_name in route_names:
-        assert await world.redis.exists(settings.thread_index_key(route_name, thread)) == 0
-        assert await world.redis.zscore(settings.route_threads_key(route_name), thread) is None
-    assert await world.redis.exists(settings.mode_key(thread)) == 0
+        assert await world.redis.exists(settings.keyspace.thread_index_key(route_name, thread)) == 0
+        assert await world.redis.zscore(settings.keyspace.route_threads_key(route_name), thread) is None
+    assert await world.redis.exists(settings.keyspace.mode_key(thread)) == 0
 
 
 async def test_a_persons_erase_reaches_the_route_its_own_unlink_took_off_it(world):  # noqa: F811
@@ -101,7 +101,7 @@ async def test_an_erase_reaches_a_route_only_a_send_to_the_person_used(world):  
     sent = await world.ask(_P1, f"{_P}-ask", our_identity=new.our_identity)
     thread = person_thread_id(_P)
     assert (await world.lua_env.store.get_record(sent)).thread_id == thread
-    assert await world.redis.zrange(world.settings.thread_index_key(new.route_name, thread), 0, -1) == [sent]
+    assert await world.redis.zrange(world.settings.keyspace.thread_index_key(new.route_name, thread), 0, -1) == [sent]
 
     result = await ops.delete_conversation_person(_P)
 

@@ -59,8 +59,8 @@ def _seed_person(fake: FakeRecordRedis, person: Person) -> None:
     """Write a person row + its index entries straight into the fake, so a test can pin a
     created_at the store's own ``datetime.now`` would not let it choose."""
     settings = ConversationsSettings()
-    fake._strings[settings.person_key(person.person_id)] = person.model_dump_json()
-    index_key = settings.person_index_key(person.target_kind, person.target_name)
+    fake._strings[settings.keyspace.person_key(person.person_id)] = person.model_dump_json()
+    index_key = settings.keyspace.person_index_key(person.target_kind, person.target_name)
     for address in person.addresses:
         dak = _door_address_key(
             door=address.door, channel=address.channel, our_identity=address.our_identity, address=address.address
@@ -170,7 +170,7 @@ async def test_merge_unions_addresses_and_rewrites_index(monkeypatch):
     assert {a.address for a in survivor.addresses} == {"+1000", "+2000"}
     # Both addresses now resolve to the survivor, and the absorbed row is gone.
     settings = ConversationsSettings()
-    assert settings.person_key("p-newer") not in fake._strings
+    assert settings.keyspace.person_key("p-newer") not in fake._strings
     for address in ("+1000", "+2000"):
         found = await _channel_person(store, address)
         assert found is not None
@@ -261,7 +261,7 @@ async def test_merge_across_targets_refuses(monkeypatch):
         created_at=datetime.now(UTC),
         addresses=[_addr("+2000")],
     )
-    fake._strings[settings.person_key("p-tool")] = other.model_dump_json()
+    fake._strings[settings.keyspace.person_key("p-tool")] = other.model_dump_json()
 
     with pytest.raises(CrossTargetMergeError):
         await store.merge("p-agent", "p-tool")
@@ -382,7 +382,7 @@ async def test_index_naming_a_missing_row_raises_on_lookup_and_ensure(monkeypatc
     settings = ConversationsSettings()
     # A dangling index entry (no such row) is corruption — both readers raise, never swallow.
     dak = _door_address_key(door="channel", channel="twilio", our_identity="+15550001111", address="+1000")
-    fake._hashes.setdefault(settings.person_index_key("agent", "assistant"), {})[dak] = "p-gone"
+    fake._hashes.setdefault(settings.keyspace.person_index_key("agent", "assistant"), {})[dak] = "p-gone"
 
     with pytest.raises(RuntimeError):
         await _channel_person(store, "+1000")

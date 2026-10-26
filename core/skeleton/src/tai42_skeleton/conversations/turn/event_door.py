@@ -202,7 +202,7 @@ async def submit_event(
             intake,
             route=route,
             intake_token=intake_token,
-            claim_key=store.settings.event_dedupe_key(route_name, event_id),
+            claim_key=store.settings.keyspace.event_dedupe_key(route_name, event_id),
             refresh_mode=True,
         )
     except asyncio.CancelledError:

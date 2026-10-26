@@ -67,7 +67,7 @@ async def _writers(world: World, thread: str) -> set[str]:
 
 async def _threads_of(world: World, writer: str) -> set[str]:
     """The threads on ``writer``'s visit list."""
-    return await world.redis.smembers(world.settings.writer_threads_key(writer))
+    return await world.redis.smembers(world.settings.keyspace.writer_threads_key(writer))
 
 
 async def _two_address_person(world: World, person_id: str, first: str, second: str, *, age_days: int) -> list[str]:
@@ -296,9 +296,9 @@ async def _assert_only_records_left(world: World, thread: str, message_ids: list
     """``thread`` keeps only its records with their refs, which keep their own retention TTL.
 
     No writer stamp names it any more."""
-    prefix = world.settings.record_key("")
+    prefix = world.settings.keyspace.record_key("")
     standing = await world.naming(thread)
-    assert {world.settings.record_key(message_id) for message_id in message_ids} <= set(standing)
+    assert {world.settings.keyspace.record_key(message_id) for message_id in message_ids} <= set(standing)
     strays = {
         key: value
         for key, value in standing.items()
@@ -691,7 +691,7 @@ async def test_a_write_inside_a_thread_delete_goes_with_it(
 
     assert result["removed"] == len(p_ids) + 1
     assert thread in world.saver.deleted[forgotten_before:]
-    r_visits = world.settings.writer_threads_key(_R)
+    r_visits = world.settings.keyspace.writer_threads_key(_R)
     assert await leftovers(world, _Q, q_chat, threads=(thread,)) == {"keys": {r_visits: [thread]}}
 
 
@@ -702,7 +702,7 @@ async def test_a_write_its_redrive_drops_as_a_duplicate_keeps_nothing_standing(
     p_ids, thread = await _q_and_r_on_one_address(world)
     await _i2_inbound("PID-R")
     [intake] = scheduled
-    await world.redis.set(world.settings.dedupe_key("twilio", "PID-R"), "another-attempt")
+    await world.redis.set(world.settings.keyspace.dedupe_key("twilio", "PID-R"), "another-attempt")
     await redrive_module._arbitrate_stranded_intake(world.lua_env.store, intake)
     assert await world.lua_env.store.get_record(intake.message_id) is None
     assert await _writers(world, thread) == set()
@@ -797,7 +797,7 @@ async def test_a_thread_a_fresh_person_continued_after_an_unlink_is_left(
         # when it lands in the cleared thread.
         assert result["removed"] == len(p_ids) + len(q_ids)
         assert q_thread in world.saver.deleted[forgotten_before:]
-        n_visits = {"keys": {world.settings.writer_threads_key(n_id): [q_thread]}} if n_ids else {}
+        n_visits = {"keys": {world.settings.keyspace.writer_threads_key(n_id): [q_thread]}} if n_ids else {}
         assert await leftovers(world, *q_ids, *n_ids, threads=(q_thread,), parks=(f"{_Q}-park-thread",)) == n_visits
         assert world.states_naming(q_thread) == []
         return

@@ -21,7 +21,7 @@ from tai42_kit.settings import reset_all_settings
 import tai42_skeleton.operations.api_keys as ops_api_keys
 import tai42_skeleton.routers.api_keys as router
 import tai42_skeleton.versioning as versioning_module
-from tai42_skeleton.access_control import management
+from tai42_skeleton.access_control import api_key_lifecycle, policy_version
 from tai42_skeleton.access_control import policy as policy_module
 from tai42_skeleton.access_control import store as store_module
 
@@ -62,7 +62,8 @@ def wired(monkeypatch):
     # The policy store resolves its Postgres through the registry; the fake transport models a configured deployment.
     monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "test")
     monkeypatch.setattr(store_module, "client_ctx", make_pg_ctx(pg))
-    monkeypatch.setattr(management, "client_ctx", make_client_ctx(redis))
+    monkeypatch.setattr(api_key_lifecycle, "client_ctx", make_client_ctx(redis))
+    monkeypatch.setattr(policy_version, "client_ctx", make_client_ctx(redis))
     monkeypatch.setattr(policy_module, "client_ctx", make_client_ctx(redis))
     # ``_record_policy_version`` writes history through the versioned store — fake it.
     monkeypatch.setattr(versioning_module, "versioned_store", lambda: _MemStore())
@@ -217,7 +218,7 @@ async def test_non_admin_revoke_own_key(wired):
     pg, _spy = wired
     _seed_caller(pg, "alice", scopes=["read"])
     # A key alice owns.
-    await management.add_user_api_key("k1", "d", ["*"], owner_user_id="alice")
+    await api_key_lifecycle.add_user_api_key("k1", "d", ["*"], owner_user_id="alice")
     resp = await _call(router.revoke_api_key, "alice", _req(path_params={"user_id": "k1"}, method="DELETE"))
     assert resp.status_code == 200
 
@@ -247,7 +248,7 @@ async def test_owner_claim_echo_accepted_on_edit(wired):
     pg, _spy = wired
     _seed_caller(pg, "admin1", scopes=["*"])
     pg.add_principal("bob")
-    await management.add_user_api_key("k1", "d", ["*"], owner_user_id="bob")
+    await api_key_lifecycle.add_user_api_key("k1", "d", ["*"], owner_user_id="bob")
     # Echoing the same owner claim back is accepted.
     resp = await _call(
         router.edit_api_key,
@@ -268,8 +269,8 @@ async def test_non_admin_listing_shows_only_own(wired):
     pg, _spy = wired
     _seed_caller(pg, "alice", scopes=["read"])
     pg.add_principal("bob")
-    await management.add_user_api_key("mine", "d", ["*"], owner_user_id="alice")
-    await management.add_user_api_key("theirs", "d", ["*"], owner_user_id="bob")
+    await api_key_lifecycle.add_user_api_key("mine", "d", ["*"], owner_user_id="alice")
+    await api_key_lifecycle.add_user_api_key("theirs", "d", ["*"], owner_user_id="bob")
     resp = await _call(router.list_tokens_payload, "alice", _req(method="GET"))
     users = {entry["user_id"] for entry in _body(resp)["data"]}
     assert users == {"mine"}
@@ -280,8 +281,8 @@ async def test_admin_listing_shows_all(wired):
     _seed_caller(pg, "admin1", scopes=["*"])
     pg.add_principal("alice")
     pg.add_principal("bob")
-    await management.add_user_api_key("mine", "d", ["*"], owner_user_id="alice")
-    await management.add_user_api_key("theirs", "d", ["*"], owner_user_id="bob")
+    await api_key_lifecycle.add_user_api_key("mine", "d", ["*"], owner_user_id="alice")
+    await api_key_lifecycle.add_user_api_key("theirs", "d", ["*"], owner_user_id="bob")
     resp = await _call(router.list_tokens_payload, "admin1", _req(method="GET"))
     users = {entry["user_id"] for entry in _body(resp)["data"]}
     assert {"mine", "theirs"} <= users

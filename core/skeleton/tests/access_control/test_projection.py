@@ -19,9 +19,8 @@ from tai42_contract.access_control import OWNER_USER_ID_CLAIM
 from tai42_contract.access_control.models import PATH_COVERAGE_VECTORS, PATTERN_OPEN_PREFIX_VECTORS, JqAuthContext
 from tai42_kit.settings import reset_all_settings
 
-from tai42_skeleton.access_control import management as management_module
+from tai42_skeleton.access_control import api_key_lifecycle, policy_version, projection
 from tai42_skeleton.access_control import policy as policy_module
-from tai42_skeleton.access_control import projection
 from tai42_skeleton.access_control.path_canon import under_prefix
 from tai42_skeleton.access_control.policy import PolicyEnforcer, RenderedCondition
 from tai42_skeleton.access_control.projection import RouteEntry, build_projection, synthetic_full_projection
@@ -70,7 +69,8 @@ def env(monkeypatch: pytest.MonkeyPatch, pg: FakeAccessControlPg, bound_app) -> 
     redis = FakeRedis(strings={}, hashes={})
     rctx = make_client_ctx(redis)
     monkeypatch.setattr(policy_module, "client_ctx", rctx)
-    monkeypatch.setattr(management_module, "client_ctx", rctx)
+    monkeypatch.setattr(api_key_lifecycle, "client_ctx", rctx)
+    monkeypatch.setattr(policy_version, "client_ctx", rctx)
     # Default-empty live seams; each test overrides what it exercises.
     monkeypatch.setattr(projection, "_registry_routes", list)
     monkeypatch.setattr(projection, "_sub_mcp_routes", _areturn({}))
@@ -458,7 +458,7 @@ async def test_projection_cache_is_version_keyed(env: _Env):
     assert {r.path for r in r1.routes} == {"/api/x"}
     # A route added + a version bump is visible on the next read (cross-worker miss).
     env.pg.add_route("/api/y", "s")
-    await management_module.bump_policy_version()
+    await policy_version.bump_policy_version()
     r2 = await build_projection("u1", ["s"], {})
     assert {r.path for r in r2.routes} == {"/api/x", "/api/y"}
     # A store change WITHOUT a bump is NOT reflected — proof the projection is cached.

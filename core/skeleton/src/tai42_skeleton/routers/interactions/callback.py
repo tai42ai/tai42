@@ -1,6 +1,7 @@
 """The unauthenticated external-answer callback door (GET page + POST claim) for the interactions surface.
 
-Serves ``/api/interactions/callback/{ticket}``.
+Serves ``/api/interactions/callback/{ticket}`` (its mid-form reaction sibling is
+:mod:`.callback_react`).
 The callback ticket is a bearer capability minted by the ``ask`` helper; it is
 never deleted, single-use is enforced by the answered-state guard in ``record_answer``,
 and a duplicate callback resolves idempotently to 200. The door is NOT audience-gated —
@@ -26,7 +27,6 @@ from tai42_contract.interactions import (
     AnswerMismatchError,
     FormReactionClosedError,
     FormReactionHandlerError,
-    FormReactionRequestError,
     InteractionResponse,
     InteractionState,
     QuestionFormat,
@@ -34,7 +34,6 @@ from tai42_contract.interactions import (
 )
 from tai42_kit.clients.impl.redis import RedisClient
 from tai42_kit.conversations.entry_params import OverBoundParamsMode, bound_entry_params
-from tai42_kit.net.request_body import RequestBodyTooLargeError, read_bounded_body
 
 from tai42_skeleton.app.http import http_surface
 from tai42_skeleton.app.route_registry import DeclaredRouteMetadata
@@ -52,7 +51,6 @@ from tai42_skeleton.interactions.continuation_dispatch import continuation_due_t
 from tai42_skeleton.interactions.reaction import (
     SubmittedCheckRejectedError,
     enforce_submitted_check,
-    react,
 )
 from tai42_skeleton.interactions.settings import InteractionsSettings
 from tai42_skeleton.interactions.store import InteractionStore
@@ -65,6 +63,7 @@ from tai42_skeleton.operations.interactions import (
 )
 from tai42_skeleton.webhooks.verify import VERIFY_ERROR, WebhookVerifyFailure, verify_webhook
 
+from .callback_envelope import callback_json, callback_post_size_guard
 from .form_render import _FormRenderError, _render_form_page
 from .pages import (
     _BASE_HEADERS,
@@ -114,27 +113,6 @@ def _callback_fault(settings: InteractionsSettings, interaction_id: str, case: s
     """
     logger.exception("form callback GET: %s for interaction %s", case, interaction_id)
     return PlainTextResponse(settings.callback_fault_text, status_code=500, headers=_BASE_HEADERS)
-
-
-def _callback_json(payload: dict, status_code: int) -> JSONResponse:
-    return JSONResponse(payload, status_code=status_code, headers=dict(_BASE_HEADERS))
-
-
-async def _callback_post_size_guard(request: Request, settings: InteractionsSettings) -> Response | bytes:
-    """Enforce ``callback_max_body_bytes`` on BOTH the raw query string and the actual body bytes.
-
-    The confirm-flow answer rides the URL, so both are capped. Return the 413 response
-    when either exceeds the cap, else the bounded body bytes — the one read of the body.
-    Runs identically in the OFF gate and the configured POST path so an oversized
-    POST answers the SAME 413 whether or not the store is configured — the public
-    door leaks no configured-vs-off oracle through the size cap.
-    """
-    if len(request.url.query.encode()) > settings.callback_max_body_bytes:
-        return _callback_json({"error": "payload too large"}, 413)
-    try:
-        return await read_bounded_body(request, settings.callback_max_body_bytes)
-    except RequestBodyTooLargeError:
-        return _callback_json({"error": "payload too large"}, 413)
 
 
 def _params_to_answer(request: Request) -> dict:
@@ -210,14 +188,14 @@ async def _record_callback_answer(
         continuation_first_attempt_at_ms=due_first_attempt_at_ms,
     )
     if claimed is None:
-        return _callback_json({"error": "answer payload could not be serialized"}, 400)
+        return callback_json({"error": "answer payload could not be serialized"}, 400)
     if not claimed:
-        return _callback_json({"data": {"status": "already_answered"}}, 200)
+        return callback_json({"data": {"status": "already_answered"}}, 200)
     # This door claimed the answer: fire an async park's stored continuation ONCE
     # (the shared post-claim seam both answer doors run).
     await fire_continuation_after_claim(r, store, state.request, response)
     await _record_ask_reply(interaction_id, answer, medium_message_id, reply_to_medium_message_id)
-    return _callback_json({"data": {"interaction_id": interaction_id, "status": "answered"}}, 200)
+    return callback_json({"data": {"interaction_id": interaction_id, "status": "answered"}}, 200)
 
 
 async def _record_ask_reply(
@@ -273,7 +251,7 @@ async def _claim_external(
             answer,
         )
     except AnswerMismatchError as exc:
-        return _callback_json({"error": str(exc)}, 400)
+        return callback_json({"error": str(exc)}, 400)
     return await _record_callback_answer(r, store, settings, ticket, interaction_id, state, answer)
 
 
@@ -313,7 +291,7 @@ async def _verify_callback(request: Request, raw: bytes, state: InteractionState
         binding = None
     if binding is None:
         logger.error("callback verify: malformed verifier binding for interaction %s", interaction_id)
-        return _callback_json({"error": VERIFY_ERROR}, 500), False
+        return callback_json({"error": VERIFY_ERROR}, 500), False
     try:
         verdict = await verify_webhook(
             binding,
@@ -324,7 +302,7 @@ async def _verify_callback(request: Request, raw: bytes, state: InteractionState
             with_replay_defense=False,
         )
     except WebhookVerifyFailure as exc:
-        return _callback_json({"error": exc.message}, exc.status), False
+        return callback_json({"error": exc.message}, exc.status), False
     return None, verdict.post_only
 
 
@@ -352,32 +330,32 @@ def _parse_typed_answer(raw: bytes, fmt: AnswerFormat) -> Response | _TypedAnswe
             # The GET-confirm page's form POSTs an empty body — an affirmative tap.
             return _TypedAnswer(True, None, None, None)
         # text/select: an answer is required.
-        return _callback_json({"error": "body must contain 'answer'"}, 400)
+        return callback_json({"error": "body must contain 'answer'"}, 400)
     try:
         parsed = parse_json_object(raw)
     except BadRequestError as exc:
-        return _callback_json({"error": exc.message}, 400)
+        return callback_json({"error": exc.message}, 400)
     if "answer" not in parsed:
-        return _callback_json({"error": "body must contain 'answer'"}, 400)
+        return callback_json({"error": "body must contain 'answer'"}, 400)
     answer_params: dict[str, str] | None = None
     if "params" in parsed:
         raw_params = parsed["params"]
         if not isinstance(raw_params, dict):
-            return _callback_json({"error": "params must be a JSON object"}, 400)
+            return callback_json({"error": "params must be a JSON object"}, 400)
         try:
             answer_params = bound_entry_params(
                 raw_params, mode=OverBoundParamsMode.REFUSE, door="interactions-callback"
             )
         except ValueError as exc:
-            return _callback_json({"error": f"invalid params: {exc}"}, 400)
+            return callback_json({"error": f"invalid params: {exc}"}, 400)
     medium_message_id = parsed.get("medium_message_id")
     if medium_message_id is not None and not isinstance(medium_message_id, str):
-        return _callback_json({"error": "medium_message_id must be a string"}, 400)
+        return callback_json({"error": "medium_message_id must be a string"}, 400)
     reply_to_medium_message_id = parsed.get("reply_to_medium_message_id")
     if reply_to_medium_message_id is not None and (
         not isinstance(reply_to_medium_message_id, str) or not reply_to_medium_message_id.strip()
     ):
-        return _callback_json({"error": "reply_to_medium_message_id must be a non-blank string"}, 400)
+        return callback_json({"error": "reply_to_medium_message_id must be a non-blank string"}, 400)
     return _TypedAnswer(parsed["answer"], answer_params, medium_message_id, reply_to_medium_message_id)
 
 
@@ -420,7 +398,7 @@ async def _claim_channel_typed(
         body: dict[str, Any] = {"error": str(exc), "retry_in_place": True}
         if exc.field is not None:
             body["field"] = exc.field
-        return _callback_json(body, 400)
+        return callback_json(body, 400)
     # The consumer's submit check runs HERE, server-side, before the record: a reacting form that
     # declares ``submitted`` runs its handler through the one reaction chokepoint. Per-field errors
     # refuse the answer re-answerable in place (the ask stands); a handler raise/timeout is a loud
@@ -428,11 +406,11 @@ async def _claim_channel_typed(
     try:
         await enforce_submitted_check(interaction_id, state.request.answer_format, state.request.format_payload, value)
     except SubmittedCheckRejectedError as exc:
-        return _callback_json({"error": exc.reason, "errors": exc.errors, "retry_in_place": True}, 400)
+        return callback_json({"error": exc.reason, "errors": exc.errors, "retry_in_place": True}, 400)
     except FormReactionClosedError as exc:
-        return _callback_json({"error": exc.reason}, 409)
+        return callback_json({"error": exc.reason}, 409)
     except FormReactionHandlerError as exc:
-        return _callback_json({"error": exc.reason}, 502)
+        return callback_json({"error": exc.reason}, 502)
     return await _record_callback_answer(
         r,
         store,
@@ -468,13 +446,13 @@ async def _claim_verbatim_external(
     """
     if not raw:
         if post_only:
-            return _callback_json({"error": _POST_ONLY_EMPTY_BODY_DENY}, 400)
+            return callback_json({"error": _POST_ONLY_EMPTY_BODY_DENY}, 400)
         answer = _params_to_answer(request)
     else:
         try:
             answer = parse_json_object(raw)
         except BadRequestError as exc:
-            return _callback_json({"error": exc.message}, 400)
+            return callback_json({"error": exc.message}, 400)
     return await _claim_external(r, store, settings, ticket, interaction_id, state, answer)
 
 
@@ -487,18 +465,18 @@ async def _callback_post(
     if interaction_id is None:
         # Uniform 404: same status and body whether the ticket never existed or
         # expired — no timing or body distinction.
-        return _callback_json({"error": "not found"}, 404)
+        return callback_json({"error": "not found"}, 404)
     state = await store.get_state(r, interaction_id)
     if state is None:
         # A cancel/timeout prune deletes the state while the ticket lives out its
         # TTL — the same uniform 404, never a None dereference.
-        return _callback_json({"error": "not found"}, 404)
+        return callback_json({"error": "not found"}, 404)
     if is_caller_ask(state):
         # A caller ask is addressed to the calling run and resolved only by that run
         # resuming; the public answer door refuses it loudly (both the typed and the
         # external claim branch flow through here). A caller ask carries no channel
         # delivery and no ticket, so this is defence-in-depth on the ticket resolution.
-        return _callback_json({"error": CALLER_ASK_RESOLUTION_REFUSED}, 409)
+        return callback_json({"error": CALLER_ASK_RESOLUTION_REFUSED}, 409)
     # Verify the signed server-to-server answer over the RAW body BEFORE the
     # answered-state check, before parsing, and before recording. A bound door
     # authenticates before it reports anything about the ticket's state, so a
@@ -514,7 +492,7 @@ async def _callback_post(
         # Idempotent duplicate handling (incl. provider retries after success);
         # the ticket is never deleted and its TTL was refreshed on claim. A bound
         # question reaches this only after passing verification above.
-        return _callback_json({"data": {"status": "already_answered"}}, 200)
+        return callback_json({"data": {"status": "already_answered"}}, 200)
 
     if state.request.answer_format is not AnswerFormat.EXTERNAL:
         return await _claim_channel_typed(request, r, store, settings, ticket, interaction_id, state, raw)
@@ -576,95 +554,6 @@ async def _callback_get(request: Request, r: Any, store: InteractionStore, setti
     return HTMLResponse(_render_awaiting_page(_page_wording(state)), headers=_HTML_HEADERS)
 
 
-def _parse_react_body(raw: bytes) -> Response | tuple[Any, Any]:
-    """Parse a mid-form reaction body into ``(event, values)``, or a 400 ``Response``.
-
-    The reacting channel forwards ``{"event": {...}, "values": {...}}`` — the triggering
-    event and the values filled so far. A malformed or incomplete body is a 400.
-    """
-    if not raw:
-        return _callback_json({"error": "body must contain 'event' and 'values'"}, 400)
-    try:
-        parsed = parse_json_object(raw)
-    except BadRequestError as exc:
-        return _callback_json({"error": exc.message}, 400)
-    if "event" not in parsed or "values" not in parsed:
-        return _callback_json({"error": "body must contain 'event' and 'values'"}, 400)
-    return parsed["event"], parsed["values"]
-
-
-async def _callback_react(
-    request: Request, r: Any, store: InteractionStore, settings: InteractionsSettings, raw: bytes
-) -> Response:
-    """The mid-form reaction claim for a ticketed channel-delivered reacting form.
-
-    A SIBLING of the answer callback door under the SAME ticket (the ticket is the
-    capability, exactly as for the answer claim) and the SAME size caps: resolve the ticket,
-    parse the event + partial values, and run the ONE ``react`` chokepoint. STATELESS — no
-    answer is recorded and the durable record is untouched. A handler failure/deadline is a
-    loud 502 (never a stale/silent value). ``raw`` is the body the caller's size guard read.
-    """
-    ticket = request.path_params["ticket"]
-    interaction_id = await store.resolve_ticket(r, ticket)
-    if interaction_id is None:
-        return _callback_json({"error": "not found"}, 404)
-    parsed = _parse_react_body(raw)
-    if isinstance(parsed, Response):
-        return parsed
-    event, values = parsed
-    try:
-        update = await react(interaction_id, event, values)
-    except FormReactionClosedError as exc:
-        return _callback_json({"error": exc.reason}, 409)
-    except FormReactionRequestError as exc:
-        return _callback_json({"error": exc.reason}, 400)
-    except FormReactionHandlerError as exc:
-        logger.exception("reaction callback: handler failed for interaction %s", interaction_id)
-        return _callback_json({"error": exc.reason}, 502)
-    return _callback_json({"data": {"update": update}}, 200)
-
-
-class InteractionReactionAck(BaseModel):
-    """The reaction door's JSON body: the validated form ``update`` a reaction returned."""
-
-    update: dict[str, Any]
-
-
-@http_surface().custom_route(
-    "/api/interactions/callback/{ticket}/react",
-    methods=["POST"],
-    summary="External interaction mid-form reaction door",
-    tags=["interactions"],
-    response_model=InteractionReactionAck,
-    authed=False,
-    declared=DeclaredRouteMetadata(
-        reload_gated=False,
-        reads_body=False,
-        error_statuses=(400, 404, 409, 413, 502),
-        success_status=200,
-        rate_limit_budget=SKELETON_DOOR_BUDGET,
-    ),
-)
-async def callback_react(request: Request) -> Response:
-    """Serve the unauthenticated mid-form reaction door (POST only), under the ticket capability."""
-    settings = _pkg.interactions_settings()
-    store = InteractionStore(settings.key_prefix)
-    # OFF gate — same uniform-404 (after the shared size guard) the answer callback door gives,
-    # so an unconfigured store is no oracle on this public door.
-    if not _pkg.interactions_store_configured():
-        oversized = await _callback_post_size_guard(request, settings)
-        if isinstance(oversized, Response):
-            return oversized
-        return _callback_json({"error": "not found"}, 404)
-    async with _pkg.client_ctx(RedisClient, settings.redis) as r:
-        # Size caps (query string + actual body bytes) come first — the SAME guard the OFF
-        # gate runs, so an oversized POST answers 413 in both states.
-        guarded = await _callback_post_size_guard(request, settings)
-        if isinstance(guarded, Response):
-            return guarded
-        return await _callback_react(request, r, store, settings, guarded)
-
-
 class InteractionCallbackAck(BaseModel):
     """The POST callback door's JSON body.
 
@@ -712,17 +601,17 @@ async def callback(request: Request) -> Response:
         # A POST still runs the SAME size guard the configured path runs BEFORE the
         # uniform 404, so an oversized POST answers 413 identically in both states —
         # the size cap is not a configured-vs-off oracle on this public door.
-        oversized = await _callback_post_size_guard(request, settings)
+        oversized = await callback_post_size_guard(request, settings)
         if isinstance(oversized, Response):
             return oversized
-        return _callback_json({"error": "not found"}, 404)
+        return callback_json({"error": "not found"}, 404)
 
     async with _pkg.client_ctx(RedisClient, settings.redis) as r:
         if request.method == "GET":
             return await _callback_get(request, r, store, settings)
         # Size caps (query string + actual body bytes) come first — the SAME guard the OFF
         # gate runs, so an oversized POST answers 413 in both states.
-        guarded = await _callback_post_size_guard(request, settings)
+        guarded = await callback_post_size_guard(request, settings)
         if isinstance(guarded, Response):
             return guarded
         return await _callback_post(request, r, store, settings, guarded)

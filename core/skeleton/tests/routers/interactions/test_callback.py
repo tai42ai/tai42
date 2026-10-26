@@ -15,6 +15,7 @@ from tai42_skeleton.interactions.caller_ask import CALLER_ASK_RESOLUTION_REFUSED
 from tai42_skeleton.operations.interactions import _add_data, _reply_ttl
 from tai42_skeleton.routers import interactions as router
 from tai42_skeleton.routers.interactions.callback import _POST_ONLY_EMPTY_BODY_DENY
+from tai42_skeleton.routers.interactions.callback_envelope import callback_post_size_guard
 from tai42_skeleton.routers.interactions.pages import _render_awaiting_page, _render_confirm_page
 
 from ..._helpers import await_add_event
@@ -1011,16 +1012,16 @@ async def test_callback_post_oversized_query_413_when_off(wired):
 
 async def test_post_reads_the_body_once(wired, monkeypatch):
     # The size guard's bounded read is the one read of the body: the claim takes those bytes. The
-    # read is counted in the namespace the served door resolves its globals from.
-    door_globals = router.callback.__globals__
+    # read is counted in the namespace the size guard resolves its globals from.
+    guard_globals = callback_post_size_guard.__globals__
     reads = []
-    real_read = door_globals["read_bounded_body"]
+    real_read = guard_globals["read_bounded_body"]
 
     async def _counting_read(request, cap):
         reads.append(cap)
         return await real_read(request, cap)
 
-    monkeypatch.setitem(door_globals, "read_bounded_body", _counting_read)
+    monkeypatch.setitem(guard_globals, "read_bounded_body", _counting_read)
     task = asyncio.create_task(ask("Sign?", answer_format="external", link="{callback_url}", timeout=5))
     await await_add_event(wired.fake, wired.store)
     resp = await router.callback(make_request("POST", path_params={"ticket": "TKT"}, body=b'{"signed":true}'))

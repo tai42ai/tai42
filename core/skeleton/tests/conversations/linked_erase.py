@@ -291,7 +291,7 @@ class World:
         return survivor
 
     async def record_ids(self) -> set[str]:
-        prefix = self.settings.record_key("")
+        prefix = self.settings.keyspace.record_key("")
         return {key.removeprefix(prefix) async for key in self.redis.scan_iter(match=f"{prefix}*")}
 
     async def dump(self) -> dict[str, Any]:
@@ -318,7 +318,7 @@ class World:
 
         An inbound-dedupe marker under its TTL outlives an erase by design and is left out: a
         provider redelivery must not re-enter the message."""
-        dedupe = self.settings.dedupe_key("channel", "id").removesuffix("channel:id")
+        dedupe = self.settings.keyspace.dedupe_key("channel", "id").removesuffix("channel:id")
         found = {}
         for key, value in (await self.dump()).items():
             if not any(t in f"{key} {value}" for t in tokens):
@@ -349,7 +349,7 @@ class World:
         return _address_key_of(address)
 
     async def index(self) -> dict[str, str]:
-        return await self.redis.hgetall(self.settings.person_index_key(*_TARGET_KEY))
+        return await self.redis.hgetall(self.settings.keyspace.person_index_key(*_TARGET_KEY))
 
 
 async def leftovers(

@@ -23,7 +23,7 @@ from tests._helpers import AddressingChannel
 
 from tai42_skeleton.app.conversations_facet import ConversationsFacet
 from tai42_skeleton.app.instance import app
-from tai42_skeleton.channels.inbound import _REJECTION_NOTICES, INBOUND_REJECTED_EVENT_TOPIC
+from tai42_skeleton.channels.inbound_rejection import _REJECTION_NOTICES, INBOUND_REJECTED_EVENT_TOPIC
 from tai42_skeleton.conversations import cache as conversations_cache
 from tai42_skeleton.hooks import cache as hooks_cache
 

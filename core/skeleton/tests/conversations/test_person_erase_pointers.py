@@ -36,7 +36,7 @@ from .test_person_erase_states import states_pg  # noqa: F401  # the states stor
 
 
 async def _pointer(world, person_id: str) -> str | None:  # noqa: F811
-    return await world.redis.get(world.settings.person_absorbed_into_key(person_id))
+    return await world.redis.get(world.settings.keyspace.person_absorbed_into_key(person_id))
 
 
 async def _snapshot(world) -> tuple:  # noqa: F811
@@ -144,13 +144,13 @@ async def test_a_stale_id_and_an_id_that_never_existed_answer_nothing_erased(wor
     assert await ops.delete_conversation_person(_P) == _gone(_P)
     assert await ops.delete_conversation_person(never) == _gone(never)
     for person_id in (_P, never):
-        assert await world.redis.exists(world.settings.person_absorbed_into_key(person_id)) == 0
+        assert await world.redis.exists(world.settings.keyspace.person_absorbed_into_key(person_id)) == 0
 
 
 async def test_a_dangling_pointer_is_loud_and_the_erase_touches_nothing(world, monkeypatch):  # noqa: F811
     await world.routes(LINE, LINE_B)
     await _two_address_person(world, _P, _P1, _P2, age_days=1)
-    await world.redis.set(world.settings.person_absorbed_into_key(_P), "x-gone")
+    await world.redis.set(world.settings.keyspace.person_absorbed_into_key(_P), "x-gone")
     message = re.escape(repr(_P)) + ".*" + re.escape(repr("x-gone"))
     with pytest.raises(RuntimeError, match=message):
         await world.persons.read_for_erase(_P)
@@ -239,7 +239,7 @@ async def test_an_erase_behind_a_delete_person_call_past_the_bound_is_the_503_wi
         await asyncio.wait_for(ops.delete_conversation_person(_P), 10)
 
     assert refused.value.status == 503
-    assert await world.redis.exists(world.settings.person_erasing_key(_P)) == 0
+    assert await world.redis.exists(world.settings.keyspace.person_erasing_key(_P)) == 0
     assert await world.persons.get_by_id(_P) is not None
     reading.go.set()
     with pytest.raises(ConflictError):

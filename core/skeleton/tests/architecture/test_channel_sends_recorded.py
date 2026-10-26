@@ -22,7 +22,7 @@ _RECORDED_SITES = frozenset(
     {
         ("conversations/delivery_channel.py", "_run_channel_send_loop"),
         ("conversations/delivery_channel.py", "_notify_refusal"),
-        ("channels/inbound.py", "_send_notice.send"),
+        ("channels/participant_notice.py", "send_participant_notice.send"),
         ("channels/notify.py", "_send_with_telemetry.send"),
         ("interactions/ask/delivery.py", "_attempt_loop"),
     }

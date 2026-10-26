@@ -233,7 +233,7 @@ async def set_cancel_marker(record: ConversationRecord) -> None:
     conversations Redis, so a worker with no backend never reaches here — it fails loudly at accept.
     """
     settings = cache.get_conversations_manager().records.settings
-    key = settings.overlap_cancel_key(record.thread_id)
+    key = settings.keyspace.overlap_cancel_key(record.thread_id)
     value = json.dumps({"message_id": record.message_id, "created_at": record.created_at})
     async with client_ctx(RedisClient, settings.redis) as r:
         await awaited(r.set(key, value, px=settings.thread_lease_seconds * 1000))
@@ -321,7 +321,7 @@ async def _watch_cancel(
     marker naming a member of the batch (or an older message) never cancels it. A transient read
     error is logged and retried; a silent death would let a superseding message go unheeded.
     """
-    key = settings.overlap_cancel_key(batch.lead.thread_id)
+    key = settings.keyspace.overlap_cancel_key(batch.lead.thread_id)
     newest = batch.newest
     while True:
         try:

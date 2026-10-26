@@ -71,11 +71,11 @@ async def test_a_lapsed_lease_is_taken_when_it_expires(redis_url: str) -> None:
     settings = ConversationsSettings()
     client = Redis.from_url(redis_url, decode_responses=True)
     try:
-        await client.set(settings.thread_lease_key("thread-2"), "crashed-holder", px=400)
+        await client.set(settings.keyspace.thread_lease_key("thread-2"), "crashed-holder", px=400)
         started = time.perf_counter()
         async with ThreadTurnLease(lambda: settings).held("thread-2"):
             waited = time.perf_counter() - started
-            assert await client.get(settings.thread_lease_key("thread-2")) != "crashed-holder"
+            assert await client.get(settings.keyspace.thread_lease_key("thread-2")) != "crashed-holder"
         assert 0.3 < waited < 2
     finally:
         await client.aclose()

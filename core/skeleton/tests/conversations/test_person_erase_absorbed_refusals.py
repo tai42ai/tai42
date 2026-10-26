@@ -70,11 +70,11 @@ async def _exists(world, key: str) -> bool:  # noqa: F811
 
 
 async def _entries(world, person_id: str) -> list[str]:  # noqa: F811
-    return sorted(await world.redis.smembers(world.settings.person_absorbed_key(person_id)))
+    return sorted(await world.redis.smembers(world.settings.keyspace.person_absorbed_key(person_id)))
 
 
 async def _pointer(world, person_id: str) -> str | None:  # noqa: F811
-    return await world.redis.get(world.settings.person_absorbed_into_key(person_id))
+    return await world.redis.get(world.settings.keyspace.person_absorbed_into_key(person_id))
 
 
 async def _standing(world, message_ids: list[str]) -> list[str]:  # noqa: F811
@@ -83,7 +83,7 @@ async def _standing(world, message_ids: list[str]) -> list[str]:  # noqa: F811
 
 async def _lapsed(world, message_id: str) -> str:  # noqa: F811
     """Lapse an accepted intake's lease, as before its turn took it; answers the lease to put back."""
-    key = world.settings.record_key(message_id)
+    key = world.settings.keyspace.record_key(message_id)
     lease = await world.redis.hget(key, "intake_claim")
     token, _sep, _expiry = lease.partition(":")
     await world.redis.hset(key, "intake_claim", f"{token}:0")
@@ -92,7 +92,7 @@ async def _lapsed(world, message_id: str) -> str:  # noqa: F811
 
 async def _taken(world, message_id: str, lease: str) -> None:  # noqa: F811
     """The intake's lease taken again: its turn is live in its thread."""
-    await world.redis.hset(world.settings.record_key(message_id), "intake_claim", lease)
+    await world.redis.hset(world.settings.keyspace.record_key(message_id), "intake_claim", lease)
 
 
 async def _accepted(scheduled, address: str, provider_message_id: str) -> str:  # noqa: F811
@@ -137,8 +137,8 @@ async def test_an_interrupted_erase_with_an_absorbed_person_is_finished_by_its_r
         await ops.delete_conversation_person(_P)
 
     settings = world.settings
-    assert await _exists(world, settings.person_key(_P))
-    assert await _exists(world, settings.person_erasing_key(_P))
+    assert await _exists(world, settings.keyspace.person_key(_P))
+    assert await _exists(world, settings.keyspace.person_erasing_key(_P))
     assert await _entries(world, _P) == [_Q]
     assert await _standing(world, q_ids) == []
     assert person_thread_id(_Q) in world.saver.deleted
@@ -146,7 +146,7 @@ async def test_an_interrupted_erase_with_an_absorbed_person_is_finished_by_its_r
     result = await ops.delete_conversation_person(_P)
 
     assert (result["erased"], result["absorbed_person_ids"]) == (True, [_Q])
-    assert not await _exists(world, settings.person_absorbed_key(_P))
+    assert not await _exists(world, settings.keyspace.person_absorbed_key(_P))
     await assert_clean(
         world, _P, _Q, _P1, _P2, _Q1, _Q2, *p_ids, *q_ids, threads=_threads(_P, _Q), parks=_parks(_P, _Q)
     )
@@ -244,7 +244,7 @@ async def test_a_turn_live_in_an_absorbed_thread_after_the_early_checks_refuses_
 ):
     ids, pending, lease = await _p_absorbed_q_and_r(world, scheduled)
     settings = world.settings
-    recorded_routes = await world.redis.smembers(settings.person_thread_routes_key(_P))
+    recorded_routes = await world.redis.smembers(settings.keyspace.person_thread_routes_key(_P))
     assert recorded_routes == {LINE.route_name, LINE_B.route_name}
     clearing = pause_call(
         monkeypatch,
@@ -260,10 +260,10 @@ async def test_a_turn_live_in_an_absorbed_thread_after_the_early_checks_refuses_
     with pytest.raises(ConflictError, match=re.escape(_in_flight(_R))):
         await asyncio.wait_for(erase, 30)
 
-    assert not await _exists(world, settings.person_erasing_key(_P))
-    assert await _exists(world, settings.person_key(_P))
+    assert not await _exists(world, settings.keyspace.person_erasing_key(_P))
+    assert await _exists(world, settings.keyspace.person_key(_P))
     assert await _entries(world, _P) == [_Q, _R]
-    assert await world.redis.smembers(settings.person_thread_routes_key(_P)) == recorded_routes
+    assert await world.redis.smembers(settings.keyspace.person_thread_routes_key(_P)) == recorded_routes
     assert await _standing(world, [i for i in ids if i.startswith(_Q)]) == []
     assert await world.lua_env.store.get_record(pending) is not None
     await _answered(world, scheduled)
@@ -312,8 +312,8 @@ async def test_an_unsettled_save_after_the_persons_own_teardown_keeps_the_mark_a
         await ops.delete_conversation_person(_P)
 
     settings = world.settings
-    assert await _exists(world, settings.person_erasing_key(_P))
-    assert await _exists(world, settings.person_key(_P))
+    assert await _exists(world, settings.keyspace.person_erasing_key(_P))
+    assert await _exists(world, settings.keyspace.person_key(_P))
     assert await _standing(world, ids) == []
     marks: list[bool] = []
     real_mark = world.persons.mark_erasing
@@ -371,7 +371,7 @@ async def test_a_turn_in_flight_in_an_absorbed_thread_refuses_the_erase_before_i
         await ops.delete_conversation_person(_P)
 
     assert reserved == []
-    assert not await _exists(world, world.settings.person_erasing_key(_P))
+    assert not await _exists(world, world.settings.keyspace.person_erasing_key(_P))
 
 
 async def test_a_row_gone_after_the_mark_raises_and_leaves_the_mark(world, monkeypatch):  # noqa: F811
@@ -391,7 +391,7 @@ async def test_a_row_gone_after_the_mark_raises_and_leaves_the_mark(world, monke
         await ops.delete_conversation_person(_P)
 
     assert reads == [_P, _P]
-    assert await _exists(world, world.settings.person_erasing_key(_P))
+    assert await _exists(world, world.settings.keyspace.person_erasing_key(_P))
 
 
 async def test_a_turn_live_in_an_absorbed_thread_after_the_early_check_gives_the_person_back(
@@ -406,7 +406,7 @@ async def test_a_turn_live_in_an_absorbed_thread_after_the_early_check_gives_the
     lease = await _lapsed(world, pending)
     survivor = await world.link(_Q, _P)
     index = await world.index()
-    absorbed_ids = await world.redis.smembers(world.settings.person_absorbed_key(_P))
+    absorbed_ids = await world.redis.smembers(world.settings.keyspace.person_absorbed_key(_P))
     states = world.states_naming(_P, person_thread_id(_P))
     marking = pause_call(monkeypatch, world.persons, "mark_erasing")
     erase = asyncio.ensure_future(ops.delete_conversation_person(_P))
@@ -418,11 +418,11 @@ async def test_a_turn_live_in_an_absorbed_thread_after_the_early_check_gives_the
         await asyncio.wait_for(erase, 30)
 
     assert str(refused.value) == _in_flight(_Q)
-    assert not await _exists(world, world.settings.person_erasing_key(_P))
+    assert not await _exists(world, world.settings.keyspace.person_erasing_key(_P))
     assert await world.persons.get_by_id(_P) == survivor
     assert await _standing(world, p_ids) == p_ids
     assert world.states_naming(_P, person_thread_id(_P)) == states
-    assert await world.redis.smembers(world.settings.person_absorbed_key(_P)) == absorbed_ids
+    assert await world.redis.smembers(world.settings.keyspace.person_absorbed_key(_P)) == absorbed_ids
     assert await world.index() == index
     assert set(index.values()) == {_P}
 
@@ -452,7 +452,7 @@ async def test_a_turn_holding_an_absorbed_thread_past_the_bound_is_the_503_and_g
         await asyncio.wait_for(ops.delete_conversation_person(_P), 10)
 
     assert refused.value.status == 503
-    assert not await _exists(world, world.settings.person_erasing_key(_P))
+    assert not await _exists(world, world.settings.keyspace.person_erasing_key(_P))
     assert await world.persons.get_by_id(_P) == survivor
     release.set()
     await asyncio.wait_for(turn, 10)
@@ -549,7 +549,7 @@ async def test_a_turn_waiting_for_the_gate_on_an_absorbed_thread_is_the_503_then
     with pytest.raises(ThreadBusyError, match=re.escape(person_thread_id(_Q))):
         await asyncio.wait_for(erase, 30)
 
-    assert not await _exists(world, world.settings.person_erasing_key(_P))
+    assert not await _exists(world, world.settings.keyspace.person_erasing_key(_P))
     await asyncio.wait_for(turn, 10)
     assert ran.is_set()
 

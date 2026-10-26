@@ -20,7 +20,7 @@ from tai42_contract.template import TemplatedText
 from tests._helpers import AddressingChannel
 from tests.agent._memoryless import MemorylessTestAgent
 
-from tai42_skeleton.access_control import management
+from tai42_skeleton.access_control import api_key_lifecycle, policy_version
 from tai42_skeleton.access_control import policy as policy_module
 from tai42_skeleton.access_control import role_grants as role_grants_module
 from tai42_skeleton.access_control import store as store_module
@@ -148,7 +148,8 @@ def ac(monkeypatch) -> FakeAccessControlPg:
     monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "test")
     monkeypatch.setattr(store_module, "client_ctx", make_pg_ctx(pg))
     monkeypatch.setattr(policy_module, "client_ctx", make_client_ctx(redis))
-    monkeypatch.setattr(management, "client_ctx", make_client_ctx(redis))
+    monkeypatch.setattr(api_key_lifecycle, "client_ctx", make_client_ctx(redis))
+    monkeypatch.setattr(policy_version, "client_ctx", make_client_ctx(redis))
     reset_route_index()
     role_grants_module.reset_role_grants_cache()
     return pg

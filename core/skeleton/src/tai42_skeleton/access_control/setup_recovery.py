@@ -9,7 +9,8 @@ re-mint the orphans, so this is the way back in.
 It runs behind the SAME gate the setup door uses — the per-source throttle, the constant-time
 token compare, and the mint mutex — under a ``local`` source bucket, because its only caller
 is the host-side command that holds the deployment's env. It re-mints a fresh identity record
-onto ONE surviving owner policy row through :func:`~tai42_skeleton.access_control.management.remint_orphaned_api_key`
+onto ONE surviving owner policy row through
+:func:`~tai42_skeleton.access_control.api_key_lifecycle.remint_orphaned_api_key`
 (the policy row, fingerprint and owner claim stay), returns the plaintext once, and creates or
 touches nothing else. It refuses loudly — every refusal is a :class:`SetupRecoveryError` — when
 the owner already holds a live key, when no owner key policy survives, or when the owner marker
@@ -23,7 +24,7 @@ from typing import Any
 
 from tai42_contract.access_control import KEY_FINGERPRINT_CLAIM, OWNER_USER_ID_CLAIM
 
-from tai42_skeleton.access_control import management
+from tai42_skeleton.access_control import api_key_lifecycle, management
 from tai42_skeleton.access_control.settings import access_control_settings
 from tai42_skeleton.access_control.setup_gate import (
     SetupContendedError,
@@ -85,7 +86,7 @@ async def recover_owner_key(setup_token: str, *, key_user_id: str | None, key_de
                 )
             key_id, body = _choose_key(candidates, key_user_id)
             try:
-                raw_key = await management.remint_orphaned_api_key(key_id, key_description)
+                raw_key = await api_key_lifecycle.remint_orphaned_api_key(key_id, key_description)
             except ValueError as exc:
                 raise SetupRecoveryError(str(exc)) from exc
     except SetupContendedError as exc:

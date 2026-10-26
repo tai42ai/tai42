@@ -118,7 +118,7 @@ async def test_delete_thread_clears_checkpoint_records_and_indexes(wired, record
     )
     await _seed_record(message_id="m0", route_name="chat", thread_id=_THREAD)
     settings = ConversationsSettings()
-    assert settings.thread_index_key("chat", _THREAD) in record_redis._zsets
+    assert settings.keyspace.thread_index_key("chat", _THREAD) in record_redis._zsets
 
     result = await ops.delete_conversation_thread("chat", _THREAD)
 
@@ -126,10 +126,10 @@ async def test_delete_thread_clears_checkpoint_records_and_indexes(wired, record
     # a. the agent checkpoint — adelete_thread asked to forget exactly this thread.
     assert checkpoint_saver.deleted == [_THREAD]
     # b. the answer record itself.
-    assert settings.record_key("m0") not in record_redis._hashes
+    assert settings.keyspace.record_key("m0") not in record_redis._hashes
     # c. both thread indexes.
-    assert settings.thread_index_key("chat", _THREAD) not in record_redis._zsets
-    assert _THREAD not in record_redis._zsets.get(settings.route_threads_key("chat"), {})
+    assert settings.keyspace.thread_index_key("chat", _THREAD) not in record_redis._zsets
+    assert _THREAD not in record_redis._zsets.get(settings.keyspace.route_threads_key("chat"), {})
     # Forgetting is absolute: a re-run of a now-empty id on its own route succeeds with
     # removed=0 and forgets the checkpoint again, never a 404.
     rerun = await ops.delete_conversation_thread("chat", _THREAD)
@@ -211,8 +211,8 @@ async def test_delete_thread_with_a_turn_in_flight_is_a_409(wired, record_redis,
         await ops.delete_conversation_thread("chat", _THREAD)
     # Refused before any teardown: the intake record stands and the checkpoint is untouched.
     assert checkpoint_saver.deleted == []
-    assert settings.record_key("live") in record_redis._hashes
-    assert settings.thread_index_key("chat", _THREAD) in record_redis._zsets
+    assert settings.keyspace.record_key("live") in record_redis._hashes
+    assert settings.keyspace.thread_index_key("chat", _THREAD) in record_redis._zsets
 
 
 async def test_delete_thread_waits_behind_an_in_flight_operator_send(wired, record_redis, checkpoint_saver):
@@ -316,8 +316,8 @@ async def test_delete_thread_rechecks_the_live_intake_under_the_lock(wired, reco
         await delete
     assert checkpoint_saver.deleted == []
     settings = ConversationsSettings()
-    assert settings.record_key("m0") in record_redis._hashes
-    assert settings.thread_index_key("chat", _THREAD) in record_redis._zsets
+    assert settings.keyspace.record_key("m0") in record_redis._hashes
+    assert settings.keyspace.thread_index_key("chat", _THREAD) in record_redis._zsets
 
 
 async def test_delete_thread_ignores_a_live_intake_on_another_thread(wired, record_redis, checkpoint_saver):
@@ -357,7 +357,7 @@ async def test_delete_thread_proceeds_when_the_target_thread_intake_lease_has_la
     settings = ConversationsSettings()
     # Force the stored lease expiry into the past — the way records.py reads it is
     # ``float(expiry) > now``, so a past expiry is a dead lease.
-    record_redis._hashes[settings.record_key("lapsed")]["intake_claim"] = f"tok:{time.time() - 3600}"
+    record_redis._hashes[settings.keyspace.record_key("lapsed")]["intake_claim"] = f"tok:{time.time() - 3600}"
 
     result = await ops.delete_conversation_thread("chat", _THREAD)
 
@@ -411,8 +411,8 @@ async def test_delete_person_thread_clears_every_route_index(wired, record_redis
     assert checkpoint_saver.deleted == [_PERSON_THREAD]
     # Every route index that carried the thread is reclaimed — else a member strands under one.
     for route_name in ("chat-a", "chat-b"):
-        assert settings.thread_index_key(route_name, _PERSON_THREAD) not in record_redis._zsets
-        assert _PERSON_THREAD not in record_redis._zsets.get(settings.route_threads_key(route_name), {})
+        assert settings.keyspace.thread_index_key(route_name, _PERSON_THREAD) not in record_redis._zsets
+        assert _PERSON_THREAD not in record_redis._zsets.get(settings.keyspace.route_threads_key(route_name), {})
 
 
 async def test_delete_person_thread_404s_when_the_route_is_not_the_persons(
@@ -490,8 +490,8 @@ async def test_delete_person_thread_with_a_turn_in_flight_is_a_409(wired, record
         await ops.delete_conversation_thread("chat-a", _PERSON_THREAD)
     # Refused before any teardown: the intake record stands, the checkpoint is untouched.
     assert checkpoint_saver.deleted == []
-    assert settings.record_key("plive") in record_redis._hashes
-    assert settings.thread_index_key("chat-a", _PERSON_THREAD) in record_redis._zsets
+    assert settings.keyspace.record_key("plive") in record_redis._hashes
+    assert settings.keyspace.thread_index_key("chat-a", _PERSON_THREAD) in record_redis._zsets
 
 
 async def test_an_interrupted_thread_delete_is_finished_by_a_retry_not_404d(
@@ -527,14 +527,14 @@ async def test_an_interrupted_thread_delete_is_finished_by_a_retry_not_404d(
         await ops.delete_conversation_thread("chat", _THREAD)
     # The checkpoint went first, and the thread index survives holding the un-reclaimed work.
     assert checkpoint_saver.deleted == [_THREAD]
-    assert settings.thread_index_key("chat", _THREAD) in record_redis._zsets
+    assert settings.keyspace.thread_index_key("chat", _THREAD) in record_redis._zsets
 
     result = await ops.delete_conversation_thread("chat", _THREAD)
 
     # Not a 404: the retry finished the reclamation.
     assert result["removed"] == 2
     assert result["thread_id"] == _THREAD
-    assert settings.thread_index_key("chat", _THREAD) not in record_redis._zsets
+    assert settings.keyspace.thread_index_key("chat", _THREAD) not in record_redis._zsets
     # The checkpoint delete is idempotent under the re-run.
     assert checkpoint_saver.deleted == [_THREAD, _THREAD]
 

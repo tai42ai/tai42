@@ -77,7 +77,7 @@ async def _sends(world, address: str) -> list[str]:  # noqa: F811
 
 
 async def _thread_members(world, route: ConversationRoute, thread_id: str) -> list[str]:  # noqa: F811
-    return await world.redis.zrange(world.settings.thread_index_key(route.route_name, thread_id), 0, -1)
+    return await world.redis.zrange(world.settings.keyspace.thread_index_key(route.route_name, thread_id), 0, -1)
 
 
 # -- bounded reads count only the records that are not sends ----------------------------------

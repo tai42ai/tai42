@@ -253,7 +253,7 @@ def route_manager(monkeypatch, _conversations_env) -> _FakeRouteManager:
 
 def _claim(fake: FakeRecordRedis, message_id: str) -> tuple[str, float]:
     """The record's live lease as ``(token, expiry)``; an empty token when it is free."""
-    raw = fake._hashes[ConversationsSettings().record_key(message_id)]["claim"]
+    raw = fake._hashes[ConversationsSettings().keyspace.record_key(message_id)]["claim"]
     if not raw:
         return "", 0.0
     token, expiry = raw.split(":", 1)
@@ -262,7 +262,7 @@ def _claim(fake: FakeRecordRedis, message_id: str) -> tuple[str, float]:
 
 def _expire_claim(fake: FakeRecordRedis, message_id: str) -> None:
     """Age the record's lease out — what the passage of time does to a dead worker's."""
-    key = ConversationsSettings().record_key(message_id)
+    key = ConversationsSettings().keyspace.record_key(message_id)
     token = fake._hashes[key]["claim"].split(":", 1)[0]
     fake._hashes[key]["claim"] = f"{token}:{time.time() - 1}"
 
@@ -1061,7 +1061,7 @@ async def test_an_unparseable_ledger_entry_drives_the_record_terminal(monkeypatc
     """A stored entry that cannot be decoded, or that lacks a field, is a record-shaped fault, not a transient
     one: the record reaches a terminal ``failed`` rather than being re-driven forever."""
     await create_record(store, _record("m-garbled", "aaaaaaaaaabbbbbbbbbb"))
-    fake._lists[ConversationsSettings().chunk_ledger_key("m-garbled")] = [entry]
+    fake._lists[ConversationsSettings().keyspace.chunk_ledger_key("m-garbled")] = [entry]
     _wire_channel(monkeypatch, FakeChannel())
 
     with pytest.raises(ledger_module.LedgerInconsistentError, match="unparseable"):

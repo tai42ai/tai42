@@ -29,6 +29,7 @@ from tai42_contract.conversations import (
 from tai42_skeleton.app.conversations_facet import ConversationsFacet
 from tai42_skeleton.app.instance import app as skeleton_app
 from tai42_skeleton.channels import inbound as inbound_module
+from tai42_skeleton.channels import inbound_rejection as inbound_rejection_module
 from tai42_skeleton.channels import notify as notify_module
 from tai42_skeleton.channels.notify import notify_user
 from tai42_skeleton.conversations import delivery as delivery_module
@@ -93,7 +94,7 @@ async def test_the_record_is_sending_before_the_medium_call_and_in_no_thread(lua
     async def during():
         [record] = await send_records(lua_env)
         [(member, score)] = await sending_ids(lua_env)
-        thread_key = lua_env.store.settings.thread_index_key("line", route_thread_id("line", _ADDRESS))
+        thread_key = lua_env.store.settings.keyspace.thread_index_key("line", route_thread_id("line", _ADDRESS))
         return record, member, score, await lua_env.redis.zrange(thread_key, 0, -1)
 
     channel = channels(GatedChannel(during))
@@ -113,7 +114,7 @@ async def test_the_record_is_sending_before_the_medium_call_and_in_no_thread(lua
 
 
 def _thread_key(lua_env: LuaEnv, thread_id: str, route_name: str = "line") -> str:
-    return lua_env.store.settings.thread_index_key(route_name, thread_id)
+    return lua_env.store.settings.keyspace.thread_index_key(route_name, thread_id)
 
 
 async def test_a_completed_send_is_provisional_with_its_sends_outbound_index_and_refs_in_its_thread(
@@ -130,7 +131,7 @@ async def test_a_completed_send_is_provisional_with_its_sends_outbound_index_and
     assert [sent.provider_message_ids for sent in record.sends] == [["out-1"]]
     assert record.answer == "hello"
     assert record.thread_id == route_thread_id("line", _ADDRESS)
-    assert await lua_env.redis.get(settings.outbound_index_key("twilio", "out-1")) == record.message_id
+    assert await lua_env.redis.get(settings.keyspace.outbound_index_key("twilio", "out-1")) == record.message_id
     assert await lua_env.store.resolve_message_ref("twilio", _IDENTITY, _ADDRESS, "out-1") == [record.message_id]
     assert await lua_env.redis.zrange(_thread_key(lua_env, record.thread_id), 0, -1) == [record.message_id]
     assert await sending_ids(lua_env) == []
@@ -525,7 +526,7 @@ def notice_sites(lua_env, monkeypatch):
     async def _no_event(**kwargs):
         return None
 
-    monkeypatch.setattr(inbound_module, "_emit_inbound_rejected", _no_event)
+    monkeypatch.setattr(inbound_rejection_module, "_emit_inbound_rejected", _no_event)
 
     async def refusal(channel):
         await _notify_refusal(lua_env.store, await _refused_reply(lua_env), channel)
@@ -545,8 +546,8 @@ def notice_sites(lua_env, monkeypatch):
         await inbound_module._notify_participant(bridge, "that did not match; try again")
 
     async def rejected(channel):
-        monkeypatch.setattr(inbound_module, "tai42_app", _FakeApp(channel))
-        await inbound_module.notify_inbound_rejected(
+        monkeypatch.setattr(inbound_rejection_module, "tai42_app", _FakeApp(channel))
+        await inbound_rejection_module.notify_inbound_rejected(
             channel_id="twilio",
             recipient=_ADDRESS,
             sender_identity=_IDENTITY,

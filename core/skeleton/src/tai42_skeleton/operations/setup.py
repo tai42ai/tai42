@@ -23,7 +23,7 @@ from tai42_contract.accounts.errors import LoginAttachError, LoginConflictError
 from tai42_contract.accounts.models import LoginAttachment, LoginCredential
 from tai42_contract.setup import SetupRequest, SetupResult
 
-from tai42_skeleton.access_control import management, roles
+from tai42_skeleton.access_control import api_key_lifecycle, policy_version, roles
 from tai42_skeleton.access_control.roles import RESERVED_ADMIN_ROLE
 from tai42_skeleton.access_control.settings import access_control_settings
 from tai42_skeleton.access_control.setup_gate import (
@@ -74,10 +74,10 @@ async def _compensate(owner_user_id: str, key_user_id: str, *, key_minted: bool)
     store = access_control_store()
     try:
         if key_minted:
-            await management.revoke_api_key(key_user_id)
+            await api_key_lifecycle.revoke_api_key(key_user_id)
         await store.delete_policy(owner_user_id)
         await store.delete_principal(owner_user_id)
-        await management.bump_policy_version()
+        await policy_version.bump_policy_version()
     except Exception:
         logger.exception("setup: compensation could not fully tear down owner %s", owner_user_id)
 
@@ -140,7 +140,7 @@ async def setup_deployment(
             key_minted = False
             try:
                 await roles.apply_role(owner_id, RESERVED_ADMIN_ROLE)
-                raw_key, _body, key_fingerprint = await management.add_user_api_key(
+                raw_key, _body, key_fingerprint = await api_key_lifecycle.add_user_api_key(
                     key_id, key_description, [UNIVERSAL_SCOPE], owner_user_id=owner_id
                 )
                 key_minted = True

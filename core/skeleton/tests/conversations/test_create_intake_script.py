@@ -69,7 +69,7 @@ class _CountingRedis(aioredis.FakeRedis):
 async def lua_redis(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[_CountingRedis]:
     monkeypatch.setenv("CONVERSATIONS_REDIS_URL", "redis://localhost:1/0")
     client = _CountingRedis(decode_responses=True)
-    await client.set(ConversationsSettings().route_key("line"), "{}")
+    await client.set(ConversationsSettings().keyspace.route_key("line"), "{}")
 
     @asynccontextmanager
     async def fake_client_ctx(client_cls, settings=None, **kwargs):
@@ -112,7 +112,7 @@ def _intake(message_id: str) -> ConversationRecord:
 async def _index_members(client: _CountingRedis) -> set[str]:
     members: set[str] = set()
     for status in DeliveryStatus:
-        members.update(await client.zrange(_s().status_index_key(status.value), 0, -1))
+        members.update(await client.zrange(_s().keyspace.status_index_key(status.value), 0, -1))
     return members
 
 
@@ -120,78 +120,90 @@ async def _index_members(client: _CountingRedis) -> set[str]:
 
 
 async def test_a_fresh_claim_writes_the_record_the_claim_and_refreshes_the_mode_in_one_script(lua_redis):
-    await lua_redis.set(_s().mode_key(_THREAD), "manual", ex=60)
+    await lua_redis.set(_s().keyspace.mode_key(_THREAD), "manual", ex=60)
     lua_redis.commands.clear()
 
     owner = await create_record(
-        _store(), _intake("m1"), intake_token="tok", claim_key=_s().dedupe_key("twilio", "PID1"), refresh_mode=True
+        _store(),
+        _intake("m1"),
+        intake_token="tok",
+        claim_key=_s().keyspace.dedupe_key("twilio", "PID1"),
+        refresh_mode=True,
     )
 
     assert owner == "m1"
     assert [c for c in lua_redis.commands if c in {"EVAL", "EVALSHA"}] == [lua_redis.commands[0]]
     assert len(lua_redis.commands) == 1
-    assert await lua_redis.hget(_s().record_key("m1"), "delivery_status") == "accepted"
-    assert await lua_redis.get(_s().dedupe_key("twilio", "PID1")) == "m1"
-    assert 0 < await lua_redis.ttl(_s().dedupe_key("twilio", "PID1")) <= _s().inbound_dedupe_ttl_seconds
-    assert await lua_redis.ttl(_s().mode_key(_THREAD)) > 60
+    assert await lua_redis.hget(_s().keyspace.record_key("m1"), "delivery_status") == "accepted"
+    assert await lua_redis.get(_s().keyspace.dedupe_key("twilio", "PID1")) == "m1"
+    assert 0 < await lua_redis.ttl(_s().keyspace.dedupe_key("twilio", "PID1")) <= _s().inbound_dedupe_ttl_seconds
+    assert await lua_redis.ttl(_s().keyspace.mode_key(_THREAD)) > 60
 
 
 async def test_a_lost_claim_writes_nothing_and_returns_the_owner(lua_redis):
-    await lua_redis.set(_s().dedupe_key("twilio", "PID1"), "winner")
-    await lua_redis.set(_s().mode_key(_THREAD), "manual", ex=60)
+    await lua_redis.set(_s().keyspace.dedupe_key("twilio", "PID1"), "winner")
+    await lua_redis.set(_s().keyspace.mode_key(_THREAD), "manual", ex=60)
 
     owner = await create_record(
-        _store(), _intake("loser"), intake_token="tok", claim_key=_s().dedupe_key("twilio", "PID1"), refresh_mode=True
+        _store(),
+        _intake("loser"),
+        intake_token="tok",
+        claim_key=_s().keyspace.dedupe_key("twilio", "PID1"),
+        refresh_mode=True,
     )
 
     assert owner == "winner"
-    assert await lua_redis.exists(_s().record_key("loser")) == 0
+    assert await lua_redis.exists(_s().keyspace.record_key("loser")) == 0
     assert "loser" not in await _index_members(lua_redis)
-    assert await lua_redis.zrange(_s().thread_index_key("line", _THREAD), 0, -1) == []
-    assert await lua_redis.get(_s().dedupe_key("twilio", "PID1")) == "winner"
+    assert await lua_redis.zrange(_s().keyspace.thread_index_key("line", _THREAD), 0, -1) == []
+    assert await lua_redis.get(_s().keyspace.dedupe_key("twilio", "PID1")) == "winner"
     # The losing attempt does not refresh the thread's mode; the winner's own create did.
-    assert await lua_redis.ttl(_s().mode_key(_THREAD)) <= 60
+    assert await lua_redis.ttl(_s().keyspace.mode_key(_THREAD)) <= 60
 
 
 async def test_an_absent_mode_key_stays_absent(lua_redis):
     await create_record(_store(), _intake("m1"), intake_token="tok", refresh_mode=True)
 
-    assert await lua_redis.exists(_s().mode_key(_THREAD)) == 0
+    assert await lua_redis.exists(_s().keyspace.mode_key(_THREAD)) == 0
 
 
 async def test_a_same_id_re_create_proceeds(lua_redis):
-    await lua_redis.set(_s().dedupe_key("twilio", "PID1"), "m1")
+    await lua_redis.set(_s().keyspace.dedupe_key("twilio", "PID1"), "m1")
 
     owner = await create_record(
-        _store(), _intake("m1"), intake_token="tok", claim_key=_s().dedupe_key("twilio", "PID1")
+        _store(), _intake("m1"), intake_token="tok", claim_key=_s().keyspace.dedupe_key("twilio", "PID1")
     )
 
     assert owner == "m1"
-    assert await lua_redis.hget(_s().record_key("m1"), "delivery_status") == "accepted"
+    assert await lua_redis.hget(_s().keyspace.record_key("m1"), "delivery_status") == "accepted"
 
 
 async def test_an_event_claim_uses_its_own_key_family(lua_redis):
-    await lua_redis.set(_s().dedupe_key("line", "E1"), "channel-owner")
+    await lua_redis.set(_s().keyspace.dedupe_key("line", "E1"), "channel-owner")
 
     owner = await create_record(
-        _store(), _intake("ev"), intake_token="tok", claim_key=_s().event_dedupe_key("line", "E1")
+        _store(), _intake("ev"), intake_token="tok", claim_key=_s().keyspace.event_dedupe_key("line", "E1")
     )
 
     assert owner == "ev"
-    assert await lua_redis.get(_s().event_dedupe_key("line", "E1")) == "ev"
+    assert await lua_redis.get(_s().keyspace.event_dedupe_key("line", "E1")) == "ev"
 
 
 async def test_the_route_missing_marker_and_warning_are_unchanged_under_a_claim(lua_redis, caplog):
-    await lua_redis.delete(_s().route_key("line"))
+    await lua_redis.delete(_s().keyspace.route_key("line"))
 
     with caplog.at_level(logging.WARNING):
         owner = await create_record(
-            _store(), _intake("m1"), intake_token="tok", claim_key=_s().dedupe_key("twilio", "PID1"), refresh_mode=True
+            _store(),
+            _intake("m1"),
+            intake_token="tok",
+            claim_key=_s().keyspace.dedupe_key("twilio", "PID1"),
+            refresh_mode=True,
         )
 
     assert owner == "m1"
-    assert await lua_redis.hget(_s().record_key("m1"), "route_missing") == "1"
-    assert await lua_redis.get(_s().dedupe_key("twilio", "PID1")) == "m1"
+    assert await lua_redis.hget(_s().keyspace.record_key("m1"), "route_missing") == "1"
+    assert await lua_redis.get(_s().keyspace.dedupe_key("twilio", "PID1")) == "m1"
     assert any("stopped routing" in r.getMessage() for r in caplog.records)
 
 
@@ -210,7 +222,7 @@ class _SiteCounts:
         self.claims = 0
         self.mode_expires = 0
         real_eval, real_expire = fake.eval, fake.expire
-        mode_prefix = _s().mode_key("x")[:-1]
+        mode_prefix = _s().keyspace.mode_key("x")[:-1]
 
         async def eval_(script: str, numkeys: int, *keys_and_args: Any) -> Any:
             if "conversations:record:create" in script:
@@ -274,7 +286,7 @@ async def test_a_channel_redelivery_that_loses_the_claim_writes_no_record(env, s
     await _settle()
     # A concurrent attempt for the same pair commits between this attempt's fast-path read and
     # its create: the read finds no owner, the claim already stands when the create runs.
-    await env.set(_s().dedupe_key("twilio", "PID2"), first)
+    await env.set(_s().keyspace.dedupe_key("twilio", "PID2"), first)
 
     async def no_owner_yet(self: ConversationRecordStore, channel_name: str, provider_message_id: str) -> None:
         return None

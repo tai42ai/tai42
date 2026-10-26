@@ -67,7 +67,7 @@ async def test_put_keys_and_indexes_the_row_atomically(manager, lua_redis):
     # leaves exactly one index member.
     assert await manager.put_route(_api_route()) is True
     assert await lua_redis.smembers(_NAMES_KEY) == {"chat"}
-    assert await lua_redis.get(ConversationsSettings().route_key("chat")) is not None
+    assert await lua_redis.get(ConversationsSettings().keyspace.route_key("chat")) is not None
 
     assert await manager.put_route(_api_route(target_kind="agent", target_name="other")) is False
     assert await lua_redis.smembers(_NAMES_KEY) == {"chat"}
@@ -80,7 +80,7 @@ async def test_delete_removes_the_row_and_unindexes_it_atomically(manager, lua_r
     await manager.put_route(_api_route())
 
     assert await manager.delete_route("chat") is True
-    assert await lua_redis.exists(ConversationsSettings().route_key("chat")) == 0
+    assert await lua_redis.exists(ConversationsSettings().keyspace.route_key("chat")) == 0
     assert await lua_redis.smembers(_NAMES_KEY) == set()
     # A second delete removes nothing and says so, and the SREM is harmless on an absent name.
     assert await manager.delete_route("chat") is False
@@ -95,7 +95,7 @@ async def test_a_door_flip_is_refused_by_the_write_itself_not_by_an_earlier_coun
 
     settings = ConversationsSettings()
     await manager.put_route(_api_route())
-    await lua_redis.zadd(settings.route_threads_key("chat"), {"bridge:chat:alice/user-1": 1.0})
+    await lua_redis.zadd(settings.keyspace.route_threads_key("chat"), {"bridge:chat:alice/user-1": 1.0})
 
     with pytest.raises(DoorFlipRefusedError) as refused:
         await manager.put_route(
@@ -133,7 +133,7 @@ async def test_the_door_of_a_route_holding_no_thread_is_still_written(manager, l
 async def test_a_route_holding_threads_is_still_editable_on_every_other_field(manager, lua_redis):
     settings = ConversationsSettings()
     await manager.put_route(_api_route())
-    await lua_redis.zadd(settings.route_threads_key("chat"), {"bridge:chat:alice/user-1": 1.0})
+    await lua_redis.zadd(settings.keyspace.route_threads_key("chat"), {"bridge:chat:alice/user-1": 1.0})
 
     assert await manager.put_route(_api_route(target_name="other")) is False
     stored = await manager.get_route("chat")

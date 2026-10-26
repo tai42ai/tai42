@@ -825,7 +825,7 @@ async def test_list_counts_an_indexed_route_with_no_row(monkeypatch):
     await manager.put_route(_route("live"))
     await manager.put_route(_route("orphan"))
     # Drop only the row key, leaving the name in the index behind.
-    del fake._strings[ConversationsSettings().route_key("orphan")]
+    del fake._strings[ConversationsSettings().keyspace.route_key("orphan")]
 
     listed = await ops.list_conversation_routes()
     assert listed["total"] == 1
@@ -879,13 +879,13 @@ async def test_delete_reclaims_the_routes_thread_indexes(wired, record_redis):
                 updated_at=now,
             ),
         )
-    assert settings.route_threads_key("chat") in record_redis._zsets
+    assert settings.keyspace.route_threads_key("chat") in record_redis._zsets
 
     assert (await ops.delete_conversation_route("chat"))["removed"] is True
 
-    assert settings.route_threads_key("chat") not in record_redis._zsets
+    assert settings.keyspace.route_threads_key("chat") not in record_redis._zsets
     for index in range(2):
-        assert settings.thread_index_key("chat", f"bridge:chat:alice/user-{index}") not in record_redis._zsets
+        assert settings.keyspace.thread_index_key("chat", f"bridge:chat:alice/user-{index}") not in record_redis._zsets
 
 
 async def test_an_interrupted_delete_is_finished_by_a_retry_instead_of_404ing(wired, record_redis, monkeypatch):
@@ -920,15 +920,15 @@ async def test_an_interrupted_delete_is_finished_by_a_retry_instead_of_404ing(wi
     # The routing row is already gone, so no message can open a thread on the name...
     assert "chat" not in wired.rows
     # ...and the route's thread index survives, holding the work the run never reached.
-    assert settings.route_threads_key("chat") in record_redis._zsets
+    assert settings.keyspace.route_threads_key("chat") in record_redis._zsets
 
     result = await ops.delete_conversation_route("chat")
 
     # Not a 404: the retry re-ran the reclamation and says the row was not this call's to
     # remove.
     assert result == {"removed": False, "route_name": "chat"}
-    assert settings.route_threads_key("chat") not in record_redis._zsets
-    assert settings.thread_index_key("chat", "bridge:chat:alice/user-1") not in record_redis._zsets
+    assert settings.keyspace.route_threads_key("chat") not in record_redis._zsets
+    assert settings.keyspace.thread_index_key("chat", "bridge:chat:alice/user-1") not in record_redis._zsets
 
 
 async def test_flipping_the_door_of_a_route_that_holds_threads_is_refused(wired, record_redis):

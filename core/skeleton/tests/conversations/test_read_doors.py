@@ -360,7 +360,7 @@ async def test_a_transcript_counts_an_unreadable_member(monkeypatch):
     monkeypatch.setattr(ops, "get_conversations_manager", lambda: _DictManager())
     store = ConversationRecordStore(ConversationsSettings())
     await _seed_thread(store, caller_principal="alice")
-    fake._hashes.pop(ConversationsSettings().record_key("t0"))
+    fake._hashes.pop(ConversationsSettings().keyspace.record_key("t0"))
     _as_caller(monkeypatch, _Caller("root", is_admin=True))
 
     read = await ops.get_conversation_thread("chat", _THREAD)

@@ -143,8 +143,8 @@ async def test_one_medium_message_on_two_records_quotes_both_texts_in_accept_ord
     settings = lua_env.store.settings
     first = _record("m-a", inbound_text="caption", inbound_message_id="m1", provider_message_id="ev-0")
     second = _record("m-b", inbound_text="second file", inbound_message_id="m1", provider_message_id="ev-1")
-    await create_record(lua_env.store, first, claim_key=settings.dedupe_key("twilio", "ev-0"))
-    await create_record(lua_env.store, second, claim_key=settings.dedupe_key("twilio", "ev-1"))
+    await create_record(lua_env.store, first, claim_key=settings.keyspace.dedupe_key("twilio", "ev-0"))
+    await create_record(lua_env.store, second, claim_key=settings.keyspace.dedupe_key("twilio", "ev-1"))
 
     assert await _resolve(lua_env, "m1") == _found("m1", "caption\n\nsecond file")
 
@@ -218,7 +218,7 @@ async def test_a_forgotten_thread_and_an_expired_row_are_not_found(lua_env):
     await create_record(lua_env.store, _record("m-old", inbound_message_id="m2", provider_message_id="ev-2"))
     assert (await _resolve(lua_env, "m1")).status is ReplyToStatus.FOUND
 
-    await lua_env.redis.pexpire(lua_env.store.settings.record_key("m-old"), 1)
+    await lua_env.redis.pexpire(lua_env.store.settings.keyspace.record_key("m-old"), 1)
     await asyncio.sleep(0.01)
     assert await _resolve(lua_env, "m2") == _status("m2", ReplyToStatus.NOT_FOUND)
 

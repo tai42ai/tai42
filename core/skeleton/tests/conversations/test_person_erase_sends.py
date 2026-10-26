@@ -113,11 +113,11 @@ async def _linked_person(
 async def _assert_erased(lua_env: LuaEnv, person: Person, *routes: str) -> None:
     settings = lua_env.store.settings
     for route in routes:
-        assert await lua_env.redis.exists(settings.thread_index_key(route, _PERSON_THREAD)) == 0
-        assert await lua_env.redis.zscore(settings.route_threads_key(route), _PERSON_THREAD) is None
-    assert await lua_env.redis.exists(settings.person_key(_PERSON)) == 0
-    assert await lua_env.redis.exists(settings.person_erasing_key(_PERSON)) == 0
-    index = await lua_env.redis.hgetall(settings.person_index_key(person.target_kind, person.target_name))
+        assert await lua_env.redis.exists(settings.keyspace.thread_index_key(route, _PERSON_THREAD)) == 0
+        assert await lua_env.redis.zscore(settings.keyspace.route_threads_key(route), _PERSON_THREAD) is None
+    assert await lua_env.redis.exists(settings.keyspace.person_key(_PERSON)) == 0
+    assert await lua_env.redis.exists(settings.keyspace.person_erasing_key(_PERSON)) == 0
+    index = await lua_env.redis.hgetall(settings.keyspace.person_index_key(person.target_kind, person.target_name))
     assert _PERSON not in index.values()
     with pytest.raises(NotFoundError):
         await ops.delete_conversation_thread(routes[0], _PERSON_THREAD)
@@ -157,7 +157,9 @@ async def test_a_send_begun_after_the_walk_lands_nowhere_in_the_erased_person_th
     await channel.entered.wait()
     [begun] = await send_records(lua_env)
     assert begun.thread_id == _PERSON_THREAD
-    assert await lua_env.redis.hget(lua_env.store.settings.record_key(begun.message_id), "forgotten_threads") in (
+    assert await lua_env.redis.hget(
+        lua_env.store.settings.keyspace.record_key(begun.message_id), "forgotten_threads"
+    ) in (
         None,
         "",
     )
@@ -176,7 +178,7 @@ async def test_a_send_begun_after_the_walk_lands_nowhere_in_the_erased_person_th
     settings = lua_env.store.settings
     if ends == "raise":
         assert (await erase)["erased"] is True
-        assert await lua_env.redis.exists(settings.record_key(begun.message_id)) == 0
+        assert await lua_env.redis.exists(settings.keyspace.record_key(begun.message_id)) == 0
         assert await keys_naming(lua_env, begun.message_id) == set()
         assert any(begun.message_id in message and _PERSON_THREAD in message for message in caplog.messages)
         await _assert_erased(lua_env, person, "line")
@@ -186,15 +188,17 @@ async def test_a_send_begun_after_the_walk_lands_nowhere_in_the_erased_person_th
     [landed] = await send_records(lua_env)
     assert landed.thread_id == _OWN_THREAD
     assert landed.delivery_status is DeliveryStatus.PROVISIONAL
-    assert await lua_env.redis.zrange(settings.thread_index_key("line", _OWN_THREAD), 0, -1) == [landed.message_id]
+    assert await lua_env.redis.zrange(settings.keyspace.thread_index_key("line", _OWN_THREAD), 0, -1) == [
+        landed.message_id
+    ]
     assert await lua_env.store.resolve_outbound("twilio", "out-1") == landed.message_id
-    assert await lua_env.redis.exists(settings.person_erasing_key(_PERSON)) == 1
+    assert await lua_env.redis.exists(settings.keyspace.person_erasing_key(_PERSON)) == 1
 
     assert (await ops.delete_conversation_person(_PERSON))["erased"] is True
 
     assert await send_records(lua_env) == []
     assert await lua_env.store.resolve_outbound("twilio", "out-1") is None
-    assert await lua_env.redis.exists(settings.thread_index_key("line", _OWN_THREAD)) == 0
+    assert await lua_env.redis.exists(settings.keyspace.thread_index_key("line", _OWN_THREAD)) == 0
     await _assert_erased(lua_env, person, "line")
 
 
@@ -212,12 +216,12 @@ async def test_a_send_begun_after_the_mark_into_the_persons_route_thread_is_wipe
 
     [record] = await send_records(lua_env)
     assert record.thread_id == _OWN_THREAD
-    assert await lua_env.redis.hget(lua_env.store.settings.record_key(record.message_id), "writer") == _PERSON
+    assert await lua_env.redis.hget(lua_env.store.settings.keyspace.record_key(record.message_id), "writer") == _PERSON
     marked.go.set()
     result = await erase
     assert (result["erased"], result["removed"]) == (True, 1)
     assert await send_records(lua_env) == []
-    assert await lua_env.redis.exists(lua_env.store.settings.thread_index_key("line", _OWN_THREAD)) == 0
+    assert await lua_env.redis.exists(lua_env.store.settings.keyspace.thread_index_key("line", _OWN_THREAD)) == 0
     await _assert_erased(lua_env, person, "line")
 
 
@@ -256,14 +260,14 @@ async def test_a_stranded_send_begun_in_the_person_thread_after_the_walk_is_dele
     with caplog.at_level(logging.WARNING):
         await delivery_module.sweep_stalled_deliveries()
 
-    assert await lua_env.redis.exists(lua_env.store.settings.record_key("stranded-1")) == 0
+    assert await lua_env.redis.exists(lua_env.store.settings.keyspace.record_key("stranded-1")) == 0
     assert await keys_naming(lua_env, "stranded-1") == set()
     assert any("stranded-1" in message and _PERSON_THREAD in message for message in caplog.messages)
     await _assert_erased(lua_env, person, "line")
 
 
 async def _record_ids(lua_env: LuaEnv) -> set[str]:
-    prefix = lua_env.store.settings.record_key("")
+    prefix = lua_env.store.settings.keyspace.record_key("")
     return {key.removeprefix(prefix) for key in await lua_env.redis.keys(f"{prefix}*")}
 
 
@@ -308,7 +312,7 @@ async def test_a_channel_inbound_created_after_the_walk_is_refused_and_a_resend_
 
     erase, walked = await _refused_while_the_erase_walks(lua_env, monkeypatch, lambda: _inbound("PID1"), "line")
     settings = lua_env.store.settings
-    assert await lua_env.redis.exists(settings.dedupe_key("twilio", "PID1")) == 0
+    assert await lua_env.redis.exists(settings.keyspace.dedupe_key("twilio", "PID1")) == 0
     assert await lua_env.store.resolve_message_ref("twilio", "+15550001111", _ADDRESS, "medium-1") == []
     assert scheduled == []
 
@@ -384,7 +388,7 @@ async def test_an_event_by_thread_id_created_after_the_walk_is_refused(
         return event_door_module.submit_event("tool-line", submission, "alice", client_connected=_connected)
 
     erase, walked = await _refused_while_the_erase_walks(lua_env, monkeypatch, _event, "tool-line")
-    assert await lua_env.redis.exists(lua_env.store.settings.event_dedupe_key("tool-line", "evt-1")) == 0
+    assert await lua_env.redis.exists(lua_env.store.settings.keyspace.event_dedupe_key("tool-line", "evt-1")) == 0
     assert scheduled == []
     walked.go.set()
     assert (await erase)["erased"] is True

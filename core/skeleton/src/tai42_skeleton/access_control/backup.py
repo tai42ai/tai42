@@ -3,8 +3,9 @@
 The export carries every route mapping (public ones included), the dynamic-route
 patterns, every principal with its own policy row, and every provisioned key merged with
 its policy. The import restores principals first (so a token's owner exists), then the
-route mappings, then the tokens, all through :mod:`~tai42_skeleton.access_control.management`.
-The whole import runs inside :func:`~tai42_skeleton.access_control.management.policy_write_batch`,
+route mappings, then the tokens, through :mod:`~tai42_skeleton.access_control.management` and
+(for the keys) :mod:`~tai42_skeleton.access_control.api_key_lifecycle`.
+The whole import runs inside :func:`~tai42_skeleton.access_control.policy_version.policy_write_batch`,
 so the policy cache is invalidated once at the end — and still when a write part-way raises.
 """
 
@@ -18,7 +19,7 @@ from tai42_contract.access_control import OWNER_USER_ID_CLAIM
 from tai42_contract.backup import BackupSectionReport
 from tai42_contract.template import TemplatedText
 
-from tai42_skeleton.access_control import management
+from tai42_skeleton.access_control import api_key_lifecycle, management, policy_version
 from tai42_skeleton.access_control.settings import access_control_settings
 from tai42_skeleton.backup.registry import BackupMode, _empty_report
 
@@ -154,7 +155,7 @@ async def import_access_control(payload: dict[str, Any], mode: BackupMode) -> Ba
 
     # Every write below records its change; the policy cache is invalidated once at the end,
     # and still when a write part-way raises.
-    async with management.policy_write_batch():
+    async with policy_version.policy_write_batch():
         await _restore_principals(payload, report)
 
         # Replay route -> scope mappings first so the token restore below finds every
@@ -216,14 +217,14 @@ async def _restore_token(token: dict[str, Any], report: BackupSectionReport) -> 
         return
     try:
         if state == "orphaned":
-            api_key = await management.remint_orphaned_api_key(user_id, description)
+            api_key = await api_key_lifecycle.remint_orphaned_api_key(user_id, description)
         else:
             assert isinstance(owner_user_id, str)  # noqa: S101 — narrowed by the guard above
             stored_condition = token.get("condition")
             # Parse the stored templated-text document back through the contract so a
             # malformed one raises here, never restores as a silently dropped condition.
             condition = TemplatedText.model_validate(stored_condition) if stored_condition is not None else None
-            api_key, _committed_body, _fingerprint = await management.add_user_api_key(
+            api_key, _committed_body, _fingerprint = await api_key_lifecycle.add_user_api_key(
                 user_id,
                 description,
                 token.get("scopes") or [],

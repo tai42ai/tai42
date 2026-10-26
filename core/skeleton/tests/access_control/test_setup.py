@@ -26,7 +26,7 @@ from tai42_contract.accounts.models import (
 )
 from tai42_kit.access_control import registry
 
-from tai42_skeleton.access_control import management
+from tai42_skeleton.access_control import api_key_lifecycle, policy_version
 from tai42_skeleton.access_control import roles as roles_module
 from tai42_skeleton.access_control import setup_gate as setup_gate_mod
 from tai42_skeleton.access_control.settings import access_control_settings, setup_settings
@@ -163,7 +163,8 @@ def setup_redis(monkeypatch: pytest.MonkeyPatch) -> FakeRedis:
     """
     fake = FakeRedis(strings={})
     monkeypatch.setattr(setup_gate_mod, "client_ctx", make_client_ctx(fake))
-    monkeypatch.setattr(management, "client_ctx", make_client_ctx(fake))
+    monkeypatch.setattr(api_key_lifecycle, "client_ctx", make_client_ctx(fake))
+    monkeypatch.setattr(policy_version, "client_ctx", make_client_ctx(fake))
     monkeypatch.setattr(access_control_settings().redis, "redis_url", "redis://ac-redis")
     return fake
 

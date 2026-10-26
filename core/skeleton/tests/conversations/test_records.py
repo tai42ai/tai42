@@ -354,7 +354,7 @@ async def test_a_shed_record_is_created_terminal_with_the_retention_ttl(monkeypa
     assert got.delivery_status is DeliveryStatus.SHED
     assert got.answer is None
     # It is terminal at birth: it carries the retention TTL, and no transition moves it.
-    assert fake.ttl_ms[settings.record_key("m1")] == settings.answer_retention_ttl_seconds * 1000
+    assert fake.ttl_ms[settings.keyspace.record_key("m1")] == settings.answer_retention_ttl_seconds * 1000
     assert await store.claim_delivery("m1", time.time(), "tok", 120) == 0
     assert await store.mark_delivered("m1", [], 1, time.time(), "tok") == -2
     assert await store.mark_failed("m1", 1, time.time(), "tok", sends=[]) == -2
@@ -364,7 +364,7 @@ async def test_an_intake_record_never_expires(monkeypatch):
     fake = FakeRecordRedis()
     store = _store(monkeypatch, fake)
     await create_record(store, _intake("m1"), intake_token="worker-1")
-    assert ConversationsSettings().record_key("m1") not in fake.ttl_ms
+    assert ConversationsSettings().keyspace.record_key("m1") not in fake.ttl_ms
 
 
 async def test_create_and_get_round_trip(monkeypatch):
@@ -550,16 +550,16 @@ async def test_pending_work_skips_corrupt_rows_and_still_reports_the_rest(monkey
     settings = ConversationsSettings()
     await create_record(store, _record("good"))
     fake.seed_hash(
-        settings.record_key("unknown-status"),
+        settings.keyspace.record_key("unknown-status"),
         {"data": "{}", "delivery_status": "in_flight", "outbound_ids": "[]", "attempts": "0", "updated_at": "1"},
     )
     fake.seed_hash(
-        settings.record_key("non-numeric-attempts"),
+        settings.keyspace.record_key("non-numeric-attempts"),
         {"data": "{}", "delivery_status": "pending_delivery", "outbound_ids": "[]", "attempts": "?", "updated_at": "1"},
     )
-    fake.seed_hash(settings.record_key("foreign-row"), {"something": "else"})
+    fake.seed_hash(settings.keyspace.record_key("foreign-row"), {"something": "else"})
     fake.seed_hash(
-        settings.record_key("bad-grace"),
+        settings.keyspace.record_key("bad-grace"),
         {
             "data": "{}",
             "delivery_status": "provisional",
@@ -577,7 +577,7 @@ async def test_pending_work_skips_corrupt_rows_and_still_reports_the_rest(monkey
         ("foreign-row", "pending_delivery", float("inf")),
         ("bad-grace", "provisional", 1.0),
     ):
-        await fake.zadd(settings.status_index_key(indexed_as), {message_id: score})
+        await fake.zadd(settings.keyspace.status_index_key(indexed_as), {message_id: score})
 
     work = await store.pending_work(due_only=False)
     assert [w.message_id for w in work] == ["good"]
@@ -600,7 +600,7 @@ async def test_retention_ttl_applied_only_on_a_terminal_transition(monkeypatch):
     fake = FakeRecordRedis()
     store = _store(monkeypatch, fake)
     settings = ConversationsSettings()
-    key = settings.record_key("m1")
+    key = settings.keyspace.record_key("m1")
     await create_record(store, _record("m1"))
     assert key not in fake.ttl_ms  # pending_delivery never expires
 
@@ -615,7 +615,7 @@ async def test_retention_ttl_applied_on_a_failed_transition(monkeypatch):
     fake = FakeRecordRedis()
     store = _store(monkeypatch, fake)
     settings = ConversationsSettings()
-    key = settings.record_key("m1")
+    key = settings.keyspace.record_key("m1")
     await create_record(store, _record("m1"))
     await store.mark_failed("m1", 8, time.time(), "tok", sends=[])
     assert fake.ttl_ms[key] == settings.answer_retention_ttl_seconds * 1000
@@ -643,8 +643,8 @@ async def test_a_transition_moves_the_record_between_status_indexes(monkeypatch)
     fake = FakeRecordRedis()
     store = _store(monkeypatch, fake)
     settings = ConversationsSettings()
-    pending = settings.status_index_key(DeliveryStatus.PENDING_DELIVERY.value)
-    failed = settings.status_index_key(DeliveryStatus.FAILED.value)
+    pending = settings.keyspace.status_index_key(DeliveryStatus.PENDING_DELIVERY.value)
+    failed = settings.keyspace.status_index_key(DeliveryStatus.FAILED.value)
     await create_record(store, _record("m1"))
     assert await fake.zrange(pending, 0, -1) == ["m1"]
 
@@ -672,10 +672,10 @@ async def test_a_member_whose_row_is_gone_is_unindexed(monkeypatch):
     settings = ConversationsSettings()
     await create_record(store, _record("gone"))
     # The row removed from under the index rather than through ``delete_record``.
-    fake._hashes.pop(settings.record_key("gone"))
+    fake._hashes.pop(settings.keyspace.record_key("gone"))
 
     assert await store.pending_work(due_only=False) == []
-    assert await fake.zrange(settings.status_index_key(DeliveryStatus.PENDING_DELIVERY.value), 0, -1) == []
+    assert await fake.zrange(settings.keyspace.status_index_key(DeliveryStatus.PENDING_DELIVERY.value), 0, -1) == []
 
 
 async def test_delete_record_unindexes_the_row_it_removes(monkeypatch):
@@ -687,7 +687,10 @@ async def test_delete_record_unindexes_the_row_it_removes(monkeypatch):
     assert await store.delete_record(record) is True
     assert await store.pending_work(due_only=False) == []
     assert (
-        await fake.zrange(ConversationsSettings().status_index_key(DeliveryStatus.PENDING_DELIVERY.value), 0, -1) == []
+        await fake.zrange(
+            ConversationsSettings().keyspace.status_index_key(DeliveryStatus.PENDING_DELIVERY.value), 0, -1
+        )
+        == []
     )
 
 
@@ -701,7 +704,7 @@ async def test_pending_work_moves_a_corrupt_row_to_terminal_failed(monkeypatch):
     settings = ConversationsSettings()
     await create_record(store, _record("good"))
     fake.seed_hash(
-        settings.record_key("bad-data"),
+        settings.keyspace.record_key("bad-data"),
         {
             "data": "{not json",
             "delivery_status": "pending_delivery",
@@ -711,12 +714,12 @@ async def test_pending_work_moves_a_corrupt_row_to_terminal_failed(monkeypatch):
             "updated_at": "1",
         },
     )
-    await fake.zadd(settings.status_index_key("pending_delivery"), {"bad-data": float("inf")})
+    await fake.zadd(settings.keyspace.status_index_key("pending_delivery"), {"bad-data": float("inf")})
 
     work = await store.pending_work(due_only=False)
     assert [w.message_id for w in work] == ["good"]
     # The corrupt row is now terminal ``failed`` and is not re-enumerated by a second pass.
-    assert fake._hashes[settings.record_key("bad-data")]["delivery_status"] == "failed"
+    assert fake._hashes[settings.keyspace.record_key("bad-data")]["delivery_status"] == "failed"
     assert [w.message_id for w in await store.pending_work(due_only=False)] == ["good"]
     # It rides the FAILED index but stays unreadable (its blob is still corrupt), so the
     # failed listing counts it rather than silently dropping it.
@@ -734,14 +737,14 @@ async def test_prune_expired_terminal_indexes_drops_only_expired_members(monkeyp
     now = time.time()
     for status in (DeliveryStatus.DELIVERED, DeliveryStatus.SHED, DeliveryStatus.FAILED):
         await fake.zadd(
-            settings.status_index_key(status.value),
+            settings.keyspace.status_index_key(status.value),
             {f"{status.value}-expired": now - 10, f"{status.value}-live": now + 100_000},
         )
 
     await store.prune_expired_terminal_indexes([])
 
     for status in (DeliveryStatus.DELIVERED, DeliveryStatus.SHED, DeliveryStatus.FAILED):
-        assert await fake.zrange(settings.status_index_key(status.value), 0, -1) == [f"{status.value}-live"]
+        assert await fake.zrange(settings.keyspace.status_index_key(status.value), 0, -1) == [f"{status.value}-live"]
 
 
 async def test_a_record_must_carry_the_inbound_text_it_answers(monkeypatch):
@@ -765,7 +768,7 @@ async def test_list_by_status_counts_unreadable(monkeypatch):
     settings = ConversationsSettings()
     await create_record(store, _record("good"))
     fake.seed_hash(
-        settings.record_key("bad"),
+        settings.keyspace.record_key("bad"),
         {
             "data": "{not json",
             "delivery_status": "pending_delivery",
@@ -775,7 +778,7 @@ async def test_list_by_status_counts_unreadable(monkeypatch):
             "updated_at": "1",
         },
     )
-    await fake.zadd(settings.status_index_key("pending_delivery"), {"bad": float("inf")})
+    await fake.zadd(settings.keyspace.status_index_key("pending_delivery"), {"bad": float("inf")})
 
     listing = await store.list_by_status(frozenset({DeliveryStatus.PENDING_DELIVERY}))
     assert [r.message_id for r in listing.items] == ["good"]
@@ -788,14 +791,14 @@ async def test_list_by_status_counts_orphan_member(monkeypatch, caplog):
     store = _store(monkeypatch, fake)
     settings = ConversationsSettings()
     await create_record(store, _record("gone"))
-    fake._hashes.pop(settings.record_key("gone"))
+    fake._hashes.pop(settings.keyspace.record_key("gone"))
 
     with caplog.at_level("WARNING"):
         listing = await store.list_by_status(frozenset({DeliveryStatus.PENDING_DELIVERY}))
     assert listing.items == []
     assert listing.unreadable == 1
     assert "indexed but has no row" in caplog.text
-    assert await fake.zrange(settings.status_index_key(DeliveryStatus.PENDING_DELIVERY.value), 0, -1) == []
+    assert await fake.zrange(settings.keyspace.status_index_key(DeliveryStatus.PENDING_DELIVERY.value), 0, -1) == []
 
 
 async def test_create_marks_route_missing_when_route_gone(monkeypatch):
@@ -806,13 +809,13 @@ async def test_create_marks_route_missing_when_route_gone(monkeypatch):
     settings = ConversationsSettings()
     await create_record(store, _record("m1"))
 
-    assert fake._hashes[settings.record_key("m1")].get("route_missing") == "1"
+    assert fake._hashes[settings.keyspace.record_key("m1")].get("route_missing") == "1"
     record = await store.get_record("m1")
     assert record is not None
     assert record.route_missing is True
     listing = await store.list_by_status(frozenset({DeliveryStatus.PENDING_DELIVERY}))
     assert [(r.message_id, r.route_missing) for r in listing.items] == [("m1", True)]
-    assert await fake.zrange(settings.thread_index_key("line", "bridge:line:m1"), 0, -1) == []
+    assert await fake.zrange(settings.keyspace.thread_index_key("line", "bridge:line:m1"), 0, -1) == []
 
 
 async def test_create_route_present_not_missing(monkeypatch):
@@ -826,7 +829,7 @@ async def test_create_route_present_not_missing(monkeypatch):
     record = await store.get_record("m1")
     assert record is not None
     assert record.route_missing is False
-    assert await fake.zrange(settings.thread_index_key("line", "bridge:line:m1"), 0, -1) == ["m1"]
+    assert await fake.zrange(settings.keyspace.thread_index_key("line", "bridge:line:m1"), 0, -1) == ["m1"]
 
 
 def test_pending_receipt_on_admin_view_absent_from_caller_view():

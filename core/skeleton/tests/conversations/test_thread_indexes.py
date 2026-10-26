@@ -65,11 +65,11 @@ def _record(message_id: str, *, created_at: float, thread_id: str = _THREAD, **o
 
 
 def _thread_key(thread_id: str = _THREAD) -> str:
-    return ConversationsSettings().thread_index_key(_ROUTE, thread_id)
+    return ConversationsSettings().keyspace.thread_index_key(_ROUTE, thread_id)
 
 
 def _route_threads_key() -> str:
-    return ConversationsSettings().route_threads_key(_ROUTE)
+    return ConversationsSettings().keyspace.route_threads_key(_ROUTE)
 
 
 # -- writes ------------------------------------------------------------------
@@ -235,7 +235,7 @@ async def test_a_transcript_read_leaves_a_rowless_member_for_the_prune_pass(stor
     await create_record(store, _record("m1", created_at=now))
     await create_record(store, _record("m2", created_at=now + 1))
     # The row swept by the retention TTL from under its index.
-    fake._hashes.pop(ConversationsSettings().record_key("m1"))
+    fake._hashes.pop(ConversationsSettings().keyspace.record_key("m1"))
 
     page, unreadable = await store.list_thread_records(_ROUTE, _THREAD, offset=0, limit=10)
 
@@ -254,7 +254,7 @@ async def test_paging_a_transcript_holding_rowless_members_never_skips_a_live_re
     for index in range(6):
         await create_record(store, _record(f"m{index}", created_at=now + index))
     for gone in ("m0", "m2"):
-        fake._hashes.pop(ConversationsSettings().record_key(gone))
+        fake._hashes.pop(ConversationsSettings().keyspace.record_key(gone))
 
     seen: list[str] = []
     for page in range(3):
@@ -268,7 +268,7 @@ async def test_paging_a_transcript_holding_rowless_members_never_skips_a_live_re
 async def test_a_thread_listing_leaves_a_thread_with_no_readable_record_for_the_prune_pass(store, fake, caplog):
     now = time.time()
     await create_record(store, _record("m1", created_at=now))
-    fake._hashes.pop(ConversationsSettings().record_key("m1"))
+    fake._hashes.pop(ConversationsSettings().keyspace.record_key("m1"))
 
     page, unreadable = await store.list_route_threads(_ROUTE, offset=0, limit=10)
 
@@ -288,7 +288,7 @@ async def test_paging_a_thread_listing_holding_dead_threads_never_skips_a_live_o
             store, _record(f"m{index}", created_at=now + index, thread_id=f"bridge:line:+1555000{index}")
         )
     for gone in ("m4", "m2"):
-        fake._hashes.pop(ConversationsSettings().record_key(gone))
+        fake._hashes.pop(ConversationsSettings().keyspace.record_key(gone))
 
     seen: list[str] = []
     for page in range(3):
@@ -308,7 +308,7 @@ async def test_the_prune_pass_reclaims_an_idle_thread_and_leaves_a_live_one(stor
     await create_record(store, _record("old", created_at=now - retention - 60, thread_id="bridge:line:+15550000000"))
     await create_record(store, _record("new", created_at=now))
     # Only the idle thread's row has been swept by the retention TTL.
-    fake._hashes.pop(ConversationsSettings().record_key("old"))
+    fake._hashes.pop(ConversationsSettings().keyspace.record_key("old"))
 
     await store.prune_expired_terminal_indexes([_ROUTE])
 
@@ -339,7 +339,7 @@ async def test_the_prune_pass_reclaims_the_expired_members_of_an_ACTIVE_thread(s
         await create_record(store, _record(f"old{index}", created_at=now - retention - 60 + index))
     await create_record(store, _record("live", created_at=now))
     for index in range(3):
-        fake._hashes.pop(ConversationsSettings().record_key(f"old{index}"))
+        fake._hashes.pop(ConversationsSettings().keyspace.record_key(f"old{index}"))
     assert (await store.list_route_threads(_ROUTE, offset=0, limit=10))[0].threads[0].message_count == 4
 
     await store.prune_expired_terminal_indexes([_ROUTE])
@@ -355,7 +355,7 @@ async def test_the_prune_pass_reads_a_thread_in_bounded_batches(store, fake, mon
     retention = ConversationsSettings().answer_retention_ttl_seconds
     for index in range(5):
         await create_record(store, _record(f"old{index}", created_at=now - retention - 60 + index))
-        fake._hashes.pop(ConversationsSettings().record_key(f"old{index}"))
+        fake._hashes.pop(ConversationsSettings().keyspace.record_key(f"old{index}"))
     reads: list[int] = []
     inner = fake.zrangebyscore
 
@@ -415,7 +415,7 @@ async def test_the_prune_pass_resumes_where_the_last_one_stopped(store, fake, mo
             _record(f"live{index}", created_at=now - retention - 60 + index, thread_id=f"bridge:line:+1555000{index}"),
         )
     await create_record(store, _record("dead", created_at=now - retention - 30, thread_id="bridge:line:+15550009"))
-    fake._hashes.pop(ConversationsSettings().record_key("dead"))
+    fake._hashes.pop(ConversationsSettings().keyspace.record_key("dead"))
 
     cursor = records_module.PRUNE_START
     for _ in range(4):
@@ -463,7 +463,7 @@ async def test_the_prune_pass_ignores_a_cursor_naming_a_deleted_route(store, fak
     now = time.time()
     retention = ConversationsSettings().answer_retention_ttl_seconds
     await create_record(store, _record("old", created_at=now - retention - 60))
-    fake._hashes.pop(ConversationsSettings().record_key("old"))
+    fake._hashes.pop(ConversationsSettings().keyspace.record_key("old"))
 
     await store.prune_expired_terminal_indexes([_ROUTE], records_module.PruneCursor("deleted-route", 7, 9))
 
@@ -481,7 +481,7 @@ async def test_the_prune_pass_drops_index_members_only_inside_the_atomic_step(st
     now = time.time()
     retention = ConversationsSettings().answer_retention_ttl_seconds
     await create_record(store, _record("old", created_at=now - retention - 60))
-    fake._hashes.pop(ConversationsSettings().record_key("old"))
+    fake._hashes.pop(ConversationsSettings().keyspace.record_key("old"))
     monkeypatch.setattr(fake, "zrem", _refuse)
 
     await store.prune_expired_terminal_indexes([_ROUTE])
@@ -586,7 +586,7 @@ async def _two_reclaimable_members(store, fake, thread_id: str) -> None:
         await create_record(
             store, _record(f"dead{index}", created_at=now - retention - 60 + index, thread_id=thread_id)
         )
-        fake._hashes.pop(ConversationsSettings().record_key(f"dead{index}"))
+        fake._hashes.pop(ConversationsSettings().keyspace.record_key(f"dead{index}"))
 
 
 async def test_a_resumed_member_rank_applies_to_the_thread_it_was_measured_in(store, fake):
@@ -663,7 +663,7 @@ async def test_the_thread_listing_scans_past_a_corrupt_record_to_the_next_readab
     await create_record(store, _record("m1", created_at=now))
     await create_record(store, _record("m2", created_at=now + 1))
     fake.seed_hash(
-        ConversationsSettings().record_key("m2"),
+        ConversationsSettings().keyspace.record_key("m2"),
         {"data": "{not json", "delivery_status": "delivered", "outbound_ids": "[]", "attempts": "0", "updated_at": "0"},
     )
 
@@ -680,7 +680,7 @@ async def test_a_transcript_skips_a_corrupt_record_and_keeps_the_readable_ones(s
     for index in range(3):
         await create_record(store, _record(f"m{index}", created_at=now + index))
     fake.seed_hash(
-        ConversationsSettings().record_key("m1"),
+        ConversationsSettings().keyspace.record_key("m1"),
         {"data": "{not json", "delivery_status": "delivered", "outbound_ids": "[]", "attempts": "0", "updated_at": "0"},
     )
 
