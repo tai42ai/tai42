@@ -10,6 +10,7 @@ ranks them in the plugin. Each way has a bound it answers ``MonitoringReadTooBro
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Iterator, Sequence
 from contextlib import aclosing
 from dataclasses import dataclass, field
@@ -59,6 +60,7 @@ from tai42_monitoring_langfuse.query_base import (
     PAGE_SIZE,
     RANKED_MAX_REACH,
     TRACE_ID_CHUNK,
+    WALK_LIMIT,
     WINDOW_MAX_ROOTS,
 )
 from tai42_monitoring_langfuse.sorting import RANKED_MEASURE, _none_last_sorted, resolve_trace_sort
@@ -305,8 +307,10 @@ class TraceQuery(ObservationQuery):
             runs = await self._window_runs(client, source, from_timestamp, to_timestamp, filter_, sort, run_wide)
         page = runs[start:reach]
         if page:
-            await self._detail(client, source, page)
-            await self._enrich(client, source, [run for run in page if not run.enriched])
+            await asyncio.gather(
+                self._detail(client, source, page),
+                self._enrich(client, source, [run for run in page if not run.enriched]),
+            )
         return [run.summary() for run in page]
 
     def _root_clauses(
@@ -323,9 +327,18 @@ class TraceQuery(ObservationQuery):
         reach: int,
         filter_: MonitoringFilter | None,
     ) -> list[_Run]:
-        """The newest ``reach`` roots, plus every root sharing the last one's start, by start then trace id."""
+        """The newest ``reach`` roots, plus every root sharing the last one's start, by start then trace id.
+
+        The first list call asks for one root past ``reach``: the root that shows whether a tie on the last start
+        crosses.
+        """
         roots: list[ObservationRow] = []
-        walk = self._walk(client, fields=_ROOT_FIELDS, clauses=self._root_clauses(source, t0, t1, filter_))
+        walk = self._walk(
+            client,
+            fields=_ROOT_FIELDS,
+            clauses=self._root_clauses(source, t0, t1, filter_),
+            first_limit=min(reach + 1, WALK_LIMIT),
+        )
         async with aclosing(walk) as rows:
             async for row in rows:
                 if len(roots) >= reach and row.start_time != roots[reach - 1].start_time:
@@ -346,7 +359,10 @@ class TraceQuery(ObservationQuery):
         *,
         export: bool,
     ) -> list[_Run]:
-        """The runs ranked by one top-N metrics query over the time range, whose roots started in it."""
+        """The runs ranked by one top-N metrics query over the time range, whose roots started in it.
+
+        The roots are read in rank order, one chunk of trace ids per call, until ``reach`` runs are found.
+        """
         if t0 is None:
             raise MonitoringReadTooBroadError(_NO_START_TOO_BROAD)
         if not export and reach > RANKED_MAX_REACH:
@@ -372,25 +388,26 @@ class TraceQuery(ObservationQuery):
                 raise MonitoringError(f"Langfuse metrics response row carries no traceId or {column} column: {row!r}")
             ranked.append((_measure_value(row[column]) or 0.0, row["traceId"]))
         ranked.sort(reverse=True)
-        roots = await self._roots_of(client, source, [trace_id for _, trace_id in ranked])
-        runs = [
-            _Run(roots[trace_id])
-            for _, trace_id in ranked
-            if trace_id in roots
-            and roots[trace_id].start_time >= t0
-            and (t1 is None or roots[trace_id].start_time < t1)
-        ]
+        runs: list[_Run] = []
+        for chunk in _chunks([trace_id for _, trace_id in ranked]):
+            roots = await self._roots_of(client, source, chunk)
+            runs.extend(
+                _Run(roots[trace_id])
+                for trace_id in chunk
+                if trace_id in roots
+                and roots[trace_id].start_time >= t0
+                and (t1 is None or roots[trace_id].start_time < t1)
+            )
+            if len(runs) >= reach:
+                break
         if len(runs) < reach and len(rows) >= RANKED_MAX_REACH:
             raise MonitoringReadTooBroadError(_RANKED_TOO_BROAD)
         return runs
 
     async def _roots_of(self, client: httpx.Client, source: str, trace_ids: list[str]) -> dict[str, ObservationRow]:
-        roots: dict[str, ObservationRow] = {}
-        for chunk in _chunks(trace_ids):
-            clauses = [environment_clause(source), ROOT_CLAUSE, trace_ids_clause(chunk)]
-            for row in await self._walk_all(client, fields=_ROOT_FIELDS, clauses=clauses):
-                roots[row.trace_id] = row
-        return roots
+        """The roots of one chunk of ``trace_ids``, by trace id."""
+        clauses = [environment_clause(source), ROOT_CLAUSE, trace_ids_clause(trace_ids)]
+        return {row.trace_id: row for row in await self._walk_all(client, fields=_ROOT_FIELDS, clauses=clauses)}
 
     async def _window_runs(
         self,

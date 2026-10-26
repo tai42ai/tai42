@@ -190,14 +190,24 @@ class ObservationQuery(_LangfuseQuery):
         return page.data, page.cursor
 
     async def _walk(
-        self, client: httpx.Client, *, fields: str, clauses: list[Clause], expand_metadata: bool = False
+        self,
+        client: httpx.Client,
+        *,
+        fields: str,
+        clauses: list[Clause],
+        expand_metadata: bool = False,
+        first_limit: int = WALK_LIMIT,
     ) -> AsyncGenerator[ObservationRow]:
-        """Every row the clauses match, newest start first, one list call per page as the consumer reads on."""
+        """Every row the clauses match, newest start first, one list call per page as the consumer reads on.
+
+        The first call asks for ``first_limit`` rows and each later call for ``WALK_LIMIT``.
+        """
         cursor: str | None = None
         previous: datetime | None = None
+        limit = first_limit
         while True:
             rows, cursor = await self._list_page(
-                client, fields=fields, clauses=clauses, cursor=cursor, expand_metadata=expand_metadata
+                client, fields=fields, clauses=clauses, cursor=cursor, expand_metadata=expand_metadata, limit=limit
             )
             for row in rows:
                 if previous is not None and row.start_time > previous:
@@ -206,6 +216,7 @@ class ObservationQuery(_LangfuseQuery):
                 yield row
             if not cursor:
                 return
+            limit = WALK_LIMIT
 
     async def _walk_all(
         self, client: httpx.Client, *, fields: str, clauses: list[Clause], expand_metadata: bool = False

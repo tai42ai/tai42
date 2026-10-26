@@ -79,6 +79,26 @@ async def test_ranked_pages_slice_the_rank(fake, reader):
     assert [s.id for s in page] == [f"t{n:02}" for n in range(14, 4, -1)]
 
 
+async def test_ranked_reads_roots_in_rank_order_until_the_page_is_full(fake, reader):
+    for n in range(1000):
+        fake.run(f"t{n:04}", T0, children=1, child_cost=float(n))
+    page = await reader.list_traces(from_timestamp=FROM, order_by=_COST_DESC, limit=50)
+    assert [s.id for s in page] == [f"t{n:04}" for n in range(999, 949, -1)]
+    [root_fetch] = [json.loads(kw["filter"]) for kw in _walks(fake)]
+    assert root_fetch[2]["value"] == [f"t{n:04}" for n in range(999, 899, -1)]
+
+
+async def test_ranked_reads_on_past_a_chunk_whose_roots_are_outside_the_range(fake, reader):
+    for n in range(100):
+        early = fake.run(f"e{n:03}", FROM - timedelta(minutes=1), seconds=7200)
+        fake.add(id=f"e{n:03}-late", trace_id=early.trace_id, parent_id=early.id, start=T0, total_cost=100.0 + n)
+    for n in range(150):
+        fake.run(f"t{n:03}", T0, children=1, child_cost=float(n))
+    page = await reader.list_traces(from_timestamp=FROM, order_by=_COST_DESC, limit=10, page=6)
+    assert [s.id for s in page] == [f"t{n:03}" for n in range(99, 89, -1)]
+    assert len(_walks(fake)) == 2
+
+
 async def test_ranked_drops_a_run_whose_root_is_outside_the_range(fake, reader):
     fake.run("inside", T0, children=1, child_cost=0.1)
     early = fake.run("early", FROM - timedelta(minutes=5), seconds=3600)

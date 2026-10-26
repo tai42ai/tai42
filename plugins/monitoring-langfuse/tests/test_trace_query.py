@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from datetime import UTC, datetime, timedelta
 
 import httpx
@@ -287,6 +288,52 @@ async def test_roots_tied_on_start_list_once_each_in_trace_id_order(fake, reader
     second = await reader.list_traces(limit=100, page=11)
     assert [s.id for s in first][-1:] == ["tie-c"]
     assert [s.id for s in second] == ["tie-b", "tie-a"]
+
+
+async def test_native_list_asks_for_one_root_past_its_reach(fake, reader):
+    for n in range(2500):
+        fake.add(id=f"r{n}", trace_id=f"t{n:04}", start=T0 + timedelta(seconds=n))
+    await reader.list_traces(limit=50, page=3)
+    walks = [kw for kw in fake.calls_of("observations") if "metrics" in kw["fields"]]
+    assert [kw["limit"] for kw in walks] == ["151"]
+
+
+async def test_a_tie_crossing_a_list_call_lists_every_root_once(fake, reader):
+    for n in range(18):
+        fake.add(id=f"r{n}", trace_id=f"late{n:02}", start=T0 + timedelta(hours=1, seconds=n))
+    for trace_id in ("tie-e", "tie-c", "tie-a", "tie-d", "tie-b"):
+        fake.add(id=f"{trace_id}-root", trace_id=trace_id, start=T0)
+    fake.add(id="early-root", trace_id="early", start=T0 - timedelta(seconds=1))
+    second = await reader.list_traces(limit=10, page=2)
+    second_walks = [kw for kw in fake.calls_of("observations") if "metrics" in kw["fields"]]
+    third = await reader.list_traces(limit=10, page=3)
+    assert [kw["limit"] for kw in second_walks] == ["21", "1000"]
+    assert [s.id for s in second] == [*(f"late{n:02}" for n in range(7, -1, -1)), "tie-e", "tie-d"]
+    assert [s.id for s in third] == ["tie-c", "tie-b", "tie-a", "early"]
+
+
+async def test_a_tie_past_the_first_list_call_is_read_on_in_full_calls(fake, reader):
+    for n in range(300):
+        fake.add(id=f"tie-{n:03}-root", trace_id=f"tie-{n:03}", start=T0)
+    [first] = await reader.list_traces(limit=1)
+    walks = [kw for kw in fake.calls_of("observations") if "metrics" in kw["fields"]]
+    assert [kw["limit"] for kw in walks] == ["2", "1000"]
+    assert first.id == "tie-299"
+
+
+async def test_page_detail_and_totals_are_read_at_once(fake, reader, monkeypatch):
+    fake.run("t1", T0, children=1, child_cost=0.5, input='{"q": 1}')
+    both_in_flight = threading.Barrier(2, timeout=10)
+    answer = fake._observations
+
+    def _meet_on_page_reads(params):
+        if params["fields"] in ("core,io", "core,basic,usage,model"):
+            both_in_flight.wait()
+        return answer(params)
+
+    monkeypatch.setattr(fake, "_observations", _meet_on_page_reads)
+    [summary] = await reader.list_traces()
+    assert (summary.input, summary.total_cost) == ({"q": 1}, 0.5)
 
 
 async def test_rows_out_of_start_order_fail_loudly(fake, reader):
