@@ -85,6 +85,7 @@ def test_writer_protocol_members():
         {
             "open_span",
             "use_span",
+            "use_trace_context",
             "start_span",
             "record_span",
             "create_event",

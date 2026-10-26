@@ -25,13 +25,12 @@ import threading
 import weakref
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
-from contextvars import ContextVar, Token
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
 import orjson
-from opentelemetry import context as otel_context
 from opentelemetry import trace as otel_trace
 from opentelemetry.context import Context
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
@@ -40,7 +39,7 @@ from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import SpanLimits, Tracer, TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor, SpanExporter
-from opentelemetry.trace import NonRecordingSpan, SpanContext, Status, StatusCode, TraceFlags
+from opentelemetry.trace import NonRecordingSpan, SpanContext, TraceFlags
 from tai42_contract.monitoring import (
     DEFAULT_LEVEL,
     PROMOTED_METADATA_KEYS,
@@ -55,10 +54,10 @@ from tai42_contract.monitoring import (
 
 from tai42_kit.monitoring.encode import UNENCODABLE_KEY, encode_payload
 from tai42_kit.monitoring.otel import attributes as attr
+from tai42_kit.monitoring.otel._span import NOOP_SPAN, NoOpSpan, OtelSpan, attach, hex_ids, live_current, to_ns, unwind
 from tai42_kit.monitoring.otel.attribution import (
     AttributionFrame,
     AttributionSpanProcessor,
-    merged_attributes,
     pushed_frame,
 )
 from tai42_kit.monitoring.otel.exporter import CountingSpanExporter, QueueDropMetricExporter
@@ -78,15 +77,21 @@ _DISABLED: ContextVar[bool] = ContextVar("tai42_otel_disabled", default=False)
 HealthListener = Callable[[MonitoringExportHealth], None]
 
 
-def _ns(ts: datetime | None) -> int | None:
-    return None if ts is None else int(ts.timestamp() * 1_000_000_000)
-
-
-def _hex_ids(span_context: SpanContext) -> tuple[str, str]:
-    return format(span_context.trace_id, "032x"), format(span_context.span_id, "016x")
-
-
 _HEX = {32: re.compile(r"[0-9a-fA-F]{32}"), 16: re.compile(r"[0-9a-fA-F]{16}")}
+
+
+def _named_parent(trace_context: TraceContext) -> NonRecordingSpan:
+    """The remote span ``trace_context`` names; ``ValueError`` when it names no valid span."""
+    if not trace_context.trace_id or not trace_context.parent_span_id:
+        raise ValueError("a trace context names a span only with both its trace id and its parent span id")
+    return NonRecordingSpan(
+        SpanContext(
+            _parse_hex(trace_context.trace_id, 32),
+            _parse_hex(trace_context.parent_span_id, 16),
+            is_remote=True,
+            trace_flags=TraceFlags(TraceFlags.SAMPLED),
+        )
+    )
 
 
 def _parse_hex(value: str, width: int) -> int:
@@ -103,217 +108,6 @@ class _Pipeline:
     provider: TracerProvider
     meter_provider: MeterProvider
     tracer: Tracer
-
-
-class _NoOpSpan:
-    """The handle of a record that is not written (disabled, or its setup failed); ``id`` is ``""``."""
-
-    @property
-    def id(self) -> str:
-        return ""
-
-    def update(
-        self,
-        *,
-        output: Any = None,
-        model: str | None = None,
-        usage: TokenUsage | None = None,
-        metadata: dict[str, Any] | None = None,
-        level: MonitoringLevel | None = None,
-        status_message: str | None = None,
-    ) -> None:
-        pass
-
-    def set_trace_metadata(self, *, name: str | None = None, tags: list[str] | None = None) -> None:
-        pass
-
-    def end(self, *, end_time: datetime | None = None) -> None:
-        pass
-
-
-_NOOP_SPAN = _NoOpSpan()
-
-
-class _OtelSpan:
-    """The handle of one open span. Metadata is merged here and written once, at ``end()``."""
-
-    __slots__ = (
-        "_activation",
-        "_ended",
-        "_handle_token",
-        "_kind",
-        "_metadata",
-        "_otel",
-        "_previous_handle",
-        "_previous_span",
-        "_writer",
-    )
-
-    def __init__(self, writer: OtelWriter, otel_span: otel_trace.Span, kind: SpanKind) -> None:
-        self._writer = writer
-        self._otel = otel_span
-        self._kind = kind
-        self._metadata: dict[str, Any] = {}
-        self._activation: Token[Context] | None = None
-        self._handle_token: Token[_OtelSpan | None] | None = None
-        self._previous_handle: _OtelSpan | None = None
-        self._previous_span: otel_trace.Span = otel_trace.INVALID_SPAN
-        self._ended = False
-
-    @property
-    def id(self) -> str:
-        return format(self._otel.get_span_context().span_id, "016x")
-
-    @property
-    def name(self) -> str:
-        return getattr(self._otel, "name", "")
-
-    @property
-    def ended(self) -> bool:
-        return self._ended
-
-    def activate(self) -> None:
-        self._previous_handle = _ACTIVE_HANDLE.get()
-        self._previous_span = otel_trace.get_current_span()
-        self._activation = otel_context.attach(otel_trace.set_span_in_context(self._otel))
-        self._handle_token = _ACTIVE_HANDLE.set(self)
-
-    def set_input(self, value: Any) -> None:
-        self._otel.set_attribute(attr.input_attribute(self._kind), self._writer.encode_field(value, self.name))
-
-    def merge_metadata(self, metadata: Mapping[str, Any]) -> None:
-        self._metadata.update(metadata)
-
-    def update(
-        self,
-        *,
-        output: Any = None,
-        model: str | None = None,
-        usage: TokenUsage | None = None,
-        metadata: dict[str, Any] | None = None,
-        level: MonitoringLevel | None = None,
-        status_message: str | None = None,
-    ) -> None:
-        try:
-            if output is not None:
-                self._otel.set_attribute(
-                    attr.output_attribute(self._kind), self._writer.encode_field(output, self.name)
-                )
-            if model is not None:
-                self._otel.set_attribute(attr.GEN_AI_RESPONSE_MODEL, model)
-            if usage is not None:
-                self._otel.set_attributes(_usage_attributes(usage))
-            if metadata:
-                self._metadata.update(metadata)
-            _apply_level(self._otel, level, status_message)
-        except Exception as exc:
-            self._writer.record_failure("Span.update", self.name, exc)
-
-    def set_trace_metadata(self, *, name: str | None = None, tags: list[str] | None = None) -> None:
-        try:
-            if name is not None:
-                self._otel.set_attribute(attr.TRACE_NAME, name)
-            if tags is not None:
-                self._otel.set_attribute(attr.TRACE_TAGS, self._writer.encode_field(list(tags), self.name))
-        except Exception as exc:
-            self._writer.record_failure("Span.set_trace_metadata", self.name, exc)
-
-    def end(self, *, end_time: datetime | None = None) -> None:
-        self.finish(_ns(end_time))
-
-    def finish(self, end_ns: int | None) -> bool:
-        """Write the merged metadata and end the span at ``end_ns`` (now when ``None``); whether it was written."""
-        if self._ended:
-            return False
-        self._ended = True
-        try:
-            self._otel.set_attributes(self._writer.metadata_attributes(self._metadata, self.name))
-            self._otel.end(end_time=end_ns)
-        except Exception as exc:
-            self._writer.record_failure("Span.end", self.name, exc)
-            return False
-        finally:
-            self._deactivate()
-        return True
-
-    @property
-    def start_ns(self) -> int | None:
-        return getattr(self._otel, "start_time", None)
-
-    @property
-    def record_id(self) -> RecordId:
-        trace_id, span_id = _hex_ids(self._otel.get_span_context())
-        return RecordId(trace_id=trace_id, span_id=span_id)
-
-    def set_request_attributes(self, model: str | None, model_parameters: dict[str, Any] | None) -> None:
-        if model is not None:
-            self._otel.set_attribute(attr.GEN_AI_REQUEST_MODEL, model)
-        if model_parameters is not None:
-            self._otel.set_attribute(attr.MODEL_PARAMETERS, self._writer.encode_field(model_parameters, self.name))
-
-    def stamp_attribution(self) -> None:
-        self._otel.set_attributes(merged_attributes(self._writer.encode_field, self.name))
-
-    def _deactivate(self) -> None:
-        """Restore the previous current span when ``end()`` runs in the context that activated this one.
-
-        Callback frameworks end a run in a different context than the one that started it
-        (an async LangChain / LangGraph run fires its end callback in a fresh task). There
-        the activating context cannot be restored from here: its activation stays set but
-        is inert, since an ended handle is never current (``_live_current``), and it unwinds
-        when an enclosing activation of that context ends.
-        """
-        handle_token, activation = self._handle_token, self._activation
-        self._handle_token = self._activation = None
-        if handle_token is None or activation is None:
-            return
-        try:
-            _ACTIVE_HANDLE.reset(handle_token)
-        except ValueError:
-            return
-        otel_context.detach(activation)
-
-
-_ACTIVE_HANDLE: ContextVar[_OtelSpan | None] = ContextVar("tai42_otel_active_handle", default=None)
-
-
-def _live_current() -> tuple[_OtelSpan | None, otel_trace.Span]:
-    """The innermost live activated handle (``None`` when there is none) and the current span.
-
-    An ended handle is never current: it is skipped, together with the span it made current,
-    in favour of what was current before it.
-    """
-    handle = _ACTIVE_HANDLE.get()
-    if handle is None or not handle.ended:
-        return handle, otel_trace.get_current_span()
-    while handle is not None and handle.ended:
-        previous_span = handle._previous_span
-        handle = handle._previous_handle
-    if handle is not None:
-        return handle, handle._otel
-    return None, previous_span
-
-
-def _usage_attributes(usage: TokenUsage) -> dict[str, int | float]:
-    out: dict[str, int | float] = {}
-    if usage.input_tokens is not None:
-        out[attr.GEN_AI_USAGE_INPUT_TOKENS] = usage.input_tokens
-    if usage.output_tokens is not None:
-        out[attr.GEN_AI_USAGE_OUTPUT_TOKENS] = usage.output_tokens
-    if usage.total_tokens is not None:
-        out[attr.USAGE_TOTAL_TOKENS] = usage.total_tokens
-    if usage.cost_usd is not None:
-        out[attr.USAGE_COST_USD] = usage.cost_usd
-    return out
-
-
-def _apply_level(otel_span: otel_trace.Span, level: MonitoringLevel | None, status_message: str | None) -> None:
-    if level is not None and level is not MonitoringLevel.DEFAULT:
-        otel_span.set_attribute(attr.LEVEL, MonitoringLevel(level).value)
-        if level is MonitoringLevel.ERROR:
-            otel_span.set_status(Status(StatusCode.ERROR, status_message))
-    if status_message is not None:
-        otel_span.set_attribute(attr.STATUS_MESSAGE, status_message)
 
 
 class OtelWriter:
@@ -453,15 +247,9 @@ class OtelWriter:
     def _parent_context(self, trace_context: TraceContext | None) -> Context:
         """The context a span starts in: the explicit parent when ``trace_context`` names one, else the live span."""
         if trace_context is None or not trace_context.trace_id or not trace_context.parent_span_id:
-            _, current = _live_current()
+            _, current = live_current()
             return otel_trace.set_span_in_context(current)
-        parent = SpanContext(
-            _parse_hex(trace_context.trace_id, 32),
-            _parse_hex(trace_context.parent_span_id, 16),
-            is_remote=True,
-            trace_flags=TraceFlags(TraceFlags.SAMPLED),
-        )
-        return otel_trace.set_span_in_context(NonRecordingSpan(parent), Context())
+        return otel_trace.set_span_in_context(_named_parent(trace_context), Context())
 
     def _start(
         self,
@@ -470,7 +258,7 @@ class OtelWriter:
         kind: SpanKind,
         trace_context: TraceContext | None,
         start_time: datetime | None,
-    ) -> _OtelSpan | None:
+    ) -> OtelSpan | None:
         """Start a span, or ``None`` when the trace context is invalid (logged and counted)."""
         try:
             parent = self._parent_context(trace_context)
@@ -480,8 +268,8 @@ class OtelWriter:
             return None
         tracer = self._ensure_built().tracer
         attributes = attr.kind_attributes(kind, name)
-        otel_span = tracer.start_span(name, context=parent, attributes=attributes, start_time=_ns(start_time))
-        return _OtelSpan(self, otel_span, kind)
+        otel_span = tracer.start_span(name, context=parent, attributes=attributes, start_time=to_ns(start_time))
+        return OtelSpan(self, otel_span, kind)
 
     # --- emit (fail-safe) -----------------------------------------------------
 
@@ -501,11 +289,11 @@ class OtelWriter:
         """Open a span and return its handle; ``end()`` records it (fail-safe)."""
         self._check_pid()
         if _DISABLED.get():
-            return _NOOP_SPAN
+            return NOOP_SPAN
         try:
             span = self._start(name=name, kind=kind, trace_context=trace_context, start_time=start_time)
             if span is None:
-                return _NOOP_SPAN
+                return NOOP_SPAN
             if input_ is not None:
                 span.set_input(input_)
             span.set_request_attributes(model, model_parameters)
@@ -515,7 +303,7 @@ class OtelWriter:
                 span.activate()
         except Exception as exc:
             self.record_failure("open_span", name, exc)
-            return _NOOP_SPAN
+            return NOOP_SPAN
         return span
 
     @contextmanager
@@ -524,20 +312,43 @@ class OtelWriter:
 
         The no-op span changes nothing; a span of another writer is counted as a record failure and changes nothing.
         """
-        if isinstance(span, _NoOpSpan):
+        if isinstance(span, NoOpSpan):
             yield
             return
-        if not isinstance(span, _OtelSpan) or span._writer is not self:
+        if not isinstance(span, OtelSpan) or span.writer is not self:
             self.record_failure("use_span", None, TypeError(f"not a span of this writer: {type(span).__qualname__}"))
             yield
             return
-        activation = otel_context.attach(otel_trace.set_span_in_context(span._otel))
-        handle_token = _ACTIVE_HANDLE.set(span)
+        activation = attach(span.otel_span, span)
         try:
             yield
         finally:
-            _ACTIVE_HANDLE.reset(handle_token)
-            otel_context.detach(activation)
+            unwind(activation)
+
+    @contextmanager
+    def use_trace_context(self, trace_context: TraceContext) -> Iterator[None]:
+        """Make the span ``trace_context`` names current for the block, the parent of spans started in it (fail-safe).
+
+        The named span is a remote one this writer never ends. A lineage that is already the live span changes
+        nothing, so the live span's handle stays the one ``update_current_span`` amends. A context that names no
+        valid span is counted as a record failure and changes nothing.
+        """
+        try:
+            parent = _named_parent(trace_context)
+        except ValueError as exc:
+            self.record_failure("use_trace_context", None, exc)
+            yield
+            return
+        live = live_current()[1].get_span_context()
+        named = parent.get_span_context()
+        if live.is_valid and (live.trace_id, live.span_id) == (named.trace_id, named.span_id):
+            yield
+            return
+        activation = attach(parent, None)
+        try:
+            yield
+        finally:
+            unwind(activation)
 
     @contextmanager
     def start_span(
@@ -616,7 +427,7 @@ class OtelWriter:
         span = self.open_span(
             name=name, kind=SpanKind.EVENT, trace_context=trace_context, input_=input_, metadata=metadata
         )
-        if not isinstance(span, _OtelSpan):
+        if not isinstance(span, OtelSpan):
             return None
         span.update(output=output, level=level, status_message=status_message)
         return span.record_id if span.finish(span.start_ns) else None
@@ -634,7 +445,7 @@ class OtelWriter:
         self._check_pid()
         if _DISABLED.get():
             return
-        handle, _ = _live_current()
+        handle, _ = live_current()
         if handle is None:
             return
         try:
@@ -663,7 +474,7 @@ class OtelWriter:
             session_id=session_id,
         )
         with pushed_frame(frame):
-            handle, _ = _live_current()
+            handle, _ = live_current()
             if handle is not None and not _DISABLED.get():
                 try:
                     handle.stamp_attribution()
@@ -675,13 +486,13 @@ class OtelWriter:
 
     def current_trace_id(self) -> str | None:
         """The current span's trace id (32 lower-hex), or ``None``."""
-        span_context = _live_current()[1].get_span_context()
-        return _hex_ids(span_context)[0] if span_context.is_valid else None
+        span_context = live_current()[1].get_span_context()
+        return hex_ids(span_context)[0] if span_context.is_valid else None
 
     def current_span_id(self) -> str | None:
         """The current span's id (16 lower-hex), or ``None``."""
-        span_context = _live_current()[1].get_span_context()
-        return _hex_ids(span_context)[1] if span_context.is_valid else None
+        span_context = live_current()[1].get_span_context()
+        return hex_ids(span_context)[1] if span_context.is_valid else None
 
     def is_recording(self) -> bool:
         """This writer records."""

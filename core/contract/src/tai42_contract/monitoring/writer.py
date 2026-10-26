@@ -100,7 +100,9 @@ class MonitoringWriter(Protocol):
         """Open a span (started at ``start_time``, else now) and return its handle; ``Span.end`` records it.
 
         ``activate=True`` makes the span the current span of the calling context until
-        ``end()`` restores the previous one (``end()`` must run in the same context).
+        ``end()``, or until a ``use_span`` / ``use_trace_context`` block it was activated in
+        is left; then the innermost activation still live in that context is current again,
+        whatever order spans end in (``end()`` must run in the same context).
         ``model`` / ``model_parameters`` carry generation-span detail. Under an active
         ``disable()`` block the handle is a no-op one.
         """
@@ -113,6 +115,17 @@ class MonitoringWriter(Protocol):
         and exit the block in the same context. A span that never opened (the no-op span of a disabled
         writer or a failed open) leaves the current span unchanged. A span this writer did not open is a
         record failure: it is logged and counted, and the current span is unchanged.
+        """
+        ...
+
+    def use_trace_context(self, trace_context: TraceContext) -> AbstractContextManager[None]:
+        """Make the span ``trace_context`` names the current span of the calling context for the block.
+
+        The named span is the parent of every span started in the block and the one ``current_trace_id`` /
+        ``current_span_id`` report; it is not this writer's to end, so ``update_current_span`` amends nothing
+        under it. When it already is the current span nothing changes. The span current before the block is
+        current again after it; enter and exit the block in the same context. A context naming no valid span
+        is a record failure: it is logged and counted, and the current span is unchanged.
         """
         ...
 

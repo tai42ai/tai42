@@ -6,7 +6,8 @@ from collections.abc import Iterator
 
 import pytest
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
-from tai42_contract.monitoring import SpanKind, TraceContext
+from tai42_contract.monitoring import MONITORING_PARENT_SPAN_ID_KEY, MONITORING_TRACE_ID_KEY, SpanKind, TraceContext
+from tai42_kit.monitoring import begin_run_trace
 from tai42_kit.monitoring.otel import OtelWriter
 
 from tai42_skeleton.monitoring import (
@@ -63,3 +64,19 @@ def test_with_no_live_span_it_is_none(writer: OtelWriter) -> None:
 
 def test_under_the_no_op_writer_it_is_none() -> None:
     assert current_trace_parent() is None
+
+
+def test_inside_a_run_under_a_lineage_its_config_names_it_is_that_lineage(writer: OtelWriter) -> None:
+    lineage = TraceContext(trace_id="1" * 32, parent_span_id="c" * 16)
+    config = {
+        "configurable": {
+            MONITORING_TRACE_ID_KEY: lineage.trace_id,
+            MONITORING_PARENT_SPAN_ID_KEY: lineage.parent_span_id,
+        }
+    }
+    root = begin_run_trace(config)
+    with root.step():
+        parent = current_trace_parent()
+    root.end()
+
+    assert parent == lineage

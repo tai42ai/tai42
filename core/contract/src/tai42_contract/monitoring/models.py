@@ -166,9 +166,9 @@ class Span(Protocol):
     def end(self, *, end_time: datetime | None = None) -> None:
         """End this span (at ``end_time``, else now) and record it.
 
-        A span opened with ``activate=True`` stops being the current span here and the
-        previous current span is restored. A span yielded by ``start_span`` is ended by its
-        context manager.
+        A span opened with ``activate=True`` stops being the current span here, and the
+        innermost activation still live in the calling context is current again. A span
+        yielded by ``start_span`` is ended by its context manager.
         """
         ...
 
