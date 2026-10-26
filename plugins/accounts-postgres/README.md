@@ -90,9 +90,9 @@ longer bespoke routes or a bespoke Studio page here: the provider **declares**
 those actions (`member_actions`) and performs them (`invoke_member_action`)
 through the platform's generic member-actions seam, which the Studio's own generic
 Members page renders. The provider also declares its display name (`display_name`,
-"Postgres"), which the Members page shows beside each of its page actions. The
-one-time invite link a new invite or a resend produces surfaces on that action's
-result.
+"Postgres"), which the Members page shows on each of its member and invitation
+rows and beside each of its page actions. The one-time invite link a new invite
+or a resend produces surfaces on that action's result.
 
 Logout is NOT here — the skeleton owns the single `POST /api/auth/logout`
 dispatcher; this plugin contributes `revoke_session`.

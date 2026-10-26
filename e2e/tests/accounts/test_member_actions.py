@@ -5,11 +5,13 @@ The catalog door renders every declared action's
 label to a plain string from the real provider's declarations; the invoke door's happy path mints
 a one-time invite link (surfaced only on the result) and its typed-error path maps a provider
 conflict to a 409; the accepted member's row carries the role each principal holds; both doors
-refuse a non-admin caller."""
+refuse a non-admin caller. Every directory row carries the same declared provider name as
+the catalog's actions."""
 
 from __future__ import annotations
 
 from collections.abc import Callable
+from typing import Any
 
 import pytest
 
@@ -21,6 +23,18 @@ pytestmark = pytest.mark.needs("kind:identity", "kind:accounts:postgres", "topol
 _PASSWORD = "member-actions-user-password-1"
 
 _SCOPES = {"page", "member_row", "invite_row"}
+
+
+def _assert_rows_carry_provider_name(directory: dict[str, Any], provider_name: str) -> None:
+    """Every member and invite row carries the owning provider's declared name.
+
+    One accounts provider owns every row here, so each row names the same provider the
+    catalog's actions name.
+    """
+    for row in [*directory["members"], *directory["invites"]]:
+        assert isinstance(row["provider_name"], str), row
+        assert row["provider_name"].strip(), row
+        assert row["provider_name"] == provider_name, (row, provider_name)
 
 
 async def test_catalog_renders_invoke_happy_and_error_and_admin_only(
@@ -46,7 +60,9 @@ async def test_catalog_renders_invoke_happy_and_error_and_admin_only(
         assert descriptor["provider_name"].strip(), descriptor
     # One accounts provider owns every action here, so every descriptor carries its one
     # declared name.
-    assert len({d["provider_name"] for d in actions}) == 1, actions
+    provider_names = {d["provider_name"] for d in actions}
+    assert len(provider_names) == 1, actions
+    (provider_name,) = provider_names
 
     catalog_keys = {d["key"] for d in actions}
     # The page-scoped action creates a new account; identify it by its generic scope,
@@ -68,6 +84,7 @@ async def test_catalog_renders_invoke_happy_and_error_and_admin_only(
     # The invited person surfaces in the directory as an invite row whose opaque tokens
     # join the catalog — the row carrier renders end to end without a 500.
     directory = await admin.get("/api/auth/members")
+    _assert_rows_carry_provider_name(directory, provider_name)
     invite_row = next((row for row in directory["invites"] if row["email"] == email), None)
     assert invite_row is not None, f"the invited email must appear as an invite row: {directory}"
     assert isinstance(invite_row["handle"], str), invite_row
@@ -89,6 +106,7 @@ async def test_catalog_renders_invoke_happy_and_error_and_admin_only(
     # The accepted person is a member row whose role the platform joins from each principal's
     # own policy record: the one principal holds the invited role, so the row's role is it too.
     directory = await admin.get("/api/auth/members")
+    _assert_rows_carry_provider_name(directory, provider_name)
     member_row = next((row for row in directory["members"] if row["email"] == email), None)
     assert member_row is not None, f"the accepted email must appear as a member row: {directory}"
     assert [principal["role"] for principal in member_row["principals"]] == ["editor"], member_row

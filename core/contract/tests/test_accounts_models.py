@@ -280,9 +280,18 @@ def test_roles_are_nullable_on_every_role_carrying_shape():
     principal = MemberPrincipalState(user_id="usr-1", disabled=False, role=None)
     invite = InviteEntry(id="usr-2", email="b@x.test", role=None, created_at=now, expires_at=now)
     row = MemberRow(
-        id="usr-1", email="a@x.test", role=None, created_at=now, principals=[principal], disabled=False, handle="h"
+        id="usr-1",
+        email="a@x.test",
+        role=None,
+        created_at=now,
+        principals=[principal],
+        disabled=False,
+        handle="h",
+        provider_name="Alpha",
     )
-    invite_row = InviteRow(id="usr-2", email="b@x.test", role=None, created_at=now, expires_at=now, handle="h")
+    invite_row = InviteRow(
+        id="usr-2", email="b@x.test", role=None, created_at=now, expires_at=now, handle="h", provider_name="Alpha"
+    )
     assert (principal.role, invite.role, row.role, invite_row.role) == (None, None, None, None)
     for model in (MemberPrincipalState, MemberRow, InviteRow, InviteEntry):
         assert model.model_json_schema()["properties"]["role"]["anyOf"][1] == {"type": "null"}
@@ -438,11 +447,28 @@ def test_member_row_carries_joined_principals_and_opaque_tokens():
         ],
         disabled=False,
         handle="opaque-handle",
+        provider_name="Alpha",
         action_keys=["k1", "k2"],
     )
     assert [(p.user_id, p.role) for p in row.principals] == [("usr-1", "editor"), ("usr-1b", "editor")]
     assert row.disabled is False
     assert row.handle == "opaque-handle"
+    assert row.provider_name == "Alpha"
+
+
+@pytest.mark.parametrize("missing_or_empty", [{}, {"provider_name": ""}])
+def test_member_row_requires_a_provider_name(missing_or_empty: dict[str, str]):
+    with pytest.raises(ValidationError):
+        MemberRow(
+            id="usr-1",
+            email="a@x.test",
+            role=None,
+            created_at=datetime.now(UTC),
+            principals=[],
+            disabled=False,
+            handle="h",
+            **missing_or_empty,  # pyright: ignore[reportArgumentType]
+        )
 
 
 def test_member_principal_state_carries_the_role_its_principal_holds():
@@ -459,10 +485,28 @@ def test_member_principal_state_requires_its_role():
 
 def test_invite_row_defaults_action_keys_and_directory_holds_rows():
     now = datetime.now(UTC)
-    invite = InviteRow(id="usr-2", email="b@x.test", role="viewer", created_at=now, expires_at=now, handle="h")
+    invite = InviteRow(
+        id="usr-2", email="b@x.test", role="viewer", created_at=now, expires_at=now, handle="h", provider_name="Alpha"
+    )
     assert invite.action_keys == []
+    assert invite.provider_name == "Alpha"
     directory = MemberDirectory(members=[], invites=[invite])
     assert [i.id for i in directory.invites] == ["usr-2"]
+
+
+@pytest.mark.parametrize("missing_or_empty", [{}, {"provider_name": ""}])
+def test_invite_row_requires_a_provider_name(missing_or_empty: dict[str, str]):
+    now = datetime.now(UTC)
+    with pytest.raises(ValidationError):
+        InviteRow(
+            id="usr-2",
+            email="b@x.test",
+            role=None,
+            created_at=now,
+            expires_at=now,
+            handle="h",
+            **missing_or_empty,  # pyright: ignore[reportArgumentType]
+        )
 
 
 def test_invoke_request_ignores_unknown_top_level_keys_and_defaults_input():

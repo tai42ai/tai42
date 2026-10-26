@@ -5,9 +5,9 @@ outstanding invitations into one deployment-wide view, so a generic Members
 screen can render without knowing which providers are installed. Each provider
 supplies its own :class:`~tai42_contract.accounts.models.MemberListing` through
 the contract seam; the aggregate wraps each entry into a wire row carrying the
-opaque routing tokens (handle + applicable action keys) and, for a member, each
-principal's access-control ``disabled`` state and the role it holds, JOINED from the
-platform's own records.
+owning provider's declared display name, the opaque routing tokens (handle +
+applicable action keys) and, for a member, each principal's access-control
+``disabled`` state and the role it holds, JOINED from the platform's own records.
 
 The operation fans out over the CURRENT epoch's live accounts-provider instances —
 the ones the epoch build eagerly instantiated and recorded — rather than
@@ -82,21 +82,30 @@ async def list_members() -> MemberDirectory:
     supplies its own members and invites; the aggregate wraps them into wire rows in provider
     name order, minting each row's opaque handle and action keys and joining each member
     principal's ``disabled`` state (the principal store, read once per call) and the role it
-    holds (one ``principal_roles`` read for every member principal). A member row's
-    ``disabled`` is derived True only when EVERY principal is disabled; its ``role`` is the
-    one role every principal holds, else ``None``. Provider errors propagate (loud, never a
-    silently empty listing).
+    holds (one ``principal_roles`` read for every member principal). The provider's declared
+    :meth:`~tai42_contract.accounts.provider.AccountsProvider.display_name` rides on every
+    member and invite row it owns. A member row's ``disabled`` is derived True only when
+    EVERY principal is disabled; its ``role`` is the one role every principal holds, else
+    ``None``. Provider errors propagate (loud, never a silently empty listing).
     """
     caller = await resolve_caller()
     require_admin(caller)
     disabled_by_principal = {row["user_id"]: row["disabled"] for row in await management.list_principals()}
-    listings = [(name, await provider.list_members()) for name, provider in _active_accounts_provider_items()]
+    listings = [
+        (name, provider.display_name(), await provider.list_members())
+        for name, provider in _active_accounts_provider_items()
+    ]
     role_by_principal = await roles.principal_roles(
-        [principal_id for _, listing in listings for entry in listing.members for principal_id in entry.principal_ids]
+        [
+            principal_id
+            for _, _, listing in listings
+            for entry in listing.members
+            for principal_id in entry.principal_ids
+        ]
     )
     members: list[MemberRow] = []
     invites: list[InviteRow] = []
-    for name, listing in listings:
+    for name, provider_name, listing in listings:
         for entry in listing.members:
             principals = [
                 _joined_principal(disabled_by_principal, role_by_principal, name, principal_id)
@@ -111,6 +120,7 @@ async def list_members() -> MemberDirectory:
                     principals=principals,
                     disabled=all(state.disabled for state in principals),
                     handle=_encode_handle(name, entry.id),
+                    provider_name=provider_name,
                     action_keys=[_encode_action_key(name, action_id) for action_id in entry.actions],
                 )
             )
@@ -122,6 +132,7 @@ async def list_members() -> MemberDirectory:
                 created_at=entry.created_at,
                 expires_at=entry.expires_at,
                 handle=_encode_handle(name, entry.id),
+                provider_name=provider_name,
                 action_keys=[_encode_action_key(name, action_id) for action_id in entry.actions],
             )
             for entry in listing.invites

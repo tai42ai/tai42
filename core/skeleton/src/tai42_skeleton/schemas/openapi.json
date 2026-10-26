@@ -7869,7 +7869,7 @@
       },
       "InviteRow": {
         "additionalProperties": false,
-        "description": "An invite row in the aggregated directory the Members door returns.\n\nDisplay fields plus the opaque routing tokens. An invitation holds no principal, so it\ncarries no principal state, and ``role`` is provider-sourced; ``None`` — the policy is\nnot written from a role template.",
+        "description": "An invite row in the aggregated directory the Members door returns.\n\nDisplay fields plus the opaque routing tokens. An invitation holds no principal, so it\ncarries no principal state, and ``role`` is provider-sourced; ``None`` — the policy is\nnot written from a role template. ``provider_name`` is the display name the owning\nprovider declares (never the platform's registry name) — the caller shows it on the\nrow so rows of different providers read apart.",
         "properties": {
           "action_keys": {
             "items": {
@@ -7903,6 +7903,11 @@
             "title": "Id",
             "type": "string"
           },
+          "provider_name": {
+            "minLength": 1,
+            "title": "Provider Name",
+            "type": "string"
+          },
           "role": {
             "anyOf": [
               {
@@ -7922,7 +7927,8 @@
           "role",
           "created_at",
           "expires_at",
-          "handle"
+          "handle",
+          "provider_name"
         ],
         "title": "InviteRow",
         "type": "object"
@@ -9184,7 +9190,7 @@
       },
       "MemberRow": {
         "additionalProperties": false,
-        "description": "A member row in the aggregated directory the Members door returns.\n\nDisplay fields plus the platform-joined principal state and opaque routing tokens.\n``handle`` routes an invoke back to the producing provider and pins this row;\n``action_keys`` are the opaque catalog keys of the actions applicable to it — a caller\njoins and echoes both, never parses them. ``principals`` carries each principal's\njoined state; ``disabled`` is derived True only when EVERY principal is disabled, so a\nperson with any enabled principal still reads active while the per-principal truth\nstays visible. ``role`` is derived too: the one name every principal holds, ``None``\nwhen there is no single name — every principal's policy was set directly, or the\nprincipals hold different roles; ``principals[].role`` carries each principal's own.",
+        "description": "A member row in the aggregated directory the Members door returns.\n\nDisplay fields plus the platform-joined principal state and opaque routing tokens.\n``handle`` routes an invoke back to the producing provider and pins this row;\n``action_keys`` are the opaque catalog keys of the actions applicable to it — a caller\njoins and echoes both, never parses them. ``principals`` carries each principal's\njoined state; ``disabled`` is derived True only when EVERY principal is disabled, so a\nperson with any enabled principal still reads active while the per-principal truth\nstays visible. ``role`` is derived too: the one name every principal holds, ``None``\nwhen there is no single name — every principal's policy was set directly, or the\nprincipals hold different roles; ``principals[].role`` carries each principal's own.\n``provider_name`` is the display name the owning provider declares (never the\nplatform's registry name) — the caller shows it on the row so rows of different\nproviders read apart.",
         "properties": {
           "action_keys": {
             "items": {
@@ -9224,6 +9230,11 @@
             "title": "Principals",
             "type": "array"
           },
+          "provider_name": {
+            "minLength": 1,
+            "title": "Provider Name",
+            "type": "string"
+          },
           "role": {
             "anyOf": [
               {
@@ -9244,7 +9255,8 @@
           "created_at",
           "principals",
           "disabled",
-          "handle"
+          "handle",
+          "provider_name"
         ],
         "title": "MemberRow",
         "type": "object"
@@ -22800,7 +22812,7 @@
     },
     "/api/auth/members": {
       "get": {
-        "description": "Aggregate every registered accounts provider's people and invitations (admin only).\n\nEach provider's :meth:`~tai42_contract.accounts.provider.AccountsProvider.list_members`\nsupplies its own members and invites; the aggregate wraps them into wire rows in provider\nname order, minting each row's opaque handle and action keys and joining each member\nprincipal's ``disabled`` state (the principal store, read once per call) and the role it\nholds (one ``principal_roles`` read for every member principal). A member row's\n``disabled`` is derived True only when EVERY principal is disabled; its ``role`` is the\none role every principal holds, else ``None``. Provider errors propagate (loud, never a\nsilently empty listing).",
+        "description": "Aggregate every registered accounts provider's people and invitations (admin only).\n\nEach provider's :meth:`~tai42_contract.accounts.provider.AccountsProvider.list_members`\nsupplies its own members and invites; the aggregate wraps them into wire rows in provider\nname order, minting each row's opaque handle and action keys and joining each member\nprincipal's ``disabled`` state (the principal store, read once per call) and the role it\nholds (one ``principal_roles`` read for every member principal). The provider's declared\n:meth:`~tai42_contract.accounts.provider.AccountsProvider.display_name` rides on every\nmember and invite row it owns. A member row's ``disabled`` is derived True only when\nEVERY principal is disabled; its ``role`` is the one role every principal holds, else\n``None``. Provider errors propagate (loud, never a silently empty listing).",
         "operationId": "get_api_auth_members",
         "responses": {
           "200": {

@@ -321,6 +321,9 @@ class MemberRow(BaseModel):
     stays visible. ``role`` is derived too: the one name every principal holds, ``None``
     when there is no single name — every principal's policy was set directly, or the
     principals hold different roles; ``principals[].role`` carries each principal's own.
+    ``provider_name`` is the display name the owning provider declares (never the
+    platform's registry name) — the caller shows it on the row so rows of different
+    providers read apart.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -332,6 +335,7 @@ class MemberRow(BaseModel):
     principals: list[MemberPrincipalState]
     disabled: bool
     handle: str = Field(min_length=1)
+    provider_name: str = Field(min_length=1)
     action_keys: list[str] = Field(default_factory=list)
 
 
@@ -340,7 +344,9 @@ class InviteRow(BaseModel):
 
     Display fields plus the opaque routing tokens. An invitation holds no principal, so it
     carries no principal state, and ``role`` is provider-sourced; ``None`` — the policy is
-    not written from a role template.
+    not written from a role template. ``provider_name`` is the display name the owning
+    provider declares (never the platform's registry name) — the caller shows it on the
+    row so rows of different providers read apart.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -351,6 +357,7 @@ class InviteRow(BaseModel):
     created_at: datetime
     expires_at: datetime
     handle: str = Field(min_length=1)
+    provider_name: str = Field(min_length=1)
     action_keys: list[str] = Field(default_factory=list)
 
 
