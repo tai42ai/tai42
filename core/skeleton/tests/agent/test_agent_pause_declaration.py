@@ -35,7 +35,7 @@ def _manifest() -> Manifest:
             "tools": [
                 {
                     "title": "fxt",
-                    "module": "tests.app._fixtures.tools_b",
+                    "module": "tests.app._fixtures.extended_tools",
                     "include": ["shout"],
                     "extensions": {"parking_kind": [["loud"]]},
                 }

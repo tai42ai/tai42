@@ -14,7 +14,7 @@ from __future__ import annotations
 from tai42_skeleton.app.mount_map import package_mounts
 from tai42_skeleton.app.route_registry import route_registry
 from tai42_skeleton.operations import OperationFailedError, operation
-from tai42_skeleton.operations.response_models_group_c import StudioPluginListing
+from tai42_skeleton.operations.response_models.plugins import StudioPluginListing
 from tai42_skeleton.plugins.registry import StudioPluginError, current_registry
 
 

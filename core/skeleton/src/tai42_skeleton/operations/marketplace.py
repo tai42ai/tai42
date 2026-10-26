@@ -100,15 +100,15 @@ from tai42_skeleton.operations import (
     operation,
 )
 from tai42_skeleton.operations._broadcast import apply_response, translate_orphan_env_write, writer_exit_response
-from tai42_skeleton.operations.response_models_group_a import (
+from tai42_skeleton.operations.response_models.marketplace import (
     AdvisorySnapshot,
     InstalledInventory,
     InstallPreview,
     InstallResult,
-    StringList,
     UninstallResult,
     UpgradeAllResult,
 )
+from tai42_skeleton.operations.response_models.shared import StringList
 
 logger = logging.getLogger(__name__)
 

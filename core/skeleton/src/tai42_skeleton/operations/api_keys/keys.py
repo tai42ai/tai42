@@ -20,7 +20,7 @@ from tai42_skeleton.operations import (
     operation,
 )
 from tai42_skeleton.operations._authority import owner_of, require_owned_by_caller
-from tai42_skeleton.operations.response_models_group_a import (
+from tai42_skeleton.operations.response_models.api_keys import (
     ApiKeyCreateResult,
     ClaimLinkResult,
     RevokeAck,

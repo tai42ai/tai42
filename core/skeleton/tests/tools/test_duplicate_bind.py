@@ -58,7 +58,7 @@ def test_duplicate_agent_name_bind_raises():
         {
             "agents": [
                 {"title": "a1", "module": "tests.agent._fixtures", "include": ["echo_fields"]},
-                {"title": "a2", "module": "tests.agent._fixtures2", "include": ["echo_fields"]},
+                {"title": "a2", "module": "tests.agent._name_collision_fixtures", "include": ["echo_fields"]},
             ]
         }
     )

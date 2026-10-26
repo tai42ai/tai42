@@ -17,8 +17,9 @@ from tai42_skeleton.operations.holders import bound_branches, delete_holders, ho
 from tai42_skeleton.operations.presets.models import PresetRefereesQuery
 from tai42_skeleton.operations.presets.views import _store_record_view
 from tai42_skeleton.operations.reference_graph import StoredPresets, _reference_maps
-from tai42_skeleton.operations.response_models_group_a import DocumentVersionList, HoldersPreview
-from tai42_skeleton.operations.response_models_group_presets import PresetDetailView, PresetRecordList
+from tai42_skeleton.operations.response_models.holders import HoldersPreview
+from tai42_skeleton.operations.response_models.presets import PresetDetailView, PresetRecordList
+from tai42_skeleton.operations.response_models.shared import DocumentVersionList
 from tai42_skeleton.presets.secret_refs import mask_all_baked_secrets, redact_baked_secrets
 from tai42_skeleton.tools.binding.errors import UnknownToolError
 

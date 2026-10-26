@@ -30,7 +30,7 @@ from tai42_skeleton.app.bus import ops as fleet_ops
 from tai42_skeleton.app.reload_gate import reload_gate
 from tai42_skeleton.operations import BadRequestError, operation
 from tai42_skeleton.operations._broadcast import awaiting_respawn_after, broadcast, log_awaiting_respawn
-from tai42_skeleton.operations.response_models_group_c import BackendInfo
+from tai42_skeleton.operations.response_models.backend import BackendInfo
 
 
 class ReloadConfig(BaseModel):

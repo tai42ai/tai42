@@ -45,7 +45,7 @@ if not os.path.basename(os.environ.get("PROMETHEUS_MULTIPROC_DIR", "")).startswi
     atexit.register(shutil.rmtree, os.environ["PROMETHEUS_MULTIPROC_DIR"], ignore_errors=True)
 
 # The manifest-driven suites name fixture packages by dotted path
-# (``tests.fixtures.dummy_agent``, ``tests.app._fixtures.tools_b``) that the app's
+# (``tests.fixtures.dummy_agent``, ``tests.app._fixtures.extended_tools``) that the app's
 # own importer resolves through ``importlib`` and, on reload, pops from
 # ``sys.modules`` to re-import. Under ``--import-mode=importlib`` pytest never puts
 # the package root on ``sys.path``, so a popped ``tests.*`` module would be

@@ -1,24 +1,13 @@
 """Response models for the states operations.
 
-Cover ``/api/states*``, ``/api/state-templates*``, ``/api/state-retention/prune`` and
-``/api/state-pending-saves*``.
-
-Each model DESCRIBES the inner payload a states operation returns — the shape the
-route adapter wraps in the ``{"data": ...}`` success envelope — and never re-declares the
-envelope or reshapes a wire body. The persisted wire shapes (``StateDeclaration``,
-``StateTemplateDocument``, ``StateRecord``, ``ApplyResult``, ``WritesPage``, ``ConsumerRow``,
-``StateSubject``) live in :mod:`tai42_contract.states` and are imported and reused (or
-extended) here, never re-authored. A genuinely-open JSON-Schema fragment (a state's base
-or effective schema, an attachment's resolved parameters/declarations, a composed regime
-rule) is typed ``JsonValue`` — it is arbitrary per-deployment JSON, not a fixed platform
-shape. Bare-list bodies are NAMED ``RootModel`` subclasses so the offline emitter registers
-each under a stable, unique ``__name__``.
+Cover ``/api/states*``, ``/api/state-templates*`` and ``/api/state-retention/prune``. The persisted
+wire shapes (``StateDeclaration``, ``StateTemplateDocument``, ``StateRecord``, ``ConsumerRow``,
+``StateSubject``, ``HeldPendingSave``) live in :mod:`tai42_contract.states` and are imported and
+reused (or extended) here, never re-authored. A state's base or effective schema, an attachment's
+resolved parameters/declarations and a composed regime rule are typed ``JsonValue``.
 """
 
 from __future__ import annotations
-
-from datetime import datetime
-from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, RootModel
 from tai42_contract.states import (
@@ -31,10 +20,6 @@ from tai42_contract.states import (
 )
 
 from tai42_skeleton.states.service.records import FoldMode
-
-# --------------------------------------------------------------------------- #
-# Declarations                                                                 #
-# --------------------------------------------------------------------------- #
 
 
 class HeldPendingSaveList(RootModel[list[HeldPendingSave]]):
@@ -121,11 +106,6 @@ class StateDeclarationPutResponse(StateDeclaration):
     held: HeldPendingSaveList = Field(default_factory=lambda: HeldPendingSaveList([]))
 
 
-# --------------------------------------------------------------------------- #
-# Attachments                                                                  #
-# --------------------------------------------------------------------------- #
-
-
 class StateAttachmentRow(StateAttachmentView):
     """One attachment as the ``list_state_attachments`` listing carries it.
 
@@ -168,11 +148,6 @@ class DetachAck(BaseModel):
     detached: bool
     state: str
     template: str
-
-
-# --------------------------------------------------------------------------- #
-# Subjects + records                                                           #
-# --------------------------------------------------------------------------- #
 
 
 class StateSubjectEntry(BaseModel):
@@ -258,11 +233,6 @@ class StateConsumerList(RootModel[list[ConsumerRow]]):
     """
 
 
-# --------------------------------------------------------------------------- #
-# Templates (the sibling collection) + retention                              #
-# --------------------------------------------------------------------------- #
-
-
 class StateTemplateCatalogEntry(StateTemplateDocument):
     """One state-template document in the catalog listing.
 
@@ -287,74 +257,3 @@ class PruneResult(BaseModel):
 
     pruned: dict[str, int]
     held: HeldPendingSaveList = Field(default_factory=lambda: HeldPendingSaveList([]))
-
-
-# --------------------------------------------------------------------------- #
-# Pending saves                                                                #
-# --------------------------------------------------------------------------- #
-
-
-class StatePendingSaveSubject(BaseModel):
-    """One subject a pending save writes, under its ``state``."""
-
-    state: str
-    subject: StateSubject
-
-
-class StatePendingSaveCall(BaseModel):
-    """One call a pending save runs after its records apply: its call ``kind`` and what it calls."""
-
-    kind: str
-    target: str
-
-
-class StatePendingSave(BaseModel):
-    """One outstanding pending state save, without its record data or call arguments.
-
-    ``status`` is ``pending`` (records not yet applied), ``calls`` (records applied, calls queued),
-    ``running`` (a call is running) or ``failed`` (held until an operator retries or discards it;
-    ``failed_phase`` says which part failed).
-    """
-
-    id: str
-    status: Literal["pending", "calls", "running", "failed"]
-    run_id: str | None
-    states: list[str]
-    subjects: list[StatePendingSaveSubject]
-    calls: list[StatePendingSaveCall]
-    attempts: int
-    last_error: str | None
-    failed_phase: Literal["records", "calls"] | None
-    created_at: datetime
-    failed_at: datetime | None
-
-
-class StatePendingSavesPage(BaseModel):
-    """One page of pending saves, newest first, with the totals of every outstanding and every failed save.
-
-    ``next_cursor`` is the cursor the next page reads from, ``null`` on the last page.
-    """
-
-    items: list[StatePendingSave]
-    next_cursor: str | None
-    outstanding: int
-    failed: int
-
-
-class StatePendingSaveRetried(BaseModel):
-    """A retried pending save's state after its records phase.
-
-    ``applied`` — it landed whole and is gone; ``pending`` — it waits behind an older save or a
-    contended subject; ``calls`` / ``running`` — its records applied and its calls are queued or
-    running; ``failed`` — it failed again (``last_error`` says why).
-    """
-
-    id: str
-    status: Literal["applied", "pending", "calls", "running", "failed"]
-    last_error: str | None
-
-
-class StatePendingSaveDiscarded(BaseModel):
-    """A discarded pending save's id."""
-
-    discarded: str

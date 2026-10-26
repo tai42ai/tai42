@@ -1,5 +1,5 @@
 """Fixture extensions exercising apply-site kind enforcement against the base
-tool ``shout(text: str)`` in :mod:`tests.app._fixtures.tools_b`.
+tool ``shout(text: str)`` in :mod:`tests.app._fixtures.extended_tools`.
 
 Covers every branch of ``ToolBinding._enforce_extension_schema``: wrapper
 schema-transparency (with ``reserved_params``), transformer concrete-signature

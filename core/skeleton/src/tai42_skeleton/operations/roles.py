@@ -37,7 +37,7 @@ from tai42_skeleton.access_control.store import access_control_store
 from tai42_skeleton.operations._authority import require_admin, resolve_caller
 from tai42_skeleton.operations.decorator import operation
 from tai42_skeleton.operations.errors import BadRequestError, ConflictError, ForbiddenError, NotFoundError
-from tai42_skeleton.operations.response_models_group_b import RoleDeleted, RoleVersionsView
+from tai42_skeleton.operations.response_models.roles import RoleDeleted, RoleVersionsView
 from tai42_skeleton.template.references import assert_templates_stored
 from tai42_skeleton.template.stored_refs import condition_template_refs
 

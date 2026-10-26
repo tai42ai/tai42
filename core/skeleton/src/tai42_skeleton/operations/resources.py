@@ -21,7 +21,7 @@ from tai42_contract.app import tai42_app
 from tai42_contract.template import TemplatedText
 
 from tai42_skeleton.operations import BadRequestError, NotFoundError, NotSupportedError, operation
-from tai42_skeleton.operations.response_models_group_c import ResourceContent
+from tai42_skeleton.operations.response_models.resources import ResourceContent
 from tai42_skeleton.template import ContentNotLoadableError, TemplateNotFoundError
 from tai42_skeleton.template.media import MediaBlock
 from tai42_skeleton.template.path_guard import UnsafeTemplatePathError

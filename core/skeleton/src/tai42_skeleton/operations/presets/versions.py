@@ -46,7 +46,7 @@ from tai42_skeleton.operations.reference_graph import (
     base_reference,
     body_head_references,
 )
-from tai42_skeleton.operations.response_models_group_presets import (
+from tai42_skeleton.operations.response_models.presets import (
     PresetRollbackResult,
     PresetVersionSaveResult,
     PresetVersionTagsResult,

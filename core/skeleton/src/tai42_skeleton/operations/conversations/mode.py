@@ -11,7 +11,7 @@ from tai42_contract.conversations import CONVERSATION_MODES
 
 from tai42_skeleton.operations import BadRequestError, NotFoundError, operation
 from tai42_skeleton.operations.errors import NotSupportedError
-from tai42_skeleton.operations.response_models_group_a import ThreadModeSetResult, ThreadModeView
+from tai42_skeleton.operations.response_models.conversations import ThreadModeSetResult, ThreadModeView
 
 from .backend import _require_backend, _require_route
 from .models import ThreadModeSet

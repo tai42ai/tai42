@@ -81,7 +81,7 @@ def test_a_new_mcp_entry_is_refused_on_a_base_not_bound(live_store: LiveStore) -
 def test_a_new_tools_entry_is_refused_on_a_base_not_bound(live_store: LiveStore) -> None:
     entry = {
         "title": "b",
-        "module": "tests.app._fixtures.tools_b",
+        "module": "tests.app._fixtures.extended_tools",
         "include": ["echo"],
         "extensions": {"fetch": [[{"name": "labelled", "config": {}}]]},
     }

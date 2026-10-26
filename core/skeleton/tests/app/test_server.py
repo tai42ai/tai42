@@ -678,7 +678,7 @@ def test_started_app_tool_extension_agent_and_client_tools():
             "tools": [
                 {
                     "title": "fxt",
-                    "module": "tests.app._fixtures.tools_b",
+                    "module": "tests.app._fixtures.extended_tools",
                     "include": ["shout"],
                     "extensions": {"shout": [["loud"]]},
                 },
@@ -727,7 +727,7 @@ def test_stacked_extensions_compose_descriptions():
             "tools": [
                 {
                     "title": "fxt",
-                    "module": "tests.app._fixtures.tools_b",
+                    "module": "tests.app._fixtures.extended_tools",
                     "include": ["shout"],
                     "extensions": {"shout": [["first", "second"]]},
                 },
@@ -803,7 +803,7 @@ def test_extension_returning_same_name_is_rejected():
             "tools": [
                 {
                     "title": "fxt",
-                    "module": "tests.app._fixtures.tools_b",
+                    "module": "tests.app._fixtures.extended_tools",
                     "include": ["shout"],
                     "extensions": {"shout": [["samename"]]},
                 }

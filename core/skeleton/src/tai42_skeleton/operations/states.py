@@ -67,8 +67,8 @@ from tai42_skeleton.operations import (
     operation,
 )
 from tai42_skeleton.operations.holders import detach_holders, holders_preview, holders_refusal
-from tai42_skeleton.operations.response_models_group_a import HoldersPreview
-from tai42_skeleton.operations.response_models_group_states import (
+from tai42_skeleton.operations.response_models.holders import HoldersPreview
+from tai42_skeleton.operations.response_models.states import (
     AttachAck,
     AttachUpdateAck,
     DetachAck,

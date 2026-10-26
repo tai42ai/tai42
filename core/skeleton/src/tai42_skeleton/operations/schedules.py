@@ -103,7 +103,7 @@ from tai42_skeleton.operations._submitted_tool_authz import authorize_submitted_
 from tai42_skeleton.operations.definition_door import definition_door
 from tai42_skeleton.operations.reference_check import RegistryReference, reference_refusal
 from tai42_skeleton.operations.reference_graph import assert_blob_references_resolve
-from tai42_skeleton.operations.response_models_group_b import ScheduleListResponse
+from tai42_skeleton.operations.response_models.schedules import ScheduleListResponse
 from tai42_skeleton.schedules import check_schedule_definition
 from tai42_skeleton.tools.binding import UnknownToolError
 from tai42_skeleton.tools.time import server_time

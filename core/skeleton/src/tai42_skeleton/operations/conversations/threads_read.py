@@ -17,7 +17,7 @@ from tai42_skeleton.operations import BadRequestError, NotFoundError, operation
 from tai42_skeleton.operations._authority import Caller, require_admin
 from tai42_skeleton.operations._paging import next_page, page_bounds
 from tai42_skeleton.operations.errors import ForbiddenError, NotSupportedError
-from tai42_skeleton.operations.response_models_group_a import (
+from tai42_skeleton.operations.response_models.conversations import (
     FailedConversationsEnvelope,
     MessageSearchEnvelope,
     ThreadSummaryEnvelope,

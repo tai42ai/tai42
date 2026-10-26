@@ -59,7 +59,7 @@ from tai42_skeleton.operations import (
     operation,
 )
 from tai42_skeleton.operations._paging import next_page, page_bounds
-from tai42_skeleton.operations.response_models_group_c import (
+from tai42_skeleton.operations.response_models.interactions import (
     InteractionActionResult,
     InteractionWindow,
     PendingInteractionListing,

@@ -19,7 +19,7 @@ from tai42_contract.agent import Agent
 
 from tai42_skeleton.app import instance
 from tai42_skeleton.operations import operation
-from tai42_skeleton.operations.response_models_group_c import AgentListing
+from tai42_skeleton.operations.response_models.agents import AgentListing
 
 
 def _agents_registry() -> dict[str, Agent]:

@@ -25,7 +25,7 @@ from tai42_skeleton.conversations.thread_ids import (
 )
 from tai42_skeleton.operations import BadRequestError, NotFoundError, operation
 from tai42_skeleton.operations.errors import ConflictError, NotSupportedError
-from tai42_skeleton.operations.response_models_group_a import PersonDeleteResult, ThreadDeleteResult
+from tai42_skeleton.operations.response_models.conversations import PersonDeleteResult, ThreadDeleteResult
 from tai42_skeleton.states import states_store_configured
 
 from .backend import _require_backend, _thread_not_found

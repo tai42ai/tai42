@@ -23,7 +23,7 @@ from tai42_skeleton.marketplace.compat import CorePluginBootError
 from tai42_skeleton.tools.binding.surface import remove_surface_tool
 from tai42_skeleton.tools.registry import ToolRegistry
 
-_TOOLS_B = "tests.app._fixtures.tools_b"
+_EXTENDED_TOOLS = "tests.app._fixtures.extended_tools"
 _EXT_MOD = "tests.app._fixtures.ext_mod"  # registers the WRAPPER ``loud``
 _EXT_KINDS = "tests.app._fixtures.ext_kinds"  # marka/markb wrappers, backendx/backendy
 
@@ -51,7 +51,7 @@ def _tools_manifest(
         {
             "extensions_modules": [ext_module],
             "tools": [
-                {"title": "fxt", "module": _TOOLS_B, "include": include, "extensions": extensions},
+                {"title": "fxt", "module": _EXTENDED_TOOLS, "include": include, "extensions": extensions},
             ],
         }
     )
@@ -186,7 +186,7 @@ def test_multiple_combos_bind_independent_and_stacked_branches():
             "tools": [
                 {
                     "title": "fxt",
-                    "module": _TOOLS_B,
+                    "module": _EXTENDED_TOOLS,
                     "include": ["shout"],
                     "extensions": {"shout": [["marka"], ["marka", "markb"]]},
                 }
@@ -214,7 +214,7 @@ def test_two_backends_in_one_combo_rejected():
             "tools": [
                 {
                     "title": "fxt",
-                    "module": _TOOLS_B,
+                    "module": _EXTENDED_TOOLS,
                     "include": ["shout"],
                     "extensions": {"shout": [["backendx", "backendy"]]},
                 }
@@ -245,7 +245,7 @@ def test_locality_wrapper_outside_relocating_backend_rejected():
             "tools": [
                 {
                     "title": "fxt",
-                    "module": _TOOLS_B,
+                    "module": _EXTENDED_TOOLS,
                     "include": ["shout"],
                     "extensions": {"shout": [["backendx", "localwrap"]]},
                 }
@@ -275,7 +275,7 @@ def test_locality_wrapper_inside_relocating_backend_binds():
             "tools": [
                 {
                     "title": "fxt",
-                    "module": _TOOLS_B,
+                    "module": _EXTENDED_TOOLS,
                     "include": ["shout"],
                     "extensions": {"shout": [["localwrap", "backendx"]]},
                 }

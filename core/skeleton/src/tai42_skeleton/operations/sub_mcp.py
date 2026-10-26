@@ -31,7 +31,7 @@ from tai42_skeleton.app.sub_mcp_app import (
     validate_registration,
 )
 from tai42_skeleton.operations import BadRequestError, NotFoundError, operation
-from tai42_skeleton.operations.response_models_group_c import (
+from tai42_skeleton.operations.response_models.sub_mcp import (
     SubMcpMapListing,
     SubMcpRegistrationResult,
     SubMcpRemovalResult,

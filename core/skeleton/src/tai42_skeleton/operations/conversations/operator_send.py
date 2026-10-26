@@ -26,7 +26,7 @@ from tai42_skeleton.conversations.thread_ids import (
 )
 from tai42_skeleton.operations import BadRequestError, NotFoundError, operation
 from tai42_skeleton.operations.errors import NotSupportedError, OperationFailedError
-from tai42_skeleton.operations.response_models_group_a import ThreadMessageAck
+from tai42_skeleton.operations.response_models.conversations import ThreadMessageAck
 
 from .backend import _require_backend, _require_route, _thread_not_found
 from .models import _OPTIONS_ADAPTER, _SECTIONS_ADAPTER, ThreadMessageSend

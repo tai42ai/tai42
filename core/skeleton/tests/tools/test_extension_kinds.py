@@ -7,7 +7,7 @@ imported at start — a violation aborts boot through the shared abort seam
 (a manifest-declared module that cannot load), so each rejection case asserts
 the ``CorePluginBootError``. Fixtures live in :mod:`tests.app._fixtures.ext_kinds` and
 extend the base tool ``shout(text: str)`` in
-:mod:`tests.app._fixtures.tools_b`.
+:mod:`tests.app._fixtures.extended_tools`.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.marketplace.compat import CorePluginBootError
 from tai42_skeleton.tools.binding.surface import remove_surface_tool
 
-_TOOLS_B = "tests.app._fixtures.tools_b"
+_EXTENDED_TOOLS = "tests.app._fixtures.extended_tools"
 
 
 @pytest.fixture(autouse=True)
@@ -51,7 +51,7 @@ def _manifest(tool: str, *extensions: str) -> Manifest:
             "tools": [
                 {
                     "title": "fxt",
-                    "module": "tests.app._fixtures.tools_b",
+                    "module": "tests.app._fixtures.extended_tools",
                     "include": [tool],
                     "extensions": {tool: [list(extensions)]},
                 }

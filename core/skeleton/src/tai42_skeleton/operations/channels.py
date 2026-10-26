@@ -12,7 +12,7 @@ from tai42_contract.app import tai42_app
 
 from tai42_skeleton.channels.registry import declared_identity_hint
 from tai42_skeleton.operations import operation
-from tai42_skeleton.operations.response_models_group_c import ChannelListing
+from tai42_skeleton.operations.response_models.channels import ChannelListing
 
 
 @operation(summary="List registered channels", tags=["channels"], response_model=ChannelListing)

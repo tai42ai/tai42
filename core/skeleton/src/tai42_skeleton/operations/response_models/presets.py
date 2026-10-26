@@ -1,14 +1,8 @@
 """Response models for the presets operations.
 
 Cover ``/api/presets*``: the preset record rows and detail, the create / rename / delete results,
-the version save / rollback / tag results and the draft validation verdict.
-
-Each model DESCRIBES the inner payload a presets operation returns; the route adapter wraps that
-payload in the ``{"data": ...}`` success envelope, so nothing here re-declares the envelope. The
-bare-list body is a NAMED ``RootModel`` subclass so the offline emitter registers it under a
-stable, unique ``__name__``. Shared cross-seam models (``FanoutSummary``) live in
-:mod:`tai42_contract.app.responses` and existing record models (``DocumentVersion``) are imported,
-never redefined here.
+the version save / rollback / tag results and the draft validation verdict. Existing record
+models (``DocumentVersion``) are imported and extended, never redefined here.
 """
 
 from __future__ import annotations

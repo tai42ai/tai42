@@ -40,10 +40,10 @@ from tai42_skeleton.operations import (
     operation,
 )
 from tai42_skeleton.operations._broadcast import broadcast, fleet_fanout
-from tai42_skeleton.operations.response_models_group_b import (
+from tai42_skeleton.operations.response_models.shared import StringListResponse
+from tai42_skeleton.operations.response_models.templates import (
     CacheClearResult,
     RenderedTemplate,
-    StringListResponse,
     TemplateDeleteResult,
     TemplateEntry,
     TemplateUploadResult,

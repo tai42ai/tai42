@@ -21,7 +21,7 @@ from tai42_skeleton.app import instance
 from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.operations import BadRequestError
 from tai42_skeleton.operations import tool_extensions as ops
-from tai42_skeleton.operations.response_models_group_b import ToolExtensionCombosModified, ToolExtensionsView
+from tai42_skeleton.operations.response_models.tool_extensions import ToolExtensionCombosModified, ToolExtensionsView
 
 from .._fakes.bus import FakeBus
 from .._fakes.combo_check_app import CHECK_DOCUMENT, LiveStore, booted_check_app, clean_server, live_store

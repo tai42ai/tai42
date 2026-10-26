@@ -37,7 +37,7 @@ from tai42_skeleton.operations._broadcast import (
     writer_exit_response,
     writer_self_exit_armed,
 )
-from tai42_skeleton.operations.response_models_group_c import BackupImportResult, BackupSectionListing
+from tai42_skeleton.operations.response_models.backup import BackupImportResult, BackupSectionListing
 
 logger = logging.getLogger(__name__)
 

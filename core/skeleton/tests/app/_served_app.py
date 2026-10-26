@@ -52,7 +52,7 @@ ADMIN_KEY = "admin-raw-key"
 VIEWER_KEY = "viewer-raw-key"
 
 # The tool every served manifest registers, so a session has something to list.
-TOOL_MANIFEST_ENTRY = {"title": "fxt", "module": "tests.app._fixtures.tools_a", "include": ["greet"]}
+TOOL_MANIFEST_ENTRY = {"title": "fxt", "module": "tests.app._fixtures.plain_tools", "include": ["greet"]}
 TOOL_NAME = "greet"
 
 # Every test request runs under this bound: a guard that is missing lets a GET open a

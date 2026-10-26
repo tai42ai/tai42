@@ -64,7 +64,7 @@ from tai42_skeleton.connectors.store.persistence import load_record_or_none
 from tai42_skeleton.connectors.store.reencrypt import reencrypt_connection_tokens
 from tai42_skeleton.db import SKELETON_COMPONENT, not_configured_message
 from tai42_skeleton.operations import BadRequestError, ConflictError, NotFoundError, NotSupportedError, operation
-from tai42_skeleton.operations.response_models_group_b import ConnectorReencryptResult, StartConnectOutcome
+from tai42_skeleton.operations.response_models.connectors import ConnectorReencryptResult, StartConnectOutcome
 
 logger = logging.getLogger(__name__)
 

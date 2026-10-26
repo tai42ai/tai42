@@ -7,12 +7,7 @@ from typing import Any
 import tai42_skeleton.operations.api_keys as _pkg
 from tai42_skeleton.access_control import management
 from tai42_skeleton.operations import BadRequestError, NotFoundError, NotSupportedError, operation
-from tai42_skeleton.operations.response_models_group_a import (
-    ScopeDeleteResult,
-    ScopeUrlAck,
-    ScopeUrlMap,
-    UrlAck,
-)
+from tai42_skeleton.operations.response_models.api_keys import ScopeDeleteResult, ScopeUrlAck, ScopeUrlMap, UrlAck
 
 from .models import _DISABLED_CODE, _DISABLED_MESSAGE, ScopeUrlAdd, ScopeUrlRemove
 

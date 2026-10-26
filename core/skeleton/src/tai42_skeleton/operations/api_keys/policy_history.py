@@ -18,7 +18,8 @@ from tai42_skeleton.operations import (
     operation,
 )
 from tai42_skeleton.operations._authority import require_admin
-from tai42_skeleton.operations.response_models_group_a import DocumentVersionList, PolicyRollbackResult
+from tai42_skeleton.operations.response_models.api_keys import PolicyRollbackResult
+from tai42_skeleton.operations.response_models.shared import DocumentVersionList
 
 from .models import _DISABLED_CODE, _DISABLED_MESSAGE, PolicyRollback
 

@@ -150,7 +150,7 @@ def _clean_server() -> Iterator[None]:
     asyncio.run(_clear())
 
 
-def _manifest(tool: str, *extensions: str, tool_module: str = "tests.app._fixtures.tools_b") -> Manifest:
+def _manifest(tool: str, *extensions: str, tool_module: str = "tests.app._fixtures.extended_tools") -> Manifest:
     # ``include`` selects the tool; the ``extensions`` map attaches the combo
     # formed by ``extensions`` — no colon parsing.
     return Manifest.model_validate(

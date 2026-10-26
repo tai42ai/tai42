@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from tai42_skeleton.app.kind_status import collect_kind_status
 from tai42_skeleton.operations import operation
-from tai42_skeleton.operations.response_models_group_c import SystemKindsListing
+from tai42_skeleton.operations.response_models.system_kinds import SystemKindsListing
 
 
 @operation(summary="List pluggable-kind status", tags=["system"], response_model=SystemKindsListing)

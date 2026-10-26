@@ -64,7 +64,7 @@ def _manifest() -> Manifest:
     return Manifest.model_validate(
         {
             "api_tools": {"enabled": True},
-            "tools": [{"title": "fxt", "module": "tests.app._fixtures.tools_b", "include": ["shout"]}],
+            "tools": [{"title": "fxt", "module": "tests.app._fixtures.extended_tools", "include": ["shout"]}],
             "routers_modules": [_PROBE_ROUTER, "tai42_skeleton.routers.agents"],
             "default_routers": "none",
         }

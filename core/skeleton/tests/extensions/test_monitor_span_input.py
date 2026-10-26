@@ -55,7 +55,7 @@ def test_an_agent_run_tools_monitor_branch_records_only_the_supplied_arguments(m
             "tools": [
                 {
                     "title": "fxt",
-                    "module": "tests.app._fixtures.tools_b",
+                    "module": "tests.app._fixtures.extended_tools",
                     "include": ["shout"],
                     "extensions": {"echo_fields": [["monitor"]]},
                 }

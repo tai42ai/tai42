@@ -27,7 +27,7 @@ from tai42_skeleton.operations import BadRequestError, NotFoundError, operation
 from tai42_skeleton.operations.definition_door import definition_door
 from tai42_skeleton.operations.errors import ForbiddenError, NotSupportedError, ValidationRejectedError
 from tai42_skeleton.operations.reference_check import RegistryReference, assert_references_resolve
-from tai42_skeleton.operations.response_models_group_a import (
+from tai42_skeleton.operations.response_models.conversations import (
     ConversationRecordView,
     ConversationRouteCreateResult,
     ConversationRouteListEnvelope,

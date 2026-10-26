@@ -31,7 +31,7 @@ from tai42_skeleton.manifest import Manifest, union_tool_extensions
 from tai42_skeleton.operations import BadRequestError, ConflictError, NotFoundError, operation
 from tai42_skeleton.operations._broadcast import apply_response
 from tai42_skeleton.operations.manifest.reads import normalized_extension_map, read_preserved_document
-from tai42_skeleton.operations.response_models_group_b import ToolExtensionCombosModified, ToolExtensionsView
+from tai42_skeleton.operations.response_models.tool_extensions import ToolExtensionCombosModified, ToolExtensionsView
 
 
 class ToolExtensionsUpdate(BaseModel):

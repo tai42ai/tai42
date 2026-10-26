@@ -53,7 +53,7 @@ from tai42_skeleton.operations.reference_graph import (
     base_reference,
     schema_references,
 )
-from tai42_skeleton.operations.response_models_group_presets import PresetCreateResult
+from tai42_skeleton.operations.response_models.presets import PresetCreateResult
 from tai42_skeleton.presets.manager import is_valid_preset_name
 
 logger = logging.getLogger(__name__)

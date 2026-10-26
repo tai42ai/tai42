@@ -52,7 +52,7 @@ def test_registry_names_sync_raises_when_list_tools_fails():
 
 def test_start_binds_global_handle_and_loads_tools():
     manifest = Manifest.model_validate(
-        {"tools": [{"title": "fxt", "module": "tests.app._fixtures.tools_a", "include": ["greet"]}]}
+        {"tools": [{"title": "fxt", "module": "tests.app._fixtures.plain_tools", "include": ["greet"]}]}
     )
 
     async def run():
@@ -124,7 +124,7 @@ def test_module_handlers_and_middleware_idempotent_across_update():
 
 def test_update_drops_old_tools_and_reruns_reload_handlers():
     base = Manifest.model_validate(
-        {"tools": [{"title": "fxt", "module": "tests.app._fixtures.tools_a", "include": ["greet"]}]}
+        {"tools": [{"title": "fxt", "module": "tests.app._fixtures.plain_tools", "include": ["greet"]}]}
     )
     empty = Manifest.model_validate({})
     reloaded: list[bool] = []
@@ -152,7 +152,7 @@ def test_failed_update_leaves_previous_tool_set_live():
     # worker's previous tool surface is restored (re-added) rather than left
     # empty — a bad module bricks nothing.
     base = Manifest.model_validate(
-        {"tools": [{"title": "fxt", "module": "tests.app._fixtures.tools_a", "include": ["greet"]}]}
+        {"tools": [{"title": "fxt", "module": "tests.app._fixtures.plain_tools", "include": ["greet"]}]}
     )
     broken = Manifest.model_validate({"storage_module": "totally_bogus_pkg_xyz"})
 

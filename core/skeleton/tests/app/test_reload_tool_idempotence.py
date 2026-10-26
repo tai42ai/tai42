@@ -30,7 +30,7 @@ from tai42_skeleton.manifest import Manifest
 # component kinds ``_reset_component_surface`` clears.
 _MANIFEST = Manifest.model_validate(
     {
-        "tools": [{"title": "fxt", "module": "tests.app._fixtures.tools_a"}],
+        "tools": [{"title": "fxt", "module": "tests.app._fixtures.plain_tools"}],
         "lifecycle_modules": [
             "tests.app._fixtures.prompt_mod",
             "tests.app._fixtures.resource_mod",
