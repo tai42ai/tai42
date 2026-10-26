@@ -190,6 +190,40 @@ def test_a_zip_stays_binary_and_unsupported() -> None:
         fl.load_content(archive, "a.zip")
 
 
+@pytest.mark.parametrize("text", ["situação\n", "Ångström\n", "Straße\n", "garçon\n"])
+def test_short_utf8_text_the_detector_cannot_name_is_text(text: str) -> None:
+    data = text.encode()
+    assert _magika_label(data) == ("unknown", False)
+    assert fl.classify(data, "parts/greeting").kind == "text"
+    assert fl.load_content(data, "parts/greeting") == text
+
+
+def _undetected(monkeypatch: pytest.MonkeyPatch) -> None:
+    detection = fl._Detection("unknown", "application/octet-stream", "", False)
+    monkeypatch.setattr(fl, "_identify", lambda data, source: detection)
+
+
+@pytest.mark.parametrize("data", [b"ab\x00cd", "caf\xe9".encode("latin-1"), b"\xc3"])
+def test_undetected_bytes_that_are_not_utf8_text_stay_binary(monkeypatch: pytest.MonkeyPatch, data: bytes) -> None:
+    _undetected(monkeypatch)
+    assert fl.classify(data, "blob").kind == "binary"
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["a" + "ç" * fl.DETECTION_WINDOW_BYTES, "ç" * fl.DETECTION_WINDOW_BYTES + "a"],
+    ids=["cut-at-the-first-windows-end", "cut-at-the-last-windows-start"],
+)
+def test_undetected_text_cut_where_its_two_windows_join_is_text(monkeypatch: pytest.MonkeyPatch, text: str) -> None:
+    _undetected(monkeypatch)
+    window = fl.DETECTION_WINDOW_BYTES
+    data = text.encode()
+    sample = data[:window] + data[-window:]
+    classified = fl.classify(sample, "parts/long")
+    assert classified.kind == "text"
+    assert fl.load_classified(data, classified, "parts/long") == text
+
+
 def test_a_text_label_with_no_handler_takes_the_text_path_for_both_functions(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(fl, "_identify", lambda data, source: fl._Detection("toml", "application/toml", ".toml", True))
     assert fl.classify(b"a = 1", "c.toml").kind == "text"

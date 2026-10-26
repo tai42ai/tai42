@@ -23,6 +23,7 @@ each call that loads content refuses.
 
 from __future__ import annotations
 
+import codecs
 import mimetypes
 import os
 import tempfile
@@ -300,8 +301,10 @@ def classify(data: bytes, source: str | None) -> Classified:
     :data:`DETECTION_WINDOW_BYTES`: Magika reads only those two windows, so both classify
     the object alike and the result loads its whole bytes through :func:`load_classified`.
     Empty bytes are empty text, with no detection. Otherwise a text or extracting
-    handler matched by the detection wins; failing that, bytes Magika reports as text
-    load through the strict UTF-8 decode; otherwise the media handler matched, or none.
+    handler matched by the detection wins; failing that, bytes Magika reports as text,
+    and bytes no handler matches that read as UTF-8 text (:func:`_reads_as_utf8_text`;
+    Magika names no type for some short text), load through the strict UTF-8 decode;
+    otherwise the media handler matched, or none.
     An extracting handler gives ``"document"`` when the stored bytes are not text
     (PDF, DOCX, XLSX, …) and ``"text"`` when they are (CSV, HTML, RTF).
     """
@@ -313,9 +316,38 @@ def classify(data: bytes, source: str | None) -> Classified:
         return Classified(handler=handler, detection=detection, kind="text" if detection.is_text else "document")
     if handler is not None and handler.kind == "text":
         return Classified(handler=handler, detection=detection, kind="text")
-    if detection.is_text:
+    if detection.is_text or (handler is None and _reads_as_utf8_text(data)):
         return Classified(handler=_TEXT_HANDLER, detection=detection, kind="text")
     return Classified(handler=handler, detection=detection, kind="binary")
+
+
+def _decodes_as_utf8(data: bytes, *, final: bool) -> bool:
+    """Whether ``data`` decodes as UTF-8; with ``final`` false, a character cut at its end is allowed."""
+    try:
+        codecs.getincrementaldecoder("utf-8")().decode(data, final=final)
+    except UnicodeDecodeError:
+        return False
+    return True
+
+
+def _reads_as_utf8_text(data: bytes) -> bool:
+    """Whether ``data`` reads as UTF-8 text: it holds no NUL byte and decodes as UTF-8.
+
+    Bytes of exactly two :data:`DETECTION_WINDOW_BYTES` may be an object's first and last
+    window joined, where each window's edge can cut a character: the first window may end
+    inside one and the last may start inside one. The whole bytes still load through the
+    strict decode.
+    """
+    if b"\x00" in data:
+        return False
+    window = DETECTION_WINDOW_BYTES
+    if len(data) != 2 * window:
+        return _decodes_as_utf8(data, final=True)
+    head, tail = data[:window], data[window:]
+    cut = 0
+    while cut < 3 and cut < len(tail) and 0x80 <= tail[cut] <= 0xBF:
+        cut += 1
+    return _decodes_as_utf8(head, final=False) and _decodes_as_utf8(tail[cut:], final=True)
 
 
 def check_within_cap(size: int) -> None:

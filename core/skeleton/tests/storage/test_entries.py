@@ -62,6 +62,17 @@ async def test_utf8_text_is_a_text_entry_with_its_content_and_size(store: Record
     }
 
 
+async def test_short_utf8_text_the_detector_cannot_name_is_a_text_entry(store: RecordingStorage) -> None:
+    store.put("parts/greeting", "situação\n".encode())
+    assert await read_stored_entry("parts/greeting") == {
+        "kind": "text",
+        "id": "parts/greeting",
+        "content_type": None,
+        "size": 11,
+        "content": "situação\n",
+    }
+
+
 async def test_png_bytes_are_a_binary_entry_with_no_content(store: RecordingStorage) -> None:
     image = png()
     store.put("img/a.png", image, "image/png")
