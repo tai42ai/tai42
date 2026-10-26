@@ -65,6 +65,9 @@ class _FakeAccounts(AccountsProvider):
     async def list_members(self) -> MemberListing:  # pragma: no cover - unused
         return MemberListing(members=[], invites=[])
 
+    def display_name(self) -> str:
+        return "Alpha"
+
     def member_actions(self) -> list[MemberAction]:  # pragma: no cover - unused
         return []
 
@@ -91,6 +94,9 @@ class _FakeLoginAttaching(LoginAttachingProvider):
 
     async def list_members(self) -> MemberListing:  # pragma: no cover - unused
         return MemberListing(members=[], invites=[])
+
+    def display_name(self) -> str:
+        return "Alpha"
 
     def member_actions(self) -> list[MemberAction]:  # pragma: no cover - unused
         return []
@@ -208,6 +214,9 @@ class _FakeLoginOwning(LoginOwningProvider):
 
     async def list_members(self) -> MemberListing:  # pragma: no cover - unused
         return MemberListing(members=[], invites=[])
+
+    def display_name(self) -> str:
+        return "Alpha"
 
     def member_actions(self) -> list[MemberAction]:  # pragma: no cover - unused
         return []

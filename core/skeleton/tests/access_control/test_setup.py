@@ -90,6 +90,9 @@ class _FakeLoginAttaching(LoginAttachingProvider):
     async def list_members(self) -> MemberListing:  # pragma: no cover - unused here
         return MemberListing(members=[], invites=[])
 
+    def display_name(self) -> str:
+        return "Alpha"
+
     def member_actions(self) -> list[MemberAction]:  # pragma: no cover - unused here
         return []
 
@@ -125,6 +128,9 @@ class _RaisingLoginAttaching(LoginAttachingProvider):
 
     async def list_members(self) -> MemberListing:  # pragma: no cover - unused here
         return MemberListing(members=[], invites=[])
+
+    def display_name(self) -> str:
+        return "Alpha"
 
     def member_actions(self) -> list[MemberAction]:  # pragma: no cover - unused here
         return []

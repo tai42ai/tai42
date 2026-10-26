@@ -112,12 +112,13 @@ app.add_typer(member_actions_app, name="member-actions")
 @member_actions_app.command("list")
 @covers(("GET", "/api/auth/member-actions"))
 def list_member_actions(ctx: typer.Context) -> None:
-    """List every declared member action by its opaque key, label, scope, and destructive flag.
+    """List every declared member action by its opaque key, label, provider name, scope, and destructive flag.
 
     Each registered accounts provider declares its own member-admin actions; the catalog
     carries each by an opaque ``key`` (which `invoke` echoes back), the rendered label, the
-    placement ``scope``, the ``destructive`` confirm hint, and the input/result JSON schemas
-    a caller renders a form and a result view from.
+    ``provider_name`` the owning provider declares, the placement ``scope``, the
+    ``destructive`` confirm hint, and the input/result JSON schemas a caller renders a form
+    and a result view from.
 
     Example: ``tai auth member-actions list``
     """

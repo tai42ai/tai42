@@ -42,9 +42,10 @@ class _NeutralAccounts(AccountsProvider):
     is agnostic to each accounts implementation.
     """
 
-    def __init__(self, listing: MemberListing, *, list_raises: bool = False) -> None:
+    def __init__(self, listing: MemberListing, *, list_raises: bool = False, display_name: str = "Alpha") -> None:
         self._listing = listing
         self._list_raises = list_raises
+        self._display_name = display_name
 
     async def validate_token(self, token: str) -> AuthIdentity | None:  # pragma: no cover - unused
         return None
@@ -56,6 +57,9 @@ class _NeutralAccounts(AccountsProvider):
         if self._list_raises:
             raise RuntimeError("provider store down")
         return self._listing
+
+    def display_name(self) -> str:
+        return self._display_name
 
     def member_actions(self) -> list[MemberAction]:  # pragma: no cover - unused
         return []
@@ -175,6 +179,24 @@ async def test_two_providers_concatenate_in_name_order(admin_caller: None, princ
     # Name-sorted provider order: alpha before bravo, members and invites kept separate.
     assert [m.id for m in directory.members] == ["a-mem", "b-mem"]
     assert [i.id for i in directory.invites] == ["a-inv", "b-inv"]
+
+
+async def test_every_row_carries_its_own_providers_declared_name(
+    admin_caller: None, principal_store: dict[str, bool]
+) -> None:
+    principal_store.update({"a-mem": False, "b-mem": False})
+    _register(
+        "first",
+        _NeutralAccounts(MemberListing(members=[_member("a-mem")], invites=[_invite("a-inv")]), display_name="Alpha"),
+    )
+    _register(
+        "second",
+        _NeutralAccounts(MemberListing(members=[_member("b-mem")], invites=[_invite("b-inv")]), display_name="Beta"),
+    )
+    directory = await members_ops.list_members()
+    # The row carries the provider's declared display name, never its registry name.
+    assert [(m.id, m.provider_name) for m in directory.members] == [("a-mem", "Alpha"), ("b-mem", "Beta")]
+    assert [(i.id, i.provider_name) for i in directory.invites] == [("a-inv", "Alpha"), ("b-inv", "Beta")]
 
 
 async def test_provider_error_propagates(admin_caller: None, principal_store: dict[str, bool]) -> None:

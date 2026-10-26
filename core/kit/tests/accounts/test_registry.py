@@ -60,6 +60,9 @@ class _FakeAccounts(AccountsProvider):
     async def list_members(self) -> MemberListing:
         return MemberListing(members=[], invites=[])
 
+    def display_name(self) -> str:
+        return "Alpha"
+
     def member_actions(self) -> list[MemberAction]:
         return []
 

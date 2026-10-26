@@ -53,6 +53,10 @@ def test_registered_in_both_registries():
     assert get_identity_provider_factory("accounts-postgres") is PostgresAccountsProvider
 
 
+def test_display_name_is_the_providers_own_name():
+    assert _provider().display_name() == "Postgres"
+
+
 # -- validate_token -------------------------------------------------------------
 
 

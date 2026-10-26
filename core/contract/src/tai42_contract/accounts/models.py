@@ -9,7 +9,8 @@ icons, paths); the renderer supplies only the two shapes.
 The same module carries the credential shapes a provider attaches to a principal
 and the membership shapes it lists — the people it owns and the invitations it
 holds — so a generic Members view can render every provider's accounts without
-naming any of them.
+hard-coding any of them; the only provider name it shows is the one each provider
+declares for itself.
 """
 
 from __future__ import annotations
@@ -191,16 +192,19 @@ class MemberActionDescriptor(BaseModel):
 
     ``key`` is the opaque catalog key the platform mints for (provider, action) — a caller
     joins and echoes it, never parses it. ``label`` is the resolved wording (the
-    declaration's :class:`TemplatedText` rendered at the door). ``input_schema`` and
-    ``result_schema`` are the declared models' ``model_json_schema()`` — a caller renders
-    a form and a read-only result view from them generically, with no provider field name
-    known to the platform.
+    declaration's :class:`TemplatedText` rendered at the door). ``provider_name`` is the
+    display name the owning provider declares (never the platform's registry name) — the
+    caller shows it next to the label so actions of different providers read apart.
+    ``input_schema`` and ``result_schema`` are the declared models' ``model_json_schema()``
+    — a caller renders a form and a read-only result view from them generically, with no
+    provider field name known to the platform.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     key: str = Field(min_length=1)
     label: str
+    provider_name: str = Field(min_length=1)
     scope: MemberActionScope
     destructive: bool
     input_schema: dict[str, Any]
@@ -317,6 +321,9 @@ class MemberRow(BaseModel):
     stays visible. ``role`` is derived too: the one name every principal holds, ``None``
     when there is no single name — every principal's policy was set directly, or the
     principals hold different roles; ``principals[].role`` carries each principal's own.
+    ``provider_name`` is the display name the owning provider declares (never the
+    platform's registry name) — the caller shows it on the row so rows of different
+    providers read apart.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -328,6 +335,7 @@ class MemberRow(BaseModel):
     principals: list[MemberPrincipalState]
     disabled: bool
     handle: str = Field(min_length=1)
+    provider_name: str = Field(min_length=1)
     action_keys: list[str] = Field(default_factory=list)
 
 
@@ -336,7 +344,9 @@ class InviteRow(BaseModel):
 
     Display fields plus the opaque routing tokens. An invitation holds no principal, so it
     carries no principal state, and ``role`` is provider-sourced; ``None`` — the policy is
-    not written from a role template.
+    not written from a role template. ``provider_name`` is the display name the owning
+    provider declares (never the platform's registry name) — the caller shows it on the
+    row so rows of different providers read apart.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -347,6 +357,7 @@ class InviteRow(BaseModel):
     created_at: datetime
     expires_at: datetime
     handle: str = Field(min_length=1)
+    provider_name: str = Field(min_length=1)
     action_keys: list[str] = Field(default_factory=list)
 
 
