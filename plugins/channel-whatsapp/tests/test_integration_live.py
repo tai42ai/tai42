@@ -29,16 +29,10 @@ from tai42_kit.clients.impl.redis import RedisClient
 from tai42_kit.settings import reset_all_settings
 
 from tai42_channel_whatsapp import WhatsAppChannel
-from tai42_channel_whatsapp.client import (
-    FlowCreateResult,
-    _send,
-    create_flow,
-    delete_flow,
-    list_flows,
-    publish_flow,
-    send_message,
-)
+from tai42_channel_whatsapp.client import send_message
+from tai42_channel_whatsapp.flow_assets import FlowCreateResult, create_flow, delete_flow, list_flows, publish_flow
 from tai42_channel_whatsapp.flows import build_form_flow
+from tai42_channel_whatsapp.graph import send_request
 from tai42_channel_whatsapp.settings import whatsapp_settings
 
 from .conftest import FakeRedis, make_delivery
@@ -197,7 +191,7 @@ class _ProbeFlows:
         self._states[flow_id] = "PUBLISHED"
 
     async def deprecate(self, flow_id: str) -> None:
-        await _send(f"{self._api_base_url}/{flow_id}/deprecate", {})
+        await send_request(f"{self._api_base_url}/{flow_id}/deprecate", {})
         self._states[flow_id] = "DEPRECATED"
 
     async def delete(self, flow_id: str) -> None:
@@ -239,13 +233,13 @@ async def test_flow_list_page_shape_and_after_cursor_paging():
     assert settings.waba_id is not None
     url = f"{settings.api_base_url}/{settings.waba_id}/flows"
 
-    first = (await _send(url, method="get")).json()
+    first = (await send_request(url, method="get")).json()
     assert isinstance(first["data"], list)
     for item in first["data"]:
         assert {"id", "name", "status"} <= set(item)
     if "next" in first.get("paging", {}):
         after = first["paging"]["cursors"]["after"]
-        second = (await _send(url, method="get", params={"after": after})).json()
+        second = (await send_request(url, method="get", params={"after": after})).json()
         assert isinstance(second["data"], list)
         assert {item["id"] for item in second["data"]}.isdisjoint({item["id"] for item in first["data"]})
 

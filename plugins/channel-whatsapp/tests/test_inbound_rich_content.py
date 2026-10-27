@@ -26,7 +26,7 @@ from tai42_contract.interactions.models import LocationElement, MediaItem, Media
 from tai42_kit.net import MediaFetchError, UrlGuardError
 
 import tai42_channel_whatsapp.inbound  # noqa: F401  (route registration side-effect)
-from tai42_channel_whatsapp.client import fetch_media_metadata
+from tai42_channel_whatsapp.media_download import fetch_media_metadata
 
 from .conftest import (
     _CONTACT_KEY,
@@ -108,7 +108,7 @@ def _stub_stream(
     error: Exception | None = None,
     capture: list[dict[str, Any]] | None = None,
 ) -> None:
-    """Replace the kit's ``open_media_stream`` at the client import site with a fake context manager."""
+    """Replace the kit's ``open_media_stream`` at the media-download import site with a fake context manager."""
 
     @asynccontextmanager
     async def _open(
@@ -124,7 +124,7 @@ def _stub_stream(
             raise error
         yield _FakeMediaStream(content_type, content_length, host, _aiter(list(chunks)))
 
-    monkeypatch.setattr("tai42_channel_whatsapp.client.open_media_stream", _open)
+    monkeypatch.setattr("tai42_channel_whatsapp.media_download.open_media_stream", _open)
 
 
 async def test_inbound_image_with_caption_ingests_and_bridges_typed_attachment(

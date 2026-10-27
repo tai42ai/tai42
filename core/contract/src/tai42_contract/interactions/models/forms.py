@@ -2,25 +2,28 @@
 
 ``FormOption``/``FormData``/``FormPage`` are the per-send data layered over a form's
 published schema; ``DisplayBlock`` is an ordered display element (heading/body/image) a
-page shows beside its input fields; ``FormReactions`` declares WHEN an open form reacts.
+page shows beside its input fields.
 ``check_form_data``/``check_form_pages``/``check_form_reactions`` cross-check that data
 against the schema (prefilled values, per-send option lists, one-page-per-property
 coverage with unique display slots, and reaction triggers that name real fields/pages).
-``SHAPE_KEYWORDS``/``FormShapeKind``/``FormShapeError`` are the vocabulary of a field whose value
-breaks its declared shape. ``__proto__`` is the one name a form refuses for a top-level property
-or a display slot: JavaScript reads it as an object's prototype, so a form drawn in a browser
-cannot keep it.
+The reaction triggers and their events live in
+:mod:`tai42_contract.interactions.models.form_reactions`; the vocabulary of a field whose value
+breaks its declared shape lives in :mod:`tai42_contract.interactions.models.form_shape_errors`.
+``__proto__`` is the one name a form refuses for a top-level property or a display slot:
+JavaScript reads it as an object's prototype, so a form drawn in a browser cannot keep it.
 """
 
 from __future__ import annotations
 
 import re
 from enum import StrEnum
-from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
-from pydantic import BaseModel, ConfigDict, Field, RootModel, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 from tai42_contract.interactions.models.form_dates import check_time_pages
+from tai42_contract.interactions.models.form_reactions import FormReactions
+from tai42_contract.interactions.models.form_shape_errors import SHAPE_KEYWORDS
 
 if TYPE_CHECKING:
     from tai42_contract.interactions.models.wording import FieldWording
@@ -80,81 +83,6 @@ class FormControl(StrEnum):
 
     CHIPS = "chips"
     TEXTAREA = "textarea"
-
-
-#: The form-schema keywords that declare a SHAPE a field's value can break — the JSON-Schema string,
-#: number and array bounds, ``pattern`` and ``format``, the platform date constraints, and the
-#: ``timeOf`` of a range end's time (the END's time can break the range order). A field carrying
-#: none of them (on itself or on an array's ``items``) has no shape to word an error for.
-SHAPE_KEYWORDS: tuple[str, ...] = (
-    "pattern",
-    "format",
-    "minLength",
-    "maxLength",
-    "minimum",
-    "maximum",
-    "exclusiveMinimum",
-    "exclusiveMaximum",
-    "multipleOf",
-    "minItems",
-    "maxItems",
-    "minDate",
-    "maxDate",
-    "unavailableDates",
-    "rangeStart",
-    "minDays",
-    "maxDays",
-    "timeOf",
-)
-
-
-class FormShapeKind(StrEnum):
-    """Which declared shape a form field's value breaks — the kind a surface words its error by.
-
-    ``required`` a demanded field is missing; ``type`` the value is not the declared type; the
-    keyword kinds name the JSON-Schema keyword broken; ``min_date``/``max_date``/
-    ``date_unavailable``/``range_order``/``range_span`` name the platform date constraint broken
-    (``range_order`` is keyed to the END date, or to the END's ``timeOf`` time when the two dates
-    are equal and the times decide; its ``params["by"]`` reads ``"date"`` or ``"time"``);
-    ``other`` is any other keyword (its name rides the error's ``params["keyword"]``).
-    """
-
-    REQUIRED = "required"
-    TYPE = "type"
-    PATTERN = "pattern"
-    FORMAT = "format"
-    MIN_LENGTH = "min_length"
-    MAX_LENGTH = "max_length"
-    MINIMUM = "minimum"
-    MAXIMUM = "maximum"
-    MIN_ITEMS = "min_items"
-    MAX_ITEMS = "max_items"
-    ENUM = "enum"
-    MIN_DATE = "min_date"
-    MAX_DATE = "max_date"
-    DATE_UNAVAILABLE = "date_unavailable"
-    RANGE_ORDER = "range_order"
-    RANGE_SPAN = "range_span"
-    OTHER = "other"
-
-
-class FormShapeError(BaseModel):
-    """One form field whose value breaks its declared shape. Frozen.
-
-    ``field`` is the top-level property name; ``kind`` the shape broken; ``params`` the bound the
-    shape names (``{"minimum": 1}``, ``{"format": "email"}``, ``{"keyword": "multipleOf"}`` for
-    ``other``); ``message`` the platform's plain sentence for it. A surface shows the caller's
-    ``wording.form.fields[field].required`` for a ``required`` error and
-    ``wording.form.fields[field].invalid`` for any other kind, when set, else its own word for
-    ``kind`` or ``message``.
-    """
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    field: str
-    kind: FormShapeKind
-    params: dict[str, Any]
-    message: str
 
 
 class FormOption(BaseModel):
@@ -313,81 +241,6 @@ class FormPage(BaseModel):
         elif not self.fields:
             raise ValueError("form page fields must be a non-empty list")
         return self
-
-
-class FormReactions(BaseModel):
-    """When an open form reacts — plain, renderer-readable trigger description. Frozen.
-
-    A reacting form names a handler on the request (``InteractionRequest.reaction_tool``);
-    this declares the three events that fire it, each optional and absent-by-default (an
-    absent ``reactions`` block is a static form, today's behavior). ``field_changed``
-    names the input fields whose change triggers a reaction; ``page_advanced`` names the
-    pages whose advance triggers one; ``submitted`` is whether the submission is checked by
-    a reaction before it is accepted — the server runs that check on every answer door before
-    it records, so a client that ran it first only shows errors early and can never bypass it.
-    ``choices`` names the fields whose CHOICE LIST a
-    reaction may supply or replace while the form is open (the slots for a date just
-    picked, say): for such a field the platform's static submit check validates its TYPE
-    only — never membership in the send-time list, which the reaction replaced — so the
-    consumer owns membership at the ``submitted`` event. A form declaring any ``choices``
-    field therefore MUST also set ``submitted`` (the request model raises otherwise), so an
-    unvetted reaction-fed value always meets a consumer submit check. Unknown event kinds
-    are refused (``extra='forbid'``); the named fields/pages/choices are cross-checked
-    against the schema/pages by :func:`check_form_reactions`.
-    """
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    field_changed: list[str] = []
-    page_advanced: list[str] = []
-    submitted: bool = False
-    choices: list[str] = []
-
-    def has_trigger(self) -> bool:
-        """Whether this declares at least one reaction trigger (a field change, a page advance, or submit)."""
-        return bool(self.field_changed or self.page_advanced or self.submitted)
-
-
-class FormReactionEventKind(StrEnum):
-    """The event kinds a reacting form fires on; one per :class:`FormReactions` trigger."""
-
-    FIELD_CHANGED = "field_changed"
-    PAGE_ADVANCED = "page_advanced"
-    SUBMITTED = "submitted"
-
-
-class FieldChangedEvent(BaseModel):
-    """A declared ``field_changed`` input field changed."""
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    kind: Literal[FormReactionEventKind.FIELD_CHANGED] = FormReactionEventKind.FIELD_CHANGED
-    field: str = Field(min_length=1)
-
-
-class PageAdvancedEvent(BaseModel):
-    """A declared ``page_advanced`` page was advanced past."""
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    kind: Literal[FormReactionEventKind.PAGE_ADVANCED] = FormReactionEventKind.PAGE_ADVANCED
-    page: str = Field(min_length=1)
-
-
-class SubmittedEvent(BaseModel):
-    """The form was submitted and its ``submitted`` reaction checks it before it is accepted."""
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    kind: Literal[FormReactionEventKind.SUBMITTED] = FormReactionEventKind.SUBMITTED
-
-
-#: One form-reaction event, discriminated on ``kind``.
-FormReactionEvent = Annotated[FieldChangedEvent | PageAdvancedEvent | SubmittedEvent, Field(discriminator="kind")]
-
-
-class FormReactionEventBody(RootModel[FormReactionEvent]):
-    """The published form of one form-reaction event."""
 
 
 def _schema_properties(schema: dict[str, Any]) -> dict[str, dict[str, Any]]:

@@ -1,6 +1,9 @@
 """The subject-keyed state store's wire models.
 
-The shapes every door and tool read and write a subject's document through.
+The shapes every door and tool read and write a subject's document through. The
+runtime seams beside them live in :mod:`tai42_contract.states.unit` (the unit of
+work) and :mod:`tai42_contract.states.consumer_seams` (the callables a consumer
+registers on the states facet).
 
 A *state* is a declared JSON document, one per *subject*. A subject is
 ``{target_kind, target_name, kind, key}``: the ``(target_kind, target_name)``
@@ -23,11 +26,8 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Awaitable, Callable, Sequence
-from contextlib import AbstractAsyncContextManager
-from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Annotated, Any, Literal, Protocol, runtime_checkable
+from typing import Annotated, Any, Literal
 
 from pydantic import (
     BaseModel,
@@ -630,152 +630,3 @@ class ConsumerRow(BaseModel):
     detail: str | None = None
     link: ConsumerLink | None = None
     unavailable: str | None = None
-
-
-#: A data-dependent attach validator a consumer registers on the states facet: given the
-#: state name, the template document, the attachment's declaration VALUES, and the state's
-#: effective schema, it RAISES loudly (a ``TemplateValidationError`` naming the offending item)
-#: to refuse the door — consulted before every attach / declarations write and every template
-#: replace, once per live attachment. A pass returns ``None``.
-AttachValidator = Callable[[str, "StateTemplateDocument", dict[str, Any], dict[str, Any]], Awaitable[None]]
-
-
-class StateUnitClosedError(RuntimeError):
-    """The unit of work was already committed or discarded; it accepts no further staging, savepoint or commit."""
-
-
-@runtime_checkable
-class AttachReconcileRecords(Protocol):
-    """The narrow record door an attach reconciler reads and writes a (re)attached state through.
-
-    A subset of the states facet bound to the one state: read a subject, page its subjects,
-    ``merge`` a shallow resolution, or ``apply`` a full op batch (the same keyed ops as an
-    update-purpose program, so a record under a ``composing`` write regime can be closed too). Every
-    write runs on the attach transaction and is completed and audited at the platform chokepoint
-    exactly like a facet write.
-    """
-
-    async def read(self, subject: StateSubject) -> StateRecord | None:
-        """Return the state's record for ``subject``, or ``None`` when it has none."""
-        ...
-
-    async def list_subjects(
-        self, *, kind: str | None = None, limit: int | None = None, cursor: str | None = None
-    ) -> dict[str, Any]:
-        """Return one keyset page of the state's subjects, optionally filtered by ``kind``."""
-        ...
-
-    async def merge(self, subject: StateSubject, patch: dict[str, Any], *, origin: WriteOrigin) -> StateRecord:
-        """Merge ``patch`` into ``subject``'s record and return the updated record."""
-        ...
-
-    async def apply(self, subject: StateSubject, ops: list[dict[str, Any]], *, origin: WriteOrigin) -> ApplyResult:
-        """Apply ``ops`` to ``subject``'s record and return the :class:`ApplyResult`."""
-        ...
-
-
-@runtime_checkable
-class StateUnit(Protocol):
-    """A unit of work over the states facet: a scope's writes staged and projected, committed once, or discarded.
-
-    A caller opens a unit for a scope it owns and stages write sets against it. Each staged
-    batch is validated and projected exactly the way a committed apply would be — guards, the
-    path ops, the composing-shape rule and the whole-document schema, the SAME applier — but
-    lands in the unit's staging, not the store. While the unit is bound to the caller's scope,
-    every facet read of a subject the unit has staged is served from the projection (the
-    committed document overlaid with the unit's staged deltas in order, on a monotonic
-    provisional sequence), so the scope reads its own staged writes while every other scope
-    still sees the store's committed document. ``defer_call`` stages a tool call to run after the
-    unit's writes apply. ``commit`` writes the staged batches and calls durably as one pending
-    save, applied after the caller returns in per-subject order. ``discard`` drops the staging.
-    A unit neither committed nor discarded by the end of its scope is discarded by the scope
-    teardown, an error the caller logs.
-    """
-
-    async def stage(self, writes: list[StateBatchWrite]) -> list[ApplyResult]:
-        """Validate and project ``writes`` into the unit's staging, returning the provisional per-write result.
-
-        Each write is validated and projected exactly as
-        :meth:`~tai42_contract.app.facets.AppStates.apply` /
-        :meth:`~tai42_contract.app.facets.AppStates.apply_template_jq` would apply it, over the
-        unit's current projection, and returns its provisional :class:`ApplyResult` (a re-staged
-        ``op_id`` — already staged here or already committed — answers ``applied=False`` without
-        touching the projection, mirroring the ledger at commit). The whole-document schema is
-        checked once per touched subject, on the document the batch's last write for it leaves, so
-        a batch is accepted or refused as one multi-op ``apply`` would be. No store write happens;
-        a validation, composing-shape or schema error raises loudly and leaves nothing of the batch
-        staged. A committed or discarded unit raises :class:`StateUnitClosedError`.
-        """
-        ...
-
-    async def commit(self) -> UnitCommitResult:
-        """Write every staged batch and deferred call durably as ONE pending save in one store transaction.
-
-        Returns the provisional results; the save is applied after the caller returns, in
-        per-subject order, and every later reader of its subjects waits for it. Validation already
-        ran at stage. A committed or discarded unit raises :class:`StateUnitClosedError`.
-        """
-        ...
-
-    async def defer_call(self, tool: str, arguments: dict[str, Any], *, run_id: str | None = None) -> None:
-        """Stage a call of ``tool`` with ``arguments`` to run after the unit's pending save applies.
-
-        Captured with the caller's execution identity, state context and run attribution; dropped
-        with the unit on discard and with a savepoint on its rollback. ``run_id`` names the
-        caller's run, as ``WriteOrigin.run_id`` does. Raises
-        :class:`~tai42_contract.states.errors.DeferredCallRefusedError` when the tool is not
-        registered or the arguments are not plain JSON.
-        """
-        ...
-
-    async def discard(self) -> None:
-        """Drop the unit's staging without writing.
-
-        A committed or discarded unit raises :class:`StateUnitClosedError`.
-        """
-        ...
-
-    def savepoint(self) -> AbstractAsyncContextManager[None]:
-        """A nested staging scope inside the unit.
-
-        Writes staged inside the ``async with`` block are KEPT on a clean exit and DROPPED on an
-        exception — only the child's staged deltas roll back, and the exception propagates
-        loudly. Savepoints nest to any depth. Entering one on a committed or discarded unit raises
-        :class:`StateUnitClosedError`.
-        """
-        ...
-
-
-@dataclass(frozen=True, kw_only=True)
-class AttachReconcileContext:
-    """What an attach reconciler receives before an attach write commits.
-
-    The ``state`` name, the ``template`` document, the ``operation`` replacing declarations, the
-    ``previous_declarations`` (``None`` on a first attach), the ``new_declarations``, the
-    attachment ``options``, and the ``records`` door bound to the state. A reconciler RAISES a
-    :class:`~tai42_contract.states.errors.TemplateValidationError` to refuse the attach
-    (naming the offending records) or writes resolutions through ``records`` and returns,
-    letting the attach commit with those writes.
-    """
-
-    state: str
-    template: StateTemplateDocument
-    operation: Literal["attach", "update_declarations"]
-    previous_declarations: dict[str, Any] | None
-    new_declarations: dict[str, Any]
-    options: dict[str, Any] = field(default_factory=dict[str, Any])
-    records: AttachReconcileRecords
-
-
-#: A pre-write attach reconciler a consumer registers on the states facet: given a
-#: :class:`AttachReconcileContext`, it reconciles the state's OPEN records against the new
-#: declarations — RAISING (a ``TemplateValidationError`` naming the records) to refuse the
-#: attach, or writing resolutions through the context's record door and returning to let
-#: the attach commit. Run inside every attach / declarations write, after the validators and
-#: before the write.
-AttachReconciler = Callable[["AttachReconcileContext"], Awaitable[None]]
-
-#: A consumer lister a plugin registers per consumer ``kind``: given a state name,
-#: returns the :class:`ConsumerRow` rows for that kind. The facet's ``consumers``
-#: unions every registered lister.
-ConsumerLister = Callable[[str], Awaitable[Sequence[ConsumerRow]]]

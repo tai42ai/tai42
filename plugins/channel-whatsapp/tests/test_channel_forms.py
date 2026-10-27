@@ -1738,7 +1738,7 @@ async def test_form_list_walk_past_the_page_bound_raises(
     waba_env, monkeypatch: pytest.MonkeyPatch, fake_redis: FakeRedis, fake_httpx: FakeHttpx
 ):
     # The walk's end is the vendor's ``paging.next``; a list that never ends is a loud bound, not a hang.
-    monkeypatch.setattr("tai42_channel_whatsapp.client._MAX_FLOW_LIST_PAGES", 2)
+    monkeypatch.setattr("tai42_channel_whatsapp.flow_assets._MAX_FLOW_LIST_PAGES", 2)
     fake_httpx.get_responses.append(flow_list_page(after="c1", more=True))
     fake_httpx.get_responses.append(flow_list_page(after="c2", more=True))
 

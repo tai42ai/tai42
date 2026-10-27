@@ -6,13 +6,11 @@ from collections.abc import Collection, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager
 from typing import Any, Literal, Protocol, runtime_checkable
 
+from tai42_contract.states.consumer_seams import AttachReconciler, AttachValidator, ConsumerLister
 from tai42_contract.states.errors import StateNotFoundError, ValueValidationError
 from tai42_contract.states.models import (
     ApplyResult,
     AttachBody,
-    AttachReconciler,
-    AttachValidator,
-    ConsumerLister,
     ConsumerRow,
     StateBatchWrite,
     StateContext,
@@ -20,7 +18,6 @@ from tai42_contract.states.models import (
     StateRecord,
     StateSubject,
     StateTemplateDocument,
-    StateUnit,
     TemplateJqApplyResult,
     TemplateJqResult,
     WriteOrigin,
@@ -38,6 +35,7 @@ from tai42_contract.states.rendered import (
     ResolvedTemplateJq,
     TemplateJqReference,
 )
+from tai42_contract.states.unit import StateUnit
 from tai42_contract.states.validation import RecordValidation
 
 

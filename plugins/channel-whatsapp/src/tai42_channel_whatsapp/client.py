@@ -13,22 +13,16 @@ extraction); each returns the send's :class:`SentMessage`: its ``wamid``
 (``messages[0].id``) and the recipient's ``wa_id`` (``contacts[0].wa_id``). The
 interactive builders take an optional pre-built media ``header`` and text
 ``footer``; the template builder maps the template's named components
-(``header_media`` / ``body_parameters`` / ``buttons``). The Flow lifecycle wrappers
-(``list_flows``, ``create_flow``, ``publish_flow``, ``delete_flow``) share the same
-auth + transport + error policy through ``_send`` but target the graph object
-endpoints, not ``/messages``.
+(``header_media`` / ``body_parameters`` / ``buttons``). The send seam's auth, transport and
+error policy is :func:`~tai42_channel_whatsapp.graph.send_request`, which the Flow asset
+wrappers (:mod:`tai42_channel_whatsapp.flow_assets`) and :func:`mark_read` share.
 """
 
 from __future__ import annotations
 
-import json
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any, NamedTuple
 
-import httpx
 from pydantic import ValidationError
-from tai42_contract.app import tai42_app
 from tai42_contract.channels import (
     ChannelDeliveryError,
     ChannelInputError,
@@ -36,65 +30,17 @@ from tai42_contract.channels import (
     SendOutcome,
 )
 from tai42_contract.interactions.models import MediaItem, MediaKind
-from tai42_kit.clients.impl.http import HttpxClient
-from tai42_kit.net import MediaFetchError, open_media_stream
 
 from tai42_channel_whatsapp.channel.template_params import (
     QuickReplyButtonParam,
     TemplateButtonParam,
     parse_template_parameters,
 )
-from tai42_channel_whatsapp.settings import require_delivery_secret, whatsapp_settings
+from tai42_channel_whatsapp.graph import send_request
+from tai42_channel_whatsapp.settings import whatsapp_settings
 
 if TYPE_CHECKING:
-    from tai42_kit.net import MediaStream
-
-# Meta ``error.code`` values that mean throttled, not refused: the app request
-# limit (4), the rate limit hit (80007), the throughput limit (130429), the spam
-# rate limit (131048), and the per-pair rate limit (131056).
-_RATE_LIMIT_CODES = frozenset({4, 80007, 130429, 131048, 131056})
-
-
-async def _send(
-    url: str,
-    payload: dict[str, object] | None = None,
-    *,
-    method: str = "post",
-    params: dict[str, str] | None = None,
-) -> httpx.Response:
-    """Send one already-built request to a graph ``url`` and return its 2xx response.
-
-    The single auth + transport + error-classification seam shared by every Graph call.
-    ``method`` is ``"post"`` (JSON ``payload`` body), ``"get"`` (query ``params``, no
-    body) or ``"delete"`` (no body). Raises ``ChannelDeliveryError`` on a missing access
-    token (checked before any network work), transport failure, or a non-2xx response.
-    Never retries: the raised error carries the transient/hard classification the
-    central caller retries on. Body extraction (wamid, flow id, list page) is the caller's.
-    """
-    settings = whatsapp_settings()
-    access_token = require_delivery_secret(settings.access_token, "CHANNEL_WHATSAPP_ACCESS_TOKEN")
-    headers = {"Authorization": f"Bearer {access_token}"}
-    try:
-        async with tai42_app.clients.client_ctx(HttpxClient, timeout=settings.http_timeout_seconds) as client:
-            if method == "get":
-                response = await client.get(url, params=params, headers=headers)
-            elif method == "delete":
-                response = await client.delete(url, headers=headers)
-            else:
-                response = await client.post(url, json=payload, headers=headers)
-    except httpx.HTTPError as exc:
-        # A transport fault may have landed Meta-side; a re-send is accepted —
-        # both sends carry the same reply correlation.
-        raise ChannelDeliveryError(f"WhatsApp send failed in transport: {exc!r}", retryable=True) from exc
-    if response.status_code not in (200, 201):
-        body = _parse_json(response)  # parsed once: the detail and the classification share it
-        retryable, retry_after = _retry_policy(response, body)
-        raise ChannelDeliveryError(
-            f"WhatsApp rejected the send: HTTP {response.status_code}: {_error_detail(response, body)}",
-            retryable=retryable,
-            retry_after=retry_after,
-        )
-    return response
+    pass
 
 
 class SentMessage(NamedTuple):
@@ -127,11 +73,11 @@ async def _post(phone_number_id: str, payload: dict[str, object]) -> SentMessage
     """Send one already-built message payload FROM ``phone_number_id``; return its :class:`SentMessage`.
 
     ``wamid`` is ``messages[0].id`` and ``wa_id`` is ``contacts[0].wa_id``. The send seam for
-    every message shape. Raises ``ChannelDeliveryError`` on the ``_send`` failure modes or a
+    every message shape. Raises ``ChannelDeliveryError`` on the ``send_request`` failure modes or a
     2xx that carries no message id or no contact ``wa_id``.
     """
     url = f"{whatsapp_settings().api_base_url}/{phone_number_id}/messages"
-    response = await _send(url, payload)
+    response = await send_request(url, payload)
     body = response.json()
     messages = body.get("messages") or []
     if not messages or not messages[0].get("id"):
@@ -149,8 +95,8 @@ async def mark_read(phone_number_id: str, wamid: str) -> None:
 
     POSTs the mark-as-read body to ``{api}/{phone_number_id}/messages`` (Graph
     v23.0). Meta answers ``{"success": true}`` with no ``messages[].id``, so this
-    rides ``_send`` directly and discards the body — ``_post`` is unusable here (it
-    demands a returned message id). Raises ``ChannelDeliveryError`` on the ``_send``
+    rides ``send_request`` directly and discards the body — ``_post`` is unusable here (it
+    demands a returned message id). Raises ``ChannelDeliveryError`` on the ``send_request``
     failure modes; the inbound caller swallows it — a read receipt must never fail a
     batch.
     """
@@ -160,7 +106,7 @@ async def mark_read(phone_number_id: str, wamid: str) -> None:
         "status": "read",
         "message_id": wamid,
     }
-    await _send(url, payload)
+    await send_request(url, payload)
 
 
 async def mark_read_typing(phone_number_id: str, wamid: str) -> None:
@@ -168,11 +114,11 @@ async def mark_read_typing(phone_number_id: str, wamid: str) -> None:
 
     POSTs the combined mark-as-read + typing-indicator body to
     ``{api}/{phone_number_id}/messages`` (Graph v23.0). Meta answers
-    ``{"success": true}`` with no ``messages[].id``, so this rides ``_send``
+    ``{"success": true}`` with no ``messages[].id``, so this rides ``send_request``
     directly and discards the body — ``_post`` is unusable here (it demands a
     returned message id). Re-marking read is idempotent, so the working-signal loop
     re-sends this to refresh the indicator, which Meta dismisses after 25 s or on the
-    reply. Raises ``ChannelDeliveryError`` on the ``_send`` failure modes.
+    reply. Raises ``ChannelDeliveryError`` on the ``send_request`` failure modes.
     """
     url = f"{whatsapp_settings().api_base_url}/{phone_number_id}/messages"
     payload = {
@@ -181,69 +127,7 @@ async def mark_read_typing(phone_number_id: str, wamid: str) -> None:
         "message_id": wamid,
         "typing_indicator": {"type": "text"},
     }
-    await _send(url, payload)
-
-
-def media_endpoint_host() -> str:
-    """The Graph media endpoint's host — error/log text only, never a URL or credential."""
-    return httpx.URL(whatsapp_settings().api_base_url).host or "<unknown host>"
-
-
-async def fetch_media_metadata(media_id: str) -> dict[str, Any]:
-    """Look up an inbound media object's download metadata off the Graph media endpoint.
-
-    ``GET {api_base_url}/{media_id}`` with the Bearer access token, returning Meta's metadata
-    JSON — a short-lived, Bearer-authenticated lookaside ``url`` (guaranteed a non-empty string on
-    return) plus ``mime_type``, ``sha256``, and ``file_size``. The token rides the request header
-    only, never an error string. A transport fault, a 5xx, a 408 or a 429 is a TRANSIENT
-    :class:`~tai42_kit.net.MediaFetchError` (a redelivery may succeed); any other 4xx (the media
-    object has expired or is unknown), a body that is not a JSON object, or a body with no usable
-    ``url`` is a PERMANENT one. The fault carries the vendor host and status only, never the url.
-    """
-    settings = whatsapp_settings()
-    access_token = require_delivery_secret(settings.access_token, "CHANNEL_WHATSAPP_ACCESS_TOKEN")
-    url = f"{settings.api_base_url}/{media_id}"
-    host = httpx.URL(url).host or "<unknown host>"
-    headers = {"Authorization": f"Bearer {access_token}"}
-    response: httpx.Response | None = None
-    fault_class: str | None = None
-    try:
-        async with tai42_app.clients.client_ctx(HttpxClient, timeout=settings.http_timeout_seconds) as client:
-            response = await client.get(url, headers=headers)
-    except httpx.HTTPError as exc:
-        fault_class = type(exc).__name__
-    if response is None:
-        # An httpx transport fault carries the request URL — and, on its ``.request``, the
-        # ``Authorization: Bearer`` header. Re-wrap it OUTSIDE the ``except`` so that
-        # credential-bearing exception is neither chained as ``__cause__`` nor left on
-        # ``__context__`` of the URL-free fault the caller sees.
-        raise MediaFetchError(host=host, cause_class=fault_class)
-    if response.status_code != 200:
-        raise MediaFetchError(host=host, status_code=response.status_code)
-    try:
-        body = response.json()
-    except ValueError as exc:
-        raise MediaFetchError(host=host, status_code=response.status_code) from exc
-    if not isinstance(body, dict) or not isinstance(body.get("url"), str) or not body["url"]:
-        raise MediaFetchError(host=host, status_code=response.status_code)
-    return body
-
-
-@asynccontextmanager
-async def open_media_download(url: str) -> AsyncIterator[MediaStream]:
-    """Open a Bearer-authenticated streaming download of an inbound media's lookaside ``url``.
-
-    The Graph lookaside ``url`` is short-lived and serves the bytes to a request carrying the
-    access token; redirects are not followed, so a redirect answer is a permanent fetch fault
-    rather than a hop the token could ride to another host. Faults surface as
-    :class:`~tai42_kit.net.MediaFetchError` (host + status only) or ``UrlGuardError`` from the
-    kit — the token rides the request header only, never an error string. The response is closed
-    when the context exits.
-    """
-    settings = whatsapp_settings()
-    access_token = require_delivery_secret(settings.access_token, "CHANNEL_WHATSAPP_ACCESS_TOKEN")
-    async with open_media_stream(url, headers={"Authorization": f"Bearer {access_token}"}) as stream:
-        yield stream
+    await send_request(url, payload)
 
 
 async def send_message(phone_number_id: str, to: str, body: str) -> SentMessage:
@@ -512,141 +396,6 @@ async def send_template(phone_number_id: str, to: str, template: ChannelTemplate
     return await _post(phone_number_id, payload)
 
 
-# A loud bound on the flow-list page walk, whose end is the vendor's ``paging.next``.
-_MAX_FLOW_LIST_PAGES = 1000
-
-
-class FlowSummary(NamedTuple):
-    """One Flow as Meta's flow list answers it; ``status`` is Meta's spelling (``PUBLISHED`` …)."""
-
-    flow_id: str
-    name: str
-    status: str
-
-
-def _flow_list_page(body: Any) -> tuple[list[FlowSummary], str | None]:
-    """The Flows on one list page and the ``after`` cursor of the page that follows, if any.
-
-    Meta marks a following page with ``paging.next``; its absence marks the last page.
-    Raises ``ChannelDeliveryError`` on a body that is not a JSON object, a ``data`` that
-    is not a list, an item without a string ``id``/``name``/``status``, or a ``next``
-    without a string ``paging.cursors.after``.
-    """
-    if not isinstance(body, dict):
-        raise ChannelDeliveryError("WhatsApp answered the flow list with a body that is not a JSON object")
-    data = body.get("data")
-    if not isinstance(data, list):
-        raise ChannelDeliveryError("WhatsApp answered the flow list without a data array")
-    flows: list[FlowSummary] = []
-    for item in data:
-        if not isinstance(item, dict) or not all(isinstance(item.get(key), str) for key in ("id", "name", "status")):
-            raise ChannelDeliveryError(
-                "WhatsApp's flow list carries an item without a string id, name and status: "
-                + json.dumps(item, sort_keys=True, separators=(",", ":"))[:300]
-            )
-        flows.append(FlowSummary(flow_id=item["id"], name=item["name"], status=item["status"]))
-    paging = body.get("paging", {})
-    if not isinstance(paging, dict):
-        raise ChannelDeliveryError("WhatsApp answered the flow list with a paging value that is not a JSON object")
-    if "next" not in paging:
-        return flows, None
-    cursors = paging.get("cursors")
-    after = cursors.get("after") if isinstance(cursors, dict) else None
-    if not isinstance(after, str) or not after:
-        raise ChannelDeliveryError("WhatsApp's flow list announces a next page without an after cursor")
-    return flows, after
-
-
-async def list_flows(waba_id: str) -> list[FlowSummary]:
-    """Every Flow under ``waba_id``: GET ``{api}/{waba_id}/flows``, walked page by page.
-
-    Each following page is requested on this same URL with ``after=<paging.cursors.after>``,
-    never by following the vendor-supplied ``paging.next`` URL, so the Bearer token only
-    ever goes to the configured API base. The walk stops on the page without ``next``. A
-    pure Graph wrapper: it returns what Meta listed and decides nothing. Raises
-    ``ChannelDeliveryError`` on the ``_send`` failure modes, an unreadable page, or a walk
-    past ``_MAX_FLOW_LIST_PAGES`` pages.
-    """
-    url = f"{whatsapp_settings().api_base_url}/{waba_id}/flows"
-    flows: list[FlowSummary] = []
-    params: dict[str, str] | None = None
-    for _ in range(_MAX_FLOW_LIST_PAGES):
-        response = await _send(url, method="get", params=params)
-        page, after = _flow_list_page(_parse_json(response))
-        flows.extend(page)
-        if after is None:
-            return flows
-        params = {"after": after}
-    raise ChannelDeliveryError(f"WhatsApp's flow list for WABA {waba_id} runs past {_MAX_FLOW_LIST_PAGES} pages")
-
-
-class FlowCreateResult(NamedTuple):
-    """The create response the Flow lifecycle owner acts on.
-
-    ``flow_id`` is the new draft's id; ``validation_errors`` is the vendor's
-    top-level array — empty when the Flow JSON is valid, non-empty when Meta
-    created the draft anyway but it can never publish. The lifecycle owner
-    (``_resolve_flow_id``) decides whether to publish or delete.
-    """
-
-    flow_id: str
-    validation_errors: list[dict[str, Any]]
-
-
-async def create_flow(
-    waba_id: str, name: str, flow_json: dict[str, Any], endpoint_uri: str | None = None
-) -> FlowCreateResult:
-    """Create a Flow under ``waba_id`` from ``flow_json``; return its create result.
-
-    POSTs ``{name, categories: ["OTHER"], flow_json: <json string>}`` to
-    ``{api}/{waba_id}/flows``. An ``endpoint_uri`` is included for an ENDPOINT-DRIVEN
-    Flow, linking the published Flow to the plugin's data endpoint; a static Flow
-    passes none. A 2xx that carries no ``id`` raises loudly (mirrors the no-message-id guard on
-    the send path). A pure Graph wrapper: it returns both handles Meta returned (the draft id
-    and any ``validation_errors``); the lifecycle owner acts on them.
-    """
-    url = f"{whatsapp_settings().api_base_url}/{waba_id}/flows"
-    payload: dict[str, object] = {"name": name, "categories": ["OTHER"], "flow_json": json.dumps(flow_json)}
-    if endpoint_uri is not None:
-        payload["endpoint_uri"] = endpoint_uri
-    response = await _send(url, payload)
-    body = response.json()
-    flow_id = body.get("id")
-    if not flow_id:
-        raise ChannelDeliveryError("WhatsApp accepted the flow create but returned no flow id")
-    return FlowCreateResult(flow_id=flow_id, validation_errors=body.get("validation_errors") or [])
-
-
-async def set_business_public_key(phone_number_id: str, public_key_pem: str) -> None:
-    """Register the business PUBLIC key for ``phone_number_id`` so Meta can encrypt data-endpoint payloads.
-
-    POSTs ``{business_public_key: <PEM>}`` to ``{api}/{phone_number_id}/whatsapp_business_encryption``
-    (the key the data endpoint's private key decrypts). Idempotent operator provisioning — run
-    once per sending number, or after a key rotation. Raises ``ChannelDeliveryError`` on the
-    ``_send`` failure modes.
-    """
-    url = f"{whatsapp_settings().api_base_url}/{phone_number_id}/whatsapp_business_encryption"
-    await _send(url, {"business_public_key": public_key_pem})
-
-
-async def publish_flow(flow_id: str) -> None:
-    """Publish a draft Flow so it can be sent; POST ``{api}/{flow_id}/publish``."""
-    url = f"{whatsapp_settings().api_base_url}/{flow_id}/publish"
-    await _send(url, {})
-
-
-async def delete_flow(flow_id: str) -> None:
-    """Delete a draft Flow; DELETE ``{api}/{flow_id}``.
-
-    Cleans up a draft stranded when a publish or cache write fails after create, and
-    a draft found on the WABA under a Flow's name before that Flow is created; Meta
-    deletes only unpublished flows. Raises ``ChannelDeliveryError`` on failure like
-    every builder; the caller decides what the failure means for its step.
-    """
-    url = f"{whatsapp_settings().api_base_url}/{flow_id}"
-    await _send(url, method="delete")
-
-
 # The default label on the chat button that OPENS a Flow, made explicit; the caller's own
 # ``wording.form.open`` overrides it per send.
 _OPEN_LABEL = "Fill form"
@@ -701,84 +450,3 @@ async def send_flow(
         },
     }
     return await _post(phone_number_id, payload)
-
-
-def _parse_json(response: httpx.Response) -> Any:
-    """The response body parsed as JSON, or ``None`` when it carries none."""
-    try:
-        return response.json()
-    except ValueError:
-        return None
-
-
-# Meta's Graph ``error`` object fields, in the vendor's documented order — every
-# one the operator's diagnostic needs, none dropped.
-_ERROR_FIELDS = (
-    "code",
-    "error_subcode",
-    "type",
-    "message",
-    "error_user_title",
-    "error_user_msg",
-    "error_data",
-    "fbtrace_id",
-)
-
-
-def _error_detail(response: httpx.Response, payload: Any) -> str:
-    """Meta's full documented ``error`` object from the parsed body, else raw text.
-
-    Each present field renders as a ``name=<render>`` token in the vendor's fixed
-    order — ``repr(value)`` for a scalar, compact sorted JSON for ``error_data`` —
-    joined by one space; the whole is bounded to 500 chars so an HTML error page
-    cannot flood the exception. A non-JSON body, or an ``error`` that is absent or
-    not a dict, falls back to the raw response text (also bounded).
-    """
-    if not isinstance(payload, dict):
-        return response.text[:500]
-    error = payload.get("error")
-    if not isinstance(error, dict):
-        return response.text[:500]
-    tokens: list[str] = []
-    for name in _ERROR_FIELDS:
-        if name not in error:
-            continue
-        value = error[name]
-        if isinstance(value, (list, dict)):
-            render = json.dumps(value, sort_keys=True, separators=(",", ":"))
-        else:
-            render = repr(value)
-        tokens.append(f"{name}={render}")
-    return " ".join(tokens)[:500]
-
-
-def _retry_after_seconds(response: httpx.Response) -> float | None:
-    """The ``Retry-After`` header as seconds, or ``None`` when absent or in HTTP-date form.
-
-    For the HTTP-date form the backoff stands in for it.
-    """
-    raw = response.headers.get("Retry-After")
-    if raw is None:
-        return None
-    try:
-        return float(raw)
-    except ValueError:
-        return None
-
-
-def _retry_policy(response: httpx.Response, payload: Any) -> tuple[bool, float | None]:
-    """Whether a rejected send may be re-attempted, and the seconds Meta asked the caller to wait.
-
-    A ``Retry-After`` header is honored on every transient rejection, not only the
-    429.
-
-    Transient: any 5xx, an HTTP 429, or a Meta rate-limit ``error.code`` whatever
-    the status. Everything else — a recipient outside the allowed list (131030),
-    a send past the 24-hour window (131047), an expired token (190), any other
-    4xx, an unreadable body — is a hard rejection a fresh attempt cannot fix.
-    """
-    error = payload.get("error", {}) if isinstance(payload, dict) else {}
-    code = error.get("code") if isinstance(error, dict) else None
-    if response.status_code == 429 or response.status_code >= 500 or code in _RATE_LIMIT_CODES:
-        return True, _retry_after_seconds(response)
-    return False, None

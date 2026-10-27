@@ -38,12 +38,8 @@ from copy import deepcopy
 from typing import TYPE_CHECKING, Any
 
 from tai42_contract.states.errors import InvalidPathError
-from tai42_contract.states.models import (
-    ApplyResult,
-    StateSubject,
-    StateUnitClosedError,
-    UnitCommitResult,
-)
+from tai42_contract.states.models import ApplyResult, StateSubject, UnitCommitResult
+from tai42_contract.states.unit import StateUnitClosedError
 
 from tai42_skeleton.states.outbox.calls import deferred_call_kind
 from tai42_skeleton.states.outbox.drain import drained
