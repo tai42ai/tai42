@@ -1,4 +1,4 @@
-"""The RQ worker runtime: worker classes, fork safety, and the ``worker`` launch entrypoint.
+"""The RQ worker runtime: fork safety, the pool's worker build, and the ``worker`` launch entrypoint.
 
 ``launch(["worker", ...])`` drives :class:`RqWorkerRuntime`, which the shared
 ``ManagedBackend`` base runs on a dedicated daemon thread — readiness gating,
@@ -18,302 +18,37 @@ nothing for the whole span.
 docstring): while a re-import runs, no child may be FORKED and no in-process job may
 RUN. This worker takes the work-loop side per pool — prefork gates the ``fork()``
 instant (a child forked outside the window inherits unlocked copies and is immune
-thereafter), solo/gevent gate the whole in-process job — plus every scheduler spawn.
+thereafter), solo/gevent gate the whole in-process job — plus every scheduler spawn. The worker
+classes that take that side live in :mod:`tai42_backend_rq.worker_pools`.
 """
 
 from __future__ import annotations
 
 import logging
 import os
-import signal
 import sys
-import threading
-import time
 import urllib.request
 from collections.abc import Mapping, Sequence
 from typing import Any, Self
 
 import click
 from redis import Redis
-from rq import SimpleWorker, Worker
-from rq.exceptions import StopRequested
-from rq.timeouts import HorseMonitorTimeoutException, TimerDeathPenalty, UnixSignalDeathPenalty
-from rq.worker import WorkerStatus
 from tai42_contract.app import tai42_app
-from tai42_contract.backend.runtime import BackendRuntime, ExecutionMode
+from tai42_contract.backend.runtime import BackendRuntime, ExecutionMode, ProgressLiveness, ProgressReporter
 from tai42_kit.clients.impl.redis import KitSyncRedis, redis_from_url_kwargs
 from tai42_kit.fork_gate import fork_gate
+from tai42_kit.liveness import LivenessFile, backend_liveness_settings
 
 from tai42_backend_rq.queue import TaskBudgetQueue
 from tai42_backend_rq.queues import check_queue_label, derived_queue
 from tai42_backend_rq.settings import rq_client_kwargs, rq_settings
+from tai42_backend_rq.worker_pools import (
+    CustomRQGeventWorker,
+    CustomRQSimpleWorker,
+    CustomRQWorker,
+)
 
 logger = logging.getLogger(__name__)
-
-# Upper bound on one idle dequeue block, kept short so a warm-shutdown request
-# (honored when the work loop next checks its stop flag) is not delayed by rq's
-# default ``worker_ttl - 15`` poll off the main thread.
-_DEQUEUE_POLL_SECONDS = 5
-
-# How often the prefork parent re-checks whether its work-horse has exited, short
-# enough to wake promptly and hit the ``job_monitoring_interval`` deadline in one tick.
-_HORSE_POLL_SECONDS = 0.25
-
-# Upper bound on the wait for a config reload's module re-import to finish before this
-# worker spawns a child (or, on the non-forking pools, starts a job in-process). Sized
-# generously against the REBUILD it waits on — seconds, not minutes — rather than
-# against the job: the job is already dequeued, rq re-delivers nothing here, so this
-# wait is the only thing holding it and a queued job must never be dropped because a
-# reload was slow. A reload that somehow overruns even this is reported by the fork
-# gate's ERROR and the spawn proceeds unguarded.
-_FORK_GATE_WAIT_SECONDS = 120
-
-
-class _TaiWorkerMixin:
-    """Worker behavior shared by both worker classes.
-
-    * Skips rq's signal-handler install when the work loop runs off the main
-      thread (``signal.signal`` requires the main thread; shutdown then arrives
-      via :meth:`RqWorkerRuntime.request_drain`).
-    * Bounds each idle dequeue poll (``_DEQUEUE_POLL_SECONDS``) AND returns to the
-      outer ``work`` loop each poll so an off-thread drain request is honored
-      within seconds even while the worker is idle.
-    * Runs every job under the worker's current job budget (:meth:`prepare_execution`).
-    * Holds a :meth:`fork_gate.job_span` around the two SCHEDULER-SPAWNING bodies — the
-      start rq performs with the work loop and the re-spawn from its maintenance pass —
-      so no child is created while this process re-imports its manifest modules on a
-      config reload. Each span covers its whole body: at most one spawn plus bounded
-      Redis work. (Only :meth:`CustomRQWorker.fork_work_horse` is scoped to the fork
-      instant itself, which is all a forked child is exposed to — it copies
-      ``importlib``'s module-lock table at ``fork()``.) The per-job spans differ by pool
-      and live on the two worker classes (see each).
-    """
-
-    name: str  # provided by the RQ worker base class
-    _stop_requested: bool  # provided by the RQ worker base class
-
-    # The timer-based penalty is thread-agnostic, so it is what the PARENT arms
-    # (``signal.signal`` cannot arm the signal penalty off the main thread). Its
-    # async exception cannot interrupt a C-blocked thread, so the horse monitor
-    # does not rely on it (``wait_for_horse`` self-times-out) and the work-horse
-    # child restores the signal penalty (``main_work_horse``), where SIGALRM works.
-    death_penalty_class = TimerDeathPenalty
-
-    def _install_signal_handlers(self) -> None:
-        if threading.current_thread() is threading.main_thread():
-            super()._install_signal_handlers()  # pyright: ignore[reportAttributeAccessIssue]
-            return
-        logger.info(
-            "worker %r runs off the main thread; shutdown is driven by warm-shutdown requests, not signal handlers",
-            self.name,
-        )
-
-    @property
-    def dequeue_timeout(self) -> int:
-        return _DEQUEUE_POLL_SECONDS
-
-    def prepare_execution(self, job: Any) -> Any:
-        """Run ``job`` under this worker's job budget, ``RQ_TASK_TIMEOUT``.
-
-        A job carries the timeout it was stored with — the enqueuing process's budget, and for a
-        recurring schedule the budget of its first fire, kept for every later fire. rq's worker
-        reads ``job.timeout`` for the horse monitor and the death penalty, so it is set here, where
-        both worker classes prepare every job before running it (the forked horse inherits it).
-        """
-        job.timeout = rq_settings().task_timeout
-        return super().prepare_execution(job)  # pyright: ignore[reportAttributeAccessIssue]
-
-    def dequeue_job_and_maintain_ttl(self, timeout: int | None, max_idle_time: int | None = None) -> Any:
-        """Honor an off-thread drain request even while IDLE.
-
-        rq's own idle shutdown relies on ``request_stop`` raising ``StopRequested`` INSIDE the
-        blocked dequeue — a signal delivered on the worker's own (main) thread. Here the work
-        loop runs off the main thread, so :meth:`RqWorkerRuntime.request_drain` can only set
-        ``_stop_requested``; it cannot raise into this blocked call. And rq's
-        ``dequeue_job_and_maintain_ttl`` re-loops INTERNALLY on every ``DequeueTimeout`` when
-        ``max_idle_time`` is ``None`` (a continuous worker), so control never returns to the
-        outer ``work`` loop that checks the flag — an idle worker would then never stop.
-
-        Bound each blocking poll (via ``max_idle_time = dequeue_timeout``) so the base returns
-        every ``_DEQUEUE_POLL_SECONDS`` with no job, and re-check ``_stop_requested`` between
-        polls: when set, raise ``StopRequested`` so the outer ``work`` loop breaks and the
-        process exits cleanly (the recycle self-exit + any graceful backend shutdown). A
-        dequeued job returns immediately, exactly as before.
-        """
-        poll = self.dequeue_timeout
-        while True:
-            if self._stop_requested:
-                raise StopRequested()
-            result = super().dequeue_job_and_maintain_ttl(poll, max_idle_time=poll)  # pyright: ignore[reportAttributeAccessIssue]
-            if result is not None:
-                return result
-
-    def run_maintenance_tasks(self) -> None:
-        """Run rq's periodic maintenance under the fork gate.
-
-        It re-spawns the scheduler process when that process has died, which is the same hazard
-        as a work-horse fork. The span covers the whole body, which spawns at most once and
-        otherwise does bounded Redis maintenance (registry cleaning).
-        """
-        with fork_gate.job_span(timeout=_FORK_GATE_WAIT_SECONDS):
-            super().run_maintenance_tasks()  # pyright: ignore[reportAttributeAccessIssue]
-
-    def _start_scheduler(self, *args: Any, **kwargs: Any) -> None:
-        """Gate the work loop's FIRST scheduler spawn too.
-
-        ``work()`` starts the scheduler process before entering its dequeue loop, and
-        that start is a ``fork()`` like any other. It is rarer than the maintenance
-        re-spawn (once per worker, at startup) but not impossible to race: a worker
-        starting while a sibling-triggered reload is already re-importing in this
-        process would spawn its scheduler straight into the window.
-
-        The span covers the whole body, which spawns at most once and otherwise does
-        bounded Redis work (scheduler construction plus ``acquire_locks``; in burst mode
-        it enqueues due jobs and forks nothing at all).
-        """
-        with fork_gate.job_span(timeout=_FORK_GATE_WAIT_SECONDS):
-            super()._start_scheduler(*args, **kwargs)  # pyright: ignore[reportAttributeAccessIssue]
-
-
-class CustomRQWorker(_TaiWorkerMixin, Worker):
-    """The prefork worker: RQ's native forking ``execute_job``, a monitored work-horse child per job.
-
-    Its fork gate spans the ``os.fork()`` INSTANT (see :meth:`fork_work_horse`), not the
-    job: the horse is a separate process, and what it inherits is a SNAPSHOT of
-    ``importlib``'s module locks taken at the fork. A horse forked while no re-import is
-    running therefore holds unlocked copies and is immune to every later parent
-    re-import, however long its job runs. Holding the gate for the whole fork→reap span
-    would block reloads behind arbitrarily long jobs for no added protection.
-    """
-
-    def __init__(self, queues: Any, *args: Any, **kwargs: Any) -> None:
-        """Build the prefork worker and clear the killed-horse pid tracker."""
-        super().__init__(queues, *args, **kwargs)
-        # The horse pid ``kill_horse`` last targeted; the post-kill reap must not
-        # self-timeout (see ``wait_for_horse``).
-        self._killed_horse_pid = 0
-
-    def fork_work_horse(self, job: Any, queue: Any) -> None:
-        """Fork the work-horse under the gate — THE seam that must not race a re-import.
-
-        ``super()`` returns in the parent as soon as ``os.fork()`` has returned, so the
-        span closes the moment the child exists; the horse then runs its whole job
-        outside the gate against its own inherited lock table.
-        """
-        # Each new horse starts un-killed, so an OS-reused pid is never mistaken
-        # for the killed one.
-        self._killed_horse_pid = 0
-        with fork_gate.job_span(timeout=_FORK_GATE_WAIT_SECONDS):
-            super().fork_work_horse(job, queue)
-
-    def kill_horse(self, sig: signal.Signals = signal.SIGKILL) -> None:
-        """Record the horse pid being killed, then signal it (default SIGKILL)."""
-        self._killed_horse_pid = self.horse_pid
-        super().kill_horse(sig)
-
-    def wait_for_horse(self) -> tuple[int | None, int | None, Any | None]:
-        """Reap the work-horse by POLLING rather than blocking, so the monitor loop keeps ticking while a job runs.
-
-        RQ's monitor wraps this in a death penalty sized to
-        ``job_monitoring_interval`` that refreshes heartbeats and enforces the
-        runaway backstop; off the main thread its timer exception is never
-        delivered to a thread blocked in ``os.wait4``, so a blocking reap would
-        silence the monitor for the whole job. Polling with ``WNOHANG`` and raising
-        ``HorseMonitorTimeoutException`` one tick short of the interval keeps the
-        loop cycling. The post-``kill_horse`` reap runs outside any penalty context,
-        so once the horse is killed this polls until reaped and never self-times-out.
-        """
-        reaping_killed_horse = self._killed_horse_pid == self.horse_pid
-        deadline = time.monotonic() + max(self.job_monitoring_interval - _HORSE_POLL_SECONDS, _HORSE_POLL_SECONDS)
-        while True:
-            try:
-                pid, stat, rusage = os.wait4(self.horse_pid, os.WNOHANG)
-            except ChildProcessError:
-                # Already reaped (rq's own semantics for a vanished horse).
-                return None, None, None
-            if pid:
-                return pid, stat, rusage
-            if not reaping_killed_horse and time.monotonic() >= deadline:
-                raise HorseMonitorTimeoutException
-            time.sleep(_HORSE_POLL_SECONDS)
-
-    def main_work_horse(self, job: Any, queue: Any) -> None:
-        """Run the forked child's work loop under rq's SIGNAL death penalty.
-
-        The forking thread becomes the child's main thread, so ``signal.signal`` works here
-        (and only SIGALRM can interrupt C-blocked job code).
-        """
-        self.death_penalty_class = UnixSignalDeathPenalty
-        super().main_work_horse(job, queue)
-
-    def perform_job(self, job: Any, queue: Any) -> bool:
-        """Run one job in the work-horse child, flushing monitoring before exit.
-
-        The work-horse leaves via ``os._exit``, which skips atexit, so buffered
-        spans must be flushed explicitly. A failed flush is logged at ERROR (not
-        raised, which would turn a finished job into a horse failure).
-        """
-        try:
-            return super().perform_job(job, queue)
-        finally:
-            try:
-                tai42_app.monitoring.active.writer.flush()
-            except Exception:
-                logger.error(
-                    "work-horse %s: monitoring flush failed; buffered spans are lost", os.getpid(), exc_info=True
-                )
-
-
-class CustomRQSimpleWorker(_TaiWorkerMixin, SimpleWorker):
-    """The non-forking worker (``solo`` and ``gevent`` pools): jobs run in the worker process itself.
-
-    Its fork gate spans the WHOLE job (see :meth:`execute_job`), unlike the prefork
-    pool's fork-instant span. There is no child and no inherited lock snapshot here: the
-    job body executes in this very process and imports lazily against the same live
-    ``sys.modules`` a reload is churning, so the exposure lasts as long as the job does.
-    """
-
-    def execute_job(self, job: Any, queue: Any) -> None:
-        """Run the job in this process, refreshing the heartbeats while it runs.
-
-        The fork gate is held for the whole body: an in-process job's imports race a
-        concurrent re-import for its entire duration, so nothing narrower is sound. The
-        prefork pool deliberately does NOT route through here — it gates the fork
-        instant instead (:meth:`CustomRQWorker.fork_work_horse`).
-
-        A non-forking worker has no horse monitor to refresh heartbeats during a
-        job, so a refresher thread ticks them on the same
-        ``job_monitoring_interval``, keeping both pools on one liveness contract.
-        """
-        with fork_gate.job_span(timeout=_FORK_GATE_WAIT_SECONDS):
-            self._run_job_inline(job, queue)
-
-    def _run_job_inline(self, job: Any, queue: Any) -> None:
-        """The in-process job body, run with the fork gate held."""
-        self.prepare_execution(job)
-        done = threading.Event()
-        beat = threading.Thread(
-            target=self._maintain_heartbeats_until, args=(job, done), name=f"rq-heartbeat-{job.id}", daemon=True
-        )
-        beat.start()
-        try:
-            self.perform_job(job, queue)
-        finally:
-            done.set()
-            beat.join(timeout=self.job_monitoring_interval)
-        self.set_state(WorkerStatus.IDLE)
-
-    def _maintain_heartbeats_until(self, job: Any, done: threading.Event) -> None:
-        """Refresh this worker's heartbeats every monitoring interval until the job finishes.
-
-        A failed refresh is logged at ERROR and retried, never swallowed — a stopped heartbeat
-        drops this worker from the census.
-        """
-        while not done.wait(self.job_monitoring_interval):
-            try:
-                self.maintain_heartbeats(job)
-            except Exception:
-                logger.error("worker %r: heartbeat refresh failed while running %s", self.name, job.id, exc_info=True)
 
 
 def setup_gevent() -> None:
@@ -419,6 +154,7 @@ def _build_worker(
     results_ttl: int,
     pool: str,
     label: str | None,
+    report_progress: ProgressReporter,
 ) -> tuple[CustomRQWorker | CustomRQSimpleWorker, Redis]:
     """Build the RQ worker for the selected pool, returning it with its dedicated connection.
 
@@ -427,7 +163,8 @@ def _build_worker(
     ``gevent`` run jobs in-process. ``results_ttl`` is the default result TTL; a
     ``name`` of ``None`` lets RQ auto-generate a unique per-process name. The worker
     serves one queue: ``<RQ_QUEUE_NAME>.<label>``, or ``RQ_QUEUE_NAME`` for no label,
-    read from the settings here at build time.
+    read from the settings here at build time. The worker reports each pass of its work
+    loop to ``report_progress``.
 
     Every pool installs the after-fork child hook here: even the non-forking pools spawn
     the ``rq-scheduler`` child, which inherits the same unusable monitoring writer and
@@ -437,7 +174,7 @@ def _build_worker(
 
     if pool == "gevent":
         setup_gevent()
-        worker_class: type[CustomRQWorker | CustomRQSimpleWorker] = CustomRQSimpleWorker
+        worker_class: type[CustomRQWorker | CustomRQSimpleWorker] = CustomRQGeventWorker
     elif pool == "solo":
         worker_class = CustomRQSimpleWorker
     else:  # prefork
@@ -446,7 +183,9 @@ def _build_worker(
 
     redis_conn = rq_redis_connection(redis_url)
     queue = TaskBudgetQueue(derived_queue(label), connection=redis_conn)
-    worker = worker_class([queue], name=name, connection=redis_conn, default_result_ttl=results_ttl)
+    worker = worker_class(
+        [queue], name=name, connection=redis_conn, default_result_ttl=results_ttl, report_progress=report_progress
+    )
     return worker, redis_conn
 
 
@@ -469,6 +208,7 @@ class RqWorkerRuntime(BackendRuntime):
     mode = ExecutionMode.worker_thread
     consumes_work = True
     pool_turnover_required = False
+    liveness = ProgressLiveness()
 
     def __init__(self, params: Mapping[str, Any]) -> None:
         """Store the launch ``params``; the worker and its connection are built in :meth:`build`."""
@@ -493,15 +233,14 @@ class RqWorkerRuntime(BackendRuntime):
             self._params["results_ttl"],
             self._params["pool"],
             self._params["queue"],
+            self.report_progress,
         )
 
     def run_blocking(self) -> None:
         """RQ's own work loop, on the daemon thread the base spawned."""
-        self._require_worker().work(
-            burst=self._params["burst"],
-            logging_level=self._params["loglevel"].upper(),
-            with_scheduler=True,
-        )
+        worker = self._require_worker()
+        worker.work(burst=self._params["burst"], logging_level=self._params["loglevel"].upper(), with_scheduler=True)
+        worker.raise_for_liveness_failure()
 
     def request_drain(self) -> None:
         """Stop after the current job by setting rq's OWN stop flag, always.
@@ -570,12 +309,20 @@ def start_rq_worker(
     in that process, so rq owning the signals is correct there. (The host
     ``launch`` path drives :class:`RqWorkerRuntime` instead, where the host owns
     them.)
+
+    The work loop refreshes the liveness file (``TAI_BACKEND_LIVENESS_``) on every pass, as
+    the host path does; the file is removed when the loop exits.
     """
-    worker, redis_conn = _build_worker(redis_url, name, results_ttl, pool, queue)
+    liveness = LivenessFile.from_settings(backend_liveness_settings())
+    worker, redis_conn = _build_worker(redis_url, name, results_ttl, pool, queue, liveness.report)
     try:
-        worker.work(burst=burst, logging_level=loglevel.upper(), with_scheduler=True)
+        try:
+            worker.work(burst=burst, logging_level=loglevel.upper(), with_scheduler=True)
+        finally:
+            redis_conn.close()
+        worker.raise_for_liveness_failure()
     finally:
-        redis_conn.close()
+        liveness.remove()
 
 
 def _queue_label_option(ctx: click.Context, param: click.Parameter, value: str | None) -> str | None:

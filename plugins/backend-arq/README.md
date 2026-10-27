@@ -130,6 +130,18 @@ never retries a tool body (a tool that wants retries declares a `ToolRetryPolicy
 arq itself re-runs a job cut by a cold stop (`CancelledError`), bounded by
 `--max-tries` — arq's own delivery semantics.
 
+## Liveness
+
+`tai backend worker` reports each pass of arq's poll loop into a liveness file
+at `TAI_BACKEND_LIVENESS_PATH`, promising the next pass within `--poll-delay`.
+`tai42-backend-probe` (shipped with `tai42-kit`) run in the worker's environment
+exits 0 while that promise is not overdue by more than
+`TAI_BACKEND_LIVENESS_GRACE` seconds, and 1 otherwise; point the orchestrator's
+exec liveness probe at it. Jobs run as tasks on the same loop, so the passes go
+on while jobs run; a job that blocks the loop stops them, and the probe then
+reports not alive. The worker removes the file when it exits. Each worker on one
+filesystem needs its own `TAI_BACKEND_LIVENESS_PATH`.
+
 ## Fleet ops
 
 Config-change propagation across the worker fleet (manifest updates,

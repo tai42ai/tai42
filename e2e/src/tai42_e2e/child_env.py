@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import os
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -143,10 +144,15 @@ def dynamic_env(stack: TaiStack) -> dict[str, str]:
     }
 
 
-def child_env(stack: TaiStack, tmpdir: str, process: str) -> dict[str, str]:
+def child_env(
+    stack: TaiStack, tmpdir: str, process: str, *, variant_env: Mapping[str, str] | None = None
+) -> dict[str, str]:
     """A clean child env built from scratch: PATH/HOME/venv-bin, the stack's deployment
-    env, the deployment env of the one ``process`` it is for (``StackConfig.process_env``),
-    the after-boot fills, and TMPDIR for the run-family metrics dir. Never an
+    env, the env the variant gives this process shape (``variant_env``), the deployment env
+    of the one ``process`` it is for (``StackConfig.process_env``),
+    the after-boot fills, TMPDIR for the run-family metrics dir, and the process's own
+    backend liveness file under ``TaiStack.liveness_dir`` (a backend process refuses a file
+    another live process owns, so every child gets its own). Never an
     ``os.environ`` passthrough, and never ``PROMETHEUS_MULTIPROC_DIR`` (the entrypoint
     stamps that itself). The config dir's stored ``.env`` is not part of it: the entry
     points' boot ``.env`` load skips that file, and the server applies its keys itself."""
@@ -158,8 +164,10 @@ def child_env(stack: TaiStack, tmpdir: str, process: str) -> dict[str, str]:
         "TAI_CONFIG_MODE": "file",
         "TAI_CONFIG_DIR_PATH": str(stack._config_dir),
         "TAI_MANIFEST_PATH": str(stack._config_dir / "manifest.yml"),
+        "TAI_BACKEND_LIVENESS_PATH": str(stack.liveness_dir / process),
     }
     env.update(stack.config.env)
+    env.update(variant_env or {})
     env.update(stack.config.process_env.get(process, {}))
     env.update(dynamic_env(stack))
     if "PROMETHEUS_MULTIPROC_DIR" in env:

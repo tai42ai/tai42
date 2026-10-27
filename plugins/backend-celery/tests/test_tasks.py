@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import sys
 from typing import Any
 
@@ -32,17 +33,69 @@ def test_prevent_stream_capture_restores_real_fds_then_proxies() -> None:
         sys.stdout, sys.stderr = old_out, old_err
 
 
-def test_async_task_loop_is_cached_and_rebuilt_after_close(stub_app) -> None:
+def test_a_free_loop_serves_the_next_job_and_close_shuts_it_down(stub_app) -> None:
     task = AsyncTask()
-    loop = task.loop
-    assert task.loop is loop
+    with task.loops.take() as first:
+        pass
+    with task.loops.take() as second:
+        assert asyncio.get_event_loop() is second
+    assert second is first
+
     task.close_loop()
-    assert loop.is_closed()
+
+    assert first.is_closed()
     assert stub_app.clients.shutdown_calls == 1
-    rebuilt = task.loop
-    assert rebuilt is not loop
-    assert not rebuilt.is_closed()
-    rebuilt.close()
+    with task.loops.take() as rebuilt:
+        assert rebuilt is not first
+        assert not rebuilt.is_closed()
+    task.close_loop()
+
+
+def test_jobs_at_once_each_hold_a_loop_of_their_own(stub_app) -> None:
+    task = AsyncTask()
+    with task.loops.take() as first, task.loops.take() as second:
+        assert second is not first
+    with task.loops.take() as third:
+        assert third in (first, second)
+
+    assert task.loops.count == 2
+    task.close_loop()
+    assert first.is_closed()
+    assert second.is_closed()
+    assert stub_app.clients.shutdown_calls == 2
+
+
+def test_a_closed_free_loop_is_replaced(stub_app) -> None:
+    task = AsyncTask()
+    with task.loops.take() as first:
+        pass
+    first.close()
+
+    with task.loops.take() as replaced:
+        assert replaced is not first
+        assert not replaced.is_closed()
+
+    assert task.loops.count == 1
+    task.close_loop()
+
+
+def test_close_closes_every_loop_and_raises_each_failed_shutdown(stub_app, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _fail() -> None:
+        stub_app.clients.shutdown_calls += 1
+        raise RuntimeError("pool close failed")
+
+    task = AsyncTask()
+    with task.loops.take() as first, task.loops.take() as second:
+        pass
+    monkeypatch.setattr(stub_app.clients, "shutdown_clients", _fail)
+
+    with pytest.raises(ExceptionGroup) as raised:
+        task.close_loop()
+
+    assert [str(failure) for failure in raised.value.exceptions] == ["pool close failed", "pool close failed"]
+    assert first.is_closed()
+    assert second.is_closed()
+    assert task.loops.count == 0
 
 
 def test_close_loop_without_loop_is_a_noop(stub_app) -> None:
@@ -52,15 +105,13 @@ def test_close_loop_without_loop_is_a_noop(stub_app) -> None:
 
 
 def test_run_async_runs_on_the_task_loop() -> None:
-    task = AsyncTask()
-
     async def _coro() -> int:
         return 41
 
     try:
-        assert task.run_async(_coro()) == 41
+        assert tool_execution.run_async(_coro()) == 41
     finally:
-        task._loop.close()  # type: ignore[union-attr]
+        tool_execution.close_loop()
 
 
 async def test_run_tool_pops_tool_name_arg(stub_app) -> None:
@@ -109,9 +160,7 @@ def test_tool_execution_runs_tool_through_app(stub_app) -> None:
             kwargs={"backend_tool_name": "my_tool", "backend_secret_capability": False, "x": 2}
         ).get()
     finally:
-        if tool_execution._loop is not None:  # close the task loop opened by apply()
-            tool_execution._loop.close()
-            tool_execution._loop = None
+        tool_execution.close_loop()  # close the task loop opened by apply()
     assert out == {"ok": True}
     assert stub_app.tools.run_tool_calls == [("my_tool", {"x": 2})]
 
@@ -151,9 +200,7 @@ def test_a_tool_body_raising_timeout_error_runs_once(monkeypatch: pytest.MonkeyP
     try:
         result = tool_execution.apply(kwargs={"x": 1})
     finally:
-        if tool_execution._loop is not None:  # close the task loop opened by apply()
-            tool_execution._loop.close()
-            tool_execution._loop = None
+        tool_execution.close_loop()  # close the task loop opened by apply()
     assert calls == [{"x": 1}]
     assert isinstance(result.result, TimeoutError)
 
@@ -166,9 +213,7 @@ def test_callback_task_runs_callback_execution(stub_app) -> None:
     try:
         out = callback_task.apply(args=({"k": 3}, CallbackSchema(expr=TemplatedText(content=".k * 2")))).get()
     finally:
-        if callback_task._loop is not None:
-            callback_task._loop.close()
-            callback_task._loop = None
+        callback_task.close_loop()
     assert out == 6
 
 
@@ -202,9 +247,29 @@ def test_callback_task_with_a_transient_error_runs_once_with_the_carried_capabil
     try:
         outcome = callback_task.apply(args=({"k": 1}, callback))
     finally:
-        if callback_task._loop is not None:
-            callback_task._loop.close()
-            callback_task._loop = None
+        callback_task.close_loop()
     assert outcome.state == "FAILURE", outcome.result
     assert isinstance(outcome.result, ConnectionError)
     assert attempts == [capability]
+
+
+def test_run_async_counts_the_job_in_the_worker_s_job_slots() -> None:
+    """On a pool that cannot end a job, every task body passes through the slot accounting."""
+    from tai42_backend_celery.core import job_slots
+
+    job_slots.watch(pool_name="solo", slots=1, budget=0.0, ticks_in_job=False, tick=lambda: None)
+
+    async def _coro() -> int:
+        await asyncio.sleep(0.01)
+        with pytest.raises(RuntimeError, match=rf"on the solo pool, .*: {tool_execution.name} req-1$"):
+            job_slots.check_wedged()
+        return 41
+
+    tool_execution.push_request(id="req-1")
+    try:
+        assert tool_execution.run_async(_coro()) == 41
+    finally:
+        tool_execution.pop_request()
+        tool_execution.close_loop()
+
+    job_slots.check_wedged()

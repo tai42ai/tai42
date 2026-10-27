@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import signal
 from collections.abc import Iterator
+from pathlib import Path
 
 import pytest
 from tai42_contract.app import tai42_app
@@ -31,6 +32,14 @@ def app() -> Iterator[FakeApp]:
     fake = FakeApp()
     with tai42_app.bound(fake):
         yield fake
+
+
+@pytest.fixture(autouse=True)
+def liveness_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """The liveness file every launch in this suite binds, inside the test's own directory."""
+    path = tmp_path / "liveness"
+    monkeypatch.setenv("TAI_BACKEND_LIVENESS_PATH", str(path))
+    return path
 
 
 @pytest.fixture(autouse=True)

@@ -1,8 +1,8 @@
 """The Celery application and the pool-child fork-safety hooks.
 
-``celery_app`` is built at import time from :class:`CelerySettings` (RedBeat beat
-scheduler; pool restarts and task events enabled). Every Redis connection it makes — the
-broker, the result backend and the RedBeat store — carries the kit's connection
+``celery_app`` is built at import time from :class:`CelerySettings` (the RedBeat beat
+scheduler that reports the beat's progress; pool restarts and task events enabled). Every
+Redis connection it makes — the broker, the result backend and the RedBeat store — carries the kit's connection
 behaviour (retry, socket timeouts); see :mod:`tai42_backend_celery.core.redis_seam`. ``worker_process_init`` evicts
 the monitoring vendor client in each forked child (its parent-owned
 threads/sockets are dead there; the child rebuilds it on first use).
@@ -90,7 +90,7 @@ def create_celery_app() -> Celery:
     pydantic_celery(app)
 
     app.conf.update(
-        beat_scheduler="redbeat.RedBeatScheduler",
+        beat_scheduler="tai42_backend_celery.core.beat_scheduler.ProgressReportingScheduler",
         redbeat_redis_url=settings.redbeat.redis_url,
         # Every key but the URL reaches RedBeat's ``Redis.from_url``; RedBeat decodes
         # responses on ``redis://`` itself, and ``rediss://`` / ``unix://`` match it.

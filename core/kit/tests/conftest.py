@@ -31,6 +31,7 @@ _SETTINGS_ENV_PREFIXES = (
     "MCP_CLIENT_",
     "JQ_",
     "TAI_URL_GUARD_",
+    "TAI_BACKEND_LIVENESS_",
     # The shared connection namespace the Postgres/Redis settings fall back to;
     # an ambient ``TAI_DEFAULT_*`` would resolve a connection the default-asserting
     # tests expect to be unconfigured.

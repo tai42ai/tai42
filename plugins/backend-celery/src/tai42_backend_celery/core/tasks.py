@@ -1,8 +1,8 @@
 """The Celery task surface: ``tool_execution`` and ``callback_task``.
 
-Both are :class:`AsyncTask` subclasses, each owning one long-lived private event
-loop so pooled per-loop clients are reused across invocations (closed by
-``close_loop`` at worker-child shutdown). ``tool_execution`` runs the target tool
+Both are :class:`AsyncTask` subclasses, each owning its long-lived private event
+loops, one per job running at once, so pooled per-loop clients are reused across
+invocations (closed by ``close_loop`` at worker-child shutdown). ``tool_execution`` runs the target tool
 inside :func:`prevent_celery_stream_capture`. A dispatched tool runs once; retries
 are declared per tool with a ``ToolRetryPolicy`` and applied by the platform's
 dispatch seam, never by Celery.
@@ -12,7 +12,8 @@ from __future__ import annotations
 
 import asyncio
 import sys
-from collections.abc import Coroutine, Generator
+import threading
+from collections.abc import Coroutine, Generator, Iterator
 from contextlib import contextmanager
 from typing import Any
 
@@ -23,6 +24,7 @@ from tai42_kit.backend import CallbackSchema, backend_fire, callback_execution
 from tai42_kit.utils.detached_util import mark_detached_run, reset_detached_run
 from tai42_kit.utils.worker_secret_capability import WORKER_SECRET_CAPABILITY_ARG, bind_worker_secret_capability
 
+from tai42_backend_celery.core import job_slots
 from tai42_backend_celery.core.app import celery_app
 from tai42_backend_celery.core.settings import celery_settings
 
@@ -63,37 +65,97 @@ def prevent_celery_stream_capture() -> Generator[None]:
         sys.stderr = captured_stderr
 
 
-class AsyncTask(Task):
-    """A task whose instance owns one private event loop for its async work."""
+class _TaskLoops:
+    """The private event loops of one task: each runs one job at a time, and a free one serves the next job."""
 
-    _loop: asyncio.AbstractEventLoop | None = None
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._free: list[asyncio.AbstractEventLoop] = []
+        self._open: list[asyncio.AbstractEventLoop] = []
+
+    @contextmanager
+    def take(self) -> Iterator[asyncio.AbstractEventLoop]:
+        """Hold a loop no other job is running, made when no open one is free, as this thread's loop."""
+        with self._lock:
+            loop: asyncio.AbstractEventLoop | None = None
+            while loop is None and self._free:
+                loop = self._free.pop()
+                if loop.is_closed():
+                    self._open.remove(loop)
+                    loop = None
+            if loop is None:
+                loop = asyncio.new_event_loop()
+                self._open.append(loop)
+        asyncio.set_event_loop(loop)
+        try:
+            yield loop
+        finally:
+            with self._lock:
+                if loop in self._open:
+                    self._free.append(loop)
 
     @property
-    def loop(self) -> asyncio.AbstractEventLoop:
-        """The task's private loop, (re)created when absent or closed."""
-        if self._loop is None or self._loop.is_closed():
-            self._loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(self._loop)
-        return self._loop
+    def count(self) -> int:
+        """How many loops are open."""
+        with self._lock:
+            return len(self._open)
+
+    def close(self) -> None:
+        """Close every loop, shutting down its per-loop pooled clients first.
+
+        Every loop is closed even when another's shutdown fails; the failures are then raised together.
+        """
+        with self._lock:
+            loops, self._open, self._free = self._open, [], []
+        failures: list[Exception] = []
+        for loop in loops:
+            try:
+                try:
+                    loop.run_until_complete(tai42_app.clients.shutdown_clients())
+                finally:
+                    loop.close()
+            except Exception as failure:
+                failures.append(failure)
+        if failures:
+            raise ExceptionGroup("closing the task's event loops failed", failures)
+
+
+class AsyncTask(Task):
+    """A task whose jobs run their async work on the task's private event loops.
+
+    A pool that runs several jobs at once (``-P threads``, ``-P gevent``) runs each on a loop no
+    other job is running; a loop a job has left serves the next, so the loops number at most the
+    jobs that ran at once.
+    """
+
+    # Guards the lazy creation of each task's loops; the loops guard themselves after.
+    _loops_creation: threading.Lock = threading.Lock()
+    _task_loops: _TaskLoops | None = None
+
+    @property
+    def loops(self) -> _TaskLoops:
+        """This task's private event loops."""
+        with AsyncTask._loops_creation:
+            if self._task_loops is None:
+                self._task_loops = _TaskLoops()
+            return self._task_loops
 
     def run_async(self, coroutine: Coroutine[Any, Any, Any]) -> Any:
-        """Run ``coroutine`` to completion on the task's private loop and return its result."""
-        return self.loop.run_until_complete(coroutine)
+        """Run ``coroutine`` to completion on a loop of the task's own, as one job of the worker, and return its result.
+
+        On a pool that cannot end a job at its budget the job counts against the worker's slots
+        (:mod:`~tai42_backend_celery.core.job_slots`).
+        """
+        with self.loops.take() as loop:
+            return loop.run_until_complete(job_slots.in_job(coroutine, label=f"{self.name} {self.request.id}"))
 
     def close_loop(self) -> None:
-        """Close the task loop, shutting down its per-loop pooled clients first.
+        """Close the task's loops, shutting down each one's per-loop pooled clients first.
 
         Client pools are keyed per loop, so they must be closed on it before it goes away. Run at
         worker-child shutdown.
         """
-        loop = self._loop
-        self._loop = None
-        if loop is None or loop.is_closed():
-            return
-        try:
-            loop.run_until_complete(tai42_app.clients.shutdown_clients())
-        finally:
-            loop.close()
+        self.loops.close()
 
 
 async def run_tool(**kwargs: Any) -> Any:

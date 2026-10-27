@@ -11,8 +11,9 @@ from __future__ import annotations
 
 import asyncio
 import fnmatch
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
@@ -279,10 +280,51 @@ tai42_app.bind(stub_app_instance)
 # register the backend, the Celery app + tasks, the tools, and the extensions.
 import tai42_backend_celery  # noqa: E402,F401
 
+# The live modules' in-process worker fixture, shared by every module that drives one.
+from ._live_redis_worker import run_worker  # noqa: E402,F401
+
 
 @pytest.fixture
 def stub_app() -> _StubApp:
     return stub_app_instance
+
+
+@pytest.fixture(autouse=True)
+def liveness_path(monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory) -> Iterator[Path]:
+    """Point the liveness file at a per-test path, so no test reads or writes the default one."""
+    from tai42_kit.liveness import backend_liveness_settings
+
+    path = tmp_path_factory.mktemp("liveness") / "liveness"
+    monkeypatch.setenv("TAI_BACKEND_LIVENESS_PATH", str(path))
+    backend_liveness_settings.cache_clear()
+    yield path
+    backend_liveness_settings.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def _fresh_progress_registrations(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """No reporter registered with the worker step or the beat scheduler, no embedded beat or job slots
+    watched, and the app's consumer and worker steps restored.
+
+    A launch registers its runtime's reporter process-wide, as one process runs one runtime; each
+    test stands for its own process.
+    """
+    from tai42_backend_celery.core import beat_scheduler, embedded_beat, job_slots, liveness_step
+    from tai42_backend_celery.core.app import celery_app
+
+    monkeypatch.setattr(liveness_step, "_report", None)
+    monkeypatch.setattr(liveness_step, "_task_timeout", 0.0)
+    monkeypatch.setattr(beat_scheduler, "_report", None)
+    monkeypatch.setattr(embedded_beat, "_file", None)
+    monkeypatch.setattr(embedded_beat, "_grace", 0.0)
+    monkeypatch.setattr(embedded_beat, "_beat", None)
+    monkeypatch.setattr(job_slots, "_watch", None)
+    blueprints = [liveness_step.consumer_steps(celery_app), embedded_beat.worker_steps(celery_app)]
+    before = [set(steps) for steps in blueprints]
+    yield
+    for steps, kept in zip(blueprints, before, strict=True):
+        steps.clear()
+        steps.update(kept)
 
 
 @pytest.fixture(autouse=True)

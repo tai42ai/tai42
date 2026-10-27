@@ -3,7 +3,6 @@ flushes spans and closes task-loop clients."""
 
 from __future__ import annotations
 
-import asyncio
 import logging
 
 import pytest
@@ -30,12 +29,14 @@ def test_worker_process_init_names_the_darwin_hazard(stub_app, monkeypatch, capl
 
 
 def test_worker_process_shutdown_flushes_and_closes_loops(stub_app) -> None:
-    tool_execution._loop = asyncio.new_event_loop()
-    callback_task._loop = asyncio.new_event_loop()
+    loops = []
+    for task in (tool_execution, callback_task):
+        with task.loops.take() as loop:
+            loops.append(loop)
     app_module.on_worker_process_shutdown(sender="worker-1")
     stub_app.monitoring.active.writer.flush.assert_called_once_with()
-    assert tool_execution._loop is None
-    assert callback_task._loop is None
+    assert all(loop.is_closed() for loop in loops)
+    assert (tool_execution.loops.count, callback_task.loops.count) == (0, 0)
     assert stub_app.clients.shutdown_calls == 2
 
 
@@ -60,7 +61,4 @@ def test_worker_process_shutdown_loop_close_failure_is_logged_not_raised(stub_ap
 def _reset_task_loops():
     yield
     for task in (tool_execution, callback_task):
-        loop = getattr(task, "_loop", None)
-        if loop is not None and not loop.is_closed():
-            loop.close()
-        task._loop = None
+        task.loops.close()

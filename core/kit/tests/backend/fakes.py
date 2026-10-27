@@ -21,7 +21,7 @@ from types import SimpleNamespace
 from typing import Any, ClassVar, Self
 
 from pydantic_settings import SettingsConfigDict
-from tai42_contract.backend.runtime import BackendRuntime, ExecutionMode
+from tai42_contract.backend.runtime import BackendRuntime, ExecutionMode, HttpLiveness, ProgressLiveness
 
 from tai42_kit.backend import BackendDispatchSettings, ManagedBackend
 
@@ -108,6 +108,7 @@ class FakeOnLoopWorker(RecordingRuntime):
     name = "worker"
     mode = ExecutionMode.on_loop
     consumes_work = True
+    liveness = ProgressLiveness()
 
     def __init__(self, args: Sequence[str]) -> None:
         super().__init__(args)
@@ -129,6 +130,7 @@ class FakeThreadWorker(RecordingRuntime):
     name = "worker"
     mode = ExecutionMode.worker_thread
     consumes_work = True
+    liveness = ProgressLiveness()
     pool_turnover_required = True
 
     def __init__(self, args: Sequence[str]) -> None:
@@ -157,6 +159,7 @@ class FakeSchedulerRuntime(RecordingRuntime):
 
     name = "scheduler"
     mode = ExecutionMode.inline
+    liveness = HttpLiveness("/")
 
     def run_blocking(self) -> None:
         self._enter_body()
@@ -170,6 +173,7 @@ class FakeOnLoopReporter(RecordingRuntime):
 
     name = "reporter"
     mode = ExecutionMode.on_loop
+    liveness = HttpLiveness("/")
 
     def __init__(self, args: Sequence[str]) -> None:
         super().__init__(args)
@@ -194,6 +198,7 @@ class FakeThreadReporter(RecordingRuntime):
 
     name = "reporter"
     mode = ExecutionMode.worker_thread
+    liveness = HttpLiveness("/")
 
     def __init__(self, args: Sequence[str]) -> None:
         super().__init__(args)

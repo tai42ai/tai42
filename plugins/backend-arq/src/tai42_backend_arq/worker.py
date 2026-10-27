@@ -4,7 +4,8 @@
 it builds an :class:`arq.Worker` over the three worker functions
 (``task_scheduler`` / ``callback_job`` / ``tool_execution``) with the
 ``recover_stalled_schedules`` startup watchdog, runs it on the serving loop, and
-asks it to drain or to stop cold. Readiness gating, signal wiring and
+asks it to drain or to stop cold. Each pass of arq's poll loop reports the
+worker's progress. Readiness gating, signal wiring and
 drain-on-cancellation belong to
 :class:`~tai42_kit.backend.ManagedBackend`, which drives this object.
 
@@ -24,8 +25,15 @@ from typing import Any, Self
 
 import click
 from arq import Worker, func
-from tai42_contract.backend.runtime import CONSUMING_RUNTIME, BackendRuntime, ExecutionMode
+from tai42_contract.backend.runtime import (
+    CONSUMING_RUNTIME,
+    BackendRuntime,
+    ExecutionMode,
+    ProgressLiveness,
+    ProgressReporter,
+)
 from tai42_kit.clients.impl.redis import async_redis_from_url, redis_from_url_kwargs
+from tai42_kit.liveness import LivenessFile, backend_liveness_settings
 
 from tai42_backend_arq.pool import arq_redis_over, enqueue_client_kwargs
 from tai42_backend_arq.queues import check_queue_label, derived_queue
@@ -34,6 +42,31 @@ from tai42_backend_arq.settings import arq_settings, job_deserializer, job_seria
 from tai42_backend_arq.tasks import callback_job, tool_execution
 
 logger = logging.getLogger(__name__)
+
+# The promise of a poll loop that sleeps nothing between passes (a non-positive
+# ``--poll-delay``): arq's own floor for the poll delay, the one ``heart_beat``
+# clamps its cron window to.
+_SPIN_PROMISE_SECONDS = 0.5
+
+
+class _ProgressReportingWorker(Worker):
+    """arq's worker, reporting each pass of its poll loop as this process's progress.
+
+    arq's ``main`` loops ``async for _ in poll(poll_delay_s)`` and ends every pass with
+    ``heart_beat``, sleeping at most ``poll_delay_s`` before the next one; jobs run as
+    tasks on the same loop, so the pass keeps coming while they run. A job that blocks
+    the loop stops every pass, which is the stall the report exists to show.
+    """
+
+    def __init__(self, *args: Any, report_progress: ProgressReporter, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._report_progress = report_progress
+
+    async def heart_beat(self) -> None:
+        """Report this pass, then run arq's own health record and cron."""
+        # Before arq's own: a Redis-blocked health record must not hide a pass that happened.
+        self._report_progress(next_within=self.poll_delay_s if self.poll_delay_s > 0 else _SPIN_PROMISE_SECONDS)
+        await super().heart_beat()
 
 
 class ArqWorkerRuntime(BackendRuntime):
@@ -47,6 +80,7 @@ class ArqWorkerRuntime(BackendRuntime):
     name = CONSUMING_RUNTIME
     mode = ExecutionMode.on_loop
     consumes_work = True
+    liveness = ProgressLiveness()
 
     def __init__(self, options: Mapping[str, Any], *, vendor_signals: bool = False) -> None:
         """``options`` is a parsed :func:`main` option set.
@@ -59,7 +93,7 @@ class ArqWorkerRuntime(BackendRuntime):
         """
         self._options = dict(options)
         self._vendor_signals = vendor_signals
-        self._worker: Worker | None = None
+        self._worker: _ProgressReportingWorker | None = None
         # arq schedules a fresh wait-then-cancel task on every warm-shutdown
         # call, so the second one would open a second completion window and cut
         # the first short. The host is entitled to request a drain twice (on the
@@ -82,7 +116,8 @@ class ArqWorkerRuntime(BackendRuntime):
         settings = arq_settings()
         options = self._options
         queue_name = derived_queue(options["queue"])
-        self._worker = Worker(
+        self._worker = _ProgressReportingWorker(
+            report_progress=self.report_progress,
             job_serializer=job_serializer,
             job_deserializer=job_deserializer,
             functions=[func(task_scheduler), func(callback_job), func(tool_execution)],
@@ -123,7 +158,7 @@ class ArqWorkerRuntime(BackendRuntime):
         )
 
     @property
-    def worker(self) -> Worker:
+    def worker(self) -> _ProgressReportingWorker:
         """The built engine.
 
         Reading it before :meth:`build` is a bug in the driver, not a state to tolerate quietly.
@@ -177,14 +212,20 @@ async def _run_standalone(options: Mapping[str, Any]) -> None:
 
     No readiness gate and no composed signal chain: this process has no app
     booting alongside the worker to wait for, and nothing else on its loop to
-    compose signals with, so arq keeps its own handlers.
+    compose signals with, so arq keeps its own handlers. The liveness file is
+    bound here as the launch path binds it, and removed on every way out.
     """
+    liveness = LivenessFile.from_settings(backend_liveness_settings())
     runtime = ArqWorkerRuntime(options, vendor_signals=True)
-    await runtime.build()
+    runtime.bind_progress(liveness.report)
     try:
-        await runtime.run_on_loop()
+        await runtime.build()
+        try:
+            await runtime.run_on_loop()
+        finally:
+            await runtime.aclose()
     finally:
-        await runtime.aclose()
+        liveness.remove()
 
 
 def _queue_label_option(ctx: click.Context, param: click.Parameter, value: str | None) -> str | None:

@@ -84,3 +84,15 @@ def test_a_queue_worker_without_the_backend_worker_is_refused() -> None:
             run_backend=False,
             queue_workers=("b",),
         )
+
+
+def test_liveness_processes_without_the_backend_worker_are_refused() -> None:
+    with pytest.raises(ValueError, match=r"liveness_processes need run_backend=True"):
+        StackConfig(
+            name="census",
+            topology=Topology.MULTIWORKER,
+            manifest={},
+            env={},
+            run_backend=False,
+            liveness_processes=True,
+        )

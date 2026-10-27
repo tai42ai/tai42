@@ -14,7 +14,7 @@ from collections.abc import Mapping, Sequence
 from typing import ClassVar, Self
 
 import pytest
-from tai42_contract.backend.runtime import BackendRuntime, ExecutionMode
+from tai42_contract.backend.runtime import BackendRuntime, ExecutionMode, ProgressLiveness
 
 from tai42_kit.backend import DEFAULT_DRAIN_TIMEOUT_SECONDS, BackendDispatchSettings, ManagedBackend
 from tai42_kit.signals import signal_chain
@@ -67,10 +67,23 @@ class _Bare(BackendRuntime):
     declares exactly one thing and honors none of it."""
 
     name = "worker"
+    liveness = ProgressLiveness()
 
     @classmethod
     def from_args(cls, args: Sequence[str]) -> Self:
         return cls()
+
+
+class _NoLiveness(BackendRuntime):
+    name = "worker"
+    mode = ExecutionMode.on_loop
+
+    @classmethod
+    def from_args(cls, args: Sequence[str]) -> Self:
+        return cls()
+
+    async def run_on_loop(self) -> None:
+        return None
 
 
 class _OnLoopWithNoBody(_Bare):
@@ -136,6 +149,7 @@ def _backend_for(runtime_cls: type[BackendRuntime]) -> ManagedBackend:
 @pytest.mark.parametrize(
     ("runtime_cls", "expected"),
     [
+        (_NoLiveness, "declares no liveness, so the host cannot tell how it signals it is alive"),
         (_OnLoopWithNoBody, "declares mode=on_loop but implements no run_on_loop"),
         (_BlockingWithNoBody, "declares mode=worker_thread but implements no run_blocking"),
         (_ConsumesWithNoDrain, "declares consumes_work but implements no request_drain"),

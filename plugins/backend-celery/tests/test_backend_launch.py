@@ -9,6 +9,8 @@ only the half that is Celery's.
 from __future__ import annotations
 
 import asyncio
+import os
+import re
 import sys
 import threading
 from collections.abc import Iterator
@@ -271,3 +273,121 @@ def test_the_drain_budget_tracks_the_live_task_timeout(monkeypatch: pytest.Monke
     finally:
         monkeypatch.delenv("CELERY_TASK_TIMEOUT", raising=False)
         reset_all_settings()
+
+
+# -- the reporting scheduler -----------------------------------------------------
+
+
+@pytest.mark.parametrize("runtime_cls", [CeleryWorkerRuntime, CeleryBeatRuntime])
+@pytest.mark.parametrize(
+    "argv",
+    [["--scheduler", "x.Scheduler"], ["--scheduler=x.Scheduler"], ["-l", "info", "--scheduler", "x.Scheduler"]],
+)
+def test_the_worker_and_the_beat_refuse_a_scheduler_option(runtime_cls: Any, argv: list[str]) -> None:
+    with pytest.raises(ValueError, match="progress-reporting scheduler") as raised:
+        runtime_cls.from_args(argv)
+
+    assert str(raised.value) == (
+        f"tai backend {runtime_cls.name} runs RedBeat through its progress-reporting scheduler, which reports "
+        "the process's liveness; drop --scheduler x.Scheduler"
+    )
+
+
+@pytest.mark.parametrize("argv", [["-S", "x.Scheduler"], ["-Sx.Scheduler"], ["-l", "info", "-S", "x.Scheduler"]])
+def test_the_beat_refuses_the_short_scheduler_option(argv: list[str]) -> None:
+    with pytest.raises(ValueError, match=r"^tai backend beat runs RedBeat .*; drop --scheduler x\.Scheduler$"):
+        CeleryBeatRuntime.from_args(argv)
+
+
+def _refusal(name: str, spelling: str) -> str:
+    """The pattern of the whole refusal of a scheduler class handed to ``tai backend <name>`` as ``spelling``."""
+    return (
+        "^"
+        + re.escape(
+            f"tai backend {name} runs RedBeat through its progress-reporting scheduler, which reports "
+            f"the process's liveness; drop {spelling}"
+        )
+        + "$"
+    )
+
+
+@pytest.mark.parametrize(
+    ("runtime_cls", "variable"),
+    [(CeleryWorkerRuntime, "CELERY_WORKER_SCHEDULER"), (CeleryBeatRuntime, "CELERY_BEAT_SCHEDULER")],
+)
+def test_the_worker_and_the_beat_refuse_a_scheduler_set_in_the_environment(
+    runtime_cls: Any, variable: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(variable, "x.Scheduler")
+
+    with pytest.raises(ValueError, match=_refusal(runtime_cls.name, f"{variable}=x.Scheduler")):
+        runtime_cls.from_args(["-l", "info"])
+
+
+@pytest.mark.parametrize("runtime_cls", [CeleryWorkerRuntime, CeleryBeatRuntime])
+@pytest.mark.parametrize(
+    "setting", ["beat_scheduler=x.Scheduler", "beat.scheduler=x.Scheduler", "BEAT_SCHEDULER=x.Scheduler"]
+)
+def test_the_worker_and_the_beat_refuse_a_scheduler_set_as_command_line_configuration(
+    runtime_cls: Any, setting: str
+) -> None:
+    with pytest.raises(ValueError, match=_refusal(runtime_cls.name, setting)):
+        runtime_cls.from_args(["-l", "info", setting])
+
+
+@pytest.mark.parametrize(
+    ("runtime_cls", "argv"),
+    [
+        (CeleryWorkerRuntime, ["-B", "-l", "info", "worker_prefetch_multiplier=2"]),
+        (CeleryBeatRuntime, ["-l", "info", "beat_max_loop_interval=2"]),
+    ],
+)
+def test_the_worker_and_the_beat_take_other_command_line_configuration(runtime_cls: Any, argv: list[str]) -> None:
+    assert runtime_cls.from_args(argv)._args == argv
+
+
+@pytest.mark.parametrize(
+    ("runtime_cls", "argv"),
+    [
+        (CeleryWorkerRuntime, ["-B", "-P", "solo", "-c", "1", "-Q", "a,b", "-n", "w@%h", "-s", "/tmp/schedule"]),
+        (CeleryBeatRuntime, ["-i", "3", "-l", "info", "-s", "/tmp/schedule"]),
+    ],
+)
+def test_the_worker_and_the_beat_take_every_other_option(runtime_cls: Any, argv: list[str]) -> None:
+    runtime = runtime_cls.from_args(argv)
+
+    assert runtime._args == argv
+
+
+def test_flower_takes_its_options_unread() -> None:
+    assert CeleryFlowerRuntime.from_args(["--port=5555"])._args == ["--port=5555"]
+
+
+@pytest.mark.usefixtures("restore_argv", "quiet_prefork")
+async def test_the_worker_build_hands_the_embedded_beat_its_reporter(liveness_path: Any) -> None:
+    from tai42_backend_celery.core import beat_scheduler, embedded_beat
+    from tai42_backend_celery.core.app import celery_app
+
+    runtime = CeleryWorkerRuntime.from_args(["-B"])
+    runtime.bind_progress(lambda *, next_within: None)
+
+    await runtime.build()
+
+    reporter = beat_scheduler._report
+    assert reporter is not None
+    reporter(next_within=2.0)
+    assert liveness_path.with_name(liveness_path.name + "-beat").read_text() == f"{os.getpid()}\n7\n"
+    assert embedded_beat.BeatWatchStep in embedded_beat.worker_steps(celery_app)
+
+
+async def test_the_worker_aclose_releases_its_embedded_beat(monkeypatch: pytest.MonkeyPatch) -> None:
+    from tai42_backend_celery.core import embedded_beat
+
+    released: list[threading.Thread] = []
+    monkeypatch.setattr(embedded_beat, "release", lambda: released.append(threading.current_thread()))
+
+    await CeleryWorkerRuntime.from_args([]).aclose()
+
+    # The release joins the beat, which blocks, so it runs off the loop.
+    assert len(released) == 1
+    assert released[0] is not threading.main_thread()

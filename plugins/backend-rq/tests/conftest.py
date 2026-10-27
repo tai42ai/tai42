@@ -13,9 +13,10 @@ from __future__ import annotations
 import fnmatch
 import threading
 import time
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -285,6 +286,18 @@ def _reset_process_state(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv(rq_settings().manifest_key, raising=False)
 
 
+@pytest.fixture(autouse=True)
+def liveness_path(monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory) -> Iterator[Path]:
+    """Point the liveness file at a per-test path, so no test reads or writes the default one."""
+    from tai42_kit.liveness import backend_liveness_settings
+
+    path = tmp_path_factory.mktemp("liveness") / "liveness"
+    monkeypatch.setenv("TAI_BACKEND_LIVENESS_PATH", str(path))
+    backend_liveness_settings.cache_clear()
+    yield path
+    backend_liveness_settings.cache_clear()
+
+
 @pytest.fixture
 def app() -> StubApp:
     return stub_app
@@ -333,6 +346,9 @@ class FakeRqWorker:
         self.work_thread = threading.current_thread()
         while not self._stop_requested:
             time.sleep(0.005)
+
+    def raise_for_liveness_failure(self) -> None:
+        """rq's work loop recorded no failed progress report."""
 
 
 def make_client_ctx(client: Any) -> Callable[..., Any]:

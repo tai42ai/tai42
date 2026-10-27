@@ -3,17 +3,21 @@
 ``Backend.launch`` receives a subcommand and its options; this module declares
 what ONE such subcommand is, so the vendor binding answers only "how MY engine
 starts, drains, and recycles" while the host owns readiness gating, signal
-wiring, drain-on-cancel and pool turnover. Declarations only — every default
-body either raises (a declaration the binding did not honor) or does nothing.
+wiring, drain-on-cancel, pool turnover and the liveness signal. Declarations
+only — every default body either raises (a declaration the binding did not
+honor) or does nothing — plus the progress seam the host binds and a loop
+runtime reports through.
 """
 
 from __future__ import annotations
 
 import logging
+import math
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
+from dataclasses import dataclass
 from enum import StrEnum
-from typing import ClassVar, Final, Self
+from typing import ClassVar, Final, Protocol, Self
 
 from pydantic import BaseModel
 
@@ -66,12 +70,46 @@ class FleetOpApplied(BaseModel, frozen=True):
     budget: float
 
 
+@dataclass(frozen=True)
+class ProgressLiveness:
+    """The process is alive while its engine loop keeps reporting progress.
+
+    The host binds a reporter before ``build`` (:meth:`BackendRuntime.bind_progress`); the
+    runtime calls :meth:`BackendRuntime.report_progress` from inside its loop on every pass.
+    """
+
+
+@dataclass(frozen=True)
+class HttpLiveness:
+    """The process is alive while its HTTP server answers ``GET path`` with a success status on the port it serves.
+
+    ``path`` is absolute (starts with ``/``) and needs neither a session nor data from a backing
+    store, so the answer depends on the server alone.
+    """
+
+    path: str
+
+
+Liveness = ProgressLiveness | HttpLiveness
+"""How a backend process signals it is alive: by its loop's progress, or by its HTTP server."""
+
+
+class ProgressReporter(Protocol):
+    """The host's receiver of a loop runtime's progress reports."""
+
+    def __call__(self, *, next_within: float) -> None:
+        """Record one pass of the loop, whose next pass is due within ``next_within`` seconds."""
+        ...
+
+
 class BackendRuntime(ABC):
     """ONE launchable runtime of an execution backend, named by its launch subcommand.
 
     The vendor binding answers only "how MY engine starts, drains, and
     recycles"; readiness gating, signal wiring, drain-on-cancellation and pool
-    turnover belong to the host base that drives this object.
+    turnover belong to the host base that drives this object. The liveness
+    signal is the host's too: the runtime declares which kind it has
+    (:attr:`liveness`), and a progress runtime reports from its own loop.
     """
 
     name: ClassVar[str]
@@ -94,6 +132,39 @@ class BackendRuntime(ABC):
     Declared per class like the rest, but deliberately NOT a ``ClassVar``: a
     launch option can decide whether this engine's pool persists, so an instance
     may set it. The host therefore reads it off the live runtime."""
+
+    liveness: ClassVar[Liveness]
+    """How this process signals it is alive. REQUIRED: the host refuses a runtime without it.
+
+    A consuming runtime declares :class:`ProgressLiveness`: what it is alive for is consuming,
+    and its loop is what consumes. An HTTP server declares :class:`HttpLiveness` with the path
+    an orchestrator's HTTP probe requests."""
+
+    _progress: ProgressReporter | None = None
+
+    # -- liveness ------------------------------------------------------------
+
+    def bind_progress(self, report: ProgressReporter) -> None:
+        """Bind the host's progress reporter: once, before :meth:`build`. A second bind raises ``RuntimeError``."""
+        if self._progress is not None:
+            raise RuntimeError(f"{type(self).__name__} already has a progress reporter bound")
+        self._progress = report
+
+    def report_progress(self, *, next_within: float) -> None:
+        """Report one pass of this runtime's engine loop and promise the next one within ``next_within`` seconds.
+
+        Called from inside the loop on every pass, idle or busy, from any thread. ``next_within``
+        is the loop's own sleep or poll bound for the pass that follows; the probe judges this
+        process against it, so a loop that stops passing stops reporting and is seen as such.
+        Raises ``RuntimeError`` when no reporter is bound (a runtime driven without the host's
+        binding, or one that declares :class:`HttpLiveness`) and ``ValueError`` when
+        ``next_within`` is not positive.
+        """
+        if self._progress is None:
+            raise RuntimeError(f"{type(self).__name__} reported progress with no reporter bound")
+        if not (math.isfinite(next_within) and next_within > 0):
+            raise ValueError(f"next_within must be positive seconds, got {next_within!r}")
+        self._progress(next_within=next_within)
 
     # -- construction --------------------------------------------------------
 

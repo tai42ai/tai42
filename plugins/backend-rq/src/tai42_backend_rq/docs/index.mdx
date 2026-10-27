@@ -73,6 +73,40 @@ The dashboard opens its own Redis connection from its `--redis-url` option,
 outside the backend's connection settings, so the `RQ_` retry and timeouts do
 not apply to it.
 
+## Liveness
+
+The `worker` and `beat` processes report each pass of their loop into a liveness
+file at `TAI_BACKEND_LIVENESS_PATH`.
+`tai42-backend-probe` (shipped with `tai42-kit`) run in a process's
+environment exits 0 while the promise its liveness file holds is not overdue by
+more than `TAI_BACKEND_LIVENESS_GRACE` seconds, and 1 otherwise, so it serves as
+that container's exec liveness probe. Each process on one filesystem needs its
+own `TAI_BACKEND_LIVENESS_PATH`, and removes its file when it exits.
+
+- `worker` reports on each RQ heartbeat: every dequeue poll (at most 5s apart)
+  and every job boundary. While a forked work-horse runs a job, the worker's
+  horse monitor reports; on the `solo` and `gevent` pools, where the job runs in
+  the worker process, a monitor thread reports once a second until the job ends.
+  It is an OS thread under `gevent` too, so a job that holds the CPU does not
+  starve it. Those pools cannot end every job at `RQ_TASK_TIMEOUT` (one blocked
+  in a C call, or under `gevent` one that never yields), so the monitor stops
+  reporting once a job runs past it, and the probe ends the worker.
+  A report that fails (the file is owned by another live process, or cannot be
+  written) stops the worker before its next job, and the launch exits non-zero.
+- `beat` reports each pass of the scheduler loop, promising the next within its
+  `-i/--interval`.
+- `dashboard` serves HTTP, so it is probed over HTTP instead: `GET /favicon.ico`
+  answers 200 while the dashboard serves. With `--username` and `--password` set,
+  that path sits behind the same basic auth as the rest of the dashboard, so the
+  probe sends the `Authorization` header.
+
+```yaml docker-compose.yml
+services:
+  backend:
+    healthcheck:
+      test: ["CMD", "tai42-backend-probe"]
+```
+
 ## Send a task to a chosen worker
 
 The `sync_task` and `async_task` branches take an optional `queue` argument, a

@@ -4,6 +4,10 @@ start wiring."""
 from __future__ import annotations
 
 import os
+import signal
+import subprocess
+import sys
+import textwrap
 import threading
 import time
 from types import SimpleNamespace
@@ -14,8 +18,14 @@ from click.testing import CliRunner
 from tai42_kit.fork_gate import fork_gate
 
 from tai42_backend_rq import worker as worker_module
+from tai42_backend_rq import worker_pools
 
 from .conftest import FakeRedisConn, FakeRqWorker
+
+
+def _no_report(*, next_within: float) -> None:
+    """A progress reporter that drops every report."""
+
 
 # --- worker classes ----------------------------------------------------------
 
@@ -23,10 +33,11 @@ from .conftest import FakeRedisConn, FakeRqWorker
 def test_worker_classes_compose_rq_workers():
     from rq import SimpleWorker, Worker
 
-    assert issubclass(worker_module.CustomRQWorker, Worker)
-    assert issubclass(worker_module.CustomRQSimpleWorker, SimpleWorker)
-    assert issubclass(worker_module.CustomRQWorker, worker_module._TaiWorkerMixin)
-    assert issubclass(worker_module.CustomRQSimpleWorker, worker_module._TaiWorkerMixin)
+    assert issubclass(worker_pools.CustomRQWorker, Worker)
+    assert issubclass(worker_pools.CustomRQSimpleWorker, SimpleWorker)
+    assert issubclass(worker_pools.CustomRQWorker, worker_pools._TaiWorkerMixin)
+    assert issubclass(worker_pools.CustomRQSimpleWorker, worker_pools._TaiWorkerMixin)
+    assert issubclass(worker_pools.CustomRQGeventWorker, worker_pools.CustomRQSimpleWorker)
 
 
 def test_mixin_installs_signal_handlers_only_on_main_thread():
@@ -39,10 +50,10 @@ def test_mixin_installs_signal_handlers_only_on_main_thread():
         def _install_signal_handlers(self) -> None:
             installed.append("rq")
 
-    class TestWorker(worker_module._TaiWorkerMixin, Base):
+    class TestWorker(worker_pools._TaiWorkerMixin, Base):
         pass
 
-    worker = TestWorker(["default"], name="w1")
+    worker = TestWorker(["default"], name="w1", report_progress=_no_report)
     worker._install_signal_handlers()
     assert installed == ["rq"]
 
@@ -58,10 +69,13 @@ def test_mixin_bounds_the_dequeue_poll():
         def __init__(self, queues: Any, *args: Any, **kwargs: Any) -> None:
             self.name = kwargs["name"]
 
-    class TestWorker(worker_module._TaiWorkerMixin, Base):
+    class TestWorker(worker_pools._TaiWorkerMixin, Base):
         pass
 
-    assert TestWorker(["default"], name="w1").dequeue_timeout == worker_module._DEQUEUE_POLL_SECONDS
+    assert (
+        TestWorker(["default"], name="w1", report_progress=_no_report).dequeue_timeout
+        == worker_pools._DEQUEUE_POLL_SECONDS
+    )
 
 
 # --- fork safety -------------------------------------------------------------
@@ -118,8 +132,8 @@ def test_work_horse_perform_job_flushes_monitoring(app, monkeypatch):
     """The work-horse exits via os._exit, so the job path must flush buffered
     spans explicitly after the job ran."""
     ran: list[str] = []
-    monkeypatch.setattr(worker_module.Worker, "perform_job", lambda self, job, queue: ran.append("job") or True)
-    horse = object.__new__(worker_module.CustomRQWorker)
+    monkeypatch.setattr(worker_pools.Worker, "perform_job", lambda self, job, queue: ran.append("job") or True)
+    horse = object.__new__(worker_pools.CustomRQWorker)
 
     assert horse.perform_job("job", "queue") is True
     assert ran == ["job"]
@@ -130,8 +144,8 @@ def test_work_horse_flushes_even_when_the_job_raises(app, monkeypatch):
     def boom(self: Any, job: Any, queue: Any) -> bool:
         raise RuntimeError("job blew up")
 
-    monkeypatch.setattr(worker_module.Worker, "perform_job", boom)
-    horse = object.__new__(worker_module.CustomRQWorker)
+    monkeypatch.setattr(worker_pools.Worker, "perform_job", boom)
+    horse = object.__new__(worker_pools.CustomRQWorker)
 
     with pytest.raises(RuntimeError, match="job blew up"):
         horse.perform_job("job", "queue")
@@ -139,13 +153,13 @@ def test_work_horse_flushes_even_when_the_job_raises(app, monkeypatch):
 
 
 def test_work_horse_flush_failure_is_logged_not_raised(app, monkeypatch, caplog):
-    monkeypatch.setattr(worker_module.Worker, "perform_job", lambda self, job, queue: True)
+    monkeypatch.setattr(worker_pools.Worker, "perform_job", lambda self, job, queue: True)
 
     def failing_flush() -> None:
         raise RuntimeError("flush broke")
 
     monkeypatch.setattr(app.monitoring.active.writer, "flush", failing_flush)
-    horse = object.__new__(worker_module.CustomRQWorker)
+    horse = object.__new__(worker_pools.CustomRQWorker)
 
     with caplog.at_level("ERROR"):
         assert horse.perform_job("job", "queue") is True
@@ -161,9 +175,9 @@ def test_prefork_holds_the_span_around_the_fork_instant(monkeypatch):
     exposure."""
     spans: list[int] = []
     monkeypatch.setattr(
-        worker_module.Worker, "fork_work_horse", lambda self, job, queue: spans.append(fork_gate.live_spans)
+        worker_pools.Worker, "fork_work_horse", lambda self, job, queue: spans.append(fork_gate.live_spans)
     )
-    worker = object.__new__(worker_module.CustomRQWorker)
+    worker = object.__new__(worker_pools.CustomRQWorker)
 
     worker.fork_work_horse("job", "queue")
     assert spans == [1]
@@ -177,15 +191,15 @@ def test_prefork_does_not_hold_the_span_across_the_horses_whole_run(monkeypatch)
     re-imports, so holding the gate for its whole job would block reloads behind
     arbitrarily long jobs for no protection."""
     during_monitor: list[int] = []
-    monkeypatch.setattr(worker_module.Worker, "fork_work_horse", lambda self, job, queue: None)
+    monkeypatch.setattr(worker_pools.Worker, "fork_work_horse", lambda self, job, queue: None)
     monkeypatch.setattr(
-        worker_module.Worker, "monitor_work_horse", lambda self, job, queue: during_monitor.append(fork_gate.live_spans)
+        worker_pools.Worker, "monitor_work_horse", lambda self, job, queue: during_monitor.append(fork_gate.live_spans)
     )
     # rq's execute_job is prepare -> fork -> monitor -> set_state; the two that touch
     # Redis are stubbed so the ordering assertion needs no live connection.
-    monkeypatch.setattr(worker_module.Worker, "prepare_execution", lambda self, job: None)
-    monkeypatch.setattr(worker_module.Worker, "set_state", lambda self, state, pipeline=None: None)
-    worker = cast("Any", object.__new__(worker_module.CustomRQWorker))
+    monkeypatch.setattr(worker_pools.Worker, "prepare_execution", lambda self, job: None)
+    monkeypatch.setattr(worker_pools.Worker, "set_state", lambda self, state, pipeline=None: None)
+    worker = cast("Any", object.__new__(worker_pools.CustomRQWorker))
 
     # rq's own execute_job runs unwrapped: only the fork instant inside it is gated.
     worker.execute_job(SimpleNamespace(id="job", timeout=None), "queue")
@@ -197,8 +211,8 @@ def test_prefork_releases_its_span_when_the_fork_raises(monkeypatch):
     def boom(self: Any, job: Any, queue: Any) -> None:
         raise RuntimeError("fork blew up")
 
-    monkeypatch.setattr(worker_module.Worker, "fork_work_horse", boom)
-    worker = object.__new__(worker_module.CustomRQWorker)
+    monkeypatch.setattr(worker_pools.Worker, "fork_work_horse", boom)
+    worker = object.__new__(worker_pools.CustomRQWorker)
 
     with pytest.raises(RuntimeError, match="fork blew up"):
         worker.fork_work_horse("job", "queue")
@@ -211,11 +225,11 @@ def test_simple_pool_holds_the_span_across_the_whole_in_process_job(monkeypatch)
     all. It must NOT route through the prefork fork seam."""
     spans: list[int] = []
     monkeypatch.setattr(
-        worker_module.CustomRQSimpleWorker,
+        worker_pools.CustomRQSimpleWorker,
         "_run_job_inline",
         lambda self, job, queue: spans.append(fork_gate.live_spans),
     )
-    worker = object.__new__(worker_module.CustomRQSimpleWorker)
+    worker = object.__new__(worker_pools.CustomRQSimpleWorker)
 
     worker.execute_job("job", "queue")
     assert spans == [1]
@@ -227,8 +241,8 @@ def test_simple_pool_releases_its_span_when_the_job_body_raises(monkeypatch):
     def boom(self: Any, job: Any, queue: Any) -> None:
         raise RuntimeError("job blew up")
 
-    monkeypatch.setattr(worker_module.CustomRQSimpleWorker, "_run_job_inline", boom)
-    worker = object.__new__(worker_module.CustomRQSimpleWorker)
+    monkeypatch.setattr(worker_pools.CustomRQSimpleWorker, "_run_job_inline", boom)
+    worker = object.__new__(worker_pools.CustomRQSimpleWorker)
 
     with pytest.raises(RuntimeError, match="job blew up"):
         worker.execute_job("job", "queue")
@@ -240,9 +254,9 @@ def test_start_scheduler_runs_inside_a_fork_gate_span(monkeypatch):
     FIRST child, and a spawn like any other."""
     spans: list[int] = []
     monkeypatch.setattr(
-        worker_module.Worker, "_start_scheduler", lambda self, *a, **kw: spans.append(fork_gate.live_spans)
+        worker_pools.Worker, "_start_scheduler", lambda self, *a, **kw: spans.append(fork_gate.live_spans)
     )
-    worker = object.__new__(worker_module.CustomRQWorker)
+    worker = object.__new__(worker_pools.CustomRQWorker)
 
     worker._start_scheduler(False, "INFO")
     assert spans == [1]
@@ -253,8 +267,8 @@ def test_run_maintenance_tasks_runs_inside_a_fork_gate_span(monkeypatch):
     """rq's maintenance pass re-spawns a dead scheduler process — the same hazard as
     a work-horse fork, so it takes the same span."""
     spans: list[int] = []
-    monkeypatch.setattr(worker_module.Worker, "run_maintenance_tasks", lambda self: spans.append(fork_gate.live_spans))
-    worker = object.__new__(worker_module.CustomRQWorker)
+    monkeypatch.setattr(worker_pools.Worker, "run_maintenance_tasks", lambda self: spans.append(fork_gate.live_spans))
+    worker = object.__new__(worker_pools.CustomRQWorker)
 
     worker.run_maintenance_tasks()
     assert spans == [1]
@@ -286,8 +300,11 @@ def _fake_worker_class(record: dict[str, Any]) -> type:
     class FakeWorker:
         name = "fake"
 
-        def __init__(self, queues: Any, name: str | None, connection: Any, default_result_ttl: int) -> None:
+        def __init__(
+            self, queues: Any, name: str | None, connection: Any, default_result_ttl: int, report_progress: Any
+        ) -> None:
             record["queues"] = queues
+            record["report_progress"] = report_progress
             record["name"] = name
             record["connection"] = connection
             record["default_result_ttl"] = default_result_ttl
@@ -295,6 +312,9 @@ def _fake_worker_class(record: dict[str, Any]) -> type:
 
         def work(self, **kwargs: Any) -> None:
             record["work"] = kwargs
+
+        def raise_for_liveness_failure(self) -> None:
+            record["liveness_checked"] = True
 
     return FakeWorker
 
@@ -319,6 +339,7 @@ def worker_env(monkeypatch) -> dict[str, Any]:
     fake_cls = _fake_worker_class(record)
     monkeypatch.setattr(worker_module, "CustomRQWorker", fake_cls)
     monkeypatch.setattr(worker_module, "CustomRQSimpleWorker", fake_cls)
+    monkeypatch.setattr(worker_module, "CustomRQGeventWorker", fake_cls)
     return record
 
 
@@ -351,7 +372,7 @@ def test_the_worker_connection_carries_the_kit_sync_retry(worker_env, monkeypatc
     monkeypatch.setenv("RQ_SOCKET_TIMEOUT", "3")
     rq_settings.cache_clear()
     try:
-        _worker, conn = worker_module._build_worker(None, "w1", 500, "solo", None)
+        _worker, conn = worker_module._build_worker(None, "w1", 500, "solo", None, _no_report)
     finally:
         rq_settings.cache_clear()
 
@@ -488,7 +509,7 @@ async def test_build_constructs_the_worker_and_its_connection(monkeypatch):
     runtime = cast("Any", worker_module.RqWorkerRuntime.from_args(["--pool", "gevent", "--redis-url", "redis://x/1"]))
     await runtime.build()
 
-    assert calls == [("redis://x/1", None, 500, "gevent", None)]
+    assert calls == [("redis://x/1", None, 500, "gevent", None, runtime.report_progress)]
     assert runtime._worker is worker
     assert runtime._redis_conn is conn
 
@@ -569,10 +590,10 @@ def test_an_idle_worker_stops_within_the_dequeue_poll_bound():
             time.sleep(0.01)
             return None  # an idle poll that found no job
 
-    class IdleWorker(worker_module._TaiWorkerMixin, Base):
+    class IdleWorker(worker_pools._TaiWorkerMixin, Base):
         pass
 
-    worker = IdleWorker()
+    worker = IdleWorker(report_progress=_no_report)
     worker._stop_requested = False
     runtime = _built_runtime(worker=worker)
 
@@ -592,7 +613,7 @@ def test_an_idle_worker_stops_within_the_dequeue_poll_bound():
 
     assert stopped.wait(timeout=5), "the idle worker never honored the drain"
     # Each poll is bounded, which is what makes the flag observable at all.
-    assert worker.polls[0] == (worker_module._DEQUEUE_POLL_SECONDS, worker_module._DEQUEUE_POLL_SECONDS)
+    assert worker.polls[0] == (worker_pools._DEQUEUE_POLL_SECONDS, worker_pools._DEQUEUE_POLL_SECONDS)
 
 
 def test_request_terminate_kills_the_work_horse():
@@ -665,26 +686,28 @@ def test_prefork_horse_monitor_ticks_while_the_job_runs(monkeypatch: pytest.Monk
     Without that the worker refreshes no heartbeat for the whole job: the census drops
     a live worker and RQ abandons the execution mid-run.
     """
-    worker = worker_module.CustomRQWorker.__new__(worker_module.CustomRQWorker)
+    worker = worker_pools.CustomRQWorker.__new__(worker_pools.CustomRQWorker)
     worker.job_monitoring_interval = 0.05  # type: ignore[attr-defined]
     worker._horse_pid = 424242  # type: ignore[attr-defined]
     worker._killed_horse_pid = 0  # type: ignore[attr-defined]
+    worker._report_progress = _no_report  # type: ignore[attr-defined]
 
     # A horse that has not exited: WNOHANG keeps reporting "not reaped yet".
-    monkeypatch.setattr(worker_module.os, "wait4", lambda pid, flags: (0, 0, None))
+    monkeypatch.setattr(worker_pools.os, "wait4", lambda pid, flags: (0, 0, None))
     started = time.monotonic()
-    with pytest.raises(worker_module.HorseMonitorTimeoutException):
+    with pytest.raises(worker_pools.HorseMonitorTimeoutException):
         worker.wait_for_horse()
     # It timed itself out on real time, promptly — not after the job ended.
     assert time.monotonic() - started < 1.0
 
 
 def test_prefork_horse_monitor_returns_the_reaped_horse(monkeypatch: pytest.MonkeyPatch) -> None:
-    worker = worker_module.CustomRQWorker.__new__(worker_module.CustomRQWorker)
+    worker = worker_pools.CustomRQWorker.__new__(worker_pools.CustomRQWorker)
     worker.job_monitoring_interval = 5  # type: ignore[attr-defined]
     worker._horse_pid = 424242  # type: ignore[attr-defined]
     worker._killed_horse_pid = 0  # type: ignore[attr-defined]
-    monkeypatch.setattr(worker_module.os, "wait4", lambda pid, flags: (424242, 0, "rusage"))
+    worker._report_progress = _no_report  # type: ignore[attr-defined]
+    monkeypatch.setattr(worker_pools.os, "wait4", lambda pid, flags: (424242, 0, "rusage"))
 
     assert worker.wait_for_horse() == (424242, 0, "rusage")
 
@@ -693,27 +716,30 @@ def test_work_horse_child_restores_the_signal_death_penalty(monkeypatch: pytest.
     """Only SIGALRM can interrupt job code blocked in a C call, and the forking
     thread becomes the child's main thread — so the horse enforces job timeouts with
     RQ's signal penalty even though the parent cannot arm one."""
-    worker = worker_module.CustomRQWorker.__new__(worker_module.CustomRQWorker)
-    monkeypatch.setattr(worker_module.Worker, "main_work_horse", lambda self, job, queue: None)
+    worker = worker_pools.CustomRQWorker.__new__(worker_pools.CustomRQWorker)
+    monkeypatch.setattr(worker_pools.Worker, "main_work_horse", lambda self, job, queue: None)
 
     worker.main_work_horse(object(), object())
 
-    assert worker.death_penalty_class is worker_module.UnixSignalDeathPenalty
+    assert worker.death_penalty_class is worker_pools.UnixSignalDeathPenalty
 
 
 def test_simple_worker_refreshes_heartbeats_while_a_job_runs(monkeypatch: pytest.MonkeyPatch) -> None:
     """The non-forking worker has no monitor process, so nothing would refresh its
     heartbeats for the job's whole duration — a long job would read as a dead worker.
     Its heartbeat thread is what keeps both pools on ONE liveness contract."""
-    worker = worker_module.CustomRQSimpleWorker.__new__(worker_module.CustomRQSimpleWorker)
+    worker = worker_pools.CustomRQSimpleWorker.__new__(worker_pools.CustomRQSimpleWorker)
     spy = _HeartbeatSpy()
     worker.job_monitoring_interval = spy.job_monitoring_interval  # type: ignore[attr-defined]
+    worker._report_progress = _no_report  # type: ignore[attr-defined]
+    worker._execution_guard = worker_pools._os_thread_lock()  # type: ignore[attr-defined]
+    monkeypatch.setattr(worker_pools, "_REFRESH_TICK_SECONDS", 0.005)
     monkeypatch.setattr(type(worker), "maintain_heartbeats", lambda self, job: spy.maintain_heartbeats(job))
-    monkeypatch.setattr(type(worker), "prepare_execution", lambda self, job: None)
+    monkeypatch.setattr(type(worker), "prepare_execution", lambda self, job: setattr(self, "execution", job))
     monkeypatch.setattr(type(worker), "set_state", lambda self, state: None)
     monkeypatch.setattr(type(worker), "perform_job", lambda self, job, queue: time.sleep(0.2) or True)
 
-    worker.execute_job(SimpleNamespace(id="job-1"), object())
+    worker.execute_job(SimpleNamespace(id="job-1", timeout=300), object())
 
     assert spy.beats >= 2, "a busy non-forking worker never refreshed its heartbeat"
 
@@ -724,10 +750,11 @@ def test_wait_for_horse_after_kill_does_not_self_timeout(monkeypatch: pytest.Mon
     escape ``monitor_work_horse`` and drop the job's failure handling — so once the
     current horse is killed, the poll blocks until it is reaped instead of timing out.
     """
-    worker = worker_module.CustomRQWorker.__new__(worker_module.CustomRQWorker)
+    worker = worker_pools.CustomRQWorker.__new__(worker_pools.CustomRQWorker)
     worker.job_monitoring_interval = 0.02  # type: ignore[attr-defined]
     worker._horse_pid = 424242  # type: ignore[attr-defined]
     worker._killed_horse_pid = 0  # type: ignore[attr-defined]
+    worker._report_progress = _no_report  # type: ignore[attr-defined]
 
     # Simulate rq's kill_horse recording the target, then a horse that only gets
     # reaped after several polls (longer than job_monitoring_interval).
@@ -740,9 +767,55 @@ def test_wait_for_horse_after_kill_does_not_self_timeout(monkeypatch: pytest.Mon
             return (0, 0, None)  # not reaped yet
         return (pid, 0, "rusage")
 
-    monkeypatch.setattr(worker_module.os, "wait4", fake_wait4)
+    monkeypatch.setattr(worker_pools.os, "wait4", fake_wait4)
     # It must NOT raise despite the interval elapsing across polls.
     assert worker.wait_for_horse() == (424242, 0, "rusage")
+
+
+def test_kill_horse_marks_the_horse_it_kills_so_its_reap_waits_for_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``kill_horse`` records the target before rq signals it; the reap of that horse then polls
+    past ``job_monitoring_interval`` until the horse is gone instead of timing itself out."""
+    worker = worker_pools.CustomRQWorker.__new__(worker_pools.CustomRQWorker)
+    worker.job_monitoring_interval = 0.02  # type: ignore[attr-defined]
+    worker._horse_pid = 424242  # type: ignore[attr-defined]
+    worker._killed_horse_pid = 0  # type: ignore[attr-defined]
+    worker._report_progress = _no_report  # type: ignore[attr-defined]
+    signalled: list[tuple[int, signal.Signals]] = []
+    monkeypatch.setattr(
+        worker_pools.Worker,
+        "kill_horse",
+        lambda self, sig=signal.SIGKILL: signalled.append((self._killed_horse_pid, sig)),
+    )
+
+    worker.kill_horse()
+
+    assert signalled == [(424242, signal.SIGKILL)], "rq signalled the horse before it was recorded"
+    polls = {"n": 0}
+
+    def fake_wait4(pid: int, flags: int) -> tuple[int, int, object]:
+        polls["n"] += 1
+        return (0, 0, None) if polls["n"] < 6 else (pid, 9, "rusage")
+
+    monkeypatch.setattr(worker_pools, "_HORSE_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(worker_pools.os, "wait4", fake_wait4)
+
+    assert worker.wait_for_horse() == (424242, 9, "rusage")
+
+
+def test_prefork_horse_monitor_reads_an_already_reaped_horse_as_no_status(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A horse that is no longer this process's child is reported as rq reports a vanished horse."""
+    worker = worker_pools.CustomRQWorker.__new__(worker_pools.CustomRQWorker)
+    worker.job_monitoring_interval = 5  # type: ignore[attr-defined]
+    worker._horse_pid = 424242  # type: ignore[attr-defined]
+    worker._killed_horse_pid = 0  # type: ignore[attr-defined]
+    worker._report_progress = _no_report  # type: ignore[attr-defined]
+
+    def _no_child(pid: int, flags: int) -> tuple[int, int, object]:
+        raise ChildProcessError(10, "No child processes")
+
+    monkeypatch.setattr(worker_pools.os, "wait4", _no_child)
+
+    assert worker.wait_for_horse() == (None, None, None)
 
 
 # --- the job budget at run time ----------------------------------------------
@@ -767,14 +840,14 @@ def test_the_worker_applies_the_current_job_budget_to_every_job_it_runs(
             prepared.append(job.timeout)
             return "execution"
 
-    class TestWorker(worker_module._TaiWorkerMixin, Base):
+    class TestWorker(worker_pools._TaiWorkerMixin, Base):
         pass
 
     job = SimpleNamespace(id="nightly", timeout=stored_timeout)
     monkeypatch.setenv("RQ_TASK_TIMEOUT", "60")
     reset_all_settings()
     try:
-        assert TestWorker(["default"], name="w1").prepare_execution(job) == "execution"
+        assert TestWorker(["default"], name="w1", report_progress=_no_report).prepare_execution(job) == "execution"
     finally:
         monkeypatch.delenv("RQ_TASK_TIMEOUT", raising=False)
         reset_all_settings()
@@ -785,7 +858,32 @@ def test_the_worker_applies_the_current_job_budget_to_every_job_it_runs(
 def test_both_worker_classes_prepare_through_the_budget_seam():
     from rq import SimpleWorker, Worker
 
-    for cls in (worker_module.CustomRQWorker, worker_module.CustomRQSimpleWorker):
-        assert cls.prepare_execution is worker_module._TaiWorkerMixin.prepare_execution
-    assert Worker.prepare_execution is not worker_module._TaiWorkerMixin.prepare_execution
-    assert SimpleWorker.prepare_execution is not worker_module._TaiWorkerMixin.prepare_execution
+    for cls in (worker_pools.CustomRQWorker, worker_pools.CustomRQSimpleWorker):
+        assert cls.prepare_execution is worker_pools._TaiWorkerMixin.prepare_execution
+    assert Worker.prepare_execution is not worker_pools._TaiWorkerMixin.prepare_execution
+    assert SimpleWorker.prepare_execution is not worker_pools._TaiWorkerMixin.prepare_execution
+
+
+def test_importing_the_worker_loads_no_gevent() -> None:
+    """Only ``--pool gevent`` loads gevent (:func:`~tai42_backend_rq.worker.setup_gevent`), never the import."""
+    script = textwrap.dedent(
+        """
+        import sys
+
+        sys.path.insert(0, sys.argv[1])
+        import conftest  # noqa: F401
+
+        from tai42_backend_rq import worker  # noqa: F401
+
+        print(sorted(name for name in sys.modules if name.split(".")[0] == "gevent"))
+        """
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", script, os.path.dirname(__file__)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip().splitlines()[-1] == "[]"

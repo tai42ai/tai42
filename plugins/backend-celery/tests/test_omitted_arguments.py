@@ -64,8 +64,6 @@ def test_the_worker_runs_the_named_tool_without_the_omitted_argument(stub_app: A
     try:
         out = tool_execution.apply(kwargs=loads(dumps(_SHIPPED))).get()
     finally:
-        if tool_execution._loop is not None:
-            tool_execution._loop.close()
-            tool_execution._loop = None
+        tool_execution.close_loop()
     assert out == "ran"
     assert stub_app.tools.run_tool_calls == [("probe", {"text": "x"})]

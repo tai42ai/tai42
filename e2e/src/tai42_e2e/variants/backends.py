@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import abc
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from tai42_e2e.rabbitx import RabbitAdmin, broker_url_for
@@ -11,6 +12,16 @@ from tai42_e2e.variants.census import BrokerLease
 
 if TYPE_CHECKING:
     from tai42_e2e.settings import HarnessSettings
+
+
+@dataclass(frozen=True)
+class LivenessProcess:
+    """One more ``tai backend <args>`` process a liveness stack runs: a process shape whose
+    liveness reporting differs from the plain worker's, with the env it needs beside the
+    stack's own."""
+
+    args: list[str]
+    env: dict[str, str] = field(default_factory=dict)
 
 
 class BackendVariant(abc.ABC):
@@ -53,6 +64,12 @@ class BackendVariant(abc.ABC):
         queue job the worker runs, whereas celery's RedBeat and rq's rq-scheduler
         each need their own long-lived process before a ``schedule_task`` schedule
         can ever fire."""
+
+    def liveness_processes(self, res: StackResources) -> dict[str, LivenessProcess]:
+        """The process shapes, by name, that report their liveness in a way the plain worker
+        does not: a stack with ``liveness_processes`` on runs each as ``backend-<name>``. The
+        default is none: the plain worker and the extras cover every shape of this backend."""
+        return {}
 
     @abc.abstractmethod
     def queue_worker_args(self, label: str) -> list[str]:
@@ -137,6 +154,11 @@ class RqVariant(BackendVariant):
         # a second so a short-interval schedule fires promptly.
         return [["beat", "-i", "1"]]
 
+    def liveness_processes(self, res: StackResources) -> dict[str, LivenessProcess]:
+        # ``solo`` runs each job in the worker process itself: a monitor thread reports the
+        # worker's progress while the job runs, up to the job budget. It serves its own queue.
+        return {"solo": LivenessProcess(["worker", "--pool", "solo", "--queue", "solo"])}
+
     def queue_worker_args(self, label: str) -> list[str]:
         return ["worker", "--queue", label]
 
@@ -195,6 +217,24 @@ class CeleryVariant(BackendVariant):
         # ``--max-interval 2`` bounds the beat loop so a schedule created after
         # beat starts is picked up within ~2s rather than the 60s conf default.
         return [["beat", "--max-interval", "2"]]
+
+    def liveness_processes(self, res: StackResources) -> dict[str, LivenessProcess]:
+        # ``solo`` runs each job on the worker's own loop thread, so the job reports the
+        # worker's progress itself. ``embedded-beat`` embeds a beat (``-B``) that reports
+        # into its own file, read by the worker's tick. Each serves its own queue under its
+        # own node name. The embedded beat keeps its RedBeat store apart from the stack's
+        # beat, so the two never contend for the one RedBeat lock, and its loop interval
+        # short, so the promise each tick makes is short.
+        return {
+            "solo": LivenessProcess(["worker", "-P", "solo", "-Q", "solo", "-n", "solo@%h"]),
+            "embedded-beat": LivenessProcess(
+                ["worker", "-B", "-Q", "embedded", "-n", "embedded@%h"],
+                env={
+                    "CELERY_REDBEAT_KEY_PREFIX": f"{res.bus_namespace}:redbeat-embedded:",
+                    "CELERY_BEAT_MAX_LOOP_INTERVAL": "2",
+                },
+            ),
+        }
 
     def queue_worker_args(self, label: str) -> list[str]:
         # A second Celery worker on one host needs its own node name beside the default one.

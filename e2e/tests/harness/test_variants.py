@@ -21,6 +21,7 @@ from tai42_e2e.variants import (
     resolve_variants,
     short_presence_ttl_env,
 )
+from tai42_e2e.variants.backends import LivenessProcess
 
 pytestmark = pytest.mark.needs("no-stack")
 
@@ -126,6 +127,8 @@ def test_arq_backend_feature_env_and_process_model() -> None:
     # A worker on a labelled queue takes the bare label; the plugin derives the queue.
     assert arq.queue_worker_args("b") == ["worker", "--queue", "b"]
     assert arq.task_timeout_env(8) == {"ARQ_TASK_TIMEOUT": "8"}
+    # The worker and its queue workers are the only process shapes arq runs.
+    assert arq.liveness_processes(_RES) == {}
 
 
 def test_rq_backend_feature_env_and_process_model() -> None:
@@ -142,6 +145,8 @@ def test_rq_backend_feature_env_and_process_model() -> None:
     assert rq.extra_backend_processes() == [["beat", "-i", "1"]]
     assert rq.queue_worker_args("b") == ["worker", "--queue", "b"]
     assert rq.task_timeout_env(8) == {"RQ_TASK_TIMEOUT": "8"}
+    # A solo worker runs its job in-process, so a monitor thread reports the job's progress.
+    assert rq.liveness_processes(_RES) == {"solo": LivenessProcess(["worker", "--pool", "solo", "--queue", "solo"])}
 
 
 def test_celery_feature_env_and_process_model() -> None:
@@ -161,3 +166,15 @@ def test_celery_feature_env_and_process_model() -> None:
     # A second Celery worker consumes the label's queue under its own node name.
     assert celery.queue_worker_args("b") == ["worker", "-Q", "b", "-n", "b@%h"]
     assert celery.task_timeout_env(8) == {"CELERY_TASK_TIMEOUT": "8"}
+    # A solo worker and a worker embedding its beat report their liveness their own way; the
+    # embedded beat keeps a RedBeat store of its own, apart from the stack's beat.
+    assert celery.liveness_processes(_RES) == {
+        "solo": LivenessProcess(["worker", "-P", "solo", "-Q", "solo", "-n", "solo@%h"]),
+        "embedded-beat": LivenessProcess(
+            ["worker", "-B", "-Q", "embedded", "-n", "embedded@%h"],
+            env={
+                "CELERY_REDBEAT_KEY_PREFIX": f"{_RES.bus_namespace}:redbeat-embedded:",
+                "CELERY_BEAT_MAX_LOOP_INTERVAL": "2",
+            },
+        ),
+    }

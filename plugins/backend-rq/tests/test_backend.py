@@ -69,7 +69,7 @@ async def test_launch_beat_runs_the_plugin_beat_with_its_args(backend, monkeypat
     from tai42_backend_rq import beat
 
     seen: list[list[str]] = []
-    monkeypatch.setattr(beat, "run_beat", lambda args: seen.append(list(args)))
+    monkeypatch.setattr(beat, "run_beat", lambda args, *, report_progress: seen.append(list(args)))
 
     await backend.launch(["beat", "--interval", "5"])
     assert seen == [["--interval", "5"]]
@@ -93,7 +93,7 @@ async def test_the_inline_runtimes_block_the_loop_on_purpose(backend, monkeypatc
     from tai42_backend_rq import beat
 
     threads: list[threading.Thread] = []
-    monkeypatch.setattr(beat, "run_beat", lambda args: threads.append(threading.current_thread()))
+    monkeypatch.setattr(beat, "run_beat", lambda args, *, report_progress: threads.append(threading.current_thread()))
 
     for runtime_cls in (RqBeatRuntime, RqDashboardRuntime):
         assert runtime_cls.mode is ExecutionMode.inline

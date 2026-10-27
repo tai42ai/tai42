@@ -85,6 +85,8 @@ class TaiStack:
         self.metrics_dir: str = ""
         self._config_dir = root / "config"
         self._logs_dir = root / "logs"
+        # One backend liveness file per child process (``child_env``).
+        self.liveness_dir = root / "liveness"
         # Respawn-on-exit supervisor (opt-in ``config.supervised``). Serialises every
         # ``_procs``/``_specs`` mutation the supervisor and teardown/restart race on.
         self._supervisor_lock = threading.RLock()
@@ -110,6 +112,7 @@ class TaiStack:
     def boot(self) -> None:
         self._config_dir.mkdir(parents=True, exist_ok=True)
         self._logs_dir.mkdir(parents=True, exist_ok=True)
+        self.liveness_dir.mkdir(parents=True, exist_ok=True)
 
         n_app = 2 if self.config.topology is Topology.REPLICAS else 1
         if self._pinned_app_port is not None:

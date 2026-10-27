@@ -175,6 +175,9 @@ class StackConfig:
     # Worker queue labels: each runs one more ``tai backend worker`` (``backend-queue-<label>``)
     # serving only that label's queue, beside the worker on the settings queue.
     queue_workers: tuple[str, ...] = ()
+    # Run the backend variant's liveness process shapes (``BackendVariant.liveness_processes``),
+    # each one more ``tai backend`` process named ``backend-<name>``, beside the worker.
+    liveness_processes: bool = False
     run_metrics: bool = True
     auth: bool = False
     # Serve the SUT as a user-owned embed host (uvicorn running the host FastAPI
@@ -253,6 +256,8 @@ class StackConfig:
     def __post_init__(self) -> None:
         if self.queue_workers and not self.run_backend:
             raise ValueError(f"stack {self.name!r}: queue_workers {self.queue_workers} need run_backend=True")
+        if self.liveness_processes and not self.run_backend:
+            raise ValueError(f"stack {self.name!r}: liveness_processes need run_backend=True")
 
 
 @dataclass
