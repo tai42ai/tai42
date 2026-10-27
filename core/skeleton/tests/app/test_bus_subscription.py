@@ -37,7 +37,16 @@ from tai42_contract.errors import ClientDisconnectedError
 from tai42_contract.storage import ObjectStat, Storage
 from tai42_kit.settings import TaiBaseSettings, reset_all_settings
 
-from tai42_skeleton.app.bus import FleetResult, LocalApplyResult, OpOutcome, WorkerBus, WorkerKind, WorkerResult
+from tai42_skeleton.app.bus import (
+    FleetResult,
+    LocalApplyResult,
+    OpOutcome,
+    WorkerBus,
+    WorkerKind,
+    WorkerResult,
+    WorkerState,
+    presence_fresh,
+)
 from tai42_skeleton.app.bus.ops import ClearTemplateCache, EvictTemplate, FleetOp, ReloadConfig, ReprobeFailedMcps
 from tai42_skeleton.app.bus_settings import BusRedisSettings, BusSettings
 from tai42_skeleton.app.instance import app
@@ -573,6 +582,7 @@ async def test_the_first_join_withdraws_an_applied_key_the_fleet_owns_and_notifi
 
     with caplog.at_level(logging.WARNING):
         await m._resync_on_ready()
+        await _join_done(m)
 
     assert _SIBLING_KEY not in os.environ
     assert _SIBLING_KEY not in applied_env.applied_env_keys()
@@ -597,6 +607,7 @@ async def test_a_reconnect_notifies_the_fleet_again(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(m, "_dispatch_bus_op", ok_dispatch)
     m._boot_ready.set()
     await m._resync_on_ready()
+    await _join_done(m)
 
     assert [call[0] for call in bus.publish_calls] == [{"op": "deployment_keys_changed"}]
 
@@ -896,7 +907,12 @@ async def test_a_join_notice_whose_withdraw_returns_the_namespace_to_the_bus_it_
 
 
 class _JoinBus(FakeBus):
-    """A bus whose siblings answer the join announcement with ``payloads`` and that records a recycle mark."""
+    """A bus whose siblings answer the join announcement with ``payloads`` and that records a recycle mark.
+
+    ``publish`` applies the publisher's gate to each sibling row: a ready+fresh row answers, a
+    fresh ``resyncing`` row answers only an op that declares ``awaited_mid_resync``, and any
+    other row lands as its gap outcome, freshness read through the real ``presence_fresh``.
+    """
 
     def __init__(self, payloads: dict[str, dict[str, Any]], *, fleet_keys: list[str], events: list[str]) -> None:
         super().__init__(origin="serve-1", remotes=list(payloads))
@@ -916,10 +932,15 @@ class _JoinBus(FakeBus):
     ) -> FleetResult:
         await super().publish(op, targets, local, expected_at_start=expected_at_start)
         results = [WorkerResult(name="serve-1", outcome=OpOutcome.applied)]
-        results += [
-            WorkerResult(name=name, outcome=OpOutcome.applied, payload=payload)
-            for name, payload in self._payloads.items()
-        ]
+        for row in self.rows[1:]:
+            fresh = presence_fresh(row.pttl_ms, self.ttl)
+            if fresh and (
+                row.state == WorkerState.ready or (row.state == WorkerState.resyncing and type(op).awaited_mid_resync)
+            ):
+                results.append(WorkerResult(name=row.name, outcome=OpOutcome.applied, payload=self._payloads[row.name]))
+            else:
+                outcome = OpOutcome(row.state.value) if fresh else OpOutcome.stale
+                results.append(WorkerResult(name=row.name, outcome=outcome, detail=f"state={row.state.value}"))
         return FleetResult(op=op.op, results=results)
 
     async def mark_recycling(self) -> None:
@@ -949,8 +970,8 @@ def recorded_roll(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     return seen
 
 
-async def _roll_done(m: _Mixin) -> None:
-    await asyncio.gather(*m._deployment_keys_recycle_tasks)
+async def _join_done(m: _Mixin) -> None:
+    await asyncio.gather(*m._deployment_keys_join_tasks)
 
 
 async def test_the_join_rolls_a_recycle_over_exactly_the_workers_that_reported_keys(
@@ -969,8 +990,7 @@ async def test_the_join_rolls_a_recycle_over_exactly_the_workers_that_reported_k
         ),
     )
 
-    await m._announce_deployment_keys(self_recycle_keys=[])
-    await _roll_done(m)
+    await m._join([])
 
     [call] = recorded_roll["calls"]
     assert call["expected"] == {"backend-1": (WorkerKind.backend, 1)}
@@ -978,6 +998,64 @@ async def test_the_join_rolls_a_recycle_over_exactly_the_workers_that_reported_k
     assert list(call["target_kinds"]) == [WorkerKind.backend]
     assert call["excluded_name"] == "serve-1"
     assert call["applier_self_deferred"] is False
+    assert recorded_roll["events"] == ["roll"]
+
+
+async def test_the_join_rolls_a_worker_that_was_resyncing_when_it_announced(recorded_roll: dict[str, Any]) -> None:
+    # The sibling's row is mid-resync when the joiner announces: it is subscribed, applies the
+    # announcement after its resync and reports the key it withdrew, so the join rolls it.
+    bus = _JoinBus(
+        {"backend-1": {"withdrawn": [_SIBLING_KEY], "awaiting_respawn": [_SIBLING_KEY]}},
+        fleet_keys=[],
+        events=recorded_roll["events"],
+    )
+    bus.rows[1].state = WorkerState.resyncing
+    m = _Mixin()
+    m._bus = cast("Any", bus)
+
+    await m._resync_on_ready()
+    await _join_done(m)
+
+    assert recorded_roll["calls"][0]["expected"] == {"backend-1": (WorkerKind.backend, 1)}
+    assert recorded_roll["events"] == ["roll"]
+
+
+class _HeldJoinBus(_JoinBus):
+    """A :class:`_JoinBus` whose ``publish`` answers only once ``release`` is set."""
+
+    def __init__(self, payloads: dict[str, dict[str, Any]], *, fleet_keys: list[str], events: list[str]) -> None:
+        super().__init__(payloads, fleet_keys=fleet_keys, events=events)
+        self.release = asyncio.Event()
+
+    async def publish(
+        self,
+        op: FleetOp,
+        targets: list[str] | None,
+        local: LocalApplyResult | None,
+        *,
+        expected_at_start: dict[str, int] | None = None,
+    ) -> FleetResult:
+        await self.release.wait()
+        return await super().publish(op, targets, local, expected_at_start=expected_at_start)
+
+
+async def test_the_join_announcement_does_not_hold_the_resync(recorded_roll: dict[str, Any]) -> None:
+    # The resync returns, boot-ready, while its announcement still collects: the message loop
+    # that follows it is free to answer another joiner's announcement meanwhile.
+    bus = _HeldJoinBus(
+        {"backend-1": {"withdrawn": [_SIBLING_KEY], "awaiting_respawn": [_SIBLING_KEY]}},
+        fleet_keys=[],
+        events=recorded_roll["events"],
+    )
+    m = _Mixin()
+    m._bus = cast("Any", bus)
+
+    await asyncio.wait_for(m._resync_on_ready(), 1.0)
+
+    assert m._boot_ready.is_set()
+    assert recorded_roll["events"] == []
+    bus.release.set()
+    await _join_done(m)
     assert recorded_roll["events"] == ["roll"]
 
 
@@ -990,8 +1068,7 @@ async def test_a_join_nobody_reports_keys_for_rolls_nothing(recorded_roll: dict[
         ),
     )
 
-    await m._announce_deployment_keys(self_recycle_keys=[])
-    await _roll_done(m)
+    await m._join([])
 
     assert recorded_roll["events"] == []
 
@@ -1015,8 +1092,7 @@ async def test_a_stopped_join_roll_is_logged_and_does_not_raise(
     )
 
     with caplog.at_level(logging.ERROR):
-        await m._announce_deployment_keys(self_recycle_keys=[_SIBLING_KEY])
-        await _roll_done(m)
+        await m._join([_SIBLING_KEY])
 
     errors = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
     assert any("deployment keys of serve-1" in line and "did not converge" in line for line in errors)
@@ -1040,7 +1116,7 @@ async def test_a_joiner_whose_own_withdraw_left_recycle_class_keys_recycles_itse
     _reload_returns(m, {"status": "ok", "env_keys": 0, "awaiting_respawn": [_SIBLING_KEY]})
 
     await m._resync_on_ready()
-    await _roll_done(m)
+    await _join_done(m)
 
     assert recorded_roll["calls"][0]["applier_self_deferred"] is True
     assert recorded_roll["events"] == ["roll", "mark_recycling", "exit"]
@@ -1060,7 +1136,7 @@ async def test_a_joiner_whose_withdrawn_keys_are_hot_does_not_recycle_itself(rec
     _reload_returns(m, {"status": "ok", "env_keys": 0, "awaiting_respawn": []})
 
     await m._resync_on_ready()
-    await _roll_done(m)
+    await _join_done(m)
 
     assert _SIBLING_KEY not in os.environ
     assert recorded_roll["events"] == []
@@ -1109,13 +1185,9 @@ async def test_a_first_join_recycles_itself_for_a_recycle_key_withdrawn_under_an
     m = _Mixin()
     m._bus = cast("Any", _sibling_bus([_RECYCLE_KEY]))
     _reload_returns(m, {"status": "ok", "env_keys": 0, "awaiting_respawn": [_RECYCLE_KEY]})
-    announced: list[list[str]] = []
-
-    async def record(*, self_recycle_keys: list[str]) -> None:
-        announced.append(self_recycle_keys)
-
-    cast("Any", m)._announce_deployment_keys = record
+    joined: list[list[str]] = []
+    cast("Any", m)._spawn_join = joined.append
 
     await m._resync_on_ready()
 
-    assert announced == [[_RECYCLE_KEY]]
+    assert joined == [[_RECYCLE_KEY]]

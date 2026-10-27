@@ -106,9 +106,9 @@ class LifecycleState(ABC):
         # backend but never tears down and rejoins the subscription.
         self._bus: WorkerBus | None = None
         self._bus_subscription_task: asyncio.Task[None] | None = None
-        # The recycle roll a join starts over the workers whose withdraw left recycle-class
-        # keys running; tracked until it ends, and cancelled at shutdown.
-        self._deployment_keys_recycle_tasks: set[asyncio.Task[None]] = set()
+        # The join a resync starts: its deployment keys announcement and the recycle roll it
+        # may run; tracked until it ends, and cancelled at shutdown.
+        self._deployment_keys_join_tasks: set[asyncio.Task[None]] = set()
         # Latched once this process's first boot self-resync completes: the tool
         # registry is then fully built and stable for the run. A forking/consuming
         # backend runtime awaits this (``wait_until_ready``) before its work loop

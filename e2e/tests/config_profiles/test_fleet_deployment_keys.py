@@ -19,9 +19,11 @@ recycled by the worker that joined with it, so after the roll no process runs th
 and no reload names a worker awaiting a respawn.
 
 A bus URL kept only in the store, which no worker's deployment sets, counts: every process
-reaches the bus through it, withdraws at boot the stored copies of keys another worker's
-deployment sets, and the fleet settles without recycling. A process that reaches the bus only
-through that stored URL while another worker's deployment sets it refuses to boot, naming it.
+reaches the bus through it and keeps it. A process that bound a stored copy of a key another
+worker's deployment sets before that worker's row existed is recycled once by that worker's
+join; the fleet settles and, once settled, no worker is recycled again. A process that reaches
+the bus only through that stored URL while another worker's deployment sets it refuses to boot,
+naming it.
 
 The env-reader description a presence row names outlives the row while the backend beats with a
 shorter heartbeat TTL than the serve worker.
@@ -300,7 +302,7 @@ def _bus_url_stored_stack(*args: Any) -> StackConfig:
 
 @pytest.mark.timeout(500)
 @_RECYCLE_NEEDS
-async def test_a_fleet_that_reaches_its_bus_through_a_stored_url_settles_without_recycling(
+async def test_a_fleet_that_reaches_its_bus_through_a_stored_url_settles_and_stays_settled(
     fresh_stack: Callable[..., TaiStack], llm_stub: LlmStub
 ) -> None:
     stack = fresh_stack(
@@ -308,12 +310,18 @@ async def test_a_fleet_that_reaches_its_bus_through_a_stored_url_settles_without
         resource_kwargs={"llm_base_url": llm_stub.base_url},
         process_env_overrides={"backend": {_HEARTBEAT_KEY: _HEARTBEAT_DEPLOYED}},
     )
+    booted = _lives(stack)
     for name in ("serve", "backend"):
         assert _BUS_URL_KEY not in stack.process(name).env, f"{name} must start without the bus URL"
     assert _HEARTBEAT_KEY not in stack.process("serve").env, "the serve worker must start without the heartbeat"
 
     await _wait_no_worker_awaits_a_respawn(stack)
     settled = _lives(stack)
+    # A worker that booted before another worker's row existed may run a stored copy of a key
+    # that worker's deployment sets; that worker's join recycles it once, never more.
+    assert settled.keys() == booted.keys(), (booted, settled)
+    for name, (kind, generation) in settled.items():
+        assert 0 <= generation - booted[name][1] <= 1, (name, kind, booted[name], generation)
 
     largest_pttls_ms: dict[str, tuple[str, int]] = {}
 

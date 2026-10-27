@@ -3,8 +3,9 @@
 The dispatcher owns this vocabulary. A publisher builds one of these models and the bus publishes
 its dump; a receiver validates the delivered dict back into the model (an unknown op or a missing
 field is refused before anything applies) and reports the op's declared ``effects`` to the
-post-apply handlers. ``prefix`` is the only defaulted field, so a dump that excludes defaults is
-the exact wire dict: the tag is always present, ``prefix`` only when set.
+post-apply handlers, and whether a resyncing worker owes it a reply. ``prefix`` is the only
+defaulted field, so a dump that excludes defaults is the exact wire dict: the tag is always
+present, ``prefix`` only when set.
 """
 
 from __future__ import annotations
@@ -38,9 +39,17 @@ _NONE: frozenset[FleetOpEffect] = frozenset()
 
 
 class _FleetOp(BaseModel):
+    """A fleet op's fields, its declared ``effects``, and whether a resyncing worker owes it a reply.
+
+    A fresh ``resyncing`` worker is subscribed and applies an op it is sent after its resync. An
+    op whose reply the publisher needs from such a worker declares ``awaited_mid_resync``; every
+    other op leaves a resyncing worker a gap that its own resync re-reads.
+    """
+
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     effects: ClassVar[frozenset[FleetOpEffect]]
+    awaited_mid_resync: ClassVar[bool] = False
 
 
 class ReloadConfig(_FleetOp):
@@ -136,11 +145,13 @@ class DeploymentKeysChanged(_FleetOp):
     A receiver that withdrew a key rebuilds its serving generation through the config reload it
     applies (that reload carries the registry effect), and replies with the withdrawn names and
     the recycle-class ones among them it still runs on. The op itself changes nothing, so it
-    declares no effects; its reload does.
+    declares no effects; its reload does. A worker still resyncing at publish owes the reply
+    too, since only the joiner can roll it: its own resync does not.
     """
 
     op: Literal["deployment_keys_changed"]
     effects: ClassVar[frozenset[FleetOpEffect]] = _NONE
+    awaited_mid_resync: ClassVar[bool] = True
 
 
 FleetOp = Annotated[

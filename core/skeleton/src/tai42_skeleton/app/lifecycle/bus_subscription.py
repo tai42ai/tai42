@@ -4,7 +4,6 @@ import asyncio
 import functools
 import logging
 import time
-from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, assert_never
 
 from tai42_contract.app import tai42_app
@@ -105,7 +104,7 @@ class BusSubscriptionMixin(LifecycleState):
         self._bus_subscription_task.add_done_callback(self._on_perpetual_task_done)
 
     async def _resync_on_ready(self) -> None:
-        """Self-resync run after subscribe, before presence-register, on every (re)connect.
+        """Self-resync run on every (re)connect, after subscribe and after the presence row is written as ``resyncing``.
 
         A local ``reload_config`` re-reads persisted state so a broadcast missed while this worker was away
         self-heals. Routed through the same apply path as a delivered op so ``on_fleet_op_applied`` handlers
@@ -131,12 +130,15 @@ class BusSubscriptionMixin(LifecycleState):
         (:meth:`_withdraw_fleet_owned_env`; a census it cannot read fails the resync). A
         reconnect then reloads persisted config under the names it just read; the first
         connect reloads only when it withdrew a key, so nothing it built keeps the withdrawn
-        value. After every successful resync the worker announces its join
-        (:meth:`_announce_deployment_keys`): its presence row now publishes its own names,
-        every other worker withdraws the applied keys they make owned, and the recycle-class
-        keys a withdraw leaves running are rolled as a recycle, this worker's own last. A
+        value. After every successful resync the worker is boot-ready and starts its join
+        (:meth:`_spawn_join`): its presence row publishes its own names, every other worker
+        withdraws the applied keys they make owned, and the recycle-class keys a withdraw
+        leaves running are rolled as a recycle, this worker's own last. The join runs as a
+        task, never awaited here, so this worker's message loop answers the fleet's ops,
+        another joiner's announcement among them, while its own announcement collects; a
+        worker still resyncing at the announcement replies once its own resync returns. A
         withdraw that takes away a value locating this worker's bus ends the process instead:
-        no reload, no boot-ready latch, no announcement.
+        no reload, no boot-ready latch, no join.
         """
         try:
             # Every connect learns the fleet's names: they may have changed since the boot
@@ -163,7 +165,7 @@ class BusSubscriptionMixin(LifecycleState):
             )
         else:
             self._mark_boot_ready()
-            await self._announce_deployment_keys(self_recycle_keys=self_recycle_keys)
+            self._spawn_join(self_recycle_keys)
 
     async def _withdraw_fleet_owned_env(self) -> tuple[list[str], "DeploymentOwnership"]:
         """Withdraw the applied stored keys the fleet's deployment owns, read from the census under the reload gate.
@@ -230,16 +232,36 @@ class BusSubscriptionMixin(LifecycleState):
             "awaiting_respawn": _set_by_withdrawn(result["awaiting_respawn"], withdrawn, ownership),
         }
 
-    async def _announce_deployment_keys(self, *, self_recycle_keys: list[str]) -> None:
+    def _spawn_join(self, self_recycle_keys: list[str]) -> None:
+        """Start this worker's join (:meth:`_join`) as a task, tracked until it ends and cancelled at shutdown."""
+        task = asyncio.create_task(self._join(list(self_recycle_keys)), name="tai-deployment-keys-join")
+        self._deployment_keys_join_tasks.add(task)
+        task.add_done_callback(self._deployment_keys_join_tasks.discard)
+        task.add_done_callback(self._log_task_exception)
+
+    async def _join(self, self_recycle_keys: list[str]) -> None:
+        """Announce this worker's deployment keys, then recycle the workers whose withdraw left keys running.
+
+        The roll (:meth:`_recycle_after_join`) runs when a worker replied with such keys, or
+        when ``self_recycle_keys`` (this worker's own withdraw's recycle-class keys) is
+        non-empty, and then recycles this worker last.
+        """
+        announced, reporters = await self._announce_deployment_keys()
+        if reporters or self_recycle_keys:
+            await self._recycle_after_join(announced, reporters, self_recycle_keys)
+
+    async def _announce_deployment_keys(self) -> tuple[FleetResult | None, dict[str, list[str]]]:
         """Tell every other worker this one joined, so each withdraws the applied keys its names make owned.
 
         The announcement carries no names: each receiver re-reads the census, where this
         worker's presence row publishes them, and replies with the recycle-class keys its
-        withdraw left running. The workers that reply with such keys, and this worker when
-        ``self_recycle_keys`` (its own withdraw's recycle-class keys) is non-empty, are recycled
-        by one background roll (:meth:`_recycle_after_join`). A failed publish, or a worker that
-        did not confirm, is logged at ERROR and leaves the subscription live: such a worker
-        converges at its next reload, which applies by the fleet's ownership.
+        withdraw left running. Returns the announcement's result (``None`` when the publish
+        failed) and those keys by the name of the worker that replied with them. A failed
+        publish, or a worker that did not confirm, is logged at ERROR and leaves the
+        subscription live: this join rolls no such worker. A hot key it runs on converges at
+        its next reload, which applies by the fleet's ownership; a recycle-class key it still
+        runs on is named at each reload and waits for a restart through the deployment's
+        supervisor.
         """
         from tai42_skeleton.app.bus import LocalApplyResult, OpOutcome
         from tai42_skeleton.operations._broadcast import _awaiting_keys
@@ -247,7 +269,6 @@ class BusSubscriptionMixin(LifecycleState):
         bus = self._bus
         if bus is None:
             raise RuntimeError("the deployment keys announcement ran before the bus was built")
-        reporters: dict[str, list[str]] = {}
         try:
             result = await bus.publish(
                 DeploymentKeysChanged(op="deployment_keys_changed"),
@@ -258,37 +279,26 @@ class BusSubscriptionMixin(LifecycleState):
             raise
         except Exception:
             logger.error(
-                "worker bus: announcing this worker's deployment keys to the fleet failed — each other "
-                "worker converges at its next reload",
+                "worker bus: announcing this worker's deployment keys to the fleet failed — this join rolls no "
+                "other worker: a hot key converges at each worker's next reload, a recycle-class key a worker still "
+                "runs on is named at each reload and waits for a restart through the deployment's supervisor",
                 exc_info=True,
             )
-            result = None
-        else:
-            if not result.ok:
-                logger.error(
-                    "worker bus: not every worker confirmed this worker's deployment keys announcement — "
-                    "an unconfirmed worker converges at its next reload: %s",
-                    result.model_dump_json(),
-                )
-            reporters = {
-                row.name: keys
-                for row in result.results
-                if row.name != bus.identity.name and (keys := _awaiting_keys(row.payload))
-            }
-        if reporters or self_recycle_keys:
-            self._spawn_deployment_keys_recycle(result, reporters, self_recycle_keys)
-
-    def _spawn_deployment_keys_recycle(
-        self, announced: FleetResult | None, reporters: Mapping[str, list[str]], self_recycle_keys: list[str]
-    ) -> None:
-        """Start the join's recycle roll as a serving-loop task, tracked until it ends and cancelled at shutdown."""
-        task = asyncio.create_task(
-            self._recycle_after_join(announced, dict(reporters), list(self_recycle_keys)),
-            name="tai-deployment-keys-recycle",
-        )
-        self._deployment_keys_recycle_tasks.add(task)
-        task.add_done_callback(self._deployment_keys_recycle_tasks.discard)
-        task.add_done_callback(self._log_task_exception)
+            return None, {}
+        if not result.ok:
+            logger.error(
+                "worker bus: not every worker confirmed this worker's deployment keys announcement — this join "
+                "does not roll an unconfirmed worker: a hot key converges at its next reload, a recycle-class key "
+                "it still runs on is named at each reload and waits for a restart through the deployment's "
+                "supervisor: %s",
+                result.model_dump_json(),
+            )
+        reporters = {
+            row.name: keys
+            for row in result.results
+            if row.name != bus.identity.name and (keys := _awaiting_keys(row.payload))
+        }
+        return result, reporters
 
     async def _recycle_after_join(
         self, announced: FleetResult | None, reporters: dict[str, list[str]], self_recycle_keys: list[str]
@@ -428,7 +438,7 @@ class BusSubscriptionMixin(LifecycleState):
         await self._boot_ready.wait()
 
     async def _cancel_bus_subscription(self) -> None:
-        """Cancel the join's recycle roll, if one runs, and the bus subscription, and await their termination.
+        """Cancel the join, if one runs, and the bus subscription, and await their termination.
 
         The shutdown counterpart of ``_spawn_bus_subscription``. A task that
         died with a non-``CancelledError`` exception was already surfaced at
@@ -436,10 +446,10 @@ class BusSubscriptionMixin(LifecycleState):
         than re-raised — this runs inside ``app_context``'s shutdown
         ``finally``, and one dead task must not skip the remaining teardown.
         """
-        for roll in list(self._deployment_keys_recycle_tasks):
-            roll.cancel()
-        # A cancelled roll ends silently; a roll that raised was logged by its done-callback.
-        await asyncio.gather(*self._deployment_keys_recycle_tasks, return_exceptions=True)
+        for join in list(self._deployment_keys_join_tasks):
+            join.cancel()
+        # A cancelled join ends silently; a join that raised was logged by its done-callback.
+        await asyncio.gather(*self._deployment_keys_join_tasks, return_exceptions=True)
         task = self._bus_subscription_task
         self._bus_subscription_task = None
         if task is None:

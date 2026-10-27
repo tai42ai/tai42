@@ -25,7 +25,7 @@ from tai42_skeleton.app.bus import (
     WorkerKind,
     WorkerState,
 )
-from tai42_skeleton.app.bus.ops import ReloadConfig
+from tai42_skeleton.app.bus.ops import DeploymentKeysChanged, ReloadConfig
 from tai42_skeleton.app.bus.publish import _ReplyLink
 from tai42_skeleton.config.deployment_env import published_deployment_keys, published_env_readers
 
@@ -276,7 +276,7 @@ async def test_collect_discards_stale_generation_and_opid(
         ]
         with caplog.at_level(logging.WARNING):
             results = await bus._collect(
-                client, _FramePubsub(frames), _ReplyLink(), expected, {}, "op-A", "reload_config"
+                client, _FramePubsub(frames), _ReplyLink(), expected, {}, set(), "op-A", "reload_config"
             )
         # The discarded frames never fold, so the true reply stands: applied.
         assert results["serve-1"].outcome == OpOutcome.applied
@@ -299,7 +299,7 @@ async def test_collect_transport_error_is_reported_on_the_affected_worker(
     client = aioredis.FakeRedis(server=server, decode_responses=True)
     try:
         results = await bus._collect(
-            client, _RaisingPubsub(), _ReplyLink(), {"serve-1": 1}, {}, "op-A", "reload_config"
+            client, _RaisingPubsub(), _ReplyLink(), {"serve-1": 1}, {}, set(), "op-A", "reload_config"
         )
         assert results["serve-1"].outcome == OpOutcome.missing
         assert "transport error" in (results["serve-1"].detail or "")
@@ -438,6 +438,32 @@ async def test_whole_fleet_publish_reports_a_resyncing_row(wire_bus_client: None
     by_name = {r.name: r for r in result.results}
     assert by_name["backend-1"].outcome == OpOutcome.resyncing
     assert "resyncing" in (by_name["backend-1"].detail or "")
+
+
+async def test_an_op_awaited_mid_resync_expects_a_fresh_resyncing_row(
+    wire_bus_client: None, server: fakeredis.FakeServer
+) -> None:
+    # A fresh resyncing worker is subscribed and applies a delivered op after its resync, so
+    # an op that declares it owes a reply awaits it: never reported as the resyncing gap.
+    # Nobody replies here, so the cut finds it alive, still resyncing, and says so.
+    publisher = make_bus(heartbeat_ttl=5.0, ack_timeout=0.03, apply_timeout=0.1)
+    await _register_bare_presence(
+        server, publisher._settings, "backend-1", WorkerKind.backend, ttl_ms=5000, state=WorkerState.resyncing
+    )
+    op = DeploymentKeysChanged(op="deployment_keys_changed")
+
+    result = await publisher.publish(op, targets=None, local=LocalApplyResult(outcome=OpOutcome.applied))
+
+    by_name = {r.name: r for r in result.results}
+    assert by_name["backend-1"].outcome == OpOutcome.missing
+    assert "resyncing at publish" in (by_name["backend-1"].detail or "")
+    async with bus_module.client_ctx(RedisClient, publisher._settings.redis) as r:
+        for targets in (None, ["backend-1"]):
+            assert await publisher._classify_workers(r, targets, await_resyncing=True) == (
+                {"backend-1": 1},
+                {},
+                {"backend-1"},
+            )
 
 
 async def test_whole_fleet_publish_reports_a_recycling_row(wire_bus_client: None, server: fakeredis.FakeServer) -> None:
@@ -957,11 +983,11 @@ async def test_recheck_transport_error_degrades_to_loud_missing(caplog: pytest.L
             raise RedisConnectionError("presence store down")
 
     with caplog.at_level(logging.ERROR):
-        status, gen = await bus._recheck_presence(_BoomGet(), "serve-2")
+        status, gen, state = await bus._recheck_presence(_BoomGet(), "serve-2")
         never_acked = await bus._computed_verdict(_BoomGet(), "serve-2", 1, acked=False, transport_error=None)
         acked = await bus._computed_verdict(_BoomGet(), "serve-2", 1, acked=True, transport_error=None)
 
-    assert (status, gen) == ("unreachable", None)
+    assert (status, gen, state) == ("unreachable", None, None)
     # Unreachable re-check is treated as still-present (not departed): missing when never
     # acked, timed_out when acked — the loud verdicts, not a silent drop.
     assert never_acked.outcome is OpOutcome.missing
@@ -982,10 +1008,10 @@ async def test_recheck_unparseable_presence_logs_and_treats_alive(caplog: pytest
             return "not-json"
 
     with caplog.at_level(logging.WARNING):
-        status, gen = await bus._recheck_presence(_Garbled(), "serve-2")
+        status, gen, state = await bus._recheck_presence(_Garbled(), "serve-2")
         verdict = await bus._computed_verdict(_Garbled(), "serve-2", 1, acked=True, transport_error=None)
 
-    assert (status, gen) == ("alive", None)
+    assert (status, gen, state) == ("alive", None, None)
     assert verdict.outcome is OpOutcome.timed_out
     assert any(r.levelno == logging.WARNING and "unparseable" in r.getMessage() for r in caplog.records), (
         "the unparseable-value branch did not log a warning"
