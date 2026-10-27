@@ -20,6 +20,7 @@ from tai42_skeleton.marketplace.compat import (
     update_targets,
 )
 from tai42_skeleton.marketplace.errors import LocalStateError, RegistryResponseError
+from tai42_skeleton.marketplace.installed_packages import InstalledPackages
 
 
 def _stub_metadata(
@@ -27,11 +28,11 @@ def _stub_metadata(
     *,
     contract_version: str = "0.3.0",
     requires: dict[str, list[str] | None] | None = None,
-    dist_map: dict[str, list[str]] | None = None,
+    top_levels: dict[str, list[str]] | None = None,
 ) -> None:
     """Install a fake ``compat.metadata``: ``version()`` answers only for
     tai42-contract, ``requires()`` from the given map (a missing key raises the
-    real PackageNotFoundError), ``packages_distributions()`` from ``dist_map``."""
+    real PackageNotFoundError), and the installed-packages snapshot from ``top_levels``."""
     requires_map = requires or {}
 
     def _version(dist: str) -> str:
@@ -46,10 +47,12 @@ def _stub_metadata(
     stub = SimpleNamespace(
         version=_version,
         requires=_requires,
-        packages_distributions=lambda: dict(dist_map or {}),
         PackageNotFoundError=PackageNotFoundError,
     )
     monkeypatch.setattr(compat, "metadata", stub)
+    monkeypatch.setattr(
+        compat, "installed_packages", lambda: InstalledPackages(top_levels=dict(top_levels or {}), editable_sources={})
+    )
 
 
 # -- dist_compat --------------------------------------------------------------
@@ -115,7 +118,7 @@ def test_multiple_runtime_declarations_and_together(monkeypatch) -> None:
 
 
 def test_module_with_no_dist_mapping_is_unknown(monkeypatch) -> None:
-    _stub_metadata(monkeypatch, dist_map={})
+    _stub_metadata(monkeypatch, top_levels={})
     verdict = module_compat("acme_pkg.tools")
     assert verdict.status == "unknown"
     assert verdict.reason is not None
@@ -126,7 +129,7 @@ def test_module_maps_through_its_top_level_package(monkeypatch) -> None:
     _stub_metadata(
         monkeypatch,
         requires={"acme-plugin": ["tai42-contract>=0.2,<0.3"]},
-        dist_map={"acme_pkg": ["acme-plugin"]},
+        top_levels={"acme_pkg": ["acme-plugin"]},
     )
     assert module_compat("acme_pkg.sub.module").status == "incompatible"
 
@@ -135,7 +138,7 @@ def test_module_any_incompatible_owning_dist_decides(monkeypatch) -> None:
     _stub_metadata(
         monkeypatch,
         requires={"acme-a": ["tai42-contract>=0.3,<0.4"], "acme-b": ["tai42-contract<0.2"]},
-        dist_map={"acme_pkg": ["acme-a", "acme-b"]},
+        top_levels={"acme_pkg": ["acme-a", "acme-b"]},
     )
     verdict = module_compat("acme_pkg")
     assert verdict.status == "incompatible"
@@ -144,15 +147,16 @@ def test_module_any_incompatible_owning_dist_decides(monkeypatch) -> None:
 
 
 def test_module_uses_the_passed_snapshot_map(monkeypatch) -> None:
-    # A dist_map snapshot bypasses packages_distributions() entirely — the one
+    # A passed snapshot bypasses the installed-packages read entirely — the one
     # boot pass reuses its snapshot instead of rescanning per module.
     def _boom():  # pragma: no cover - the snapshot must win
-        raise AssertionError("packages_distributions must not be re-read when a snapshot is passed")
+        raise AssertionError("the installed packages must not be re-read when a snapshot is passed")
 
     _stub_metadata(monkeypatch, requires={"acme-plugin": ["tai42-contract>=0.3,<0.4"]})
-    assert compat.metadata is not None
-    monkeypatch.setattr(compat.metadata, "packages_distributions", _boom)
-    verdict = module_compat("acme_pkg", {"acme_pkg": ["acme-plugin"]})
+    monkeypatch.setattr(compat, "installed_packages", _boom)
+    verdict = module_compat(
+        "acme_pkg", InstalledPackages(top_levels={"acme_pkg": ["acme-plugin"]}, editable_sources={})
+    )
     assert verdict == CompatVerdict("compatible")
 
 

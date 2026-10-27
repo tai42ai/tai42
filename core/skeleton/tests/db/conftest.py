@@ -1,10 +1,8 @@
 """Shared fixtures for the chain-discovery suite.
 
-Discovery resolves the effective manifest to see the chains the deployment LOADS; a
-real deployment always has a manifest (boot reads it with no fallback). These suites
-exercise the store and prefix sources, so they configure an EMPTY manifest here (no
-loaded modules); the manifest-source tests override it with their own document, and the
-absent-manifest tests override it to signal a missing file.
+Migrate's discovery unites the installed scan with the chains of the plugins the persisted
+manifest loads. These suites exercise the installed scan, so they configure an EMPTY
+manifest here (no loaded modules); a test reading a manifest file overrides it.
 """
 
 from __future__ import annotations

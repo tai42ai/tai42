@@ -23,10 +23,10 @@ from tai42_skeleton.app.boot_rules import (
     require_sub_mcp_store_for_workers,
 )
 from tai42_skeleton.app.kind_status import warn_if_noop_monitoring
+from tai42_skeleton.app.lifecycle.manifest_imports import prepare_manifest_imports
 from tai42_skeleton.app.lifecycle.off_loop import run_blocking
 from tai42_skeleton.app.lifecycle.state import LifecycleState
 from tai42_skeleton.connectors.providers.registry import reset_registry
-from tai42_skeleton.db.boot_gate import assert_skeleton_schema_applied
 from tai42_skeleton.extensions import ExtensionRegistry
 from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.middleware.rate_limit import warn_if_rate_limiting_off
@@ -47,11 +47,13 @@ class BootMixin(LifecycleState):
         # the global ``tai42_app`` handle. Constructing a ``TaiMCP`` must not — only
         # start()/app_context binds, so building a throwaway app can't hijack it.
         tai42_app.bind(self)
-        # The schema gate runs FIRST, before any store read of the build: a database
-        # with pending migrations refuses with the ``tai db migrate`` fix named, rather
-        # than failing deeper on a missing table. It fires only for a CONFIGURED
-        # skeleton database, so an all-off deployment is a no-op.
-        run_blocking(assert_skeleton_schema_applied)
+        # Before any store read of the build and before any manifest module imports: put
+        # the plugins prefix on ``sys.path`` and gate the schema — a pending or diverged
+        # chain refuses with the ``tai db migrate`` fix named, rather than failing deeper on
+        # a missing table. A chain whose component database is not configured is not
+        # checked, so an all-off deployment is a no-op. The returned package→dist snapshot
+        # serves every compat verdict of the build.
+        installed = run_blocking(lambda: prepare_manifest_imports(manifest))
         self._manifest = manifest
         self._failed_mcps = {}
         self._mcp_bound_tools = {}
@@ -124,7 +126,7 @@ class BootMixin(LifecycleState):
         _lifecycle.route_registry.reset_shape_index()
 
         self._initialize_registries()
-        self._initialize_components()
+        self._initialize_components(installed)
 
         # Drop the route index once the reimport has re-attached every route, so the next
         # lookup rebuilds it against this surface.

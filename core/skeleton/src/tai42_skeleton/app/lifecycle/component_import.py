@@ -1,6 +1,7 @@
 """Import the manifest's plugin modules into the serving surface under the compat gate."""
 
 import logging
+from typing import TYPE_CHECKING
 
 from tai42_contract.app import tai42_app
 
@@ -12,28 +13,22 @@ from tai42_skeleton.operations import reregister_operations
 from tai42_skeleton.operations.projection import project_operations
 from tai42_skeleton.tools import mcp_health
 
+if TYPE_CHECKING:
+    from tai42_skeleton.marketplace.installed_packages import InstalledPackages
+
 logger = logging.getLogger(__name__)
 
 
 class ComponentImportMixin(LifecycleState):
     """Lifecycle mixin that imports the manifest's plugin modules and runs their registration side-effects."""
 
-    def _initialize_components(self):
+    def _initialize_components(self, installed: "InstalledPackages"):
+        """Import the live manifest's modules; ``installed`` is the build's package→dist snapshot.
+
+        ``start()`` takes the snapshot once, after the plugins prefix is on ``sys.path``,
+        and the same snapshot serves the schema gate and every compat verdict of the pass.
+        """
         manifest = self._require_live_manifest()
-
-        # Put the configured plugin prefix on sys.path BEFORE any manifest module
-        # imports below, so a plugin whose distribution lives in the persistent
-        # prefix imports at boot after a restart. Appended at the END so the
-        # environment shadows the prefix for anything present in both; a no-op when
-        # no prefix is configured. Imported here (not at module scope) to keep the
-        # app import chain free of the marketplace package.
-        from tai42_skeleton.marketplace.compat import distribution_map
-        from tai42_skeleton.marketplace.prefix import activate_prefix
-
-        activate_prefix()
-
-        # One package→dist snapshot serves every compat verdict of the pass.
-        dist_map = distribution_map()
 
         # Repopulate the operation registry that start() cleared at its top. A leaf
         # module declares its operations with @operation at IMPORT, and that
@@ -76,18 +71,18 @@ class ComponentImportMixin(LifecycleState):
         # so a fresh epoch build starts with an empty ledger (never leaks across reloads).
         executed_modules: set[str] = set()
 
-        self._import_additive_role(manifest.lifecycle_modules, "lifecycle", dist_map, executed_modules)
+        self._import_additive_role(manifest.lifecycle_modules, "lifecycle", installed, executed_modules)
 
         # Import-only verifier plugins: each import runs the module's
         # ``tai42_app.webhook_verifiers.register(...)`` side-effect — the registry
         # was reset at the top of start(), so every (re)load re-registers cleanly.
-        self._import_additive_role(manifest.webhook_verifier_modules, "webhook_verifier", dist_map, executed_modules)
+        self._import_additive_role(manifest.webhook_verifier_modules, "webhook_verifier", installed, executed_modules)
 
         # Import-only channel plugins: each import runs the module's
         # ``tai42_app.channels.register(...)`` side-effect and binds the plugin's
         # inbound HTTP route. Imported like the verifier modules — the registry
         # was reset at the top of start(), so every (re)load re-registers cleanly.
-        self._import_additive_role(manifest.channel_modules, "channel", dist_map, executed_modules)
+        self._import_additive_role(manifest.channel_modules, "channel", installed, executed_modules)
 
         # Import the composed effective router set (defaults + extras + a single
         # last catch-all, per default_routers). Each import runs the module's
@@ -95,20 +90,20 @@ class ComponentImportMixin(LifecycleState):
         # The epoch build rebuilds the serving ASGI app from that table and the atomic
         # swap installs it, so a router first imported on a live reload serves the
         # instant the swap completes — no restart.
-        self._import_additive_role(self._effective_router_modules(), "router", dist_map, executed_modules)
+        self._import_additive_role(self._effective_router_modules(), "router", installed, executed_modules)
 
-        self._import_additive_role(manifest.middlewares_modules, "middleware", dist_map, executed_modules)
+        self._import_additive_role(manifest.middlewares_modules, "middleware", installed, executed_modules)
 
-        self._import_core_slots(dist_map, executed_modules)
+        self._import_core_slots(installed, executed_modules)
 
-        self._import_extension_modules(dist_map, executed_modules)
+        self._import_extension_modules(installed, executed_modules)
 
-        self._import_tool_modules(dist_map, executed_modules)
+        self._import_tool_modules(installed, executed_modules)
 
         # Importing an agents-module fires its @tai42_app.agents.agent decorator, which
         # registers the agent + auto-generates its run tool. Done after tools so
         # an agent tool can reference a base tool already loaded above.
-        self._import_additive_role([cfg.module for cfg in manifest.agents], "agents", dist_map, executed_modules)
+        self._import_additive_role([cfg.module for cfg in manifest.agents], "agents", installed, executed_modules)
 
         self._load_manifest_mcps()
 
@@ -123,7 +118,7 @@ class ComponentImportMixin(LifecycleState):
         self._validate_tool_registry()
 
     def _import_additive_role(
-        self, modules: list[str] | None, kind: str, dist_map: dict[str, list[str]], executed: set[str]
+        self, modules: list[str] | None, kind: str, installed: "InstalledPackages", executed: set[str]
     ) -> None:
         """Import one additive role group, aborting boot on the first module that cannot load.
 
@@ -132,21 +127,21 @@ class ComponentImportMixin(LifecycleState):
         (re)load re-registers cleanly.
         """
         for module in modules or []:
-            self._import_manifest_module(module, kind, dist_map, executed)
+            self._import_manifest_module(module, kind, installed, executed)
 
-    def _import_core_slots(self, dist_map: dict[str, list[str]], executed: set[str]) -> None:
+    def _import_core_slots(self, installed: "InstalledPackages", executed: set[str]) -> None:
         """Import the four scalar-slot modules (backend/sandbox/storage/monitoring).
 
         Each aborts boot on incompat or import failure through the shared abort seam — the server cannot
         run without its scalar slots.
         """
         manifest = self._require_live_manifest()
-        self._import_manifest_module(manifest.backend_module, "backend", dist_map, executed)
-        self._import_manifest_module(manifest.sandbox_module, "sandbox", dist_map, executed)
-        self._import_manifest_module(manifest.storage_module, "storage", dist_map, executed)
-        self._import_manifest_module(manifest.monitoring_module, "monitoring", dist_map, executed)
+        self._import_manifest_module(manifest.backend_module, "backend", installed, executed)
+        self._import_manifest_module(manifest.sandbox_module, "sandbox", installed, executed)
+        self._import_manifest_module(manifest.storage_module, "storage", installed, executed)
+        self._import_manifest_module(manifest.monitoring_module, "monitoring", installed, executed)
 
-    def _import_extension_modules(self, dist_map: dict[str, list[str]], executed: set[str]) -> None:
+    def _import_extension_modules(self, installed: "InstalledPackages", executed: set[str]) -> None:
         """Import the extensions modules, then validate the extension registry.
 
         A module that cannot load aborts boot through the shared abort seam; with every
@@ -155,14 +150,14 @@ class ComponentImportMixin(LifecycleState):
         """
         manifest = self._require_live_manifest()
         for extension in manifest.extensions_modules or []:
-            self._import_manifest_module(extension, "extensions", dist_map, executed)
+            self._import_manifest_module(extension, "extensions", installed, executed)
         self._extension_registry.validation()
 
-    def _import_tool_modules(self, dist_map: dict[str, list[str]], executed: set[str]) -> None:
+    def _import_tool_modules(self, installed: "InstalledPackages", executed: set[str]) -> None:
         """Import the tools modules, aborting boot on the first module that cannot load."""
         manifest = self._require_live_manifest()
         for cfg in manifest.tools:
-            self._import_manifest_module(cfg.module, "tools", dist_map, executed)
+            self._import_manifest_module(cfg.module, "tools", installed, executed)
 
     def _load_manifest_mcps(self) -> None:
         """Probe and bind the manifest's MCP servers, recording the failed ones.
@@ -201,7 +196,7 @@ class ComponentImportMixin(LifecycleState):
         self._tool_registry.validation(ignore=frozenset(self._missing_tools_ignore()))
 
     def _import_manifest_module(
-        self, module: str | None, kind: str, dist_map: dict[str, list[str]], executed_modules: set[str]
+        self, module: str | None, kind: str, installed: "InstalledPackages", executed_modules: set[str]
     ) -> None:
         """Import one manifest-named module under the plugin-compat gate — the shared boot-abort seam.
 
@@ -234,19 +229,11 @@ class ComponentImportMixin(LifecycleState):
             return
         from tai42_skeleton.app.http import plugin_owner
         from tai42_skeleton.app.route_registry import CrossOwnerRouteCollisionError
-        from tai42_skeleton.marketplace.compat import CorePluginBootError, module_compat
+        from tai42_skeleton.marketplace.compat import CorePluginBootError, refuse_incompatible
 
         if module in executed_modules:
             return
-        verdict = module_compat(module, dist_map)
-        if verdict.status == "incompatible":
-            raise CorePluginBootError(
-                f"{kind} plugin {module!r} is incompatible and cannot load: {verdict.reason}; "
-                "a manifest-declared plugin that cannot load aborts boot — fix or update the plugin, "
-                "remove it from the manifest, or point the manifest at a working one"
-            )
-        if verdict.status == "unknown":
-            logger.info("plugin compat unknown for %s module %s: %s", kind, module, verdict.reason)
+        refuse_incompatible(module, kind, installed)
         binding = self._mount_map.get(module)
         try:
             # A mount-bound module resolves its declared routes through the binding

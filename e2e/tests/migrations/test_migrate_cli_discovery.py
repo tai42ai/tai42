@@ -3,15 +3,15 @@ subprocess against a live Postgres — the composed path an operator runs.
 
 Two legs pin the CLI's own discovery where a hand-built entry list cannot:
 
-- *fresh database*: a truly empty database (no tables at all) migrates cleanly —
-  the skeleton chain applies FIRST, and plugin discovery (which reads the
-  skeleton-owned marketplace install store) runs only after the baseline exists,
-  so the command never tracebacks on the missing table.
-- *prefix-preinstalled plugin*: a real platform plugin (accounts-postgres) laid
-  into the plugins prefix the way ``pip install --prefix`` leaves it, with NO
-  marketplace install row, is discovered by the prefix scan and its declared
-  chain applied in the same run — skeleton and plugin chains both land, exactly
-  one entry per distribution, and a second run is an inert no-op.
+- *fresh database*: a truly empty database (no tables at all, no manifest)
+  migrates cleanly — the skeleton-owned chains and the chain of every plugin
+  installed in the environment (accounts-postgres among them) land in one run,
+  with no traceback.
+- *prefix-preinstalled plugins*: a neutral chain-declaring plugin laid into the
+  plugins prefix the way ``pip install --prefix`` leaves it, with NO marketplace
+  install row, has its chain applied in the same run; a second copy of
+  accounts-postgres in the prefix (shadowed by the environment copy) still gives
+  exactly one entry for that distribution, and a second run is an inert no-op.
 
 These need only the shared Postgres, not a booted stack: each leg owns a scratch
 database it drops at teardown. The subprocess env carries only the registry's
@@ -43,6 +43,27 @@ pytestmark = pytest.mark.needs("no-stack", "cli", "store:postgres")
 
 _ACCOUNTS_DISTRIBUTION = "tai42-accounts-postgres"
 _ACCOUNTS_IMPORT_PACKAGE = "tai42_accounts_postgres"
+
+_PROBE_DISTRIBUTION = "tai42-prefixprobe"
+_PROBE_IMPORT_PACKAGE = "tai42_prefixprobe"
+_PROBE_TABLE = "prefixprobe_items"
+_PROBE_SPEC = f"""\
+spec_version: 1
+namespace: tai42
+name: prefixprobe
+package: {_PROBE_DISTRIBUTION}
+version: 1.0.0
+description: A chain-declaring test plugin
+license: Apache-2.0
+contract: '>=0.1,<1000'
+categories: [dev]
+provides:
+  - kind: tool
+    name: prefixprobe_ping
+    module: {_PROBE_IMPORT_PACKAGE}.tools
+    description: Answer a fixed reply
+migrations: migrations
+"""
 
 
 @pytest.fixture(scope="module")
@@ -119,74 +140,87 @@ def _history_components(harness: HarnessSettings, dbname: str) -> set[str]:
         return {row[0] for row in cur.fetchall()}
 
 
-def _preinstall_accounts_into_prefix(prefix: Path) -> None:
-    """Lay the installed accounts-postgres distribution into the prefix the way a
-    ``pip install --prefix`` leaves it: the import-package tree (carrying its
-    packaged ``tai-plugin.yml`` and ``migrations/`` chain) under the prefix's site
-    dir, plus a ``.dist-info`` whose ``RECORD`` lists the package's files — the
-    metadata the prefix scan enumerates distributions and locates specs from.
-    Deliberately NO marketplace install row: the leg proves discovery without one.
-    """
-    site = Path(prefix_site_dirs(str(prefix))[0])
-    site.mkdir(parents=True, exist_ok=True)
+def _write_distribution(site: Path, dist_name: str, version: str, package: Path) -> None:
+    """Write the ``.dist-info`` ``pip install`` leaves beside ``package``: its METADATA and a
+    ``RECORD`` listing the package's files, which discovery reads to locate the packaged spec."""
+    dist_info = site / f"{package.name}-{version}.dist-info"
+    dist_info.mkdir()
+    (dist_info / "METADATA").write_text(f"Metadata-Version: 2.1\nName: {dist_name}\nVersion: {version}\n")
+    rows = [f"{path.relative_to(site).as_posix()},," for path in sorted(package.rglob("*")) if path.is_file()]
+    rows.append(f"{dist_info.relative_to(site).as_posix()}/METADATA,,")
+    rows.append(f"{dist_info.relative_to(site).as_posix()}/RECORD,,")
+    (dist_info / "RECORD").write_text("\n".join(rows) + "\n")
+
+
+def _preinstall_probe_into_prefix(site: Path) -> None:
+    """Lay a neutral chain-declaring plugin into the prefix site dir: the import package,
+    its packaged ``tai-plugin.yml`` and its one-file chain."""
+    package = site / _PROBE_IMPORT_PACKAGE
+    (package / "migrations").mkdir(parents=True)
+    (package / "__init__.py").write_text("")
+    (package / "tai-plugin.yml").write_text(_PROBE_SPEC)
+    (package / "migrations" / "0001_baseline.sql").write_text(
+        f"CREATE TABLE {_PROBE_TABLE} (id integer PRIMARY KEY);\n"
+    )
+    _write_distribution(site, _PROBE_DISTRIBUTION, "1.0.0", package)
+
+
+def _preinstall_accounts_into_prefix(site: Path) -> None:
+    """Copy the environment's accounts-postgres distribution into the prefix site dir, the
+    way a ``pip install --prefix`` of the same plugin leaves it."""
     source = Path(str(importlib.resources.files(_ACCOUNTS_IMPORT_PACKAGE)))
     target = site / _ACCOUNTS_IMPORT_PACKAGE
     shutil.copytree(source, target, ignore=shutil.ignore_patterns("__pycache__"))
-    version = importlib.metadata.version(_ACCOUNTS_DISTRIBUTION)
-    dist_info = site / f"{_ACCOUNTS_IMPORT_PACKAGE}-{version}.dist-info"
-    dist_info.mkdir()
-    (dist_info / "METADATA").write_text(f"Metadata-Version: 2.1\nName: {_ACCOUNTS_DISTRIBUTION}\nVersion: {version}\n")
-    rows = [f"{path.relative_to(site)},," for path in sorted(target.rglob("*")) if path.is_file()]
-    rows.append(f"{dist_info.relative_to(site)}/METADATA,,")
-    rows.append(f"{dist_info.relative_to(site)}/RECORD,,")
-    (dist_info / "RECORD").write_text("\n".join(rows) + "\n")
+    _write_distribution(site, _ACCOUNTS_DISTRIBUTION, importlib.metadata.version(_ACCOUNTS_DISTRIBUTION), target)
 
 
 def test_fresh_database_migrates_without_traceback(
     harness_settings: HarnessSettings, scratch_db: str, tmp_path: Path
 ) -> None:
-    # A truly fresh database: no tables, no install rows, no prefix. The CLI must
-    # apply the skeleton baseline cleanly — never traceback on the not-yet-created
-    # marketplace install store its plugin discovery reads.
+    # A truly fresh database: no tables, no install rows, no prefix, no manifest. The CLI
+    # applies the skeleton-owned chains and every environment-installed plugin chain.
     result = _run_migrate(_migrate_env(harness_settings, scratch_db), tmp_path)
 
     assert result.returncode == 0, f"exit {result.returncode}; stderr:\n{result.stderr}\nstdout:\n{result.stdout}"
     assert "Traceback" not in result.stderr
     assert "Applied skeleton 0001_baseline." in result.stdout
+    assert f"Applied {_ACCOUNTS_DISTRIBUTION} 0001_baseline." in result.stdout
 
-    # The baseline really landed: the history records both skeleton-owned chains —
-    # the skeleton baseline and the ``states`` record store the CLI always applies
-    # ahead of plugin discovery — and the marketplace install store (a
-    # skeleton-owned table) now exists.
-    assert _history_components(harness_settings, scratch_db) == {"skeleton", "states"}
-    assert "marketplace_installs" in _public_tables(harness_settings, scratch_db)
+    # The history records both skeleton-owned chains (the skeleton baseline and the
+    # ``states`` record store) and the installed accounts-postgres chain, whose tables
+    # exist although no manifest names the plugin.
+    assert {"skeleton", "states", _ACCOUNTS_DISTRIBUTION} <= _history_components(harness_settings, scratch_db)
+    tables = _public_tables(harness_settings, scratch_db)
+    assert "marketplace_installs" in tables
+    assert {"accounts_users", "accounts_sessions", "accounts_invites"} <= tables
 
 
 @pytest.mark.needs("files")
 def test_prefix_preinstalled_plugin_chain_applies_with_skeleton(
     harness_settings: HarnessSettings, scratch_db: str, tmp_path: Path
 ) -> None:
-    # A fresh database plus a prefix-preinstalled accounts-postgres (no install
-    # row): one ``tai db migrate`` lands the skeleton baseline AND the plugin's
-    # declared chain, discovered from the prefix scan.
+    # A fresh database plus a prefix holding the neutral probe and a second copy of
+    # accounts-postgres (no install rows): one ``tai db migrate`` lands the probe's chain
+    # from the prefix and accounts-postgres's chain exactly once.
     prefix = tmp_path / "plugins-prefix"
-    _preinstall_accounts_into_prefix(prefix)
+    site = Path(prefix_site_dirs(str(prefix))[0])
+    site.mkdir(parents=True)
+    _preinstall_probe_into_prefix(site)
+    _preinstall_accounts_into_prefix(site)
     env = _migrate_env(harness_settings, scratch_db, prefix=prefix)
 
     result = _run_migrate(env, tmp_path)
 
     assert result.returncode == 0, f"exit {result.returncode}; stderr:\n{result.stderr}\nstdout:\n{result.stdout}"
     assert "Applied skeleton 0001_baseline." in result.stdout
-    assert f"Applied {_ACCOUNTS_DISTRIBUTION} 0001_baseline." in result.stdout
+    assert f"Applied {_PROBE_DISTRIBUTION} 0001_baseline." in result.stdout
+    assert result.stdout.count(f"Applied {_ACCOUNTS_DISTRIBUTION} 0001_baseline.") == 1, result.stdout
 
-    # Every chain is recorded — both skeleton-owned chains (skeleton baseline and
-    # the ``states`` record store) and the plugin's — and the plugin's own tables
-    # exist.
-    assert _history_components(harness_settings, scratch_db) == {"skeleton", "states", _ACCOUNTS_DISTRIBUTION}
-    tables = _public_tables(harness_settings, scratch_db)
-    assert {"accounts_users", "accounts_sessions", "accounts_invites"} <= tables
+    history = _history_components(harness_settings, scratch_db)
+    assert {"skeleton", "states", _ACCOUNTS_DISTRIBUTION, _PROBE_DISTRIBUTION} <= history
+    assert _PROBE_TABLE in _public_tables(harness_settings, scratch_db)
 
-    # The plugin ran from the prefix scan, not an install record.
+    # The probe ran from the prefix scan, not an install record.
     with _connect(harness_settings, scratch_db) as conn, conn.cursor() as cur:
         cur.execute("SELECT count(*) FROM marketplace_installs")
         assert cur.fetchone() == (0,)

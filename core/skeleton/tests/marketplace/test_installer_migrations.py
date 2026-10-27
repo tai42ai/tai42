@@ -2,7 +2,7 @@
 chain AFTER the package lands and BEFORE the manifest patch activates it.
 
 Fully faked seams (reusing the installer harness): the kit runner
-(``apply_migrations``) and the entry resolver (``plugin_migration_entry``) are
+(``apply_migrations``) and the entry resolver (``installed_plugin_entry``) are
 patched so the tests pin the WIRING — the migrate call's ordering relative to the
 manifest write, the opt-in skip for a plugin with no chain, and the fail-loud /
 no-partial-state guarantee when a migration fails.
@@ -59,7 +59,7 @@ async def test_install_runs_migrations_before_manifest_patch(monkeypatch: pytest
         return [AppliedMigration("tai42-acct", 1, "baseline", "abc")]
 
     monkeypatch.setattr(installer_base_module, "apply_migrations", _fake_apply)
-    monkeypatch.setattr(installer_base_module, "plugin_migration_entry", lambda s: object())
+    monkeypatch.setattr(installer_base_module, "installed_plugin_entry", lambda distribution: object())
 
     await h.installer().install("tai42/acct")
 
@@ -99,7 +99,7 @@ async def test_migration_failure_aborts_without_manifest_patch(monkeypatch: pyte
         raise RuntimeError("migration boom")
 
     monkeypatch.setattr(installer_base_module, "apply_migrations", _boom)
-    monkeypatch.setattr(installer_base_module, "plugin_migration_entry", lambda s: object())
+    monkeypatch.setattr(installer_base_module, "installed_plugin_entry", lambda distribution: object())
 
     with pytest.raises(RuntimeError, match="migration boom"):
         await h.installer().install("tai42/acct")
@@ -126,7 +126,7 @@ async def test_update_runs_new_version_migrations_before_manifest_patch(monkeypa
         return []
 
     monkeypatch.setattr(installer_base_module, "apply_migrations", _fake_apply)
-    monkeypatch.setattr(installer_base_module, "plugin_migration_entry", lambda s: object())
+    monkeypatch.setattr(installer_base_module, "installed_plugin_entry", lambda distribution: object())
 
     await h.installer().update("tai42/acct")
 

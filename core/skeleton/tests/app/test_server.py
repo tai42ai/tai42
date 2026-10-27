@@ -270,12 +270,16 @@ def test_http_app_builds_and_finalizes():
 
 
 def _assert_error_handlers_installed(sentinel: MagicMock) -> None:
+    from tai42_kit.db import MigrationDiscoveryError, SchemaOutOfDateError
+
     from tai42_skeleton.marketplace.compat import CorePluginBootError
     from tai42_skeleton.operations._broadcast import FleetBroadcastError
 
     sentinel.add_exception_handler.assert_any_call(Exception, error_envelope.internal_error_handler)
     sentinel.add_exception_handler.assert_any_call(FleetBroadcastError, error_envelope.fleet_broadcast_error_handler)
     sentinel.add_exception_handler.assert_any_call(CorePluginBootError, error_envelope.core_plugin_boot_error_handler)
+    sentinel.add_exception_handler.assert_any_call(SchemaOutOfDateError, error_envelope.schema_gate_error_handler)
+    sentinel.add_exception_handler.assert_any_call(MigrationDiscoveryError, error_envelope.schema_gate_error_handler)
     sentinel.add_exception_handler.assert_any_call(404, error_envelope.not_found_handler)
 
 
@@ -385,6 +389,58 @@ def test_fleet_broadcast_error_surfaces_a_route_collision_cause():
     assert resp.status_code == 500
     body = _json.loads(bytes(resp.body))
     assert "remap the mount base to resolve" in body["error"]
+    assert body["report"]["op"] == "reload_config"
+
+
+_SCHEMA_REFUSAL = (
+    "database schema is out of date — refusing to start: probe-store: 1 pending (0001_items.sql). "
+    "Run 'tai db migrate' to apply the pending migrations, then restart."
+)
+
+
+_SPEC_REFUSAL = "invalid plugin spec packaged in distribution 'tai42-probe' at /site/tai42_probe/tai-plugin.yml: bad"
+
+
+@pytest.mark.parametrize(
+    ("error_type", "message"),
+    [("SchemaOutOfDateError", _SCHEMA_REFUSAL), ("MigrationDiscoveryError", _SPEC_REFUSAL)],
+)
+def test_schema_gate_error_handler_surfaces_the_refusal(error_type: str, message: str):
+    # A rebuild the schema gate refuses — a pending chain, or a chain it cannot resolve —
+    # answers the refusal itself, never the generic masked 500.
+    import json as _json
+
+    import tai42_kit.db
+    from starlette.requests import Request
+
+    scope = {"type": "http", "method": "POST", "path": "/api/config/reload", "query_string": b"", "headers": []}
+    exc = getattr(tai42_kit.db, error_type)(message)
+    resp = asyncio.run(error_envelope.schema_gate_error_handler(Request(scope), exc))
+    assert resp.status_code == 500
+    assert _json.loads(bytes(resp.body)) == {"error": message}
+
+
+def test_fleet_broadcast_error_surfaces_a_schema_refusal_cause():
+    # A reload door's rebuild refused by the schema check is wrapped as FleetBroadcastError;
+    # the refusal plus the fleet report reach the caller.
+    import json as _json
+
+    from starlette.requests import Request
+    from tai42_kit.db import SchemaOutOfDateError
+
+    from tai42_skeleton.app.bus.models import FleetResult
+    from tai42_skeleton.operations._broadcast import FleetBroadcastError
+
+    cause = SchemaOutOfDateError(_SCHEMA_REFUSAL)
+    report = FleetResult(op="reload_config", reachable=True)
+    exc = FleetBroadcastError("reload_config", report, cause)
+    exc.__cause__ = cause
+
+    scope = {"type": "http", "method": "POST", "path": "/api/manifest/replace", "query_string": b"", "headers": []}
+    resp = asyncio.run(error_envelope.fleet_broadcast_error_handler(Request(scope), exc))
+    assert resp.status_code == 500
+    body = _json.loads(bytes(resp.body))
+    assert body["error"] == _SCHEMA_REFUSAL
     assert body["report"]["op"] == "reload_config"
 
 

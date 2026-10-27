@@ -10,6 +10,7 @@ bound to a no-op fake at import so the route decorators register cleanly under t
 from __future__ import annotations
 
 import dataclasses
+import importlib.resources
 import json
 import os
 import types
@@ -26,10 +27,19 @@ from tai42_contract.accounts.errors import LastAdminError
 from tai42_contract.app import HostedUiPaths
 from tai42_kit.clients import PostgresConnectionSettings, client_ctx
 from tai42_kit.clients.impl.postgres import PostgresClient
-from tai42_kit.db import apply_migrations, component_store_settings
+from tai42_kit.db import MigrationEntry, apply_migrations, component_store_settings
 from tai42_kit.settings import reset_all_settings
 
-from tai42_accounts_postgres.db import COMPONENT, accounts_migration_entry
+from tai42_accounts_postgres.db import COMPONENT
+
+
+def accounts_chain_entry() -> MigrationEntry:
+    """The plugin's packaged chain as a runner entry on the component's store connection."""
+    return MigrationEntry(
+        component=COMPONENT,
+        migrations_dir=importlib.resources.files("tai42_accounts_postgres").joinpath("migrations"),
+        settings=component_store_settings(COMPONENT),
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -703,7 +713,7 @@ async def accounts_db(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Postgres
     for key, value in _LIVE_PG_ENV.items():
         monkeypatch.setenv(key, value)
     reset_all_settings()
-    await apply_migrations([accounts_migration_entry()])
+    await apply_migrations([accounts_chain_entry()])
     await _truncate_accounts_tables()
     yield component_store_settings(COMPONENT)
     await _truncate_accounts_tables()

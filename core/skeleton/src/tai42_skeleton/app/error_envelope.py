@@ -2,8 +2,8 @@
 
 :func:`install_error_handlers` installs, on a freshly built base app (``sse_app`` and
 ``http_app`` alike), the handlers that render an unexpected exception as the generic masked
-``500``, a plugin-load failure of a live rebuild verbatim, a work refusal during a config
-reload as the reload gate's retriable ``503``, and the router's native ``404`` as
+``500``, a plugin-load failure or a schema-gate refusal of a live rebuild verbatim, a work
+refusal during a config reload as the reload gate's retriable ``503``, and the router's native ``404`` as
 ``{"error": "not found"}``.
 """
 
@@ -17,6 +17,7 @@ from uuid import uuid4
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from tai42_contract.errors import ServerReloadingError
+from tai42_kit.db import MigrationDiscoveryError, SchemaOutOfDateError
 
 from tai42_skeleton.app.reload_gate import reload_gate
 
@@ -75,13 +76,29 @@ async def core_plugin_boot_error_handler(request: Request, exc: Exception) -> Re
     return JSONResponse({"error": str(exc)}, status_code=500)
 
 
+async def schema_gate_error_handler(request: Request, exc: Exception) -> Response:
+    """Surface a rebuild refused by the schema gate, verbatim.
+
+    A reload door drives an epoch rebuild; the schema gate refuses THAT rebuild before any
+    manifest module imports, and the previous generation keeps serving. It refuses a chain the
+    deployment depends on that is pending or diverged (``SchemaOutOfDateError``, naming each
+    stale chain, its pending files or mismatches, and the ``tai db migrate`` remedy) and a
+    chain it cannot resolve (``MigrationDiscoveryError``: a malformed packaged plugin spec
+    naming its distribution and file, or a missing or malformed migrations directory). Both
+    messages are operator-facing by construction, so they are surfaced as the shared
+    ``{"error": ...}`` envelope. The status is 500: the reload did not apply.
+    """
+    return JSONResponse({"error": str(exc)}, status_code=500)
+
+
 async def fleet_broadcast_error_handler(request: Request, exc: Exception) -> Response:
-    """Surface a fleet-broadcast failure whose cause is an operator-facing plugin-load error; mask any other cause.
+    """Surface a fleet-broadcast failure whose cause is an operator-facing rebuild error; mask any other cause.
 
     A reload that broadcasts to the fleet wraps a failed local rebuild as
     ``FleetBroadcastError``. When the underlying cause is a plugin that could not load
-    (``CorePluginBootError``) or a route mount collision (``CrossOwnerRouteCollisionError``,
-    whose message names the remap remedy), that message plus the fleet report reach the
+    (``CorePluginBootError``), a route mount collision (``CrossOwnerRouteCollisionError``,
+    whose message names the remap remedy) or a schema-gate refusal (``SchemaOutOfDateError`` or
+    ``MigrationDiscoveryError``, see :func:`schema_gate_error_handler`), that message plus the fleet report reach the
     caller (the CLI prints it and exits non-zero). Any other cause — a bus transport error
     naming internal hosts — keeps the generic masked 500, so internal detail never leaks.
     """
@@ -90,7 +107,13 @@ async def fleet_broadcast_error_handler(request: Request, exc: Exception) -> Res
     from tai42_skeleton.operations._broadcast import FleetBroadcastError
 
     cause = exc.__cause__
-    if isinstance(exc, FleetBroadcastError) and isinstance(cause, (CorePluginBootError, CrossOwnerRouteCollisionError)):
+    operator_facing = (
+        CorePluginBootError,
+        CrossOwnerRouteCollisionError,
+        SchemaOutOfDateError,
+        MigrationDiscoveryError,
+    )
+    if isinstance(exc, FleetBroadcastError) and isinstance(cause, operator_facing):
         return JSONResponse({"error": str(cause), "report": exc.report.model_dump(mode="json")}, status_code=500)
     return await internal_error_handler(request, exc)
 
@@ -103,9 +126,10 @@ async def server_reloading_handler(request: Request, exc: Exception) -> Response
 def install_error_handlers(base_app: Any) -> None:
     """Install the shared error-envelope handlers on a freshly built base app.
 
-    ``FleetBroadcastError`` / ``CorePluginBootError`` render the operator-facing reload
-    failure; ``ServerReloadingError`` (a turn refused while a reload holds the gate, raised
-    from any door, a plugin's included) renders the reload gate's retriable 503; every other
+    ``FleetBroadcastError`` / ``CorePluginBootError`` / ``SchemaOutOfDateError`` /
+    ``MigrationDiscoveryError`` render the operator-facing reload failure;
+    ``ServerReloadingError`` (a turn refused while a reload holds the gate, raised from any
+    door, a plugin's included) renders the reload gate's retriable 503; every other
     unexpected exception falls back to the generic masked 500, and the router's native 404 is
     rendered as the shared envelope.
     """
@@ -116,4 +140,6 @@ def install_error_handlers(base_app: Any) -> None:
     base_app.add_exception_handler(ServerReloadingError, server_reloading_handler)
     base_app.add_exception_handler(FleetBroadcastError, fleet_broadcast_error_handler)
     base_app.add_exception_handler(CorePluginBootError, core_plugin_boot_error_handler)
+    base_app.add_exception_handler(SchemaOutOfDateError, schema_gate_error_handler)
+    base_app.add_exception_handler(MigrationDiscoveryError, schema_gate_error_handler)
     base_app.add_exception_handler(404, not_found_handler)
