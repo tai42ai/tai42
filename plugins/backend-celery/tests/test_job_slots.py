@@ -110,16 +110,32 @@ def test_the_job_s_exception_propagates_and_frees_its_slot() -> None:
 
 
 def test_on_solo_the_running_job_ticks_the_worker_s_progress_until_it_ends(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(job_slots, "_TICK_SECONDS", 0.01)
+    tick_seconds = 0.01
+    monkeypatch.setattr(job_slots, "_TICK_SECONDS", tick_seconds)
     ticks: list[str] = []
-    _watch(slots=1, ticks_in_job=True, tick=lambda: ticks.append("tick"))
 
-    assert asyncio.run(job_slots.in_job(_sleep_then(0.1, "done"), label="tool t1")) == "done"
+    async def _main() -> None:
+        third_tick = asyncio.Event()
 
-    assert len(ticks) >= 5
-    after = len(ticks)
-    asyncio.run(asyncio.sleep(0.05))
-    assert len(ticks) == after
+        def _tick() -> None:
+            ticks.append("tick")
+            if len(ticks) == 3:
+                third_tick.set()
+
+        _watch(slots=1, ticks_in_job=True, tick=_tick)
+
+        async def _job() -> str:
+            # The job ends once it has seen three ticks; the bound only turns a ticker that
+            # stops repeating into a failure instead of a hang.
+            await asyncio.wait_for(third_tick.wait(), timeout=30)
+            return "done"
+
+        assert await job_slots.in_job(_job(), label="tool t1") == "done"
+        assert ticks == ["tick"] * 3
+        await asyncio.sleep(5 * tick_seconds)
+        assert ticks == ["tick"] * 3
+
+    asyncio.run(_main())
 
 
 def test_on_threads_the_running_job_leaves_the_ticks_to_the_hub(monkeypatch: pytest.MonkeyPatch) -> None:
