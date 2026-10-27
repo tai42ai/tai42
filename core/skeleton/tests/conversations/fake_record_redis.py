@@ -154,14 +154,14 @@ class FakeRecordRedis:
         """Plant the ROUTING ROW for ``route_name`` — the key the record create checks
         before it writes the thread indexes. Without it every create here would behave as
         one landing after the route's delete and index nothing."""
-        self._strings[ConversationsSettings().route_key(route_name)] = "{}"
+        self._strings[ConversationsSettings().keyspace.route_key(route_name)] = "{}"
 
     def seed_person(self, person: Person) -> None:
         """Plant ``person``'s row and its address→person index mappings the way the person store
         writes them, so a person-thread record create finds its person standing."""
         settings = ConversationsSettings()
-        self._strings[settings.person_key(person.person_id)] = person.model_dump_json()
-        index_key = settings.person_index_key(person.target_kind, person.target_name)
+        self._strings[settings.keyspace.person_key(person.person_id)] = person.model_dump_json()
+        index_key = settings.keyspace.person_index_key(person.target_kind, person.target_name)
         for address in person.addresses:
             self._hashes.setdefault(index_key, {})[_address_key_of(address)] = person.person_id
 
@@ -170,13 +170,17 @@ class FakeRecordRedis:
         row, its name-index member and a fresh write token for the map (the fake carries no
         config put Lua)."""
         settings = ConversationsSettings()
-        self._strings[settings.target_config_key(config.target_kind, config.target_name)] = config.model_dump_json()
-        self._sets.setdefault(settings.target_config_names_key, set()).add(f"{config.target_kind}:{config.target_name}")
-        self._strings[settings.target_config_version_key] = uuid.uuid4().hex
+        self._strings[settings.keyspace.target_config_key(config.target_kind, config.target_name)] = (
+            config.model_dump_json()
+        )
+        self._sets.setdefault(settings.keyspace.target_config_names_key, set()).add(
+            f"{config.target_kind}:{config.target_name}"
+        )
+        self._strings[settings.keyspace.target_config_version_key] = uuid.uuid4().hex
 
     def drop_route(self, route_name: str) -> None:
         """Remove the routing row, so a create lands as one racing the route's delete."""
-        self._strings.pop(ConversationsSettings().route_key(route_name), None)
+        self._strings.pop(ConversationsSettings().keyspace.route_key(route_name), None)
 
     # -- the server-side primitives the faked scripts write through ---------
     def _stores(self) -> tuple[dict, ...]:

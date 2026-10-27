@@ -19,7 +19,7 @@ from pydantic import SecretStr
 from tai42_contract.access_control import KEY_FINGERPRINT_CLAIM, OWNER_USER_ID_CLAIM
 from tai42_kit.access_control import registry
 
-from tai42_skeleton.access_control import management, setup_recovery
+from tai42_skeleton.access_control import api_key_lifecycle, management, policy_version, setup_recovery
 from tai42_skeleton.access_control import setup_gate as setup_gate_mod
 from tai42_skeleton.access_control.settings import access_control_settings, setup_settings
 from tai42_skeleton.access_control.setup_recovery import SetupRecoveryError, recover_owner_key
@@ -42,7 +42,8 @@ def setup_redis(monkeypatch: pytest.MonkeyPatch) -> FakeRedis:
     """The AC Redis the gate's throttle counters and mint mutex live on."""
     fake = FakeRedis(strings={})
     monkeypatch.setattr(setup_gate_mod, "client_ctx", make_client_ctx(fake))
-    monkeypatch.setattr(management, "client_ctx", make_client_ctx(fake))
+    monkeypatch.setattr(api_key_lifecycle, "client_ctx", make_client_ctx(fake))
+    monkeypatch.setattr(policy_version, "client_ctx", make_client_ctx(fake))
     return fake
 
 

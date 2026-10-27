@@ -283,7 +283,7 @@ async def test_an_erase_of_a_person_a_link_absorbs_before_its_mark_is_refused_an
     await marking.reached.wait()
     merged = await persons.merge(_PERSON, _OTHER)
     assert merged.person_id == _OTHER
-    index = await lua_env.redis.hgetall(lua_env.store.settings.person_index_key("agent", "echo"))
+    index = await lua_env.redis.hgetall(lua_env.store.settings.keyspace.person_index_key("agent", "echo"))
     records = sorted(states_pg.records)
     marking.go.set()
 
@@ -296,12 +296,12 @@ async def test_an_erase_of_a_person_a_link_absorbs_before_its_mark_is_refused_an
     )
     assert refused.value.extra == {"absorbed_into_person_id": _OTHER}
     settings = lua_env.store.settings
-    assert await lua_env.redis.exists(settings.person_erasing_key(_PERSON)) == 0
+    assert await lua_env.redis.exists(settings.keyspace.person_erasing_key(_PERSON)) == 0
     assert parks_cancelled == []
     assert checkpoint_saver.deleted == []
     assert drains == []
     assert await persons.get_by_id(_OTHER) == merged
-    assert await lua_env.redis.hgetall(settings.person_index_key("agent", "echo")) == index
+    assert await lua_env.redis.hgetall(settings.keyspace.person_index_key("agent", "echo")) == index
     assert sorted(states_pg.records) == records
     for message_id in ("p-line", "p-line-b"):
         assert await lua_env.store.get_record(message_id) is not None
@@ -314,8 +314,8 @@ async def test_an_erase_of_a_person_a_link_absorbs_before_its_mark_is_refused_an
     assert result["erased"] is True
     assert result["absorbed_person_ids"] == [_PERSON]
     for route in ("line", "line-b"):
-        assert await lua_env.redis.exists(settings.thread_index_key(route, person_thread_id(_PERSON))) == 0
-        assert await lua_env.redis.zscore(settings.route_threads_key(route), person_thread_id(_PERSON)) is None
+        assert await lua_env.redis.exists(settings.keyspace.thread_index_key(route, person_thread_id(_PERSON))) == 0
+        assert await lua_env.redis.zscore(settings.keyspace.route_threads_key(route), person_thread_id(_PERSON)) is None
     for message_id in ("p-line", "p-line-b"):
         assert await lua_env.store.get_record(message_id) is None
     assert _row(_PERSON) not in states_pg.records

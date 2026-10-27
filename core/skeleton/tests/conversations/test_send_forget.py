@@ -148,13 +148,17 @@ async def _seed_thread(lua_env: LuaEnv, *, thread: str = _THREAD, route: str = "
 async def _assert_forgotten(lua_env: LuaEnv, ids: list[str], *, thread: str, routes: list[str]) -> None:
     settings = lua_env.store.settings
     for message_id in ids:
-        assert await lua_env.redis.exists(settings.record_key(message_id)) == 0
+        assert await lua_env.redis.exists(settings.keyspace.record_key(message_id)) == 0
         assert await keys_naming(lua_env, message_id) == set()
-    for prefix in (settings.message_ref_key_prefix, settings.outbound_index_key_prefix, settings.ask_send_key_prefix):
+    for prefix in (
+        settings.keyspace.message_ref_key_prefix,
+        settings.keyspace.outbound_index_key_prefix,
+        settings.keyspace.ask_send_key_prefix,
+    ):
         assert [key async for key in lua_env.redis.scan_iter(match=f"{prefix}*")] == []
     for route in routes:
-        assert await lua_env.redis.exists(settings.thread_index_key(route, thread)) == 0
-        assert await lua_env.redis.zscore(settings.route_threads_key(route), thread) is None
+        assert await lua_env.redis.exists(settings.keyspace.thread_index_key(route, thread)) == 0
+        assert await lua_env.redis.zscore(settings.keyspace.route_threads_key(route), thread) is None
 
 
 # -- owned_keys names exactly the keys -----------------------------------------------------------
@@ -229,15 +233,15 @@ async def test_a_key_naming_another_record_survives_this_records_delete(lua_env)
     await _sent_record(lua_env, "ask-1", ["q-1"], ask=_ask("i-1"))
     settings = lua_env.store.settings
     # Another record now holds the outbound id and the ask key this row still names.
-    await lua_env.redis.set(settings.outbound_index_key("twilio", "q-1"), "other")
-    await lua_env.redis.set(settings.ask_send_key("i-1"), "other")
+    await lua_env.redis.set(settings.keyspace.outbound_index_key("twilio", "q-1"), "other")
+    await lua_env.redis.set(settings.keyspace.ask_send_key("i-1"), "other")
 
     record = await lua_env.store.get_record("ask-1")
     assert record is not None
     assert await lua_env.store.delete_record(record)
 
-    assert await lua_env.redis.get(settings.outbound_index_key("twilio", "q-1")) == "other"
-    assert await lua_env.redis.get(settings.ask_send_key("i-1")) == "other"
+    assert await lua_env.redis.get(settings.keyspace.outbound_index_key("twilio", "q-1")) == "other"
+    assert await lua_env.redis.get(settings.keyspace.ask_send_key("i-1")) == "other"
 
 
 # -- a writer on a removed row -------------------------------------------------------------------
@@ -256,9 +260,11 @@ async def test_an_ask_reply_on_a_row_removed_after_its_lookup_writes_nothing(lua
     monkeypatch.setattr(store, "_write_ask_reply", _forgotten_first)
 
     assert await store.record_ask_reply("i-1", _reply("a-1")) == ("gone", "ask-1")
-    assert await lua_env.redis.exists(store.settings.record_key("ask-1")) == 0
+    assert await lua_env.redis.exists(store.settings.keyspace.record_key("ask-1")) == 0
     assert await store.resolve_message_ref("twilio", _IDENTITY, _ADDRESS, "a-1") == []
-    assert await lua_env.redis.exists(store.settings.message_ref_key("twilio", _IDENTITY, _ADDRESS, "a-1")) == 0
+    assert (
+        await lua_env.redis.exists(store.settings.keyspace.message_ref_key("twilio", _IDENTITY, _ADDRESS, "a-1")) == 0
+    )
 
 
 async def test_an_ask_reply_after_the_forget_misses_the_ask_key_and_writes_nothing(lua_env):
@@ -268,7 +274,7 @@ async def test_an_ask_reply_after_the_forget_misses_the_ask_key_and_writes_nothi
 
     assert await lua_env.store.record_ask_reply("i-1", _reply("a-1")) == ("unknown", None)
     assert await keys_naming(lua_env, "ask-1") == set()
-    assert await lua_env.redis.exists(lua_env.store.settings.record_key("ask-1")) == 0
+    assert await lua_env.redis.exists(lua_env.store.settings.keyspace.record_key("ask-1")) == 0
 
 
 async def test_the_chunk_index_on_a_removed_row_writes_nothing(lua_env):
@@ -278,7 +284,7 @@ async def test_the_chunk_index_on_a_removed_row_writes_nothing(lua_env):
 
     assert await lua_env.store.index_outbound("twilio", _IDENTITY, _ADDRESS, ["r-1"], "reply-1") == -1
     assert await keys_naming(lua_env, "reply-1") == set()
-    assert await lua_env.redis.exists(lua_env.store.settings.record_key("reply-1")) == 0
+    assert await lua_env.redis.exists(lua_env.store.settings.keyspace.record_key("reply-1")) == 0
 
 
 async def test_a_reply_whose_thread_is_forgotten_mid_send_indexes_nothing_and_warns(lua_env, monkeypatch, caplog):
@@ -297,7 +303,7 @@ async def test_a_reply_whose_thread_is_forgotten_mid_send_indexes_nothing_and_wa
         await delivery_channel_module._deliver_channel(lua_env.store, record, "t-1")
 
     assert await keys_naming(lua_env, "reply-1") == set()
-    assert await lua_env.redis.exists(lua_env.store.settings.record_key("reply-1")) == 0
+    assert await lua_env.redis.exists(lua_env.store.settings.keyspace.record_key("reply-1")) == 0
     assert any("reply-1" in message and "forgotten" in message and "w1-1" in message for message in caplog.messages)
 
 
@@ -314,18 +320,20 @@ async def _assert_marked(lua_env: LuaEnv, record: ConversationRecord, thread: st
     """Right after the forget: the row stands in ``sending``, in no thread index, marked, in its in-flight set."""
     settings = lua_env.store.settings
     assert record.delivery_status is DeliveryStatus.SENDING
-    assert thread in await lua_env.redis.hget(settings.record_key(record.message_id), "forgotten_threads")
-    assert await lua_env.redis.exists(settings.thread_index_key(record.route_name, thread)) == 0
-    assert await lua_env.redis.sismember(settings.route_sending_key(record.route_name), record.message_id)
+    assert thread in await lua_env.redis.hget(settings.keyspace.record_key(record.message_id), "forgotten_threads")
+    assert await lua_env.redis.exists(settings.keyspace.thread_index_key(record.route_name, thread)) == 0
+    assert await lua_env.redis.sismember(settings.keyspace.route_sending_key(record.route_name), record.message_id)
 
 
 async def _assert_gone(lua_env: LuaEnv, message_id: str, thread: str, route: str = "line") -> None:
     settings = lua_env.store.settings
-    assert await lua_env.redis.exists(settings.record_key(message_id)) == 0
+    assert await lua_env.redis.exists(settings.keyspace.record_key(message_id)) == 0
     assert await keys_naming(lua_env, message_id) == set()
-    assert await lua_env.redis.exists(settings.thread_index_key(route, thread)) == 0
-    assert await lua_env.redis.zscore(settings.route_threads_key(route), thread) is None
-    assert await lua_env.redis.zscore(settings.status_index_key(DeliveryStatus.SENDING.value), message_id) is None
+    assert await lua_env.redis.exists(settings.keyspace.thread_index_key(route, thread)) == 0
+    assert await lua_env.redis.zscore(settings.keyspace.route_threads_key(route), thread) is None
+    assert (
+        await lua_env.redis.zscore(settings.keyspace.status_index_key(DeliveryStatus.SENDING.value), message_id) is None
+    )
 
 
 def _warned_forgotten(caplog, message_id: str) -> bool:
@@ -387,8 +395,8 @@ async def test_a_send_in_a_linked_person_thread_erased_meanwhile(ends, lua_env, 
             assert await task == ["out-1"]
 
     settings = lua_env.store.settings
-    assert await lua_env.redis.exists(settings.thread_index_key("line", _PERSON_THREAD)) == 0
-    assert await lua_env.redis.zscore(settings.route_threads_key("line"), _PERSON_THREAD) is None
+    assert await lua_env.redis.exists(settings.keyspace.thread_index_key("line", _PERSON_THREAD)) == 0
+    assert await lua_env.redis.zscore(settings.keyspace.route_threads_key("line"), _PERSON_THREAD) is None
     if ends == "raise":
         await _assert_gone(lua_env, record.message_id, _PERSON_THREAD)
         assert _warned_forgotten(caplog, record.message_id)
@@ -397,7 +405,9 @@ async def test_a_send_in_a_linked_person_thread_erased_meanwhile(ends, lua_env, 
         own_thread = route_thread_id("line", "+" + _PERSON)
         assert landed.thread_id == own_thread
         assert landed.delivery_status is DeliveryStatus.PROVISIONAL
-        assert await lua_env.redis.zrange(settings.thread_index_key("line", own_thread), 0, -1) == [landed.message_id]
+        assert await lua_env.redis.zrange(settings.keyspace.thread_index_key("line", own_thread), 0, -1) == [
+            landed.message_id
+        ]
     with pytest.raises(NotFoundError):
         await ops.delete_conversation_thread("line", _PERSON_THREAD)
 
@@ -454,7 +464,7 @@ async def test_a_send_moving_into_a_forgotten_thread_is_forgotten_and_its_neighb
     await lua_env.store.drop_thread("line", landing)
     for record in by_address.values():
         assert landing in await lua_env.redis.hget(
-            lua_env.store.settings.record_key(record.message_id), "forgotten_threads"
+            lua_env.store.settings.keyspace.record_key(record.message_id), "forgotten_threads"
         )
     with caplog.at_level(logging.WARNING):
         channel.release.set()
@@ -463,7 +473,9 @@ async def test_a_send_moving_into_a_forgotten_thread_is_forgotten_and_its_neighb
 
     await _assert_gone(lua_env, by_address["@handle"].message_id, landing)
     assert (
-        await lua_env.redis.exists(lua_env.store.settings.thread_index_key("line", route_thread_id("line", "@handle")))
+        await lua_env.redis.exists(
+            lua_env.store.settings.keyspace.thread_index_key("line", route_thread_id("line", "@handle"))
+        )
         == 0
     )
     [landed] = await send_records(lua_env)
@@ -495,8 +507,8 @@ async def test_a_send_moving_out_of_a_forgotten_thread_is_recorded_where_it_land
             assert await task == ["m-9"]
 
     settings = lua_env.store.settings
-    assert await lua_env.redis.exists(settings.thread_index_key("line", begin_thread)) == 0
-    assert await lua_env.redis.exists(settings.record_key("earlier")) == 0
+    assert await lua_env.redis.exists(settings.keyspace.thread_index_key("line", begin_thread)) == 0
+    assert await lua_env.redis.exists(settings.keyspace.record_key("earlier")) == 0
     if ends == "raise":
         await _assert_gone(lua_env, record.message_id, begin_thread)
         return
@@ -504,8 +516,8 @@ async def test_a_send_moving_out_of_a_forgotten_thread_is_recorded_where_it_land
     [landed] = await send_records(lua_env)
     assert landed.thread_id == landing
     assert landed.delivery_status is DeliveryStatus.PROVISIONAL
-    assert await lua_env.redis.zrange(settings.thread_index_key("line", landing), 0, -1) == [landed.message_id]
-    assert await lua_env.redis.zscore(settings.route_threads_key("line"), landing) is not None
-    assert await lua_env.redis.get(settings.outbound_index_key("twilio", "m-9")) == landed.message_id
+    assert await lua_env.redis.zrange(settings.keyspace.thread_index_key("line", landing), 0, -1) == [landed.message_id]
+    assert await lua_env.redis.zscore(settings.keyspace.route_threads_key("line"), landing) is not None
+    assert await lua_env.redis.get(settings.keyspace.outbound_index_key("twilio", "m-9")) == landed.message_id
     assert await lua_env.store.resolve_message_ref("twilio", _IDENTITY, "12345", "m-9") == [landed.message_id]
     assert not _warned_forgotten(caplog, landed.message_id)

@@ -20,8 +20,8 @@ from tai42_contract.access_control.identity import ApiKeyIdentityProvider
 from tai42_contract.app.responses import FanoutSummary
 from tai42_kit.access_control import registry
 
+from tai42_skeleton.access_control import api_key_lifecycle, management, policy_version
 from tai42_skeleton.access_control import backup as ac_backup
-from tai42_skeleton.access_control import management
 from tai42_skeleton.access_control import store as store_module
 from tai42_skeleton.access_control.store import PostgresAccessControlStore
 from tai42_skeleton.app import instance
@@ -90,7 +90,8 @@ def provider(monkeypatch: pytest.MonkeyPatch) -> _SpyProvider:
     context delete + version bump touch."""
     spy = _SpyProvider()
     registry._PROVIDERS._generation.committed()["redis"] = lambda _settings: spy
-    monkeypatch.setattr(management, "client_ctx", make_access_control_client_ctx(FakeAccessControlRedis()))
+    monkeypatch.setattr(api_key_lifecycle, "client_ctx", make_access_control_client_ctx(FakeAccessControlRedis()))
+    monkeypatch.setattr(policy_version, "client_ctx", make_access_control_client_ctx(FakeAccessControlRedis()))
     return spy
 
 
@@ -126,7 +127,7 @@ async def test_import_re_mints_an_orphan_and_leaves_its_policy_unchanged(
 
 
 async def test_import_skips_a_live_key(pg: FakeAccessControlPg, provider: _SpyProvider) -> None:
-    await management.add_user_api_key("live", "live-desc", ["*"], owner_user_id="owner-1")
+    await api_key_lifecycle.add_user_api_key("live", "live-desc", ["*"], owner_user_id="owner-1")
     report = await ac_backup.import_access_control({"tokens": [_token("live")]}, "skip")
     # Policy AND identity present: left in place, never re-minted.
     assert report.details["skipped_existing"] == 1
@@ -392,7 +393,7 @@ async def _seed_export_fixture(pg: FakeAccessControlPg) -> None:
     pg.add_route("/api/things", "things")
     pg.add_route("/api/things/{id}", "things", pattern="^/api/things/[^/]+$")
     pg.add_route("/api/open", "public")
-    await management.add_user_api_key("key-1", "first key", ["things"], owner_user_id="owner-1")
+    await api_key_lifecycle.add_user_api_key("key-1", "first key", ["things"], owner_user_id="owner-1")
     pg.policy("key-1")["policy_data"][KEY_FINGERPRINT_CLAIM] = "fp-key-1"
     pg.add_policy(
         "orphan-1", scopes=["things"], policy_data={KEY_FINGERPRINT_CLAIM: "fp-o", OWNER_USER_ID_CLAIM: "owner-1"}
@@ -448,13 +449,13 @@ def recorder(monkeypatch: pytest.MonkeyPatch, pg: FakeAccessControlPg, provider:
             return _spy
 
         monkeypatch.setattr(PostgresAccessControlStore, name, _make(name, original))
-    original_bump = management.bump_policy_version
+    original_bump = policy_version.bump_policy_version
 
     async def _bump() -> int | None:
         rec.calls.append(("bump",))
         return await original_bump()
 
-    monkeypatch.setattr(management, "bump_policy_version", _bump)
+    monkeypatch.setattr(policy_version, "bump_policy_version", _bump)
     return rec
 
 
@@ -559,7 +560,7 @@ async def _bumps_of(recorder: _Recorder) -> int:
 
 
 async def test_create_principal_row_marks_the_batch_changed(recorder: _Recorder, pg: FakeAccessControlPg) -> None:
-    async with management.policy_write_batch():
+    async with policy_version.policy_write_batch():
         await management.create_principal_row("w-1", "service", "W One", "owner-1")
         assert await _bumps_of(recorder) == 0
     assert await _bumps_of(recorder) == 1
@@ -567,7 +568,7 @@ async def test_create_principal_row_marks_the_batch_changed(recorder: _Recorder,
 
 
 async def test_create_principal_policy_marks_the_batch_changed(recorder: _Recorder, pg: FakeAccessControlPg) -> None:
-    async with management.policy_write_batch():
+    async with policy_version.policy_write_batch():
         await management.create_principal_policy("w-2", ["*"], {"k": "v"}, None)
         assert await _bumps_of(recorder) == 0
     assert await _bumps_of(recorder) == 1
@@ -576,7 +577,7 @@ async def test_create_principal_policy_marks_the_batch_changed(recorder: _Record
 
 async def test_set_principal_disabled_row_marks_the_batch_changed(recorder: _Recorder, pg: FakeAccessControlPg) -> None:
     pg.add_policy("owner-1", scopes=["*"])
-    async with management.policy_write_batch():
+    async with policy_version.policy_write_batch():
         await management.set_principal_disabled_row("owner-1", True)
         assert await _bumps_of(recorder) == 0
     assert await _bumps_of(recorder) == 1

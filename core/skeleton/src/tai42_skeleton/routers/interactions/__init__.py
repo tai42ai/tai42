@@ -62,7 +62,8 @@ from .answer import answer, cancel, react
 # The callback internals a callback-door test drives directly through the package alias.
 from .callback import _POST_ONLY_EMPTY_BODY_DENY as _POST_ONLY_EMPTY_BODY_DENY
 from .callback import _record_callback_answer as _record_callback_answer
-from .callback import callback, callback_react
+from .callback import callback
+from .callback_react import callback_react
 from .listing import list_interactions, list_pending_interactions
 from .media import media
 

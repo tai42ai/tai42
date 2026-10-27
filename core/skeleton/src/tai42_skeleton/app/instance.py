@@ -12,7 +12,7 @@ from tai42_kit.logging import install_record_redaction, logging_settings, setup_
 from tai42_kit.settings import register_settings_reset
 
 from tai42_skeleton import tool_meta, versioning
-from tai42_skeleton.access_control import management
+from tai42_skeleton.access_control import policy_version
 from tai42_skeleton.access_control import settings as access_control_readiness
 from tai42_skeleton.access_control.settings import access_control_settings
 from tai42_skeleton.access_control.setup_gate import ensure_setup_token
@@ -66,7 +66,7 @@ _app: TaiMCP | None = None
 
 async def _invalidate_policy_cache() -> None:
     """The mount-change listener: drop every cached policy decision and capability projection."""
-    await management.bump_policy_version()
+    await policy_version.bump_policy_version()
 
 
 def built_app() -> TaiMCP | None:

@@ -4,7 +4,7 @@ The models and the ``AppConversations`` facet are the contract; this package is 
 implementation: ``managers`` the routing-row store
 (keyspace 4), ``cache`` its singleton accessor, ``backup`` the row export/import seam,
 ``ledger`` the channel send progress (keyspace 5), ``settings`` the ``CONVERSATIONS_*``
-config carrying the keyspace helpers and every bound.
+config carrying every bound, ``keyspace`` the Redis key builders under its prefix.
 
 Without ``CONVERSATIONS_REDIS_URL`` there is no durable backend and every routing operation
 refuses with a loud 501.

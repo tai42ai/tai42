@@ -76,7 +76,7 @@ def install(monkeypatch, serve_tools, bind_sub_mcp_router):
     isolated; it is seeded from ``routes`` so the store-backed GET/DELETE see the
     same state the fake router is primed with.
     """
-    from tai42_skeleton.access_control import management as management_module
+    from tai42_skeleton.access_control import api_key_lifecycle, policy_version
     from tai42_skeleton.app import instance
     from tai42_skeleton.sub_mcp import service
     from tai42_skeleton.sub_mcp import store as sub_mcp_store
@@ -85,10 +85,11 @@ def install(monkeypatch, serve_tools, bind_sub_mcp_router):
 
     # A successful register/unregister bumps the policy version (so cached capability
     # projections re-read the new mount set) through the mount-change listener the
-    # composition root wires; the bump goes through ``management``'s Redis — point it at a
+    # composition root wires; the bump goes through ``policy_version``'s Redis — point it at a
     # per-test FakeRedis so the bump is observable and never hits a backend.
     redis = FakeRedis(strings={}, hashes={})
-    monkeypatch.setattr(management_module, "client_ctx", make_client_ctx(redis))
+    monkeypatch.setattr(api_key_lifecycle, "client_ctx", make_client_ctx(redis))
+    monkeypatch.setattr(policy_version, "client_ctx", make_client_ctx(redis))
     monkeypatch.setattr(service, "_mount_change_listeners", [])
     service.on_mount_changed(instance._invalidate_policy_cache)
 
@@ -345,13 +346,14 @@ def _gate_off_without_gate_redis(monkeypatch) -> None:
     from tai42_kit.clients import client_ctx
     from tai42_kit.settings import reset_all_settings
 
-    from tai42_skeleton.access_control import management as management_module
+    from tai42_skeleton.access_control import api_key_lifecycle, policy_version
 
     monkeypatch.setenv("ACCESS_CONTROL_ENABLE", "false")
     monkeypatch.delenv("ACCESS_CONTROL_REDIS_URL", raising=False)
     monkeypatch.delenv("TAI_DEFAULT_REDIS_URL", raising=False)
     # The real client factory, so a bump that reached for the gate's Redis would raise.
-    monkeypatch.setattr(management_module, "client_ctx", client_ctx)
+    monkeypatch.setattr(api_key_lifecycle, "client_ctx", client_ctx)
+    monkeypatch.setattr(policy_version, "client_ctx", client_ctx)
     reset_all_settings()
 
 

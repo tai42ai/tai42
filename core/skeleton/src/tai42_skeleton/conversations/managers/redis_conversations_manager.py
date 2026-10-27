@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 # refusal is only a guard if the count it decides on cannot move before the write it
 # guards. The table's write token is set in the same unit, so a reader's snapshot can never
 # be tagged with a token whose write it has not seen. Every key is passed in from
-# ``ConversationsSettings``.
+# ``ConversationsKeyspace``.
 #
 # put: KEYS[1]=names index, KEYS[2]=the route's own key, KEYS[3]=the route's thread index,
 # KEYS[4]=the table's version key; ARGV = route_name, route_json, door, token. Returns 1 when
@@ -98,10 +98,10 @@ class RedisConversationsManager(BaseConversationsManager):
                 r,
                 _PUT_LUA,
                 4,
-                self.settings.route_names_key,
-                self.settings.route_key(route.route_name),
-                self.settings.route_threads_key(route.route_name),
-                self.settings.route_version_key,
+                self.settings.keyspace.route_names_key,
+                self.settings.keyspace.route_key(route.route_name),
+                self.settings.keyspace.route_threads_key(route.route_name),
+                self.settings.keyspace.route_version_key,
                 route.route_name,
                 route.model_dump_json(),
                 route.door,
@@ -123,7 +123,7 @@ class RedisConversationsManager(BaseConversationsManager):
         snapshot = await self._load_routes()
         if route_name in snapshot.unreadable:
             async with client_ctx(RedisClient, self.settings.redis) as r:
-                raw = await awaited(r.get(self.settings.route_key(route_name)))
+                raw = await awaited(r.get(self.settings.keyspace.route_key(route_name)))
             if raw is None:
                 return None
             return ConversationRouteBody.model_validate_json(_as_str(raw)).root
@@ -136,9 +136,9 @@ class RedisConversationsManager(BaseConversationsManager):
                 r,
                 _DELETE_LUA,
                 3,
-                self.settings.route_names_key,
-                self.settings.route_key(route_name),
-                self.settings.route_version_key,
+                self.settings.keyspace.route_names_key,
+                self.settings.keyspace.route_key(route_name),
+                self.settings.keyspace.route_version_key,
                 route_name,
                 new_write_token(),
             )
@@ -160,14 +160,18 @@ class RedisConversationsManager(BaseConversationsManager):
         snapshot tagged with the older token, so the next read loads again.
         """
         async with client_ctx(RedisClient, self.settings.redis) as r:
-            token = await awaited(r.get(self.settings.route_version_key))
+            token = await awaited(r.get(self.settings.keyspace.route_version_key))
             token = None if token is None else _as_str(token)
             held = self._route_snapshot
             if held is not None and held.token == token:
                 return held
-            names = await awaited(r.smembers(self.settings.route_names_key))
+            names = await awaited(r.smembers(self.settings.keyspace.route_names_key))
             name_list = sorted(_as_str(name) for name in names)
-            raws = await awaited(r.mget([self.settings.route_key(name) for name in name_list])) if name_list else []
+            raws = (
+                await awaited(r.mget([self.settings.keyspace.route_key(name) for name in name_list]))
+                if name_list
+                else []
+            )
         routes: dict[str, ConversationRoute] = {}
         unreadable: set[str] = set()
         for name, raw in zip(name_list, raws, strict=True):

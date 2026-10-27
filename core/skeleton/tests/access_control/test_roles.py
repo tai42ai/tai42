@@ -18,7 +18,7 @@ from tai42_kit.utils.data import run_jq_first
 
 import tai42_skeleton.versioning as versioning_module
 import tai42_skeleton.versioning.backup as versioning_backup
-from tai42_skeleton.access_control import management
+from tai42_skeleton.access_control import api_key_lifecycle, policy_version
 from tai42_skeleton.access_control.roles import (
     SkeletonAccountsAdminServices,
     apply_role,
@@ -97,7 +97,8 @@ def provider() -> _SpyProvider:
 @pytest.fixture
 def redis_mgmt(monkeypatch) -> FakeRedis:
     fake = FakeRedis(strings={})
-    monkeypatch.setattr(management, "client_ctx", make_client_ctx(fake))
+    monkeypatch.setattr(api_key_lifecycle, "client_ctx", make_client_ctx(fake))
+    monkeypatch.setattr(policy_version, "client_ctx", make_client_ctx(fake))
     return fake
 
 
@@ -585,7 +586,7 @@ async def test_services_remove_policy_revokes_owned_keys(mem, pg: FakeAccessCont
     # deletes both his policy row and his principal row.
     pg.add_principal("bob")
     await access_control_store().create_policy("bob", [])
-    await management.add_user_api_key("bob-key", "machine", ["*"], owner_user_id="bob")
+    await api_key_lifecycle.add_user_api_key("bob-key", "machine", ["*"], owner_user_id="bob")
     services = SkeletonAccountsAdminServices()
     await services.remove_policy("bob")
     assert "bob-key" not in provider.identities  # owned key revoked

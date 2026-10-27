@@ -156,7 +156,7 @@ def _wire_channel(monkeypatch, channel) -> None:
 
 def _claim(fake: FakeRecordRedis, message_id: str) -> tuple[str, float]:
     """The record's live lease as ``(token, expiry)``; an empty token when it is free."""
-    raw = fake._hashes[ConversationsSettings().record_key(message_id)]["claim"]
+    raw = fake._hashes[ConversationsSettings().keyspace.record_key(message_id)]["claim"]
     if not raw:
         return "", 0.0
     token, expiry = raw.split(":", 1)
@@ -368,7 +368,7 @@ async def test_sweep_moves_unrecoverable_row_to_failed(monkeypatch, fake, store)
     _wire_channel(monkeypatch, FakeChannel())
     settings = ConversationsSettings()
     fake.seed_hash(
-        settings.record_key("bad"),
+        settings.keyspace.record_key("bad"),
         {
             "data": "{not json",
             "delivery_status": "pending_delivery",
@@ -378,12 +378,12 @@ async def test_sweep_moves_unrecoverable_row_to_failed(monkeypatch, fake, store)
             "updated_at": "1",
         },
     )
-    await fake.zadd(settings.status_index_key("pending_delivery"), {"bad": float("inf")})
+    await fake.zadd(settings.keyspace.status_index_key("pending_delivery"), {"bad": float("inf")})
 
     await delivery_module.sweep_stalled_deliveries()
     await _drain_spawned(store)
 
-    assert fake._hashes[settings.record_key("bad")]["delivery_status"] == "failed"
+    assert fake._hashes[settings.keyspace.record_key("bad")]["delivery_status"] == "failed"
     assert [w.message_id for w in await store.pending_work(due_only=False)] == []
     failed = await store.list_by_status(frozenset({DeliveryStatus.FAILED}))
     assert failed.items == []
@@ -415,8 +415,8 @@ async def test_a_provisional_record_is_indexed_at_its_grace_deadline(fake, store
     sent_at = time.time()
     await _provisional(store, "m-prov", sent_at)
 
-    score = await fake.zscore(settings.status_index_key(DeliveryStatus.PROVISIONAL.value), "m-prov")
-    grace_deadline = float(fake._hashes[settings.record_key("m-prov")]["grace_deadline"])
+    score = await fake.zscore(settings.keyspace.status_index_key(DeliveryStatus.PROVISIONAL.value), "m-prov")
+    grace_deadline = float(fake._hashes[settings.keyspace.record_key("m-prov")]["grace_deadline"])
     assert score == pytest.approx(sent_at + settings.delivery_grace_seconds)
     assert score == grace_deadline
 
@@ -462,7 +462,7 @@ async def test_the_boot_redrive_reads_every_provisional_record_and_reschedules_t
 async def test_a_provisional_member_indexed_without_its_deadline_refuses_the_boot_redrive(monkeypatch, fake, store):
     _wire_channel(monkeypatch, FakeChannel())
     await _provisional(store, "m-old-layout", time.time())
-    key = ConversationsSettings().status_index_key(DeliveryStatus.PROVISIONAL.value)
+    key = ConversationsSettings().keyspace.status_index_key(DeliveryStatus.PROVISIONAL.value)
     await fake.zadd(key, {"m-old-layout": float("inf")})
 
     with pytest.raises(ConversationsIndexLayoutError, match="m-old-layout"):

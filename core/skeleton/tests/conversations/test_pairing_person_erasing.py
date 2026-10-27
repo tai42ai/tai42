@@ -36,7 +36,7 @@ async def _person_of(address: str, our_identity: str):
 
 
 async def _index_of(fake, person) -> dict[str, str]:
-    index_key = _person_store().settings.person_index_key("agent", "assistant")
+    index_key = _person_store().settings.keyspace.person_index_key("agent", "assistant")
     fields = {_address_key_of(address) for address in person.addresses}
     return {field: owner for field, owner in (await fake.hgetall(index_key)).items() if field in fields}
 

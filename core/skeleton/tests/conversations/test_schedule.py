@@ -215,7 +215,7 @@ def _answered_channel_record(message_id: str):
 
 
 def _set_grace_deadline(fake: FakeRecordRedis, message_id: str, deadline: float) -> None:
-    fake._hashes[ConversationsSettings().record_key(message_id)]["grace_deadline"] = str(deadline)
+    fake._hashes[ConversationsSettings().keyspace.record_key(message_id)]["grace_deadline"] = str(deadline)
 
 
 async def test_redrive_confirms_a_provisional_record_whose_grace_elapsed(env, monkeypatch):

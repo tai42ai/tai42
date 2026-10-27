@@ -414,9 +414,9 @@ def _seed_multichannel_linked_person(monkeypatch, fake, *, pid: str = "person-xy
     person = Person(
         person_id=pid, target_kind="tool", target_name="echo-tool", created_at=now, addresses=[channel_addr, api_addr]
     )
-    fake._strings[settings.person_key(pid)] = person.model_dump_json()
+    fake._strings[settings.keyspace.person_key(pid)] = person.model_dump_json()
     dak = json.dumps(["twilio", "+15550001111", "+15550002222"], separators=(",", ":"))
-    fake._hashes.setdefault(settings.person_index_key("tool", "echo-tool"), {})[dak] = pid
+    fake._hashes.setdefault(settings.keyspace.person_index_key("tool", "echo-tool"), {})[dak] = pid
     config = TargetConversationConfig(target_kind="tool", target_name="echo-tool", multichannel=True)
     fake.seed_target_config(config)
     return person

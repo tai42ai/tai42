@@ -61,7 +61,7 @@ from tai42_contract.versioning import VersionedStore, VersionedStoreTransaction
 from tai42_contract.versioning.errors import DocumentExistsError, DocumentNotFoundError
 from tai42_contract.versioning.models import DocumentRecord, DocumentVersion
 
-from tai42_skeleton.access_control import management
+from tai42_skeleton.access_control import api_key_lifecycle, management, policy_version
 from tai42_skeleton.access_control.policy_store import ac_policy_store
 from tai42_skeleton.access_control.store import access_control_store
 from tai42_skeleton.access_control.user import is_admin_policy
@@ -362,7 +362,7 @@ async def role_write_transaction() -> AsyncIterator[VersionedStoreTransaction]:
 
     async with versioned_store().transaction() as tx:
         yield tx
-    await management.bump_policy_version()
+    await policy_version.bump_policy_version()
 
 
 async def seed_default_roles() -> None:
@@ -492,7 +492,7 @@ async def refresh_enforcement(user_id: str, committed: dict[str, Any]) -> None:
     flip): once the advisory-locked transaction has committed, enforcement is refreshed so
     the change takes effect on the next request.
     """
-    await management.bump_policy_version()
+    await policy_version.bump_policy_version()
     await ac_policy_store().write(user_id, committed)
 
 
@@ -511,8 +511,8 @@ async def revoke_owned_keys_and_bump(user_id: str) -> None:
     for entry in await management.get_all_existing_tokens_payload():
         owner = (entry.get("policy_data") or {}).get(OWNER_USER_ID_CLAIM)
         if owner == user_id:
-            await management.revoke_api_key(entry["user_id"])
-    await management.bump_policy_version()
+            await api_key_lifecycle.revoke_api_key(entry["user_id"])
+    await policy_version.bump_policy_version()
 
 
 async def set_principal_disabled(user_id: str, disabled: bool) -> None:

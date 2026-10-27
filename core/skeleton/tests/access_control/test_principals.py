@@ -24,7 +24,7 @@ from tai42_contract.access_control.models import AccessPolicy
 from tai42_kit.access_control import registry
 
 import tai42_skeleton.versioning as versioning_module
-from tai42_skeleton.access_control import management
+from tai42_skeleton.access_control import api_key_lifecycle, management, policy_version
 from tai42_skeleton.access_control.roles import seed_default_roles
 from tai42_skeleton.app.route_registry import _SpecApp
 from tai42_skeleton.operations import (
@@ -125,7 +125,8 @@ def record_owner(_claiming_providers: tuple[set[str], set[str]]) -> set[str]:
 @pytest.fixture
 def redis_mgmt(monkeypatch) -> FakeRedis:
     fake = FakeRedis(strings={})
-    monkeypatch.setattr(management, "client_ctx", make_client_ctx(fake))
+    monkeypatch.setattr(api_key_lifecycle, "client_ctx", make_client_ctx(fake))
+    monkeypatch.setattr(policy_version, "client_ctx", make_client_ctx(fake))
     return fake
 
 
@@ -196,7 +197,7 @@ async def test_create_principal_over_a_minted_key_id_is_409(
     await _seed_roles(pg)
     pg.add_principal("owner", kind="human", display_name="O")
     pg.add_policy("owner", scopes=["*"])
-    await management.add_user_api_key("key-1", "d", ["*"], owner_user_id="owner")
+    await api_key_lifecycle.add_user_api_key("key-1", "d", ["*"], owner_user_id="owner")
     key_body = pg.policy_body("key-1")
     with pytest.raises(ConflictError) as exc:
         await principals_ops.create_principal(user_id="key-1", kind="service", display_name="K", role="editor")
@@ -388,7 +389,7 @@ async def test_delete_service_principal_revokes_owned_keys(
 ) -> None:
     pg.add_principal("a", kind="service", display_name="A")
     await management.access_control_store().create_policy("a", [])
-    await management.add_user_api_key("a-key", "machine", ["*"], owner_user_id="a")
+    await api_key_lifecycle.add_user_api_key("a-key", "machine", ["*"], owner_user_id="a")
     result = await principals_ops.delete_principal(user_id="a")
     assert result == {"user_id": "a", "deleted": True}
     assert "a-key" not in provider.identities  # owned key revoked

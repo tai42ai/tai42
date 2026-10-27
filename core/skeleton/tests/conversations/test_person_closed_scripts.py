@@ -58,7 +58,7 @@ async def _close(lua_env: LuaEnv, person: str) -> None:
     if person == "marked":
         assert await lua_env.manager.persons.mark_erasing(_PERSON) is True
     elif person == "gone":
-        await lua_env.redis.delete(lua_env.store.settings.person_key(_PERSON))
+        await lua_env.redis.delete(lua_env.store.settings.keyspace.person_key(_PERSON))
 
 
 async def _status_members(lua_env: LuaEnv, message_id: str) -> list[str]:
@@ -66,7 +66,7 @@ async def _status_members(lua_env: LuaEnv, message_id: str) -> list[str]:
     return [
         status.value
         for status in DeliveryStatus
-        if await lua_env.redis.zscore(settings.status_index_key(status.value), message_id) is not None
+        if await lua_env.redis.zscore(settings.keyspace.status_index_key(status.value), message_id) is not None
     ]
 
 
@@ -95,12 +95,12 @@ async def test_a_send_placed_in_a_closed_person_thread_is_deleted_with_every_key
     assert await _end_one(lua_env, end, record) == (-1, "person_closed")
 
     settings = lua_env.store.settings
-    assert await lua_env.redis.exists(settings.record_key("send-1")) == 0
+    assert await lua_env.redis.exists(settings.keyspace.record_key("send-1")) == 0
     assert await keys_naming(lua_env, "send-1") == set()
     assert await _status_members(lua_env, "send-1") == []
-    assert await lua_env.redis.exists(settings.thread_index_key("line", _PERSON_THREAD)) == 0
-    assert await lua_env.redis.zscore(settings.route_threads_key("line"), _PERSON_THREAD) is None
-    assert await lua_env.redis.exists(settings.person_thread_routes_key(_PERSON)) == 0
+    assert await lua_env.redis.exists(settings.keyspace.thread_index_key("line", _PERSON_THREAD)) == 0
+    assert await lua_env.redis.zscore(settings.keyspace.route_threads_key("line"), _PERSON_THREAD) is None
+    assert await lua_env.redis.exists(settings.keyspace.person_thread_routes_key(_PERSON)) == 0
 
 
 @pytest.mark.parametrize("end", ["complete", "end", "settle"])
@@ -114,9 +114,9 @@ async def test_a_send_placed_in_a_standing_person_thread_lands_in_it(end, lua_en
 
     settings = lua_env.store.settings
     assert code == 1
-    assert await lua_env.redis.zrange(settings.thread_index_key("line", _PERSON_THREAD), 0, -1) == ["send-1"]
-    assert await lua_env.redis.zscore(settings.route_threads_key("line"), _PERSON_THREAD) is not None
-    assert await lua_env.redis.smembers(settings.person_thread_routes_key(_PERSON)) == {"line"}
+    assert await lua_env.redis.zrange(settings.keyspace.thread_index_key("line", _PERSON_THREAD), 0, -1) == ["send-1"]
+    assert await lua_env.redis.zscore(settings.keyspace.route_threads_key("line"), _PERSON_THREAD) is not None
+    assert await lua_env.redis.smembers(settings.keyspace.person_thread_routes_key(_PERSON)) == {"line"}
 
 
 @pytest.mark.parametrize("end", ["complete", "end", "settle"])
@@ -125,12 +125,12 @@ async def test_a_send_placed_in_a_person_thread_with_its_route_gone_records_no_r
     await lua_env.seed_person(standing_person(_PERSON, "line"))
     record = _record("send-1", _PERSON_THREAD)
     await lua_env.store.begin_send_record(record, route=_channel_route(), settle_deadline=time.time() + 60)
-    await lua_env.redis.delete(lua_env.store.settings.route_key("line"))
+    await lua_env.redis.delete(lua_env.store.settings.keyspace.route_key("line"))
 
     code, _detail = await _end_one(lua_env, end, record)
 
     assert code == 0
-    assert await lua_env.redis.exists(lua_env.store.settings.person_thread_routes_key(_PERSON)) == 0
+    assert await lua_env.redis.exists(lua_env.store.settings.keyspace.person_thread_routes_key(_PERSON)) == 0
 
 
 @pytest.mark.parametrize("route_standing", [True, False])
@@ -139,7 +139,7 @@ async def test_a_create_in_a_standing_person_thread_records_its_route_while_the_
     await lua_env.seed_person(standing_person(_PERSON, "line"))
     settings = lua_env.store.settings
     if not route_standing:
-        await lua_env.redis.delete(settings.route_key("line"))
+        await lua_env.redis.delete(settings.keyspace.route_key("line"))
     record = _record(
         "in-1",
         _PERSON_THREAD,
@@ -153,10 +153,10 @@ async def test_a_create_in_a_standing_person_thread_records_its_route_while_the_
 
     await lua_env.store.create_record(record, route=_channel_route())
 
-    recorded = await lua_env.redis.smembers(settings.person_thread_routes_key(_PERSON))
+    recorded = await lua_env.redis.smembers(settings.keyspace.person_thread_routes_key(_PERSON))
     assert recorded == ({"line"} if route_standing else set())
     assert (
-        await lua_env.redis.zscore(settings.route_threads_key("line"), _PERSON_THREAD) is not None
+        await lua_env.redis.zscore(settings.keyspace.route_threads_key("line"), _PERSON_THREAD) is not None
     ) is route_standing
 
 
@@ -184,17 +184,17 @@ async def test_a_create_in_a_closed_person_thread_writes_nothing(person, lua_env
             record,
             route=_channel_route(),
             intake_token="tok",
-            claim_key=settings.dedupe_key("twilio", "PID1"),
+            claim_key=settings.keyspace.dedupe_key("twilio", "PID1"),
             refresh_mode=True,
         )
 
-    assert await lua_env.redis.exists(settings.record_key("in-1")) == 0
-    assert await lua_env.redis.exists(settings.dedupe_key("twilio", "PID1")) == 0
-    assert await lua_env.redis.exists(settings.thread_index_key("line", _PERSON_THREAD)) == 0
-    assert await lua_env.redis.zscore(settings.route_threads_key("line"), _PERSON_THREAD) is None
+    assert await lua_env.redis.exists(settings.keyspace.record_key("in-1")) == 0
+    assert await lua_env.redis.exists(settings.keyspace.dedupe_key("twilio", "PID1")) == 0
+    assert await lua_env.redis.exists(settings.keyspace.thread_index_key("line", _PERSON_THREAD)) == 0
+    assert await lua_env.redis.zscore(settings.keyspace.route_threads_key("line"), _PERSON_THREAD) is None
     assert await lua_env.store.resolve_message_ref("twilio", _IDENTITY, _ADDRESS, "medium-1") == []
     assert await _status_members(lua_env, "in-1") == []
-    assert await lua_env.redis.exists(settings.person_thread_routes_key(_PERSON)) == 0
+    assert await lua_env.redis.exists(settings.keyspace.person_thread_routes_key(_PERSON)) == 0
 
 
 async def test_a_create_in_a_route_keyed_thread_declares_no_person_key(lua_env, monkeypatch):
@@ -221,10 +221,12 @@ async def test_a_create_in_a_route_keyed_thread_declares_no_person_key(lua_env, 
     await lua_env.store.create_record(record, route=_channel_route())
 
     person_prefixes = (
-        settings.person_key_prefix,
-        settings.person_erasing_key_prefix,
-        settings.person_thread_routes_key_prefix,
+        settings.keyspace.person_key_prefix,
+        settings.keyspace.person_erasing_key_prefix,
+        settings.keyspace.person_thread_routes_key_prefix,
     )
     assert declared
     assert [key for key in declared if key.startswith(person_prefixes)] == []
-    assert [key async for key in lua_env.redis.scan_iter(match=f"{settings.person_thread_routes_key_prefix}*")] == []
+    assert [
+        key async for key in lua_env.redis.scan_iter(match=f"{settings.keyspace.person_thread_routes_key_prefix}*")
+    ] == []

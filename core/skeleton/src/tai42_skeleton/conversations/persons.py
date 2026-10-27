@@ -3,7 +3,8 @@
 The runtime state that folds several channel addresses into ONE identity for a single
 ``(target_kind, target_name)`` target.
 
-Its Redis keyspaces, all built ONLY by the :class:`ConversationsSettings` helpers:
+Its Redis keyspaces, all built ONLY by the
+:class:`~tai42_skeleton.conversations.keyspace.ConversationsKeyspace` builders:
 
 - a PERSON-ROW key (``conversations:person:<person_id>``) → the :class:`Person` JSON.
 - a per-target PERSON INDEX — a HASH ``conversations:person_index:<target_kind>:<target_name>``
@@ -195,7 +196,7 @@ class ConversationPersonStore:
         addresses are attributed as unlinked.
         """
         dak = _door_address_key(door=door, channel=channel, our_identity=our_identity, address=address)
-        index_key = self.settings.person_index_key(target.target_kind, target.target_name)
+        index_key = self.settings.keyspace.person_index_key(target.target_kind, target.target_name)
         async with client_ctx(RedisClient, self.settings.redis) as r:
             result = await eval_script(
                 r,
@@ -203,8 +204,8 @@ class ConversationPersonStore:
                 1,
                 index_key,
                 dak,
-                self.settings.person_key_prefix,
-                self.settings.person_erasing_key_prefix,
+                self.settings.keyspace.person_key_prefix,
+                self.settings.keyspace.person_erasing_key_prefix,
             )
         status = _as_str(result[0])
         if status in ("miss", "erasing"):
@@ -226,8 +227,8 @@ class ConversationPersonStore:
                 r,
                 _GET_BY_ID_LUA,
                 2,
-                self.settings.person_key(person_id),
-                self.settings.person_erasing_key(person_id),
+                self.settings.keyspace.person_key(person_id),
+                self.settings.keyspace.person_erasing_key(person_id),
             )
         raw = _as_str(result[0])
         if not raw or (int(result[1]) == 1 and not include_erasing):
@@ -245,25 +246,25 @@ class ConversationPersonStore:
                 r,
                 _MARK_ERASING_LUA,
                 2,
-                self.settings.person_key(person_id),
-                self.settings.person_erasing_key(person_id),
+                self.settings.keyspace.person_key(person_id),
+                self.settings.keyspace.person_erasing_key(person_id),
             )
         return int(result) == 1
 
     async def clear_erasing(self, person_id: str) -> None:
         """Remove ``person_id``'s erase mark (an erase refused before its teardown gives the person back)."""
         async with client_ctx(RedisClient, self.settings.redis) as r:
-            await awaited(r.delete(self.settings.person_erasing_key(person_id)))
+            await awaited(r.delete(self.settings.keyspace.person_erasing_key(person_id)))
 
     async def is_erasing(self, person_id: str) -> bool:
         """Whether ``person_id``'s erase mark stands."""
         async with client_ctx(RedisClient, self.settings.redis) as r:
-            return int(await awaited(r.exists(self.settings.person_erasing_key(person_id)))) == 1
+            return int(await awaited(r.exists(self.settings.keyspace.person_erasing_key(person_id)))) == 1
 
     async def thread_routes(self, person_id: str) -> set[str]:
         """The route names ``person_id``'s aggregated thread is indexed under, as its writes recorded them."""
         async with client_ctx(RedisClient, self.settings.redis) as r:
-            members = await awaited(r.smembers(self.settings.person_thread_routes_key(person_id)))
+            members = await awaited(r.smembers(self.settings.keyspace.person_thread_routes_key(person_id)))
         return {_as_str(member) for member in members}
 
     async def read_for_erase(self, person_id: str) -> PersonEraseRead:
@@ -278,13 +279,13 @@ class ConversationPersonStore:
                 r,
                 _READ_FOR_ERASE_LUA,
                 4,
-                settings.person_key(person_id),
-                settings.person_absorbed_key(person_id),
-                settings.person_thread_routes_key(person_id),
-                settings.person_absorbed_into_key(person_id),
-                settings.person_thread_routes_key_prefix,
-                settings.person_key_prefix,
-                settings.writer_threads_key_prefix,
+                settings.keyspace.person_key(person_id),
+                settings.keyspace.person_absorbed_key(person_id),
+                settings.keyspace.person_thread_routes_key(person_id),
+                settings.keyspace.person_absorbed_into_key(person_id),
+                settings.keyspace.person_thread_routes_key_prefix,
+                settings.keyspace.person_key_prefix,
+                settings.keyspace.writer_threads_key_prefix,
                 person_id,
             )
         raw_row, pointer, survivor_stands, recorded, absorbed_rows, route_threads = result
@@ -332,10 +333,10 @@ class ConversationPersonStore:
                 _OUTSIDE_WRITER_LUA,
                 0,
                 thread_id,
-                settings.writer_prefixes(),
-                settings.person_key_prefix,
-                settings.person_erasing_key_prefix,
-                settings.person_absorbed_into_key_prefix,
+                settings.keyspace.writer_prefixes(),
+                settings.keyspace.person_key_prefix,
+                settings.keyspace.person_erasing_key_prefix,
+                settings.keyspace.person_absorbed_into_key_prefix,
                 *sorted(erased),
             )
         return _as_str(outside) or None
@@ -366,7 +367,7 @@ class ConversationPersonStore:
             locale=locale,
         )
         dak = _address_key_of(address_row)
-        index_key = self.settings.person_index_key(target.target_kind, target.target_name)
+        index_key = self.settings.keyspace.person_index_key(target.target_kind, target.target_name)
         async with client_ctx(RedisClient, self.settings.redis) as r:
             result = await eval_script(
                 r,
@@ -374,7 +375,7 @@ class ConversationPersonStore:
                 1,
                 index_key,
                 dak,
-                self.settings.person_key_prefix,
+                self.settings.keyspace.person_key_prefix,
                 new_id,
                 person.model_dump_json(),
                 address_row.door,
@@ -382,9 +383,9 @@ class ConversationPersonStore:
                 address_row.our_identity or "",
                 address_row.address,
                 json.dumps(address_row.routes, separators=(",", ":")),
-                self.settings.person_erasing_key_prefix,
+                self.settings.keyspace.person_erasing_key_prefix,
                 json.dumps([target.target_kind, target.target_name, dak], separators=(",", ":")),
-                self.settings.writer_prefixes(),
+                self.settings.keyspace.writer_prefixes(),
             )
         status = _as_str(result[0])
         if status == "created":
@@ -420,18 +421,18 @@ class ConversationPersonStore:
                 r,
                 _ERASE_LUA,
                 5,
-                settings.person_key(person.person_id),
-                settings.person_index_key(person.target_kind, person.target_name),
-                settings.person_erasing_key(person.person_id),
-                settings.person_absorbed_key(person.person_id),
-                settings.person_thread_routes_key(person.person_id),
+                settings.keyspace.person_key(person.person_id),
+                settings.keyspace.person_index_key(person.target_kind, person.target_name),
+                settings.keyspace.person_erasing_key(person.person_id),
+                settings.keyspace.person_absorbed_key(person.person_id),
+                settings.keyspace.person_thread_routes_key(person.person_id),
                 person.person_id,
-                settings.person_thread_routes_key_prefix,
-                settings.person_absorbed_into_key_prefix,
-                settings.writer_prefixes(),
+                settings.keyspace.person_thread_routes_key_prefix,
+                settings.keyspace.person_absorbed_into_key_prefix,
+                settings.keyspace.writer_prefixes(),
                 json.dumps(sorted(visited), separators=(",", ":")),
-                settings.person_key_prefix,
-                settings.person_erasing_key_prefix,
+                settings.keyspace.person_key_prefix,
+                settings.keyspace.person_erasing_key_prefix,
                 *absorbed_ids,
             )
         status = _as_str(result[0])
@@ -452,11 +453,11 @@ class ConversationPersonStore:
         a later turn's ``ensure_provisional`` never clobbers it. A person whose erase is running
         raises :class:`PersonErasingError` with nothing written.
         """
-        row_key = self.settings.person_key(person_id)
+        row_key = self.settings.keyspace.person_key(person_id)
         mode = "clear" if locale is None else "set"
         async with client_ctx(RedisClient, self.settings.redis) as r:
             result = await eval_script(
-                r, _SET_LOCALE_LUA, 2, row_key, self.settings.person_erasing_key(person_id), mode, locale or ""
+                r, _SET_LOCALE_LUA, 2, row_key, self.settings.keyspace.person_erasing_key(person_id), mode, locale or ""
             )
         status = _as_str(result[0])
         if status == "missing":
@@ -485,14 +486,14 @@ class ConversationPersonStore:
                 r,
                 _MERGE_LUA,
                 6,
-                settings.person_key(person_id_a),
-                settings.person_key(person_id_b),
-                settings.person_erasing_key(person_id_a),
-                settings.person_erasing_key(person_id_b),
-                settings.person_absorbed_key(person_id_a),
-                settings.person_absorbed_key(person_id_b),
-                settings.person_index_key_prefix,
-                settings.person_absorbed_into_key_prefix,
+                settings.keyspace.person_key(person_id_a),
+                settings.keyspace.person_key(person_id_b),
+                settings.keyspace.person_erasing_key(person_id_a),
+                settings.keyspace.person_erasing_key(person_id_b),
+                settings.keyspace.person_absorbed_key(person_id_a),
+                settings.keyspace.person_absorbed_key(person_id_b),
+                settings.keyspace.person_index_key_prefix,
+                settings.keyspace.person_absorbed_into_key_prefix,
             )
         status = _as_str(result[0])
         if status == "ok":
@@ -532,10 +533,10 @@ class ConversationPersonStore:
                 r,
                 _DETACH_LUA,
                 3,
-                self.settings.person_key(person_id),
-                self.settings.person_key(new_id),
-                self.settings.person_erasing_key(person_id),
-                self.settings.person_index_key_prefix,
+                self.settings.keyspace.person_key(person_id),
+                self.settings.keyspace.person_key(new_id),
+                self.settings.keyspace.person_erasing_key(person_id),
+                self.settings.keyspace.person_index_key_prefix,
                 dak,
                 new_id,
                 datetime.now(UTC).isoformat(),

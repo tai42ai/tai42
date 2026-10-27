@@ -73,7 +73,7 @@ class ConversationModeStore:
         A stored value that is not a known mode is corruption and raises.
         """
         async with client_ctx(RedisClient, self.settings.redis) as r:
-            raw = await awaited(r.get(self.settings.mode_key(thread_id)))
+            raw = await awaited(r.get(self.settings.keyspace.mode_key(thread_id)))
         if raw is None:
             return None
         value = raw.decode() if isinstance(raw, bytes) else raw
@@ -88,14 +88,16 @@ class ConversationModeStore:
         checked = _validate_mode(mode)
         async with client_ctx(RedisClient, self.settings.redis) as r:
             await awaited(
-                r.set(self.settings.mode_key(thread_id), checked, ex=self.settings.answer_retention_ttl_seconds)
+                r.set(
+                    self.settings.keyspace.mode_key(thread_id), checked, ex=self.settings.answer_retention_ttl_seconds
+                )
             )
         return checked
 
     async def delete_mode(self, thread_id: str) -> bool:
         """Remove ``thread_id``'s override, returning whether one was removed."""
         async with client_ctx(RedisClient, self.settings.redis) as r:
-            return bool(await awaited(r.delete(self.settings.mode_key(thread_id))))
+            return bool(await awaited(r.delete(self.settings.keyspace.mode_key(thread_id))))
 
 
 async def effective_mode(route: ConversationRoute, thread_id: str) -> ConversationMode:

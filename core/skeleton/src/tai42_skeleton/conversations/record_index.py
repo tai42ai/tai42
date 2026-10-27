@@ -64,7 +64,7 @@ class RecordIndexMixin(RecordStoreBase):
         """
         ids: list[str] = []
         for status in statuses:
-            key = self.settings.status_index_key(status.value)
+            key = self.settings.keyspace.status_index_key(status.value)
             if status in TERMINAL_STATUSES:
                 await awaited(r.zremrangebyscore(key, "-inf", now))
             ids.extend(_text(member) for member in await awaited(r.zrange(key, 0, -1)))
@@ -76,7 +76,7 @@ class RecordIndexMixin(RecordStoreBase):
         The whole read checks the index layout: a member scored ``+inf`` was indexed without its
         grace deadline, a layout this code does not read, and raises.
         """
-        key = self.settings.status_index_key(DeliveryStatus.PROVISIONAL.value)
+        key = self.settings.keyspace.status_index_key(DeliveryStatus.PROVISIONAL.value)
         if due_only:
             return [_text(member) for member in await awaited(r.zrangebyscore(key, "-inf", now))]
         ids: list[str] = []
@@ -121,7 +121,7 @@ class RecordIndexMixin(RecordStoreBase):
                 *await self._provisional_ids(r, due_only=due_only, now=now),
             ]
             for message_id in candidates:
-                hashed = await awaited(r.hgetall(self.settings.record_key(message_id)))
+                hashed = await awaited(r.hgetall(self.settings.keyspace.record_key(message_id)))
                 if not hashed:
                     await self._drop_orphan(r, message_id)
                     continue
@@ -170,7 +170,7 @@ class RecordIndexMixin(RecordStoreBase):
         now = time.time()
         async with _records.client_ctx(RedisClient, self.settings.redis) as r:
             for message_id in await self._indexed_ids(r, statuses, now):
-                hashed = await awaited(r.hgetall(self.settings.record_key(message_id)))
+                hashed = await awaited(r.hgetall(self.settings.keyspace.record_key(message_id)))
                 if not hashed:
                     await self._drop_orphan(r, message_id)
                     unreadable += 1
@@ -197,11 +197,11 @@ class RecordIndexMixin(RecordStoreBase):
         off the ``accepted`` status index, which holds only the turns in flight fleet-wide.
         """
         now = time.time()
-        accepted_key = self.settings.status_index_key(DeliveryStatus.ACCEPTED.value)
+        accepted_key = self.settings.keyspace.status_index_key(DeliveryStatus.ACCEPTED.value)
         async with _records.client_ctx(RedisClient, self.settings.redis) as r:
             for member in await awaited(r.zrange(accepted_key, 0, -1)):
                 message_id = _member(member)
-                hashed = await awaited(r.hgetall(self.settings.record_key(message_id)))
+                hashed = await awaited(r.hgetall(self.settings.keyspace.record_key(message_id)))
                 if hashed.get(_F_STATUS) != DeliveryStatus.ACCEPTED.value:
                     continue
                 try:

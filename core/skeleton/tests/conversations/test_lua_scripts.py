@@ -42,7 +42,7 @@ async def lua_redis(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[aioredis.F
     client = aioredis.FakeRedis(decode_responses=True)
     # The create script writes the thread indexes only while the route still routes, so
     # the routing row every record here names stands from the start.
-    await client.set(ConversationsSettings().route_key("line"), "{}")
+    await client.set(ConversationsSettings().keyspace.route_key("line"), "{}")
 
     @asynccontextmanager
     async def fake_client_ctx(client_cls, settings=None, **kwargs):
@@ -83,7 +83,7 @@ def _record(message_id: str, *, status: DeliveryStatus = DeliveryStatus.PENDING_
 
 
 def _key(message_id: str) -> str:
-    return ConversationsSettings().record_key(message_id)
+    return ConversationsSettings().keyspace.record_key(message_id)
 
 
 # -- the inbound claim (conversations:dedupe:claim) ---------------------------
@@ -94,12 +94,12 @@ async def test_the_inbound_claim_is_get_or_set(store, lua_redis):
     # A second attempt on the same pair is answered with the id that owns it, and does not
     # overwrite it — the arbitration two concurrent accepts resolve through.
     assert await store.claim_inbound("twilio", "PID1", "second") == "first"
-    assert await lua_redis.get(ConversationsSettings().dedupe_key("twilio", "PID1")) == "first"
+    assert await lua_redis.get(ConversationsSettings().keyspace.dedupe_key("twilio", "PID1")) == "first"
 
 
 async def test_the_inbound_claim_carries_the_dedupe_ttl(store, lua_redis):
     await store.claim_inbound("twilio", "PID1", "first")
-    ttl = await lua_redis.ttl(ConversationsSettings().dedupe_key("twilio", "PID1"))
+    ttl = await lua_redis.ttl(ConversationsSettings().keyspace.dedupe_key("twilio", "PID1"))
     assert 0 < ttl <= ConversationsSettings().inbound_dedupe_ttl_seconds
 
 
@@ -111,12 +111,12 @@ async def test_the_event_claim_is_get_or_set(store, lua_redis):
     # A redelivery of the same (route, event_id) is answered with the id that owns it and
     # does not overwrite it — the same arbitration the channel claim runs, over its family.
     assert await store.claim_event("line", "E1", "second") == "first"
-    assert await lua_redis.get(ConversationsSettings().event_dedupe_key("line", "E1")) == "first"
+    assert await lua_redis.get(ConversationsSettings().keyspace.event_dedupe_key("line", "E1")) == "first"
 
 
 async def test_the_event_claim_carries_the_dedupe_ttl(store, lua_redis):
     await store.claim_event("line", "E1", "first")
-    ttl = await lua_redis.ttl(ConversationsSettings().event_dedupe_key("line", "E1"))
+    ttl = await lua_redis.ttl(ConversationsSettings().keyspace.event_dedupe_key("line", "E1"))
     assert 0 < ttl <= ConversationsSettings().inbound_dedupe_ttl_seconds
 
 
@@ -559,7 +559,8 @@ async def test_the_scans_report_unfinished_work_and_skip_a_corrupt_row(store, lu
     # the shape a corrupt row reaches it in.
     await lua_redis.hset(_key("m-corrupt"), mapping={"delivery_status": "not-a-status", "attempts": "x"})
     await lua_redis.zadd(
-        ConversationsSettings().status_index_key(DeliveryStatus.PENDING_DELIVERY.value), {"m-corrupt": float("inf")}
+        ConversationsSettings().keyspace.status_index_key(DeliveryStatus.PENDING_DELIVERY.value),
+        {"m-corrupt": float("inf")},
     )
 
     work = {item.message_id: item for item in await store.pending_work(due_only=False)}
@@ -581,7 +582,7 @@ async def _indexed_under(lua_redis, message_id: str) -> list[str]:
     return [
         status.value
         for status in DeliveryStatus
-        if await lua_redis.zscore(settings.status_index_key(status.value), message_id) is not None
+        if await lua_redis.zscore(settings.keyspace.status_index_key(status.value), message_id) is not None
     ]
 
 
@@ -594,7 +595,9 @@ async def test_every_transition_moves_the_record_to_exactly_one_status_index(sto
     assert await store.complete_turn(_record("m1")) == 1
     assert await _indexed_under(lua_redis, "m1") == ["pending_delivery"]
     # A live record's member outlives nothing: it is never swept out from under the listing.
-    assert await lua_redis.zscore(ConversationsSettings().status_index_key("pending_delivery"), "m1") == float("inf")
+    assert await lua_redis.zscore(ConversationsSettings().keyspace.status_index_key("pending_delivery"), "m1") == float(
+        "inf"
+    )
 
     now = time.time()
     assert await store.mark_provisional("m1", sent("out-1"), 1, now, "tok") == 1
@@ -616,7 +619,7 @@ async def test_a_terminal_write_indexes_the_member_to_expire_with_its_row(store,
     assert await _indexed_under(lua_redis, "m1") == [terminal]
     # The member's score is the moment its row expires, so the index is swept with it and
     # never outlives what it names.
-    score = await lua_redis.zscore(ConversationsSettings().status_index_key(terminal), "m1")
+    score = await lua_redis.zscore(ConversationsSettings().keyspace.status_index_key(terminal), "m1")
     assert score == pytest.approx(now + ConversationsSettings().answer_retention_ttl_seconds)
     assert await store.pending_work(due_only=False) == []
 
@@ -643,10 +646,10 @@ async def test_creating_a_record_writes_both_thread_indexes(store, lua_redis):
     record = _record("m1")
     await create_record(store, record)
 
-    assert await lua_redis.zscore(settings.thread_index_key("line", record.thread_id), "m1") == pytest.approx(
+    assert await lua_redis.zscore(settings.keyspace.thread_index_key("line", record.thread_id), "m1") == pytest.approx(
         record.created_at
     )
-    assert await lua_redis.zscore(settings.route_threads_key("line"), record.thread_id) == pytest.approx(
+    assert await lua_redis.zscore(settings.keyspace.route_threads_key("line"), record.thread_id) == pytest.approx(
         record.created_at
     )
 
@@ -658,7 +661,7 @@ async def test_a_create_landing_after_the_route_delete_writes_no_thread_index(st
     it, and the prune (which walks LIVE routes only) never sees it again."""
     settings = ConversationsSettings()
     record = _record("m1")
-    await lua_redis.delete(settings.route_key("line"))
+    await lua_redis.delete(settings.keyspace.route_key("line"))
 
     await create_record(store, record)
 
@@ -667,8 +670,8 @@ async def test_a_create_landing_after_the_route_delete_writes_no_thread_index(st
     assert stored is not None
     assert await _indexed_under(lua_redis, "m1") == ["pending_delivery"]
     # ...but neither thread index was re-created.
-    assert await lua_redis.exists(settings.thread_index_key("line", record.thread_id)) == 0
-    assert await lua_redis.exists(settings.route_threads_key("line")) == 0
+    assert await lua_redis.exists(settings.keyspace.thread_index_key("line", record.thread_id)) == 0
+    assert await lua_redis.exists(settings.keyspace.route_threads_key("line")) == 0
 
 
 async def test_a_create_on_a_live_route_still_writes_both_thread_indexes(store, lua_redis):
@@ -679,8 +682,8 @@ async def test_a_create_on_a_live_route_still_writes_both_thread_indexes(store, 
 
     await create_record(store, record)
 
-    assert await lua_redis.zscore(settings.thread_index_key("line", record.thread_id), "m1") is not None
-    assert await lua_redis.zscore(settings.route_threads_key("line"), record.thread_id) is not None
+    assert await lua_redis.zscore(settings.keyspace.thread_index_key("line", record.thread_id), "m1") is not None
+    assert await lua_redis.zscore(settings.keyspace.route_threads_key("line"), record.thread_id) is not None
 
 
 async def test_the_prune_step_reclaims_a_thread_whose_index_is_already_empty(store, lua_redis):
@@ -694,12 +697,12 @@ async def test_the_prune_step_reclaims_a_thread_whose_index_is_already_empty(sto
     await create_record(store, _aged("m1", thread, time.time()))
     # The transcript index gone from under the route index — what an interrupted route
     # reclamation leaves behind (it deletes the thread's own index first).
-    await lua_redis.delete(settings.thread_index_key("line", thread))
-    assert await lua_redis.zscore(settings.route_threads_key("line"), thread) is not None
+    await lua_redis.delete(settings.keyspace.thread_index_key("line", thread))
+    assert await lua_redis.zscore(settings.keyspace.route_threads_key("line"), thread) is not None
 
     await store.prune_expired_terminal_indexes(["line"])
 
-    assert await lua_redis.zscore(settings.route_threads_key("line"), thread) is None
+    assert await lua_redis.zscore(settings.keyspace.route_threads_key("line"), thread) is None
 
 
 async def test_a_completed_turn_re_scores_its_thread_to_the_moment_it_landed(store, lua_redis):
@@ -709,7 +712,7 @@ async def test_a_completed_turn_re_scores_its_thread_to_the_moment_it_landed(sto
 
     completed = ConversationRecord.model_validate(_record("m1").model_dump() | {"updated_at": intake.created_at + 42})
     assert await store.complete_turn(completed) == 1
-    assert await lua_redis.zscore(settings.route_threads_key("line"), intake.thread_id) == pytest.approx(
+    assert await lua_redis.zscore(settings.keyspace.route_threads_key("line"), intake.thread_id) == pytest.approx(
         intake.created_at + 42
     )
 
@@ -722,11 +725,11 @@ async def test_the_thread_leaves_the_route_index_with_its_last_record(store, lua
     await create_record(store, second)
 
     assert await store.delete_record(first) is True
-    assert await lua_redis.zscore(settings.route_threads_key("line"), first.thread_id) is not None
+    assert await lua_redis.zscore(settings.keyspace.route_threads_key("line"), first.thread_id) is not None
 
     assert await store.delete_record(second) is True
-    assert await lua_redis.zcard(settings.thread_index_key("line", first.thread_id)) == 0
-    assert await lua_redis.zscore(settings.route_threads_key("line"), first.thread_id) is None
+    assert await lua_redis.zcard(settings.keyspace.thread_index_key("line", first.thread_id)) == 0
+    assert await lua_redis.zscore(settings.keyspace.route_threads_key("line"), first.thread_id) is None
 
 
 def _aged(message_id: str, thread_id: str, created_at: float) -> ConversationRecord:
@@ -748,8 +751,8 @@ async def test_the_prune_step_drops_expired_members_and_keeps_a_thread_that_stil
 
     await store.prune_expired_terminal_indexes(["line"])
 
-    assert await lua_redis.zrange(settings.thread_index_key("line", thread), 0, -1) == ["m2"]
-    assert await lua_redis.zscore(settings.route_threads_key("line"), thread) is not None
+    assert await lua_redis.zrange(settings.keyspace.thread_index_key("line", thread), 0, -1) == ["m2"]
+    assert await lua_redis.zscore(settings.keyspace.route_threads_key("line"), thread) is not None
 
 
 async def test_the_prune_step_takes_the_thread_out_of_the_route_index_once_it_empties(store, lua_redis):
@@ -762,8 +765,8 @@ async def test_the_prune_step_takes_the_thread_out_of_the_route_index_once_it_em
 
     await store.prune_expired_terminal_indexes(["line"])
 
-    assert await lua_redis.zcard(settings.thread_index_key("line", thread)) == 0
-    assert await lua_redis.zscore(settings.route_threads_key("line"), thread) is None
+    assert await lua_redis.zcard(settings.keyspace.thread_index_key("line", thread)) == 0
+    assert await lua_redis.zscore(settings.keyspace.route_threads_key("line"), thread) is None
 
 
 async def test_the_prune_step_leaves_a_member_that_is_not_yet_expired(store, lua_redis):
@@ -776,7 +779,7 @@ async def test_the_prune_step_leaves_a_member_that_is_not_yet_expired(store, lua
 
     await store.prune_expired_terminal_indexes(["line"])
 
-    assert await lua_redis.zrange(settings.thread_index_key("line", thread), 0, -1) == ["m1"]
+    assert await lua_redis.zrange(settings.keyspace.thread_index_key("line", thread), 0, -1) == ["m1"]
 
 
 @pytest.mark.parametrize("outcome", ["completed", "silent"])
@@ -798,8 +801,8 @@ async def test_a_turn_completing_after_a_route_delete_never_resurrects_the_route
         )
         assert await store.complete_silent(silent) == 1
 
-    assert await lua_redis.exists(settings.route_threads_key("line")) == 0
-    assert await lua_redis.exists(settings.thread_index_key("line", intake.thread_id)) == 0
+    assert await lua_redis.exists(settings.keyspace.route_threads_key("line")) == 0
+    assert await lua_redis.exists(settings.keyspace.thread_index_key("line", intake.thread_id)) == 0
 
 
 async def test_a_completion_still_stamps_the_route_index_of_a_live_thread(store, lua_redis):
@@ -811,7 +814,7 @@ async def test_a_completion_still_stamps_the_route_index_of_a_live_thread(store,
 
     completed = ConversationRecord.model_validate(_record("m1").model_dump() | {"updated_at": intake.created_at + 42})
     assert await store.complete_turn(completed) == 1
-    assert await lua_redis.zscore(settings.route_threads_key("line"), intake.thread_id) == pytest.approx(
+    assert await lua_redis.zscore(settings.keyspace.route_threads_key("line"), intake.thread_id) == pytest.approx(
         intake.created_at + 42
     )
 
@@ -834,7 +837,7 @@ async def test_the_prune_step_reports_what_the_thread_index_still_holds(store, l
     assert step.spent == 2
     # One member removed, one still standing — so the thread has not left the route index.
     assert step.emptied is False
-    assert await lua_redis.zscore(settings.route_threads_key("line"), thread) is not None
+    assert await lua_redis.zscore(settings.keyspace.route_threads_key("line"), thread) is not None
 
 
 async def test_dropping_a_route_deletes_its_thread_indexes(store, lua_redis):
@@ -844,9 +847,9 @@ async def test_dropping_a_route_deletes_its_thread_indexes(store, lua_redis):
 
     await store.drop_route_threads("line")
 
-    assert await lua_redis.exists(settings.route_threads_key("line")) == 0
-    assert await lua_redis.exists(settings.thread_index_key("line", "bridge:line:a")) == 0
-    assert await lua_redis.exists(settings.thread_index_key("line", "bridge:line:b")) == 0
+    assert await lua_redis.exists(settings.keyspace.route_threads_key("line")) == 0
+    assert await lua_redis.exists(settings.keyspace.thread_index_key("line", "bridge:line:a")) == 0
+    assert await lua_redis.exists(settings.keyspace.thread_index_key("line", "bridge:line:b")) == 0
 
 
 async def test_the_orphan_unindex_drops_a_member_whose_row_is_gone(store, lua_redis):

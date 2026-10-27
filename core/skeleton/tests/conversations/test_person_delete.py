@@ -109,9 +109,9 @@ def checkpoint_saver(monkeypatch) -> _RecordingSaver:
 
 def _seed_person(fake: FakeRecordRedis, person: Person) -> None:
     settings = ConversationsSettings()
-    fake._strings[settings.person_key(person.person_id)] = person.model_dump_json()
+    fake._strings[settings.keyspace.person_key(person.person_id)] = person.model_dump_json()
     for address in person.addresses:
-        index_key = settings.person_index_key(person.target_kind, person.target_name)
+        index_key = settings.keyspace.person_index_key(person.target_kind, person.target_name)
         fake._hashes.setdefault(index_key, {})[_address_key_of(address)] = person.person_id
 
 
@@ -172,8 +172,8 @@ async def test_store_erase_removes_the_row_and_its_index_mappings(fake):
 
     assert row_removed is True
     assert fields_removed == 2
-    assert settings.person_key(_PERSON_ID) not in fake._strings
-    assert fake._hashes.get(settings.person_index_key("agent", "relay"), {}) == {}
+    assert settings.keyspace.person_key(_PERSON_ID) not in fake._strings
+    assert fake._hashes.get(settings.keyspace.person_index_key("agent", "relay"), {}) == {}
 
 
 async def test_store_erase_is_idempotent(fake):
@@ -200,7 +200,7 @@ async def test_delete_person_erases_every_person_scoped_store(fake, checkpoint_s
     await _seed_record("chat-b", "pb")
     settings = ConversationsSettings()
     # A mode override on the aggregated thread, so its teardown by ``drop_thread`` is asserted.
-    fake._strings[settings.mode_key(_PERSON_THREAD)] = "manual"
+    fake._strings[settings.keyspace.mode_key(_PERSON_THREAD)] = "manual"
 
     result = await ops.delete_conversation_person(_PERSON_ID)
 
@@ -214,16 +214,16 @@ async def test_delete_person_erases_every_person_scoped_store(fake, checkpoint_s
     # a. the aggregated agent checkpoint — forgotten once.
     assert checkpoint_saver.deleted == [_PERSON_THREAD]
     # b. the answer records + both route indexes + the thread's mode override.
-    assert settings.record_key("pa") not in fake._hashes
-    assert settings.record_key("pb") not in fake._hashes
-    assert settings.mode_key(_PERSON_THREAD) not in fake._strings
+    assert settings.keyspace.record_key("pa") not in fake._hashes
+    assert settings.keyspace.record_key("pb") not in fake._hashes
+    assert settings.keyspace.mode_key(_PERSON_THREAD) not in fake._strings
     for route_name in ("chat-a", "chat-b"):
-        assert settings.thread_index_key(route_name, _PERSON_THREAD) not in fake._zsets
-        assert _PERSON_THREAD not in fake._zsets.get(settings.route_threads_key(route_name), {})
+        assert settings.keyspace.thread_index_key(route_name, _PERSON_THREAD) not in fake._zsets
+        assert _PERSON_THREAD not in fake._zsets.get(settings.keyspace.route_threads_key(route_name), {})
     # c. the person row.
-    assert settings.person_key(_PERSON_ID) not in fake._strings
+    assert settings.keyspace.person_key(_PERSON_ID) not in fake._strings
     # d. every address→person index mapping.
-    assert fake._hashes.get(settings.person_index_key("agent", "relay"), {}) == {}
+    assert fake._hashes.get(settings.keyspace.person_index_key("agent", "relay"), {}) == {}
 
 
 async def test_delete_person_leaves_no_store_holding_a_quoted_text(fake, checkpoint_saver):
@@ -288,8 +288,8 @@ async def test_delete_person_with_a_turn_in_flight_is_a_409(fake, checkpoint_sav
         await ops.delete_conversation_person(_PERSON_ID)
     # Refused before any teardown: the checkpoint, the record and the person row all stand.
     assert checkpoint_saver.deleted == []
-    assert settings.record_key("live") in fake._hashes
-    assert settings.person_key(_PERSON_ID) in fake._strings
+    assert settings.keyspace.record_key("live") in fake._hashes
+    assert settings.keyspace.person_key(_PERSON_ID) in fake._strings
 
 
 async def test_delete_person_linked_refuses_503_when_a_foreign_worker_holds_the_lease(
@@ -305,14 +305,14 @@ async def test_delete_person_linked_refuses_503_when_a_foreign_worker_holds_the_
     fake.seed_route("chat-a")
     fake.seed_route("chat-b")
     settings = ConversationsSettings()
-    key = settings.thread_lease_key(_PERSON_THREAD)
+    key = settings.keyspace.thread_lease_key(_PERSON_THREAD)
     await fake.set(key, "foreign-token", px=120_000, nx=True)
 
     with pytest.raises(ThreadBusyError, match="busy with an in-flight turn"):
         await ops.delete_conversation_person(_PERSON_ID)
 
     assert checkpoint_saver.deleted == []
-    assert settings.person_key(_PERSON_ID) in fake._strings
+    assert settings.keyspace.person_key(_PERSON_ID) in fake._strings
     assert fake._strings.get(key) == "foreign-token"
 
 
@@ -325,7 +325,7 @@ async def test_delete_person_gone_branch_refuses_503_when_a_foreign_worker_holds
     monkeypatch.setenv("CONVERSATIONS_SYNC_DOOR_WAIT_SECONDS", "0.1")
     caps_module._CAPS_CACHE.clear()
     settings = ConversationsSettings()
-    key = settings.thread_lease_key("bridge:@person:never-seen")
+    key = settings.keyspace.thread_lease_key("bridge:@person:never-seen")
     await fake.set(key, "foreign-token", px=120_000, nx=True)
 
     with pytest.raises(ThreadBusyError, match="busy with an in-flight turn"):

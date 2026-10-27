@@ -382,7 +382,7 @@ async def test_release_is_token_guarded(fake):
     # that owns the lease can delete it.
     settings = ConversationsSettings()
     lease = ThreadTurnLease(lambda: settings)
-    key = settings.thread_lease_key(_THREAD)
+    key = settings.keyspace.thread_lease_key(_THREAD)
     await fake.set(key, "adopter", px=2000, nx=True)
 
     await lease._release(key, "stale", _THREAD)
@@ -719,14 +719,14 @@ async def test_an_uncontended_turn_takes_the_lease_without_a_listener(lua):
     settings = ConversationsSettings()
     lease = ThreadTurnLease(lambda: settings)
     async with lease.held(_THREAD):
-        assert await lua.client.get(settings.thread_lease_key(_THREAD)) is not None
+        assert await lua.client.get(settings.keyspace.thread_lease_key(_THREAD)) is not None
     assert lua.fresh_opened == 0
     assert lua.client.acquire_attempts() == 1
 
 
 async def test_a_holder_that_dies_is_taken_over_when_its_lease_ends(lua, monkeypatch):
     settings = ConversationsSettings()
-    key = settings.thread_lease_key(_THREAD)
+    key = settings.keyspace.thread_lease_key(_THREAD)
     await lua.client.set(key, "crashed-holder", px=60_000)
     waits: list[float] = []
 
@@ -745,7 +745,7 @@ async def test_a_holder_that_dies_is_taken_over_when_its_lease_ends(lua, monkeyp
 
 async def test_a_lease_without_expiry_is_waited_for_one_lease_length(lua, monkeypatch):
     settings = ConversationsSettings()
-    key = settings.thread_lease_key(_THREAD)
+    key = settings.keyspace.thread_lease_key(_THREAD)
     await lua.client.set(key, "holder-without-expiry")
     waits: list[float] = []
 
@@ -916,10 +916,10 @@ def test_two_loops_get_two_listeners() -> None:
 async def test_a_stale_release_neither_deletes_nor_publishes(lua):
     settings = ConversationsSettings()
     lease = ThreadTurnLease(lambda: settings)
-    key = settings.thread_lease_key(_THREAD)
+    key = settings.keyspace.thread_lease_key(_THREAD)
     await lua.client.set(key, "adopter", px=2000)
     pubsub = lua.client.pubsub()
-    await pubsub.subscribe(settings.thread_lease_released_channel)
+    await pubsub.subscribe(settings.keyspace.thread_lease_released_channel)
     await pubsub.get_message(timeout=1)
 
     await lease._release(key, "stale", _THREAD)
@@ -936,7 +936,7 @@ async def test_a_stale_release_neither_deletes_nor_publishes(lua):
 
 def test_the_release_channel_lives_under_the_prefix(monkeypatch) -> None:
     monkeypatch.setenv("CONVERSATIONS_PREFIX", "acme")
-    assert ConversationsSettings().thread_lease_released_channel == "acme:thread_lease_released"
+    assert ConversationsSettings().keyspace.thread_lease_released_channel == "acme:thread_lease_released"
 
 
 def test_the_removed_poll_setting_refuses_boot(monkeypatch, tmp_path) -> None:

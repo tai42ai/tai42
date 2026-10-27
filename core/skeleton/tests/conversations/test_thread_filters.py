@@ -174,7 +174,7 @@ async def test_a_filter_scan_reads_the_route_index_in_bounded_windows(store, fak
     inner = fake.zrevrange
 
     async def _windowed(key, start, end, withscores=False):
-        if key == ConversationsSettings().route_threads_key(_ROUTE):
+        if key == ConversationsSettings().keyspace.route_threads_key(_ROUTE):
             windows.append((start, end))
         return await inner(key, start, end, withscores)
 
@@ -235,7 +235,7 @@ async def test_a_transcript_q_search_counts_an_unreadable_member(store, fake):
     now = time.time()
     await create_record(store, _record("m0", created_at=now, thread_id=_THREAD, inbound_text="a widget please"))
     await create_record(store, _record("m1", created_at=now + 1, thread_id=_THREAD, inbound_text="another widget"))
-    fake._hashes.pop(ConversationsSettings().record_key("m0"))
+    fake._hashes.pop(ConversationsSettings().keyspace.record_key("m0"))
 
     page, unreadable = await store.list_thread_records(_ROUTE, _THREAD, offset=0, limit=10, q="widget")
 
@@ -282,7 +282,7 @@ async def test_search_route_messages_skips_a_rowless_member_loudly(store, fake, 
     await create_record(
         store, _record("a1", created_at=now + 1, thread_id="bridge:line:+1000", inbound_text="widget two")
     )
-    fake._hashes.pop(ConversationsSettings().record_key("a0"))
+    fake._hashes.pop(ConversationsSettings().keyspace.record_key("a0"))
 
     found, unreadable = await store.search_route_messages(_ROUTE, offset=0, limit=10, q="widget")
 
@@ -297,7 +297,7 @@ async def test_search_route_messages_bounds_the_thread_dimension_on_empty_indexe
     # outer loop — otherwise it is an unbounded scan that never reports truncation.
     monkeypatch.setattr(records_module, "_FILTER_THREAD_SCAN", 3)
     settings = ConversationsSettings()
-    route_key = settings.route_threads_key(_ROUTE)
+    route_key = settings.keyspace.route_threads_key(_ROUTE)
     for index in range(10):
         fake._zsets.setdefault(route_key, {})[f"bridge:line:+{index}"] = float(index)
 

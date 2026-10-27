@@ -58,7 +58,7 @@ async def test_delete_removes_row_and_index_member(store):
     assert await store.list() == ({}, 0)
     # ``list() == ({}, 0)`` alone passes even on a leaked index member (it orphan-skips an
     # indexed-but-rowless member), so assert the names set itself no longer carries the member.
-    assert await store.fake.smembers(store.settings.target_config_names_key) == set()
+    assert await store.fake.smembers(store.settings.keyspace.target_config_names_key) == set()
     # A second delete of the now-absent key removes nothing.
     assert await store.delete("agent", "assistant") is False
 
@@ -68,7 +68,7 @@ async def test_list_skips_an_indexed_member_with_no_row(store):
     # An index member whose row never landed (or was dropped from under it) is logged and
     # skipped, never surfaced as a half-row.
     store.fake.seed_member(
-        store.settings.target_config_names_key, "tool:ghost", store.settings.target_config_version_key
+        store.settings.keyspace.target_config_names_key, "tool:ghost", store.settings.keyspace.target_config_version_key
     )
     listed, unreadable = await store.list()
     assert set(listed) == {("agent", "assistant")}
@@ -80,8 +80,10 @@ async def test_list_skips_an_unparseable_row(store):
     # A row whose bytes are not a valid config payload is logged and skipped, never aborting
     # the whole listing.
     member = "tool:corrupt"
-    store.fake.seed_member(store.settings.target_config_names_key, member, store.settings.target_config_version_key)
-    store.fake._strings[f"{store.settings.target_config_key_prefix}{member}"] = "{not json"
+    store.fake.seed_member(
+        store.settings.keyspace.target_config_names_key, member, store.settings.keyspace.target_config_version_key
+    )
+    store.fake._strings[f"{store.settings.keyspace.target_config_key_prefix}{member}"] = "{not json"
     listed, unreadable = await store.list()
     assert set(listed) == {("agent", "assistant")}
     assert unreadable == 1

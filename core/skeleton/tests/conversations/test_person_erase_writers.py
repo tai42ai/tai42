@@ -85,7 +85,7 @@ async def _writers(world: World, thread: str) -> set[str]:
 
 async def _threads_of(world: World, writer: str) -> set[str]:
     """The threads on ``writer``'s visit list."""
-    return await world.redis.smembers(world.settings.writer_threads_key(writer))
+    return await world.redis.smembers(world.settings.keyspace.writer_threads_key(writer))
 
 
 def _door(identity: str, address: str, target: tuple[str, str] = (TARGET.target_kind, TARGET.target_name)) -> str:
@@ -220,7 +220,7 @@ async def test_a_thread_delete_clears_its_writers_and_the_next_write_starts_them
 
     assert result["erased"] is True
     assert result["removed"] == 1
-    door = world.settings.writer_threads_key(_door(_I2, _Q1))
+    door = world.settings.keyspace.writer_threads_key(_door(_I2, _Q1))
     assert await leftovers(world, _P, _Q, again, threads=(thread,)) == {"keys": {door: [thread]}}
 
 
@@ -273,7 +273,7 @@ async def test_two_erases_in_a_row_of_both_writers_wipe_their_shared_chat(world)
 async def _late_write_goes_with_the_next_holders_chat(world: World, thread: str, late: str, *, writes: bool) -> None:
     """``late`` stands in ``thread`` under its erased writer ``_Q``; the person minted for the door
     writes there or not (``writes``), and that person's erase wipes the thread."""
-    assert await world.redis.hget(world.settings.record_key(late), "writer") == _Q
+    assert await world.redis.hget(world.settings.keyspace.record_key(late), "writer") == _Q
     assert await _writers(world, thread) == {_Q}
     minted, created = await world.persons.ensure_provisional(
         PairingTarget(target_kind=TARGET.target_kind, target_name=TARGET.target_name), channel_address(LINE, _Q1)
@@ -322,7 +322,7 @@ async def test_a_write_in_a_left_chat_the_other_writer_still_holds_keeps_its_wri
     assert (await asyncio.wait_for(erase, 30))["erased"] is True
 
     assert await _records_standing(world, [*ids, late]) == [*ids, late]
-    assert await world.redis.hget(world.settings.record_key(late), "writer") == _Q
+    assert await world.redis.hget(world.settings.keyspace.record_key(late), "writer") == _Q
     assert await _writers(world, thread) == {_Q, _X}
     assert (await ops.delete_conversation_person(_X))["erased"] is True
     await _assert_shared_chat_wiped(world, thread, [*ids, late])
@@ -353,8 +353,8 @@ async def test_a_chat_the_other_writers_erase_cleared_during_a_refused_erase_sta
     with pytest.raises(UnavailableError):
         await asyncio.wait_for(erase, 30)
 
-    assert await world.redis.exists(world.settings.person_erasing_key(_Q)) == 0
-    assert await world.redis.exists(world.settings.person_key(_Q)) == 1
+    assert await world.redis.exists(world.settings.keyspace.person_erasing_key(_Q)) == 0
+    assert await world.redis.exists(world.settings.keyspace.person_key(_Q)) == 1
     await _assert_shared_chat_wiped(world, shared, ids)
 
 
@@ -432,7 +432,7 @@ async def test_an_erase_stopped_after_leaving_a_shared_chat_is_finished_by_its_r
     monkeypatch.setattr(threads_delete_module, "_erase_person_state", _failing_once)
     with pytest.raises(RuntimeError, match="the states store is unreachable"):
         await ops.delete_conversation_person(_Q)
-    assert await world.redis.exists(world.settings.person_erasing_key(_Q)) == 1
+    assert await world.redis.exists(world.settings.keyspace.person_erasing_key(_Q)) == 1
     assert await _writers(world, thread) == {_Q, _X}
 
     assert (await ops.delete_conversation_person(_Q))["erased"] is True
@@ -663,7 +663,7 @@ async def test_every_record_write_into_a_route_thread_stamps_its_writer(
     if begun is None:
         assert _Q in await _writers(world, thread)
     else:
-        assert await world.redis.hget(world.settings.record_key(begun.message_id), "writer") == _Q
+        assert await world.redis.hget(world.settings.keyspace.record_key(begun.message_id), "writer") == _Q
     assert await _threads_of(world, _Q) == {thread}
     if begun is not None:
         await begun.fail()

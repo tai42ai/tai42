@@ -611,7 +611,7 @@ class TaiMCP(TaiMCPLifecycleMixin):
         kind: str,
         reason: "InboundRejectionReason",
     ) -> None:
-        from tai42_skeleton.channels.inbound import notify_inbound_rejected
+        from tai42_skeleton.channels.inbound_rejection import notify_inbound_rejected
 
         await notify_inbound_rejected(
             channel_id=channel_id,

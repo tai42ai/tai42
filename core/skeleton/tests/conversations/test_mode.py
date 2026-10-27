@@ -161,7 +161,7 @@ async def test_set_refuses_an_unknown_value(fake) -> None:
 
 async def test_get_raises_on_a_corrupt_stored_value(fake) -> None:
     # A value no set could write is corruption, surfaced loudly rather than coerced.
-    fake._strings[ConversationsSettings().mode_key("bridge:line:+1")] = "auto"
+    fake._strings[ConversationsSettings().keyspace.mode_key("bridge:line:+1")] = "auto"
     with pytest.raises(ValueError, match="conversation mode must be one of"):
         await _store().get_mode("bridge:line:+1")
 
@@ -234,11 +234,11 @@ async def test_drop_thread_reclaims_the_mode_override(fake) -> None:
     fake.seed_route("line")
     await _seed_record(store, message_id="m0", route_name="line", thread_id="bridge:line:+15550002222")
     await _store().set_mode("bridge:line:+15550002222", "manual")
-    assert settings.mode_key("bridge:line:+15550002222") in fake._strings
+    assert settings.keyspace.mode_key("bridge:line:+15550002222") in fake._strings
 
     await store.drop_thread("line", "bridge:line:+15550002222")
 
-    assert settings.mode_key("bridge:line:+15550002222") not in fake._strings
+    assert settings.keyspace.mode_key("bridge:line:+15550002222") not in fake._strings
 
 
 async def test_drop_route_threads_reclaims_every_thread_mode_override(fake) -> None:
@@ -252,8 +252,8 @@ async def test_drop_route_threads_reclaims_every_thread_mode_override(fake) -> N
 
     await store.drop_route_threads("line")
 
-    assert settings.mode_key("bridge:line:+15550002222") not in fake._strings
-    assert settings.mode_key("bridge:line:+15550003333") not in fake._strings
+    assert settings.keyspace.mode_key("bridge:line:+15550002222") not in fake._strings
+    assert settings.keyspace.mode_key("bridge:line:+15550003333") not in fake._strings
 
 
 # -- person-thread default (spans several routes) ----------------------------
@@ -286,7 +286,7 @@ async def test_person_thread_override_still_wins_over_the_folded_default(fake, m
 async def test_set_mode_writes_the_retention_ttl(fake) -> None:
     settings = ConversationsSettings()
     await _store().set_mode("bridge:line:+1", "manual")
-    assert fake.ttl_ms[settings.mode_key("bridge:line:+1")] == settings.answer_retention_ttl_seconds * 1000
+    assert fake.ttl_ms[settings.keyspace.mode_key("bridge:line:+1")] == settings.answer_retention_ttl_seconds * 1000
 
 
 async def test_override_expires_to_the_route_default(fake) -> None:

@@ -12,7 +12,7 @@ from tai42_contract.template import TemplatedText
 
 import tai42_skeleton.operations.roles as roles_ops
 import tai42_skeleton.versioning as versioning_module
-from tai42_skeleton.access_control import management
+from tai42_skeleton.access_control import api_key_lifecycle, policy_version
 from tai42_skeleton.access_control import role_grants as role_grants_module
 from tai42_skeleton.access_control.role_gate import DenialCause, reset_route_index, resolve_route_meta
 from tai42_skeleton.access_control.role_grants import resolve_role_grants, role_level_decision
@@ -46,7 +46,8 @@ def _wire(monkeypatch, mem: _MemStore) -> None:
 @pytest.fixture
 def redis_mgmt(monkeypatch) -> FakeRedis:
     fake = FakeRedis(strings={})
-    monkeypatch.setattr(management, "client_ctx", make_client_ctx(fake))
+    monkeypatch.setattr(api_key_lifecycle, "client_ctx", make_client_ctx(fake))
+    monkeypatch.setattr(policy_version, "client_ctx", make_client_ctx(fake))
     return fake
 
 
@@ -89,7 +90,8 @@ async def test_role_crud_with_the_gate_off_needs_no_gate_redis(mem, pg: FakeAcce
     monkeypatch.delenv("ACCESS_CONTROL_REDIS_URL", raising=False)
     monkeypatch.delenv("TAI_DEFAULT_REDIS_URL", raising=False)
     # The real client factory, so a bump that reached for the gate's Redis would raise.
-    monkeypatch.setattr(management, "client_ctx", client_ctx)
+    monkeypatch.setattr(api_key_lifecycle, "client_ctx", client_ctx)
+    monkeypatch.setattr(policy_version, "client_ctx", client_ctx)
     reset_all_settings()
     await seed_default_roles()
     tag = _grantable_tag()

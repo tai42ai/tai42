@@ -54,7 +54,7 @@ class RecordDeliveryMixin(RecordStoreBase):
                     r,
                     _CLAIM_DELIVERY_LUA,
                     1,
-                    self.settings.record_key(message_id),
+                    self.settings.keyspace.record_key(message_id),
                     now,
                     lease_seconds,
                     token,
@@ -64,7 +64,7 @@ class RecordDeliveryMixin(RecordStoreBase):
     async def bump_attempt(self, message_id: str) -> int:
         """Increment and return the record's attempt count — one per send attempt."""
         async with _records.client_ctx(RedisClient, self.settings.redis) as r:
-            return int(await awaited(r.hincrby(self.settings.record_key(message_id), _F_ATTEMPTS, 1)))
+            return int(await awaited(r.hincrby(self.settings.keyspace.record_key(message_id), _F_ATTEMPTS, 1)))
 
     async def mark_provisional(
         self, message_id: str, sends: list[SentMessage], attempts: int, now: float, token: str
@@ -247,9 +247,9 @@ class RecordDeliveryMixin(RecordStoreBase):
         ids = list(dict.fromkeys(outbound_ids))
         if not ids:
             return 1
-        keys = [self.settings.record_key(message_id)]
-        keys.extend(self.settings.outbound_index_key(channel, pid) for pid in ids)
-        keys.extend(self.settings.message_ref_key(channel, our_identity, client_address, pid) for pid in ids)
+        keys = [self.settings.keyspace.record_key(message_id)]
+        keys.extend(self.settings.keyspace.outbound_index_key(channel, pid) for pid in ids)
+        keys.extend(self.settings.keyspace.message_ref_key(channel, our_identity, client_address, pid) for pid in ids)
         async with _records.client_ctx(RedisClient, self.settings.redis) as r:
             return int(
                 await eval_script(
@@ -271,11 +271,13 @@ class RecordDeliveryMixin(RecordStoreBase):
         Only members whose record still exists are returned, so a record past its retention is a
         miss; an id that was never ours, or whose records are all gone, answers ``[]``.
         """
-        key = self.settings.message_ref_key(channel, our_identity, client_address, medium_message_id)
+        key = self.settings.keyspace.message_ref_key(channel, our_identity, client_address, medium_message_id)
         async with _records.client_ctx(RedisClient, self.settings.redis) as r:
             members = [_member(member) for member in await awaited(r.lrange(key, 0, -1))]
             return [
-                message_id for message_id in members if await awaited(r.exists(self.settings.record_key(message_id)))
+                message_id
+                for message_id in members
+                if await awaited(r.exists(self.settings.keyspace.record_key(message_id)))
             ]
 
     async def resolve_outbound(self, channel: str, outbound_id: str) -> str | None:
@@ -284,7 +286,7 @@ class RecordDeliveryMixin(RecordStoreBase):
         An unknown id, or one already swept.
         """
         async with _records.client_ctx(RedisClient, self.settings.redis) as r:
-            raw = await awaited(r.get(self.settings.outbound_index_key(channel, outbound_id)))
+            raw = await awaited(r.get(self.settings.keyspace.outbound_index_key(channel, outbound_id)))
         if raw is None:
             return None
         return raw.decode() if isinstance(raw, bytes) else raw

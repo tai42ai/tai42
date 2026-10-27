@@ -27,10 +27,9 @@ from tai42_contract.access_control import (
 )
 from tai42_contract.app import tai42_app
 
+from tai42_skeleton.access_control import api_key_lifecycle, policy_version, projection
 from tai42_skeleton.access_control import claim_links as claim_links_module
-from tai42_skeleton.access_control import management as management_module
 from tai42_skeleton.access_control import policy as policy_module
-from tai42_skeleton.access_control import projection
 from tai42_skeleton.access_control import store as store_module
 from tai42_skeleton.access_control.adapter import handle_auth_error
 from tai42_skeleton.access_control.backend import AccessControlAuthBackend
@@ -85,7 +84,8 @@ def table(monkeypatch: pytest.MonkeyPatch) -> Iterator[FakeAccessControlPg]:
     rctx = make_client_ctx(redis)
     monkeypatch.setattr(store_module, "client_ctx", make_pg_ctx(pg))
     monkeypatch.setattr(policy_module, "client_ctx", rctx)
-    monkeypatch.setattr(management_module, "client_ctx", rctx)
+    monkeypatch.setattr(api_key_lifecycle, "client_ctx", rctx)
+    monkeypatch.setattr(policy_version, "client_ctx", rctx)
     monkeypatch.setattr(claim_links_module, "client_ctx", rctx)
     monkeypatch.setattr(projection, "_registry_routes", list)
     monkeypatch.setattr(projection, "_all_agent_names", list)

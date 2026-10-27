@@ -194,7 +194,7 @@ class _DictManager(BaseConversationsManager):
     async def put_route(self, route: ConversationRoute) -> bool:
         existing = self.rows.get(route.route_name)
         if existing is not None and existing.door != route.door:
-            held = await self._redis.zcard(self.settings.route_threads_key(route.route_name))
+            held = await self._redis.zcard(self.settings.keyspace.route_threads_key(route.route_name))
             if held:
                 raise DoorFlipRefusedError(route.route_name, existing.door, route.door, held)
         created = route.route_name not in self.rows
@@ -856,15 +856,15 @@ class LuaEnv:
         from tai42_skeleton.conversations.persons import _address_key_of
 
         settings = self.store.settings
-        await self.redis.set(settings.person_key(person.person_id), person.model_dump_json())
-        index_key = settings.person_index_key(person.target_kind, person.target_name)
+        await self.redis.set(settings.keyspace.person_key(person.person_id), person.model_dump_json())
+        index_key = settings.keyspace.person_index_key(person.target_kind, person.target_name)
         for address in person.addresses:
             await self.redis.hset(index_key, _address_key_of(address), person.person_id)
 
 
 async def sending_ids(lua_env: LuaEnv) -> list[tuple[str, float]]:
     """The ``sending`` index members with their settle-deadline scores."""
-    key = lua_env.store.settings.status_index_key(DeliveryStatus.SENDING.value)
+    key = lua_env.store.settings.keyspace.status_index_key(DeliveryStatus.SENDING.value)
     return await lua_env.redis.zrange(key, 0, -1, withscores=True)
 
 
@@ -880,7 +880,7 @@ async def send_records(lua_env: LuaEnv) -> list[ConversationRecord]:
 
 async def past_deadline(lua_env: LuaEnv, message_id: str) -> None:
     """Move a ``sending`` row's settle deadline into the past."""
-    key = lua_env.store.settings.status_index_key(DeliveryStatus.SENDING.value)
+    key = lua_env.store.settings.keyspace.status_index_key(DeliveryStatus.SENDING.value)
     await lua_env.redis.zadd(key, {message_id: time.time() - 1})
 
 
@@ -888,9 +888,9 @@ async def keys_naming(lua_env: LuaEnv, message_id: str) -> set[str]:
     """Every message-ref, keyspace-3, ask and in-flight key whose value names ``message_id``, by a prefix scan."""
     settings = lua_env.store.settings
     prefixes = (
-        settings.message_ref_key_prefix,
-        settings.outbound_index_key_prefix,
-        settings.ask_send_key_prefix,
+        settings.keyspace.message_ref_key_prefix,
+        settings.keyspace.outbound_index_key_prefix,
+        settings.keyspace.ask_send_key_prefix,
         f"{settings.prefix}:route_sending:",
     )
     found: set[str] = set()
@@ -910,7 +910,7 @@ async def keys_naming(lua_env: LuaEnv, message_id: str) -> set[str]:
 
 async def owned_keys(lua_env: LuaEnv, message_id: str) -> list[str]:
     """The key names on the record row's ``owned_keys`` field."""
-    raw = await lua_env.redis.hget(lua_env.store.settings.record_key(message_id), "owned_keys")
+    raw = await lua_env.redis.hget(lua_env.store.settings.keyspace.record_key(message_id), "owned_keys")
     return json.loads(raw) if raw else []
 
 
@@ -1233,13 +1233,13 @@ async def _create_stranded_intake(store: ConversationRecordStore, fake: FakeReco
     """Persist an intake record whose intake lease has LAPSED — what a worker that died
     mid-turn leaves behind, and the only shape the re-drive may adopt."""
     await create_record(store, _intake_record(message_id, "PID1"), intake_token="dead-worker")
-    key = ConversationsSettings().record_key(message_id)
+    key = ConversationsSettings().keyspace.record_key(message_id)
     fields = await fake.hgetall(key)
     fake.seed_hash(key, fields | {"intake_claim": f"dead-worker:{time.time() - 1}"})
 
 
 async def _intake_lease(fake: FakeRecordRedis, message_id: str) -> str:
-    return (await fake.hgetall(ConversationsSettings().record_key(message_id)))["intake_claim"]
+    return (await fake.hgetall(ConversationsSettings().keyspace.record_key(message_id)))["intake_claim"]
 
 
 # The door rules the route-create union carries, one refused body per rule: (body overrides,

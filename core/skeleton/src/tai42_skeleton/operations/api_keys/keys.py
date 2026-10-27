@@ -8,7 +8,7 @@ from tai42_contract.accounts.errors import LastAdminError
 from tai42_contract.template import TemplatedText
 
 import tai42_skeleton.operations.api_keys as _pkg
-from tai42_skeleton.access_control import management
+from tai42_skeleton.access_control import api_key_lifecycle, management
 from tai42_skeleton.access_control.claim_links import ClaimLinkError
 from tai42_skeleton.access_control.claim_links import create_claim_link as _create_claim_link
 from tai42_skeleton.operations import (
@@ -110,7 +110,7 @@ async def create_api_key(
         raise ForbiddenError("the acting principal could not be resolved for the mint's owner")
 
     try:
-        raw_key, committed_body, key_fingerprint = await management.add_user_api_key(
+        raw_key, committed_body, key_fingerprint = await api_key_lifecycle.add_user_api_key(
             user_id=user_id,
             description=description,
             scopes=scopes,
@@ -168,7 +168,7 @@ async def _edit_key_policy(user_id: str, **updates: Any) -> dict[str, Any]:
     an unprovisioned ``user_id`` a 404.
     """
     try:
-        updated = await management.edit_user_payload(user_id=user_id, **updates)
+        updated = await api_key_lifecycle.edit_user_payload(user_id=user_id, **updates)
     except ValueError as exc:
         raise BadRequestError(str(exc)) from exc
     except LastAdminError as exc:
@@ -253,7 +253,7 @@ async def revoke_api_key(user_id: str) -> dict[str, Any]:
 
     No version bump here, unlike every other mutation on this surface: revocation's
     cache-buster is atomic with the policy-row delete inside
-    :func:`~tai42_skeleton.access_control.management.revoke_api_key`, so no fault in the
+    :func:`~tai42_skeleton.access_control.api_key_lifecycle.revoke_api_key`, so no fault in the
     steps behind it can leave the revoked key's authority live in a warm cache slot.
     """
     # OFF: access control disabled → refuse the revoke with a named, machine-readable
@@ -265,7 +265,7 @@ async def revoke_api_key(user_id: str) -> dict[str, Any]:
         # A non-admin may revoke only a key it owns.
         await require_owned_by_caller(caller, user_id)
     try:
-        revoked = await management.revoke_api_key(user_id)
+        revoked = await api_key_lifecycle.revoke_api_key(user_id)
     except ValueError as exc:
         raise BadRequestError(str(exc)) from exc
     if not revoked:

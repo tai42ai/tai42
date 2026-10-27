@@ -32,8 +32,8 @@ from tai42_contract.template import TemplatedText
 from tai42_identity_redis import redis_api_key_provider as provider_module
 from tai42_identity_redis.redis_api_key_provider import RedisApiKeyProvider
 
+from tai42_skeleton.access_control import api_key_lifecycle, management, policy_version
 from tai42_skeleton.access_control import claim_links as claim_links_module
-from tai42_skeleton.access_control import management
 from tai42_skeleton.access_control import policy as policy_module
 from tai42_skeleton.access_control import store as store_module
 from tai42_skeleton.access_control.policy import PolicyEnforcer
@@ -108,7 +108,8 @@ def store(monkeypatch: pytest.MonkeyPatch) -> _Fakes:
     redis = FakeRedis(strings={}, hashes={})
     rctx = make_client_ctx(redis)
     monkeypatch.setattr(store_module, "client_ctx", make_pg_ctx(pg))
-    monkeypatch.setattr(management, "client_ctx", rctx)
+    monkeypatch.setattr(api_key_lifecycle, "client_ctx", rctx)
+    monkeypatch.setattr(policy_version, "client_ctx", rctx)
     monkeypatch.setattr(provider_module, "client_ctx", rctx)
     monkeypatch.setattr(policy_module, "client_ctx", rctx)
     monkeypatch.setattr(claim_links_module, "client_ctx", rctx)
@@ -637,7 +638,7 @@ async def test_scope_edit_visible_to_warm_cache_after_version_bump(store: _Fakes
 
     # The management writer bumps the version after its write → cross-worker cache miss,
     # the edit is visible immediately without waiting out the ttl.
-    await management.edit_user_payload("u1", scopes=["scope-b"])
+    await api_key_lifecycle.edit_user_payload("u1", scopes=["scope-b"])
     assert (await enforcer.get_policy("u1")).scopes == ["scope-b"]
 
 

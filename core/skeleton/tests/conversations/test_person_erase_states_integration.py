@@ -231,7 +231,7 @@ async def test_a_pending_save_whose_base_moved_is_replayed_by_the_erase_drain_an
     assert replays == [kind]
     assert await _person_rows(state) == []
     assert await _outbox_rows(state) == []
-    assert await lua_env.redis.exists(lua_env.store.settings.person_erasing_key(_PERSON)) == 0
+    assert await lua_env.redis.exists(lua_env.store.settings.keyspace.person_erasing_key(_PERSON)) == 0
 
 
 async def test_a_pending_save_on_a_person_with_no_row_is_still_refused_at_its_replay(states, lua_env, caplog):
@@ -243,7 +243,7 @@ async def test_a_pending_save_on_a_person_with_no_row_is_still_refused_at_its_re
         "UPDATE state_records SET updated_at = updated_at + interval '1 second' WHERE state = %s AND subject_key = %s",
         (state, _PERSON),
     )
-    await lua_env.redis.delete(lua_env.store.settings.person_key(_PERSON))
+    await lua_env.redis.delete(lua_env.store.settings.keyspace.person_key(_PERSON))
 
     unsettled = await svc.drain_target_saves("agent", "echo")
 

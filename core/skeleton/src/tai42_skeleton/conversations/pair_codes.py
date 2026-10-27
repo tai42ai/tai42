@@ -122,7 +122,7 @@ class ConversationPairCodeStore:
             our_identity=conversation.our_identity,
             address=conversation.address,
         )
-        open_key = self.settings.open_code_key(conversation.target_kind, conversation.target_name, dak)
+        open_key = self.settings.keyspace.open_code_key(conversation.target_kind, conversation.target_name, dak)
         record_json = json.dumps(asdict(conversation), separators=(",", ":"))
         async with client_ctx(RedisClient, self.settings.redis) as r:
             for _attempt in range(2):
@@ -133,11 +133,11 @@ class ConversationPairCodeStore:
                     _MINT_LUA,
                     2,
                     open_key,
-                    self.settings.pair_code_key(code_hash),
+                    self.settings.keyspace.pair_code_key(code_hash),
                     code_hash,
                     record_json,
                     str(ttl),
-                    self.settings.pair_code_key_prefix,
+                    self.settings.keyspace.pair_code_key_prefix,
                 )
                 if written:
                     expires_at = datetime.now(UTC) + timedelta(seconds=ttl)
@@ -151,7 +151,7 @@ class ConversationPairCodeStore:
         already-redeemed all raise the UNIFORM :class:`PairCodeInvalidError` (no oracle).
         """
         async with client_ctx(RedisClient, self.settings.redis) as r:
-            raw = await awaited(r.getdel(self.settings.pair_code_key(hash_api_key(code))))
+            raw = await awaited(r.getdel(self.settings.keyspace.pair_code_key(hash_api_key(code))))
         if raw is None:
             raise PairCodeInvalidError(_INVALID_CODE)
         return MintingConversation(**json.loads(_as_str(raw)))

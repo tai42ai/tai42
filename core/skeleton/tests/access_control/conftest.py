@@ -20,6 +20,7 @@ import asyncio
 import copy
 import fnmatch
 import os
+import re
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -29,8 +30,10 @@ from typing import Any
 import pytest
 from psycopg.errors import UniqueViolation
 from redis.exceptions import WatchError
+from tai42_contract.access_control.identity import ApiKeyIdentityProvider
 from tai42_kit.clients.impl.postgres import Json, PostgresClient
 
+from .._fakes.recording_storage import MappedStorage
 from .._helpers import inline_templated_text
 
 
@@ -883,3 +886,106 @@ def pg(monkeypatch) -> FakeAccessControlPg:
     fake = FakeAccessControlPg()
     monkeypatch.setattr(store_module, "client_ctx", make_pg_ctx(fake))
     return fake
+
+
+# -- the api-key suites: spy identity provider, owner seed, cache-bump counter -----
+
+
+# The default owner principal every mint in the api-key suites belongs to. Every api key
+# belongs to a principal, so a mint names an existing, enabled owner.
+OWNER = "owner"
+
+# The refusal a condition naming the absent stored template ``jq/acl`` raises.
+ACL_MATCH = "^" + re.escape("stored id 'jq/acl' at condition is not a stored template") + "$"
+
+
+class SpyApiKeyProvider(ApiKeyIdentityProvider):
+    """In-memory api-key identity provider: models the record store the real
+    ``tai42-identity-redis`` plugin owns, so the orchestration can be driven without
+    a plugin."""
+
+    def __init__(self) -> None:
+        self.identities: dict[str, str] = {}
+        self.provision_calls: list[str] = []
+        self.provision_owners: dict[str, str | None] = {}
+        self.revoke_calls: list[str] = []
+        self.description_calls: list[tuple[str, str]] = []
+
+    async def validate_token(self, token: str):  # pragma: no cover - unused here
+        return None
+
+    async def provision(self, user_id: str, description: str, *, owner_user_id: str) -> str:
+        self.provision_calls.append(user_id)
+        self.provision_owners[user_id] = owner_user_id
+        self.identities[user_id] = description
+        return f"sk-{user_id}"
+
+    async def revoke(self, user_id: str) -> bool:
+        self.revoke_calls.append(user_id)
+        return self.identities.pop(user_id, None) is not None
+
+    async def update_description(self, user_id: str, description: str) -> bool:
+        self.description_calls.append((user_id, description))
+        if user_id not in self.identities:
+            return False
+        self.identities[user_id] = description
+        return True
+
+    async def list_identities(self) -> list[tuple[str, str]]:
+        return list(self.identities.items())
+
+
+@pytest.fixture
+def provider() -> SpyApiKeyProvider:
+    """Register a spy provider as ``"redis"`` (the default ``auth_providers`` entry); the
+    autouse registry-isolation fixture restores the real registration afterwards."""
+    from tai42_kit.access_control import registry
+
+    spy = SpyApiKeyProvider()
+    registry._PROVIDERS._generation.committed()["redis"] = lambda _settings: spy
+    return spy
+
+
+@pytest.fixture
+def redis(monkeypatch) -> FakeRedis:
+    """The AC Redis backing the live-context delete + the version counter."""
+    from tai42_skeleton.access_control import api_key_lifecycle, policy_version
+
+    fake = FakeRedis(strings={})
+    monkeypatch.setattr(api_key_lifecycle, "client_ctx", make_client_ctx(fake))
+    monkeypatch.setattr(policy_version, "client_ctx", make_client_ctx(fake))
+    return fake
+
+
+@pytest.fixture
+def seed_owner(pg: FakeAccessControlPg) -> None:
+    """Seed the default owner principal every mint belongs to."""
+    pg.add_principal(OWNER, kind="human", display_name="Owner")
+
+
+@pytest.fixture
+def bumps(monkeypatch) -> list[int]:
+    """Count every policy-version bump a policy writer makes."""
+    from tai42_skeleton.access_control import policy_version
+
+    seen: list[int] = []
+
+    async def _bump() -> int:
+        seen.append(1)
+        return len(seen)
+
+    monkeypatch.setattr(policy_version, "bump_policy_version", _bump)
+    return seen
+
+
+@pytest.fixture
+def store_holding(monkeypatch: pytest.MonkeyPatch):
+    """Install a template storage holding exactly the given stored ids."""
+    from tai42_skeleton.app import instance
+
+    def _install(*ids: str) -> MappedStorage:
+        storage = MappedStorage(dict.fromkeys(ids, ".ok"))
+        monkeypatch.setattr(instance.app._storage_registry, "_provider", storage)
+        return storage
+
+    return _install

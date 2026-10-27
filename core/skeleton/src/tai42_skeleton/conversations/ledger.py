@@ -87,7 +87,7 @@ class ChannelSendLedger:
         Empty for a send that has not started, and for one whose ledger has been cleared.
         """
         async with client_ctx(RedisClient, self.settings.redis) as r:
-            entries = await awaited(r.lrange(self.settings.chunk_ledger_key(message_id), 0, -1))
+            entries = await awaited(r.lrange(self.settings.keyspace.chunk_ledger_key(message_id), 0, -1))
         return [_decode(entry) for entry in entries]
 
     async def append(self, message_id: str, chars: int, outbound_ids: list[str], part: int = 0) -> None:
@@ -96,7 +96,7 @@ class ChannelSendLedger:
         MUST be called before the next chunk is sent, so at most the one chunk in flight can ever be re-sent.
         ``part`` defaults to 0 — a single-part answer's only part.
         """
-        key = self.settings.chunk_ledger_key(message_id)
+        key = self.settings.keyspace.chunk_ledger_key(message_id)
         entry = json.dumps({"part": part, "chars": chars, "outbound_ids": outbound_ids})
         async with client_ctx(RedisClient, self.settings.redis) as r:
             await awaited(r.rpush(key, entry))
@@ -105,7 +105,7 @@ class ChannelSendLedger:
     async def clear(self, message_id: str) -> None:
         """Drop the ledger for a record whose send is over; the record itself now carries the full outbound id list."""
         async with client_ctx(RedisClient, self.settings.redis) as r:
-            await awaited(r.delete(self.settings.chunk_ledger_key(message_id)))
+            await awaited(r.delete(self.settings.keyspace.chunk_ledger_key(message_id)))
 
 
 __all__ = ["ChannelSendLedger", "LedgerInconsistentError", "SentChunk"]

@@ -79,7 +79,7 @@ def _route_of(write: str) -> ConversationRoute:
 
 
 async def _writer(world: World, message_id: str) -> str | None:  # noqa: F811
-    return await world.redis.hget(world.settings.record_key(message_id), "writer")
+    return await world.redis.hget(world.settings.keyspace.record_key(message_id), "writer")
 
 
 async def _write(world: World, route: ConversationRoute, person_id: str, identity: str, *, age_days: int) -> str:  # noqa: F811
@@ -372,7 +372,7 @@ async def test_a_write_after_the_final_step_is_its_doors_until_the_next_holder_a
     thread, ids = await _chat(world, LINE)
     assert (await ops.delete_conversation_person(_Q))["erased"] is True
     late = await world.record(f"{_Q}-late", LINE, thread, _Q1)
-    assert await _writer(world, late) == await world.redis.hget(world.settings.record_key(late), "writer_door")
+    assert await _writer(world, late) == await world.redis.hget(world.settings.keyspace.record_key(late), "writer_door")
 
     minted, created = await world.persons.ensure_provisional(
         PairingTarget(target_kind=TARGET.target_kind, target_name=TARGET.target_name), channel_address(LINE, _Q1)
@@ -417,8 +417,8 @@ async def test_a_refusal_under_a_hold_keeps_the_chat_the_other_writers_erase_wip
 
     assert await _records_standing(world, ids) == []
     assert world.states_naming(thread) == []
-    assert await world.redis.exists(world.settings.person_key(_Q)) == 1
-    assert await world.redis.exists(world.settings.person_erasing_key(_Q)) == 0
+    assert await world.redis.exists(world.settings.keyspace.person_key(_Q)) == 1
+    assert await world.redis.exists(world.settings.keyspace.person_erasing_key(_Q)) == 0
     await _answered(world, scheduled)
     assert (await ops.delete_conversation_person(_Q))["erased"] is True
 
@@ -438,7 +438,7 @@ async def test_a_retry_after_a_stop_leaves_a_chat_another_person_continued_in_be
     with pytest.raises(RuntimeError, match="the states store is unreachable"):
         await ops.delete_conversation_person(_Q)
     assert await _records_standing(world, ids) == []
-    assert await world.redis.exists(world.settings.person_erasing_key(_Q)) == 1
+    assert await world.redis.exists(world.settings.keyspace.person_erasing_key(_Q)) == 1
     continued = await _write(world, LINE, _X, _I2, age_days=2)
 
     assert (await ops.delete_conversation_person(_Q))["erased"] is True
@@ -519,7 +519,7 @@ async def test_a_chat_an_address_nobody_holds_wrote_in_is_left_until_a_person_ad
     await world.routes(LINE, LINE_B)
     thread, ids = route_thread_id(LINE.route_name, _Q1), [await _write(world, LINE, _Q, _I2, age_days=1)]
     sent = await _operator_send(world, monkeypatch, LINE, _Q1)
-    assert await _writer(world, sent) == await world.redis.hget(world.settings.record_key(sent), "writer_door")
+    assert await _writer(world, sent) == await world.redis.hget(world.settings.keyspace.record_key(sent), "writer_door")
 
     assert (await ops.delete_conversation_person(_Q))["erased"] is True
     assert await _records_standing(world, [*ids, sent]) == [*ids, sent]
@@ -576,8 +576,8 @@ async def test_a_thread_the_erase_never_visited_stops_its_final_step_and_the_ret
 
     with pytest.raises(ConflictError, match=re.escape(f"in the thread {later!r} landed while the erase of {_P!r} ran")):
         await ops.delete_conversation_person(_P)
-    assert await world.redis.exists(world.settings.person_key(_P)) == 1
-    assert await world.redis.exists(world.settings.person_erasing_key(_P)) == 1
+    assert await world.redis.exists(world.settings.keyspace.person_key(_P)) == 1
+    assert await world.redis.exists(world.settings.keyspace.person_erasing_key(_P)) == 1
     assert await _records_standing(world, ids) == ids[1:]
     stale[0] = False
 

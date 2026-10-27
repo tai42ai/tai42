@@ -112,7 +112,7 @@ class RecordSendMixin(RecordWriteMixin):
     ) -> tuple[list[str], bool]:
         """The send layout's keys for placing ``record`` in its thread, and whether it is a person thread."""
         keys = self._record_keys(record.message_id, target, record, route_row=True)
-        keys.append(self.settings.route_sending_key(sending_route))
+        keys.append(self.settings.keyspace.route_sending_key(sending_route))
         person_keys = self._person_thread_keys(record.thread_id)
         keys.extend(person_keys)
         return keys, bool(person_keys)
@@ -135,10 +135,10 @@ class RecordSendMixin(RecordWriteMixin):
             )
         _check_route(record, route)
         keys = self._record_keys(record.message_id, DeliveryStatus.SENDING)
-        keys.append(self.settings.route_sending_key(record.route_name))
+        keys.append(self.settings.keyspace.route_sending_key(record.route_name))
         ask_ttl = ""
         if record.ask is not None:
-            keys.append(self.settings.ask_send_key(record.ask.interaction_id))
+            keys.append(self.settings.keyspace.ask_send_key(record.ask.interaction_id))
             ask_ttl = str(self.settings.answer_retention_ttl_seconds * 1000)
         async with _records.client_ctx(RedisClient, self.settings.redis) as r:
             written = int(
@@ -155,7 +155,7 @@ class RecordSendMixin(RecordWriteMixin):
                     record.thread_id,
                     ask_ttl,
                     thread_door(route, record.thread_id) or "",
-                    self.settings.writer_prefixes(),
+                    self.settings.keyspace.writer_prefixes(),
                 )
             )
         if not written:
@@ -175,9 +175,9 @@ class RecordSendMixin(RecordWriteMixin):
         now = time.time()
         keys, person = self._send_keys(record, DeliveryStatus.PROVISIONAL, sending_route=route.route_name)
         ids = _unique([pid for sent in record.sends for pid in sent.provider_message_ids])
-        keys.extend(self.settings.outbound_index_key(record.channel, pid) for pid in ids)
+        keys.extend(self.settings.keyspace.outbound_index_key(record.channel, pid) for pid in ids)
         keys.extend(
-            self.settings.message_ref_key(record.channel, record.our_identity, record.client_address, pid)
+            self.settings.keyspace.message_ref_key(record.channel, record.our_identity, record.client_address, pid)
             for pid in ids
         )
         async with _records.client_ctx(RedisClient, self.settings.redis) as r:
@@ -201,7 +201,7 @@ class RecordSendMixin(RecordWriteMixin):
                 "1" if person else "",
                 len(ids),
                 thread_door(route, record.thread_id) or "",
-                self.settings.writer_prefixes(),
+                self.settings.keyspace.writer_prefixes(),
             )
         return _placement(reply)
 
@@ -235,7 +235,7 @@ class RecordSendMixin(RecordWriteMixin):
                 record.created_at,
                 record.route_name,
                 "1" if person else "",
-                self.settings.writer_prefixes(),
+                self.settings.keyspace.writer_prefixes(),
             )
         return _placement(reply)
 
@@ -249,11 +249,11 @@ class RecordSendMixin(RecordWriteMixin):
         now = time.time()
         due: list[ConversationRecord] = []
         unreadable: list[str] = []
-        key = self.settings.status_index_key(DeliveryStatus.SENDING.value)
+        key = self.settings.keyspace.status_index_key(DeliveryStatus.SENDING.value)
         async with _records.client_ctx(RedisClient, self.settings.redis) as r:
             for member in await awaited(r.zrangebyscore(key, "-inf", now)):
                 message_id = _member(member)
-                hashed = await awaited(r.hgetall(self.settings.record_key(message_id)))
+                hashed = await awaited(r.hgetall(self.settings.keyspace.record_key(message_id)))
                 if not hashed:
                     logger.warning("conversations: record %r is indexed but has no row; unindexed", message_id)
                     await awaited(r.zrem(key, message_id))
@@ -283,7 +283,7 @@ class RecordSendMixin(RecordWriteMixin):
         id names may already be gone (its thread was forgotten); the caller reads it to know.
         """
         async with _records.client_ctx(RedisClient, self.settings.redis) as r:
-            raw = await awaited(r.get(self.settings.ask_send_key(interaction_id)))
+            raw = await awaited(r.get(self.settings.keyspace.ask_send_key(interaction_id)))
         return None if raw is None else _member(raw)
 
     async def record_ask_reply(self, interaction_id: str, reply: AskReply) -> tuple[AskReplyOutcome, str | None]:
@@ -334,7 +334,7 @@ class RecordSendMixin(RecordWriteMixin):
             if record.channel is None or record.our_identity is None:
                 raise ValueError(f"send record {record.message_id} carries no channel and our_identity")
             keys.append(
-                self.settings.message_ref_key(
+                self.settings.keyspace.message_ref_key(
                     record.channel, record.our_identity, record.client_address, reply.medium_message_id
                 )
             )

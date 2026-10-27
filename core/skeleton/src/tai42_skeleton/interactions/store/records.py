@@ -17,6 +17,16 @@ from tai42_contract.presets import PresetParkStages
 from tai42_contract.states import StateBinding, StateContext, SubjectCandidates
 
 
+def decode_chain_keys(fields: dict[str, str]) -> list[str]:
+    """The ``chain_keys`` (JSON) a state hash or a due / kill-due record carries; empty when the field is absent.
+
+    The writers set the field only for a park nested under a chained call, so its absence is the
+    empty lineage.
+    """
+    raw = fields.get("chain_keys")
+    return json.loads(raw) if raw is not None else []
+
+
 def subjects_descriptor(candidates: SubjectCandidates) -> dict[str, Any]:
     """The compact subject descriptor denormalized onto a record so a delete path leaves the index.
 

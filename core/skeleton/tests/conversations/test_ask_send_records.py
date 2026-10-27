@@ -197,7 +197,7 @@ async def _ask(
 
 
 async def _the_record(lua_env: LuaEnv) -> ConversationRecord:
-    message_id = await lua_env.redis.get(lua_env.store.settings.ask_send_key(_INTERACTION))
+    message_id = await lua_env.redis.get(lua_env.store.settings.keyspace.ask_send_key(_INTERACTION))
     assert message_id is not None
     record = await lua_env.store.get_record(message_id)
     assert record is not None
@@ -227,7 +227,7 @@ async def test_an_ask_is_one_ask_record_completed_from_its_outcome_with_its_ask_
 
     async def during(call):
         record = await _the_record(lua_env)
-        key = lua_env.store.settings.status_index_key(DeliveryStatus.SENDING.value)
+        key = lua_env.store.settings.keyspace.status_index_key(DeliveryStatus.SENDING.value)
         seen.append((record, await lua_env.redis.zscore(key, record.message_id), time.time()))
 
     channel = _AskChannel("ok", during=during)
@@ -901,23 +901,23 @@ async def test_an_ask_forgotten_in_its_retry_loop_is_deleted_by_its_end_and_a_la
         if call == 1:
             seen["mid"] = (await _the_record(lua_env)).message_id
             await lua_env.store.drop_thread("line", route_thread_id("line", _ADDRESS))
-            assert await lua_env.redis.get(lua_env.store.settings.ask_send_key(_INTERACTION)) == seen["mid"]
+            assert await lua_env.redis.get(lua_env.store.settings.keyspace.ask_send_key(_INTERACTION)) == seen["mid"]
         if call == 2:
-            assert await lua_env.redis.get(lua_env.store.settings.ask_send_key(_INTERACTION)) == seen["mid"]
+            assert await lua_env.redis.get(lua_env.store.settings.keyspace.ask_send_key(_INTERACTION)) == seen["mid"]
 
     with caplog.at_level(logging.WARNING):
         await _ask(lua_env, interactions, _AskChannel("raise", "ok", during=during))
 
     mid = seen["mid"]
-    assert await lua_env.redis.exists(lua_env.store.settings.record_key(mid)) == 0
-    assert await lua_env.redis.exists(lua_env.store.settings.ask_send_key(_INTERACTION)) == 0
+    assert await lua_env.redis.exists(lua_env.store.settings.keyspace.record_key(mid)) == 0
+    assert await lua_env.redis.exists(lua_env.store.settings.keyspace.ask_send_key(_INTERACTION)) == 0
     assert await keys_naming(lua_env, mid) == set()
     assert any(mid in message and "forgotten" in message for message in caplog.messages)
 
     response = await _claim_over_the_channel(interactions, "yes")
 
     assert response.status_code == 200
-    assert await lua_env.redis.exists(lua_env.store.settings.record_key(mid)) == 0
+    assert await lua_env.redis.exists(lua_env.store.settings.keyspace.record_key(mid)) == 0
     assert await keys_naming(lua_env, mid) == set()
 
 
@@ -926,7 +926,7 @@ async def test_a_reply_whose_ask_record_is_gone_is_a_warning_naming_the_interact
 ):
     await _ask(lua_env, interactions, _AskChannel("ok"))
     record = await _the_record(lua_env)
-    await lua_env.redis.delete(lua_env.store.settings.record_key(record.message_id))
+    await lua_env.redis.delete(lua_env.store.settings.keyspace.record_key(record.message_id))
 
     with caplog.at_level(logging.WARNING):
         response = await _claim_over_the_channel(interactions, "yes")

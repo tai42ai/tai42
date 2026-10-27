@@ -64,7 +64,7 @@ async def _lookup(lua_env: LuaEnv, address: str = _ADDRESS):
 
 
 async def _index_names(lua_env: LuaEnv, person_id: str) -> list[str]:
-    index = await lua_env.redis.hgetall(lua_env.store.settings.person_index_key("agent", "echo"))
+    index = await lua_env.redis.hgetall(lua_env.store.settings.keyspace.person_index_key("agent", "echo"))
     return sorted(field for field, owner in index.items() if owner == person_id)
 
 
@@ -84,7 +84,7 @@ async def test_a_marked_person_reads_as_absent_until_its_mark_is_removed(lua_env
 
 async def test_a_mark_asked_for_a_gone_person_sets_nothing(lua_env):
     assert await lua_env.manager.persons.mark_erasing(_PERSON) is False
-    assert await lua_env.redis.exists(lua_env.store.settings.person_erasing_key(_PERSON)) == 0
+    assert await lua_env.redis.exists(lua_env.store.settings.keyspace.person_erasing_key(_PERSON)) == 0
 
 
 async def test_the_row_delete_removes_the_mark_with_the_row(lua_env):
@@ -97,8 +97,8 @@ async def test_the_row_delete_removes_the_mark_with_the_row(lua_env):
 
     settings = lua_env.store.settings
     assert erased is True
-    assert await lua_env.redis.exists(settings.person_key(_PERSON)) == 0
-    assert await lua_env.redis.exists(settings.person_erasing_key(_PERSON)) == 0
+    assert await lua_env.redis.exists(settings.keyspace.person_key(_PERSON)) == 0
+    assert await lua_env.redis.exists(settings.keyspace.person_erasing_key(_PERSON)) == 0
 
 
 async def test_an_inbound_written_before_the_mark_refuses_the_erase_and_gives_the_person_back(
@@ -124,7 +124,7 @@ async def test_an_inbound_written_before_the_mark_refuses_the_erase_and_gives_th
         await erase
 
     settings = lua_env.store.settings
-    assert await lua_env.redis.exists(settings.person_erasing_key(_PERSON)) == 0
+    assert await lua_env.redis.exists(settings.keyspace.person_erasing_key(_PERSON)) == 0
     assert await lua_env.manager.persons.get_by_id(_PERSON) == person
     assert await _index_names(lua_env, _PERSON) == fields
     stored = await lua_env.store.get_record(accepted)
@@ -151,8 +151,8 @@ async def test_an_interrupted_erase_keeps_the_mark_and_a_retry_finishes_it(lua_e
         await ops.delete_conversation_person(_PERSON)
 
     settings = lua_env.store.settings
-    assert await lua_env.redis.exists(settings.person_key(_PERSON)) == 1
-    assert await lua_env.redis.exists(settings.person_erasing_key(_PERSON)) == 1
+    assert await lua_env.redis.exists(settings.keyspace.person_key(_PERSON)) == 1
+    assert await lua_env.redis.exists(settings.keyspace.person_erasing_key(_PERSON)) == 1
     await notify_user("hello", channel="twilio", recipient=_ADDRESS)
     [sent] = await send_records(lua_env)
     assert sent.thread_id == route_thread_id("line", _ADDRESS)
@@ -165,8 +165,8 @@ async def test_an_interrupted_erase_keeps_the_mark_and_a_retry_finishes_it(lua_e
 
     assert (await ops.delete_conversation_person(_PERSON))["erased"] is True
 
-    assert await lua_env.redis.exists(settings.person_key(_PERSON)) == 0
-    assert await lua_env.redis.exists(settings.person_erasing_key(_PERSON)) == 0
+    assert await lua_env.redis.exists(settings.keyspace.person_key(_PERSON)) == 0
+    assert await lua_env.redis.exists(settings.keyspace.person_erasing_key(_PERSON)) == 0
     assert await _index_names(lua_env, _PERSON) == []
 
 
@@ -226,9 +226,9 @@ async def test_a_merge_landing_before_the_mark_is_erased_on_every_route_the_merg
 
     settings = lua_env.store.settings
     for route in ("line", "line-b"):
-        assert await lua_env.redis.exists(settings.thread_index_key(route, _PERSON_THREAD)) == 0
-        assert await lua_env.redis.zscore(settings.route_threads_key(route), _PERSON_THREAD) is None
-    assert await lua_env.redis.exists(settings.record_key("after-link-1")) == 0
+        assert await lua_env.redis.exists(settings.keyspace.thread_index_key(route, _PERSON_THREAD)) == 0
+        assert await lua_env.redis.zscore(settings.keyspace.route_threads_key(route), _PERSON_THREAD) is None
+    assert await lua_env.redis.exists(settings.keyspace.record_key("after-link-1")) == 0
 
 
 async def _person_rows(lua_env: LuaEnv) -> set[str]:

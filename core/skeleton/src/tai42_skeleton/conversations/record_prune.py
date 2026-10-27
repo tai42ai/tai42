@@ -116,7 +116,7 @@ class RecordPruneMixin(RecordStoreBase):
         routes = _resume_at(list(route_names), cursor.route_name)
         async with _records.client_ctx(RedisClient, self.settings.redis) as r:
             for status in TERMINAL_STATUSES:
-                await awaited(r.zremrangebyscore(self.settings.status_index_key(status.value), "-inf", now))
+                await awaited(r.zremrangebyscore(self.settings.keyspace.status_index_key(status.value), "-inf", now))
             for position, route_name in enumerate(routes):
                 resuming = position == 0 and route_name == cursor.route_name
                 spent, stopped = await self._prune_route(
@@ -162,7 +162,7 @@ class RecordPruneMixin(RecordStoreBase):
         recorded, and a member offset carried into a different thread would silently skip
         that thread's first members.
         """
-        key = self.settings.route_threads_key(route_name)
+        key = self.settings.keyspace.route_threads_key(route_name)
         spent = 0
         rank = thread_rank
         resume_member = member_rank
@@ -225,8 +225,8 @@ class RecordPruneMixin(RecordStoreBase):
         ``total``, re-logging the read doors' orphan warning and blocking a door edit behind
         a count with no visible thread.
         """
-        thread_key = self.settings.thread_index_key(route_name, thread_id)
-        route_key = self.settings.route_threads_key(route_name)
+        thread_key = self.settings.keyspace.thread_index_key(route_name, thread_id)
+        route_key = self.settings.keyspace.route_threads_key(route_name)
         spent = 0
         rank = start_rank
         while True:
@@ -242,7 +242,7 @@ class RecordPruneMixin(RecordStoreBase):
                 _, remaining = await eval_script(r, _PRUNE_THREAD_LUA, 2, thread_key, route_key, thread_id)
                 return _ThreadPruneStep(spent, None, emptied=int(remaining) == 0)
             keys = [thread_key, route_key]
-            keys.extend(self.settings.record_key(message_id) for message_id in candidates)
+            keys.extend(self.settings.keyspace.record_key(message_id) for message_id in candidates)
             removed, remaining = await eval_script(r, _PRUNE_THREAD_LUA, len(keys), *keys, thread_id, *candidates)
             spent += len(candidates)
             rank += len(candidates) - int(removed)
@@ -260,7 +260,7 @@ class RecordPruneMixin(RecordStoreBase):
         interrupted and is owed.
         """
         async with _records.client_ctx(RedisClient, self.settings.redis) as r:
-            return int(await awaited(r.zcard(self.settings.route_threads_key(route_name))))
+            return int(await awaited(r.zcard(self.settings.keyspace.route_threads_key(route_name))))
 
     async def route_thread_ids(self, route_name: str) -> list[str]:
         """Every thread id currently in ``route_name``'s thread index.
@@ -271,7 +271,7 @@ class RecordPruneMixin(RecordStoreBase):
         in full because the cascade must reach every thread the route owns, not a page of them.
         """
         async with _records.client_ctx(RedisClient, self.settings.redis) as r:
-            key = self.settings.route_threads_key(route_name)
+            key = self.settings.keyspace.route_threads_key(route_name)
             return [_member(member) for member in await awaited(r.zrange(key, 0, -1))]
 
     async def drop_route_threads(self, route_name: str) -> None:
@@ -293,7 +293,7 @@ class RecordPruneMixin(RecordStoreBase):
         delete door treats a name with a surviving route index as reclaimable rather than
         as an unknown route.
         """
-        key = self.settings.route_threads_key(route_name)
+        key = self.settings.keyspace.route_threads_key(route_name)
         async with _records.client_ctx(RedisClient, self.settings.redis) as r:
             while True:
                 members = [
@@ -302,8 +302,8 @@ class RecordPruneMixin(RecordStoreBase):
                 if not members:
                     break
                 for thread_id in members:
-                    await awaited(r.delete(self.settings.thread_index_key(route_name, thread_id)))
-                    await awaited(r.delete(self.settings.mode_key(thread_id)))
+                    await awaited(r.delete(self.settings.keyspace.thread_index_key(route_name, thread_id)))
+                    await awaited(r.delete(self.settings.keyspace.mode_key(thread_id)))
                 await awaited(r.zrem(key, *members))
             await awaited(r.delete(key))
 
@@ -314,7 +314,7 @@ class RecordPruneMixin(RecordStoreBase):
         ``forgotten_threads``, so its placement step deletes it when it lands there; a member
         that already ended leaves the set. Removes no row. Returns how many rows it marked.
         """
-        inflight = self.settings.route_sending_key(route_name)
+        inflight = self.settings.keyspace.route_sending_key(route_name)
         marked = 0
         async with _records.client_ctx(RedisClient, self.settings.redis) as r:
             for member in await awaited(r.smembers(inflight)):
@@ -325,7 +325,7 @@ class RecordPruneMixin(RecordStoreBase):
                         _FORGET_SENDING_LUA,
                         2,
                         inflight,
-                        self.settings.record_key(message_id),
+                        self.settings.keyspace.record_key(message_id),
                         message_id,
                         thread_id,
                     )
@@ -355,9 +355,9 @@ class RecordPruneMixin(RecordStoreBase):
         thread that was not forgotten is recorded there.
         """
         await self.forget_sending(route_name, thread_id)
-        thread_key = self.settings.thread_index_key(route_name, thread_id)
-        route_key = self.settings.route_threads_key(route_name)
-        status_keys = [self.settings.status_index_key(status.value) for status in _INDEXED_STATUSES]
+        thread_key = self.settings.keyspace.thread_index_key(route_name, thread_id)
+        route_key = self.settings.keyspace.route_threads_key(route_name)
+        status_keys = [self.settings.keyspace.status_index_key(status.value) for status in _INDEXED_STATUSES]
         removed = 0
         async with _records.client_ctx(RedisClient, self.settings.redis) as r:
             while True:
@@ -368,9 +368,9 @@ class RecordPruneMixin(RecordStoreBase):
                 if not members:
                     break
                 for message_id in members:
-                    keys = [self.settings.record_key(message_id), *status_keys, thread_key, route_key]
+                    keys = [self.settings.keyspace.record_key(message_id), *status_keys, thread_key, route_key]
                     removed += int(await eval_script(r, _DELETE_LUA, len(keys), *keys, message_id, thread_id))
             await awaited(r.delete(thread_key))
             await awaited(r.zrem(route_key, thread_id))
-            await awaited(r.delete(self.settings.mode_key(thread_id)))
+            await awaited(r.delete(self.settings.keyspace.mode_key(thread_id)))
         return removed

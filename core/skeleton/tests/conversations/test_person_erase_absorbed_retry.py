@@ -131,7 +131,7 @@ async def test_an_erase_stopped_after_a_thread_drop_is_finished_by_its_retry(wor
         with pytest.raises((RuntimeError, UnavailableError)):
             await ops.delete_conversation_person(_P)
         assert failed[-1] == step
-        assert await world.redis.exists(world.settings.person_erasing_key(_P)) == 0
+        assert await world.redis.exists(world.settings.keyspace.person_erasing_key(_P)) == 0
         assert thread in await _threads_of(world, _Q)
         assert thread in (await world.persons.read_for_erase(_P)).route_threads
 
@@ -190,7 +190,7 @@ async def test_a_thread_continued_between_a_failed_attempt_and_its_retry_is_left
     with pytest.raises(UnavailableError):
         await ops.delete_conversation_person(_P)
     assert (await _writers(world, thread), await _threads_of(world, _Q)) == (set(), {thread})
-    assert await world.redis.exists(world.settings.person_erasing_key(_P)) == 0
+    assert await world.redis.exists(world.settings.keyspace.person_erasing_key(_P)) == 0
     forgotten_before = len(world.saver.deleted)
 
     if continued_by == "none":
@@ -538,7 +538,7 @@ async def test_a_live_intake_on_an_absorbed_route_thread_is_a_409_before_the_fif
         await ops.delete_conversation_person(_P)
 
     assert reserved == []
-    assert await world.redis.exists(world.settings.person_erasing_key(_P)) == 0
+    assert await world.redis.exists(world.settings.keyspace.person_erasing_key(_P)) == 0
     await _answered(world, scheduled)
 
     result = await ops.delete_conversation_person(_P)
@@ -575,7 +575,7 @@ async def test_a_live_intake_after_the_early_check_is_a_409_before_the_hold(
     with pytest.raises(ConflictError, match=re.escape(_in_flight_message(thread))):
         await asyncio.wait_for(erase, 30)
 
-    assert await world.redis.exists(world.settings.person_erasing_key(_P)) == 0
+    assert await world.redis.exists(world.settings.keyspace.person_erasing_key(_P)) == 0
     assert (await world.lua_env.store.get_record(chat)).thread_id == thread
     await _answered(world, scheduled)
 
@@ -614,7 +614,7 @@ async def test_a_live_intake_after_the_check_before_the_hold_is_the_409_under_it
     with pytest.raises(ConflictError, match=re.escape(_in_flight_message(thread))):
         await asyncio.wait_for(erase, 30)
 
-    assert await world.redis.exists(world.settings.person_erasing_key(_P)) == 0
+    assert await world.redis.exists(world.settings.keyspace.person_erasing_key(_P)) == 0
     assert (await world.lua_env.store.get_record(chat)).thread_id == thread
     await _answered(world, scheduled)
 
@@ -675,10 +675,10 @@ async def test_a_chain_of_links_is_erased_whole_and_names_its_last_survivor(worl
     assert (await world.link(_Q, _P)).person_id == _P
 
     for absorbed_id in (_Q, _R):
-        assert await world.redis.get(world.settings.person_absorbed_into_key(absorbed_id)) == _P
+        assert await world.redis.get(world.settings.keyspace.person_absorbed_into_key(absorbed_id)) == _P
         with pytest.raises(ConflictError, match=re.escape(f"absorbed into person '{_P}'")):
             await ops.delete_conversation_person(absorbed_id)
-    assert await world.redis.smembers(world.settings.person_absorbed_key(_P)) == {_Q, _R}
+    assert await world.redis.smembers(world.settings.keyspace.person_absorbed_key(_P)) == {_Q, _R}
     assert r_thread in (await world.persons.read_for_erase(_P)).route_threads
 
     result = await ops.delete_conversation_person(_P)
@@ -692,7 +692,7 @@ async def test_a_chain_of_links_is_erased_whole_and_names_its_last_survivor(worl
         await leftovers(world, _P, _Q, _R, *p_ids, *q_ids, *r_ids, threads=(r_thread,), parks=(f"{_R}-park-thread",))
         == {}
     )
-    assert await world.redis.exists(world.settings.person_absorbed_key(_P)) == 0
+    assert await world.redis.exists(world.settings.keyspace.person_absorbed_key(_P)) == 0
 
 
 async def test_an_absorbed_persons_thread_is_dropped_on_a_route_its_address_left_afterwards(world):  # noqa: F811

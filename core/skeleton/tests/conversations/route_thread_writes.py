@@ -129,8 +129,8 @@ async def writers(lua_env: LuaEnv, thread: str = T_A) -> set[str]:
     settings = lua_env.store.settings
     route = thread.removeprefix("bridge:").split(":", 1)[0]
     found: set[str] = set()
-    for message_id in await lua_env.redis.zrange(settings.thread_index_key(route, thread), 0, -1):
-        writer = await lua_env.redis.hget(settings.record_key(message_id), "writer")
+    for message_id in await lua_env.redis.zrange(settings.keyspace.thread_index_key(route, thread), 0, -1):
+        writer = await lua_env.redis.hget(settings.keyspace.record_key(message_id), "writer")
         if writer is not None:
             found.add(writer)
     return found
@@ -138,30 +138,30 @@ async def writers(lua_env: LuaEnv, thread: str = T_A) -> set[str]:
 
 async def threads_of(lua_env: LuaEnv, writer: str) -> set[str]:
     """The threads on ``writer``'s visit list."""
-    return await lua_env.redis.smembers(lua_env.store.settings.writer_threads_key(writer))
+    return await lua_env.redis.smembers(lua_env.store.settings.keyspace.writer_threads_key(writer))
 
 
 async def stamps(lua_env: LuaEnv) -> dict[str, set[str]]:
     """Every writer's visit list standing, by key name."""
-    prefix = lua_env.store.settings.writer_threads_key_prefix
+    prefix = lua_env.store.settings.keyspace.writer_threads_key_prefix
     return {key: await lua_env.redis.smembers(key) async for key in lua_env.redis.scan_iter(match=f"{prefix}*")}
 
 
 async def row_field(lua_env: LuaEnv, message_id: str, field: str) -> str | None:
     """One field of a record row."""
-    return await lua_env.redis.hget(lua_env.store.settings.record_key(message_id), field)
+    return await lua_env.redis.hget(lua_env.store.settings.keyspace.record_key(message_id), field)
 
 
 async def point(lua_env: LuaEnv, absorbed_id: str, survivor_id: str) -> None:
     """Plant an absorbed id's absorbed-into pointer."""
-    await lua_env.redis.set(lua_env.store.settings.person_absorbed_into_key(absorbed_id), survivor_id)
+    await lua_env.redis.set(lua_env.store.settings.keyspace.person_absorbed_into_key(absorbed_id), survivor_id)
 
 
 async def absorbed(lua_env: LuaEnv, person_id: str) -> set[str]:
     """The ids a person absorbed."""
-    return await lua_env.redis.smembers(lua_env.store.settings.person_absorbed_key(person_id))
+    return await lua_env.redis.smembers(lua_env.store.settings.keyspace.person_absorbed_key(person_id))
 
 
 async def into(lua_env: LuaEnv, absorbed_id: str) -> str | None:
     """An absorbed id's absorbed-into pointer."""
-    return await lua_env.redis.get(lua_env.store.settings.person_absorbed_into_key(absorbed_id))
+    return await lua_env.redis.get(lua_env.store.settings.keyspace.person_absorbed_into_key(absorbed_id))

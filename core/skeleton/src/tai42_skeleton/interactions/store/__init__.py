@@ -25,6 +25,7 @@ from __future__ import annotations
 from . import scripts, ttl
 from .events import ADD_EVENT, ANSWERED_EVENT, REMOVED_EVENT
 from .reads import _StoreReads
+from .reaper_dues import _StoreReaperDues
 from .records import (
     CONTINUATION_DROPPED,
     KILL_DROPPED,
@@ -50,8 +51,9 @@ class InteractionStore(
     _StoreOutcomeWrites,
     _StoreRekeyWrites,
     _StoreReads,
+    _StoreReaperDues,
 ):
-    """The interactions store: the durable question lifecycle (writes) and read/query/audit + reaper claims (reads).
+    """The interactions store: the durable question lifecycle (writes), read/query/audit (reads) and reaper claims.
 
     Reassembled over the shared Redis key contract into the one class every ``store.<method>`` call
     site uses. The lifecycle mutations are split across cohesive write mixins (add/slot/prune,

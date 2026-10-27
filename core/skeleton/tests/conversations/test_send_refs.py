@@ -81,11 +81,11 @@ async def _get(lua_env: LuaEnv, message_id: str) -> ConversationRecord:
 
 
 def _ref_key(lua_env: LuaEnv, medium_id: str, address: str = _ADDRESS) -> str:
-    return lua_env.store.settings.message_ref_key("twilio", _IDENTITY, address, medium_id)
+    return lua_env.store.settings.keyspace.message_ref_key("twilio", _IDENTITY, address, medium_id)
 
 
 async def _expire_claim(lua_env: LuaEnv, message_id: str) -> None:
-    key = lua_env.store.settings.record_key(message_id)
+    key = lua_env.store.settings.keyspace.record_key(message_id)
     token = (await lua_env.redis.hget(key, "claim")).split(":", 1)[0]
     await lua_env.redis.hset(key, "claim", f"{token}:{time.time() - 1}")
 
@@ -135,8 +135,8 @@ async def test_a_resumed_reply_reindexes_its_sent_chunk_once(lua_env, monkeypatc
     assert len(owned) == len(set(owned))
     settings = lua_env.store.settings
     assert set(owned) == {
-        settings.outbound_index_key("twilio", "w1-1"),
-        settings.outbound_index_key("twilio", "w2-1"),
+        settings.keyspace.outbound_index_key("twilio", "w1-1"),
+        settings.keyspace.outbound_index_key("twilio", "w2-1"),
         _ref_key(lua_env, "w1-1"),
         _ref_key(lua_env, "w2-1"),
     }
@@ -160,7 +160,7 @@ async def test_a_create_re_run_under_the_same_id_names_the_record_once_and_stamp
     route = _channel_route()
     await lua_env.manager.put_route(route)
     record = _reply("m-again", "hello", inbound_message_id="in-1", provider_message_id="ev-0")
-    claim_key = lua_env.store.settings.dedupe_key("twilio", "ev-0")
+    claim_key = lua_env.store.settings.keyspace.dedupe_key("twilio", "ev-0")
     thread = record.thread_id
     door = thread_door(route, thread)
     assert door is not None
@@ -172,8 +172,8 @@ async def test_a_create_re_run_under_the_same_id_names_the_record_once_and_stamp
     owned = await owned_keys(lua_env, "m-again")
     assert owned == [_ref_key(lua_env, "in-1")]
     settings = lua_env.store.settings
-    assert await lua_env.redis.hget(settings.record_key("m-again"), "writer") == door
-    assert await lua_env.redis.smembers(settings.writer_threads_key(door)) == {thread}
+    assert await lua_env.redis.hget(settings.keyspace.record_key("m-again"), "writer") == door
+    assert await lua_env.redis.smembers(settings.keyspace.writer_threads_key(door)) == {thread}
 
 
 # -- refs and the store read --------------------------------------------------------------------
@@ -201,8 +201,8 @@ async def test_two_inbounds_carrying_one_medium_id_both_resolve_in_accept_order(
     await lua_env.manager.put_route(_channel_route())
     first = _reply("m-first", "a", inbound_message_id="shared", provider_message_id="ev-0")
     second = _reply("m-second", "b", inbound_message_id="shared", provider_message_id="ev-1")
-    await create_record(lua_env.store, first, claim_key=lua_env.store.settings.dedupe_key("twilio", "ev-0"))
-    await create_record(lua_env.store, second, claim_key=lua_env.store.settings.dedupe_key("twilio", "ev-1"))
+    await create_record(lua_env.store, first, claim_key=lua_env.store.settings.keyspace.dedupe_key("twilio", "ev-0"))
+    await create_record(lua_env.store, second, claim_key=lua_env.store.settings.keyspace.dedupe_key("twilio", "ev-1"))
     resolve = lua_env.store.resolve_message_ref
 
     assert (await _get(lua_env, "m-first")).inbound_message_id == "shared"
@@ -220,7 +220,7 @@ async def test_an_inbound_past_its_retention_drops_out_of_the_shared_ref(lua_env
     await create_record(lua_env.store, _reply("m-second", "b", inbound_message_id="shared"))
 
     # The retention TTL removes the row alone; the ref list keeps the member and the read skips it.
-    await lua_env.redis.delete(lua_env.store.settings.record_key("m-first"))
+    await lua_env.redis.delete(lua_env.store.settings.keyspace.record_key("m-first"))
 
     assert await lua_env.store.resolve_message_ref("twilio", _IDENTITY, _ADDRESS, "shared") == ["m-second"]
     assert await lua_env.redis.exists(_ref_key(lua_env, "shared")) == 1

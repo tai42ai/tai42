@@ -12,7 +12,7 @@ recovered by TTL expiry. The idiom mirrors the intake lease
 (:data:`~tai42_skeleton.conversations.record_scripts._CLAIM_INTAKE_LUA` and its refresher).
 
 A release is announced on the release channel
-(:attr:`~tai42_skeleton.conversations.settings.ConversationsSettings.thread_lease_released_channel`).
+(:attr:`~tai42_skeleton.conversations.keyspace.ConversationsKeyspace.thread_lease_released_channel`).
 A turn that finds the thread busy waits on its event loop's release listener and retries the
 moment the holder releases, or when the holder's lease would lapse (a crashed holder).
 """
@@ -241,7 +241,7 @@ _listeners_lock = threading.Lock()
 def _release_listener(settings: Callable[[], ConversationsSettings]) -> _LeaseReleaseListener:
     """The running loop's listener on the current release channel, made on first use."""
     loop = asyncio.get_running_loop()
-    channel = settings().thread_lease_released_channel
+    channel = settings().keyspace.thread_lease_released_channel
     with _listeners_lock:
         per_loop = _listeners.setdefault(loop, {})
         listener = per_loop.get(channel)
@@ -282,7 +282,7 @@ class ThreadTurnLease:
             # never run a turn — the mutex is an explicit local no-op, not a hidden skip.
             yield
             return
-        key = self._settings().thread_lease_key(thread_id)
+        key = self._settings().keyspace.thread_lease_key(thread_id)
         token = uuid4().hex
         owner = asyncio.current_task()
         if owner is None:
@@ -413,7 +413,9 @@ class ThreadTurnLease:
         try:
             settings = self._settings()
             async with client_ctx(RedisClient, settings.redis) as r:
-                await eval_script(r, _RELEASE_LUA, 1, key, token, settings.thread_lease_released_channel, thread_id)
+                await eval_script(
+                    r, _RELEASE_LUA, 1, key, token, settings.keyspace.thread_lease_released_channel, thread_id
+                )
         except Exception:
             logger.error(
                 "conversations: releasing thread lease %s failed; its TTL is the hard bound",

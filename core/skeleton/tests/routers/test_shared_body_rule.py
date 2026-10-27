@@ -137,7 +137,7 @@ async def test_the_in_app_answer_and_react_doors_answer_the_shared_texts(
     ],
 )
 def test_the_callback_react_body_answers_the_shared_texts(raw: bytes, message: str) -> None:
-    from tai42_skeleton.routers.interactions.callback import _parse_react_body
+    from tai42_skeleton.routers.interactions.callback_react import _parse_react_body
 
     result = _parse_react_body(raw)
     assert isinstance(result, Response)

@@ -50,7 +50,7 @@ class ConversationRedeemThrottle:
 
         Checked BEFORE the code store is touched, so a locked attempt burns no code.
         """
-        lock_key = self.settings.redeem_lock_key(target.target_kind, target.target_name, source_key)
+        lock_key = self.settings.keyspace.redeem_lock_key(target.target_kind, target.target_name, source_key)
         async with client_ctx(RedisClient, self.settings.redis) as r:
             return bool(await awaited(r.exists(lock_key)))
 
@@ -62,8 +62,8 @@ class ConversationRedeemThrottle:
         """
         cap = self.settings.redeem_backoff_cap_seconds
         threshold = self.settings.redeem_backoff_threshold
-        fail_key = self.settings.redeem_fail_key(target.target_kind, target.target_name, source_key)
-        lock_key = self.settings.redeem_lock_key(target.target_kind, target.target_name, source_key)
+        fail_key = self.settings.keyspace.redeem_fail_key(target.target_kind, target.target_name, source_key)
+        lock_key = self.settings.keyspace.redeem_lock_key(target.target_kind, target.target_name, source_key)
         async with client_ctx(RedisClient, self.settings.redis) as r:
             failures = int(await awaited(r.incr(fail_key)))
             await awaited(r.expire(fail_key, cap))
@@ -78,8 +78,8 @@ class ConversationRedeemThrottle:
 
         An honest user who fat-fingered a code first is not left throttled.
         """
-        fail_key = self.settings.redeem_fail_key(target.target_kind, target.target_name, source_key)
-        lock_key = self.settings.redeem_lock_key(target.target_kind, target.target_name, source_key)
+        fail_key = self.settings.keyspace.redeem_fail_key(target.target_kind, target.target_name, source_key)
+        lock_key = self.settings.keyspace.redeem_lock_key(target.target_kind, target.target_name, source_key)
         async with client_ctx(RedisClient, self.settings.redis) as r:
             await awaited(r.delete(fail_key))
             await awaited(r.delete(lock_key))

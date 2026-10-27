@@ -14,12 +14,14 @@ from pydantic import BaseModel
 from tai42_contract.channels import Channel
 from tai42_contract.interactions import FormShapeKind
 
-from tai42_skeleton.interactions.form_schema import (
-    channel_form_fields,
-    check_channel_form,
+from tai42_skeleton.interactions.form_answer_rules import (
     date_constraint_errors,
     date_constraint_mismatch,
     effective_answer_schema,
+)
+from tai42_skeleton.interactions.form_schema import (
+    channel_form_fields,
+    check_channel_form,
     validate_channel_form_schema,
     validate_form_answer_schema,
 )
