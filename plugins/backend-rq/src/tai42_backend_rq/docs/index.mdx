@@ -96,9 +96,10 @@ own `TAI_BACKEND_LIVENESS_PATH`, and removes its file when it exits.
 - `beat` reports each pass of the scheduler loop, promising the next within its
   `-i/--interval`.
 - `dashboard` serves HTTP, so it is probed over HTTP instead: `GET /favicon.ico`
-  answers 200 while the dashboard serves. With `--username` and `--password` set,
-  that path sits behind the same basic auth as the rest of the dashboard, so the
-  probe sends the `Authorization` header.
+  answers 200 while the dashboard serves; under `--url-prefix` the path is
+  `/<prefix>/favicon.ico`. With `--username` set, that path sits behind the same
+  basic auth as the rest of the dashboard, so the probe sends the `Authorization`
+  header.
 
 ```yaml docker-compose.yml
 services:
