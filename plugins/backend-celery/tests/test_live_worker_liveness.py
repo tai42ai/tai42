@@ -193,7 +193,13 @@ def test_an_embedded_beat_reports_into_its_own_file_which_the_worker_reads(
 def test_a_worker_stopped_before_its_consumer_starts_reaps_its_embedded_beat_and_removes_its_file(
     monkeypatch, run_worker, liveness_path: Path
 ) -> None:
-    """With the broker down at boot the consumer never starts, while the embedded beat already ticks."""
+    """With the broker down at boot the consumer never starts, while the embedded beat already ticks.
+
+    The broker is a listener that accepts connections and never answers, so the consumer's first
+    connect waits on it until the test drops it. The beat's first tick and the consumer giving up
+    are independent, so the drop comes once the beat has ticked: the worker then stops on its
+    failed connect with a beat file in place.
+    """
     import socket
     import threading
 
@@ -202,20 +208,38 @@ def test_a_worker_stopped_before_its_consumer_starts_reaps_its_embedded_beat_and
     backend_liveness_settings.cache_clear()
     settings = backend_liveness_settings()
     beat_path = embedded_beat.embedded_beat_path(settings)
-    with socket.socket() as closed:
-        closed.bind(("127.0.0.1", 0))
-        down = f"redis://127.0.0.1:{closed.getsockname()[1]}/0"
-    app = _app_on(monkeypatch, down)
-    embedded_beat.register(app, settings)
-    app.conf.redbeat_redis_url = _BROKER
-    app.conf.redbeat_key_prefix = f"tai42-live-redbeat-{uuid.uuid4().hex}:"
-    app.conf.beat_max_loop_interval = 1
-    liveness_step.register(app, LivenessFile(liveness_path, _INTERVAL).report, task_timeout=300)
-    worker = run_worker(app, beat=True)
-    _until(lambda: worker.beat is not None and check_liveness(beat_path, _GRACE).alive, "a fresh beat file")
-    assert not liveness_path.exists(), "the consumer started against a broker that is down"
+    silent = socket.create_server(("127.0.0.1", 0))
+    held: list[socket.socket] = []
 
-    state.should_stop = 0
+    def hold() -> None:
+        while True:
+            try:
+                held.append(silent.accept()[0])
+            except OSError:
+                return
+
+    holder = threading.Thread(target=hold, daemon=True)
+    holder.start()
+    try:
+        app = _app_on(monkeypatch, f"redis://127.0.0.1:{silent.getsockname()[1]}/0")
+        embedded_beat.register(app, settings)
+        app.conf.redbeat_redis_url = _BROKER
+        app.conf.redbeat_key_prefix = f"tai42-live-redbeat-{uuid.uuid4().hex}:"
+        app.conf.beat_max_loop_interval = 1
+        liveness_step.register(app, LivenessFile(liveness_path, _INTERVAL).report, task_timeout=300)
+        worker = run_worker(app, beat=True)
+        _until(lambda: worker.beat is not None and check_liveness(beat_path, _GRACE).alive, "a fresh beat file")
+        assert not liveness_path.exists(), "the consumer started against a broker that is down"
+
+        state.should_stop = 0
+    finally:
+        # Shutting the listener down wakes the blocked accept, so every held connection is listed.
+        silent.shutdown(socket.SHUT_RDWR)
+        silent.close()
+        holder.join(timeout=5)
+        assert not holder.is_alive(), "the silent broker's accept loop did not end"
+        for connection in held:
+            connection.close()
     _until(
         lambda: not any(thread.name == "live-seam-worker" for thread in threading.enumerate()), "the worker stopping"
     )
