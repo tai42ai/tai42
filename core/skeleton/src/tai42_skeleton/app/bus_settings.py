@@ -15,23 +15,36 @@ process runs on :meth:`WorkerBus.local`, and the boot rules name this var when t
 refuse a deployment that requires a bus (multi-worker, a registered backend, or a
 non-file ``TAI_CONFIG_MODE``).
 
-Namespacing (``TAI_BUS_NAMESPACE``, default ``tai``) prefixes every bus key: the
-control channel, every ephemeral reply channel, the per-worker presence keys and
-their presence index, the slot-claim keys, and the generation counters. Redis
-pub/sub is server-global (it is NOT scoped by the numeric db), so two stacks sharing
-one Redis MUST diverge by namespace or they cross-deliver each other's fleet ops.
+Every bus key is under one root, ``{namespace}:v{major}``: the namespace
+(``TAI_BUS_NAMESPACE``, default ``tai``) and the major version of the running skeleton.
+The root prefixes the control channel, every ephemeral reply channel, the per-worker
+presence keys and their presence index, the slot-claim keys, the generation counters
+and the env-reader descriptions. Redis pub/sub is server-global (it is NOT scoped by
+the numeric db), so two stacks sharing one Redis MUST diverge by namespace or they
+cross-deliver each other's fleet ops. Workers of two skeleton majors on one Redis and
+namespace are two fleets: neither reads the other's presence rows nor receives the
+other's ops, so a rolling replacement across majors runs both side by side until the
+older workers are gone. The major is a fact of the installed code, not a setting.
 """
 
 from __future__ import annotations
 
 from typing import ClassVar
 
-from pydantic import Field
+from packaging.version import Version
+from pydantic import Field, PrivateAttr
 from pydantic_settings import SettingsConfigDict
 from tai42_contract.access_control.identity import ReadinessTarget
 from tai42_kit.clients import RedisConnectionSettings
 from tai42_kit.clients.impl.redis import RedisClient
 from tai42_kit.settings import ReloadClass, TaiBaseSettings, registered_settings, settings_cache
+
+from tai42_skeleton import __version__
+
+
+def skeleton_major() -> int:
+    """The major version of the running skeleton: the part of the bus key root that is not the namespace."""
+    return Version(__version__).major
 
 
 class BusRedisSettings(RedisConnectionSettings):
@@ -62,16 +75,16 @@ class BusSettings(TaiBaseSettings):
     # so the group declares no connection fields of its own.
     redis: BusRedisSettings = Field(default_factory=BusRedisSettings)
 
-    # Prefixes every bus key — the control channel, every reply channel, the
-    # per-worker presence keys and their index, the slot-claim keys, and the
-    # generation counters — so co-tenant stacks on one server-global pub/sub Redis
-    # do not cross-deliver. It locates the census the recycle roll reads, so no config
-    # change or profile may change it (``bus_reaching_keys``).
+    # With the running skeleton major, prefixes every bus key (:attr:`key_root`) so
+    # co-tenant stacks on one server-global pub/sub Redis do not cross-deliver. It
+    # locates the census the recycle roll reads, so no config change or profile may
+    # change it (``bus_reaching_keys``).
     namespace: str = Field(
         default="tai",
         description=(
-            "Prefixes every worker-bus key. Set it in the deployment's environment: a config change or "
-            "settings profile that changes it is refused."
+            "Prefixes every worker-bus key, followed by the running skeleton's major version: workers of "
+            "different majors on one Redis and namespace are separate fleets. Set it in the deployment's "
+            "environment: a config change or settings profile that changes it is refused."
         ),
     )
 
@@ -101,6 +114,11 @@ class BusSettings(TaiBaseSettings):
     # blocks the serving loop, not the heartbeat thread, so it never lapses the row.
     heartbeat_ttl: float = Field(default=15.0, gt=0)
 
+    # The skeleton major these settings were built under, read by looking up
+    # :func:`skeleton_major` each time a value is built and fixed for its life like every
+    # other value of this frozen group.
+    _major: int = PrivateAttr(default_factory=lambda: skeleton_major())
+
     @property
     def enabled(self) -> bool:
         """True when a Redis URL is configured; False means the bus is off."""
@@ -112,24 +130,34 @@ class BusSettings(TaiBaseSettings):
 
         Two settings with the same ``fleet`` reach the same census, whatever their heartbeat,
         timeouts or connection knobs; ``(None, namespace)`` is the busless process. Every env
-        name that sets one of these values is in :func:`fleet_env_names`.
+        name that sets one of these values is in :func:`fleet_env_names`. The skeleton major,
+        the other part of :attr:`key_root`, is one value for every setting of one process.
         """
         return (self.redis.redis_url, self.namespace)
 
     @property
+    def key_root(self) -> str:
+        """The root of every bus key and channel: ``{namespace}:v{major}``.
+
+        ``major`` is the running skeleton's major version, so workers of two majors on one
+        Redis and namespace share no key: each major is its own fleet.
+        """
+        return f"{self.namespace}:v{self._major}"
+
+    @property
     def channel(self) -> str:
         """The single control channel every subscriber consumes."""
-        return f"{self.namespace}:bus:control"
+        return f"{self.key_root}:bus:control"
 
     @property
     def reply_prefix(self) -> str:
         """Prefix for the per-dispatch ephemeral reply channels."""
-        return f"{self.namespace}:bus:reply:"
+        return f"{self.key_root}:bus:reply:"
 
     @property
     def presence_prefix(self) -> str:
         """Prefix for the per-name presence keys the census reads."""
-        return f"{self.namespace}:bus:presence:"
+        return f"{self.key_root}:bus:presence:"
 
     @property
     def presence_index(self) -> str:
@@ -140,7 +168,7 @@ class BusSettings(TaiBaseSettings):
         member's presence key. The set has no TTL and is self-healing: a member whose
         presence key has expired is SREMed by the census on read.
         """
-        return f"{self.namespace}:bus:presence-index"
+        return f"{self.key_root}:bus:presence-index"
 
     def presence_key(self, name: str) -> str:
         """The presence key for one worker slot name."""
@@ -149,7 +177,7 @@ class BusSettings(TaiBaseSettings):
     @property
     def slot_prefix(self) -> str:
         """Prefix for the per-name slot-claim keys (``SET NX`` at claim time)."""
-        return f"{self.namespace}:bus:slot:"
+        return f"{self.key_root}:bus:slot:"
 
     def slot_key(self, name: str) -> str:
         """The claim key a worker wins to hold the slot ``name``."""
@@ -158,7 +186,7 @@ class BusSettings(TaiBaseSettings):
     @property
     def gen_prefix(self) -> str:
         """Prefix for the per-name generation counters (``INCR`` at claim time)."""
-        return f"{self.namespace}:bus:gen:"
+        return f"{self.key_root}:bus:gen:"
 
     def gen_key(self, name: str) -> str:
         """The monotonic generation counter for the slot ``name``."""
@@ -166,7 +194,7 @@ class BusSettings(TaiBaseSettings):
 
     def env_readers_key(self, digest: str) -> str:
         """The key holding the env-reader description a presence row names by ``digest``."""
-        return f"{self.namespace}:env-readers:{digest}"
+        return f"{self.key_root}:env-readers:{digest}"
 
 
 @settings_cache

@@ -1,11 +1,14 @@
 """The values of the worker-bus settings that locate the fleet a process is a member of.
 
 The Redis URL and the namespace locate the census; the heartbeat, the two timeouts and the
-connection's behaviour knobs are how a member takes part, not where the fleet is.
+connection's behaviour knobs are how a member takes part, not where the fleet is. Every bus
+key and channel is under the namespace and the running skeleton's major, so workers of two
+majors on one Redis are two fleets.
 """
 
 from __future__ import annotations
 
+import importlib.metadata
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -14,6 +17,8 @@ from tai42_kit.settings import reset_all_settings
 
 from tai42_skeleton.app.bus import WorkerBus, WorkerKind
 from tai42_skeleton.app.bus_settings import BusRedisSettings, BusSettings, fleet_env_names
+
+from .._helpers import another_skeleton_major
 
 
 def _settings(
@@ -76,3 +81,32 @@ def test_a_process_in_its_config_dir_reads_no_bus_setting_from_the_stored_env(
     settings = BusSettings()
 
     assert (settings.redis.redis_url, settings.heartbeat_ttl) == (None, 15.0)
+
+
+def _derived_names(settings: BusSettings) -> list[str]:
+    return [
+        settings.channel,
+        settings.reply_prefix,
+        settings.presence_prefix,
+        settings.presence_index,
+        settings.presence_key("serve-1"),
+        settings.slot_key("serve-1"),
+        settings.gen_key("serve-1"),
+        settings.env_readers_key("digest"),
+    ]
+
+
+def test_every_bus_key_is_under_the_namespace_and_the_running_skeleton_major() -> None:
+    major = int(importlib.metadata.version("tai42-skeleton").split(".", 1)[0])
+    settings = _settings({"namespace": "stack"})
+
+    assert [name for name in _derived_names(settings) if not name.startswith(f"stack:v{major}:")] == []
+
+
+def test_workers_of_two_majors_on_one_namespace_share_no_bus_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    running = _settings({"namespace": "stack"})
+    with another_skeleton_major(monkeypatch) as other:
+        foreign = _settings({"namespace": "stack"})
+
+    assert foreign.presence_index.startswith(f"stack:v{other}:")
+    assert set(_derived_names(running)) & set(_derived_names(foreign)) == set()
