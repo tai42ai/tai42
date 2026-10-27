@@ -15,7 +15,7 @@ from collections.abc import Mapping, Sequence
 from typing import ClassVar, Self
 
 from tai42_contract.app import tai42_app
-from tai42_contract.backend.runtime import BackendRuntime, ExecutionMode
+from tai42_contract.backend.runtime import BackendRuntime, ExecutionMode, HttpLiveness, ProgressLiveness
 from tai42_kit.backend import ManagedBackend
 
 from tai42_backend_rq.settings import rq_settings
@@ -62,10 +62,12 @@ class RqBeatRuntime(_InlineRuntime):
     """The rq beat: moves due scheduled jobs onto the queue.
 
     It enqueues work rather than pulling it, so it is not a consuming runtime. Its
-    options are parsed by :func:`~tai42_backend_rq.beat.run_beat`.
+    options are parsed by :func:`~tai42_backend_rq.beat.run_beat`, and each pass of the
+    scheduler's loop reports this process's progress.
     """
 
     name = "beat"
+    liveness = ProgressLiveness()
 
     def run_blocking(self) -> None:
         """Run the rq scheduler in the foreground on a connection built by the kit seam."""
@@ -73,13 +75,19 @@ class RqBeatRuntime(_InlineRuntime):
         # scheduler, and only this process ever becomes one.
         from tai42_backend_rq import beat
 
-        beat.run_beat(self._args)
+        beat.run_beat(self._args, report_progress=self.report_progress)
 
 
 class RqDashboardRuntime(_VendorCliRuntime):
-    """``rq-dashboard``: the read-only web view over the queues."""
+    """``rq-dashboard``: the read-only web view over the queues.
+
+    An orchestrator probes it over HTTP on ``/favicon.ico``, which the dashboard serves from
+    its own package without reading Redis, so a store outage does not restart a healthy
+    server. With ``--username`` set, every route asks for basic auth, this one included.
+    """
 
     name = "dashboard"
+    liveness = HttpLiveness("/favicon.ico")
     argv0 = "rq-dashboard"
 
     def run_blocking(self) -> None:

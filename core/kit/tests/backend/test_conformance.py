@@ -12,7 +12,7 @@ from collections.abc import Mapping, Sequence
 from typing import ClassVar, Self
 
 import pytest
-from tai42_contract.backend.runtime import BackendRuntime, ExecutionMode
+from tai42_contract.backend.runtime import BackendRuntime, ExecutionMode, HttpLiveness, ProgressLiveness
 
 from tai42_kit.backend import ManagedBackend, check_backend_declarations, check_runtime_declarations
 
@@ -133,6 +133,7 @@ def test_a_runtime_missing_its_declarations_is_reported_not_raised() -> None:
     assert problems == [
         "_UndeclaredRuntime declares no name, so no launch subcommand can select it",
         "_UndeclaredRuntime declares no mode, so the host cannot tell how to drive its run body",
+        "_UndeclaredRuntime declares no liveness, so the host cannot tell how it signals it is alive",
     ]
 
 
@@ -141,6 +142,7 @@ def test_a_nameless_runtime_is_not_also_reported_as_mismatched() -> None:
     # the subcommand it is mapped to.
     class _NamelessRuntime(BackendRuntime):
         mode = ExecutionMode.inline
+        liveness = HttpLiveness("/")
 
         @classmethod
         def from_args(cls, args: Sequence[str]) -> Self:
@@ -174,6 +176,7 @@ def test_the_certification_thought_experiment_needs_one_class() -> None:
         name = "worker"
         mode = ExecutionMode.on_loop
         consumes_work = True
+        liveness = ProgressLiveness()
 
         @classmethod
         def from_args(cls, args: Sequence[str]) -> Self:
@@ -206,3 +209,46 @@ def test_a_mode_that_only_looks_like_one_is_reported() -> None:
         "_StringModeRuntime declares mode='on_loop', which is not an ExecutionMode member; the host dispatches "
         "on identity, so a look-alike string matches no mode at all"
     ]
+
+
+def test_a_liveness_that_is_not_a_liveness_kind_is_reported() -> None:
+    class _StringLivenessRuntime(FakeSchedulerRuntime):
+        liveness = "/healthcheck"  # pyright: ignore[reportAssignmentType]
+
+    problems = check_runtime_declarations(_StringLivenessRuntime)
+    assert problems == [
+        "_StringLivenessRuntime declares liveness='/healthcheck', which is neither a ProgressLiveness nor an "
+        "HttpLiveness, so the host cannot tell how it signals it is alive"
+    ]
+
+
+def test_an_http_liveness_path_without_a_leading_slash_is_reported() -> None:
+    class _RelativeProbeRuntime(FakeSchedulerRuntime):
+        liveness = HttpLiveness("healthcheck")
+
+    problems = check_runtime_declarations(_RelativeProbeRuntime)
+    assert problems == [
+        "_RelativeProbeRuntime declares HttpLiveness(path='healthcheck'): the path an orchestrator probes is "
+        "absolute, so it starts with '/'"
+    ]
+
+
+def test_a_consuming_runtime_with_http_liveness_is_reported() -> None:
+    class _HttpConsumer(FakeOnLoopWorker):
+        liveness = HttpLiveness("/healthcheck")
+
+    problems = check_runtime_declarations(_HttpConsumer)
+    assert problems == [
+        "_HttpConsumer declares consumes_work with HttpLiveness: a consuming runtime's liveness is its loop, "
+        "so it declares ProgressLiveness and reports from that loop"
+    ]
+
+
+@pytest.mark.parametrize("liveness", [ProgressLiveness(), HttpLiveness("/healthcheck")])
+def test_a_non_consuming_runtime_may_declare_either_liveness_kind(
+    liveness: ProgressLiveness | HttpLiveness,
+) -> None:
+    runtime = FakeSchedulerRuntime.from_args([])
+    runtime.liveness = liveness  # pyright: ignore[reportAttributeAccessIssue]
+
+    assert check_runtime_declarations(runtime) == []

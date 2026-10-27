@@ -4,9 +4,10 @@ A vendor binding declares its runtimes and implements
 :class:`~tai42_contract.backend.runtime.BackendRuntime` — how ITS engine starts,
 drains, and recycles. Everything host-shaped around that (subcommand dispatch,
 boot-readiness gating, off-loop running, composed warm/cold shutdown wiring,
-drain-on-cancellation, pool turnover after a registry-mutating fleet op) lives
-here, in :class:`~tai42_kit.backend.base.ManagedBackend`. The contract's scheduling
-protocol (names and models) is re-exported here beside the kit's dispatch helpers.
+drain-on-cancellation, pool turnover after a registry-mutating fleet op, the
+liveness file a progress runtime reports into) lives here, in
+:class:`~tai42_kit.backend.base.ManagedBackend`. The contract's scheduling protocol
+(names and models) is re-exported here beside the kit's dispatch helpers.
 
 It lives in kit and not in the skeleton because a backend plugin may not import
 the skeleton, and not in the contract because the contract carries no logic.

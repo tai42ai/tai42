@@ -15,6 +15,7 @@ import itertools
 import threading
 from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
@@ -252,6 +253,18 @@ tai42_app.bind(_stub_app)
 
 # Imported AFTER the bind so every import-time registration lands in the stub.
 import tai42_backend_arq  # noqa: E402,F401
+
+
+@pytest.fixture(autouse=True)
+def liveness_path(monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory) -> Iterator[Path]:
+    """Point the liveness file at a per-test path, so no test reads or writes the default one."""
+    from tai42_kit.liveness import backend_liveness_settings
+
+    path = tmp_path_factory.mktemp("liveness") / "liveness"
+    monkeypatch.setenv("TAI_BACKEND_LIVENESS_PATH", str(path))
+    backend_liveness_settings.cache_clear()
+    yield path
+    backend_liveness_settings.cache_clear()
 
 
 @pytest.fixture

@@ -31,6 +31,10 @@ _SETTINGS_QUEUE = "ns-1:default"
 _GPU = f"{_SETTINGS_QUEUE}.gpu"
 
 
+def _no_report(*, next_within: float) -> None:
+    """A progress reporter that drops every report."""
+
+
 @pytest.fixture
 def settings_queue(monkeypatch) -> Iterator[str]:
     monkeypatch.setenv("RQ_QUEUE_NAME", _SETTINGS_QUEUE)
@@ -114,14 +118,14 @@ def test_no_label_derives_the_settings_queue(settings_queue) -> None:
 
 
 def test_a_worker_on_a_label_serves_the_derived_queue_alone(redis) -> None:
-    worker, _conn = worker_module._build_worker(None, None, 500, "solo", "gpu")
+    worker, _conn = worker_module._build_worker(None, None, 500, "solo", "gpu", _no_report)
 
     assert worker.queue_names() == [_GPU]
     assert isinstance(worker.queues[0], TaskBudgetQueue)
 
 
 def test_a_worker_without_a_label_serves_the_settings_queue(redis) -> None:
-    worker, _conn = worker_module._build_worker(None, None, 500, "solo", None)
+    worker, _conn = worker_module._build_worker(None, None, 500, "solo", None, _no_report)
 
     assert worker.queue_names() == [_SETTINGS_QUEUE]
 
@@ -149,7 +153,7 @@ async def test_the_worker_runtime_build_passes_the_label(monkeypatch) -> None:
 
     await runtime.build()
 
-    assert calls == [(None, None, 500, "prefork", "gpu")]
+    assert calls == [(None, None, 500, "prefork", "gpu", runtime.report_progress)]
 
 
 def test_a_worker_label_outside_the_rule_is_a_bad_parameter() -> None:

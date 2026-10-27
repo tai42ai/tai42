@@ -1,7 +1,7 @@
 """Execution-backend contract.
 
-Exposes the ``Backend`` ABC, the ``BackendRuntime`` ABC one launch subcommand implements, the
-``CallbackSchema``, and the scheduling protocol's names and models.
+Exposes the ``Backend`` ABC, the ``BackendRuntime`` ABC one launch subcommand implements with
+its liveness declarations, the ``CallbackSchema``, and the scheduling protocol's names and models.
 """
 
 from __future__ import annotations
@@ -14,6 +14,10 @@ from tai42_contract.backend.runtime import (
     ExecutionMode,
     FleetOpApplied,
     FleetOpEffect,
+    HttpLiveness,
+    Liveness,
+    ProgressLiveness,
+    ProgressReporter,
 )
 from tai42_contract.backend.scheduling import (
     SCHEDULE_BRANCH_SUFFIX,
@@ -55,7 +59,11 @@ __all__ = [
     "ExecutionMode",
     "FleetOpApplied",
     "FleetOpEffect",
+    "HttpLiveness",
     "IntervalCadence",
+    "Liveness",
+    "ProgressLiveness",
+    "ProgressReporter",
     "ScheduleCadence",
     "ScheduleCreate",
     "ScheduleImportError",

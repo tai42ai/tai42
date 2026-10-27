@@ -174,6 +174,10 @@ dev = [
     "uvloop>=0.22; sys_platform != 'win32'",
 ]
 
+[project.entry-points.console_scripts]
+# The exec probe for a backend worker's liveness file (tai42_kit.liveness).
+tai42-backend-probe = "tai42_kit.liveness.probe:main"
+
 [tool.setuptools]
 package-dir = { "" = "src" }
 

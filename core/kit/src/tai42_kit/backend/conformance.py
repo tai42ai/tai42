@@ -16,7 +16,13 @@ import inspect
 import re
 from typing import Any
 
-from tai42_contract.backend.runtime import CONSUMING_RUNTIME, BackendRuntime, ExecutionMode
+from tai42_contract.backend.runtime import (
+    CONSUMING_RUNTIME,
+    BackendRuntime,
+    ExecutionMode,
+    HttpLiveness,
+    ProgressLiveness,
+)
 
 # Signal installs a runtime may never make: the host owns the process's signal
 # disposition, ``add_signal_handler`` is last-writer-wins, and ``signal.signal``
@@ -101,6 +107,31 @@ def _check_pool_turnover(
     return problems
 
 
+def _check_liveness(runtime: BackendRuntime | type[BackendRuntime], name: str) -> list[str]:
+    """A missing or malformed ``liveness``, and the HTTP kind a consuming runtime may not declare."""
+    liveness = _declared(runtime, "liveness")
+    if liveness is _UNDECLARED:
+        return [f"{name} declares no liveness, so the host cannot tell how it signals it is alive"]
+    if isinstance(liveness, ProgressLiveness):
+        return []
+    if not isinstance(liveness, HttpLiveness):
+        return [
+            f"{name} declares liveness={liveness!r}, which is neither a ProgressLiveness nor an HttpLiveness, "
+            "so the host cannot tell how it signals it is alive"
+        ]
+    problems: list[str] = []
+    if not liveness.path.startswith("/"):
+        problems.append(
+            f"{name} declares {liveness!r}: the path an orchestrator probes is absolute, so it starts with '/'"
+        )
+    if runtime.consumes_work:
+        problems.append(
+            f"{name} declares consumes_work with HttpLiveness: a consuming runtime's liveness is its loop, "
+            "so it declares ProgressLiveness and reports from that loop"
+        )
+    return problems
+
+
 def check_runtime_declarations(runtime: BackendRuntime | type[BackendRuntime]) -> list[str]:
     """Every way ``runtime``'s declarations and its bindings disagree.
 
@@ -120,6 +151,7 @@ def check_runtime_declarations(runtime: BackendRuntime | type[BackendRuntime]) -
         *_check_mode(runtime, cls, name),
         *_check_consumes_work(runtime, cls, mode, name),
         *_check_pool_turnover(runtime, cls, name),
+        *_check_liveness(runtime, name),
     ]
 
 

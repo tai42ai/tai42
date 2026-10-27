@@ -19,13 +19,15 @@ from __future__ import annotations
 import asyncio
 import sys
 from collections.abc import Mapping, Sequence
-from typing import ClassVar, Self
+from typing import ClassVar, NoReturn, Self
 
 from tai42_contract.app import tai42_app
-from tai42_contract.backend.runtime import BackendRuntime, ExecutionMode
+from tai42_contract.backend.runtime import BackendRuntime, ExecutionMode, HttpLiveness, ProgressLiveness
 from tai42_kit.backend import BackendDispatchSettings, ManagedBackend
+from tai42_kit.liveness import backend_liveness_settings
 
 from tai42_backend_celery.core import prefork
+from tai42_backend_celery.core.app import celery_app
 from tai42_backend_celery.core.settings import celery_settings
 
 # The Celery application module handed to the Celery CLI (`-A`).
@@ -44,11 +46,67 @@ def _celery_cli_main() -> None:
     celery_main()
 
 
+def _refuse_scheduler_option(name: str, args: Sequence[str]) -> None:
+    """Refuse every way of handing the Celery command ``name`` a scheduler class of its own.
+
+    A scheduler class reaches the command three ways, and each is read the way Celery reads it:
+
+    - the ``--scheduler`` option (the beat's ``-S``) in ``args``: the command's own parser reads
+      the argv, so every spelling it accepts is caught (``-S x``, ``-Sx``, ``--scheduler=x``,
+      combined short flags) and nothing else it accepts is;
+    - the same option from the environment: the Celery CLI runs with the ``CELERY`` envvar
+      prefix, so ``CELERY_WORKER_SCHEDULER`` and ``CELERY_BEAT_SCHEDULER`` fill it;
+    - the ``beat_scheduler`` setting as command-line configuration (``beat_scheduler=x``,
+      ``beat.scheduler=x``, in any case), which the command applies to the app's configuration,
+      read with Celery's own command-line configuration parser.
+
+    Parsing is resilient: an argv or a configuration item the command rejects for another reason
+    is left to the Celery CLI to report.
+    """
+    from celery import Celery
+    from celery.bin.beat import beat
+    from celery.bin.celery import celery
+    from celery.bin.worker import worker
+
+    command = {"worker": worker, "beat": beat}[name]
+    parent = celery.context_class(celery, info_name="celery", auto_envvar_prefix="CELERY", resilient_parsing=True)
+    with command.make_context(name, list(args), parent=parent, resilient_parsing=True) as ctx:
+        scheduler = ctx.params.get("scheduler")
+        source = ctx.get_parameter_source("scheduler")
+        source_name = source.name if source is not None else None
+        envvar = f"{ctx.auto_envvar_prefix}_SCHEDULER"
+        extra_args = list(ctx.args)
+    if scheduler and source_name == "ENVIRONMENT":
+        _raise_scheduler_refusal(name, f"{envvar}={scheduler}")
+    if scheduler and source_name == "COMMANDLINE":
+        _raise_scheduler_refusal(name, f"--scheduler {scheduler}")
+
+    # The worker applies its command-line configuration in the ``worker`` namespace, the beat in
+    # Celery's default one; both resolve ``beat_scheduler`` / ``beat.scheduler`` to the same setting.
+    namespace = "worker" if name == "worker" else "celery"
+    parse = Celery(set_as_current=False).loader.cmdline_config_parser
+    for item in extra_args:
+        try:
+            setting = parse([item], namespace)
+        except (KeyError, ValueError):
+            continue
+        if "beat_scheduler" in setting:
+            _raise_scheduler_refusal(name, item)
+
+
+def _raise_scheduler_refusal(name: str, spelling: str) -> NoReturn:
+    raise ValueError(
+        f"tai backend {name} runs RedBeat through its progress-reporting scheduler, which reports the "
+        f"process's liveness; drop {spelling}"
+    )
+
+
 class _CeleryRuntime(BackendRuntime):
     """What every Celery runtime shares.
 
-    It parses nothing of its own (the options belong to the Celery CLI, which validates them) and starts by
-    handing that CLI its own subcommand plus the rest of the launch argv.
+    It parses nothing of its own but the worker's and the beat's refusal of the one option that
+    would replace their scheduler (the options belong to the Celery CLI, which validates them),
+    and starts by handing that CLI its own subcommand plus the rest of the launch argv.
     """
 
     def __init__(self, args: Sequence[str]) -> None:
@@ -76,15 +134,28 @@ class CeleryWorkerRuntime(_CeleryRuntime):
     mode = ExecutionMode.worker_thread
     consumes_work = True
     pool_turnover_required = True
+    liveness = ProgressLiveness()
+
+    @classmethod
+    def from_args(cls, args: Sequence[str]) -> Self:
+        """Take the worker's argv, refusing ``--scheduler``: an embedded beat (``-B``) runs the reporting scheduler."""
+        _refuse_scheduler_option(cls.name, args)
+        return cls(args)
 
     async def build(self) -> None:
-        """Set the CLI's argv and prepare the pool turnover, both before the host gates on boot-readiness.
+        """Set the CLI's argv, prepare the pool turnover and add the progress step, before the boot-readiness gate.
 
-        Connecting Celery's setup/ready signals must happen before the worker boots past them, and neither
-        consumes work.
+        Connecting Celery's setup/ready signals and adding a consumer bootstep must happen before the worker
+        boots past them, and none of them consumes work. The embedded beat's reporter is handed over
+        here too, before ``-B`` forks the beat from this process.
         """
+        # Imported on the path that runs it: only a worker process adds the consumer step.
+        from tai42_backend_celery.core import embedded_beat, liveness_step
+
         self._set_argv()
         prefork.register()
+        embedded_beat.register(celery_app, backend_liveness_settings())
+        liveness_step.register(celery_app, self.report_progress, task_timeout=celery_settings().task_timeout)
 
     def run_blocking(self) -> None:
         """Run the Celery worker, blocking this thread until it exits."""
@@ -115,6 +186,12 @@ class CeleryWorkerRuntime(_CeleryRuntime):
         """
         await asyncio.to_thread(prefork.turnover_local_pool, reason, budget)
 
+    async def aclose(self) -> None:
+        """Reap the embedded beat and remove its liveness file, off the loop: the reap waits on the beat."""
+        from tai42_backend_celery.core import embedded_beat
+
+        await asyncio.to_thread(embedded_beat.release)
+
 
 class _CeleryInlineRuntime(_CeleryRuntime):
     """A Celery command that owns its process.
@@ -131,15 +208,34 @@ class _CeleryInlineRuntime(_CeleryRuntime):
 
 
 class CeleryBeatRuntime(_CeleryInlineRuntime):
-    """The RedBeat scheduler."""
+    """The RedBeat scheduler, reporting each tick of the beat loop as this process's progress."""
 
     name = "beat"
+    liveness = ProgressLiveness()
+
+    @classmethod
+    def from_args(cls, args: Sequence[str]) -> Self:
+        """Take the beat's argv, refusing ``-S``/``--scheduler``: the beat runs the reporting scheduler."""
+        _refuse_scheduler_option(cls.name, args)
+        return cls(args)
+
+    async def build(self) -> None:
+        """Hand the beat scheduler this runtime's progress reporter before the beat starts ticking."""
+        # Imported on the path that runs it: only a beat process loads the scheduler.
+        from tai42_backend_celery.core import beat_scheduler
+
+        beat_scheduler.register(self.report_progress)
 
 
 class CeleryFlowerRuntime(_CeleryInlineRuntime):
-    """The Flower dashboard."""
+    """The Flower dashboard.
+
+    An orchestrator probes it over HTTP on ``/healthcheck``, which Flower answers without
+    authentication.
+    """
 
     name = "flower"
+    liveness = HttpLiveness("/healthcheck")
 
 
 class CeleryBackend(ManagedBackend):

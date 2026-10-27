@@ -11,15 +11,19 @@ here, plus the few launch-level assertions that pin this backend into that base.
 from __future__ import annotations
 
 import asyncio
+import os
 import signal
 import time
+from pathlib import Path
 from typing import Any, ClassVar, cast
 from unittest.mock import AsyncMock
 
 import click
 import pytest
+from arq import Worker
 from click.testing import CliRunner
-from tai42_contract.backend.runtime import CONSUMING_RUNTIME, ExecutionMode
+from tai42_contract.backend.runtime import CONSUMING_RUNTIME, ExecutionMode, ProgressLiveness
+from tai42_kit.liveness import LivenessFile, backend_liveness_settings
 
 from tai42_backend_arq import worker
 from tai42_backend_arq.backend import ArqBackend
@@ -48,8 +52,11 @@ class _FakeWorker:
 
     async def async_run(self) -> None:
         # A burst worker's run returns when the queue drains; model that, so a
-        # launch completes and tears its resources down.
+        # launch completes and tears its resources down. One pass reports, as
+        # arq's ``heart_beat`` does on every poll.
         self.ran = True
+        self.kwargs["report_progress"](next_within=0.5)
+        self.reported = Path(os.environ["TAI_BACKEND_LIVENESS_PATH"]).read_text()
 
     async def close(self) -> None:
         self.closed = True
@@ -79,7 +86,7 @@ class _StubPool:
 @pytest.fixture
 def worker_env(monkeypatch: pytest.MonkeyPatch) -> type[_FakeWorker]:
     _FakeWorker.instances.clear()
-    monkeypatch.setattr(worker, "Worker", _FakeWorker)
+    monkeypatch.setattr(worker, "_ProgressReportingWorker", _FakeWorker)
     return _FakeWorker
 
 
@@ -112,6 +119,10 @@ def test_runtime_declares_a_consuming_on_loop_worker() -> None:
     assert ArqWorkerRuntime.pool_turnover_required is False
 
 
+def test_runtime_declares_progress_liveness() -> None:
+    assert ArqWorkerRuntime.liveness == ProgressLiveness()
+
+
 def test_backend_declares_the_worker_subcommand() -> None:
     assert ArqBackend.label == "arq"
     assert dict(ArqBackend.runtimes) == {"worker": ArqWorkerRuntime}
@@ -133,6 +144,61 @@ async def test_build_constructs_the_worker_and_keeps_arq_off_the_signals(worker_
     assert len(kwargs["functions"]) == 3
     assert kwargs["keep_result"] == 3600
     assert kwargs["max_jobs"] == 10
+
+
+async def test_build_hands_the_worker_the_runtimes_reporter(worker_env) -> None:
+    runtime = await _built()
+
+    assert worker_env.latest().kwargs["report_progress"] == runtime.report_progress
+
+
+async def test_the_built_worker_is_arqs_worker_reporting_progress() -> None:
+    runtime = await _built()
+
+    assert isinstance(runtime.worker, worker._ProgressReportingWorker)
+    assert isinstance(runtime.worker, Worker)
+
+
+def _reporting_worker(poll_delay_s: float, promises: list[float]) -> worker._ProgressReportingWorker:
+    """A progress-reporting worker with only what ``heart_beat`` reads, recording every promise."""
+    built = worker._ProgressReportingWorker.__new__(worker._ProgressReportingWorker)
+    built.poll_delay_s = poll_delay_s
+
+    def _record(*, next_within: float) -> None:
+        promises.append(next_within)
+
+    built._report_progress = _record
+    return built
+
+
+async def test_heart_beat_reports_the_poll_delay_before_arqs_own(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The pass is the loop's progress: a Redis-blocked health record must not hide a pass that happened."""
+    promises: list[float] = []
+    seen: list[list[float]] = []
+
+    async def _arq_heart_beat(self: Worker) -> None:
+        seen.append(list(promises))
+
+    monkeypatch.setattr(Worker, "heart_beat", _arq_heart_beat)
+
+    await _reporting_worker(0.75, promises).heart_beat()
+
+    assert seen == [[0.75]]
+
+
+@pytest.mark.parametrize("poll_delay_s", [0.0, -1.0])
+async def test_a_spinning_poll_promises_arqs_own_floor(monkeypatch: pytest.MonkeyPatch, poll_delay_s: float) -> None:
+    """A non-positive poll delay makes arq's poll sleep nothing between passes; the promise stays positive."""
+    promises: list[float] = []
+
+    async def _arq_heart_beat(self: Worker) -> None:
+        return None
+
+    monkeypatch.setattr(Worker, "heart_beat", _arq_heart_beat)
+
+    await _reporting_worker(poll_delay_s, promises).heart_beat()
+
+    assert promises == [0.5]
 
 
 async def test_build_passes_zero_keep_result_and_burst_through(worker_env) -> None:
@@ -214,6 +280,7 @@ def test_reading_the_worker_before_build_is_a_loud_error() -> None:
 
 async def test_run_on_loop_runs_the_worker(worker_env) -> None:
     runtime = await _built()
+    runtime.bind_progress(LivenessFile.from_settings(backend_liveness_settings()).report)
 
     await runtime.run_on_loop()
 
@@ -229,7 +296,7 @@ async def test_run_on_loop_reports_a_cancellation_and_propagates_it(worker_env, 
             self.ran = True
             await asyncio.Event().wait()
 
-    monkeypatch.setattr(worker, "Worker", _IdleWorker)
+    monkeypatch.setattr(worker, "_ProgressReportingWorker", _IdleWorker)
     runtime = await _built()
     task = asyncio.create_task(runtime.run_on_loop())
     await _running(worker_env)
@@ -354,6 +421,31 @@ def test_main_runs_a_standalone_worker_with_arq_owning_the_signals(worker_env) -
     assert built.closed is True
 
 
+def test_main_reports_into_the_liveness_file_and_removes_it(worker_env, liveness_path: Path) -> None:
+    result = CliRunner().invoke(worker.main, [], catch_exceptions=False)
+
+    assert result.exit_code == 0
+    assert worker_env.latest().reported == f"{os.getpid()}\n5.5\n"
+    assert not liveness_path.exists()
+
+
+def test_main_removes_the_liveness_file_when_the_worker_raises(
+    worker_env, monkeypatch: pytest.MonkeyPatch, liveness_path: Path
+) -> None:
+    class _FailingWorker(_FakeWorker):
+        async def async_run(self) -> None:
+            self.kwargs["report_progress"](next_within=0.5)
+            assert liveness_path.exists()
+            raise RuntimeError("arq loop failed")
+
+    monkeypatch.setattr(worker, "_ProgressReportingWorker", _FailingWorker)
+
+    with pytest.raises(RuntimeError, match="arq loop failed"):
+        CliRunner().invoke(worker.main, [], catch_exceptions=False)
+
+    assert not liveness_path.exists()
+
+
 def test_main_keyboard_interrupt_exits_130(monkeypatch) -> None:
     monkeypatch.setattr(worker, "_run_standalone", AsyncMock(side_effect=KeyboardInterrupt))
 
@@ -400,6 +492,13 @@ async def test_launch_worker_parses_its_options_and_runs_the_worker(worker_env, 
     assert built.kwargs["job_timeout"] == 77
     assert built.ran is True
     assert built.closed is True
+
+
+async def test_launch_reports_into_the_liveness_file_and_removes_it(worker_env, liveness_path: Path) -> None:
+    await ArqBackend().launch(["worker", "--burst"])
+
+    assert worker_env.latest().reported == f"{os.getpid()}\n5.5\n"
+    assert not liveness_path.exists()
 
 
 async def test_an_explicit_job_timeout_flag_wins_over_the_setting(worker_env, monkeypatch) -> None:
@@ -475,7 +574,7 @@ async def test_launch_cancellation_lets_the_arq_drain_finish_before_unwinding(wo
             self.job_completed = True
             self._stopped.set()
 
-    monkeypatch.setattr(worker, "Worker", _DrainingWorker)
+    monkeypatch.setattr(worker, "_ProgressReportingWorker", _DrainingWorker)
     task = asyncio.create_task(ArqBackend().launch(["worker"]))
     built = await _running(worker_env)
     assert isinstance(built, _DrainingWorker)

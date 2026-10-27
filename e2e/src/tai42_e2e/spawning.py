@@ -60,10 +60,17 @@ def spawn_all(stack: TaiStack, manifest_path: Path, family_dirs: list[str]) -> N
         # and teardown leak-reap — an early exit aborts boot loudly through the
         # shared ``_early_exit_detail`` readiness check, exactly like the worker.
         backend = stack.infra.variants.backend
-        extras = [(f"backend-{args[0]}", args) for args in backend.extra_backend_processes()]
+        extras = [(f"backend-{args[0]}", args, {}) for args in backend.extra_backend_processes()]
         # One more worker per queue label, serving only that label's queue.
-        extras += [(f"backend-queue-{label}", backend.queue_worker_args(label)) for label in stack.config.queue_workers]
-        for extra_name, extra_args in extras:
+        extras += [
+            (f"backend-queue-{label}", backend.queue_worker_args(label), {}) for label in stack.config.queue_workers
+        ]
+        if stack.config.liveness_processes:
+            extras += [
+                (f"backend-{name}", process.args, process.env)
+                for name, process in backend.liveness_processes(stack.resources).items()
+            ]
+        for extra_name, extra_args, variant_env in extras:
             extra_cwd = stack.config.cwd_overrides.get(extra_name)
             spawn(
                 stack,
@@ -71,7 +78,7 @@ def spawn_all(stack: TaiStack, manifest_path: Path, family_dirs: list[str]) -> N
                     name=extra_name,
                     argv=[tai, "backend", *extra_args, "--manifest-path", str(manifest_path)],
                     cwd=Path(extra_cwd) if extra_cwd else stack._config_dir,
-                    env=child_env(stack, family_dirs[0], extra_name),
+                    env=child_env(stack, family_dirs[0], extra_name, variant_env=variant_env),
                     log_path=stack._logs_dir / f"{extra_name}.log",
                 ),
             )

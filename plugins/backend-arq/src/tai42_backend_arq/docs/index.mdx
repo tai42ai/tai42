@@ -59,6 +59,26 @@ flags, not env vars. `worker` is the only `tai backend` subcommand this backend
 accepts — there is no beat or dashboard process, and anything else is refused by
 name.
 
+## Liveness
+
+The worker reports each pass of arq's poll loop into a liveness file at
+`TAI_BACKEND_LIVENESS_PATH`, promising the next pass within `--poll-delay`.
+`tai42-backend-probe` run in the worker's environment exits 0 while that
+promise is not overdue by more than `TAI_BACKEND_LIVENESS_GRACE` seconds, and 1
+otherwise, so it serves as the container's exec liveness probe:
+
+```yaml docker-compose.yml
+services:
+  backend:
+    healthcheck:
+      test: ["CMD", "tai42-backend-probe"]
+```
+
+Jobs run as tasks on the same loop, so the passes go on while jobs run; a job
+that blocks the loop stops them, and the probe then reports not alive. The
+worker removes the file when it exits. Each worker on one filesystem needs its
+own `TAI_BACKEND_LIVENESS_PATH`.
+
 ## Send a task to a chosen worker
 
 The `sync_task` and `async_task` branches take an optional `queue` argument, a

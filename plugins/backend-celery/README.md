@@ -102,6 +102,50 @@ to keep reading the bus subscription; `launch` installs SIGTERM/SIGINT handlers
 that request a warm (then cold) Celery shutdown, since Celery skips its own
 signal handlers off the main thread.
 
+## Liveness
+
+The `worker` and `beat` processes report the passes of their loop into a
+liveness file at `TAI_BACKEND_LIVENESS_PATH`. `tai42-backend-probe` (shipped
+with `tai42-kit`) run in a process's environment exits 0 while the promise its
+file holds is not overdue by more than `TAI_BACKEND_LIVENESS_GRACE` seconds, and
+1 otherwise, so it serves as that container's exec liveness probe. Each process
+on one filesystem needs its own `TAI_BACKEND_LIVENESS_PATH`, and removes its
+file when it exits.
+
+- `worker` reports once a second from a consumer bootstep on the timer of
+  Celery's event loop, so a report proves the loop is passing. While the broker
+  connection is down the loop does not pass, so the file goes stale; the
+  reports resume once the consumer reconnects. Per pool:
+  - `prefork`: the jobs run in the pool children and the loop goes on while
+    they run; a child stuck in a job is the pool's to end, by
+    `CELERY_TASK_TIMEOUT`.
+  - `solo`: the job runs on the loop's own thread, so the running job reports
+    once a second from its own asyncio loop. A job that blocks that loop stops
+    the reports. The pool cannot end a job, so a job past
+    `CELERY_TASK_TIMEOUT` holds a wedged slot: the worker then reports
+    nothing, so the probe fails and the orchestrator restarts it.
+  - `threads`: the loop goes on while the jobs run in the pool's threads. Once
+    every thread holds a job past `CELERY_TASK_TIMEOUT` the worker reports
+    nothing; one such job beside free threads keeps it reporting.
+  - `gevent`, `eventlet`: the timer runs on its own green thread, so there a
+    report proves the process and that thread.
+- `worker -B` embeds a beat, which reports each tick into its own file,
+  `<TAI_BACKEND_LIVENESS_PATH>-beat`, with its own pid. The worker reports
+  nothing while its beat's promise is overdue, so the one probe on the
+  worker's file covers both. When the worker exits, even before it ever
+  reached its broker, it ends its beat and removes both files.
+- `beat` reports each tick of RedBeat's scheduler, promising the next within
+  the interval the beat sleeps (at most `--max-interval`). A beat that cannot
+  hold RedBeat's lock waits for it before its first tick and reports nothing
+  while it waits, so run one beat (standalone or embedded with `-B`). The app
+  names the reporting scheduler as its `beat_scheduler`. `tai backend worker`
+  and `tai backend beat` refuse any other scheduler at launch: `--scheduler`
+  (`-S`), the `CELERY_WORKER_SCHEDULER` / `CELERY_BEAT_SCHEDULER` environment
+  variables, and `beat_scheduler=` as command-line configuration.
+- `flower` serves HTTP, so it is probed over HTTP instead: `GET /healthcheck`
+  answers 200 while Flower serves, without authentication even when Flower's
+  own auth is on. Under `--url_prefix`, the path is `/<prefix>/healthcheck`.
+
 ## Task execution
 
 The `sync_task` / `async_task` extension branches dispatch the wrapped tool to
@@ -110,7 +154,9 @@ retries are declared per tool with a `ToolRetryPolicy` and applied by the
 platform, never by Celery (Celery still retries publishing the task message on
 connection loss, the `retry` option below). Every task — dispatched or fired by
 beat — is bounded by the dispatch job budget `CELERY_TASK_TIMEOUT` (Celery's
-`task_time_limit`, enforced by the prefork pool). Task options exposed on every branch: `queue`,
+`task_time_limit`, enforced by the prefork pool; the `solo` and `threads` pools
+cannot end a job, and there the worker's liveness stops reporting once every
+slot holds a job past the budget, see [Liveness](#liveness)). Task options exposed on every branch: `queue`,
 `countdown`, `priority`, `retry`, `routing_key`, `expires`, `eta`, and
 `callback_kwargs` — a callback schema chained via a Celery `link` that runs
 `celery.callback_task` on the result (jq condition gate, jq expression

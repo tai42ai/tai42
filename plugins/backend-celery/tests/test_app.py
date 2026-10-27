@@ -16,7 +16,7 @@ from tai42_backend_celery.core.settings import celery_settings
 
 def test_create_celery_app_wires_redbeat_and_events() -> None:
     conf: Any = app_module.celery_app.conf
-    assert conf["beat_scheduler"] == "redbeat.RedBeatScheduler"
+    assert conf["beat_scheduler"] == "tai42_backend_celery.core.beat_scheduler.ProgressReportingScheduler"
     assert conf["redbeat_key_prefix"] == "redbeat:"
     assert conf["timezone"] == "UTC"
     assert conf["worker_pool_restarts"] is True

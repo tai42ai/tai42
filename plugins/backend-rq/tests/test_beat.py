@@ -2,8 +2,8 @@
 
 ``run_beat`` parses the scheduler's own options (with rq-scheduler's names, defaults and
 meanings), builds the connection the way the rq worker does, so the ``RQ_*`` retry and
-socket timeouts reach every scheduler command, and runs ``Scheduler`` with the plugin's
-queue class.
+socket timeouts reach every scheduler command, and runs the progress-reporting scheduler with
+the plugin's queue class.
 """
 
 from __future__ import annotations
@@ -42,7 +42,7 @@ def scheduler(monkeypatch: pytest.MonkeyPatch) -> Iterator[type[_FakeScheduler]]
         if key.startswith(("RQ_", "TAI_DEFAULT_")):
             monkeypatch.delenv(key, raising=False)
     _FakeScheduler.instances.clear()
-    monkeypatch.setattr(beat, "Scheduler", _FakeScheduler)
+    monkeypatch.setattr(beat, "ProgressReportingScheduler", _FakeScheduler)
     levels: list[str] = []
     monkeypatch.setattr(beat, "setup_loghandlers", levels.append)
     _FakeScheduler.levels = levels  # type: ignore[attr-defined]
@@ -50,6 +50,14 @@ def scheduler(monkeypatch: pytest.MonkeyPatch) -> Iterator[type[_FakeScheduler]]
     rq_settings.cache_clear()
     yield _FakeScheduler
     rq_settings.cache_clear()
+
+
+def _no_report(*, next_within: float) -> None:
+    """A reporter for tests that do not look at the beat's progress."""
+
+
+def _run_beat(args: list[str]) -> None:
+    beat.run_beat(args, report_progress=_no_report)
 
 
 def _ran(scheduler: type[_FakeScheduler]) -> _FakeScheduler:
@@ -68,7 +76,7 @@ def test_the_scheduler_runs_on_a_connection_with_the_kit_sync_retry(scheduler, m
     monkeypatch.setenv("RQ_RETRY_ATTEMPTS", "2")
     monkeypatch.setenv("RQ_SOCKET_TIMEOUT", "3")
 
-    beat.run_beat(["-i", "5"])
+    _run_beat(["-i", "5"])
 
     instance = _ran(scheduler)
     connection_kwargs = _connection_kwargs(instance)
@@ -87,7 +95,7 @@ def test_the_scheduler_runs_on_a_connection_with_the_kit_sync_retry(scheduler, m
 
 
 def test_the_defaults_are_the_vendor_defaults(scheduler) -> None:
-    beat.run_beat([])
+    _run_beat([])
 
     instance = _ran(scheduler)
     assert instance.kwargs["interval"] == 60.0
@@ -99,7 +107,7 @@ def test_the_defaults_are_the_vendor_defaults(scheduler) -> None:
 def test_the_url_falls_back_to_the_shared_default(scheduler, monkeypatch) -> None:
     monkeypatch.setenv("TAI_DEFAULT_REDIS_URL", "redis://shared:6391/4")
 
-    beat.run_beat([])
+    _run_beat([])
 
     connection_kwargs = _connection_kwargs(_ran(scheduler))
     assert (connection_kwargs["host"], connection_kwargs["port"], connection_kwargs["db"]) == ("shared", 6391, 4)
@@ -109,7 +117,7 @@ def test_the_url_option_overrides_the_setting(scheduler, monkeypatch) -> None:
     monkeypatch.setenv("RQ_REDIS_URL", "redis://configured:6390/2")
     monkeypatch.setenv("RQ_RETRY_ATTEMPTS", "1")
 
-    beat.run_beat(["--url", "redis://elsewhere:6392/5"])
+    _run_beat(["--url", "redis://elsewhere:6392/5"])
 
     connection_kwargs = _connection_kwargs(_ran(scheduler))
     assert (connection_kwargs["host"], connection_kwargs["port"], connection_kwargs["db"]) == ("elsewhere", 6392, 5)
@@ -117,20 +125,20 @@ def test_the_url_option_overrides_the_setting(scheduler, monkeypatch) -> None:
 
 
 def test_burst_reaches_the_run(scheduler) -> None:
-    beat.run_beat(["-b"])
+    _run_beat(["-b"])
 
     assert _ran(scheduler).ran == {"burst": True}
 
 
 @pytest.mark.parametrize(("flag", "level"), [("-v", "DEBUG"), ("--verbose", "DEBUG"), ("--quiet", "WARNING")])
 def test_the_log_level_follows_the_vendor_flags(scheduler, flag: str, level: str) -> None:
-    beat.run_beat([flag])
+    _run_beat([flag])
 
     assert scheduler.levels == [level]  # type: ignore[attr-defined]
 
 
 def test_the_job_class_is_handed_through(scheduler) -> None:
-    beat.run_beat(["-j", "rq.job.Job"])
+    _run_beat(["-j", "rq.job.Job"])
 
     assert _ran(scheduler).kwargs["job_class"] == "rq.job.Job"
 
@@ -138,7 +146,7 @@ def test_the_job_class_is_handed_through(scheduler) -> None:
 def test_path_and_pid_apply_as_the_vendor_does(scheduler, tmp_path: Path) -> None:
     pid_file = tmp_path / "beat.pid"
 
-    beat.run_beat(["--path", "/opt/a:/opt/b", "--pid", str(pid_file)])
+    _run_beat(["--path", "/opt/a:/opt/b", "--pid", str(pid_file)])
 
     assert sys.path[:2] == ["/opt/a", "/opt/b"]
     assert pid_file.read_text() == str(os.getpid())
@@ -147,7 +155,7 @@ def test_path_and_pid_apply_as_the_vendor_does(scheduler, tmp_path: Path) -> Non
 @pytest.mark.parametrize("args", [["-H", "localhost"], ["--port", "6379"], ["-q", "x.Queue"]])
 def test_the_connection_and_queue_class_options_are_refused(scheduler, args: list[str]) -> None:
     with pytest.raises(click.UsageError):
-        beat.run_beat(args)
+        _run_beat(args)
 
     assert scheduler.instances == []
 
@@ -156,6 +164,6 @@ def test_the_connection_is_closed_after_the_scheduler_ends(scheduler, monkeypatc
     closed: list[bool] = []
     monkeypatch.setattr(Redis, "close", lambda self: closed.append(True))
 
-    beat.run_beat(["-b"])
+    _run_beat(["-b"])
 
     assert closed == [True]

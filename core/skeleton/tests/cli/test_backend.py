@@ -19,13 +19,14 @@ import signal
 import sys
 from collections.abc import Mapping
 from contextlib import asynccontextmanager
+from pathlib import Path
 from types import SimpleNamespace
 from typing import ClassVar
 
 import pytest
 from click.testing import CliRunner
 from tai42_contract.app import tai42_app
-from tai42_contract.backend.runtime import BackendRuntime, ExecutionMode
+from tai42_contract.backend.runtime import BackendRuntime, ExecutionMode, ProgressLiveness
 from tai42_kit.backend import ManagedBackend
 from tai42_kit.logging import redaction as kit_redaction
 from tai42_kit.signals import signal_chain
@@ -318,6 +319,27 @@ def test_main_sets_manifest_env_and_runs_loop(monkeypatch: pytest.MonkeyPatch) -
     assert captured == [["--flag", "worker"]] or captured == [["worker", "--flag"]]
 
 
+def test_main_fails_when_the_backend_refuses_its_argv(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A runtime that refuses an option it is handed (``tai backend worker --scheduler x``) fails the command."""
+    captured: list[list[str]] = []
+
+    async def refusing_run_backend(args: list[str]) -> None:
+        captured.append(list(args))
+        raise ValueError("tai backend worker refuses --scheduler")
+
+    monkeypatch.setattr(backend, "run_backend", refusing_run_backend)
+    import uvloop
+
+    monkeypatch.setattr(uvloop, "run", asyncio.run)
+
+    result = CliRunner().invoke(backend.main, ["worker", "--scheduler", "x"])
+
+    assert result.exit_code == 1
+    assert isinstance(result.exception, ValueError)
+    assert str(result.exception) == "tai backend worker refuses --scheduler"
+    assert captured == [["worker", "--scheduler", "x"]]
+
+
 def test_main_falls_back_to_asyncio_when_uvloop_missing(monkeypatch: pytest.MonkeyPatch) -> None:
     # Force the ``import uvloop`` to fail so the asyncio fallback branch runs.
     monkeypatch.setitem(sys.modules, "uvloop", None)
@@ -524,6 +546,7 @@ class _DrainingWorker(BackendRuntime):
     name = "worker"
     mode = ExecutionMode.on_loop
     consumes_work = True
+    liveness = ProgressLiveness()
     latest: ClassVar[_DrainingWorker | None] = None
 
     def __init__(self) -> None:
@@ -551,7 +574,7 @@ class _DrainingBackend(ManagedBackend):
 
 
 async def test_run_backend_sigterm_drains_the_backend_and_still_runs_teardown(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """One SIGTERM, two subscribers — the composed-chain regression.
 
@@ -562,6 +585,7 @@ async def test_run_backend_sigterm_drains_the_backend_and_still_runs_teardown(
     teardown is skipped. Both must hold.
     """
     _DrainingWorker.latest = None
+    monkeypatch.setenv("TAI_BACKEND_LIVENESS_PATH", str(tmp_path / "liveness"))
 
     class _DrainApp:
         def __init__(self) -> None:

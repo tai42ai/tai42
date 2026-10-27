@@ -8,7 +8,8 @@ composed from: data and text transforms, LangChain/FastMCP/MCP tool glue, the
 pooled-client facade and concrete drivers (`redis`, `curl`, `mcp`, `postgres`,
 `http`), the SSRF URL guard and safe download, MCP client transports over a UDS
 socket, the settings machinery, LLM/embedding factories with checkpoint/store
-backends, and logging setup. Heavier backends are gated behind extras and
+backends, logging setup, and the backend liveness file with its
+`tai42-backend-probe` console script. Heavier backends are gated behind extras and
 imported lazily. Typed package (`py.typed`).
 
 ## Position in the ecosystem
@@ -57,6 +58,26 @@ checkpoint/store backends `tai42-kit[langgraph-checkpoint-postgres]`,
 `tai42-kit[langgraph-checkpoint-sqlite]`, and LLM-provider backends like
 `tai42-kit[anthropic]`, `tai42-kit[google]`, `tai42-kit[mistral]`, `tai42-kit[xai]`,
 `tai42-kit[ollama]`, `tai42-kit[huggingface]`.
+
+## Backend liveness
+
+`tai42_kit.liveness` holds the file a backend loop process reports its progress
+into (`LivenessFile`), its `TAI_BACKEND_LIVENESS_` settings (`PATH`, `INTERVAL`,
+`GRACE`), and the reading of it (`check_liveness`). Each report writes the
+process's pid and a horizon: the seconds within which the next pass is
+promised, the report's own promise plus `INTERVAL`. The file is rewritten only
+when the promise already in it would expire before the next pass, so a steady
+loop writes about once per `INTERVAL`. A file holding the pid of another live
+process is refused: each process needs its own path. Of two processes claiming
+one file at once, the second is refused. A process removes its file when it
+exits (a file left by a process that no longer exists is removed too), and a
+report after that removal raises instead of writing the file again.
+
+The `tai42-backend-probe` console script reads the file at
+`TAI_BACKEND_LIVENESS_PATH` and prints one line: it exits 0 while the file's age
+is at most its horizon plus the grace (`--grace`, default
+`TAI_BACKEND_LIVENESS_GRACE`), and 1 when the file is stale or missing, so it
+serves as an orchestrator's exec liveness probe.
 
 ## Development
 

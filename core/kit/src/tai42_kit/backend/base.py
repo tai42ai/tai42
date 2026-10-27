@@ -20,10 +20,12 @@ from tai42_contract.backend.runtime import (
     BackendRuntime,
     ExecutionMode,
     FleetOpApplied,
+    ProgressLiveness,
 )
 
 from tai42_kit.backend.conformance import OVERRIDDEN_LAUNCH_VERDICT, check_runtime_declarations
 from tai42_kit.backend.settings import BackendDispatchSettings
+from tai42_kit.liveness import LivenessFile, backend_liveness_settings
 from tai42_kit.signals import SignalSubscription, signal_chain
 
 logger = logging.getLogger(__name__)
@@ -108,20 +110,21 @@ class ManagedBackend(Backend):
         """
         self._drain_overran = False
         runtime = self._select(args)
+        liveness = self._bind_liveness(runtime)
         if not runtime.consumes_work:
             # A runtime that pulls no work has nothing to gate on and nothing to
             # drain: an ``inline`` one keeps whatever signal disposition its
             # engine installs, which is safe because nothing else runs on its loop.
             # It still BUILDS: constructing engine objects is every runtime's own
             # step, and only the readiness gate and the drain wiring are the
-            # consumer's.
+            # consumer's. A progress runtime still reports its loop.
             try:
                 await runtime.build()
                 await self._run_body(runtime)
             except BaseException:
-                await self._release(runtime, propagating=True)
+                await self._unwind(runtime, liveness, propagating=True)
                 raise
-            await self._release(runtime, propagating=False)
+            await self._unwind(runtime, liveness, propagating=False)
             return
 
         # Registered BEFORE the build, so an op landing during a long boot is not
@@ -134,9 +137,9 @@ class ManagedBackend(Backend):
             with self._drain_wiring(runtime):
                 await self._run_body(runtime)
         except BaseException:
-            await self._release(runtime, propagating=True)
+            await self._unwind(runtime, liveness, propagating=True)
             raise
-        await self._release(runtime, propagating=False)
+        await self._unwind(runtime, liveness, propagating=False)
 
     # -- dispatch ------------------------------------------------------------
 
@@ -293,6 +296,55 @@ class ManagedBackend(Backend):
             )
             return True
         return False
+
+    # -- liveness ------------------------------------------------------------
+
+    def _bind_liveness(self, runtime: BackendRuntime) -> LivenessFile | None:
+        """Bind a liveness file as the reporter of a runtime that declares :class:`ProgressLiveness`.
+
+        Bound before ``build``, so the engine objects the runtime builds can hold its
+        reporter. A runtime declaring any other kind is probed by the orchestrator
+        directly and gets no file.
+        """
+        if not isinstance(runtime.liveness, ProgressLiveness):
+            return None
+        liveness = LivenessFile.from_settings(backend_liveness_settings())
+        runtime.bind_progress(liveness.report)
+        return liveness
+
+    def _release_liveness(self, runtime: BackendRuntime, liveness: LivenessFile | None, *, propagating: bool) -> None:
+        """Remove the liveness file on the way out of ``launch``, so no probe reads a process that has exited.
+
+        The same policy as :meth:`_release`: while an exception is propagating, a
+        removal failure is REPORTED and swallowed so the original cause still
+        reaches the caller; on the clean path it propagates.
+        """
+        if liveness is None:
+            return
+        try:
+            liveness.remove()
+        except Exception:
+            if not propagating:
+                raise
+            logger.exception(
+                "%s %s: removing the liveness file %s failed while the launch was already unwinding",
+                self.label,
+                runtime.name,
+                liveness.path,
+            )
+
+    async def _unwind(self, runtime: BackendRuntime, liveness: LivenessFile | None, *, propagating: bool) -> None:
+        """Release the engine resources, then the liveness file, on every exit path out of ``launch``.
+
+        The file is removed even when the clean-path release raises: that failure
+        then propagates, and the removal runs under the propagating policy.
+        """
+        try:
+            await self._release(runtime, propagating=propagating)
+        except BaseException:
+            self._release_liveness(runtime, liveness, propagating=True)
+            raise
+        self._release_liveness(runtime, liveness, propagating=propagating)
 
     async def _release(self, runtime: BackendRuntime, *, propagating: bool) -> None:
         """Release the runtime's engine resources on the way out of ``launch``.
