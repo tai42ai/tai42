@@ -1,9 +1,12 @@
 """Settings registry: every concrete ``TaiBaseSettings`` subclass self-registers
-as a plain-data group. Extraction honors aliases, marks secrets, skips
-non-JSON-safe defaults, and references nested settings as their own group."""
+as a plain-data group. Extraction honors aliases, marks secrets, emits each
+default in its JSON form (none for a default without one), and references
+nested settings as their own group."""
 
 import enum
 import json
+from datetime import timedelta
+from pathlib import Path
 from typing import Annotated, ClassVar, cast
 
 import pytest
@@ -327,7 +330,7 @@ def test_dict_builtin_default_factory_reports_empty_dict():
 def test_set_builtin_default_factory_is_called_and_yields_empty_set():
     # ``set`` is a builtin (uninspectable signature): it does NOT need validated
     # data, so it is called and returns an empty set rather than being skipped.
-    # (The field-level default is stripped by JSON-safety, so assert the resolve.)
+    # (This asserts the resolved value; the emitted field default is its list form.)
     assert _factory_needs_validated_data(set) is False
     assert _resolve_default(FieldInfo(default_factory=set)) == set()
 
@@ -372,6 +375,29 @@ def test_non_json_safe_default_is_emitted_as_none():
     # value.
     field = _field("BinaryDefaultSettings", "blob")
     assert field.default is None
+
+
+def test_path_duration_and_set_defaults_are_emitted_in_their_env_form(monkeypatch: pytest.MonkeyPatch):
+    class TypedDefaultSettings(TaiBaseSettings):
+        model_config = SettingsConfigDict(env_prefix="TYPED_")
+
+        state_path: Path = Path("/srv/state")
+        session_ttl: timedelta = timedelta(days=180)
+        mime_allowlist: frozenset[str] = frozenset({"text/plain", "image/png", "application/pdf"})
+
+    # A path is emitted as its string, a duration as its ISO 8601 form, and a set as
+    # a sorted list, so the emitted value is stable across processes.
+    assert _field("TypedDefaultSettings", "state_path").default == "/srv/state"
+    assert _field("TypedDefaultSettings", "session_ttl").default == "P180D"
+    assert _field("TypedDefaultSettings", "mime_allowlist").default == ["application/pdf", "image/png", "text/plain"]
+
+    # Each emitted form is one the field reads back from the environment as the
+    # same default (a scalar as the raw value, a collection as JSON).
+    defaults = TypedDefaultSettings()
+    for info in _group("TypedDefaultSettings").fields:
+        value = info.default
+        monkeypatch.setenv(info.env_var, value if isinstance(value, str) else json.dumps(value))
+    assert TypedDefaultSettings() == defaults
 
 
 def test_fieldless_subclass_is_not_registered():
