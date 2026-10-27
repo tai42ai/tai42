@@ -12,9 +12,17 @@
 // With --dry-run nothing is written: the would-be releases and release pull
 // requests are printed instead, each pull request with its title, branch and
 // releaseData. Log lines go to stderr.
+//
+// The config's `python-workspace` plugin queries the ranges of this script's
+// own checkout, which the release job checks out at the target branch.
 
+const path = require('node:path');
 const {parseArgs} = require('node:util');
 const {GitHub, Manifest, setLogger} = require('release-please');
+const {registerPythonWorkspace} = require('./python-workspace');
+
+// The workspace checkout this script belongs to.
+const WORKSPACE_ROOT = path.resolve(__dirname, '..', '..');
 
 const logger = {
   error: (...args) => console.error(...args),
@@ -80,6 +88,7 @@ function gitHubManifests(opts) {
 
 async function main(argv, manifests = gitHubManifests, out = process.stdout) {
   const opts = options(argv);
+  registerPythonWorkspace({root: WORKSPACE_ROOT});
   const load = manifests(opts);
   let result;
   if (opts.dryRun) {

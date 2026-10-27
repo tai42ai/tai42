@@ -8,7 +8,6 @@ from pathlib import Path
 
 import pytest
 from _range_sync_support import (
-    _PENDING_REPIN_WINDOW,
     _build_major_tree,
     _build_tree,
     _kit_deps,
@@ -68,32 +67,33 @@ def test_comments_and_formatting_preserved(tmp_path: Path):
     assert "# version-less first-party ref must be left untouched" in demo_text
 
 
-def test_core_major_bump_produces_repin_and_converges(tmp_path: Path):
-    """The two-train contract: the core release train bumps a depended-upon member
-    and leaves its dependents' ranges stale; the post-merge re-pin (release-repin's
-    range_sync apply) rewrites every dependent and is itself a fixed point, so the
-    follow-up train's re-pin PR carries a self-consistent tree."""
+def test_core_major_with_patch_bumped_dependents_converges_in_one_apply(tmp_path: Path):
+    """A release train carries a core major and a patch release of every dependent whose
+    ranges it moves. One apply over that tree rewrites exactly those dependents, and a second
+    apply finds nothing: a patch release never moves a derived range (the floor is major.minor),
+    so the train's tree is self-consistent after the single apply its follow-up commit runs."""
     _build_tree(tmp_path)
     range_sync.apply(tmp_path)  # fleet in sync at contract 0.3.0
 
-    # The core train ships only the member bump; dependents are untouched on it.
-    contract = tmp_path / "core/contract/pyproject.toml"
-    contract.write_text(contract.read_text().replace('version = "0.3.0"', 'version = "1.0.0"'))
+    for rel, old, new in (
+        ("core/contract/pyproject.toml", 'version = "0.3.0"', 'version = "1.0.0"'),
+        ("core/kit/pyproject.toml", 'version = "0.3.0"', 'version = "0.3.1"'),
+        ("plugins/demo/pyproject.toml", 'version = "0.2.1"', 'version = "0.2.2"'),
+    ):
+        path = tmp_path / rel
+        path.write_text(path.read_text().replace(old, new))
 
-    repin = range_sync.apply(tmp_path)  # what release-repin runs on the tag
-    assert repin.dirty
-    repinned = {member for member, _ in repin.spec_changes}
-    assert repinned == {"core/kit", "plugins/demo"}  # every dependent, none missed
+    report = range_sync.apply(tmp_path)
+    assert report.dirty
+    assert {member for member, _ in report.spec_changes} == {"core/kit", "plugins/demo"}
     assert "tai42-contract>=1.0,<2" in (tmp_path / "core/kit/pyproject.toml").read_text()
 
-    # The re-pin PR's own tree is self-consistent — re-applying changes nothing.
     assert not range_sync.apply(tmp_path).dirty
 
 
-def test_follow_up_patch_bumps_are_repin_noop(tmp_path: Path):
-    """The follow-up train bumps the re-pinned dependents by a patch; a patch never
-    moves a derived range (the floor is major.minor), so range_sync finds no drift
-    on that train's tags and no third train opens — the loop terminates."""
+def test_patch_bumps_leave_every_range_in_sync(tmp_path: Path):
+    """A patch release of every member never moves a derived range (the floor is
+    major.minor), so a synced tree stays in sync."""
     _build_tree(tmp_path)
     range_sync.apply(tmp_path)
 
@@ -168,15 +168,9 @@ def test_malformed_pin_raises_via_check(tmp_path: Path):
 
 
 def test_tracked_workspace_declares_no_preserved_pins():
-    """Outside the pending-re-pin window the tracked workspace declares no preserved
-    pins, so ``check`` reports no warnings, no preserved ranges, and no untouched
-    descriptors. During that window (a release-please train branch or the main push
-    that opens it) first-party caps are deliberately stale until the post-tag
-    release-repin, so the assertions are skipped then — mirroring test_fleet's
-    window-aware cap admission. Range drift between derived and declared ranges is
-    checked by the range-sync gate, not here."""
-    if _PENDING_REPIN_WINDOW:
-        pytest.skip("pending re-pin window: first-party caps are deliberately stale until the post-tag release-repin")
+    """The tracked workspace declares no preserved pins, so ``check`` reports no warnings, no
+    preserved ranges, and no untouched descriptors. Range drift between derived and declared
+    ranges is checked by the range-sync gate, not here."""
     report = range_sync.check(range_sync._repo_root())
     assert report.warnings == []
     assert report.preserved == []

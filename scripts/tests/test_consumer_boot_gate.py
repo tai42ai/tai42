@@ -108,7 +108,6 @@ def test_a_tag_on_head_counts_as_released_by_the_tree(core_repo: Path):
     candidate = gate.read_candidate(core_repo, _CORE)
     assert [m.bump for m in candidate.members] == ["minor", None]
     assert candidate.bump == "minor"
-    assert gate.release_bump_set(core_repo) == {"a"}
 
 
 def test_a_first_release_reads_major(core_repo: Path):
@@ -470,7 +469,7 @@ def _plugin_tree(repo: Path, plugins: dict[str, str], manifest: dict[str, str]) 
     (repo / "release-please-config.json").write_text(json.dumps({"packages": config_packages}))
 
 
-def test_release_bump_set_flags_untagged_manifest_versions(tmp_path: Path):
+def test_released_packages_flags_untagged_manifest_versions(tmp_path: Path):
     repo = tmp_path / "r"
     repo.mkdir()
     _git(repo, "init", "-q")
@@ -484,12 +483,14 @@ def test_release_bump_set_flags_untagged_manifest_versions(tmp_path: Path):
     (repo / "f").write_text("x")
     _git(repo, "add", ".")
     _git(repo, "commit", "-qm", "c")
-    _git(repo, "tag", "tai42-plug-a-v1.2.0")  # a is published; b's 2.0.0 is not tagged (being bumped)
+    _git(repo, "tag", "tai42-plug-a-v1.2.0")  # a is published; b's 2.0.0 is not tagged (a first release)
     _git(repo, "commit", "-q", "--allow-empty", "-m", "c2")
-    assert gate.release_bump_set(repo) == {"tai42-plug-b"}
+    assert gate.released_packages(repo) == gate.ReleasedPackages(
+        own_changes=frozenset({"tai42-plug-b"}), bookkeeping_only=frozenset()
+    )
 
 
-def test_enumerate_first_party_excludes_bump_set_and_skips_unpublished(tmp_path: Path, monkeypatch):
+def test_enumerate_first_party_excludes_own_change_releases_and_skips_unpublished(tmp_path: Path, monkeypatch):
     repo = tmp_path / "r"
     repo.mkdir()
     _plugin_tree(
@@ -499,11 +500,15 @@ def test_enumerate_first_party_excludes_bump_set_and_skips_unpublished(tmp_path:
     )
     # enumerate_first_party calls these within its own module, so patch the definition
     # module (a facade-level patch would not reach the intra-module call).
-    monkeypatch.setattr(cbg_consumers, "release_bump_set", lambda _root: {"tai42-plug-b"})
+    monkeypatch.setattr(
+        cbg_consumers,
+        "released_packages",
+        lambda _root: gate.ReleasedPackages(own_changes=frozenset({"tai42-plug-b"}), bookkeeping_only=frozenset()),
+    )
     pypi = {"tai42-plug-a": "1.2.0", "tai42-plug-c": None}
     monkeypatch.setattr(cbg_consumers, "latest_pypi_version", lambda name: pypi[name])
     consumers, notices = gate.enumerate_first_party(repo)
-    # plug-b excluded (bump set); plug-c skipped (no PyPI, a notice not a failure); plug-a booted.
+    # plug-b excluded (released with its own changes); plug-c skipped (no PyPI, a notice not a failure); plug-a booted.
     assert [c.install_arg for c in consumers] == ["tai42-plug-a==1.2.0"]
     assert any("tai42-plug-c" in n and "no PyPI release" in n for n in notices)
 

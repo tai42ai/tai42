@@ -52,17 +52,36 @@ dependency refuses. A ``pinned`` name that is not a first-party dependency of
 that member is a loud error, and a ``[tool.range-sync]`` table on a non-member
 pyproject (e.g. the root) is a loud error too — it would silently do nothing.
 
+Releases keep the ranges current in the same release pull request that bumps the
+versions: the release tooling asks ``--query`` which members' ranges a candidate
+set of versions moves and releases each of them alongside, the release pull request's
+follow-up commit runs APPLY so its tree carries the derived ranges, and the
+publish job runs ``--check`` before building a wheel, so no wheel is built from a
+tree whose declared ranges differ from the ones it derives.
+
 CLI:
   python scripts/range_sync.py            # APPLY: rewrite in place (default)
   python scripts/range_sync.py --check    # verify sync; exit 1 + diff on drift
+  python scripts/range_sync.py --query    # stdin {"<unit path>": "<version>"} ->
+                                          # stdout {"members": [{"path", "changes"}]}
+
+``--query`` reads a JSON object mapping release-unit paths (workspace members and
+descriptor-only components) to candidate versions, and prints every unit whose
+ranges or ``contract:`` pins would change under them, each with the changes
+(``file``, ``subject``, ``from``, ``to``). It writes no file; a path that is no
+release unit or a value that is no release version is an error.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
+import sys
 from pathlib import Path
+from typing import TextIO
 
 from _range_sync.pyproject_specs import PIN_KEY, PIN_TABLE
+from _range_sync.query import query
 from _range_sync.sync import SyncReport, _format_drift, apply, check
 
 
@@ -81,12 +100,42 @@ def _print_descriptor_untouched(report: SyncReport) -> None:
         print(f"range-sync: {yaml_path}: descriptor left untouched (pinned, underivable floor), at {kept!r}")
 
 
+def _read_versions(stream: TextIO) -> dict[str, str]:
+    """The ``--query`` input: a JSON object of release-unit path -> candidate version strings."""
+    versions = json.loads(stream.read())
+    if not isinstance(versions, dict) or not all(
+        isinstance(path, str) and isinstance(version, str) for path, version in versions.items()
+    ):
+        raise ValueError("range-sync query: stdin must be a JSON object of path -> version strings")
+    return versions
+
+
+def _print_query(root: Path, versions: dict[str, str]) -> None:
+    members = [
+        {
+            "path": unit,
+            "changes": [
+                {"file": change.file, "subject": change.subject, "from": change.old, "to": change.new}
+                for change in changes
+            ],
+        }
+        for unit, changes in query(root, versions).items()
+    ]
+    print(json.dumps({"members": members}))
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
         "--check",
         action="store_true",
         help="verify ranges are already synced; exit 1 with a diff on drift",
+    )
+    mode.add_argument(
+        "--query",
+        action="store_true",
+        help="read candidate versions as JSON on stdin; print the members whose ranges they move as JSON",
     )
     parser.add_argument(
         "--root",
@@ -96,6 +145,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
     root = (args.root or _repo_root()).resolve()
+
+    if args.query:
+        _print_query(root, _read_versions(sys.stdin))
+        return 0
 
     if args.check:
         report = check(root)

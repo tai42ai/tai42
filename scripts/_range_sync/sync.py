@@ -236,8 +236,17 @@ def check(root: Path) -> SyncReport:
     Returns a report of any drift (does not modify files).
     """
     members = discover_members(root)
+    return drift_under(root, members, first_party_versions(members))
+
+
+def drift_under(root: Path, members: list[Path], first_party: dict[str, str]) -> SyncReport:
+    """Report every specifier and contract pin that differs from the ranges *first_party* derives.
+
+    *first_party* maps each normalized member name to the version its ranges derive from: the
+    on-disk versions for ``check``, a candidate release's versions for a query. Never modifies
+    any file.
+    """
     _assert_no_stray_pin_tables(root, members)
-    first_party = first_party_versions(members)
     contract_range = _contract_range(first_party)
     preserved_contract = _preserved_contract_ranges(members, first_party, root)
     report = _empty_report()

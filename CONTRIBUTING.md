@@ -79,6 +79,26 @@ releases nothing for that package. Non-conforming commits and PR titles fail the
 `!` or `?`) in a commit header, a `BREAKING CHANGE:` footer or the PR title: the
 release notes are parsed as HTML, so write placeholders without angle brackets.
 
+First-party dependency ranges and `tai-plugin.yml` `contract:` pins are derived
+from the sibling versions by `scripts/range_sync.py` (`>=major.minor,<major+1`).
+The release PR keeps them current: release-please's `python-workspace` plugin
+(`scripts/release-please/python-workspace.js`) asks `range_sync.py --query`
+which members the release's versions move ranges for and adds a patch release
+of each one to the same PR, with the moved ranges in its notes; the PR's
+follow-up commit runs `range_sync.py` and `uv lock`. CI runs
+`range_sync.py --check` on every change, and the release workflow runs it before
+building, so no package publishes a range that differs from the one its
+siblings derive. Before that follow-up commit writes the ranges,
+`scripts/release_train_check.py` fails the run unless every unit whose ranges
+or contract pins are about to move is one the release PR releases.
+
+Pull requests to `main` merge only when they are up to date with it (the branch
+protection's "Require branches to be up to date before merging"). The release
+PR is rebuilt from the tip of `main` on every push and its ranges are derived
+from that tip, so the requirement makes the release PR merge only the tree its
+CI proved, and makes a development PR's `range_sync.py --check` run against the
+`main` it lands on. A fork sets the same protection on its own `main`.
+
 The `release-label` check asks release-please what it would mint for the pull
 request on top of everything unreleased on main and runs the release API-diff
 gate at that version; release-please's own release PR (its

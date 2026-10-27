@@ -81,11 +81,10 @@ jobs:
       browser_engines: ${{ steps.assemble.outputs.browser_engines }}
       browser_lane: ${{ steps.assemble.outputs.browser_lane }}
       needs_heavy: ${{ steps.assemble.outputs.needs_heavy }}
-      is_train: ${{ steps.assemble.outputs.is_train }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        # Full history so the version-only classifier can diff the base...head
-        # range (scripts/version_only_diff.py, the needs_heavy gate below).
+        # Full history so the release-bookkeeping classifier can diff the base...head
+        # range (scripts/release_bookkeeping_diff.py, the needs_heavy gate below).
         with:
           fetch-depth: 0
       - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
@@ -146,7 +145,7 @@ jobs:
           # The head commit's message on a push (empty otherwise): the train-detection
           # below reads its title to recognise release-please's merge commit on main.
           HEAD_COMMIT_MSG: ${{ github.event.head_commit.message }}
-          # The range the version-only classifier diffs: a PR's base/head, or a
+          # The range the release-bookkeeping classifier diffs: a PR's base/head, or a
           # push's before/after. Empty on an event that carries neither, which
           # leaves needs_heavy true (the heavy lanes run) — the safe default.
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
@@ -177,7 +176,6 @@ jobs:
               echo "browser_engines=$(engine_list "$WIDEN")"
               echo 'browser_lane=true'
               echo 'needs_heavy=true'
-              echo 'is_train=false'
             } >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -188,9 +186,9 @@ jobs:
           fi
           # The release-please train PR is the tree that gets tagged and published on
           # merge, so it runs the full CHECK matrix (ruff/pyright/unit for every
-          # member) rather than the lock-incidental subset its version-only diff would
-          # otherwise select. The heavy e2e / browser lanes add no signal to a
-          # version-only tree and are gated off it by needs_heavy below.
+          # member) rather than the lock-incidental subset its bookkeeping-only diff
+          # would otherwise select. The heavy e2e / browser lanes add no signal to a
+          # bookkeeping-only tree and are gated off it by needs_heavy below.
           case "${HEAD_REF:-}" in
             release-please--*) CORE=true ;;
           esac
@@ -289,22 +287,23 @@ jobs:
           fi
           # The heavy lanes — the e2e backend matrix and the ui-e2e browser matrix,
           # the jobs that boot service stacks or browsers — carry the CI cost. They
-          # add no signal to a commit that only carries release version bumps, so
+          # add no signal to a commit that only carries release version bumps (and the
+          # first-party ranges they derive, which change nothing the workspace installs), so
           # re-running them on every update of a release-please train (or on the
-          # version-only merge it lands on main) is pure waste. Gate them off a
+          # release merge it lands on main) is pure waste. Gate them off a
           # release-please train branch (this PR's head, or the merge push's ref) and
-          # off any version-only diff; a forced-full dispatch and the weekly schedule
+          # off any bookkeeping-only diff; a forced-full dispatch and the weekly schedule
           # keep them on unconditionally (handled above by FORCE_FULL / the ui lane).
           needs_heavy=true
-          # A release-please train carries only version bumps; it is detected once here
-          # and surfaced as the is_train output. The train enters through two doors: the
+          # A release-please train carries only version bumps and their derived ranges;
+          # it is detected once here. The train enters through two doors: the
           # train PR (its head_ref, or a push to that same release-please-- branch) and
           # the merge commit release-please lands on main (a push whose ref is main and
           # whose title is release-please's own — the default `chore: release main`,
-          # squash-merged as `chore: release main (#N)`). The merge push opens the same
-          # pending-re-pin window the PR does, so the same gating must hold across it; no
+          # squash-merged as `chore: release main (#N)`). The merge push carries the same
+          # release the PR does, so the same gating holds across it; no
           # other main push is a train. A forced-full dispatch and the weekly schedule
-          # leave is_train false so every gate runs unconditionally.
+          # leave is_train false so every heavy lane runs.
           is_train=false
           if [ "$FORCE_FULL" != "true" ]; then
             case "${HEAD_REF:-}" in release-please--*) is_train=true ;; esac
@@ -315,13 +314,13 @@ jobs:
                 is_train=true
               fi
             fi
-            version_only=false
+            bookkeeping_only=false
             if [ "$is_train" != "true" ] && [ -n "${BASE_SHA:-}" ] && [ -n "${HEAD_SHA:-}" ]; then
-              if python3 scripts/version_only_diff.py --base "$BASE_SHA" --head "$HEAD_SHA"; then
-                version_only=true
+              if python3 scripts/release_bookkeeping_diff.py --base "$BASE_SHA" --head "$HEAD_SHA"; then
+                bookkeeping_only=true
               fi
             fi
-            if [ "$is_train" = "true" ] || [ "$version_only" = "true" ]; then
+            if [ "$is_train" = "true" ] || [ "$bookkeeping_only" = "true" ]; then
               needs_heavy=false
             fi
           fi
@@ -339,7 +338,6 @@ jobs:
             echo "browser_engines=$(engine_list "$run_browsers")"
             echo "browser_lane=false"
             echo "needs_heavy=$needs_heavy"
-            echo "is_train=$is_train"
           } >> "$GITHUB_OUTPUT"
 
   check:
@@ -404,58 +402,16 @@ jobs:
       - name: Pyright
         working-directory: ${{ matrix.dir }}
         run: uv run --no-sync pyright
-      - name: Contract admission
-        # Whether this member's declared tai42-contract range admits the workspace
-        # contract version. On a release train the contract member is bumped ahead of
-        # its dependents' ranges, so a dependent's code quarantines its own routers at
-        # runtime and its suite cannot pass until the post-merge re-pin widens the
-        # range; the Pytest steps below read this to skip exactly those members. The
-        # contract member declares no such range and always admits.
-        id: admit
-        run: |
-          set -euo pipefail
-          uv run --no-sync python - "${{ matrix.dir }}" <<'PY'
-          import os
-          import sys
-          import tomllib
-          from pathlib import Path
-
-          from packaging.requirements import Requirement
-          from packaging.specifiers import SpecifierSet
-          from packaging.utils import canonicalize_name
-
-          member = Path(sys.argv[1])
-          contract_version = tomllib.loads(
-              Path("core/contract/pyproject.toml").read_text()
-          )["project"]["version"]
-          project = tomllib.loads((member / "pyproject.toml").read_text())["project"]
-          requirements = list(project.get("dependencies", []))
-          for group in project.get("optional-dependencies", {}).values():
-              requirements.extend(group)
-          admits = True
-          for raw in requirements:
-              req = Requirement(raw)
-              if canonicalize_name(req.name) == "tai42-contract" and not SpecifierSet(
-                  str(req.specifier)
-              ).contains(contract_version, prereleases=True):
-                  admits = False
-          with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
-              fh.write(f"admits={'true' if admits else 'false'}\n")
-          print(f"member={member} contract={contract_version} admits={admits}")
-          PY
       - name: Pytest
         # The e2e member's suite is infra-bound; here it is collect-only (imports +
         # plugin registration, no live Redis/Postgres). Its live pytest is the
         # services-backed e2e job. Every other member runs the full suite with cov.
         # The skeleton, kit, and accounts-postgres members are handled by the two-pass
         # steps below (each needs its real-Postgres integration suite for its floor).
-        # On a release train a member whose declared range runs behind the bumped
-        # contract skips its suite (its code was proven on main; it reloads once the
-        # post-merge re-pin widens the range); a member that still admits runs it.
         # The Celery backend's live prefork-turnover test runs a real worker against
         # the job's Redis service; with the broker named here, an unreachable broker
         # fails that test instead of skipping it.
-        if: ${{ (matrix.dir != 'core/skeleton' && matrix.dir != 'core/kit' && matrix.dir != 'plugins/accounts-postgres') && (needs.changes.outputs.is_train != 'true' || steps.admit.outputs.admits == 'true') }}
+        if: ${{ matrix.dir != 'core/skeleton' && matrix.dir != 'core/kit' && matrix.dir != 'plugins/accounts-postgres' }}
         working-directory: ${{ matrix.dir }}
         env:
           TAI_TEST_CELERY_BROKER: redis://localhost:6379/0
@@ -484,10 +440,7 @@ jobs:
         # pytest-cov aggregates the workers' data so the combined floor is enforced
         # unchanged. The integration pass stays serial: it is small and shares the one
         # Postgres/Redis service, so worker fan-out buys nothing there.
-        # Skipped on a release train while the skeleton's declared contract range runs
-        # behind the bumped contract (its routers quarantine at runtime until the
-        # post-merge re-pin widens the range); its code was proven on main.
-        if: ${{ matrix.dir == 'core/skeleton' && (needs.changes.outputs.is_train != 'true' || steps.admit.outputs.admits == 'true') }}
+        if: ${{ matrix.dir == 'core/skeleton' }}
         working-directory: ${{ matrix.dir }}
         run: |
           set -euo pipefail
@@ -508,10 +461,7 @@ jobs:
         # coverage accumulated (--cov-append); the final report applies the package's
         # fail_under against the COMBINED data. The service starts each job empty, and the
         # integration fixtures apply their schema and use per-run unique keys.
-        # Skipped on a release train while the kit's declared contract range runs behind
-        # the bumped contract; its code was proven on main and runs again once the
-        # post-merge re-pin widens the range.
-        if: ${{ matrix.dir == 'core/kit' && (needs.changes.outputs.is_train != 'true' || steps.admit.outputs.admits == 'true') }}
+        if: ${{ matrix.dir == 'core/kit' }}
         working-directory: ${{ matrix.dir }}
         run: |
           set -euo pipefail
@@ -531,10 +481,7 @@ jobs:
         # report applies the package's fail_under against the COMBINED data. The service
         # starts each job empty; the integration fixtures apply the plugin's own shipped
         # migration chain through the kit runner and TRUNCATE the account tables per test.
-        # Skipped on a release train while the plugin's declared contract range runs
-        # behind the bumped contract; its code was proven on main and runs again once
-        # the post-merge re-pin widens the range.
-        if: ${{ matrix.dir == 'plugins/accounts-postgres' && (needs.changes.outputs.is_train != 'true' || steps.admit.outputs.admits == 'true') }}
+        if: ${{ matrix.dir == 'plugins/accounts-postgres' }}
         working-directory: ${{ matrix.dir }}
         run: |
           set -euo pipefail
@@ -662,20 +609,10 @@ jobs:
       - name: Module length
         run: uv run --no-sync python scripts/check_file_size.py
       - name: Range sync check
-        # Catch first-party range and contract-pin drift a person hand-authored on
-        # a development PR — including a too-wide cap that still admits the sibling.
-        # A release train deliberately runs its dependents' ranges behind the bumped
-        # member until the post-merge `fix(deps)` re-pin (release-repin.yml)
-        # republishes them, so this exact-match gate — which cannot pass while that
-        # re-pin is pending — runs only on development PRs, not the release-please or
-        # fleet-repin branches nor the main push. Installability across the window is
-        # held by test_cap_admission, which checks cap admission against the re-pinned
-        # ranges while a re-pin is pending (main push / release train) and the on-disk
-        # ranges on a development PR.
-        if: >-
-          github.event_name == 'pull_request' &&
-          !startsWith(github.head_ref, 'release-please--') &&
-          github.head_ref != 'fleet-repin'
+        # Every first-party range and contract pin must be the one its sibling
+        # versions derive — including a too-wide cap that still admits the sibling.
+        # A release train passes too: its sync-lock commit writes the ranges its
+        # version bumps move.
         run: uv run --no-sync python scripts/range_sync.py --check
       - name: Fleet consistency
         run: uv run pytest tests scripts/tests
@@ -1221,9 +1158,10 @@ jobs:
           uv run --no-project --python 3.13 --with pyyaml --with-editable ./core/cli python scripts/consumer_boot_gate.py $WHEELS
 
   # Enumerate the first-party plugins to boot: each at its latest published PyPI
-  # version that is NOT in this train's bump set (a plugin being released now boots
-  # its unpublished candidate code through its own lanes, not here). Emits a matrix
-  # so the boot job below runs one job per consumer.
+  # version, except a plugin this train releases with changes of its own (it boots
+  # its unpublished candidate code through its own lanes, not here); a plugin
+  # released for its derived ranges alone is booted at its published version. Emits
+  # a matrix so the boot job below runs one job per consumer.
   consumer-boot-gate-plan:
     needs: [reuse, changes]
     if: >-

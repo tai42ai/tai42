@@ -1,10 +1,12 @@
 name: release-please
 
 # release-please runs on every push to main and on manual dispatch, opening or
-# updating the release-train PR; that PR's own CI is the merge gate. Merging the
-# train pushes its merge commit, which re-triggers this workflow to mint the
-# tags; release-please is idempotent, so an already-present tag is a no-op.
-# Publish lanes fire on the tag push, not on this workflow.
+# updating the release-train PR. The train merges only when its own CI is green
+# and its branch is up to date with main (the branch protection of main requires
+# both), so the tree that merges is the tree its CI proved. Merging the train
+# pushes its merge commit, which re-triggers this workflow to mint the tags;
+# release-please is idempotent, so an already-present tag is a no-op. Publish
+# lanes fire on the tag push, not on this workflow.
 on:
   push:
     branches: [main]
@@ -44,14 +46,29 @@ jobs:
         if: env.HAS_RELEASE_TOKEN == 'true'
         working-directory: scripts/release-please
         run: npm ci
+      # The python-workspace plugin asks scripts/range_sync.py which members'
+      # ranges the release moves, so the run needs a Python on PATH.
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        if: env.HAS_RELEASE_TOKEN == 'true'
+        with:
+          version: "0.11.26"
+          enable-cache: true
+      - run: uv python install 3.13
+        if: env.HAS_RELEASE_TOKEN == 'true'
       # release-please from the repo's lockfile, the same pin the release-label
       # check projects with: it creates the releases and tags for a merged
       # release PR, then opens or updates the release PR. Manifest mode reads
       # release-please-config.json + .release-please-manifest.json from the
-      # target branch through the API. The PAT (not GITHUB_TOKEN) is required so
-      # the release PR triggers CI and the tags it creates on merge trigger
-      # release.yml — refs written by GITHUB_TOKEN do not fire workflows. The
-      # token is scoped to this step alone.
+      # target branch through the API; the python-workspace plugin adds a patch
+      # release of every member whose first-party ranges or contract pins the
+      # release moves, asking range_sync.py over this checkout of that branch.
+      # `always-update` rebuilds the open release PR from the target branch's
+      # tip on every push to it, even when its notes are unchanged, so sync-lock
+      # below always re-derives the ranges over the current tree and the
+      # rebuilt train is up to date with main again. The PAT (not GITHUB_TOKEN)
+      # is required so the release PR triggers CI and the tags it creates on
+      # merge trigger release.yml — refs written by GITHUB_TOKEN do not fire
+      # workflows. The token is scoped to this step alone.
       - name: Run release-please
         id: release
         if: env.HAS_RELEASE_TOKEN == 'true'
@@ -60,16 +77,17 @@ jobs:
           TARGET_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           set -euo pipefail
-          node scripts/release-please/run.js --repo-url "$GITHUB_REPOSITORY" --target-branch "$TARGET_BRANCH" > "$RUNNER_TEMP/release.json"
+          uv run --no-project --python 3.13 -- node scripts/release-please/run.js --repo-url "$GITHUB_REPOSITORY" --target-branch "$TARGET_BRANCH" > "$RUNNER_TEMP/release.json"
           cat "$RUNNER_TEMP/release.json"
           echo "pr_branch=$(jq -r '.prs[0].headBranchName // empty' "$RUNNER_TEMP/release.json")" >> "$GITHUB_OUTPUT"
 
-  # release-please bumps [project].version in the changed members' pyproject.toml
-  # but not the root uv.lock, whose workspace entries still record the old
-  # versions, so CI's `uv sync --locked` rejects the release PR. Refresh the one
-  # root lock on the release branch. Workspace siblings resolve in-tree, so there
-  # is nothing to wait for on the index — no ordering wait. Push with the PAT so
-  # CI re-fires on the release PR.
+  # release-please bumps [project].version in the released members' pyproject.toml
+  # but neither the first-party ranges and contract pins those versions move nor
+  # the root uv.lock, whose workspace entries still record the old versions. Write
+  # the ranges with range_sync.py, then refresh the one root lock on the release
+  # branch, so the release PR carries the tree its tags publish. Workspace
+  # siblings resolve in-tree, so there is nothing to wait for on the index — no
+  # ordering wait. Push with the PAT so CI re-fires on the release PR.
   sync-lock:
     needs: release-please
     if: needs.release-please.outputs.pr_branch != ''
@@ -114,14 +132,17 @@ jobs:
           else
             echo "rebuild=false" >> "$GITHUB_OUTPUT"
           fi
-      # First-party tai42-* ranges are NOT re-derived here: a range change squashed
-      # into the release merge is unattributed, so the dependent it re-pins never
-      # gets a version bump and its published wheel keeps the stale pin. The re-pin
-      # lands post-merge as release-repin.yml's `fix(deps)` commit, which the next
-      # train attributes to each dependent. A first-party dep is a specifier-less
-      # editable workspace entry in the lock, so the deferred range change never
-      # touches uv.lock — the only lock staleness on the release PR is the members'
-      # own version bumps, which this refresh clears.
+      # Every unit whose ranges or contract pins are written below must be one
+      # this release PR releases (its version differs from main's), so its
+      # published version carries the new ranges. The python-workspace plugin
+      # adds those releases from the tree its run checked out; a release branch
+      # built on a later main tip can need more, and then this step fails
+      # naming each unit and its moves, and the release-please run for that tip
+      # rebuilds the branch.
+      - name: Check this release releases every unit whose ranges move
+        run: uv run --no-project --python 3.13 python scripts/release_train_check.py --base origin/main
+      - name: Write first-party ranges and contract pins
+        run: uv run --no-project --python 3.13 python scripts/range_sync.py
       - name: Refresh uv.lock
         run: uv lock
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
@@ -141,17 +162,16 @@ jobs:
           for dir in $DIRS; do
             (cd "$dir" && pnpm install --frozen-lockfile && pnpm run build)
           done
-      - name: Commit refreshed lockfile and bundle
+      - name: Commit ranges, lockfile and bundle
         env:
           BRANCH: ${{ needs.release-please.outputs.pr_branch }}
           REBUILD: ${{ steps.detect.outputs.rebuild }}
         run: |
           set -euo pipefail
-          # Stage the refreshed lock and any rebuilt frontend bundle (bundles live
-          # under plugins/), so versions, bundles, and lock land as one commit on
-          # the release PR. Ranges are re-pinned post-merge, not here.
-          git add -- plugins
-          git add -- uv.lock
+          # Stage the written ranges and pins (core, plugins, e2e), any rebuilt
+          # frontend bundle (under plugins/) and the refreshed lock, so they land
+          # as one commit on the release PR.
+          git add -- core plugins e2e uv.lock
           if git diff --cached --quiet; then
             echo "Release artifacts already in sync; nothing to commit."
             exit 0
@@ -159,8 +179,8 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           if [ "$REBUILD" = "true" ]; then
-            git commit -m "chore: sync uv.lock and frontend bundles for release"
+            git commit -m "chore: sync ranges, uv.lock and frontend bundles for release"
           else
-            git commit -m "chore: sync uv.lock for release"
+            git commit -m "chore: sync ranges and uv.lock for release"
           fi
           git push origin "HEAD:$BRANCH"
