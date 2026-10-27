@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from tai42_e2e.variants.backends import BACKENDS, ArqVariant, BackendVariant, CeleryVariant, RqVariant
-from tai42_e2e.variants.census import BrokerLease, BusWorker, bus_census, short_presence_ttl_env
+from tai42_e2e.variants.census import BrokerLease, BusWorker, bus_census, bus_key_root, short_presence_ttl_env
 from tai42_e2e.variants.identities import IDENTITIES, FixtureIdentity, IdentityVariant, RedisIdentity
 from tai42_e2e.variants.resolve import Variants, resolve_variants
 from tai42_e2e.variants.storages import (
@@ -52,6 +52,7 @@ __all__ = [
     "StorageVariant",
     "Variants",
     "bus_census",
+    "bus_key_root",
     "github_stub_base",
     "open_s3_client",
     "resolve_variants",

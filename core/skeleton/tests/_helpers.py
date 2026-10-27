@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Iterator
+from contextlib import contextmanager
 
+import pytest
 from tai42_contract.channels import ChannelAddress, ChannelDelivery, ChannelNotification, SendOutcome
 from tai42_contract.template import TemplatedText
 
+from tai42_skeleton.app import bus_settings as bus_settings_module
 from tai42_skeleton.config.deployment_env import capture_deployment_env, reset_deployment_env
 
 
@@ -17,6 +21,19 @@ def recapture_deployment_env() -> None:
     """
     reset_deployment_env()
     capture_deployment_env()
+
+
+@contextmanager
+def another_skeleton_major(monkeypatch: pytest.MonkeyPatch) -> Iterator[int]:
+    """Run the block as a skeleton of a major other than the running one, and yield that major.
+
+    Bus settings built inside the block are the settings of a worker of that major, so one
+    process can hold workers of two majors on one Redis.
+    """
+    other = bus_settings_module.skeleton_major() + 1
+    with monkeypatch.context() as patch:
+        patch.setattr(bus_settings_module, "skeleton_major", lambda: other)
+        yield other
 
 
 def inline_templated_text(text: TemplatedText) -> str:

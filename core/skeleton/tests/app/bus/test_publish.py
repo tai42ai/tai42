@@ -30,7 +30,7 @@ from tai42_skeleton.app.bus.publish import _ReplyLink
 from tai42_skeleton.config.deployment_env import published_deployment_keys, published_env_readers
 
 from ..._fakes.kit_redis import KitFakeRedis
-from ..._helpers import recapture_deployment_env
+from ..._helpers import another_skeleton_major, recapture_deployment_env
 from .conftest import (
     _drop_presence,
     _FramePubsub,
@@ -180,6 +180,26 @@ async def test_stale_prune_spares_a_name_re_minted_live_before_the_prune(
     assert "serve-1" in await client.smembers(settings.presence_index)
     assert await client.get(settings.presence_key("serve-1")) is not None
     await client.aclose()
+
+
+async def test_the_census_reads_only_the_rows_of_workers_of_its_own_major(
+    wire_bus_client: None, server: fakeredis.FakeServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A worker of another skeleton major on the same Redis and namespace writes a presence row
+    # of its own shape under its own keys: here a row with none of the deployment fields this
+    # major's row carries. The census of this major reads this major's rows alone.
+    with another_skeleton_major(monkeypatch):
+        foreign = make_bus()._settings
+    client: Any = aioredis.FakeRedis(server=server, decode_responses=True)
+    now = "2026-01-01T00:00:00+00:00"
+    foreign_row = {"kind": "serve", "pid": 7, "generation": 1, "joined_at": now, "beat_at": now, "state": "ready"}
+    await client.set(foreign.presence_key("serve-1"), json.dumps(foreign_row), px=5000)
+    await client.sadd(foreign.presence_index, "serve-1")
+    await client.aclose()
+    bus = make_bus()
+    await _register_bare_presence(server, bus._settings, "serve-2", WorkerKind.serve, ttl_ms=5000)
+
+    assert [row.name for row in await bus.census()] == ["serve-2"]
 
 
 async def test_census_reads_the_index_never_a_keyspace_scan(recording_bus_client, server) -> None:

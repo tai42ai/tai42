@@ -99,7 +99,7 @@ class RedisAdmin:
         """Refuse a logical DB that a live foreign worker still heartbeats on.
 
         Every SUT worker (HTTP ``serve`` and the ``backend`` consumer alike)
-        refreshes a TTL-bound ``<ns>:bus:presence:<name>`` key while it runs. A
+        refreshes a TTL-bound ``<ns>:v<major>:bus:presence:<name>`` key while it runs. A
         cleanly torn-down stack leaves only expiring keys whose process is gone; a
         LEAKED worker keeps re-writing its key on this index. No stack of this run
         holds the index yet (allocation is exclusive and pre-spawn), so a presence

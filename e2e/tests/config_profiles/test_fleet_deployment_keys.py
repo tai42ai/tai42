@@ -46,6 +46,7 @@ from tai42_e2e.llmstub import LlmStub
 from tai42_e2e.manifests import build_recycle_stack
 from tai42_e2e.stack import TaiStack
 from tai42_e2e.topology import StackConfig
+from tai42_e2e.variants import bus_key_root
 from tai42_e2e.waiting import WaitTimeoutError, wait_absent_async
 
 _KEY = "TAI_LOG_LEVEL"
@@ -374,7 +375,7 @@ def _presence_pttls_ms(stack: TaiStack) -> dict[str, tuple[str, int]]:
     try:
         pttls: dict[str, tuple[str, int]] = {}
         for worker in stack.census():
-            pttl = client.pttl(f"{resources.bus_namespace}:bus:presence:{worker.name}")
+            pttl = client.pttl(f"{bus_key_root(resources.bus_namespace)}:bus:presence:{worker.name}")
             if not isinstance(pttl, int):
                 raise TypeError(f"PTTL of {worker.name!r} is not an integer: {pttl!r}")
             if pttl > 0:
@@ -430,12 +431,12 @@ def _rows_whose_reader_body_dies_first(stack: TaiStack) -> dict[str, tuple[str, 
     try:
         dying: dict[str, tuple[str, int, int]] = {}
         for worker in stack.census():
-            row_key = f"{resources.bus_namespace}:bus:presence:{worker.name}"
+            row_key = f"{bus_key_root(resources.bus_namespace)}:bus:presence:{worker.name}"
             row, row_pttl = client.get(row_key), client.pttl(row_key)
             if not isinstance(row, str) or not isinstance(row_pttl, int) or row_pttl <= 0:
                 continue
             digest = json.loads(row)["env_readers"]
-            body_pttl = client.pttl(f"{resources.bus_namespace}:env-readers:{digest}")
+            body_pttl = client.pttl(f"{bus_key_root(resources.bus_namespace)}:env-readers:{digest}")
             if not isinstance(body_pttl, int):
                 raise TypeError(f"PTTL of the description {digest!r} is not an integer: {body_pttl!r}")
             if body_pttl < row_pttl:

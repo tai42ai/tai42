@@ -7,19 +7,25 @@ ignored by the reload apply and left out of the env diff on this process too.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Any
 
+import fakeredis
 import pytest
 from pydantic import AliasChoices, Field
 from pydantic_settings import SettingsConfigDict
 from tai42_contract.errors import ClientDisconnectedError
 from tai42_kit.settings import TaiBaseSettings
 
+import tai42_skeleton.app.bus as bus_module
 from tai42_skeleton.app import applied_env
-from tai42_skeleton.app.bus import FleetResult, LocalApplyResult, WorkerKind, WorkerRow, WorkerState
+from tai42_skeleton.app.bus import FleetResult, LocalApplyResult, WorkerBus, WorkerKind, WorkerRow, WorkerState
 from tai42_skeleton.app.bus.ops import FleetOp
+from tai42_skeleton.app.bus_settings import BusRedisSettings, BusSettings
 from tai42_skeleton.config.boundary import counting_diff_keys, refuse_deployment_owned
 from tai42_skeleton.config.deployment_env import (
     DeploymentOwnership,
@@ -32,7 +38,8 @@ from tai42_skeleton.config.deployment_env import (
 )
 
 from .._fakes.bus import FakeBus
-from .._helpers import recapture_deployment_env
+from .._fakes.kit_redis import KitFakeRedis
+from .._helpers import another_skeleton_major, recapture_deployment_env
 from .fake_pipeline import (
     FakeConfigStore,
     _reset_settings_after,  # noqa: F401  — autouse fixture, active on import
@@ -174,6 +181,47 @@ async def test_a_non_transport_census_error_still_raises() -> None:
 
 
 @pytest.mark.usefixtures("restore_applied_env")
+async def test_the_boot_read_judges_by_the_workers_of_its_own_major_beside_a_worker_of_another(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A worker of another skeleton major is live on the same Redis and namespace with a presence
+    # row of its own shape, without the deployment fields this major's row carries. The boot env
+    # bridge's ownership read on this major's bus judges by this major's sibling alone.
+    server = fakeredis.FakeServer()
+
+    @asynccontextmanager
+    async def fake_ctx(client_cls: Any, settings: Any = None, **kwargs: Any) -> AsyncIterator[KitFakeRedis]:
+        client = KitFakeRedis(server=server, decode_responses=True)
+        try:
+            yield client
+        finally:
+            await client.aclose()
+
+    monkeypatch.setattr(bus_module, "client_ctx", fake_ctx)
+
+    def _settings() -> BusSettings:
+        return BusSettings(redis=BusRedisSettings(redis_url="redis://fake"), namespace="stack")
+
+    with another_skeleton_major(monkeypatch):
+        foreign = _settings()
+    settings = _settings()
+    now = "2026-01-01T00:00:00+00:00"
+    row = {"kind": "backend", "pid": 7, "generation": 1, "joined_at": now, "beat_at": now, "state": "ready"}
+    readers = published_env_readers()
+    sibling = {**row, "deployment_keys": [SIBLING_KEY], "env_readers": readers.digest}
+    client: Any = KitFakeRedis(server=server, decode_responses=True)
+    await client.set(foreign.presence_key("backend-1"), json.dumps(row), px=5000)
+    await client.sadd(foreign.presence_index, "backend-1")
+    await client.set(settings.presence_key("backend-2"), json.dumps(sibling), px=5000)
+    await client.sadd(settings.presence_index, "backend-2")
+    await client.set(settings.env_readers_key(readers.digest), readers.body, px=10000)
+    await client.aclose()
+
+    ownership = await resolve_deployment_ownership(WorkerBus(settings, kind=WorkerKind.serve), "boot env bridge")
+
+    assert ownership.owns(SIBLING_KEY)
+
+
 async def test_a_successful_read_refreshes_the_names_a_late_settings_group_withdraws_by(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

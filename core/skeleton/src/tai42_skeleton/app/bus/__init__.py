@@ -26,7 +26,9 @@ for the life of the held claim; a reconnect that still holds its claim keeps the
 Namespacing
 -----------
 ``TAI_BUS_NAMESPACE`` (default ``tai``) prefixes the control channel, every reply
-channel, and every presence/slot/generation key. Redis pub/sub is server-global (NOT
+channel, and every presence/slot/generation key; each sits under
+``{ns}:v{major}`` (:attr:`BusSettings.key_root`), so workers of two skeleton majors on
+one namespace are two fleets. Redis pub/sub is server-global (NOT
 scoped by db index), so two deployments/stacks sharing one Redis MUST diverge by
 namespace or they would cross-talk; a shared-Redis deployment sets a unique
 namespace per stack.
@@ -53,14 +55,16 @@ op-start census as ``expected_at_start``, and those names stay expected here.
 
 Presence lifecycle
 ------------------
-Presence is written under ``{ns}:bus:presence:{name}`` with a value carrying
-``{kind, pid, generation, joined_at, beat_at, state, last_op?}`` and refreshed at
-``ttl/3``. It is NOT force-deleted on a reconnect: the TTL carries the row across a
-blip so a reader can tell "same worker, still here on TTL" from "new life". A
-transport-error or lost-slot exit leaves the keys to their TTL; only a deliberate
-stop deletes the presence row, and only after the compare-token claim release
-succeeds (an absent/foreign claim means the slot already belongs to a new holder,
-whose row must not be deleted). The row's ``state`` is ``resyncing`` before the boot
+Presence is written under ``{ns}:v{major}:bus:presence:{name}`` (the namespace and the
+running skeleton major, :attr:`BusSettings.key_root`) with a value carrying
+``{kind, pid, generation, joined_at, beat_at, state, deployment_keys, env_readers,
+last_op?}`` and refreshed at ``ttl/3``. Workers of another skeleton major write under
+their own root, so the census never reads their rows. It is NOT force-deleted on a
+reconnect: the TTL carries the row across a blip so a reader can tell "same worker,
+still here on TTL" from "new life". A transport-error or lost-slot exit leaves the
+keys to their TTL; only a deliberate stop deletes the presence row, and only after
+the compare-token claim release succeeds (an absent/foreign claim means the slot
+already belongs to a new holder, whose row must not be deleted). The row's ``state`` is ``resyncing`` before the boot
 resync, ``ready`` after, and ``recycling`` before a graceful self-exit.
 
 Fork safety

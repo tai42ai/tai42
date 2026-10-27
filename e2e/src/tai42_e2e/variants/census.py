@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.metadata
 import json
 from dataclasses import dataclass
 from typing import Any
@@ -30,18 +31,28 @@ class BusWorker:
     last_op: dict[str, Any] | None = None
 
 
+def bus_key_root(namespace: str) -> str:
+    """The root of every worker-bus key of a stack under ``namespace``: ``{namespace}:v{major}``.
+
+    ``major`` is the major version of the installed tai42-skeleton the stack runs, read from
+    the installed distribution's metadata.
+    """
+    major = importlib.metadata.version("tai42-skeleton").split(".", 1)[0]
+    return f"{namespace}:v{major}"
+
+
 def bus_census(bus_redis_url: str, namespace: str) -> list[BusWorker]:
     """The live fleet on the worker bus: scan the per-name presence keys under this
-    stack's namespace on the bus Redis and parse each value's
+    stack's bus key root (:func:`bus_key_root`) on the bus Redis and parse each value's
     ``{kind, pid, generation, joined_at, beat_at, state, last_op?}``.
 
     Backend-independent — every subscribed worker (both the HTTP ``serve`` workers and
     the ``backend`` runtime) advertises exactly one presence key under its slot name, so
     this is the whole fleet the reload/readiness seams draw from, read straight off the
     bus Redis (the harness never imports the system under test). A key that expires
-    between the scan and the value read is skipped; a malformed value raises loudly
-    (a stack scans only its own namespace, so it sees only its own well-formed keys)."""
-    prefix = f"{namespace}:bus:presence:"
+    between the scan and the value read is skipped; a malformed value raises loudly (a
+    stack scans only its own key root, so it sees only its own well-formed keys)."""
+    prefix = f"{bus_key_root(namespace)}:bus:presence:"
     client = redis.Redis.from_url(bus_redis_url, decode_responses=True)
     try:
         workers: list[BusWorker] = []
