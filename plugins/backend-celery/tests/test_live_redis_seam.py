@@ -6,7 +6,9 @@ the test controls, closes it while the worker waits on its blocking read, and sh
 celery's own reconnect loop (logged at ERROR) brings the worker back once Redis answers
 again. Two more run the result consumer alone through the relay: a result written while
 its pub/sub reconnects is still delivered, and a reconnect past its retry raises the
-connection error.
+connection error. Through a relay that closes a new connection before its handshake is
+answered, a result backend command and a broker channel's opening PING still succeed
+under the seam's retry.
 
 Point ``TAI_TEST_CELERY_BROKER`` at a Redis broker to run it; once set, an unreachable
 broker fails the module instead of skipping it. Unset, it probes
@@ -31,7 +33,7 @@ from celery import states
 from tai42_backend_celery.core.redis_seam import KitRedisBackend, KitRedisTransport
 from tai42_backend_celery.core.settings import celery_settings
 
-from ._live_redis_worker import _BROKER, _app_on, _live_marks, _Relay, _result
+from ._live_redis_worker import _BROKER, _app_on, _DropsFirstHandshake, _live_marks, _Relay, _result
 
 pytestmark = _live_marks()
 
@@ -61,28 +63,28 @@ def test_a_task_round_trips_over_the_kit_backend_and_transport(monkeypatch, run_
 
 def test_a_redis_restart_under_a_waiting_worker_is_recovered_by_celerys_loop(monkeypatch, run_worker) -> None:
     upstream = urlsplit(_BROKER)
-    relay = _Relay((upstream.hostname or "localhost", upstream.port or 6379))
-    relay.open()
     records = _Records()
     consumer_logger = logging.getLogger("celery.worker.consumer.consumer")
     consumer_logger.addHandler(records)
-    try:
-        app = _app_on(monkeypatch, f"redis://127.0.0.1:{relay.port}{upstream.path or '/0'}")
-        run_worker(app)
-        assert _result(app, timeout=30) == 5
-
-        # The worker now waits on its blocking read; the relay going away is a Redis restart.
-        relay.close()
-        deadline = time.monotonic() + 30
-        while not any("Cannot connect" in message for message in records.messages):
-            assert time.monotonic() < deadline, f"celery logged no reconnect error: {records.messages}"
-            time.sleep(0.1)
-
+    with _Relay((upstream.hostname or "localhost", upstream.port or 6379)) as relay:
         relay.open()
-        assert _result(app, timeout=40) == 5
-    finally:
-        consumer_logger.removeHandler(records)
-        relay.close()
+        try:
+            app = _app_on(monkeypatch, f"redis://127.0.0.1:{relay.port}{upstream.path or '/0'}")
+            run_worker(app)
+            assert _result(app, timeout=30) == 5
+
+            # The worker now waits on its blocking read; the relay going away is a Redis restart.
+            relay.close()
+            deadline = time.monotonic() + 30
+            while not any("Cannot connect" in message for message in records.messages):
+                assert time.monotonic() < deadline, f"celery logged no reconnect error: {records.messages}"
+                time.sleep(0.1)
+
+            relay.open()
+            assert _result(app, timeout=40) == 5
+        finally:
+            consumer_logger.removeHandler(records)
+            relay.close()
 
 
 def _drop_fanout_links(url: str) -> int:
@@ -145,27 +147,27 @@ def test_a_control_reply_read_that_drops_raises_and_the_next_call_reconnects(mon
 def _relayed_app(monkeypatch: pytest.MonkeyPatch, *, result_retry_attempts: int) -> Iterator[tuple[Any, _Relay]]:
     """A plugin app on the broker through a relay the test controls; closed at exit."""
     upstream = urlsplit(_BROKER)
-    relay = _Relay((upstream.hostname or "localhost", upstream.port or 6379))
-    relay.open()
-    app = _app_on(
-        monkeypatch,
-        f"redis://127.0.0.1:{relay.port}{upstream.path or '/0'}",
-        result_retry_attempts=result_retry_attempts,
-    )
-    try:
-        yield app, relay
-    finally:
-        consumer = app.backend.result_consumer
-        consumer.stop()
-        # A result still held by a captured log record (its retried error's traceback
-        # pins the wait) is collected after this test, and a collected result
-        # unsubscribes on the consumer's pub/sub: with none left, it sends nothing,
-        # instead of retrying against the closed relay inside a later test.
-        consumer._pubsub = None
-        app.backend.client.connection_pool.disconnect()
-        app.close()
-        relay.close()
-        celery_settings.cache_clear()
+    with _Relay((upstream.hostname or "localhost", upstream.port or 6379)) as relay:
+        relay.open()
+        app = _app_on(
+            monkeypatch,
+            f"redis://127.0.0.1:{relay.port}{upstream.path or '/0'}",
+            result_retry_attempts=result_retry_attempts,
+        )
+        try:
+            yield app, relay
+        finally:
+            consumer = app.backend.result_consumer
+            consumer.stop()
+            # A result still held by a captured log record (its retried error's traceback
+            # pins the wait) is collected after this test, and a collected result
+            # unsubscribes on the consumer's pub/sub: with none left, it sends nothing,
+            # instead of retrying against the closed relay inside a later test.
+            consumer._pubsub = None
+            app.backend.client.connection_pool.disconnect()
+            app.close()
+            relay.close()
+            celery_settings.cache_clear()
 
 
 def _wait_in_thread(result: Any) -> tuple[threading.Thread, dict[str, Any]]:
@@ -190,13 +192,37 @@ def _wait_subscribed(direct: Any, key: bytes) -> None:
         time.sleep(0.05)
 
 
+def _wait_on_the_pubsub(direct: Any, result: Any) -> tuple[threading.Thread, dict[str, Any]]:
+    """Wait on ``result`` in a daemon thread; return once that wait reads the result consumer's pub/sub.
+
+    A wait subscribes its task, reads the task's stored state over a pooled connection,
+    then reads the pub/sub. A link dropped after this returns drops under the pub/sub
+    read, never under that stored-state read.
+    """
+    consumer = result.backend.result_consumer
+    draining = threading.Event()
+    drain_events = consumer.drain_events
+
+    def signalled(timeout: float | None = None) -> None:
+        draining.set()
+        drain_events(timeout=timeout)
+
+    consumer.drain_events = signalled
+    try:
+        waiter, outcome = _wait_in_thread(result)
+        _wait_subscribed(direct, result.backend.get_key_for_task(result.id))
+        assert draining.wait(10), "the wait never read the result consumer's pub/sub"
+    finally:
+        del consumer.drain_events
+    return waiter, outcome
+
+
 def test_a_result_written_while_the_consumer_reconnects_is_delivered(monkeypatch) -> None:
     direct = redis.Redis.from_url(_BROKER)
     with _relayed_app(monkeypatch, result_retry_attempts=30) as (app, relay):
         task_id = uuid.uuid4().hex
         key = app.backend.get_key_for_task(task_id)
-        waiter, outcome = _wait_in_thread(app.AsyncResult(task_id))
-        _wait_subscribed(direct, key)
+        waiter, outcome = _wait_on_the_pubsub(direct, app.AsyncResult(task_id))
 
         # The consumer's link drops; the task's result is written while it reconnects.
         relay.close()
@@ -213,9 +239,7 @@ def test_a_result_written_while_the_consumer_reconnects_is_delivered(monkeypatch
 def test_a_reconnect_past_its_retry_raises_the_connection_error(monkeypatch) -> None:
     direct = redis.Redis.from_url(_BROKER)
     with _relayed_app(monkeypatch, result_retry_attempts=2) as (app, relay):
-        task_id = uuid.uuid4().hex
-        waiter, outcome = _wait_in_thread(app.AsyncResult(task_id))
-        _wait_subscribed(direct, app.backend.get_key_for_task(task_id))
+        waiter, outcome = _wait_on_the_pubsub(direct, app.AsyncResult(uuid.uuid4().hex))
 
         relay.close()
 
@@ -236,8 +260,7 @@ def _publish_result(direct: Any, app: Any, task_id: str, *, store: bool) -> None
 def _fail_a_wait(direct: Any, app: Any, relay: _Relay, task_id: str) -> Any:
     """Wait on ``task_id`` while the relay goes away; the wait's reconnect fails. Returns the awaited result."""
     result = app.AsyncResult(task_id)
-    waiter, outcome = _wait_in_thread(result)
-    _wait_subscribed(direct, app.backend.get_key_for_task(task_id))
+    waiter, outcome = _wait_on_the_pubsub(direct, result)
     relay.close()
     waiter.join(20)
     assert isinstance(outcome.get("error"), redis.ConnectionError), outcome
@@ -313,8 +336,7 @@ def test_a_pubsub_rebuilt_with_nothing_awaited_still_catches_up_after_a_drop(mon
         # A later wait subscribes on that pub/sub; its link drops and the result is stored meanwhile.
         task_id = uuid.uuid4().hex
         key = app.backend.get_key_for_task(task_id)
-        waiter, outcome = _wait_in_thread(app.AsyncResult(task_id))
-        _wait_subscribed(direct, key)
+        waiter, outcome = _wait_on_the_pubsub(direct, app.AsyncResult(task_id))
         relay.close()
         meta = {**app.backend._get_result_meta(5, states.SUCCESS, None, None), "task_id": task_id}
         direct.set(key, app.backend.encode(meta))
@@ -324,3 +346,78 @@ def test_a_pubsub_rebuilt_with_nothing_awaited_still_catches_up_after_a_drop(mon
         assert outcome == {"value": 5}
     direct.delete(key)
     direct.close()
+
+
+def test_a_catch_up_that_fails_after_the_reconnect_ends_the_wait_on_the_result_backend_budget(
+    monkeypatch, caplog
+) -> None:
+    budget = 3
+    direct = redis.Redis.from_url(_BROKER)
+    with _relayed_app(monkeypatch, result_retry_attempts=budget) as (app, relay):
+        consumer = app.backend.result_consumer
+        catch_up = consumer.catch_up
+        catch_ups: list[None] = []
+
+        def unreachable_catch_up() -> None:
+            # Each catch-up finds the relay gone: its stored-state read spends the
+            # result-backend budget and raises, then the relay comes back.
+            catch_ups.append(None)
+            relay.close()
+            try:
+                catch_up()
+            finally:
+                relay.open()
+
+        waiter, outcome = _wait_on_the_pubsub(direct, app.AsyncResult(uuid.uuid4().hex))
+        consumer.catch_up = unreachable_catch_up
+        caplog.set_level(logging.WARNING, logger="tai42_kit.clients.impl.redis")
+        relay.close()
+        relay.open()
+
+        waiter.join(20)
+        assert isinstance(outcome.get("error"), redis.ConnectionError), outcome
+        # Two catch-ups: the reconnect inside the read, then the pub/sub the consumer rebuilds.
+        assert catch_ups == [None, None]
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        # Each catch-up's read logs one WARNING per retried attempt; the read's drop logs at most one.
+        assert len(warnings) <= 2 * budget + 1, [r.getMessage() for r in warnings]
+    direct.close()
+
+
+@contextlib.contextmanager
+def _handshake_dropping_relay() -> Iterator[tuple[_DropsFirstHandshake, str]]:
+    """A relay to the broker whose first connection drops before its handshake, and its URL; closed at exit."""
+    upstream = urlsplit(_BROKER)
+    with _DropsFirstHandshake((upstream.hostname or "localhost", upstream.port or 6379)) as relay:
+        relay.open()
+        try:
+            yield relay, f"redis://127.0.0.1:{relay.port}{upstream.path or '/0'}"
+        finally:
+            relay.close()
+            celery_settings.cache_clear()
+
+
+def test_a_result_backend_command_whose_new_connection_drops_in_its_handshake_is_retried(monkeypatch) -> None:
+    with _handshake_dropping_relay() as (relay, url):
+        app = _app_on(monkeypatch, url, result_retry_attempts=30)
+        try:
+            assert app.backend.client.get(f"tai42-live-seam-absent-{uuid.uuid4().hex}") is None
+        finally:
+            app.backend.client.connection_pool.disconnect()
+            app.close()
+    assert relay.dropped_first == 1
+
+
+def test_a_broker_channel_whose_new_connection_drops_in_its_handshake_opens(monkeypatch) -> None:
+    with _handshake_dropping_relay() as (relay, url):
+        app = _app_on(monkeypatch, url)
+        connection = app.connection_for_write()
+        transport = connection.transport
+        try:
+            # The channel's constructor PINGs on a new connection of its pool.
+            channel = transport.create_channel(transport)
+            channel.close()
+        finally:
+            connection.release()
+            app.close()
+    assert relay.dropped_first == 1

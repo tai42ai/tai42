@@ -1,5 +1,7 @@
 """The live worker harness: a plugin app on a real Redis, an in-process worker, and a TCP relay.
 
+The relay forwards in its own process (``_tcp_relay.py``), driven as a context manager.
+
 Point ``TAI_TEST_CELERY_BROKER`` at a Redis broker to run the live modules; once set, an
 unreachable broker fails them instead of skipping them. Unset, they probe
 ``redis://localhost:6399/0`` and skip when nothing answers there. The ``run_worker`` fixture
@@ -9,14 +11,15 @@ is registered for every module by ``conftest.py``.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import gc
 import os
-import socket
+import subprocess
+import sys
 import threading
 import uuid
 from collections.abc import Iterator
-from typing import Any
+from pathlib import Path
+from typing import Any, Self
 
 import pytest
 import redis
@@ -28,6 +31,7 @@ from tai42_backend_celery.core.tasks import AsyncTask
 _BROKER_ENV = "TAI_TEST_CELERY_BROKER"
 _BROKER_REQUIRED = _BROKER_ENV in os.environ
 _BROKER = os.environ.get(_BROKER_ENV, "redis://localhost:6399/0")
+_RELAY_PROGRAM = Path(__file__).with_name("_tcp_relay.py")
 
 
 def _redis_reachable(url: str) -> bool:
@@ -54,57 +58,69 @@ def _live_marks() -> list[pytest.MarkDecorator]:
 
 
 class _Relay:
-    """A loopback TCP forwarder to one upstream, which can be closed and reopened on the same port."""
+    """A loopback TCP forwarder to one upstream, which can be closed and reopened on the same port.
+
+    It forwards in its own process (``_tcp_relay.py``), so no finalizer the garbage collector
+    runs in this process (a collected result unsubscribing over the relay) can block the
+    forwarding it waits on. Used as a context manager: the process runs until the exit.
+    """
+
+    _drop_first = False
 
     def __init__(self, upstream: tuple[str, int]) -> None:
         self._upstream = upstream
-        self._lock = threading.Lock()
-        self._sockets: list[socket.socket] = []
-        self._listener: socket.socket | None = None
+        self._process: subprocess.Popen[str] | None = None
         self.port = 0
+        self.dropped_first = 0
+
+    def __enter__(self) -> Self:
+        host, port = self._upstream
+        command = [sys.executable, str(_RELAY_PROGRAM), host, str(port)]
+        if self._drop_first:
+            command.append("--drop-first")
+        self._process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        process, self._process = self._process, None
+        assert process is not None
+        try:
+            process.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+            raise
+        if process.returncode:
+            raise RuntimeError(f"the relay process exited with {process.returncode}")
+
+    def _command(self, command: str) -> list[str]:
+        process = self._process
+        assert process is not None
+        assert process.stdin is not None
+        assert process.stdout is not None
+        process.stdin.write(f"{command}\n")
+        process.stdin.flush()
+        answer = process.stdout.readline().split()
+        if not answer:
+            raise RuntimeError(f"the relay process ended on {command!r} with {process.wait()}")
+        return answer
 
     def open(self) -> None:
-        listener = socket.socket()
-        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        listener.bind(("127.0.0.1", self.port))
-        listener.listen()
-        self.port = listener.getsockname()[1]
-        self._listener = listener
-        threading.Thread(target=self._accept, args=(listener,), daemon=True).start()
+        self.port = int(self._command("open")[1])
 
     def close(self) -> None:
-        """Stop listening and close every open socket, as a Redis restart does."""
-        with self._lock:
-            sockets, self._sockets = self._sockets, []
-            listener, self._listener = self._listener, None
-        for sock in [listener, *sockets]:
-            if sock is not None:
-                # A socket the far side already shut down refuses a second shutdown.
-                with contextlib.suppress(OSError):
-                    sock.shutdown(socket.SHUT_RDWR)
-                sock.close()
+        """Stop listening and close every open socket, as a Redis restart does.
 
-    def _accept(self, listener: socket.socket) -> None:
-        while True:
-            try:
-                client, _ = listener.accept()
-            except OSError:
-                return
-            upstream = socket.create_connection(self._upstream)
-            with self._lock:
-                self._sockets += [client, upstream]
-            threading.Thread(target=self._pipe, args=(client, upstream), daemon=True).start()
-            threading.Thread(target=self._pipe, args=(upstream, client), daemon=True).start()
+        Records :attr:`dropped_first`, the number of connections the relay closed
+        unanswered as its first (1 or 0; always 0 on a relay that forwards its first).
+        """
+        self.dropped_first = int(self._command("close")[1])
 
-    @staticmethod
-    def _pipe(source: socket.socket, target: socket.socket) -> None:
-        # Closing the relay breaks its pipes; a broken pipe ends the forwarding, as a dropped link does.
-        with contextlib.suppress(OSError):
-            while data := source.recv(65536):
-                target.sendall(data)
-        for sock in (source, target):
-            with contextlib.suppress(OSError):
-                sock.shutdown(socket.SHUT_RDWR)
+
+class _DropsFirstHandshake(_Relay):
+    """A relay that closes its first accepted connection unanswered, as a proxy with no upstream yet does."""
+
+    _drop_first = True
 
 
 def _app_on(monkeypatch: pytest.MonkeyPatch, url: str, *, result_retry_attempts: int = 2) -> Any:

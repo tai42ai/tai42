@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import gc
+import logging
 import weakref
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
@@ -27,12 +28,17 @@ from redis.asyncio import Redis as AsyncRedis
 from redis.asyncio.connection import (
     AbstractConnection,
     Connection,
+    ConnectionPool,
     SSLConnection,
     UnixDomainSocketConnection,
 )
 
 from tai42_kit.clients import client_ctx
+from tai42_kit.clients.impl import redis as redis_impl
 from tai42_kit.clients.impl.redis import RedisClient, async_redis_from_url, redis_from_url_kwargs
+from tai42_kit.clients.impl.redis_connections import EmptyContextConnectionPool
+
+from ._redis_pool_kwargs import comparable_connection_kwargs
 
 _caller: contextvars.ContextVar[object] = contextvars.ContextVar("caller")
 
@@ -53,6 +59,8 @@ class _Stub:
 def _command_answerer(stub: _Stub, *, close_after_ping: bool = False):
     """A connection handler answering each RESP command: ``+PONG`` to a PING, ``+OK`` to anything else.
 
+    A ``HELLO 3`` is answered with the RESP3 map that names protocol 3.
+
     With ``close_after_ping`` it closes the first connection once it has answered a PING.
     """
 
@@ -65,7 +73,10 @@ def _command_answerer(stub: _Stub, *, close_after_ping: bool = False):
                 for _ in range(int(header[1:])):
                     length = int((await reader.readline())[1:])
                     words.append((await reader.readexactly(length + 2))[:-2].upper())
-                writer.write(b"+PONG\r\n" if words[0] == b"PING" else b"+OK\r\n")
+                if words[0] == b"HELLO" and words[1:2] == [b"3"]:
+                    writer.write(b"%1\r\n$5\r\nproto\r\n:3\r\n")
+                else:
+                    writer.write(b"+PONG\r\n" if words[0] == b"PING" else b"+OK\r\n")
                 await writer.drain()
                 if close_after_ping and first and words[0] == b"PING":
                     return
@@ -141,14 +152,12 @@ async def test_a_unix_socket_connection_keeps_no_context_of_its_caller(tmp_path:
 
 
 async def test_a_reconnect_of_a_pooled_connection_keeps_no_context_of_its_caller() -> None:
-    async with _tcp_stub(close_after_ping=True) as stub:
+    async with _tcp_stub() as stub:
         redis = async_redis_from_url(stub.url)
         try:
             await redis.ping()
-            await asyncio.wait_for(stub.closed.wait(), 5)
-            # The client sees the close once the end of the stream reaches its socket.
-            await asyncio.sleep(0.05)
-            # The pooled connection was closed by the server; the next command reconnects it.
+            # The pooled connection is closed and kept in the pool; the next checkout reconnects it.
+            await cast("ConnectionPool", redis.connection_pool).disconnect()
             marker = await _caller_marker_after(redis.ping)
             assert stub.connections == 2
             assert marker() is None
@@ -177,19 +186,19 @@ def test_the_client_is_the_from_url_client_over_the_empty_context_pool() -> None
     url = "redis://127.0.0.1:6379/3?socket_timeout=2"
     built = async_redis_from_url(url, decode_responses=True, max_connections=7)
     plain = AsyncRedis.from_url(url, decode_responses=True, max_connections=7)
-    assert built.connection_pool.connection_kwargs == plain.connection_pool.connection_kwargs
+    assert comparable_connection_kwargs(built.connection_pool.connection_kwargs) == comparable_connection_kwargs(
+        plain.connection_pool.connection_kwargs
+    )
     assert built.connection_pool.max_connections == plain.connection_pool.max_connections
     assert built.auto_close_connection_pool is plain.auto_close_connection_pool is True
 
 
 def test_a_connection_class_without_an_empty_context_connect_is_refused() -> None:
-    from tai42_kit.clients.impl import redis as redis_impl
-
     class _OtherConnection(Connection):
         pass
 
     with pytest.raises(TypeError, match="no empty-context connect is defined for the Redis connection class"):
-        redis_impl._EmptyContextConnectionPool(connection_class=_OtherConnection)
+        EmptyContextConnectionPool(connection_class=_OtherConnection)
 
 
 async def test_a_direct_socket_open_keeps_no_context_of_its_caller() -> None:
@@ -205,13 +214,19 @@ async def test_a_direct_socket_open_keeps_no_context_of_its_caller() -> None:
             await connection.disconnect()
 
 
-async def test_a_commands_reconnect_under_the_retry_keeps_no_context_of_its_caller() -> None:
+async def test_a_commands_reconnect_under_the_retry_keeps_no_context_of_its_caller(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     async with _tcp_stub(close_after_ping=True) as stub:
         redis = async_redis_from_url(**redis_from_url_kwargs({"url": stub.url, "retry_attempts": 1}))
         try:
             await redis.ping()
             await asyncio.wait_for(stub.closed.wait(), 5)
             await asyncio.sleep(0.05)
+            # The retry's WARNING record holds the failed read's error, whose traceback holds
+            # the caller's frames; a record kept by the test's log capture would keep the
+            # caller's context alive, so the kit logger's records stay with it here.
+            monkeypatch.setattr(logging.getLogger(redis_impl.__name__), "propagate", False)
             marker = await _caller_marker_after(redis.ping)
             assert stub.connections == 2
             assert marker() is None

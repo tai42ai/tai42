@@ -270,10 +270,10 @@ def test_an_extractor_value_error_is_a_400(pg) -> None:
 
 
 def test_the_write_validator_answers_before_the_extractor_is_called(pg) -> None:
-    from tests.presets import _ref_fixtures
-
     async def run() -> None:
         async with instance.app.app_context(_manifest()):
+            # The module's tools register against the booted manifest, which names it.
+            from tests.presets import _ref_fixtures
 
             async def validator(body: Any) -> list[str]:
                 return [] if isinstance(body.fixed_kwargs.get("plan", {}), dict) else ["plan must be an object"]
