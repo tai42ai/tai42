@@ -28,10 +28,12 @@ test('a registered agent whose model turn errors surfaces a loud failed state', 
   await page.goto('/agents');
 
   // Open the run view for the registered tools_agent and start a run — the model
-  // call hits the unscripted stub and 500s.
-  await page.locator('[data-agent="tools_agent"]').getByRole('button', { name: 'Run' }).click();
+  // call hits the unscripted stub and 500s. Each agents-list entry names its Run by
+  // kind and agent (a registered agent's is "Run agent <name>"), in the table and the
+  // card view alike; the button waits out the list's loading placeholder.
+  await page.getByRole('button', { name: 'Run agent tools_agent', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'tools_agent' })).toBeVisible();
-  await page.getByRole('button', { name: 'Run' }).click();
+  await page.getByRole('button', { name: 'Run', exact: true }).click();
 
   // UI: the run reaches a terminal Failed state (never a stuck Running… spinner).
   await expect(page.getByText('Failed')).toBeVisible();

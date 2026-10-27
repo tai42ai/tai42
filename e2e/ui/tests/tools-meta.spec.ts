@@ -4,8 +4,9 @@
  * app itself uses. The screen merges each tool's native tags (`/api/tools/tags`)
  * with its overlay row (`/api/tool-meta`): a display name over the real name, a flat
  * file-explorer list (breadcrumb + subfolders) with a tag-chip OR filter, and the full
- * four-field edit dialog. An effectively hidden tool is excluded outright — unhiding
- * is a CLI/API operation (overlay `hidden:false`), never a screen toggle.
+ * five-field edit dialog (display name, tags, badges, folder, visibility). An
+ * effectively hidden tool is excluded outright — unhiding is a CLI/API operation
+ * (overlay `hidden:false`), never a screen toggle.
  *
  * The list paginates client-side (24 entries per page by default) over a catalog larger
  * than one page, and the shell-owned `?tags=` and `?q=` deep links filter the whole
@@ -154,6 +155,88 @@ test('display name + merged native/overlay tags render; edit dialog round-trips 
       return meta.data.meta.find((row) => row.tool_name === 'e2e_echo')?.display_name ?? null;
     })
     .toBe(renamed);
+});
+
+test('the edit dialog opens on the stored display name, tags, badges, folder and visibility', async ({
+  page,
+  request,
+}) => {
+  const displayName = uniq('Echo');
+  const tag = uniq('team');
+  const badge = uniq('beta');
+  const folderName = uniq('Probes');
+  const folderId = await createFolder(request, folderName);
+  await upsert(request, 'e2e_echo', {
+    display_name: displayName,
+    tags: [tag],
+    badges: [badge],
+    folder_id: folderId,
+    hidden: false,
+  });
+
+  await seedCredential(page);
+  // The filed tool is listed inside its folder; the name filter keeps it on one page.
+  await gotoToolsSettled(page, '/tools?tags=e2e&q=e2e_echo');
+  await page.getByRole('button', { name: folderName, exact: true }).click();
+  await page.getByRole('button', { name: 'Edit tool e2e_echo', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Edit e2e_echo' });
+  await expect(dialog).toBeVisible();
+
+  await expect(dialog.getByLabel('Display name')).toHaveValue(displayName);
+  await expect(dialog.getByRole('button', { name: `Remove tag ${tag}`, exact: true })).toBeVisible();
+  await expect(dialog.getByRole('button', { name: `Remove badge ${badge}`, exact: true })).toBeVisible();
+  await expect(dialog.getByRole('combobox', { name: 'Folder', exact: true })).toHaveText(folderName);
+  await expect(dialog.getByRole('radio', { name: 'Shown', exact: true })).toBeChecked();
+
+  await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await expect(dialog).toBeHidden();
+});
+
+test('a folder created from the edit dialog is chosen, and saving files the tool into it', async ({
+  page,
+  request,
+}) => {
+  const folderName = uniq('Probes');
+
+  await seedCredential(page);
+  await gotoToolsSettled(page, '/tools?tags=e2e&q=e2e_echo');
+  await page.getByRole('button', { name: 'Edit tool e2e_echo', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Edit e2e_echo' });
+  await expect(dialog).toBeVisible();
+  const folderPicker = dialog.getByRole('combobox', { name: 'Folder', exact: true });
+  await expect(folderPicker).toHaveText('No folder');
+
+  // The inline create makes the folder and selects it in the picker.
+  await dialog.getByRole('button', { name: 'New folder', exact: true }).click();
+  await dialog.getByRole('textbox', { name: 'New folder name', exact: true }).fill(folderName);
+  await dialog.getByRole('button', { name: 'Create', exact: true }).click();
+  await expect(folderPicker).toHaveText(folderName);
+  await dialog.getByRole('button', { name: 'Save', exact: true }).click();
+  await expect(dialog).toBeHidden();
+
+  // API: the folder exists at the root and the tool's row points at it.
+  await expect
+    .poll(async () => {
+      const meta = (await (await request.get('/api/tool-meta', { headers: apiHeaders() })).json()) as {
+        data: {
+          meta: Array<{ tool_name: string; folder_id: string | null }>;
+          folders: Array<{ id: string; parent_id: string | null; name: string }>;
+        };
+      };
+      const folder = meta.data.folders.find((f) => f.name === folderName);
+      const row = meta.data.meta.find((r) => r.tool_name === 'e2e_echo');
+      return folder === undefined
+        ? null
+        : { parent: folder.parent_id, filed: row?.folder_id === folder.id };
+    })
+    .toEqual({ parent: null, filed: true });
+
+  // UI: the tool has left the root for the new folder.
+  const folderButton = page.getByRole('button', { name: folderName, exact: true });
+  await expect(folderButton).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Open tool e2e_echo', exact: true })).toBeHidden();
+  await folderButton.click();
+  await expect(page.getByRole('link', { name: 'Open tool e2e_echo', exact: true })).toBeVisible();
 });
 
 test('folder explorer: a filed tool lives inside its folder, reached via the breadcrumb', async ({

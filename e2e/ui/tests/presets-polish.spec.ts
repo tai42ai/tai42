@@ -8,6 +8,7 @@
 import { expect, type Page } from '@playwright/test';
 import { apiHeaders, fillFixedKwargs, seedCredential, uniq } from './helpers';
 import { needs, test } from './needs';
+import { pickTool } from './pickers';
 
 needs('kind:versioning', 'probe-tools', 'mutable', 'setting:no-quarantined-presets');
 
@@ -19,17 +20,13 @@ async function createEchoPreset(page: Page, name: string, payload: string): Prom
   await dialog.getByRole('textbox', { name: 'Name' }).fill(name);
   // Description is REQUIRED and gates submit; the bound tool's LLM-facing docstring.
   await dialog.getByRole('textbox', { name: 'Description' }).fill(`echo preset ${name}`);
-  const baseTool = dialog.getByRole('combobox', { name: 'Base tool' });
-  // The picker is disabled ("Loading tools…") until the tools query resolves;
-  // focus/typeahead on the disabled trigger drops the keystrokes, so gate on the
-  // trigger being enabled before typing.
-  await expect(baseTool).toBeEnabled();
-  await baseTool.focus();
-  await baseTool.pressSequentially('e2e_echo');
-  await expect(baseTool).toHaveText(/^e2e_echo(?!_)/);
+  const baseTool = dialog.getByRole('combobox', { name: 'Base tool', exact: true });
+  await pickTool(page, baseTool, 'e2e_echo');
+  await expect(baseTool).toHaveText('e2e_echo');
   await fillFixedKwargs(dialog, { payload });
   await dialog.getByRole('button', { name: 'Create preset' }).click();
-  await expect(page.getByRole('link', { name: `Open preset ${name}` })).toBeVisible();
+  await expect(dialog).toBeHidden();
+  await expect(page.getByRole('heading', { level: 2, name })).toBeVisible();
 }
 
 test('rename preflight lists holders and disables submit', async ({ page, request }) => {
@@ -104,8 +101,8 @@ test('the presets edit-details dialog writes the overlay display name + tags', a
   await seedCredential(page);
   await createEchoPreset(page, name, uniq('payload'));
 
-  // The presets screen edits the tool_meta overlay's display name + tags (no folder /
-  // hide controls here — those are centralized on the tools screen).
+  // The presets screen edits the tool_meta overlay's display name, tags and folder;
+  // hiding a tool and its badges are edited on the tools screen.
   await page.goto(`/presets?preset=${name}`);
   await page.getByRole('button', { name: `Edit details for ${name}` }).click();
   const dialog = page.getByRole('dialog', { name: `Edit details — ${name}` });
@@ -146,14 +143,9 @@ test('validate reports a clean bind, and no conflicted section when none is quar
   // Description is REQUIRED: the validate door mirrors the create rule and
   // rejects an empty one, so the draft must carry it to bind cleanly.
   await dialog.getByRole('textbox', { name: 'Description' }).fill('a draft that binds cleanly');
-  const baseTool = dialog.getByRole('combobox', { name: 'Base tool' });
-  // The picker is disabled ("Loading tools…") until the tools query resolves;
-  // focus/typeahead on the disabled trigger drops the keystrokes, so gate on the
-  // trigger being enabled before typing.
-  await expect(baseTool).toBeEnabled();
-  await baseTool.focus();
-  await baseTool.pressSequentially('e2e_echo');
-  await expect(baseTool).toHaveText(/^e2e_echo(?!_)/);
+  const baseTool = dialog.getByRole('combobox', { name: 'Base tool', exact: true });
+  await pickTool(page, baseTool, 'e2e_echo');
+  await expect(baseTool).toHaveText('e2e_echo');
   await fillFixedKwargs(dialog, { payload: 'x' });
   await dialog.getByRole('button', { name: 'Validate' }).click();
   await expect(dialog.getByText('Draft binds cleanly')).toBeVisible();
