@@ -27,7 +27,7 @@ from tai42_kit.db import (
 )
 
 from tai42_skeleton.cli.native import db
-from tai42_skeleton.db import MigrationChainDiscovery, SkippedChain
+from tai42_skeleton.db import MigrationChainDiscovery
 
 _TARGET = cast("PostgresConnectionSettings", SimpleNamespace(pg_host="db", pg_port=5432, pg_db="tai"))
 
@@ -45,17 +45,11 @@ def _fake_target(monkeypatch: pytest.MonkeyPatch) -> None:
     # The migrator target is only read for messages; the fakes make real connection
     # fields irrelevant and keep the credential-redaction assertions deterministic.
     # Chain discovery is stubbed so the command wiring is exercised without resolving
-    # a real database or reading the marketplace store.
+    # a real database or scanning the installed distributions.
     monkeypatch.setattr(db, "component_migrator_settings", lambda component: _TARGET)
     monkeypatch.setattr(db, "component_binding", lambda component: "default")
 
-    async def _empty_discovery() -> MigrationChainDiscovery:
-        return MigrationChainDiscovery(entries=[], skipped=[])
-
-    monkeypatch.setattr(db, "discover_all_migration_chains", _empty_discovery)
-    monkeypatch.setattr(db, "discover_plugin_chains", _empty_discovery)
-    monkeypatch.setattr(db, "skeleton_entry", lambda: SimpleNamespace(component="skeleton", settings=_TARGET))
-    monkeypatch.setattr(db, "states_entry", lambda: SimpleNamespace(component="states", settings=_TARGET))
+    monkeypatch.setattr(db, "discover_all_migration_chains", lambda: MigrationChainDiscovery(entries=[], skipped=[]))
 
 
 # --- migrate --------------------------------------------------------------
@@ -74,29 +68,29 @@ def test_migrate_applies_and_reports(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "Applied 1 migration(s)." in result.output
 
 
-def test_migrate_applies_skeleton_before_plugin_discovery(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Plugin discovery reads skeleton-owned tables, so migrate must land the
-    # two skeleton-owned chains BEFORE it enumerates plugin chains — the order is
-    # observable as apply(skeleton,states), then discovery, then apply(plugins).
+def test_migrate_applies_every_discovered_chain(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Migrate discovers every chain first, then applies them all in one run.
     calls: list[str] = []
 
     async def _apply(entries: object) -> list[AppliedMigration]:
-        components = ",".join(entry.component for entry in cast("list", entries))
-        calls.append(f"apply:{components}")
+        calls.append("apply:" + ",".join(entry.component for entry in cast("list", entries)))
         return []
 
-    async def _plugin_discovery() -> MigrationChainDiscovery:
-        calls.append("discover-plugins")
-        entries = cast("list[MigrationEntry]", [SimpleNamespace(component="tai42-widget", settings=_TARGET)])
+    def _discovery() -> MigrationChainDiscovery:
+        calls.append("discover")
+        entries = cast(
+            "list[MigrationEntry]",
+            [SimpleNamespace(component=name, settings=_TARGET) for name in ("skeleton", "states", "tai42-widget")],
+        )
         return MigrationChainDiscovery(entries=entries, skipped=[])
 
     monkeypatch.setattr(db, "apply_migrations", _apply)
-    monkeypatch.setattr(db, "discover_plugin_chains", _plugin_discovery)
+    monkeypatch.setattr(db, "discover_all_migration_chains", _discovery)
 
     result = CliRunner().invoke(app_module.app, ["db", "migrate"])
 
     assert result.exit_code == 0, result.output
-    assert calls == ["apply:skeleton,states", "discover-plugins", "apply:tai42-widget"]
+    assert calls == ["discover", "apply:skeleton,states,tai42-widget"]
 
 
 def test_migrate_json_reports_applied(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -111,7 +105,11 @@ def test_migrate_json_reports_applied(monkeypatch: pytest.MonkeyPatch) -> None:
 
     assert result.exit_code == 0, result.output
     data = json.loads(result.output)
-    assert data == {"applied": [{"component": "skeleton", "version": 1, "name": "baseline"}], "skipped_chains": []}
+    assert data == {
+        "applied": [{"component": "skeleton", "version": 1, "name": "baseline"}],
+        "skipped_chains": [],
+        "unlocatable": [],
+    }
 
 
 def test_migrate_plan_json_parses(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -140,69 +138,6 @@ def test_migrate_up_to_date_reports_nothing_applied(monkeypatch: pytest.MonkeyPa
 
     assert result.exit_code == 0, result.output
     assert "up to date" in result.output
-
-
-def test_migrate_names_skipped_chain_and_exits_nonzero(monkeypatch: pytest.MonkeyPatch) -> None:
-    # A declared chain whose override binding is unset is carried as a skip: migrate
-    # still reports what DID run, then names the skipped chain and exits non-zero.
-    async def _apply(entries: object) -> list[AppliedMigration]:
-        return [AppliedMigration("skeleton", 1, "baseline", "abc")]
-
-    async def _discovery() -> MigrationChainDiscovery:
-        return MigrationChainDiscovery(entries=[], skipped=[SkippedChain(component="acme_alerts")])
-
-    monkeypatch.setattr(db, "apply_migrations", _apply)
-    monkeypatch.setattr(db, "discover_plugin_chains", _discovery)
-
-    result = CliRunner().invoke(app_module.app, ["db", "migrate"])
-
-    assert result.exit_code == 1, result.output
-    # The migrations that DID run are still reported first.
-    assert "Applied skeleton 0001_baseline" in result.output
-    # The skipped chain is named, with its unset binding env var.
-    assert "acme_alerts" in result.output
-    assert "TAI_DB_BINDING" in result.output
-
-
-def test_migrate_json_reports_skipped_chains(monkeypatch: pytest.MonkeyPatch) -> None:
-    import json
-
-    async def _apply(entries: object) -> list[AppliedMigration]:
-        return [AppliedMigration("skeleton", 1, "baseline", "abc")]
-
-    async def _discovery() -> MigrationChainDiscovery:
-        return MigrationChainDiscovery(entries=[], skipped=[SkippedChain(component="acme_alerts")])
-
-    monkeypatch.setattr(db, "apply_migrations", _apply)
-    monkeypatch.setattr(db, "discover_plugin_chains", _discovery)
-
-    result = CliRunner().invoke(app_module.app, ["--json", "db", "migrate"])
-
-    assert result.exit_code == 1, result.output
-    data = json.loads(result.output)
-    assert data["applied"] == [{"component": "skeleton", "version": 1, "name": "baseline"}]
-    assert data["skipped_chains"] == [{"component": "acme_alerts"}]
-
-
-def test_migrate_plan_names_skipped_chain_and_exits_nonzero(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def _status_fn(entries: object) -> list[ComponentStatus]:
-        return [_status("skeleton", applied=(1,))]
-
-    async def _discovery() -> MigrationChainDiscovery:
-        return MigrationChainDiscovery(entries=[], skipped=[SkippedChain(component="acme_alerts")])
-
-    async def _forbidden_apply(entries: object) -> list[AppliedMigration]:
-        raise AssertionError("--plan must not apply anything")
-
-    monkeypatch.setattr(db, "migration_status", _status_fn)
-    monkeypatch.setattr(db, "discover_all_migration_chains", _discovery)
-    monkeypatch.setattr(db, "apply_migrations", _forbidden_apply)
-
-    result = CliRunner().invoke(app_module.app, ["db", "migrate", "--plan"])
-
-    assert result.exit_code == 1, result.output
-    assert "acme_alerts" in result.output
-    assert "nothing applied (--plan)" in result.output
 
 
 def test_migrate_plan_shows_pending_without_applying(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -294,11 +229,9 @@ def _use_real_discovery(monkeypatch: pytest.MonkeyPatch) -> None:
     # Undo the autouse chain-discovery stub so the real registry runs: a half-set
     # admin identity is raised EAGERLY from discovery (through the skeleton entry's
     # migrator-settings resolve), before any status/apply fake.
-    from tai42_skeleton.db import discover_all_migration_chains, discover_plugin_chains, skeleton_entry
+    from tai42_skeleton.db import discover_all_migration_chains
 
     monkeypatch.setattr(db, "discover_all_migration_chains", discover_all_migration_chains)
-    monkeypatch.setattr(db, "discover_plugin_chains", discover_plugin_chains)
-    monkeypatch.setattr(db, "skeleton_entry", skeleton_entry)
     monkeypatch.delenv("TAI_DB_BINDING_SKELETON", raising=False)
     monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "secret")
     monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_ADMIN_USER", "migrator")
@@ -368,45 +301,6 @@ def test_status_out_of_date_exits_non_zero(monkeypatch: pytest.MonkeyPatch) -> N
     assert "OUT OF DATE" in result.output
 
 
-def test_status_names_skipped_chain_and_exits_nonzero(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Every component up to date, but a declared chain was skipped: status names it
-    # and still exits non-zero, so it stays honest as a CI / pre-deploy gate.
-    async def _status_fn(entries: object) -> list[ComponentStatus]:
-        return [_status("skeleton", applied=(1,))]
-
-    async def _discovery() -> MigrationChainDiscovery:
-        return MigrationChainDiscovery(entries=[], skipped=[SkippedChain(component="acme_alerts")])
-
-    monkeypatch.setattr(db, "migration_status", _status_fn)
-    monkeypatch.setattr(db, "discover_all_migration_chains", _discovery)
-
-    result = CliRunner().invoke(app_module.app, ["db", "status"])
-
-    assert result.exit_code == 1, result.output
-    assert "acme_alerts" in result.output
-    assert "TAI_DB_BINDING" in result.output
-
-
-def test_status_json_reports_skipped_chains(monkeypatch: pytest.MonkeyPatch) -> None:
-    import json
-
-    async def _status_fn(entries: object) -> list[ComponentStatus]:
-        return [_status("skeleton", applied=(1,))]
-
-    async def _discovery() -> MigrationChainDiscovery:
-        return MigrationChainDiscovery(entries=[], skipped=[SkippedChain(component="acme_alerts")])
-
-    monkeypatch.setattr(db, "migration_status", _status_fn)
-    monkeypatch.setattr(db, "discover_all_migration_chains", _discovery)
-
-    result = CliRunner().invoke(app_module.app, ["--json", "db", "status"])
-
-    assert result.exit_code == 1, result.output
-    data = json.loads(result.output)
-    assert data["status"][0]["component"] == "skeleton"
-    assert data["skipped_chains"] == [{"component": "acme_alerts"}]
-
-
 def test_status_json_parses(monkeypatch: pytest.MonkeyPatch) -> None:
     import json
 
@@ -423,14 +317,14 @@ def test_status_json_parses(monkeypatch: pytest.MonkeyPatch) -> None:
     assert data["skipped_chains"] == []
 
 
-# --- manifest-loaded chains -----------------------------------------------
+# --- installed plugin chains ----------------------------------------------
 
 
-def _widget_spec():
+def _widget_spec(**overrides: object):
     """A chain-declaring spec whose package is the installed ``tai42-skeleton`` distribution.
 
-    So the manifest source resolves its chain against a real installed package (the
-    distribution's own ``sql/migrations``) with no live plugin install."""
+    Its chain resolves against a real installed package (the distribution's own
+    ``sql/migrations``) with no live plugin install."""
     from tai42_contract.plugins import PluginSpec
 
     return PluginSpec.model_validate(
@@ -446,50 +340,37 @@ def _widget_spec():
             "categories": ["dev"],
             "provides": [{"kind": "tool", "name": "w", "module": "w.m", "description": "d"}],
             "migrations": "sql/migrations",
+            **overrides,
         }
     )
 
 
-def _wire_manifest_loaded_chain(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Real chain discovery against a manifest that LOADS one chain-declaring plugin.
+def _wire_installed_chain(monkeypatch: pytest.MonkeyPatch, installed) -> None:  # type: ignore[no-untyped-def]
+    """Real chain discovery over a fixed installed-plugin scan.
 
-    No store row and no prefix (a plugin baked into the environment, loaded only via the
-    manifest). The password-only database config
-    lets the migrator identity resolve without a connection; the store is faked empty and
-    only each test's PG-touching runner (``migration_status`` / ``apply_migrations``) is
-    stubbed."""
-    from tai42_skeleton.config import ConfigManagerFactory
-    from tai42_skeleton.db import discover_all_migration_chains, discover_plugin_chains
+    ``installed`` stands in for the scan of the installed distributions, returning the
+    located specs (no distribution is unlocatable). The password-only
+    database config lets the migrator identity resolve without a connection; only each
+    test's PG-touching runner (``migration_status`` / ``apply_migrations``) is stubbed."""
+    from tai42_skeleton.db import discover_all_migration_chains
     from tai42_skeleton.db import discovery as db_discovery
-    from tai42_skeleton.marketplace import prefix as mp_prefix
-    from tai42_skeleton.marketplace import store as mp_store
 
     monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "secret")
     monkeypatch.setattr(db, "discover_all_migration_chains", discover_all_migration_chains)
-    monkeypatch.setattr(db, "discover_plugin_chains", discover_plugin_chains)
-
-    class _EmptyStore:
-        async def list_installed(self):
-            return []
-
-    monkeypatch.setattr(mp_store, "MarketplaceInstallStore", _EmptyStore)
-    monkeypatch.setattr(mp_prefix, "configured_prefix", lambda: None)
-    monkeypatch.setattr(
-        ConfigManagerFactory,
-        "create",
-        lambda: SimpleNamespace(read_manifest=lambda: {"lifecycle_modules": ["tai42_widget.lifecycle"]}),
-    )
-    monkeypatch.setattr(
-        db_discovery,
-        "_manifest_module_spec",
-        lambda name: _widget_spec() if name == "tai42_widget.lifecycle" else None,
-    )
+    monkeypatch.setattr(db_discovery, "_installed_plugin_specs", lambda: (installed(), []))
 
 
-def test_migrate_applies_manifest_loaded_chain(monkeypatch: pytest.MonkeyPatch) -> None:
-    # A chain-declaring plugin the manifest LOADS (no store row, no prefix) is discovered
-    # and applied by migrate — the runner migrates exactly what boot will gate on.
-    _wire_manifest_loaded_chain(monkeypatch)
+def _one_installed_widget(monkeypatch: pytest.MonkeyPatch, **overrides: object) -> None:
+    import importlib.resources
+
+    root = importlib.resources.files("tai42_skeleton")
+    _wire_installed_chain(monkeypatch, lambda: [(_widget_spec(**overrides), root)])
+
+
+def test_migrate_applies_installed_chain(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A chain-declaring installed plugin is discovered and applied by migrate, whether or
+    # not any manifest loads it.
+    _one_installed_widget(monkeypatch)
     applied: list[str] = []
 
     async def _apply(entries: object) -> list[AppliedMigration]:
@@ -501,14 +382,14 @@ def test_migrate_applies_manifest_loaded_chain(monkeypatch: pytest.MonkeyPatch) 
     result = CliRunner().invoke(app_module.app, ["db", "migrate"])
 
     assert result.exit_code == 0, result.output
-    assert "tai42-skeleton" in applied
+    assert applied == ["skeleton", "states", "tai42-skeleton"]
 
 
-def test_status_gate_nonzero_for_manifest_loaded_pending_chain(monkeypatch: pytest.MonkeyPatch) -> None:
-    # The gate contract: a manifest-loaded chain that is pending makes ``tai db status``
-    # exit non-zero (and names the component), so a deployment that would boot-gate the
-    # chain can never pass the pre-deploy gate green.
-    _wire_manifest_loaded_chain(monkeypatch)
+def test_status_gate_nonzero_for_installed_pending_chain(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A pending installed chain makes ``tai db status`` exit non-zero and names the
+    # component, so a deployment that would boot-gate the chain never passes the
+    # pre-deploy gate green.
+    _one_installed_widget(monkeypatch)
 
     async def _status_fn(entries: object) -> list[ComponentStatus]:
         return [
@@ -528,10 +409,10 @@ def test_status_gate_nonzero_for_manifest_loaded_pending_chain(monkeypatch: pyte
     assert "tai42-skeleton" in result.output
 
 
-def test_status_json_lists_manifest_loaded_component(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_status_json_lists_installed_component(monkeypatch: pytest.MonkeyPatch) -> None:
     import json
 
-    _wire_manifest_loaded_chain(monkeypatch)
+    _one_installed_widget(monkeypatch)
 
     async def _status_fn(entries: object) -> list[ComponentStatus]:
         return [_status(entry.component, applied=(1,)) for entry in cast("list", entries)]
@@ -542,108 +423,50 @@ def test_status_json_lists_manifest_loaded_component(monkeypatch: pytest.MonkeyP
 
     assert result.exit_code == 0, result.output
     data = json.loads(result.output)
-    assert "tai42-skeleton" in [row["component"] for row in data["status"]]
+    assert [row["component"] for row in data["status"]] == ["skeleton", "states", "tai42-skeleton"]
 
 
-def test_status_absent_manifest_proceeds_on_store_and_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
-    # migrate/status are manifest-OPTIONAL: an absent manifest contributes no manifest-loaded
-    # chains and status proceeds on the skeleton/store/prefix chains — exit 0, no error, and
-    # never a "Manifest not found" failure.
-    from tai42_skeleton.config import ConfigManagerFactory
-    from tai42_skeleton.db import discover_all_migration_chains
-    from tai42_skeleton.marketplace import prefix as mp_prefix
-    from tai42_skeleton.marketplace import store as mp_store
+def test_status_malformed_installed_spec_is_clean_nonzero(monkeypatch: pytest.MonkeyPatch) -> None:
+    # An installed distribution packaging an invalid plugin spec is a real error, never
+    # skipped: discovery raises MigrationDiscoveryError, which the CLI seam maps to a
+    # clean, credential-free non-zero, never a false green and never a raw traceback.
+    from tai42_kit.db import MigrationDiscoveryError
 
-    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "secret")
-    monkeypatch.setattr(db, "discover_all_migration_chains", discover_all_migration_chains)
+    def _malformed() -> list:
+        raise MigrationDiscoveryError("invalid plugin spec packaged in distribution 'tai42-widget' at /x: bad")
 
-    class _EmptyStore:
-        async def list_installed(self):
-            return []
+    _wire_installed_chain(monkeypatch, _malformed)
 
-    monkeypatch.setattr(mp_store, "MarketplaceInstallStore", _EmptyStore)
-    monkeypatch.setattr(mp_prefix, "configured_prefix", lambda: None)
+    async def _forbidden_status(entries: object) -> list[ComponentStatus]:
+        raise AssertionError("status must not run after a discovery error")
 
-    def _absent() -> dict:
-        raise FileNotFoundError("Manifest not found: /app/config/manifest.yml")
-
-    monkeypatch.setattr(ConfigManagerFactory, "create", lambda: SimpleNamespace(read_manifest=_absent))
-
-    async def _status_fn(entries: object) -> list[ComponentStatus]:
-        return [_status(entry.component, applied=(1,)) for entry in cast("list", entries)]
-
-    monkeypatch.setattr(db, "migration_status", _status_fn)
-
-    result = CliRunner().invoke(app_module.app, ["db", "status"])
-
-    assert result.exit_code == 0, result.output
-    assert "Manifest not found" not in result.output
-    # The skeleton-owned chains are reported (discovery fell through to them).
-    assert "skeleton" in result.output
-
-
-def test_status_malformed_manifest_is_clean_nonzero(monkeypatch: pytest.MonkeyPatch) -> None:
-    # A manifest that EXISTS but is schema-invalid is a real error, never swallowed:
-    # discovery wraps the ValidationError as a MigrationDiscoveryError, which the CLI seam
-    # maps to a clean, credential-free non-zero — never a false zero-pending green and never a
-    # raw traceback.
-    from tai42_skeleton.config import ConfigManagerFactory
-    from tai42_skeleton.db import discover_all_migration_chains
-    from tai42_skeleton.marketplace import prefix as mp_prefix
-    from tai42_skeleton.marketplace import store as mp_store
-
-    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "secret")
-    monkeypatch.setattr(db, "discover_all_migration_chains", discover_all_migration_chains)
-
-    class _EmptyStore:
-        async def list_installed(self):
-            return []
-
-    monkeypatch.setattr(mp_store, "MarketplaceInstallStore", _EmptyStore)
-    monkeypatch.setattr(mp_prefix, "configured_prefix", lambda: None)
-    monkeypatch.setattr(
-        ConfigManagerFactory,
-        "create",
-        lambda: SimpleNamespace(read_manifest=lambda: {"lifecycle_modules": "not-a-list"}),
-    )
+    monkeypatch.setattr(db, "migration_status", _forbidden_status)
 
     result = CliRunner().invoke(app_module.app, ["db", "status"])
 
     assert result.exit_code == 1, result.output
     assert "Error:" in result.output
-    assert "not a valid manifest" in result.output
+    assert "invalid plugin spec packaged in distribution 'tai42-widget'" in result.output
     assert "Traceback" not in result.output
 
 
-def test_status_broken_yaml_manifest_is_clean_nonzero(monkeypatch: pytest.MonkeyPatch) -> None:
-    # A manifest that EXISTS but is unparseable YAML surfaces as a clean, credential-free
-    # non-zero: discovery wraps the YAMLError (NOT a ValueError, so unwrapped it would escape
-    # the CLI seam as a raw traceback) as a MigrationDiscoveryError, which the seam maps.
-    import yaml
+def test_migrate_malformed_installed_spec_applies_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Discovery runs before any apply, so a malformed installed spec refuses migrate
+    # before a single migration lands.
+    from tai42_kit.db import MigrationDiscoveryError
 
-    from tai42_skeleton.config import ConfigManagerFactory
-    from tai42_skeleton.db import discover_all_migration_chains
-    from tai42_skeleton.marketplace import prefix as mp_prefix
-    from tai42_skeleton.marketplace import store as mp_store
+    def _malformed() -> list:
+        raise MigrationDiscoveryError("invalid plugin spec packaged in distribution 'tai42-widget' at /x: bad")
 
-    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "secret")
-    monkeypatch.setattr(db, "discover_all_migration_chains", discover_all_migration_chains)
+    _wire_installed_chain(monkeypatch, _malformed)
 
-    class _EmptyStore:
-        async def list_installed(self):
-            return []
+    async def _forbidden_apply(entries: object) -> list[AppliedMigration]:
+        raise AssertionError("migrate must not apply after a discovery error")
 
-    monkeypatch.setattr(mp_store, "MarketplaceInstallStore", _EmptyStore)
-    monkeypatch.setattr(mp_prefix, "configured_prefix", lambda: None)
+    monkeypatch.setattr(db, "apply_migrations", _forbidden_apply)
 
-    def _broken_yaml() -> dict:
-        raise yaml.YAMLError("mapping values are not allowed here")
-
-    monkeypatch.setattr(ConfigManagerFactory, "create", lambda: SimpleNamespace(read_manifest=_broken_yaml))
-
-    result = CliRunner().invoke(app_module.app, ["db", "status"])
+    result = CliRunner().invoke(app_module.app, ["db", "migrate"])
 
     assert result.exit_code == 1, result.output
-    assert "Error:" in result.output
-    assert "could not be parsed as YAML" in result.output
+    assert "invalid plugin spec packaged in distribution 'tai42-widget'" in result.output
     assert "Traceback" not in result.output

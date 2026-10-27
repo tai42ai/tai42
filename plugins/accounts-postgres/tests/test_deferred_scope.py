@@ -1,13 +1,13 @@
 """Boundary between what the unit suite proves and what the e2e leg owns.
 
 Proven here against the fakes: the provider, login, login-attachment, invite, and
-users-route matrices, the single registration landing in both registries, the
-packaged migration chain, and the boot-time schema gate's rendering/wiring. NOT
-unit-provable, owned by the e2e leg against a live Postgres: real SQL correctness
-(the UNIQUE constraints, ``pg_advisory_xact_lock`` under true concurrency, the
-atomic invite UPDATE, the sessions⋈users JOIN), applying the chain through the kit
-runner against a live database, and the full request→middleware→provider
-integration.
+users-route matrices, the single registration landing in both registries, and the
+packaged migration chain. NOT unit-provable, owned by the e2e leg against a live
+Postgres: real SQL correctness (the UNIQUE constraints, ``pg_advisory_xact_lock`` under
+true concurrency, the atomic invite UPDATE, the sessions⋈users JOIN), applying the chain
+through the kit runner against a live database, the startup schema check refusing a
+manifest that loads the provider while its chain is pending, and the full
+request→middleware→provider integration.
 """
 
 from __future__ import annotations
@@ -15,11 +15,12 @@ from __future__ import annotations
 from tai42_kit.db import discover_migrations
 
 from tai42_accounts_postgres import stores
-from tai42_accounts_postgres.db import accounts_migration_entry
+
+from .conftest import accounts_chain_entry
 
 
 def _baseline_ddl() -> str:
-    return discover_migrations(accounts_migration_entry().migrations_dir)[0].sql
+    return discover_migrations(accounts_chain_entry().migrations_dir)[0].sql
 
 
 def test_store_sql_names_match_the_baseline_schema():

@@ -3,12 +3,14 @@
 Recovery runs where the deployment runs: it reads the manifest and the stores the server
 reads, so it holds the same trust level as reading the boot log. It resolves the deployment's
 manifest (``--manifest-path`` or ``TAI_MANIFEST_PATH``), bridges the stored env and validates
-it through the one boot-manifest read every serving entrypoint crosses, binds the process app
-onto the ``tai42_app`` handle as a server boot does, imports the manifest's lifecycle modules so
-the identity/accounts providers register, and then, with the app still bound, re-mints ONE
+it through the one boot-manifest read every serving entrypoint crosses, runs the same preflight a
+server boot runs (the plugins prefix, the schema gate), binds the process app onto the
+``tai42_app`` handle as a server boot does, imports the manifest's lifecycle modules under the
+plugin-compat refusal so the identity/accounts providers register, and then, with the app still bound, re-mints ONE
 surviving owner key through :func:`~tai42_skeleton.access_control.setup_recovery.recover_owner_key`.
-A recovery refusal or an unreachable store surfaces as a clean, credential-free message and a
-non-zero exit rather than a raw traceback.
+A schema-gate refusal, an incompatible lifecycle plugin, a recovery refusal or an unreachable
+store surfaces as a clean, credential-free message and a non-zero exit rather than a raw
+traceback.
 """
 
 from __future__ import annotations
@@ -25,7 +27,7 @@ import psycopg
 from redis.exceptions import ConnectionError as RedisConnectionError
 from redis.exceptions import TimeoutError as RedisTimeoutError
 from tai42_contract.app import tai42_app
-from tai42_kit.db import component_store_settings
+from tai42_kit.db import MigrationDiscoveryError, SchemaOutOfDateError, component_store_settings
 
 from tai42_skeleton.access_control.setup_recovery import SetupRecoveryError, recover_owner_key
 from tai42_skeleton.db import SKELETON_COMPONENT
@@ -44,13 +46,18 @@ async def _deployment(manifest_path: str | None) -> AsyncIterator[None]:
 
     Stamps the resolved manifest path so the one boot-manifest read finds it, reads and
     validates the manifest under the bridged stored env (the read builds the worker bus and
-    reads its census on the running loop, the same loop the re-mint runs on), activates the configured plugin
-    prefix so a prefix-installed lifecycle module imports, then binds the process app onto
-    ``tai42_app`` and imports each named lifecycle module — the side effect that registers the
-    identity/accounts providers this command re-mints through. A lifecycle module may
-    register on an app facet at import (``tai42_app.webhook_verifiers``, …), so the imports
-    run under the binding, and the block that re-mints runs under it too. The binding is
-    restored on exit. A failing import raises loudly, aborting the command.
+    reads its census on the running loop, the same loop the re-mint runs on), then runs the
+    preflight a server boot runs (:func:`~tai42_skeleton.app.lifecycle.manifest_imports.prepare_manifest_imports`):
+    the configured plugin prefix goes on ``sys.path`` so a prefix-installed lifecycle module
+    imports, and the schema gate refuses an out-of-date database with the ``tai db migrate``
+    fix before any provider reads a table. It then binds the process app onto ``tai42_app``
+    and imports each named lifecycle module under the plugin-compat refusal — the side effect
+    that registers the identity/accounts providers this command re-mints through. A lifecycle
+    module may register on an app facet at import (``tai42_app.webhook_verifiers``, …), so the
+    imports run under the binding, and the block that re-mints runs under it too. The binding
+    is restored on exit. A schema-gate refusal or an incompatible lifecycle plugin is a
+    :class:`click.ClickException` carrying its message; a failing import raises loudly,
+    aborting the command.
     """
     resolved = manifest_path or default_manifest_path()
     if resolved is None:
@@ -58,18 +65,18 @@ async def _deployment(manifest_path: str | None) -> AsyncIterator[None]:
     os.environ["TAI_MANIFEST_PATH"] = resolved
 
     from tai42_skeleton.app.instance import app
-    from tai42_skeleton.marketplace.prefix import activate_prefix
+    from tai42_skeleton.app.lifecycle.manifest_imports import prepare_manifest_imports
+    from tai42_skeleton.marketplace.compat import CorePluginBootError, refuse_incompatible
 
     manifest = await app.lifecycle.read_boot_manifest()
-    # Put the configured plugin prefix on sys.path before importing any manifest module, so a
-    # prefix-installed lifecycle module (a marketplace-installed identity/accounts provider)
-    # imports here exactly as it does at serving boot. A no-op when no prefix is configured;
-    # idempotent. Imported function-locally to keep the app import chain free of the marketplace
-    # package.
-    activate_prefix()
     with tai42_app.bound(app):
-        for name in manifest.lifecycle_modules:
-            importlib.import_module(name)
+        try:
+            installed = await prepare_manifest_imports(manifest)
+            for name in manifest.lifecycle_modules:
+                refuse_incompatible(name, "lifecycle", installed)
+                importlib.import_module(name)
+        except (SchemaOutOfDateError, MigrationDiscoveryError, CorePluginBootError) as exc:
+            raise click.ClickException(str(exc)) from exc
         yield
 
 

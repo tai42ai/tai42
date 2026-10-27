@@ -4,16 +4,19 @@ No live stores: the deployment read (the boot-manifest read and the lifecycle-mo
 and the recovery orchestration are faked, so the tests assert the command wiring — it stamps
 the resolved manifest path, reads the manifest, imports the lifecycle modules, renders the
 recovery result, and surfaces a recovery refusal and a missing manifest path as loud,
-non-zero failures. One test imports a real lifecycle module that registers on an app facet
+non-zero failures, and that the schema gate and the plugin-compat check run before any
+lifecycle module imports. One test imports a real lifecycle module that registers on an app facet
 at import, proving the command binds the deployment's app for the imports and the recovery.
 """
 
 from __future__ import annotations
 
 import asyncio
+import importlib
 import json
 import os
 import sys
+from collections.abc import Callable
 from types import SimpleNamespace
 
 import psycopg
@@ -27,6 +30,7 @@ import tai42_skeleton.app.instance as instance
 from tai42_skeleton.access_control.setup_recovery import SetupRecoveryError
 from tai42_skeleton.app.server import TaiMCP
 from tai42_skeleton.cli.native import setup_recover
+from tai42_skeleton.manifest import Manifest
 
 _RESULT = {
     "owner_user_id": "owner",
@@ -36,19 +40,39 @@ _RESULT = {
 }
 
 
+_LIFECYCLE_MODULE = "deployment.lifecycle.module"
+_real_import_module = importlib.import_module
+
+
+def _recording_import(record: Callable[[str], object]) -> Callable[..., object]:
+    """An ``importlib.import_module`` that records the deployment's lifecycle module instead of importing it.
+
+    ``setup_recover.importlib`` is the process-wide ``importlib`` module, so every other name
+    (the platform's own lazy imports) is imported for real.
+    """
+
+    def _import(name: str, package: str | None = None) -> object:
+        if name != _LIFECYCLE_MODULE:
+            return _real_import_module(name, package)
+        record(name)
+        return SimpleNamespace()
+
+    return _import
+
+
 @pytest.fixture
 def fake_deployment(monkeypatch: pytest.MonkeyPatch) -> dict:
     """Fake the boot-manifest read and record the manifest path stamped before it, plus the imports."""
     seen: dict = {"imported": []}
 
     class _FakeLifecycle:
-        async def read_boot_manifest(self) -> SimpleNamespace:
+        async def read_boot_manifest(self) -> Manifest:
             seen["manifest_env"] = os.environ.get("TAI_MANIFEST_PATH")
             seen["bridge_loop"] = asyncio.get_running_loop()
-            return SimpleNamespace(lifecycle_modules=["deployment.lifecycle.module"])
+            return Manifest.model_validate({"default_routers": "none", "lifecycle_modules": [_LIFECYCLE_MODULE]})
 
     monkeypatch.setattr(instance, "app", SimpleNamespace(lifecycle=_FakeLifecycle()))
-    monkeypatch.setattr(setup_recover.importlib, "import_module", lambda name: seen["imported"].append(name))
+    monkeypatch.setattr(setup_recover.importlib, "import_module", _recording_import(seen["imported"].append))
     return seen
 
 
@@ -104,7 +128,9 @@ def test_recover_activates_the_prefix_before_importing_lifecycle_modules(
 
     calls: list[str] = []
     monkeypatch.setattr(prefix, "activate_prefix", lambda: calls.append("activate_prefix"))
-    monkeypatch.setattr(setup_recover.importlib, "import_module", lambda name: calls.append(f"import:{name}"))
+    monkeypatch.setattr(
+        setup_recover.importlib, "import_module", _recording_import(lambda name: calls.append(f"import:{name}"))
+    )
 
     async def _fake_recover(setup_token: str, *, key_user_id: str | None, key_description: str) -> dict:
         return _RESULT
@@ -193,8 +219,8 @@ def test_recover_binds_the_app_for_lifecycle_modules_and_the_recovery(monkeypatc
     """
     server = TaiMCP(name="recover-under-test")
 
-    async def _read_boot_manifest(*, kind: object) -> SimpleNamespace:
-        return SimpleNamespace(lifecycle_modules=[_SHARED_SECRET_MODULE])
+    async def _read_boot_manifest(*, kind: object) -> Manifest:
+        return Manifest.model_validate({"default_routers": "none", "lifecycle_modules": [_SHARED_SECRET_MODULE]})
 
     monkeypatch.setattr(server, "_read_boot_manifest", _read_boot_manifest)
     monkeypatch.setattr(instance, "app", server)
@@ -219,3 +245,75 @@ def test_recover_binds_the_app_for_lifecycle_modules_and_the_recovery(monkeypatc
     assert result.exit_code == 0, result.output
     assert "shared_secret" in server.webhook_verifiers.names()
     assert seen["verifier_during_recovery"] is server.webhook_verifiers.get("shared_secret")
+
+
+def test_recover_refuses_a_pending_schema_before_importing_lifecycle_modules(
+    monkeypatch: pytest.MonkeyPatch, fake_deployment: dict
+) -> None:
+    import tai42_kit.db.migrations as kit_migrations
+    from tai42_kit.db import ComponentStatus, MigrationScript
+
+    from tai42_skeleton.db import boot_gate
+
+    pending = MigrationScript(version=2, name="add_thing", filename="0002_add_thing.sql", checksum="c", sql="")
+
+    async def status(entries):
+        return [
+            ComponentStatus(component=entry.component, applied_versions=(1,), pending=(pending,), mismatches=())
+            for entry in entries
+        ]
+
+    monkeypatch.setattr(boot_gate, "component_store_configured", lambda component: component == "skeleton")
+    monkeypatch.setattr(boot_gate, "component_store_settings", lambda component: SimpleNamespace(pg_dsn="runtime"))
+    monkeypatch.setattr(kit_migrations, "migration_status", status)
+    recovered: list[str] = []
+
+    async def _fake_recover(setup_token: str, *, key_user_id: str | None, key_description: str) -> dict:
+        recovered.append(setup_token)
+        return _RESULT
+
+    monkeypatch.setattr(setup_recover, "recover_owner_key", _fake_recover)
+
+    result = CliRunner().invoke(
+        app_module.app, ["setup", "--recover", "--token", "t", "--manifest-path", "/deploy/manifest.yaml"]
+    )
+
+    assert result.exit_code == 1, result.output
+    assert "database schema is out of date — refusing to start: skeleton: 1 pending (0002_add_thing.sql)" in (
+        result.output
+    )
+    assert "Run 'tai db migrate'" in result.output
+    assert fake_deployment["imported"] == []
+    assert recovered == []
+
+
+def test_recover_refuses_an_incompatible_lifecycle_module_without_importing_it(
+    monkeypatch: pytest.MonkeyPatch, fake_deployment: dict
+) -> None:
+    from tai42_skeleton.marketplace import compat
+    from tai42_skeleton.marketplace.installed_packages import InstalledPackages
+
+    monkeypatch.setattr(
+        compat,
+        "distribution_map",
+        lambda: InstalledPackages(top_levels={"deployment": ["deployment-plugin"]}, editable_sources={}),
+    )
+    monkeypatch.setattr(
+        compat, "dist_compat", lambda dist_name: compat.CompatVerdict("incompatible", f"{dist_name} needs another")
+    )
+
+    async def _fake_recover(setup_token: str, *, key_user_id: str | None, key_description: str) -> dict:
+        return _RESULT
+
+    monkeypatch.setattr(setup_recover, "recover_owner_key", _fake_recover)
+
+    result = CliRunner().invoke(
+        app_module.app, ["setup", "--recover", "--token", "t", "--manifest-path", "/deploy/manifest.yaml"]
+    )
+
+    assert result.exit_code == 1, result.output
+    assert (
+        f"lifecycle plugin {_LIFECYCLE_MODULE!r} is incompatible and cannot load: deployment-plugin needs another"
+        in result.output
+    )
+    assert fake_deployment["imported"] == []

@@ -42,6 +42,7 @@ from packaging.utils import canonicalize_name
 from packaging.version import InvalidVersion, Version
 
 from tai42_skeleton.marketplace.errors import LocalStateError, RegistryResponseError
+from tai42_skeleton.marketplace.installed_packages import InstalledPackages, installed_packages
 
 logger = getLogger(__name__)
 
@@ -97,13 +98,15 @@ def running_contract_version() -> str:
     return metadata.version(_CONTRACT_DIST)
 
 
-def distribution_map() -> dict[str, list[str]]:
+def distribution_map() -> InstalledPackages:
     """A snapshot of top-level package → owning distribution(s), reusable across a boot pass.
 
-    The underlying read walks every installed dist, so per-module fresh reads would
-    be quadratic; one boot pass reuses this snapshot across every manifest module.
+    Read by :func:`~tai42_skeleton.marketplace.installed_packages.installed_packages`, so an
+    editable install that records only a ``.pth``, and one served by an import hook, map to
+    their distribution too. The read walks every installed dist, so per-module fresh reads
+    would be quadratic; one boot pass reuses this snapshot across every manifest module.
     """
-    return dict(metadata.packages_distributions())
+    return installed_packages()
 
 
 def _declared_contract_specifier(dist_name: str) -> SpecifierSet | None:
@@ -157,19 +160,19 @@ def dist_compat(dist_name: str) -> CompatVerdict:
     )
 
 
-def module_compat(module: str, dist_map: dict[str, list[str]] | None = None) -> CompatVerdict:
+def module_compat(module: str, installed: InstalledPackages | None = None) -> CompatVerdict:
     """The verdict for a manifest MODULE, from the owning distribution(s) of its top-level package.
 
     The top-level package is mapped to the owning distribution(s) via
-    ``importlib.metadata.packages_distributions`` and each mapped dist is evaluated —
+    :func:`distribution_map` and each mapped dist is evaluated —
     any incompatible dist decides the verdict (naming that dist), else compatible when
-    at least one dist declared a range, else unknown. ``dist_map`` lets one boot pass
+    at least one dist declared a range, else unknown. ``installed`` lets one boot pass
     snapshot the (sys.path-scan-priced) mapping once and reuse it across every manifest
     module; omitted, the mapping is read fresh.
     """
     top_level = module.partition(".")[0]
-    mapping = metadata.packages_distributions() if dist_map is None else dist_map
-    dists = mapping.get(top_level)
+    snapshot = distribution_map() if installed is None else installed
+    dists = snapshot.distributions_for(top_level)
     if not dists:
         return CompatVerdict(
             "unknown",
@@ -182,6 +185,27 @@ def module_compat(module: str, dist_map: dict[str, list[str]] | None = None) -> 
     if any(verdict.status == "compatible" for verdict in verdicts):
         return CompatVerdict("compatible")
     return verdicts[0]
+
+
+def refuse_incompatible(module: str, kind: str, installed: InstalledPackages | None = None) -> None:
+    """Refuse a manifest-declared ``kind`` module whose distribution is contract-incompatible, before it imports.
+
+    The one compat refusal every door that loads a manifest-named module crosses: an
+    INCOMPATIBLE verdict (:func:`module_compat`) raises :class:`CorePluginBootError` naming
+    the module, its kind, the versions in play and the remedy — importing it is exactly what
+    crash-loops or misbehaves. An ``unknown`` verdict proceeds with a logged note, never a
+    silent pass. ``installed`` is the caller's :func:`distribution_map` snapshot; omitted,
+    the mapping is read fresh.
+    """
+    verdict = module_compat(module, installed)
+    if verdict.status == "incompatible":
+        raise CorePluginBootError(
+            f"{kind} plugin {module!r} is incompatible and cannot load: {verdict.reason}; "
+            "a manifest-declared plugin that cannot load aborts boot — fix or update the plugin, "
+            "remove it from the manifest, or point the manifest at a working one"
+        )
+    if verdict.status == "unknown":
+        logger.info("plugin compat unknown for %s module %s: %s", kind, module, verdict.reason)
 
 
 @dataclass(frozen=True)

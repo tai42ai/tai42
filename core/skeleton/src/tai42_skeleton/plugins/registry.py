@@ -402,21 +402,13 @@ def build_registry(studio_plugins: list[str], dist_path: str | None) -> StudioPl
     the shell, so it stays a boot failure; an optional specifier the dist does not
     ship is simply not offered.
     """
-    from tai42_skeleton.marketplace.compat import CorePluginBootError, module_compat
+    from tai42_skeleton.marketplace.compat import CorePluginBootError, refuse_incompatible
 
     plugins: dict[str, InstalledStudioPlugin] = {}
     for package in dict.fromkeys(studio_plugins):
         if studio_plugins.count(package) > 1:
             logger.error("studio plugin %r is listed more than once in ``studio_plugins``; loading it once", package)
-        verdict = module_compat(package)
-        if verdict.status == "incompatible":
-            raise CorePluginBootError(
-                f"studio plugin {package!r} is incompatible and cannot load: {verdict.reason}; "
-                "a manifest-declared plugin that cannot load aborts boot — fix or update the plugin, "
-                "remove it from the manifest, or point the manifest at a working one"
-            )
-        if verdict.status == "unknown":
-            logger.info("plugin compat unknown for studio plugin %s: %s", package, verdict.reason)
+        refuse_incompatible(package, "studio")
         try:
             plugins[package] = _load_plugin(package)
         except Exception as exc:

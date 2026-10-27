@@ -1,33 +1,29 @@
-"""The packaged migration chain, its schema shape, and the boot-time gate.
+"""The packaged migration chain and its schema shape.
 
 The baseline is loaded through the kit runner's own discovery (the same path
 production uses) and asserted schema-equal to the accounts store the plugin
 reads and writes: the three tables, their unique constraints, and the two
 per-user indexes — with no ``ALTER ... ADD COLUMN`` backfill (the
-baseline IS the schema). The gate is exercised with a faked ``migration_status``
-so the refusal RENDERING and WIRING are pinned without a live Postgres.
+baseline IS the schema).
 """
 
 from __future__ import annotations
 
+import importlib.resources
 import re
-from collections.abc import Sequence
 
 import pytest
 import yaml
-from tai42_kit.db import ChecksumMismatch, ComponentStatus, MigrationEntry, MigrationScript, discover_migrations
+from tai42_kit.db import discover_migrations
 
-from tai42_accounts_postgres.db import (
-    COMPONENT,
-    SchemaOutOfDateError,
-    accounts_migration_entry,
-    accounts_store_configured,
-    assert_accounts_schema_applied,
-)
+from tai42_accounts_postgres.db import COMPONENT, accounts_store_configured
+
+_PACKAGE_ROOT = importlib.resources.files("tai42_accounts_postgres")
+_CHAIN_DIR = _PACKAGE_ROOT.joinpath("migrations")
 
 
 def _baseline_sql() -> str:
-    scripts = discover_migrations(accounts_migration_entry().migrations_dir)
+    scripts = discover_migrations(_CHAIN_DIR)
     assert scripts, "the accounts chain must ship at least the baseline migration"
     return scripts[0].sql
 
@@ -42,17 +38,19 @@ def _table_block(ddl: str, table: str) -> str:
 
 
 def test_chain_is_the_single_baseline_migration():
-    scripts = discover_migrations(accounts_migration_entry().migrations_dir)
+    scripts = discover_migrations(_CHAIN_DIR)
     assert [s.filename for s in scripts] == ["0001_baseline.sql"]
     assert scripts[0].version == 1
     assert scripts[0].name == "baseline"
 
 
-def test_migration_entry_identity_is_the_distribution_name():
-    entry = accounts_migration_entry()
-    # The history-table identity MUST equal the distribution name so the boot gate
-    # reads the same rows the installer and the `tai db` CLI write.
-    assert entry.component == COMPONENT == "tai42-accounts-postgres"
+def test_chain_identity_is_the_distribution_name():
+    # The packaged spec declares no ``migrations_component``, so the chain's
+    # history-table identity is the spec's ``package``: the component whose store
+    # the plugin reads (``COMPONENT``) is the one ``tai db migrate`` writes.
+    spec = yaml.safe_load(_PACKAGE_ROOT.joinpath("tai-plugin.yml").read_text(encoding="utf-8"))
+    assert "migrations_component" not in spec
+    assert spec["package"] == COMPONENT == "tai42-accounts-postgres"
 
 
 def test_tai_plugin_yml_declares_the_migrations_dir():
@@ -62,7 +60,7 @@ def test_tai_plugin_yml_declares_the_migrations_dir():
     # A bare, package-relative POSIX dir with no trailing slash — the runner
     # resolves it against the import root, which is where the chain is packaged.
     assert spec["migrations"] == "migrations"
-    discovered = discover_migrations(accounts_migration_entry().migrations_dir)
+    discovered = discover_migrations(_CHAIN_DIR)
     assert [s.filename for s in discovered] == ["0001_baseline.sql"]
 
 
@@ -130,62 +128,3 @@ def test_store_configured_follows_component_binding(monkeypatch: pytest.MonkeyPa
     monkeypatch.delenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", raising=False)
     monkeypatch.setenv("TAI_DATABASE_ACCOUNTS_PG_PASSWORD", "secret")
     assert accounts_store_configured() is True
-
-
-# -- boot gate ------------------------------------------------------------------
-
-
-def _script(version: int, name: str) -> MigrationScript:
-    return MigrationScript(version=version, name=name, filename=f"{version:04d}_{name}.sql", checksum="c", sql="")
-
-
-def _status(*, pending: tuple = (), mismatches: tuple = ()) -> ComponentStatus:
-    return ComponentStatus(component=COMPONENT, applied_versions=(1,), pending=pending, mismatches=mismatches)
-
-
-def _fake_status(result: list[ComponentStatus]):
-    async def _fn(entries: Sequence[MigrationEntry]) -> list[ComponentStatus]:
-        return result
-
-    return _fn
-
-
-async def test_gate_clean_is_noop(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "secret")
-    # The gate is the shared kit primitive; fake kit's ``migration_status`` at its
-    # source so the real ``assert_chain_applied`` renders the refusal end-to-end.
-    monkeypatch.setattr("tai42_kit.db.migrations.migration_status", _fake_status([_status()]))
-    await assert_accounts_schema_applied()  # no raise
-
-
-async def test_gate_pending_refuses_naming_migrate(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "secret")
-    monkeypatch.setattr(
-        "tai42_kit.db.migrations.migration_status", _fake_status([_status(pending=(_script(2, "add_thing"),))])
-    )
-    with pytest.raises(SchemaOutOfDateError) as excinfo:
-        await assert_accounts_schema_applied()
-    message = str(excinfo.value)
-    assert "tai db migrate" in message
-    assert "tai42-accounts-postgres" in message
-    assert "0002_add_thing.sql" in message
-
-
-async def test_gate_checksum_mismatch_refuses(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "secret")
-    mismatch = ChecksumMismatch(COMPONENT, 1, "baseline", "old", "new")
-    monkeypatch.setattr("tai42_kit.db.migrations.migration_status", _fake_status([_status(mismatches=(mismatch,))]))
-    with pytest.raises(SchemaOutOfDateError) as excinfo:
-        await assert_accounts_schema_applied()
-    assert "checksum mismatch" in str(excinfo.value)
-    assert "tai db migrate" in str(excinfo.value)
-
-
-async def test_gate_skipped_when_store_unconfigured(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.delenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", raising=False)
-
-    async def _forbidden(entries: Sequence[MigrationEntry]) -> list[ComponentStatus]:
-        raise AssertionError("an unconfigured accounts store must not query the database")
-
-    monkeypatch.setattr("tai42_kit.db.migrations.migration_status", _forbidden)
-    await assert_accounts_schema_applied()  # no query, no raise

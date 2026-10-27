@@ -1,11 +1,13 @@
 """``tai db`` — apply and inspect database migrations.
 
 ``migrate`` applies every pending migration across every discovered component (the
-skeleton chains plus every plugin that declares one — the plugins the deployment
-LOADS via the manifest, and the marketplace-installed and prefix-installed plugins)
-through the kit migration runner; ``--plan`` prints what WOULD be applied without
+skeleton chains plus the chain of every installed plugin that declares one, in the
+environment or the plugins prefix, whether or not the manifest loads it, and of every
+plugin the persisted manifest loads) through the kit migration runner; ``--plan`` prints what WOULD be applied without
 touching the database. ``status`` reports each component's applied / pending /
-checksum verdict.
+checksum verdict. Every command names each plugin component that is off (its override
+binding unset) and each installed distribution whose packages no installed metadata records
+(an editable install served by an import hook); neither changes the exit code.
 
 Each component connects through its bound database's migrator (DDL-privileged)
 identity, resolved through the central registry — distinct from the app's runtime
@@ -35,13 +37,10 @@ from tai42_kit.db import (
 
 from tai42_skeleton.db import (
     SKELETON_COMPONENT,
-    SkippedChain,
+    MigrationChainDiscovery,
     discover_all_migration_chains,
-    discover_plugin_chains,
-    skeleton_entry,
 )
-from tai42_skeleton.db.discovery import chain_skip_message
-from tai42_skeleton.states.db import states_entry
+from tai42_skeleton.db.discovery import chain_skip_message, unlocatable_message
 
 app = typer.Typer(
     name="db",
@@ -60,26 +59,22 @@ def _target() -> str:
     return f"database {name!r} at {settings.pg_host}:{settings.pg_port}/{settings.pg_db}"
 
 
-async def _apply() -> tuple[list[AppliedMigration], list[SkippedChain]]:
-    """Apply the two skeleton-owned chains first, then discover and apply the plugin chains.
+async def _apply() -> tuple[list[AppliedMigration], MigrationChainDiscovery]:
+    """Discover every chain, then apply them in order: the skeleton baseline, ``states``, the plugins.
 
-    Applies the skeleton baseline and the ``states`` record store FIRST. Plugin
-    discovery reads skeleton-owned tables (the marketplace install store), so a fresh
-    database must receive the skeleton baseline before the plugin chains can even be
-    enumerated. Returns both the applied migrations and every declared plugin chain
-    that was skipped because its override binding is unset.
+    Discovery reads installed metadata only, so every chain is resolved before anything is
+    applied and a malformed plugin spec refuses before any migration runs. Returns both the
+    applied migrations and the discovery, whose ``skipped`` and ``unlocatable`` are named in
+    the report.
     """
-    applied = await apply_migrations([skeleton_entry(), states_entry()])
-    plugin = await discover_plugin_chains()
-    if plugin.entries:
-        applied.extend(await apply_migrations(plugin.entries))
-    return applied, plugin.skipped
+    discovery = discover_all_migration_chains()
+    return await apply_migrations(discovery.entries), discovery
 
 
-async def _status() -> tuple[list[ComponentStatus], list[SkippedChain]]:
-    discovery = await discover_all_migration_chains()
+async def _status() -> tuple[list[ComponentStatus], MigrationChainDiscovery]:
+    discovery = discover_all_migration_chains()
     statuses = await migration_status(discovery.entries)
-    return statuses, discovery.skipped
+    return statuses, discovery
 
 
 def _status_records(statuses: list[ComponentStatus]) -> list[dict[str, str]]:
@@ -95,18 +90,31 @@ def _status_records(statuses: list[ComponentStatus]) -> list[dict[str, str]]:
     ]
 
 
-def _skip_records(skips: list[SkippedChain]) -> list[dict[str, str]]:
-    return [{"component": skip.component} for skip in skips]
+def _discovery_records(discovery: MigrationChainDiscovery) -> dict[str, list[dict[str, str]]]:
+    """The JSON keys naming every off component and every installed distribution whose packages cannot be enumerated."""
+    return {
+        "skipped_chains": [{"component": skip.component} for skip in discovery.skipped],
+        "unlocatable": [
+            {"distribution": item.distribution, "reason": unlocatable_message(item)} for item in discovery.unlocatable
+        ],
+    }
 
 
-def _emit_status(statuses: list[ComponentStatus], skips: list[SkippedChain], *, json_output: bool) -> None:
+def _echo_discovery_notes(discovery: MigrationChainDiscovery) -> None:
+    """One line per off component, then one per installed distribution whose packages cannot be enumerated."""
+    for skip in discovery.skipped:
+        typer.echo(chain_skip_message(skip))
+    for item in discovery.unlocatable:
+        typer.echo(unlocatable_message(item))
+
+
+def _emit_status(statuses: list[ComponentStatus], discovery: MigrationChainDiscovery, *, json_output: bool) -> None:
     records = _status_records(statuses)
     if json_output:
-        print_json({"status": records, "skipped_chains": _skip_records(skips)})
+        print_json({"status": records, **_discovery_records(discovery)})
     else:
         typer.echo(render_table(records, ["component", "applied", "pending", "mismatches", "status"]))
-        for skip in skips:
-            typer.echo(chain_skip_message(skip))
+        _echo_discovery_notes(discovery)
 
 
 def _run(coro):  # type: ignore[no-untyped-def]
@@ -114,15 +122,10 @@ def _run(coro):  # type: ignore[no-untyped-def]
 
     A connection error names the credential-free target; the registry's not-configured
     and half-set-admin-identity errors and the chain-integrity errors surface their own
-    actionable messages; all exit non-zero without a traceback. A manifest that EXISTS but
-    cannot be read, parsed, or validated is wrapped by discovery as a
-    :class:`~tai42_kit.db.MigrationDiscoveryError` (a :class:`~tai42_kit.db.MigrationError`,
-    caught below) naming the manifest, so it maps here to the same clean credential-free
-    non-zero. An ABSENT manifest is NOT mapped here: discovery treats migrate/status as
-    manifest-optional and contributes no manifest chains when the file does not exist, so no
-    ``FileNotFoundError`` reaches this seam for that case — leaving ``FileNotFoundError``
-    unmapped keeps a genuinely different missing-file fault loud rather than masked as a
-    clean exit.
+    actionable messages; all exit non-zero without a traceback. A malformed installed plugin
+    spec is a :class:`~tai42_kit.db.MigrationDiscoveryError` (a
+    :class:`~tai42_kit.db.MigrationError`, caught below) naming the distribution, so it maps
+    here to the same clean credential-free non-zero.
     """
     import psycopg
 
@@ -142,47 +145,44 @@ def _run(coro):  # type: ignore[no-untyped-def]
 
 
 def _emit_plan(*, json_output: bool) -> None:
-    """Report what ``migrate`` WOULD apply, and every skipped chain, without applying.
+    """Report what ``migrate`` WOULD apply, every off component's chain and every unlocatable install, without applying.
 
-    Exits non-zero when a declared chain was skipped so ``--plan`` is honest a chain will not run.
+    An off component (its override binding unset) is a valid state: it is named, so the plan
+    is honest that its chain will not run, and the exit stays zero. An installed distribution
+    whose packages cannot be enumerated is named the same way.
     """
-    statuses, skips = _run(_status())
+    statuses, discovery = _run(_status())
     pending_total = sum(len(status.pending) for status in statuses)
     if json_output:
-        _emit_status(statuses, skips, json_output=True)
+        _emit_status(statuses, discovery, json_output=True)
     else:
-        _emit_status(statuses, skips, json_output=False)
+        _emit_status(statuses, discovery, json_output=False)
         typer.echo(
             f"{pending_total} pending migration(s) across {len(statuses)} component(s) — nothing applied (--plan)."
         )
-    if skips:
-        raise typer.Exit(1)
 
 
 def _emit_applied(*, json_output: bool) -> None:
-    """Apply every pending migration, report what ran, then name every skipped chain.
+    """Apply every pending migration, report what ran, then name every off component and unlocatable install.
 
-    Exits non-zero after reporting when a declared chain was skipped (its override binding is unset).
+    An off component (its override binding unset) is a valid state: its chain is not applied,
+    the line naming it follows the report, and the exit stays zero. An installed distribution
+    whose packages cannot be enumerated is named after it, the exit unchanged.
     """
-    applied, skips = _run(_apply())
+    applied, discovery = _run(_apply())
     if json_output:
         applied_records = [
             {"component": item.component, "version": item.version, "name": item.name} for item in applied
         ]
-        print_json({"applied": applied_records, "skipped_chains": _skip_records(skips)})
-        if skips:
-            raise typer.Exit(1)
+        print_json({"applied": applied_records, **_discovery_records(discovery)})
         return
     if applied:
         for item in applied:
             typer.echo(f"Applied {item.component} {item.version:04d}_{item.name}.")
         typer.echo(f"Applied {len(applied)} migration(s).")
-    elif not skips:
+    else:
         typer.echo("Schema is up to date — no migrations to apply.")
-    if skips:
-        for skip in skips:
-            typer.echo(chain_skip_message(skip))
-        raise typer.Exit(1)
+    _echo_discovery_notes(discovery)
 
 
 @app.command("migrate")
@@ -192,15 +192,15 @@ def migrate_command(
 ) -> None:
     """Apply every pending migration across all discovered components.
 
-    Discovery covers the skeleton chains plus every plugin that declares one: the plugins
-    the deployment LOADS via the manifest, and the marketplace-installed and
-    prefix-installed plugins. ``--plan`` lists what would be applied and changes nothing.
-    Idempotent: with nothing pending it reports so and exits 0. Exits non-zero, after
-    reporting what ran, when a declared migration chain was skipped (its override binding
-    is unset). Manifest-optional: an absent manifest contributes no manifest-loaded chains
-    and migrate proceeds on the skeleton, store, and prefix chains. Loud on a connection
-    failure, an unconfigured connection, a rewritten (checksum-mismatched) chain, or a
-    manifest that exists but is malformed or invalid.
+    Discovery covers the skeleton chains plus the chain of every installed plugin that
+    declares one, in the environment or the plugins prefix, whether or not the manifest loads
+    it, and of every plugin the persisted manifest loads. ``--plan`` lists what would be
+    applied and changes nothing. Idempotent: with nothing pending it reports so and exits 0.
+    A plugin component whose override binding is unset is off: its chain is not applied, a
+    line names it, and the exit stays 0. An installed distribution whose packages no
+    installed metadata records (an editable install served by an import hook) is named by a
+    line too, the exit unchanged. Loud on a connection failure, an unconfigured connection, a
+    rewritten (checksum-mismatched) chain, or a malformed installed plugin spec.
     """
     json_output = app_context(ctx).json_output
     if plan:
@@ -213,16 +213,17 @@ def migrate_command(
 def status_command(ctx: typer.Context) -> None:
     """Report each component's applied / pending / checksum verdict.
 
-    Reports every discovered component: the skeleton chains plus every plugin that declares
-    one — the plugins the deployment LOADS via the manifest, and the marketplace-installed
-    and prefix-installed plugins. Exits non-zero when any component has pending migrations
-    or a checksum mismatch, or when a declared migration chain was skipped (its override
-    binding is unset), so it doubles as a CI / pre-deploy gate. Manifest-optional: an absent
-    manifest contributes no manifest-loaded chains and status reports the skeleton, store,
-    and prefix chains. Loud on a connection failure, an unconfigured connection, or a
-    manifest that exists but is malformed or invalid.
+    Reports every discovered component: the skeleton chains plus the chain of every
+    installed plugin that declares one, in the environment or the plugins prefix, whether or
+    not the manifest loads it, and of every plugin the persisted manifest loads. Exits
+    non-zero when any component has pending migrations or a checksum mismatch, so it doubles
+    as a CI / pre-deploy gate. A plugin component whose override binding is unset is off, a
+    valid state: a line names it and it does not fail the gate; an installed distribution
+    whose packages cannot be enumerated is named the same way.
+    Loud on a connection failure, an unconfigured connection, or a malformed installed
+    plugin spec.
     """
-    statuses, skips = _run(_status())
-    _emit_status(statuses, skips, json_output=app_context(ctx).json_output)
-    if any(not status.is_up_to_date for status in statuses) or skips:
+    statuses, discovery = _run(_status())
+    _emit_status(statuses, discovery, json_output=app_context(ctx).json_output)
+    if any(not status.is_up_to_date for status in statuses):
         raise typer.Exit(1)

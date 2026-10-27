@@ -15,14 +15,15 @@ directory doubles as the packaged fixture chain. Generic component/binding names
 
 from __future__ import annotations
 
+import importlib.resources
 import logging
-from types import SimpleNamespace
 
 import pytest
 from tai42_contract.plugins import PluginSpec
+from tai42_kit.db import MigrationEntry, component_migrator_settings, component_store_settings
 
-from tai42_skeleton.db import installed_plugin_entries, plugin_migration_entry
-from tai42_skeleton.db.discovery import SkippedChain, _plugin_chain
+from tai42_skeleton.db import installed_plugin_entries
+from tai42_skeleton.db.discovery import SkippedChain, plugin_chain
 
 _DISCOVERY_LOGGER = "tai42_skeleton.db.discovery"
 
@@ -63,17 +64,57 @@ def _bind_alerts(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("TAI_DATABASE_ALERTSDB_PG_HOST", "alerts-host")
 
 
+# The ``tai42-skeleton`` import root, holding the packaged fixture chain ``sql/migrations``.
+_ROOT = importlib.resources.files("tai42_skeleton")
+
+
+def _installed(monkeypatch: pytest.MonkeyPatch, *specs: PluginSpec) -> None:
+    """Make ``specs`` the installed plugins, each packaged in the ``tai42-skeleton`` import root."""
+    from tai42_skeleton.db import discovery
+
+    monkeypatch.setattr(discovery, "_installed_plugin_specs", lambda: ([(spec, _ROOT) for spec in specs], []))
+
+
+def _migrate_entry(monkeypatch: pytest.MonkeyPatch, spec: PluginSpec) -> MigrationEntry | None:
+    """The entry ``tai db migrate`` builds for ``spec`` installed alone, or ``None`` when it builds none."""
+    _installed(monkeypatch, spec)
+    entries = installed_plugin_entries()
+    return entries[0] if entries else None
+
+
 def test_override_runs_against_the_declared_binding(monkeypatch: pytest.MonkeyPatch) -> None:
     _bind_alerts(monkeypatch)
     spec = _spec(migrations="sql/migrations", migrations_component="acme_alerts")
 
-    entry = plugin_migration_entry(spec)
+    entry = _migrate_entry(monkeypatch, spec)
     assert entry is not None
     # The history identity is the OVERRIDE component, not the distribution.
     assert entry.component == "acme_alerts"
     # ...and its CONNECTION points at that component's bound database, not the default.
     assert entry.settings.pg_host == "alerts-host"
     assert entry.migrations_dir.is_dir()
+
+
+def test_store_and_migrator_selectors_resolve_the_same_chain(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The boot gate (runtime store identity) and ``tai db migrate`` (migrator identity) share
+    # one resolution: the same component and directory, each on its own connection identity.
+    _bind_alerts(monkeypatch)
+    monkeypatch.setenv("TAI_DATABASE_ALERTSDB_PG_ADMIN_USER", "alerts-admin")
+    monkeypatch.setenv("TAI_DATABASE_ALERTSDB_PG_ADMIN_PASSWORD", "admin-secret")
+    spec = _spec(migrations="sql/migrations", migrations_component="acme_alerts")
+
+    gated = plugin_chain(spec, settings_for=component_store_settings, package_root=_ROOT)
+    migrated = plugin_chain(spec, settings_for=component_migrator_settings, package_root=_ROOT)
+
+    assert not isinstance(gated, SkippedChain)
+    assert not isinstance(migrated, SkippedChain)
+    assert gated is not None
+    assert migrated is not None
+    assert gated.component == migrated.component == "acme_alerts"
+    assert str(gated.migrations_dir) == str(migrated.migrations_dir)
+    assert gated.settings.pg_host == migrated.settings.pg_host == "alerts-host"
+    assert gated.settings.pg_user != "alerts-admin"
+    assert migrated.settings.pg_user == "alerts-admin"
 
 
 def test_override_with_unset_binding_is_a_visible_skip(
@@ -86,10 +127,12 @@ def test_override_with_unset_binding_is_a_visible_skip(
     spec = _spec(migrations="sql/migrations", migrations_component="acme_alerts")
 
     # The three-outcome resolver returns the DISTINCT skip sentinel, not None/entry.
-    assert _plugin_chain(spec) == SkippedChain(component="acme_alerts")
+    assert plugin_chain(spec, settings_for=component_migrator_settings, package_root=_ROOT) == SkippedChain(
+        component="acme_alerts"
+    )
 
     with caplog.at_level(logging.WARNING, logger=_DISCOVERY_LOGGER):
-        entry = plugin_migration_entry(spec)
+        entry = _migrate_entry(monkeypatch, spec)
 
     # No migration entry is applied for the skipped chain.
     assert entry is None
@@ -98,7 +141,9 @@ def test_override_with_unset_binding_is_a_visible_skip(
     assert any("acme_alerts" in msg and "TAI_DB_BINDING" in msg for msg in skip_lines)
 
 
-def test_visible_skip_is_distinct_from_silent_no_migrations(caplog: pytest.LogCaptureFixture) -> None:
+def test_visible_skip_is_distinct_from_silent_no_migrations(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
     # Both a no-migrations plugin AND an unset-binding override resolve to a None
     # entry — but they are DISTINCT: the no-migrations path is silent, the override
     # skip is surfaced. The visible line is what separates them.
@@ -106,22 +151,24 @@ def test_visible_skip_is_distinct_from_silent_no_migrations(caplog: pytest.LogCa
     override_skip = _spec(migrations="sql/migrations", migrations_component="acme_alerts")
 
     with caplog.at_level(logging.WARNING, logger=_DISCOVERY_LOGGER):
-        assert plugin_migration_entry(no_migrations) is None
+        assert _migrate_entry(monkeypatch, no_migrations) is None
     assert [r for r in caplog.records if r.name == _DISCOVERY_LOGGER] == []  # silent
 
     caplog.clear()
     with caplog.at_level(logging.WARNING, logger=_DISCOVERY_LOGGER):
-        assert plugin_migration_entry(override_skip) is None
+        assert _migrate_entry(monkeypatch, override_skip) is None
     assert any(r.name == _DISCOVERY_LOGGER for r in caplog.records)  # surfaced
 
 
-def test_no_override_chain_is_unchanged(caplog: pytest.LogCaptureFixture) -> None:
+def test_no_override_chain_resolves_to_the_distribution(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
     # With no override the component is the distribution name and the chain resolves
     # WITHOUT any TAI_DB_BINDING_* declared, and never a skip.
     spec = _spec(migrations="sql/migrations")
 
     with caplog.at_level(logging.WARNING, logger=_DISCOVERY_LOGGER):
-        entry = plugin_migration_entry(spec)
+        entry = _migrate_entry(monkeypatch, spec)
 
     assert entry is not None
     assert entry.component == "tai42-skeleton"  # the distribution identity
@@ -131,26 +178,21 @@ def test_no_override_chain_is_unchanged(caplog: pytest.LogCaptureFixture) -> Non
     assert [r for r in caplog.records if r.name == _DISCOVERY_LOGGER] == []
 
 
-async def test_installed_entries_omit_and_surface_the_skip(
+def test_installed_entries_omit_and_surface_the_skip(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    # Across the marketplace store: an unset-binding override chain is omitted from
-    # the runner entries AND surfaced, while an ordinary chain is included — the skip
-    # is reported, never silently dropped.
-    from tai42_skeleton.marketplace import store as mp_store
-
+    # Across the installed plugins: an unset-binding override chain is omitted from the
+    # runner entries AND surfaced, while an ordinary chain is included — the skip is
+    # reported, never silently dropped.
     monkeypatch.delenv("TAI_DB_BINDING_ACME_ALERTS", raising=False)
-    override_skip = _spec(migrations="sql/migrations", migrations_component="acme_alerts").model_dump(mode="json")
-    plain_chain = _spec(migrations="sql/migrations").model_dump(mode="json")
-
-    class _FakeStore:
-        async def list_installed(self):
-            return [SimpleNamespace(spec=override_skip), SimpleNamespace(spec=plain_chain)]
-
-    monkeypatch.setattr(mp_store, "MarketplaceInstallStore", _FakeStore)
+    _installed(
+        monkeypatch,
+        _spec(migrations="sql/migrations", migrations_component="acme_alerts"),
+        _spec(migrations="sql/migrations"),
+    )
 
     with caplog.at_level(logging.WARNING, logger=_DISCOVERY_LOGGER):
-        entries = await installed_plugin_entries()
+        entries = installed_plugin_entries()
 
     # Only the ordinary chain contributes an entry; the override skip is omitted.
     assert [entry.component for entry in entries] == ["tai42-skeleton"]
@@ -158,23 +200,16 @@ async def test_installed_entries_omit_and_surface_the_skip(
     assert any(r.name == _DISCOVERY_LOGGER and "acme_alerts" in r.getMessage() for r in caplog.records)
 
 
-async def test_all_chains_discovery_includes_skips(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_all_chains_discovery_includes_skips(monkeypatch: pytest.MonkeyPatch) -> None:
     # The whole-process discovery result carries the two skeleton-owned chains as
     # entries AND the unset-binding override chain as a skip — never silently dropped.
     from tai42_skeleton.db import SKELETON_COMPONENT, SkippedChain, discover_all_migration_chains
-    from tai42_skeleton.marketplace import store as mp_store
     from tai42_skeleton.states.db import STATES_COMPONENT
 
     monkeypatch.delenv("TAI_DB_BINDING_ACME_ALERTS", raising=False)
-    override_skip = _spec(migrations="sql/migrations", migrations_component="acme_alerts").model_dump(mode="json")
+    _installed(monkeypatch, _spec(migrations="sql/migrations", migrations_component="acme_alerts"))
 
-    class _FakeStore:
-        async def list_installed(self):
-            return [SimpleNamespace(spec=override_skip)]
-
-    monkeypatch.setattr(mp_store, "MarketplaceInstallStore", _FakeStore)
-
-    discovery = await discover_all_migration_chains()
+    discovery = discover_all_migration_chains()
 
     # The two skeleton-owned chains are present as entries; the override chain is not.
     assert [entry.component for entry in discovery.entries] == [SKELETON_COMPONENT, STATES_COMPONENT]

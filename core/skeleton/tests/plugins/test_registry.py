@@ -373,7 +373,7 @@ def test_build_registry_incompatible_plugin_aborts_boot_without_loading(tmp_path
     monkeypatch.setattr(
         compat,
         "module_compat",
-        lambda module, dist_map=None: compat.CompatVerdict("incompatible", "needs tai42-contract <0.2, 0.3.0 running"),
+        lambda module, installed=None: compat.CompatVerdict("incompatible", "needs tai42-contract <0.2, 0.3.0 running"),
     )
     with pytest.raises(CorePluginBootError, match=r"needs tai42-contract <0\.2"):
         build_registry(["acme_plugin"], None)

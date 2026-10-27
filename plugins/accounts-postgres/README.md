@@ -147,9 +147,10 @@ tai db migrate     # apply every pending migration across all discovered compone
 tai db status      # per-component applied / pending / checksum verdicts
 ```
 
-The provider's boot healthcheck asserts the chain is fully applied — a pending
-migration or a checksum mismatch fails startup loudly naming `tai db migrate` —
-and fires only when the accounts store is configured (the database bound by
+The platform's startup schema check covers this chain whenever a manifest loads
+the plugin: on every boot and every reload, a pending migration or a checksum
+mismatch refuses the start loudly naming `tai db migrate`. The check runs only
+when the accounts store is configured (the database bound by
 `TAI_DB_BINDING_TAI42_ACCOUNTS_POSTGRES` resolves a non-empty password). It NEVER
 auto-applies.
 

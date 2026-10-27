@@ -383,19 +383,18 @@ def _offline_connector_categories(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture(autouse=True)
 def _offline_schema_gate(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The boot-time migration gate (:func:`assert_skeleton_schema_applied`) reads the
-    ``tai_schema_history`` table through the kit runner whenever the skeleton database
-    is configured. An offline app-boot test that sets the database password (to turn a
-    feature ON) but fakes that store's Postgres would otherwise have the gate reach for
-    a real Postgres it never provided. Neutralize it by reporting the database as
-    unconfigured — the same offline posture the store-seam fakes above take. The gate's
-    own suite (``tests/db/test_boot_gate.py``) re-patches this seam to drive the
-    configured / pending / refusal branches."""
+    """The boot-time schema gate (:func:`assert_deployment_schemas_applied`) reads the
+    ``tai_schema_history`` table through the kit runner for every chain it checks — a chain
+    whose component database is configured. An offline app-boot test that sets the database password (to
+    turn a feature ON) but fakes that store's Postgres would otherwise have the gate reach
+    for a real Postgres it never provided. Neutralize it by reporting every component
+    database as unconfigured to the gate — the same offline posture the store-seam fakes
+    above take. The gate's own suite (``tests/db/test_boot_gate.py``) re-patches this seam
+    to drive the configured / pending / refusal branches."""
     monkeypatch.setattr(boot_gate, "component_store_configured", lambda component: False)
-    # The ``states`` component owns a second skeleton chain with the same posture: its
-    # boot gate + seed applier read the store only when configured. Report it unconfigured
-    # too, so an offline app-boot that sets the database password (to turn another feature
-    # ON) does not have the states gate reach a Postgres it never provided. The states
+    # The ``states`` seed applier reads the store only when configured. Report it
+    # unconfigured too, so an offline app-boot that sets the database password (to turn
+    # another feature ON) does not have it reach a Postgres it never provided. The states
     # store/service suites drive the configured behavior directly (fake store / real PG).
     monkeypatch.setattr(states_db, "states_store_configured", lambda: False)
 
