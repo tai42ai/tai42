@@ -25,6 +25,7 @@ from tai42_contract.access_control.identity import (
 from tai42_contract.access_control.models import (
     API_KEY_HEADER,
     UNIVERSAL_SCOPE,
+    AccessCondition,
     AccessPolicy,
     IdentityRecord,
     JqAuthContext,
@@ -40,6 +41,7 @@ __all__ = [
     "KEY_FINGERPRINT_CLAIM",
     "OWNER_USER_ID_CLAIM",
     "UNIVERSAL_SCOPE",
+    "AccessCondition",
     "AccessPolicy",
     "ApiKeyIdentityProvider",
     "AuthIdentity",

@@ -14,7 +14,7 @@ from typing import Any, Literal, overload
 from tai42_contract.agent import PRESET_NAME_PATTERN
 from tai42_contract.agent.base import PresetSpec
 from tai42_contract.manifest import ExtensionElement
-from tai42_contract.presets import PresetBody, PresetSeed
+from tai42_contract.presets import PresetBody, PresetInputMap, PresetOutputMap, PresetSeed
 from tai42_contract.presets.errors import (
     PresetExistsError,
     PresetNameConflictError,
@@ -406,8 +406,8 @@ async def create_preset(
     extensions: list[list[ExtensionElement]],
     output_schema: TemplatedText | dict[str, Any] | None,
     input_schema: TemplatedText | dict[str, Any] | None = None,
-    input_map: TemplatedText | str | None = None,
-    output_map: TemplatedText | str | None = None,
+    input_map: PresetInputMap = None,
+    output_map: PresetOutputMap = None,
     state_binding: StateBinding | None = None,
 ) -> dict[str, Any]:
     """Create a preset, atomically.

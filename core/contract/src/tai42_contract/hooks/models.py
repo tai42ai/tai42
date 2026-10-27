@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Annotated, Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
 
@@ -11,7 +11,12 @@ from tai42_contract.interactions.door_contract import ParkableDoorMixin
 from tai42_contract.plugins.routes import PATH_SEGMENT_SLUG_RE
 from tai42_contract.states.binding import StateBinding
 from tai42_contract.states.models import SUBJECT_KIND_RE
-from tai42_contract.template import ConditionMixin, TemplatedText
+from tai42_contract.template import EXPRESSION_ANNOTATION_KEY, ConditionMixin, TemplatedText, expression_annotation
+
+HOOK_DELIVERY_BLURB = (
+    "the parsed webhook delivery (structured bodies merged top-level with query params; arbitrary text under raw_body)"
+)
+"""The input document every hook jq expression runs over, as its expression annotations gloss it."""
 
 # A hook's ``topic`` is dispatched as ONE path segment of the public webhook URL
 # (``/universal_webhook/{topic}``), and its ``name`` addresses the hook on every
@@ -52,7 +57,19 @@ class HookSubject(BaseModel):
     target_kind: ConversationTargetKind
     target_name: str = Field(min_length=1)
     kind: str
-    key_expr: TemplatedText
+    key_expr: Annotated[
+        TemplatedText,
+        Field(
+            json_schema_extra={
+                EXPRESSION_ANNOTATION_KEY: expression_annotation(
+                    label="subject key expression",
+                    blurb=HOOK_DELIVERY_BLURB,
+                    returns="a non-empty string: the subject key the fire's state reads and writes use",
+                    caveats=["an empty, blank or non-string result fails the fire loudly"],
+                )
+            }
+        ),
+    ]
 
     @field_validator("kind")
     @classmethod

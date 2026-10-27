@@ -6,6 +6,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel
 from tai42_contract.manifest import ExtensionElement
+from tai42_contract.presets import PresetInputMap, PresetOutputMap
 from tai42_contract.states.binding import StateBinding
 from tai42_contract.template import TemplatedText
 
@@ -30,8 +31,8 @@ class PresetCreate(BaseModel):
     extensions: list[list[ExtensionElement]] = []
     output_schema: TemplatedText | dict[str, Any] | None = None
     input_schema: TemplatedText | dict[str, Any] | None = None
-    input_map: TemplatedText | str | None = None
-    output_map: TemplatedText | str | None = None
+    input_map: PresetInputMap = None
+    output_map: PresetOutputMap = None
     state_binding: StateBinding | None = None
 
 
@@ -51,8 +52,8 @@ class PresetVersionSave(BaseModel):
     extensions: list[list[ExtensionElement]] | None = None
     output_schema: TemplatedText | dict[str, Any] | None = None
     input_schema: TemplatedText | dict[str, Any] | None = None
-    input_map: TemplatedText | str | None = None
-    output_map: TemplatedText | str | None = None
+    input_map: PresetInputMap = None
+    output_map: PresetOutputMap = None
     description: str | None = None
     #: Omitted carries the active binding forward; an explicit ``null`` clears it; a
     #: binding sets it — the presence flag (``state_binding_provided``) tells absent from
@@ -88,8 +89,8 @@ class PresetValidate(BaseModel):
     extensions: list[list[ExtensionElement]] | None = None
     output_schema: TemplatedText | dict[str, Any] | None = None
     input_schema: TemplatedText | dict[str, Any] | None = None
-    input_map: TemplatedText | str | None = None
-    output_map: TemplatedText | str | None = None
+    input_map: PresetInputMap = None
+    output_map: PresetOutputMap = None
     state_binding: StateBinding | None = None
 
 

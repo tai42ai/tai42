@@ -8,8 +8,7 @@ from __future__ import annotations
 from typing import Any
 
 from pydantic import BaseModel, RootModel
-from tai42_contract.access_control.models import RoleDefinition
-from tai42_contract.template import TemplatedText
+from tai42_contract.access_control.models import AccessCondition, RoleDefinition
 
 from tai42_skeleton.access_control.projection import PrincipalRef
 from tai42_skeleton.access_control.role_gate import RoleReach
@@ -82,7 +81,7 @@ class TokenPayloadRow(BaseModel):
     description: str
     scopes: list[str] | None = None
     policy_data: dict[str, Any] | None = None
-    condition: TemplatedText | None = None
+    condition: AccessCondition = None
     principal: PrincipalRef | None = None
     orphaned: bool = False
 

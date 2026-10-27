@@ -11,6 +11,7 @@ from typing import Any
 
 from pydantic import BaseModel, RootModel
 from tai42_contract.app.responses import FanoutSummary
+from tai42_contract.presets import PresetInputMap, PresetOutputMap
 from tai42_contract.template import TemplatedText
 from tai42_contract.versioning.models import DocumentVersion
 
@@ -31,8 +32,8 @@ class PresetRecordView(BaseModel):
     extensions: list[list[str | dict[str, Any]]]
     output_schema: TemplatedText | dict[str, Any] | None
     input_schema: TemplatedText | dict[str, Any] | None
-    input_map: TemplatedText | str | None
-    output_map: TemplatedText | str | None
+    input_map: PresetInputMap
+    output_map: PresetOutputMap
     conflicted: bool
     conflicted_reason: str | None
     uses: list[str]

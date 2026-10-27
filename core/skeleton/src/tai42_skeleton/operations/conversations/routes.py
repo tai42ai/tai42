@@ -18,8 +18,10 @@ from tai42_contract.conversations import (
     ConversationRouteCreateBody,
     OverlapPolicy,
     ReplyTexts,
+    RouteReplyExpr,
+    RouteStartExpr,
 )
-from tai42_contract.template import TemplatedText
+from tai42_contract.interactions import DoorCancelExpr, DoorExtrasExpr, DoorResumeExpr
 
 from tai42_skeleton.conversations.managers.base_conversations_manager import DoorFlipRefusedError
 from tai42_skeleton.conversations.route_writes import RouteBindRefusedError, write_route
@@ -127,11 +129,11 @@ async def create_conversation_route(
     target_kind: str,
     target_name: str,
     execution_key: str,
-    start_expr: TemplatedText | None = None,
-    cancel_expr: TemplatedText | None = None,
-    resume_expr: TemplatedText | None = None,
-    extras_expr: TemplatedText | None = None,
-    reply_expr: TemplatedText | None = None,
+    start_expr: RouteStartExpr = None,
+    cancel_expr: DoorCancelExpr = None,
+    resume_expr: DoorResumeExpr = None,
+    extras_expr: DoorExtrasExpr = None,
+    reply_expr: RouteReplyExpr = None,
     initial_mode: str = "agent",
     channel: str | None = None,
     our_identity: str | None = None,

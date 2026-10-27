@@ -50,7 +50,7 @@ from typing import Annotated, Any, Literal, NoReturn
 from pydantic import BaseModel, Field
 from tai42_contract.app import tai42_app
 from tai42_contract.errors import OperationError
-from tai42_contract.hooks import HookParams, HookRegister, HookSubject, TopicVerifierBinding
+from tai42_contract.hooks import HOOK_DELIVERY_BLURB, HookParams, HookRegister, HookSubject, TopicVerifierBinding
 from tai42_contract.states.binding import StateBinding
 from tai42_contract.template import EXPRESSION_ANNOTATION_KEY, TemplatedText, expression_annotation
 
@@ -187,9 +187,6 @@ async def list_hooks(topic: str | None = None) -> dict[str, Any]:
 # currently parked interactions as ``$parked`` beside the delivery. Declared as ``Annotated``
 # metadata on the parameter type so the schema fastmcp builds off the flat signature carries
 # it; schema METADATA only, never validation.
-_HOOK_DELIVERY_BLURB = (
-    "the parsed webhook delivery (structured bodies merged top-level with query params; arbitrary text under raw_body)"
-)
 # The parked-interactions variable every door-contract flat param reads as ``$parked``.
 _HOOK_PARKED_VARIABLE = (
     "parked",
@@ -203,8 +200,7 @@ _HOOK_CONDITION_PARAM = Annotated[
         json_schema_extra={
             EXPRESSION_ANNOTATION_KEY: expression_annotation(
                 label="condition",
-                blurb="the parsed webhook delivery (structured bodies merged top-level with query "
-                "params; arbitrary text under raw_body)",
+                blurb=HOOK_DELIVERY_BLURB,
                 returns="truthy to fire the hook; a falsy result skips it",
                 caveats=[
                     "an absent/empty condition always fires; a present condition that "
@@ -220,7 +216,7 @@ _HOOK_START_EXPR_PARAM = Annotated[
         json_schema_extra={
             EXPRESSION_ANNOTATION_KEY: expression_annotation(
                 label="start expression",
-                blurb=_HOOK_DELIVERY_BLURB,
+                blurb=HOOK_DELIVERY_BLURB,
                 variables=[_HOOK_PARKED_VARIABLE],
                 returns="an object — the fired tool's kwargs (the hook's static tool_kwargs win on a key clash)",
                 caveats=[
@@ -238,7 +234,7 @@ _HOOK_CANCEL_EXPR_PARAM = Annotated[
         json_schema_extra={
             EXPRESSION_ANNOTATION_KEY: expression_annotation(
                 label="cancel expression",
-                blurb=_HOOK_DELIVERY_BLURB,
+                blurb=HOOK_DELIVERY_BLURB,
                 variables=[_HOOK_PARKED_VARIABLE],
                 returns="null (cancel nothing), a parked interaction id, or a list of ids to cancel",
             )
@@ -251,7 +247,7 @@ _HOOK_RESUME_EXPR_PARAM = Annotated[
         json_schema_extra={
             EXPRESSION_ANNOTATION_KEY: expression_annotation(
                 label="resume expression",
-                blurb=_HOOK_DELIVERY_BLURB,
+                blurb=HOOK_DELIVERY_BLURB,
                 variables=[_HOOK_PARKED_VARIABLE],
                 returns=(
                     "null (resume nothing), {id, payload} to resume an ask with an answer, a bare id to "
@@ -267,7 +263,7 @@ _HOOK_EXTRAS_EXPR_PARAM = Annotated[
         json_schema_extra={
             EXPRESSION_ANNOTATION_KEY: expression_annotation(
                 label="extras expression",
-                blurb=_HOOK_DELIVERY_BLURB,
+                blurb=HOOK_DELIVERY_BLURB,
                 variables=[_HOOK_PARKED_VARIABLE],
                 returns="the extras mapping handed to the started target; null for no extras",
             )

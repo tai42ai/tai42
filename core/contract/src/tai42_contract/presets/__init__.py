@@ -30,9 +30,13 @@ from tai42_contract.presets.errors import (
 )
 from tai42_contract.presets.models import (
     CARRY_FORWARD,
+    PRESET_INPUT_MAP_ANNOTATION,
+    PRESET_OUTPUT_MAP_ANNOTATION,
     CarryForward,
     PresetBody,
+    PresetInputMap,
     PresetInputSchemaSupport,
+    PresetOutputMap,
     PresetSeed,
     PresetSeedToolMeta,
 )
@@ -196,13 +200,17 @@ class PresetStore(Protocol):
 
 __all__ = [
     "CARRY_FORWARD",
+    "PRESET_INPUT_MAP_ANNOTATION",
+    "PRESET_OUTPUT_MAP_ANNOTATION",
     "CarryForward",
     "PresetBody",
     "PresetError",
     "PresetExistsError",
+    "PresetInputMap",
     "PresetInputSchemaSupport",
     "PresetNameConflictError",
     "PresetNotFoundError",
+    "PresetOutputMap",
     "PresetOutputStage",
     "PresetParkStages",
     "PresetSeed",
