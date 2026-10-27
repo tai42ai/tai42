@@ -28,9 +28,9 @@ from tai42_kit.clients import client_ctx
 from tai42_kit.clients.base import shutdown_all_clients
 from tai42_kit.clients.impl.postgres import PostgresClient
 from tai42_kit.db import apply_migrations, component_store_settings
+from tai42_kit.plugins import parse_plugin_spec
 from tai42_kit.settings import reset_all_settings
 
-import tai42_skeleton.db.discovery as discovery
 from tai42_skeleton.db import SKELETON_COMPONENT, skeleton_entry
 from tai42_skeleton.marketplace.installer import Installer
 
@@ -77,7 +77,7 @@ class _Plugin:
 
 
 @pytest.fixture
-async def plugin(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[_Plugin]:
+async def plugin() -> AsyncIterator[_Plugin]:
     if os.environ.get(_OPT_IN_ENV) not in ("1", "true", "True"):
         pytest.skip(
             f"real-Postgres installer migration test is opt-in: set {_OPT_IN_ENV}=1 and point the "
@@ -91,37 +91,48 @@ async def plugin(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[_Plugin]:
     dist_name = f"tai42-layers-mig-{token}"
     table = f"layers_plugin_{token}"
 
-    # A minimal REAL importable package on ``sys.path`` carrying a well-formed one-file chain
-    # (``NNNN_name.sql``) that creates a uniquely-named table.
+    spec_yaml = (
+        "spec_version: 1\n"
+        "namespace: tai42\n"
+        f"name: mig-{token}\n"
+        f"package: {dist_name}\n"
+        "version: 1.0.0\n"
+        "description: A table-owning integration-test plugin\n"
+        "license: Apache-2.0\n"
+        "contract: '>=0.1,<1.0'\n"
+        "categories: [dev]\n"
+        "provides:\n"
+        "  - kind: tool\n"
+        f"    module: {import_pkg}.tools.x\n"
+        f"    name: tool-{token}\n"
+        "    description: A tool\n"
+        "migrations: migrations\n"
+    )
+    # A minimal REAL installed distribution in a site directory on ``sys.path``: an import
+    # package carrying its packaged spec and a well-formed one-file chain (``NNNN_name.sql``)
+    # that creates a uniquely-named table, and a ``.dist-info`` whose RECORD lists them — what
+    # the installer resolves the chain from after ``pip`` lands a plugin.
     root = Path(tempfile.mkdtemp(prefix="tai42_layers_mig_"))
     package_dir = root / import_pkg
     (package_dir / "migrations").mkdir(parents=True)
-    (package_dir / "__init__.py").write_text("")
-    (package_dir / "migrations" / "0001_baseline.sql").write_text(
-        f"CREATE TABLE IF NOT EXISTS {table} (id INTEGER PRIMARY KEY, note TEXT NOT NULL);\n"
-    )
+    files = {
+        package_dir / "__init__.py": "",
+        package_dir / "tai-plugin.yml": spec_yaml,
+        package_dir / "migrations" / "0001_baseline.sql": (
+            f"CREATE TABLE IF NOT EXISTS {table} (id INTEGER PRIMARY KEY, note TEXT NOT NULL);\n"
+        ),
+    }
+    for path, body in files.items():
+        path.write_text(body)
+    dist_info = root / f"{import_pkg}-1.0.0.dist-info"
+    dist_info.mkdir()
+    (dist_info / "METADATA").write_text(f"Metadata-Version: 2.1\nName: {dist_name}\nVersion: 1.0.0\n")
+    rows = [f"{path.relative_to(root).as_posix()},," for path in files]
+    rows += [f"{dist_info.name}/METADATA,,", f"{dist_info.name}/RECORD,,"]
+    (dist_info / "RECORD").write_text("\n".join(rows) + "\n")
     sys.path.insert(0, str(root))
-    # ``plugin_migration_entry`` resolves the distribution's import package from installed
-    # metadata; this in-test package is not pip-installed, so map the name directly.
-    monkeypatch.setattr(discovery, "_import_package_for_distribution", lambda distribution: import_pkg)
 
-    spec = PluginSpec.model_validate(
-        {
-            "spec_version": 1,
-            "namespace": "tai42",
-            "name": f"mig-{token}",
-            "package": dist_name,
-            "version": "1.0.0",
-            "description": "A table-owning integration-test plugin",
-            "license": "Apache-2.0",
-            "contract": ">=0.1,<1.0",
-            "categories": ["dev"],
-            "provides": [
-                {"kind": "tool", "module": f"{import_pkg}.tools.x", "name": f"tool-{token}", "description": "A tool"}
-            ],
-            "migrations": "migrations",
-        }
-    )
+    spec = parse_plugin_spec(spec_yaml.encode(), source="registry")
     try:
         yield _Plugin(installer=Installer(), spec=spec, component=dist_name, table=table)
     finally:

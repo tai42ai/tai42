@@ -2,8 +2,9 @@
 
 The kit owns the runner (:mod:`tai42_kit.db`) and the central database registry;
 this package owns the skeleton's integration: chain discovery for the skeleton and
-installed plugins (:mod:`.discovery`), the boot-time schema gate every schema-owning
-feature and plugin shares (:mod:`.boot_gate`), and the fleet-wide advisory lock a
+installed plugins (:mod:`.discovery`), the boot-time schema gate every epoch build runs
+over the platform chains and the chain of every plugin the manifest loads
+(:mod:`.boot_gate`), and the fleet-wide advisory lock a
 read-then-write takes to stay atomic across processes (:mod:`.locks`).
 """
 
@@ -12,7 +13,7 @@ from __future__ import annotations
 from tai42_skeleton.db.boot_gate import (
     SchemaOutOfDateError,
     assert_chain_applied,
-    assert_skeleton_schema_applied,
+    assert_deployment_schemas_applied,
 )
 from tai42_skeleton.db.discovery import (
     SKELETON_COMPONENT,
@@ -22,7 +23,7 @@ from tai42_skeleton.db.discovery import (
     discover_all_migration_chains,
     discover_plugin_chains,
     installed_plugin_entries,
-    plugin_migration_entry,
+    installed_plugin_entry,
     skeleton_entry,
     skeleton_migrations_dir,
 )
@@ -37,12 +38,12 @@ __all__ = [
     "advisory_name_lock",
     "all_migration_entries",
     "assert_chain_applied",
-    "assert_skeleton_schema_applied",
+    "assert_deployment_schemas_applied",
     "discover_all_migration_chains",
     "discover_plugin_chains",
     "installed_plugin_entries",
+    "installed_plugin_entry",
     "not_configured_message",
-    "plugin_migration_entry",
     "skeleton_entry",
     "skeleton_migrations_dir",
 ]

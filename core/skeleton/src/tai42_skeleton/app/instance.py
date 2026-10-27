@@ -55,7 +55,6 @@ from tai42_skeleton.plugins.settings import check_hosted_ui_settings
 from tai42_skeleton.routers import tool_runs_settings
 from tai42_skeleton.settings import rate_limit
 from tai42_skeleton.states import db as states_readiness
-from tai42_skeleton.states.db import assert_states_schema_applied
 from tai42_skeleton.sub_mcp import service as sub_mcp_service
 from tai42_skeleton.sub_mcp import settings as sub_mcp_readiness
 
@@ -275,15 +274,11 @@ def _register_feature_lifecycles(app: TaiMCP) -> None:
 
 
 def _register_states_lifecycles(app: TaiMCP) -> None:
-    """Register the states component's schema gate, its outbox sweep and its seed reconcile.
+    """Register the states component's outbox sweep and its seed reconcile.
 
-    Registered right after the skeleton's schema gate, so neither the sweep nor the reconcile
-    ever runs against a pending-migration database.
+    Both run after ``start()``'s schema gate has verified the states chain, so neither ever
+    runs against a pending-migration database.
     """
-    # The states component's chain is a second skeleton-owned schema-gate: it
-    # defaults to the same database as the skeleton (component_store_configured),
-    # so it is verified whenever a database is bound, before any state read/write.
-    app.lifecycle.on_startup(assert_states_schema_applied)
     # Every process that runs the app lifespan sweeps the states outbox (pending saves applied
     # after the reply), so any serve process or backend worker recovers any pending save.
     from tai42_skeleton.states.outbox.sweep import start_state_outbox_sweep, stop_state_outbox_sweep

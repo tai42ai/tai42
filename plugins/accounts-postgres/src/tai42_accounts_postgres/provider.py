@@ -33,7 +33,7 @@ from tai42_kit.clients.impl.redis import RedisClient
 from tai42_kit.db import component_store_settings
 
 from tai42_accounts_postgres import member_actions, service
-from tai42_accounts_postgres.db import COMPONENT, assert_accounts_schema_applied
+from tai42_accounts_postgres.db import COMPONENT
 from tai42_accounts_postgres.hashing import hash_password_async
 from tai42_accounts_postgres.settings import accounts_settings
 
@@ -265,10 +265,6 @@ class PostgresAccountsProvider(LoginAttachingProvider):
             return None
         deleted = await service.sessions_store().delete(service.token_hash(token))
         return SessionRevocation() if deleted else None
-
-    async def healthcheck(self) -> None:
-        """Boot-time gate: assert the plugin's schema chain is fully applied."""
-        await assert_accounts_schema_applied()
 
     def readiness_targets(self) -> tuple[ReadinessTarget, ReadinessTarget]:
         """The provider's backing stores probed by the readiness check: its Postgres and its Redis."""

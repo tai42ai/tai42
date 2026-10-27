@@ -15,6 +15,7 @@ from tai42_skeleton.exceptions.exceptions import TaiValidationError
 from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.marketplace import compat as mkt_compat
 from tai42_skeleton.marketplace.compat import CompatVerdict, CorePluginBootError
+from tai42_skeleton.marketplace.installed_packages import InstalledPackages
 from tai42_skeleton.tools import mcp_health
 
 from .._fixtures.reload import reload_with
@@ -174,7 +175,7 @@ def test_initialize_helpers_require_started():
     with pytest.raises(RuntimeError, match="not started"):
         m._initialize_registries()
     with pytest.raises(RuntimeError, match="not started"):
-        m._initialize_components()
+        m._initialize_components(InstalledPackages(top_levels={}, editable_sources={}))
 
 
 def test_start_imports_lifecycle_router_and_middleware_modules():
@@ -229,7 +230,7 @@ def _incompatible_module_compat(target: str):
     """A ``module_compat`` stub that rules ``target`` incompatible (a versioned reason)
     and everything else unknown — so ``target`` aborts the import pass before importing."""
 
-    def _refuse(module, dist_map=None):
+    def _refuse(module, installed=None):
         if module == target:
             return CompatVerdict("incompatible", "needs tai42-contract <0.2, but 0.3.0 is running")
         return CompatVerdict("unknown", "no dist")

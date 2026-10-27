@@ -27,6 +27,7 @@ from tai42_skeleton.app.mount_map import MountBinding, MountRegistrationError, b
 from tai42_skeleton.app.route_registry import RouteOwner, RouteRegistry
 from tai42_skeleton.app.server import TaiMCP
 from tai42_skeleton.marketplace.compat import CompatVerdict
+from tai42_skeleton.marketplace.installed_packages import InstalledPackages
 
 from ._fixtures.route_table import route_table
 
@@ -428,7 +429,7 @@ def test_accounts_shape_runs_each_route_module_body_exactly_once_per_pass(
     import _regprobe  # pyright: ignore[reportMissingImports]  (on sys.path via the plugin_dist fixture)
 
     registry = plugin_dist
-    monkeypatch.setattr("tai42_skeleton.marketplace.compat.module_compat", lambda module, dist_map: _UNKNOWN_VERDICT)
+    monkeypatch.setattr("tai42_skeleton.marketplace.compat.module_compat", lambda module, installed: _UNKNOWN_VERDICT)
     app = TaiMCP(name="accounts-shape")
     app._mount_map = {_LOGIN_LEAF: _LOGIN_BINDING, _USERS_LEAF: _USERS_BINDING}
 
@@ -436,11 +437,12 @@ def test_accounts_shape_runs_each_route_module_body_exactly_once_per_pass(
         _regprobe.exec_count.clear()
         registry.reset_shape_index()
         executed: set[str] = set()
+        nothing_installed = InstalledPackages(top_levels={}, editable_sources={})
         # Lifecycle loop: the root package sweeps in both route submodules under their bindings.
-        app._import_manifest_module("multi_router_plugin", "lifecycle", {}, executed)
+        app._import_manifest_module("multi_router_plugin", "lifecycle", nothing_installed, executed)
         # Router role: each route submodule is its own entry — already executed by the walk.
-        app._import_manifest_module(_LOGIN_LEAF, "router", {}, executed)
-        app._import_manifest_module(_USERS_LEAF, "router", {}, executed)
+        app._import_manifest_module(_LOGIN_LEAF, "router", nothing_installed, executed)
+        app._import_manifest_module(_USERS_LEAF, "router", nothing_installed, executed)
         # The walk executed the submodules and the ledger recorded them, so the router-role import skipped.
         assert {_LOGIN_LEAF, _USERS_LEAF} <= executed
         assert _regprobe.exec_count[_LOGIN_LEAF] == 1

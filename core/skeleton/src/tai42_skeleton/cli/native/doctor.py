@@ -25,7 +25,7 @@ from tai42_kit.logging import redact_url_userinfo
 
 from tai42_skeleton.config.config_mode import config_mode
 from tai42_skeleton.db import SKELETON_COMPONENT, discover_all_migration_chains
-from tai42_skeleton.db.discovery import chain_skip_message
+from tai42_skeleton.db.discovery import chain_skip_message, unlocatable_message
 
 _OK = "ok"
 _FAIL = "fail"
@@ -76,8 +76,10 @@ async def _probe_schema(settings: PostgresConnectionSettings) -> Check:
 
     ``migration_status`` never raises on a mismatch — a pending migration or a
     rewritten (checksum-diverged) chain comes back as data, rendered here as a FAIL
-    naming ``tai db migrate``. A declared chain whose override binding is unset comes
-    back as a skip and is rendered as a FAIL naming it and its unset binding. A
+    naming ``tai db migrate``. A declared chain whose override binding is unset belongs to
+    an off component, a valid state: the detail names it and its unset binding, and it does
+    not fail the check. An installed distribution whose packages no installed metadata records
+    (an editable install served by an import hook) is named in the detail the same way. A
     connection failure, a malformed installed-plugin chain (a kit
     :class:`~tai42_kit.db.MigrationError` from discovery/checksum), or a component
     bound to an unconfigured named database (a kit
@@ -85,18 +87,14 @@ async def _probe_schema(settings: PostgresConnectionSettings) -> Check:
     with a half-set admin identity (a kit
     :class:`~tai42_kit.db.AdminIdentityIncompleteError`, which names both admin vars) is
     caught and rendered as a FAIL so the diagnostic stays a diagnostic; every other error
-    propagates so a broken probe is never mistaken for a clean schema. Discovery is
-    manifest-optional: an absent manifest contributes no manifest-loaded chains and the probe
-    proceeds on the store and prefix chains (NOT a FAIL — nothing is loaded via a manifest
-    that does not exist), while a manifest that exists but cannot be read, parsed, or validated
-    surfaces from discovery as a :class:`~tai42_kit.db.MigrationDiscoveryError` and is caught
-    by the :class:`~tai42_kit.db.MigrationError` branch above — rendered as a schema FAIL
-    naming the cause rather than mistaken for a clean schema.
+    propagates so a broken probe is never mistaken for a clean schema. Discovery covers the
+    chain of every installed plugin, whether or not the manifest loads it, and of every plugin
+    the persisted manifest loads.
     """
     import psycopg
 
     try:
-        discovery = await discover_all_migration_chains()
+        discovery = discover_all_migration_chains()
         statuses = await migration_status(discovery.entries)
     except psycopg.OperationalError as exc:
         return Check("schema", _FAIL, f"cannot inspect schema at {_pg_target(settings)}: {exc}")
@@ -104,16 +102,19 @@ async def _probe_schema(settings: PostgresConnectionSettings) -> Check:
         return Check("schema", _FAIL, f"cannot inspect schema (run 'tai db migrate'): {exc}")
     except (DatabaseNotConfiguredError, AdminIdentityIncompleteError) as exc:
         return Check("schema", _FAIL, str(exc))
-    if discovery.skipped:
-        detail = "; ".join(chain_skip_message(skip) for skip in discovery.skipped)
-        return Check("schema", _FAIL, f"declared migration chain(s) skipped: {detail}")
+    off = "".join(
+        [
+            *(f"; {chain_skip_message(skip)}" for skip in discovery.skipped),
+            *(f"; {unlocatable_message(item)}" for item in discovery.unlocatable),
+        ]
+    )
     stale = [status for status in statuses if not status.is_up_to_date]
     if stale:
         detail = ", ".join(
             f"{status.component} ({len(status.pending)} pending, {len(status.mismatches)} mismatch)" for status in stale
         )
-        return Check("schema", _FAIL, f"out of date (run 'tai db migrate'): {detail}")
-    return Check("schema", _OK, f"all {len(statuses)} component(s) up to date")
+        return Check("schema", _FAIL, f"out of date (run 'tai db migrate'): {detail}{off}")
+    return Check("schema", _OK, f"all {len(statuses)} component(s) up to date{off}")
 
 
 async def _probe_redis() -> Check:

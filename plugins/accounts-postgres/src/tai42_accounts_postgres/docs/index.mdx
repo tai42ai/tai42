@@ -69,9 +69,9 @@ alongside the core chain:
 tai db migrate
 ```
 
-The provider asserts its chain at boot and never applies it for you: with the store
-configured but the chain pending, the process refuses to start, naming `tai db
-migrate`.
+The platform checks this chain at every boot and reload and never applies it for
+you: with the store configured but the chain pending, the process refuses to start,
+naming `tai db migrate`.
 
 ### Tune sessions and login limits
 

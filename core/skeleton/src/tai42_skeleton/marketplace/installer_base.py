@@ -19,10 +19,10 @@ from typing import Any
 
 from tai42_contract.app import tai42_app
 from tai42_contract.plugins import PluginSpec
-from tai42_kit.db import apply_migrations
+from tai42_kit.db import MigrationDiscoveryError, apply_migrations
 
 from tai42_skeleton.config.service import ConfigService
-from tai42_skeleton.db import plugin_migration_entry
+from tai42_skeleton.db import installed_plugin_entry
 from tai42_skeleton.marketplace import locks, route_preflight
 from tai42_skeleton.marketplace import routes as routes_mod
 from tai42_skeleton.marketplace.client import RegistryClient
@@ -142,7 +142,10 @@ class _InstallerBase:
 
         Opt-in: no ``migrations`` field is skipped.
 
-        Runs on a migration advisory lock DISTINCT from the marketplace lock this
+        The chain is resolved from the installed distribution's packaged spec, never by
+        importing the plugin (:func:`~tai42_skeleton.db.installed_plugin_entry`), so the folder
+        applied here is the one ``tai db migrate`` applies and the boot-time schema gate
+        checks. Runs on a migration advisory lock DISTINCT from the marketplace lock this
         operation holds, so the nested lock never self-deadlocks. Called AFTER the
         package lands and BEFORE the manifest patch, so a failure aborts with the
         manifest untouched; applied files roll forward. The import machinery is
@@ -150,8 +153,10 @@ class _InstallerBase:
         """
         if spec.migrations is None:
             return
+        if spec.package is None:
+            raise MigrationDiscoveryError(f"plugin {spec.name!r} declares migrations but no package")
         importlib.invalidate_caches()
-        entry = plugin_migration_entry(spec)
+        entry = installed_plugin_entry(spec.package)
         if entry is None:
             return
         applied = await apply_migrations([entry])

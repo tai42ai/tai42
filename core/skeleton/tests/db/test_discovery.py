@@ -1,5 +1,4 @@
-"""Chain discovery (A3/A5): resolving skeleton and plugin migration chains into
-runner entries.
+"""Chain discovery: resolving skeleton and plugin migration chains into runner entries.
 
 No live Postgres — pure resolution against installed package metadata. The
 skeleton and the ``tai42-skeleton`` distribution are guaranteed installed in the
@@ -10,6 +9,10 @@ identity resolve without opening a connection.
 
 from __future__ import annotations
 
+import importlib
+import importlib.metadata
+import sys
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -20,9 +23,11 @@ from tai42_skeleton.db import (
     SKELETON_COMPONENT,
     all_migration_entries,
     installed_plugin_entries,
-    plugin_migration_entry,
+    installed_plugin_entry,
 )
-from tai42_skeleton.db.discovery import _import_package_for_distribution, skeleton_migrations_dir
+from tai42_skeleton.db.discovery import skeleton_migrations_dir
+from tai42_skeleton.marketplace.compat import distribution_map
+from tai42_skeleton.marketplace.installed_packages import InstalledPackages
 
 
 @pytest.fixture(autouse=True)
@@ -54,116 +59,20 @@ def test_skeleton_migrations_dir_exists() -> None:
     assert skeleton_migrations_dir().is_dir()
 
 
-def test_import_package_resolves_normalized_distribution() -> None:
-    # ``tai42-skeleton`` installs the ``tai42_skeleton`` import package.
-    assert _import_package_for_distribution("tai42-skeleton") == "tai42_skeleton"
-    # The lookup is normalization-insensitive (hyphen/underscore/case).
-    assert _import_package_for_distribution("Tai42_Skeleton") == "tai42_skeleton"
+def test_installed_entry_for_a_distribution_that_is_not_installed_is_loud() -> None:
+    with pytest.raises(MigrationDiscoveryError, match="'tai42-no-such-plugin-xyz' is not installed"):
+        installed_plugin_entry("tai42-no-such-plugin-xyz")
 
 
-def test_import_package_unknown_distribution_is_loud() -> None:
-    with pytest.raises(MigrationDiscoveryError, match="not installed"):
-        _import_package_for_distribution("tai42-no-such-plugin-xyz")
+@pytest.mark.parametrize("name", ["tai42-skeleton", "Tai42_Skeleton"])
+def test_installed_entry_for_a_distribution_packaging_no_spec_is_loud(name: str) -> None:
+    # ``tai42-skeleton`` is installed (found under any spelling pip treats as the same
+    # project) and packages no ``tai-plugin.yml``: no chain folder can be located for it.
+    with pytest.raises(MigrationDiscoveryError, match=r"packages no tai-plugin\.yml"):
+        installed_plugin_entry(name)
 
 
-def test_plugin_entry_none_when_no_migrations_declared() -> None:
-    assert plugin_migration_entry(_spec(package="tai42-skeleton", migrations=None)) is None
-
-
-def test_plugin_entry_resolves_package_relative_directory() -> None:
-    # Point a synthetic spec at the skeleton distribution's real chain directory.
-    spec = _spec(package="tai42-skeleton", migrations="sql/migrations")
-    entry = plugin_migration_entry(spec)
-    assert entry is not None
-    assert entry.component == "tai42-skeleton"  # component identity is the distribution
-    assert entry.migrations_dir.is_dir()
-
-
-async def test_all_entries_two_skeleton_chains_without_installed_plugins(monkeypatch: pytest.MonkeyPatch) -> None:
-    from tai42_skeleton.marketplace import store as mp_store
-    from tai42_skeleton.states.db import STATES_COMPONENT
-
-    class _EmptyStore:
-        async def list_installed(self):
-            return []
-
-    monkeypatch.setattr(mp_store, "MarketplaceInstallStore", _EmptyStore)
-
-    entries = await all_migration_entries()
-    # The two skeleton-owned chains, in order: the skeleton baseline first (plugin discovery
-    # reads skeleton-owned tables), then the states record store.
-    assert [entry.component for entry in entries] == [SKELETON_COMPONENT, STATES_COMPONENT]
-
-
-async def test_installed_plugin_entries_reads_marketplace_store(monkeypatch: pytest.MonkeyPatch) -> None:
-    from types import SimpleNamespace
-
-    from tai42_skeleton.marketplace import store as mp_store
-
-    with_chain = _spec(package="tai42-skeleton", migrations="sql/migrations").model_dump(mode="json")
-    no_chain = _spec(package="tai42-skeleton", migrations=None).model_dump(mode="json")
-
-    class _FakeStore:
-        async def list_installed(self):
-            return [SimpleNamespace(spec=with_chain), SimpleNamespace(spec=no_chain)]
-
-    monkeypatch.setattr(mp_store, "MarketplaceInstallStore", _FakeStore)
-
-    entries = await installed_plugin_entries()
-    # Only the record that declares a chain contributes an entry (opt-in).
-    assert [entry.component for entry in entries] == ["tai42-skeleton"]
-
-
-async def test_discover_plugin_chains_carries_skip(monkeypatch: pytest.MonkeyPatch) -> None:
-    # A plugin declaring a ``migrations_component`` override whose binding is unset is
-    # carried on the discovery result's ``.skipped`` and omitted from ``.entries``;
-    # ``installed_plugin_entries()`` keeps its signature and returns only ``.entries``.
-    from types import SimpleNamespace
-
-    from tai42_skeleton.db import SkippedChain, discover_plugin_chains
-    from tai42_skeleton.marketplace import store as mp_store
-
-    monkeypatch.delenv("TAI_DB_BINDING_ACME_ALERTS", raising=False)
-    override_skip = _spec(package="tai42-skeleton", migrations="sql/migrations").model_dump(mode="json")
-    override_skip["migrations_component"] = "acme_alerts"
-    plain_chain = _spec(package="tai42-skeleton", migrations="sql/migrations").model_dump(mode="json")
-
-    class _FakeStore:
-        async def list_installed(self):
-            return [SimpleNamespace(spec=override_skip), SimpleNamespace(spec=plain_chain)]
-
-    monkeypatch.setattr(mp_store, "MarketplaceInstallStore", _FakeStore)
-
-    discovery = await discover_plugin_chains()
-    assert [entry.component for entry in discovery.entries] == ["tai42-skeleton"]
-    assert discovery.skipped == [SkippedChain(component="acme_alerts")]
-    # The entry-only accessor stays signature-stable: only the runnable entries.
-    assert [entry.component for entry in await installed_plugin_entries()] == ["tai42-skeleton"]
-
-
-async def test_installed_plugin_entries_empty_when_database_not_configured(monkeypatch: pytest.MonkeyPatch) -> None:
-    # An unconfigured default database owns no store, so there are no plugin chains.
-    monkeypatch.delenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", raising=False)
-    assert await installed_plugin_entries() == []
-
-
-async def test_installed_plugin_entries_tolerate_missing_store_table(monkeypatch: pytest.MonkeyPatch) -> None:
-    # A database not yet migrated to the skeleton baseline has no
-    # ``marketplace_installs`` table: no store rows, never a discovery crash.
-    from psycopg.errors import UndefinedTable
-
-    from tai42_skeleton.marketplace import store as mp_store
-
-    class _NoTableStore:
-        async def list_installed(self):
-            raise UndefinedTable('relation "marketplace_installs" does not exist')
-
-    monkeypatch.setattr(mp_store, "MarketplaceInstallStore", _NoTableStore)
-
-    assert await installed_plugin_entries() == []
-
-
-# --- prefix scan ----------------------------------------------------------
+# --- the installed-distribution scan ---------------------------------------
 
 
 _WIDGET_SPEC_YAML = """\
@@ -172,7 +81,7 @@ namespace: tai42
 name: widget
 package: tai42-widget
 version: 1.0.0
-description: A prefix-installed test plugin
+description: An installed test plugin
 license: Apache-2.0
 contract: ">=0.1,<1.0"
 categories: [dev]
@@ -183,6 +92,26 @@ provides:
     description: d
 migrations: migrations
 """
+
+
+@pytest.fixture
+def environment(monkeypatch: pytest.MonkeyPatch) -> Callable[..., None]:
+    """Make the given site directories the whole environment: ``sys.path`` holds them alone.
+
+    The modules discovery imports lazily are imported first, so narrowing ``sys.path`` only
+    changes which distributions are installed. The plugins prefix is unset unless a test
+    configures one.
+    """
+    import tai42_skeleton.marketplace.prefix
+    import tai42_skeleton.states.db
+
+    monkeypatch.setattr(tai42_skeleton.marketplace.prefix, "configured_prefix", lambda: None)
+
+    def _set(*sites: Path) -> None:
+        monkeypatch.setattr(sys, "path", [str(site) for site in sites])
+        importlib.invalidate_caches()
+
+    return _set
 
 
 def _prefix_site(prefix: Path) -> Path:
@@ -206,202 +135,204 @@ def _write_dist_info(site: Path, dist_name: str, version: str, files: list[Path]
     (dist_info / "RECORD").write_text("\n".join(record_rows) + "\n")
 
 
-def _install_widget_into_prefix(prefix: Path, *, spec_yaml: str = _WIDGET_SPEC_YAML) -> Path:
-    """Lay a ``tai42-widget`` distribution into the prefix's site dir the way a
-    ``pip install --prefix`` leaves one: package tree + spec + chain + dist-info."""
-    site = _prefix_site(prefix)
+def _install_widget(
+    site: Path,
+    *,
+    spec_yaml: str = _WIDGET_SPEC_YAML,
+    spec_subpath: tuple[str, ...] = (),
+    init_body: str = "",
+) -> Path:
+    """Lay a ``tai42-widget`` distribution into ``site`` the way ``pip install`` leaves one.
+
+    The package tree, its spec (at ``tai42_widget/<spec_subpath>/tai-plugin.yml``), one
+    chain file, and a dist-info whose RECORD lists them. Returns the package directory.
+    """
+    site.mkdir(parents=True, exist_ok=True)
     pkg = site / "tai42_widget"
     (pkg / "migrations").mkdir(parents=True)
-    (pkg / "__init__.py").write_text("")
-    (pkg / "tai-plugin.yml").write_text(spec_yaml)
+    spec_dir = pkg.joinpath(*spec_subpath)
+    spec_dir.mkdir(parents=True, exist_ok=True)
+    (pkg / "__init__.py").write_text(init_body)
+    (spec_dir / "tai-plugin.yml").write_text(spec_yaml)
     (pkg / "migrations" / "0001_baseline.sql").write_text("CREATE TABLE widget_items (id integer PRIMARY KEY);\n")
     _write_dist_info(
         site,
         "tai42-widget",
         "1.0.0",
-        [pkg / "__init__.py", pkg / "tai-plugin.yml", pkg / "migrations" / "0001_baseline.sql"],
+        [pkg / "__init__.py", spec_dir / "tai-plugin.yml", pkg / "migrations" / "0001_baseline.sql"],
     )
     return pkg
-
-
-@pytest.fixture
-def _empty_store(monkeypatch: pytest.MonkeyPatch):
-    from tai42_skeleton.marketplace import store as mp_store
-
-    class _EmptyStore:
-        async def list_installed(self):
-            return []
-
-    monkeypatch.setattr(mp_store, "MarketplaceInstallStore", _EmptyStore)
 
 
 def _configure_prefix(monkeypatch: pytest.MonkeyPatch, prefix: Path) -> None:
     monkeypatch.setattr("tai42_skeleton.marketplace.prefix.configured_prefix", lambda: str(prefix))
 
 
-@pytest.mark.usefixtures("_empty_store")
-async def test_prefix_preinstalled_plugin_discovered_without_store_row(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    # A plugin pip-installed into the prefix has NO marketplace install row; its
-    # declared chain is discovered from the prefix scan alone, resolved against the
-    # prefix filesystem (the distribution is not importable from ``sys.path``).
-    pkg = _install_widget_into_prefix(tmp_path)
-    _configure_prefix(monkeypatch, tmp_path)
+def test_all_entries_two_skeleton_chains_without_installed_plugins(environment: Callable[..., None]) -> None:
+    from tai42_skeleton.states.db import STATES_COMPONENT
 
-    entries = await installed_plugin_entries()
+    environment()
+
+    # The two skeleton-owned chains, in order: the skeleton baseline first, then the
+    # states record store.
+    assert [entry.component for entry in all_migration_entries()] == [SKELETON_COMPONENT, STATES_COMPONENT]
+
+
+def test_environment_plugin_resolves_against_its_install_directory(
+    environment: Callable[..., None], tmp_path: Path
+) -> None:
+    pkg = _install_widget(tmp_path / "site")
+    environment(tmp_path / "site")
+
+    entries = installed_plugin_entries()
+
+    assert [entry.component for entry in entries] == ["tai42-widget"]
+    assert Path(str(entries[0].migrations_dir)) == pkg / "migrations"
+
+
+def test_installed_plugin_entries_empty_when_database_not_configured(
+    monkeypatch: pytest.MonkeyPatch, environment: Callable[..., None], tmp_path: Path
+) -> None:
+    # An unconfigured default database owns no store, so there are no plugin chains.
+    _install_widget(tmp_path / "site")
+    environment(tmp_path / "site")
+    monkeypatch.delenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", raising=False)
+
+    assert installed_plugin_entries() == []
+
+
+def test_prefix_preinstalled_plugin_discovered(
+    monkeypatch: pytest.MonkeyPatch, environment: Callable[..., None], tmp_path: Path
+) -> None:
+    # A plugin pip-installed into the prefix is discovered although the prefix is not on
+    # ``sys.path`` (a CLI process never activates it), resolved against the prefix filesystem.
+    environment()
+    pkg = _install_widget(_prefix_site(tmp_path / "prefix"))
+    _configure_prefix(monkeypatch, tmp_path / "prefix")
+
+    entries = installed_plugin_entries()
 
     assert [entry.component for entry in entries] == ["tai42-widget"]
     assert Path(str(entries[0].migrations_dir)) == pkg / "migrations"
     assert entries[0].migrations_dir.is_dir()
 
 
-async def test_prefix_and_store_same_plugin_yield_one_entry(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    # The same installed artifact seen from BOTH sources (a marketplace install
-    # into a configured prefix) is one entry — resolved from the prefix filesystem,
-    # which never needs the distribution importable in this process.
-    from types import SimpleNamespace
+def test_distribution_in_environment_and_prefix_is_one_entry_from_the_environment(
+    monkeypatch: pytest.MonkeyPatch, environment: Callable[..., None], tmp_path: Path
+) -> None:
+    # The environment shadows the prefix for a package present in both, so the copy the
+    # deployment imports is the one whose chain is discovered, once.
+    env_pkg = _install_widget(tmp_path / "site")
+    _install_widget(_prefix_site(tmp_path / "prefix"))
+    environment(tmp_path / "site")
+    _configure_prefix(monkeypatch, tmp_path / "prefix")
 
-    import yaml
-
-    from tai42_skeleton.marketplace import store as mp_store
-
-    pkg = _install_widget_into_prefix(tmp_path)
-    _configure_prefix(monkeypatch, tmp_path)
-    record_spec = yaml.safe_load(_WIDGET_SPEC_YAML)
-
-    class _FakeStore:
-        async def list_installed(self):
-            return [SimpleNamespace(spec=record_spec, ref="tai42/widget")]
-
-    monkeypatch.setattr(mp_store, "MarketplaceInstallStore", _FakeStore)
-
-    entries = await installed_plugin_entries()
+    entries = installed_plugin_entries()
 
     assert [entry.component for entry in entries] == ["tai42-widget"]
-    assert Path(str(entries[0].migrations_dir)) == pkg / "migrations"
+    assert Path(str(entries[0].migrations_dir)) == env_pkg / "migrations"
 
 
-@pytest.mark.usefixtures("_empty_store")
-async def test_prefix_dependency_without_spec_contributes_nothing(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    # A dependency distribution in the prefix ships no packaged spec: skipped.
-    site = _prefix_site(tmp_path)
+def test_dependency_without_spec_contributes_nothing(environment: Callable[..., None], tmp_path: Path) -> None:
+    site = tmp_path / "site"
     pkg = site / "some_helper"
-    pkg.mkdir()
+    pkg.mkdir(parents=True)
     (pkg / "__init__.py").write_text("")
     _write_dist_info(site, "some-helper", "2.0.0", [pkg / "__init__.py"])
-    _configure_prefix(monkeypatch, tmp_path)
+    environment(site)
 
-    assert await installed_plugin_entries() == []
-
-
-@pytest.mark.usefixtures("_empty_store")
-async def test_prefix_plugin_without_chain_contributes_nothing(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    # A prefix plugin whose spec declares no ``migrations`` chain owns no schema.
-    spec_yaml = _WIDGET_SPEC_YAML.replace("migrations: migrations\n", "")
-    _install_widget_into_prefix(tmp_path, spec_yaml=spec_yaml)
-    _configure_prefix(monkeypatch, tmp_path)
-
-    assert await installed_plugin_entries() == []
+    assert installed_plugin_entries() == []
 
 
-@pytest.mark.usefixtures("_empty_store")
-async def test_prefix_malformed_spec_is_a_loud_discovery_error(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    # A prefix distribution shipping a schema-invalid spec fails discovery as a
-    # clean MigrationDiscoveryError naming the distribution — never a raw traceback.
-    _install_widget_into_prefix(tmp_path, spec_yaml="spec_version: 1\nname: widget\n")
-    _configure_prefix(monkeypatch, tmp_path)
+def test_plugin_without_chain_contributes_nothing(environment: Callable[..., None], tmp_path: Path) -> None:
+    _install_widget(tmp_path / "site", spec_yaml=_WIDGET_SPEC_YAML.replace("migrations: migrations\n", ""))
+    environment(tmp_path / "site")
+
+    assert installed_plugin_entries() == []
+
+
+def test_spec_file_below_the_top_level_package_is_not_the_plugin_spec(
+    environment: Callable[..., None], tmp_path: Path
+) -> None:
+    # The plugin spec is packaged beside the top-level package; a ``tai-plugin.yml`` deeper in
+    # the tree (a template the distribution ships) is not one.
+    _install_widget(tmp_path / "site", spec_yaml="not: a spec\n", spec_subpath=("templates", "plugin"))
+    environment(tmp_path / "site")
+
+    assert installed_plugin_entries() == []
+
+
+def test_distribution_packaging_several_specs_is_loud(environment: Callable[..., None], tmp_path: Path) -> None:
+    site = tmp_path / "site"
+    files: list[Path] = []
+    for top_level in ("tai42_widget_a", "tai42_widget_b"):
+        (site / top_level).mkdir(parents=True)
+        (site / top_level / "tai-plugin.yml").write_text(_WIDGET_SPEC_YAML)
+        files.append(site / top_level / "tai-plugin.yml")
+    _write_dist_info(site, "tai42-widget", "1.0.0", files)
+    environment(site)
+
+    with pytest.raises(MigrationDiscoveryError, match=r"several tai-plugin\.yml"):
+        installed_plugin_entries()
+
+
+def test_malformed_spec_is_a_loud_discovery_error(environment: Callable[..., None], tmp_path: Path) -> None:
+    # A schema-invalid packaged spec fails discovery as a clean MigrationDiscoveryError
+    # naming the distribution — never a raw traceback, never a silent skip.
+    _install_widget(tmp_path / "site", spec_yaml="spec_version: 1\nname: widget\n")
+    environment(tmp_path / "site")
 
     with pytest.raises(MigrationDiscoveryError, match="tai42-widget"):
-        await installed_plugin_entries()
+        installed_plugin_entries()
 
 
-async def test_store_malformed_spec_is_a_loud_discovery_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    # A store record whose persisted spec no longer validates fails discovery as a
-    # clean MigrationDiscoveryError naming the distribution — never a raw traceback.
-    from types import SimpleNamespace
-
-    from tai42_skeleton.marketplace import store as mp_store
-
-    class _BadSpecStore:
-        async def list_installed(self):
-            return [SimpleNamespace(spec={"spec_version": 1, "package": "tai42-widget"})]
-
-    monkeypatch.setattr(mp_store, "MarketplaceInstallStore", _BadSpecStore)
-
-    with pytest.raises(MigrationDiscoveryError, match="tai42-widget"):
-        await installed_plugin_entries()
-
-
-@pytest.mark.usefixtures("_empty_store")
-async def test_prefix_unset_or_empty_is_no_entries(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    # No prefix configured: the scan contributes nothing.
-    monkeypatch.setattr("tai42_skeleton.marketplace.prefix.configured_prefix", lambda: None)
-    assert await installed_plugin_entries() == []
+def test_prefix_unset_or_never_created_adds_nothing(
+    monkeypatch: pytest.MonkeyPatch, environment: Callable[..., None], tmp_path: Path
+) -> None:
+    environment()
+    assert installed_plugin_entries() == []
     # A configured prefix whose site dirs do not exist (never installed into).
     _configure_prefix(monkeypatch, tmp_path / "never-created")
-    assert await installed_plugin_entries() == []
+    assert installed_plugin_entries() == []
 
 
-# --- manifest source ------------------------------------------------------
+def test_installed_spec_is_read_without_importing_the_package(environment: Callable[..., None], tmp_path: Path) -> None:
+    # Importing a plugin's package runs its module-level code (which may touch the unbound
+    # app), so discovery reads the packaged spec off installed metadata and never imports it.
+    _install_widget(tmp_path / "site", init_body="raise RuntimeError('discovery must never import a plugin package')\n")
+    environment(tmp_path / "site")
+
+    assert [entry.component for entry in installed_plugin_entries()] == ["tai42-widget"]
+    assert "tai42_widget" not in sys.modules
 
 
-class _FakeConfigManager:
-    """A config-manager stand-in whose ``read_manifest`` returns a fixed document."""
-
-    def __init__(self, document: dict) -> None:
-        self._document = document
-
-    def read_manifest(self) -> dict:
-        return self._document
+# --- the modules a manifest loads -------------------------------------------
 
 
-def _set_manifest(monkeypatch: pytest.MonkeyPatch, document: dict) -> None:
-    from tai42_skeleton.config import ConfigManagerFactory
-
-    monkeypatch.setattr(ConfigManagerFactory, "create", lambda: _FakeConfigManager(document))
-
-
-def _map_module_to_skeleton_chain(monkeypatch: pytest.MonkeyPatch, module: str) -> None:
-    """Resolve ``module``'s packaged spec to the installed ``tai42-skeleton`` chain.
-
-    The import-free metadata resolver is exercised end to end by the fake-distribution test;
-    here the manifest source's fold is exercised against a spec that resolves to a real
-    installed distribution (``tai42-skeleton``'s own ``sql/migrations``), so no live plugin
-    install is needed. A module other than ``module`` ships no spec (an operator-authored
-    module).
-    """
+def _map_module_to_widget_spec(monkeypatch: pytest.MonkeyPatch, module: str) -> None:
+    """Resolve the packaged spec of ``module``'s top-level package to the widget spec; any other ships none."""
     from tai42_skeleton.db import discovery
 
+    top_level = module.partition(".")[0]
     monkeypatch.setattr(
         discovery,
-        "_manifest_module_spec",
-        lambda name: _spec(package="tai42-skeleton", migrations="sql/migrations") if name == module else None,
+        "_top_level_spec",
+        lambda name, installed: (
+            (_spec(package="tai42-widget", migrations="migrations"), Path("/site/tai42_widget"))
+            if name == top_level
+            else None
+        ),
     )
 
 
-@pytest.mark.usefixtures("_empty_store")
-async def test_manifest_loaded_plugin_discovered_without_store_or_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
-    # A chain-declaring plugin the manifest LOADS, with no store row and no prefix, is
-    # discovered so the runner migrates exactly what boot will gate on.
-    monkeypatch.setattr("tai42_skeleton.marketplace.prefix.configured_prefix", lambda: None)
-    _set_manifest(monkeypatch, {"lifecycle_modules": ["tai42_widget.lifecycle"]})
-    _map_module_to_skeleton_chain(monkeypatch, "tai42_widget.lifecycle")
+def test_manifest_plugin_specs_cover_every_role_list(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A plugin is found whichever role list the manifest loads it under — the set mirrors
+    # the component importer's, not just one field.
+    from tai42_skeleton.db.discovery import manifest_plugin_specs
+    from tai42_skeleton.manifest import Manifest
 
-    entries = await installed_plugin_entries()
-
-    assert [entry.component for entry in entries] == ["tai42-skeleton"]
-    assert entries[0].migrations_dir.is_dir()
-
-
-@pytest.mark.usefixtures("_empty_store")
-async def test_manifest_loaded_from_every_role_list(monkeypatch: pytest.MonkeyPatch) -> None:
-    # A chain-declaring plugin reaches discovery whichever role list the manifest loads it
-    # under — the source mirrors the component importer's full set, not just one field.
-    monkeypatch.setattr("tai42_skeleton.marketplace.prefix.configured_prefix", lambda: None)
     for field, value, module in (
+        ("lifecycle_modules", ["tai42_widget.lifecycle"], "tai42_widget.lifecycle"),
         ("webhook_verifier_modules", ["tai42_widget.verify"], "tai42_widget.verify"),
         ("channel_modules", ["tai42_widget.channel"], "tai42_widget.channel"),
         ("routers_modules", ["tai42_widget.routes"], "tai42_widget.routes"),
@@ -411,302 +342,69 @@ async def test_manifest_loaded_from_every_role_list(monkeypatch: pytest.MonkeyPa
         ("tools", [{"module": "tai42_widget.tools", "title": "Widget"}], "tai42_widget.tools"),
         ("agents", [{"module": "tai42_widget.agent", "title": "Widget"}], "tai42_widget.agent"),
     ):
-        _set_manifest(monkeypatch, {field: value})
-        _map_module_to_skeleton_chain(monkeypatch, module)
-        entries = await installed_plugin_entries()
-        assert [entry.component for entry in entries] == ["tai42-skeleton"], field
+        _map_module_to_widget_spec(monkeypatch, module)
+        specs = manifest_plugin_specs(
+            Manifest.model_validate({field: value}), InstalledPackages(top_levels={}, editable_sources={})
+        )
+        assert list(specs) == ["tai42-widget"], field
 
 
-def test_manifest_source_skips_module_without_packaged_spec(monkeypatch: pytest.MonkeyPatch) -> None:
-    # A manifest module whose top-level package ships no tai-plugin.yml (an
-    # operator-authored module) yields no slot — never a guess, never a crash.
-    from tai42_skeleton.db.discovery import _collect_manifest_sources
+def test_manifest_plugin_specs_skip_skeleton_routers() -> None:
+    # The effective router set is composed of skeleton-owned modules that ship no plugin spec.
+    from tai42_skeleton.db.discovery import manifest_plugin_specs
+    from tai42_skeleton.manifest import Manifest
 
-    _set_manifest(monkeypatch, {"lifecycle_modules": ["tai42_skeleton.app.instance"]})
+    manifest = Manifest.model_validate({"default_routers": "all"})
 
-    assert _collect_manifest_sources() == {}
-
-
-def test_manifest_source_excludes_skeleton_routers_and_never_aborts(monkeypatch: pytest.MonkeyPatch) -> None:
-    # The effective router set is composed of skeleton-owned modules that ship no
-    # tai-plugin.yml, so the manifest source yields nothing for them; and because it maps
-    # NAMED modules to their packaged spec (never scanning a site dir), it cannot trip the
-    # prefix scan's several-tai-plugin.yml guard on tai42-cli's template specs.
-    from tai42_skeleton.db.discovery import _collect_manifest_sources
-
-    _set_manifest(monkeypatch, {"default_routers": "all"})
-
-    assert _collect_manifest_sources() == {}
+    assert manifest_plugin_specs(manifest, distribution_map()) == {}
 
 
-async def test_manifest_and_store_same_distribution_yield_one_entry(monkeypatch: pytest.MonkeyPatch) -> None:
-    # The same installed distribution named by BOTH the manifest and the store is one
-    # artifact: discovery yields a single entry, never a duplicate.
-    from types import SimpleNamespace
-
-    from tai42_skeleton.marketplace import store as mp_store
-
-    monkeypatch.setattr("tai42_skeleton.marketplace.prefix.configured_prefix", lambda: None)
-    store_spec = _spec(package="tai42-skeleton", migrations="sql/migrations").model_dump(mode="json")
-
-    class _FakeStore:
-        async def list_installed(self):
-            return [SimpleNamespace(spec=store_spec)]
-
-    monkeypatch.setattr(mp_store, "MarketplaceInstallStore", _FakeStore)
-    _set_manifest(monkeypatch, {"lifecycle_modules": ["tai42_widget.lifecycle"]})
-    _map_module_to_skeleton_chain(monkeypatch, "tai42_widget.lifecycle")
-
-    entries = await installed_plugin_entries()
-
-    assert [entry.component for entry in entries] == ["tai42-skeleton"]
+# --- spec resolution for one top-level package -------------------------------
 
 
-async def test_prefix_wins_over_manifest_for_same_distribution(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    # A distribution the prefix carries (with a package root) AND the manifest loads is one
-    # entry, resolved from the prefix filesystem — the root-carrying source is preferred.
-    from tai42_skeleton.marketplace import store as mp_store
+def test_top_level_spec_unmapped_top_level_yields_none() -> None:
+    # A manifest module whose top-level import name maps to no installed distribution
+    # contributes nothing — the same quiet no-spec outcome as an operator-authored module.
+    from tai42_skeleton.db.discovery import _top_level_spec
 
-    class _EmptyStore:
-        async def list_installed(self):
-            return []
-
-    monkeypatch.setattr(mp_store, "MarketplaceInstallStore", _EmptyStore)
-    pkg = _install_widget_into_prefix(tmp_path)
-    _configure_prefix(monkeypatch, tmp_path)
-    _set_manifest(monkeypatch, {"lifecycle_modules": ["tai42_widget.lifecycle"]})
-    # The manifest maps the module to the SAME distribution the prefix carries.
-    from tai42_skeleton.db import discovery
-
-    def _resolver(name: str):
-        return _spec(package="tai42-widget", migrations="migrations") if name == "tai42_widget.lifecycle" else None
-
-    monkeypatch.setattr(discovery, "_manifest_module_spec", _resolver)
-
-    entries = await installed_plugin_entries()
-
-    assert [entry.component for entry in entries] == ["tai42-widget"]
-    # Resolved from the prefix filesystem, not installed metadata.
-    assert Path(str(entries[0].migrations_dir)) == pkg / "migrations"
+    assert _top_level_spec("tai42_no_such_top_level_xyz", distribution_map()) is None
 
 
-async def test_absent_manifest_contributes_no_sources_fall_through_stands(monkeypatch: pytest.MonkeyPatch) -> None:
-    # migrate/status/doctor are manifest-OPTIONAL: when no manifest file exists,
-    # read_manifest raises FileNotFoundError, the manifest source contributes NOTHING, and
-    # discovery falls through to the store + prefix sources — NOT an error, NOT a false green.
-    from types import SimpleNamespace
-
-    from tai42_skeleton.config import ConfigManagerFactory
-    from tai42_skeleton.db import discover_plugin_chains
-    from tai42_skeleton.marketplace import store as mp_store
-
-    # A store-attributed chain plugin stands in for the fall-through sources.
-    store_spec = _spec(package="tai42-skeleton", migrations="sql/migrations").model_dump(mode="json")
-
-    class _FakeStore:
-        async def list_installed(self):
-            return [SimpleNamespace(spec=store_spec)]
-
-    monkeypatch.setattr(mp_store, "MarketplaceInstallStore", _FakeStore)
-    monkeypatch.setattr("tai42_skeleton.marketplace.prefix.configured_prefix", lambda: None)
-
-    def _absent() -> dict:
-        raise FileNotFoundError("Manifest not found: /app/config/manifest.yml")
-
-    class _AbsentManager:
-        read_manifest = staticmethod(_absent)
-
-    monkeypatch.setattr(ConfigManagerFactory, "create", lambda: _AbsentManager())
-
-    discovery = await discover_plugin_chains()
-
-    # No error, and the store source stands — no manifest:* slot contributed anything.
-    assert [entry.component for entry in discovery.entries] == ["tai42-skeleton"]
-    assert discovery.skipped == []
-
-
-@pytest.mark.usefixtures("_empty_store")
-async def test_malformed_manifest_raises_loudly(monkeypatch: pytest.MonkeyPatch) -> None:
-    # A manifest that EXISTS but is schema-invalid is a real error, never swallowed:
-    # read_manifest returns the document, Manifest.model_validate rejects it, and the
-    # ValidationError is wrapped as a loud MigrationDiscoveryError (only the ABSENT case is
-    # caught and falls through to the store/prefix sources).
-    from tai42_skeleton.db import discover_plugin_chains
-
-    monkeypatch.setattr("tai42_skeleton.marketplace.prefix.configured_prefix", lambda: None)
-    _set_manifest(monkeypatch, {"lifecycle_modules": "not-a-list"})
-
-    with pytest.raises(MigrationDiscoveryError, match="not a valid manifest"):
-        await discover_plugin_chains()
-
-
-# --- manifest spec resolution is import-free ------------------------------
-
-
-_BOOM_SPEC_YAML = """\
-spec_version: 1
-namespace: tai42
-name: boom
-package: tai42-boom
-version: 1.0.0
-description: A manifest-loaded test plugin whose package raises on import
-license: Apache-2.0
-contract: ">=0.1,<1.0"
-categories: [dev]
-provides:
-  - kind: tool
-    name: b
-    module: tai42_boom.tools
-    description: d
-migrations: migrations
-"""
-
-
-def _install_dist_on_syspath(
-    monkeypatch: pytest.MonkeyPatch,
-    site: Path,
-    *,
-    dist_name: str,
-    top_level: str,
-    spec_yaml: str,
-    init_body: str,
+def test_top_level_spec_multi_dist_picks_the_one_shipping_the_spec(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Lay a wheel-shaped distribution into ``site`` and put ``site`` on ``sys.path``.
+    # A top-level import name mapping to several distributions (a namespace package) resolves
+    # the distribution that actually ships <top_level>/tai-plugin.yml; the others are skipped.
+    from tai42_skeleton.db.discovery import _top_level_spec
 
-    The distribution packages ``<top_level>/tai-plugin.yml`` and a chain directory and
-    records them in its ``.dist-info`` RECORD, so ``packages_distributions()`` maps the
-    top-level to the distribution and ``Distribution.files`` lists the spec — the import-free
-    metadata path discovery resolves specs through. ``init_body`` is the package
-    ``__init__.py``: set it to raise so any import of the package is a loud test failure.
-    """
-    import importlib
-
-    site.mkdir(parents=True, exist_ok=True)
-    pkg = site / top_level
-    (pkg / "migrations").mkdir(parents=True)
-    (pkg / "__init__.py").write_text(init_body)
-    (pkg / "tai-plugin.yml").write_text(spec_yaml)
-    (pkg / "migrations" / "0001_baseline.sql").write_text("CREATE TABLE boom_items (id integer PRIMARY KEY);\n")
-    _write_dist_info(
-        site,
-        dist_name,
-        "1.0.0",
-        [pkg / "__init__.py", pkg / "tai-plugin.yml", pkg / "migrations" / "0001_baseline.sql"],
-    )
+    site = tmp_path / "site"
+    namespace = site / "tai42_ns"
+    namespace.mkdir(parents=True)
+    (namespace / "helper.py").write_text("")
+    (namespace / "tai-plugin.yml").write_text(_WIDGET_SPEC_YAML)
+    _write_dist_info(site, "ns-helper", "1.0.0", [namespace / "helper.py"])
+    _write_dist_info(site, "ns-plugin", "1.0.0", [namespace / "tai-plugin.yml"])
     monkeypatch.syspath_prepend(str(site))
     importlib.invalidate_caches()
 
-
-def test_manifest_source_resolves_spec_from_metadata_without_importing(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    # The regression: discovery must map a manifest-loaded module to its packaged
-    # tai-plugin.yml from installed METADATA, never by importing the module's package —
-    # importing a real consumer runs module-level code that touches the unbound app and
-    # raises. The fake distribution's __init__ raises on import; the spec is still resolved
-    # off the recorded files and the package is proven not imported.
-    import sys
-
-    from tai42_skeleton.db.discovery import _collect_manifest_sources
-
-    _install_dist_on_syspath(
-        monkeypatch,
-        tmp_path / "site",
-        dist_name="tai42-boom",
-        top_level="tai42_boom",
-        spec_yaml=_BOOM_SPEC_YAML,
-        init_body="raise RuntimeError('a manifest module must never be imported by discovery')\n",
+    located = _top_level_spec(
+        "tai42_ns", InstalledPackages(top_levels={"tai42_ns": ["ns-helper", "ns-plugin"]}, editable_sources={})
     )
-    _set_manifest(monkeypatch, {"lifecycle_modules": ["tai42_boom.lifecycle"]})
 
-    sources = _collect_manifest_sources()
-
-    assert set(sources) == {"manifest:tai42-boom"}
-    spec, root = sources["manifest:tai42-boom"]
-    assert spec.package == "tai42-boom"
-    assert spec.migrations == "migrations"
-    # The slot carries NO package root: the chain resolves from installed metadata.
-    assert root is None
-    # The proof: the package was never imported while its spec was resolved.
-    assert "tai42_boom" not in sys.modules
-
-
-def test_manifest_module_spec_unmapped_top_level_yields_none() -> None:
-    # A manifest module whose top-level import name maps to no installed distribution
-    # contributes nothing — the same quiet no-spec outcome as an operator-authored module.
-    from tai42_skeleton.db.discovery import _manifest_module_spec
-
-    assert _manifest_module_spec("tai42_no_such_top_level_xyz.mod") is None
-
-
-def test_manifest_module_spec_multi_dist_picks_the_one_shipping_the_spec(monkeypatch: pytest.MonkeyPatch) -> None:
-    # A top-level import name mapping to several distributions (a namespace package) resolves
-    # the distribution that actually ships <top_level>/tai-plugin.yml; the others are skipped.
-    import importlib.metadata as md
-    from types import SimpleNamespace
-
-    from tai42_skeleton.db.discovery import _manifest_module_spec
-
-    class _RecordedFile:
-        def __init__(self, parts: tuple[str, ...], data: bytes) -> None:
-            self.parts = parts
-            self.name = parts[-1]
-            self._data = data
-
-        def read_binary(self) -> bytes:
-            return self._data
-
-    files_by_dist = {
-        "ns-helper": [_RecordedFile(("tai42_ns", "helper.py"), b"")],
-        "ns-plugin": [_RecordedFile(("tai42_ns", "tai-plugin.yml"), _WIDGET_SPEC_YAML.encode())],
-    }
-    monkeypatch.setattr(md, "packages_distributions", lambda: {"tai42_ns": ["ns-helper", "ns-plugin"]})
-    monkeypatch.setattr(md, "distribution", lambda name: SimpleNamespace(files=files_by_dist[name]))
-
-    spec = _manifest_module_spec("tai42_ns.channel")
-
-    assert spec is not None
+    assert located is not None
+    spec, package_root = located
     assert spec.package == "tai42-widget"
+    assert package_root == namespace
 
 
-def test_manifest_module_spec_malformed_packaged_spec_is_loud(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_top_level_spec_malformed_packaged_spec_is_loud(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     # A distribution that DOES ship a tai-plugin.yml but a schema-invalid one is a loud
     # MigrationDiscoveryError naming the distribution — never a silent skip, never a traceback.
-    from tai42_skeleton.db.discovery import _manifest_module_spec
+    from tai42_skeleton.db.discovery import _top_level_spec
 
-    _install_dist_on_syspath(
-        monkeypatch,
-        tmp_path / "site",
-        dist_name="tai42-badspec",
-        top_level="tai42_badspec",
-        spec_yaml="spec_version: 1\nname: badspec\n",
-        init_body="raise RuntimeError('must not import')\n",
-    )
+    _install_widget(tmp_path / "site", spec_yaml="spec_version: 1\nname: widget\n")
+    monkeypatch.syspath_prepend(str(tmp_path / "site"))
+    importlib.invalidate_caches()
 
-    with pytest.raises(MigrationDiscoveryError, match="tai42-badspec"):
-        _manifest_module_spec("tai42_badspec.lifecycle")
-
-
-@pytest.mark.usefixtures("_empty_store")
-async def test_broken_yaml_manifest_raises_loudly(monkeypatch: pytest.MonkeyPatch) -> None:
-    # A manifest that EXISTS but is unparseable YAML is a real error, never swallowed:
-    # read_manifest raises a YAMLError (which is NOT a ValueError, so unwrapped it would
-    # escape the CLI seam as a raw traceback), and discovery wraps it as a loud
-    # MigrationDiscoveryError.
-    import yaml
-
-    from tai42_skeleton.config import ConfigManagerFactory
-    from tai42_skeleton.db import discover_plugin_chains
-
-    monkeypatch.setattr("tai42_skeleton.marketplace.prefix.configured_prefix", lambda: None)
-
-    def _broken_yaml() -> dict:
-        raise yaml.YAMLError("mapping values are not allowed here")
-
-    class _BrokenYamlManager:
-        read_manifest = staticmethod(_broken_yaml)
-
-    monkeypatch.setattr(ConfigManagerFactory, "create", lambda: _BrokenYamlManager())
-
-    with pytest.raises(MigrationDiscoveryError, match="could not be parsed as YAML"):
-        await discover_plugin_chains()
+    with pytest.raises(MigrationDiscoveryError, match="tai42-widget"):
+        _top_level_spec("tai42_widget", distribution_map())
