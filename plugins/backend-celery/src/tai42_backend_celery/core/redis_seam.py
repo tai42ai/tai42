@@ -6,7 +6,9 @@ library-parsed identity (host, port, db or virtual host, credentials, TLS, unix 
 path, kombu's key prefix and its poller-aware connection class) and takes the connection
 behaviour (retry, ``retry_on_error``, ``retry_on_timeout``, the socket timeouts) from
 :func:`~tai42_kit.clients.impl.redis.redis_connection_options`. A knob left unset keeps
-the library's own default.
+the library's own default. Every connection either side builds is the kit's sync
+connection over the library's class, so its whole connect — socket, handshake and
+connect callbacks — is one attempt of that retry.
 
 - :class:`KitRedisBackend`, the Redis result backend, with ``CELERY_RESULT_BACKEND_*``.
   :class:`KitLoader` selects it for every ``redis`` / ``rediss`` backend URL. Its result
@@ -34,6 +36,7 @@ from __future__ import annotations
 
 import contextlib
 import functools
+import inspect
 import os
 from collections.abc import Callable, Iterator, Mapping
 from typing import Any, cast
@@ -52,6 +55,7 @@ from kombu.transport.redis import Transport as RedisTransport
 from redis.backoff import NoBackoff
 from redis.retry import Retry
 from tai42_kit.clients.impl.redis import KitSyncRedis, ReentrantPubSub, redis_connection_options
+from tai42_kit.clients.impl.redis_connections import KitSyncConnectionPool, kit_sync_connection_class
 
 from tai42_backend_celery.core.settings import celery_settings
 
@@ -148,13 +152,18 @@ class KitResultConsumer(ResultConsumer):
             self._reconnect()
 
     def _reconnect_pubsub(self) -> None:
-        """Build a new pub/sub, subscribe every awaited task on it, then catch up.
+        """Close the pub/sub in use, build a new one, subscribe every awaited task on it, then catch up.
 
-        The subscribe comes before the stored-state read, so a result written in between
-        is published to the new subscription. A connection error closes the new pub/sub
-        and leaves the consumer without one.
+        The replaced pub/sub releases its connection here, so it never releases it from
+        its finalizer: a finalizer run by the garbage collector on a thread inside the
+        pool's lock would wait on that lock forever. The subscribe comes before the
+        stored-state read, so a result written in between is published to the new
+        subscription. A connection error closes the new pub/sub and leaves the consumer
+        without one.
         """
-        self._pubsub = None
+        replaced, self._pubsub = self._pubsub, None
+        if replaced is not None:
+            replaced.close()
         self.backend.client.connection_pool.reset()
         pubsub = self.backend.client.pubsub(ignore_subscribe_messages=True)
         try:
@@ -184,9 +193,17 @@ class KitResultConsumer(ResultConsumer):
 
 
 class KitRedisBackend(RedisBackend):
-    """celery's Redis result backend on a pool that carries the kit seam's connection behaviour."""
+    """celery's Redis result backend on a pool that carries the kit seam's connection behaviour.
+
+    Its pool is a :class:`~tai42_kit.clients.impl.redis_connections.KitSyncConnectionPool`, over the
+    connection class celery selects for the URL (TCP, TLS or a unix socket).
+    """
 
     ResultConsumer = KitResultConsumer
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        """Build the backend from ``args`` / ``kwargs``, with its pools as kit sync pools."""
+        super().__init__(*args, connection_pool=KitSyncConnectionPool, **kwargs)
 
     def _get_client(self) -> Callable[..., _ResultClient]:
         return functools.partial(_ResultClient, on_pubsub_reconnect=self._on_pubsub_reconnect)
@@ -260,32 +277,39 @@ class _PrefixedRedis(PrefixedStrictRedis):
 
 
 def _polled_connection_class(connection_class: type, channel: RedisChannel) -> type:
-    """``connection_class`` for ``channel``'s asynchronous pool, under the kit retry until the channel is polled.
+    """The kit ``connection_class`` for ``channel``'s asynchronous pool, under its retry until the channel is polled.
 
     The asynchronous pool holds ``client`` and ``subclient``: the connections kombu polls
     for BRPOP and the fanout LISTEN, a worker's task and fanout reads and a control
     command's reply read alike. Before the channel registers with kombu's poller, at
-    channel open, they run under the kit retry, which covers the channel's opening PING,
-    so a worker's first broker connect and a publish's first channel. Once it is
-    registered a connection acts as redis-py's own with no retry, each with its own
-    ``Retry``: on a drop it disconnects and raises. kombu takes the dropped socket off
+    channel open, they are the kit connection under the kit retry, handshake included,
+    which covers the channel's opening PING, so a worker's first broker connect and a
+    publish's first channel. Once it is registered a connection acts as redis-py's own
+    with no retry, each with its own ``Retry``, and retries no error: a connect makes one
+    attempt, and on a drop it disconnects and raises. kombu takes the dropped socket off
     the poller and counts on that error reaching its caller: a worker's consumer restart
     registers it again, a control call fails. A retry that reconnected inside the read
     would leave a worker no longer consuming and lose a reply.
+
+    ``connection_class`` is a kit sync connection class (see :func:`kit_sync_connection_class`);
+    any other class raises ``TypeError``. Its ``retry`` stays the kit's own (the connection's
+    retry view, with the kit budget) until the channel is registered.
     """
+    if kit_sync_connection_class(connection_class) is not connection_class:
+        raise TypeError(f"{connection_class.__qualname__} is not a kit sync connection class")
+    kit_retry = inspect.getattr_static(connection_class, "retry")
 
     class PolledConnection(connection_class):
-        _kit_retry: Any
         _kit_retry_on_error: Any
         _own_retry: Retry
 
         @property
         def retry(self) -> Any:
-            return self._own_retry if channel._registered else self._kit_retry
+            return self._own_retry if channel._registered else super().retry
 
         @retry.setter
         def retry(self, value: Any) -> None:
-            self._kit_retry = value
+            kit_retry.__set__(self, value)
             # The retry redis-py gives a connection that has none: one attempt, a disconnect on its error.
             self._own_retry = Retry(NoBackoff(), 0)
 
@@ -304,11 +328,16 @@ class KitRedisChannel(RedisChannel):
     """kombu's Redis channel, whose sync and async pools carry the kit seam's connection behaviour."""
 
     def _connparams(self, asynchronous: bool = False) -> dict[str, Any]:
-        """The params of kombu's connections, with the kit's behaviour (see :func:`_polled_connection_class`)."""
+        """The params of kombu's connections, with the kit's behaviour.
+
+        The connection class is the kit's sync connection over kombu's own; the
+        asynchronous pool's is wrapped once more (see :func:`_polled_connection_class`).
+        """
         options = redis_connection_options(
             celery_settings().broker_redis.connection_options(), sync=True, label=self.connection.broker_label
         )
         params = {**super()._connparams(asynchronous), **options}
+        params["connection_class"] = kit_sync_connection_class(params["connection_class"])
         if asynchronous:
             params["connection_class"] = _polled_connection_class(params["connection_class"], self)
         return params

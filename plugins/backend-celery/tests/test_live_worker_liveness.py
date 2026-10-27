@@ -82,21 +82,23 @@ def test_the_file_turns_stale_without_the_broker_and_fresh_after_the_reconnect(
     monkeypatch, run_worker, liveness_path: Path
 ) -> None:
     upstream = urlsplit(_BROKER)
-    relay = _Relay((upstream.hostname or "localhost", upstream.port or 6379))
-    relay.open()
-    try:
-        app = _start(monkeypatch, run_worker, f"redis://127.0.0.1:{relay.port}{upstream.path or '/0'}", liveness_path)
-        assert _result(app, timeout=30) == 5
-        _until(lambda: _alive(liveness_path), "a fresh liveness file")
-
-        relay.close()
-        _until(lambda: check_liveness(liveness_path, _GRACE).state == "stale", "a stale file during the outage")
-
+    with _Relay((upstream.hostname or "localhost", upstream.port or 6379)) as relay:
         relay.open()
-        assert _result(app, timeout=40) == 5
-        _until(lambda: _alive(liveness_path), "a fresh file after the reconnect")
-    finally:
-        relay.close()
+        try:
+            app = _start(
+                monkeypatch, run_worker, f"redis://127.0.0.1:{relay.port}{upstream.path or '/0'}", liveness_path
+            )
+            assert _result(app, timeout=30) == 5
+            _until(lambda: _alive(liveness_path), "a fresh liveness file")
+
+            relay.close()
+            _until(lambda: check_liveness(liveness_path, _GRACE).state == "stale", "a stale file during the outage")
+
+            relay.open()
+            assert _result(app, timeout=40) == 5
+            _until(lambda: _alive(liveness_path), "a fresh file after the reconnect")
+        finally:
+            relay.close()
 
 
 def test_a_solo_job_longer_than_the_horizon_keeps_the_file_fresh(monkeypatch, run_worker, liveness_path: Path) -> None:

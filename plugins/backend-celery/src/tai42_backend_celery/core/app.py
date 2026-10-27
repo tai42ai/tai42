@@ -92,15 +92,6 @@ def create_celery_app() -> Celery:
     app.conf.update(
         beat_scheduler="tai42_backend_celery.core.beat_scheduler.ProgressReportingScheduler",
         redbeat_redis_url=settings.redbeat.redis_url,
-        # Every key but the URL reaches RedBeat's ``Redis.from_url``; RedBeat decodes
-        # responses on ``redis://`` itself, and ``rediss://`` / ``unix://`` match it.
-        redbeat_redis_options={
-            key: value
-            for key, value in redis_from_url_kwargs(
-                {**settings.redbeat.client_kwargs(), "decode_responses": True}, sync=True
-            ).items()
-            if key != "url"
-        },
         redbeat_key_prefix=settings.redbeat_key_prefix,
         beat_max_loop_interval=settings.beat_max_loop_interval,
         timezone="UTC",
@@ -113,6 +104,17 @@ def create_celery_app() -> Celery:
         task_time_limit=settings.task_timeout,
     )
     configure_redis_seam(app)
+    # Built once the seam has checked the RedBeat URL: every key but the URL reaches
+    # RedBeat's ``Redis.from_url``, the kit connection class for the URL's scheme
+    # included; RedBeat decodes responses on ``redis://`` itself, and ``rediss://`` /
+    # ``unix://`` match it.
+    app.conf.redbeat_redis_options = {
+        key: value
+        for key, value in redis_from_url_kwargs(
+            {**settings.redbeat.client_kwargs(), "decode_responses": True}, sync=True
+        ).items()
+        if key != "url"
+    }
 
     return app
 
