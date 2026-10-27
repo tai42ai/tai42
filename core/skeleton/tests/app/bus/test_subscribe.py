@@ -36,6 +36,7 @@ from tai42_skeleton.app.bus.subscribe import _HeartbeatThread
 from tai42_skeleton.config.deployment_env import published_env_readers
 
 from ..._fakes.kit_redis import KitFakeRedis
+from ..._helpers import another_skeleton_major
 from .conftest import _noop_op, _RecordingRedis, _spawn_subscriber, _stop, _until, make_bus
 
 _RELOAD = ReloadConfig(op="reload_config")
@@ -129,6 +130,45 @@ async def test_establish_identity_keeps_held_claim_but_remints_a_lost_one(
         assert bus.identity.generation == 1
     finally:
         await client.aclose()
+
+
+# -- workers of two skeleton majors on one namespace ---------------------------
+
+
+async def test_workers_of_two_majors_on_one_namespace_are_two_fleets(
+    wire_bus_client: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    applied: dict[str, list[dict]] = {"running": [], "other": []}
+
+    def _recording(cohort: str) -> Any:
+        async def apply(op: dict, *, deadline: float) -> None:
+            applied[cohort].append(op)
+
+        return apply
+
+    running = make_bus(kind=WorkerKind.serve)
+    running_publisher = make_bus(kind=WorkerKind.serve)
+    with another_skeleton_major(monkeypatch):
+        other = make_bus(kind=WorkerKind.backend)
+        other_publisher = make_bus(kind=WorkerKind.serve)
+    t1, running_id = await _spawn_subscriber(running, _recording("running"))
+    t2, other_id = await _spawn_subscriber(other, _recording("other"))
+    try:
+        assert [row.name for row in await running.census()] == [running_id.name]
+        assert [row.name for row in await other.census()] == [other_id.name]
+
+        local = LocalApplyResult(outcome=OpOutcome.applied)
+        running_result = await running_publisher.publish(_RELOAD, targets=None, local=local)
+        other_result = await other_publisher.publish(_RELOAD, targets=None, local=local)
+
+        assert {r.name for r in running_result.results} == {running_publisher.identity.name, running_id.name}
+        assert {r.name for r in other_result.results} == {other_publisher.identity.name, other_id.name}
+        # Each subscriber's one channel delivers in publish order, so the op published on the
+        # running major's fleet, published first, would have reached the other worker first.
+        assert len(applied["running"]) == 1
+        assert len(applied["other"]) == 1
+    finally:
+        await _stop(t1, t2)
 
 
 # -- echo-skip + op-frame admission -------------------------------------------

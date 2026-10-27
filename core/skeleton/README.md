@@ -125,7 +125,10 @@ to turn it on. A single-worker, file-mode, no-backend deployment needs no bus an
 runs on a no-op local variant; a multi-worker, backend-bearing, or non-file
 config-mode boot refuses to start without one, naming `TAI_BUS_REDIS_URL`. On a shared Redis,
 `TAI_BUS_NAMESPACE` must diverge per stack — Redis pub/sub is server-global, so
-co-tenant deployments would otherwise cross-talk.
+co-tenant deployments would otherwise cross-talk. Every bus key is under the namespace
+and the running skeleton's major version, so workers of two majors on one Redis are two
+separate fleets: a rolling replacement across majors runs both side by side until the
+older workers are gone.
 
 The bus does not carry sub-MCP app registrations: those live in their own store.
 Under `tai serve` with more than one worker, each worker refuses to boot while that
