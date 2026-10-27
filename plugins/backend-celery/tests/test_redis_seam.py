@@ -7,9 +7,11 @@ carry, and hands celery's startup and publish retries on a kit side to the seam.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import socket
+import threading
 from collections.abc import Iterator
 from typing import Any
 
@@ -19,6 +21,11 @@ from celery.backends.rpc import RPCBackend
 from kombu.transport.pyamqp import Transport as AmqpTransport
 from kombu.transport.redis import PrefixedRedisPubSub
 from tai42_kit.clients.impl.redis import KitSyncRedis, ReentrantPubSub, _LoggedSyncRetry
+from tai42_kit.clients.impl.redis_connections import (
+    KitSyncConnectionPool,
+    _SyncConnectionRetry,
+    kit_sync_connection_class,
+)
 
 import tai42_backend_celery.core.app as app_module
 from tai42_backend_celery.core.redis_seam import (
@@ -27,6 +34,7 @@ from tai42_backend_celery.core.redis_seam import (
     KitRedisTransport,
     KitResultConsumer,
     UnsupportedRedisUrlError,
+    _polled_connection_class,
 )
 from tai42_backend_celery.core.settings import celery_settings
 
@@ -62,6 +70,42 @@ def _closed_port() -> int:
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         return sock.getsockname()[1]
+
+
+class _DropsHandshakes:
+    """A loopback server that closes its next ``drops`` connections after their first command, unanswered.
+
+    Every later connection gets ``+OK`` to each command. The first command is read in
+    full, so the close is a FIN the client reads as the server closing.
+    """
+
+    def __init__(self) -> None:
+        self.drops = 0
+        self._listener = socket.create_server(("127.0.0.1", 0))
+        self.port = self._listener.getsockname()[1]
+        threading.Thread(target=self._accept, daemon=True).start()
+
+    def close(self) -> None:
+        self._listener.close()
+
+    def _accept(self) -> None:
+        while True:
+            try:
+                client, _ = self._listener.accept()
+            except OSError:
+                return
+            drop, self.drops = self.drops > 0, max(self.drops - 1, 0)
+            threading.Thread(target=self._serve, args=(client, drop), daemon=True).start()
+
+    @staticmethod
+    def _serve(client: socket.socket, drop: bool) -> None:
+        with client, client.makefile("rb") as reader, contextlib.suppress(OSError, ValueError):
+            while header := reader.readline():
+                for _ in range(int(header[1:])):
+                    reader.read(int(reader.readline()[1:]) + 2)
+                if drop:
+                    return
+                client.sendall(b"+OK\r\n")
 
 
 # --- selection, whichever env var names the URL -----------------------------------
@@ -211,20 +255,63 @@ def test_the_result_backend_pool_carries_its_own_namespace(monkeypatch) -> None:
     assert (connection_kwargs["host"], connection_kwargs["db"]) == ("results.example", 3)
 
 
+@pytest.mark.parametrize(
+    ("url", "url_class"),
+    [
+        ("redis://h:6390/2", redis.Connection),
+        ("rediss://h:6390/2?ssl_cert_reqs=required", redis.SSLConnection),
+        ("redis+socket:///tmp/r.sock", redis.UnixDomainSocketConnection),
+    ],
+    ids=["tcp", "tls", "unix"],
+)
+def test_the_result_backend_client_is_on_the_kit_sync_pool(monkeypatch, url: str, url_class: type) -> None:
+    app = _app(monkeypatch, CELERY_RESULT_BACKEND=url)
+
+    pool = app.backend.client.connection_pool
+    assert type(pool) is KitSyncConnectionPool
+    assert pool.connection_class is kit_sync_connection_class(url_class)
+
+
+@pytest.mark.parametrize(
+    ("url", "url_class"),
+    [
+        ("redis://h:6390/2", redis.Connection),
+        ("rediss://h:6390/2", redis.SSLConnection),
+        ("unix:///tmp/r.sock", redis.UnixDomainSocketConnection),
+    ],
+    ids=["tcp", "tls", "unix"],
+)
+def test_the_redbeat_client_options_carry_the_kit_connection_of_the_urls_scheme(
+    monkeypatch, url: str, url_class: type
+) -> None:
+    app = _app(monkeypatch, CELERY_REDBEAT_REDIS_URL=url)
+
+    assert app.conf.redbeat_redis_options["connection_class"] is kit_sync_connection_class(url_class)
+
+
 def test_the_result_backend_pubsub_reconnects_under_the_seam_and_then_catches_up(monkeypatch) -> None:
-    app = _app(monkeypatch, CELERY_RESULT_BACKEND="redis://results.example:6390/3")
-    consumer = app.backend.result_consumer
-    caught_up: list[bool] = []
-    monkeypatch.setattr(consumer, "catch_up", lambda: caught_up.append(True))
+    server = _DropsHandshakes()
+    try:
+        app = _app(monkeypatch, CELERY_RESULT_BACKEND=f"redis://127.0.0.1:{server.port}/3")
+        consumer = app.backend.result_consumer
+        caught_up: list[bool] = []
+        monkeypatch.setattr(consumer, "catch_up", lambda: caught_up.append(True))
 
-    assert isinstance(consumer, KitResultConsumer)
-    assert isinstance(app.backend.client, KitSyncRedis)
-    pubsub = app.backend.client.pubsub()
-    assert isinstance(pubsub, ReentrantPubSub)
+        assert isinstance(consumer, KitResultConsumer)
+        assert isinstance(app.backend.client, KitSyncRedis)
+        pubsub = app.backend.client.pubsub()
+        assert isinstance(pubsub, ReentrantPubSub)
 
-    pubsub.on_connect(object())  # nothing subscribed yet, so nothing is sent on the connection
+        # The pub/sub's reconnect callback on one of the backend's connections; nothing is
+        # subscribed yet, so the callback sends nothing and the catch-up runs after the connect.
+        connection = app.backend.client.connection_pool.make_connection()
+        connection.register_connect_callback(pubsub.on_connect)
+        connection.connect()
+        connection.disconnect()
 
-    assert caught_up == [True]
+        assert caught_up == [True]
+    finally:
+        server.close()
 
 
 def test_the_result_consumer_catch_up_delivers_every_stored_state(monkeypatch) -> None:
@@ -239,6 +326,22 @@ def test_the_result_consumer_catch_up_delivers_every_stored_state(monkeypatch) -
     consumer.catch_up()
 
     assert delivered == [(meta, None)]
+
+
+def test_a_rebuilt_result_pubsub_closes_the_pubsub_it_replaces(monkeypatch) -> None:
+    # A replaced pub/sub releases its connection to the pool at the rebuild; one left
+    # holding it would release it from its finalizer, whenever it is collected.
+    app = _app(monkeypatch, CELERY_RESULT_BACKEND="redis://results.example:6390/3")
+    consumer = app.backend.result_consumer
+    replaced = app.backend.client.pubsub()
+    replaced.connection = app.backend.client.connection_pool.make_connection()
+    consumer._pubsub = replaced
+
+    consumer._reconnect_pubsub()
+
+    assert replaced.connection is None
+    assert consumer._pubsub is not None
+    assert consumer._pubsub is not replaced
 
 
 def test_a_failed_result_consumer_reconnect_raises_its_connection_error(monkeypatch) -> None:
@@ -327,13 +430,27 @@ def test_the_broker_connparams_carry_the_seam_and_keep_kombus_identity(monkeypat
     assert params["socket_timeout"] == 3
     assert (params["host"], params["port"], params["db"], params["password"]) == ("broker.example", 6390, 4, "s3cret")
     if asynchronous:
-        # A subclass of kombu's poller-aware connection class, defined inside its ``_connparams``.
-        kombu_class = params["connection_class"].__mro__[1]
-        assert kombu_class.__module__ == "kombu.transport.redis"
+        # The kit connection over kombu's poller-aware connection class, defined inside its ``_connparams``.
+        kombu_class = next(
+            cls for cls in params["connection_class"].__mro__ if cls.__module__ == "kombu.transport.redis"
+        )
         assert kombu_class is not redis.Connection
         assert issubclass(kombu_class, redis.Connection)
+        assert params["connection_class"].__mro__[1] is kit_sync_connection_class(kombu_class)
     else:
-        assert params["connection_class"] is redis.Connection
+        assert params["connection_class"] is kit_sync_connection_class(redis.Connection)
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+def test_the_broker_connparams_keep_kombus_health_check_interval(monkeypatch, asynchronous: bool) -> None:
+    # Every broker connection health-checks its socket with kombu's default interval, on the
+    # kit connection class: a health check that meets a dropped socket reconnects through it.
+    app = _app(monkeypatch, CELERY_BROKER_URL="redis://broker.example:6390/4", CELERY_BROKER_RETRY_ATTEMPTS="2")
+    params = _channel(app.connection_for_write().transport)._connparams(asynchronous=asynchronous)
+
+    assert params["health_check_interval"] == 25
+    # A class that already connects under the kit retry is its own kit class.
+    assert kit_sync_connection_class(params["connection_class"]) is params["connection_class"]
 
 
 def test_a_polled_connection_runs_under_the_seam_retry_until_its_channel_is_registered(monkeypatch) -> None:
@@ -345,9 +462,10 @@ def test_a_polled_connection_runs_under_the_seam_retry_until_its_channel_is_regi
         host=params["host"], port=params["port"], retry=params["retry"], retry_on_error=params["retry_on_error"]
     )
 
-    # The channel's opening PING runs under the seam retry.
-    assert isinstance(connection.retry, _LoggedSyncRetry)
-    assert connection.retry._label == "CELERY_BROKER_URL"
+    # The channel's opening PING runs under the seam retry, through the connection's view of it.
+    assert isinstance(connection.retry, _SyncConnectionRetry)
+    assert isinstance(connection.retry._given, _LoggedSyncRetry)
+    assert connection.retry._given._label == "CELERY_BROKER_URL"
     assert redis.ConnectionError in connection.retry_on_error
 
     # Once kombu's poller holds the channel, a drop disconnects and raises, as redis-py's own connection does.
@@ -356,7 +474,50 @@ def test_a_polled_connection_runs_under_the_seam_retry_until_its_channel_is_regi
     assert connection.retry_on_error == []
 
     # The synchronous pool's connections keep the retry throughout.
-    assert channel._connparams()["connection_class"] is redis.Connection
+    assert channel._connparams()["connection_class"] is kit_sync_connection_class(redis.Connection)
+
+
+def test_a_polled_connections_handshake_drop_is_retried_only_until_its_channel_is_registered(
+    monkeypatch, caplog
+) -> None:
+    server = _DropsHandshakes()
+    try:
+        app = _app(
+            monkeypatch, CELERY_BROKER_URL=f"redis://127.0.0.1:{server.port}/1", CELERY_BROKER_RETRY_ATTEMPTS="2"
+        )
+        channel = _channel(app.connection_for_read().transport)
+        channel._in_poll = channel._in_listen = None
+        channel._registered = False
+        params = channel._connparams(asynchronous=True)
+
+        def connection() -> Any:
+            return params["connection_class"](
+                host="127.0.0.1", port=server.port, retry=params["retry"], retry_on_error=params["retry_on_error"]
+            )
+
+        # Before the channel registers, the dropped handshake is retried and logged.
+        server.drops = 1
+        before = connection()
+        with caplog.at_level(logging.WARNING):
+            before.connect()
+        before.disconnect()
+        warnings = [record.getMessage() for record in caplog.records if record.levelno == logging.WARNING]
+        assert len(warnings) == 1
+        assert "CELERY_BROKER_URL" in warnings[0]
+
+        # Once it is registered, one attempt: the drop raises.
+        caplog.clear()
+        channel._registered = True
+        server.drops = 1
+        after = connection()
+        with (
+            caplog.at_level(logging.WARNING),
+            pytest.raises(redis.ConnectionError, match="Connection closed by server"),
+        ):
+            after.connect()
+        assert [record for record in caplog.records if record.levelno == logging.WARNING] == []
+    finally:
+        server.close()
 
 
 def test_each_registered_polled_connection_carries_its_own_retry(monkeypatch) -> None:
@@ -373,6 +534,82 @@ def test_each_registered_polled_connection_carries_its_own_retry(monkeypatch) ->
 
     assert first.retry is not second.retry
     assert KeyError not in second.retry._supported_errors
+
+
+class _RecordsTheRetry:
+    """A connect callback (redis-py keeps it as a weak method) that records the connection's retry and its nesting."""
+
+    def __init__(self) -> None:
+        self.seen: list[tuple[type, int]] = []
+
+    def callback(self, connection: Any) -> None:
+        self.seen.append((type(connection.retry), connection.retry._depth))
+
+
+def test_a_polled_connection_is_the_kit_connection_and_its_attempt_makes_one_try(monkeypatch) -> None:
+    server = _DropsHandshakes()
+    try:
+        app = _app(
+            monkeypatch, CELERY_BROKER_URL=f"redis://127.0.0.1:{server.port}/1", CELERY_BROKER_RETRY_ATTEMPTS="2"
+        )
+        channel = _channel(app.connection_for_read().transport)
+        channel._registered = False
+        params = channel._connparams(asynchronous=True)
+        kit_class = params["connection_class"].__mro__[1]
+        assert kit_sync_connection_class(kit_class) is kit_class
+
+        connection = params["connection_class"](
+            host="127.0.0.1", port=server.port, retry=params["retry"], retry_on_error=params["retry_on_error"]
+        )
+        recorder = _RecordsTheRetry()
+        connection.register_connect_callback(recorder.callback)
+        connection.connect()
+        connection.disconnect()
+
+        # Inside the attempt, the kit's view runs a nested retried call once; outside it, the seam retry's loop.
+        assert recorder.seen == [(_SyncConnectionRetry, 1)]
+        assert connection.retry._depth == 0
+        assert isinstance(connection.retry._given, _LoggedSyncRetry)
+    finally:
+        server.close()
+
+
+def test_a_registered_polled_connection_makes_one_attempt_with_no_error_retried(monkeypatch) -> None:
+    server = _DropsHandshakes()
+    try:
+        app = _app(
+            monkeypatch, CELERY_BROKER_URL=f"redis://127.0.0.1:{server.port}/1", CELERY_BROKER_RETRY_ATTEMPTS="2"
+        )
+        channel = _channel(app.connection_for_read().transport)
+        channel._registered = True
+        params = channel._connparams(asynchronous=True)
+        connection = params["connection_class"](
+            host="127.0.0.1", port=server.port, retry=params["retry"], retry_on_error=params["retry_on_error"]
+        )
+        attempts: list[None] = []
+        connect_once = redis.Connection._connect
+
+        def counted(self: Any) -> Any:
+            attempts.append(None)
+            return connect_once(self)
+
+        monkeypatch.setattr(redis.Connection, "_connect", counted)
+        server.drops = 1
+
+        assert connection.retry_on_error == []
+        with pytest.raises(redis.ConnectionError, match="Connection closed by server"):
+            connection.connect()
+        assert len(attempts) == 1
+    finally:
+        server.close()
+
+
+def test_a_polled_connection_class_needs_a_kit_connection_class(monkeypatch) -> None:
+    app = _app(monkeypatch, CELERY_BROKER_URL="redis://broker.example:6390/1")
+    channel = _channel(app.connection_for_read().transport)
+
+    with pytest.raises(TypeError, match="is not a kit sync connection class"):
+        _polled_connection_class(redis.Connection, channel)
 
 
 def test_the_broker_client_pubsub_takes_the_kits_reentrant_lock(monkeypatch) -> None:
@@ -403,7 +640,7 @@ def test_a_unix_socket_broker_keeps_kombus_socket_connection(monkeypatch) -> Non
     app = _app(monkeypatch, CELERY_BROKER_URL="redis+socket:///tmp/r.sock", CELERY_BROKER_SOCKET_CONNECT_TIMEOUT="2")
     params = _channel(app.connection_for_write().transport)._connparams()
 
-    assert params["connection_class"] is redis.UnixDomainSocketConnection
+    assert params["connection_class"] is kit_sync_connection_class(redis.UnixDomainSocketConnection)
     assert params["path"] == "/tmp/r.sock"
     assert params["socket_connect_timeout"] == 2
 
