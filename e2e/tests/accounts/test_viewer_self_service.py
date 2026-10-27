@@ -51,7 +51,8 @@ async def test_viewer_session_logs_out_and_mints_its_own_key(
 
     # The viewer logs itself out, and the session no longer authenticates.
     revoked = await viewer.post("/api/auth/logout")
-    assert revoked["revoked"] is True, revoked
+    # A local login has no identity-provider session, so the result carries no end-session URL.
+    assert revoked == {"revoked": True, "end_session_url": None}, revoked
 
     async def session_dead() -> bool:
         response = await viewer.request_raw("GET", "/api/auth/me")

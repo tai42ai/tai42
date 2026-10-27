@@ -25,6 +25,7 @@ from tai42_contract.accounts import (
     MemberAction,
     MemberEntry,
     MemberListing,
+    SessionRevocation,
 )
 from tai42_kit.accounts.registry import register_accounts_provider
 from tai42_kit.clients.impl.postgres import PostgresClient
@@ -253,12 +254,17 @@ class PostgresAccountsProvider(LoginAttachingProvider):
             login_path=service.invite_login_path(raw_invite),
         )
 
-    async def revoke_session(self, token: str) -> bool:
-        """Delete the session for ``token``; returns ``False`` when the token is not ours to revoke."""
+    async def revoke_session(self, token: str) -> SessionRevocation | None:
+        """Delete the session for ``token``; returns ``None`` when the token is not ours to revoke.
+
+        A local login has no identity-provider session behind it, so a revocation carries no
+        end-session URL.
+        """
         if not token.startswith(service.SESSION_TOKEN_PREFIX):
             # Not ours — the logout dispatcher moves on.
-            return False
-        return await service.sessions_store().delete(service.token_hash(token))
+            return None
+        deleted = await service.sessions_store().delete(service.token_hash(token))
+        return SessionRevocation() if deleted else None
 
     async def healthcheck(self) -> None:
         """Boot-time gate: assert the plugin's schema chain is fully applied."""

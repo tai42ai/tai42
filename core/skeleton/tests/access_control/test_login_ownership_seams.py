@@ -14,7 +14,13 @@ import pytest
 from pydantic import BaseModel
 from tai42_contract.access_control.identity import AuthIdentity, IdentityProvider
 from tai42_contract.accounts import LoginAttachingProvider, LoginOwningProvider
-from tai42_contract.accounts.models import LoginAttachment, LoginCredential, MemberAction, MemberListing
+from tai42_contract.accounts.models import (
+    LoginAttachment,
+    LoginCredential,
+    MemberAction,
+    MemberListing,
+    SessionRevocation,
+)
 
 from tai42_skeleton.operations import principals as principals_ops
 from tai42_skeleton.operations import setup as setup_ops
@@ -29,8 +35,8 @@ class _RecordsOnly(LoginOwningProvider):
     async def validate_token(self, token: str) -> AuthIdentity | None:  # pragma: no cover - unused
         return None
 
-    async def revoke_session(self, token: str) -> bool:  # pragma: no cover - unused
-        return False
+    async def revoke_session(self, token: str) -> SessionRevocation | None:  # pragma: no cover - unused
+        return None
 
     async def list_members(self) -> MemberListing:  # pragma: no cover - unused
         return MemberListing(members=[], invites=[])

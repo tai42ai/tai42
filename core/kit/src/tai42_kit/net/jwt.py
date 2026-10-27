@@ -85,6 +85,7 @@ class OidcDiscovery:
     authorization_endpoint: str
     token_endpoint: str
     userinfo_endpoint: str | None
+    end_session_endpoint: str | None
 
 
 def _is_loopback_host(host: str | None) -> bool:
@@ -165,6 +166,7 @@ async def fetch_discovery(issuer: str, *, timeout: float = 5.0, max_bytes: int =
         authorization_endpoint=_require_str(document, "authorization_endpoint", url),
         token_endpoint=_require_str(document, "token_endpoint", url),
         userinfo_endpoint=_optional_str(document, "userinfo_endpoint", url),
+        end_session_endpoint=_optional_str(document, "end_session_endpoint", url),
     )
 
 

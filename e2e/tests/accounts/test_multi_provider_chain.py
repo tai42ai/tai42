@@ -55,7 +55,8 @@ async def test_key_and_session_both_resolve(accounts_stack: TaiStack, uniq: Call
 
     # After logout on A, the session no longer authenticates on B.
     revoked = await session_b.post("/api/auth/logout")
-    assert revoked["revoked"] is True, revoked
+    # A local login has no identity-provider session, so the result carries no end-session URL.
+    assert revoked == {"revoked": True, "end_session_url": None}, revoked
 
     async def session_dead() -> bool:
         response = await session_b.request_raw("GET", "/api/system/kinds")

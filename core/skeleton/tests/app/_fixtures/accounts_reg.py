@@ -10,6 +10,7 @@ the same declared provider is a no-op, not an "already registered" crash.
 from pydantic import BaseModel
 from tai42_contract.access_control.identity import AuthIdentity
 from tai42_contract.accounts import AccountsProvider, LoginMethod, MemberAction, MemberListing
+from tai42_contract.accounts.models import SessionRevocation
 from tai42_kit.accounts.registry import register_accounts_provider
 
 
@@ -32,8 +33,8 @@ class FixtureAccountsProvider(AccountsProvider):
     async def invoke_member_action(self, action_id: str, *, target: str | None, payload: BaseModel) -> BaseModel:
         raise ValueError(f"no member action {action_id!r}")
 
-    async def revoke_session(self, token: str) -> bool:
-        return False
+    async def revoke_session(self, token: str) -> SessionRevocation | None:
+        return None
 
 
 register_accounts_provider("fixture-accounts", FixtureAccountsProvider)

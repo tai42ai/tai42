@@ -25,6 +25,7 @@ from tai42_contract.accounts.models import (
     LoginMethod,
     MemberAction,
     MemberListing,
+    SessionRevocation,
 )
 from tai42_contract.accounts.provider import AccountsProvider, LoginAttachingProvider, LoginOwningProvider
 from tai42_kit.accounts import registry as accounts_registry
@@ -46,11 +47,13 @@ class _FakeAccounts(AccountsProvider):
         methods: list[LoginMethod],
         methods_raise: bool = False,
         revocable: set[str] | None = None,
+        end_session_urls: dict[str, str] | None = None,
         revoke_raises: bool = False,
     ) -> None:
         self._methods = methods
         self._methods_raise = methods_raise
         self._revocable = revocable or set()
+        self._end_session_urls = end_session_urls or {}
         self._revoke_raises = revoke_raises
         self.revoke_calls: list[str] = []
 
@@ -76,11 +79,13 @@ class _FakeAccounts(AccountsProvider):
     ) -> BaseModel:
         raise ValueError(action_id)
 
-    async def revoke_session(self, token: str) -> bool:
+    async def revoke_session(self, token: str) -> SessionRevocation | None:
         self.revoke_calls.append(token)
         if self._revoke_raises:
             raise RuntimeError("provider down")
-        return token in self._revocable
+        if token not in self._revocable:
+            return None
+        return SessionRevocation(end_session_url=self._end_session_urls.get(token))
 
 
 class _FakeLoginAttaching(LoginAttachingProvider):
@@ -106,8 +111,8 @@ class _FakeLoginAttaching(LoginAttachingProvider):
     ) -> BaseModel:
         raise ValueError(action_id)
 
-    async def revoke_session(self, token: str) -> bool:  # pragma: no cover - unused
-        return False
+    async def revoke_session(self, token: str) -> SessionRevocation | None:  # pragma: no cover - unused
+        return None
 
     async def has_login(self, user_id: str) -> bool:  # pragma: no cover - unused
         return False
@@ -226,8 +231,8 @@ class _FakeLoginOwning(LoginOwningProvider):
     ) -> BaseModel:
         raise ValueError(action_id)
 
-    async def revoke_session(self, token: str) -> bool:  # pragma: no cover - unused
-        return False
+    async def revoke_session(self, token: str) -> SessionRevocation | None:  # pragma: no cover - unused
+        return None
 
     async def has_login(self, user_id: str) -> bool:  # pragma: no cover - unused
         return False
@@ -261,7 +266,7 @@ async def test_logout_first_false_second_true_revokes():
     _register("b", p2)
 
     resp = await login_router.logout(_request({"Authorization": "Bearer tok"}))
-    assert json.loads(bytes(resp.body)) == {"data": {"revoked": True}}
+    assert json.loads(bytes(resp.body)) == {"data": {"revoked": True, "end_session_url": None}}
     # Both consulted for the single candidate, registry order (a before b).
     assert p1.revoke_calls == ["tok"]
     assert p2.revoke_calls == ["tok"]
@@ -273,8 +278,36 @@ async def test_logout_iterates_all_candidates():
     _register("a", p)
 
     resp = await login_router.logout(_request({"Authorization": "Bearer stale", "X-Api-Key": "live"}))
-    assert json.loads(bytes(resp.body)) == {"data": {"revoked": True}}
+    assert json.loads(bytes(resp.body)) == {"data": {"revoked": True, "end_session_url": None}}
     assert p.revoke_calls == ["stale", "live"]
+
+
+async def test_logout_passes_the_end_session_url_through():
+    url = "https://issuer.example/logout?id_token_hint=abc&client_id=app"
+    _register("a", _FakeAccounts(methods=[], revocable={"tok"}, end_session_urls={"tok": url}))
+
+    resp = await login_router.logout(_request({"Authorization": "Bearer tok"}))
+    assert json.loads(bytes(resp.body)) == {"data": {"revoked": True, "end_session_url": url}}
+
+
+async def test_logout_local_session_has_no_end_session_url():
+    _register("a", _FakeAccounts(methods=[], revocable={"tok"}))
+
+    resp = await login_router.logout(_request({"Authorization": "Bearer tok"}))
+    assert json.loads(bytes(resp.body)) == {"data": {"revoked": True, "end_session_url": None}}
+
+
+async def test_logout_first_revocation_wins_with_its_end_session_url():
+    first = _FakeAccounts(methods=[], revocable={"tok"}, end_session_urls={"tok": "https://first.example/logout"})
+    second = _FakeAccounts(methods=[], revocable={"tok"}, end_session_urls={"tok": "https://second.example/logout"})
+    _register("a", first)
+    _register("b", second)
+
+    resp = await login_router.logout(_request({"Authorization": "Bearer tok"}))
+    assert json.loads(bytes(resp.body)) == {
+        "data": {"revoked": True, "end_session_url": "https://first.example/logout"}
+    }
+    assert second.revoke_calls == []
 
 
 async def test_logout_all_false_is_404():

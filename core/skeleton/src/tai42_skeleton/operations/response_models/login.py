@@ -47,6 +47,12 @@ class ClaimExchangeResult(BaseModel):
 
 
 class LogoutResult(BaseModel):
-    """The logout confirmation — success-only (a non-revocable session is a 404)."""
+    """The logout confirmation — success-only (a non-revocable session is a 404).
+
+    ``end_session_url`` is where the client sends the browser after clearing its credential,
+    so the identity provider behind the login ends its session too; ``null`` when the login
+    had none.
+    """
 
     revoked: bool
+    end_session_url: str | None = None

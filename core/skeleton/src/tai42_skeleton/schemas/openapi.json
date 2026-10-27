@@ -8274,8 +8274,20 @@
         "type": "object"
       },
       "LogoutResult": {
-        "description": "The logout confirmation — success-only (a non-revocable session is a 404).",
+        "description": "The logout confirmation — success-only (a non-revocable session is a 404).\n\n``end_session_url`` is where the client sends the browser after clearing its credential,\nso the identity provider behind the login ends its session too; ``null`` when the login\nhad none.",
         "properties": {
+          "end_session_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "End Session Url"
+          },
           "revoked": {
             "title": "Revoked",
             "type": "boolean"
@@ -22687,7 +22699,7 @@
     },
     "/api/auth/logout": {
       "post": {
-        "description": "Revoke the caller's session by fanning ``revoke_session`` out over every candidate and provider.\n\nFans out over every presented credential candidate and every registered accounts\nprovider.\n\nIterating all candidates is required: a client may present a stale value in\n``Authorization`` alongside its live session in ``X-Api-Key``, so checking only the\nfirst would leave that session alive. The FIRST ``True`` → ``{\"revoked\": true}``.\nOnly when EVERY candidate against EVERY provider returns ``False`` → 404 (an\n``sk-`` API key cannot \"log out\" — loud, not a silent no-op), with a server-side\nlog naming the caller so probing/replay stays visible. Provider errors propagate\n(fail closed).",
+        "description": "Revoke the caller's session by fanning ``revoke_session`` out over every candidate and provider.\n\nFans out over every presented credential candidate and every registered accounts\nprovider.\n\nIterating all candidates is required: a client may present a stale value in\n``Authorization`` alongside its live session in ``X-Api-Key``, so checking only the\nfirst would leave that session alive. The FIRST revocation wins →\n``{\"revoked\": true, \"end_session_url\": ...}``, its end-session URL passed through\nunchanged. Only when EVERY candidate against EVERY provider returns ``None`` → 404 (an\n``sk-`` API key cannot \"log out\" — loud, not a silent no-op), with a server-side\nlog naming the caller so probing/replay stays visible. Provider errors propagate\n(fail closed).",
         "operationId": "post_api_auth_logout",
         "responses": {
           "200": {

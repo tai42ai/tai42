@@ -26,6 +26,7 @@ from tai42_contract.accounts.models import (
     MemberAction,
     MemberListing,
     PasswordCredential,
+    SessionRevocation,
 )
 from tai42_contract.accounts.provider import (
     AccountsAdminServices,
@@ -66,8 +67,8 @@ class _FakeAccounts(AccountsProvider):
     async def invoke_member_action(self, action_id: str, *, target: str | None, payload: BaseModel) -> BaseModel:
         raise ValueError(f"no member action {action_id!r}")
 
-    async def revoke_session(self, token: str) -> bool:
-        return token == "tai-sess-ok"
+    async def revoke_session(self, token: str) -> SessionRevocation | None:
+        return SessionRevocation() if token == "tai-sess-ok" else None
 
 
 # -- AccountsProvider ABC ------------------------------------------------------
@@ -89,8 +90,8 @@ class _MissingLoginMethods(AccountsProvider):
     async def list_members(self) -> MemberListing:
         return MemberListing(members=[], invites=[])
 
-    async def revoke_session(self, token: str) -> bool:
-        return False
+    async def revoke_session(self, token: str) -> SessionRevocation | None:
+        return None
 
 
 class _MissingRevokeSession(AccountsProvider):
@@ -117,8 +118,8 @@ class _MissingValidateToken(AccountsProvider):
     async def list_members(self) -> MemberListing:
         return MemberListing(members=[], invites=[])
 
-    async def revoke_session(self, token: str) -> bool:
-        return False
+    async def revoke_session(self, token: str) -> SessionRevocation | None:
+        return None
 
 
 class _MissingListMembers(AccountsProvider):
@@ -131,8 +132,8 @@ class _MissingListMembers(AccountsProvider):
     def login_methods(self) -> list[LoginMethod]:
         return []
 
-    async def revoke_session(self, token: str) -> bool:
-        return False
+    async def revoke_session(self, token: str) -> SessionRevocation | None:
+        return None
 
     def member_actions(self) -> list[MemberAction]:
         return []
@@ -154,8 +155,8 @@ class _MissingMemberActions(AccountsProvider):
     async def list_members(self) -> MemberListing:
         return MemberListing(members=[], invites=[])
 
-    async def revoke_session(self, token: str) -> bool:
-        return False
+    async def revoke_session(self, token: str) -> SessionRevocation | None:
+        return None
 
     async def invoke_member_action(self, action_id: str, *, target: str | None, payload: BaseModel) -> BaseModel:
         raise ValueError(action_id)
@@ -174,8 +175,8 @@ class _MissingInvokeMemberAction(AccountsProvider):
     async def list_members(self) -> MemberListing:
         return MemberListing(members=[], invites=[])
 
-    async def revoke_session(self, token: str) -> bool:
-        return False
+    async def revoke_session(self, token: str) -> SessionRevocation | None:
+        return None
 
     def member_actions(self) -> list[MemberAction]:
         return []
@@ -197,8 +198,8 @@ class _MissingDisplayName(AccountsProvider):
     async def invoke_member_action(self, action_id: str, *, target: str | None, payload: BaseModel) -> BaseModel:
         raise ValueError(action_id)
 
-    async def revoke_session(self, token: str) -> bool:
-        return False
+    async def revoke_session(self, token: str) -> SessionRevocation | None:
+        return None
 
 
 @pytest.mark.parametrize(
@@ -225,8 +226,8 @@ def test_full_subclass_instantiates_and_inherits_concrete_members():
         methods = provider.login_methods()
         assert len(methods) == 1
         assert provider.display_name() == "Alpha"
-        assert await provider.revoke_session("tai-sess-ok") is True
-        assert await provider.revoke_session("foreign") is False
+        assert await provider.revoke_session("tai-sess-ok") == SessionRevocation()
+        assert await provider.revoke_session("foreign") is None
         assert await provider.validate_token("tai-sess-ok") == AuthIdentity(user_id="u1", claims={})
         assert await provider.validate_token("nope") is None
         # Inherited concrete members from IdentityProvider are locked in place.

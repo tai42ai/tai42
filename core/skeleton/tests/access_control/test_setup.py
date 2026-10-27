@@ -23,6 +23,7 @@ from tai42_contract.accounts.models import (
     MemberAction,
     MemberListing,
     PasswordCredential,
+    SessionRevocation,
 )
 from tai42_kit.access_control import registry
 
@@ -84,8 +85,8 @@ class _FakeLoginAttaching(LoginAttachingProvider):
     async def validate_token(self, token: str) -> AuthIdentity | None:  # pragma: no cover - unused here
         return None
 
-    async def revoke_session(self, token: str) -> bool:  # pragma: no cover - unused here
-        return False
+    async def revoke_session(self, token: str) -> SessionRevocation | None:  # pragma: no cover - unused here
+        return None
 
     async def list_members(self) -> MemberListing:  # pragma: no cover - unused here
         return MemberListing(members=[], invites=[])
@@ -123,8 +124,8 @@ class _RaisingLoginAttaching(LoginAttachingProvider):
     async def validate_token(self, token: str) -> AuthIdentity | None:  # pragma: no cover - unused here
         return None
 
-    async def revoke_session(self, token: str) -> bool:  # pragma: no cover - unused here
-        return False
+    async def revoke_session(self, token: str) -> SessionRevocation | None:  # pragma: no cover - unused here
+        return None
 
     async def list_members(self) -> MemberListing:  # pragma: no cover - unused here
         return MemberListing(members=[], invites=[])

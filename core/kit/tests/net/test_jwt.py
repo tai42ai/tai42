@@ -78,7 +78,7 @@ def test_looks_like_jwt_truth_table(token: str, expected: bool) -> None:
 # --- discovery --------------------------------------------------------------
 
 
-def _configure_discovery(server: Any, *, issuer: str | None = None) -> str:
+def _configure_discovery(server: Any, *, issuer: str | None = None, extra: dict[str, Any] | None = None) -> str:
     resolved: str = issuer if issuer is not None else server.base_url
     server.set_json(
         "/.well-known/openid-configuration",
@@ -88,6 +88,7 @@ def _configure_discovery(server: Any, *, issuer: str | None = None) -> str:
             "authorization_endpoint": f"{server.base_url}/authorize",
             "token_endpoint": f"{server.base_url}/token",
             "userinfo_endpoint": f"{server.base_url}/userinfo",
+            **(extra or {}),
         },
     )
     return resolved
@@ -174,6 +175,24 @@ async def test_fetch_discovery_without_userinfo(oidc_server: Any) -> None:
     )
     discovery = await fetch_discovery(oidc_server.base_url)
     assert discovery.userinfo_endpoint is None
+
+
+async def test_fetch_discovery_end_session_endpoint(oidc_server: Any) -> None:
+    _configure_discovery(oidc_server, extra={"end_session_endpoint": f"{oidc_server.base_url}/logout"})
+    discovery = await fetch_discovery(oidc_server.base_url)
+    assert discovery.end_session_endpoint == f"{oidc_server.base_url}/logout"
+
+
+async def test_fetch_discovery_without_end_session_endpoint(oidc_server: Any) -> None:
+    _configure_discovery(oidc_server)
+    discovery = await fetch_discovery(oidc_server.base_url)
+    assert discovery.end_session_endpoint is None
+
+
+async def test_fetch_discovery_non_string_end_session_endpoint(oidc_server: Any) -> None:
+    _configure_discovery(oidc_server, extra={"end_session_endpoint": 42})
+    with pytest.raises(JwksFetchError, match="non-string 'end_session_endpoint'"):
+        await fetch_discovery(oidc_server.base_url)
 
 
 async def test_fetch_discovery_transport_error() -> None:

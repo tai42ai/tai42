@@ -6,7 +6,14 @@ from __future__ import annotations
 import pytest
 from pydantic import BaseModel
 from tai42_contract.access_control.identity import AuthIdentity
-from tai42_contract.accounts.models import FormField, FormMethod, LoginMethod, MemberAction, MemberListing
+from tai42_contract.accounts.models import (
+    FormField,
+    FormMethod,
+    LoginMethod,
+    MemberAction,
+    MemberListing,
+    SessionRevocation,
+)
 from tai42_contract.accounts.provider import AccountsProvider
 
 from tai42_kit.access_control import registry as identity_registry
@@ -69,8 +76,8 @@ class _FakeAccounts(AccountsProvider):
     async def invoke_member_action(self, action_id: str, *, target: str | None, payload: BaseModel) -> BaseModel:
         raise ValueError(f"no member action {action_id!r}")
 
-    async def revoke_session(self, token: str) -> bool:
-        return token == "tai-sess-ok"
+    async def revoke_session(self, token: str) -> SessionRevocation | None:
+        return SessionRevocation() if token == "tai-sess-ok" else None
 
 
 def _fake_factory(*_args: object, **_kwargs: object) -> AccountsProvider:
