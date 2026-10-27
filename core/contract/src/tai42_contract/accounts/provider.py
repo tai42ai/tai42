@@ -16,6 +16,7 @@ from tai42_contract.accounts.models import (
     LoginMethod,
     MemberAction,
     MemberListing,
+    SessionRevocation,
 )
 
 
@@ -189,15 +190,14 @@ class AccountsProvider(IdentityProvider):
         ...
 
     @abstractmethod
-    async def revoke_session(self, token: str) -> bool:
+    async def revoke_session(self, token: str) -> SessionRevocation | None:
         """Revoke the session behind ``token`` if it is this provider's.
 
-        Returns ``True`` when a session was found and revoked; ``False``
-        when the token is not this provider's (wrong prefix, unknown). The
-        application's single logout route dispatches across ALL registered
-        accounts providers, so implementations must answer ``False`` for
-        foreign tokens instead of raising. Backend errors still raise
-        (fail closed).
+        Returns a :class:`~tai42_contract.accounts.models.SessionRevocation` when a session was
+        found and revoked (its ``end_session_url`` names where the browser goes next, or ``None``);
+        ``None`` when the token is not this provider's (wrong prefix, unknown). The application's
+        single logout route dispatches across ALL registered accounts providers, so implementations
+        answer ``None`` for foreign tokens instead of raising. Backend errors still raise (fail closed).
         """
         ...
 

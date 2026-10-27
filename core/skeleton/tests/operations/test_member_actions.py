@@ -33,6 +33,7 @@ from tai42_contract.accounts.errors import (
     MemberActionError,
     MemberActionNotFoundError,
 )
+from tai42_contract.accounts.models import SessionRevocation
 from tai42_contract.errors import OperationError
 from tai42_contract.template import TemplatedText
 
@@ -129,8 +130,8 @@ class _NeutralActionsProvider(AccountsProvider):
         assert isinstance(payload, _PokeInput)
         return _PokeResult(link=f"link:{target}:{payload.reason}")
 
-    async def revoke_session(self, token: str) -> bool:  # pragma: no cover - unused
-        return False
+    async def revoke_session(self, token: str) -> SessionRevocation | None:  # pragma: no cover - unused
+        return None
 
 
 def _member(id_: str, *, principal_ids: list[str] | None = None, actions: list[str] | None = None) -> MemberEntry:

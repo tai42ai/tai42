@@ -31,6 +31,7 @@ from tai42_contract.accounts.models import (
     MemberPrincipalState,
     MemberRow,
     PasswordCredential,
+    SessionRevocation,
 )
 from tai42_contract.template import TemplatedText
 
@@ -243,6 +244,17 @@ def test_login_attachment_defaults():
     attachment = LoginAttachment(attached=False)
     assert attachment.invite_token is None
     assert attachment.login_path is None
+
+
+def test_session_revocation_defaults_to_no_end_session_url():
+    assert SessionRevocation().end_session_url is None
+    url = "https://issuer.example/logout?id_token_hint=abc"
+    assert SessionRevocation(end_session_url=url).end_session_url == url
+
+
+def test_session_revocation_refuses_an_unknown_field():
+    with pytest.raises(ValidationError):
+        SessionRevocation.model_validate({"end_session_url": None, "revoked": True})
 
 
 # -- Membership listing shapes -------------------------------------------------

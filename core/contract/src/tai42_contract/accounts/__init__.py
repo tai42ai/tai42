@@ -39,6 +39,7 @@ from tai42_contract.accounts.models import (
     MemberPrincipalState,
     MemberRow,
     PasswordCredential,
+    SessionRevocation,
 )
 from tai42_contract.accounts.provider import (
     AccountsAdminServices,
@@ -83,4 +84,5 @@ __all__ = [
     "MemberPrincipalState",
     "MemberRow",
     "PasswordCredential",
+    "SessionRevocation",
 ]

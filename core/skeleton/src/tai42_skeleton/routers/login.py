@@ -14,7 +14,8 @@ Two doors fanning out over the accounts-provider registry:
 - ``POST /api/auth/logout`` — the single AUTHED logout dispatcher (logout is
   application surface so two installed accounts plugins never race to own the route).
   It fans out ``revoke_session`` over every presented credential candidate and every
-  registered accounts provider; the first ``True`` wins.
+  registered accounts provider; the first revocation wins, its end-session URL passed
+  through unchanged.
 
 The doors are thin adapters over operations in
 ``tai42_skeleton.operations.login``. The logout candidates are HTTP-edge input —

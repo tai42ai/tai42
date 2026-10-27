@@ -28,6 +28,7 @@ from tai42_contract.accounts import (
     MemberEntry,
     MemberListing,
 )
+from tai42_contract.accounts.models import SessionRevocation
 
 from tai42_skeleton.operations import ForbiddenError
 from tai42_skeleton.operations import members as members_ops
@@ -69,8 +70,8 @@ class _NeutralAccounts(AccountsProvider):
     ) -> BaseModel:
         raise ValueError(action_id)
 
-    async def revoke_session(self, token: str) -> bool:  # pragma: no cover - unused
-        return False
+    async def revoke_session(self, token: str) -> SessionRevocation | None:  # pragma: no cover - unused
+        return None
 
 
 def _member(id_: str, *, principal_ids: list[str] | None = None) -> MemberEntry:

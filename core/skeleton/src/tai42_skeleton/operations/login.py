@@ -6,7 +6,8 @@
   which providers are installed.
 - ``logout`` revokes the caller's session by fanning ``revoke_session`` out over
   every presented credential candidate and every registered accounts provider;
-  the first ``True`` wins, and no match is a loud 404 (:class:`NotFoundError`).
+  the first revocation wins, its end-session URL is passed through unchanged, and
+  no match is a loud 404 (:class:`NotFoundError`).
 - ``exchange_claim_token`` burns a one-time claim token and returns the raw API key it
   carried — the public QR-onboarding exchange leg, ``authority_changing`` so it never
   projects as an MCP tool.
@@ -140,8 +141,9 @@ async def logout(candidates: list[str]) -> dict:
 
     Iterating all candidates is required: a client may present a stale value in
     ``Authorization`` alongside its live session in ``X-Api-Key``, so checking only the
-    first would leave that session alive. The FIRST ``True`` → ``{"revoked": true}``.
-    Only when EVERY candidate against EVERY provider returns ``False`` → 404 (an
+    first would leave that session alive. The FIRST revocation wins →
+    ``{"revoked": true, "end_session_url": ...}``, its end-session URL passed through
+    unchanged. Only when EVERY candidate against EVERY provider returns ``None`` → 404 (an
     ``sk-`` API key cannot "log out" — loud, not a silent no-op), with a server-side
     log naming the caller so probing/replay stays visible. Provider errors propagate
     (fail closed).
@@ -152,8 +154,9 @@ async def logout(candidates: list[str]) -> dict:
     # presented candidate revokes it and wins.
     for token in candidates:
         for provider in providers:
-            if await provider.revoke_session(token):
-                return {"revoked": True}
+            revocation = await provider.revoke_session(token)
+            if revocation is not None:
+                return {"revoked": True, "end_session_url": revocation.end_session_url}
 
     logger.info(
         "access_control: logout by %s matched no accounts provider (presented credential is not a revocable session)",

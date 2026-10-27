@@ -15,7 +15,7 @@ from types import SimpleNamespace
 import pytest
 from pydantic import BaseModel
 from tai42_contract.access_control.identity import AuthIdentity, IdentityProvider
-from tai42_contract.accounts.models import LoginMethod, MemberAction, MemberListing
+from tai42_contract.accounts.models import LoginMethod, MemberAction, MemberListing, SessionRevocation
 from tai42_contract.accounts.provider import AccountsProvider
 from tai42_kit.access_control import registry
 from tai42_kit.accounts import registry as accounts_registry
@@ -135,8 +135,8 @@ class _FakeAccountsProvider(AccountsProvider):
     async def invoke_member_action(self, action_id: str, *, target: str | None, payload: BaseModel) -> BaseModel:
         raise ValueError(action_id)
 
-    async def revoke_session(self, token: str) -> bool:
-        return False
+    async def revoke_session(self, token: str) -> SessionRevocation | None:
+        return None
 
 
 async def test_registered_but_unconfigured_accounts_provider_fails_boot(monkeypatch: pytest.MonkeyPatch) -> None:

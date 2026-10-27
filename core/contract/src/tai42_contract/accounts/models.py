@@ -153,6 +153,19 @@ class LoginAttachment(BaseModel):
     login_path: str | None = None
 
 
+class SessionRevocation(BaseModel):
+    """What follows a provider's revocation of a session.
+
+    ``end_session_url`` is the absolute URL the user's browser is sent to so the identity
+    provider behind the login ends its own session too; ``None`` when no such session
+    exists (a local login, or an issuer that offers no end-session endpoint).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    end_session_url: str | None = None
+
+
 MemberActionScope = Literal["page", "member_row", "invite_row"]
 """Where a declared member action renders: a page-level button, a member-row menu item,
 or an invite-row menu item. A provider classifies each of its own actions into one of

@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 from tai42_contract.access_control.identity import AuthIdentity
-from tai42_contract.accounts import FormMethod, InviteCredential, PasswordCredential
+from tai42_contract.accounts import FormMethod, InviteCredential, PasswordCredential, SessionRevocation
 from tai42_contract.accounts.errors import LoginAttachError
 from tai42_kit.access_control.registry import get_identity_provider_factory
 from tai42_kit.accounts.registry import get_accounts_provider_factory
@@ -305,9 +305,10 @@ async def test_revoke_session_variants(monkeypatch, users_store, sessions_store)
     raw = _seed_user(users_store, sessions_store)
     monkeypatch.setattr(service, "sessions_store", lambda: sessions_store)
     provider = _provider()
-    assert await provider.revoke_session("sk-foreign") is False
-    assert await provider.revoke_session("tai-sess-unknown") is False
-    assert await provider.revoke_session(raw) is True
+    assert await provider.revoke_session("sk-foreign") is None
+    assert await provider.revoke_session("tai-sess-unknown") is None
+    # A local login has no identity-provider session to end.
+    assert await provider.revoke_session(raw) == SessionRevocation(end_session_url=None)
 
 
 async def test_revoke_session_store_error_raises(monkeypatch, sessions_store):
