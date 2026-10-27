@@ -18,6 +18,8 @@ import json
 import os
 import types
 from collections.abc import Callable, Mapping
+from datetime import timedelta
+from pathlib import PurePath
 from typing import TYPE_CHECKING, Any, NamedTuple, Union, cast, get_args, get_origin
 
 from pydantic import AliasChoices, BaseModel, PrivateAttr, SecretBytes, SecretStr, TypeAdapter
@@ -99,9 +101,29 @@ def _qualname(cls: type) -> str:
     return f"{cls.__module__}.{cls.__qualname__}"
 
 
-def _json_safe(value: Any) -> Any | None:
-    """Return ``value`` if it JSON-serializes, else ``None`` (no default emitted)."""
+# A ``timedelta`` default is emitted in pydantic's JSON form (an ISO 8601 duration).
+_TIMEDELTA_ADAPTER: TypeAdapter[timedelta] = TypeAdapter(timedelta)
+
+
+def _json_default(value: Any) -> Any | None:
+    """The JSON form of a display default, or ``None`` when it has none (no default emitted).
+
+    A value whose type the settings layer reads from a plain JSON form is emitted in
+    that form: an Enum member as its ``.value``, a path as its string, a ``timedelta``
+    as its ISO 8601 duration, and a set as a list sorted by each item's JSON text, so
+    the emitted order is stable across processes. Any other value is emitted as it
+    is when it JSON-serializes, else ``None`` (a value with no JSON representation,
+    such as bytes).
+    """
+    if isinstance(value, enum.Enum):
+        value = value.value
+    elif isinstance(value, PurePath):
+        value = str(value)
+    elif isinstance(value, timedelta):
+        value = _TIMEDELTA_ADAPTER.dump_python(value, mode="json")
     try:
+        if isinstance(value, set | frozenset):
+            value = sorted(value, key=json.dumps)
         json.dumps(value)
     except (TypeError, ValueError):
         return None
@@ -393,12 +415,7 @@ def _extract(cls: type[BaseSettings]) -> SettingsClassInfo:
         if required or secret:
             default: Any | None = None
         else:
-            raw_default = _resolve_default(field_info)
-            if isinstance(raw_default, enum.Enum):
-                # An Enum member is not JSON-serializable, but its ``.value`` (a
-                # str/int for the enums used here) is — emit that.
-                raw_default = raw_default.value
-            default = _json_safe(raw_default)
+            default = _json_default(_resolve_default(field_info))
         default_key = default_fields.get(name)
         reload_override = _reload_override(field_info)
         field_reload = (
