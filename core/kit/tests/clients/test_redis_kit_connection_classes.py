@@ -1,7 +1,8 @@
 """The connection classes and pools a kit Redis client gets.
 
 Every URL scheme gives a sync client the kit connection class over the scheme's own
-class, one kit class per base; the sync and async from-url clients are redis-py's own
+class, one kit class per base, and the kit async connection class over a base is one
+class per base too; the sync and async from-url clients are redis-py's own
 from-url clients on the kit's pool and connection.
 """
 
@@ -16,7 +17,11 @@ import pytest
 pytest.importorskip("redis")
 
 import redis
+from redis.asyncio import Connection as AsyncConnection
 from redis.asyncio import Redis as AsyncRedis
+from redis.asyncio.connection import AbstractConnection as AsyncAbstractConnection
+from redis.asyncio.connection import SSLConnection as AsyncSSLConnection
+from redis.asyncio.connection import UnixDomainSocketConnection as AsyncUnixDomainSocketConnection
 
 from tai42_kit.clients.impl import redis as redis_mod
 from tai42_kit.clients.impl import redis_connections as connections_mod
@@ -74,6 +79,59 @@ def test_the_kit_sync_connection_class_is_one_class_per_base_and_wraps_once() ->
     # The collection that frees the kit class drops its entry, which frees the base on the next one.
     gc.collect()
     assert base_released() is None
+
+
+@pytest.mark.parametrize(
+    ("url", "url_class"),
+    [
+        ("redis://127.0.0.1:6379/0", AsyncConnection),
+        ("rediss://127.0.0.1:6380/0", AsyncSSLConnection),
+        ("unix:///run/redis.sock", AsyncUnixDomainSocketConnection),
+    ],
+    ids=["tcp", "tls", "unix"],
+)
+def test_the_kit_async_connection_class_over_a_url_schemes_class_is_the_async_pools(
+    url: str, url_class: type[AsyncAbstractConnection]
+) -> None:
+    assert AsyncRedis.from_url(url).connection_pool.connection_class is url_class
+    pool = redis_mod.async_redis_from_url(url).connection_pool
+    assert connections_mod.kit_async_connection_class(url_class) is pool.connection_class
+
+
+def test_the_kit_async_connection_class_is_one_class_per_base_and_wraps_once() -> None:
+    tcp = connections_mod.kit_async_connection_class(AsyncConnection)
+    assert connections_mod.kit_async_connection_class(AsyncConnection) is tcp
+    assert connections_mod.kit_async_connection_class(tcp) is tcp
+
+    # A connection class a pool's owner defines per pool, as a library building its own pools does.
+    class PerPool(AsyncConnection):
+        pass
+
+    wrapped = connections_mod.kit_async_connection_class(PerPool)
+    assert issubclass(wrapped, PerPool)
+    assert issubclass(wrapped, connections_mod._AsyncConnectsUnderTheRetry)
+    assert issubclass(wrapped, connections_mod._ConnectsFromAnEmptyContext)
+    assert connections_mod.kit_async_connection_class(PerPool) is wrapped
+    assert connections_mod.kit_async_connection_class(wrapped) is wrapped
+
+    # Nothing pins a per-pool class once its pool is gone.
+    released, base_released = weakref.ref(wrapped), weakref.ref(PerPool)
+    del wrapped, PerPool
+    gc.collect()
+    assert released() is None
+    # The collection that frees the kit class drops its entry, which frees the base on the next one.
+    gc.collect()
+    assert base_released() is None
+
+
+async def test_a_connection_of_the_kit_async_class_over_a_base_runs_an_action_unretried() -> None:
+    class PerPool(AsyncConnection):
+        pass
+
+    connection = connections_mod.kit_async_connection_class(PerPool)()
+    ran: list[str] = []
+    connections_mod.run_unretried(connection, lambda: ran.append("ran"))
+    assert ran == ["ran"]
 
 
 def test_the_sync_client_is_the_from_url_client_over_the_kit_sync_pool() -> None:

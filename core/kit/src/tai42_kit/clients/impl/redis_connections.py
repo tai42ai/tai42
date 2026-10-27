@@ -1,7 +1,8 @@
 """The kit's Redis connection classes and pools: how a kit connection connects.
 
 Every connection the kit hands out — the async pool's, the :class:`KitSyncConnectionPool`'s,
-and the class :func:`kit_sync_connection_class` gives a pool the kit does not own — makes
+and the classes :func:`kit_async_connection_class` and :func:`kit_sync_connection_class`
+give a pool the kit does not own — makes
 its whole connect (socket open, handshake, connect callbacks) one attempt of the
 connection's retry, so a connection dropped during its handshake is retried and logged
 like a refused one. A command sent on a dropped socket reconnects through ``connect()``
@@ -277,6 +278,37 @@ _EMPTY_CONTEXT_CONNECTIONS: dict[type[AbstractConnection], type[AbstractConnecti
     SSLConnection: _SslConnection,
     UnixDomainSocketConnection: _UnixConnection,
 }
+
+# The kit async connection class over each base. The classes over redis-py's own three
+# connection classes are module-level and live as long as the module; a class over any
+# other base lives only as long as something holds it, and its entry goes with it.
+_KIT_ASYNC_CONNECTIONS: weakref.WeakValueDictionary[type[AbstractConnection], type[AbstractConnection]] = (
+    weakref.WeakValueDictionary(_EMPTY_CONTEXT_CONNECTIONS)
+)
+_KIT_ASYNC_CONNECTIONS_LOCK = threading.Lock()
+
+
+def kit_async_connection_class(base: type[AbstractConnection]) -> type[AbstractConnection]:
+    """The async connection class over ``base`` that connects as every kit async connection does.
+
+    The async twin of :func:`kit_sync_connection_class`: a subclass of ``base`` whose whole
+    connect is one attempt of its retry and whose socket opens from an empty context, the
+    same class for the same ``base`` while it is in use (for redis-py's own three classes,
+    the one :class:`EmptyContextConnectionPool` gives its connections). A ``base`` that
+    already connects under its retry is returned as it is, so a class is never wrapped twice.
+    """
+    if issubclass(base, _AsyncConnectsUnderTheRetry):
+        return base
+    with _KIT_ASYNC_CONNECTIONS_LOCK:
+        kit_class = _KIT_ASYNC_CONNECTIONS.get(base)
+        if kit_class is None:
+            kit_class = type(
+                base.__name__,
+                (_AsyncConnectsUnderTheRetry, _ConnectsFromAnEmptyContext, base),
+                {"__module__": __name__},
+            )
+            _KIT_ASYNC_CONNECTIONS[base] = kit_class
+        return kit_class
 
 
 class EmptyContextConnectionPool(ConnectionPool):
