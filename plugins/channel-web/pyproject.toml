@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tai42-channel-web"
-version = "10.0.8"
+version = "10.0.9"
 description = "Public web chat channel plugin for the TAI ecosystem — hosts a visitor chat page, delivers ask questions into it, and bridges the reply back."
 readme = "README.md"
 requires-python = ">=3.13"
@@ -26,10 +26,10 @@ dependencies = [
     # The pure interface contract — Channel/ChannelDelivery/ChannelDeliveryError,
     # the caller-identity context, and the tai42_app handle the plugin registers through.
     # The contract floor is rewritten by scripts/range_sync.py at release.
-    "tai42-contract>=27.0,<28",
+    "tai42-contract>=28.0,<29",
     # HttpxClient (pooled answer-forward HTTP), RedisClient (transcript store),
     # TaiBaseSettings + the settings cache registry. [redis] pulls redis-py.
-    "tai42-kit[redis]>=15.0,<16",
+    "tai42-kit[redis]>=16.0,<17",
     # Imported directly (transport error types on the answer forward).
     "httpx>=0.28",
     # Imported directly by routes.py / stream.py (Request/Response/StreamingResponse types).

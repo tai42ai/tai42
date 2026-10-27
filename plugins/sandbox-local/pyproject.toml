@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tai42-sandbox-local"
-version = "2.3.6"
+version = "2.3.7"
 description = "Direct/host sandbox provider for the TAI ecosystem — runs a session's code as a plain host subprocess, no container and no isolation."
 readme = "README.md"
 requires-python = ">=3.13"
@@ -27,12 +27,12 @@ dependencies = [
     # the session/stream models, SandboxPolicy, the error family, PluginItemKind.SANDBOX,
     # and the tai42_app.sandboxes facet.
     # The contract floor is rewritten by scripts/range_sync.py at release.
-    "tai42-contract>=27.0,<28",
+    "tai42-contract>=28.0,<29",
     # ManagedSandbox / ManagedSandboxSession (the ledger, TTL, reap, orphan-recovery
     # and the session-create policy chokepoint), SandboxDispatchSettings, and the
     # importable conformance suite. The floor names the first release carrying
     # `tai42_kit.sandbox`, which this provider builds on.
-    "tai42-kit>=15.0,<16",
+    "tai42-kit>=16.0,<17",
     # SettingsConfigDict / SecretStr for the settings model and the env credential
     # channel; imported directly, so declared directly rather than leaned on as a
     # transitive.
