@@ -1,5 +1,8 @@
 # Release trains open as drafts; a person un-drafts one to release it, which
-# fires ready_for_review and arms auto-merge here. The PAT (not GITHUB_TOKEN)
+# fires ready_for_review and arms auto-merge here. Auto-merge merges the train
+# once it is up to date with main and green; when release-please rebuilds the
+# train after a push to main, the PR stays un-drafted and armed, and merges
+# once CI is green on the rebuilt head. The PAT (not GITHUB_TOKEN)
 # must both enable auto-merge and author the merge commit: refs written by
 # GITHUB_TOKEN fire no workflows, so a GITHUB_TOKEN merge would strand the
 # train before its tag ever published.

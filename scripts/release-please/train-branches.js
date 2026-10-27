@@ -14,6 +14,7 @@
 const {Manifest, setLogger} = require('release-please');
 const {LocalGitHub} = require('release-please/build/src/local-github');
 const {BranchName} = require('release-please/build/src/util/branch-name');
+const {registerPythonWorkspace} = require('./python-workspace');
 
 const logger = {
   error: (...args) => console.error('release-please:', ...args),
@@ -26,6 +27,9 @@ const logger = {
 async function trainBranches({repo, base, baseBranch}) {
   if (!baseBranch) throw new Error('release-label-check: baseBranch is required');
   setLogger(logger);
+  // The config names the `python-workspace` plugin, which a Manifest builds as
+  // it loads; reading branch names runs no query.
+  registerPythonWorkspace({root: repo});
   const scm = new LocalGitHub({owner: 'local', repo: 'projection', defaultBranch: base}, {}, repo, {logger});
   const manifest = await Manifest.fromManifest(scm, base, undefined, undefined, {logger});
   const separate = Object.keys(manifest.repositoryConfig).filter(

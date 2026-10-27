@@ -47,6 +47,7 @@ from _range_sync.pyproject_specs import (
     pinned_deps,
     rewrite_pyproject_text,
 )
+from _range_sync.query import RangeChange, changes_by_unit, query, release_units
 from _range_sync.sync import (
     SyncReport,
     _apply_descriptor_writes,
@@ -60,6 +61,7 @@ from _range_sync.sync import (
     _self_assert,
     apply,
     check,
+    drift_under,
 )
 from _range_sync.version_ranges import (
     _CAP_RE,
@@ -90,6 +92,7 @@ __all__ = [
     "ParsedRequirement",
     "Preserved",
     "PyprojectAnalysis",
+    "RangeChange",
     "SpecChange",
     "SyncReport",
     "_apply_descriptor_writes",
@@ -116,18 +119,22 @@ __all__ = [
     "_self_assert",
     "analyze_pyproject",
     "apply",
+    "changes_by_unit",
     "check",
     "compute_pyproject_changes",
     "contract_yaml_value",
     "derive_range",
     "descriptor_only_contract_files",
     "discover_members",
+    "drift_under",
     "first_party_versions",
     "is_cross_major",
     "main",
     "parse_requirement",
     "pinned_deps",
     "plugin_descriptor_files",
+    "query",
+    "release_units",
     "rewrite_contract_yaml",
     "rewrite_pyproject_text",
     "scaffold_descriptor_files",

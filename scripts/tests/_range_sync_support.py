@@ -2,14 +2,9 @@
 
 from __future__ import annotations
 
-import os
 import tomllib
 from pathlib import Path
 from textwrap import dedent
-
-_PENDING_REPIN_WINDOW = not (
-    os.environ.get("GITHUB_HEAD_REF", "") and not os.environ["GITHUB_HEAD_REF"].startswith("release-please--")
-)
 
 
 def _write(path: Path, text: str) -> None:

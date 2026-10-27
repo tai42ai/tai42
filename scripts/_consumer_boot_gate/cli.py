@@ -65,10 +65,16 @@ Consumers come from two sources. Supplied ones are wheels (``--consumer-wheel``)
 or requirement specs (``--consumer-req``); the gate names no specific consumer, so
 it is agnostic to which distributions a deployment layers on the platform. The
 first-party plugins are enumerated with ``--emit-matrix``: each packaged plugin at
-its latest published PyPI version that is NOT in this train's bump set (a plugin
-being released now boots its unpublished candidate code through its own lanes,
+its latest published PyPI version unless this tree releases it with changes of its
+own (such a plugin boots its unpublished candidate code through its own lanes,
 never here), one boot per consumer so mutually exclusive infra plugins never share
-a manifest. When no consumer is supplied (a first release, or a run without the
+a manifest. A plugin this tree releases for its version and derived ranges alone
+(``scripts/release_bookkeeping_diff.py`` reads its diff since its previous release
+tag) publishes the code it already published, so its published version is booted,
+with a notice naming it. Under a core major its published ranges exclude the
+candidate, so its install meets the resolver conflict above: a notice naming it as
+an accepted major-bump break, the gate passes, and its re-released version carries
+the moved ranges. When no consumer is supplied (a first release, or a run without the
 download secret) the gate says so and passes; a plugin with no PyPI release yet is
 a skipped notice, never a failure. A supplied wheel that does not exist raises
 loudly — a download that failed upstream can never read as a silent pass.
@@ -183,7 +189,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--emit-matrix",
         action="store_true",
-        help="enumerate first-party consumers (minus the bump set) and print a CI matrix, then exit",
+        help="enumerate first-party consumers (minus those released with own changes), print a CI matrix, exit",
     )
     parser.add_argument(
         "--identity-dir",

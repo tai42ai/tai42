@@ -24,6 +24,7 @@ const {LocalGitHub} = require('release-please/build/src/local-github');
 const {CommitSplit} = require('release-please/build/src/util/commit-split');
 const {CommitExclude} = require('release-please/build/src/util/commit-exclude');
 const {TagName} = require('release-please/build/src/util/tag-name');
+const {registerPythonWorkspace} = require('./python-workspace');
 
 const run = promisify(execFile);
 
@@ -191,6 +192,9 @@ async function requireReleaseTags(manifest, strategiesByPath, baseVersions) {
 
 async function project({repo, repository, tree, base, pullRequest}) {
   setLogger(logger);
+  // `tree` is the checkout at `repo`, so the config's `python-workspace` plugin
+  // queries the ranges of the tree being projected.
+  registerPythonWorkspace({root: repo});
   const commit = squashCommit(pullRequest, base);
   const scm = new ProjectionScm(repo, tree, base, commit, await gitHubPullRequests(repository));
   const manifest = await Manifest.fromManifest(scm, tree, undefined, undefined, {logger});

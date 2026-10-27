@@ -46,12 +46,13 @@ from _consumer_boot_gate.candidate import (
 from _consumer_boot_gate.cli import _emit_matrix, _load_plugin_yaml, main
 from _consumer_boot_gate.consumers import (
     Consumer,
+    ReleasedPackages,
     _req_dist_name,
     collect_consumers,
     enumerate_first_party,
     first_party_plugin_names,
     latest_pypi_version,
-    release_bump_set,
+    released_packages,
     wheel_name_version,
 )
 from _consumer_boot_gate.install import (
@@ -78,6 +79,7 @@ __all__ = [
     "IdentityFixture",
     "Infra",
     "Provides",
+    "ReleasedPackages",
     "_ResolutionConflictError",
     "_boot_env",
     "_channel_env",
@@ -109,8 +111,8 @@ __all__ = [
     "read_candidate",
     "read_identity_fixture",
     "read_provides",
-    "release_bump_set",
     "released_by_tree",
+    "released_packages",
     "run_gate_step",
     "subprocess",
     "wheel_name_version",

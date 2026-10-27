@@ -108,6 +108,11 @@ jobs:
           echo "dir=$dir" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "descriptor=$descriptor" >> "$GITHUB_OUTPUT"
+      - name: Range sync gate
+        # Every first-party range and contract pin in the tagged tree must be the
+        # one its sibling versions derive: a wheel or descriptor published from a
+        # tree with a stale range would carry that range for good.
+        run: uv run --no-project --python 3.13 python scripts/range_sync.py --check
       - name: API-diff gate
         # Label-honesty gate: a breaking public-API change (griffe classification
         # plus the gate's own attribute-value rule) may not publish under a bump the
