@@ -14,7 +14,7 @@ from tai42_skeleton.conversations.records import ConversationRecordStore
 from tai42_skeleton.conversations.settings import ConversationsSettings
 from tai42_skeleton.operations import conversations as ops
 from tai42_skeleton.operations.errors import BadRequestError, ConflictError, NotFoundError
-from tai42_skeleton.operations.response_models_group_a import PersonDeleteResult, ThreadDeleteResult
+from tai42_skeleton.operations.response_models.conversations import PersonDeleteResult, ThreadDeleteResult
 
 from .conftest import _assert_park_cancelled, _seed_park, create_record
 from .quoting_records import QUOTED_TEXT, holds_text, quoting_records

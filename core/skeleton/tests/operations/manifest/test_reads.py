@@ -18,7 +18,7 @@ from tai42_contract.app import tai42_app
 from tai42_skeleton.app.bus import LocalApplyResult, OpOutcome
 from tai42_skeleton.operations import manifest as manifest_ops
 from tai42_skeleton.operations import operation_metadata_of
-from tai42_skeleton.operations.response_models_group_a import PreservedManifestView
+from tai42_skeleton.operations.response_models.manifest import PreservedManifestView
 
 from ..._fakes.bus import FakeBus
 from .conftest import _Admin, _install

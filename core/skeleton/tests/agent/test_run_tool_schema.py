@@ -55,7 +55,7 @@ def _cache_manifest(*agents: str) -> Manifest:
             "tools": [
                 {
                     "title": "fxt",
-                    "module": "tests.app._fixtures.tools_b",
+                    "module": "tests.app._fixtures.extended_tools",
                     "include": ["shout"],
                     "extensions": {agent: [["cache"]] for agent in agents},
                 }
@@ -303,7 +303,7 @@ def test_agent_run_tool_accepts_extension_combo():
             "tools": [
                 {
                     "title": "fxt",
-                    "module": "tests.app._fixtures.tools_b",
+                    "module": "tests.app._fixtures.extended_tools",
                     "include": ["shout"],
                     "extensions": {"echo_fields": [["loud"]]},
                 }
@@ -343,7 +343,7 @@ def test_a_relocating_branch_of_an_agent_run_tool_ships_only_the_supplied_argume
             "tools": [
                 {
                     "title": "fxt",
-                    "module": "tests.app._fixtures.tools_b",
+                    "module": "tests.app._fixtures.extended_tools",
                     "include": ["shout"],
                     "extensions": {"echo_fields": [["relocate"]]},
                 }
@@ -374,7 +374,7 @@ def test_cache_and_chain_compose_over_agent_run_tool_across_a_real_run():
             "tools": [
                 {
                     "title": "fxt",
-                    "module": "tests.app._fixtures.tools_b",
+                    "module": "tests.app._fixtures.extended_tools",
                     "include": ["shout"],
                     "extensions": {"echo_fields": [["cache"], ["chain"]]},
                 }
@@ -427,7 +427,7 @@ def test_chain_over_agent_run_tool_omitting_an_optional_preserves_set_fields_onl
             "tools": [
                 {
                     "title": "fxt",
-                    "module": "tests.app._fixtures.tools_b",
+                    "module": "tests.app._fixtures.extended_tools",
                     "include": ["shout"],
                     "extensions": {"echo_fields": [["chain"]]},
                 }

@@ -16,11 +16,7 @@ from tai42_skeleton.app.bus.ops import ListFailedMcps
 from tai42_skeleton.manifest import TaiMCPConfig
 from tai42_skeleton.operations import operation
 from tai42_skeleton.operations._broadcast import broadcast
-from tai42_skeleton.operations.response_models_group_a import (
-    McpEnvRefList,
-    McpStatusSnapshot,
-    PreservedManifestView,
-)
+from tai42_skeleton.operations.response_models.manifest import McpEnvRefList, McpStatusSnapshot, PreservedManifestView
 
 from .models import FailedMcpsQuery
 

@@ -47,7 +47,7 @@ from tai42_kit.monitoring import payload_ref, resolve_refs
 
 from tai42_skeleton.monitoring.registry import get_monitoring
 from tai42_skeleton.operations import BadRequestError, NotFoundError, NotSupportedError, UpstreamError, operation
-from tai42_skeleton.operations.response_models_group_c import (
+from tai42_skeleton.operations.response_models.observability import (
     MetricsResult,
     ObservabilityCapabilities,
     ObservabilityRunsPage,

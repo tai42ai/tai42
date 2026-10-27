@@ -31,11 +31,7 @@ from tai42_skeleton.access_control import management
 from tai42_skeleton.access_control.claim_links import ClaimLinkError
 from tai42_skeleton.access_control.claim_links import exchange_claim_token as _exchange_claim_token
 from tai42_skeleton.operations import NotFoundError, operation
-from tai42_skeleton.operations.response_models_group_c import (
-    ClaimExchangeResult,
-    LoginMethodsListing,
-    LogoutResult,
-)
+from tai42_skeleton.operations.response_models.login import ClaimExchangeResult, LoginMethodsListing, LogoutResult
 from tai42_skeleton.plugins.settings import hosted_ui_settings
 
 logger = logging.getLogger(__name__)

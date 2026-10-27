@@ -1,7 +1,7 @@
-"""Every delete of a stored object goes through the resource manager, where a held object is refused.
+"""Every delete of a stored object goes through the store writes, where a held object is refused.
 
 A storage provider's ``delete`` / ``delete_dir`` is called only from
-``template/resource_manager.py``; a call anywhere else would remove an object a stored
+``template/store_writes.py``; a call anywhere else would remove an object a stored
 object still names. A provider is recognised by its receiver: any ``delete_dir`` call, and
 a ``delete`` call whose receiver names a provider or a storage.
 """
@@ -14,7 +14,7 @@ from pathlib import Path
 import tai42_skeleton
 
 _SKELETON_SRC = Path(tai42_skeleton.__file__).parent
-_SEAM = "template/resource_manager.py"
+_SEAM = "template/store_writes.py"
 
 
 def _receiver_names(node: ast.expr) -> list[str]:
@@ -49,7 +49,7 @@ def _provider_delete_sites() -> list[str]:
     return sites
 
 
-def test_only_the_resource_manager_deletes_through_a_storage_provider() -> None:
+def test_only_the_store_writes_delete_through_a_storage_provider() -> None:
     sites = _provider_delete_sites()
     assert [site for site in sites if not site.startswith(f"{_SEAM}:")] == []
     assert len(sites) == 2

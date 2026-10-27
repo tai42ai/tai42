@@ -55,7 +55,7 @@ from tai42_skeleton.operations import (
     NotSupportedError,
     operation,
 )
-from tai42_skeleton.operations.response_models_group_b import FolderDeleted, ToolMetaDeleted, ToolMetaListView
+from tai42_skeleton.operations.response_models.tool_meta import FolderDeleted, ToolMetaDeleted, ToolMetaListView
 
 # The machine-readable code the tool-meta write OFF refusals carry when the overlay
 # store is unconfigured; the message is rendered from the live binding at raise time.

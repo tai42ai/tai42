@@ -17,7 +17,7 @@ from tai42_skeleton.operations import (
     ValidationRejectedError,
 )
 from tai42_skeleton.operations.decorator import operation
-from tai42_skeleton.operations.response_models_group_states import (
+from tai42_skeleton.operations.response_models.states_outbox import (
     StatePendingSave,
     StatePendingSaveCall,
     StatePendingSaveDiscarded,

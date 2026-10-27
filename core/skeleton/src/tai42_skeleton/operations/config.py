@@ -65,7 +65,7 @@ from tai42_skeleton.operations._broadcast import (
     profile_apply_response,
     writer_exit_response,
 )
-from tai42_skeleton.operations.response_models_group_b import (
+from tai42_skeleton.operations.response_models.config import (
     ConfigModeView,
     EnvView,
     OkResult,

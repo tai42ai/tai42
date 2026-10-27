@@ -1,5 +1,5 @@
 """A THIRD tools module that also defines ``shout`` — a different module than
-``tests.app._fixtures.tools_b``'s ``shout``.
+``tests.app._fixtures.extended_tools``'s ``shout``.
 
 Two ``tools`` configs each providing a tool of the same name is the genuine
 ambiguity the extension-apply route's owning-config guard defends against: the

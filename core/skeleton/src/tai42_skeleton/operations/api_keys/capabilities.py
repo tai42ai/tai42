@@ -9,7 +9,7 @@ from tai42_skeleton.access_control import management
 from tai42_skeleton.access_control.roles import role_store
 from tai42_skeleton.operations import ForbiddenError, operation
 from tai42_skeleton.operations._authority import require_admin
-from tai42_skeleton.operations.response_models_group_a import MintCapabilities, RoleDefinitionList
+from tai42_skeleton.operations.response_models.api_keys import MintCapabilities, RoleDefinitionList
 
 
 @operation(summary="Report key-mint capabilities", tags=["access-control"], response_model=MintCapabilities)

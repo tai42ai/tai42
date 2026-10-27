@@ -10,7 +10,8 @@ import tai42_skeleton.operations.api_keys as _pkg
 from tai42_skeleton.access_control import management
 from tai42_skeleton.access_control.role_gate import role_reach
 from tai42_skeleton.operations import BadRequestError, NotFoundError, NotSupportedError, operation
-from tai42_skeleton.operations.response_models_group_a import RouteMappingList, StringList, UrlAck
+from tai42_skeleton.operations.response_models.api_keys import RouteMappingList, UrlAck
+from tai42_skeleton.operations.response_models.shared import StringList
 
 from .models import _DISABLED_CODE, _DISABLED_MESSAGE, PublicRoutePin, PublicRouteUnpin
 

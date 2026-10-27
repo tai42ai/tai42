@@ -59,7 +59,7 @@ from tai42_skeleton.channels.notify import SenderIdentityNotAllowedError
 from tai42_skeleton.channels.notify import notify_user as _notify_user
 from tai42_skeleton.interactions.settings import interactions_store_configured
 from tai42_skeleton.operations import BadRequestError, ForbiddenError, NotSupportedError, UpstreamError, operation
-from tai42_skeleton.operations.response_models_group_c import NotificationListing, NotifyResult
+from tai42_skeleton.operations.response_models.notifications import NotificationListing, NotifyResult
 
 with warnings.catch_warnings():
     # The ``schema`` field intentionally shadows pydantic's deprecated

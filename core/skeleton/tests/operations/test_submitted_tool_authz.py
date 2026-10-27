@@ -49,7 +49,7 @@ def _manifest() -> Manifest:
     return Manifest.model_validate(
         {
             "api_tools": {"enabled": True},
-            "tools": [{"title": "fxt", "module": "tests.app._fixtures.tools_b", "include": ["shout"]}],
+            "tools": [{"title": "fxt", "module": "tests.app._fixtures.extended_tools", "include": ["shout"]}],
             # Exactly the probe router: it carries both action-classes the matrix needs.
             "routers_modules": [_PROBE_ROUTER],
             "default_routers": "none",

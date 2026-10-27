@@ -15,7 +15,7 @@ from tai42_skeleton.app.reload_gate import reload_gate
 from tai42_skeleton.config.service import ConfigService
 from tai42_skeleton.operations import BadRequestError, ConflictError, NotFoundError, UpstreamError, operation
 from tai42_skeleton.operations._broadcast import apply_response, broadcast, translate_orphan_env_write
-from tai42_skeleton.operations.response_models_group_a import McpAdvertisedTools
+from tai42_skeleton.operations.response_models.manifest import McpAdvertisedTools
 from tai42_skeleton.tools.mcp_health import redact_probe_error
 
 from .models import ManifestReplace, McpTargets

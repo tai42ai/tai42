@@ -7,7 +7,7 @@ manifest dict (``read_manifest`` + the ``mutate_manifest``/``replace_manifest``
 seams) so ``reload_config`` actually re-reads the written manifest and rebinds the
 branch tools — the same flow
 ``POST /api/mcp-config`` uses. Base tools ``shout``/``ping`` come from
-``tests.app._fixtures.tools_b``; the extension catalog (WRAPPER ``marka``/``markb``/
+``tests.app._fixtures.extended_tools``; the extension catalog (WRAPPER ``marka``/``markb``/
 ``argswrap`` + BACKEND ``backendx``/``backendy``) from ``tests.app._fixtures.ext_kinds``.
 """
 
@@ -34,7 +34,7 @@ from tai42_skeleton.tools.binding.surface import remove_surface_tool
 from .._fakes.bus import FakeBus
 
 _EXT_MODULE = "tests.app._fixtures.ext_kinds"
-_TOOLS_B = "tests.app._fixtures.tools_b"
+_EXTENDED_TOOLS = "tests.app._fixtures.extended_tools"
 _SPARE = "tests.routers._ext_fixtures"
 _DUP = "tests.routers._ext_dup"
 
@@ -98,7 +98,7 @@ async def _tools() -> set[str]:
 def _single(extensions: dict[str, Any] | None = None, include: list[str] | None = None) -> dict[str, Any]:
     cfg: dict[str, Any] = {
         "title": "fx",
-        "module": _TOOLS_B,
+        "module": _EXTENDED_TOOLS,
         "include": ["shout", "ping"] if include is None else include,
     }
     if extensions is not None:
@@ -110,7 +110,7 @@ def _two(a_ext: dict[str, Any], b_ext: dict[str, Any]) -> dict[str, Any]:
     return {
         "extensions_modules": [_EXT_MODULE],
         "tools": [
-            {"title": "fx", "module": _TOOLS_B, "include": ["shout", "ping"], "extensions": a_ext},
+            {"title": "fx", "module": _EXTENDED_TOOLS, "include": ["shout", "ping"], "extensions": a_ext},
             {"title": "fx2", "module": _SPARE, "include": ["spare"], "extensions": b_ext},
         ],
     }
@@ -120,7 +120,7 @@ def _dup() -> dict[str, Any]:
     return {
         "extensions_modules": [_EXT_MODULE],
         "tools": [
-            {"title": "fx", "module": _TOOLS_B, "include": ["shout"]},
+            {"title": "fx", "module": _EXTENDED_TOOLS, "include": ["shout"]},
             {"title": "dup", "module": _DUP, "include": ["shout"]},
         ],
     }

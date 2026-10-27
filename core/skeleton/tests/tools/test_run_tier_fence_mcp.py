@@ -164,7 +164,7 @@ async def test_fence_middleware_installed_on_sub_mcp_app(monkeypatch: pytest.Mon
     monkeypatch.setattr(sub_mod, "FastMCP", _RecordingFastMCP)
 
     manifest = Manifest.model_validate(
-        {"tools": [{"title": "fxt", "module": "tests.app._fixtures.tools_a", "include": ["greet"]}]}
+        {"tools": [{"title": "fxt", "module": "tests.app._fixtures.plain_tools", "include": ["greet"]}]}
     )
 
     async with app.app_context(manifest):

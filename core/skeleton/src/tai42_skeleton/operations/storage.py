@@ -47,7 +47,7 @@ from tai42_skeleton.operations import (
     operation,
 )
 from tai42_skeleton.operations._broadcast import broadcast
-from tai42_skeleton.operations.response_models_group_b import (
+from tai42_skeleton.operations.response_models.storage import (
     DirDeleted,
     ResourceDeleted,
     ResourceList,

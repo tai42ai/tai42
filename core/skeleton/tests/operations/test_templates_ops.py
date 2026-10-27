@@ -36,7 +36,7 @@ from tai42_skeleton.operations import (
 )
 from tai42_skeleton.operations._broadcast import FleetBroadcastError
 from tai42_skeleton.operations.projection import project_operations
-from tai42_skeleton.operations.response_models_group_b import TemplateTextEntry
+from tai42_skeleton.operations.response_models.templates import TemplateTextEntry
 from tai42_skeleton.operations.templates import (
     clear_templates_cache,
     delete_template,

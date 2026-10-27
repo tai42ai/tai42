@@ -313,7 +313,7 @@ def test_missing_requested_extension_aborts_boot():
             "tools": [
                 {
                     "title": "fxt",
-                    "module": "tests.app._fixtures.tools_a",
+                    "module": "tests.app._fixtures.plain_tools",
                     "include": ["greet"],
                     "extensions": {"greet": [["phantom_ext"]]},
                 }
@@ -335,7 +335,7 @@ def test_start_aborts_on_broken_tools_module():
     manifest = Manifest.model_validate(
         {
             "tools": [
-                {"title": "fxt", "module": "tests.app._fixtures.tools_a", "include": ["greet"]},
+                {"title": "fxt", "module": "tests.app._fixtures.plain_tools", "include": ["greet"]},
                 {"title": "broken", "module": "totally_bogus_tools_pkg", "include": ["phantom_tool"]},
             ]
         }

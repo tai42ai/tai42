@@ -12,7 +12,7 @@ from tai42_kit.utils.data.jq_util import get_compiled_jq
 
 from tai42_skeleton.access_control.policy import ConditionVerdict, PolicyEnforcer, render_condition
 from tai42_skeleton.operations import BadRequestError, operation
-from tai42_skeleton.operations.response_models_group_a import ConditionCheckResult
+from tai42_skeleton.operations.response_models.api_keys import ConditionCheckResult
 from tai42_skeleton.template import TemplateNotFoundError
 
 from .models import ConditionValidation

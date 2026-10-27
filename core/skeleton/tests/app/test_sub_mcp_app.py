@@ -560,7 +560,7 @@ async def test_real_build_http_sse_stdio_and_cache():
     from tai42_skeleton.manifest import Manifest
 
     manifest = Manifest.model_validate(
-        {"tools": [{"title": "fxt", "module": "tests.app._fixtures.tools_a", "include": ["greet"]}]}
+        {"tools": [{"title": "fxt", "module": "tests.app._fixtures.plain_tools", "include": ["greet"]}]}
     )
 
     async def run():

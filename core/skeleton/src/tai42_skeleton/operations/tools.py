@@ -74,13 +74,13 @@ from tai42_skeleton.operations import (
     operation,
 )
 from tai42_skeleton.operations._broadcast import broadcast
-from tai42_skeleton.operations.response_models_group_b import (
-    StringListResponse,
+from tai42_skeleton.operations.response_models.shared import StringListResponse
+from tai42_skeleton.operations.response_models.tools import (
+    RunAnswerResponse,
     ToolSchemaView,
     ToolsSchemaMap,
     ToolTagListResponse,
 )
-from tai42_skeleton.operations.response_models_group_c import RunAnswerResponse
 from tai42_skeleton.states import api_context
 from tai42_skeleton.tools.binding import ToolResultEncodingError, UnknownToolError
 

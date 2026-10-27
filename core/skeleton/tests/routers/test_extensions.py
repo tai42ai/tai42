@@ -12,7 +12,7 @@ from tai42_contract.app import tai42_app
 from tai42_contract.extensions import ExtensionKind
 
 from tai42_skeleton.extensions.registry import ExtensionRegistry
-from tai42_skeleton.operations.response_models_group_c import ExtensionListing
+from tai42_skeleton.operations.response_models.extensions import ExtensionListing
 from tai42_skeleton.routers import extensions as router
 
 

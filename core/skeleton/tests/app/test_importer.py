@@ -32,9 +32,9 @@ def test_happy_path_reimports_package_and_submodules():
 def test_single_module_reload_has_no_submodules():
     # A plain module (no ``submodule_search_locations``) discovers only itself —
     # the false branch of the package-walk guard.
-    reloaded = import_or_reload_package("tests.app._fixtures.neutral.leaf2")
-    assert reloaded == ["tests.app._fixtures.neutral.leaf2"]
-    assert sys.modules["tests.app._fixtures.neutral.leaf2"].VALUE == 2
+    reloaded = import_or_reload_package("tests.app._fixtures.neutral.sibling")
+    assert reloaded == ["tests.app._fixtures.neutral.sibling"]
+    assert sys.modules["tests.app._fixtures.neutral.sibling"].VALUE == 2
 
 
 def test_missing_top_level_package_raises():
@@ -51,12 +51,12 @@ def test_failing_submodule_raises_with_module_name(monkeypatch):
     real_import = importlib.import_module
 
     def flaky_import(name, *args, **kwargs):
-        if name == "tests.app._fixtures.neutral.leaf2":
+        if name == "tests.app._fixtures.neutral.sibling":
             raise ImportError("simulated import failure")
         return real_import(name, *args, **kwargs)
 
     monkeypatch.setattr(importlib, "import_module", flaky_import)
-    with pytest.raises(ImportError, match=r"Failed to import module tests\.app\._fixtures\.neutral\.leaf2") as ei:
+    with pytest.raises(ImportError, match=r"Failed to import module tests\.app\._fixtures\.neutral\.sibling") as ei:
         import_or_reload_package("tests.app._fixtures.neutral")
     assert isinstance(ei.value.__cause__, ImportError)
 
@@ -113,7 +113,7 @@ def test_extra_modules_are_popped_and_reimported_with_the_leaf():
     # A bound plugin's route-registering SIBLING is passed as an extra so it re-fires
     # on reload: it is popped+reimported alongside the leaf, not left cached.
     leaf = "tests.app._fixtures.neutral.leaf"
-    sibling = "tests.app._fixtures.neutral.leaf2"
+    sibling = "tests.app._fixtures.neutral.sibling"
     import_or_reload_package(leaf)  # boot both into the cache
     importlib.import_module(sibling)
     reloaded = import_or_reload_package(leaf, [sibling])

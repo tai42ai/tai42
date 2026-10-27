@@ -67,7 +67,7 @@ from tai42_skeleton.operations.definition_door import definition_door
 from tai42_skeleton.operations.errors import ConflictError, ForbiddenError, NotSupportedError, OperationFailedError
 from tai42_skeleton.operations.reference_check import RegistryReference
 from tai42_skeleton.operations.reference_graph import assert_blob_references_resolve
-from tai42_skeleton.operations.response_models_group_b import (
+from tai42_skeleton.operations.response_models.hooks import (
     HookListView,
     HookRegisterResult,
     HookRunClaimIntentView,
@@ -76,11 +76,11 @@ from tai42_skeleton.operations.response_models_group_b import (
     HookRunView,
     RemovedByName,
     RemovedByTopic,
-    StringListResponse,
     TopicVerifierView,
     TriggerLinkCreated,
     TriggerLinkListView,
 )
+from tai42_skeleton.operations.response_models.shared import StringListResponse
 
 logger = logging.getLogger(__name__)
 

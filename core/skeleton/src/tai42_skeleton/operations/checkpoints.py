@@ -44,7 +44,7 @@ from tai42_kit.llm.settings import llm_provider_settings
 from tai42_skeleton.interactions import checkpoint_liveness  # noqa: F401 -- registers the interactions filter
 from tai42_skeleton.operations import operation
 from tai42_skeleton.operations.checkpoint_metrics import sweep_spared_counter
-from tai42_skeleton.operations.response_models_group_c import CheckpointSweepResult
+from tai42_skeleton.operations.response_models.checkpoints import CheckpointSweepResult
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator

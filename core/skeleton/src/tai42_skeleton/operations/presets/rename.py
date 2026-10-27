@@ -25,7 +25,7 @@ from tai42_skeleton.operations.presets.authoring import _enforce_registration_ti
 from tai42_skeleton.operations.presets.models import PresetRename
 from tai42_skeleton.operations.presets.read import require_preset
 from tai42_skeleton.operations.reference_graph import StoredPresets
-from tai42_skeleton.operations.response_models_group_presets import PresetDeleteResult, PresetRenameResult
+from tai42_skeleton.operations.response_models.presets import PresetDeleteResult, PresetRenameResult
 from tai42_skeleton.presets.manager import is_valid_preset_name
 
 logger = logging.getLogger(__name__)

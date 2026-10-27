@@ -182,7 +182,7 @@ async def test_render_and_fetch_by_id_reject_traversal() -> None:
     with pytest.raises(UnsafeTemplatePathError):
         await manager.render_by_id("../x")
     with pytest.raises(UnsafeTemplatePathError):
-        await manager._fetch_and_compile("../x")
+        await manager._render_cache.compiled("../x")
     with pytest.raises(UnsafeTemplatePathError):
         await manager.get_template_schema(template_id="../x")
     with pytest.raises(UnsafeTemplatePathError):
