@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import threading
 from types import SimpleNamespace
 from typing import Any, cast
@@ -277,6 +278,49 @@ async def test_middleware_rejects_session_tool_call_while_reloading() -> None:
     result = await middleware.on_call_tool(cast(Any, object()), call_next)
     assert result == "tool-result"
     assert calls == ["dispatched"]
+
+
+def _fork_and_call_a_gated_tool() -> str:
+    """Fork, and in the child run one session tool call through the reload-rejection middleware.
+
+    Runs on a worker thread, as a backend pool forks its job children off the serving loop, so
+    the child's only thread has no running loop and can run the call on a loop of its own.
+    Returns what the child reports: ``dispatched``, or the rejection message.
+    """
+    read_fd, write_fd = os.pipe()
+    pid = os.fork()
+    if pid == 0:  # pragma: no cover - the child exits through os._exit
+        try:
+            os.close(read_fd)
+
+            async def call_next(context: Any) -> str:
+                return "dispatched"
+
+            async def call() -> str:
+                try:
+                    return await ReloadRejectionMiddleware(reload_gate).on_call_tool(cast(Any, object()), call_next)
+                except ToolError as exc:
+                    return str(exc)
+
+            os.write(write_fd, asyncio.run(call()).encode())
+        finally:
+            os._exit(0)
+    os.close(write_fd)
+    try:
+        with os.fdopen(read_fd) as pipe:
+            return pipe.read()
+    finally:
+        os.waitpid(pid, 0)
+
+
+async def test_a_child_forked_while_the_parent_holds_the_gate_serves_gated_calls() -> None:
+    """A forked child runs no reload of its own, and the parent's hold can never be released in
+    it, so the child starts with the gate free: a backend job child forked while its worker
+    holds the gate (a fleet op applying, a re-probe pass) runs its gated calls instead of
+    answering ``reloading`` for its whole life. The parent's own calls are still rejected."""
+    async with reload_gate.synchronized():
+        assert await asyncio.to_thread(_fork_and_call_a_gated_tool) == "dispatched"
+        assert reload_gate.locked
 
 
 def test_reload_rejection_middleware_registered_on_server() -> None:

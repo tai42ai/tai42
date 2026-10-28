@@ -43,6 +43,13 @@ process lifetime; an off-serving-loop caller reaches the gate by scheduling a
 coroutine onto the serving loop (``asyncio.run_coroutine_threadsafe``), never by
 acquiring the lock from a foreign loop.
 
+A forked child starts with the gate unbound and free. A backend pool forks its job
+children off the serving loop at any moment, including while the parent holds the
+gate; the child inherits that held lock, which only the parent's serving loop can
+ever release, so the child would answer ``reloading`` to every gated call for its
+whole life. The child runs no reload of its own (a reload in the parent reaches its
+children by re-forking them), so nothing in it is ever reloading.
+
 The lock is never taken bare. Every holder enters through one of two context managers,
 which record on the serving generation the work engaged with the gate
 (:class:`GateParty`), so a retire of that generation never severs it. A request waiting for
@@ -73,6 +80,8 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import logging
+import os
+import sys
 import threading
 from collections.abc import AsyncIterator, Callable
 from contextlib import AbstractContextManager, ExitStack, asynccontextmanager
@@ -413,6 +422,11 @@ class ReloadGate:
         with fork_gate.exclusive(timeout=FORK_QUIESCE_SECONDS):
             return fn()
 
+    def reset_after_fork(self) -> None:
+        """Start a forked child with the gate unbound: it inherits no hold of the parent's serving loop."""
+        self._lock = None
+        self._loop = None
+
     def reject_response(self) -> JSONResponse:
         """Return the retriable 503 a gated route serves while a reload holds the lock.
 
@@ -428,3 +442,5 @@ class ReloadGate:
 # The one process-wide gate. Routers import this singleton and check
 # ``reload_gate.locked`` at entry; reload callers await ``reload_gate.run(...)``.
 reload_gate = ReloadGate()
+if sys.platform != "win32":
+    os.register_at_fork(after_in_child=reload_gate.reset_after_fork)
