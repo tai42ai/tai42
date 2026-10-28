@@ -16,7 +16,7 @@
     "test": "vitest run --coverage"
   },
   "dependencies": {
-    "@tai42/studio-sdk": "^30.0.0",
+    "@tai42/studio-sdk": "^31.0.0",
     "@tanstack/react-query": "^5.104.5",
     "react": "^19.3.1",
     "react-dom": "^19.3.1",

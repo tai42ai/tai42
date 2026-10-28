@@ -1,7 +1,7 @@
 {
   "name": "tai42_channel_web",
   "version": "10.0.9",
-  "api_version": 2,
+  "api_version": 3,
   "entry": "tai42-channel-web-69422pUl.js",
   "integrity": {
     "tai42-channel-web-69422pUl.js": "sha384-rLZKtvlLU+fJ5A8l12k/0oQnSRPMPTozUYGptCxfkpmakdHl7MOr0IX/Hh7ySH0I"
