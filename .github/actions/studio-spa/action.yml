@@ -1,7 +1,9 @@
 name: studio-spa
 description: >-
   Set up pnpm + Node and build the Studio SPA (and the @tai42/studio-sdk the
-  browser legs link against). Shared by the browser build legs.
+  browser legs link against), then build the checkout's reference plugin bundle
+  against that same SDK and install the plugin into the synced venv. Shared by
+  the browser build legs.
 
 inputs:
   build:
@@ -30,3 +32,15 @@ runs:
       run: |
         pnpm install --frozen-lockfile
         pnpm -r build
+
+    # The studio stack's manifest names the reference plugin (its tools module and
+    # its Studio bundle). It is built from the same tai-studio checkout as the SPA,
+    # so the bundle targets the host's own STUDIO_PLUGIN_API_VERSION. --no-deps: its
+    # one dependency, tai42-contract, is already the workspace's editable package,
+    # and resolving it again would replace that with a published wheel.
+    - name: Build and install the reference plugin
+      if: inputs.build == 'true'
+      shell: bash
+      run: |
+        pnpm --dir tai-studio --filter @tai42/e2e run build:reference-plugin
+        uv pip install --python .venv --no-deps ./tai-studio/e2e/reference-plugin

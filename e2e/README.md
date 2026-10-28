@@ -216,8 +216,9 @@ a change to a shared root, sets `run_e2e`):
   the marketplace suite (`TAI_E2E_MARKETPLACE=1`), installing the git-sourced
   `tai42-marketplace` and booting it as harness processes.
 - `ui-e2e` — needs `e2e`; boots redis + postgres, clones `tai-studio`, builds the
-  Studio SPA, and runs the Playwright chromium suite in `ui/`. When the `run_browsers`
-  gate is on (a change under `e2e/ui`, or a manual `workflow_dispatch`) it also
+  Studio SPA and the reference plugin, and runs the Playwright chromium suite in
+  `ui/`. When the `run_browsers` gate is on (a change under `e2e/ui`, or a manual
+  `workflow_dispatch`) it also
   widens the matrix onto firefox + webkit. With the token it also clones the private
   `tai-marketplace` monorepo (its `web/` workspace is the browse site) and runs the
   marketplace browser specs under `TAI_E2E_MARKETPLACE=1`.
@@ -227,9 +228,12 @@ only when the `RELEASE_PLEASE_TOKEN` secret is available — a fork PR has no
 secrets, so those steps skip with a visible
 `::warning::` rather than failing. Other external consumers install this harness as
 the published `tai42-e2e` package and run their own suites against it. Any consumer
-booting the studio stack must also install the Studio reference plugin from the
-`tai42ai/tai-studio` repo (`e2e/reference-plugin`), which the studio profile manifest
-names but the harness does not carry as a runtime dependency.
+booting the studio stack must also install the Studio reference plugin, which the
+studio profile manifest names but the harness does not carry as a dependency. The
+browser legs build it from the same `tai42ai/tai-studio` checkout as the SPA
+(`pnpm --filter @tai42/e2e run build:reference-plugin`) and install
+`tai-studio/e2e/reference-plugin` into the synced venv with `--no-deps`, so its bundle
+always targets that checkout's plugin API version.
 
 ## Marketplace area (opt-in)
 

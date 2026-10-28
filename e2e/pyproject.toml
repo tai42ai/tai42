@@ -128,20 +128,12 @@ tai42-e2e-studio-stack = "tai42_e2e.studio_runner:main"
 tai42-e2e = "tai42_e2e.pytest_plugin"
 
 [dependency-groups]
-# Dev/CI-only, never in the wheel's Requires-Dist: the static gates plus the
-# studio leg's boot-time plugin prerequisite.
+# Dev/CI-only, never in the wheel's Requires-Dist: the static gates.
 dev = [
     "ruff>=0.6",
     "pyright>=1.1.389",
     # Splits the suite into balanced shards across the CI matrix's shard axis.
     "pytest-split>=0.10",
-    # The Studio reference/fixture plugin the browser-e2e studio_stack names in its
-    # manifest (studio_plugins + reference_plugin.tools) and serves to the ``ui/``
-    # suite. A boot prerequisite of the studio leg, not imported by harness code;
-    # floated at the tai-studio checkout by the source override below. Kept out of
-    # [project.dependencies] so the published wheel carries no bare, unresolvable
-    # reference-plugin Requires-Dist.
-    "reference-plugin",
 ]
 # The docs media-card recapture workflow's capture toolchain, locked so a
 # floating install can never break capture: Playwright (the Python package
@@ -216,7 +208,6 @@ tai42-channel-twilio = { workspace = true }
 tai42-channel-whatsapp = { workspace = true }
 tai42-channel-web = { workspace = true }
 tai42-monitoring-langfuse = { workspace = true }
-reference-plugin = { git = "https://github.com/tai42ai/tai-studio", subdirectory = "e2e/reference-plugin" }
 
 [tool.ruff]
 src = ["src", "tests"]
