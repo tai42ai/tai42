@@ -26,6 +26,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 RELEASE_PLEASE = REPO_ROOT / "scripts" / "release-please"
 REPOSITORY = "acme/widgets"
 TRAIN_BRANCH = "release-please--branches--main"
+# The exact release-please version scripts/release-please pins and installs.
+PINNED_RELEASE_PLEASE = json.loads((RELEASE_PLEASE / "package.json").read_text())["dependencies"]["release-please"]
 
 
 def _pr(
@@ -287,7 +289,7 @@ def test_projection_runs_for_real_on_a_synthetic_repository(tmp_path, fake_githu
 
     gated = rlc.versions_to_gate(repo, base, "HEAD", pr, repository=REPOSITORY, release_please=RELEASE_PLEASE)
 
-    assert gated == {"core/kit": ("8.0.0", "projected by release-please 17.6.0")}
+    assert gated == {"core/kit": ("8.0.0", f"projected by release-please {PINNED_RELEASE_PLEASE}")}
     assert fake_github
     assert all(request["authorization"] == "token test-token" for request in fake_github)
 
