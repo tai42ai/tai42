@@ -12,6 +12,8 @@ const path = require('node:path');
 const {after, before, beforeEach, test} = require('node:test');
 
 const PROJECTION = path.join(__dirname, 'projection.js');
+// The exact release-please version this runner pins and installs.
+const PINNED_RELEASE_PLEASE = require('./package.json').dependencies['release-please'];
 const REPOSITORY = 'acme/widgets';
 const TOKEN = 'test-token';
 
@@ -184,7 +186,7 @@ test('a fix on a clean main projects a patch for the touched package', async () 
 test('the output names the release-please version that projected it', async () => {
   const outcome = await project(repository(), {headline: 'fix(pkg): x (#7)', files: ['pkg/src/a.py']});
   assert.equal(outcome.code, 0, outcome.stderr);
-  assert.equal(JSON.parse(outcome.stdout).releasePlease, '17.6.0');
+  assert.equal(JSON.parse(outcome.stdout).releasePlease, PINNED_RELEASE_PLEASE);
 });
 
 test('an unreleased breaking fix on main plus a feat pull request projects the major', async () => {
