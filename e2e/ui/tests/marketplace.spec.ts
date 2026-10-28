@@ -250,17 +250,20 @@ test('browse lists the plugins as cards, switches to a table and back, and a car
   await seedCredential(page);
   await page.goto('/marketplace');
 
-  // Browse opens on the card view: one card per seeded listing in the "Plugins" list.
+  // Browse opens on the card view: one card per seeded listing in the "Plugins" list. The
+  // shell's sidebar carries its own "Plugins" nav list, so the results list is found in
+  // the page's main region.
+  const results = page.getByRole('main').getByRole('list', { name: 'Plugins', exact: true });
   const viewToggle = page.getByRole('radiogroup', { name: 'Plugins view' });
   await expect(viewToggle.getByRole('radio', { name: 'Card view', exact: true })).toBeChecked();
-  const cards = page.getByRole('list', { name: 'Plugins' }).getByRole('listitem');
+  const cards = results.getByRole('listitem');
   for (const ref of [ALPHA_REF, BETA_REF, GAMMA_REF]) {
     await expect(cards.filter({ hasText: ref })).toHaveCount(1);
   }
 
   // The list view draws the same listings as table rows, and the choice survives a reload.
   await viewToggle.getByRole('radio', { name: 'List view', exact: true }).click();
-  await expect(page.getByRole('list', { name: 'Plugins' })).toHaveCount(0);
+  await expect(results).toHaveCount(0);
   const table = page.getByRole('table');
   await expect(table.getByRole('columnheader', { name: 'Plugin', exact: true })).toBeVisible();
   for (const ref of [ALPHA_REF, BETA_REF, GAMMA_REF]) {
@@ -274,7 +277,7 @@ test('browse lists the plugins as cards, switches to a table and back, and a car
 
   // Back on the cards, a click anywhere on a card — here its reference line — opens the detail.
   await viewToggle.getByRole('radio', { name: 'Card view', exact: true }).click();
-  const betaCard = page.getByRole('list', { name: 'Plugins' }).getByRole('listitem').filter({ hasText: BETA_REF });
+  const betaCard = results.getByRole('listitem').filter({ hasText: BETA_REF });
   await betaCard.getByText(BETA_REF, { exact: true }).click();
   await expect(page.getByRole('heading', { name: BETA_REF })).toBeVisible();
 });
