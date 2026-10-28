@@ -1713,7 +1713,16 @@
       "description": "The optional state subject a hook fire targets.\n\nCarries the conversation-target scope ``(target_kind, target_name)``, the subject ``kind`` (matching\n:data:`~tai42_contract.states.SUBJECT_KIND_RE`), and a ``key_expr`` — a templated text\ncarrying (inline or by stored id) a jq program evaluated over the event payload at\nfire — it must yield a non-empty string, else the fire fails loudly like any hook\nerror. Frozen; deposited as the ambient state context so a state write during the fire\nis keyed and attributed to the hook.",
       "properties": {
         "key_expr": {
-          "$ref": "#/$defs/TemplatedText"
+          "$ref": "#/$defs/TemplatedText",
+          "x-tai42-expression": {
+            "blurb": "the parsed webhook delivery (structured bodies merged top-level with query params; arbitrary text under raw_body)",
+            "caveats": [
+              "an empty, blank or non-string result fails the fire loudly"
+            ],
+            "label": "subject key expression",
+            "language": "jq",
+            "returns": "a non-empty string: the subject key the fire's state reads and writes use"
+          }
         },
         "kind": {
           "title": "Kind",
@@ -2308,7 +2317,33 @@
               "type": "null"
             }
           ],
-          "default": null
+          "default": null,
+          "x-tai42-expression": {
+            "blurb": "the declarations (static values) an attachment stores",
+            "caveats": [
+              "any other result rejects the declarations"
+            ],
+            "label": "declarations check",
+            "language": "jq",
+            "returns": "exactly boolean true accepts the declarations; a string result is the rejection message",
+            "sample": {
+              "items": [
+                {
+                  "id": "a",
+                  "label": "First item"
+                }
+              ]
+            },
+            "variables": [
+              {
+                "blurb": "the attachment's effective parameters",
+                "name": "parameters",
+                "sample": {
+                  "limit": 3
+                }
+              }
+            ]
+          }
         },
         "schema": {
           "additionalProperties": true,
@@ -2332,7 +2367,59 @@
           "type": "string"
         },
         "jq": {
-          "$ref": "#/$defs/TemplatedText"
+          "$ref": "#/$defs/TemplatedText",
+          "x-tai42-expression": {
+            "blurb": "the record's attached subtree",
+            "caveats": [
+              "the template's input programs are callable as prelude functions named tjq_<name>"
+            ],
+            "label": "template jq program",
+            "language": "jq",
+            "returns": "for purpose input, the served value; for purpose update, a batch (list) of template-relative ops",
+            "sample": {
+              "items": {
+                "a": {
+                  "done": false
+                }
+              }
+            },
+            "variables": [
+              {
+                "blurb": "the attachment's effective parameters",
+                "name": "parameters",
+                "sample": {
+                  "limit": 3
+                }
+              },
+              {
+                "blurb": "the attachment's declarations",
+                "name": "declarations",
+                "sample": {
+                  "items": [
+                    {
+                      "id": "a",
+                      "label": "First item"
+                    }
+                  ]
+                }
+              },
+              {
+                "blurb": "an input program's declared params object (bound only for purpose input)",
+                "name": "params",
+                "sample": {
+                  "id": "a"
+                }
+              },
+              {
+                "blurb": "an update program's input (bound only for purpose update)",
+                "name": "input",
+                "sample": {
+                  "done": true,
+                  "id": "a"
+                }
+              }
+            ]
+          }
         },
         "params": {
           "items": {
@@ -2401,13 +2488,77 @@
       "description": "The ``reconcile`` section of a state-template document.\n\nThree jq programs the store runs to settle a state's OPEN records on a declarations edit —\n``orphans`` names the items a record subtree orphans against the new declarations,\n``resolutions`` names the not-done resolutions a close may name, and ``close`` returns the op\nbatch that closes one orphan. Each is a :class:`~tai42_contract.template.TemplatedText` (inline\n``content`` or a stored ``id``).",
       "properties": {
         "close": {
-          "$ref": "#/$defs/TemplatedText"
+          "$ref": "#/$defs/TemplatedText",
+          "x-tai42-expression": {
+            "blurb": "the orphan's record subtree",
+            "label": "close program",
+            "language": "jq",
+            "returns": "a batch (list) of template-relative ops that closes the orphan",
+            "sample": {
+              "done": false
+            },
+            "variables": [
+              {
+                "blurb": "the orphaned item's id",
+                "name": "id",
+                "sample": "a"
+              },
+              {
+                "blurb": "the not-done resolution the close names",
+                "name": "resolution",
+                "sample": "dropped"
+              }
+            ]
+          }
         },
         "orphans": {
-          "$ref": "#/$defs/TemplatedText"
+          "$ref": "#/$defs/TemplatedText",
+          "x-tai42-expression": {
+            "blurb": "an open record's attached subtree",
+            "label": "orphans program",
+            "language": "jq",
+            "returns": "a list of {id, label} objects naming the items the subtree orphans against the new declarations",
+            "sample": {
+              "items": {
+                "a": {
+                  "done": false
+                }
+              }
+            },
+            "variables": [
+              {
+                "blurb": "the declarations before the edit",
+                "name": "previous",
+                "sample": {
+                  "items": [
+                    {
+                      "id": "a",
+                      "label": "First item"
+                    }
+                  ]
+                }
+              },
+              {
+                "blurb": "the declarations after the edit",
+                "name": "new",
+                "sample": {
+                  "items": []
+                }
+              }
+            ]
+          }
         },
         "resolutions": {
-          "$ref": "#/$defs/TemplatedText"
+          "$ref": "#/$defs/TemplatedText",
+          "x-tai42-expression": {
+            "blurb": "the new declarations",
+            "label": "resolutions program",
+            "language": "jq",
+            "returns": "a list of the not-done resolution names a close may name",
+            "sample": {
+              "items": []
+            }
+          }
         }
       },
       "required": [
@@ -3281,7 +3432,16 @@
       "description": "The optional state subject a hook fire targets.\n\nCarries the conversation-target scope ``(target_kind, target_name)``, the subject ``kind`` (matching\n:data:`~tai42_contract.states.SUBJECT_KIND_RE`), and a ``key_expr`` — a templated text\ncarrying (inline or by stored id) a jq program evaluated over the event payload at\nfire — it must yield a non-empty string, else the fire fails loudly like any hook\nerror. Frozen; deposited as the ambient state context so a state write during the fire\nis keyed and attributed to the hook.",
       "properties": {
         "key_expr": {
-          "$ref": "#/$defs/TemplatedText"
+          "$ref": "#/$defs/TemplatedText",
+          "x-tai42-expression": {
+            "blurb": "the parsed webhook delivery (structured bodies merged top-level with query params; arbitrary text under raw_body)",
+            "caveats": [
+              "an empty, blank or non-string result fails the fire loudly"
+            ],
+            "label": "subject key expression",
+            "language": "jq",
+            "returns": "a non-empty string: the subject key the fire's state reads and writes use"
+          }
         },
         "kind": {
           "title": "Kind",
@@ -3358,7 +3518,28 @@
             }
           ],
           "default": null,
-          "title": "Input Map"
+          "title": "Input Map",
+          "x-tai42-expression": {
+            "blurb": "the caller's object, validated against the preset's input_schema",
+            "caveats": [
+              "a key both the map result and fixed_kwargs set is refused, unless both values are objects, which merge key by key"
+            ],
+            "label": "input map",
+            "language": "jq",
+            "returns": "an object of the base tool's arguments, merged with fixed_kwargs",
+            "sample": {
+              "query": "status"
+            },
+            "variables": [
+              {
+                "blurb": "the preset's stored fixed_kwargs",
+                "name": "fixed",
+                "sample": {
+                  "limit": 10
+                }
+              }
+            ]
+          }
         },
         "input_schema": {
           "anyOf": [
@@ -3389,7 +3570,23 @@
             }
           ],
           "default": null,
-          "title": "Output Map"
+          "title": "Output Map",
+          "x-tai42-expression": {
+            "blurb": "the base tool's result",
+            "caveats": [
+              "the map never runs over a result that carries a secret"
+            ],
+            "label": "output map",
+            "language": "jq",
+            "returns": "the mapped result, then validated against the preset's output_schema when one is set",
+            "sample": {
+              "items": [
+                {
+                  "id": "a"
+                }
+              ]
+            }
+          }
         },
         "output_schema": {
           "anyOf": [
@@ -3456,7 +3653,28 @@
             }
           ],
           "default": null,
-          "title": "Input Map"
+          "title": "Input Map",
+          "x-tai42-expression": {
+            "blurb": "the caller's object, validated against the preset's input_schema",
+            "caveats": [
+              "a key both the map result and fixed_kwargs set is refused, unless both values are objects, which merge key by key"
+            ],
+            "label": "input map",
+            "language": "jq",
+            "returns": "an object of the base tool's arguments, merged with fixed_kwargs",
+            "sample": {
+              "query": "status"
+            },
+            "variables": [
+              {
+                "blurb": "the preset's stored fixed_kwargs",
+                "name": "fixed",
+                "sample": {
+                  "limit": 10
+                }
+              }
+            ]
+          }
         },
         "input_schema": {
           "anyOf": [
@@ -3491,7 +3709,23 @@
             }
           ],
           "default": null,
-          "title": "Output Map"
+          "title": "Output Map",
+          "x-tai42-expression": {
+            "blurb": "the base tool's result",
+            "caveats": [
+              "the map never runs over a result that carries a secret"
+            ],
+            "label": "output map",
+            "language": "jq",
+            "returns": "the mapped result, then validated against the preset's output_schema when one is set",
+            "sample": {
+              "items": [
+                {
+                  "id": "a"
+                }
+              ]
+            }
+          }
         },
         "output_schema": {
           "anyOf": [

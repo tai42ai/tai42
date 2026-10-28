@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from tai42_contract.access_control import AccessCondition
 from tai42_contract.accounts.errors import LastAdminError
-from tai42_contract.template import TemplatedText
 
 import tai42_skeleton.operations.api_keys as _pkg
 from tai42_skeleton.access_control import api_key_lifecycle, management
@@ -73,7 +73,7 @@ async def create_api_key(
     description: str,
     scopes: list[str],
     policy_data: dict[str, Any] | None,
-    condition: TemplatedText | None,
+    condition: AccessCondition,
     owner_user_id: str | None,
 ) -> dict[str, Any]:
     """Provision a key, returning ``{"api_key", "key_fingerprint"}``.

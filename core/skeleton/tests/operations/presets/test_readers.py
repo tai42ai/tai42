@@ -5,8 +5,10 @@ from __future__ import annotations
 
 import pytest
 from tai42_contract.manifest import normalize_extension_element
+from tai42_contract.template import TemplatedText
 
 from tai42_skeleton.operations import presets as preset_ops
+from tai42_skeleton.operations.presets.readers import read_input_map, read_output_map
 
 
 def test_read_element_rejects_empty_string() -> None:
@@ -69,6 +71,17 @@ def test_read_edit_extensions_empty_clears() -> None:
 def test_read_edit_extensions_non_list_rejected() -> None:
     with pytest.raises(preset_ops.BadRequestError, match="must be a list of combos"):
         preset_ops.read_edit_extensions(True, 5)
+
+
+@pytest.mark.parametrize("reader", [read_input_map, read_output_map])
+def test_read_map_variants(reader: object) -> None:
+    parsed = TemplatedText(content="{a: .x}")
+    assert reader(None) is None  # type: ignore[operator]
+    assert reader(".x") == ".x"  # type: ignore[operator]
+    assert reader(parsed) is parsed  # type: ignore[operator]
+    assert reader({"content": "{a: .x}"}) == parsed  # type: ignore[operator]
+    with pytest.raises(preset_ops.BadRequestError, match="jq program string or a stored-body reference"):
+        reader(42)  # type: ignore[operator]
 
 
 def test_read_output_schema_variants() -> None:

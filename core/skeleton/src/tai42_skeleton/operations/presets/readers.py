@@ -99,11 +99,12 @@ def read_input_schema(value: Any) -> TemplatedText | dict[str, Any] | None:
 def _read_map(field: str, value: Any) -> TemplatedText | str | None:
     """An optional author-set jq map — the ``TemplatedText | str`` union — from a request value.
 
-    ``null`` → ``None``; a string → the program itself; a ``{content|id, kwargs}`` object → the
+    ``null`` → ``None``; a string or an already-parsed
+    :class:`~tai42_contract.template.TemplatedText` → itself; a ``{content|id, kwargs}`` object → the
     parsed :class:`~tai42_contract.template.TemplatedText`; anything else → a loud 400. The program
     is rendered and compiled at the save-time document check, not here.
     """
-    if value is None or isinstance(value, str):
+    if value is None or isinstance(value, str | TemplatedText):
         return value
     if not isinstance(value, dict):
         raise BadRequestError(f"'{field}' must be a jq program string or a stored-body reference")

@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from pydantic import BaseModel, Field
-from tai42_contract.template import TemplatedText
+from tai42_contract.access_control import AccessCondition
 
 # When access control is DISABLED by choice (``ACCESS_CONTROL_ENABLE=false``) the
 # key-management surface must not operate the AC store under the synthetic admin:
@@ -41,7 +41,7 @@ class ApiKeyCreate(BaseModel):
     description: str = Field(min_length=1)
     scopes: list[str]
     policy_data: dict[str, Any] | None = None
-    condition: TemplatedText | None = None
+    condition: AccessCondition = None
     # The account that owns this key. A non-admin caller may only mint self-owned keys
     # (an explicit different owner is rejected); an admin may set any owner or None.
     owner_user_id: str | None = None
@@ -56,7 +56,7 @@ class ApiKeyEdit(BaseModel):
     description: str | None = Field(default=None, min_length=1)
     scopes: list[str] | None = None
     policy_data: dict[str, Any] | None = None
-    condition: TemplatedText | None = None
+    condition: AccessCondition = None
 
 
 class KeyScopesModify(BaseModel):
@@ -76,7 +76,7 @@ class ConditionValidation(BaseModel):
     Compile and (with a ``sample_context``) sample-evaluate a condition without persisting it.
     """
 
-    condition: TemplatedText | None = None
+    condition: AccessCondition = None
     sample_context: dict[str, Any] | None = None
 
 

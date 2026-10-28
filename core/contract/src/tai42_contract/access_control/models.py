@@ -74,6 +74,13 @@ _ACCESS_CONDITION_ANNOTATION: dict[str, Any] = {
     )
 }
 
+AccessCondition = Annotated[TemplatedText | None, Field(json_schema_extra=_ACCESS_CONDITION_ANNOTATION)]
+"""An access-control jq ``condition`` field type, carrying the STRICT-TRUE expression annotation.
+
+Every surface that stores, edits, validates or reads back a policy condition the enforcer
+evaluates declares its field (or flat parameter) with this type, so each generated schema
+glosses the same input document and result rule."""
+
 
 class IdentityRecord(BaseModel):
     """Schema for an api-key identity record. Represents purely WHO the user is.
@@ -131,8 +138,8 @@ class AccessPolicy(ConditionMixin):
 
     # ``condition`` is inherited from ConditionMixin but redeclared here solely to
     # refine the vendor annotation with this surface's STRICT-TRUE fact (see
-    # ``_ACCESS_CONDITION_ANNOTATION``): the enforcer allows only on boolean true.
-    condition: Annotated[TemplatedText | None, Field(json_schema_extra=_ACCESS_CONDITION_ANNOTATION)] = None
+    # ``AccessCondition``): the enforcer allows only on boolean true.
+    condition: AccessCondition = None
 
 
 class RoleDefinition(ConditionMixin):
@@ -163,8 +170,8 @@ class RoleDefinition(ConditionMixin):
     base_tier: str | None = None
 
     # Same STRICT-TRUE override as AccessPolicy.condition: the enforcer admits this
-    # jq base only when it evaluates to boolean true (see _ACCESS_CONDITION_ANNOTATION).
-    condition: Annotated[TemplatedText | None, Field(json_schema_extra=_ACCESS_CONDITION_ANNOTATION)] = None
+    # jq base only when it evaluates to boolean true (see AccessCondition).
+    condition: AccessCondition = None
 
     # The reserved/admin tier: everything, jq base None, grant map skipped at
     # enforce. Mutually exclusive with a non-empty `grants` map (see below).

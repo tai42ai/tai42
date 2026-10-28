@@ -42,7 +42,7 @@ from pydantic import (
 
 from tai42_contract.conversation_target import ConversationTargetKind
 from tai42_contract.locale import normalize_optional_locale
-from tai42_contract.template import TemplatedText
+from tai42_contract.template import EXPRESSION_ANNOTATION_KEY, TemplatedText, expression_annotation
 
 #: A subject ``kind`` (and every entry of a declaration's ``subject_kinds``): a
 #: lowercase identifier of at most 63 characters.
@@ -317,6 +317,62 @@ class StateDeclaration(BaseModel):
         return self
 
 
+_PARAMETERS_VARIABLE = ("parameters", "the attachment's effective parameters", {"limit": 3})
+_DECLARATIONS_SAMPLE: dict[str, Any] = {"items": [{"id": "a", "label": "First item"}]}
+
+_DECLARATIONS_CHECK_ANNOTATION = expression_annotation(
+    label="declarations check",
+    blurb="the declarations (static values) an attachment stores",
+    variables=[_PARAMETERS_VARIABLE],
+    returns="exactly boolean true accepts the declarations; a string result is the rejection message",
+    caveats=["any other result rejects the declarations"],
+    sample=_DECLARATIONS_SAMPLE,
+)
+
+_TEMPLATE_JQ_ANNOTATION = expression_annotation(
+    label="template jq program",
+    blurb="the record's attached subtree",
+    variables=[
+        _PARAMETERS_VARIABLE,
+        ("declarations", "the attachment's declarations", _DECLARATIONS_SAMPLE),
+        ("params", "an input program's declared params object (bound only for purpose input)", {"id": "a"}),
+        ("input", "an update program's input (bound only for purpose update)", {"id": "a", "done": True}),
+    ],
+    returns=("for purpose input, the served value; for purpose update, a batch (list) of template-relative ops"),
+    caveats=["the template's input programs are callable as prelude functions named tjq_<name>"],
+    sample={"items": {"a": {"done": False}}},
+)
+
+_RECONCILE_ORPHANS_ANNOTATION = expression_annotation(
+    label="orphans program",
+    blurb="an open record's attached subtree",
+    variables=[
+        ("previous", "the declarations before the edit", _DECLARATIONS_SAMPLE),
+        ("new", "the declarations after the edit", {"items": []}),
+    ],
+    returns="a list of {id, label} objects naming the items the subtree orphans against the new declarations",
+    sample={"items": {"a": {"done": False}}},
+)
+
+_RECONCILE_CLOSE_ANNOTATION = expression_annotation(
+    label="close program",
+    blurb="the orphan's record subtree",
+    variables=[
+        ("id", "the orphaned item's id", "a"),
+        ("resolution", "the not-done resolution the close names", "dropped"),
+    ],
+    returns="a batch (list) of template-relative ops that closes the orphan",
+    sample={"done": False},
+)
+
+_RECONCILE_RESOLUTIONS_ANNOTATION = expression_annotation(
+    label="resolutions program",
+    blurb="the new declarations",
+    returns="a list of the not-done resolution names a close may name",
+    sample={"items": []},
+)
+
+
 class StateTemplateDeclarations(BaseModel):
     """The ``declarations`` section of a state-template document.
 
@@ -332,7 +388,9 @@ class StateTemplateDeclarations(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True, serialize_by_alias=True)
 
     schema_: dict[str, Any] = Field(alias="schema")
-    check: TemplatedText | None = None
+    check: Annotated[
+        TemplatedText | None, Field(json_schema_extra={EXPRESSION_ANNOTATION_KEY: _DECLARATIONS_CHECK_ANNOTATION})
+    ] = None
 
 
 class StateTemplateJq(BaseModel):
@@ -351,7 +409,7 @@ class StateTemplateJq(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     purpose: Literal["input", "update"]
-    jq: TemplatedText
+    jq: Annotated[TemplatedText, Field(json_schema_extra={EXPRESSION_ANNOTATION_KEY: _TEMPLATE_JQ_ANNOTATION})]
     description: str = ""
     params: list[str] = Field(default_factory=list)
     reads: list[list[str]] = Field(default_factory=list[list[str]])
@@ -390,9 +448,13 @@ class StateTemplateReconcile(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    orphans: TemplatedText
-    close: TemplatedText
-    resolutions: TemplatedText
+    orphans: Annotated[
+        TemplatedText, Field(json_schema_extra={EXPRESSION_ANNOTATION_KEY: _RECONCILE_ORPHANS_ANNOTATION})
+    ]
+    close: Annotated[TemplatedText, Field(json_schema_extra={EXPRESSION_ANNOTATION_KEY: _RECONCILE_CLOSE_ANNOTATION})]
+    resolutions: Annotated[
+        TemplatedText, Field(json_schema_extra={EXPRESSION_ANNOTATION_KEY: _RECONCILE_RESOLUTIONS_ANNOTATION})
+    ]
 
 
 class StateTemplateDocument(BaseModel):

@@ -9,7 +9,7 @@ import sys
 from typing import Any
 
 from tai42_contract.manifest import ExtensionElement
-from tai42_contract.presets import CARRY_FORWARD, CarryForward, PresetBody
+from tai42_contract.presets import CARRY_FORWARD, CarryForward, PresetBody, PresetInputMap, PresetOutputMap
 from tai42_contract.presets.errors import PresetNotFoundError, PresetVersionNotFoundError
 from tai42_contract.states.binding import StateBinding
 from tai42_contract.template import TemplatedText
@@ -277,9 +277,9 @@ async def save_version(
     description: str | None,
     input_schema: TemplatedText | dict[str, Any] | None = None,
     input_schema_provided: bool = False,
-    input_map: TemplatedText | str | None = None,
+    input_map: PresetInputMap = None,
     input_map_provided: bool = False,
-    output_map: TemplatedText | str | None = None,
+    output_map: PresetOutputMap = None,
     output_map_provided: bool = False,
     state_binding: StateBinding | None = None,
     state_binding_provided: bool = False,

@@ -8,6 +8,7 @@
 import { expect, type APIRequestContext, type Locator, type Page } from '@playwright/test';
 import { apiHeaders, createMemberSession, fillFixedKwargs, runTool, seedCredential, uniq } from './helpers';
 import { needs, test } from './needs';
+import { pickTool } from './pickers';
 
 needs('kind:versioning', 'probe-tools', 'mutable');
 
@@ -21,22 +22,9 @@ async function openCreateDialog(page: Page, name: string): Promise<Locator> {
   await dialog.getByRole('textbox', { name: 'Name' }).fill(name);
   // Description is REQUIRED and gates submit; the bound tool's LLM-facing docstring.
   await dialog.getByRole('textbox', { name: 'Description' }).fill(`echo preset ${name}`);
-  // The base-tool listbox holds 40+ tools in a Radix Select whose content sets no
-  // max-height/scroll, so an option below the fold (e2e_echo is ~18th) is off
-  // screen and unreachable by pointer. Radix typeahead on the focused trigger
-  // selects it WITHOUT opening the listbox: typing jumps to the first option
-  // whose text starts with the string (e2e_echo, before its _prometheus variants).
-  const baseTool = dialog.getByRole('combobox', { name: 'Base tool' });
-  // The picker is disabled ("Loading tools…") until the tools query resolves;
-  // focus/typeahead on the disabled trigger drops the keystrokes, so gate on the
-  // trigger being enabled before typing.
-  await expect(baseTool).toBeEnabled();
-  await baseTool.focus();
-  await baseTool.pressSequentially('e2e_echo');
-  // Exactly e2e_echo (typeahead lands on the first prefix match), not an
-  // e2e_echo_prometheus_metrics variant — the negative lookahead rejects a
-  // trailing underscore.
-  await expect(baseTool).toHaveText(/^e2e_echo(?!_)/);
+  const baseTool = dialog.getByRole('combobox', { name: 'Base tool', exact: true });
+  await pickTool(page, baseTool, 'e2e_echo');
+  await expect(baseTool).toHaveText('e2e_echo');
   return dialog;
 }
 
@@ -82,7 +70,7 @@ async function openPresetDetail(page: Page, name: string): Promise<void> {
   await expect(page.getByTestId('version-row-2')).toBeVisible();
 }
 
-test('create a preset over e2e_echo; UI row + API list + live tool', async ({ page, request }) => {
+test('create a preset over e2e_echo; UI detail + API list + live tool', async ({ page, request }) => {
   const name = uniq('preset');
   const payload = uniq('payload');
 
@@ -93,8 +81,9 @@ test('create a preset over e2e_echo; UI row + API list + live tool', async ({ pa
   await fillFixedKwargs(dialog, { payload });
   await dialog.getByRole('button', { name: 'Create preset' }).click();
 
-  // UI: the new preset appears as a row (its name cell links to the detail view).
-  await expect(page.getByRole('link', { name: `Open preset ${name}` })).toBeVisible();
+  // UI: the dialog closes onto the new preset's detail.
+  await expect(dialog).toBeHidden();
+  await expect(page.getByRole('heading', { level: 2, name })).toBeVisible();
 
   // API: the presets list carries it.
   const list = await request.get('/api/presets', { headers: apiHeaders() });
@@ -123,17 +112,57 @@ test('author the input and output maps in the create dialog; the detail shows th
   const dialog = await openCreateDialog(page, name);
   await dialog.getByLabel('Input schema JSON').fill(JSON.stringify(inputSchema));
   await dialog.getByTestId('binding-jq-input-map').getByRole('textbox').first().fill(inputMap);
+  // The input map is a jq expression: its visual-editor button opens the editor over the
+  // typed program, and closing it unedited leaves the program as typed. The dialog's
+  // accessible name is the editor's title, so finding it by name proves which editor opened.
+  await dialog.getByRole('button', { name: 'Open the visual editor for Input map', exact: true }).click();
+  const editor = page.getByRole('dialog', { name: 'Input map — Editor', exact: true });
+  await expect(editor).toBeVisible();
+  await editor.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await expect(editor).toBeHidden();
+  await expect(dialog.getByTestId('binding-jq-input-map').getByRole('textbox').first()).toHaveValue(inputMap);
   await dialog.getByTestId('binding-jq-output-map').getByRole('textbox').first().fill(outputMap);
   await dialog.getByRole('button', { name: 'Create preset' }).click();
   await expect(dialog).toBeHidden();
 
-  await page.getByRole('link', { name: `Open preset ${name}` }).click();
+  // The dialog closes onto the new preset's detail.
   await expect(page.getByRole('heading', { level: 2, name })).toBeVisible();
 
   // The body cards show the authored schema and both programs.
   await expect(bodyCard(page, 'Input schema')).toContainText('text');
   await expect(bodyCard(page, 'Input map').locator('pre code')).toContainText(inputMap);
   await expect(bodyCard(page, 'Output map').locator('pre code')).toContainText(outputMap);
+});
+
+test('the base-tool picker narrows its tools to the search and picks the match', async ({ page }) => {
+  await seedCredential(page);
+  await page.goto('/presets');
+  await page.getByRole('button', { name: 'Create preset' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Create preset' });
+  const baseTool = dialog.getByRole('combobox', { name: 'Base tool', exact: true });
+  await expect(baseTool).toBeEnabled();
+  await baseTool.click();
+
+  const search = page.getByRole('combobox', { name: 'Search tools', exact: true });
+  const options = page.getByRole('listbox', { name: 'Base tool' }).getByRole('option');
+  // A search no tool matches says so in place of the options.
+  const nothing = uniq('no-such-tool');
+  await search.fill(nothing);
+  await expect(page.getByRole('status').filter({ hasText: 'Nothing matches' })).toHaveText(
+    `Nothing matches “${nothing}”.`,
+  );
+  await expect(options).toHaveCount(0);
+
+  // A search for the tool keeps only the options that contain it.
+  await search.fill('e2e_echo');
+  await expect(options.first()).toBeVisible();
+  for (const label of await options.allTextContents()) expect(label).toContain('e2e_echo');
+  await page.getByRole('option', { name: /^e2e_echo$/ }).click();
+  await expect(search).toHaveCount(0);
+  await expect(baseTool).toHaveText('e2e_echo');
+
+  await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await expect(dialog).toBeHidden();
 });
 
 test.describe('the preset write controls follow the caller\'s access', () => {

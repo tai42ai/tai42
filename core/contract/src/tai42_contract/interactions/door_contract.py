@@ -80,6 +80,73 @@ PARKED_VARIABLE_ANNOTATION = (
 )
 
 
+DoorCancelExpr = Annotated[
+    TemplatedText | None,
+    Field(
+        json_schema_extra={
+            EXPRESSION_ANNOTATION_KEY: expression_annotation(
+                label="cancel expression",
+                blurb="the door's input document",
+                variables=[PARKED_VARIABLE_ANNOTATION],
+                returns="null (cancel nothing), a parked interaction id, or a list of ids to cancel",
+            )
+        }
+    ),
+]
+"""A door-contract ``cancel_expr`` field type: an optional jq program carrying its expression annotation."""
+
+
+DoorResumeExpr = Annotated[
+    TemplatedText | None,
+    Field(
+        json_schema_extra={
+            EXPRESSION_ANNOTATION_KEY: expression_annotation(
+                label="resume expression",
+                blurb="the door's input document",
+                variables=[PARKED_VARIABLE_ANNOTATION],
+                returns=(
+                    "null (resume nothing), {id, payload} to resume an ask with an answer, a bare id to "
+                    "take a waiting outcome, or a list of these"
+                ),
+            )
+        }
+    ),
+]
+"""A door-contract ``resume_expr`` field type: an optional jq program carrying its expression annotation."""
+
+
+DoorStartExpr = Annotated[
+    TemplatedText | None,
+    Field(
+        json_schema_extra={
+            EXPRESSION_ANNOTATION_KEY: expression_annotation(
+                label="start expression",
+                blurb="the door's input document",
+                variables=[PARKED_VARIABLE_ANNOTATION],
+                returns="the object dispatched as the started target's kwargs; null starts nothing",
+            )
+        }
+    ),
+]
+"""A door-contract ``start_expr`` field type: an optional jq program carrying its expression annotation."""
+
+
+DoorExtrasExpr = Annotated[
+    TemplatedText | None,
+    Field(
+        json_schema_extra={
+            EXPRESSION_ANNOTATION_KEY: expression_annotation(
+                label="extras expression",
+                blurb="the door's input document",
+                variables=[PARKED_VARIABLE_ANNOTATION],
+                returns="the extras mapping handed to the started target; null for no extras",
+            )
+        }
+    ),
+]
+"""A door-contract ``extras_expr`` field type: an optional jq program carrying its expression annotation."""
+
+
 class ParkableDoorMixin(BaseModel):
     """The four optional jq expressions a parkable-driving door carries.
 
@@ -89,61 +156,10 @@ class ParkableDoorMixin(BaseModel):
     the run's parked interactions as the jq variable ``$parked``.
     """
 
-    cancel_expr: Annotated[
-        TemplatedText | None,
-        Field(
-            json_schema_extra={
-                EXPRESSION_ANNOTATION_KEY: expression_annotation(
-                    label="cancel expression",
-                    blurb="the door's input document",
-                    variables=[PARKED_VARIABLE_ANNOTATION],
-                    returns="null (cancel nothing), a parked interaction id, or a list of ids to cancel",
-                )
-            }
-        ),
-    ] = None
-    resume_expr: Annotated[
-        TemplatedText | None,
-        Field(
-            json_schema_extra={
-                EXPRESSION_ANNOTATION_KEY: expression_annotation(
-                    label="resume expression",
-                    blurb="the door's input document",
-                    variables=[PARKED_VARIABLE_ANNOTATION],
-                    returns=(
-                        "null (resume nothing), {id, payload} to resume an ask with an answer, a bare id to "
-                        "take a waiting outcome, or a list of these"
-                    ),
-                )
-            }
-        ),
-    ] = None
-    start_expr: Annotated[
-        TemplatedText | None,
-        Field(
-            json_schema_extra={
-                EXPRESSION_ANNOTATION_KEY: expression_annotation(
-                    label="start expression",
-                    blurb="the door's input document",
-                    variables=[PARKED_VARIABLE_ANNOTATION],
-                    returns="the object dispatched as the started target's kwargs; null starts nothing",
-                )
-            }
-        ),
-    ] = None
-    extras_expr: Annotated[
-        TemplatedText | None,
-        Field(
-            json_schema_extra={
-                EXPRESSION_ANNOTATION_KEY: expression_annotation(
-                    label="extras expression",
-                    blurb="the door's input document",
-                    variables=[PARKED_VARIABLE_ANNOTATION],
-                    returns="the extras mapping handed to the started target; null for no extras",
-                )
-            }
-        ),
-    ] = None
+    cancel_expr: DoorCancelExpr = None
+    resume_expr: DoorResumeExpr = None
+    start_expr: DoorStartExpr = None
+    extras_expr: DoorExtrasExpr = None
 
 
 def _clean_id(value: Any) -> str:

@@ -6,8 +6,7 @@ from typing import Any
 
 from jinja2 import TemplateError
 from pydantic import ValidationError
-from tai42_contract.access_control.models import JqAuthContext
-from tai42_contract.template import TemplatedText
+from tai42_contract.access_control.models import AccessCondition, JqAuthContext
 from tai42_kit.utils.data.jq_util import get_compiled_jq
 
 from tai42_skeleton.access_control.policy import ConditionVerdict, PolicyEnforcer, render_condition
@@ -26,7 +25,7 @@ from .models import ConditionValidation
     response_model=ConditionCheckResult,
 )
 async def validate_condition(
-    condition: TemplatedText | None,
+    condition: AccessCondition,
     sample_context: dict[str, Any] | None,
 ) -> dict[str, Any]:
     """Fail-closed guard: compile — and optionally sample-evaluate — a jq policy ``condition``, unpersisted.

@@ -62,6 +62,8 @@ from tai42_contract.conversations.routes import (
     ConversationRouteCreate,
     ConversationRouteCreateBody,
     ReplyTexts,
+    RouteReplyExpr,
+    RouteStartExpr,
     TargetBindValidator,
 )
 from tai42_contract.conversations.targets import (
@@ -151,6 +153,8 @@ __all__ = [
     "ReplyTexts",
     "ReplyTo",
     "ReplyToStatus",
+    "RouteReplyExpr",
+    "RouteStartExpr",
     "TargetBindValidator",
     "TargetConversationConfig",
     "ThreadQueueOverflowError",

@@ -58,7 +58,11 @@ from tai42_contract.interactions.continuation import (
     set_resume_continuation_tool,
 )
 from tai42_contract.interactions.door_contract import (
+    DoorCancelExpr,
     DoorContractError,
+    DoorExtrasExpr,
+    DoorResumeExpr,
+    DoorStartExpr,
     ParkableDoorMixin,
     ResumeItem,
     TakeItem,
@@ -227,7 +231,11 @@ __all__ = [
     "CountdownWording",
     "DeliveryAddress",
     "DisplayBlock",
+    "DoorCancelExpr",
     "DoorContractError",
+    "DoorExtrasExpr",
+    "DoorResumeExpr",
+    "DoorStartExpr",
     "FieldChangedEvent",
     "FieldWording",
     "FormControl",

@@ -8,13 +8,51 @@ mirroring the AC-policy view — a contract holds models, never logic.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Annotated, Any
 
 from pydantic import BaseModel, Field
 
 from tai42_contract.manifest import ExtensionElement
 from tai42_contract.states.binding import StateBinding
-from tai42_contract.template import TemplatedText
+from tai42_contract.template import EXPRESSION_ANNOTATION_KEY, TemplatedText, expression_annotation
+
+PRESET_INPUT_MAP_ANNOTATION: dict[str, Any] = expression_annotation(
+    label="input map",
+    blurb="the caller's object, validated against the preset's input_schema",
+    variables=[("fixed", "the preset's stored fixed_kwargs", {"limit": 10})],
+    returns="an object of the base tool's arguments, merged with fixed_kwargs",
+    caveats=[
+        "a key both the map result and fixed_kwargs set is refused, unless both values are objects,"
+        " which merge key by key"
+    ],
+    sample={"query": "status"},
+)
+"""The expression annotation of a preset ``input_map``: its input document, ``$fixed`` and result rule."""
+
+PRESET_OUTPUT_MAP_ANNOTATION: dict[str, Any] = expression_annotation(
+    label="output map",
+    blurb="the base tool's result",
+    returns="the mapped result, then validated against the preset's output_schema when one is set",
+    caveats=["the map never runs over a result that carries a secret"],
+    sample={"items": [{"id": "a"}]},
+)
+"""The expression annotation of a preset ``output_map``: its input document and result rule."""
+
+PresetInputMap = Annotated[
+    TemplatedText | str | None, Field(json_schema_extra={EXPRESSION_ANNOTATION_KEY: PRESET_INPUT_MAP_ANNOTATION})
+]
+"""A preset ``input_map`` field type: a jq program (a ``str``, or a ``TemplatedText`` rendered to one), annotated.
+
+Every surface that stores, edits, validates or reads back a preset's input map declares its field
+(or flat parameter) with this type, so each generated schema carries the same expression annotation."""
+
+PresetOutputMap = Annotated[
+    TemplatedText | str | None, Field(json_schema_extra={EXPRESSION_ANNOTATION_KEY: PRESET_OUTPUT_MAP_ANNOTATION})
+]
+"""A preset ``output_map`` field type: a jq program (a ``str``, or a ``TemplatedText`` rendered to one), annotated.
+
+Every surface that stores, edits, validates or reads back a preset's output map declares its field
+(or flat parameter) with this type, so each generated schema carries the same expression annotation."""
 
 
 class PresetBody(BaseModel):
@@ -83,8 +121,8 @@ class PresetBody(BaseModel):
     extensions: list[list[ExtensionElement]] = Field(default_factory=list[list[ExtensionElement]])
     output_schema: TemplatedText | dict[str, Any] | None = None
     input_schema: TemplatedText | dict[str, Any] | None = None
-    input_map: TemplatedText | str | None = None
-    output_map: TemplatedText | str | None = None
+    input_map: PresetInputMap = None
+    output_map: PresetOutputMap = None
     #: The OPTIONAL door-layer state binding this preset carries; the dispatch chokepoint
     #: resolves it from the active version stamp and merges it with any door binding. Like
     #: every other body field it must survive version carry-forward (dropping it would
@@ -151,8 +189,8 @@ class PresetSeed(BaseModel):
         ),
     )
     input_schema: TemplatedText | dict[str, Any] | None = None
-    input_map: TemplatedText | str | None = None
-    output_map: TemplatedText | str | None = None
+    input_map: PresetInputMap = None
+    output_map: PresetOutputMap = None
     output_schema: TemplatedText | dict[str, Any] | None = None
     tool_meta: PresetSeedToolMeta | None = None
     #: The OPTIONAL door-layer state binding the seed installs onto the preset it creates.

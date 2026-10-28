@@ -10,7 +10,7 @@ from typing import Any
 
 from tai42_contract.agent import PRESET_NAME_PATTERN
 from tai42_contract.manifest import ExtensionElement
-from tai42_contract.presets import PresetBody
+from tai42_contract.presets import PresetBody, PresetInputMap, PresetOutputMap
 from tai42_contract.presets.errors import PresetNotFoundError
 from tai42_contract.states.binding import StateBinding
 from tai42_contract.template import TemplatedText
@@ -217,9 +217,9 @@ async def validate_preset(
     input_schema_present: bool = False,
     input_schema_value: Any = None,
     input_map_present: bool = False,
-    input_map_value: Any = None,
+    input_map_value: PresetInputMap = None,
     output_map_present: bool = False,
-    output_map_value: Any = None,
+    output_map_value: PresetOutputMap = None,
     state_binding_present: bool = False,
     state_binding_value: Any = None,
 ) -> dict[str, Any]:

@@ -153,6 +153,124 @@ class ReplyTexts(BaseModel):
         return self
 
 
+RouteStartExpr = Annotated[
+    TemplatedText | None,
+    Field(
+        json_schema_extra={
+            EXPRESSION_ANNOTATION_KEY: expression_annotation(
+                label="start expression",
+                blurb="the inbound turn payload the route maps to the started run's kwargs",
+                variables=[PARKED_VARIABLE_ANNOTATION],
+                keys=[
+                    ("message", "the inbound message text"),
+                    ("sender", "the sending address"),
+                    ("our_identity", "door=channel: the medium address we are texted at"),
+                    ("channel", "door=channel: the registry channel name"),
+                    ("route", "the name of the conversation route the turn entered through"),
+                    ("thread_id", "the turn's canonical thread id (the thread doors' id)"),
+                    ("person_id", "multichannel only: the linked person's id"),
+                    ("person_addresses", "multichannel only: the person's known addresses"),
+                    ("params", "non-empty entry params, nested under this key"),
+                    ("form", "a structured form submission, present only when the inbound carried one"),
+                    (
+                        "form_tag",
+                        "the caller-set opaque per-send form tag, present only when the submission carried one",
+                    ),
+                    (
+                        "attachments",
+                        "inbound media the participant sent, present only when the inbound carried some",
+                    ),
+                    (
+                        "location",
+                        "a geographic point the participant shared, present only when the inbound carried one",
+                    ),
+                    (
+                        "reply_to",
+                        "the earlier message this one replies to, {message_id, status, text}; present only when "
+                        "the inbound quoted one",
+                    ),
+                    (
+                        "messages",
+                        "overlap deliver=all: the batch carried into this turn, in acceptance order, "
+                        "each {id, text, accepted_at} (+ form/form_tag/attachments/location/reply_to when that "
+                        "message carried them)",
+                    ),
+                    (
+                        "superseded",
+                        "overlap deliver=all: messages dropped in favour of this turn, in the same shape; "
+                        "present only when non-empty",
+                    ),
+                    (
+                        "turn",
+                        "the turn: {id, inbound: {id, kind, source}, subject: {target_kind, target_name, person, "
+                        "thread, locale}, reply_window: {state, closes_at}}; reply_window.state is open (a "
+                        "free-form reply is allowed until closes_at), closed, or none (no window on this channel "
+                        "or address)",
+                    ),
+                    ("event", "an event turn's structured payload {id, kind, payload}; absent on a message turn"),
+                ],
+                returns="the JSON object dispatched as the started run's kwargs; null starts nothing",
+            )
+        }
+    ),
+]
+"""A conversation route's ``start_expr`` field type, carrying the route's expression annotation.
+
+A templated text carrying (inline or by stored id) a jq program mapping the inbound turn payload to
+the started run's kwargs; rendered then compiled at create. It reads the run's currently parked
+interactions as ``$parked``. Every surface that creates or reads back a route declares its
+``start_expr`` with this type, so each generated schema glosses the same input keys."""
+
+RouteReplyExpr = Annotated[
+    TemplatedText | None,
+    Field(
+        json_schema_extra={
+            EXPRESSION_ANNOTATION_KEY: expression_annotation(
+                label="reply expression",
+                blurb=(
+                    "the started run's result (the SUCCESS shape) the route maps to the participant reply; "
+                    "null when the run asked its caller instead of finishing"
+                ),
+                variables=[
+                    (
+                        "turn",
+                        "the turn this reply answers ({id, inbound, subject, reply_window}); reply_window "
+                        "{state, closes_at} is read when the turn starts, or at delivery for a late reply: open "
+                        "until closes_at, closed, or none; null when an out-of-band delivery's originating record "
+                        "has aged out",
+                        {
+                            "id": "m-1",
+                            "inbound": {"id": "i-1", "kind": "message", "source": "chat-line"},
+                            "subject": {
+                                "target_kind": "agent",
+                                "target_name": "assistant",
+                                "person": None,
+                                "thread": "t-1",
+                                "locale": None,
+                            },
+                            "reply_window": {"state": "open", "closes_at": "2026-01-02T09:30:00Z"},
+                        },
+                    ),
+                    (
+                        "asks",
+                        "the run's caller-ask entries when it asked instead of finishing (each the full parked "
+                        "entry); an empty list on a plain result",
+                        [{"id": "i-42", "question": "proceed?", "answer_format": "confirm"}],
+                    ),
+                    PARKED_VARIABLE_ANNOTATION,
+                ],
+                returns="the reply: null (silent), a string, or a list of answer parts",
+            )
+        }
+    ),
+]
+"""A conversation route's ``reply_expr`` field type, carrying the route's expression annotation.
+
+A jq program mapping the started run's returned value to the participant reply; a failed run raises
+and takes the error outcome before mapping. Every surface that creates or reads back a route
+declares its ``reply_expr`` with this type, so each generated schema glosses the same input."""
+
+
 class _ConversationRouteFields(ParkableDoorMixin):
     """The client-facing create/edit body for a conversation route: the fields a caller supplies.
 
@@ -179,118 +297,12 @@ class _ConversationRouteFields(ParkableDoorMixin):
     route_name: Annotated[str, Field(pattern=ROUTE_NAME_RE.pattern)]
     target_kind: ConversationTargetKind
     target_name: str = Field(min_length=1)
-    # A templated text carrying (inline or by stored id) a jq program mapping the inbound turn
-    # payload to the started run's kwargs, overriding the mixin's generic ``start_expr`` gloss with
-    # this route's own input keys. Rendered then compiled at create. ``reply_expr`` (below) maps the
-    # run's returned value; a failed run raises and takes the error outcome before mapping. Both
-    # carry the ``x-tai42-expression`` schema annotation
-    # (via ``Annotated`` so the attribute default stays the ``None`` literal — the api-gate flags a
-    # ``Field(default=...)`` redeclaration as breaking) so a schema-driven UI auto-renders the jq
-    # editor. The four door jqs read the run's currently parked interactions as ``$parked``.
-    start_expr: Annotated[
-        TemplatedText | None,
-        Field(
-            json_schema_extra={
-                EXPRESSION_ANNOTATION_KEY: expression_annotation(
-                    label="start expression",
-                    blurb="the inbound turn payload the route maps to the started run's kwargs",
-                    variables=[PARKED_VARIABLE_ANNOTATION],
-                    keys=[
-                        ("message", "the inbound message text"),
-                        ("sender", "the sending address"),
-                        ("our_identity", "door=channel: the medium address we are texted at"),
-                        ("channel", "door=channel: the registry channel name"),
-                        ("route", "the name of the conversation route the turn entered through"),
-                        ("thread_id", "the turn's canonical thread id (the thread doors' id)"),
-                        ("person_id", "multichannel only: the linked person's id"),
-                        ("person_addresses", "multichannel only: the person's known addresses"),
-                        ("params", "non-empty entry params, nested under this key"),
-                        ("form", "a structured form submission, present only when the inbound carried one"),
-                        (
-                            "form_tag",
-                            "the caller-set opaque per-send form tag, present only when the submission carried one",
-                        ),
-                        (
-                            "attachments",
-                            "inbound media the participant sent, present only when the inbound carried some",
-                        ),
-                        (
-                            "location",
-                            "a geographic point the participant shared, present only when the inbound carried one",
-                        ),
-                        (
-                            "reply_to",
-                            "the earlier message this one replies to, {message_id, status, text}; present only when "
-                            "the inbound quoted one",
-                        ),
-                        (
-                            "messages",
-                            "overlap deliver=all: the batch carried into this turn, in acceptance order, "
-                            "each {id, text, accepted_at} (+ form/form_tag/attachments/location/reply_to when that "
-                            "message carried them)",
-                        ),
-                        (
-                            "superseded",
-                            "overlap deliver=all: messages dropped in favour of this turn, in the same shape; "
-                            "present only when non-empty",
-                        ),
-                        (
-                            "turn",
-                            "the turn: {id, inbound: {id, kind, source}, subject: {target_kind, target_name, person, "
-                            "thread, locale}, reply_window: {state, closes_at}}; reply_window.state is open (a "
-                            "free-form reply is allowed until closes_at), closed, or none (no window on this channel "
-                            "or address)",
-                        ),
-                        ("event", "an event turn's structured payload {id, kind, payload}; absent on a message turn"),
-                    ],
-                    returns="the JSON object dispatched as the started run's kwargs; null starts nothing",
-                )
-            }
-        ),
-    ] = None
-    reply_expr: Annotated[
-        TemplatedText | None,
-        Field(
-            json_schema_extra={
-                EXPRESSION_ANNOTATION_KEY: expression_annotation(
-                    label="reply expression",
-                    blurb=(
-                        "the started run's result (the SUCCESS shape) the route maps to the participant reply; "
-                        "null when the run asked its caller instead of finishing"
-                    ),
-                    variables=[
-                        (
-                            "turn",
-                            "the turn this reply answers ({id, inbound, subject, reply_window}); reply_window "
-                            "{state, closes_at} is read when the turn starts, or at delivery for a late reply: open "
-                            "until closes_at, closed, or none; null when an out-of-band delivery's originating record "
-                            "has aged out",
-                            {
-                                "id": "m-1",
-                                "inbound": {"id": "i-1", "kind": "message", "source": "chat-line"},
-                                "subject": {
-                                    "target_kind": "agent",
-                                    "target_name": "assistant",
-                                    "person": None,
-                                    "thread": "t-1",
-                                    "locale": None,
-                                },
-                                "reply_window": {"state": "open", "closes_at": "2026-01-02T09:30:00Z"},
-                            },
-                        ),
-                        (
-                            "asks",
-                            "the run's caller-ask entries when it asked instead of finishing (each the full parked "
-                            "entry); an empty list on a plain result",
-                            [{"id": "i-42", "question": "proceed?", "answer_format": "confirm"}],
-                        ),
-                        PARKED_VARIABLE_ANNOTATION,
-                    ],
-                    returns="the reply: null (silent), a string, or a list of answer parts",
-                )
-            }
-        ),
-    ] = None
+    # ``start_expr`` overrides the mixin's generic gloss with this route's own input keys and
+    # ``reply_expr`` maps the run's returned value (see :data:`RouteStartExpr` / :data:`RouteReplyExpr`).
+    # Each is declared through its ``Annotated`` alias so the attribute default stays the ``None``
+    # literal — the api-gate flags a ``Field(default=...)`` redeclaration as breaking.
+    start_expr: RouteStartExpr = None
+    reply_expr: RouteReplyExpr = None
     # The thread's control mode when no per-thread override is set: ``agent`` runs the
     # target turn, ``manual`` suppresses it for an operator to answer.
     initial_mode: ConversationMode = "agent"

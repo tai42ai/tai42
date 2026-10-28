@@ -7,6 +7,6 @@ The ``HookRegister`` request body, the stored ``HookParams`` /
 from __future__ import annotations
 
 from tai42_contract.hooks.manager import HooksManager
-from tai42_contract.hooks.models import HookParams, HookRegister, HookSubject, TopicVerifierBinding
+from tai42_contract.hooks.models import HOOK_DELIVERY_BLURB, HookParams, HookRegister, HookSubject, TopicVerifierBinding
 
-__all__ = ["HookParams", "HookRegister", "HookSubject", "HooksManager", "TopicVerifierBinding"]
+__all__ = ["HOOK_DELIVERY_BLURB", "HookParams", "HookRegister", "HookSubject", "HooksManager", "TopicVerifierBinding"]
