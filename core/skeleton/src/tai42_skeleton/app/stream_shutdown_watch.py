@@ -1,8 +1,9 @@
 """Start the event-stream shutdown watch of a serving loop from an empty context.
 
 Every MCP streaming response is an ``EventSourceResponse``. To end its streams when the
-server shuts down, the response library runs one long-lived watch task per serving
-thread, started by the first response the thread serves and kept until shutdown. A task
+serve exit releases them (:mod:`~tai42_skeleton.app.serve_exit`), the response library runs
+one long-lived watch task per serving thread, started by the first response the thread
+serves and kept until shutdown. A task
 keeps the context it was started in: started by a request, it would keep that request —
 and through its ``scope["app"]`` the serving generation that admitted it — reachable for
 the life of the loop, across every reload. The worker lifespan therefore serves one

@@ -262,6 +262,24 @@ class Epoch:
                 await asyncio.wait([task])
                 self.driving_tasks.discard(task)
 
+    @property
+    def answered(self) -> bool:
+        """Whether no request of this generation is in flight and none of its work drives or waits on a lock."""
+        return self._idle.is_set() and not self.engaged
+
+    async def wait_answered(self) -> None:
+        """Wait until this generation is :attr:`answered`.
+
+        Covers the counted requests, the work driving a gated body and the work waiting on a
+        recorded lock (uncounted while it waits, counted again once it moves); a drain-exempt
+        stream is not counted, so it never holds the wait. Unbounded here, as
+        :meth:`_wait_driving` is: the work's own bounds bound it.
+        """
+        while not self.answered:
+            await self._idle.wait()
+            await self._wait_driving()
+            await self._wait_gate_waiters()
+
     def register_periodic_loop(self, cancel: Callable[[], Awaitable[None]]) -> None:
         """Register a cancel-and-await callback for a periodic loop this generation owns.
 

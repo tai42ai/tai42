@@ -20,6 +20,7 @@ from tai42_kit.utils.runtime.uvicorn_util import parse_and_validate_uvicorn_args
 from tai42_skeleton import asgi
 from tai42_skeleton.app import instance
 from tai42_skeleton.app.boot_rules import SERVE_WORKERS_VAR, require_bus_for_shared_config
+from tai42_skeleton.app.serve_exit import arm_serve_exit
 from tai42_skeleton.cli.worker_supervisor import run_workers
 from tai42_skeleton.config.config_mode import ConfigMode, config_mode
 from tai42_skeleton.connectors.meta_log_redactor import register_connector_log_redaction
@@ -88,7 +89,13 @@ def create_app():
     # outside the accepted literals.
     transport = os.getenv("TAI_TRANSPORT", "http")
     stateless_http = os.getenv("TAI_STATELESS_HTTP") == "1"
-    return asgi.create_app(transport=cast("asgi.Transport", transport), stateless_http=stateless_http)
+    served = asgi.create_app(transport=cast("asgi.Transport", transport), stateless_http=stateless_http)
+
+    # This CLI-owned worker owns its process's signal handling, so it ends its event streams
+    # only once its in-flight replies are written. uvicorn runs this factory inside its signal
+    # capture; the public factory arms nothing, so an embedded host keeps its own.
+    arm_serve_exit()
+    return served
 
 
 def _refuse_stdio_profile_apply() -> None:
@@ -143,9 +150,11 @@ async def run_debug(config_kwargs: dict[str, Any]) -> int:
     the fresh-FastMCP-per-epoch serving surface and a profile apply swaps a fresh epoch in place
     exactly as a served worker does. Only the process shape differs — one uvicorn ``Server`` here
     versus the supervised worker pool. The transport / stateless-http selection travels to
-    ``create_app`` through the env ``run_mcp_app`` stamped before dispatching here.
+    ``create_app`` through the env ``run_mcp_app`` stamped before dispatching here. The server
+    calls the factory itself, inside its signal capture, as every served worker does.
     """
-    config_kwargs["app"] = create_app()
+    config_kwargs["app"] = create_app
+    config_kwargs["factory"] = True
     await uvicorn.Server(uvicorn.Config(**config_kwargs)).serve()
     return 0
 

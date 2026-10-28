@@ -486,7 +486,7 @@ def test_run_mcp_app_debug_path_carries_graceful_shutdown(patch_app_seam, monkey
     assert rc == 0
     # The debug path serves the shim factory app, carrying the setting into its Config.
     assert isinstance(fake_uvicorn.config_kwargs, dict)
-    assert isinstance(fake_uvicorn.config_kwargs["app"], Starlette)
+    assert isinstance(fake_uvicorn.loaded_app, Starlette)
     assert (
         fake_uvicorn.config_kwargs["timeout_graceful_shutdown"] == mcp_app.app_args_settings().timeout_graceful_shutdown
     )

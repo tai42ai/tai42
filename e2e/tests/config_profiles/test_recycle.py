@@ -374,7 +374,7 @@ _SUPERVISED_RECYCLE_NEEDS = (
 )
 
 
-@pytest.mark.timeout(420)
+@pytest.mark.timeout(480)
 @pytest.mark.needs(*_SUPERVISED_RECYCLE_NEEDS)
 async def test_an_env_write_over_mcp_rolls_the_fleet_and_the_writer_recycles_itself_after_the_call(
     recycle_stack: TaiStack, uniq: Callable[[str], str]
