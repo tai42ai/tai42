@@ -4,8 +4,10 @@ A recycled worker replies ``applied`` and then exits cleanly so its supervisor r
 the fresh process loads new store env at boot. The exit is a SIGTERM delivered to the worker's
 process: its already-installed graceful handler runs, so in-flight work finishes before the
 process ends — never a hard kill. For a serve worker that is uvicorn's shutdown, which stops
-accepting and lets in-flight requests send their responses; for a backend worker it is the
-backend's drain, which lets the in-flight job finish and record its result.
+accepting and lets in-flight requests send their responses; the worker ends its event streams,
+the ones MCP replies ride, only once those replies are written
+(:mod:`~tai42_skeleton.app.serve_exit`). For a backend worker it is the backend's drain, which
+lets the in-flight job finish and record its result.
 
 Three callers use it: the recycle handler arms it on the bus's post-reply slot (fired AFTER the
 terminal reply); an env-change door arms it as the writer's own exit after a converged roll

@@ -90,7 +90,9 @@ class AppArgsSettings(TaiBaseSettings):
 
     # uvicorn's graceful-shutdown budget (seconds): on SIGTERM uvicorn force-
     # completes in-flight requests within this window instead of waiting
-    # indefinitely, so the lifespan teardown always runs. A shipped
+    # indefinitely, so the lifespan teardown always runs. A served worker ends its
+    # event streams itself once its in-flight replies are written
+    # (``app/serve_exit.py``); this window is the cap on that wait too. A shipped
     # ``--timeout-graceful-shutdown`` CLI extra-arg overrides this default. Must
     # be positive. The ``tai serve`` launcher reads it once to build the uvicorn
     # config it hands to every worker it spawns or respawns, so only a launcher

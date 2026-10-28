@@ -122,10 +122,12 @@ def manifest(default_routers: str) -> dict[str, Any]:
 
 @dataclass
 class Served:
-    """A running server: the base URL a client dials (the host prefix included)."""
+    """A running server: the base URL a client dials (the host prefix included), the server and its serving task."""
 
     base_url: str
     origin: str
+    server: uvicorn.Server
+    serving: asyncio.Task[None]
 
 
 @asynccontextmanager
@@ -136,11 +138,13 @@ async def served(
     transport: asgi.Transport = "http",
     stateless_http: bool = False,
     prefix: str = "",
+    timeout_graceful_shutdown: int = 1,
 ) -> AsyncIterator[Served]:
     """Serve ``create_app`` for ``manifest_body`` on a loopback port and yield its base URL.
 
     With ``prefix`` the app is mounted in a host application under that path, the host
-    running the platform's lifespan, as the embed documents it.
+    running the platform's lifespan, as the embed documents it. ``timeout_graceful_shutdown``
+    is uvicorn's cap on the graceful stop.
     """
     boot_manifest = Manifest.model_validate(manifest_body)
     # A fresh sub-MCP router per served app: the process router caches sub-apps whose
@@ -172,7 +176,7 @@ async def served(
         port=0,
         lifespan="on",
         log_level="warning",
-        timeout_graceful_shutdown=1,
+        timeout_graceful_shutdown=timeout_graceful_shutdown,
     )
     server = uvicorn.Server(config)
     task = asyncio.create_task(server.serve())
@@ -184,7 +188,7 @@ async def served(
             await asyncio.sleep(0.01)
         port = server.servers[0].sockets[0].getsockname()[1]
         origin = f"http://127.0.0.1:{port}"
-        yield Served(base_url=f"{origin}{prefix}", origin=origin)
+        yield Served(base_url=f"{origin}{prefix}", origin=origin, server=server, serving=task)
     finally:
         server.should_exit = True
         await task

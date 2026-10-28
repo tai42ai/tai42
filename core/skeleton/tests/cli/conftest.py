@@ -187,12 +187,26 @@ def patch_app_seam(monkeypatch: pytest.MonkeyPatch):
     return _install
 
 
+@pytest.fixture(autouse=True)
+def serve_exit_arms(monkeypatch: pytest.MonkeyPatch) -> list[bool]:
+    """Record each arming of the serve exit instead of running it.
+
+    These launch paths run outside a uvicorn server's signal capture, which the arming needs.
+    """
+    arms: list[bool] = []
+    monkeypatch.setattr(mcp_app, "arm_serve_exit", lambda: arms.append(True))
+    return arms
+
+
 # --- create_app: worker lifespan + dispatch -------------------------------
 
 
 class _FakeUvicorn:
+    """Stands in for uvicorn: records the ``Config`` kwargs and, on ``serve``, loads the app as uvicorn does."""
+
     def __init__(self) -> None:
         self.config_kwargs: dict | None = None
+        self.loaded_app: object | None = None
         self.served = False
 
     def Config(self, **kwargs):
@@ -201,9 +215,11 @@ class _FakeUvicorn:
 
     def Server(self, config):
         outer = self
+        _, kwargs = config
 
         class _Server:
             async def serve(self) -> None:
+                outer.loaded_app = kwargs["app"]() if kwargs.get("factory") else kwargs["app"]
                 outer.served = True
 
         return _Server()

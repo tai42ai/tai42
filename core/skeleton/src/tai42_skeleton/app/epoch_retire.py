@@ -58,6 +58,11 @@ def retire_drain_floor_seconds(budget: float) -> float:
 _deferred_retire_tasks: set[asyncio.Task[None]] = set()
 
 
+def deferred_retires() -> frozenset[asyncio.Task[None]]:
+    """The deferred retire tails still running, each draining and then closing its retired generation."""
+    return frozenset(_deferred_retire_tasks)
+
+
 def _drain_budget(deadline: float | None) -> float:
     # ``deadline`` here is a relative duration in SECONDS (the drain budget), not an
     # absolute time — mirrors the kit's ``drain_epoch(epoch, deadline)`` vocabulary.

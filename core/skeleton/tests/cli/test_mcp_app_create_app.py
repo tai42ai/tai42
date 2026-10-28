@@ -303,14 +303,16 @@ async def test_run_debug_routes_through_create_app(patch_app_seam, monkeypatch: 
     rc = await mcp_app.run_debug(config_kwargs)
 
     assert rc == 0
-    served_app = config_kwargs["app"]
+    assert config_kwargs["app"] is mcp_app.create_app
+    assert config_kwargs["factory"] is True
+    served_app = fake_uvicorn.loaded_app
     assert isinstance(served_app, Starlette)
     assert isinstance(served_app.routes[0], Mount)  # the shim's single dispatch mount
     assert fake_uvicorn.served is True
 
 
 async def test_run_debug_serves_create_app_result(patch_app_seam, monkeypatch: pytest.MonkeyPatch) -> None:
-    """run_debug serves exactly what ``create_app`` returns — the delegation seam."""
+    """run_debug serves exactly what ``create_app`` returns, the server calling it — the delegation seam."""
     patch_app_seam(_FakeApp(_FakeInnerApp()))
     fake_uvicorn = _FakeUvicorn()
     monkeypatch.setattr(mcp_app, "uvicorn", fake_uvicorn)
@@ -323,7 +325,7 @@ async def test_run_debug_serves_create_app_result(patch_app_seam, monkeypatch: p
 
     assert rc == 0
     assert calls == [True]
-    assert config_kwargs["app"] is sentinel
+    assert fake_uvicorn.loaded_app is sentinel
     assert fake_uvicorn.served is True
 
 
@@ -356,6 +358,42 @@ def test_wrapper_enables_the_fault_handler(
     mcp_app.create_app()
 
     assert enabled == [{"file": mcp_app.sys.stderr, "all_threads": True}]
+
+
+def test_wrapper_arms_the_serve_exit_once_the_app_is_built(
+    patch_app_seam, root_logger_restored, serve_exit_arms: list[bool], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The served worker ends its event streams only once its in-flight replies are written.
+    monkeypatch.setenv("TAI_TRANSPORT", "http")
+    monkeypatch.delenv("TAI_STATELESS_HTTP", raising=False)
+    patch_app_seam(_FakeApp(_FakeInnerApp()))
+
+    mcp_app.create_app()
+
+    assert serve_exit_arms == [True]
+
+
+def test_wrapper_arms_nothing_when_the_app_build_fails(
+    patch_app_seam, root_logger_restored, serve_exit_arms: list[bool], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("TAI_TRANSPORT", "garbage")
+    patch_app_seam(_FakeApp(_FakeInnerApp()))
+
+    with pytest.raises(ValueError, match="transport must be one of"):
+        mcp_app.create_app()
+
+    assert serve_exit_arms == []
+
+
+async def test_run_debug_arms_the_serve_exit_inside_the_server(
+    patch_app_seam, serve_exit_arms: list[bool], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    patch_app_seam(_FakeApp(_FakeInnerApp()))
+    monkeypatch.setattr(mcp_app, "uvicorn", _FakeUvicorn())
+
+    await mcp_app.run_debug({"host": "127.0.0.1", "port": 8000})
+
+    assert serve_exit_arms == [True]
 
 
 async def test_run_stdio_registers_cli_logging(patch_app_seam) -> None:
