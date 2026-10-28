@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tai42-channel-whatsapp"
-version = "14.0.0"
+version = "14.0.1"
 description = "Meta WhatsApp API channel plugin for the TAI ecosystem — delivers ask questions to a human on WhatsApp and bridges the reply back."
 readme = "README.md"
 requires-python = ">=3.13"
@@ -26,7 +26,7 @@ dependencies = [
     # The pure interface contract — Channel/ChannelDelivery/ChannelDeliveryError
     # and the tai42_app handle the plugin registers through.
     # The contract floor is rewritten by scripts/range_sync.py at release.
-    "tai42-contract>=28.0,<29",
+    "tai42-contract>=28.1,<29",
     # HttpxClient (pooled outbound HTTP), RedisClient (correlation store),
     # TaiBaseSettings + the settings cache registry. [redis] pulls redis-py, whose
     # Lock error types the Flow resolve lock imports directly.
