@@ -54,7 +54,7 @@ jobs:
         # released tag to classify the surface change.
         with:
           fetch-depth: 0
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
           version: "0.11.26"
           enable-cache: true
@@ -177,7 +177,7 @@ jobs:
         # Descriptor releases publish no wheel — their artifact is the tai-plugin.yml
         # at the tag — so the PyPI upload is skipped for them.
         if: steps.resolve.outputs.descriptor != 'true'
-        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
         with:
           password: ${{ secrets.PYPI_API_TOKEN }}
           # A lane re-run after the upload landed (or a tag re-minted for a version
