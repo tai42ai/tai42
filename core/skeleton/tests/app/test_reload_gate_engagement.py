@@ -17,7 +17,11 @@ import logging
 import pytest
 
 from tai42_skeleton.app import epoch_retire as epoch_retire_mod
-from tai42_skeleton.app.admission import admit_session_call, mark_current_request_drain_exempt
+from tai42_skeleton.app.admission import (
+    admit_session_call,
+    mark_current_request_drain_exempt,
+    track_current_stream_replies,
+)
 from tai42_skeleton.app.epoch import build_and_swap_epoch, current_epoch
 from tai42_skeleton.app.reload_gate import reload_gate
 from tai42_skeleton.config.deployment_env import DeploymentOwnership
@@ -29,6 +33,7 @@ from .test_epoch import (  # noqa: F401 - _reset_epoch_state is the autouse fixt
     _serve,
     _served_request,
 )
+from .test_session_call_admission import _reply_event
 
 DRAIN_ERROR = "still in flight after the drain budget"
 
@@ -331,7 +336,7 @@ async def test_a_session_call_driving_a_reload_answers_before_the_close(
     """A reload driven by a call of an SSE session (the call runs in its own task under the
     session stream, which exempted itself from the drain) defers the retire, so the reload
     answers at once; the call is its own request, so the close, which ends the session,
-    waits until the call's task has answered."""
+    waits until the call has answered and its reply is written."""
     _install_boot("boot-app")
     boot = current_epoch()
     log: list[str] = []
@@ -341,7 +346,7 @@ async def test_a_session_call_driving_a_reload_answers_before_the_close(
     answer = asyncio.Event()
 
     async def _session_call() -> None:
-        admit_session_call()
+        admit_session_call(1)
         async with reload_gate.driving():
             start = loop.time()
             await build_and_swap_epoch(
@@ -357,7 +362,10 @@ async def test_a_session_call_driving_a_reload_answers_before_the_close(
 
     async def _session_stream() -> None:
         mark_current_request_drain_exempt()
+        replies = track_current_stream_replies()
+        assert replies is not None
         await asyncio.create_task(_session_call())
+        replies.wrote(_reply_event(1))
 
     with caplog.at_level(logging.ERROR):
         stream = _served_request(boot, _session_stream)
@@ -384,14 +392,17 @@ async def test_a_session_call_driving_a_body_that_does_not_swap_drives_nothing_o
     seen: dict[str, object] = {}
 
     async def _session_call() -> None:
-        admit_session_call()
+        admit_session_call(1)
         async with reload_gate.driving():
             seen["driving"] = len(boot.driving)
 
     async def _session_stream() -> None:
         mark_current_request_drain_exempt()
+        replies = track_current_stream_replies()
+        assert replies is not None
         await asyncio.create_task(_session_call())
         await asyncio.sleep(0)
+        replies.wrote(_reply_event(1))
         seen["after"] = (boot.engaged, boot.in_flight)
         await hold.wait()
 

@@ -72,7 +72,7 @@ waiter the same way.
 
 A call of an SSE session acts for its own admission record, not the session stream's
 (:func:`~tai42_skeleton.app.admission.admit_session_call`), so it is recorded exactly as a
-request is and its record finishes once its reply is handed to the transport.
+request is and its record finishes once its session stream has written its reply.
 """
 
 from __future__ import annotations

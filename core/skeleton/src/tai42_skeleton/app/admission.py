@@ -6,8 +6,8 @@ travels with the request (on its ASGI scope and in the context), so a long-lived
 exempt itself from the retire drain and the reload gate can record the request that drives
 or waits on it (:func:`current_request_admission`). A call of an MCP session served on a
 long-lived stream (the SSE transport, where every call answers on the session's stream) is
-admitted as a request of its own (:func:`admit_session_call`), counted until its reply is
-handed to the transport.
+admitted as a request of its own (:func:`admit_session_call`), counted until its task has
+ended and the stream has written its reply or ended (:func:`track_current_stream_replies`).
 """
 
 from __future__ import annotations
@@ -18,6 +18,8 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from fastmcp.server.dependencies import get_http_request
+
+from tai42_skeleton.app.stream_replies import StreamReplies
 
 if TYPE_CHECKING:
     from starlette.types import ASGIApp, Receive, Scope, Send
@@ -40,7 +42,8 @@ class RequestAdmission:
     not counted (it cannot move until the lock is released); it is counted again when the
     wait ends. ``finished`` is set when the
     request ends. ``session_call`` marks the record of one call of a session served on a
-    long-lived stream (:func:`admit_session_call`).
+    long-lived stream (:func:`admit_session_call`). ``replies`` is set on the record of a
+    long-lived stream that carries its session's replies (:func:`track_current_stream_replies`).
     """
 
     epoch: Epoch
@@ -50,6 +53,7 @@ class RequestAdmission:
     _counted: bool = True
     _waits: int = 0
     session_call: bool = False
+    replies: StreamReplies | None = None
 
     def finish(self) -> None:
         """Record that the request ended: it drives nothing any more and its slot is released."""
@@ -133,30 +137,64 @@ def current_request_admission() -> RequestAdmission | None:
     return state
 
 
-def admit_session_call() -> RequestAdmission | None:
+def admit_session_call(request_id: object | None) -> RequestAdmission | None:
     """Admit the MCP call running in the current task as a request of its own when its session runs on a stream.
 
     On the SSE transport a session runs inside its ``GET`` stream, which is exempt from the
     retire drain, and every call of the session runs in its own task under that stream's
     record while its message ``POST`` has already been answered. Such a call is admitted on
     the stream's generation with a record of its own, set as the current task's record, and
-    counted until the task ends — after the MCP SDK has handed the call's reply to the
-    transport — so a retire drains it and waits for it when it drives a gated body, before
-    the generation's close ends the session. Returns the call's record, or ``None`` (nothing
-    admitted) when the current code runs under no live long-lived stream: a streamable-HTTP
-    call is counted by its own ``POST``.
+    counted until both the task has ended and the stream has written the reply to
+    ``request_id`` (the call's JSON-RPC request id) or ended — so a retire drains it and waits
+    for it when it drives a gated body, before the generation's close ends the session, and a
+    serve worker's stop ends the stream only after the reply is written. Returns the call's
+    record, or ``None`` (nothing admitted) when the current code runs under no live long-lived
+    stream: a streamable-HTTP call is counted by its own ``POST``. Raises when the stream does
+    not track the replies it writes, or the call has no request id (``None``): its reply could
+    not be told apart, so the call could not be counted until it is answered.
     """
     stream = _admission.get()
     if stream is None or not stream.long_lived or stream.finished.is_set():
         return None
+    if stream.replies is None:
+        raise RuntimeError("an MCP session call runs on a long-lived stream that does not track the replies it writes")
+    if request_id is None:
+        raise RuntimeError("an MCP session call on a long-lived stream runs without a JSON-RPC request id")
     task = asyncio.current_task()
     if task is None:
         raise RuntimeError("an MCP session call is admitted from inside its own task")
     stream.epoch.admit()
     call = RequestAdmission(epoch=stream.epoch, session_call=True)
     _admission.set(call)
-    task.add_done_callback(lambda _task: call.finish())
+    # The call ends once its task has ended and its reply is written (or its stream ended).
+    outstanding = 2
+
+    def settle() -> None:
+        nonlocal outstanding
+        outstanding -= 1
+        if outstanding == 0:
+            call.finish()
+
+    stream.replies.expect(request_id, settle)
+    task.add_done_callback(lambda _task: settle())
     return call
+
+
+def track_current_stream_replies() -> StreamReplies | None:
+    """Track the replies the CURRENT long-lived stream writes for the calls of the session it carries.
+
+    Called by a stream that has exempted itself from the retire drain
+    (:func:`mark_current_request_drain_exempt`) and carries its session's replies (the SSE
+    transport's session stream). Each call admitted under it (:func:`admit_session_call`)
+    stays counted until the returned tracker has seen its reply written; the stream reports
+    what it writes and its own end to the tracker. Returns ``None`` off a served request, where
+    no call is admitted either.
+    """
+    state = _admission.get()
+    if state is None or not state.long_lived or state.finished.is_set():
+        return None
+    state.replies = StreamReplies()
+    return state.replies
 
 
 class EpochAdmissionApp:

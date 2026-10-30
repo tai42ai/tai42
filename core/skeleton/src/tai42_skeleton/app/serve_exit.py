@@ -7,7 +7,9 @@ uvicorn's for every signal uvicorn captures. uvicorn's handler starts the stop (
 connection, idle connections closed); on the first signal the worker also starts, on the
 serving loop, the drain that waits until the serving work has answered and then sets
 ``AppStatus.should_exit``, the library's flag that ends the long-lived streams, so uvicorn
-reaches the lifespan shutdown. uvicorn's ``timeout_graceful_shutdown`` caps the whole stop.
+reaches the lifespan shutdown. A call counts as answered once its reply is written: a
+streamable-HTTP call once its ``POST`` response is sent, an SSE call once its session stream
+has written the reply. uvicorn's ``timeout_graceful_shutdown`` caps the whole stop.
 """
 
 from __future__ import annotations

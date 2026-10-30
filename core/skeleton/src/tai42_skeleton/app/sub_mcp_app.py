@@ -509,12 +509,15 @@ class SubMcpAppRouter:
         # registered no-op.
         #
         # The sub-app's transport stream is exempt from the retire drain inside its own
-        # stack too, matched on the stream path the sub-app serves.
-        def sub_middleware(stream_path: str) -> list[Middleware]:
+        # stack too, matched on the stream path the sub-app serves; an SSE stream carries
+        # its session's replies.
+        def sub_middleware(stream_path: str, *, carries_replies: bool) -> list[Middleware]:
             return [
                 *([Middleware(AuditLogMiddleware)] if audit_log_settings().enable else []),
                 Middleware(BodyLimitMiddleware),
-                Middleware(TransportStreamDrainExemptMiddleware, stream_path=stream_path),
+                Middleware(
+                    TransportStreamDrainExemptMiddleware, stream_path=stream_path, carries_replies=carries_replies
+                ),
             ]
 
         # The dispatcher hands every sub-app a scope relative to its ``/app/{slug}`` mount
@@ -527,7 +530,10 @@ class SubMcpAppRouter:
             sse_path = f"/{SSE_STREAM_SEGMENT}"
             message_path = f"/{SSE_MESSAGES_SEGMENT}/"
             sub_app = create_sse_app(
-                mcp, message_path=message_path, sse_path=sse_path, middleware=sub_middleware(sse_path)
+                mcp,
+                message_path=message_path,
+                sse_path=sse_path,
+                middleware=sub_middleware(sse_path, carries_replies=True),
             )
             # The mount's sessions end with the lifespan that owns it (its generation's close).
             bind_sse_session_ender(sub_app, message_path)
@@ -535,7 +541,9 @@ class SubMcpAppRouter:
             # The streamable-HTTP endpoint lives at the sub-app ROOT (an ``/app/{slug}``
             # request is dispatched as ``/``), and runs in the stateless mode the worker booted
             # with, so a multi-worker deployment serves it like the main endpoint.
-            sub_app = mcp.http_app(path="/", middleware=sub_middleware("/"), stateless_http=boot_stateless_http())
+            sub_app = mcp.http_app(
+                path="/", middleware=sub_middleware("/", carries_replies=False), stateless_http=boot_stateless_http()
+            )
 
         app_lifespan = SubAppLifespan(sub_app)
         # start() enters the lifespan in its dedicated task and blocks until it is
