@@ -61,7 +61,7 @@ pytestmark = [
         HarnessSettings().is_real("llm")
         or HarnessSettings().is_real("twilio")
         or HarnessSettings().is_real("whatsapp"),
-        reason="scripted-LLM + channel stubs are the 'llm'/'twilio'/'whatsapp' mock leg; real on creds host",
+        reason="scripted-LLM + channel stubs are the 'llm'/'twilio'/'whatsapp' mock leg; real under TAI_E2E_REAL",
     ),
 ]
 

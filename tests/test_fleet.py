@@ -46,7 +46,7 @@ def _plugin_dirs_with(predicate) -> list[Path]:
 MEMBER_DIRS = _member_dirs()
 MEMBER_PATHS = [d.relative_to(ROOT).as_posix() for d in MEMBER_DIRS]
 
-# The two disk-derived fleet sets (design point 12): a plugins/* dir with a
+# The two disk-derived fleet sets: a plugins/* dir with a
 # pyproject.toml is a PACKAGED workspace member; a plugins/* dir carrying a
 # tai-plugin.yml but NO pyproject.toml is a DESCRIPTOR-only component.
 PACKAGED_DIRS = _plugin_dirs_with(lambda d: (d / "pyproject.toml").is_file())

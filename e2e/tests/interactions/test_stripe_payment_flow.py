@@ -39,13 +39,13 @@ from tai42_e2e.waiting import wait_for_async
 # Every delivery here is HMAC-signed locally and answered by the in-process FakeStripe stub
 # (session mint, complete_payment, list-cursor introspection), so this is the stripe MOCK leg.
 # A real stripe selection points the tools at the live Stripe host and the webhook arrives from
-# Stripe's servers; that real leg is exercised on the dedicated e2e creds host, not
+# Stripe's servers; that real leg is exercised under TAI_E2E_REAL, not
 # in CI, so the stub-bound module steps aside for it. Inert in the default mock run —
 # is_real("stripe") is False, so collection is byte-for-byte today's.
 pytestmark = [
     pytest.mark.skipif(
         HarnessSettings().is_real("stripe"),
-        reason="locally-signed FakeStripe flow is the stripe mock leg; the real leg runs on the creds host",
+        reason="locally-signed FakeStripe flow is the stripe mock leg; the real leg runs under TAI_E2E_REAL",
     ),
     pytest.mark.needs(
         "kind:identity",
@@ -218,7 +218,7 @@ async def _get_callback(url: str) -> httpx.Response:
         return await client.get(url)
 
 
-# ---- SSE frame helpers (item 3: exactly-one terminal event) --------------
+# ---- SSE frame helpers (exactly-one terminal event) ----------------------
 
 
 def _parse_frame(frame: str) -> tuple[str | None, dict[str, Any] | None]:

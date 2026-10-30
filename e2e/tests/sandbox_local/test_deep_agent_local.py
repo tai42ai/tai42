@@ -26,12 +26,12 @@ from tai42_e2e.settings import HarnessSettings
 from tai42_e2e.stack import TaiStack
 
 # The stack runs no backend worker; the scripted ``llm_stub`` round-trips are the LLM MOCK
-# leg, so the module steps aside when the 'llm' seam is real (that leg runs on the creds host).
+# leg, so the module steps aside when the 'llm' seam is real (that leg runs under TAI_E2E_REAL).
 pytestmark = [
     pytest.mark.backendless,
     pytest.mark.skipif(
         HarnessSettings().is_real("llm"),
-        reason="scripted llm_stub is the 'llm' mock leg; the real leg runs on the e2e creds host",
+        reason="scripted llm_stub is the 'llm' mock leg; the real leg runs under TAI_E2E_REAL",
     ),
     pytest.mark.needs("kind:sandbox:local", "helper:llm", "setting:agent:langchain_deep_agent"),
 ]

@@ -5,7 +5,7 @@ tests prove the other half: with a seam named on ``TAI_E2E_REAL`` (and its opera
 env present), the manifest builder / storage variant renders the REAL branch — the
 mock stub coordinates gone, the live-vendor knobs in — and with the seam UNnamed the
 render is byte-for-byte the mock default. No live creds and no booted stack: the real
-leg is READY, not run (real runs only on the e2e host with the filled creds file).
+leg is READY, not run (it runs only where ``TAI_E2E_REAL`` names the seam and its credentials are exported).
 """
 
 from __future__ import annotations

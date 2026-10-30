@@ -1058,7 +1058,7 @@ def sandbox_local_claude_stack(
     infra: Infra, tmp_path_factory: pytest.TempPathFactory, llm_stub: LlmStub
 ) -> Iterator[TaiStack]:
     """The ``sandbox-local`` provider plus the ``claude_code`` entry — the direct-mode claude leg,
-    which runs its one real turn only on the creds host (gated on ``ANTHROPIC_API_KEY``)."""
+    which runs its one real turn only under TAI_E2E_REAL (gated on ``ANTHROPIC_API_KEY``)."""
     resource_kwargs = {"llm_base_url": llm_stub.base_url}
     yield from _boot(
         infra,

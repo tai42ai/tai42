@@ -7,7 +7,7 @@ key, so the deep agent's ONE model turn runs SERVER-side through ``get_llm_async
 Anthropic. The MODEL credential NEVER enters the session (only service creds do) — no
 ``claude-agent-sdk``, no in-session model key. Asserts a terminal answer lands.
 
-SKIPS without the key — expected off the creds host. The loud-fail selection wiring names a
+SKIPS unless the ``claude_agent`` seam is selected on ``TAI_E2E_REAL``. The loud-fail selection wiring names a
 missing ``ANTHROPIC_API_KEY`` if the seam is selected without it (``assert_real_selection_ready``).
 """
 

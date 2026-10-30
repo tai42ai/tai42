@@ -238,7 +238,7 @@ def test_refuse_key_material_names_offenders_and_the_rotation_path() -> None:
     message = str(exc.value)
     assert "CONNECTORS_KEK" in message
     assert "OK_KEY" not in message
-    # Names the rotation path, per the plan's "names the rotation path" refusal rule.
+    # The refusal points at the key-rotation path to use instead of an env write.
     assert "rotat" in message.lower()
 
 

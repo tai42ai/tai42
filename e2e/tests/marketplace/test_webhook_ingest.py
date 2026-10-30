@@ -57,7 +57,7 @@ pytestmark = [
     # TAI_E2E_REAL is empty (and the module is opt-in via TAI_E2E_MARKETPLACE=1 regardless).
     pytest.mark.skipif(
         HarnessSettings().is_real("marketplace-github"),
-        reason="FixturePackageIndex github ingest is the marketplace-github mock leg; real on creds host",
+        reason="FixturePackageIndex github ingest is the marketplace-github mock leg; real under TAI_E2E_REAL",
     ),
     pytest.mark.needs("helper:registry", "helper:package-index", "helper:github", "no-stack"),
 ]

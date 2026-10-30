@@ -8,7 +8,7 @@ SDK) instead of the scripted stub — a real engine, NO docker. One trivial prom
 real ``MessageFinal`` lands.
 
 Without the key this SKIPS (the inverse gate), which is the expected local/CI outcome; it runs
-only on the creds host. API-KEY MODE ONLY for the smoke — the OAuth mode is deterministic-suite
+only under ``TAI_E2E_REAL=claude_agent``. API-KEY MODE ONLY for the smoke — the OAuth mode is deterministic-suite
 only (no live-subscription smoke).
 """
 
@@ -22,7 +22,7 @@ from tai42_e2e.stack import TaiStack
 pytestmark = [
     pytest.mark.skipif(
         not HarnessSettings().is_real("claude_agent"),
-        reason="the real claude-agent-sdk smoke needs ANTHROPIC_API_KEY (TAI_E2E_REAL=claude_agent); creds host only",
+        reason="the real claude-agent-sdk smoke needs ANTHROPIC_API_KEY (TAI_E2E_REAL=claude_agent)",
     ),
     pytest.mark.needs(
         "setting:real-credentials",

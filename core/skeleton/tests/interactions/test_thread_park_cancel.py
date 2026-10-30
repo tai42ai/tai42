@@ -1,14 +1,14 @@
-"""The thread→interaction reverse index and its cascade cancel — Phase 1 of the
-"parked-ask orphaned by thread deletion" fix.
+"""The thread→interaction reverse index and its cascade cancel.
 
 An async ``ask`` park is stored keyed by interaction id alone, so a conversation
-thread delete had no way to reach it and left it orphaned: the expiry reaper later
-fired a continuation into a deleted thread (a delivery retry storm) and the channel
-correlation stayed muted until the ~24h deadline. This suite proves the reverse index
-that closes that gap: a park bound to a thread joins ``thread-parks:{thread_id}``, the
-member is dropped wherever the interaction leaves pending (answer / prune), and the whole-run
-kill's thread reach reads the reverse-index snapshot (``thread_park_members``) and reconciles it
-(``reconcile_thread_park_members``) as it routes each member through the kill seam.
+thread delete reaches it only through a reverse index; without one the park would
+outlive its thread, the expiry reaper would fire a continuation into a deleted thread
+(a delivery retry storm) and the channel correlation would stay muted until the ~24h
+deadline. This suite proves that reverse index: a park bound to a thread joins
+``thread-parks:{thread_id}``, the member is dropped wherever the interaction leaves pending
+(answer / prune), and the whole-run kill's thread reach reads the reverse-index snapshot
+(``thread_park_members``) and reconciles it (``reconcile_thread_park_members``) as it routes
+each member through the kill seam.
 """
 
 from __future__ import annotations

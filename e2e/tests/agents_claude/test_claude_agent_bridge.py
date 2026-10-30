@@ -15,7 +15,7 @@ The reachable, engine-agnostic legs over the identity-less ephemeral doors:
   adapter answers a SYNC ask itself and parks an ASYNC ask through the resume continuation
   rather than leaning on the MCP edge. This keeps the ask design's justification ENFORCED.
 
-The conversation-bridge ask legs the plan also names — an adapter-answered SYNC ask, an ASYNC
+The conversation-bridge ask legs — an adapter-answered SYNC ask, an ASYNC
 PARK + cross-door resume, a FIRST-TURN park — require the identity-bound conversation-bridge
 door (a trusted in-process ``thread_id`` + a bound execution identity + the resume store). That
 door is not wired on ``build_claude_agent_stack``; those legs are covered in the plugin's own

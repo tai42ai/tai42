@@ -36,7 +36,7 @@ from ._bridge_support import (
 # flow, so this module is the mock leg for the 'twilio', 'whatsapp' AND 'llm' seams
 # (build_bridge_stack wires the LLM env too, so TAI_E2E_REAL=llm also sends the bridge LLM to
 # the live provider). Any of those selections real breaks the stub scripting, so the module
-# steps aside; the real legs run on the dedicated e2e creds host, not in CI. Inert
+# steps aside; the real legs run under TAI_E2E_REAL, not in CI. Inert
 # in the default mock run — every is_real check is False, so collection is byte-for-byte today's.
 pytestmark = [
     pytest.mark.needs(
@@ -46,7 +46,7 @@ pytestmark = [
         HarnessSettings().is_real("twilio")
         or HarnessSettings().is_real("whatsapp")
         or HarnessSettings().is_real("llm"),
-        reason="channel stubs + scripted-LLM are the 'twilio'/'whatsapp'/'llm' mock leg; real on creds host",
+        reason="channel stubs + scripted-LLM are the 'twilio'/'whatsapp'/'llm' mock leg; real under TAI_E2E_REAL",
     ),
 ]
 

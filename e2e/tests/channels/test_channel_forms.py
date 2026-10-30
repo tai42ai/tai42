@@ -40,10 +40,10 @@ pytestmark = [
     pytest.mark.backendless,
     # Form delivery over telegram/slack rides their recording stub; under a real selection of
     # either the plugin talks to the live vendor and these captures never land. The real legs
-    # run on the dedicated creds host. Inert on the all-mock default (both checks False).
+    # run under TAI_E2E_REAL. Inert on the all-mock default (both checks False).
     pytest.mark.skipif(
         HarnessSettings().is_real("telegram") or HarnessSettings().is_real("slack"),
-        reason="form delivery over telegram/slack is a stub-capture leg; the real legs run on the creds host",
+        reason="form delivery over telegram/slack is a stub-capture leg; the real legs run under TAI_E2E_REAL",
     ),
 ]
 
@@ -1151,4 +1151,4 @@ async def test_notify_form_over_whatsapp_live_leg_skips_without_creds(uniq: Call
 
     if not (os.environ.get("CHANNEL_WHATSAPP_ACCESS_TOKEN") and os.environ.get("CHANNEL_WHATSAPP_PHONE_NUMBER_ID")):
         pytest.skip("whatsapp form-notification live leg needs CHANNEL_WHATSAPP_ACCESS_TOKEN + _PHONE_NUMBER_ID")
-    raise AssertionError("whatsapp live form-notification leg is unimplemented on the creds host")
+    raise AssertionError("whatsapp live form-notification leg has no implementation")

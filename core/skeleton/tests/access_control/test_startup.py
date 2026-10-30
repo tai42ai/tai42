@@ -347,7 +347,7 @@ async def test_check_always_public_routes_ignores_routes_outside_the_surface(mon
     await check_always_public_routes()  # no raise: the route is not on the pre-auth surface
 
 
-# -- SPA-shell public fallback boot audit (H3/H4/H7) -------------------------
+# -- SPA-shell public fallback boot audit ------------------------------------
 
 
 def _bind_spa_check(
@@ -373,7 +373,7 @@ def _bind_spa_check(
 
 
 async def test_spa_check_fails_on_unacknowledged_public_declaration(monkeypatch: pytest.MonkeyPatch) -> None:
-    # An authed=False non-/api GET route not on the allowlist HALTS boot (H3): a boot-log
+    # An authed=False non-/api GET route not on the allowlist HALTS boot: a boot-log
     # flag is not a control — the reviewer must consciously acknowledge it.
     _bind_spa_check(monkeypatch, [_meta("/dashboard", ("GET",), False)], derived={"/dashboard"})
     with pytest.raises(RuntimeError, match="/dashboard"):
@@ -396,7 +396,7 @@ async def test_spa_check_fails_when_the_shell_tier_would_serve_a_control_plane_p
 
 async def test_spa_check_passes_acknowledged_and_logs_surface(monkeypatch: pytest.MonkeyPatch, caplog) -> None:
     # Acknowledged public-by-declaration routes pass; the derived reserved set and the
-    # acknowledged routes are both printed (H7) so the surface is reviewable at boot.
+    # acknowledged routes are both printed so the surface is reviewable at boot.
     _bind_spa_check(
         monkeypatch,
         [_meta("/health", ("GET",), False), _meta("/ready", ("GET",), False)],

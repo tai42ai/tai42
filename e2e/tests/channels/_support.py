@@ -153,8 +153,8 @@ class ChannelCase:
     allowlist_env: str = ""
     correlation_prefix: str = ""
     secret_env: str = ""
-    # Every medium's inbound door answers one constant deny for a bad/missing
-    # signature (the plan's fail-closed anchor).
+    # Every medium's inbound door fails closed with one constant deny for a
+    # bad/missing signature.
     deny_status: int = 401
 
     def __init__(self, stack: TaiStack, stub: object) -> None:

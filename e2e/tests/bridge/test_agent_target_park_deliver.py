@@ -52,7 +52,7 @@ from ._bridge_support import BridgeHarness
 
 # The stack runs no backend worker (every moving part of this leg is in-process), so the module
 # is backendless: under a non-default backend variant it would re-run identical work. The scripted
-# llm_stub is the LLM MOCK leg — the real-provider leg runs on the e2e creds host.
+# llm_stub is the LLM MOCK leg — the real-provider leg runs under TAI_E2E_REAL.
 pytestmark = [
     pytest.mark.needs(
         "kind:channels:web",
@@ -70,7 +70,7 @@ pytestmark = [
     pytest.mark.backendless,
     pytest.mark.skipif(
         HarnessSettings().is_real("llm"),
-        reason="scripted llm_stub is the 'llm' mock leg; the real leg runs on the e2e creds host",
+        reason="scripted llm_stub is the 'llm' mock leg; the real leg runs under TAI_E2E_REAL",
     ),
 ]
 

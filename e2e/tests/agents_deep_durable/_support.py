@@ -35,7 +35,7 @@ DETERMINISTIC_MARKS = [
     pytest.mark.backendless,
     pytest.mark.skipif(
         HarnessSettings().is_real("claude_agent"),
-        reason="the scripted llm_stub is the mock leg; the durable stack's real LLM turn runs on the creds host",
+        reason="the scripted llm_stub is the mock leg; the durable stack's real LLM turn runs under TAI_E2E_REAL",
     ),
 ]
 

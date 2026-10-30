@@ -634,7 +634,7 @@ async def test_a_profile_whose_build_fails_applied_as_a_backend_job_persists_not
 @pytest.mark.timeout(480)
 @pytest.mark.skipif(
     HarnessSettings().is_real("llm"),
-    reason="scripted llm_stub is the 'llm' mock leg; the real leg runs on the e2e creds host",
+    reason="scripted llm_stub is the 'llm' mock leg; the real leg runs under TAI_E2E_REAL",
 )
 @pytest.mark.needs(*_SUPERVISED_RECYCLE_NEEDS, "helper:llm", "setting:agent:tools_agent", "kind:tool_runs")
 async def test_an_env_write_by_an_agent_rolls_the_fleet_and_the_writer_recycles_itself_after_the_run(

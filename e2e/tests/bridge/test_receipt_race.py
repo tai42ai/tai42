@@ -54,7 +54,7 @@ pytestmark = [
     ),
     pytest.mark.skipif(
         HarnessSettings().is_real("twilio") or HarnessSettings().is_real("llm"),
-        reason="FakeTwilio + scripted-LLM is the 'twilio'/'llm' mock leg; real legs on the creds host",
+        reason="FakeTwilio + scripted-LLM is the 'twilio'/'llm' mock leg; real legs under TAI_E2E_REAL",
     ),
 ]
 

@@ -219,7 +219,7 @@ async def test_spa_deep_link_falls_back_to_index_with_csp(studio_env):
     assert resp.headers["content-type"] == "text/html; charset=utf-8"
     # The shell must never be pinned by a stale copy (dead asset hashes / desynced nonce).
     assert resp.headers["cache-control"] == "no-store, must-revalidate"
-    # ``nosniff`` rides the shell so the browser honors the declared HTML type (H6).
+    # ``nosniff`` rides the shell so the browser honors the declared HTML type.
     assert resp.headers["x-content-type-options"] == "nosniff"
     csp = resp.headers["content-security-policy"]
     assert "frame-ancestors 'none'" in csp
@@ -426,7 +426,7 @@ async def test_oauth_static_html_carries_security_headers(studio_env):
     assert "'wasm-unsafe-eval'" in csp
 
 
-# -- SPA realpath containment (H2) -------------------------------------------
+# -- SPA realpath containment ------------------------------------------------
 
 
 async def test_spa_traversal_escaping_root_never_serves_file(studio_env, tmp_path):

@@ -41,7 +41,7 @@ pytestmark = [
     ),
     pytest.mark.skipif(
         HarnessSettings().is_real("twilio"),
-        reason="FakeTwilio is the 'twilio' mock leg; the real leg runs on the creds host",
+        reason="FakeTwilio is the 'twilio' mock leg; the real leg runs under TAI_E2E_REAL",
     ),
 ]
 

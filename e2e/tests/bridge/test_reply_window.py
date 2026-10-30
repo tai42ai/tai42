@@ -50,7 +50,7 @@ pytestmark = [
         HarnessSettings().is_real("whatsapp")
         or HarnessSettings().is_real("twilio")
         or HarnessSettings().is_real("llm"),
-        reason="FakeWhatsApp + FakeTwilio + scripted-LLM is the mock leg; real legs on the creds host",
+        reason="FakeWhatsApp + FakeTwilio + scripted-LLM is the mock leg; real legs under TAI_E2E_REAL",
     ),
 ]
 

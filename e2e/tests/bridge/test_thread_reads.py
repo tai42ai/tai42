@@ -43,17 +43,17 @@ from ._bridge_support import (
 
 # Every leg scripts the LLM stub and asserts the scripted answer back, so the whole module
 # is the 'llm' mock leg; the twilio-driven ones additionally need FakeTwilio's signed
-# inbound. The real legs run on the dedicated creds host, not in CI.
+# inbound. The real legs run under TAI_E2E_REAL, not in CI.
 pytestmark = [
     pytest.mark.needs("kind:identity", "setting:conversations", "setting:seeded-access-control"),
     pytest.mark.skipif(
         HarnessSettings().is_real("llm"),
-        reason="scripted-LLM is the 'llm' mock leg; the real leg runs on the creds host",
+        reason="scripted-LLM is the 'llm' mock leg; the real leg runs under TAI_E2E_REAL",
     ),
 ]
 MOCK_TWILIO_ONLY = pytest.mark.skipif(
     HarnessSettings().is_real("twilio"),
-    reason="FakeTwilio inbound is the 'twilio' mock leg; the real leg runs on the creds host",
+    reason="FakeTwilio inbound is the 'twilio' mock leg; the real leg runs under TAI_E2E_REAL",
 )
 
 # An https callback URL with nothing behind it. Every api-door turn here finishes inside its

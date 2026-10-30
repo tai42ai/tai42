@@ -39,7 +39,7 @@ pytestmark = [
     ),
     pytest.mark.skipif(
         HarnessSettings().is_real("llm"),
-        reason="scripted-LLM is the 'llm' mock leg; the real leg runs on the creds host",
+        reason="scripted-LLM is the 'llm' mock leg; the real leg runs under TAI_E2E_REAL",
     ),
 ]
 

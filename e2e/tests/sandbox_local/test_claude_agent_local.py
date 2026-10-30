@@ -8,7 +8,7 @@ The materialize + ``exec_start`` env/cwd paths are all built from
 so this leg exercises the workspace-relative resolution and would FAIL under the old
 hardcoded ``/workspace`` env — proving the adapter is genuinely provider-agnostic.
 
-GATED on the creds host: it needs the operator-installed SDK wheel + a live model
+GATED on ``TAI_E2E_REAL=claude_agent``: it needs the operator-installed SDK wheel + a live model
 credential (the single ``.env`` ``ANTHROPIC_API_KEY`` mapped onto ``TAI_AGENTS_CLAUDE_API_KEY``
 by the stack builder). It SKIPS by default and runs only under ``TAI_E2E_REAL=claude_agent``;
 an absent runtime on the gated host surfaces LOUDLY, never a silent skip past the gate. This
@@ -26,7 +26,7 @@ from tai42_e2e.settings import HarnessSettings
 from tai42_e2e.stack import TaiStack
 
 # Direct-mode claude_code needs the operator-installed claude-agent-sdk wheel + a live model
-# credential on the host, so this leg runs ONLY on the creds host (metered API-key mode).
+# credential on the host, so this leg runs ONLY under TAI_E2E_REAL=claude_agent (metered API-key mode).
 pytestmark = [
     pytest.mark.backendless,
     pytest.mark.skipif(

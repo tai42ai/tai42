@@ -63,7 +63,7 @@ pytestmark = [
     ),
     pytest.mark.skipif(
         HarnessSettings().is_real("twilio") or HarnessSettings().is_real("whatsapp"),
-        reason="FakeTwilio + FakeWhatsApp are the 'twilio'/'whatsapp' mock leg; real on the creds host",
+        reason="FakeTwilio + FakeWhatsApp are the 'twilio'/'whatsapp' mock leg; real under TAI_E2E_REAL",
     ),
 ]
 

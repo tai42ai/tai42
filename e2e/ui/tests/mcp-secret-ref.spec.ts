@@ -14,7 +14,7 @@
  * session-generated key, decline a picked key, and the per-key split of a two-secret
  * server), the browser-level counterpart of the unit proofs in `mcp-servers.test.tsx`.
  *
- * Real-UX notes (verified against tai-studio source, not the plan's wording):
+ * Real-UX notes (how the studio UI behaves, read from its source):
  *  - The entry is seeded via the API (`POST /api/mcp-config`) rather than authored
  *    through the schema-driven form: the focus is the SecretRefField + save-time
  *    sweep, not driving the nested transport/record form. `env` is launcher-only, so

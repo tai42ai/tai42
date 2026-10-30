@@ -23,7 +23,7 @@ pytestmark = [
     pytest.mark.needs("kind:identity", "kind:channels:slack", "helper:slack"),
     pytest.mark.skipif(
         HarnessSettings().is_real("slack"),
-        reason="the reaction banner leg drives the Slack stub's views.update; the real leg runs on the creds host",
+        reason="the reaction banner leg drives the Slack stub's views.update; the real leg runs under TAI_E2E_REAL",
     ),
 ]
 

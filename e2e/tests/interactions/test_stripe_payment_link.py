@@ -24,13 +24,13 @@ from tai42_e2e.stripe_stub import FakeStripe
 
 # This asserts against the in-process FakeStripe stub (session mint + money metadata), so it
 # is the stripe MOCK leg. A real stripe selection points the tool at the live Stripe host; the
-# real leg is exercised on the dedicated e2e creds host, not in CI, so the
+# real leg is exercised under TAI_E2E_REAL, not in CI, so the
 # stub-bound module steps aside for it. Inert in the default mock run — is_real("stripe") is
 # False, so collection is byte-for-byte today's.
 pytestmark = [
     pytest.mark.skipif(
         HarnessSettings().is_real("stripe"),
-        reason="in-process FakeStripe mint is the stripe mock leg; the real leg runs on the creds host",
+        reason="in-process FakeStripe mint is the stripe mock leg; the real leg runs under TAI_E2E_REAL",
     ),
     pytest.mark.needs(
         "kind:identity",

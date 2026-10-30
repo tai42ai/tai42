@@ -586,7 +586,7 @@ async def test_a_method_the_route_does_not_serve_falls_to_resolution():
     assert spy.calls == ["/api/auth/me"]
 
 
-# -- SPA-shell public fallback: H4 terminal deny, public deep link, H5 walk ---
+# -- SPA-shell public fallback: terminal deny, public deep link, route walk ---
 
 
 def _real_guard(monkeypatch, pg: FakeAccessControlPg, settings: AccessControlSettings | None = None):
@@ -655,8 +655,8 @@ async def test_unregistered_post_terminal_denies(monkeypatch, caplog):
     assert _one_reject(caplog).group("reason") == "route-unconfigured"
 
 
-async def test_h4_terminal_deny_unmatched_control_plane(monkeypatch, streamable_http_mounted):
-    # H4: an UNMATCHED path under a control-plane prefix (``/api`` and the mounted
+async def test_terminal_deny_unmatched_control_plane(monkeypatch, streamable_http_mounted):
+    # An UNMATCHED path under a control-plane prefix (``/api`` and the mounted
     # streamable-http transport) terminal-denies (JSON 401/403), NEVER the shell.
     mw = _real_guard(monkeypatch, FakeAccessControlPg())
     for path in ("/api/does-not-exist", "/mcp/does-not-exist"):
@@ -672,8 +672,8 @@ async def test_websocket_deeplink_never_shell_public(monkeypatch):
     assert sent == [{"type": "websocket.close", "code": 1008}]
 
 
-async def test_h5_unauthenticated_route_walk(monkeypatch, bound_app):
-    # H5 (MUST): walk EVERY registered route + a hostile-path corpus with NO credentials.
+async def test_unauthenticated_route_walk(monkeypatch, bound_app):
+    # Walk EVERY registered route + a hostile-path corpus with NO credentials.
     # Backstop invariant — the control plane never leaks unauthenticated, hostile
     # /api-canonicalizing forms never reach data, genuine deep links reach the shell.
     from tai42_skeleton.access_control.path_canon import under_prefix

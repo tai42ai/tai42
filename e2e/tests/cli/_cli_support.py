@@ -3,8 +3,8 @@
 A bare-name sibling module (the suite's convention). The stack mounts a broad
 router surface with access control ON and a backend + scheduler running, so one
 booted deployment answers a representative command from each ``tai`` group and the
-mutating commands the plan names (presets/storage/tool_meta/schedules/roles/scopes/
-keys). The runner invokes the REAL ``tai`` console script over a subprocess with
+mutating commands of presets/storage/tool_meta/schedules/roles/scopes/keys. The runner
+invokes the REAL ``tai`` console script over a subprocess with
 ``--server`` and ``TAI_API_KEY`` (the CLI's env-var auth path; there is deliberately
 no ``--api-key`` value flag), exactly as an operator drives it."""
 
