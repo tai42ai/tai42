@@ -329,7 +329,9 @@ class TaiMCP(TaiMCPLifecycleMixin):
             raise RuntimeError("TaiMCP is not started — call start()/app_context first.")
         return self._manifest.live_manifest.model_dump(mode="json", exclude_none=True)
 
-    def _base_middleware(self, middleware: list[Middleware] | None, *, stream_path: str) -> list[Middleware]:
+    def _base_middleware(
+        self, middleware: list[Middleware] | None, *, stream_path: str, carries_replies: bool
+    ) -> list[Middleware]:
         """The app's own base-app middleware, outermost first, ahead of whatever the launch surface's caller passes.
 
         FastMCP builds the base app's stack as ``[*auth middleware, *middleware]``, so
@@ -358,6 +360,8 @@ class TaiMCP(TaiMCPLifecycleMixin):
         ``stream_path`` is the route path the transport serves its server-to-client stream
         on; that stream is exempt from its generation's retire drain
         (:class:`~tai42_skeleton.app.transport_stream.TransportStreamDrainExemptMiddleware`).
+        ``carries_replies`` says whether that stream carries its session's replies (the SSE
+        transport's does), so each call counts as answered once its reply is written there.
         """
         gate_off_secret_capability = (
             [] if access_control_settings().enable else [Middleware(DisabledAccessControlSecretCapabilityMiddleware)]
@@ -367,7 +371,7 @@ class TaiMCP(TaiMCPLifecycleMixin):
             *gate_off_secret_capability,
             *audit,
             Middleware(BodyLimitMiddleware),
-            Middleware(TransportStreamDrainExemptMiddleware, stream_path=stream_path),
+            Middleware(TransportStreamDrainExemptMiddleware, stream_path=stream_path, carries_replies=carries_replies),
             *(middleware or []),
         ]
 
@@ -391,7 +395,7 @@ class TaiMCP(TaiMCPLifecycleMixin):
             sse_path=actual_path,
             message_path=actual_message_path,
             auth=self._fast_mcp.auth,
-            middleware=self._base_middleware(middleware, stream_path=actual_path),
+            middleware=self._base_middleware(middleware, stream_path=actual_path, carries_replies=True),
         )
         # Its sessions end with the lifespan that owns it (its generation's close).
         bind_sse_session_ender(base_app, actual_message_path)
@@ -423,7 +427,7 @@ class TaiMCP(TaiMCPLifecycleMixin):
             stream_path = path if path is not None else fastmcp.settings.streamable_http_path
         base_app = self._fast_mcp.http_app(
             path=path,
-            middleware=self._base_middleware(middleware, stream_path=stream_path),
+            middleware=self._base_middleware(middleware, stream_path=stream_path, carries_replies=transport == "sse"),
             json_response=json_response,
             stateless_http=stateless_http,
             transport=transport,

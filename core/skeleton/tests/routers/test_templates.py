@@ -232,7 +232,7 @@ def test_with_access_control_off_a_refused_delete_over_http_names_the_identities
     provider = _identities_name_jq_gate(monkeypatch)
     app = Starlette(
         routes=[Route("/api/delete-template", router.delete_template, methods=["POST"])],
-        middleware=instance.app._base_middleware(None, stream_path="/mcp"),
+        middleware=instance.app._base_middleware(None, stream_path="/mcp", carries_replies=False),
     )
     try:
         with TestClient(app) as client:

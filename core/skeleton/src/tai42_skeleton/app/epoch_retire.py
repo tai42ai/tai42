@@ -16,7 +16,7 @@ retire leaves the transports open and hands the drain and the close to a backgro
 lets the gate turn over, drains the ordinary work within the budget, waits for every driver to
 answer, and, while work of the generation still waits on a recorded lock, waits for those
 waits to end and repeats; only then does it close. A call of an SSE session is a
-request of its own here, counted until its reply is handed to the transport, so closing the
+request of its own here, counted until its session stream has written its reply, so closing the
 transports — which ends the generation's SSE sessions — never overtakes a driver's answer.
 """
 

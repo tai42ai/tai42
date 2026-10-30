@@ -243,12 +243,16 @@ class Epoch:
     async def _wait_driving(self) -> None:
         """Wait for every request and tool-run supervisor driving a gated body of this generation to finish.
 
-        Unbounded here by design: a driver's remaining work is the reload's own tail, which
-        the gated body's own bounds already bound (the rebuild, the fleet apply timeout, a
-        recycle step). The sets are live, so a driver that engages during the wait is seen.
-        A call of an SSE session is a request of its own here (its record finishes once the
-        MCP SDK has handed its reply to the transport), so the close that ends the session
-        comes after the driver's answer.
+        The wait has no bound of its own. A driver's remaining work is the reload's own tail,
+        which the gated body's own bounds bound (the rebuild, the fleet apply timeout, a
+        recycle step), and then the writing of its reply. A call of an SSE session is a
+        request of its own here, and its record finishes only once its session stream's
+        ASGI ``send`` of the reply has returned; that send waits on the client's reads, so a
+        connected SSE client that stops reading holds this wait (and the deferred retire tail
+        behind it) until it reads again or its connection drops. On a serve worker's stop,
+        uvicorn's ``timeout_graceful_shutdown`` still caps it. The close that ends the session
+        therefore comes after the driver's answer is written. The sets are live, so a driver
+        that engages during the wait is seen.
         """
         while True:
             requests = list(self.driving)

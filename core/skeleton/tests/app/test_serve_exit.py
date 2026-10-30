@@ -10,9 +10,10 @@ against a ``uvicorn.Server`` handler installed by the test.
 from __future__ import annotations
 
 import asyncio
+import json
 import signal
 import sys
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 from datetime import timedelta
 
 import httpx
@@ -31,7 +32,7 @@ from tai42_skeleton.app.epoch import Epoch
 from tai42_skeleton.app.reload_gate import reload_gate
 from tai42_skeleton.app.serve_exit import arm_serve_exit
 
-from ._served_app import ADMIN_KEY, REQUEST_TIMEOUT_S, bearer, install_access_control, served
+from ._served_app import ADMIN_KEY, INITIALIZE_BODY, REQUEST_TIMEOUT_S, bearer, install_access_control, served
 
 pytestmark = [
     pytest.mark.filterwarnings("ignore::async_lru.AlruCacheLoopResetWarning"),
@@ -45,6 +46,15 @@ HELD_MANIFEST = {
     "default_routers": "none",
     "tools": [{"title": "held", "module": HELD_MODULE, "include": ["held_reply"]}],
 }
+SSE_MANIFEST = {
+    "default_routers": "none",
+    "tools": [{"title": "held", "module": HELD_MODULE, "include": ["held_reply", "sized_reply"]}],
+}
+# A reply far larger than the loopback socket buffers between the server and a client that
+# does not read hold, so the session stream's write of it waits on the client's reads.
+LARGE_REPLY_CHARS = 16 * 1024 * 1024
+# Time for a call that answers to hand its reply to the session stream.
+HAND_OFF_S = 0.3
 # The response library's stream watch polls its shutdown flag every 0.5 s; the call is held
 # in flight past that poll after the signal, so a stream the library ends never carries it.
 HOLD_AFTER_SIGNAL_S = 1.0
@@ -118,6 +128,82 @@ async def test_an_in_flight_mcp_reply_is_delivered_when_the_graceful_stop_begins
         # The server ends its streams and stops by itself, without the harness's own exit.
         await asyncio.wait_for(asyncio.shield(running.serving), REQUEST_TIMEOUT_S)
     assert sigterms_after_serve == [signal.SIGTERM]
+
+
+async def _sse_events(lines: AsyncIterator[str]) -> AsyncIterator[tuple[str, str]]:
+    """The ``(event, data)`` pairs of a decoded SSE line stream; comments and other fields are skipped."""
+    event, data = "message", []
+    async for line in lines:
+        if not line:
+            if data:
+                yield event, "\n".join(data)
+            event, data = "message", []
+            continue
+        if line.startswith(":"):
+            continue
+        name, _, value = line.partition(":")
+        value = value.removeprefix(" ")
+        if name == "event":
+            event = value
+        elif name == "data":
+            data.append(value)
+
+
+async def test_an_sse_reply_handed_to_its_stream_before_the_graceful_stop_is_written_before_the_stream_ends(
+    monkeypatch: pytest.MonkeyPatch, sigterms_after_serve: list[int]
+) -> None:
+    # The client stops reading the session stream after its calls. A large reply fills the
+    # socket buffers, so the stream's write of it waits on the client's reads, and the held
+    # call's reply, handed to the stream after it, waits behind that write. The stop begins
+    # after both hand-offs, and the client reads again only once the response library's
+    # stream watch has polled its flag past the signal.
+    install_access_control(monkeypatch)
+    async with served(monkeypatch, SSE_MANIFEST, transport="sse", timeout_graceful_shutdown=SHUTDOWN_CAP_S) as running:
+        arm_serve_exit()
+        held = sys.modules[HELD_MODULE]
+        client = httpx.AsyncClient(headers=bearer(ADMIN_KEY), timeout=httpx.Timeout(REQUEST_TIMEOUT_S))
+        async with client, client.stream("GET", f"{running.base_url}/sse") as stream:
+            events = _sse_events(stream.aiter_lines())
+            kind, endpoint = await anext(events)
+            assert kind == "endpoint"
+
+            async def post(message: dict[str, object]) -> None:
+                answer = await client.post(f"{running.origin}{endpoint}", json=message)
+                answer.raise_for_status()
+
+            await post(json.loads(INITIALIZE_BODY))
+            kind, data = await anext(events)
+            assert (kind, json.loads(data)["id"]) == ("message", 1)
+            await post({"jsonrpc": "2.0", "method": "notifications/initialized"})
+            await post(_tool_call(2, "held_reply", {"text": "answered"}))
+            await asyncio.wait_for(held.ENTERED.wait(), REQUEST_TIMEOUT_S)
+            await post(_tool_call(3, "sized_reply", {"size": LARGE_REPLY_CHARS}))
+            await asyncio.sleep(HAND_OFF_S)
+            held.RELEASE.set()
+            await asyncio.sleep(HAND_OFF_S)
+            signal.raise_signal(signal.SIGTERM)
+            await asyncio.sleep(HOLD_AFTER_SIGNAL_S)
+            replies: dict[object, dict[str, object]] = {}
+            async with asyncio.timeout(REQUEST_TIMEOUT_S):
+                async for kind, data in events:
+                    if kind == "message":
+                        reply = json.loads(data)
+                        replies[reply["id"]] = reply["result"]
+                    if len(replies) == 2:
+                        break
+        assert replies[3]["content"] == [{"type": "text", "text": "x" * LARGE_REPLY_CHARS}]
+        assert replies[2]["content"] == [{"type": "text", "text": "answered"}]
+        await asyncio.wait_for(asyncio.shield(running.serving), REQUEST_TIMEOUT_S)
+    assert sigterms_after_serve == [signal.SIGTERM]
+
+
+def _tool_call(request_id: int, name: str, arguments: dict[str, object]) -> dict[str, object]:
+    return {
+        "jsonrpc": "2.0",
+        "id": request_id,
+        "method": "tools/call",
+        "params": {"name": name, "arguments": arguments},
+    }
 
 
 async def _unserved_app(scope: object, receive: object, send: object) -> None:

@@ -2,11 +2,13 @@
 
 Every transport app the platform assembles (the main streamable-HTTP and SSE apps, and each
 sub-MCP mount's) carries :class:`TransportStreamDrainExemptMiddleware` beside its body cap,
-built with the path its transport serves the stream on. Every FastMCP server the platform
-builds carries :class:`SessionCallAdmissionMiddleware`, so a call of an SSE session is
-counted against the drain as a request of its own. An SSE app records, when it is
-assembled, how its live sessions are ended (:func:`bind_sse_session_ender`); the lifespan
-that owns the app ends them when its generation closes its transports.
+built with the path its transport serves the stream on and whether the stream carries its
+session's replies (the SSE transport's does). Every FastMCP server the platform builds
+carries :class:`SessionCallAdmissionMiddleware`, so a call of an SSE session is counted
+against the drain as a request of its own until its stream has written its reply. An SSE
+app records, when it is assembled, how its live sessions are ended
+(:func:`bind_sse_session_ender`); the lifespan that owns the app ends them when its
+generation closes its transports.
 """
 
 from __future__ import annotations
@@ -20,7 +22,11 @@ from mcp.server.sse import SseServerTransport
 from starlette.routing import Mount
 
 from tai42_skeleton.access_control.path_canon import strip_root_path
-from tai42_skeleton.app.admission import admit_session_call, mark_current_request_drain_exempt
+from tai42_skeleton.app.admission import (
+    admit_session_call,
+    mark_current_request_drain_exempt,
+    track_current_stream_replies,
+)
 
 if TYPE_CHECKING:
     from fastmcp.server.middleware import CallNext, MiddlewareContext
@@ -51,12 +57,18 @@ class TransportStreamDrainExemptMiddleware:
 
     ``stream_path`` is the route path the transport serves the stream on, compared with the
     request's path once a mount's ``root_path`` is stripped, as the router matches it.
+    ``carries_replies`` says whether the stream carries the replies to its session's calls
+    (the SSE transport's session stream). Such a stream reports every body chunk to its
+    reply tracker once the chunk's ``send`` has returned, and its end once its app returns
+    (:func:`~tai42_skeleton.app.admission.track_current_stream_replies`), so each call of its
+    session counts as answered only once its reply is written.
     """
 
-    def __init__(self, app: ASGIApp, *, stream_path: str) -> None:
-        """Wrap the transport ``app`` whose stream is served at ``stream_path``."""
+    def __init__(self, app: ASGIApp, *, stream_path: str, carries_replies: bool) -> None:
+        """Wrap the transport ``app`` whose stream is served at ``stream_path`` and may carry its session's replies."""
         self.app = app
         self.stream_path = stream_path
+        self.carries_replies = carries_replies
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         """Exempt the transport's stream, then pass the request through."""
@@ -68,25 +80,35 @@ class TransportStreamDrainExemptMiddleware:
             await self.app(scope, receive, send)
             return
         mark_current_request_drain_exempt()
+        replies = track_current_stream_replies() if self.carries_replies else None
         completed = False
 
         async def send_until_complete(message: Message) -> None:
             nonlocal completed
             if completed:
                 return
-            if message["type"] == "http.response.body" and not message.get("more_body", False):
+            is_body = message["type"] == "http.response.body"
+            if is_body and not message.get("more_body", False):
                 completed = True
             await send(message)
+            if is_body and replies is not None:
+                replies.wrote(message.get("body", b""))
 
-        await self.app(scope, receive, send_until_complete)
+        try:
+            await self.app(scope, receive, send_until_complete)
+        finally:
+            if replies is not None:
+                replies.end()
 
 
 class SessionCallAdmissionMiddleware(McpMiddleware):
     """Counts each call of a session served on a long-lived stream (SSE) as a request of its own.
 
-    The call is admitted on its generation when it enters the server's middleware and
-    released when its task ends, after the MCP SDK has handed its reply to the transport
-    (:func:`~tai42_skeleton.app.admission.admit_session_call`). A streamable-HTTP call is
+    A call here is a request that reaches the server's middleware: a tool, resource or
+    prompt request. The call is admitted on its generation when it enters the middleware
+    and released once its task has ended and its session stream has written its reply or
+    ended (:func:`~tai42_skeleton.app.admission.admit_session_call`). Requests the session
+    answers without the middleware (``ping``, ``logging/setLevel``) are not counted. A streamable-HTTP call is
     counted by its own ``POST`` and admits nothing here. ``initialize`` is answered inline
     by the session's own receive loop, before that loop reads its next message, so the
     session's end cannot overtake it and it is not admitted.
@@ -95,8 +117,15 @@ class SessionCallAdmissionMiddleware(McpMiddleware):
     async def on_request(self, context: MiddlewareContext[Any], call_next: CallNext[Any, Any]) -> Any:
         """Admit the call (when it runs on a long-lived stream), then run it."""
         if context.method != "initialize":
-            admit_session_call()
+            admit_session_call(_request_id(context))
         return await call_next(context)
+
+
+def _request_id(context: MiddlewareContext[Any]) -> object | None:
+    """The JSON-RPC id of the request ``context`` runs, as the MCP SDK request context holds it, or ``None``."""
+    fastmcp_context = context.fastmcp_context
+    request_context = fastmcp_context.request_context if fastmcp_context is not None else None
+    return request_context.request_id if request_context is not None else None
 
 
 def _sse_transport(app: Starlette, message_path: str) -> SseServerTransport:

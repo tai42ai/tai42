@@ -239,7 +239,7 @@ def test_sse_app_builds_and_finalizes():
         TransportStreamDrainExemptMiddleware,
     ]
     # The transport's stream (``GET /sse``) is the one exempted from the retire drain.
-    assert mk.call_args.kwargs["middleware"][2].kwargs == {"stream_path": "/sse"}
+    assert mk.call_args.kwargs["middleware"][2].kwargs == {"stream_path": "/sse", "carries_replies": True}
     # finalize mounts the sub-app router on the base, then wraps only the always-on
     # outer RateLimitMiddleware around it.
     _assert_sub_mcp_mounted(sentinel, a)
@@ -262,7 +262,7 @@ def test_http_app_builds_and_finalizes():
         BodyLimitMiddleware,
         TransportStreamDrainExemptMiddleware,
     ]
-    assert mcp.http_app.call_args.kwargs["middleware"][2].kwargs == {"stream_path": "/mcp"}
+    assert mcp.http_app.call_args.kwargs["middleware"][2].kwargs == {"stream_path": "/mcp", "carries_replies": False}
     _assert_sub_mcp_mounted(sentinel, a)
     # finalize wraps only the always-on outer RateLimitMiddleware around the base.
     assert isinstance(result, RateLimitMiddleware)
