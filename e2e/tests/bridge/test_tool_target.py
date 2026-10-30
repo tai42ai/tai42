@@ -45,7 +45,7 @@ pytestmark = pytest.mark.needs("kind:identity", "probe-tools", "setting:conversa
 
 @pytest.mark.skipif(
     HarnessSettings().is_real("twilio"),
-    reason="FakeTwilio is the 'twilio' mock leg; the real leg runs on the creds host",
+    reason="FakeTwilio is the 'twilio' mock leg; the real leg runs under TAI_E2E_REAL",
 )
 @pytest.mark.needs("kind:channels:twilio", "helper:twilio", "store:redis")
 async def test_tool_target_echoes_a_reply_and_maps_null_to_silence(

@@ -40,7 +40,7 @@ def test_mock_leg_binds_loopback_when_public_base_url_unset() -> None:
 
 
 def test_mock_leg_binds_loopback_even_with_public_base_url_set() -> None:
-    # The e2e host always sets E2E_PUBLIC_BASE_URL, so the manifest carries
+    # A real-vendor setup sets E2E_PUBLIC_BASE_URL for the whole run, so the manifest carries
     # public_base_url onto the mock leg too — but this medium is mock. The mock twilio
     # door still binds to loopback, so its X-Twilio-Signature matches the loopback POST
     # (never a 401).

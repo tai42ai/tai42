@@ -17,7 +17,7 @@ from ._support import CASE_CLASSES, ChannelCase
 # FakeSlack/FakeTelegram/FakeTwilio (``case.sends_matching``). Under ``TAI_E2E_REAL=<channel>``
 # ``build_channel_stack`` drops ``CHANNEL_<X>_API_BASE_URL`` and the plugin talks to the live
 # vendor, so those sends never land on the stub and the wait would false-fail. Those specs are
-# the channel MOCK leg; the real channel leg is exercised on the dedicated e2e creds host,
+# the channel MOCK leg; the real channel leg is exercised under TAI_E2E_REAL,
 # not in CI. The real-safe NEGATIVES (which assert ``sends_matching(...) == []``)
 # stay — a real send simply never lands, which is exactly what they assert — so they are NOT
 # listed here. Value ``None`` = every test in the module asserts delivery.
@@ -50,7 +50,7 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
         if names is None or original in names:
             item.add_marker(
                 pytest.mark.skip(
-                    reason=f"{channel!r} stub-delivery is the channel mock leg; real leg on the creds host"
+                    reason=f"{channel!r} stub-delivery is the channel mock leg; real leg under TAI_E2E_REAL"
                 )
             )
 

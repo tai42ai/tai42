@@ -62,7 +62,7 @@ pytestmark = [
     ),
     pytest.mark.skipif(
         any(HarnessSettings().is_real(seam) for seam in ("telegram", "slack", "twilio", "whatsapp", "llm")),
-        reason="the media-bridge stubs are the mock leg; real legs run on the creds host",
+        reason="the media-bridge stubs are the mock leg; real legs run under TAI_E2E_REAL",
     ),
 ]
 

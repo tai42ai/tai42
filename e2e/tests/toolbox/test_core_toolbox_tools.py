@@ -48,10 +48,10 @@ async def test_request_tool_hits_the_target_server(core_stack: TaiStack, target_
 
 # The stub's deterministic /v1/embeddings (identical input → identical vectors) IS the
 # embeddings MOCK leg, so this test steps aside when the 'embeddings' seam is real — the
-# real leg replaces the stub on the creds host.
+# real leg replaces the stub under TAI_E2E_REAL.
 @pytest.mark.skipif(
     HarnessSettings().is_real("embeddings"),
-    reason="stub-embeddings determinism is the 'embeddings' mock leg; the real leg on the creds host",
+    reason="stub-embeddings determinism is the 'embeddings' mock leg; the real leg runs under TAI_E2E_REAL",
 )
 @pytest.mark.needs("setting:tool:toolbox.generate_embeddings", "setting:tool:toolbox.pad_embeddings", "helper:llm")
 async def test_generate_and_pad_embeddings(core_stack: TaiStack, llm_stub: LlmStub) -> None:
@@ -148,7 +148,7 @@ def _assert_classify_values(response: ClassifyResponse) -> None:
 # this test steps aside when the 'classifier' seam is real — the real leg replaces the stub.
 @pytest.mark.skipif(
     HarnessSettings().is_real("classifier"),
-    reason="stub-classify determinism is the 'classifier' mock leg; the real leg on the creds host",
+    reason="stub-classify determinism is the 'classifier' mock leg; the real leg runs under TAI_E2E_REAL",
 )
 @pytest.mark.needs("setting:tool:toolbox.classify", "helper:llm")
 async def test_classify_is_deterministic_against_the_stub(core_stack: TaiStack, llm_stub: LlmStub) -> None:
@@ -235,11 +235,11 @@ async def test_classify_refuses_an_answer_outside_its_declared_sets(
 
 
 # The real classifier leg runs the tool against the live vendor instead of the stub, so it
-# runs only when the 'classifier' seam is real (creds host); the provider and key flow from
+# runs only when the 'classifier' seam is real (TAI_E2E_REAL=classifier); the provider and key flow from
 # the stack env, so the call passes NO classifier_kwargs.
 @pytest.mark.skipif(
     not HarnessSettings().is_real("classifier"),
-    reason="the real classify leg needs TYPESAFE_API_KEY (TAI_E2E_REAL=classifier); creds host only",
+    reason="the real classify leg needs TYPESAFE_API_KEY (TAI_E2E_REAL=classifier)",
 )
 @pytest.mark.needs("setting:tool:toolbox.classify", "setting:real-credentials")
 async def test_classify_against_the_real_vendor(core_stack: TaiStack) -> None:

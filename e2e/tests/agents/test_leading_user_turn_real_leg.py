@@ -1,4 +1,4 @@
-"""Whether the REAL configured provider accepts a history that opens with an assistant turn (creds host only).
+"""Whether the REAL configured provider accepts a history that opens with an assistant turn (real-vendor runs only).
 
 ``requires_leading_user_turn(provider)`` records, per hosted provider, whether the provider refuses a
 request whose first non-system message is an assistant turn. No provider package decides it before
@@ -43,7 +43,7 @@ pytestmark = [
     ),
     pytest.mark.skipif(
         not HarnessSettings().is_real("llm"),
-        reason="real-provider history-order leg; runs on the e2e creds host, not the mock CI leg",
+        reason="real-provider history-order leg; runs under TAI_E2E_REAL, not the mock CI leg",
     ),
 ]
 

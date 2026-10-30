@@ -38,7 +38,7 @@ from tai42_e2e.webchat import WebChatClient
 from ._bridge_support import MEDIA_REF_RE, BridgeHarness, wait_probe_record
 
 # The web-media stack boots twilio + whatsapp on their in-process stubs and scripts no LLM; a real
-# selection breaks the stubs, so the module steps aside on the creds host.
+# selection breaks the stubs, so the module steps aside when TAI_E2E_REAL names any of them.
 pytestmark = [
     pytest.mark.needs(
         "kind:channels:web",
@@ -50,7 +50,7 @@ pytestmark = [
     ),
     pytest.mark.skipif(
         any(HarnessSettings().is_real(seam) for seam in ("twilio", "whatsapp", "llm")),
-        reason="the web-media stubs are the mock leg; real legs run on the creds host",
+        reason="the web-media stubs are the mock leg; real legs run under TAI_E2E_REAL",
     ),
 ]
 

@@ -475,7 +475,7 @@ async def test_put_without_expiry_persists_key(store_fakes):
     assert f"connectors:rec:{CID}" in redis.persisted
 
 
-# -- cache coherence (H6 version fence) --------------------------------------
+# -- cache coherence (version fence) -----------------------------------------
 
 
 async def test_stale_read_populate_cannot_poison_a_newer_cache(store_fakes):

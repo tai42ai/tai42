@@ -20,8 +20,9 @@ that reads outbound traffic off an in-process stub (scripted `llm_stub`,
 **mock legs step aside** under real-select via a `skipif(HarnessSettings().is_real(<seam>))`
 guard (or, where a spec is parametrized across channels, a per-param skip), so
 naming that seam real deselects the mock leg rather than running it against a live
-vendor it was never written to reach. The real leg for these is demonstrated on
-the dedicated e2e creds host, not in CI. The seams that step aside:
+vendor it was never written to reach. The real leg for these runs only where
+`TAI_E2E_REAL` names the seam and its credentials are exported, never in the
+default CI run. The seams that step aside:
 
 - `llm`, `embeddings` — scripted-stub determinism legs.
 - `classifier` — the classify determinism leg against the stub's `/v1/systemone`.
@@ -60,9 +61,9 @@ receive them. Every dashboard URL below is relative to a single knob:
 - `E2E_PUBLIC_BASE_URL` — a stable public **HTTPS** host with its own domain (a
   durable managed endpoint, not an ad-hoc tunnel), reverse-proxying to the e2e
   stack-under-test port. Real legs that need inbound refuse to start without it.
-- The filled `REAL_E2E_CREDENTIALS.env` lives **only** on that dedicated e2e
-  host. Real legs run there (via `workflow_dispatch` / scheduled job), never on
-  PRs.
+- Keep the filled `REAL_E2E_CREDENTIALS.env` **only** on the machine behind that
+  host and run the real legs there (manually or from a scheduled job), never on
+  pull requests.
 
 Endpoint-origin settings the harness derives from `E2E_PUBLIC_BASE_URL` at wiring
 time — leave the `[AUTO-DERIVED]` entries alone: `CHANNEL_TELEGRAM_PUBLIC_BASE_URL`,
@@ -88,8 +89,8 @@ public host. No API automates the registration.
 ### twilio — `TAI_E2E_REAL=twilio`
 
 - Dashboard: https://console.twilio.com → your number → Messaging webhook =
-  `{E2E_PUBLIC_BASE_URL}/api/channels/twilio/inbound` (one-time; the plan can
-  also set it via the IncomingPhoneNumbers API).
+  `{E2E_PUBLIC_BASE_URL}/api/channels/twilio/inbound` (one-time; the
+  IncomingPhoneNumbers API can also set it).
 - Template vars: `CHANNEL_TWILIO_ACCOUNT_SID`, `CHANNEL_TWILIO_AUTH_TOKEN`,
   `CHANNEL_TWILIO_FROM`, `CHANNEL_TWILIO_TEST_TO`. To run over WhatsApp instead of
   SMS there is no separate leg: set `CHANNEL_TWILIO_FROM` / `CHANNEL_TWILIO_TEST_TO`

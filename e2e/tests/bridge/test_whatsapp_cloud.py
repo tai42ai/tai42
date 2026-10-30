@@ -67,13 +67,13 @@ from ._bridge_support import (
 # are the mock leg for BOTH the 'whatsapp' channel seam and the 'llm' seam (build_bridge_stack
 # wires the LLM env too, so TAI_E2E_REAL=llm also sends the bridge LLM to the live provider).
 # Either selection real breaks the stub scripting, so the module steps aside; the real legs run
-# on the dedicated e2e creds host, not in CI. Inert in the default mock run — both
+# under TAI_E2E_REAL, not in CI. Inert in the default mock run — both
 # is_real checks are False, so collection is byte-for-byte today's.
 pytestmark = [
     pytest.mark.needs("kind:identity"),
     pytest.mark.skipif(
         HarnessSettings().is_real("whatsapp") or HarnessSettings().is_real("llm"),
-        reason="FakeWhatsApp + scripted-LLM is the 'whatsapp'/'llm' mock leg; real legs on the creds host",
+        reason="FakeWhatsApp + scripted-LLM is the 'whatsapp'/'llm' mock leg; real legs under TAI_E2E_REAL",
     ),
 ]
 

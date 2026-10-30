@@ -57,12 +57,12 @@ pytestmark = [
     ),
     pytest.mark.skipif(
         HarnessSettings().is_real("llm"),
-        reason="scripted-LLM is the 'llm' mock leg; the real leg runs on the creds host",
+        reason="scripted-LLM is the 'llm' mock leg; the real leg runs under TAI_E2E_REAL",
     ),
 ]
 MOCK_TWILIO_ONLY = pytest.mark.skipif(
     HarnessSettings().is_real("twilio"),
-    reason="FakeTwilio inbound is the 'twilio' mock leg; the real leg runs on the creds host",
+    reason="FakeTwilio inbound is the 'twilio' mock leg; the real leg runs under TAI_E2E_REAL",
 )
 
 # A content blob that is not valid JSON: the store's ``_from_hash`` raises decoding it, which is

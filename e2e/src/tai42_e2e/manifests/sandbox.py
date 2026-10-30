@@ -163,7 +163,7 @@ def build_sandbox_local_deep_stack(res: StackResources, variants: Variants) -> S
 
 def build_sandbox_local_claude_stack(res: StackResources, variants: Variants) -> StackConfig:
     """``build_sandbox_local_stack`` plus the ``claude_code`` entry — the direct-mode claude leg,
-    GATED on the creds host (direct ``claude_code`` assumes the operator-installed
+    GATED on ``TAI_E2E_REAL=claude_agent`` (direct ``claude_code`` assumes the operator-installed
     ``claude-agent-sdk`` wheel + the model credential on the host). Maps the single ``.env``
     ``ANTHROPIC_API_KEY`` onto the operator auth env and runs the real materialized payload."""
     manifest = {
@@ -184,13 +184,13 @@ def build_sandbox_local_claude_stack(res: StackResources, variants: Variants) ->
     env.update(_memory_agent_state_env())
     env.update(_llm_env(res))
     env["TAI_AGENTS_CLAUDE_SESSION_IMAGE"] = _STUB_SESSION_IMAGE
-    # The direct-mode leg runs only on the creds host: the adapter materializes the real
+    # The direct-mode leg runs only under TAI_E2E_REAL=claude_agent: the adapter materializes the real
     # ``tai_runner`` into the host-dir workspace and drives the operator-installed SDK against the
     # real key mapped onto the operator auth env (no fake-runner seam — that is the fake provider's).
     if _switch().is_real("claude_agent"):
         env["TAI_AGENTS_CLAUDE_API_KEY"] = os.environ["ANTHROPIC_API_KEY"]
     else:
-        # Off the creds host the leg is skipped at collection; a placeholder key keeps the exactly-
+        # Without the claude_agent real seam the leg is skipped at collection; a placeholder key keeps the exactly-
         # one-auth validator happy so the stack still boots for the non-gated sibling suites.
         env["TAI_AGENTS_CLAUDE_API_KEY"] = "e2e-fake-claude-key"
     return StackConfig(

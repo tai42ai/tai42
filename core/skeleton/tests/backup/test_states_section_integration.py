@@ -1,5 +1,5 @@
 """A REAL Postgres round-trip of the ``states`` backup section: export the store, then
-import it back through the facet doors in the plan's order (modules → declarations →
+import it back through the facet doors in dependency order (modules → declarations →
 attachments → aliases → records), asserting the per-entity created/updated/failed counts and
 that one refused entity is reported while the rest still lands.
 

@@ -24,7 +24,7 @@ pytestmark = [
     pytest.mark.backendless,
     pytest.mark.skipif(
         HarnessSettings().is_real("llm"),
-        reason="scripted llm_stub is the 'llm' mock leg; the real leg runs on the e2e creds host",
+        reason="scripted llm_stub is the 'llm' mock leg; the real leg runs under TAI_E2E_REAL",
     ),
     pytest.mark.needs("helper:llm", "setting:agent:tools_agent", "kind:tool_runs", "mutable"),
 ]

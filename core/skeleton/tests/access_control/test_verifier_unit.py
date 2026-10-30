@@ -503,7 +503,7 @@ async def test_dynamic_pattern_change_visible_after_version_bump(monkeypatch):
     assert await v.resolve_resource_ids("/dyn/7") == ["dynroute"]
 
 
-# -- SPA-shell public fallback + H1 canonicalization -------------------------
+# -- SPA-shell public fallback + path canonicalization -----------------------
 #
 # The last resolution tier: a GET to an UNMAPPED, non-/api, non-/mcp canonical path
 # that is NOT a registered route resolves public so a deep-link refresh reaches the
@@ -659,10 +659,10 @@ async def test_reload_added_route_not_served_anonymously_after_reset(monkeypatch
     assert await v.resolve_resource_ids("/status", method="GET") == []
 
 
-# -- H1 bypass corpus (MUST): one canonical form, segment-aware prefixes ------
+# -- Canonicalization bypass corpus: one canonical form, segment-aware prefixes
 
 
-async def test_h1_bypass_corpus(monkeypatch):
+async def test_canonicalization_bypass_corpus(monkeypatch):
     settings = AccessControlSettings()
     _wire(monkeypatch, FakeAccessControlPg())
     v = _verifier(settings)
@@ -685,7 +685,7 @@ async def test_h1_bypass_corpus(monkeypatch):
     assert await v.resolve_resource_ids("/API/x", method="GET") == public
 
 
-async def test_h1_malformed_paths_denied(monkeypatch):
+async def test_malformed_paths_denied(monkeypatch):
     # A NUL / control / backslash path is malformed → fail-closed deny, never the shell.
     settings = AccessControlSettings()
     _wire(monkeypatch, FakeAccessControlPg())

@@ -1,4 +1,4 @@
-"""``response_format`` against the REAL configured provider (creds host only).
+"""``response_format`` against the REAL configured provider (real-vendor runs only).
 
 On the real ``llm`` leg (``REAL_E2E_LLM_PROVIDER`` / ``REAL_E2E_LLM_MODEL``), a tools_agent
 ``response_format`` run over the ``TurnIntake``-shaped schema (nested objects, nullable type
@@ -21,11 +21,11 @@ from tai42_e2e.stack import TaiStack
 
 pytestmark = [
     pytest.mark.backendless,
-    # The inverse of the mock-leg module: this runs ONLY against a real provider, on the e2e
-    # creds host — never in the default mock CI run.
+    # The inverse of the mock-leg module: this runs ONLY against a real provider, under
+    # TAI_E2E_REAL — never in the default mock CI run.
     pytest.mark.skipif(
         not HarnessSettings().is_real("llm"),
-        reason="real-provider structured-output leg; runs on the e2e creds host, not the mock CI leg",
+        reason="real-provider structured-output leg; runs under TAI_E2E_REAL, not the mock CI leg",
     ),
     pytest.mark.needs("helper:llm", "setting:agent:tools_agent"),
 ]

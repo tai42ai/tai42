@@ -18,7 +18,7 @@ from tai42_e2e.webchat import WebChatClient
 from ._bridge_support import BridgeHarness, request_mentions, script_reply
 from ._overlap_support import joined, open_visitor, reply_matching, send_web
 
-# The scripted-LLM turn is the 'llm' mock leg; the real leg runs on the creds host.
+# The scripted-LLM turn is the 'llm' mock leg; the real leg runs under TAI_E2E_REAL.
 pytestmark = [
     pytest.mark.needs(
         "kind:channels:web",
@@ -31,7 +31,7 @@ pytestmark = [
     ),
     pytest.mark.skipif(
         HarnessSettings().is_real("llm"),
-        reason="scripted-LLM is the 'llm' mock leg; the real leg runs on the creds host",
+        reason="scripted-LLM is the 'llm' mock leg; the real leg runs under TAI_E2E_REAL",
     ),
 ]
 

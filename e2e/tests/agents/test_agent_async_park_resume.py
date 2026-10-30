@@ -48,13 +48,13 @@ from tai42_e2e.stack import TaiStack
 _STORED_PARK_IDENTITY = "e2e-async-driver"
 
 # The agents stack runs no backend worker; skip on non-default backend legs (they exercise
-# no backend seam). The scripted llm_stub is the LLM MOCK leg — the real-provider leg runs on
-# the e2e creds host, not in CI — so the stub-bound module steps aside when 'llm' is real.
+# no backend seam). The scripted llm_stub is the LLM MOCK leg — the real-provider leg runs
+# under TAI_E2E_REAL, not in CI — so the stub-bound module steps aside when 'llm' is real.
 pytestmark = [
     pytest.mark.backendless,
     pytest.mark.skipif(
         HarnessSettings().is_real("llm"),
-        reason="scripted llm_stub is the 'llm' mock leg; the real leg runs on the e2e creds host",
+        reason="scripted llm_stub is the 'llm' mock leg; the real leg runs under TAI_E2E_REAL",
     ),
     pytest.mark.needs(
         "probe-tools",

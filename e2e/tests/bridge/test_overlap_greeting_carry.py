@@ -234,7 +234,7 @@ async def test_greeting_rides_the_successor_on_the_api_door_when_the_first_conta
 
 @pytest.mark.skipif(
     HarnessSettings().is_real("twilio"),
-    reason="FakeTwilio is the 'twilio' mock leg; the real leg runs on the creds host",
+    reason="FakeTwilio is the 'twilio' mock leg; the real leg runs under TAI_E2E_REAL",
 )
 @pytest.mark.needs("kind:channels:twilio", "helper:twilio")
 async def test_greeting_rides_the_successor_on_the_bridge_door_when_the_first_contact_turn_is_cancelled(

@@ -77,11 +77,11 @@ async def test_shipped_connector_descriptors_are_registered(shipped_connectors_s
 
 # The launch-URL assertion pins the fixture client_id (``GOOGLE_CLIENT_ID``); under
 # TAI_E2E_REAL=connector-google the real CONNECTORS_GOOGLE_CLIENT_ID replaces it, so this is
-# the connector-google mock leg — the real token/probe leg runs on the creds host.
+# the connector-google mock leg — the real token/probe leg runs under TAI_E2E_REAL.
 # Inert while TAI_E2E_REAL is empty.
 @pytest.mark.skipif(
     HarnessSettings().is_real("connector-google"),
-    reason="fixture client_id is the connector-google mock leg; the real leg on the creds host",
+    reason="fixture client_id is the connector-google mock leg; the real leg runs under TAI_E2E_REAL",
 )
 @pytest.mark.needs("setting:CONNECTORS_GOOGLE_CLIENT_ID", "setting:CONNECTORS_REDIRECT_URI_ALLOWLIST=stack-origin")
 async def test_google_launch_url_shape(shipped_connectors_stack: TaiStack) -> None:
@@ -111,7 +111,7 @@ async def test_google_launch_url_shape(shipped_connectors_stack: TaiStack) -> No
 # which the real CONNECTORS_ATLASSIAN_CLIENT_ID replaces under TAI_E2E_REAL=connector-atlassian.
 @pytest.mark.skipif(
     HarnessSettings().is_real("connector-atlassian"),
-    reason="fixture client_id is the connector-atlassian mock leg; the real leg on the creds host",
+    reason="fixture client_id is the connector-atlassian mock leg; the real leg runs under TAI_E2E_REAL",
 )
 @pytest.mark.needs("setting:CONNECTORS_ATLASSIAN_CLIENT_ID", "setting:CONNECTORS_REDIRECT_URI_ALLOWLIST=stack-origin")
 async def test_atlassian_launch_url_shape(shipped_connectors_stack: TaiStack) -> None:
@@ -140,7 +140,7 @@ async def test_atlassian_launch_url_shape(shipped_connectors_stack: TaiStack) ->
 # under TAI_E2E_REAL=connector-slack.
 @pytest.mark.skipif(
     HarnessSettings().is_real("connector-slack"),
-    reason="fixture client_id is the connector-slack mock leg; the real leg on the creds host",
+    reason="fixture client_id is the connector-slack mock leg; the real leg runs under TAI_E2E_REAL",
 )
 @pytest.mark.needs("setting:CONNECTORS_SLACK_CLIENT_ID", "setting:CONNECTORS_REDIRECT_URI_ALLOWLIST=stack-origin")
 async def test_slack_launch_url_shape(shipped_connectors_stack: TaiStack) -> None:
@@ -169,7 +169,7 @@ async def test_slack_launch_url_shape(shipped_connectors_stack: TaiStack) -> Non
 # under TAI_E2E_REAL=connector-github.
 @pytest.mark.skipif(
     HarnessSettings().is_real("connector-github"),
-    reason="fixture client_id is the connector-github mock leg; the real leg on the creds host",
+    reason="fixture client_id is the connector-github mock leg; the real leg runs under TAI_E2E_REAL",
 )
 @pytest.mark.needs("setting:CONNECTORS_GITHUB_CLIENT_ID", "setting:CONNECTORS_REDIRECT_URI_ALLOWLIST=stack-origin")
 async def test_github_launch_url_shape(shipped_connectors_stack: TaiStack) -> None:

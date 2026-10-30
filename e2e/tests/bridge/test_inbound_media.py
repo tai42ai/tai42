@@ -47,7 +47,7 @@ from ._bridge_support import (
 
 # The four channels mock over their in-process stubs; a real selection sends outbound to the live
 # vendor (never the stub) and breaks the deterministic scripted round-trip, so the module steps
-# aside — the real legs run on the dedicated creds host. Inert on the all-mock default.
+# aside — the real legs run under TAI_E2E_REAL. Inert on the all-mock default.
 pytestmark = [
     pytest.mark.needs(
         "kind:identity",
@@ -59,7 +59,7 @@ pytestmark = [
     ),
     pytest.mark.skipif(
         any(HarnessSettings().is_real(seam) for seam in ("telegram", "slack", "twilio", "whatsapp", "llm")),
-        reason="the media-bridge stubs are the mock leg; real legs run on the creds host",
+        reason="the media-bridge stubs are the mock leg; real legs run under TAI_E2E_REAL",
     ),
 ]
 

@@ -84,7 +84,7 @@ def _vendor(name: str) -> Any:
         name,
         marks=pytest.mark.skipif(
             not _SETTINGS.is_real(f"connector-{name}"),
-            reason=f"live-vendor leg: runs on the creds host with TAI_E2E_REAL=connector-{name}",
+            reason=f"live-vendor leg: runs with TAI_E2E_REAL=connector-{name}",
         ),
         id=name,
     )

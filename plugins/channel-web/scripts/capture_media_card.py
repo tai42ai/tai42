@@ -3,8 +3,8 @@
 Path A (maintained): the channel-web doc page pulls its images from the PLUGIN's own
 ``docs/images/`` tree, so these captures write committed plugin assets —
 ``src/tai42_channel_web/docs/images/media-card.png`` (the agent-sent media card) plus the
-visitor's inbound-attachment shots ``inbound-attachment-tray-{light,dark}.png`` (the
-composer with a ready attachment in the tray) and ``inbound-attachment-row-{light,dark}.png``
+visitor's inbound-attachment shots ``inbound-attachment-tray-light.png`` (the
+composer with a ready attachment in the tray) and ``inbound-attachment-row-light.png``
 (a transcript row carrying an inbound image and a document) — rather than one-offs. The
 recapture workflow (``.github/workflows/channel-web-media-card-screenshot.yml``) runs this
 script and opens a PR with the refreshed PNGs whenever the media UI source changes.
@@ -13,7 +13,7 @@ The media card is captured over ``build_channel_stack`` through the ``/api/notif
 door; the inbound-attachment shots drive the composer's real upload + send over the
 ``build_web_media_stack`` profile (the upload door + the redis conversations backend + the
 storage-local blob provider), so a visitor attaches, uploads, and sends exactly as in a
-browser, in both the light and dark themes.
+browser, in the light theme the docs page shows.
 
 What the media-card capture does, all through the plugin's own public doors and the proven e2e harness:
 
@@ -80,9 +80,9 @@ _DEFAULT_OUT = _DOCS_IMAGES / "media-card.png"
 _INBOUND_IMAGE_NAME = "photo.png"
 _INBOUND_DOC_NAME = "document.pdf"
 
-# The two themes the docs page renders under; Playwright drives each through the media query the
-# stylesheet keys its dark palette off.
-_THEMES: tuple[Literal["light", "dark"], ...] = ("light", "dark")
+# The colour scheme the inbound-attachment shots are taken in — the theme the docs page shows.
+# Playwright emulates it through the media query the stylesheet keys its palette off.
+_THEME: Literal["light"] = "light"
 
 # Domain-agnostic card content (platform rule: no business-domain words, no client/product
 # names anywhere). A neutral caption and two generic option chips.
@@ -322,9 +322,7 @@ def _settle(page: Page) -> None:
     )
 
 
-def _capture_composer_tray(
-    stack: TaiStack, identity: str, out_path: Path, *, theme: Literal["light", "dark"], headed: bool
-) -> None:
+def _capture_composer_tray(stack: TaiStack, identity: str, out_path: Path, *, headed: bool) -> None:
     """Screenshot the composer with one ready attachment in its tray — the pending-attachment state.
 
     Opens the visitor page, attaches one image through the composer's file input, and shoots the whole
@@ -334,7 +332,9 @@ def _capture_composer_tray(
     page_url = f"http://{stack.host}:{stack.port_b}/api/channels/web/chat/{identity}"
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=not headed)
-        context = browser.new_context(color_scheme=theme, viewport={"width": 900, "height": 720}, device_scale_factor=2)
+        context = browser.new_context(
+            color_scheme=_THEME, viewport={"width": 900, "height": 720}, device_scale_factor=2
+        )
         page = context.new_page()
         try:
             page.goto(page_url, wait_until="domcontentloaded")
@@ -359,9 +359,7 @@ def _capture_composer_tray(
             browser.close()
 
 
-def _capture_inbound_row(
-    stack: TaiStack, identity: str, out_path: Path, *, theme: Literal["light", "dark"], headed: bool
-) -> None:
+def _capture_inbound_row(stack: TaiStack, identity: str, out_path: Path, *, headed: bool) -> None:
     """Screenshot the inbound transcript row carrying an image and a document.
 
     Opens the visitor page, attaches an image AND a document through the composer, sends, and shoots
@@ -370,7 +368,9 @@ def _capture_inbound_row(
     page_url = f"http://{stack.host}:{stack.port_b}/api/channels/web/chat/{identity}"
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=not headed)
-        context = browser.new_context(color_scheme=theme, viewport={"width": 900, "height": 720}, device_scale_factor=2)
+        context = browser.new_context(
+            color_scheme=_THEME, viewport={"width": 900, "height": 720}, device_scale_factor=2
+        )
         page = context.new_page()
         try:
             page.goto(page_url, wait_until="domcontentloaded")
@@ -412,20 +412,19 @@ def _capture_inbound_row(
 
 
 def _capture_inbound_attachments(infra: Infra, root: Path, *, headed: bool) -> list[Path]:
-    """Capture the composer tray + the inbound transcript row in both themes; return the PNG paths.
+    """Capture the composer tray + the inbound transcript row; return the PNG paths.
 
-    Boots the web-media stack once and drives the composer for each theme.
+    Boots the web-media stack once and drives the composer for both shots.
     """
     written: list[Path] = []
     with _web_media_stack(infra, root) as (stack, root_token):
         identity = _create_capture_web_route(stack, root_token)
-        for theme in _THEMES:
-            tray_out = _DOCS_IMAGES / f"inbound-attachment-tray-{theme}.png"
-            _capture_composer_tray(stack, identity, tray_out, theme=theme, headed=headed)
-            written.append(tray_out)
-            row_out = _DOCS_IMAGES / f"inbound-attachment-row-{theme}.png"
-            _capture_inbound_row(stack, identity, row_out, theme=theme, headed=headed)
-            written.append(row_out)
+        tray_out = _DOCS_IMAGES / f"inbound-attachment-tray-{_THEME}.png"
+        _capture_composer_tray(stack, identity, tray_out, headed=headed)
+        written.append(tray_out)
+        row_out = _DOCS_IMAGES / f"inbound-attachment-row-{_THEME}.png"
+        _capture_inbound_row(stack, identity, row_out, headed=headed)
+        written.append(row_out)
     return written
 
 

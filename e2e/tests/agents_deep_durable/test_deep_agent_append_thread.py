@@ -34,7 +34,7 @@ from tai42_e2e.stack import TaiStack
 pytestmark = [
     pytest.mark.skipif(
         HarnessSettings().is_real("llm") or HarnessSettings().is_real("claude_agent"),
-        reason="the scripted-LLM bridge stack is the mock leg; the real leg runs on the creds host",
+        reason="the scripted-LLM bridge stack is the mock leg; the real leg runs under TAI_E2E_REAL",
     ),
     pytest.mark.needs(
         "kind:identity",

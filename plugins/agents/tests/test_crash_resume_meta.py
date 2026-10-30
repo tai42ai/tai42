@@ -26,8 +26,8 @@ from tai42_agents.langchain_deep_agent.settings import langchain_deep_agent_sett
 
 from .conftest import APP
 
-# The platform-generic registration meta key the skeleton run-dispatch seam reads (the plan's
-# ``tai42/*`` meta convention); the agents plugin cannot import the skeleton to share the constant.
+# The platform-generic registration meta key the skeleton run-dispatch seam reads (a
+# ``tai42/``-prefixed platform meta key); the agents plugin cannot import the skeleton to share the constant.
 _CRASH_RESUME_META_KEY = "tai42/crash_resume"
 
 # The ``TAI_AGENTS_CLAUDE_*`` env vars whose ABSENCE the import-without-creds proof clears.
