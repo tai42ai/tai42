@@ -91,7 +91,7 @@ Settings are read from the `ARQ_` environment group (see `ArqSettings`):
 | `ARQ_REDIS_URL` | `redis://localhost:6379/0` | Redis connection for the queue and schedules |
 | `ARQ_REDIS_MAX_CONNECTIONS` | — | Optional cap on the pool's connections |
 | `ARQ_QUEUE_NAME` | `arq:queue` | The arq queue key the host enqueues to and a worker started without `--queue` consumes; a `--queue <label>` worker consumes `<ARQ_QUEUE_NAME>.<label>`. Every process of one stack sets the same value. Stacks sharing one Redis DB set distinct values, and no stack's value is another stack's value followed by `.<label>`. |
-| `ARQ_RETRY_ATTEMPTS` | `0` | Times a failed Redis connect or command is retried, each retry logged as a warning; `0` makes one attempt |
+| `ARQ_RETRY_ATTEMPTS` | `0` | Times a failed Redis connect or command is retried, each retry logged as a warning; `0` makes one attempt. A refused password is raised at once, never retried |
 | `ARQ_RETRY_ON_TIMEOUT` | `false` | With `ARQ_RETRY_ATTEMPTS` at `0`, retry a timed-out command once at once |
 | `ARQ_SOCKET_TIMEOUT` | — | Seconds a Redis command may wait on its socket; redis-py's default when unset |
 | `ARQ_SOCKET_CONNECT_TIMEOUT` | `1` | Seconds a Redis connect may take |

@@ -209,15 +209,15 @@ Settings are read from the `CELERY_` environment group (see `CelerySettings`):
 | `CELERY_REDBEAT_REDIS_URL` | `redis://localhost:6379/0` | Redis URL for the RedBeat schedule store |
 | `CELERY_REDBEAT_KEY_PREFIX` | `redbeat:` | RedBeat key prefix (schedule zset is `redbeat::schedule`) |
 | `CELERY_REDBEAT_REDIS_MAX_CONNECTIONS` | — | Caps the RedBeat store's connection pool; uncapped when unset |
-| `CELERY_REDBEAT_RETRY_ATTEMPTS` | `0` | Times a failed RedBeat Redis connect or command is retried, each retry logged as a warning; `0` makes one attempt |
+| `CELERY_REDBEAT_RETRY_ATTEMPTS` | `0` | Times a failed RedBeat Redis connect or command is retried, each retry logged as a warning; `0` makes one attempt. A refused password is raised at once, never retried |
 | `CELERY_REDBEAT_RETRY_ON_TIMEOUT` | `false` | With `CELERY_REDBEAT_RETRY_ATTEMPTS` at `0`, retries a timed-out command once at once |
 | `CELERY_REDBEAT_SOCKET_TIMEOUT` | — | Seconds a RedBeat command may wait on its socket; redis-py's default when unset |
 | `CELERY_REDBEAT_SOCKET_CONNECT_TIMEOUT` | — | Seconds a RedBeat connect may take; redis-py's default when unset |
-| `CELERY_RESULT_BACKEND_RETRY_ATTEMPTS` | `0` | A Redis result backend: times a failed connect or command is retried, each retry logged as a warning; `0` makes one attempt |
+| `CELERY_RESULT_BACKEND_RETRY_ATTEMPTS` | `0` | A Redis result backend: times a failed connect or command is retried, each retry logged as a warning; `0` makes one attempt. A refused password is raised at once, never retried |
 | `CELERY_RESULT_BACKEND_RETRY_ON_TIMEOUT` | `false` | A Redis result backend: with `…_RETRY_ATTEMPTS` at `0`, retries a timed-out command once at once |
 | `CELERY_RESULT_BACKEND_SOCKET_TIMEOUT` | — | A Redis result backend: seconds a command may wait on its socket; celery's default when unset |
 | `CELERY_RESULT_BACKEND_SOCKET_CONNECT_TIMEOUT` | — | A Redis result backend: seconds a connect may take; celery's default when unset |
-| `CELERY_BROKER_RETRY_ATTEMPTS` | `0` | A Redis broker, read and write sides alike: times a failed connect or command is retried, each retry logged as a warning; `0` makes one attempt. Never retried: the reads kombu polls (a worker's task and fanout reads, a control command's reply read), where a drop raises |
+| `CELERY_BROKER_RETRY_ATTEMPTS` | `0` | A Redis broker, read and write sides alike: times a failed connect or command is retried, each retry logged as a warning; `0` makes one attempt. Never retried: the reads kombu polls (a worker's task and fanout reads, a control command's reply read), where a drop raises. A refused password is never retried by this setting; kombu's own connect step and a running worker's reconnect loop still retry it |
 | `CELERY_BROKER_RETRY_ON_TIMEOUT` | `false` | A Redis broker: with `…_RETRY_ATTEMPTS` at `0`, retries a timed-out command once at once |
 | `CELERY_BROKER_SOCKET_TIMEOUT` | — | A Redis broker: seconds a command may wait on its socket; kombu's default when unset |
 | `CELERY_BROKER_SOCKET_CONNECT_TIMEOUT` | — | A Redis broker: seconds a connect may take; kombu's default when unset |

@@ -94,7 +94,7 @@ Optional Redis connection tuning (see `TelegramCorrelationSettings`):
 | `CHANNEL_TELEGRAM_SOCKET_TIMEOUT` | — | Per-command socket timeout (seconds) |
 | `CHANNEL_TELEGRAM_SOCKET_CONNECT_TIMEOUT` | — | Connect-phase timeout (seconds) |
 | `CHANNEL_TELEGRAM_RETRY_ON_TIMEOUT` | `false` | Retry commands on timeout |
-| `CHANNEL_TELEGRAM_RETRY_ATTEMPTS` | `0` | Exponential-backoff retries on connection errors |
+| `CHANNEL_TELEGRAM_RETRY_ATTEMPTS` | `0` | Exponential-backoff retries on connection errors. A refused password is raised at once, never retried |
 
 ## How an answer travels
 

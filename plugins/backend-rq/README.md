@@ -228,7 +228,7 @@ from them.
 | --- | --- | --- |
 | `RQ_REDIS_URL` | `redis://localhost:6379/0` | Redis connection URL (broker and results). |
 | `RQ_REDIS_MAX_CONNECTIONS` | — | Optional cap on the pool's connections. |
-| `RQ_RETRY_ATTEMPTS` | `0` | Times a failed Redis connect or command is retried, each retry logged as a warning; `0` makes one attempt. |
+| `RQ_RETRY_ATTEMPTS` | `0` | Times a failed Redis connect or command is retried, each retry logged as a warning; `0` makes one attempt. A refused password is never retried by this setting; a waiting worker's own RQ reconnect loop and its pub/sub thread still retry it. |
 | `RQ_RETRY_ON_TIMEOUT` | `false` | With `RQ_RETRY_ATTEMPTS` at `0`, retry a timed-out command once at once. |
 | `RQ_SOCKET_TIMEOUT` | — | Seconds a Redis command may wait on its socket; redis-py's default when unset. |
 | `RQ_SOCKET_CONNECT_TIMEOUT` | — | Seconds a Redis connect may take; redis-py's default when unset. |

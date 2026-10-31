@@ -12,6 +12,10 @@ from typing import Any
 # The error a handshake read raises when the server closes the fresh socket unanswered.
 HANDSHAKE_DROP = "Connection closed by server."
 
+# The message of Redis's ``WRONGPASS`` reply to an ``AUTH`` or ``HELLO ... AUTH`` naming the
+# wrong password: the error a client raises carries it without the ``WRONGPASS`` code.
+REFUSED_PASSWORD = "invalid username-password pair or user is disabled."
+
 
 def closed_loopback_port() -> int:
     probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -22,16 +26,17 @@ def closed_loopback_port() -> int:
 
 
 class Stub:
-    """A loopback Redis stub: answers HELLO, PING, SUBSCRIBE and anything else; can drop and come back.
+    """A loopback Redis stub: answers AUTH, HELLO, PING, SUBSCRIBE and anything else; can drop and come back.
 
     A connection that says ``HELLO 3`` is answered in RESP3, its pub/sub replies as pushes;
     any other is answered in RESP2, a ``PING`` on a subscribed one with a ``pong`` message
     carrying its argument, as Redis answers a pub/sub health check. The stub can also drop
     a connection's handshake (:meth:`drop_next`) and publish to every subscribed connection
-    (:meth:`publish`).
+    (:meth:`publish`). With a ``password`` an ``AUTH`` or ``HELLO ... AUTH`` naming another
+    password is refused with ``WRONGPASS``, as Redis refuses it; :attr:`auths` counts both.
     """
 
-    def __init__(self, *, drop_on_ping: int | None = None) -> None:
+    def __init__(self, *, drop_on_ping: int | None = None, password: str | None = None) -> None:
         self.port = 0
         self.servers: list[asyncio.Server] = []
         self.writers: list[asyncio.StreamWriter] = []
@@ -41,6 +46,8 @@ class Stub:
         self.pings = 0
         self.drop_on_ping = drop_on_ping
         self.handshake_drops = 0
+        self.password = password
+        self.auths = 0
 
     def drop_next(self, connections: int) -> None:
         """Close the next ``connections`` accepted connections before any reply; answer normally after."""
@@ -89,7 +96,9 @@ class Stub:
         try:
             while words := await self._read_command(reader):
                 command = words[0].upper()
-                if command == b"HELLO" and words[1:2] == [b"3"]:
+                if self._refuses_auth(command, words):
+                    writer.write(b"-WRONGPASS " + REFUSED_PASSWORD.encode() + b"\r\n")
+                elif command == b"HELLO" and words[1:2] == [b"3"]:
                     self.resp3.add(writer)
                     writer.write(b"%1\r\n$5\r\nproto\r\n:3\r\n")
                 elif command == b"PING":
@@ -111,6 +120,14 @@ class Stub:
             pass
         finally:
             writer.close()
+
+    def _refuses_auth(self, command: bytes, words: list[bytes]) -> bool:
+        """Count an ``AUTH`` or ``HELLO ... AUTH`` and tell whether it names a password other than :attr:`password`."""
+        authenticates = command == b"AUTH" or (command == b"HELLO" and b"AUTH" in (word.upper() for word in words))
+        if not authenticates:
+            return False
+        self.auths += 1
+        return self.password is not None and words[-1] != self.password.encode()
 
     async def start(self) -> None:
         server = await asyncio.start_server(self.handle, "127.0.0.1", self.port)
