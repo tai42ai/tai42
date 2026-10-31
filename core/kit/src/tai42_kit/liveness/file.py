@@ -87,7 +87,8 @@ class LivenessFile:
     :meth:`report` is thread-safe and cheap between writes (one clock read). Each write first checks
     the file's owner: a file holding the pid of another live process is refused with a
     ``RuntimeError``, because two processes writing one file would hide either one's stall. A file
-    left by a process that no longer exists is taken over. Claiming a file this process does not
+    left by a process that no longer exists is taken over, and the temp file that process staged a
+    write in is cleared with it. Claiming a file this process does not
     own yet (a missing file, or a dead owner's) happens under a lock on the file's directory, so
     of two processes claiming one file at once the second is refused.
 
@@ -140,12 +141,19 @@ class LivenessFile:
                             f"liveness file {self.path} is owned by live process {owner}; "
                             "set TAI_BACKEND_LIVENESS_PATH to a distinct path per backend process"
                         )
+                    if owner is not None and owner != pid:
+                        # A dead owner killed between its write and its rename left its temp file.
+                        self._temp_file(owner).unlink(missing_ok=True)
                     self._write(pid, horizon)
             self._deadline = now + horizon
 
+    def _temp_file(self, pid: int) -> Path:
+        """The file the writer with ``pid`` stages each write in before renaming it over :attr:`path`."""
+        return self.path.with_name(f"{self.path.name}.{pid}.tmp")
+
     def _write(self, pid: int, horizon: float) -> None:
         """Replace the file atomically with ``pid`` and ``horizon``."""
-        tmp = self.path.with_name(f"{self.path.name}.{pid}.tmp")
+        tmp = self._temp_file(pid)
         tmp.write_bytes(f"{pid}\n{horizon:g}\n".encode("ascii"))
         os.replace(tmp, self.path)
 
@@ -154,11 +162,14 @@ class LivenessFile:
 
         A missing file is already the state removal leaves. A file another live process owns is
         left in place and reported at WARNING: it is that process's signal, not this one's. Every
-        later :meth:`report` through this writer raises.
+        later :meth:`report` through this writer raises. The temp file a write is staged in goes
+        with the file it belongs to: this process's own always, a dead owner's with that owner's
+        file, another live process's never.
         """
         with self._lock:
             self._removed = True
             pid = os.getpid()
+            self._temp_file(pid).unlink(missing_ok=True)
             owner = _owner(self.path)
             if owner is None:
                 return
@@ -174,6 +185,7 @@ class LivenessFile:
                         "liveness file %s is owned by process %s, not this one; leaving it in place", self.path, owner
                     )
                     return
+                self._temp_file(owner).unlink(missing_ok=True)
                 self.path.unlink(missing_ok=True)
 
 

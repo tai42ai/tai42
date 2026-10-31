@@ -83,14 +83,17 @@ more than `TAI_BACKEND_LIVENESS_GRACE` seconds, and 1 otherwise, so it serves as
 that container's exec liveness probe. Each process on one filesystem needs its
 own `TAI_BACKEND_LIVENESS_PATH`, and removes its file when it exits.
 
-- `worker` reports on each RQ heartbeat: every dequeue poll (at most 5s apart)
-  and every job boundary. While a forked work-horse runs a job, the worker's
-  horse monitor reports; on the `solo` and `gevent` pools, where the job runs in
-  the worker process, a monitor thread reports once a second until the job ends.
-  It is an OS thread under `gevent` too, so a job that holds the CPU does not
-  starve it. Those pools cannot end every job at `RQ_TASK_TIMEOUT` (one blocked
-  in a C call, or under `gevent` one that never yields), so the monitor stops
-  reporting once a job runs past it, and the probe ends the worker.
+- `worker` reports on each RQ heartbeat: every dequeue poll (at most 5s apart),
+  every job boundary, and once a second while `rq suspend` holds it. A job that
+  arrives while a config reload re-imports the manifest modules waits for the
+  re-import to finish, and the worker reports once a second while it waits.
+  While a forked work-horse runs a job, the worker's horse monitor reports; on
+  the `solo` and `gevent` pools, where the job runs in the worker process, a
+  monitor thread reports once a second until the job ends. It is an OS thread
+  under `gevent` too, so a job that holds the CPU does not starve it. Those
+  pools cannot end every job at `RQ_TASK_TIMEOUT` (one blocked in a C call, or
+  under `gevent` one that never yields), so the monitor stops reporting once a
+  job runs past it, and the probe ends the worker.
   A report that fails (the file is owned by another live process, or cannot be
   written) stops the worker before its next job, and the launch exits non-zero.
 - `beat` reports each pass of the scheduler loop, promising the next within its
@@ -132,6 +135,9 @@ need a worker without a label.
 
 - A tool with its own `queue` parameter cannot take a `sync_task` or
   `async_task` branch.
+- A job does not wait for another job: it chains the next one with
+  `callback_kwargs`. `sync_task` and `backend_task_result` (given a `timeout`)
+  are for callers outside a job and raise `RuntimeError` inside one.
 - RQ has no disabled-schedule state, so `backend_list_schedules` always reports a
   schedule as enabled, and disabling one deletes it.
 - `backend_registered_tasks` and `backend_list_failed_tasks` are not implemented.

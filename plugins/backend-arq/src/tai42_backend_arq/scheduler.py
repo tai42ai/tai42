@@ -266,7 +266,10 @@ async def task_scheduler(ctx: dict[str, Any], schedule_name: str) -> Any:
     When due it enqueues the target (if enabled), waits for the result, then defers
     its own replacement conditioned on this job still being the recorded pending
     job. A stale invocation exits without running the target, so a schedule never
-    fires twice.
+    fires twice. A later pickup of this same job (arq takes it up again after a worker
+    died inside its run, or after a cold stop cancelled it) never fires the target again,
+    since the cut run may already have fired it: it only moves the schedule on to its
+    next run.
     """
     settings = arq_settings()
     key = settings.arq_schedule_key(schedule_name)
@@ -322,8 +325,18 @@ async def task_scheduler(ctx: dict[str, Any], schedule_name: str) -> Any:
     next_run_ts = next_time.timestamp()
     defer_by = next_run_ts - datetime.now(UTC).timestamp()
 
+    picked_up_again = ctx["job_try"] > 1
+    if picked_up_again:
+        logger.warning(
+            "Schedule '%s': job %s was picked up again (try %d) after its run was cut; "
+            "the fire is not repeated and the schedule moves on to its next run.",
+            schedule_name,
+            ctx["job_id"],
+            ctx["job_try"],
+        )
+
     try:
-        if enabled:
+        if enabled and not picked_up_again:
             job = await ctx["redis"].enqueue_job(target, *args, _queue_name=arq_settings().queue_name, **kwargs)
             # wait_job_result surfaces an aborted target as TaskFailedError, not
             # a raw CancelledError that would read as a cancellation of THIS job.

@@ -9,10 +9,12 @@ not exist post-fork: the child blocks forever on the same import. That is what
 wedges an rq work-horse — it resolves its job function by importing its module, and
 the parent then sits in ``monitor_work_horse`` draining nothing.
 
-Both legs run. ``no_gate`` forks unguarded and asserts the child does NOT exit — the
-wedge must still reproduce, or the gated leg proves nothing. ``gate`` runs the same
-two sides through a real :class:`ForkGate` and asserts the fork is deferred until the
-re-import completes, after which the child imports a settled module and exits clean.
+Every leg runs. ``no_gate`` forks unguarded and asserts the child does NOT exit — the
+wedge must still reproduce, or the gated legs prove nothing. ``gate`` runs the same
+two sides through a real :class:`ForkGate`, the fork inside an explicit job span;
+``guard`` installs the gate's fork guard and forks bare, as rq's own fork call does.
+Both assert the fork is deferred until the re-import completes, after which the child
+imports a settled module and exits clean.
 """
 
 from __future__ import annotations
@@ -118,12 +120,15 @@ def _spawn(fn: Callable[[], None]) -> threading.Thread:
     return thread
 
 
-@pytest.mark.parametrize("guarded", [False, True], ids=["no_gate", "gate"])
+@pytest.mark.parametrize("mode", ["no_gate", "gate", "guard"])
 def test_a_child_forked_during_a_module_reimport_wedges_unless_gated(
-    parked_package: tuple[str, threading.Event, threading.Event], guarded: bool
+    parked_package: tuple[str, threading.Event, threading.Event], mode: str
 ) -> None:
     name, importing, release = parked_package
     gate = ForkGate()
+    guarded = mode != "no_gate"
+    if mode == "guard":
+        gate.guard_forks(timeout=_ARRIVES, tick=lambda: None)
     forked = threading.Event()
     pid_slot: dict[str, int] = {}
 
@@ -140,9 +145,8 @@ def test_a_child_forked_during_a_module_reimport_wedges_unless_gated(
             reimport()
 
     def work_side() -> None:
-        """The rq work loop's job span around the fork instant, as the prefork worker's
-        ``fork_work_horse`` drives it."""
-        if guarded:
+        """The rq work loop's fork: inside an explicit job span, or bare under the guard or no gate."""
+        if mode == "gate":
             with gate.job_span(timeout=_ARRIVES):
                 pid_slot["pid"] = _fork_child_importing(name)
                 forked.set()
@@ -178,6 +182,8 @@ def test_a_child_forked_during_a_module_reimport_wedges_unless_gated(
             worker.join(timeout=_ARRIVES)
     finally:
         release.set()
+        # The guard's fork hooks stay registered for the process; with no guard installed they do nothing.
+        gate._fork_hooks.guard = None
         pid = pid_slot.get("pid")
         if pid is not None:
             with contextlib.suppress(ProcessLookupError, ChildProcessError):

@@ -29,6 +29,7 @@ from tai42_contract.backend import (
     ScheduleListRow,
     ScheduleRecord,
 )
+from tai42_kit.backend.job_context import assert_not_in_job
 from tai42_kit.clients.impl.redis import RedisClient
 from tai42_kit.utils.runtime.schedule_util import normalize_schedule
 
@@ -112,7 +113,12 @@ def backend_task_result(task_id: str, timeout: float | None = None) -> Any:
     When ``timeout`` is given, wait up to that many seconds for the task to
     finish before reading the result. When ``timeout`` is None, read the
     current state without waiting. Raises if the task itself failed.
+
+    A job does not wait for another job's result: given a ``timeout`` inside a job, it raises
+    ``RuntimeError`` (a job chains the next one with ``callback_kwargs``).
     """
+    if timeout is not None:
+        assert_not_in_job("backend_task_result")
     result = AsyncResult(task_id, app=celery_app)
     if timeout is None:
         if not result.ready():
