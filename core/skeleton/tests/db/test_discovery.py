@@ -341,12 +341,35 @@ def test_manifest_plugin_specs_cover_every_role_list(monkeypatch: pytest.MonkeyP
         ("backend_module", "tai42_widget.backend", "tai42_widget.backend"),
         ("tools", [{"module": "tai42_widget.tools", "title": "Widget"}], "tai42_widget.tools"),
         ("agents", [{"module": "tai42_widget.agent", "title": "Widget"}], "tai42_widget.agent"),
+        ("studio_plugins", ["tai42_widget"], "tai42_widget"),
     ):
         _map_module_to_widget_spec(monkeypatch, module)
         specs = manifest_plugin_specs(
             Manifest.model_validate({field: value}), InstalledPackages(top_levels={}, editable_sources={})
         )
         assert list(specs) == ["tai42-widget"], field
+
+
+def test_manifest_plugin_specs_cover_the_selected_config_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The config provider TAI_CONFIG_MODE selects is loaded by every deployment, whatever the
+    # manifest names, so its plugin is read like a manifest-loaded one.
+    from tai42_kit.settings import reset_all_settings
+
+    from tai42_skeleton.db.discovery import manifest_plugin_specs
+    from tai42_skeleton.manifest import Manifest
+
+    monkeypatch.setenv("TAI_CONFIG_MODE", "widget")
+    reset_all_settings()
+    _map_module_to_widget_spec(monkeypatch, "tai42_config_widget.manager")
+    try:
+        specs = manifest_plugin_specs(
+            Manifest.model_validate({}), InstalledPackages(top_levels={}, editable_sources={})
+        )
+    finally:
+        monkeypatch.delenv("TAI_CONFIG_MODE")
+        reset_all_settings()
+
+    assert list(specs) == ["tai42-widget"]
 
 
 def test_manifest_plugin_specs_skip_skeleton_routers() -> None:

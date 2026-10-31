@@ -10,6 +10,7 @@ from tai42_contract._urls import check_web_url
 from tai42_contract.plugins.bindings import KIND_MANIFEST_BINDINGS, PluginItemKind
 from tai42_contract.plugins.field_validation import (
     DISPLAY_NAME_MAX_LEN,
+    FEATURE_KIND_RE,
     ICON_RE,
     LICENSE_RE,
     LISTING_SLUG_RE,
@@ -74,6 +75,13 @@ class PluginSpec(BaseModel):
     component rather than the distribution itself — absent (the default) runs the
     chain under the distribution name, byte-identical to prior behavior. Setting
     it REQUIRES ``migrations`` (a component with no chain migrates nothing).
+
+    ``requires`` names the platform features the plugin's code cannot work without,
+    by the platform's gated-feature kind (``versioning``, ``tool_meta``, ...); empty (the
+    default) requires none. The contract validates only each name's SHAPE and that the
+    spec ships code (only a plugin whose modules a deployment loads is checked); whether
+    a name is a feature the platform knows, and whether it is on, is decided at boot,
+    which refuses a deployment that loads the plugin while a required feature is off.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -97,6 +105,7 @@ class PluginSpec(BaseModel):
     provides: list[PluginItem]
     migrations: str | None = None
     migrations_component: str | None = None
+    requires: list[str] = Field(default_factory=list)
 
     @property
     def ref(self) -> str:
@@ -246,6 +255,16 @@ class PluginSpec(BaseModel):
             raise ValueError(f"migrations path {value!r} must not contain a '..' segment")
         return value
 
+    @field_validator("requires")
+    @classmethod
+    def _check_requires(cls, value: list[str]) -> list[str]:
+        if len(set(value)) != len(value):
+            raise ValueError("requires must be unique")
+        for kind in value:
+            if not FEATURE_KIND_RE.fullmatch(kind):
+                raise ValueError(f"required feature {kind!r} must match {FEATURE_KIND_RE.pattern}")
+        return value
+
     @model_validator(mode="after")
     def _contract_by_kind(self) -> PluginSpec:
         # One package is one thing: an mcp-server package imports no
@@ -272,12 +291,15 @@ class PluginSpec(BaseModel):
         # the pip distribution that ships it; an all-data spec may be
         # descriptor-only (no package). ``migrations`` are packaged SQL — a
         # cross-field rule the ``migrations`` field validator cannot see — so
-        # they also require a package.
+        # they also require a package. ``requires`` is checked when a deployment
+        # loads the plugin's code, so a spec with no code item may not declare it.
         has_module_item = any(KIND_MANIFEST_BINDINGS[item.kind].payload == "module" for item in self.provides)
         if has_module_item and self.package is None:
             raise ValueError("a plugin with code items must name its package")
         if self.migrations is not None and self.package is None:
             raise ValueError("migrations require a package")
+        if self.requires and not has_module_item:
+            raise ValueError("requires needs a code item: only a plugin whose modules a deployment loads is checked")
         return self
 
     @model_validator(mode="after")

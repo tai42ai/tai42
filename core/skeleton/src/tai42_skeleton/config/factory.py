@@ -21,7 +21,8 @@ from tai42_skeleton.config.config_mode import config_mode
 _BUILTIN_PROVIDERS: dict[str, str] = {"file": "tai42_skeleton.config.file_manager"}
 
 
-def _provider_module(mode: str) -> str:
+def provider_module(mode: str) -> str:
+    """The import path of the config provider module ``mode`` resolves to."""
     return _BUILTIN_PROVIDERS.get(mode, f"tai42_config_{mode}.manager")
 
 
@@ -38,7 +39,7 @@ class ConfigManagerFactory:
                 that error unwrapped, so a broken provider is never mislabeled absent.
         """
         mode = config_mode()
-        module_name = _provider_module(mode)
+        module_name = provider_module(mode)
         try:
             found = importlib.util.find_spec(module_name) is not None
         except ModuleNotFoundError:

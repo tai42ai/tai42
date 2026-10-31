@@ -47,9 +47,9 @@ def test_file_provider_module_exposes_build_config_manager() -> None:
 def test_provider_module_resolves_builtins_and_convention() -> None:
     """``file`` is built into the skeleton; every other mode resolves by convention
     to ``tai42_config_<mode>.manager``, naming no plugin in the factory."""
-    assert factory_mod._provider_module("file") == "tai42_skeleton.config.file_manager"
-    assert factory_mod._provider_module("external") == "tai42_config_external.manager"
-    assert factory_mod._provider_module("vault") == "tai42_config_vault.manager"
+    assert factory_mod.provider_module("file") == "tai42_skeleton.config.file_manager"
+    assert factory_mod.provider_module("external") == "tai42_config_external.manager"
+    assert factory_mod.provider_module("vault") == "tai42_config_vault.manager"
 
 
 def test_factory_imports_no_provider_plugin() -> None:

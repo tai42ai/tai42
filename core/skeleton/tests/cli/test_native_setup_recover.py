@@ -287,6 +287,57 @@ def test_recover_refuses_a_pending_schema_before_importing_lifecycle_modules(
     assert recovered == []
 
 
+def test_recover_refuses_a_plugin_requiring_an_off_feature_before_importing_lifecycle_modules(
+    monkeypatch: pytest.MonkeyPatch, fake_deployment: dict
+) -> None:
+    from tai42_contract.plugins import PluginSpec
+    from tai42_kit.db import database_password_env
+    from tai42_kit.settings import reset_all_settings
+
+    from tai42_skeleton.app.lifecycle import manifest_imports
+
+    spec = PluginSpec.model_validate(
+        {
+            "spec_version": 1,
+            "namespace": "acme",
+            "name": "relay",
+            "package": "acme-relay",
+            "version": "1.0.0",
+            "description": "A neutral test plugin.",
+            "license": "Apache-2.0",
+            "contract": ">=0.1,<1000",
+            "categories": ["dev"],
+            "provides": [{"kind": "tool", "name": "ping", "module": "deployment.lifecycle.module", "description": "d"}],
+            "requires": ["versioning"],
+        }
+    )
+    monkeypatch.setattr(
+        manifest_imports, "manifest_plugin_specs", lambda manifest, installed: {"acme/relay": (spec, None)}
+    )
+    monkeypatch.delenv(database_password_env("default"), raising=False)
+    reset_all_settings()
+    recovered: list[str] = []
+
+    async def _fake_recover(setup_token: str, *, key_user_id: str | None, key_description: str) -> dict:
+        recovered.append(setup_token)
+        return _RESULT
+
+    monkeypatch.setattr(setup_recover, "recover_owner_key", _fake_recover)
+
+    result = CliRunner().invoke(
+        app_module.app, ["setup", "--recover", "--token", "t", "--manifest-path", "/deploy/manifest.yaml"]
+    )
+
+    assert result.exit_code == 1, result.output
+    assert "a loaded plugin requires a platform feature this deployment does not provide" in result.output
+    assert (
+        "plugin 'acme/relay' requires the Versioning feature ('versioning'), "
+        f"which is off: set {database_password_env('default')}" in result.output
+    )
+    assert fake_deployment["imported"] == []
+    assert recovered == []
+
+
 def test_recover_refuses_an_incompatible_lifecycle_module_without_importing_it(
     monkeypatch: pytest.MonkeyPatch, fake_deployment: dict
 ) -> None:

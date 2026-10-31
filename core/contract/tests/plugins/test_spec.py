@@ -596,6 +596,48 @@ def test_migrations_without_package_rejected():
         PluginSpec(**_connector_spec_kwargs(migrations="migrations"))
 
 
+def test_requires_defaults_to_none_required():
+    from tai42_contract.plugins import PluginSpec
+
+    assert PluginSpec(**_spec_kwargs()).requires == []
+
+
+def test_requires_round_trips_feature_kind_names():
+    from tai42_contract.plugins import PluginSpec
+
+    spec = PluginSpec.model_validate(_spec_kwargs(requires=["versioning", "tool_meta"]))
+
+    assert spec.requires == ["versioning", "tool_meta"]
+
+
+@pytest.mark.parametrize("bad", ["Versioning", "tool-meta", "1store", "", "tool meta"])
+def test_requires_rejects_a_malformed_name(bad: str):
+    from pydantic import ValidationError
+
+    from tai42_contract.plugins import PluginSpec
+
+    with pytest.raises(ValidationError, match="required feature"):
+        PluginSpec(**_spec_kwargs(requires=[bad]))
+
+
+def test_requires_rejects_duplicates():
+    from pydantic import ValidationError
+
+    from tai42_contract.plugins import PluginSpec
+
+    with pytest.raises(ValidationError, match="requires must be unique"):
+        PluginSpec(**_spec_kwargs(requires=["versioning", "versioning"]))
+
+
+def test_requires_without_a_code_item_rejected():
+    from pydantic import ValidationError
+
+    from tai42_contract.plugins import PluginSpec
+
+    with pytest.raises(ValidationError, match="requires needs a code item"):
+        PluginSpec(**_connector_spec_kwargs(requires=["connectors"]))
+
+
 def test_connector_origin_system_ok_for_tai42_namespace():
     from tai42_contract.plugins import PluginSpec
 

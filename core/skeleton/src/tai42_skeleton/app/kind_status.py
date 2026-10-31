@@ -239,7 +239,8 @@ def _studio_plugins_row() -> KindStatus:
 class GatedFeature:
     """One DB-backed feature gate's registration.
 
-    The single source both the live ``kinds`` table and the generated OFF-behavior doc read.
+    The single source the live ``kinds`` table, the generated OFF-behavior doc and the boot-time
+    check of a plugin's required features read.
 
     ``kind`` is the pluggable-kind name the row reports; ``label`` is the human name
     the docs table shows; ``configured`` is the predicate reading the same fresh
@@ -330,6 +331,11 @@ _GATED_FEATURES: list[GatedFeature] = [
         off_behavior="Every states read and write refuses 501 states-not-configured.",
     ),
 ]
+
+
+def gated_features() -> dict[str, GatedFeature]:
+    """Every DB-backed feature gate keyed by its ``kind`` — the names a plugin's spec ``requires`` list resolves to."""
+    return {feature.kind: feature for feature in _GATED_FEATURES}
 
 
 def _gated_feature_row(feature: GatedFeature) -> KindStatus:

@@ -52,7 +52,7 @@ _CONTRACT_DIST = "tai42-contract"
 
 
 class CorePluginBootError(RuntimeError):
-    """A manifest-declared plugin is contract-incompatible or failed to import/load.
+    """A manifest-declared plugin is contract-incompatible, requires a platform feature that is off, or cannot load.
 
     Raised to ABORT boot — and, on a live reload, to abort THAT rebuild so the
     previous generation keeps serving. Every manifest-named module the operator
@@ -60,8 +60,9 @@ class CorePluginBootError(RuntimeError):
     (backend/sandbox/storage/monitoring), the additive roles
     (lifecycle/webhook_verifier/channel/router/middleware/agents/extensions/tools),
     and the studio plugins. A module that cannot load is corrupt configuration, not
-    a degradation to serve around. The message names the module, its kind, the
-    versions in play, and the remedy.
+    a degradation to serve around. The message names what cannot load (the module and
+    its kind, or the plugin and the feature it requires), why (the versions in play, the
+    feature's enabling variable), and the remedy.
     """
 
 
