@@ -10,3 +10,4 @@ key_env: TAI_E2E_KEY
 provides:
   - probe-tools # the e2e probe tools are loaded
   - mutable # tests may change stack-wide state
+  - package-runners # the stack can launch uvx and npx packages from the public indexes

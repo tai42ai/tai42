@@ -24,6 +24,7 @@ from tai42_skeleton.app.reload_gate import reload_gate
 from tai42_skeleton.connectors.runtime import refresh_owner
 from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.settings.owned_settings import require_known_owned_settings
+from tai42_skeleton.tools import mcp_start
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +58,7 @@ class LifespanMixin(LifecycleState):
         # A bus-enabled process's fleet apply window must cover the retire's drain floor, so
         # a worker draining real work answers inside it.
         require_apply_window_covers_drain()
-        from tai42_skeleton.app.epoch import clear_epoch, current_epoch_or_none, install_boot_core
+        from tai42_skeleton.app.epoch import clear_epoch, install_boot_core
 
         try:
             # Install boot epoch 0's serving core BEFORE start(), so start() and the
@@ -126,6 +127,8 @@ class LifespanMixin(LifecycleState):
             remove_ready_sentinel()
             await self._cancel_bus_subscription()
             await self._cancel_reprobe_task()
+            # Cancel every MCP server start still running and close the start loop.
+            await mcp_start.aclose()
             await self._cancel_interactions_reaper()
             await self._cancel_sandbox_reaper()
             await self._cancel_media_reaper()
@@ -139,13 +142,14 @@ class LifespanMixin(LifecycleState):
             # Shutdown keeps swallow-and-log so teardown runs every handler.
             await self._run_handlers(list(self._shutdown_handlers.values()))
             await self._teardown_resources()
-            # Keep a serving-core read-target for any post-context read, then drop the
-            # process serving generation (closing its FastMCP lifespan) so a later
-            # app_context in this process starts from a clean slate.
-            live = current_epoch_or_none()
-            if live is not None and live.core is not None:
-                self._building = live.core
-            await clear_epoch()
+            # Drop the process serving generation (closing its FastMCP lifespan), then
+            # leave a fresh boot-scaffold core as the read target of the un-booted app, as
+            # construction does: a post-context read sees none of the dropped generation's
+            # state, and a later app_context in this process starts from a clean slate.
+            try:
+                await clear_epoch()
+            finally:
+                self._building = self._build_serving_core()
 
     @staticmethod
     def _log_task_exception(task: asyncio.Task[Any]) -> bool:

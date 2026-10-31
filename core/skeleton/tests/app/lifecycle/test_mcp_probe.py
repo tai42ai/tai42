@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import threading
 import time
 from contextlib import asynccontextmanager
 from typing import Any, ClassVar, cast
@@ -17,16 +16,17 @@ from tai42_contract.connectors.models import AuthHealthState, ConnectorRef
 from tai42_contract.manifest import MCPConfig, TaiMCPConfig
 
 from tai42_skeleton.app import lifecycle as lifecycle_module
-from tai42_skeleton.app.clients import ClientsFacet
 from tai42_skeleton.app.instance import app
+from tai42_skeleton.app.lifecycle import mcp_probe as mcp_probe_module
 from tai42_skeleton.app.lifecycle.off_loop import run_blocking
 from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.tools import mcp_health
+from tai42_skeleton.tools.mcp_start import McpStartPending, StartId
 
 from ...connectors import mcp_fakes
 from ...connectors.credential_path import CONNECTION_ID, CredentialPath, on_loop, owner_loop
 from ._credential_app import BUDGET, roomy_budgets
-from ._doubles import _cfg, _failed_row, _FakeMcpTool, _Mixin
+from ._doubles import _cfg, _failed_row, _FakeMcpTool, _Mixin, _mixin
 
 
 class _Resp:
@@ -60,6 +60,18 @@ def test_record_failed_mcp_records_credential_free_detail():
     assert "https://***@h/sse?apikey=***" in row["message"]
     # The list door surfaces the same record under a ``title`` key, nothing more.
     assert m._list_failed_mcps() == [{"title": "gh", **row}]
+
+
+def test_a_starting_record_keeps_its_start_and_the_list_and_status_doors_leave_it_out():
+    m = _Mixin()
+    start = StartId()
+    m._record_failed_mcp(_cfg("gh"), McpStartPending("gh", 3.0, 15.0, start=start))
+    assert m._failed_mcps["gh"]["start"] is start
+    [row] = m._list_failed_mcps()
+    assert row["title"] == "gh"
+    assert row["category"] == "starting"
+    assert "start" not in row
+    assert m._live_mcp_status()["failed"] == [row]
 
 
 def test_failed_mcp_categories_cover_auth_unreachable_error():
@@ -160,37 +172,47 @@ def test_load_mcps_early_returns_without_mcp():
     assert asyncio.run(m._load_mcps()) == ([], [])
 
 
-def test_load_mcps_uses_short_reload_budget_during_a_rebuild(monkeypatch):
-    # A RELOAD (epoch rebuild) probes with the SHORT budget, so an unreachable server can't
-    # stall the reload gate / fleet convergence for the full cold-boot budget.
+def _captured_start(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """Replace the start loop's entry with one that records the wait and the start budget it is handed."""
+    seen: dict[str, Any] = {}
+
+    async def fake_start_listing(run, *, title, key, wait, lifetime, on_late_outcome):
+        seen.update(title=title, wait=wait, lifetime=lifetime)
+        return []
+
+    monkeypatch.setattr(mcp_probe_module, "start_listing", fake_start_listing)
+    return seen
+
+
+def test_load_mcps_waits_the_short_reload_budget_during_a_rebuild(monkeypatch):
+    # A RELOAD (epoch rebuild) waits only the SHORT reload budget, so an unreachable server can't
+    # stall the reload gate / fleet convergence; the start itself keeps the full start budget.
     from tai42_skeleton.settings.cache import mcp_probe_timeout, mcp_reload_probe_timeout
 
     m = _Mixin()
     m._manifest = Manifest.model_validate({"mcp": [_cfg("svc").model_dump()]})
-    probe = AsyncMock(return_value=[])
-    monkeypatch.setattr(m, "_probe_mcp", probe)
+    seen = _captured_start(monkeypatch)
     monkeypatch.setattr(lifecycle_module, "is_epoch_rebuild_in_progress", lambda: True)
-    asyncio.run(m._load_mcps())
-    call = probe.await_args
-    assert call is not None  # the probe WAS awaited
-    assert call.kwargs["timeout"] == mcp_reload_probe_timeout()
-    assert mcp_reload_probe_timeout() < mcp_probe_timeout()  # short reload budget vs cold-boot
+    with owner_loop() as serving:
+        m._serving_loop = serving
+        asyncio.run(m._load_mcps())
+    assert seen == {"title": "svc", "wait": mcp_reload_probe_timeout(), "lifetime": mcp_probe_timeout()}
+    assert mcp_reload_probe_timeout() < mcp_probe_timeout()  # short reload wait vs the start budget
 
 
-def test_load_mcps_uses_full_budget_at_cold_boot(monkeypatch):
-    # Cold boot (no rebuild in progress) keeps the generous budget: it is one-time and may
+def test_load_mcps_waits_the_whole_start_budget_at_cold_boot(monkeypatch):
+    # Cold boot (no rebuild in progress) waits the whole start budget: it is one-time and may
     # legitimately wait for a server still coming up.
     from tai42_skeleton.settings.cache import mcp_probe_timeout
 
     m = _Mixin()
     m._manifest = Manifest.model_validate({"mcp": [_cfg("svc").model_dump()]})
-    probe = AsyncMock(return_value=[])
-    monkeypatch.setattr(m, "_probe_mcp", probe)
+    seen = _captured_start(monkeypatch)
     monkeypatch.setattr(lifecycle_module, "is_epoch_rebuild_in_progress", lambda: False)
-    asyncio.run(m._load_mcps())
-    call = probe.await_args
-    assert call is not None  # the probe WAS awaited
-    assert call.kwargs["timeout"] == mcp_probe_timeout()
+    with owner_loop() as serving:
+        m._serving_loop = serving
+        asyncio.run(m._load_mcps())
+    assert seen == {"title": "svc", "wait": mcp_probe_timeout(), "lifetime": mcp_probe_timeout()}
 
 
 def test_probe_mcp_uses_pooled_client_seam(monkeypatch):
@@ -295,16 +317,9 @@ def test_a_boot_whose_include_names_an_unusable_schema_tool_binds_the_rest(monke
 # read, lock take and token request is counted (``credential_path``).
 
 
-def _mixin(*entries: TaiMCPConfig) -> _Mixin:
-    m = _Mixin()
-    m.clients = ClientsFacet()
-    m._manifest = Manifest.model_validate({"mcp": [e.model_dump() for e in entries]})
-    return m
-
-
 def _probe(m: _Mixin, config: TaiMCPConfig) -> Any:
     """The probe as the boot listing runs it: a throwaway loop, no refresh owner bound."""
-    return run_blocking(lambda: m._probe_mcp(config, timeout=BUDGET))
+    return run_blocking(lambda: m._probe_mcp(config, wait=BUDGET))
 
 
 def _record(m: _Mixin, config: TaiMCPConfig) -> dict:
@@ -327,13 +342,14 @@ def test_a_server_that_demands_a_credential_lists_with_the_stored_one(path):
     assert path.store.writes == 0
 
 
-def test_an_expired_token_is_refreshed_once_and_the_tools_list(path):
+def test_an_expired_token_is_refreshed_once_and_the_tools_list(path, monkeypatch):
+    roomy_budgets(monkeypatch)  # the start budget bounds this listing, with room for the refresh
     path.connect(expires_in=-5)
     path.token_endpoint()
     path.mcp.reset(mcp_fakes.bearer_only("at-new"))
     m = _mixin(path.entry)
     with owner_loop() as loop:
-        tools = on_loop(loop, m._probe_mcp(path.entry, timeout=BUDGET * 4))
+        tools = on_loop(loop, m._probe_mcp(path.entry))
     assert [t.name for t in tools] == ["ping"]
     assert path.attempts == [None, "Bearer at-new"]
     assert path.token_requests == 1
@@ -442,7 +458,7 @@ def test_a_server_that_lists_without_a_credential_gets_one_request_and_no_store_
     m = _mixin(path.entry)
     with owner_loop() as loop:
         started = time.monotonic()
-        tools = on_loop(loop, m._probe_mcp(path.entry, timeout=BUDGET))
+        tools = on_loop(loop, m._probe_mcp(path.entry, wait=BUDGET))
         elapsed = time.monotonic() - started
     assert [t.name for t in tools] == ["ping"]
     assert path.attempts == [None]
@@ -465,13 +481,14 @@ def test_the_credential_demand_is_noted_from_the_last_listing(path):
     assert path.entry.title not in m._mcp_credential_demanded  # listed without a credential: cleared
 
 
-def test_a_refused_stored_token_is_force_refreshed_once_fenced_on_it(path, caplog):
+def test_a_refused_stored_token_is_force_refreshed_once_fenced_on_it(path, monkeypatch, caplog):
+    roomy_budgets(monkeypatch)  # the start budget bounds this listing, with room for the refresh
     path.connect(access_token="at-revoked")
     path.token_endpoint()
     path.mcp.reset(mcp_fakes.bearer_only("at-new"))
     m = _mixin(path.entry)
     with caplog.at_level(logging.WARNING), owner_loop() as loop:
-        tools = on_loop(loop, m._probe_mcp(path.entry, timeout=BUDGET * 4))
+        tools = on_loop(loop, m._probe_mcp(path.entry))
     assert [t.name for t in tools] == ["ping"]
     assert path.attempts == [None, "Bearer at-revoked", "Bearer at-new"]
     assert path.token_requests == 1
@@ -480,13 +497,14 @@ def test_a_refused_stored_token_is_force_refreshed_once_fenced_on_it(path, caplo
     )
 
 
-def test_a_reconnect_required_connection_is_recorded_auth_naming_the_connection(path):
+def test_a_reconnect_required_connection_is_recorded_auth_naming_the_connection(path, monkeypatch):
+    roomy_budgets(monkeypatch)  # the start budget bounds this listing, with room for the refresh
     path.connect(expires_in=-5, health=AuthHealthState.RECONNECT_REQUIRED)
     path.mcp.reset(mcp_fakes.bearer_only("at-new"))
     m = _mixin(path.entry)
     with owner_loop() as loop:
         try:
-            on_loop(loop, m._probe_mcp(path.entry, timeout=BUDGET * 4))
+            on_loop(loop, m._probe_mcp(path.entry))
         except Exception as exc:
             m._record_failed_mcp(path.entry, exc)
     record = m._failed_mcps[path.entry.title]
@@ -497,6 +515,7 @@ def test_a_reconnect_required_connection_is_recorded_auth_naming_the_connection(
 
 
 def test_a_token_endpoint_that_is_down_is_recorded_auth_and_the_health_follows_the_engine(path, monkeypatch):
+    roomy_budgets(monkeypatch)  # the start budget bounds this listing, with room for the refresh
     import tai42_skeleton.connectors.runtime.resolver as resolver_mod
 
     monkeypatch.setattr(resolver_mod, "TRANSIENT_BACKOFF_BASE_SECONDS", 0.0)
@@ -506,7 +525,7 @@ def test_a_token_endpoint_that_is_down_is_recorded_auth_and_the_health_follows_t
     m = _mixin(path.entry)
     with owner_loop() as loop:
         try:
-            on_loop(loop, m._probe_mcp(path.entry, timeout=BUDGET * 4))
+            on_loop(loop, m._probe_mcp(path.entry))
         except Exception as exc:
             m._record_failed_mcp(path.entry, exc)
     record = m._failed_mcps[path.entry.title]
@@ -527,7 +546,7 @@ def test_a_forged_entry_is_listed_with_no_credential_ever(path, caplog, server_p
     m = _mixin(forged)
     with caplog.at_level(logging.ERROR), owner_loop() as loop:
         try:
-            on_loop(loop, m._probe_mcp(forged, timeout=BUDGET))
+            on_loop(loop, m._probe_mcp(forged, wait=BUDGET))
         except Exception as exc:
             m._record_failed_mcp(forged, exc)
     assert path.attempts == [None]
@@ -656,10 +675,9 @@ def test_an_anonymous_listing_applies_with_no_refresh_and_no_eviction_error(path
     assert path.locks == 0
 
 
-def test_the_note_is_kept_beside_the_failed_set_of_the_generation(path):
-    m = _mixin(path.entry)
-    m._note_credential_demand("a", demanded=True)
-    assert m._serving_core._mcp_credential_demanded == {"a"}
-    m._note_credential_demand("a", demanded=False)
-    assert m._serving_core._mcp_credential_demanded == set()
-    assert threading.current_thread() is threading.main_thread()
+def test_the_note_is_set_and_cleared_by_each_listing_in_the_set_it_is_given():
+    demanded_titles: set[str] = set()
+    mcp_probe_module._note_credential_demand(demanded_titles, "a", demanded=True)
+    assert demanded_titles == {"a"}
+    mcp_probe_module._note_credential_demand(demanded_titles, "a", demanded=False)
+    assert demanded_titles == set()

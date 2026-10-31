@@ -42,6 +42,7 @@ DEFAULT_KEY_ENV = "TAI_E2E_KEY"
 DECLARED_NEEDS: Mapping[str, str] = {
     "probe-tools": "the e2e probe tools are loaded in the stack",
     "mutable": "tests may change stack-wide state",
+    "package-runners": "the stack's servers can launch `uvx` and `npx` packages from the public package indexes",
 }
 
 # Needs only a stack the run builds itself can meet.

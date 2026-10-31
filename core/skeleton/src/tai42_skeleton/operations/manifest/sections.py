@@ -11,6 +11,7 @@ from __future__ import annotations
 from typing import Any
 
 from tai42_contract.app.responses import ApplyResponse
+from tai42_contract.errors import UnavailableError
 
 from tai42_skeleton.app.boot_rules import translate_config_invariants
 from tai42_skeleton.config.service import ConfigService
@@ -25,7 +26,7 @@ from .models import AgentsEntriesAdd, McpConfigUpdate, McpEntriesAdd, McpToolFil
     tags=["manifest"],
     destructive=True,
     reload_gated=True,
-    errors=[BadRequestError, ConflictError, UpstreamError],
+    errors=[BadRequestError, ConflictError, UnavailableError, UpstreamError],
     request_model=McpConfigUpdate,
     response_model=ApplyResponse,
 )
@@ -53,7 +54,7 @@ async def set_mcp_config(mcp: list[Any]) -> dict:
     tags=["manifest"],
     destructive=True,
     reload_gated=True,
-    errors=[BadRequestError, ConflictError, NotFoundError, UpstreamError],
+    errors=[BadRequestError, ConflictError, NotFoundError, UnavailableError, UpstreamError],
     request_model=McpToolFilterUpdate,
     response_model=ApplyResponse,
 )
@@ -61,7 +62,10 @@ async def set_mcp_tool_filter(title: str, include: list[str], exclude: list[str]
     """Set the ``include`` and ``exclude`` of the ``mcp`` entry named ``title`` and hot-reload the fleet.
 
     Every other key of the entry is kept as stored. An unknown title is a 404; unpicking a tool
-    something still uses is a 409, and a server that cannot be listed for that check a 502.
+    something still uses is a 409; for that check, a server whose start is in progress is a 503 with
+    ``code`` ``mcp-server-starting``, one this worker has not loaded a 503 with ``code``
+    ``mcp-server-not-loaded``, and one this worker holds no listing for, whose last start or bind
+    failed, a 502 with the recorded cause.
     """
 
     def mutator(document: dict[str, Any]) -> None:
@@ -163,7 +167,7 @@ async def _apply_entry_remove(section: str, title: str) -> dict:
     tags=["manifest"],
     destructive=True,
     reload_gated=True,
-    errors=[BadRequestError, ConflictError, UpstreamError],
+    errors=[BadRequestError, ConflictError, UnavailableError, UpstreamError],
     request_model=McpEntriesAdd,
     response_model=ApplyResponse,
 )

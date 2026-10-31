@@ -51,7 +51,7 @@ def _ports(stack: TaiStack) -> tuple[int, int]:
 
 
 async def _rows(stack: TaiStack, port: int) -> dict:
-    return await stack.api(port=port).post(_ADVERTISED, retry_on_reloading=True)
+    return await stack.api(port=port).get(_ADVERTISED, retry_on_reloading=True)
 
 
 async def _wait_rows(stack: TaiStack, expected: dict[str, tuple[bool, bool]], unadvertised: list[str]) -> None:

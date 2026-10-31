@@ -51,7 +51,7 @@ def client() -> TestClient:
         Starlette(
             routes=[
                 Route("/api/mcp-config/entries/{title}/tool-filter", router.set_mcp_tool_filter, methods=["PUT"]),
-                Route("/api/mcp-status/{title}/advertised-tools", router.list_mcp_advertised_tools, methods=["POST"]),
+                Route("/api/mcp-status/{title}/advertised-tools", router.list_mcp_advertised_tools, methods=["GET"]),
             ]
         )
     )
@@ -91,6 +91,6 @@ def test_the_tool_filter_refuses_a_malformed_body_with_422(
     assert store.persisted == []
 
 
-def test_the_advertised_tools_read_serves_post_only(client: TestClient) -> None:
-    assert client.get("/api/mcp-status/acme/advertised-tools").status_code == 405
+def test_the_advertised_tools_read_serves_get_only(client: TestClient) -> None:
+    assert client.post("/api/mcp-status/acme/advertised-tools").status_code == 405
     assert client.get("/api/mcp-config/entries/acme/tool-filter").status_code == 405

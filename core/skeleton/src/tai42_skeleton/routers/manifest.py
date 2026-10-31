@@ -23,12 +23,12 @@ stays behind the credential):
 - ``GET  /api/mcp-status/failed``            — the MCP servers skipped by the viability check.
 - ``POST /api/mcp-status/reload-failed``     — re-probe every failed MCP server.
 - ``POST /api/mcp-status/{title}/reload``    — reload a single MCP server by title.
-- ``POST /api/mcp-status/{title}/advertised-tools`` — probe one live MCP server by title for every tool
-  it advertises, before the selection.
+- ``GET  /api/mcp-status/{title}/advertised-tools`` — every tool one MCP server advertised at its bind,
+  before the selection.
 - ``POST /api/mcp-status/{title}/deregister``— detach a single MCP server's tools by title.
 
-``POST /api/mcp-status/{title}/advertised-tools`` probes one live server by title for
-its tools before the selection; there is no probe of an arbitrary address.
+``GET /api/mcp-status/{title}/advertised-tools`` reads, for one manifest server by title, the
+listing the answering worker bound it from; it never starts the server and reaches no other address.
 
 Success bodies are ``{"data": ...}``; failures are ``{"error": "<message>"}``.
 """
@@ -356,8 +356,8 @@ list_mcp_advertised_tools = register_operation_route(
     tai42_app,
     operation_metadata_of(_list_mcp_advertised_tools_op),
     path="/api/mcp-status/{title}/advertised-tools",
-    method="POST",
-    action="write",
+    method="GET",
+    action="read",
 )
 
 deregister_mcp = register_operation_route(

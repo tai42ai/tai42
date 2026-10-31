@@ -144,21 +144,29 @@ def dynamic_env(stack: TaiStack) -> dict[str, str]:
     }
 
 
+def child_path(*extra_dirs: str) -> str:
+    """The ``PATH`` every child runs with: the SUT venv's bin, the system bin dirs, then
+    ``extra_dirs``. A profile whose processes launch a host program the system dirs do
+    not hold sets ``PATH`` to this with that program's dir appended."""
+    venv_bin = str(Path(sys.executable).parent)
+    return os.pathsep.join([venv_bin, "/usr/local/bin", "/usr/bin", "/bin", *extra_dirs])
+
+
 def child_env(
     stack: TaiStack, tmpdir: str, process: str, *, variant_env: Mapping[str, str] | None = None
 ) -> dict[str, str]:
-    """A clean child env built from scratch: PATH/HOME/venv-bin, the stack's deployment
-    env, the env the variant gives this process shape (``variant_env``), the deployment env
-    of the one ``process`` it is for (``StackConfig.process_env``),
-    the after-boot fills, TMPDIR for the run-family metrics dir, and the process's own
-    backend liveness file under ``TaiStack.liveness_dir`` (a backend process refuses a file
-    another live process owns, so every child gets its own). Never an
+    """A clean child env built from scratch: the :func:`child_path` PATH and HOME, the
+    stack's deployment env (which may set its own PATH), the env the variant gives this
+    process shape (``variant_env``), the deployment env of the one ``process`` it is for
+    (``StackConfig.process_env``), the after-boot fills, TMPDIR for the run-family metrics
+    dir, and the process's own backend liveness file under ``TaiStack.liveness_dir`` (a
+    backend process refuses a file another live process owns, so every child gets its
+    own). Never an
     ``os.environ`` passthrough, and never ``PROMETHEUS_MULTIPROC_DIR`` (the entrypoint
     stamps that itself). The config dir's stored ``.env`` is not part of it: the entry
     points' boot ``.env`` load skips that file, and the server applies its keys itself."""
-    venv_bin = str(Path(sys.executable).parent)
     env: dict[str, str] = {
-        "PATH": os.pathsep.join([venv_bin, "/usr/local/bin", "/usr/bin", "/bin"]),
+        "PATH": child_path(),
         "HOME": os.environ.get("HOME", str(stack.root)),
         "TMPDIR": tmpdir,
         "TAI_CONFIG_MODE": "file",

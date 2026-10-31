@@ -369,7 +369,7 @@ class ConfigService(_ProfileApplyMixin, _ValidationMixin, _ResolutionMixin, _Bro
 
         Both documents are projected to the typed manifest; ``after`` resolves its ``!ENV`` markers
         against ``env`` when given (the post-change env of a write that changes the env). Raises
-        the 409 or 502 of :func:`refuse_held_unpicks` before anything persists. A write that keeps
+        the 409, 503 or 502 of :func:`refuse_held_unpicks` before anything persists. A write that keeps
         the env and leaves the ``mcp`` section as stored changes no selection and is not projected.
         """
         if env is None and before.get("mcp") == after.get("mcp"):

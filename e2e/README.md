@@ -68,7 +68,7 @@ Playwright:
 | Need | Met by | Examples |
 |------|--------|----------|
 | `kind:<kind>`, `kind:<kind>:<name>` | the stack reports that kind on (and names `<name>`) | `kind:storage`, `kind:channels:web` |
-| `probe-tools`, `mutable` | the target file lists it under `provides` | the probe tools are loaded; the test changes stack-wide state |
+| `probe-tools`, `mutable`, `package-runners` | the target file lists it under `provides` | the probe tools are loaded; the test changes stack-wide state; the stack can launch `uvx` and `npx` packages |
 | `process`, `store`, `files`, `helper`, `setting`, `topology`, `cli`, `metrics`, `second-stack`, `fixture-page`, `no-stack` | only a stack the run builds | `helper:llm`, `store:redis`, `setting:ACCESS_CONTROL_ENABLE=false` |
 
 ```python

@@ -1,6 +1,6 @@
 """get_mcp_transport: a URL server gets fastmcp's HTTP or SSE transport built on the
 kit's MCP HTTP client; a UDS server gets the transport for the selected wire protocol;
-a command server gets fastmcp's dict config carrying its resolved command and child env.
+a command server gets fastmcp's stdio transport carrying its resolved command and child env.
 Every kit-built MCP HTTP client keeps its idle connections for
 ``MCP_CLIENT_KEEPALIVE_EXPIRY_SECONDS``."""
 
@@ -10,6 +10,7 @@ import httpx
 import pytest
 from fastmcp.client.transports.http import StreamableHttpTransport
 from fastmcp.client.transports.sse import SSETransport
+from fastmcp.client.transports.stdio import StdioTransport
 from mcp.shared._httpx_utils import MCP_DEFAULT_SSE_READ_TIMEOUT, MCP_DEFAULT_TIMEOUT
 from pydantic import ValidationError
 from tai42_contract.manifest import MCPConfig, TaiMCPConfig
@@ -57,7 +58,7 @@ def test_sse_url_gets_the_sse_transport_on_the_kit_client():
 
 
 def test_the_transport_follows_the_url_not_the_type_field():
-    # fastmcp's own URL inference picks the wire protocol, as its dict config did.
+    # fastmcp's own URL inference picks the wire protocol; the type field is not read.
     sse_typed = TaiMCPConfig(title="srv", config=MCPConfig(url="http://host/mcp", type="sse"))
     http_typed = TaiMCPConfig(title="srv", config=MCPConfig(url="http://host/sse", type="http"))
 
@@ -76,12 +77,18 @@ def test_an_invalid_url_raises():
         get_mcp_transport(cfg)
 
 
-def test_command_server_returns_dict_config():
+def test_command_server_gets_a_stdio_transport():
     # A command with a directory part launches as given (bare-name resolution is
     # covered in test_stdio_launch.py).
     cfg = TaiMCPConfig(title="srv", config=MCPConfig(command="/opt/tools/run-server", args=["--stdio"]))
     transport = get_mcp_transport(cfg)
-    assert transport == {"mcpServers": {"srv": cfg.config.model_dump(exclude_none=True)}}
+    assert isinstance(transport, StdioTransport)
+    assert (transport.command, transport.args, transport.env) == ("/opt/tools/run-server", ["--stdio"], {})
+
+
+def test_a_server_with_no_transport_raises_naming_it():
+    with pytest.raises(ValueError, match="'srv' declares none of url, uds or command"):
+        get_mcp_transport(TaiMCPConfig(title="srv", config=MCPConfig()))
 
 
 def test_uds_defaults_to_http():

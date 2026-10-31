@@ -1,10 +1,12 @@
 """The held-tool check on an MCP selection change, through every write door.
 
 A write that would stop picking a tool something still uses is refused with a 409 naming
-the holders, and a write the check cannot decide because the server did not list its tools
-is refused with a 502; either way nothing is written. The check reads the stored manifest,
-the stored presets' active bodies, the registered rename referees and the server's own
-listing (scripted here on the reload admin), never what the answering worker has bound.
+the holders, and a write the check cannot decide because no listing of the server is held
+is refused with a 503 (its start is in progress, or this worker has not loaded it) or a 502
+(its last start or bind failed); either way nothing is written. The check reads the stored
+manifest, the stored presets' active bodies, the registered rename referees and the listing
+this worker bound the server from (scripted on the reload admin, or this worker's own), never
+the bound set, which holds only the selected tools.
 """
 
 from __future__ import annotations
@@ -13,9 +15,12 @@ import copy
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import asynccontextmanager
 from typing import Any, cast
+from unittest.mock import AsyncMock
 
+import mcp
 import pytest
 import yaml
+from tai42_contract.errors import UnavailableError
 from tai42_contract.presets import PresetBody
 from tai42_contract.tools import ReferenceHolder
 
@@ -27,6 +32,7 @@ from tai42_skeleton.operations import config as config_ops
 from tai42_skeleton.operations import manifest as manifest_ops
 from tai42_skeleton.operations.manifest.selection_holders import refuse_held_unpicks, unpick_holders
 from tai42_skeleton.operations.reference_graph import StoredPresets
+from tai42_skeleton.tools.mcp_start import StartId
 
 from ..._fakes.bus import FakeBus
 from ..._fakes.caller_reach import bound_caller
@@ -100,23 +106,35 @@ class _World:
 
 _TAGS = {"schedule": "schedules", "preset": "presets"}
 
-_WORKERS = ("bound", "failed", "deregistered")
 
-
-@pytest.fixture(params=_WORKERS)
-def world(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> Iterator[_World]:
-    """The world as seen from a worker where ``acme`` is bound, failed, or deregistered.
-
-    The check reads nothing the answering worker bound for ``acme``, so every verdict is the
-    same on each of the three.
-    """
-    if request.param == "bound":
-        monkeypatch.setitem(instance.app._mcp_bound_tools, "acme", {"acme_send", "acme_read"})
-    elif request.param == "failed":
-        monkeypatch.setitem(instance.app._failed_mcps, "acme", {"error": "connection refused"})
+@pytest.fixture
+def world(monkeypatch: pytest.MonkeyPatch) -> Iterator[_World]:
+    """The world with the server's listing scripted on the reload admin."""
     instance.app._rename_referee_registry.reset()
     yield _World(monkeypatch)
     instance.app._rename_referee_registry.reset()
+
+
+_OBJECT = {"type": "object", "properties": {}}
+_UNUSABLE = {"type": "object", "properties": {"q": {"anyOf": []}}}
+
+
+@pytest.fixture
+def listing_world(world: _World, monkeypatch: pytest.MonkeyPatch) -> _World:
+    """The world whose check reads this worker's own listing of ``acme``, with a start refused."""
+    monkeypatch.setattr(world.admin, "served_mcp_names", instance.app.admin.served_mcp_names)
+    monkeypatch.setattr(instance.app, "_probe_mcp", AsyncMock(side_effect=AssertionError("a start was launched")))
+    return world
+
+
+def _hold_listing(monkeypatch: pytest.MonkeyPatch) -> None:
+    tools = [
+        mcp.types.Tool(name=name, inputSchema=schema)
+        for name, schema in (("send", _OBJECT), ("read", _OBJECT), ("blob", _UNUSABLE))
+    ]
+    monkeypatch.setitem(instance.app._mcp_listed_tools, "acme", tools)
+    # The bind holds only the selected tools; the check reads the whole listing.
+    monkeypatch.setitem(instance.app._mcp_bound_tools, "acme", {"acme_read"})
 
 
 # -- the write doors -------------------------------------------------------------------------
@@ -210,6 +228,83 @@ async def test_every_door_refuses_502_when_the_server_cannot_be_listed(world: _W
     assert "token=abc" not in message
     assert caught.value.status == 502
     assert world.store.manifest == before
+
+
+async def test_every_door_checks_against_the_listing_this_worker_bound_from_and_launches_no_start(
+    listing_world: _World, door: Door, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _hold_listing(monkeypatch)
+    listing_world.bodies = {"notify": _body("acme_send")}
+    listing_world.referee("acme_blob", "schedule", "nightly")
+    before = copy.deepcopy(listing_world.store.manifest)
+
+    with pytest.raises(ConflictError) as caught:
+        await door(listing_world, _entry(include=["acme_read"]))
+
+    assert caught.value.message == _NOTIFY_MESSAGE
+    assert listing_world.store.manifest == before
+    cast("AsyncMock", instance.app._probe_mcp).assert_not_awaited()
+
+
+_STARTING = (
+    "MCP server 'acme' start still in progress after 3.0s; it continues up to the start budget 15.0s; "
+    "it binds once its start lists its tools"
+)
+
+
+@pytest.mark.parametrize(
+    ("record", "error", "code", "cause"),
+    [
+        pytest.param(
+            {
+                "status": "unavailable",
+                "category": "starting",
+                "message": _STARTING,
+                "http_status": None,
+                "start": StartId(),
+            },
+            UnavailableError,
+            "mcp-server-starting",
+            _STARTING,
+            id="starting",
+        ),
+        pytest.param(
+            {"status": "unavailable", "category": "unreachable", "message": "Connection closed", "http_status": None},
+            UpstreamError,
+            None,
+            "Connection closed",
+            id="failed",
+        ),
+        pytest.param(
+            None,
+            UnavailableError,
+            "mcp-server-not-loaded",
+            "MCP server 'acme' is not loaded on this worker; a reload binds it",
+            id="not loaded",
+        ),
+    ],
+)
+async def test_every_door_with_no_listing_held_refuses_by_the_servers_record(
+    listing_world: _World,
+    door: Door,
+    monkeypatch: pytest.MonkeyPatch,
+    record: dict[str, Any] | None,
+    error: type[Exception],
+    code: str | None,
+    cause: str,
+) -> None:
+    if record is not None:
+        monkeypatch.setitem(instance.app._failed_mcps, "acme", record)
+    before = copy.deepcopy(listing_world.store.manifest)
+
+    with pytest.raises(error) as caught:
+        await door(listing_world, _entry(include=["acme_read"]))
+
+    raised = cast("Any", caught.value)
+    assert raised.message == f"tool selection of 'acme' cannot be checked: the server did not list its tools: {cause}"
+    assert raised.extra == ({"code": code} if code else {})
+    assert listing_world.store.manifest == before
+    cast("AsyncMock", instance.app._probe_mcp).assert_not_awaited()
 
 
 async def test_every_door_refuses_an_invalid_write_400_before_listing_the_server(world: _World, door: Door) -> None:
@@ -583,11 +678,11 @@ async def test_an_env_write_that_keeps_the_selection_passes_without_a_listing(ma
         config_ops.apply_profile,
     ],
 )
-def test_each_selection_write_door_declares_409_and_502(op: Any) -> None:
+def test_each_selection_write_door_declares_409_502_and_503(op: Any) -> None:
     from tai42_skeleton.operations import operation_metadata_of
 
     declared = set(operation_metadata_of(op).error_classes)
-    assert {ConflictError, UpstreamError} <= declared
+    assert {ConflictError, UpstreamError, UnavailableError} <= declared
 
 
 # -- the check itself ------------------------------------------------------------------------

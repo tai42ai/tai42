@@ -2,8 +2,8 @@
 
 Every manifest write passes :class:`~tai42_skeleton.config.service.ConfigService`, which runs
 :func:`refuse_held_unpicks` on the stored document and the one it would persist. The check
-decides from the stored manifest, the stored presets and the server's own listing, never from
-what the answering worker has bound, so every worker gives the same verdict.
+decides from the stored manifest, the stored presets and the listing this worker bound the
+server from, not from the bound set, which holds only the selected tools.
 """
 
 from __future__ import annotations
@@ -15,11 +15,10 @@ from tai42_contract.tools import ReferenceHolder
 
 from tai42_skeleton.app import instance
 from tai42_skeleton.manifest import selection_admits
-from tai42_skeleton.operations.errors import UpstreamError
 from tai42_skeleton.operations.holders import holders_refusal, rename_holders_by_tool
+from tai42_skeleton.operations.manifest.listing_failure import listing_failure
 from tai42_skeleton.operations.reference_graph import StoredPresets
 from tai42_skeleton.tools import holder_kinds
-from tai42_skeleton.tools.mcp_health import redact_probe_error
 from tai42_skeleton.tools.naming import normalized_name
 
 if TYPE_CHECKING:
@@ -65,9 +64,8 @@ async def _served(entry: TaiMCPConfig, served_names: Callable[[TaiMCPConfig], Aw
     try:
         return set(await served_names(entry))
     except Exception as exc:
-        raise UpstreamError(
-            f"tool selection of {entry.title!r} cannot be checked: the server did not list its tools: "
-            f"{redact_probe_error(str(exc))}"
+        raise listing_failure(
+            f"tool selection of {entry.title!r} cannot be checked: the server did not list its tools", exc
         ) from exc
 
 
@@ -129,8 +127,10 @@ async def refuse_held_unpicks(
     name has a holder, the server is listed (once per title): a held name it does not serve is
     not bound through this entry and does not refuse, a served one that a stored preset owns is
     dropped (the binder binds no MCP tool under a stored preset's name), and any other refuses.
-    A listing failure raises ``UpstreamError`` naming the title: the check never passes on a
-    server it could not list.
+    A listing failure raises naming the title (:func:`listing_failure`): a 503 with ``code``
+    ``mcp-server-starting`` while the server's start is in progress, a 503 with ``code``
+    ``mcp-server-not-loaded`` when this worker has not loaded the server, else a 502 with the
+    recorded cause. The check never passes on a server it could not list.
     """
     before_entries = {entry.title: entry for entry in before.mcp}
     stored = _StoredOnce()

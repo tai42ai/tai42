@@ -81,18 +81,11 @@ _EXPECTED_503_GATE_ONLY: set[tuple[str, str]] = {
     ("POST", "/api/api-tools"),
     ("POST", "/api/backup/import"),
     ("POST", "/api/checkpoints/sweep"),
-    ("POST", "/api/config/env"),
-    ("POST", "/api/config/profiles/{name}/apply"),
     ("POST", "/api/config/reload"),
     ("POST", "/api/connectors/providers"),
-    ("POST", "/api/manifest/replace"),
-    ("POST", "/api/mcp-config"),
-    ("POST", "/api/mcp-config/entries"),
-    ("POST", "/api/mcp-config/secret-env"),
     ("POST", "/api/mcp-status/reload-failed"),
     ("POST", "/api/mcp-status/{title}/deregister"),
     ("POST", "/api/mcp-status/{title}/reload"),
-    ("PUT", "/api/mcp-config/entries/{title}/tool-filter"),
     # ``/api/presets`` create refuses a store-less deploy with a 501 (NotSupportedError),
     # not a declared 503, so only the reload gate's 503 remains here.
     ("POST", "/api/presets"),
@@ -129,6 +122,10 @@ _EXPECTED_503_DECLARED_ONLY: set[tuple[str, str]] = {
     ("GET", "/api/interactions/media/{media_id}"),
     ("HEAD", "/api/interactions/media/{media_id}"),
     ("GET", "/api/schedules"),
+    # The advertised-tools read answers a 503 while the server's start is in progress
+    # (``mcp-server-starting``) or while this worker has not loaded it (``mcp-server-not-loaded``);
+    # it is not reload-gated, so it carries that 503 alone.
+    ("GET", "/api/mcp-status/{title}/advertised-tools"),
     ("POST", "/api/conversations/{route_name}/thread/messages"),
     # The send door declares the transient channel-delivery UnavailableError (503,
     # retryable, carrying the medium's retry_after); it is not reload-gated, so it
@@ -162,7 +159,8 @@ _EXPECTED_503_BOTH: set[tuple[str, str]] = {
     ("POST", "/api/conversations/{route_name}/messages"),
     # The marketplace mutations keep a declared 503 beside the reload gate: it is the
     # transient fleet-advisory-lock UnavailableError (retriable), NOT the store gate,
-    # which refuses with a 501. Both sources coexist here alongside that 501.
+    # which refuses with a 501. Both sources coexist here alongside that 501. An update whose new
+    # version changes an MCP tool selection also refuses the listing 503s named below.
     ("POST", "/api/marketplace/install"),
     ("POST", "/api/marketplace/uninstall"),
     ("POST", "/api/marketplace/update"),
@@ -174,6 +172,17 @@ _EXPECTED_503_BOTH: set[tuple[str, str]] = {
     # The synchronous run-tool door declares the pending-save UnavailableError: a subject of the
     # run still has a pending state save after the drain timeout (retry later).
     ("POST", "/api/run-tool"),
+    # The writes that can change an MCP tool selection check the tools still used against the
+    # listing this worker bound the server from; with no listing held they refuse a 503 while the
+    # server's start is in progress (``mcp-server-starting``) or while this worker has not loaded
+    # it (``mcp-server-not-loaded``), beside the reload gate's own.
+    ("POST", "/api/config/env"),
+    ("POST", "/api/config/profiles/{name}/apply"),
+    ("POST", "/api/manifest/replace"),
+    ("POST", "/api/mcp-config"),
+    ("POST", "/api/mcp-config/entries"),
+    ("POST", "/api/mcp-config/secret-env"),
+    ("PUT", "/api/mcp-config/entries/{title}/tool-filter"),
 }
 
 

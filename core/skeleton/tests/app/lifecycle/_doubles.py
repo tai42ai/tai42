@@ -6,18 +6,22 @@ from typing import Any, ClassVar, cast
 
 from tai42_contract.manifest import MCPConfig, TaiMCPConfig
 
+from tai42_skeleton.app.clients import ClientsFacet
 from tai42_skeleton.app.lifecycle import TaiMCPLifecycleMixin
 from tai42_skeleton.app.server import ServingCore
+from tai42_skeleton.manifest import Manifest
 
 
 class _FakeMcpTool:
-    name = "ping"
     description = "ping"
     inputSchema: ClassVar[dict] = {"type": "object", "properties": {}}
     outputSchema: ClassVar[dict] = {}
     title = None
     annotations = None
     icons = None
+
+    def __init__(self, name: str = "ping") -> None:
+        self.name = name
 
 
 class _NoManifestConfig:
@@ -48,8 +52,8 @@ class _StubPresetManager:
 
 
 class _Mixin(TaiMCPLifecycleMixin):
-    """A concrete-enough mixin: ``_mcp_tools`` records bound tool names without a
-    real server."""
+    """A concrete-enough mixin: ``_mcp_tools`` records the bound tool names and the listing
+    they were bound from without a real server."""
 
     def __init__(self):
         super().__init__()
@@ -65,6 +69,7 @@ class _Mixin(TaiMCPLifecycleMixin):
 
     def _mcp_tools(self, config, tools, preset_names):
         self._mcp_bound_tools[config.title] = {f"{config.title}_t"}
+        self._mcp_listed_tools[config.title] = list(tools)
 
 
 def _cfg(title="svc"):
@@ -74,3 +79,11 @@ def _cfg(title="svc"):
 def _failed_row(category: str = "error", message: str = "", http_status: int | None = None) -> dict[str, Any]:
     """A failed-MCP record as ``_record_failed_mcp`` writes it, for seeding ``_failed_mcps``."""
     return {"status": "unavailable", "category": category, "message": message, "http_status": http_status}
+
+
+def _mixin(*entries: TaiMCPConfig) -> _Mixin:
+    """A lifecycle mixin with a real clients facet and a manifest of ``entries``."""
+    m = _Mixin()
+    m.clients = ClientsFacet()
+    m._manifest = Manifest.model_validate({"mcp": [e.model_dump() for e in entries]})
+    return m

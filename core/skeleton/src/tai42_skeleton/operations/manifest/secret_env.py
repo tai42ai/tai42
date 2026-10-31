@@ -6,6 +6,7 @@ from collections.abc import Callable
 from typing import Any, cast
 
 from tai42_contract.app.responses import ApplyResponse
+from tai42_contract.errors import UnavailableError
 from tai42_kit.settings import fold_env_name, unknown_owned_env_keys
 from tai42_kit.utils.data.env_markers import format_env_marker
 
@@ -163,7 +164,7 @@ def _pointer_index(node: list[Any], segment: str, segments: list[str]) -> int:
     tags=["manifest"],
     destructive=True,
     reload_gated=True,
-    errors=[BadRequestError, ConflictError, UpstreamError],
+    errors=[BadRequestError, ConflictError, UnavailableError, UpstreamError],
     request_model=SetMcpSecretEnv,
     response_model=ApplyResponse,
 )
@@ -188,8 +189,10 @@ async def set_mcp_secret_env(
     setting rolls a worker recycle as every env write does (the response's ``recycle``; this
     worker recycles itself after replying when the roll converged).
     An ``mcp`` selection list whose ``!ENV`` marker would resolve so that a tool something still
-    uses stops being picked is refused with a 409 naming the holders, or a 502 when the server
-    cannot list its tools for that check, before anything is written.
+    uses stops being picked is refused with a 409 naming the holders, a 503 with ``code``
+    ``mcp-server-starting`` while the server's start is in progress or ``mcp-server-not-loaded``
+    while this worker has not loaded the server, or a 502 with the recorded cause when this worker
+    holds no listing for the server and its last start or bind failed, before anything is written.
     """
     segments = _parse_manifest_pointer(manifest_pointer)  # loud 400 on a non-mcp head
 

@@ -17,6 +17,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from fastmcp.client.transports.stdio import StdioTransport
 from mcp.client.stdio import get_default_environment
 from tai42_contract.manifest import MCPConfig, TaiMCPConfig
 from tai42_kit.transport import (
@@ -152,19 +153,17 @@ def _write_console_script(directory: str, name: str) -> Path:
     return script
 
 
-def _stdio_server(command: str) -> dict[str, object]:
-    """The dict config the stdio MCP transport for a bare ``command`` server launches."""
+def _stdio_server(command: str) -> StdioTransport:
+    """The stdio MCP transport for a bare ``command`` server."""
     config = TaiMCPConfig(title="srv", config=MCPConfig(command=command, args=["--stdio"]))
     transport = get_mcp_transport(config)
-    assert isinstance(transport, dict)
-    return transport["mcpServers"]["srv"]
+    assert isinstance(transport, StdioTransport)
+    return transport
 
 
 def _stdio_command(command: str) -> str:
     """The command the stdio MCP transport for a bare ``command`` server launches."""
-    resolved = _stdio_server(command)["command"]
-    assert isinstance(resolved, str)
-    return resolved
+    return _stdio_server(command).command
 
 
 def test_activate_prefix_declares_the_prefix_scripts_and_site_dirs_as_the_stdio_launch(
@@ -245,9 +244,8 @@ def test_an_activated_prefix_launches_its_console_script_with_the_prefix_importa
         server = _stdio_server("prefix-launch-probe")
     finally:
         sys.path[:] = orig
-    command, env = server["command"], server["env"]
-    assert isinstance(command, str)
-    assert isinstance(env, dict)
+    command, env = server.command, server.env
+    assert env is not None
 
     launched = subprocess.run(
         [command], env={**get_default_environment(), **env}, capture_output=True, text=True, check=False
@@ -267,8 +265,8 @@ def test_an_entry_path_names_the_executable_the_child_runs(monkeypatch: pytest.M
         title="srv", config=MCPConfig(command=other.name, args=["server.py"], env={"PATH": str(other.parent)})
     )
     transport = get_mcp_transport(config)
-    assert isinstance(transport, dict)
-    assert transport["mcpServers"]["srv"]["command"] == str(other)
+    assert isinstance(transport, StdioTransport)
+    assert transport.command == str(other)
 
 
 def test_a_script_in_the_environment_scripts_dir_launches_without_the_prefix_on_its_pythonpath(
@@ -282,9 +280,9 @@ def test_a_script_in_the_environment_scripts_dir_launches_without_the_prefix_on_
         server = _stdio_server(Path(sys.executable).name)
     finally:
         sys.path[:] = orig
-    env = server["env"]
-    assert isinstance(env, dict)
-    assert server["command"] == str(Path(sysconfig.get_path("scripts")) / Path(sys.executable).name)
+    env = server.env
+    assert env is not None
+    assert server.command == str(Path(sysconfig.get_path("scripts")) / Path(sys.executable).name)
     assert "PYTHONPATH" not in env
 
 

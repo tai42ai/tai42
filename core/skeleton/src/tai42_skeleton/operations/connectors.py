@@ -75,7 +75,9 @@ _MAX_LIST_LIMIT = 500
 # Upper bound on a single sub-service reachability probe (credential read + MCP
 # round-trip). The GET is idempotent, so the whole probe is bounded and a timeout
 # reads as unreachable — a read never blocks the caller on a slow/down provider.
-# Sits above ``probe``'s own transport timeout so a live MCP round-trip completes.
+# Sits above ``probe``'s own wait for the server start (``_PROBE_WAIT_SECONDS``) so that
+# wait ends first; a start still in progress then goes on, on the MCP start loop, up to the
+# start budget, and the probe reads unreachable.
 _SUB_SERVICE_PROBE_TIMEOUT_SECONDS = 8.0
 
 # The machine-readable code the connector START refusal carries when the token

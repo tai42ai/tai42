@@ -43,7 +43,7 @@ def fleet(infra: Infra, tmp_path_factory: pytest.TempPathFactory) -> Iterator[tu
 
 
 async def _row(stack: TaiStack, port: int) -> dict:
-    body = await stack.api(port=port).post(_ADVERTISED, retry_on_reloading=True)
+    body = await stack.api(port=port).get(_ADVERTISED, retry_on_reloading=True)
     return next(row for row in body["tools"] if row["name"] == _NAME)
 
 

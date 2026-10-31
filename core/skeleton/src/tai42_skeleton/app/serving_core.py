@@ -55,6 +55,7 @@ from tai42_skeleton.tools.rename_referees import ToolRenameRefereeRegistry
 from tai42_skeleton.webhooks.registry import WebhookVerifierRegistry
 
 if TYPE_CHECKING:
+    import mcp
     from tai42_contract.access_control.identity import IdentityProvider
 
     from tai42_skeleton.app.server import TaiMCP
@@ -234,12 +235,16 @@ class ServingCore:
         self._tool_registry: ToolRegistry = ToolRegistry(set[str](), {})
         self._extension_registry: ExtensionRegistry = ExtensionRegistry(frozenset[str]())
         # Manifest MCP servers that failed their viability check (title -> the failure
-        # record: status, credential-free category, redacted message, http_status),
+        # record: status, credential-free category, redacted message, http_status, and for
+        # a ``starting`` record the start it waits on),
         # the tools each live MCP bound (per title, so a targeted reload replaces cleanly),
+        # the full listing each live MCP's bind consumed (per title: the rows of the
+        # advertised-tools read and the names the selection check validates against),
         # the per-title names a scoped MCP (re)bind refused because a preset owns them,
         # and the per-title tools a (re)bind skipped because they advertised an unusable schema.
         self._failed_mcps: dict[str, dict[str, Any]] = {}
         self._mcp_bound_tools: dict[str, set[str]] = {}
+        self._mcp_listed_tools: dict[str, list[mcp.types.Tool]] = {}
         self._mcp_preset_conflicts: dict[str, set[str]] = {}
         self._mcp_unusable_tools: dict[str, set[str]] = {}
         # The titles whose server answered their last listing's request without a credential with a 401.

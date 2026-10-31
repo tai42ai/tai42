@@ -13,6 +13,7 @@ from tai42_skeleton.extensions import ExtensionRegistry
 from tai42_skeleton.tools import ToolRegistry
 
 if TYPE_CHECKING:
+    import mcp
     from tai42_contract.conversations import TargetBindValidator
 
     from tai42_skeleton.agent.binding import AgentBinding
@@ -176,6 +177,14 @@ class ServingCoreAccessMixin(LifecycleState):
     @_mcp_credential_demanded.setter
     def _mcp_credential_demanded(self, value: set[str]) -> None:
         self._serving_core._mcp_credential_demanded = value
+
+    @property
+    def _mcp_listed_tools(self) -> dict[str, list["mcp.types.Tool"]]:
+        return self._serving_core._mcp_listed_tools
+
+    @_mcp_listed_tools.setter
+    def _mcp_listed_tools(self, value: dict[str, list["mcp.types.Tool"]]) -> None:
+        self._serving_core._mcp_listed_tools = value
 
     @property
     def _mcp_unusable_tools(self) -> dict[str, set[str]]:

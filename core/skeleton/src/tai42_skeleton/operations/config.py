@@ -27,6 +27,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict
 from tai42_contract.app import tai42_app
 from tai42_contract.app.responses import ApplyResponse, ProfileApplyResponse
+from tai42_contract.errors import UnavailableError
 from tai42_contract.settings_profiles import PREVIOUS_PROFILE_NAME, RESERVED_PROFILE_PREFIX, SettingsProfileBody
 from tai42_contract.settings_profiles.errors import (
     SettingsProfileExistsError,
@@ -252,7 +253,7 @@ async def read_settings_schema() -> dict:
     tags=["config"],
     destructive=True,
     reload_gated=True,
-    errors=[BadRequestError, ConflictError, UpstreamError],
+    errors=[BadRequestError, ConflictError, UnavailableError, UpstreamError],
     request_model=EnvUpdate,
     response_model=ApplyResponse,
 )
@@ -273,8 +274,10 @@ async def write_env(env: dict[str, str], secret_keys: list[str] | None = None) -
     ``secret_keys`` (when not ``None``) replaces the operator's secret marks in the same write;
     the marks variable itself is never accepted as an ``env`` key.
     An ``mcp`` selection list whose ``!ENV`` marker would resolve so that a tool something still
-    uses stops being picked is refused with a 409 naming the holders, or a 502 when the server
-    cannot list its tools for that check, before anything is written.
+    uses stops being picked is refused with a 409 naming the holders, a 503 with ``code``
+    ``mcp-server-starting`` while the server's start is in progress or ``mcp-server-not-loaded``
+    while this worker has not loaded the server, or a 502 with the recorded cause when this worker
+    holds no listing for the server and its last start or bind failed, before anything is written.
 
     Called over MCP, the reload answers on the session that called it and then retires that session with
     the generation it ran on: a later call on the same session fails (streamable HTTP answers it 404,
@@ -671,7 +674,7 @@ async def _save_previous_version(stored_env: dict[str, str]) -> None:
     destructive=True,
     reload_gated=True,
     authority_changing=True,
-    errors=[BadRequestError, ConflictError, NotFoundError, NotSupportedError, UpstreamError],
+    errors=[BadRequestError, ConflictError, NotFoundError, NotSupportedError, UnavailableError, UpstreamError],
     response_model=ProfileApplyResponse,
 )
 async def apply_profile(name: str) -> OperationResponse:
@@ -710,8 +713,10 @@ async def apply_profile(name: str) -> OperationResponse:
     agent, a preset, a schedule, a hook) returned — and its supervisor respawns it on the new
     env. 404 for an absent name.
     An ``mcp`` selection list whose ``!ENV`` marker would resolve so that a tool something still
-    uses stops being picked is refused with a 409 naming the holders, or a 502 when the server
-    cannot list its tools for that check, before anything is snapshotted.
+    uses stops being picked is refused with a 409 naming the holders, a 503 with ``code``
+    ``mcp-server-starting`` while the server's start is in progress or ``mcp-server-not-loaded``
+    while this worker has not loaded the server, or a 502 with the recorded cause when this worker
+    holds no listing for the server and its last start or bind failed, before anything is snapshotted.
 
     Called over MCP, the reload answers on the session that called it and then retires that session with
     the generation it ran on: a later call on the same session fails (streamable HTTP answers it 404,

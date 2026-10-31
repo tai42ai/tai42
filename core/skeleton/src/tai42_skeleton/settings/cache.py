@@ -34,13 +34,13 @@ def sandbox_provider() -> str:
 
 @settings_cache
 def mcp_probe_timeout() -> float:
-    """The boot MCP-probe timeout in seconds."""
+    """The MCP server start budget in seconds: how long a server start may take before it is torn down."""
     return CoreSettings().mcp_probe_timeout
 
 
 @settings_cache
 def mcp_reload_probe_timeout() -> float:
-    """The reload MCP-probe timeout in seconds."""
+    """How long a reload waits for an MCP server start, in seconds; the start itself goes on to the start budget."""
     return CoreSettings().mcp_reload_probe_timeout
 
 
