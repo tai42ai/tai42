@@ -14,6 +14,13 @@ from tai42_skeleton.operations import tool_extensions
 
 from .._fakes.combo_check_app import LiveStore, booted_check_app, clean_server, live_store
 
+# The bound on a write whose last step is a full config reload. A reload is CPU-bound (it
+# re-imports the manifest modules, rebinds every operation tool and reads the installed
+# distributions' metadata) and hands work between the serving loop and worker threads, so a
+# loaded host stretches it twenty times over and more; the bound only stops a hung reload
+# from holding the run.
+_RELOAD_BOUND_S = 60.0
+
 
 async def _reached(event: asyncio.Event, what: str) -> None:
     """Wait for ``event``; fail the test when it is not set within 10 s."""
@@ -49,8 +56,8 @@ def test_a_remount_reload_keeps_a_write_that_landed_while_it_waited(
             for _ in range(50):
                 await asyncio.sleep(0)
             release.set()
-            answer = await asyncio.wait_for(edit, 10)
-            result = await asyncio.wait_for(remount, 10)
+            answer = await asyncio.wait_for(edit, _RELOAD_BOUND_S)
+            result = await asyncio.wait_for(remount, _RELOAD_BOUND_S)
             assert answer["combos"] == [[combo]]
             assert result is not prior
             assert live_store.manifest["tools"][0]["extensions"] == {"echo": [[combo]]}
