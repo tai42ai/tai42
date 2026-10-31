@@ -9,8 +9,8 @@ importers:
   .:
     dependencies:
       '@tai42/studio-sdk':
-        specifier: ^31.0.0
-        version: 31.0.0(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)
+        specifier: ^32.0.0
+        version: 32.0.0(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)
       '@tanstack/react-query':
         specifier: ^5.104.5
         version: 5.104.5(@types/react@19.3.0)(react@19.3.1)
@@ -799,11 +799,11 @@ packages:
   '@rolldown/pluginutils@1.0.1':
     resolution: {integrity: sha512-2j9bGt5Jh8hj+vPtgzPtl72j0yRxHAyumoo6TNfAjsLB04UtpSvPbPcDcBMxz7n+9CYB0c1GxQFxYRg2jimqGw==}
 
-  '@tai42/api-client@31.0.0':
-    resolution: {integrity: sha512-fueanNIaPQrXAjjaF3JMcF0Ulqobv8UQZwGjfaG7QxMBoOyabt7JP3gHf4h9n9fXcdTOC4G2z7o115n79PPFoA==}
+  '@tai42/api-client@32.0.0':
+    resolution: {integrity: sha512-RjxqqRPi5a34fSd7KkHPWyDEdlvAZYL0n8lb4fMQqMefNujDS5CsLUIh9NJPtF0rGIzoA4oPde5wouxZsscUqA==}
 
-  '@tai42/studio-sdk@31.0.0':
-    resolution: {integrity: sha512-2QVc/ybazJ/hUtg1DzqS9D6r7d6LRREJxygylkpKqeoia0jkzGW9We0XC2PJIAnqWm77lPKCCgcKcNXmN1a8dQ==}
+  '@tai42/studio-sdk@32.0.0':
+    resolution: {integrity: sha512-ARvO1eSl55b5c9GLeFHnW/Q+ynL5bzsDPjK3PBQaM8pqn8eCZoAXlMMG9gAbnu6TvJ8kj0AvEcuJdaBOV+XipQ==}
     peerDependencies:
       react: ^19.0.0
       react-dom: ^19.0.0
@@ -2948,11 +2948,11 @@ snapshots:
 
   '@rolldown/pluginutils@1.0.1': {}
 
-  '@tai42/api-client@31.0.0':
+  '@tai42/api-client@32.0.0':
     dependencies:
       zod: 4.6.7
 
-  '@tai42/studio-sdk@31.0.0(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)':
+  '@tai42/studio-sdk@32.0.0(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)':
     dependencies:
       '@fontsource-variable/geist-mono': 5.3.0
       '@fontsource-variable/inter': 5.3.0
@@ -2963,7 +2963,7 @@ snapshots:
       '@radix-ui/react-select': 2.4.1(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)
       '@radix-ui/react-tabs': 1.2.1(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)
       '@radix-ui/react-tooltip': 1.4.1(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)
-      '@tai42/api-client': 31.0.0
+      '@tai42/api-client': 32.0.0
       react: 19.3.1
       react-dom: 19.3.1(react@19.3.1)
     transitivePeerDependencies:
