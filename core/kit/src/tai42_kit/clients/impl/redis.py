@@ -44,6 +44,7 @@ from redis.backoff import AbstractBackoff, ExponentialBackoff, NoBackoff
 from redis.client import PubSub as SyncPubSub
 from redis.connection import Connection as SyncConnection
 from redis.connection import parse_url
+from redis.exceptions import AuthenticationError
 from redis.exceptions import ConnectionError as RedisConnectionError
 from redis.exceptions import TimeoutError as RedisTimeoutError
 from redis.retry import Retry as SyncRetry
@@ -274,7 +275,11 @@ class SyncRedisClient(PooledClient[KitSyncRedis]):
 class _LoggedAsyncRetry(AsyncRetry):
     """redis-py's async ``Retry`` that logs a WARNING for every failure it retries.
 
-    The caller's extra arguments and the arguments the loop gives ``fail`` are passed
+    A server refusing the connection's credentials (redis-py's ``AuthenticationError``,
+    raised by a refused ``AUTH`` or ``HELLO ... AUTH`` and by ``NOAUTH``) is raised at
+    once after the caller's ``fail`` ran: the next attempt sends the same credentials,
+    though redis-py files the error under the ``ConnectionError`` it retries. The
+    caller's extra arguments and the arguments the loop gives ``fail`` are passed
     on unchanged, whatever the redis-py major.
     """
 
@@ -294,6 +299,8 @@ class _LoggedAsyncRetry(AsyncRetry):
             nonlocal failures
             failures += 1
             await fail(error, *rest)
+            if isinstance(error, AuthenticationError):
+                raise error
             if failures <= self._budget:
                 _log_retry(self._label, failures, self._budget, error, self._backoff.compute(failures))
 
@@ -303,7 +310,8 @@ class _LoggedAsyncRetry(AsyncRetry):
 class _LoggedSyncRetry(SyncRetry):
     """redis-py's sync ``Retry`` that logs a WARNING for every failure it retries.
 
-    The same logging and pass-through as :class:`_LoggedAsyncRetry`, with plain calls.
+    The same logging, refused-credentials raise and pass-through as
+    :class:`_LoggedAsyncRetry`, with plain calls.
     """
 
     __slots__ = ("_budget", "_label")
@@ -322,6 +330,8 @@ class _LoggedSyncRetry(SyncRetry):
             nonlocal failures
             failures += 1
             fail(error, *rest)
+            if isinstance(error, AuthenticationError):
+                raise error
             if failures <= self._budget:
                 _log_retry(self._label, failures, self._budget, error, self._backoff.compute(failures))
 
@@ -349,7 +359,8 @@ def redis_connection_options(options: Mapping[str, Any], *, sync: bool = False, 
 
     - ``retry_attempts > 0``: the kit's logged retry with that many retries and the kit's
       exponential backoff, retrying redis-py's ``ConnectionError`` / ``TimeoutError`` and a
-      raw ``OSError`` from the socket connect.
+      raw ``OSError`` from the socket connect. A refused password (``AuthenticationError``)
+      is raised at once, never retried.
     - ``retry_attempts == 0`` with ``retry_on_timeout``: the kit's logged retry with one
       retry and no backoff — the retry redis-py attaches itself in that case.
     - Otherwise no retry: redis-py's own single attempt.

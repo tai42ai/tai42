@@ -54,7 +54,8 @@ class RedisConnectionOptions(TaiBaseSettings):
     socket_connect_timeout: float | None = Field(default=None, gt=0)
     retry_on_timeout: bool = False
     # Re-tries after a first connection/timeout failure (total tries = 1 + n), with the
-    # kit's exponential backoff; each retried failure logs a WARNING. 0 = off.
+    # kit's exponential backoff; each retried failure logs a WARNING. 0 = off. A refused
+    # password is raised at once, never retried.
     retry_attempts: int = 0
 
     def connection_options(self) -> dict[str, Any]:

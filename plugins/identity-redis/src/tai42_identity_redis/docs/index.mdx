@@ -36,7 +36,7 @@ from its own `TAI_IDENTITY_` env group. The access-control gate keeps its own Re
 | `TAI_IDENTITY_SOCKET_CONNECT_TIMEOUT` | `5` | Seconds to connect before the auth path fails; must be positive. |
 | `TAI_IDENTITY_SOCKET_TIMEOUT` | `5` | Seconds per Redis read before the auth path fails. |
 | `TAI_IDENTITY_RETRY_ON_TIMEOUT` | `true` | Retry a command that timed out. |
-| `TAI_IDENTITY_RETRY_ATTEMPTS` | `0` | Retries after a first connection or timeout failure, with backoff. |
+| `TAI_IDENTITY_RETRY_ATTEMPTS` | `0` | Retries after a first connection or timeout failure, with backoff. A refused password is raised at once, never retried. |
 | `TAI_SETUP_TOKEN` | unset | Gate token for the one-shot `POST /api/setup` door that initializes the deployment. Unset, the platform auto-generates one and logs it once at startup; set it to pin a known value. |
 | `TAI_SETUP_OPEN` | `false` | Drops the setup-token gate for local/dev. Leave off in any shared deployment. |
 
