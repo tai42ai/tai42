@@ -35,7 +35,6 @@ build reached by any other route must take that same exclusive side.
 from __future__ import annotations
 
 import asyncio
-import contextvars
 import logging
 import os
 import weakref
@@ -45,6 +44,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from tai42_kit.clients import advance_client_epoch, current_client_epoch
+from tai42_kit.fork_gate import fork_gate
 from tai42_kit.settings import reset_all_settings, unbind_respawn_class_env
 from tai42_kit.settings.cache_registry import restamp_settings_born_after, settings_birth_mark
 
@@ -536,20 +536,24 @@ def _swap(new_epoch: Epoch) -> Epoch:
 
 
 async def _outside_any_request[T](step: Callable[[], Awaitable[T]]) -> T:
-    """Await ``step`` in a task that starts from an empty context.
+    """Await ``step`` in a task that starts from no request's context.
 
     A task copies the context it is created in. A door-driven reload runs inside the
     request that drove it, whose context carries that request (and through its scope the
     retiring generation's app) and its caller's identity. The new generation's long-lived
     tasks — its FastMCP lifespan supervisor and its periodic loops — are created in the
     steps run through here, so they start from no request's context, the same on every
-    door.
+    door. The step is still the re-import's own work, so it starts from the fork gate's
+    :meth:`~tai42_kit.fork_gate.ForkGate.rebuild_context`: a fork it makes while the rebuild
+    holds the gate is the rebuild's own and does not wait on it. The tasks it creates outlive
+    the rebuild and the job that may have driven it, so the context carries no job span:
+    a span or a fork they make later is one of their own.
     """
 
     async def _step() -> T:
         return await step()
 
-    return await asyncio.create_task(_step(), context=contextvars.Context())
+    return await asyncio.create_task(_step(), context=fork_gate.rebuild_context())
 
 
 @dataclass

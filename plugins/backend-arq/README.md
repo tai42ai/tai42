@@ -123,12 +123,21 @@ result retention), `--queue LABEL` (consume `<ARQ_QUEUE_NAME>.<label>` instead o
 `ARQ_QUEUE_NAME`; one label per worker, letters, digits, `_` or `-`; any other
 value is refused before the worker starts), `--max-jobs` (default `10`),
 `--job-timeout` (defaults to `ARQ_TASK_TIMEOUT`), `--poll-delay` (default `0.5`),
-`--max-tries` (default `5`), `--health-check-interval` (default `60`). The worker
+`--health-check-interval` (default `60`). The worker
 runs with arq's `allow_abort_jobs` enabled — task cancellation and schedule
-replace/delete rely on abort processing. A dispatched tool runs once: the backend
-never retries a tool body (a tool that wants retries declares a `ToolRetryPolicy`).
-arq itself re-runs a job cut by a cold stop (`CancelledError`), bounded by
-`--max-tries` — arq's own delivery semantics.
+replace/delete rely on abort processing.
+
+A dispatched tool runs once: the backend never retries a tool body (a tool that
+wants retries declares a `ToolRetryPolicy`). arq takes a job up again when its
+run was cut: after a worker died inside it (once the job's in-progress key
+expires, `--job-timeout` plus 10 seconds) and after a cold stop cancelled it.
+That second pickup never runs the body: the job ends failed, and a caller
+reading its result gets `TaskFailedError` with the type `JobRunCutError` and the
+detail
+`JobRunCutError('the run was cut (its worker died or was stopped mid-run) and is not run again')`
+(the same detail `backend_list_failed_tasks` lists). The schedule driver is the one exception:
+a later pickup of a cut schedule run never fires its tool again, it only moves
+the schedule on to its next run.
 
 ## Liveness
 
@@ -141,6 +150,18 @@ exec liveness probe at it. Jobs run as tasks on the same loop, so the passes go
 on while jobs run; a job that blocks the loop stops them, and the probe then
 reports not alive. The worker removes the file when it exits. Each worker on one
 filesystem needs its own `TAI_BACKEND_LIVENESS_PATH`.
+
+The worker forks no child. Its jobs run as coroutines on the loop a config
+reload rebuilds on, and a sync tool a job runs off the loop goes on running
+while that loop is busy, so each job that runs manifest code (`tool_execution`,
+`callback_job`) holds the fork gate for its whole run, as the in-process pools
+of the other backends do. The schedule driver `task_scheduler` runs platform
+code only and holds none, so a reload never waits on a schedule that is waiting
+for its target. A reload that re-imports the manifest modules waits for the
+running jobs first, up to 30s, and past that logs an error and goes ahead. A
+job that arrives while a reload is pending starts after it, waiting up to 120s
+without holding up the loop. A job waiting on a config reload's lock does not
+hold that reload up.
 
 ## Fleet ops
 
@@ -204,6 +225,12 @@ raises `TimeoutError` after `ARQ_TASK_TIMEOUT`, and an `async_task` id stays
 `async_task` branch. Schedules carry no queue: the control job and every fire
 run on `ARQ_QUEUE_NAME`, so recurring schedules need a worker without a label.
 
+A job does not wait for another job: it chains the next one with
+`callback_kwargs`. `sync_task` and `backend_task_result` (given a `timeout`) are
+for callers outside a job and raise `RuntimeError` inside one, before anything
+is queued; `backend_task_result` with no `timeout` reads the current state and
+works anywhere.
+
 ## Tools
 
 Task/worker tools use arq's public `Job` status/result API; a tool given a job
@@ -213,7 +240,8 @@ failure re-raises as `TaskFailedError` carrying the original exception's type,
 `repr`, and traceback text — result payloads describe an unserializable value
 in a tagged JSON shape the deserializer revives on read), `backend_cancel_task`
 (a stored abort replays as arq's confirmed-abort verdict; stored failures are
-reported with their detail), `backend_active_tasks` (a flat
+reported with their detail; inside a job it requests the abort and returns
+without waiting for it), `backend_active_tasks` (a flat
 job-id-keyed map — arq has no per-worker attribution), `backend_reserved_tasks`
 (due job ids keyed by queue: `ARQ_QUEUE_NAME` and every labelled queue a task
 was sent to, an empty queue as `[]`), `backend_scheduled_tasks` (job id → due

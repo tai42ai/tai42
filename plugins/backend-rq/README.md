@@ -89,14 +89,21 @@ tool with its own `queue` parameter cannot take a `sync_task` or `async_task`
 branch. Recurring schedules carry no queue: `beat` puts them on
 `RQ_QUEUE_NAME`, so they need a worker without a label.
 
+A job does not wait for another job: it chains the next one with
+`callback_kwargs`. `sync_task` and `backend_task_result` (given a `timeout`) are
+for callers outside a job and raise `RuntimeError` inside one, before anything
+is queued; `backend_task_result` with no `timeout` reads the current state and
+works anywhere.
+
 ## Runtime
 
 `launch(args)` selects the process role from the first argument:
 
 - `worker [--redis-url URL] [-n NAME] [--loglevel LEVEL] [--burst] [--results-ttl N] [--pool prefork|solo|gevent] [--queue LABEL]`
   — runs an RQ worker. `prefork` (default) forks a monitored work-horse per
-  job; `solo` runs jobs in-process; `gevent` runs jobs in-process on green
-  threads. `--results-ttl` sets the worker's default result TTL. The worker
+  job; `solo` runs jobs in-process; `gevent` runs jobs in-process too, one at a
+  time, with blocking I/O made cooperative so the greenlets a job spawns overlap
+  their I/O. `--results-ttl` sets the worker's default result TTL. The worker
   serves one queue: `RQ_QUEUE_NAME`, or with `--queue <label>` the queue
   `<RQ_QUEUE_NAME>.<label>` alone (one label, letters, digits, `_` or `-`; any
   other value is refused before the worker starts); its `countdown` / `eta` jobs
@@ -133,12 +140,14 @@ more than `TAI_BACKEND_LIVENESS_GRACE` seconds, and 1 otherwise, so it serves as
 that container's exec liveness probe. Each process on one filesystem needs its
 own `TAI_BACKEND_LIVENESS_PATH`, and removes its file when it exits.
 
-- `worker` reports on each RQ heartbeat: every dequeue poll (at most 5s apart)
-  and every job boundary. While a forked work-horse runs a job, the worker's
-  horse monitor reports; on the `solo` and `gevent` pools, where the job runs in
-  the worker process, a monitor thread reports once a second until the job ends.
-  It is an OS thread under `gevent` too, so a job that holds the CPU does not
-  starve it.
+- `worker` reports on each RQ heartbeat: every dequeue poll (at most 5s apart),
+  every job boundary, and once a second while `rq suspend` holds it. A job that
+  arrives while a config reload re-imports the manifest modules waits for the
+  re-import to finish, and the worker reports once a second while it waits.
+  While a forked work-horse runs a job, the worker's horse monitor reports; on
+  the `solo` and `gevent` pools, where the job runs in the worker process, a
+  monitor thread reports once a second until the job ends. It is an OS thread
+  under `gevent` too, so a job that holds the CPU does not starve it.
   `solo` ends a job at `RQ_TASK_TIMEOUT` only while it runs Python code, not
   while it blocks in a C call; `gevent` ends it only when it yields to gevent,
   not while it holds the CPU or blocks without yielding. So the monitor stops
@@ -169,21 +178,35 @@ threads do not survive `fork()`), and on macOS it disables `urllib` system
 proxy detection, which deadlocks in forked children during SSL setup. An
 `os.register_at_fork` hook — installed on *every* pool, since `solo` and
 `gevent` still spawn the `rq-scheduler` child — repeats the evict in each
-forked child, which then rebuilds a clean client lazily, and resets the
-fork-gate state the child inherited. Every step logs loudly; telemetry is
-never silently disabled.
+forked child, which then rebuilds a clean client lazily. Every step logs
+loudly; telemetry is never silently disabled.
 
 The fork gate is the mutual exclusion between this worker and a config
 reload. A reload pops the manifest modules out of `sys.modules` and re-imports
 them; a child forked during that window inherits a held `importlib` lock whose
 owner thread no longer exists and hangs forever on its first import. So:
 
-- **prefork** holds the gate across the `fork()` instant only — a child forked
-  outside the window is immune however long its job runs. A job that arrives
-  mid-reload waits for the re-import to finish, up to 120s, before forking.
+- **every pool** holds the gate across the `fork()` instant of every child it
+  forks — each work-horse and every `rq-scheduler` spawn — with a job span the
+  worker takes around the fork itself. The kit's fork guard (an
+  `os.register_at_fork` hook, which also resets the gate state the child
+  inherits) holds a span around every other fork of the process, and a fork
+  inside the worker's own span nests in it. A child forked outside the window
+  is immune however long its job runs. A job that arrives mid-reload waits for
+  the re-import to finish, up to 120s, before forking, and reports the worker's
+  progress each second while it waits, so the probe reads it alive.
 - **solo / gevent** run jobs in-process, with no inherited snapshot to protect
-  them, so the gate is held for the whole job. A config reload arriving while
-  one is running therefore waits for it, up to 30s.
+  them, so the gate is held for the whole job. A job that arrives mid-reload
+  waits for the re-import the same way, reporting each second; a config reload
+  arriving while one is running waits for it, up to 30s. A fork the job makes
+  itself, on its own thread or in a sync tool it runs off the event loop,
+  falls inside the job's span and goes ahead at once; a fork from a thread the
+  job starts with `threading` takes a span of its own. With no reload pending
+  it goes ahead at once; while a reload is pending it waits behind it, and
+  that reload first waits out its 30s for the job's span to close and logs
+  that it could not quiesce, so the fork goes ahead only after the re-import.
+  A thread started in `contextvars.copy_context().run` stays inside the job's
+  span. A job waiting on a config reload's lock does not hold that reload up.
 
 Both waits are bounded and proceed loudly (ERROR) rather than deadlocking if
 the budget is exhausted.

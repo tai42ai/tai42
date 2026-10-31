@@ -33,6 +33,7 @@ from tai42_contract.backend import (
     ScheduleListRow,
     ScheduleRecord,
 )
+from tai42_kit.backend.job_context import assert_not_in_job
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.redis import RedisClient, SyncRedisClient
 from tai42_kit.utils.runtime.schedule_util import normalize_schedule
@@ -182,7 +183,12 @@ async def backend_task_result(task_id: str, timeout: float | None = None) -> Any
     the current state without waiting. A FAILED task raises the task's stored
     failure (RQ retains a failed job's exception as its traceback text, so
     that text is what the raised error carries).
+
+    A job does not wait for another job's result: given a ``timeout`` inside a job, it raises
+    ``RuntimeError`` (a job chains the next one with ``callback_kwargs``).
     """
+    if timeout is not None:
+        assert_not_in_job("backend_task_result")
     settings = rq_settings()
     async with _async_redis() as r:
         deadline = None if timeout is None else time.monotonic() + timeout
@@ -201,22 +207,26 @@ async def backend_task_result(task_id: str, timeout: float | None = None) -> Any
             if deadline is None or time.monotonic() >= deadline:
                 return f"Task {task_id} is not ready (status: {status})"
             await asyncio.sleep(0.25)
+        return await _read_result(r, settings, task_id)
 
-        stream_key = settings.rq_result_key(task_id)
-        # Newest-first: a recurring job reuses its id, so only the latest entry
-        # is "the" result.
-        stream_entries = await r.xrevrange(stream_key, count=1)
-        if not stream_entries:
-            return f"No result found for task {task_id} in stream {stream_key}"
 
-        entry = stream_entries[0]
-        result_bytes = entry[1].get(b"return_value")
-        if result_bytes:
-            try:
-                return pickle.loads(base64.b64decode(result_bytes))  # noqa: S301 deserializes this worker's own result payload, not external input
-            except (binascii.Error, pickle.UnpicklingError) as e:
-                raise ValueError(f"Failed to decode result for task {task_id}: {e}") from e
-        return None
+async def _read_result(r: Any, settings: RqSettings, task_id: str) -> Any:
+    """Read a finished task's stored result from its result stream."""
+    stream_key = settings.rq_result_key(task_id)
+    # Newest-first: a recurring job reuses its id, so only the latest entry
+    # is "the" result.
+    stream_entries = await r.xrevrange(stream_key, count=1)
+    if not stream_entries:
+        return f"No result found for task {task_id} in stream {stream_key}"
+
+    entry = stream_entries[0]
+    result_bytes = entry[1].get(b"return_value")
+    if result_bytes:
+        try:
+            return pickle.loads(base64.b64decode(result_bytes))  # noqa: S301 deserializes this worker's own result payload, not external input
+        except (binascii.Error, pickle.UnpicklingError) as e:
+            raise ValueError(f"Failed to decode result for task {task_id}: {e}") from e
+    return None
 
 
 @tai42_app.tools.tool(tags={"backend"})

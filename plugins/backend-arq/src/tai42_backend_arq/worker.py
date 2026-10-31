@@ -3,11 +3,20 @@
 :class:`ArqWorkerRuntime` answers only "how arq starts, drains, and recycles":
 it builds an :class:`arq.Worker` over the three worker functions
 (``task_scheduler`` / ``callback_job`` / ``tool_execution``) with the
-``recover_stalled_schedules`` startup watchdog, runs it on the serving loop, and
-asks it to drain or to stop cold. Each pass of arq's poll loop reports the
-worker's progress. Readiness gating, signal wiring and
-drain-on-cancellation belong to
+``recover_stalled_schedules`` startup watchdog, runs it on the serving loop, and asks
+it to drain or to stop cold. The two that run manifest code (``callback_job`` runs the
+callback, ``tool_execution`` the tool) hold the process's fork-gate job span for their
+whole run; ``task_scheduler`` runs platform code only and waits for the target it
+enqueued, so it holds none: a span there would wait on a job that waits behind the
+rebuild. Each
+pass of arq's poll loop reports the worker's progress. Readiness gating, signal
+wiring and drain-on-cancellation belong to
 :class:`~tai42_kit.backend.ManagedBackend`, which drives this object.
+
+A job runs at most once. arq picks a job up again after its run was cut (a worker died
+inside it, or a cold stop cancelled it); that pickup ends the job failed with
+:class:`JobRunCutError`, without entering its body. The schedule driver's later pickups
+only move its schedule on.
 
 The ``main`` click command defines the CLI option surface twice over: it is what
 ``launch`` parses its subcommand args through, and it is the direct entry point
@@ -17,14 +26,17 @@ for running a worker outside a host process.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
+import functools
 import logging
 import signal
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any, Self
 
 import click
 from arq import Worker, func
+from arq.worker import Function
 from tai42_contract.backend.runtime import (
     CONSUMING_RUNTIME,
     BackendRuntime,
@@ -32,7 +44,9 @@ from tai42_contract.backend.runtime import (
     ProgressLiveness,
     ProgressReporter,
 )
+from tai42_kit.backend.job_context import running_job
 from tai42_kit.clients.impl.redis import async_redis_from_url, redis_from_url_kwargs
+from tai42_kit.fork_gate import JOB_SPAN_WAIT_SECONDS, fork_gate
 from tai42_kit.liveness import LivenessFile, backend_liveness_settings
 
 from tai42_backend_arq.pool import arq_redis_over, enqueue_client_kwargs
@@ -47,6 +61,61 @@ logger = logging.getLogger(__name__)
 # ``--poll-delay``): arq's own floor for the poll delay, the one ``heart_beat``
 # clamps its cron window to.
 _SPIN_PROMISE_SECONDS = 0.5
+
+
+class JobRunCutError(RuntimeError):
+    """The failure of a job picked up again after its run was cut, which is not run again.
+
+    arq takes a job up again after a worker died inside it (once its in-progress key
+    expires) or after a cold stop cancelled it. A job runs at most once, so that pickup
+    ends the job with this error, stored as its failed result for the caller to read.
+    """
+
+    def __init__(self) -> None:
+        """The one message every cut run carries."""
+        super().__init__("the run was cut (its worker died or was stopped mid-run) and is not run again")
+
+
+def _run_once(job_function: Function) -> Function:
+    """``job_function`` refusing every pickup of a job but the first with :class:`JobRunCutError`.
+
+    arq counts each pickup of a job as a try (``ctx["job_try"]``) and refuses one past
+    ``max_tries`` with its own ``JobExecutionFailed``; this function puts no bound there and
+    refuses the later pickup itself, before the body or its job span is entered, so the
+    failure the job stores names what happened to it.
+    """
+    body = job_function.coroutine
+
+    @functools.wraps(body)
+    async def job(ctx: dict[str, Any], *args: Any, **kwargs: Any) -> Any:
+        if ctx["job_try"] > 1:
+            raise JobRunCutError
+        return await body(ctx, *args, **kwargs)
+
+    return dataclasses.replace(job_function, coroutine=job, max_tries=sys.maxsize)
+
+
+def _in_job_span(function: Callable[..., Awaitable[Any]]) -> Function:
+    """``function`` as an arq job function that runs inside the fork gate's job span, marked as a job.
+
+    A job runs as a coroutine on the loop a config reload rebuilds on, and a sync step it
+    hands to ``asyncio.to_thread`` goes on running while that loop re-imports the manifest
+    modules. The span holds the job out of the re-import for its whole run: a rebuild waits
+    for the running jobs, and a job that arrives while one is pending waits for it, off the
+    loop and up to ``JOB_SPAN_WAIT_SECONDS``, inside arq's job timeout. Only the job
+    functions that run manifest code take it (see the module docstring).
+
+    The body runs marked as a backend job (:func:`~tai42_kit.backend.job_context.running_job`),
+    so a tool it runs that would wait for another job's result refuses.
+    """
+
+    @functools.wraps(function)
+    async def job(ctx: dict[str, Any], *args: Any, **kwargs: Any) -> Any:
+        async with fork_gate.job_span_async(timeout=JOB_SPAN_WAIT_SECONDS):
+            with running_job():
+                return await function(ctx, *args, **kwargs)
+
+    return func(job)
 
 
 class _ProgressReportingWorker(Worker):
@@ -120,7 +189,14 @@ class ArqWorkerRuntime(BackendRuntime):
             report_progress=self.report_progress,
             job_serializer=job_serializer,
             job_deserializer=job_deserializer,
-            functions=[func(task_scheduler), func(callback_job), func(tool_execution)],
+            functions=[
+                # The schedule driver alone takes later pickups of its job: each one only moves
+                # its schedule on and never fires the target again (see ``task_scheduler``), so
+                # arq puts no bound on them.
+                func(task_scheduler, max_tries=sys.maxsize),
+                _run_once(_in_job_span(callback_job)),
+                _run_once(_in_job_span(tool_execution)),
+            ],
             # No ``--queue`` label consumes the settings queue (``ARQ_QUEUE_NAME``); a
             # label consumes ``<ARQ_QUEUE_NAME>.<label>``, the queue tasks sent with it land on.
             queue_name=queue_name,
@@ -143,7 +219,10 @@ class ArqWorkerRuntime(BackendRuntime):
             # the one limit every backend reads; an explicit flag still wins.
             job_timeout=options["job_timeout"] or settings.task_timeout,
             poll_delay=options["poll_delay"],
-            max_tries=options["max_tries"],
+            # The at-most-once floor for a job function that declares no tries of its own:
+            # arq refuses its later pickups with its own ``JobExecutionFailed``. Each function
+            # above declares its own (``_run_once`` and the schedule driver).
+            max_tries=1,
             health_check_interval=options["health_check_interval"],
             # A graceful shutdown drains in-flight jobs for up to this many
             # seconds rather than cancelling them; arq cancels running jobs
@@ -250,7 +329,6 @@ def _queue_label_option(ctx: click.Context, param: click.Parameter, value: str |
 @click.option("--max-jobs", type=int, default=10, help="Max concurrent jobs")
 @click.option("--job-timeout", type=int, default=None, help="Job timeout seconds (defaults to ARQ_TASK_TIMEOUT)")
 @click.option("--poll-delay", type=float, default=0.5, help="Poll delay seconds")
-@click.option("--max-tries", type=int, default=5, help="Max tries")
 @click.option("--health-check-interval", type=int, default=60, help="Health check interval seconds")
 def main(**options: Any) -> None:
     """Run one arq worker standalone from the command line."""

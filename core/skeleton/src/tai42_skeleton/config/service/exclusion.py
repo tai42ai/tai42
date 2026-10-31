@@ -25,6 +25,8 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
     from contextlib import AbstractContextManager
 
+    from tai42_kit.process_lock import ProcessLock
+
 logger = logging.getLogger(__name__)
 
 
@@ -40,7 +42,7 @@ class WriteSpan:
 
 
 @asynccontextmanager
-async def write_exclusion(lock: asyncio.Lock, span: AbstractContextManager[None]) -> AsyncIterator[WriteSpan]:
+async def write_exclusion(lock: ProcessLock, span: AbstractContextManager[None]) -> AsyncIterator[WriteSpan]:
     """Hold ``lock``, then the store's exclusive write ``span``, each with the caller recorded as waiting.
 
     Yields the :class:`WriteSpan` the release outcome is recorded on. An error entering

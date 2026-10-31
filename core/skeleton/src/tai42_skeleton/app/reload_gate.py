@@ -6,7 +6,7 @@ the manifest modules and re-probes every MCP server. Run inline on the serving
 loop, an MCP re-probe would freeze health checks, MCP keepalives and in-flight SSE
 streams for its whole duration. The gate keeps the bodies off the loop:
 
-* :meth:`ReloadGate.run` holds an :class:`asyncio.Lock` and awaits the heavy sync
+* :meth:`ReloadGate.run` holds the gate's process lock and awaits the heavy sync
   body on a worker thread (`asyncio.to_thread`). An MCP re-probe body runs there,
   marshalling only short reconciles onto the serving loop, so the loop keeps
   running while it executes. A config reload
@@ -20,15 +20,21 @@ streams for its whole duration. The gate keeps the bodies off the loop:
   the FastMCP session surface rejects tool calls the same way. Health, liveness
   and read-only GETs keep answering;
 * a body declared ``reimports=True`` ALSO holds ``fork_gate.exclusive`` on that
-  worker thread, which excludes the OTHER live consumer of this process's modules:
-  a backend work loop that forks a job child. A re-importing body pops the manifest
-  modules out of ``sys.modules`` and re-imports them (``import_or_reload_package``),
-  and a child forked during that window inherits a held ``importlib`` per-module lock
-  whose owner thread does not exist post-fork — it blocks forever on that import and
-  wedges the work loop monitoring it. The asyncio lock cannot cover this: the forking
-  work loop is off-loop and never touches it. ``reimports`` is REQUIRED and explicit
-  at every call site rather than defaulted, so adding a door is a decision about the
-  fork gate, not an omission.
+  worker thread, which excludes the OTHER live consumers of this process's modules:
+  a backend work loop that forks a job child, and a backend job that runs in this
+  process. A re-importing body pops the manifest modules out of ``sys.modules`` and
+  re-imports them (``import_or_reload_package``); a child forked during that window
+  inherits a held ``importlib`` per-module lock whose owner thread does not exist
+  post-fork — it blocks forever on that import and wedges the work loop monitoring it —
+  and an in-process job imports against the module table the re-import is tearing
+  down. The reload lock cannot cover this: a job neither takes it nor waits on it,
+  whether it runs on a worker thread, on a green thread, or as a coroutine on the
+  serving loop itself (arq). ``reimports`` is REQUIRED and explicit at every call site
+  rather than defaulted, so adding a door is a decision about the fork gate, not an
+  omission. A job that starts a re-importing reload itself is never waited for by its
+  own reload. A job queued on the lock behind another reload is not waited for either:
+  its fork-gate job span is parked while it waits (``ForkGate.parked_span``), so it can
+  neither import nor fork, and it counts again before the job runs on.
 
 Only ``reload_config`` re-imports. ``reload_mcp`` / ``deregister_mcp`` /
 ``reload_failed_mcps`` re-probe MCP servers and rebind tools against modules already
@@ -36,19 +42,18 @@ in ``sys.modules``; they declare ``reimports=False`` and do NOT stall a forking
 backend's jobs, which matters because an MCP re-probe can take a while and job
 throughput should not pay for it.
 
-The lock is owned by the serving loop. A single process runs a single serving
-loop, so the lock is created once (on first use, or explicitly via
-:meth:`bind_to_running_loop` at lifespan startup) and bound to that loop for the
-process lifetime; an off-serving-loop caller reaches the gate by scheduling a
-coroutine onto the serving loop (``asyncio.run_coroutine_threadsafe``), never by
-acquiring the lock from a foreign loop.
+The lock is one per process, not one per event loop
+(:class:`~tai42_kit.process_lock.ProcessLock`): a holder on any loop and any thread
+excludes every other, the serving loop's and a backend job's private loop's alike.
+Each waiter waits on a dedicated thread of its own, so the loop it runs on keeps
+running, and waiters take the lock in arrival order.
 
-A forked child starts with the gate unbound and free. A backend pool forks its job
-children off the serving loop at any moment, including while the parent holds the
-gate; the child inherits that held lock, which only the parent's serving loop can
-ever release, so the child would answer ``reloading`` to every gated call for its
-whole life. The child runs no reload of its own (a reload in the parent reaches its
-children by re-forking them), so nothing in it is ever reloading.
+A forked child starts with the gate free. A backend pool forks its job children at
+any moment, including while the parent holds the gate; the child inherits that held
+lock, whose holder thread is the parent's and does not exist in the child, so the
+child would answer ``reloading`` to every gated call for its whole life. The child
+runs no reload of its own (a reload in the parent reaches its children by re-forking
+them), so nothing in it is ever reloading.
 
 The lock is never taken bare. Every holder enters through one of two context managers,
 which record on the serving generation the work engaged with the gate
@@ -68,7 +73,9 @@ Both acquire through :func:`hold_recorded`, as does any other lock whose holder 
 retire (the config-write lock a settings-profile apply holds across its build), so every such
 waiter is recorded the same way. A blocking span taken off the loop (the config store's
 exclusive write span) is entered through :func:`hold_recorded_blocking`, which records its
-waiter the same way.
+waiter the same way. Both helpers park the caller's fork-gate job span while they wait
+(``ForkGate.parked_span``), so a job queued behind a reload's holder never holds that reload
+up, and counts again before it runs.
 
 A call of an SSE session acts for its own admission record, not the session stream's
 (:func:`~tai42_skeleton.app.admission.admit_session_call`), so it is recorded exactly as a
@@ -84,12 +91,13 @@ import os
 import sys
 import threading
 from collections.abc import AsyncIterator, Callable
-from contextlib import AbstractContextManager, ExitStack, asynccontextmanager
+from contextlib import AbstractContextManager, AsyncExitStack, ExitStack, asynccontextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, TypeVar
 
 from starlette.responses import JSONResponse
-from tai42_kit.fork_gate import fork_gate
+from tai42_kit.fork_gate import JOB_SPAN_WAIT_SECONDS, fork_gate
+from tai42_kit.process_lock import ProcessLock
 
 if TYPE_CHECKING:
     from tai42_skeleton.app.admission import RequestAdmission
@@ -103,9 +111,9 @@ logger = logging.getLogger(__name__)
 # FastMCP session-tool rejection so a client sees one consistent surface.
 REJECT_MESSAGE = "reloading — the server is applying a config reload; retry shortly"
 
-# How long a re-importing rebuild waits for a forking backend's in-flight job child to
-# be reaped before it starts — the one budget for every door, shared with the
-# profile-apply path that drives ``build_and_swap_epoch`` directly.
+# How long a re-importing rebuild waits for the open job spans (a fork instant, or a
+# whole in-process job) to close before it starts — the one budget for every door,
+# shared with the profile-apply path that drives ``build_and_swap_epoch`` directly.
 #
 # This is a DELIBERATE bound against the fleet-ack deadline, not a wait sized to the
 # work. How long a job span actually lasts depends on the pool:
@@ -113,17 +121,22 @@ REJECT_MESSAGE = "reloading — the server is applying a config reload; retry sh
 # * PREFORK (the default): a span is ~the ``os.fork()`` instant — the child inherits a
 #   snapshot of the import locks and is immune thereafter — so a reload's wait here is
 #   normally milliseconds, however long the job itself runs.
-# * SOLO / GEVENT: the job runs IN the worker process, so its span lasts the whole job.
-#   rq's job timeout is the dispatch ``task_timeout`` (``RQ_TASK_TIMEOUT``, 300 s by
-#   default), the NOMINAL bound, ten times this budget, but on these pools it is not
-#   reliably enforceable: off the main thread the timer death penalty cannot interrupt a
-#   C-blocked call, so a job wedged in one runs past it. The degraded proceed below is
-#   what actually bounds this side.
+# * IN-PROCESS pools (solo, threads, gevent, eventlet, and arq, whose jobs are
+#   coroutines on the serving loop): the job runs IN the worker process, so its span
+#   lasts the whole job. The dispatch job timeout (300 s by
+#   default) is the NOMINAL bound, ten times this budget, but on these pools it is not
+#   reliably enforceable: a job wedged in a C-blocked call runs past it. The degraded
+#   proceed below is what actually bounds this side.
 #
-# A reload therefore proceeds UNGUARDED — logging the fork gate's ERROR — in exactly two
-# residual cases: a solo/gevent job that has already been running longer than 30s, or a
-# fork instant that happens to collide with the tail of an exhausted quiesce. In both the
-# child is exposed to the re-import race the gate otherwise closes. That
+# A reload therefore proceeds UNGUARDED — logging the fork gate's ERROR where it overruns —
+# in exactly four residual cases: an in-process job that has already been running longer
+# than 30s; an in-process job whose own ``threading`` thread (one that does not carry the
+# job's context) forks or enters a span while the reload is pending, so that thread waits
+# behind the reload and the job's span stays open until the budget runs out; a fork
+# instant that happens to collide with the tail of an exhausted quiesce; or an in-process
+# job whose own sibling task (one that shares the job's context) imports while the job's
+# wait on a recorded lock is parked. In each, the job or the child is exposed to the
+# re-import race the gate otherwise closes. That
 # is the accepted tradeoff: the alternative is a reload that misses its fleet ack (and, on
 # a sibling, blocks fleet convergence) behind a long-running job.
 FORK_QUIESCE_SECONDS = 30.0
@@ -192,23 +205,25 @@ def gate_party() -> GateParty:
 
 
 @asynccontextmanager
-async def hold_recorded(lock: asyncio.Lock, party: GateParty | None = None) -> AsyncIterator[GateParty]:
+async def hold_recorded(lock: ProcessLock, party: GateParty | None = None) -> AsyncIterator[GateParty]:
     """Hold ``lock``, with ``party`` (the current one by default) recorded as waiting while it waits.
 
     For a lock whose holder may drive a retire of the waiter's generation: a waiter cannot move
     before the holder releases, so the retire never counts it against the drain budget and never
-    severs it. Yields the party, released on exit.
+    severs it. Its fork-gate job span is parked while it waits
+    (:meth:`~tai42_kit.fork_gate.ForkGate.parked_span`), as the holder may be starting a
+    re-import, and counts again before it holds the lock. A waiter stopped (cancelled, timed out)
+    while its span counts again does not keep the lock. Yields the party, released on exit.
     """
     party = gate_party() if party is None else party
     party.wait()
-    try:
-        await lock.acquire()
-    finally:
-        party.stop_waiting()
-    try:
+    async with AsyncExitStack() as holding:
+        try:
+            async with fork_gate.parked_span(timeout=JOB_SPAN_WAIT_SECONDS):
+                await holding.enter_async_context(lock.held())
+        finally:
+            party.stop_waiting()
         yield party
-    finally:
-        lock.release()
 
 
 class _ThreadEntry:
@@ -300,7 +315,9 @@ async def hold_recorded_blocking(span: AbstractContextManager[None], party: Gate
     while it blocks, and the party is recorded as waiting exactly as a :func:`hold_recorded`
     waiter is. A waiter abandoned before its entry completed returns at once and leaves the entry
     to its thread, which exits the span as soon as entry completes; a waiter whose cancellation
-    lands as its entry completes exits the span itself before it returns. The span must therefore
+    lands as its entry completes exits the span itself before it returns. The caller's fork-gate
+    job span is parked while the entry blocks, as :func:`hold_recorded` parks it, and counts again
+    before the holder runs on. The span must therefore
     exclude on its own and tolerate being entered and exited on different threads. The exit always
     completes before the holder returns: a cancellation during it is re-raised afterwards, and an
     error entering or exiting the span propagates; an entry that fails after its waiter returned
@@ -309,7 +326,8 @@ async def hold_recorded_blocking(span: AbstractContextManager[None], party: Gate
     entry = _ThreadEntry(span)
     party.wait()
     try:
-        await asyncio.to_thread(entry.enter)
+        async with fork_gate.parked_span(timeout=JOB_SPAN_WAIT_SECONDS):
+            await asyncio.to_thread(entry.enter)
     except BaseException as stopped:
         if entry.abandon():
             await _exit_on_thread(entry)
@@ -329,38 +347,12 @@ class ReloadGate:
     """Process-wide reload lock plus its retriable-rejection response.
 
     Instantiated once per process (the module-level :data:`reload_gate`
-    singleton). The lock is bound to the serving loop; because a process runs a
-    single serving loop it is created once and reused for the process lifetime.
+    singleton). The lock is the process's, held from any event loop and thread.
     """
 
     def __init__(self) -> None:
-        """Create the gate with its lock unbound until first serving-loop use."""
-        self._lock: asyncio.Lock | None = None
-        self._loop: asyncio.AbstractEventLoop | None = None
-
-    def _serving_lock(self) -> asyncio.Lock:
-        """The lock bound to the running serving loop, created on first use.
-
-        A process runs a single serving loop, so this binds exactly once. It
-        rebinds only if the running loop differs from the bound one — the loop
-        was replaced (there is never a second live loop in the same process to
-        share the lock with), which keeps the process-wide singleton correct
-        across a loop swap rather than raising the cross-loop ``RuntimeError`` an
-        ``asyncio.Lock`` would.
-        """
-        loop = asyncio.get_running_loop()
-        if self._lock is None or self._loop is not loop:
-            self._lock = asyncio.Lock()
-            self._loop = loop
-        return self._lock
-
-    def bind_to_running_loop(self) -> None:
-        """Bind the lock to the current running loop.
-
-        The lifespan-startup hook, so the gate is owned by the serving loop from
-        the first request rather than lazily on the first reload.
-        """
-        self._serving_lock()
+        """Create the gate with its lock free."""
+        self._lock = ProcessLock()
 
     @asynccontextmanager
     async def driving(self) -> AsyncIterator[None]:
@@ -369,7 +361,7 @@ class ReloadGate:
         Use ``async with reload_gate.driving(): ...`` around a body that rebuilds or swaps the
         serving generation outside :meth:`run` (the profile apply).
         """
-        async with hold_recorded(self._serving_lock()) as party:
+        async with hold_recorded(self._lock) as party:
             party.drive()
             yield
 
@@ -379,21 +371,22 @@ class ReloadGate:
 
         Use ``async with reload_gate.synchronized(): ...``.
         """
-        async with hold_recorded(self._serving_lock()):
+        async with hold_recorded(self._lock):
             yield
 
     @property
     def locked(self) -> bool:
         """Whether a reload is in progress.
 
-        ``locked()`` reads a plain flag and never touches the loop, so a route
-        entry check is safe before the lock has ever been bound (no reload has
-        run yet).
+        A plain flag read that never touches a loop, so a route entry check is
+        safe from any loop and thread.
         """
-        return self._lock is not None and self._lock.locked()
+        return self._lock.locked
 
     async def run(self, fn: Callable[[], T], *, reimports: bool) -> T:
-        """Hold the reload lock through :meth:`driving` and await ``fn`` on a worker thread.
+        """Hold the reload lock and await ``fn`` on a worker thread.
+
+        The lock is held through :meth:`driving`.
 
         The heavy reload bodies stay synchronous and unchanged; only the acquire
         and the thread offload live here, so the serving loop keeps running while
@@ -408,9 +401,9 @@ class ReloadGate:
         Required, never defaulted — adding a door is a decision about the fork gate.
         """
         async with self.driving():
-            if not reimports:
-                return await asyncio.to_thread(fn)
-            return await asyncio.to_thread(self._run_fork_exclusive, fn)
+            if reimports:
+                return await asyncio.to_thread(self._run_fork_exclusive, fn)
+            return await asyncio.to_thread(fn)
 
     @staticmethod
     def _run_fork_exclusive(fn: Callable[[], T]) -> T:
@@ -423,9 +416,8 @@ class ReloadGate:
             return fn()
 
     def reset_after_fork(self) -> None:
-        """Start a forked child with the gate unbound: it inherits no hold of the parent's serving loop."""
-        self._lock = None
-        self._loop = None
+        """Start a forked child with the gate free: it inherits no hold of the parent's."""
+        self._lock.reset_after_fork()
 
     def reject_response(self) -> JSONResponse:
         """Return the retriable 503 a gated route serves while a reload holds the lock.

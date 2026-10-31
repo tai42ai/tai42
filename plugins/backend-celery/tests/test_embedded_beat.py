@@ -9,12 +9,15 @@ from __future__ import annotations
 
 import multiprocessing
 import os
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import fakeredis
 import pytest
+from celery.signals import beat_init
 from redbeat import RedBeatScheduler
 from tai42_kit.liveness import BackendLivenessSettings, backend_liveness_settings
 
@@ -108,6 +111,42 @@ def test_an_embedded_beat_that_keeps_its_promise_passes_the_check() -> None:
     embedded_beat.watch(_Beat())
 
     embedded_beat.check()
+
+
+class _LockWaitingBeat:
+    """A ``Service``-shaped beat whose RedBeat lock another beat holds."""
+
+    def __init__(self) -> None:
+        self.scheduler = SimpleNamespace(
+            app=celery_app, lock_key="redbeat::lock", lock_timeout=300, max_interval=60, lock=None
+        )
+        self._is_shutdown = threading.Event()
+
+
+def _wait_for_a_held_lock_in_child() -> None:
+    """Start a beat that waits for the lock another beat holds, until it is ended."""
+    client = fakeredis.FakeRedis()
+    client.set("redbeat::lock", "another beat")
+    beat_scheduler.get_redis = lambda app: client  # type: ignore[assignment]
+    beat_init.send(sender=_LockWaitingBeat())
+
+
+def test_an_embedded_beat_waiting_for_the_lock_passes_the_check(liveness_path: Path) -> None:
+    embedded_beat.register(celery_app, backend_liveness_settings())
+    child = multiprocessing.get_context("fork").Process(target=_wait_for_a_held_lock_in_child, daemon=True)
+    child.start()
+    try:
+        deadline = time.monotonic() + 10.0
+        while not _beat_path(liveness_path).exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        embedded_beat.watch(_Beat(pid=child.pid))
+
+        embedded_beat.check()
+
+        assert _beat_path(liveness_path).read_text().startswith(f"{child.pid}\n")
+    finally:
+        child.terminate()
+        child.join(10)
 
 
 def test_an_embedded_beat_past_its_promise_fails_the_check(liveness_path: Path) -> None:

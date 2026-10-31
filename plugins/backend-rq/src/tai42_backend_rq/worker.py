@@ -16,10 +16,12 @@ nothing for the whole span.
 
 ``tai42_kit.fork_gate`` holds the invariant (canonical statement in its module
 docstring): while a re-import runs, no child may be FORKED and no in-process job may
-RUN. This worker takes the work-loop side per pool — prefork gates the ``fork()``
-instant (a child forked outside the window inherits unlocked copies and is immune
-thereafter), solo/gevent gate the whole in-process job — plus every scheduler spawn. The worker
-classes that take that side live in :mod:`tai42_backend_rq.worker_pools`.
+RUN. The worker holds the work-loop side around the ``fork()`` instant of every child it
+forks — each work-horse and every scheduler spawn (a child forked outside the window
+inherits unlocked copies and is immune thereafter) — and installs the gate's fork guard,
+which holds it around every other fork of the process; the solo/gevent pools also gate
+each whole in-process job. The worker classes that take that
+side live in :mod:`tai42_backend_rq.worker_pools`.
 """
 
 from __future__ import annotations
@@ -36,7 +38,6 @@ from redis import Redis
 from tai42_contract.app import tai42_app
 from tai42_contract.backend.runtime import BackendRuntime, ExecutionMode, ProgressLiveness, ProgressReporter
 from tai42_kit.clients.impl.redis import KitSyncRedis, redis_from_url_kwargs
-from tai42_kit.fork_gate import fork_gate
 from tai42_kit.liveness import LivenessFile, backend_liveness_settings
 
 from tai42_backend_rq.queue import TaskBudgetQueue
@@ -52,7 +53,10 @@ logger = logging.getLogger(__name__)
 
 
 def setup_gevent() -> None:
-    """Monkey-patch blocking primitives so the gevent pool can overlap I/O-bound jobs in one worker process.
+    """Monkey-patch blocking primitives for the gevent pool, which runs one job at a time in the worker process.
+
+    The worker's loop is rq's sequential one, as on ``solo``; the patch makes blocking I/O
+    cooperative, so the greenlets a job spawns overlap their I/O inside that job.
 
     ``patch_all`` runs before the fork gate's ``Condition`` is first used, so the waiter
     locks that ``Condition.wait`` allocates per wait are green ones: a gate wait yields
@@ -77,17 +81,12 @@ def setup_gevent() -> None:
 
 
 def _after_fork_in_child() -> None:
-    """Run fork-safety for EVERY child this process forks — a work-horse or the ``rq-scheduler`` process.
+    """Evict the inherited monitoring writer in EVERY child this process forks — a work-horse or the ``rq-scheduler``.
 
-    Two inherited things are unusable in the child: the monitoring writer (its
-    parent-owned background threads do not survive ``fork()`` and would hang flushes
-    here; the child rebuilds a clean client on first use) and the fork gate's state.
+    Its parent-owned background threads do not survive ``fork()`` and would hang flushes
+    here; the child rebuilds a clean client on first use. The child's copy of the fork gate
+    is reset by the gate's own fork guard (:meth:`~tai42_kit.fork_gate.ForkGate.guard_forks`).
     """
-    # The fork happens INSIDE a job span, so the child inherits ``_live_spans >= 1``
-    # (its own span, which only the parent will ever close) and possibly a condition
-    # locked by a parent thread that does not exist here. Either would deadlock or
-    # mis-block the child's first gate call, so reset to an empty gate.
-    fork_gate.reset_after_fork()
     logger.info("forked child %s: evicting inherited monitoring client (fork safety); it rebuilds lazily", os.getpid())
     tai42_app.monitoring.active.writer.shutdown()
 
@@ -100,7 +99,7 @@ def install_fork_hooks() -> None:
 
     EVERY pool needs this, not just prefork: ``work(with_scheduler=True)`` spawns the
     ``rq-scheduler`` child on solo and gevent too, and that child inherits the same
-    unusable monitoring writer and fork-gate state. Called from :func:`_build_worker`,
+    unusable monitoring writer. Called from :func:`_build_worker`,
     the one seam every pool passes through. Idempotent — ``os.register_at_fork`` has no
     deregister, so a second registration would run the hook twice per child.
     """
@@ -166,9 +165,10 @@ def _build_worker(
     read from the settings here at build time. The worker reports each pass of its work
     loop to ``report_progress``.
 
-    Every pool installs the after-fork child hook here: even the non-forking pools spawn
-    the ``rq-scheduler`` child, which inherits the same unusable monitoring writer and
-    fork-gate state. Only prefork additionally runs :func:`prepare_forking_worker`.
+    Every pool installs the after-fork child hook and the fork gate's guard here: even the
+    non-forking pools spawn the ``rq-scheduler`` child, which inherits the same unusable
+    monitoring writer and must not be forked into a running re-import. Only prefork
+    additionally runs :func:`prepare_forking_worker`.
     """
     install_fork_hooks()
 
@@ -186,6 +186,7 @@ def _build_worker(
     worker = worker_class(
         [queue], name=name, connection=redis_conn, default_result_ttl=results_ttl, report_progress=report_progress
     )
+    worker.guard_forks()
     return worker, redis_conn
 
 

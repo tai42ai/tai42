@@ -124,11 +124,16 @@ file when it exits.
     the reports. The pool cannot end a job, so a job past
     `CELERY_TASK_TIMEOUT` holds a wedged slot: the worker then reports
     nothing, so the probe fails and the orchestrator restarts it.
-  - `threads`: the loop goes on while the jobs run in the pool's threads. Once
-    every thread holds a job past `CELERY_TASK_TIMEOUT` the worker reports
-    nothing; one such job beside free threads keeps it reporting.
+  - `threads`: the loop goes on while the jobs run in the pool's threads; a
+    job past `CELERY_TASK_TIMEOUT` holds its thread for good, so once one such
+    job runs the worker reports nothing and the probe ends it (the healthy jobs
+    beside it end with the worker and are not retried, as celery acknowledges a
+    task when it picks it up; a thread cannot be ended on its own).
   - `gevent`, `eventlet`: the timer runs on its own green thread, so there a
-    report proves the process and that thread.
+    report proves the process and that thread. The `gevent` pool ends a job at
+    `CELERY_TASK_TIMEOUT`; the `eventlet` pool cannot, so there, as on
+    `threads`, once one job runs past it the worker reports nothing and the
+    probe ends it.
 - `worker -B` embeds a beat, which reports each tick into its own file,
   `<TAI_BACKEND_LIVENESS_PATH>-beat`, with its own pid. The worker reports
   nothing while its beat's promise is overdue, so the one probe on the
@@ -136,8 +141,12 @@ file when it exits.
   reached its broker, it ends its beat and removes both files.
 - `beat` reports each tick of RedBeat's scheduler, promising the next within
   the interval the beat sleeps (at most `--max-interval`). A beat that cannot
-  hold RedBeat's lock waits for it before its first tick and reports nothing
-  while it waits, so run one beat (standalone or embedded with `-B`). The app
+  hold RedBeat's lock waits for it before its first tick, trying once a second
+  and reporting each try, so it reads alive while it waits and starts ticking
+  within a second of the lock lapsing (RedBeat holds it for 5 × `--max-interval`,
+  300 s at the default, and a cleanly stopped beat releases it at once). Run one
+  beat (standalone or embedded with `-B`); a second one waits and takes over
+  only if the first stops. The app
   names the reporting scheduler as its `beat_scheduler`. `tai backend worker`
   and `tai backend beat` refuse any other scheduler at launch: `--scheduler`
   (`-S`), the `CELERY_WORKER_SCHEDULER` / `CELERY_BEAT_SCHEDULER` environment
@@ -154,13 +163,19 @@ retries are declared per tool with a `ToolRetryPolicy` and applied by the
 platform, never by Celery (Celery still retries publishing the task message on
 connection loss, the `retry` option below). Every task — dispatched or fired by
 beat — is bounded by the dispatch job budget `CELERY_TASK_TIMEOUT` (Celery's
-`task_time_limit`, enforced by the prefork pool; the `solo` and `threads` pools
-cannot end a job, and there the worker's liveness stops reporting once every
-slot holds a job past the budget, see [Liveness](#liveness)). Task options exposed on every branch: `queue`,
+`task_time_limit`, enforced by the prefork and gevent pools; the `solo`, `threads` and `eventlet` pools
+cannot end a job, and there the worker's liveness stops reporting once a job
+runs past the budget, see [Liveness](#liveness)). Task options exposed on every branch: `queue`,
 `countdown`, `priority`, `retry`, `routing_key`, `expires`, `eta`, and
 `callback_kwargs` — a callback schema chained via a Celery `link` that runs
 `celery.callback_task` on the result (jq condition gate, jq expression
 transform, optional follow-up tool).
+
+A job does not wait for another job: it chains the next one with
+`callback_kwargs`. `sync_task` and `backend_task_result` (given a `timeout`) are
+for callers outside a job and raise `RuntimeError` inside one, before anything
+is dispatched; `backend_task_result` with no `timeout` reads the current state and
+works anywhere.
 
 `schedule_task` persists a RedBeat entry from the contract's typed cadence
 (`tai42_contract.backend.scheduling`: an interval with `kind: "interval"`,
@@ -302,6 +317,40 @@ this worker's receipt of the op, and the confirmation budget sits a small margin
 the confirm or raise reaches the publisher before its report cut, so a stalled turnover is
 recorded as a truthful `failed` rather than a `timed_out` guess. Raising
 `TAI_BUS_APPLY_TIMEOUT` raises the turnover budget under it.
+
+### Config reloads and the fork gate
+
+A config reload pops the manifest modules out of `sys.modules` and re-imports
+them. A child forked during that window inherits a held `importlib` lock whose
+owner thread no longer exists and hangs forever on its first import, and a job
+running in the worker process meanwhile reads half-imported modules. The fork
+gate is the mutual exclusion between this worker and a config reload:
+
+- **every pool** holds the gate across the `fork()` instant of every child the
+  worker forks — the `prefork` pool's children, the ones a pool turnover forks,
+  and the beat child of `-B` — through the kit's fork guard (an
+  `os.register_at_fork` hook). A fork that arrives mid-reload waits for the
+  re-import to finish, up to 120s, and the worker reports its progress each
+  second while it waits, so the probe reads it alive.
+- **solo / threads / gevent / eventlet** run jobs in the worker process, so
+  each job holds the gate for its whole run. A job that arrives mid-reload
+  waits for the re-import the same way, reporting each second; a config reload
+  arriving while jobs run waits for them, up to 30s. A fork a job makes
+  itself, on its own thread or in a sync tool it runs off the event loop,
+  falls inside the job's span and goes ahead at once; a fork from a thread the
+  job starts with `threading` takes a span of its own. With no reload pending
+  it goes ahead at once; while a reload is pending it waits behind it, and
+  that reload first waits out its 30s for the job's span to close and logs
+  that it could not quiesce, so the fork goes ahead only after the re-import.
+  A fork from a thread that runs an event loop never waits, as a wait would
+  block that loop: it enters its span at once, so a pending reload waits it
+  out, and one that lands while a reload already holds the gate goes ahead and
+  is logged at ERROR. A thread started in `contextvars.copy_context().run`
+  stays inside the job's span. A job waiting on a config reload's lock does
+  not hold that reload up.
+
+Both waits are bounded and proceed loudly (ERROR) rather than deadlocking if
+the budget is exhausted.
 
 ## Development
 

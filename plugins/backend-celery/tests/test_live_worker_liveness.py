@@ -4,9 +4,10 @@ An in-process solo worker on a real Redis broker runs with the progress step reg
 file stays fresh while the loop passes; when the broker goes away the loop stops passing and
 the file turns stale; once the broker is back, the consumer's restart registers the step's
 tick again and the file is fresh again. A job on the solo pool keeps the file fresh from its
-own loop up to the job budget. A ``threads`` worker keeps it fresh while one of its slots is
-free of a job past its budget and lets it turn stale once every slot holds one. A beat the
-worker embeds (``-B``) reports into its own file, which the worker reads.
+own loop up to the job budget. A ``threads`` worker lets it turn stale once one of its jobs runs
+past its budget. A job that arrives while a config reload re-imports waits for it, the file
+fresh meanwhile. A beat the worker embeds (``-B``) reports into its own file, which the worker
+reads, also while it waits for the RedBeat lock another beat holds.
 
 Point ``TAI_TEST_CELERY_BROKER`` at a Redis broker to run it (see the live worker harness module).
 """
@@ -15,6 +16,7 @@ from __future__ import annotations
 
 import os
 import signal
+import threading
 import time
 import uuid
 from collections.abc import Callable
@@ -23,7 +25,9 @@ from typing import Any
 from urllib.parse import urlsplit
 
 import pytest
+import redis
 from celery.worker import state
+from tai42_kit.fork_gate import fork_gate
 from tai42_kit.liveness import LivenessFile, backend_liveness_settings, check_liveness
 
 from tai42_backend_celery.core import embedded_beat, liveness_step
@@ -127,31 +131,46 @@ def test_a_solo_job_past_its_budget_turns_the_file_stale_until_it_ends(
     _until(lambda: _alive(liveness_path), "a fresh file once the job ended")
 
 
-def test_a_threads_worker_reads_alive_with_one_slot_past_its_budget_and_stale_with_every_slot(
+def test_a_threads_worker_reads_stale_once_one_job_runs_past_its_budget(
     monkeypatch, run_worker, liveness_path: Path
 ) -> None:
     app = _start(monkeypatch, run_worker, _BROKER, liveness_path, task_timeout=1.0, pool="threads", concurrency=2)
     assert _result(app, timeout=30) == 5
     _until(lambda: _alive(liveness_path), "a fresh liveness file")
 
-    first = app.send_task("tests.live_async_sleep", args=(10.0,))
-    time.sleep(1.0)
-    _assert_alive_for(liveness_path, 2 * (_INTERVAL + 1.0 + _GRACE))
-    assert not first.ready()
+    job = app.send_task("tests.live_async_sleep", args=(6.0,))
+    _until(lambda: check_liveness(liveness_path, _GRACE).state == "stale", "a stale file with one job past budget")
+    assert not job.ready()
 
-    second = app.send_task("tests.live_async_sleep", args=(4.0,))
-    _until(lambda: check_liveness(liveness_path, _GRACE).state == "stale", "a stale file with every slot past budget")
-    assert not first.ready()
-    assert not second.ready()
+    assert job.get(timeout=30, disable_sync_subtasks=False) == 6.0
+    _until(lambda: _alive(liveness_path), "a fresh file once the job ended")
 
-    assert [
-        first.get(timeout=30, disable_sync_subtasks=False),
-        second.get(timeout=30, disable_sync_subtasks=False),
-    ] == [
-        10.0,
-        4.0,
-    ]
-    _until(lambda: _alive(liveness_path), "a fresh file once the jobs ended")
+
+def test_a_job_that_arrives_during_a_reimport_is_deferred_and_the_file_stays_fresh(
+    monkeypatch, run_worker, liveness_path: Path
+) -> None:
+    app = _start(monkeypatch, run_worker, _BROKER, liveness_path)
+    assert _result(app, timeout=30) == 5
+    _until(lambda: _alive(liveness_path), "a fresh liveness file")
+    held, release = threading.Event(), threading.Event()
+
+    def _reimport() -> None:
+        with fork_gate.exclusive(timeout=5.0):
+            held.set()
+            release.wait(30.0)
+
+    rebuild = threading.Thread(target=_reimport, daemon=True)
+    rebuild.start()
+    try:
+        assert held.wait(5.0)
+        job = app.send_task("tests.live_async_sleep", args=(0.0,))
+        _assert_alive_for(liveness_path, 3 * (_INTERVAL + 1.0 + _GRACE))
+        assert not job.ready(), "the job ran while the re-import held the fork gate"
+    finally:
+        release.set()
+        rebuild.join(10.0)
+
+    assert job.get(timeout=30, disable_sync_subtasks=False) == 0.0
 
 
 def test_an_embedded_beat_reports_into_its_own_file_which_the_worker_reads(
@@ -190,6 +209,43 @@ def test_an_embedded_beat_reports_into_its_own_file_which_the_worker_reads(
     _until(lambda: not worker.beat.is_alive(), "the embedded beat ending with its worker")
     embedded_beat.release()
     assert not beat_path.exists()
+
+
+def test_a_second_beat_waiting_on_the_lock_keeps_its_file_fresh(monkeypatch, run_worker, liveness_path: Path) -> None:
+    monkeypatch.setenv("TAI_BACKEND_LIVENESS_INTERVAL", str(_INTERVAL))
+    monkeypatch.setenv("TAI_BACKEND_LIVENESS_GRACE", str(_GRACE))
+    backend_liveness_settings.cache_clear()
+    settings = backend_liveness_settings()
+    beat_path = embedded_beat.embedded_beat_path(settings)
+    app = _app_on(monkeypatch, _BROKER)
+    embedded_beat.register(app, settings)
+    prefix = f"tai42-live-redbeat-{uuid.uuid4().hex}:"
+    lock_key = f"{prefix}lock"
+    app.conf.redbeat_redis_url = _BROKER
+    app.conf.redbeat_key_prefix = prefix
+    app.conf.redbeat_lock_key = lock_key
+    app.conf.beat_max_loop_interval = 1
+    client = redis.Redis.from_url(_BROKER)
+    client.set(lock_key, "another beat", ex=300)
+    try:
+        liveness_step.register(app, LivenessFile(liveness_path, _INTERVAL).report, task_timeout=300)
+        worker = run_worker(app, beat=True)
+        _until(lambda: worker.beat is not None and check_liveness(beat_path, _GRACE).alive, "a fresh beat file")
+
+        _assert_alive_for(beat_path, 3.0)
+        _until(lambda: _alive(liveness_path), "a fresh worker file while its beat waits for the lock")
+        assert client.get(lock_key) == b"another beat"
+
+        client.delete(lock_key)
+        _until(lambda: client.get(lock_key) not in (None, b"another beat"), "the waiting beat taking the lock")
+        _assert_alive_for(beat_path, 2.0)
+
+        state.should_stop = 0
+        _until(lambda: not worker.beat.is_alive(), "the embedded beat ending with its worker")
+        embedded_beat.release()
+    finally:
+        client.delete(lock_key)
+        client.close()
 
 
 def test_a_worker_stopped_before_its_consumer_starts_reaps_its_embedded_beat_and_removes_its_file(

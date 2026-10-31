@@ -9,6 +9,7 @@ the refresher thread that runs beside an in-process job.
 from __future__ import annotations
 
 import os
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -19,6 +20,7 @@ import pytest
 from rq import Queue, SimpleWorker, Worker
 from rq.timeouts import JobTimeoutException
 from tai42_contract.backend.runtime import ProgressLiveness
+from tai42_kit.fork_gate import fork_gate
 
 from tai42_backend_rq import worker as worker_module
 from tai42_backend_rq import worker_pools
@@ -133,14 +135,16 @@ def test_the_simple_worker_refresher_reports_every_tick_and_refreshes_rq_on_its_
     assert 2 <= len(refreshes) <= 4, f"rq's heartbeat cadence changed: {len(refreshes)} refreshes"
 
 
-def test_a_failed_refresher_report_is_logged_and_retried(
+def test_a_failed_refresher_report_is_retried_and_logged_once(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     worker = _bare(worker_pools.CustomRQSimpleWorker, _Reports())
     worker.name = "w1"
     worker.job_monitoring_interval = 5.0
+    attempts: list[float] = []
 
     def _refuse(*, next_within: float) -> None:
+        attempts.append(next_within)
         raise RuntimeError("liveness file is owned by live process 1")
 
     worker._report_progress = _refuse
@@ -153,7 +157,8 @@ def test_a_failed_refresher_report_is_logged_and_retried(
         worker.execute_job(SimpleNamespace(id="job-1", timeout=300), object())
 
     failures = [r for r in caplog.records if "reporting its progress failed" in r.getMessage()]
-    assert len(failures) >= 2
+    assert len(attempts) >= 2
+    assert len(failures) == 1
 
 
 def test_the_worker_runtime_declares_progress_liveness() -> None:
@@ -168,6 +173,9 @@ def test_the_standalone_entry_writes_the_liveness_file_while_it_works_and_remove
     class _Worker:
         def __init__(self, queues: Any, *, name: Any, connection: Any, default_result_ttl: int, report_progress: Any):
             self._report = report_progress
+
+        def guard_forks(self) -> None:
+            pass
 
         def work(self, **kwargs: Any) -> None:
             self._report(next_within=worker_pools._DEQUEUE_POLL_SECONDS)
@@ -195,6 +203,9 @@ def test_the_standalone_entry_removes_the_liveness_file_when_the_work_loop_raise
     class _Worker:
         def __init__(self, queues: Any, *, name: Any, connection: Any, default_result_ttl: int, report_progress: Any):
             self._report = report_progress
+
+        def guard_forks(self) -> None:
+            pass
 
         def work(self, **kwargs: Any) -> None:
             self._report(next_within=worker_pools._DEQUEUE_POLL_SECONDS)
@@ -369,7 +380,7 @@ def test_a_failed_report_in_the_horse_monitor_keeps_monitoring_the_horse(
     with caplog.at_level("ERROR", logger="tai42_backend_rq.worker_pools"):
         assert worker.wait_for_horse() == (424242, 0, None)
 
-    assert len(caplog.records) == 3
+    assert len(caplog.records) == 1
     with pytest.raises(RuntimeError, match="stopped because reporting its progress failed"):
         worker.raise_for_liveness_failure()
 
@@ -388,3 +399,95 @@ def test_the_standalone_entry_fails_when_its_liveness_file_is_refused(
         worker_module.start_rq_worker(None, None, "info", True, 500, "solo", None)
 
     assert liveness_path.read_text() == f"{owner}\n5\n"
+
+
+def _hold_rebuild_for(seconds: float) -> threading.Thread:
+    """Hold the process's fork gate as a config reload's re-import does, for ``seconds``, on a thread."""
+    held = threading.Event()
+
+    def _rebuild() -> None:
+        with fork_gate.exclusive(timeout=5.0):
+            held.set()
+            time.sleep(seconds)
+
+    thread = threading.Thread(target=_rebuild, daemon=True)
+    thread.start()
+    assert held.wait(5.0)
+    return thread
+
+
+def _fork_an_exiting_child(self: Any, job: Any, queue: Any) -> None:
+    """Fork a child that exits at once, and reap it: the fork a work-horse spawn performs."""
+    pid = os.fork()
+    if pid == 0:  # pragma: no cover - runs in the child
+        os._exit(0)
+    os.waitpid(pid, 0)
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="os.fork is not available on this platform")
+def test_a_job_waiting_on_the_fork_gate_reports_the_worker_s_progress(monkeypatch: pytest.MonkeyPatch) -> None:
+    reports = _Reports()
+    worker = _bare(worker_pools.CustomRQWorker, reports)
+    worker.guard_forks()
+    monkeypatch.setattr(Worker, "fork_work_horse", _fork_an_exiting_child)
+    rebuild = _hold_rebuild_for(2.5)
+
+    worker.fork_work_horse(object(), object())
+
+    rebuild.join(5.0)
+    assert reports.promises.count(worker_pools._REFRESH_TICK_SECONDS) >= 2
+
+
+def test_an_in_process_job_waiting_on_the_fork_gate_reports_the_worker_s_progress(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reports = _Reports()
+    worker = _bare(worker_pools.CustomRQSimpleWorker, reports)
+    ran: list[int] = []
+    monkeypatch.setattr(worker_pools.CustomRQSimpleWorker, "_run_job_inline", lambda self, job, queue: ran.append(1))
+    rebuild = _hold_rebuild_for(2.5)
+
+    worker.execute_job(object(), object())
+
+    rebuild.join(5.0)
+    assert ran == [1]
+    assert reports.promises.count(worker_pools._REFRESH_TICK_SECONDS) >= 2
+
+
+def test_a_failed_report_is_logged_once_however_often_the_monitor_ticks(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    worker = _bare(worker_pools.CustomRQWorker, _Reports())
+    worker.name = "w1"
+    worker._report_progress = _refuse
+    worker.job_monitoring_interval = 30
+    worker._horse_pid = 424242
+    worker._killed_horse_pid = 0
+    results = iter([(0, 0, None)] * 9 + [(424242, 0, None)])
+    monkeypatch.setattr(worker_pools, "_HORSE_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(worker_pools.os, "wait4", lambda pid, flags: next(results))
+
+    with caplog.at_level("ERROR", logger="tai42_backend_rq.worker_pools"):
+        assert worker.wait_for_horse() == (424242, 0, None)
+
+    assert [record.getMessage() for record in caplog.records] == [
+        "worker 'w1': reporting its progress failed; it stops before its next job"
+    ]
+    assert caplog.records[0].exc_info is not None
+
+
+def test_a_suspended_worker_reports_each_second_while_it_waits() -> None:
+    """``rq suspend`` parks the work loop in rq's suspension check, which heartbeats once a second."""
+    from rq.suspension import suspend
+
+    reports = _Reports()
+    worker, conn = _queued_worker(worker_pools.CustomRQWorker, reports)
+    suspend(conn)
+    waiter = threading.Thread(target=worker.check_for_suspension, args=(False,), daemon=True)
+    waiter.start()
+    time.sleep(2.5)
+    worker._stop_requested = True
+    waiter.join(5.0)
+
+    assert not waiter.is_alive()
+    assert reports.promises.count(worker_pools._DEQUEUE_POLL_SECONDS) >= 2

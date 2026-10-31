@@ -30,6 +30,7 @@ from tai42_contract.backend import (
 )
 from tai42_contract.extensions import ExtensionKind
 from tai42_kit.backend import prepare_backend_kwargs
+from tai42_kit.backend.job_context import assert_not_in_job
 from tai42_kit.utils.data import makefun_func_name
 from tai42_kit.utils.schedule_subject import SCHEDULE_STAMPED_DOOR_OPTS
 
@@ -48,13 +49,15 @@ def sync_task(func: Callable[..., Any], name: str, description: str) -> Callable
     """Branch ``func`` into ``<name>_sync_task``: queue the tool and wait for its result.
 
     Waits up to ``task_timeout``. A failed job re-raises as ``TaskFailedError``; an unserializable
-    success returns its tagged description instead of the value.
+    success returns its tagged description instead of the value. Inside a job it raises
+    ``RuntimeError`` and queues nothing: a job chains the next one with ``callback_kwargs``.
     """
     raw_name = f"{name}_sync_task"
     safe_name = makefun_func_name(raw_name)
     sig = add_signature_params(func, ARQ_TASK_OPTS, exclude_fastmcp_ctx=True)
 
     async def func_impl(*args: Any, **kwargs: Any) -> Any:
+        assert_not_in_job(raw_name)
         kwargs = await prepare_backend_kwargs(func, arq_settings().tool_name_arg, name, kwargs)
         async with pool.arq_connection() as arq_redis:
             job = await enqueue_task(arq_redis, *args, **kwargs)
