@@ -11,7 +11,7 @@ import { expect } from '@playwright/test';
 import type { APIRequestContext, Page } from '@playwright/test';
 import { apiHeaders, createMemberSession, LLM_CONTROL_URL, seedCredential, uniq } from './helpers';
 import { needs, test } from './needs';
-import { pickTool } from './pickers';
+import { pickToolByDescription } from './pickers';
 
 needs('kind:versioning', 'probe-tools', 'mutable', 'setting:agent:tools_agent', 'helper:llm');
 
@@ -109,8 +109,14 @@ test('author an agent, run it over the scripted stub, and assert both sides', as
   await dialog.getByRole('textbox', { name: 'Description' }).fill(`authored agent ${name}`);
   await dialog.getByRole('combobox', { name: 'Base agent' }).click();
   await page.getByRole('option', { name: /^tools_agent/ }).click();
-  // Add exactly one tool: search the tool picker for it and choose it.
-  await pickTool(page, dialog.getByRole('combobox', { name: 'Add a tool', exact: true }), 'e2e_echo');
+  // Add exactly one tool: search the tool picker for words of its declared description,
+  // which no tool name holds, and choose it.
+  await pickToolByDescription(
+    page,
+    dialog.getByRole('combobox', { name: 'Add a tool', exact: true }),
+    'e2e_echo',
+    'subject for extension',
+  );
   await expect(dialog.getByRole('button', { name: 'Remove tool e2e_echo', exact: true })).toBeVisible();
   await dialog.getByRole('button', { name: 'Compose agent' }).click();
 

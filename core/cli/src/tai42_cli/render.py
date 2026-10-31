@@ -4,10 +4,13 @@ Human-readable tables by default; raw JSON under the global ``--json`` flag for
 scripting and piping. Every server-supplied string is treated as untrusted:
 control characters (which include terminal escape sequences) are stripped before
 anything is written to a terminal, so a malicious tool/resource name cannot
-inject cursor moves or colour codes.
+inject cursor moves or colour codes. A table cell first reads each whitespace run
+(line breaks and tabs included) as one space, so a multi-line value stays on its row
+with its words apart.
 """
 
 import json
+import re
 import sys
 import unicodedata
 from collections.abc import Mapping, Sequence
@@ -16,6 +19,8 @@ from typing import IO, Any
 # Categories covering C0/C1 control characters (Cc — includes ESC, the start of
 # every ANSI terminal escape) and zero-width/format characters (Cf).
 _STRIP_CATEGORIES = {"Cc", "Cf"}
+
+_WHITESPACE_RUN = re.compile(r"\s+")
 
 
 def strip_control(value: str) -> str:
@@ -30,7 +35,7 @@ def _cell(value: Any) -> str:
         text = value
     else:
         text = json.dumps(value, default=str, ensure_ascii=False)
-    return strip_control(text)
+    return strip_control(_WHITESPACE_RUN.sub(" ", text))
 
 
 def render_json(data: Any) -> str:

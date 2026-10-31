@@ -136,10 +136,35 @@ async def test_tool_tags_map(install):
     # declares no visibility meta is not hidden.
     assert _json(resp) == {
         "data": [
-            {"name": "alpha", "tags": [], "hidden": False, "badges": [], "schedulable": False},
-            {"name": "beta", "tags": ["a", "z"], "hidden": False, "badges": [], "schedulable": False},
+            {
+                "name": "alpha",
+                "description": "alpha desc",
+                "tags": [],
+                "hidden": False,
+                "badges": [],
+                "schedulable": False,
+            },
+            {
+                "name": "beta",
+                "description": "beta desc",
+                "tags": ["a", "z"],
+                "hidden": False,
+                "badges": [],
+                "schedulable": False,
+            },
         ]
     }
+
+
+async def test_tool_tags_description_null_when_undeclared(install):
+    # ``description`` is the tool's own declaration passed through; a tool that declares
+    # none carries null.
+    bare = _tool("bare")
+    bare.description = None
+    install(_FakeTools({"bare": bare, "described": _tool("described")}))
+    resp = await router.tool_tags(_req())
+    by_name = {entry["name"]: entry["description"] for entry in _json(resp)["data"]}
+    assert by_name == {"bare": None, "described": "described desc"}
 
 
 async def test_tool_tags_exposes_plugin_declared_badges(install):

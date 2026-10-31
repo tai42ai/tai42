@@ -20969,7 +20969,7 @@
         "type": "array"
       },
       "ToolTagRow": {
-        "description": "One tool's declared tags, visibility, and capability badges.\n\n``hidden`` and ``badges`` are the tool's OWN declaration (before the tool_meta overlay's override).\n``schedulable`` is whether the tool's schedule vehicle is registered (the scheduling backend's\n``schedule_task`` extension is attached to it).",
+        "description": "One tool's declared description, tags, visibility, and capability badges.\n\n``description`` is the tool's own declaration, null when the tool declares none.\n``hidden`` and ``badges`` are the tool's OWN declaration (before the tool_meta overlay's override).\n``schedulable`` is whether the tool's schedule vehicle is registered (the scheduling backend's\n``schedule_task`` extension is attached to it).",
         "properties": {
           "badges": {
             "items": {
@@ -20977,6 +20977,17 @@
             },
             "title": "Badges",
             "type": "array"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
           },
           "hidden": {
             "title": "Hidden",
@@ -21000,6 +21011,7 @@
         },
         "required": [
           "name",
+          "description",
           "tags",
           "hidden",
           "badges",
@@ -43383,7 +43395,7 @@
     },
     "/api/tools/tags": {
       "get": {
-        "description": "The per-tool native-``tags`` map plus the plugin-declared visibility and capability badges.\n\nOne ``{name, tags, hidden, badges, schedulable}`` entry per registered tool, ``tags`` and ``badges`` each\nsorted for a stable wire order. ``hidden`` is the tool's OWN declaration, read from the\nFastMCP ``meta`` under ``TOOL_META_HIDDEN`` (a tool that never declared it is\nnot hidden); ``badges`` is likewise the tool's OWN declared INFORMATIONAL capability badges,\nread from ``meta`` under ``TOOL_META_BADGES`` (a tool that declared none carries an empty list).\nThe tool_meta overlay's tri-state override and its own badge set are merged on top\nclient-side; this read exposes only the declaration. ``schedulable`` is whether the tool's\n``<name>_schedule_task`` vehicle is registered, so a client never spells the suffix. Additive to\nthe flat names contract; a tool with no tags carries an empty list.",
+        "description": "The per-tool description and native ``tags`` plus the plugin-declared visibility and capability badges.\n\nOne ``{name, description, tags, hidden, badges, schedulable}`` entry per registered tool, ``tags`` and\n``badges`` each sorted for a stable wire order. ``description`` is the tool's own declared description\n(null when it declares none). ``hidden`` is the tool's OWN declaration, read from the\nFastMCP ``meta`` under ``TOOL_META_HIDDEN`` (a tool that never declared it is\nnot hidden); ``badges`` is likewise the tool's OWN declared INFORMATIONAL capability badges,\nread from ``meta`` under ``TOOL_META_BADGES`` (a tool that declared none carries an empty list).\nThe tool_meta overlay's tri-state override and its own badge set are merged on top\nclient-side; this read exposes only the declaration. ``schedulable`` is whether the tool's\n``<name>_schedule_task`` vehicle is registered, so a client never spells the suffix. Additive to\nthe flat names contract; a tool with no tags carries an empty list.",
         "operationId": "get_api_tools_tags",
         "responses": {
           "200": {
@@ -43420,7 +43432,7 @@
             "ApiKeyAuth": []
           }
         ],
-        "summary": "List each tool's native tags, declared visibility, and badges",
+        "summary": "List each tool's description, native tags, declared visibility, and badges",
         "tags": [
           "tools"
         ]
