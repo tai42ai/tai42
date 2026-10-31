@@ -195,6 +195,18 @@ class RepeatableReadsContext implements APIRequestContext {
     return this.inner.storageState(...args);
   }
 
+  cookies(...args: Parameters<APIRequestContext['cookies']>): ReturnType<APIRequestContext['cookies']> {
+    return this.inner.cookies(...args);
+  }
+
+  addCookies(...args: Parameters<APIRequestContext['addCookies']>): ReturnType<APIRequestContext['addCookies']> {
+    return this.inner.addCookies(...args);
+  }
+
+  clearCookies(...args: Parameters<APIRequestContext['clearCookies']>): ReturnType<APIRequestContext['clearCookies']> {
+    return this.inner.clearCookies(...args);
+  }
+
   [Symbol.asyncDispose](): Promise<void> {
     return this.inner[Symbol.asyncDispose]();
   }
@@ -511,23 +523,43 @@ export async function loginViaUi(page: Page, key: string = API_KEY): Promise<voi
   }).toPass({ timeout: 45_000 });
 }
 
+/** The scopes the credential `key` holds, read from its own projection (`GET /api/auth/me`). */
+export async function credentialScopes(request: APIRequestContext, key: string = API_KEY): Promise<string[]> {
+  const res = await request.get('/api/auth/me', { headers: apiHeaders(key) });
+  expect(res.status(), await res.text()).toBe(200);
+  return ((await res.json()) as { data: { scopes: string[] } }).data.scopes;
+}
+
 /**
  * Mint an API key through the live mint door (as the pinned root admin) and return its
- * raw `sk-` token. Every key belongs to a principal, so a key minted with an explicit
- * scope set and no `owner_user_id` is owned by the admin's own principal — a SCOPED,
- * non-admin OWNED key (it can mint nothing and is confined to its own isolation slice),
- * the shape the owned-key journey arranges over the API.
+ * raw `sk-` token. Every key belongs to a principal: with no `ownerUserId` the key is
+ * owned by the admin's own principal. Without `scopes` the key carries the login key's
+ * own scopes, which every stack can mint — on a `*` root that is a full admin key. A
+ * scope set without `*` makes a SCOPED, non-admin OWNED key (it can mint nothing and is
+ * confined to its own isolation slice); a scope only the built stack seeds is a built
+ * need of its spec (`setting:seeded-access-control`).
  */
 export async function mintKey(
   request: APIRequestContext,
-  opts: { userId: string; scopes: string[]; description?: string },
+  opts: { userId: string; scopes?: string[]; ownerUserId?: string; description?: string },
 ): Promise<string> {
   const res = await request.post('/api/auth/api-keys', {
     headers: apiHeaders(),
-    data: { user_id: opts.userId, description: opts.description ?? 'e2e owned-journey key', scopes: opts.scopes },
+    data: {
+      user_id: opts.userId,
+      description: opts.description ?? 'e2e owned-journey key',
+      scopes: opts.scopes ?? (await credentialScopes(request)),
+      ...(opts.ownerUserId === undefined ? {} : { owner_user_id: opts.ownerUserId }),
+    },
   });
   expect(res.status(), await res.text()).toBe(200);
   return ((await res.json()) as { data: { api_key: string } }).data.api_key;
+}
+
+/** Revoke the key minted for `userId` through the live revoke door (as the pinned root admin). */
+export async function revokeKey(request: APIRequestContext, userId: string): Promise<void> {
+  const res = await request.delete(`/api/auth/api-keys/${userId}`, { headers: apiHeaders() });
+  expect(res.status(), await res.text()).toBe(200);
 }
 
 /**

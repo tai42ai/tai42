@@ -9,7 +9,7 @@
  * browser owns.
  */
 import { expect, type Page } from '@playwright/test';
-import { createClaimLink, mintKey, uniq } from './helpers';
+import { createClaimLink, mintKey, revokeKey, uniq } from './helpers';
 import { needs, test } from './needs';
 
 needs('kind:identity');
@@ -41,15 +41,21 @@ test('a burned claim link (already exchanged once) shows the inline error and no
   page,
   request,
 }) => {
-  // Arrange: mint a key, link it, and exchange the link once over the public leg so
-  // the second (browser) exchange of the SAME token is a miss.
-  const key = await mintKey(request, { userId: uniq('burned'), scopes: ['studio'] });
-  const { token } = await createClaimLink(request, key);
-  const burn = await request.post('/api/login/claim', { data: { token } });
-  expect(burn.status(), await burn.text()).toBe(200);
+  // Arrange: mint a disposable key, link it, and exchange the link once over the public
+  // leg so the second (browser) exchange of the SAME token is a miss. The key holds the
+  // login key's own scopes, so it is revoked once the test is done with it.
+  const userId = uniq('burned');
+  const key = await mintKey(request, { userId, description: 'e2e burned-claim disposable key' });
+  try {
+    const { token } = await createClaimLink(request, key);
+    const burn = await request.post('/api/login/claim', { data: { token } });
+    expect(burn.status(), await burn.text()).toBe(200);
 
-  await page.goto(`/login#claim=${token}`);
-  await expectDeadClaim(page, token);
+    await page.goto(`/login#claim=${token}`);
+    await expectDeadClaim(page, token);
+  } finally {
+    await revokeKey(request, userId);
+  }
 });
 
 test('a garbage claim token shows the inline error and no session', async ({ page }) => {

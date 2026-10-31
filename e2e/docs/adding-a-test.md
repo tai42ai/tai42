@@ -108,7 +108,10 @@ it; a run against a target (`TAI_E2E_TARGET`) uses it to decide whether the test
 there. A test that restarts a process, reads the stack's Redis or Postgres, scripts a
 helper, or depends on a profile's settings says so (`process`, `store:redis`,
 `helper:llm`, `setting:...`) and only ever runs on a built stack. A test left without a
-marker is treated the same way.
+marker is treated the same way. A key minted with a scope the harness seeds (`e2e-all`,
+`studio`) depends on the built stack's route table, so its test needs
+`setting:seeded-access-control`; a key that only has to work carries the login key's own
+scopes, which every stack can mint.
 
 ## 7. File it
 
