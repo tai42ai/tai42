@@ -72,7 +72,7 @@ def _installed(monkeypatch: pytest.MonkeyPatch, *specs: PluginSpec) -> None:
     """Make ``specs`` the installed plugins, each packaged in the ``tai42-skeleton`` import root."""
     from tai42_skeleton.db import discovery
 
-    monkeypatch.setattr(discovery, "_installed_plugin_specs", lambda: ([(spec, _ROOT) for spec in specs], []))
+    monkeypatch.setattr(discovery, "_installed_plugin_specs", lambda installed: ([(spec, _ROOT) for spec in specs], []))
 
 
 def _migrate_entry(monkeypatch: pytest.MonkeyPatch, spec: PluginSpec) -> MigrationEntry | None:

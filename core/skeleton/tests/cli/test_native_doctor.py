@@ -7,7 +7,9 @@ credential-redaction rule (connection-URL userinfo is masked, never echoed).
 from __future__ import annotations
 
 import asyncio
+import importlib
 from contextlib import asynccontextmanager
+from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
 
@@ -19,9 +21,12 @@ from tai42_cli import app as app_module
 from tai42_kit.clients import PostgresConnectionSettings
 from tai42_kit.db import AdminIdentityIncompleteError, DatabaseNotConfiguredError
 
+import tai42_skeleton.app.instance as instance
+from tai42_skeleton.app.server import TaiMCP
 from tai42_skeleton.cli.native import doctor
 from tai42_skeleton.cli.native.doctor import Check
 from tai42_skeleton.db import MigrationChainDiscovery
+from tai42_skeleton.manifest import Manifest
 
 
 def test_redact_url_masks_userinfo() -> None:
@@ -397,3 +402,86 @@ def test_run_checks_reports_postgres_fail_when_admin_identity_half_set(monkeypat
     postgres = next(c for c in checks if c.name == "postgres")
     assert postgres.status == doctor._FAIL
     assert "half-set admin identity" in postgres.detail
+
+
+def _install_broken_direct_url(monkeypatch: pytest.MonkeyPatch, site: Path) -> None:
+    """Put a distribution whose ``direct_url.json`` is not JSON on ``sys.path``."""
+    dist_info = site / "tai42_brokenurl-1.0.0.dist-info"
+    dist_info.mkdir(parents=True)
+    (dist_info / "METADATA").write_text("Metadata-Version: 2.1\nName: tai42-brokenurl\nVersion: 1.0.0\n")
+    (dist_info / "direct_url.json").write_text("{ not json")
+    (dist_info / "RECORD").write_text(f"{dist_info.name}/METADATA,,\n{dist_info.name}/RECORD,,\n")
+    monkeypatch.syspath_prepend(str(site))
+    importlib.invalidate_caches()
+
+
+def _install_nameless_dist_info(monkeypatch: pytest.MonkeyPatch, site: Path) -> None:
+    """Put a ``.dist-info`` that holds no ``METADATA`` on ``sys.path``."""
+    (site / "stray-1.0.0.dist-info").mkdir(parents=True)
+    monkeypatch.syspath_prepend(str(site))
+    importlib.invalidate_caches()
+
+
+_BROKEN_METADATA = {
+    "direct-url-not-json": (
+        _install_broken_direct_url,
+        "distribution 'tai42-brokenurl' records a direct_url.json that is not JSON",
+    ),
+    "dist-info-without-name": (_install_nameless_dist_info, "stray-1.0.0.dist-info records no Name"),
+}
+
+
+# The operator commands that read the installed metadata to report or recover a deployment
+# (``tai serve`` and ``tai backend`` read it at boot too); ``{manifest}`` is a manifest file the
+# test writes.
+_METADATA_DOORS = [
+    ["doctor"],
+    ["db", "status"],
+    ["db", "migrate"],
+    ["setup", "--recover", "--token", "t", "--manifest-path", "{manifest}"],
+]
+
+
+@pytest.mark.parametrize("broken", sorted(_BROKEN_METADATA))
+@pytest.mark.parametrize("door", _METADATA_DOORS, ids=lambda door: " ".join(door[:2]))
+def test_broken_installed_metadata_is_a_clean_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, door: list[str], broken: str
+) -> None:
+    # Every door reading the installed metadata names the broken file and exits non-zero
+    # without a traceback.
+    monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "secret")
+    monkeypatch.setattr("tai42_skeleton.marketplace.prefix.configured_prefix", lambda: None)
+    manifest = tmp_path / "manifest.yml"
+    manifest.write_text("default_routers: none\n")
+    # ``setup --recover`` stamps the path it is given into the environment; set here, the
+    # variable is restored when the test ends.
+    monkeypatch.setenv("TAI_MANIFEST_PATH", str(manifest))
+    argv = [arg.format(manifest=manifest) for arg in door]
+    install, expected = _BROKEN_METADATA[broken]
+    install(monkeypatch, tmp_path / "site")
+
+    async def _pg(settings: object) -> Check:
+        return Check("postgres", doctor._OK, "connected")
+
+    async def _redis() -> Check:
+        return Check("redis", doctor._OK, "connected")
+
+    monkeypatch.setattr(doctor, "_probe_postgres", _pg)
+    monkeypatch.setattr(doctor, "_probe_redis", _redis)
+
+    # ``setup --recover`` boots the deployment's app up to the installed-metadata read. A
+    # fresh app whose boot-manifest read returns the manifest stands in for the process app,
+    # so the worker bus and the stored env that read sets up never reach later tests.
+    server = TaiMCP(name="metadata-door-under-test")
+
+    async def _read_boot_manifest(*, kind: object) -> Manifest:
+        return Manifest.model_validate({"default_routers": "none"})
+
+    monkeypatch.setattr(server, "_read_boot_manifest", _read_boot_manifest)
+    monkeypatch.setattr(instance, "app", server)
+
+    result = CliRunner().invoke(app_module.app, argv)
+
+    assert isinstance(result.exception, SystemExit), result.exception
+    assert result.exit_code == 1
+    assert expected in result.output

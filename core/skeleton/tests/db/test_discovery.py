@@ -345,7 +345,8 @@ def test_manifest_plugin_specs_cover_every_role_list(monkeypatch: pytest.MonkeyP
     ):
         _map_module_to_widget_spec(monkeypatch, module)
         specs = manifest_plugin_specs(
-            Manifest.model_validate({field: value}), InstalledPackages(top_levels={}, editable_sources={})
+            Manifest.model_validate({field: value}),
+            InstalledPackages(top_levels={}, editable_sources={}, distributions={}),
         )
         assert list(specs) == ["tai42-widget"], field
 
@@ -363,7 +364,7 @@ def test_manifest_plugin_specs_cover_the_selected_config_provider(monkeypatch: p
     _map_module_to_widget_spec(monkeypatch, "tai42_config_widget.manager")
     try:
         specs = manifest_plugin_specs(
-            Manifest.model_validate({}), InstalledPackages(top_levels={}, editable_sources={})
+            Manifest.model_validate({}), InstalledPackages(top_levels={}, editable_sources={}, distributions={})
         )
     finally:
         monkeypatch.delenv("TAI_CONFIG_MODE")
@@ -410,9 +411,10 @@ def test_top_level_spec_multi_dist_picks_the_one_shipping_the_spec(
     monkeypatch.syspath_prepend(str(site))
     importlib.invalidate_caches()
 
-    located = _top_level_spec(
-        "tai42_ns", InstalledPackages(top_levels={"tai42_ns": ["ns-helper", "ns-plugin"]}, editable_sources={})
-    )
+    snapshot = distribution_map()
+    assert sorted(snapshot.distributions_for("tai42_ns")) == ["ns-helper", "ns-plugin"]
+
+    located = _top_level_spec("tai42_ns", snapshot)
 
     assert located is not None
     spec, package_root = located

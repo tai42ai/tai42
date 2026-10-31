@@ -50,7 +50,7 @@ class ComponentImportMixin(LifecycleState):
         # each declared plugin route resolves its absolute path + public flag from the
         # declaration while its module imports below (bound through
         # ``_import_manifest_module``). Reserved-prefix violations fail the build here.
-        self._mount_map = self._build_mount_map()
+        self._mount_map = self._build_mount_map(installed)
 
         # Register the manifest's declarative connector providers before importing
         # any manifest module. A connector is pure data (no import path), so it is

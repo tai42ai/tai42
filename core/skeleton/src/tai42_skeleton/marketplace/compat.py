@@ -42,7 +42,11 @@ from packaging.utils import canonicalize_name
 from packaging.version import InvalidVersion, Version
 
 from tai42_skeleton.marketplace.errors import LocalStateError, RegistryResponseError
-from tai42_skeleton.marketplace.installed_packages import InstalledPackages, installed_packages
+from tai42_skeleton.marketplace.installed_packages import (
+    InstalledDistribution,
+    InstalledPackages,
+    installed_packages,
+)
 
 logger = getLogger(__name__)
 
@@ -110,18 +114,14 @@ def distribution_map() -> InstalledPackages:
     return installed_packages()
 
 
-def _declared_contract_specifier(dist_name: str) -> SpecifierSet | None:
-    """The dist's declared ``tai42-contract`` specifier, or ``None`` when no verdict is derivable.
+def _declared_contract_specifier(dist_name: str, requires: list[str] | None) -> SpecifierSet | None:
+    """The ``tai42-contract`` specifier the dist's ``requires`` lines declare, or ``None`` when none is derivable.
 
     ``None`` covers a dist not installed, no metadata, or no declaration.
     Extra-gated requirement lines are skipped (not part of the runtime set);
     multiple runtime declarations AND together. A malformed line is skipped with
     a warning — see the module docstring for why that is not a boot failure.
     """
-    try:
-        requires = metadata.requires(dist_name)
-    except metadata.PackageNotFoundError:
-        return None
     if not requires:
         return None
     combined: SpecifierSet | None = None
@@ -143,8 +143,22 @@ def _declared_contract_specifier(dist_name: str) -> SpecifierSet | None:
 
 
 def dist_compat(dist_name: str) -> CompatVerdict:
-    """The verdict for one installed distribution, by its declared range."""
-    specifier = _declared_contract_specifier(dist_name)
+    """The verdict for one installed distribution, found by name on ``sys.path``, by its declared range."""
+    try:
+        requires = metadata.requires(dist_name)
+    except metadata.PackageNotFoundError:
+        requires = None
+    return _verdict(dist_name, requires)
+
+
+def distribution_compat(read: InstalledDistribution) -> CompatVerdict:
+    """The verdict for an installed distribution already read, wherever it is installed, by its declared range."""
+    return _verdict(read.name, read.dist.requires)
+
+
+def _verdict(dist_name: str, requires: list[str] | None) -> CompatVerdict:
+    """The verdict for distribution ``dist_name`` whose ``Requires-Dist`` lines are ``requires``."""
+    specifier = _declared_contract_specifier(dist_name, requires)
     if specifier is None:
         return CompatVerdict(
             "unknown",
@@ -165,11 +179,12 @@ def module_compat(module: str, installed: InstalledPackages | None = None) -> Co
     """The verdict for a manifest MODULE, from the owning distribution(s) of its top-level package.
 
     The top-level package is mapped to the owning distribution(s) via
-    :func:`distribution_map` and each mapped dist is evaluated —
-    any incompatible dist decides the verdict (naming that dist), else compatible when
-    at least one dist declared a range, else unknown. ``installed`` lets one boot pass
-    snapshot the (sys.path-scan-priced) mapping once and reuse it across every manifest
-    module; omitted, the mapping is read fresh.
+    :func:`distribution_map` and each mapped dist is evaluated from the snapshot's own read
+    of it (:func:`distribution_compat`), so the verdict holds for a distribution wherever the
+    snapshot found it — any incompatible dist decides the verdict (naming that dist), else
+    compatible when at least one dist declared a range, else unknown. ``installed`` lets one
+    boot pass snapshot the (sys.path-scan-priced) mapping once and reuse it across every
+    manifest module; omitted, the mapping is read fresh.
     """
     top_level = module.partition(".")[0]
     snapshot = distribution_map() if installed is None else installed
@@ -179,7 +194,7 @@ def module_compat(module: str, installed: InstalledPackages | None = None) -> Co
             "unknown",
             f"module {module!r} maps to no installed distribution; treating it as compatible",
         )
-    verdicts = [dist_compat(dist_name) for dist_name in dict.fromkeys(dists)]
+    verdicts = [distribution_compat(snapshot.distribution(dist_name)) for dist_name in dict.fromkeys(dists)]
     for verdict in verdicts:
         if verdict.status == "incompatible":
             return verdict
@@ -199,14 +214,23 @@ def refuse_incompatible(module: str, kind: str, installed: InstalledPackages | N
     the mapping is read fresh.
     """
     verdict = module_compat(module, installed)
+    refuse_incompatible_verdict(module, kind, verdict)
+    if verdict.status == "unknown":
+        logger.info("plugin compat unknown for %s module %s: %s", kind, module, verdict.reason)
+
+
+def refuse_incompatible_verdict(module: str, kind: str, verdict: CompatVerdict) -> None:
+    """Raise :class:`CorePluginBootError` for ``module`` when ``verdict`` is INCOMPATIBLE; else return.
+
+    The refusal :func:`refuse_incompatible` raises, for a caller that already holds the
+    module's verdict and reads the module's packaged spec before the module imports.
+    """
     if verdict.status == "incompatible":
         raise CorePluginBootError(
             f"{kind} plugin {module!r} is incompatible and cannot load: {verdict.reason}; "
             "a manifest-declared plugin that cannot load aborts boot — fix or update the plugin, "
             "remove it from the manifest, or point the manifest at a working one"
         )
-    if verdict.status == "unknown":
-        logger.info("plugin compat unknown for %s module %s: %s", kind, module, verdict.reason)
 
 
 @dataclass(frozen=True)

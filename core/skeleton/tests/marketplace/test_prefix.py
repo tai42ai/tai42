@@ -464,3 +464,41 @@ def test_uninstall_from_prefix_record_escape_raises_and_deletes_nothing_outside(
     # A RECORD path outside the prefix is refused before deletion — the outside file
     # is untouched.
     assert outside.read_text(encoding="utf-8") == "keep me"
+
+
+# -- a distribution whose metadata carries no Name is never a match ----------
+
+
+def test_prefix_has_distribution_passes_over_a_nameless_distribution(tmp_path: Path) -> None:
+    # A nameless .dist-info cannot be the target, even one whose directory carries the
+    # target's name: only the named distribution answers.
+    prefix = str(tmp_path / "pfx")
+    site = _install_fake_dist(prefix, "foo", "1.0")
+    _write_nameless_dist(site, "bar")
+
+    assert prefix_has_distribution("foo", prefix) is True
+    assert prefix_has_distribution("bar", prefix) is False
+
+
+def test_environment_distribution_version_passes_over_a_nameless_distribution(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The nameless .dist-info sits earlier on sys.path, so the scan reaches it first.
+    stray = tmp_path / "stray"
+    env = tmp_path / "env"
+    _write_nameless_dist(stray, "widget")
+    _write_env_dist(env, "widget", "1.0")
+    monkeypatch.setattr(prefix_module.sys, "path", [str(stray), str(env)])
+
+    assert environment_distribution_version("widget", str(tmp_path / "pfx")) == "1.0"
+
+
+def test_uninstall_from_prefix_passes_over_a_nameless_distribution(tmp_path: Path) -> None:
+    prefix = str(tmp_path / "pfx")
+    site = _install_fake_dist(prefix, "foo", "1.0")
+    _write_nameless_dist(site, "foo")
+
+    uninstall_from_prefix("foo", prefix)
+
+    assert not (site / "foo-1.0.dist-info").exists()
+    assert (site / "foo-0.dist-info").exists()

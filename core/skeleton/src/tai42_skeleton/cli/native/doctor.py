@@ -79,9 +79,10 @@ async def _probe_schema(settings: PostgresConnectionSettings) -> Check:
     naming ``tai db migrate``. A declared chain whose override binding is unset belongs to
     an off component, a valid state: the detail names it and its unset binding, and it does
     not fail the check. An installed distribution whose packages no installed metadata records
-    (an editable install served by an import hook) is named in the detail the same way. A
-    connection failure, a malformed installed-plugin chain (a kit
-    :class:`~tai42_kit.db.MigrationError` from discovery/checksum), or a component
+    (an editable install served by an import hook) and the manifest does not load is named in
+    the detail the same way. A
+    connection failure, a malformed installed-plugin chain or an unreadable installed
+    metadata file (a kit :class:`~tai42_kit.db.MigrationError` from discovery/checksum), or a component
     bound to an unconfigured named database (a kit
     :class:`~tai42_kit.db.DatabaseNotConfiguredError`, which names the env var) or one
     with a half-set admin identity (a kit

@@ -7,7 +7,8 @@ plugin the persisted manifest loads) through the kit migration runner; ``--plan`
 touching the database. ``status`` reports each component's applied / pending /
 checksum verdict. Every command names each plugin component that is off (its override
 binding unset) and each installed distribution whose packages no installed metadata records
-(an editable install served by an import hook); neither changes the exit code.
+(an editable install served by an import hook) and the manifest does not load; neither
+changes the exit code.
 
 Each component connects through its bound database's migrator (DDL-privileged)
 identity, resolved through the central registry — distinct from the app's runtime
@@ -123,9 +124,10 @@ def _run(coro):  # type: ignore[no-untyped-def]
     A connection error names the credential-free target; the registry's not-configured
     and half-set-admin-identity errors and the chain-integrity errors surface their own
     actionable messages; all exit non-zero without a traceback. A malformed installed plugin
-    spec is a :class:`~tai42_kit.db.MigrationDiscoveryError` (a
-    :class:`~tai42_kit.db.MigrationError`, caught below) naming the distribution, so it maps
-    here to the same clean credential-free non-zero.
+    spec or an unreadable installed metadata file is a
+    :class:`~tai42_kit.db.MigrationDiscoveryError` (a :class:`~tai42_kit.db.MigrationError`,
+    caught below) naming the distribution, so it maps here to the same clean credential-free
+    non-zero.
     """
     import psycopg
 
@@ -199,8 +201,10 @@ def migrate_command(
     A plugin component whose override binding is unset is off: its chain is not applied, a
     line names it, and the exit stays 0. An installed distribution whose packages no
     installed metadata records (an editable install served by an import hook) is named by a
-    line too, the exit unchanged. Loud on a connection failure, an unconfigured connection, a
-    rewritten (checksum-mismatched) chain, or a malformed installed plugin spec.
+    line too unless the manifest loads it, the exit unchanged. Loud on a connection failure,
+    an unconfigured connection, a rewritten (checksum-mismatched) chain, unreadable installed
+    metadata, or a malformed installed plugin spec; a spec unreadable because its plugin is
+    built for another contract is named by the contract range the plugin declares.
     """
     json_output = app_context(ctx).json_output
     if plan:
@@ -219,9 +223,9 @@ def status_command(ctx: typer.Context) -> None:
     non-zero when any component has pending migrations or a checksum mismatch, so it doubles
     as a CI / pre-deploy gate. A plugin component whose override binding is unset is off, a
     valid state: a line names it and it does not fail the gate; an installed distribution
-    whose packages cannot be enumerated is named the same way.
-    Loud on a connection failure, an unconfigured connection, or a malformed installed
-    plugin spec.
+    whose packages cannot be enumerated and the manifest does not load is named the same way.
+    Loud on a connection failure, an unconfigured connection, unreadable installed metadata,
+    or a malformed installed plugin spec, named as ``migrate`` names it.
     """
     statuses, discovery = _run(_status())
     _emit_status(statuses, discovery, json_output=app_context(ctx).json_output)

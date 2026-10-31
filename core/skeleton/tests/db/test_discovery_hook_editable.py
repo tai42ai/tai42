@@ -265,3 +265,19 @@ def test_hook_served_library_is_named_and_contributes_no_chain(
 
     assert DIST not in {entry.component for entry in discovery.entries}
     assert [item.distribution for item in discovery.unlocatable] == [DIST]
+
+
+def test_hook_served_library_the_manifest_loads_is_not_named(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, shape: str
+) -> None:
+    from tai42_skeleton.db import discover_plugin_chains
+
+    install = _hook_editable.lay_out(tmp_path, shape, spec_text=None, requires_contract=None)
+    _hook_editable.activate(monkeypatch, install)
+    _persist_manifest_loading_the_plugin(monkeypatch, tmp_path)
+
+    discovery = discover_plugin_chains()
+
+    assert DIST not in {entry.component for entry in discovery.entries}
+    assert DIST not in {item.distribution for item in discovery.unlocatable}
+    assert TOP_LEVEL not in sys.modules

@@ -11,6 +11,7 @@ settings-schema API serves, so a drift is caught here rather than at apply.
 from __future__ import annotations
 
 import pytest
+from tai42_contract.config.manager import file_config_dir
 from tai42_kit.settings import SettingsClassInfo, SettingsFieldInfo, registered_settings
 
 # Import each module so its settings classes self-register in the kit registry.
@@ -95,6 +96,10 @@ def test_config_dir_path_registers_the_bare_read_key() -> None:
     # The env var must be exactly the key file_manager reads, or the boundary
     # would guard a phantom key and leave the real one plantable.
     assert _field("ConfigModeSettings", "config_dir_path").env_var == "TAI_CONFIG_DIR_PATH"
+
+
+def test_config_dir_path_publishes_the_dir_the_file_provider_falls_back_to() -> None:
+    assert _field("ConfigModeSettings", "config_dir_path").default == file_config_dir({})
 
 
 @pytest.mark.parametrize("field_name", ["kek", "state_hmac_key"])

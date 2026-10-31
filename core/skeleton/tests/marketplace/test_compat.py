@@ -7,8 +7,9 @@ metadata — no dependence on the environment's installed distributions.
 
 from __future__ import annotations
 
-from importlib.metadata import PackageNotFoundError
+from importlib.metadata import Distribution, PackageNotFoundError
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 
@@ -20,7 +21,22 @@ from tai42_skeleton.marketplace.compat import (
     update_targets,
 )
 from tai42_skeleton.marketplace.errors import LocalStateError, RegistryResponseError
-from tai42_skeleton.marketplace.installed_packages import InstalledPackages
+from tai42_skeleton.marketplace.installed_packages import InstalledDistribution, InstalledPackages
+
+
+def _read(name: str, requires: list[str] | None) -> InstalledDistribution:
+    """A snapshot's read of distribution ``name`` whose ``Requires-Dist`` lines are ``requires``."""
+    dist = cast(Distribution, SimpleNamespace(requires=requires))
+    return InstalledDistribution(dist=dist, name=name, recorded=[], top_levels=[])
+
+
+def _snapshot(top_levels: dict[str, list[str]], requires: dict[str, list[str] | None]) -> InstalledPackages:
+    """An installed-packages snapshot mapping ``top_levels`` and holding a read of each ``requires`` key."""
+    return InstalledPackages(
+        top_levels=top_levels,
+        editable_sources={},
+        distributions={name: _read(name, lines) for name, lines in requires.items()},
+    )
 
 
 def _stub_metadata(
@@ -32,7 +48,8 @@ def _stub_metadata(
 ) -> None:
     """Install a fake ``compat.metadata``: ``version()`` answers only for
     tai42-contract, ``requires()`` from the given map (a missing key raises the
-    real PackageNotFoundError), and the installed-packages snapshot from ``top_levels``."""
+    real PackageNotFoundError), and the installed-packages snapshot from ``top_levels``
+    holding a read of each ``requires`` distribution."""
     requires_map = requires or {}
 
     def _version(dist: str) -> str:
@@ -51,7 +68,9 @@ def _stub_metadata(
     )
     monkeypatch.setattr(compat, "metadata", stub)
     monkeypatch.setattr(
-        compat, "installed_packages", lambda: InstalledPackages(top_levels=dict(top_levels or {}), editable_sources={})
+        compat,
+        "installed_packages",
+        lambda: _snapshot(dict(top_levels or {}), requires_map),
     )
 
 
@@ -152,10 +171,10 @@ def test_module_uses_the_passed_snapshot_map(monkeypatch) -> None:
     def _boom():  # pragma: no cover - the snapshot must win
         raise AssertionError("the installed packages must not be re-read when a snapshot is passed")
 
-    _stub_metadata(monkeypatch, requires={"acme-plugin": ["tai42-contract>=0.3,<0.4"]})
+    _stub_metadata(monkeypatch)
     monkeypatch.setattr(compat, "installed_packages", _boom)
     verdict = module_compat(
-        "acme_pkg", InstalledPackages(top_levels={"acme_pkg": ["acme-plugin"]}, editable_sources={})
+        "acme_pkg", _snapshot({"acme_pkg": ["acme-plugin"]}, {"acme-plugin": ["tai42-contract>=0.3,<0.4"]})
     )
     assert verdict == CompatVerdict("compatible")
 

@@ -5,6 +5,9 @@ the ``_initialize_components`` MCP-load seam."""
 from __future__ import annotations
 
 import asyncio
+import importlib
+import sys
+from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
@@ -18,6 +21,7 @@ from tai42_skeleton.marketplace.compat import CompatVerdict, CorePluginBootError
 from tai42_skeleton.marketplace.installed_packages import InstalledPackages
 from tai42_skeleton.tools import mcp_health
 
+from ...db import _chain_plugin
 from .._fixtures.reload import reload_with
 from ._doubles import _cfg, _FakeMcpTool, _Mixin
 
@@ -175,7 +179,7 @@ def test_initialize_helpers_require_started():
     with pytest.raises(RuntimeError, match="not started"):
         m._initialize_registries()
     with pytest.raises(RuntimeError, match="not started"):
-        m._initialize_components(InstalledPackages(top_levels={}, editable_sources={}))
+        m._initialize_components(InstalledPackages(top_levels={}, editable_sources={}, distributions={}))
 
 
 def test_start_imports_lifecycle_router_and_middleware_modules():
@@ -393,3 +397,33 @@ def test_non_collision_registration_error_is_wrapped_as_boot_abort():
         mp.setattr(lifecycle_module, "import_or_reload_package", _boom)
         with pytest.raises(CorePluginBootError, match=r"lifecycle plugin .* failed to import: .*registration blew up"):
             asyncio.run(run())
+
+
+def test_start_refuses_incompatible_channel_plugin_before_reading_its_spec(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    # A channel plugin built for another contract may package a spec this contract cannot
+    # parse. Boot refuses it on its declared range before the route mount map reads that
+    # spec, and without importing its package.
+    site = tmp_path / "site"
+    _chain_plugin.lay_out(
+        site,
+        spec_text=_chain_plugin.spec_yaml(migrations_component=None) + "future_key: 1\n",
+        init_body="raise RuntimeError('the incompatible plugin package was imported')\n",
+        requires_contract=">=999",
+    )
+    monkeypatch.syspath_prepend(str(site))
+    importlib.invalidate_caches()
+    manifest = Manifest.model_validate({"channel_modules": [_chain_plugin.TOOLS_MODULE]})
+
+    async def run():
+        async with app.app_context(manifest):
+            pass  # pragma: no cover — start() fails before the body runs
+
+    with pytest.raises(
+        CorePluginBootError,
+        match=rf"channel plugin '{_chain_plugin.TOOLS_MODULE}' is incompatible.*"
+        rf"{_chain_plugin.DIST} requires tai42-contract >=999",
+    ):
+        asyncio.run(run())
+    assert _chain_plugin.TOP_LEVEL not in sys.modules
