@@ -195,3 +195,18 @@ def test_snapshot_resolves_each_unrecorded_name_once(monkeypatch: pytest.MonkeyP
     snapshot.distributions_for("tai42_no_such_top_level_xyz")
 
     assert calls == ["tai42_no_such_top_level_xyz"]
+
+
+@pytest.mark.parametrize(
+    "metadata_text", [None, "Metadata-Version: 2.1\nVersion: 1.0.0\n"], ids=["no-metadata-file", "no-name"]
+)
+def test_distribution_recording_no_name_is_loud(tmp_path: Path, metadata_text: str | None) -> None:
+    # A .dist-info that breaks the core-metadata standard (Name is required) is named by its
+    # path, never skipped and never read through the deprecated implicit-None header lookup.
+    dist_info = tmp_path / "stray-1.0.0.dist-info"
+    dist_info.mkdir()
+    if metadata_text is not None:
+        (dist_info / "METADATA").write_text(metadata_text)
+
+    with pytest.raises(InstalledMetadataError, match=f"{dist_info} records no Name"):
+        installed_packages([str(tmp_path)])

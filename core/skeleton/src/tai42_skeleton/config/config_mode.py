@@ -23,7 +23,7 @@ from typing import ClassVar
 
 from pydantic import field_validator
 from pydantic_settings import SettingsConfigDict
-from tai42_contract.config.manager import CONFIG_MODE_ENV, CONFIG_MODE_PATTERN, FILE_CONFIG_MODE
+from tai42_contract.config.manager import CONFIG_MODE_ENV, CONFIG_MODE_PATTERN, DEFAULT_CONFIG_DIR, FILE_CONFIG_MODE
 from tai42_kit.settings import ReloadClass, TaiBaseSettings, settings_cache
 
 
@@ -55,7 +55,8 @@ class ConfigModeSettings(TaiBaseSettings):
     # ``TAI_CONFIG_DIR_PATH`` — the bootstrap config root. The file provider reads
     # it directly (``file_manager.FileConfigManager.__init__``); this field exists
     # only to register the key as an excluded boundary member, never to serve the read.
-    config_dir_path: str | None = None
+    # Its default is the provider's own fallback dir, so the registered field states it.
+    config_dir_path: str = DEFAULT_CONFIG_DIR
 
     @field_validator("config_mode", mode="before")
     @classmethod

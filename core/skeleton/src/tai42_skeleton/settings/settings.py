@@ -21,7 +21,14 @@ class CoreSettings(TaiBaseSettings):
     # launcher-set bootstrap path) — a profile can never carry it, so it is
     # excluded from the reload boundary.
     manifest_path: str | None = Field(
-        default=None, validation_alias="TAI_MANIFEST_PATH", json_schema_extra={"reload": "excluded"}
+        default=None,
+        validation_alias="TAI_MANIFEST_PATH",
+        description=(
+            "The manifest file the server loads. Unset, the file config mode reads "
+            "<config dir>/manifest.yml; `tai serve` and `tai setup --recover` require --manifest-path; "
+            "`tai config lint` skips the manifest check unless a file is given."
+        ),
+        json_schema_extra={"reload": "excluded"},
     )
     # Backend/template selection binds pooled resources built at boot; a change
     # converges through a process recycle, not an in-process flip.

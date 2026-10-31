@@ -45,6 +45,8 @@ from pathlib import Path
 from urllib.parse import urlparse
 from urllib.request import url2pathname
 
+from packaging.utils import canonicalize_name
+
 
 class InstalledMetadataError(ValueError):
     """An installed distribution's metadata file exists but cannot be read as its standard defines it."""
@@ -206,19 +208,77 @@ def _search_locations(module_spec: importlib.machinery.ModuleSpec) -> list[str]:
 
 
 @dataclass(frozen=True)
+class InstalledDistribution:
+    """One installed distribution as a snapshot read it.
+
+    ``dist`` is its metadata handle, ``name`` its required ``Name`` (:func:`distribution_name`),
+    ``recorded`` its :func:`recorded_files` and ``top_levels`` the top-level import packages
+    it provides (:func:`distribution_top_levels`).
+    """
+
+    dist: metadata.Distribution
+    name: str
+    recorded: Sequence[metadata.PackagePath]
+    top_levels: Sequence[str]
+
+
+def _metadata_location(dist: metadata.Distribution) -> str:
+    """Where ``dist``'s metadata lives: its metadata directory, for a distribution read from a path."""
+    if isinstance(dist, metadata.PathDistribution):
+        return str(dist._path)
+    return repr(dist)
+
+
+def distribution_name(dist: metadata.Distribution) -> str:
+    """``dist``'s ``Name`` header, which the core-metadata standard requires.
+
+    Read with ``.get``: an absent header through ``[]`` or ``Distribution.name`` takes the
+    deprecated implicit-``None`` path. A distribution recording no ``Name`` (no metadata
+    file, or one without the header) is a loud :class:`InstalledMetadataError` naming where
+    its metadata lives.
+    """
+    name = dist.metadata.get("Name")
+    if not name:
+        raise InstalledMetadataError(
+            f"the installed distribution metadata at {_metadata_location(dist)} records no Name"
+        )
+    return name
+
+
+def read_distribution(dist: metadata.Distribution) -> InstalledDistribution:
+    """``dist``'s name, recorded files and top-level packages, read once from its metadata."""
+    name = distribution_name(dist)
+    recorded = recorded_files(dist)
+    return InstalledDistribution(
+        dist=dist, name=name, recorded=recorded, top_levels=distribution_top_levels(dist, recorded)
+    )
+
+
+@dataclass(frozen=True)
 class InstalledPackages:
     """One read of the installed distributions: which distribution provides each top-level import package.
 
     ``top_levels`` maps every top-level name the metadata records to the distributions
     providing it (:func:`distribution_top_levels`). ``editable_sources`` maps each editable
     distribution to its PEP 610 source directory (:func:`editable_source_dir`).
-    :meth:`distributions_for` answers a recorded name from ``top_levels`` and any other name
-    through the import system, once per name.
+    ``distributions`` holds each distribution the read found, keyed by its canonical name
+    (PEP 503), in search-path order; a distribution installed twice is held as its first copy
+    on the path, the one the import system serves. :meth:`distributions_for` answers a
+    recorded name from ``top_levels`` and any other name through the import system, once per
+    name.
     """
 
     top_levels: Mapping[str, Sequence[str]]
     editable_sources: Mapping[str, Path]
+    distributions: Mapping[str, InstalledDistribution]
     _resolved: dict[str, list[str]] = field(default_factory=dict, init=False, repr=False, compare=False)
+
+    def distribution(self, name: str) -> InstalledDistribution:
+        """The read of installed distribution ``name``; :class:`importlib.metadata.PackageNotFoundError` when absent."""
+        found = self.distributions.get(canonicalize_name(name))
+        if found is None:
+            raise metadata.PackageNotFoundError(name)
+        return found
 
     def distributions_for(self, top_level: str) -> list[str]:
         """The installed distributions providing top-level import package ``top_level``.
@@ -254,16 +314,19 @@ class InstalledPackages:
 def installed_packages(path: Sequence[str] | None = None) -> InstalledPackages:
     """The :class:`InstalledPackages` snapshot of the distributions on ``path`` (``sys.path`` when omitted).
 
-    One pass over the distributions: each one's recorded top-level packages
-    (:func:`distribution_top_levels`) and, for an editable install, its source directory.
+    One pass over the distributions: each one's :func:`read_distribution` and, for an
+    editable install, its source directory.
     """
     top_levels: dict[str, list[str]] = {}
     editable_sources: dict[str, Path] = {}
+    distributions: dict[str, InstalledDistribution] = {}
     for dist in metadata.distributions(path=list(sys.path if path is None else path)):
-        name = dist.metadata["Name"]
-        for top_level in distribution_top_levels(dist, recorded_files(dist)):
+        read = read_distribution(dist)
+        name = read.name
+        distributions.setdefault(canonicalize_name(name), read)
+        for top_level in read.top_levels:
             top_levels.setdefault(top_level, []).append(name)
         source = editable_source_dir(dist)
         if source is not None:
             editable_sources.setdefault(name, source)
-    return InstalledPackages(top_levels=top_levels, editable_sources=editable_sources)
+    return InstalledPackages(top_levels=top_levels, editable_sources=editable_sources, distributions=distributions)

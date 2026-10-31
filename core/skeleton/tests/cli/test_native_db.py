@@ -357,7 +357,7 @@ def _wire_installed_chain(monkeypatch: pytest.MonkeyPatch, installed) -> None:  
 
     monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "secret")
     monkeypatch.setattr(db, "discover_all_migration_chains", discover_all_migration_chains)
-    monkeypatch.setattr(db_discovery, "_installed_plugin_specs", lambda: (installed(), []))
+    monkeypatch.setattr(db_discovery, "_installed_plugin_specs", lambda snapshot: (installed(), []))
 
 
 def _one_installed_widget(monkeypatch: pytest.MonkeyPatch, **overrides: object) -> None:

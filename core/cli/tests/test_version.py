@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import importlib
 import json
+from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
@@ -39,3 +41,17 @@ def test_version_marks_absent_extra_not_installed(monkeypatch: pytest.MonkeyPatc
     assert by_name["definitely-not-a-real-package-xyz"] == "not installed"
     # The discovered tai42-* distributions are unaffected.
     assert any(name.startswith("tai42-") for name in by_name)
+
+
+def test_version_names_a_distribution_recording_no_name(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # A stray .dist-info with no METADATA is a clean failure naming its path, never a traceback.
+    stray = tmp_path / "site" / "stray-1.0.0.dist-info"
+    stray.mkdir(parents=True)
+    monkeypatch.syspath_prepend(str(tmp_path / "site"))
+    importlib.invalidate_caches()
+
+    result = CliRunner().invoke(app_module.app, ["version"])
+
+    assert isinstance(result.exception, SystemExit), result.exception
+    assert result.exit_code == 1
+    assert f"the installed distribution metadata at {stray} records no Name" in result.output

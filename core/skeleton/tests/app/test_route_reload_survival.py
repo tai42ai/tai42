@@ -437,7 +437,7 @@ def test_accounts_shape_runs_each_route_module_body_exactly_once_per_pass(
         _regprobe.exec_count.clear()
         registry.reset_shape_index()
         executed: set[str] = set()
-        nothing_installed = InstalledPackages(top_levels={}, editable_sources={})
+        nothing_installed = InstalledPackages(top_levels={}, editable_sources={}, distributions={})
         # Lifecycle loop: the root package sweeps in both route submodules under their bindings.
         app._import_manifest_module("multi_router_plugin", "lifecycle", nothing_installed, executed)
         # Router role: each route submodule is its own entry — already executed by the walk.

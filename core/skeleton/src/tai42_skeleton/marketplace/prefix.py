@@ -179,14 +179,26 @@ def activate_prefix() -> None:
         logger.info("plugin prefix activated on sys.path: %s", prefix)
 
 
+def _canonical_name(dist: importlib.metadata.Distribution) -> str | None:
+    """``dist``'s canonical name, or ``None`` when its metadata carries no ``Name``.
+
+    Read with ``.get`` rather than the ``.name`` property, which raises a deprecation warning
+    when the header is absent. A distribution with no name cannot be named, so it is never
+    the distribution a caller looks for.
+    """
+    name = dist.metadata.get("Name")
+    return None if name is None else canonicalize_name(name)
+
+
 def prefix_has_distribution(package: str, prefix: str) -> bool:
     """Whether ``package``'s own distribution is installed under ``prefix``.
 
     Its prefix site dirs ONLY, never an environment copy that also sits on ``sys.path`` at runtime.
+    A distribution whose metadata carries no ``Name`` is never a match.
     """
     site_dirs = [str(Path(site)) for site in prefix_site_dirs(prefix)]
     target = canonicalize_name(package)
-    return any(canonicalize_name(dist.name) == target for dist in importlib.metadata.distributions(path=site_dirs))
+    return any(_canonical_name(dist) == target for dist in importlib.metadata.distributions(path=site_dirs))
 
 
 def environment_distribution_version(package: str, prefix: str) -> str | None:
@@ -195,13 +207,14 @@ def environment_distribution_version(package: str, prefix: str) -> str | None:
     Reads every ``sys.path`` entry that is NOT a prefix site dir.
     Both the environment and the prefix sit on ``sys.path`` at runtime (the prefix
     appended at the END), so the prefix site dirs are excluded here to read the
-    environment copy alone. The first match wins, mirroring import shadowing order.
+    environment copy alone. The first match wins, mirroring import shadowing order. A
+    distribution whose metadata carries no ``Name`` is never a match.
     """
     prefix_dirs = {str(Path(site)) for site in prefix_site_dirs(prefix)}
     env_paths = [p for p in sys.path if p not in prefix_dirs]
     target = canonicalize_name(package)
     for dist in importlib.metadata.distributions(path=env_paths):
-        if canonicalize_name(dist.name) == target:
+        if _canonical_name(dist) == target:
             return dist.version
     return None
 
@@ -263,14 +276,13 @@ def uninstall_from_prefix(package: str, prefix: str) -> None:
     reaching for the environment copy — with a prefix configured, uninstall must
     never mutate the image. A ``RECORD`` path that escapes the prefix, or a
     distribution shipping no ``RECORD``, is likewise a loud refusal, never a
-    best-effort partial delete.
+    best-effort partial delete. A distribution whose metadata carries no ``Name`` is never
+    the one removed.
     """
     root = Path(prefix).resolve()
     site_dirs = [str(Path(site)) for site in prefix_site_dirs(prefix)]
     target = canonicalize_name(package)
-    match = [
-        dist for dist in importlib.metadata.distributions(path=site_dirs) if canonicalize_name(dist.name) == target
-    ]
+    match = [dist for dist in importlib.metadata.distributions(path=site_dirs) if _canonical_name(dist) == target]
     if not match:
         raise PluginPrefixError(
             f"{package!r} is not installed in the plugin prefix {prefix} — refusing to touch the environment"

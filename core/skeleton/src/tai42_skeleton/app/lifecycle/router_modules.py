@@ -1,9 +1,15 @@
 """Compose the effective router set and the module-to-mount-binding map for a registration pass."""
 
+from typing import TYPE_CHECKING
+
 from tai42_skeleton.app.lifecycle.off_loop import run_blocking
 from tai42_skeleton.app.lifecycle.state import LifecycleState
 from tai42_skeleton.app.mount_map import MountBinding, build_mount_map
 from tai42_skeleton.app.route_defaults import effective_router_modules
+from tai42_skeleton.marketplace.compat import module_compat, refuse_incompatible_verdict
+
+if TYPE_CHECKING:
+    from tai42_skeleton.marketplace.installed_packages import InstalledPackages
 
 
 class RouterModulesMixin(LifecycleState):
@@ -26,11 +32,14 @@ class RouterModulesMixin(LifecycleState):
             return None
         return self._effective_router_modules()
 
-    def _build_mount_map(self) -> dict[str, MountBinding]:
+    def _build_mount_map(self, installed: "InstalledPackages") -> dict[str, MountBinding]:
         """The module → :class:`MountBinding` map for this registration pass.
 
         Built from the manifest's channel/router modules' packaged ``tai-plugin.yml``
-        with persisted route-mount overrides applied. The install store is read ONLY
+        with persisted route-mount overrides applied. Reading a module's spec imports its
+        top-level package, so a contract-incompatible module is refused on its verdict
+        from ``installed`` (the pass's package→dist snapshot) before its spec is read,
+        with the refusal its import would raise. The install store is read ONLY
         when a real plugin route module is present. A resolved public route under a
         reserved never-public prefix fails the build.
         """
@@ -38,9 +47,13 @@ class RouterModulesMixin(LifecycleState):
             raise RuntimeError("TaiMCP is not started — call start()/app_context first.")
         from tai42_skeleton.access_control.settings import access_control_settings
 
-        modules = [*(self._manifest.channel_modules or []), *self._effective_router_modules()]
+        kinds = dict.fromkeys(self._manifest.channel_modules or [], "channel")
+        for module in self._effective_router_modules():
+            kinds.setdefault(module, "router")
+        for module, kind in kinds.items():
+            refuse_incompatible_verdict(module, kind, module_compat(module, installed))
         reserved = access_control_settings().reserved_public_pin_prefixes
-        return build_mount_map(modules, reserved, self._installed_route_mounts)
+        return build_mount_map(list(kinds), reserved, self._installed_route_mounts)
 
     def _installed_route_mounts(self) -> dict[str, dict[str, str]]:
         """Every marketplace-install row's ``{ref: {item_name: base}}`` route-mount overrides.

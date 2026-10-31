@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from importlib.metadata import PackageNotFoundError, distributions
+from importlib.metadata import Distribution, PackageNotFoundError, PathDistribution, distributions
 from importlib.metadata import version as package_version
 
+import click
 import typer
 
 from tai42_cli.commands._common import app_context
@@ -15,13 +16,33 @@ from tai42_cli.render import print_records
 _EXTRA_PACKAGES = ["typer", "click", "httpx"]
 
 
+class InstalledMetadataError(click.ClickException):
+    """An installed distribution records no ``Name``, so ``tai version`` cannot account for it."""
+
+
+def _distribution_name(dist: Distribution) -> str:
+    """``dist``'s ``Name`` header, which the core-metadata standard requires.
+
+    Read with ``.get``: an absent header through ``[]`` or ``Distribution.name`` takes the
+    deprecated implicit-``None`` path. A distribution recording no ``Name`` (no metadata
+    file, or one without the header) raises :class:`InstalledMetadataError` naming where its
+    metadata lives.
+    """
+    name = dist.metadata.get("Name")
+    if not name:
+        location = str(dist._path) if isinstance(dist, PathDistribution) else repr(dist)
+        raise InstalledMetadataError(f"the installed distribution metadata at {location} records no Name")
+    return name
+
+
 def _versions() -> list[dict[str, str]]:
     """Every installed distribution whose name starts with ``tai42-`` (sorted), then key CLI deps.
 
     No hard-coded package list — whatever tai42 packages the environment carries are what
-    report.
+    report. A distribution recording no ``Name`` raises :class:`InstalledMetadataError`.
     """
-    tai_packages = sorted({dist.name for dist in distributions() if dist.name.startswith("tai42-")})
+    names = {_distribution_name(dist) for dist in distributions()}
+    tai_packages = sorted(name for name in names if name.startswith("tai42-"))
     records: list[dict[str, str]] = [{"package": name, "version": package_version(name)} for name in tai_packages]
     for name in _EXTRA_PACKAGES:
         try:

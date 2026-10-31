@@ -56,9 +56,9 @@ async def _deployment(manifest_path: str | None) -> AsyncIterator[None]:
     identity/accounts providers this command re-mints through. A lifecycle module may register
     on an app facet at import (``tai42_app.webhook_verifiers``, …), so the imports run under
     the binding, and the block that re-mints runs under it too. The binding is restored on
-    exit. A schema-gate refusal, an unmet plugin requirement or an incompatible lifecycle
-    plugin is a :class:`click.ClickException` carrying its message; a failing import raises
-    loudly, aborting the command.
+    exit. A schema-gate refusal, an unmet plugin requirement, an incompatible lifecycle
+    plugin or an installed distribution's unreadable metadata is a :class:`click.ClickException`
+    carrying its message; a failing import raises loudly, aborting the command.
     """
     resolved = manifest_path or default_manifest_path()
     if resolved is None:
@@ -68,6 +68,7 @@ async def _deployment(manifest_path: str | None) -> AsyncIterator[None]:
     from tai42_skeleton.app.instance import app
     from tai42_skeleton.app.lifecycle.manifest_imports import prepare_manifest_imports
     from tai42_skeleton.marketplace.compat import CorePluginBootError, refuse_incompatible
+    from tai42_skeleton.marketplace.installed_packages import InstalledMetadataError
 
     manifest = await app.lifecycle.read_boot_manifest()
     with tai42_app.bound(app):
@@ -76,7 +77,7 @@ async def _deployment(manifest_path: str | None) -> AsyncIterator[None]:
             for name in manifest.lifecycle_modules:
                 refuse_incompatible(name, "lifecycle", installed)
                 importlib.import_module(name)
-        except (SchemaOutOfDateError, MigrationDiscoveryError, CorePluginBootError) as exc:
+        except (SchemaOutOfDateError, MigrationDiscoveryError, CorePluginBootError, InstalledMetadataError) as exc:
             raise click.ClickException(str(exc)) from exc
         yield
 

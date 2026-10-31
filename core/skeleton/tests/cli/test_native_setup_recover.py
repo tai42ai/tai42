@@ -13,11 +13,13 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import importlib.metadata
 import json
 import os
 import sys
 from collections.abc import Callable
 from types import SimpleNamespace
+from typing import cast
 
 import psycopg
 import pytest
@@ -342,15 +344,24 @@ def test_recover_refuses_an_incompatible_lifecycle_module_without_importing_it(
     monkeypatch: pytest.MonkeyPatch, fake_deployment: dict
 ) -> None:
     from tai42_skeleton.marketplace import compat
-    from tai42_skeleton.marketplace.installed_packages import InstalledPackages
+    from tai42_skeleton.marketplace.installed_packages import InstalledDistribution, InstalledPackages
 
+    read = InstalledDistribution(
+        dist=cast(importlib.metadata.Distribution, object()), name="deployment-plugin", recorded=[], top_levels=[]
+    )
     monkeypatch.setattr(
         compat,
         "distribution_map",
-        lambda: InstalledPackages(top_levels={"deployment": ["deployment-plugin"]}, editable_sources={}),
+        lambda: InstalledPackages(
+            top_levels={"deployment": ["deployment-plugin"]},
+            editable_sources={},
+            distributions={"deployment-plugin": read},
+        ),
     )
     monkeypatch.setattr(
-        compat, "dist_compat", lambda dist_name: compat.CompatVerdict("incompatible", f"{dist_name} needs another")
+        compat,
+        "distribution_compat",
+        lambda read: compat.CompatVerdict("incompatible", f"{read.name} needs another"),
     )
 
     async def _fake_recover(setup_token: str, *, key_user_id: str | None, key_description: str) -> dict:
