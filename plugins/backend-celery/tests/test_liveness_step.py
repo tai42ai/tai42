@@ -11,8 +11,9 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from celery.concurrency import solo, thread
+from celery.concurrency import prefork, solo, thread
 from celery.worker.consumer.connection import Connection
+from tai42_kit.fork_gate import JOB_SPAN_WAIT_SECONDS
 from tai42_kit.liveness import backend_liveness_settings
 
 from tai42_backend_celery.core import embedded_beat, job_slots, liveness_step
@@ -55,7 +56,7 @@ class _Consumer:
 
     def __init__(self, *, pool: Any = None) -> None:
         self.timer = _Timer()
-        self.pool = pool if pool is not None else SimpleNamespace(limit=4)
+        self.pool = pool if pool is not None else prefork.TaskPool(limit=4)
 
 
 def test_register_adds_the_step_to_the_app_s_consumer_blueprint() -> None:
@@ -64,8 +65,8 @@ def test_register_adds_the_step_to_the_app_s_consumer_blueprint() -> None:
     liveness_step.register(celery_app, report, task_timeout=300)
 
     assert liveness_step.ProgressStep in liveness_step.consumer_steps(celery_app)
-    liveness_step._tick()
-    assert report.promises == [liveness_step._PROGRESS_TICK_SECONDS]
+    liveness_step.tick()
+    assert report.promises == [liveness_step.PROGRESS_TICK_SECONDS]
 
 
 def test_a_second_register_with_the_same_reporter_changes_nothing() -> None:
@@ -74,7 +75,7 @@ def test_a_second_register_with_the_same_reporter_changes_nothing() -> None:
 
     liveness_step.register(celery_app, report, task_timeout=300)
 
-    liveness_step._tick()
+    liveness_step.tick()
     assert report.promises == [1.0]
 
 
@@ -87,7 +88,7 @@ def test_a_second_register_with_another_reporter_raises() -> None:
 
 def test_a_tick_with_no_reporter_raises() -> None:
     with pytest.raises(RuntimeError, match="ticked with no reporter registered"):
-        liveness_step._tick()
+        liveness_step.tick()
 
 
 def test_the_step_runs_once_the_broker_connection_is_up() -> None:
@@ -101,7 +102,7 @@ def test_start_registers_a_repeating_tick_and_stop_cancels_it() -> None:
 
     step.start(consumer)
     [entry] = consumer.timer.entries
-    assert (entry.secs, entry.fun) == (1.0, liveness_step._tick)
+    assert (entry.secs, entry.fun) == (1.0, liveness_step.tick)
 
     step.stop(consumer)
     assert entry.canceled is True
@@ -133,8 +134,29 @@ async def test_the_worker_runtime_registers_its_reporter_at_build(monkeypatch: p
     await runtime.build()
 
     assert liveness_step.ProgressStep in liveness_step.consumer_steps(celery_app)
-    liveness_step._tick()
+    liveness_step.tick()
     assert report.promises == [1.0]
+
+
+async def test_the_worker_build_installs_the_fork_guard(monkeypatch: pytest.MonkeyPatch) -> None:
+    import tai42_backend_celery.core.backend as backend_module
+
+    guards: list[dict[str, Any]] = []
+    monkeypatch.setattr(backend_module.prefork, "register", lambda: None)
+    monkeypatch.setattr(backend_module.sys, "argv", list(backend_module.sys.argv))
+    monkeypatch.setattr(backend_module.fork_gate, "guard_forks", lambda **kwargs: guards.append(kwargs))
+    runtime = CeleryWorkerRuntime.from_args([])
+    runtime.bind_progress(_Reports())
+
+    await runtime.build()
+
+    assert guards == [
+        {
+            "timeout": JOB_SPAN_WAIT_SECONDS,
+            "tick": liveness_step.tick,
+            "tick_every": liveness_step.PROGRESS_TICK_SECONDS,
+        }
+    ]
 
 
 # -- the composed tick -----------------------------------------------------------
@@ -147,22 +169,53 @@ def _started(consumer: _Consumer, *, task_timeout: float = 300) -> _Reports:
     return report
 
 
-def test_a_prefork_or_green_pool_counts_no_job_slots() -> None:
-    _started(_Consumer(pool=SimpleNamespace(limit=4)))
+def _pool_from(module: str) -> Any:
+    """A pool whose class lives in ``module``, as celery's own pool classes each do."""
+    return type("TaskPool", (), {"__module__": module})()
 
-    assert job_slots._watch is None
+
+@pytest.mark.parametrize(
+    ("module", "watched"),
+    [
+        ("celery.concurrency.prefork", ("prefork", False, None, False)),
+        ("celery.concurrency.solo", ("solo", True, 120, True)),
+        ("celery.concurrency.thread", ("threads", True, 120, False)),
+        ("celery.concurrency.gevent", ("gevent", True, None, False)),
+        ("celery.concurrency.eventlet", ("eventlet", True, 120, False)),
+    ],
+)
+def test_each_celery_pool_is_classified(module: str, watched: tuple[str, bool, float | None, bool]) -> None:
+    _started(_Consumer(pool=_pool_from(module)), task_timeout=120)
+
+    watch = job_slots._watch
+    assert watch is not None
+    assert (watch.pool_name, watch.in_process, watch.budget, watch.ticks_in_job) == watched
+    assert watch.tick is liveness_step.tick
 
 
-def test_a_solo_pool_counts_its_one_slot_and_ticks_during_a_job() -> None:
+def test_an_unknown_pool_raises_at_start() -> None:
+    liveness_step.register(celery_app, _Reports(), task_timeout=120)
+    consumer = _Consumer(pool=_pool_from("acme.pools"))
+
+    with pytest.raises(RuntimeError) as raised:
+        liveness_step.ProgressStep(consumer).start(consumer)
+
+    assert str(raised.value) == (
+        "the celery worker's pool TaskPool from acme.pools is not one celery ships "
+        "(prefork, solo, threads, gevent, eventlet); its progress cannot be reported"
+    )
+    assert consumer.timer.entries == []
+
+
+def test_a_solo_pool_is_held_to_the_budget_and_ticks_during_a_job() -> None:
     _started(_Consumer(pool=solo.TaskPool(limit=1)), task_timeout=120)
 
     watch = job_slots._watch
     assert watch is not None
-    assert (watch.pool_name, watch.slots, watch.budget, watch.ticks_in_job) == ("solo", 1, 120, True)
-    assert watch.tick is liveness_step._tick
+    assert (watch.pool_name, watch.in_process, watch.budget, watch.ticks_in_job) == ("solo", True, 120, True)
 
 
-def test_a_threads_pool_counts_its_slots_and_leaves_the_ticks_to_the_hub() -> None:
+def test_a_threads_pool_leaves_the_ticks_to_the_hub() -> None:
     pool = thread.TaskPool(limit=3)
     try:
         _started(_Consumer(pool=pool), task_timeout=120)
@@ -171,7 +224,7 @@ def test_a_threads_pool_counts_its_slots_and_leaves_the_ticks_to_the_hub() -> No
 
     watch = job_slots._watch
     assert watch is not None
-    assert (watch.pool_name, watch.slots, watch.budget, watch.ticks_in_job) == ("threads", 3, 120, False)
+    assert (watch.pool_name, watch.in_process, watch.budget, watch.ticks_in_job) == ("threads", True, 120, False)
 
 
 def test_a_tick_withholds_the_report_while_the_embedded_beat_is_not_alive() -> None:
@@ -180,21 +233,21 @@ def test_a_tick_withholds_the_report_while_the_embedded_beat_is_not_alive() -> N
     report = _started(_Consumer())
 
     with pytest.raises(RuntimeError, match=r"^the embedded beat \(-B\) is not alive: no liveness file at "):
-        liveness_step._tick()
+        liveness_step.tick()
 
     assert report.promises == []
 
 
-def test_a_tick_withholds_the_report_once_every_slot_is_wedged() -> None:
+def test_a_tick_withholds_the_report_once_a_slot_is_wedged() -> None:
     report = _started(_Consumer(pool=solo.TaskPool(limit=1)), task_timeout=0.05)
 
     async def _job() -> None:
         await asyncio.sleep(0.1)
-        with pytest.raises(RuntimeError, match="every job slot of this worker holds a job past"):
-            liveness_step._tick()
+        with pytest.raises(RuntimeError, match="a job slot of this worker holds a job past"):
+            liveness_step.tick()
 
     asyncio.run(job_slots.in_job(_job(), label="tool t1"))
 
     assert report.promises == [1.0]
-    liveness_step._tick()
+    liveness_step.tick()
     assert report.promises == [1.0, 1.0]

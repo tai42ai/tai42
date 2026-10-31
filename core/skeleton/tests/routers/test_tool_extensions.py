@@ -534,10 +534,12 @@ def test_post_apply_fans_out_over_the_worker_bus(cfg, monkeypatch):
     async def run():
         async with _running(cfg, _single()):
             # A multi-worker fleet: the reload broadcasts, and the response embeds the
-            # per-origin report as its ``fanout`` summary.
+            # per-origin report as its ``fanout`` summary. The fake bus stands in for
+            # the request only, so the lifespan tears down the bus it joined.
             bus = FakeBus(origin="serve-x", remotes=["serve-w1"])
-            monkeypatch.setattr(instance.app, "_bus", bus)
-            resp = await _post("shout", [["marka"]])
+            with monkeypatch.context() as patch:
+                patch.setattr(instance.app, "_bus", bus)
+                resp = await _post("shout", [["marka"]])
             assert resp.status_code == 200, _err(resp)
             data = _data(resp)
             assert data["status"] == "ok"  # the local reload result rides the top level

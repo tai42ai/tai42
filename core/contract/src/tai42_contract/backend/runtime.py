@@ -84,7 +84,8 @@ class HttpLiveness:
     """The process is alive while its HTTP server answers ``GET path`` with a success status on the port it serves.
 
     ``path`` is absolute (starts with ``/``) and needs neither a session nor data from a backing
-    store, so the answer depends on the server alone.
+    store, so the answer depends on the server alone; a process whose every route sits behind
+    credentials (basic auth) needs them on the probe too.
     """
 
     path: str

@@ -83,10 +83,13 @@ The settings-profile apply and its recycle roll are kept by
 
 from __future__ import annotations
 
-import asyncio
 import copy
 import logging
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+import os
+import sys
+from typing import TYPE_CHECKING, Any, cast
+
+from tai42_kit.process_lock import ProcessLock
 
 from tai42_skeleton.app.recycle import RecycleReport, orchestrate_recycle
 from tai42_skeleton.config.deployment_env import DeploymentOwnership, resolve_deployment_ownership
@@ -115,37 +118,37 @@ def _unchanged(_document: dict[str, Any]) -> None:
     """The mutator of a write that persists the stored manifest as it is."""
 
 
+# Process-wide config-write lock: the queue of this process's writers. ``from_app`` builds a
+# FRESH ConfigService per call, so this is module-level (not per-instance) — one queue for every
+# writer of the process. Every write entry holds it from its first store read through its
+# persist. It is one lock per process, held from any event loop and thread (a backend job's
+# private loop included); each writer queued behind it waits on a dedicated thread of its own
+# while its loop keeps running, not on a pool thread. A writer abandoned before its span's entry
+# completed releases the lock and leaves that entry to its pool thread, which stays blocked until
+# the span is entered and exited, so more than one pool thread can block on the span at once.
+# Acquired through :func:`hold_recorded`, which records its waiters: a settings-profile apply
+# holds it across its build, which may retire the generation a waiter belongs to.
+#
+# Lock order: config-write lock → store write span → reload gate → fork gate, never the
+# reverse. The lock is taken first so the process's own writers queue on it instead of each
+# blocking a pool thread on the store's span; the span is taken next, before the first store
+# read, so no other write, of this process or another, lands inside this one — the combined
+# op's READ→derive→WRITE span (the secret-marks append, the generated-key collision check)
+# included, which the provider's per-call lock cannot close (``read_env`` sits OUTSIDE that
+# lock). The profile apply takes the reload gate (as its driver) and the fork gate inside both;
+# every other entry releases both before ``_reload_and_broadcast`` acquires the reload gate, and
+# nothing that holds the reload gate writes config — no deadlock.
+_config_write_lock = ProcessLock()
+if sys.platform != "win32":
+    os.register_at_fork(after_in_child=_config_write_lock.reset_after_fork)
+
+
 class ConfigService(_ProfileApplyMixin, _ValidationMixin, _ResolutionMixin, _BroadcastMixin):
     """The one pipeline every manifest / env mutation crosses.
 
     Constructed per call site from the running app via :meth:`from_app`, or directly
     with the config manager, the reload seam, and the worker bus for testing.
     """
-
-    # Process-wide config-write lock: the loop-side queue of this process's writers. ``from_app``
-    # builds a FRESH ConfigService per call, so this is CLASS-level (not per-instance) — one
-    # queue for every writer of the process. Every write entry holds it from its first store
-    # read through its persist, so the writers queued behind it wait on the loop, not on a pool
-    # thread. A writer abandoned before its span's entry completed releases the lock and leaves
-    # that entry to its pool thread, which stays blocked until the span is entered and exited,
-    # so more than one pool thread can block on the span at once. Lazily bound to the running serving
-    # loop and rebound on a loop swap (mirrors :class:`ReloadGate`), so it is correct across
-    # the process's single serving loop and across per-test loops. Acquired through
-    # :func:`hold_recorded`, which records its waiters: a settings-profile apply holds it
-    # across its build, which may retire the generation a waiter belongs to.
-    #
-    # Lock order: config-write lock → store write span → reload gate → fork gate, never the
-    # reverse. The lock is taken first so the process's own writers queue on the loop instead
-    # of each blocking a thread on the store's span; the span is taken next, before the first
-    # store read, so no other write, of this process or another, lands inside this one — the
-    # combined op's READ→derive→WRITE span (the secret-marks append, the generated-key
-    # collision check) included, which the provider's per-call lock cannot close
-    # (``read_env`` sits OUTSIDE that lock).
-    # The profile apply takes the reload gate (as its driver) and the fork gate inside both;
-    # every other entry releases both before ``_reload_and_broadcast`` acquires the reload
-    # gate, and nothing that holds the reload gate writes config — no deadlock.
-    _config_write_lock: ClassVar[asyncio.Lock | None] = None
-    _config_write_loop: ClassVar[asyncio.AbstractEventLoop | None] = None
 
     def __init__(
         self,
@@ -169,21 +172,6 @@ class ConfigService(_ProfileApplyMixin, _ValidationMixin, _ResolutionMixin, _Bro
         self._combo_check = combo_check
         self._orchestrate = orchestrate
 
-    @classmethod
-    def _write_lock(cls) -> asyncio.Lock:
-        """The process-wide config-write lock bound to the running serving loop.
-
-        Created on first use and rebound only if the running loop differs from the bound one (a loop swap —
-        there is never a second live loop in the same process). Mirrors :meth:`ReloadGate._serving_lock`,
-        keeping the singleton correct across loops rather than raising the cross-loop ``RuntimeError`` a bare
-        module-level ``asyncio.Lock`` would across test loops.
-        """
-        loop = asyncio.get_running_loop()
-        if cls._config_write_lock is None or cls._config_write_loop is not loop:
-            cls._config_write_lock = asyncio.Lock()
-            cls._config_write_loop = loop
-        return cls._config_write_lock
-
     def _write_exclusion(self) -> AbstractAsyncContextManager[WriteSpan]:
         """Hold the process-wide config-write lock, then the config store's exclusive write span.
 
@@ -191,7 +179,7 @@ class ConfigService(_ProfileApplyMixin, _ValidationMixin, _ResolutionMixin, _Bro
         last statement inside it, and hands the yielded :class:`WriteSpan`'s ``release_error``
         to its tail. A caller waiting on either hold is recorded on its generation as waiting.
         """
-        return write_exclusion(self._write_lock(), self._config_manager.exclusive_write())
+        return write_exclusion(_config_write_lock, self._config_manager.exclusive_write())
 
     async def deployment_ownership(self, op_name: str) -> DeploymentOwnership:
         """The keys the deployment owns across the fleet for ``op_name``, read from this pipeline's bus census.

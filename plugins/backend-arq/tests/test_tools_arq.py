@@ -12,6 +12,7 @@ import orjson
 import pytest
 from arq.constants import in_progress_key_prefix, result_key_prefix
 from arq.jobs import JobResult, JobStatus, SerializationError
+from tai42_kit.backend.job_context import running_job
 
 from tai42_backend_arq import scheduler, tasks, tools
 from tai42_backend_arq.jobs import register_queue
@@ -50,8 +51,11 @@ class _StatusJob:
 
     def __call__(self, job_id: str, *args: Any, **kwargs: Any) -> Any:
         outer = self
+        ident = job_id
 
         class _Job:
+            job_id = ident
+
             async def status(self) -> JobStatus:
                 value = outer._statuses[job_id]
                 if isinstance(value, list):
@@ -170,6 +174,90 @@ async def test_cancel_task_unconfirmed_reported(monkeypatch, bind_pool) -> None:
     monkeypatch.setattr(tools, "job_handle", handle_of(jobs))
 
     assert await tools.backend_cancel_task("j1") == "Task j1 abort requested but not confirmed"
+
+
+@pytest.mark.parametrize(
+    ("abort_outcome", "reply"),
+    [
+        (True, "Task j1 aborted"),
+        (False, "Task j1 abort requested; the worker honors it at pick-up (not awaited inside a job)"),
+    ],
+)
+async def test_cancel_task_inside_a_job_requests_the_abort_without_waiting(
+    monkeypatch, bind_pool, abort_outcome, reply
+) -> None:
+    """Inside a job the cancel requests the abort and returns: a wait for the target's outcome
+    could wait on a job queued behind the caller, which never starts while the caller runs."""
+    bind_pool(object())
+    jobs = _StatusJob({"j1": JobStatus.queued, "abort:j1": abort_outcome})
+    monkeypatch.setattr(tools, "job_handle", handle_of(jobs))
+
+    with running_job():
+        assert await tools.backend_cancel_task("j1") == reply
+    assert jobs.abort_calls == [0]
+
+
+async def test_cancel_task_inside_a_job_reports_an_abort_still_pending_at_pick_up(monkeypatch, bind_pool) -> None:
+    bind_pool(object())
+    jobs = _StatusJob({"j1": JobStatus.queued, "abort:j1": TimeoutError()})
+    monkeypatch.setattr(tools, "job_handle", handle_of(jobs))
+
+    with running_job():
+        out = await tools.backend_cancel_task("j1")
+    assert out == "Task j1 abort requested; the worker honors it at pick-up (not awaited inside a job)"
+
+
+def _fresh(statuses: dict[str, Any]) -> dict[str, Any]:
+    """``statuses`` with each status list copied, so a second fake job replays them from the start."""
+    return {key: list(value) if isinstance(value, list) else value for key, value in statuses.items()}
+
+
+_REVIVED = TaskFailedError("ValueError", "ValueError('boom')", None)
+
+
+@pytest.mark.parametrize(
+    ("statuses", "reply"),
+    [
+        (
+            {"j1": [JobStatus.queued, JobStatus.complete], "abort:j1": False},
+            f"Task j1 cannot be canceled (status: {JobStatus.complete})",
+        ),
+        (
+            {"j1": [JobStatus.queued, JobStatus.not_found], "abort:j1": False},
+            f"Task j1 cannot be canceled (status: {JobStatus.not_found})",
+        ),
+        (
+            {
+                "j1": [JobStatus.queued, JobStatus.complete],
+                "abort:j1": _REVIVED,
+                "result:j1": _job_result("j1", success=False, result=_REVIVED),
+            },
+            "Task j1 failed on its own before the abort could take effect: ValueError('boom')",
+        ),
+        (
+            {
+                "j1": [JobStatus.queued, JobStatus.complete],
+                "abort:j1": SerializationError("unable to serialize result"),
+                "result:j1": _job_result("j1", success=False, result="unable to serialize result"),
+            },
+            "Task j1 finished in failure after the abort request (aborted or failed on its own): "
+            "'unable to serialize result'",
+        ),
+    ],
+)
+async def test_cancel_task_inside_a_job_reports_a_task_finishing_during_the_request_as_outside_one(
+    monkeypatch, bind_pool, statuses, reply
+) -> None:
+    """A task that reaches its own outcome between the status check and the abort reads the same inside a job."""
+    bind_pool(object())
+    monkeypatch.setattr(tools, "job_handle", handle_of(_StatusJob(_fresh(statuses))))
+    outside = await tools.backend_cancel_task("j1")
+
+    monkeypatch.setattr(tools, "job_handle", handle_of(_StatusJob(_fresh(statuses))))
+    with running_job():
+        inside = await tools.backend_cancel_task("j1")
+
+    assert inside == outside == reply
 
 
 @pytest.mark.parametrize("status", [JobStatus.not_found, JobStatus.complete])

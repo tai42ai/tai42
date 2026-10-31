@@ -21,6 +21,7 @@ from celery import Task
 from tai42_contract.app import tai42_app
 from tai42_contract.backend import SCHEDULE_CADENCE_KEY, SCHEDULE_NAME_KEY
 from tai42_kit.backend import CallbackSchema, backend_fire, callback_execution
+from tai42_kit.backend.job_context import running_job
 from tai42_kit.utils.detached_util import mark_detached_run, reset_detached_run
 from tai42_kit.utils.worker_secret_capability import WORKER_SECRET_CAPABILITY_ARG, bind_worker_secret_capability
 
@@ -143,10 +144,13 @@ class AsyncTask(Task):
     def run_async(self, coroutine: Coroutine[Any, Any, Any]) -> Any:
         """Run ``coroutine`` to completion on a loop of the task's own, as one job of the worker, and return its result.
 
-        On a pool that cannot end a job at its budget the job counts against the worker's slots
-        (:mod:`~tai42_backend_celery.core.job_slots`).
+        A job that runs in the worker process holds the fork gate for its whole run, and on a pool
+        that cannot end a job at its budget it is held to that budget
+        (:mod:`~tai42_backend_celery.core.job_slots`). The run is marked as a backend job
+        (:func:`~tai42_kit.backend.job_context.running_job`), so a tool it runs that would wait for
+        another job's result refuses.
         """
-        with self.loops.take() as loop:
+        with job_slots.in_process_job(), running_job(), self.loops.take() as loop:
             return loop.run_until_complete(job_slots.in_job(coroutine, label=f"{self.name} {self.request.id}"))
 
     def close_loop(self) -> None:

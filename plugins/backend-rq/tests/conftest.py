@@ -287,6 +287,18 @@ def _reset_process_state(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _unguarded_fork_gate(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Start each test with no fork guard installed, and drop the one a built worker installs when it ends.
+
+    The guard is process-wide and accepts one configuration; every built worker brings its own
+    tick, so a guard kept across tests would refuse the next worker.
+    """
+    from tai42_kit.fork_gate import fork_gate
+
+    monkeypatch.setattr(fork_gate._fork_hooks, "guard", None)
+
+
+@pytest.fixture(autouse=True)
 def liveness_path(monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory) -> Iterator[Path]:
     """Point the liveness file at a per-test path, so no test reads or writes the default one."""
     from tai42_kit.liveness import backend_liveness_settings

@@ -19,6 +19,7 @@ import pytest
 from pydantic_settings import BaseSettings
 from tai42_contract.app import tai42_app
 from tai42_kit.clients.base import advance_client_epoch, current_client_epoch
+from tai42_kit.process_lock import ProcessLock
 from tai42_kit.settings import reset_all_settings
 from tai42_kit.settings.cache_registry import (
     _stamp_settings,
@@ -797,14 +798,22 @@ async def test_a_request_waiting_on_a_recorded_lock_held_outside_the_generation_
     boot = current_epoch()
     log: list[str] = []
     boot.supervisor = _ClosingSupervisor(log)  # type: ignore[assignment]
-    lock = asyncio.Lock()
+    lock = ProcessLock()
+    let_go = asyncio.Event()
 
     async def _waiter() -> None:
         async with hold_recorded(lock):
             log.append("waiter held the lock")
         log.append("waiter answered")
 
-    await lock.acquire()  # held by work that is no request of the boot generation
+    async def _held_outside_the_generation() -> None:
+        async with lock.held():
+            await let_go.wait()
+
+    # Held by work that is no request of the boot generation.
+    holder = asyncio.create_task(_held_outside_the_generation())
+    while not lock.locked:
+        await asyncio.sleep(0)
     try:
         async with reload_gate.synchronized():  # the bus-delivered reload, no request of its own
             request = _served_request(boot, _waiter)
@@ -821,7 +830,8 @@ async def test_a_request_waiting_on_a_recorded_lock_held_outside_the_generation_
             await asyncio.sleep(0)
         assert log == [], "the retire closed (or let run) before the lock was released"
     finally:
-        lock.release()
+        let_go.set()
+        await holder
     async with asyncio.timeout(2.0):
         await request
         await asyncio.gather(*epoch_retire_mod._deferred_retire_tasks)

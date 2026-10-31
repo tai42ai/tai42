@@ -20,7 +20,6 @@ from tai42_skeleton.app.boot_rules import (
 from tai42_skeleton.app.graceful_exit import request_graceful_exit
 from tai42_skeleton.app.lifecycle.state import LifecycleState
 from tai42_skeleton.app.readiness_sentinel import remove_ready_sentinel
-from tai42_skeleton.app.reload_gate import reload_gate
 from tai42_skeleton.connectors.runtime import refresh_owner
 from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.settings.owned_settings import require_known_owned_settings
@@ -79,11 +78,10 @@ class LifespanMixin(LifecycleState):
             # raise_on_error: a failed startup handler must abort the boot
             # loudly, never leave a healthy-looking half-initialized app.
             await self._run_handlers(list(self._startup_handlers.values()), raise_on_error=True)
-            # Bind the reload gate + remember the serving loop, so a reload running
-            # on a worker thread can marshal loop-affine work (preset reconcile,
-            # checkpoint/store close) back onto the serving loop.
+            # Remember the serving loop, so a reload running on a worker thread can
+            # marshal loop-affine work (preset reconcile, checkpoint/store close) back
+            # onto the serving loop.
             self._serving_loop = asyncio.get_running_loop()
-            reload_gate.bind_to_running_loop()
             # The connectors' credential refreshes run as tasks owned by this loop, so a
             # caller that stops waiting (a budget, a cancelled request) never cuts one.
             refresh_owner.bind_to_running_loop()

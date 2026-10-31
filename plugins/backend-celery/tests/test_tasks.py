@@ -253,16 +253,19 @@ def test_callback_task_with_a_transient_error_runs_once_with_the_carried_capabil
     assert attempts == [capability]
 
 
-def test_run_async_counts_the_job_in_the_worker_s_job_slots() -> None:
-    """On a pool that cannot end a job, every task body passes through the slot accounting."""
+def test_run_async_counts_the_job_in_the_worker_s_job_slots_and_holds_the_fork_gate() -> None:
+    """On a pool that cannot end a job, every task body passes through the slot accounting and the fork gate."""
+    from tai42_kit.fork_gate import fork_gate
+
     from tai42_backend_celery.core import job_slots
 
-    job_slots.watch(pool_name="solo", slots=1, budget=0.0, ticks_in_job=False, tick=lambda: None)
+    job_slots.watch(pool_name="solo", in_process=True, budget=0.0, ticks_in_job=False, tick=lambda: None)
 
     async def _coro() -> int:
         await asyncio.sleep(0.01)
         with pytest.raises(RuntimeError, match=rf"on the solo pool, .*: {tool_execution.name} req-1$"):
             job_slots.check_wedged()
+        assert fork_gate.live_spans == 1, "the in-process job does not hold the fork gate"
         return 41
 
     tool_execution.push_request(id="req-1")
@@ -273,3 +276,4 @@ def test_run_async_counts_the_job_in_the_worker_s_job_slots() -> None:
         tool_execution.close_loop()
 
     job_slots.check_wedged()
+    assert fork_gate.live_spans == 0

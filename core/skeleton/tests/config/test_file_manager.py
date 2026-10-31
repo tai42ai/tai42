@@ -25,6 +25,7 @@ from multiprocessing.synchronize import Event
 
 import pytest
 import yaml
+from tai42_kit.process_lock import ProcessLock
 from tests.config._file_manager_children import (
     LockTraffic,
     env_writer,
@@ -1114,7 +1115,8 @@ def test_a_span_exited_on_another_thread_than_entered_it_is_released_for_every_h
     def hold() -> None:
         with FileConfigManager(config_dir_path=str(tmp_path)).exclusive_write():
             entered.set()
-            release.wait(_LOCKED_PHASE_BOUND_S)
+            # The hold spans the taker's start-up as well as its locked phase.
+            release.wait(_START_UP_BOUND_S + _LOCKED_PHASE_BOUND_S)
 
     third = threading.Thread(target=hold)
     third.start()
@@ -1150,7 +1152,7 @@ async def test_a_waiter_cancelled_on_the_span_keeps_the_next_writer_of_its_proce
 
     monkeypatch.setattr(fm, "_acquire_exclusive_record_lock", record_blocking)
     mgr = FileConfigManager(config_dir_path=str(tmp_path))
-    queue = asyncio.Lock()
+    queue = ProcessLock()
 
     @asynccontextmanager
     async def write_exclusion() -> AsyncIterator[None]:

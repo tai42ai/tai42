@@ -16,7 +16,7 @@ from typing import Any
 
 import orjson
 from arq.constants import in_progress_key_prefix
-from arq.jobs import JobStatus, ResultNotFound
+from arq.jobs import Job, JobStatus, ResultNotFound
 from arq.utils import timestamp_ms
 from tai42_contract.app import tai42_app
 from tai42_contract.backend import (
@@ -29,6 +29,7 @@ from tai42_contract.backend import (
     ScheduleRecord,
     ScheduleRowError,
 )
+from tai42_kit.backend.job_context import assert_not_in_job, in_job
 from tai42_kit.utils.runtime.schedule_util import normalize_schedule
 
 from tai42_backend_arq import pool
@@ -118,7 +119,12 @@ async def backend_task_result(task_id: str, timeout: float | None = None) -> Any
     task re-raises the same way, its detail naming the ``CancelledError``). A
     SUCCESSFUL result that could not be JSON-serialized is returned as its
     stored tagged description (type name and ``repr``) instead of the value.
+
+    A job does not wait for another job's result: given a ``timeout`` inside a job, it raises
+    ``RuntimeError`` (a job chains the next one with ``callback_kwargs``).
     """
+    if timeout is not None:
+        assert_not_in_job("backend_task_result")
     async with pool.arq_connection() as arq_redis:
         job = await job_handle(arq_redis, task_id)
         status = await job.status()
@@ -152,46 +158,63 @@ async def backend_cancel_task(task_id: str) -> str:
     a stored failure carrying no revivable detail (arq's last-ditch placeholder
     when even the tagged description could not serialize) stays reported as
     aborted-or-failed, with the raw stored value appended.
+
+    Inside a job it requests the abort and returns without waiting: the outcome it would wait
+    for may be a job queued behind the caller, which does not start while the caller runs. An
+    outcome the task already has is reported as above; an abort with none yet is reported as
+    requested, honored by the worker at pick-up.
     """
     async with pool.arq_connection() as arq_redis:
         job = await job_handle(arq_redis, task_id)
         status = await job.status()
         if status in (JobStatus.not_found, JobStatus.complete):
             return f"Task {task_id} cannot be canceled (status: {status})"
-        try:
-            aborted = await abort_job(job, timeout=arq_settings().task_timeout)
-        except TimeoutError:
-            return f"Task {task_id} abort requested but not confirmed"
-        except Exception:
-            status = await job.status()
-            if status == JobStatus.complete:
-                # Replayed stored outcome of a task that finished during the wait —
-                # not an abort failure. A revived TaskFailedError is the task's own
-                # failure; a failure with no revivable detail leaves abort and
-                # own-failure indistinguishable.
-                info = await job.result_info()
-                if info is not None and not info.success:
-                    detail = _failure_detail(info.result)
-                    if isinstance(info.result, TaskFailedError):
-                        return f"Task {task_id} failed on its own before the abort could take effect: {detail}"
-                    return (
-                        f"Task {task_id} finished in failure after the abort request "
-                        f"(aborted or failed on its own): {detail}"
-                    )
-                return f"Task {task_id} cannot be canceled (status: {status})"
-            if status == JobStatus.not_found:
-                # Vanished between replay and re-check; gone, guaranteed not to run.
-                return f"Task {task_id} cannot be canceled (status: {status})"
-            raise
-        if aborted:
-            # ``Job.abort``'s confirmed-abort verdict (a replayed CancelledError).
-            return f"Task {task_id} aborted"
+        if in_job():
+            unconfirmed = f"Task {task_id} abort requested; the worker honors it at pick-up (not awaited inside a job)"
+            return await _abort(job, task_id, timeout=0, unconfirmed=unconfirmed)
+        unconfirmed = f"Task {task_id} abort requested but not confirmed"
+        return await _abort(job, task_id, timeout=arq_settings().task_timeout, unconfirmed=unconfirmed)
+
+
+async def _abort(job: Job, task_id: str, *, timeout: float, unconfirmed: str) -> str:
+    """Abort ``job``, waiting up to ``timeout`` seconds for its outcome; see ``backend_cancel_task``.
+
+    ``unconfirmed`` is the reply when no outcome arrives within the wait.
+    """
+    try:
+        aborted = await abort_job(job, timeout=timeout)
+    except TimeoutError:
+        return unconfirmed
+    except Exception:
         status = await job.status()
-        if status in (JobStatus.not_found, JobStatus.complete):
-            # abort returned False on a replayed success / no retained result:
-            # the task finished during the wait, nothing left to cancel.
+        if status == JobStatus.complete:
+            # Replayed stored outcome of a task that finished during the wait —
+            # not an abort failure. A revived TaskFailedError is the task's own
+            # failure; a failure with no revivable detail leaves abort and
+            # own-failure indistinguishable.
+            info = await job.result_info()
+            if info is not None and not info.success:
+                detail = _failure_detail(info.result)
+                if isinstance(info.result, TaskFailedError):
+                    return f"Task {task_id} failed on its own before the abort could take effect: {detail}"
+                return (
+                    f"Task {task_id} finished in failure after the abort request "
+                    f"(aborted or failed on its own): {detail}"
+                )
             return f"Task {task_id} cannot be canceled (status: {status})"
-        return f"Task {task_id} abort requested but not confirmed"
+        if status == JobStatus.not_found:
+            # Vanished between replay and re-check; gone, guaranteed not to run.
+            return f"Task {task_id} cannot be canceled (status: {status})"
+        raise
+    if aborted:
+        # ``Job.abort``'s confirmed-abort verdict (a replayed CancelledError).
+        return f"Task {task_id} aborted"
+    status = await job.status()
+    if status in (JobStatus.not_found, JobStatus.complete):
+        # abort returned False on a replayed success / no retained result:
+        # the task finished during the wait, nothing left to cancel.
+        return f"Task {task_id} cannot be canceled (status: {status})"
+    return unconfirmed
 
 
 @tai42_app.tools.tool(tags={"backend"})
