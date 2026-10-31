@@ -27,12 +27,13 @@ async def prepare_manifest_imports(manifest: Manifest) -> InstalledPackages:
 
     Puts the configured plugin prefix on ``sys.path`` (appended at the END, so the
     environment shadows the prefix for anything present in both; a no-op when no prefix is
-    configured), takes one :func:`~tai42_skeleton.marketplace.compat.distribution_map`
-    snapshot after that, and runs two gates on it. Both read the packaged spec of every
-    plugin the deployment loads — the manifest's module imports, its ``studio_plugins``
-    packages and the selected config provider — import-free
-    (:func:`~tai42_skeleton.db.discovery.manifest_plugin_specs`). In the requirement gate a
-    required platform feature that is off or unknown raises
+    configured) and declares the stdio launch (the plugin script locations and what a script
+    launched from the prefix imports, :func:`~tai42_skeleton.marketplace.prefix.activate_prefix`),
+    takes one :func:`~tai42_skeleton.marketplace.compat.distribution_map` snapshot after that,
+    and runs two gates on it. Both read the packaged spec of every plugin the deployment
+    loads — the manifest's module imports, its ``studio_plugins`` packages and the selected
+    config provider — import-free (:func:`~tai42_skeleton.db.discovery.manifest_plugin_specs`).
+    In the requirement gate a required platform feature that is off or unknown raises
     :class:`~tai42_skeleton.marketplace.compat.CorePluginBootError`
     (:func:`~tai42_skeleton.app.lifecycle.plugin_requirements.refuse_unmet_plugin_requirements`).
     The schema gate (:func:`~tai42_skeleton.db.boot_gate.assert_deployment_schemas_applied`)

@@ -10,6 +10,7 @@ from tai42_contract.manifest import TaiMCPConfig
 from tai42_kit.transport.http_uds_transport import HTTPUDSTransport
 from tai42_kit.transport.mcp_http import mcp_http_client
 from tai42_kit.transport.sse_uds_transport import SSEUDSTransport
+from tai42_kit.transport.stdio_launch import resolve_stdio_command, stdio_child_env
 
 
 def get_mcp_transport(
@@ -23,7 +24,12 @@ def get_mcp_transport(
     any other value raises. A URL server gets fastmcp's SSE or streamable-http
     transport, chosen by fastmcp's own URL inference, carrying only the config's
     headers and built on :func:`mcp_http_client`; it ignores ``uds_protocol``. A
-    command server returns a plain fastmcp dict-config.
+    command server returns a plain fastmcp dict-config whose ``command`` is the
+    executable :func:`~tai42_kit.transport.stdio_launch.resolve_stdio_command` finds
+    for it (a bare name with no executable match raises) and whose ``env`` is the
+    config's, carrying the import directories of the install location the command was
+    found in, when that location declares any
+    (:func:`~tai42_kit.transport.stdio_launch.stdio_child_env`).
     """
     socket_path = config.config.uds
     if socket_path:  # a truthy ``uds`` marks a UDS server, and this test narrows its type
@@ -38,4 +44,10 @@ def get_mcp_transport(
         if infer_transport_type_from_url(url) == "sse":
             return SSETransport(url, headers=headers, httpx_client_factory=mcp_http_client)
         return StreamableHttpTransport(url, headers=headers, httpx_client_factory=mcp_http_client)
-    return {"mcpServers": {config.title: config.config.model_dump(exclude_none=True)}}
+    server = config.config.model_dump(exclude_none=True)
+    command = config.config.command
+    if command:
+        resolved = resolve_stdio_command(command, config.config.env)
+        server["command"] = resolved.executable
+        server["env"] = stdio_child_env(config.config.env, resolved.import_dirs)
+    return {"mcpServers": {config.title: server}}

@@ -12,6 +12,24 @@ copied into the prefix (only genuinely-new dependencies land there), and boot ad
 the prefix's site directories to the END of ``sys.path`` so the environment shadows
 the prefix for any package present in both.
 
+The console scripts an install writes follow the same split: the environment's scripts
+directory, and the prefix's when one is set. Boot declares both as the kit's stdio launch,
+environment first, the prefix's paired with the prefix's site directories
+(:func:`plugin_script_locations`): a bare stdio MCP command is searched on the entry's own
+``PATH`` when it sets one, then in these directories, then on this process's ``PATH`` when
+the entry sets none; a child launched from the prefix's scripts directory gets the prefix's
+site directories on its ``PYTHONPATH``, and no other child's environment is changed. So a
+plugin whose MCP server is its own console script launches the installed copy wherever the
+install put it, and that copy imports its own package. In that child the prefix PRECEDES
+the environment, the reverse of this process's ``sys.path``: a package present in both
+resolves to the prefix copy there. The install constraint below keeps every package the
+environment held at install time out of the prefix, so that case arises only when the
+environment later gains a distribution the prefix already holds. Nothing removes the prefix
+copy then (a re-install under the constraint leaves it, the environment copy already
+satisfying the constraint), so this process imports the environment copy and the child the
+prefix copy, and an environment package the child imports that needs the newer copy fails
+inside the child, which the server's probe reports.
+
 The dependency rule is enforced by a constraint file: a prefix install passes
 ``pip install --prefix`` a ``--constraint`` file listing every environment
 distribution as ``name==version`` (:func:`environment_constraints`), so pip treats
@@ -40,6 +58,7 @@ from typing import ClassVar
 from packaging.utils import canonicalize_name
 from pydantic_settings import SettingsConfigDict
 from tai42_kit.settings import ReloadClass, TaiBaseSettings, settings_cache
+from tai42_kit.transport import ScriptLocation, StdioLaunch, declare_stdio_launch
 
 from tai42_skeleton.marketplace.errors import PluginPrefixError
 
@@ -91,6 +110,26 @@ def prefix_site_dirs(prefix: str) -> list[str]:
     return dirs
 
 
+def plugin_script_locations(prefix: str | None) -> list[ScriptLocation]:
+    """The directories plugin installs write console scripts to, environment first, with what each script imports.
+
+    The running interpreter environment's scripts directory (where an install with no
+    prefix lands), with no import directories: its interpreter imports its own
+    site-packages. Then, when ``prefix`` is set, the prefix scheme's scripts directory (the
+    one a ``pip install --prefix <prefix>`` populates), paired with
+    :func:`prefix_site_dirs`, which that interpreter does not import on its own; it is left
+    out when it is the environment's own. The environment comes first, the same order
+    :func:`activate_prefix` gives the site directories on ``sys.path``.
+    """
+    environment = sysconfig.get_path("scripts")
+    locations = [ScriptLocation(environment)]
+    if prefix is not None:
+        scripts = sysconfig.get_paths(vars={"base": prefix, "platbase": prefix})["scripts"]
+        if scripts != environment:
+            locations.append(ScriptLocation(scripts, tuple(prefix_site_dirs(prefix))))
+    return locations
+
+
 def ensure_prefix_writable(prefix: str) -> None:
     """Create the prefix's site directories if missing and confirm the prefix is writable, before an install.
 
@@ -110,12 +149,15 @@ def ensure_prefix_writable(prefix: str) -> None:
 
 
 def activate_prefix() -> None:
-    """Put the configured prefix on ``sys.path`` so its plugin distributions import.
+    """Make installed plugins usable: declare the stdio launch and put the configured prefix on ``sys.path``.
 
-    No-op when the prefix is unset. The site directories go at the END of
-    ``sys.path`` so the environment shadows the prefix for any package present in
-    both. Idempotent — safe on every reload. Runs before the manifest modules
-    import at boot.
+    Declares the kit's :class:`~tai42_kit.transport.StdioLaunch` of
+    :func:`plugin_script_locations`: the environment's scripts directory always, the
+    prefix's when one is set, which carries the prefix's site directories as the import
+    directories of a child launched from it. The ``sys.path`` step is a no-op when the
+    prefix is unset; otherwise the site directories go at the END of ``sys.path`` so the
+    environment shadows the prefix for any package present in both. Idempotent — safe on
+    every reload. Runs before the manifest modules import at boot.
 
     An existing directory (even read-only, a prefix of pre-installed plugins on a
     read-only mount) is a no-op to ``mkdir``, so it activates fine. A MISSING prefix
@@ -123,6 +165,7 @@ def activate_prefix() -> None:
     misconfiguration, not a silent empty import path.
     """
     prefix = configured_prefix()
+    declare_stdio_launch(StdioLaunch(tuple(plugin_script_locations(prefix))))
     if prefix is None:
         return
     changed = False

@@ -15,6 +15,13 @@ title prefix. The leg asserts that landed contract:
 * Uninstall unmounts: the projected tool leaves ``/mcp`` + ``/api/tools``, the
   manifest ``mcp`` entry is gone, and the venv distribution is removed.
 
+A second leg installs the same item into a persistent plugin prefix
+(``TAI_PLUGINS_PREFIX``): the console script lands in the prefix's scripts directory,
+which is not on ``PATH`` and whose interpreter does not see the prefix on its own. The
+stdio launch finds the script there and gives the child the prefix on its
+``PYTHONPATH``, so the server goes live at the install's reload and again after a
+serve restart; the uninstall removes the script with the distribution.
+
 This leg requires the marketplace registry's mcp-server ingest branch to be present,
 so the contract-less fixture seeds and its marketplace pin resolves at registry
 install. It is part of the ``TAI_E2E_MARKETPLACE``-gated suite (collected only with
@@ -22,6 +29,9 @@ install. It is part of the ``TAI_E2E_MARKETPLACE``-gated suite (collected only w
 """
 
 from __future__ import annotations
+
+import sysconfig
+from pathlib import Path
 
 import pytest
 
@@ -88,6 +98,26 @@ def _bound_tools(bound: dict[str, list[str]]) -> set[str]:
     return set(bound.get(ETA_MCP_TITLE) or [])
 
 
+# The console script the eta distribution installs (its ``[project.scripts]`` entry).
+_ETA_SCRIPT = "tai-e2e-market-eta-mcp"
+_ETA_DIST = "tai_e2e_market_eta"
+
+
+def _stack_prefix(stack: TaiStack) -> Path:
+    """The stack's persistent plugin prefix (``TAI_PLUGINS_PREFIX``)."""
+    return Path(stack.config.env["TAI_PLUGINS_PREFIX"])
+
+
+def _prefix_eta_dist_present(prefix: Path) -> bool:
+    """Whether the eta distribution's ``.dist-info`` is installed under ``prefix``, read from disk."""
+    return any(list(site.glob(f"{_ETA_DIST}-*.dist-info")) for site in prefix.glob("lib/python*/site-packages"))
+
+
+def _prefix_eta_script(prefix: Path) -> Path:
+    """Where ``pip install --prefix`` writes the eta console script."""
+    return Path(sysconfig.get_paths(vars={"base": str(prefix), "platbase": str(prefix)})["scripts"]) / _ETA_SCRIPT
+
+
 @pytest.mark.needs("mutable", "setting:PIP_INDEX_URL", "setting:shared-venv", "setting:fixture-plugin:eta", "files")
 async def test_install_go_live_and_uninstall_mcp_server(
     marketplace_service: MarketplaceService,
@@ -133,6 +163,59 @@ async def test_install_go_live_and_uninstall_mcp_server(
     await uninstall_and_assert_clean(
         stack, ETA_REF, package=ETA_PACKAGE, tool_name=ETA_MCP_TOOL, mcp_title=ETA_MCP_TITLE
     )
+
+
+@pytest.mark.needs(
+    "mutable", "process", "setting:PIP_INDEX_URL", "setting:TAI_PLUGINS_PREFIX", "setting:fixture-plugin:eta", "files"
+)
+async def test_prefix_install_mcp_server_goes_live_and_survives_a_restart(
+    marketplace_service: MarketplaceService,
+    package_index: FixturePackageIndex,
+    fixture_artifacts: FixtureArtifacts,
+    marketplace_prefix_stack: TaiStack,
+) -> None:
+    stack = marketplace_prefix_stack
+    prefix = _stack_prefix(stack)
+
+    await seed_eta_listing(marketplace_service, package_index, fixture_artifacts)
+
+    # Precondition (negative first): no mcp entry, nothing in the prefix, and the
+    # distribution is not in the venv.
+    assert ETA_MCP_TITLE not in manifest_mcp_titles(stack)
+    assert not _prefix_eta_dist_present(prefix)
+    assert not _prefix_eta_script(prefix).exists()
+    assert distribution_absent(ETA_PACKAGE)
+
+    await stack.api().post("/api/marketplace/install", json={"ref": ETA_REF, "version": "0.1.0"})
+
+    # The install landed IN THE PREFIX: the manifest carries the mcp entry, the
+    # distribution and its console script are on disk under the prefix, and the
+    # harness venv still cannot resolve the distribution.
+    assert ETA_MCP_TITLE in manifest_mcp_titles(stack), (
+        f"install did not append the manifest mcp entry {ETA_MCP_TITLE!r}"
+    )
+    assert _prefix_eta_dist_present(prefix)
+    assert _prefix_eta_script(prefix).is_file()
+    assert distribution_absent(ETA_PACKAGE)
+
+    # Go-live at the install's reload: the console script launched from the prefix
+    # imports its package and its tool answers over the product's own ``/mcp``.
+    await _wait_mcp_server_live(stack)
+
+    # A real serve-process restart: the cold boot launches the prefix script again.
+    stack.restart("serve")
+    await _wait_mcp_server_live(stack)
+    status = await stack.api().get("/api/mcp-status")
+    failed_titles = {row["title"] for row in (status.get("failed") or [])}
+    assert ETA_MCP_TITLE not in failed_titles, f"mcp server {ETA_MCP_TITLE!r} is in the failed list: {status!r}"
+
+    # Uninstall unmounts and removes the plugin's files from the prefix by its RECORD,
+    # the console script included.
+    await uninstall_and_assert_clean(
+        stack, ETA_REF, package=ETA_PACKAGE, tool_name=ETA_MCP_TOOL, mcp_title=ETA_MCP_TITLE
+    )
+    assert not _prefix_eta_dist_present(prefix)
+    assert not _prefix_eta_script(prefix).exists()
 
 
 async def test_eta_preview_reports_no_required_env_and_package_delivery(

@@ -1,7 +1,8 @@
 """get_mcp_transport: a URL server gets fastmcp's HTTP or SSE transport built on the
 kit's MCP HTTP client; a UDS server gets the transport for the selected wire protocol;
-a command server gets fastmcp's dict config. Every kit-built MCP HTTP client keeps its
-idle connections for ``MCP_CLIENT_KEEPALIVE_EXPIRY_SECONDS``."""
+a command server gets fastmcp's dict config carrying its resolved command and child env.
+Every kit-built MCP HTTP client keeps its idle connections for
+``MCP_CLIENT_KEEPALIVE_EXPIRY_SECONDS``."""
 
 from typing import Any
 
@@ -76,7 +77,9 @@ def test_an_invalid_url_raises():
 
 
 def test_command_server_returns_dict_config():
-    cfg = TaiMCPConfig(title="srv", config=MCPConfig(command="run-server", args=["--stdio"]))
+    # A command with a directory part launches as given (bare-name resolution is
+    # covered in test_stdio_launch.py).
+    cfg = TaiMCPConfig(title="srv", config=MCPConfig(command="/opt/tools/run-server", args=["--stdio"]))
     transport = get_mcp_transport(cfg)
     assert transport == {"mcpServers": {"srv": cfg.config.model_dump(exclude_none=True)}}
 
