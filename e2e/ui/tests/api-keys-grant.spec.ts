@@ -26,16 +26,7 @@ async function memberUserId(request: APIRequestContext, sessionToken: string): P
 /** Mint a key owned by `ownerUserId` as the root admin and return the key's id. */
 async function mintKeyOwnedBy(request: APIRequestContext, ownerUserId: string): Promise<string> {
   const keyId = uniq('member-key');
-  const res = await request.post('/api/auth/api-keys', {
-    headers: apiHeaders(),
-    data: {
-      user_id: keyId,
-      description: 'e2e member-owned key',
-      scopes: ['studio'],
-      owner_user_id: ownerUserId,
-    },
-  });
-  expect(res.status(), await res.text()).toBe(200);
+  await mintKey(request, { userId: keyId, ownerUserId, description: 'e2e member-owned key' });
   return keyId;
 }
 
@@ -63,14 +54,20 @@ for (const role of ['editor', 'viewer'] as const) {
   });
 }
 
-test('api keys (owned key): no mint grant, the status line stands in for Create key', async ({
-  page,
-  request,
-}) => {
-  const ownedKey = await mintKey(request, { userId: uniq('owned'), scopes: ['studio'] });
+// The owned key must be non-admin yet reach the Studio, so it holds the `studio` scope the
+// built stack's route table maps every authed `/api` route to.
+test.describe('an owned key', () => {
+  needs('kind:identity', 'kind:accounts', 'mutable', 'setting:seeded-access-control');
 
-  await openApiKeysTab(page, ownedKey);
+  test('api keys (owned key): no mint grant, the status line stands in for Create key', async ({
+    page,
+    request,
+  }) => {
+    const ownedKey = await mintKey(request, { userId: uniq('owned'), scopes: ['studio'] });
 
-  await expect(page.getByRole('status').filter({ hasText: 'Your access does not permit minting keys.' })).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Create key' })).toHaveCount(0);
+    await openApiKeysTab(page, ownedKey);
+
+    await expect(page.getByRole('status').filter({ hasText: 'Your access does not permit minting keys.' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Create key' })).toHaveCount(0);
+  });
 });

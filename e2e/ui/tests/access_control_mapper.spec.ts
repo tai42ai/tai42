@@ -17,10 +17,10 @@
  * absent `read_only` as `false`).
  */
 import { expect } from '@playwright/test';
-import { apiHeaders, seedCredential, uniq } from './helpers';
+import { apiHeaders, mintKey, seedCredential, uniq } from './helpers';
 import { needs, test } from './needs';
 
-needs('kind:identity', 'mutable');
+needs('kind:identity', 'mutable', 'setting:seeded-access-control');
 
 test('map /api/templates to a new scope; UI + API + AND-across-tiers enforcement', async ({ page, request }) => {
   const scope = uniq('scope');
@@ -53,12 +53,11 @@ test('map /api/templates to a new scope; UI + API + AND-across-tiers enforcement
 
   // Enforcement with a SECOND, disposable key (never touch the root wildcard key).
   const userId = uniq('user');
-  const mintRes = await request.post('/api/auth/api-keys', {
-    headers: apiHeaders(),
-    data: { user_id: userId, description: 'e2e disposable enforcement key', scopes: ['studio'] },
+  const disposableKey = await mintKey(request, {
+    userId,
+    scopes: ['studio'],
+    description: 'e2e disposable enforcement key',
   });
-  expect(mintRes.status(), await mintRes.text()).toBe(200);
-  const disposableKey = ((await mintRes.json()) as { data: { api_key: string } }).data.api_key;
 
   // It passes the blanket `/api` pattern (studio) but lacks the mapper scope → 403.
   const denied = await request.get(route, { headers: { 'x-api-key': disposableKey } });

@@ -1028,6 +1028,9 @@ jobs:
       - name: Install the ui/ workspace
         working-directory: e2e/ui
         run: pnpm install --frozen-lockfile
+      - name: Type-check the ui/ workspace
+        working-directory: e2e/ui
+        run: pnpm typecheck
       - name: Install the browser engine
         # Only this leg's engine, with its system libraries (--with-deps; the CI
         # runner is root). The cross-viewport / a11y sweeps are chromium-only via

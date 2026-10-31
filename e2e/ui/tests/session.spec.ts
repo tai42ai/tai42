@@ -6,7 +6,7 @@
  * key is used so the shared stack's root key is never revoked.
  */
 import { expect } from '@playwright/test';
-import { apiHeaders, loginViaUi, uniq } from './helpers';
+import { loginViaUi, mintKey, revokeKey, uniq } from './helpers';
 import { needs, test } from './needs';
 
 needs('kind:identity');
@@ -17,20 +17,18 @@ test('a revoked session bounces to /login?redirect on the next navigation', asyn
 }) => {
   const userId = uniq('user');
 
-  // Mint a disposable full-scope key and sign in with it through the real screen.
-  const mint = await request.post('/api/auth/api-keys', {
-    headers: apiHeaders(),
-    data: { user_id: userId, description: 'e2e session-expiry disposable key', scopes: ['studio'] },
-  });
-  expect(mint.status(), await mint.text()).toBe(200);
-  const disposableKey = ((await mint.json()) as { data: { api_key: string } }).data.api_key;
+  // Mint a disposable key holding the login key's own scopes and sign in with it through
+  // the real screen.
+  const disposableKey = await mintKey(request, { userId, description: 'e2e session-expiry disposable key' });
 
-  await loginViaUi(page, disposableKey);
-  await expect(page).toHaveURL(/\/observability/);
-
-  // Revoke the key server-side — the session's credential is now invalid.
-  const revoke = await request.delete(`/api/auth/api-keys/${userId}`, { headers: apiHeaders() });
-  expect(revoke.status(), await revoke.text()).toBe(200);
+  // The key holds the login key's own scopes, so it is revoked even when signing in fails.
+  try {
+    await loginViaUi(page, disposableKey);
+    await expect(page).toHaveURL(/\/observability/);
+  } finally {
+    // Revoke the key server-side — the session's credential is now invalid.
+    await revokeKey(request, userId);
+  }
 
   // API: the revoked key is denied over the same origin.
   const denied = await request.get('/api/tools', { headers: { 'x-api-key': disposableKey } });

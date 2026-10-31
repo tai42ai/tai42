@@ -34,7 +34,15 @@ import {
 } from './helpers';
 import { needs, test } from './needs';
 
-needs('kind:identity', 'kind:accounts', 'kind:interactions', 'probe-tools', 'mutable', 'setting:tool:ask');
+needs(
+  'kind:identity',
+  'kind:accounts',
+  'kind:interactions',
+  'probe-tools',
+  'mutable',
+  'setting:tool:ask',
+  'setting:seeded-access-control',
+);
 
 /** The sessionStorage key `useAuth` persists a REMEMBERED credential under; a claim
  * login is `remember=false`, so it must stay empty (the token lives in memory only). */
