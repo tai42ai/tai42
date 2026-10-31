@@ -27,10 +27,10 @@ dependencies = [
     # The pure interface contract these tools register through — the tai42_app
     # handle and the tool facet.
     # The contract floor is rewritten by scripts/range_sync.py at release.
-    "tai42-contract>=28.1,<29",
+    "tai42-contract>=28.2,<29",
     # Leaf helpers: settings machinery (TaiBaseSettings / settings_cache) and the
     # curl client the Graph REST module wires to.
-    "tai42-kit[curl]>=16.0,<17",
+    "tai42-kit[curl]>=16.1,<17",
     # Imported directly in the settings class: field/secret modelling.
     "pydantic>=2.12",
     "pydantic-settings>=2.15.0",
