@@ -1,5 +1,6 @@
 """The plugin prefix: settings, the sys.path activation (env-wins ordering + loud
-failures), the write pre-flight, and the RECORD-based prefix uninstall.
+failures), the stdio launch it declares, the write pre-flight, and the RECORD-based
+prefix uninstall.
 
 Every seam here is exercised against a real temp directory — a hand-built
 ``.dist-info`` + ``RECORD`` for the uninstall path, real ``sys.path`` mutation for
@@ -9,11 +10,22 @@ real, never mocked away.
 
 from __future__ import annotations
 
+import subprocess
 import sys
 import sysconfig
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from mcp.client.stdio import get_default_environment
+from tai42_contract.manifest import MCPConfig, TaiMCPConfig
+from tai42_kit.transport import (
+    ScriptLocation,
+    StdioLaunch,
+    declare_stdio_launch,
+    declared_stdio_launch,
+    get_mcp_transport,
+)
 
 from tai42_skeleton.marketplace import prefix as prefix_module
 from tai42_skeleton.marketplace.errors import PluginPrefixError
@@ -24,10 +36,20 @@ from tai42_skeleton.marketplace.prefix import (
     ensure_prefix_writable,
     environment_constraints,
     environment_distribution_version,
+    plugin_script_locations,
     prefix_has_distribution,
     prefix_site_dirs,
     uninstall_from_prefix,
 )
+
+
+@pytest.fixture(autouse=True)
+def _restore_stdio_launch() -> Iterator[None]:
+    """Each activation's stdio launch declaration is undone after the test."""
+    declared = declared_stdio_launch()
+    yield
+    declare_stdio_launch(declared)
+
 
 # -- settings ----------------------------------------------------------------
 
@@ -116,6 +138,154 @@ def test_activate_prefix_missing_and_uncreatable_raises_loudly(monkeypatch: pyte
             activate_prefix()
     finally:
         sys.path[:] = orig
+
+
+# -- activation: the stdio launch -------------------------------------------
+
+
+def _write_console_script(directory: str, name: str) -> Path:
+    """Write an executable stand-in for a console script into ``directory``."""
+    Path(directory).mkdir(parents=True, exist_ok=True)
+    script = Path(directory) / name
+    script.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    script.chmod(0o755)
+    return script
+
+
+def _stdio_server(command: str) -> dict[str, object]:
+    """The dict config the stdio MCP transport for a bare ``command`` server launches."""
+    config = TaiMCPConfig(title="srv", config=MCPConfig(command=command, args=["--stdio"]))
+    transport = get_mcp_transport(config)
+    assert isinstance(transport, dict)
+    return transport["mcpServers"]["srv"]
+
+
+def _stdio_command(command: str) -> str:
+    """The command the stdio MCP transport for a bare ``command`` server launches."""
+    resolved = _stdio_server(command)["command"]
+    assert isinstance(resolved, str)
+    return resolved
+
+
+def test_activate_prefix_declares_the_prefix_scripts_and_site_dirs_as_the_stdio_launch(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    prefix = str(tmp_path / "pfx")
+    monkeypatch.setattr(prefix_module, "configured_prefix", lambda: prefix)
+    prefix_scripts = sysconfig.get_paths(vars={"base": prefix, "platbase": prefix})["scripts"]
+    orig = list(sys.path)
+    try:
+        activate_prefix()
+        assert declared_stdio_launch() == StdioLaunch(
+            (
+                ScriptLocation(sysconfig.get_path("scripts")),
+                ScriptLocation(prefix_scripts, tuple(prefix_site_dirs(prefix))),
+            )
+        )
+        assert list(declared_stdio_launch().locations) == plugin_script_locations(prefix)
+    finally:
+        sys.path[:] = orig
+
+
+def test_without_a_prefix_activation_declares_the_environment_scripts_dir_and_no_import_dirs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(prefix_module, "configured_prefix", lambda: None)
+    activate_prefix()
+    assert declared_stdio_launch() == StdioLaunch((ScriptLocation(sysconfig.get_path("scripts")),))
+
+
+def test_an_activated_prefix_launches_the_console_script_installed_in_its_bin(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # A marketplace install into the prefix puts the plugin's console script in the
+    # prefix's scripts dir, which is not on PATH: the stdio launch finds it there.
+    prefix = str(tmp_path / "pfx")
+    monkeypatch.setattr(prefix_module, "configured_prefix", lambda: prefix)
+    script = _write_console_script(sysconfig.get_paths(vars={"base": prefix, "platbase": prefix})["scripts"], "pfx-srv")
+    orig = list(sys.path)
+    try:
+        activate_prefix()
+        assert _stdio_command("pfx-srv") == str(script)
+    finally:
+        sys.path[:] = orig
+
+
+def test_without_a_prefix_the_stdio_launch_searches_the_interpreter_scripts_dir_first(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # With no prefix, installs land in the running interpreter's environment: its
+    # scripts dir is searched before PATH, even when PATH does not carry it.
+    monkeypatch.setattr(prefix_module, "configured_prefix", lambda: None)
+    monkeypatch.setenv("PATH", "/nonexistent-dir")
+    scripts = sysconfig.get_path("scripts")
+    activate_prefix()
+    assert _stdio_command(Path(sys.executable).name) == str(Path(scripts) / Path(sys.executable).name)
+
+
+def test_an_activated_prefix_launches_its_console_script_with_the_prefix_importable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The layout ``pip install --prefix`` writes: the plugin package under the prefix's
+    # site dir and its console script in the prefix's scripts dir, with this interpreter
+    # as its shebang. The launched child imports the package from the prefix.
+    prefix = str(tmp_path / "pfx")
+    monkeypatch.setattr(prefix_module, "configured_prefix", lambda: prefix)
+    package = Path(prefix_site_dirs(prefix)[0]) / "prefix_launch_probe"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("print(__file__)\n", encoding="utf-8")
+    scripts = Path(sysconfig.get_paths(vars={"base": prefix, "platbase": prefix})["scripts"])
+    scripts.mkdir(parents=True)
+    script = scripts / "prefix-launch-probe"
+    script.write_text(f"#!{sys.executable}\nimport prefix_launch_probe\n", encoding="utf-8")
+    script.chmod(0o755)
+    orig = list(sys.path)
+    try:
+        activate_prefix()
+        server = _stdio_server("prefix-launch-probe")
+    finally:
+        sys.path[:] = orig
+    command, env = server["command"], server["env"]
+    assert isinstance(command, str)
+    assert isinstance(env, dict)
+
+    launched = subprocess.run(
+        [command], env={**get_default_environment(), **env}, capture_output=True, text=True, check=False
+    )
+
+    assert launched.returncode == 0, launched.stderr
+    assert str(package) in launched.stdout
+
+
+def test_an_entry_path_names_the_executable_the_child_runs(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # A bare ``python`` on the entry's own PATH is that PATH's interpreter, not the
+    # environment's scripts dir copy.
+    monkeypatch.setattr(prefix_module, "configured_prefix", lambda: None)
+    other = _write_console_script(str(tmp_path / "other" / "bin"), Path(sys.executable).name)
+    activate_prefix()
+    config = TaiMCPConfig(
+        title="srv", config=MCPConfig(command=other.name, args=["server.py"], env={"PATH": str(other.parent)})
+    )
+    transport = get_mcp_transport(config)
+    assert isinstance(transport, dict)
+    assert transport["mcpServers"]["srv"]["command"] == str(other)
+
+
+def test_a_script_in_the_environment_scripts_dir_launches_without_the_prefix_on_its_pythonpath(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    prefix = str(tmp_path / "pfx")
+    monkeypatch.setattr(prefix_module, "configured_prefix", lambda: prefix)
+    orig = list(sys.path)
+    try:
+        activate_prefix()
+        server = _stdio_server(Path(sys.executable).name)
+    finally:
+        sys.path[:] = orig
+    env = server["env"]
+    assert isinstance(env, dict)
+    assert server["command"] == str(Path(sysconfig.get_path("scripts")) / Path(sys.executable).name)
+    assert "PYTHONPATH" not in env
 
 
 # -- install write pre-flight ------------------------------------------------

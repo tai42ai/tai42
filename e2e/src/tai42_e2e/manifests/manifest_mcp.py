@@ -6,7 +6,6 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from tai42_e2e.binaries import venv_console_script
 from tai42_e2e.manifests.feature_env import _base_env, _pg_env
 from tai42_e2e.manifests.tool_entries import (
     _CORE_ROUTERS,
@@ -53,13 +52,14 @@ def build_postgres_mcp_stack(res: StackResources, variants: Variants) -> StackCo
     ``tai42-mcp-dynamic-postgres`` mounted as a product-level external MCP.
 
     The manifest's single ``mcp`` entry launches the ``tai42-mcp-dynamic-postgres`` console script
-    over stdio (``command`` = the absolute console-script path, so no PATH is needed in the
-    child's launch env). The child is a DYNAMIC/codegen MCP: at startup it introspects the
-    connected schema and generates per-table CRUD tools (``<verb>_<schema>_<table>``), which
-    the app's boot-time MCP loader binds onto this server's MCP surface under the ``postgres``
-    title prefix — so a test lists them over the server's own ``/mcp`` and drives one query
-    round trip through the product. The ``postgres_mcp_stack`` fixture seeds a known probe
-    table into the clone BEFORE boot so those tools exist to be discovered.
+    over stdio by its bare name: the launch resolves it in the interpreter environment's scripts
+    directory, where the venv's install put it. The child is a DYNAMIC/codegen MCP: at startup it
+    introspects the connected schema and generates per-table CRUD tools
+    (``<verb>_<schema>_<table>``), which the app's boot-time MCP loader binds onto this server's
+    MCP surface under the ``postgres`` title prefix — so a test lists them over the server's own
+    ``/mcp`` and drives one query round trip through the product. The ``postgres_mcp_stack``
+    fixture seeds a known probe table into the clone BEFORE boot so those tools exist to be
+    discovered.
 
     The connection targets this stack's own isolated per-run Postgres clone (the same database
     the feature stores use), reached over TCP at the harness pg host/port. It is passed via the
@@ -88,7 +88,7 @@ def build_postgres_mcp_stack(res: StackResources, variants: Variants) -> StackCo
                 "title": POSTGRES_MCP_TITLE,
                 "config": {
                     "type": "stdio",
-                    "command": venv_console_script("tai42-mcp-dynamic-postgres"),
+                    "command": "tai42-mcp-dynamic-postgres",
                     "env": child_env,
                 },
             }
