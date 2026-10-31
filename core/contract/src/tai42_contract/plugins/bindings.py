@@ -51,8 +51,8 @@ class ManifestBinding(BaseModel):
     - ``scalar_module`` — set a single-module slot; the slot holds ONE module,
       so a second plugin claiming an occupied slot is a conflict the caller
       must reject loudly.
-    - ``package_list`` — append the plugin's DISTRIBUTION name (not the item's
-      module) to a package list (``studio_plugins``).
+    - ``package_list`` — append the item's module, the import package that ships
+      the Studio dist, to a package list (``studio_plugins``).
     - ``mcp_entry`` — append one ``{title: item.name, config: item.mcp}`` object
       to the manifest ``mcp`` list; uninstall removes the entry by title.
     - ``descriptor_entry`` — append the item's ``provider`` descriptor to the

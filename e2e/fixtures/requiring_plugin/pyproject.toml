@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tai-e2e-requiresprobe"
+version = "0.0.0"
+description = "Installable fixture plugin whose spec requires the versioning platform feature."
+requires-python = ">=3.13"
+license = "Apache-2.0"
+dependencies = [
+    "tai42-contract",
+]
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["tai_e2e_requiresprobe*"]
+
+[tool.setuptools.package-data]
+tai_e2e_requiresprobe = ["tai-plugin.yml"]

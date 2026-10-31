@@ -49,15 +49,16 @@ async def _deployment(manifest_path: str | None) -> AsyncIterator[None]:
     reads its census on the running loop, the same loop the re-mint runs on), then runs the
     preflight a server boot runs (:func:`~tai42_skeleton.app.lifecycle.manifest_imports.prepare_manifest_imports`):
     the configured plugin prefix goes on ``sys.path`` so a prefix-installed lifecycle module
-    imports, and the schema gate refuses an out-of-date database with the ``tai db migrate``
-    fix before any provider reads a table. It then binds the process app onto ``tai42_app``
-    and imports each named lifecycle module under the plugin-compat refusal — the side effect
-    that registers the identity/accounts providers this command re-mints through. A lifecycle
-    module may register on an app facet at import (``tai42_app.webhook_verifiers``, …), so the
-    imports run under the binding, and the block that re-mints runs under it too. The binding
-    is restored on exit. A schema-gate refusal or an incompatible lifecycle plugin is a
-    :class:`click.ClickException` carrying its message; a failing import raises loudly,
-    aborting the command.
+    imports, a loaded plugin whose required platform feature is off is refused, and the schema
+    gate refuses an out-of-date database with the ``tai db migrate`` fix before any provider
+    reads a table. It then binds the process app onto ``tai42_app`` and imports each named
+    lifecycle module under the plugin-compat refusal — the side effect that registers the
+    identity/accounts providers this command re-mints through. A lifecycle module may register
+    on an app facet at import (``tai42_app.webhook_verifiers``, …), so the imports run under
+    the binding, and the block that re-mints runs under it too. The binding is restored on
+    exit. A schema-gate refusal, an unmet plugin requirement or an incompatible lifecycle
+    plugin is a :class:`click.ClickException` carrying its message; a failing import raises
+    loudly, aborting the command.
     """
     resolved = manifest_path or default_manifest_path()
     if resolved is None:

@@ -2,7 +2,7 @@
 
 Every epoch build (process boot and every reload) asserts, before any manifest module
 imports, that every migration chain the deployment depends on is fully applied: the
-skeleton chain, the ``states`` chain, and the chain each plugin the manifest loads declares.
+skeleton chain, the ``states`` chain, and the chain each plugin the deployment loads declares.
 A pending migration or a checksum mismatch is one loud refusal naming every stale chain and
 ``tai db migrate``, never a half-migrated serve. Each chain is read on its component's OWN
 runtime store connection (the runner grants ``SELECT`` on ``tai_schema_history`` to
@@ -88,7 +88,7 @@ def _platform_entries() -> list[MigrationEntry]:
 
 
 def _loaded_plugin_entries(manifest: Manifest, installed: InstalledPackages) -> list[MigrationEntry]:
-    """The chain of every plugin ``manifest`` loads, on each component's runtime store.
+    """The chain of every plugin a deployment of ``manifest`` loads, on each component's runtime store.
 
     A plugin declaring no chain contributes nothing. A chain under the distribution's own
     identity is checked when that component's database is configured. A
@@ -117,8 +117,8 @@ def _loaded_plugin_entries(manifest: Manifest, installed: InstalledPackages) -> 
 async def assert_deployment_schemas_applied(manifest: Manifest, installed: InstalledPackages) -> None:
     """Epoch-build gate: assert every chain the deployment of ``manifest`` depends on is applied.
 
-    The platform chains (skeleton, ``states``) and the chain of every plugin ``manifest``
-    loads, checked together so one :class:`SchemaOutOfDateError` names every stale chain.
+    The platform chains (skeleton, ``states``) and the chain of every plugin a deployment of
+    ``manifest`` loads, checked together so one :class:`SchemaOutOfDateError` names every stale chain.
     ``installed`` is the :func:`~tai42_skeleton.marketplace.compat.distribution_map` snapshot
     the build takes after the plugins prefix is on ``sys.path``. Run in ``BootMixin.start()``
     before any store read and before any manifest module imports, so a pending chain refuses

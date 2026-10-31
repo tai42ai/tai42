@@ -48,11 +48,12 @@ class BootMixin(LifecycleState):
         # start()/app_context binds, so building a throwaway app can't hijack it.
         tai42_app.bind(self)
         # Before any store read of the build and before any manifest module imports: put
-        # the plugins prefix on ``sys.path`` and gate the schema — a pending or diverged
-        # chain refuses with the ``tai db migrate`` fix named, rather than failing deeper on
-        # a missing table. A chain whose component database is not configured is not
-        # checked, so an all-off deployment is a no-op. The returned package→dist snapshot
-        # serves every compat verdict of the build.
+        # the plugins prefix on ``sys.path``, refuse a loaded plugin whose required platform
+        # feature is off, and gate the schema — a pending or diverged chain refuses with the
+        # ``tai db migrate`` fix named, rather than failing deeper on a missing table. A
+        # chain whose component database is not configured is not checked, so an all-off
+        # deployment is a no-op. The returned package→dist snapshot serves every compat
+        # verdict of the build.
         installed = run_blocking(lambda: prepare_manifest_imports(manifest))
         self._manifest = manifest
         self._failed_mcps = {}

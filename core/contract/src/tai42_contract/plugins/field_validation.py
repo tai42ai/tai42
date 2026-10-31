@@ -1,8 +1,8 @@
 """Reusable manifest scalar-field shape validators shared by the item and spec models.
 
 The regex constants for a listing's slug/package/tag/name/module/license/icon/migrations
-shapes, the display-name cap, and the pure control-char / one-line / tag checks that guard
-them. A cohesive set of field-shape rules, not a dumping ground.
+and required-feature shapes, the display-name cap, and the pure control-char / one-line /
+tag checks that guard them. A cohesive set of field-shape rules, not a dumping ground.
 """
 
 from __future__ import annotations
@@ -49,6 +49,11 @@ ICON_RE = re.compile(r"^[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$")
 # concern (``importlib.resources``), never a contract concern — ``PluginSpec``
 # is also hydrated from stored DB rows and can touch no filesystem.
 MIGRATIONS_DIR_RE = re.compile(r"^[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$")
+
+# A required platform feature's kind name: lowercase snake_case. Whether the name is a
+# feature the running platform knows is decided where the platform's features live (the
+# boot-time requirement check), never by the contract.
+FEATURE_KIND_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 
 # Longest single-line UI title accepted for ``display_name`` — a listing card's
 # title stays bounded.

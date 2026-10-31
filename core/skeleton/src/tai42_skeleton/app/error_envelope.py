@@ -67,11 +67,12 @@ async def core_plugin_boot_error_handler(request: Request, exc: Exception) -> Re
     """Surface a manifest plugin that could not load during a live rebuild, verbatim.
 
     A reload door drives an epoch rebuild; a manifest-declared module that is incompatible
-    or fails to import aborts THAT rebuild, the previous generation keeps serving, and the
-    failure must reach the caller instead of the generic masked 500. The message is
-    operator-facing by construction — it names the module, its kind, the versions in play,
-    and the remedy, with no host/path/stack detail — so it is surfaced as the shared
-    ``{"error": ...}`` envelope. The status is 500: the reload did not apply.
+    or fails to import, or a loaded plugin that requires a platform feature that is off,
+    aborts THAT rebuild, the previous generation keeps serving, and the failure must reach
+    the caller instead of the generic masked 500. The message is operator-facing by
+    construction — it names what cannot load, why, and the remedy, with no host/path/stack
+    detail — so it is surfaced as the shared ``{"error": ...}`` envelope. The status is 500:
+    the reload did not apply.
     """
     return JSONResponse({"error": str(exc)}, status_code=500)
 

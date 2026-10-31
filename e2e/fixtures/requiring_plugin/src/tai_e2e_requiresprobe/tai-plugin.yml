@@ -1,0 +1,15 @@
+spec_version: 1
+namespace: tai42
+name: e2e-requiresprobe
+package: tai-e2e-requiresprobe
+version: 0.0.0
+description: "Installable fixture plugin whose spec requires the versioning platform feature."
+license: Apache-2.0
+contract: ">=0.1,<1000"
+categories: [dev]
+requires: [versioning]
+provides:
+  - kind: tool
+    name: e2e_requiresprobe_ping
+    module: tai_e2e_requiresprobe.tools
+    description: "Answer a fixed reply."

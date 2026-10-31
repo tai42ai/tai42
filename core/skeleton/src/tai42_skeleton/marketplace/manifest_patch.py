@@ -26,8 +26,8 @@ The six patch shapes:
   because the catch-all matches every path and a router registered after it
   serves nothing. The catch-all's last position is a skeleton serving fact, not a
   contract rule; the contract binding stays a plain ``module_list``.
-- ``package_list`` (``studio_plugins``) — the plugin's DISTRIBUTION name (not the
-  item's module) appended to a package-name list.
+- ``package_list`` (``studio_plugins``) — the item's module, the import package that
+  ships the Studio dist, appended to a package-name list.
 - ``mcp_entry`` (``mcp``) — a ``{title: item.name, config: item.mcp}`` object
   appended to the manifest ``mcp`` list (an mcp-server item carries transport
   config in ``item.mcp`` and NO module, so the payload is built from
@@ -103,15 +103,13 @@ def _data_item_payload(item: PluginItem, mode: str) -> dict[str, Any]:
     return item.provider.model_dump(mode="json", exclude_none=True)
 
 
-def _string_item_value(item: PluginItem, spec: PluginSpec, mode: str) -> str | None:
+def _string_item_value(item: PluginItem, mode: str) -> str | None:
     """The manifest string a non-data item contributes.
 
-    The plugin's DISTRIBUTION name for a ``package_list`` slot, the module's TOP-LEVEL import
-    package for a ``scalar_module`` slot (never the descriptor's impl submodule, so the loader
-    whitelists every module under the package root), else the item's own module.
+    The module's TOP-LEVEL import package for a ``scalar_module`` slot (never the descriptor's
+    impl submodule, so the loader whitelists every module under the package root), else the
+    item's own module.
     """
-    if mode == "package_list":
-        return spec.package
     if mode == "scalar_module":
         if item.module is None:
             raise AssertionError
@@ -129,8 +127,7 @@ def _grouped_targets(spec: PluginSpec) -> dict[str, _FieldTargets]:
 
     Every ``env_selected`` (``config``) item is skipped — it has no manifest
     field. Values are de-duplicated per field: multiple items sharing a module
-    (or, for ``package_list``, the single distribution name) collapse to one
-    entry; a ``data`` item is deduped by its identifying key. An item kind with no
+    collapse to one entry; a ``data`` item is deduped by its identifying key. An item kind with no
     binding raises :class:`ManifestBindingError`.
     """
     grouped: dict[str, _FieldTargets] = {}
@@ -150,7 +147,7 @@ def _grouped_targets(spec: PluginSpec) -> dict[str, _FieldTargets]:
             if not any(existing[key] == payload[key] for existing in target.values):
                 target.values.append(payload)
         else:
-            value = _string_item_value(item, spec, binding.mode)
+            value = _string_item_value(item, binding.mode)
             if value not in target.values:
                 target.values.append(value)
     return grouped

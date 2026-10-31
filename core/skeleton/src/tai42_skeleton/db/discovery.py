@@ -18,7 +18,7 @@ One resolution, :func:`plugin_chain`, serves both consumers; only the connection
 differs. ``tai db migrate`` runs each entry under the migrator (DDL-privileged) identity of
 the database its component is bound to (:func:`~tai42_kit.db.component_migrator_settings`).
 The boot-time schema gate (:mod:`tai42_skeleton.db.boot_gate`) checks the chains of the
-plugins the manifest loads (:func:`manifest_plugin_specs`) on each component's runtime store
+plugins a deployment of the manifest loads (:func:`manifest_plugin_specs`) on each component's runtime store
 identity (:func:`~tai42_kit.db.component_store_settings`); every one of those is installed,
 and migrate resolves those same plugins through the same function, so migrate has applied
 each chain boot verifies.
@@ -233,9 +233,7 @@ def _manifest_loaded_modules(manifest: Manifest) -> list[str]:
     channel, the effective router set, middleware), the four scalar slots
     (backend/sandbox/storage/monitoring), the extension modules, the tool modules, and
     each agent's module. ``connectors`` (pure data, no import path), ``mcp`` servers, and
-    ``api_tools`` are not module imports and are not included. So the distributions resolved
-    from it are exactly the ones the booted deployment imports, and the ones whose chains the
-    boot-time schema gate checks.
+    ``api_tools`` are not module imports and are not included.
     """
     from tai42_skeleton.app.route_defaults import effective_router_modules
 
@@ -256,6 +254,23 @@ def _manifest_loaded_modules(manifest: Manifest) -> list[str]:
         *(cfg.module for cfg in manifest.tools),
         *(cfg.module for cfg in manifest.agents),
     ]
+
+
+def _deployment_top_levels(manifest: Manifest) -> list[str]:
+    """Every top-level import package a deployment of ``manifest`` loads, each once, in first-seen order.
+
+    The top-level package of each module the component importer loads
+    (:func:`_manifest_loaded_modules`), each package ``studio_plugins`` names (the Studio-plugin
+    registry serves its dist from that package), and the config provider ``TAI_CONFIG_MODE``
+    selects (:func:`~tai42_skeleton.config.factory.provider_module`). The config provider is
+    imported before any manifest is read, because the manifest is read through it; every other
+    package here imports after the epoch build's preflight.
+    """
+    from tai42_skeleton.config.config_mode import config_mode
+    from tai42_skeleton.config.factory import provider_module
+
+    modules = [*_manifest_loaded_modules(manifest), *manifest.studio_plugins, provider_module(config_mode())]
+    return list(dict.fromkeys(module.partition(".")[0] for module in modules))
 
 
 def _distributions_for_top_level(top_level: str, installed: InstalledPackages) -> list[str]:
@@ -361,13 +376,14 @@ def _top_level_spec(top_level: str, installed: InstalledPackages) -> LocatedSpec
 
 
 def manifest_plugin_specs(manifest: Manifest, installed: InstalledPackages) -> dict[str, LocatedSpec]:
-    """The located spec of every plugin distribution ``manifest`` loads, keyed by normalized distribution name.
+    """The located spec of every plugin a deployment of ``manifest`` loads, keyed by normalized distribution name.
 
-    Each module the component importer loads (:func:`_manifest_loaded_modules`) is mapped
+    Each top-level package the deployment loads (:func:`_deployment_top_levels`: the manifest's
+    module imports, its ``studio_plugins`` packages and the selected config provider) is mapped
     import-free to the spec its distribution packages and the directory holding it
     (:func:`_top_level_spec`); the spec is resolved once per top-level import package, so
-    several modules of one plugin collapse onto its one distribution. A module that ships no
-    spec (an operator-authored module) contributes nothing. A top-level package whose
+    several modules of one plugin collapse onto its one distribution. A package that ships no
+    spec (an operator-authored module, the built-in config provider) contributes nothing. A top-level package whose
     distribution the contract-compat check judges incompatible is not read: the component
     importer refuses that plugin with its compat reason before it loads, and a plugin built
     against another contract may package a spec this one cannot parse. ``installed`` is the
@@ -376,13 +392,12 @@ def manifest_plugin_specs(manifest: Manifest, installed: InstalledPackages) -> d
     """
     from tai42_skeleton.marketplace.compat import module_compat
 
-    top_levels = dict.fromkeys(module.partition(".")[0] for module in _manifest_loaded_modules(manifest))
     specs: dict[str, LocatedSpec] = {}
-    for top_level in top_levels:
+    for top_level in _deployment_top_levels(manifest):
         if module_compat(top_level, installed).status == "incompatible":
             logger.info(
-                "schema gate: %r belongs to a contract-incompatible plugin; its spec is not read — the plugin is "
-                "refused when it loads",
+                "plugin specs: %r belongs to a contract-incompatible plugin; its spec is not read — the plugin "
+                "is refused when it loads",
                 top_level,
             )
             continue

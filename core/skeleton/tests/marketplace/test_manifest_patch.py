@@ -131,12 +131,13 @@ def test_apply_webhook_verifier_appends_to_its_module_list() -> None:
     assert manifest["webhook_verifier_modules"] == ["pkg.wv"]
 
 
-def test_apply_studio_plugin_appends_the_package_name_not_the_module() -> None:
-    spec = make_spec(package="tai-studio-ext", provides=[_item("studio-plugin", "sp", "pkg.studio.entry")])
+def test_apply_studio_plugin_appends_the_import_package_the_registry_serves() -> None:
+    spec = make_spec(package="tai-studio-ext", provides=[_item("studio-plugin", "sp", "tai_studio_ext")])
     manifest: dict = {}
     apply_provides(manifest, spec)
-    # package_list stores the DISTRIBUTION name, never the item's module.
-    assert manifest["studio_plugins"] == ["tai-studio-ext"]
+    # The Studio-plugin registry reads each entry as the import package holding the ``studio/``
+    # dist, so the entry is the item's module, never the hyphenated distribution name.
+    assert manifest["studio_plugins"] == ["tai_studio_ext"]
 
 
 def test_apply_scalar_backend_sets_the_slot_to_the_package_root() -> None:
