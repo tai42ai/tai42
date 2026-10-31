@@ -46,6 +46,17 @@ def test_render_table_aligns_columns_and_strips_controls() -> None:
     assert "12" in lines[3]
 
 
+def test_render_table_keeps_words_apart_across_line_breaks() -> None:
+    records = [{"name": "echo", "description": "Return it unchanged, the default subject for extension\n\tattachment."}]
+    table = render.render_table(records, ["name", "description"])
+
+    # A cell stays on one table line: each whitespace run, line breaks and tabs included,
+    # reads as one space, so the words on either side of a break stay apart.
+    lines = table.splitlines()
+    assert len(lines) == 3
+    assert "subject for extension attachment." in lines[2]
+
+
 def test_print_records_json_output_emits_json_list(capsys: pytest.CaptureFixture[str]) -> None:
     records = [{"name": "a"}, {"name": "b"}]
     render.print_records(records, ["name"], json_output=True)

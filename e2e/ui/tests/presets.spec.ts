@@ -153,6 +153,12 @@ test('the base-tool picker narrows its tools to the search and picks the match',
   );
   await expect(options).toHaveCount(0);
 
+  // A search for words of the tool's declared description, which no tool name holds, finds
+  // it too: every match is e2e_echo or a branch of it carrying its description.
+  await search.fill('subject for extension');
+  await expect(page.getByRole('option', { name: /^e2e_echo$/ })).toBeVisible();
+  for (const label of await options.allTextContents()) expect(label).toContain('e2e_echo');
+
   // A search for the tool keeps only the options that contain it.
   await search.fill('e2e_echo');
   await expect(options.first()).toBeVisible();

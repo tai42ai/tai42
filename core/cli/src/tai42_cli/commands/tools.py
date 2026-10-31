@@ -73,7 +73,7 @@ def list_tools(ctx: typer.Context) -> None:
 @app.command("tags")
 @covers(("GET", "/api/tools/tags"))
 def tool_tags(ctx: typer.Context) -> None:
-    """List each tool's native tags.
+    """List each tool's description, native tags, visibility and badges.
 
     Example: ``tai tools tags``
     """

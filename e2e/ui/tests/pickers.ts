@@ -5,9 +5,10 @@
  * The picker's trigger is a `combobox` named by its field label. Opening it moves focus
  * into a search box (a second `combobox`, named by the picker's search label, e.g.
  * "Search tools") over a `listbox` that carries the field's name; typing narrows the
- * options to those whose label contains the text, and a click on an option chooses it
- * and closes the popup. The popup is portaled to the page body, so the search box and
- * the options are found on the page, not inside the dialog the trigger sits in.
+ * options to those whose label or description contains the text, ignoring case, and a
+ * click on an option chooses it and closes the popup. The popup is portaled to the page
+ * body, so the search box and the options are found on the page, not inside the dialog
+ * the trigger sits in.
  */
 import { expect, type Locator, type Page } from '@playwright/test';
 
@@ -50,4 +51,17 @@ export async function searchAndPick(
 /** Choose `tool` in the tool picker behind `trigger` by searching for its name. */
 export async function pickTool(page: Page, trigger: Locator, tool: string): Promise<void> {
   await searchAndPick(page, trigger, 'Search tools', tool, toolOptionName(tool));
+}
+
+/**
+ * Choose `tool` in the tool picker behind `trigger` by searching for `words` of its
+ * declared description.
+ */
+export async function pickToolByDescription(
+  page: Page,
+  trigger: Locator,
+  tool: string,
+  words: string,
+): Promise<void> {
+  await searchAndPick(page, trigger, 'Search tools', words, toolOptionName(tool));
 }

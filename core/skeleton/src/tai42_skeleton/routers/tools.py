@@ -3,7 +3,7 @@
 Thin adapters over operations in ``tai42_skeleton.operations.tools``, all AUTHED:
 
 * ``GET /api/tools`` — the sorted list of registered tool names.
-* ``GET /api/tools/tags`` — the per-tool native-``tags`` map.
+* ``GET /api/tools/tags`` — the per-tool description, native-``tags``, visibility and badges map.
 * ``GET /api/tools/{tool_name}/schema`` — one tool's input/output JSON schema.
 * ``GET /api/tools-schema`` — the same schema view for every registered tool.
 * ``POST /api/run-tool`` — execute an arbitrary registered tool with REAL side

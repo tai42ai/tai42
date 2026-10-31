@@ -7,14 +7,16 @@ from tai42_contract.interactions import RunAnswer
 
 
 class ToolTagRow(BaseModel):
-    """One tool's declared tags, visibility, and capability badges.
+    """One tool's declared description, tags, visibility, and capability badges.
 
+    ``description`` is the tool's own declaration, null when the tool declares none.
     ``hidden`` and ``badges`` are the tool's OWN declaration (before the tool_meta overlay's override).
     ``schedulable`` is whether the tool's schedule vehicle is registered (the scheduling backend's
     ``schedule_task`` extension is attached to it).
     """
 
     name: str
+    description: str | None
     tags: list[str]
     hidden: bool
     badges: list[str]

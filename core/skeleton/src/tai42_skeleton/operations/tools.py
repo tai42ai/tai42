@@ -5,7 +5,7 @@ Also exposes the live app-management tools (run, reload, and remove a tool).
 Reads:
 
 * ``list_tools`` — the sorted registered tool names.
-* ``tool_tags`` — the per-tool native-``tags`` map plus plugin-declared visibility.
+* ``tool_tags`` — the per-tool description, native tags, visibility and badges.
 * ``tool_schema`` — one tool's input/output/description (unknown name → 404).
 * ``tools_schema`` — the same schema view for every tool, keyed by name.
 
@@ -135,15 +135,16 @@ async def list_tools() -> list[str]:
 
 
 @operation(
-    summary="List each tool's native tags, declared visibility, and badges",
+    summary="List each tool's description, native tags, declared visibility, and badges",
     tags=["tools"],
     response_model=ToolTagListResponse,
 )
 async def tool_tags() -> list[dict]:
-    """The per-tool native-``tags`` map plus the plugin-declared visibility and capability badges.
+    """The per-tool description and native ``tags`` plus the plugin-declared visibility and capability badges.
 
-    One ``{name, tags, hidden, badges, schedulable}`` entry per registered tool, ``tags`` and ``badges`` each
-    sorted for a stable wire order. ``hidden`` is the tool's OWN declaration, read from the
+    One ``{name, description, tags, hidden, badges, schedulable}`` entry per registered tool, ``tags`` and
+    ``badges`` each sorted for a stable wire order. ``description`` is the tool's own declared description
+    (null when it declares none). ``hidden`` is the tool's OWN declaration, read from the
     FastMCP ``meta`` under ``TOOL_META_HIDDEN`` (a tool that never declared it is
     not hidden); ``badges`` is likewise the tool's OWN declared INFORMATIONAL capability badges,
     read from ``meta`` under ``TOOL_META_BADGES`` (a tool that declared none carries an empty list).
@@ -156,6 +157,7 @@ async def tool_tags() -> list[dict]:
     return [
         {
             "name": name,
+            "description": tool.description,
             "tags": sorted(tool.tags),
             "hidden": (tool.meta or {}).get(TOOL_META_HIDDEN) is True,
             "badges": sorted((tool.meta or {}).get(TOOL_META_BADGES) or []),

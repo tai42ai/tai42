@@ -439,11 +439,24 @@ def test_unauthenticated_surfaces_clear_message(monkeypatch: pytest.MonkeyPatch)
 def test_tools_tags_renders(monkeypatch: pytest.MonkeyPatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/api/tools/tags"
-        return data_response([{"name": "add", "tags": ["math"]}])
+        return data_response(
+            [
+                {
+                    "name": "add",
+                    "description": "Adds two numbers",
+                    "tags": ["math"],
+                    "hidden": False,
+                    "badges": [],
+                    "schedulable": False,
+                }
+            ]
+        )
 
     result = run_cli(monkeypatch, handler, ["tools", "tags"])
     assert result.exit_code == 0, result.output
     assert "add" in result.output
+    assert "description" in result.output
+    assert "Adds two numbers" in result.output
     assert "math" in result.output
 
 
