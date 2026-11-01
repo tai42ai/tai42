@@ -140,10 +140,13 @@ class AppAdmin(Protocol):
         ...
 
     async def advertised_mcp_tools(self, title: str) -> list[dict[str, Any]]:
-        """List every tool the live MCP server titled ``title`` advertises, before the manifest's selection.
+        """List every tool in the listing this worker bound MCP server ``title`` from, before the manifest's selection.
 
         Each row says why a selected tool is not bound (``unbound_reason``, from the binder's records).
-        Raises ``LookupError`` for a title not in the live manifest.
+        Answers from the listing held since the bind and never starts the server. Raises ``LookupError``
+        for a title not in the live manifest, and
+        :class:`~tai42_contract.manifest.errors.McpListingUnavailableError` when this worker holds no
+        listing for the title.
         """
         ...
 

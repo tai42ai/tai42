@@ -98,22 +98,27 @@ class AdminFacet(_Facet):
     async def reprobe_failed_mcps(self, titles: list[str]) -> list[dict[str, Any]]:
         """Re-probe those of ``titles`` that failed to load, bind the recovered ones, and report each outcome.
 
-        Probes off the reload gate on the cold-boot probe budget and takes the gate only to bind.
+        Probes off the reload gate, waiting the whole start budget, and takes the gate only to bind.
         """
         return await self._app._reprobe_failed_titles(titles)
 
     async def advertised_mcp_tools(self, title: str) -> list[dict[str, Any]]:
-        """List every tool the live MCP server ``title`` advertises, before the manifest's selection.
+        """List every tool in the listing this worker bound MCP server ``title`` from, before the selection.
 
-        Each row says why a selected tool is not bound on this worker (``unbound_reason``).
-        Raises ``LookupError`` for a title not in the live manifest.
+        Each row says why a selected tool is not bound on this worker (``unbound_reason``). Never
+        starts the server. Raises ``LookupError`` for a title not in the live manifest, and
+        :class:`~tai42_contract.manifest.errors.McpListingUnavailableError` when this worker holds no
+        listing for the title.
         """
         return await self._app._advertised_mcp_tools(title)
 
     async def served_mcp_names(self, config: TaiMCPConfig) -> list[str]:
-        """The names the binder would bind from the listing of ``config``'s server, before the selection.
+        """The names the binder would bind from the listing this worker bound ``config``'s server from.
 
-        A listed tool whose input schema cannot be adapted is not served; a probe failure raises.
+        Read before the selection; a listed tool whose input schema cannot be adapted is not served.
+        Never starts the server; raises
+        :class:`~tai42_contract.manifest.errors.McpListingUnavailableError` when this worker holds no
+        listing for the title.
         """
         return await self._app._served_mcp_names(config)
 

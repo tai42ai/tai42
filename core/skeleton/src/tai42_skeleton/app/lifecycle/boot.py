@@ -56,8 +56,13 @@ class BootMixin(LifecycleState):
         # verdict of the build.
         installed = run_blocking(lambda: prepare_manifest_imports(manifest))
         self._manifest = manifest
+        # Every per-title MCP record restarts empty, so this start's binds and failures are
+        # the only ones the generation reports.
         self._failed_mcps = {}
         self._mcp_bound_tools = {}
+        self._mcp_listed_tools = {}
+        self._mcp_preset_conflicts = {}
+        self._mcp_unusable_tools = {}
         self._mcp_credential_demanded = set()
         self._reset_declaration_registries()
 

@@ -185,14 +185,14 @@ _ADVERTISED_COLUMNS = ["name", "selected", "bound", "unbound_reason", "descripti
 
 
 @app.command("tools")
-@covers(("POST", "/api/mcp-status/{title}/advertised-tools"))
+@covers(("GET", "/api/mcp-status/{title}/advertised-tools"))
 def list_mcp_advertised_tools(
     ctx: typer.Context,
     title: Annotated[str, typer.Argument(help="MCP server title.")],
 ) -> None:
-    """List every tool an MCP server advertises, with whether the entry picks it and whether it is bound.
+    """List every tool an MCP server advertised at its bind, with whether the entry picks it and whether it is bound.
 
-    The server is probed live with its stored credential, so this is a write-tier call.
+    The answering worker reads the listing it bound the server from; it never starts the server.
     Each row gives the tool's served name, whether the entry's selection picks it, whether
     it is bound, why a picked tool is not bound, and its description. A name the entry's
     selection lists that the server no longer advertises follows as a "not advertised" row.
@@ -201,7 +201,7 @@ def list_mcp_advertised_tools(
     """
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
-        data = client.post(f"/api/mcp-status/{seg(title)}/advertised-tools")
+        data = client.get(f"/api/mcp-status/{seg(title)}/advertised-tools")
     if ctx_obj.json_output:
         print_json(data)
         return

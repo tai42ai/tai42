@@ -17,6 +17,7 @@ import { parse } from 'yaml';
 export const DECLARED_NEEDS: Readonly<Record<string, string>> = {
   'probe-tools': 'the e2e probe tools are loaded in the stack',
   mutable: 'tests may change stack-wide state',
+  'package-runners': "the stack's servers can launch `uvx` and `npx` packages from the public package indexes",
 };
 
 /** Needs only a stack the run builds itself can meet. */

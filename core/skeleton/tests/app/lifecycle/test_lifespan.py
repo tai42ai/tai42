@@ -1,4 +1,4 @@
-"""Worker lifespan resource teardown and the ``app_context`` startup-failure abort."""
+"""Worker lifespan resource teardown, the ``app_context`` startup-failure abort and the state its exit leaves."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import logging
 import time
 from unittest.mock import AsyncMock, MagicMock
 
+import mcp
 import pytest
 from tai42_contract.connectors.models import AuthHealthState
 from tai42_contract.manifest import MCPConfig, TaiMCPConfig
@@ -72,6 +73,29 @@ def test_app_context_startup_handler_failure_raises(monkeypatch):
 
     with pytest.raises(RuntimeError, match=r"lifecycle handlers failed.*startup boom"):
         asyncio.run(run())
+
+
+def test_the_lifespan_exit_leaves_no_state_of_the_generation_it_served(monkeypatch):
+    from tai42_skeleton.app import instance
+
+    tool = mcp.types.Tool(name="send", inputSchema={"type": "object", "properties": {}})
+    monkeypatch.setattr(instance.app, "_probe_mcp", AsyncMock(return_value=[tool]))
+    manifest = Manifest.model_validate(
+        {"mcp": [{"title": "acme", "include": [], "config": {"type": "http", "url": "http://x/mcp"}}]}
+    )
+
+    async def run():
+        async with instance.app.app_context(manifest):
+            assert instance.app._mcp_bound_tools == {"acme": {"acme_send"}}
+            instance.app._failed_mcps["other"] = {"status": "unavailable", "category": "error", "message": "m"}
+
+    asyncio.run(run())
+
+    # A later reader in this process sees no bound title, listing, record or manifest of that generation.
+    assert instance.app._manifest is None
+    assert instance.app._mcp_bound_tools == {}
+    assert instance.app._mcp_listed_tools == {}
+    assert instance.app._failed_mcps == {}
 
 
 def test_the_lifespan_binds_the_refresh_owner_to_its_serving_loop_and_closes_it_at_shutdown():

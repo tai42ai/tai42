@@ -157,7 +157,7 @@ async def list_failed_mcps(targets: list[str] | None = None) -> Any:
 
     Each entry is ``{"title", "status", "category", "message", "http_status"}`` — the
     title plus the coarse status and a credential-free failure detail (``category`` one
-    of ``preset_store`` / ``auth`` / ``unreachable`` / ``error``, the redacted ``message``, and the
+    of ``preset_store`` / ``auth`` / ``unreachable`` / ``starting`` / ``error``, the redacted ``message``, and the
     ``http_status`` when the failure carried one). A query op rides the same fan-out primitive as a mutation:
     every worker's list arrives as its per-worker ``payload`` in the fleet report
     (this worker's list on its own self entry); ``targets`` optionally restricts the

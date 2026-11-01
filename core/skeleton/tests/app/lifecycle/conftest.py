@@ -1,12 +1,18 @@
-"""Fixtures of the credential-path lifecycle tests: a loopback MCP server, a loopback token endpoint, and the
-managed OAuth connection wired between them under the real resolver (see ``tests.connectors.credential_path``)."""
+"""Fixtures of the lifecycle tests: for the credential path, a loopback MCP server, a loopback token endpoint, and
+the managed OAuth connection wired between them under the real resolver (see ``tests.connectors.credential_path``);
+for the MCP server start tests, a rebuild whose reload wait is far shorter than the start budget."""
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Iterator
+from typing import Any
 
 import pytest
 from tai42_kit.settings import reset_all_settings
+
+from tai42_skeleton.app import lifecycle as lifecycle_module
+from tai42_skeleton.tools import mcp_start
 
 from ...connectors import mcp_fakes
 from ...connectors.credential_path import CredentialPath
@@ -37,3 +43,14 @@ def path(monkeypatch: pytest.MonkeyPatch, mcp_server, oauth_server) -> Iterator[
     yield wiring
     refresh_owner.reset()
     mcp_server.reset()
+
+
+@pytest.fixture
+def short_reload_wait(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """A rebuild in progress whose reload wait (0.1s) is far shorter than the start budget (10s)."""
+    monkeypatch.setenv("TAI_MCP_MCP_PROBE_TIMEOUT", "10")
+    monkeypatch.setenv("TAI_MCP_MCP_RELOAD_PROBE_TIMEOUT", "0.1")
+    reset_all_settings()
+    monkeypatch.setattr(lifecycle_module, "is_epoch_rebuild_in_progress", lambda: True)
+    yield
+    asyncio.run(mcp_start.aclose())

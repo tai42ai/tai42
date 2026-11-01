@@ -433,8 +433,8 @@ def is_epoch_rebuild_in_progress() -> bool:
     True during a RELOAD, and never at cold boot or steady serving.
     (``_building_epoch`` is set only for the span of the build; cold boot
     installs its core through ``install_boot_core`` without it.) Lets a
-    build-time step (the MCP viability probe) pick a short reload budget over the
-    generous cold-boot one, so an unreachable server can't stall a live reload.
+    build-time step (the MCP viability probe) wait the short reload wait instead of
+    the whole start budget, so an unreachable server can't stall a live reload.
     Read safely from the off-loop build worker: it is a GIL-atomic reference read
     of a process global.
     """

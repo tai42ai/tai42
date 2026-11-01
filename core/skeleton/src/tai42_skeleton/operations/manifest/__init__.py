@@ -13,8 +13,8 @@ Reads (each returns its shape directly; the adapter envelopes it):
 * ``get_mcp_status`` — the live MCP binding snapshot.
 * ``list_failed_mcps`` — the MCP servers skipped by the viability check; a query op
   over the bus, so every worker's list arrives as its per-worker report payload.
-* ``list_mcp_advertised_tools`` — probe one live MCP server for every tool it advertises,
-  before the selection (write tier: the probe connects with the stored credential).
+* ``list_mcp_advertised_tools`` — every tool one MCP server advertised at its bind, before the
+  selection, read from the listing the answering worker bound it from; it never starts the server.
 
 Mutations cross the single :class:`~tai42_skeleton.config.service.ConfigService`
 pipeline (validate → persist → local reload → broadcast) or, for pure runtime ops,

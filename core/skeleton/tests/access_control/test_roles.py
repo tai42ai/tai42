@@ -364,7 +364,6 @@ _GRANTABLE_WRITE_DOORS = [
     ("/api/sub-mcp/weather", "DELETE"),
     ("/api/schedules", "POST"),
     ("/api/mcp-status/gh/reload", "POST"),
-    ("/api/mcp-status/acme/advertised-tools", "POST"),
     ("/api/mcp-config/entries/acme/tool-filter", "PUT"),
     ("/api/tools/shout/extensions", "POST"),
     ("/api/tool-meta/tools/shout", "PATCH"),
@@ -388,19 +387,20 @@ async def test_unfenced_write_doors_are_grantable_to_editor(mem: _MemStore, path
     assert allowed is True, f"{method} {path} should be grantable to a seeded editor"
 
 
-@pytest.mark.parametrize(
-    ("path", "method"),
-    [("/api/mcp-status/acme/advertised-tools", "POST"), ("/api/mcp-config/entries/acme/tool-filter", "PUT")],
-)
-async def test_the_mcp_tool_pick_doors_are_refused_to_a_viewer(mem: _MemStore, path, method):
+async def test_the_mcp_tool_pick_write_is_refused_to_a_viewer_who_reads_the_advertised_tools(mem: _MemStore):
     from tai42_skeleton.access_control import role_grants as role_grants_module
-    from tai42_skeleton.access_control.role_gate import reset_route_index
+    from tai42_skeleton.access_control.role_gate import reset_route_index, resolve_route_meta
 
     role_grants_module.reset_role_grants_cache()
     reset_route_index()
     await seed_default_roles()
-    allowed, _cause = await _level_allows("viewer", path, method)
-    assert allowed is False, f"{method} {path} must be refused to a viewer"
+    read = resolve_route_meta("/api/mcp-status/acme/advertised-tools", "GET")
+    assert read is not None
+    assert (read.path, read.methods, read.action) == ("/api/mcp-status/{title}/advertised-tools", ("GET",), "read")
+    allowed, _cause = await _level_allows("viewer", "/api/mcp-status/acme/advertised-tools", "GET")
+    assert allowed is True, "a viewer reads an MCP server's advertised tools"
+    allowed, _cause = await _level_allows("viewer", "/api/mcp-config/entries/acme/tool-filter", "PUT")
+    assert allowed is False, "a viewer must not write an MCP server's tool selection"
 
 
 async def test_supply_chain_read_routes_stay_grantable(mem: _MemStore):

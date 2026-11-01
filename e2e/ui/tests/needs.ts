@@ -11,8 +11,8 @@
  * The vocabulary has three classes, decided by the word before the first `:`:
  * - reported — `kind:<kind>` (that kind is on) and `kind:<kind>:<name>` (and `<name>`
  *   appears in its plugin or detail), read from the target's `/api/system/kinds`;
- * - declared — `probe-tools`, `mutable`: true only when the target file lists it under
- *   `provides`;
+ * - declared — `probe-tools`, `mutable`, `package-runners`: true only when the target
+ *   file lists it under `provides`;
  * - built — `process`, `store`, `files`, `helper`, `setting`, `topology`, `cli`,
  *   `metrics`, `second-stack`, `fixture-page`, `no-stack`: only a stack the run builds
  *   itself has it, so such a test never runs against a target. A qualifier after `:` is

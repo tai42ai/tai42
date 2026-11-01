@@ -56,19 +56,24 @@ class CoreSettings(TaiBaseSettings):
     sandbox_isolation: SandboxIsolation = Field(default="container", json_schema_extra={"reload": "recycle"})
     sandbox_scrub_transcript: bool = Field(default=False, json_schema_extra={"reload": "recycle"})
     sandbox_durable: bool = Field(default=True, json_schema_extra={"reload": "recycle"})
-    # Max seconds to spend on a single MCP server viability check (connect +
-    # list_tools) at COLD BOOT. A server that exceeds this is skipped and
-    # recorded instead of blocking the whole server.
+    # The start budget of an MCP server viability check (connect + list_tools): the
+    # seconds a server start may take before it is torn down, on every door — boot,
+    # reload, the re-probe task, the reload doors and the connector liveness probe.
+    # A start that exceeds it is torn down instead of blocking the whole server.
+    # Boot, a reload, the re-probe task and the reload doors then record the server
+    # unavailable, a start they stopped waiting for through the ``starting`` record
+    # that waits on it; the connector liveness probe reads the server not live and
+    # logs the start's late outcome.
     mcp_probe_timeout: float = 15.0
-    # The same viability check budget during a RELOAD (an epoch rebuild), kept
-    # SHORT and separate from the generous cold-boot value: a reload runs while
-    # the fleet is live and holds the reload gate, so an unreachable MCP server
-    # blocking the probe for the full boot budget would stall every reload-gated
-    # write and fleet-reload convergence. A server that overruns this shorter
-    # budget is recorded unavailable (its tools bind a moment later via the
-    # lifespan re-probe task / the ``reload_failed_mcps`` door, which both probe
-    # off the gate on the cold-boot ``mcp_probe_timeout``) rather than gating the
-    # whole reload — degraded-but-live, never a stalled fleet.
+    # How long a RELOAD (an epoch rebuild) WAITS for a server start, kept SHORT and
+    # separate from the start budget: a reload runs while the fleet is live and holds
+    # the reload gate, so waiting the whole start budget for a slow or unreachable
+    # server would stall every reload-gated write and fleet-reload convergence. It
+    # bounds only the wait and never tears a start down: a start still in progress
+    # when it ends is recorded ``starting``, goes on up to ``mcp_probe_timeout`` and
+    # binds once its start lists its tools — degraded-but-live, never a stalled
+    # fleet. With no serving loop running to apply a late outcome on, the whole
+    # start budget is waited instead.
     mcp_reload_probe_timeout: float = Field(default=3.0, gt=0)
     # The failed-MCP re-probe backoff bounds. The lifespan-owned re-probe task
     # sleeps ``initial`` seconds between passes, doubling up to ``max`` after a

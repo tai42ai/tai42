@@ -12,6 +12,7 @@ import sysconfig
 from pathlib import Path
 
 import pytest
+from fastmcp.client.transports.stdio import StdioTransport
 from mcp.client.stdio import get_default_environment
 from tai42_contract.manifest import MCPConfig, TaiMCPConfig
 
@@ -200,8 +201,9 @@ def test_a_command_found_on_a_path_gets_no_import_dirs(tmp_path: Path, monkeypat
 
     assert resolve_stdio_command("srv", {}) == ResolvedStdioCommand(str(on_path), ())
     transport = get_mcp_transport(TaiMCPConfig(title="srv", config=MCPConfig(command="srv")))
-    assert isinstance(transport, dict)
-    assert "PYTHONPATH" not in transport["mcpServers"]["srv"]["env"]
+    assert isinstance(transport, StdioTransport)
+    assert transport.env is not None
+    assert "PYTHONPATH" not in transport.env
 
 
 def test_a_command_found_in_a_location_without_import_dirs_gets_none(tmp_path: Path):
@@ -211,9 +213,9 @@ def test_a_command_found_in_a_location_without_import_dirs_gets_none(tmp_path: P
 
     transport = get_mcp_transport(cfg)
 
-    assert isinstance(transport, dict)
-    assert transport["mcpServers"]["srv"]["command"] == str(environment)
-    assert transport["mcpServers"]["srv"]["env"] == {"K": "v"}
+    assert isinstance(transport, StdioTransport)
+    assert transport.command == str(environment)
+    assert transport.env == {"K": "v"}
 
 
 def test_a_command_found_on_the_entry_path_runs_without_the_declared_import_dirs(tmp_path: Path):
@@ -238,17 +240,17 @@ def test_a_command_found_on_the_entry_path_runs_without_the_declared_import_dirs
     cfg = TaiMCPConfig(title="srv", config=MCPConfig(command="other-srv", env={"PATH": str(other_bin)}))
 
     transport = get_mcp_transport(cfg)
-    assert isinstance(transport, dict)
-    server = transport["mcpServers"]["srv"]
+    assert isinstance(transport, StdioTransport)
+    assert transport.env is not None
     launched = subprocess.run(
-        [server["command"]],
-        env={**get_default_environment(), **server["env"]},
+        [transport.command],
+        env={**get_default_environment(), **transport.env},
         capture_output=True,
         text=True,
         check=False,
     )
 
-    assert server["env"] == {"PATH": str(other_bin)}
+    assert transport.env == {"PATH": str(other_bin)}
     assert launched.returncode == 0, launched.stderr
     assert str(other_lib) in launched.stdout
 
@@ -293,15 +295,12 @@ def test_the_command_server_transport_carries_the_resolved_command_and_child_env
 
     transport = get_mcp_transport(cfg)
 
-    assert transport == {
-        "mcpServers": {
-            "srv": {
-                **cfg.config.model_dump(exclude_none=True),
-                "command": str(installed),
-                "env": {"K": "v", "PYTHONPATH": "/pfx/site"},
-            }
-        }
-    }
+    assert isinstance(transport, StdioTransport)
+    assert (transport.command, transport.args, transport.env) == (
+        str(installed),
+        ["--stdio"],
+        {"K": "v", "PYTHONPATH": "/pfx/site"},
+    )
 
 
 def test_the_command_server_transport_raises_for_a_command_found_nowhere(
@@ -331,11 +330,11 @@ def test_a_console_script_installed_under_a_declared_prefix_runs_with_its_import
     _declare(ScriptLocation(str(bin_dir), (paths["purelib"],)))
 
     transport = get_mcp_transport(TaiMCPConfig(title="probe", config=MCPConfig(command="launch-probe")))
-    assert isinstance(transport, dict)
-    server = transport["mcpServers"]["probe"]
+    assert isinstance(transport, StdioTransport)
+    assert transport.env is not None
     launched = subprocess.run(
-        [server["command"]],
-        env={**get_default_environment(), **server["env"]},
+        [transport.command],
+        env={**get_default_environment(), **transport.env},
         capture_output=True,
         text=True,
         check=False,

@@ -67,7 +67,9 @@ class FailedMcp(BaseModel):
 
     ``category`` is the coarse, credential-free cause (``preset_store`` when the preset
     store could not be read while the server's tools were being bound, ``auth`` for a
-    401/403, ``unreachable`` for a transport error or timeout, ``error`` otherwise); ``message``
+    401/403, ``unreachable`` for a transport error or a start that outran the start budget,
+    ``starting`` for a start still in progress when the caller stopped waiting (it binds on
+    completion), ``error`` otherwise); ``message``
     is the redacted exception message (URL-embedded credentials stripped); ``http_status``
     is the HTTP status the failure carried, or ``null`` for a pure transport failure.
     """
@@ -105,11 +107,14 @@ class McpStatusSnapshot(BaseModel):
 
 
 class McpAdvertisedTool(BaseModel):
-    """One tool an MCP server advertises.
+    """One tool an MCP server advertised at its bind on the answering worker.
 
     ``name`` is its served name and ``title``/``description`` the server's; ``selected`` says whether the
     entry's selection admits it, ``bound`` whether the live binding carries it, and ``unbound_reason`` why a
-    selected tool is not bound (``None`` otherwise).
+    selected tool is not bound (``None`` otherwise): a preset owns its name (``preset_conflict``), its
+    input schema cannot be adapted (``unusable_schema``), or no bind of the server has applied the entry's
+    current selection to it yet (``pending_bind``): a bind is in progress, or the entry was re-read after the
+    server's bind and the server's next reload binds it.
     """
 
     name: str
@@ -117,9 +122,7 @@ class McpAdvertisedTool(BaseModel):
     description: str | None
     selected: bool
     bound: bool
-    unbound_reason: (
-        Literal["server_failed", "not_loaded", "preset_conflict", "unusable_schema", "not_listed_at_bind"] | None
-    )
+    unbound_reason: Literal["preset_conflict", "unusable_schema", "pending_bind"] | None
 
 
 class McpAdvertisedTools(BaseModel):

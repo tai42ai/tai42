@@ -6,8 +6,9 @@ Two layers:
   controllable clock (an instance ``_reprobe_sleep`` seam) and a scripted
   ``_probe_and_apply_failed``, proving: a recovering title gets its tools bound
   and leaves the failed set (real reload path); the interval doubles per
-  all-failed pass and caps at the max, resetting on recovery; an empty failed set
-  probes nothing; the failed-set snapshot is taken under the reload gate; the
+  all-failed pass and caps at the max, resetting on recovery, and a pass that
+  probed nothing leaves it alone; an empty failed set probes nothing; the
+  failed-set snapshot is taken under the reload gate; the
   probe runs OFF the gate so a reload-gated write is not blocked mid-probe; a
   per-pass error is logged at ERROR and the loop survives; and the shutdown cancel
   swallows a non-``CancelledError`` failure (already surfaced by the done-callback)
@@ -33,7 +34,7 @@ from tai42_skeleton.app.instance import app
 from tai42_skeleton.app.lifecycle import TaiMCPLifecycleMixin, lifespan
 from tai42_skeleton.app.reload_gate import reload_gate
 from tai42_skeleton.manifest import Manifest
-from tai42_skeleton.settings.cache import mcp_probe_timeout, mcp_reload_probe_timeout
+from tai42_skeleton.tools.mcp_start import McpStartPending, StartId
 
 
 def _row(category: str = "error", message: str = "", http_status: int | None = None) -> dict:
@@ -143,7 +144,7 @@ async def test_recovering_title_binds_tools_and_leaves_failed_set(monkeypatch):
 
 async def test_backoff_doubles_caps_and_resets_on_recovery(monkeypatch):
     m = _Mixin()
-    m._manifest = Manifest.model_validate({})
+    m._manifest = Manifest.model_validate({"mcp": [_cfg("a").model_dump()]})
     m._failed_mcps = {"a": _row()}
     monkeypatch.setattr("tai42_skeleton.app.lifecycle.CoreSettings", _settings(1.0, 8.0))
 
@@ -182,7 +183,7 @@ async def test_backoff_doubles_caps_and_resets_on_recovery(monkeypatch):
 
 async def test_new_failed_title_resets_backoff(monkeypatch):
     m = _Mixin()
-    m._manifest = Manifest.model_validate({})
+    m._manifest = Manifest.model_validate({"mcp": [_cfg("a").model_dump(), _cfg("b").model_dump()]})
     m._failed_mcps = {"a": _row()}
     monkeypatch.setattr("tai42_skeleton.app.lifecycle.CoreSettings", _settings(1.0, 8.0))
 
@@ -213,6 +214,42 @@ async def test_new_failed_title_resets_backoff(monkeypatch):
     assert intervals == [1.0, 2.0, 4.0, 8.0, 1.0]
 
 
+# -- a pass that probes nothing leaves the backoff alone ----------------------
+
+
+async def test_a_pass_that_probes_nothing_leaves_the_backoff_alone(monkeypatch):
+    """A failed server whose start is in progress is not probed, so its passes do not grow the interval; once
+    the start fails, its first re-probe comes on the initial interval and the interval doubles from there."""
+    m = _Mixin()
+    m._manifest = Manifest.model_validate({"mcp": [_cfg("a").model_dump()]})
+    m._record_failed_mcp(_cfg("a"), McpStartPending("a", 3.0, 15.0, start=StartId()))
+    monkeypatch.setattr("tai42_skeleton.app.lifecycle.CoreSettings", _settings(1.0, 8.0))
+    probed: list[list[str]] = []
+
+    async def fake_probe_apply(snapshot):
+        probed.append(sorted(snapshot))
+        return [{"title": t, "status": "unavailable"} for t in snapshot], set(m._failed_mcps)
+
+    m._probe_and_apply_failed = fake_probe_apply  # type: ignore[method-assign]
+    intervals: list[float] = []
+
+    async def fake_sleep(seconds):
+        intervals.append(seconds)
+        # The start fails after the third pass.
+        if len(intervals) == 4:
+            m._record_failed_mcp(_cfg("a"), ConnectionError("down"))
+        if len(intervals) >= 6:
+            raise _Stop
+
+    m._reprobe_sleep = fake_sleep  # type: ignore[method-assign]
+
+    with pytest.raises(_Stop):
+        await m._reprobe_failed_mcps_loop()
+
+    assert probed == [[], [], [], ["a"], ["a"]]
+    assert intervals == [1.0, 1.0, 1.0, 1.0, 2.0, 4.0]
+
+
 # -- the failed-set snapshot is taken under the reload gate lock ---------------
 
 
@@ -222,10 +259,10 @@ async def test_reprobe_snapshots_failed_set_under_the_gate_lock(monkeypatch, cap
     dict mid-snapshot — the dictionary-changed-size race the lock removes.
 
     Asserts on the value the pass ACTUALLY snapshotted (the ``probed=`` set it logs,
-    taken from ``current_failed`` under the lock), so moving the snapshot OUT of the
-    lock would capture only the pre-mutation set and fail this test."""
+    taken under the lock), so moving the snapshot OUT of the lock would capture only
+    the pre-mutation set and fail this test."""
     m = _Mixin()
-    m._manifest = Manifest.model_validate({})
+    m._manifest = Manifest.model_validate({"mcp": [_cfg(t).model_dump() for t in ("a", "b")]})
     m._failed_mcps = {"a": _row()}
     monkeypatch.setattr("tai42_skeleton.app.lifecycle.CoreSettings", _settings(1.0, 8.0))
 
@@ -321,8 +358,8 @@ async def test_in_flight_probe_does_not_block_gated_writes(monkeypatch):
     release = asyncio.Event()
     seen: dict[str, Any] = {}
 
-    async def parked_probe(_config, timeout=None):
-        seen["timeout"] = timeout
+    async def parked_probe(_config, *, wait=None):
+        seen["wait"] = wait
         probing.set()
         await release.wait()  # stay mid-probe until the test lets go
         raise TimeoutError("never recovers")
@@ -353,10 +390,8 @@ async def test_in_flight_probe_does_not_block_gated_writes(monkeypatch):
 
         assert await asyncio.wait_for(gated_write(), timeout=1) == "ok"
         assert not reload_gate.locked  # nothing holds the gate during the probe
-        # The probe holds nothing, so it runs on the cold-boot bound: a server whose start
-        # outlasts the short reload budget still binds through the re-probe.
-        assert seen["timeout"] == mcp_probe_timeout()
-        assert seen["timeout"] != mcp_reload_probe_timeout()
+        # The probe holds nothing, so it waits the whole start budget (no shorter wait is passed).
+        assert seen["wait"] is None
     finally:
         release.set()
         await asyncio.sleep(0)  # let the pass finish and release the gate
@@ -549,7 +584,7 @@ async def test_reprobe_failed_titles_probes_only_the_named_failed_titles_in_the_
     m._failed_mcps = {"up": _row(), "down": _row(), "other": _row(), "gone": _row()}
     probed: list[str] = []
 
-    async def probe(config, timeout=None):
+    async def probe(config, *, wait=None):
         probed.append(config.title)
         if config.title == "down":
             raise TimeoutError("still down")
@@ -575,7 +610,7 @@ async def test_reprobe_failed_titles_with_no_failed_title_probes_nothing():
     m._probe_mcp.assert_not_awaited()
 
 
-async def test_reprobe_failed_titles_probes_off_the_gate_on_the_cold_boot_budget():
+async def test_reprobe_failed_titles_probes_off_the_gate_on_the_whole_start_budget():
     """The named re-probe holds the reload gate only to snapshot and apply, never across the probe."""
     m = _Mixin()
     m._manifest = Manifest.model_validate({"mcp": [_cfg("svc").model_dump()]})
@@ -584,8 +619,8 @@ async def test_reprobe_failed_titles_probes_off_the_gate_on_the_cold_boot_budget
     release = asyncio.Event()
     seen: dict[str, Any] = {}
 
-    async def parked_probe(_config, timeout=None):
-        seen["timeout"] = timeout
+    async def parked_probe(_config, *, wait=None):
+        seen["wait"] = wait
         probing.set()
         await release.wait()
         return [_FakeMcpTool()]
@@ -601,8 +636,7 @@ async def test_reprobe_failed_titles_probes_off_the_gate_on_the_cold_boot_budget
                 return "ok"
 
         assert await asyncio.wait_for(gated_write(), timeout=1) == "ok"
-        assert seen["timeout"] == mcp_probe_timeout()
-        assert seen["timeout"] != mcp_reload_probe_timeout()
+        assert seen["wait"] is None  # the whole start budget
     finally:
         release.set()
     assert [r["status"] for r in await task] == ["ok"]
@@ -619,7 +653,7 @@ async def test_reprobe_failed_titles_leaves_the_loop_backoff_alone(monkeypatch):
     loop_probed: list[list[str]] = []
     up: set[str] = set()
 
-    async def probe(config, timeout=None):
+    async def probe(config, *, wait=None):
         if config.title not in up:
             raise TimeoutError("down")
         return [_FakeMcpTool()]
@@ -649,3 +683,108 @@ async def test_reprobe_failed_titles_leaves_the_loop_backoff_alone(monkeypatch):
 
     assert loop_probed == [["a"], ["a"]]
     assert intervals == [1.0, 2.0, 4.0, 8.0]
+
+
+# -- one apply seam: the loop, the reload-failed door and a late start bind through it -------------
+
+
+async def test_a_reprobe_result_for_a_title_whose_config_changed_while_probing_is_not_applied():
+    """The snapshot's config is what was probed; an entry edited meanwhile is not bound with the old listing."""
+    m = _Mixin()
+    edited = TaiMCPConfig(title="svc", include=[], config=MCPConfig(type="http", url="http://y/mcp"))
+    m._manifest = Manifest.model_validate({"mcp": [edited.model_dump()]})
+    m._failed_mcps = {"svc": _row()}
+    m._probe_mcp = AsyncMock(return_value=[_FakeMcpTool()])
+
+    results, still_failed = await m._probe_and_apply_failed({"svc": _cfg("svc")})
+
+    assert results == []
+    assert still_failed == {"svc"}
+    assert "svc" not in m._mcp_bound_tools
+
+
+async def test_a_reprobe_result_for_a_title_cleared_while_probing_is_not_applied_and_says_so(caplog):
+    m = _Mixin()
+    m._manifest = Manifest.model_validate({"mcp": [_cfg("svc").model_dump()]})
+    m._failed_mcps = {"svc": _row()}
+
+    def clear_while_probing(_config):
+        m._failed_mcps.pop("svc")
+        return [_FakeMcpTool()]
+
+    m._probe_mcp = AsyncMock(side_effect=clear_while_probing)
+    with caplog.at_level(logging.INFO):
+        results, _still_failed = await m._probe_and_apply_failed({"svc": _cfg("svc")})
+
+    assert results == []
+    assert [r.getMessage() for r in caplog.records if "not applied" in r.getMessage()] == [
+        "MCP server 'svc': probe outcome not applied — the server is not recorded failed"
+    ]
+
+
+async def test_the_loop_the_reload_failed_door_and_a_late_start_share_one_apply_seam(monkeypatch):
+    m = _Mixin()
+    m._manifest = Manifest.model_validate({"mcp": [_cfg(t).model_dump() for t in ("loop", "door", "late")]})
+    m._failed_mcps = {"loop": _row()}
+    m._probe_mcp = AsyncMock(return_value=[_FakeMcpTool()])
+    m._serving_loop = asyncio.get_running_loop()
+    seam: list[str] = []
+    apply = m._apply_probe_outcome
+
+    async def recording(title, config, outcome, *, awaited):
+        seam.append(title)
+        return await apply(title, config, outcome, awaited=awaited)
+
+    monkeypatch.setattr(m, "_apply_probe_outcome", recording)
+
+    await m._probe_and_apply_failed({"loop": _cfg("loop")})
+    m._failed_mcps = {"door": _row()}
+    await asyncio.to_thread(m._reload_failed_mcps)
+    start = StartId()
+    m._failed_mcps = {}
+    m._record_failed_mcp(_cfg("late"), McpStartPending("late", 3.0, 15.0, start=start))
+    await asyncio.to_thread(m._apply_late_probe(_cfg("late")), start, [_FakeMcpTool()])
+    for _ in range(100):
+        if "late" not in m._failed_mcps:
+            break
+        await asyncio.sleep(0.01)
+
+    assert seam == ["loop", "door", "late"]
+    assert m._mcp_bound_tools == {"loop": {"loop_t"}, "door": {"door_t"}, "late": {"late_t"}}
+
+
+async def _loop_pass(m: _Mixin) -> None:
+    sleeps = {"n": 0}
+
+    async def one_pass(_seconds):
+        sleeps["n"] += 1
+        if sleeps["n"] >= 2:
+            raise _Stop
+
+    m._reprobe_sleep = one_pass  # type: ignore[method-assign]
+    with pytest.raises(_Stop):
+        await m._reprobe_failed_mcps_loop()
+
+
+async def _named_pass(m: _Mixin) -> None:
+    await m._reprobe_failed_titles(["svc"])
+
+
+async def _boot_credential_pass(m: _Mixin) -> None:
+    m._bring_listed_credentials_up_to_date = AsyncMock(return_value={"svc": True})  # type: ignore[method-assign]
+    await m._bring_boot_credentials_up_to_date()
+
+
+@pytest.mark.parametrize("door", [_loop_pass, _named_pass, _boot_credential_pass], ids=["loop", "named", "boot"])
+async def test_a_reprobe_door_leaves_a_title_whose_start_is_in_progress_to_that_start(monkeypatch, door):
+    """A ``starting`` title waits on its own start, whose outcome is applied to it; no second start is launched."""
+    monkeypatch.setattr("tai42_skeleton.app.lifecycle.CoreSettings", _settings(1.0, 8.0))
+    m = _Mixin()
+    m._manifest = Manifest.model_validate({"mcp": [_cfg("svc").model_dump()]})
+    m._record_failed_mcp(_cfg("svc"), McpStartPending("svc", 3.0, 15.0, start=StartId()))
+    m._probe_mcp = AsyncMock(return_value=[_FakeMcpTool()])
+
+    await door(m)
+
+    m._probe_mcp.assert_not_awaited()
+    assert m._failed_mcps["svc"]["category"] == "starting"

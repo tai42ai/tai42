@@ -21,6 +21,8 @@ if TYPE_CHECKING:
     from tai42_contract.app import RouteAction
     from tai42_contract.tools import TemplateRefsExtractor, ToolRefsExtractor
 
+    from tai42_skeleton.manifest import Manifest
+
 logger = logging.getLogger(__name__)
 
 
@@ -167,11 +169,25 @@ class _RegistrationMixin(_BranchBindingMixin):
         if virtual_module not in sys.modules:
             sys.modules[virtual_module] = types.ModuleType(virtual_module)
 
-        # Reset so a reload cleanly re-tracks what this MCP binds now.
+        # Reset so a reload cleanly re-tracks what this MCP binds now, and keep the full
+        # listing this bind consumes: the advertised-tools read and the selection check
+        # answer from it, a read during the bind included. A bind that raises drops the
+        # listing again, so a server whose bind failed holds none and its failed record answers.
         self._mcp_bound_tools[config.title] = set()
         self._app._mcp_preset_conflicts[config.title] = set()
         self._app._mcp_unusable_tools[config.title] = set()
+        tools = list(tools)
+        self._app._mcp_listed_tools[config.title] = tools
+        try:
+            self._bind_listed_mcp_tools(manifest, config, tools, preset_names)
+        except BaseException:
+            self._app._mcp_listed_tools.pop(config.title, None)
+            raise
 
+    def _bind_listed_mcp_tools(
+        self, manifest: "Manifest", config: TaiMCPConfig, tools: list["mcp.types.Tool"], preset_names: frozenset[str]
+    ) -> None:
+        """Bind the selected tools of ``config``'s listing ``tools``, recording each one it skips and why."""
         # Resolve the schema-depth bound ONCE, up front and outside the per-tool skip
         # guard below, so a malformed TAI_MCP_SCHEMA_MAX_DEPTH surfaces loudly as a
         # config error instead of being caught per tool and mis-logged as every tool

@@ -127,3 +127,43 @@ async def test_probe_http_noauth_header_differing_in_case_collapses_to_one(insta
     await probe(desc, "main", auth=ManagedAuth(headers={"x-TOKEN": "client"}))
     cfg = captured["kwargs"]["config"]
     assert cfg["config"]["headers"] == {"x-token": "client"}
+
+
+async def test_a_probe_that_stops_waiting_leaves_the_start_running_to_completion(monkeypatch, caplog):
+    import asyncio
+    import logging
+    import threading
+
+    from tai42_skeleton.tools import mcp_start
+
+    cancelled, finished = threading.Event(), threading.Event()
+
+    class _SlowClient(_FakeMcpClient):
+        async def list_tools(self):
+            try:
+                await asyncio.sleep(0.4)
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+            finished.set()
+            return []
+
+    @asynccontextmanager
+    async def slow_client_ctx(client_cls, **kwargs):
+        yield _SlowClient()
+
+    monkeypatch.setattr(probe_mod, "client_ctx", slow_client_ctx)
+    monkeypatch.setattr(probe_mod, "_PROBE_WAIT_SECONDS", 0.05)
+    try:
+        with caplog.at_level(logging.INFO, logger=probe_mod.__name__):
+            assert await probe(make_oauth_descriptor(), "mail", auth=ManagedAuth(access_token="at")) is False
+            assert await asyncio.to_thread(finished.wait, 5)
+            for _ in range(100):
+                if any("finished after its wait" in r.getMessage() for r in caplog.records):
+                    break
+                await asyncio.sleep(0.01)
+        assert not cancelled.is_set()
+        [late] = [r.getMessage() for r in caplog.records if "finished after its wait" in r.getMessage()]
+        assert late == f"connectors: probe of {make_oauth_descriptor().id}/mail finished after its wait: listed"
+    finally:
+        await mcp_start.aclose()

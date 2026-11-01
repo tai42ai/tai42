@@ -14,6 +14,7 @@ from tai42_skeleton.manifest.transport import detect_transport
 from tai42_skeleton.presets.errors import PresetStoreReadError
 from tai42_skeleton.tools import mcp_health
 from tai42_skeleton.tools.binding.surface import remove_surface_tool
+from tai42_skeleton.tools.mcp_start import StartId
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +23,14 @@ class McpReloadMixin(LifecycleState):
     """Targeted single-MCP reload/deregister and the dependent-preset reconcile methods."""
 
     async def _reload_mcp_async(self, title: str) -> dict[str, Any]:
+        """Re-probe the manifest MCP server ``title`` and rebind its tools.
+
+        Answers ``{"title", "status"}``: ``error`` (with an ``error`` message) for a title the
+        manifest does not carry, ``unavailable`` when the probe fails (recorded as the title's
+        failure), and otherwise :meth:`_apply_reloaded_mcp`'s ``ok`` result. A bind that fails
+        after a good probe is recorded as the title's failure and propagates
+        (:meth:`_bind_probed_mcp`).
+        """
         self._refresh_manifest_mcp()
         manifest = self._manifest
         mcp_map = (manifest.mcp_map if manifest else {}) or {}
@@ -39,7 +48,90 @@ class McpReloadMixin(LifecycleState):
             self._record_failed_mcp(config, e)
             return {"title": title, "status": "unavailable"}
 
-        return await self._apply_reloaded_mcp(title, config, tools)
+        return await self._bind_probed_mcp(title, config, tools)
+
+    async def _apply_probe_outcome(
+        self, title: str, config: TaiMCPConfig, outcome: Any, *, awaited: StartId | None
+    ) -> dict[str, Any] | None:
+        """Apply one probe outcome of a failed server: bind its listed tools, or record its failure.
+
+        The one apply seam of every door that probes a failed server and applies the outcome
+        under the reload gate — the re-probe loop, the ``reload_failed_mcps`` door and a late
+        start (:meth:`_apply_late_probe`); the caller holds the gate. ``outcome`` is the
+        listed tools or the probe's exception. ``awaited`` is the start the title's failed
+        record waited on when the outcome's start was launched — a late start passes its own
+        start, a door that probes from a snapshot passes the snapshot's — so a record written
+        meanwhile for a newer start is never replaced by an older start's outcome. It applies
+        only while ``title`` is still failed, its record still waits on ``awaited``, and it is
+        still in the manifest with the ``config`` that was probed: a concurrent
+        reload/deregister/edit or a newer start may have cleared, replaced, removed or changed
+        it meanwhile, and a stale outcome is not applied (``None``, logged with the reason);
+        when the record still waits on ``awaited`` — its row was removed or edited while the
+        start ran — the record is rewritten to say the start ended, so it no longer reads
+        ``starting`` and a re-probe probes the current config. A failure is recorded
+        through ``_record_failed_mcp``; tools bind through :meth:`_bind_probed_mcp`, and a
+        failure of that bind is logged with its trace and answered coarsely (``error``) so it
+        does not lose the other titles' results.
+        """
+        manifest = self._manifest
+        mcp_map = (manifest.mcp_map if manifest else {}) or {}
+        skipped = self._probe_outcome_skip_reason(title, config, awaited, mcp_map)
+        if skipped is not None:
+            logger.info("MCP server %r: probe outcome not applied — %s", title, skipped)
+            if awaited is not None and self._start_awaited_by(title) is awaited:
+                self._record_start_ended_unapplied(config, skipped, re_probed=title in mcp_map)
+            return None
+        if isinstance(outcome, BaseException):
+            self._record_failed_mcp(config, outcome)
+            return {"title": title, "status": "unavailable"}
+        try:
+            return await self._bind_probed_mcp(title, config, outcome)
+        except Exception:
+            logger.error("applying the probed MCP %r failed after its probe", title, exc_info=True)
+            return {"title": title, "status": "error"}
+
+    async def _bind_probed_mcp(self, title: str, config: TaiMCPConfig, tools: list[Any]) -> dict[str, Any]:
+        """Bind the tools a good probe of ``title`` listed, recording a failure of that bind.
+
+        The bind seam of the two doors that probe a server and apply its listing: the
+        single-server reload and :meth:`_apply_probe_outcome`. Answers
+        :meth:`_apply_reloaded_mcp`'s result. A bind that raises is recorded as the title's
+        failure through ``_record_failed_mcp`` — a stored-preset read failure keeps the record
+        :meth:`_apply_reloaded_mcp` writes for it — and propagates, so the failure reads back
+        from the title's failed record.
+        """
+        try:
+            return await self._apply_reloaded_mcp(title, config, tools)
+        except PresetStoreReadError:
+            raise
+        except Exception as exc:
+            self._record_failed_mcp(config, exc)
+            raise
+
+    def _probe_outcome_skip_reason(
+        self, title: str, config: TaiMCPConfig, awaited: StartId | None, mcp_map: dict[str, TaiMCPConfig]
+    ) -> str | None:
+        """Why a probe outcome of ``title`` probed with ``config`` is not applied now; ``None`` when it is."""
+        if title not in self._failed_mcps:
+            return "the server is not recorded failed"
+        waits_on = self._start_awaited_by(title)
+        if waits_on is not awaited:
+            if waits_on is None:
+                return "its failed record waits on no start"
+            return "its failed record waits on another start"
+        current = mcp_map.get(title)
+        if current is None:
+            return "removed from the manifest while probed"
+        if current != config:
+            return "its config was edited while probed"
+        return None
+
+    def _record_start_ended_unapplied(self, config: TaiMCPConfig, reason: str, *, re_probed: bool) -> None:
+        """Record that the start a ``starting`` record waited on ended without its outcome being applied."""
+        message = f"MCP server '{config.title}' start ended but its outcome was not applied: {reason}"
+        if re_probed:
+            message += "; it is re-probed with its current config"
+        self._record_failed_mcp(config, RuntimeError(message))
 
     async def _apply_reloaded_mcp(self, title: str, config: TaiMCPConfig, tools: list[Any]) -> dict[str, Any]:
         """Bind a freshly-probed MCP server's tools and reconcile dependent presets.
@@ -175,12 +267,15 @@ class McpReloadMixin(LifecycleState):
         probe result rewrites the process-wide tool/preset registry and marshals the
         reconcile onto the serving loop, so applications are serialized: running two
         at once would let one server's bind race another's reconcile across the probe
-        and serving threads. Titles are snapshotted before any mutation.
+        and serving threads. Titles, and the start each failed record waits on, are
+        snapshotted before any mutation; each outcome applies through
+        :meth:`_apply_probe_outcome`.
         """
         self._refresh_manifest_mcp()
         manifest = self._manifest
         mcp_map = (manifest.mcp_map if manifest else {}) or {}
         titles = list(self._failed_mcps.keys())
+        awaited = {t: self._start_awaited_by(t) for t in titles}
         known = [t for t in titles if t in mcp_map]
         unknown = [t for t in titles if t not in mcp_map]
 
@@ -188,18 +283,9 @@ class McpReloadMixin(LifecycleState):
 
         out: list[dict[str, Any]] = []
         for title, probe in zip(known, probes, strict=True):
-            config = mcp_map[title]
-            if isinstance(probe, BaseException):
-                self._record_failed_mcp(config, probe)
-                out.append({"title": title, "status": "unavailable"})
-                continue
-            try:
-                out.append(await self._apply_reloaded_mcp(title, config, probe))
-            except Exception:
-                # A post-probe bind/reconcile failure must not lose the other titles'
-                # results — log the trace loudly, then surface this one coarsely.
-                logger.error("reload_failed_mcps: applying reloaded MCP %r failed after probe", title, exc_info=True)
-                out.append({"title": title, "status": "error"})
+            result = await self._apply_probe_outcome(title, mcp_map[title], probe, awaited=awaited[title])
+            if result is not None:
+                out.append(result)
         out.extend(
             {
                 "title": title,
@@ -234,11 +320,12 @@ class McpReloadMixin(LifecycleState):
     def _reload_mcp(self, title: str) -> dict[str, Any]:
         """Re-probe one MCP server by title and, if viable, (re)attach its tools.
 
-        Synchronous and context-agnostic, mirroring ``update``. On failure the
-        server is re-recorded in ``list_failed_mcps`` and its
-        existing tools are left intact (transient blips self-heal). Only a
-        successful reload replaces tools; a mid-rebind failure can leave the set
-        partially updated — rerun after fixing the config.
+        Synchronous and context-agnostic, mirroring ``update``; answers as
+        :meth:`_reload_mcp_async`. On a probe failure (``unavailable``) the server is
+        re-recorded in ``list_failed_mcps`` and its existing tools are left intact
+        (transient blips self-heal). A bind that fails after a good probe is recorded there
+        too and raises; it can leave the set partially updated — rerun after fixing the
+        config. Only a successful reload replaces tools.
         """
         self._raise_if_on_serving_loop("reload_mcp")
         return run_blocking(lambda: self._reload_mcp_async(title))
@@ -259,6 +346,7 @@ class McpReloadMixin(LifecycleState):
         self._raise_if_on_serving_loop("deregister_mcp")
         self._refresh_manifest_mcp()
         bound = sorted(self._mcp_bound_tools.pop(title, set()))
+        self._mcp_listed_tools.pop(title, None)
         failed = self._failed_mcps.pop(title, None) is not None
         # The title ceases to exist here — clear its passive health so a removed
         # MCP leaves no residue behind in the process-wide store.

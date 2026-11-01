@@ -252,7 +252,7 @@ _ADVERTISED = {
 
 
 def _advertised_handler(request: httpx.Request) -> httpx.Response:
-    assert request.method == "POST"
+    assert request.method == "GET"
     assert request.url.raw_path == b"/api/mcp-status/my%20srv/advertised-tools"
     assert request.content == b""
     return data_response(_ADVERTISED)

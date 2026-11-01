@@ -1,4 +1,4 @@
-"""How a stdio MCP server child is launched: where its command is found, and what its interpreter imports.
+"""How a stdio MCP server child is launched: where its command is found, what it imports, where its stderr goes.
 
 The owner of the install locations declares one :class:`StdioLaunch` through
 :func:`declare_stdio_launch` in every process that launches a stdio server: the
@@ -29,6 +29,11 @@ as a path is launched with its ``env`` exactly as declared. The mcp SDK gives th
 only a short safe-list of this process's environment (``HOME``, ``PATH``, ``USER``, …)
 overlaid with the server config's ``env``, so the config ``env`` is the only channel into
 the child's environment, and a ``PATH`` it sets replaces the inherited one.
+
+A child's stderr is this process's standard error descriptor (:func:`stdio_child_stderr`),
+whatever object stands at ``sys.stderr``: a host may replace ``sys.stderr`` with a stream
+that has no file descriptor (a task worker's logging proxy), and a child cannot be handed
+such a stream.
 """
 
 from __future__ import annotations
@@ -36,6 +41,7 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from typing import TextIO
 
 
 @dataclass(frozen=True)
@@ -133,3 +139,13 @@ def stdio_child_env(env: Mapping[str, str], import_dirs: Sequence[str]) -> dict[
         own = [entry for entry in child.get("PYTHONPATH", "").split(os.pathsep) if entry]
         child["PYTHONPATH"] = os.pathsep.join([*own, *import_dirs])
     return child
+
+
+def stdio_child_stderr() -> TextIO:
+    """Return the stream a stdio server child's stderr is written to: this process's standard error descriptor.
+
+    A stream over file descriptor 2 that leaves the descriptor open when it is closed. The child
+    writes where this process's own standard error goes, whatever object stands at
+    ``sys.stderr``. A process whose descriptor 2 is not open raises :class:`OSError`.
+    """
+    return os.fdopen(2, "w", closefd=False)

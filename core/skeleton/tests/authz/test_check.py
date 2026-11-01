@@ -1104,7 +1104,7 @@ def test_any_authenticated_operation_admits_a_scoped_key_at_both_edges(ac_env, b
         asyncio.run(check(CallerIdentity(user_id="fenced1", effective_scopes=("things",)), meta, {}, settings=settings))
 
 
-# -- the MCP tool-pick read: a write-level door with a per-server fence ---------------------
+# -- the MCP tool-pick read: a read-level door with a per-server fence ----------------------
 
 
 def _advertised_tools_meta():
@@ -1113,11 +1113,12 @@ def _advertised_tools_meta():
 
     meta = operation_metadata_of(list_mcp_advertised_tools)
     assert meta.route_template == "/api/mcp-status/{title}/advertised-tools"
+    assert meta.http_method == "GET"
     return meta
 
 
-@pytest.mark.parametrize(("level", "allowed"), [("read", False), ("write", True)])
-def test_the_advertised_tools_read_needs_a_write_level_grant(ac_env, bound_app, monkeypatch, level, allowed):
+@pytest.mark.parametrize(("level", "allowed"), [("none", False), ("read", True), ("write", True)])
+def test_the_advertised_tools_read_needs_a_read_level_grant(ac_env, bound_app, monkeypatch, level, allowed):
     settings = AccessControlSettings()
     meta = _advertised_tools_meta()
 
@@ -1159,7 +1160,7 @@ def test_a_condition_admitting_one_server_fences_the_advertised_tools_read_at_bo
         asyncio.run(check(identity, meta, {"title": "other"}, settings=settings))
 
     async def reaches(path: str) -> bool:
-        return await _http_reaches(verifier, {"X-Api-Key": "tok-u1"}, path, settings, method="POST")
+        return await _http_reaches(verifier, {"X-Api-Key": "tok-u1"}, path, settings, method="GET")
 
     assert asyncio.run(reaches("/api/mcp-status/acme/advertised-tools")) is True
     assert asyncio.run(reaches("/api/mcp-status/other/advertised-tools")) is False

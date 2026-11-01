@@ -417,18 +417,18 @@ async def test_a_role_holder_sees_the_templated_write_routes_its_grant_admits(se
     assert viewer.routes == []
 
 
-async def test_the_editor_sees_the_mcp_tool_pick_routes_and_the_viewer_does_not(seeded_roles: _Env):
+async def test_the_editor_sees_both_mcp_tool_pick_routes_and_the_viewer_only_the_read(seeded_roles: _Env):
     seeded_roles.routes(
-        ("/api/mcp-status/{title}/advertised-tools", ["POST"]),
+        ("/api/mcp-status/{title}/advertised-tools", ["GET"]),
         ("/api/mcp-config/entries/{title}/tool-filter", ["PUT"]),
     )
     editor = await build_projection("ed", ["*"], {})
     assert editor.routes == [
         RouteEntry(path="/api/mcp-config/entries/{title}/tool-filter", methods=["PUT"]),
-        RouteEntry(path="/api/mcp-status/{title}/advertised-tools", methods=["POST"]),
+        RouteEntry(path="/api/mcp-status/{title}/advertised-tools", methods=["GET"]),
     ]
     viewer = await build_projection("vw", ["*"], {})
-    assert viewer.routes == []
+    assert viewer.routes == [RouteEntry(path="/api/mcp-status/{title}/advertised-tools", methods=["GET"])]
 
 
 async def test_a_templated_route_projects_only_the_methods_the_jq_admits(env: _Env):
