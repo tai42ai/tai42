@@ -30,6 +30,7 @@ from tai42_contract.backend import (
 )
 from tai42_contract.extensions import ExtensionKind
 from tai42_kit.backend import prepare_backend_kwargs
+from tai42_kit.backend.job_context import assert_not_in_job
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.redis import SyncRedisClient
 from tai42_kit.utils.data import makefun_func_name
@@ -88,13 +89,15 @@ def _wait_for_job_result(job: _PollableJob, timeout: float) -> Any:
 def sync_task(func: Any, name: str, description: str) -> Any:
     """Branch ``func`` into ``<name>_sync_task``: queue the call and block for the result.
 
-    Blocks until the job finishes, returning the job's result.
+    Blocks until the job finishes, returning the job's result. Inside a job it raises
+    ``RuntimeError`` and queues nothing: a job chains the next one with ``callback_kwargs``.
     """
     raw_name = f"{name}_sync_task"
     safe_name = makefun_func_name(raw_name)
     sig = add_signature_params(func, RQ_TASK_OPTS, exclude_fastmcp_ctx=True)
 
     async def func_impl(*args: Any, **kwargs: Any) -> Any:
+        assert_not_in_job(raw_name)
         kwargs = await prepare_backend_kwargs(func, rq_settings().tool_name_arg, name, kwargs)
         job = await enqueue_task(*args, **kwargs)
         timeout = rq_settings().task_timeout

@@ -17,8 +17,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import threading
+import time
+from collections.abc import Callable, Coroutine
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -168,6 +171,259 @@ async def test_run_releases_the_fork_gate_when_the_body_raises() -> None:
     assert not fork_gate.blocked
     assert fork_gate._owner is None
     assert not gate.locked
+
+
+async def test_a_reimporting_reload_a_job_runs_does_not_wait_on_that_jobs_span(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A job that runs a reload (the reload projected as a tool) holds a job span; the
+    reload's fork-gate hold passes that span and runs the body at once."""
+    gate = ReloadGate()
+    ran = threading.Event()
+
+    with caplog.at_level(logging.ERROR, logger="tai42_kit.fork_gate"):
+        async with fork_gate.job_span_async(timeout=5.0):
+            started = time.monotonic()
+            await gate.run(ran.set, reimports=True)
+            waited = time.monotonic() - started
+
+    assert ran.is_set()
+    assert waited < 3.0
+    assert not caplog.records
+    assert not fork_gate.blocked
+
+
+async def test_two_jobs_running_a_reimporting_reload_at_once_do_not_hold_each_other_up(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Two jobs each run a reload at once: the first holds the reload lock and quiesces the
+    fork gate while the second waits for that lock with its own job span open. The first
+    reload's body starts at once, with no quiesce error, and then the second runs."""
+    gate = ReloadGate()
+    entered: dict[str, float] = {}
+    first_holds_the_lock = asyncio.Event()
+    started = time.monotonic()
+
+    def body(name: str) -> None:
+        entered[name] = time.monotonic() - started
+
+    async def first_job() -> None:
+        async with fork_gate.job_span_async(timeout=5.0):
+
+            async def reload() -> None:
+                await gate.run(lambda: body("first"), reimports=True)
+
+            task = asyncio.create_task(reload())
+            while not gate.locked:
+                await asyncio.sleep(0.01)
+            first_holds_the_lock.set()
+            await task
+
+    async def second_job() -> None:
+        async with fork_gate.job_span_async(timeout=5.0):
+            await first_holds_the_lock.wait()
+            await gate.run(lambda: body("second"), reimports=True)
+
+    with caplog.at_level(logging.ERROR, logger="tai42_kit.fork_gate"):
+        second = asyncio.create_task(second_job())
+        await asyncio.sleep(0.05)
+        await asyncio.wait_for(asyncio.gather(first_job(), second), 60.0)
+
+    assert entered["first"] < 3.0
+    assert entered["second"] >= entered["first"]
+    assert not caplog.records
+    assert not fork_gate.blocked
+
+
+def _on_a_loop_of_its_own(
+    work: Callable[[], Coroutine[Any, Any, None]],
+) -> tuple[threading.Thread, list[BaseException]]:
+    """Start a thread that runs ``work()`` on a new event loop of its own; collect what it raises.
+
+    The shape of a backend job running on its private loop beside the serving loop.
+    """
+    errors: list[BaseException] = []
+
+    def run() -> None:
+        try:
+            asyncio.run(work())
+        except BaseException as exc:
+            errors.append(exc)
+
+    thread = threading.Thread(target=run, name="test-own-loop")
+    thread.start()
+    return thread, errors
+
+
+async def test_the_gate_excludes_holders_on_two_loops_in_two_threads() -> None:
+    """A serving loop and a job's private loop both hold the gate: the holds never overlap,
+    and the loop that is not holding reads the gate as locked while the other holds."""
+    gate = ReloadGate()
+    windows: list[tuple[float, float]] = []
+    first_holds = threading.Event()
+    seen_locked: list[bool] = []
+
+    async def first() -> None:
+        async with gate.driving():
+            started = time.monotonic()
+            first_holds.set()
+            await asyncio.sleep(0.3)
+            windows.append((started, time.monotonic()))
+
+    async def second() -> None:
+        assert await asyncio.to_thread(first_holds.wait, 5.0)
+        seen_locked.append(gate.locked)
+        async with gate.driving():
+            started = time.monotonic()
+            await asyncio.sleep(0.3)
+            windows.append((started, time.monotonic()))
+
+    threads = [_on_a_loop_of_its_own(first), _on_a_loop_of_its_own(second)]
+    for thread, _ in threads:
+        await asyncio.to_thread(thread.join, 10.0)
+    assert [errors for _, errors in threads] == [[], []]
+    assert seen_locked == [True]
+    (first_start, first_end), (second_start, _) = windows
+    assert second_start >= first_end > first_start
+
+
+async def test_a_second_loop_touching_the_gate_keeps_the_first_loops_hold() -> None:
+    """While this loop holds the gate, another loop on another thread asks for it: this loop's
+    gate still reads as locked, and a second holder on this loop waits for the first to release."""
+    gate = ReloadGate()
+    order: list[str] = []
+    asking = threading.Event()
+
+    async def other_loop() -> None:
+        asking.set()
+        async with gate.synchronized():
+            order.append("other loop held")
+
+    async def second_holder() -> None:
+        async with gate.driving():
+            order.append("second holder held")
+
+    async with gate.driving():
+        thread, errors = _on_a_loop_of_its_own(other_loop)
+        assert await asyncio.to_thread(asking.wait, 5.0)
+        await asyncio.sleep(0.2)
+        assert gate.locked
+        second = asyncio.create_task(second_holder())
+        await asyncio.sleep(0.2)
+        assert gate.locked
+        assert order == []
+        order.append("first holder released")
+    await asyncio.wait_for(second, 10.0)
+    await asyncio.to_thread(thread.join, 10.0)
+    assert errors == []
+    assert order[0] == "first holder released"
+    assert sorted(order[1:]) == ["other loop held", "second holder held"]
+    assert not gate.locked
+
+
+async def test_a_job_on_its_own_loop_running_a_reimporting_reload_beside_another_does_not_hold_it_up(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Two jobs each run a reload at once, the second on its own loop and thread inside its job
+    span: the first holds the reload lock and quiesces the fork gate while the second waits for
+    that lock. The first reload's body starts at once, with no quiesce error, and the second's
+    starts only once the first's has ended."""
+    gate = ReloadGate()
+    windows: dict[str, tuple[float, float]] = {}
+    started = time.monotonic()
+
+    def body(name: str) -> None:
+        began = time.monotonic() - started
+        if name == "first":
+            time.sleep(0.5)
+        windows[name] = (began, time.monotonic() - started)
+
+    async def second_reload() -> None:
+        await _until(lambda: gate.locked)
+        await gate.run(lambda: body("second"), reimports=True)
+
+    errors: list[BaseException] = []
+
+    def second_job() -> None:
+        try:
+            with fork_gate.job_span(timeout=5.0):
+                asyncio.run(second_reload())
+        except BaseException as exc:
+            errors.append(exc)
+
+    with caplog.at_level(logging.ERROR, logger="tai42_kit.fork_gate"):
+        second = threading.Thread(target=second_job, name="test-second-job")
+        second.start()
+        await asyncio.sleep(0.05)
+        async with fork_gate.job_span_async(timeout=5.0):
+            await asyncio.wait_for(gate.run(lambda: body("first"), reimports=True), 60.0)
+        await asyncio.to_thread(second.join, 60.0)
+
+    assert errors == []
+    first_began, first_ended = windows["first"]
+    assert first_began < 3.0
+    assert windows["second"][0] >= first_ended
+    assert not caplog.records
+    assert not fork_gate.blocked
+
+
+async def _until(condition: Callable[[], bool]) -> None:
+    async with asyncio.timeout(5.0):
+        while not condition():
+            await asyncio.sleep(0.01)
+
+
+@pytest.mark.parametrize("stop", ["timeout", "cancel"])
+async def test_a_job_whose_wait_for_the_reload_lock_stops_early_runs_on_only_after_the_reimport(
+    stop: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A job queued on the reload lock behind a re-importing reload does not hold that reload up.
+    When its wait stops early (its own timeout, or a cancellation), the code it runs next still
+    waits for the re-import to end: the job counts again before it runs."""
+    gate = ReloadGate()
+    span_open, lock_held = asyncio.Event(), asyncio.Event()
+    in_body, may_end, body_ended = threading.Event(), threading.Event(), threading.Event()
+    seen: list[bool] = []
+
+    def body() -> None:
+        in_body.set()
+        assert may_end.wait(10.0)
+        body_ended.set()
+
+    async def job() -> None:
+        async with fork_gate.job_span_async(timeout=5.0):
+            span_open.set()
+            await lock_held.wait()
+            try:
+                if stop == "timeout":
+                    async with asyncio.timeout(0.2):
+                        await gate.run(lambda: None, reimports=True)
+                else:
+                    await gate.run(lambda: None, reimports=True)
+            finally:
+                seen.append(body_ended.is_set())
+
+    with caplog.at_level(logging.ERROR, logger="tai42_kit.fork_gate"):
+        queued = asyncio.create_task(job())
+        await span_open.wait()
+        reload = asyncio.create_task(gate.run(body, reimports=True))
+        while not gate.locked:
+            await asyncio.sleep(0.01)
+        lock_held.set()
+        assert await asyncio.to_thread(in_body.wait, 3.0)
+        if stop == "cancel":
+            queued.cancel()
+        await asyncio.sleep(0.5)
+        assert seen == []
+        may_end.set()
+        await asyncio.wait_for(reload, 10.0)
+        with pytest.raises(TimeoutError if stop == "timeout" else asyncio.CancelledError):
+            await asyncio.wait_for(queued, 10.0)
+
+    assert seen == [True]
+    assert not caplog.records
+    assert not fork_gate.blocked
+    assert fork_gate.live_spans == 0
 
 
 # -- gated routes reject while the gate is held ------------------------------

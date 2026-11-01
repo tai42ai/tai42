@@ -24,6 +24,7 @@ from typing import ClassVar, NoReturn, Self
 from tai42_contract.app import tai42_app
 from tai42_contract.backend.runtime import BackendRuntime, ExecutionMode, HttpLiveness, ProgressLiveness
 from tai42_kit.backend import BackendDispatchSettings, ManagedBackend
+from tai42_kit.fork_gate import JOB_SPAN_WAIT_SECONDS, fork_gate
 from tai42_kit.liveness import backend_liveness_settings
 
 from tai42_backend_celery.core import prefork
@@ -143,11 +144,14 @@ class CeleryWorkerRuntime(_CeleryRuntime):
         return cls(args)
 
     async def build(self) -> None:
-        """Set the CLI's argv, prepare the pool turnover and add the progress step, before the boot-readiness gate.
+        """Set the CLI's argv, prepare the pool turnover, add the progress step, guard forks: before the readiness gate.
 
         Connecting Celery's setup/ready signals and adding a consumer bootstep must happen before the worker
         boots past them, and none of them consumes work. The embedded beat's reporter is handed over
-        here too, before ``-B`` forks the beat from this process.
+        here too, before ``-B`` forks the beat from this process. The fork gate's guard then holds a job
+        span around every fork this process makes — the prefork pool's children at start, on respawn and
+        on turnover, and the ``-B`` beat child — so none is forked into a config reload's re-import; a
+        fork waiting on one reports the worker's progress each tick.
         """
         # Imported on the path that runs it: only a worker process adds the consumer step.
         from tai42_backend_celery.core import embedded_beat, liveness_step
@@ -156,6 +160,9 @@ class CeleryWorkerRuntime(_CeleryRuntime):
         prefork.register()
         embedded_beat.register(celery_app, backend_liveness_settings())
         liveness_step.register(celery_app, self.report_progress, task_timeout=celery_settings().task_timeout)
+        fork_gate.guard_forks(
+            timeout=JOB_SPAN_WAIT_SECONDS, tick=liveness_step.tick, tick_every=liveness_step.PROGRESS_TICK_SECONDS
+        )
 
     def run_blocking(self) -> None:
         """Run the Celery worker, blocking this thread until it exits."""

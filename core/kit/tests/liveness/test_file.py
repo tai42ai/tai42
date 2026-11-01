@@ -153,6 +153,56 @@ def test_remove_removes_a_file_left_by_a_dead_process(tmp_path: Path) -> None:
     assert not path.exists()
 
 
+def _temp_file(path: Path, pid: int) -> Path:
+    """The temp file a writer with ``pid`` stages its next write in."""
+    return path.with_name(f"{path.name}.{pid}.tmp")
+
+
+def test_remove_clears_the_writer_s_own_temp_file(tmp_path: Path) -> None:
+    path = tmp_path / "liveness"
+    writer = LivenessFile(path, interval=5.0)
+    writer.report(next_within=1.0)
+    _temp_file(path, os.getpid()).write_text("staged")
+
+    writer.remove()
+
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_a_takeover_clears_the_dead_owner_s_temp_file(tmp_path: Path) -> None:
+    path = tmp_path / "liveness"
+    dead = _dead_pid()
+    path.write_text(f"{dead}\n5\n")
+    _temp_file(path, dead).write_text(f"{dead}\n6\n")
+
+    LivenessFile(path, interval=5.0).report(next_within=1.0)
+
+    assert path.read_text() == f"{os.getpid()}\n6\n"
+    assert [entry.name for entry in tmp_path.iterdir()] == ["liveness"]
+
+
+def test_remove_clears_a_dead_owner_s_temp_file(tmp_path: Path) -> None:
+    path = tmp_path / "liveness"
+    dead = _dead_pid()
+    path.write_text(f"{dead}\n5\n")
+    _temp_file(path, dead).write_text(f"{dead}\n6\n")
+
+    LivenessFile(path, interval=5.0).remove()
+
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_remove_leaves_another_process_s_temp_file(tmp_path: Path) -> None:
+    path = tmp_path / "liveness"
+    owner = os.getppid()
+    path.write_text(f"{owner}\n5\n")
+    _temp_file(path, owner).write_text(f"{owner}\n6\n")
+
+    LivenessFile(path, interval=5.0).remove()
+
+    assert sorted(entry.name for entry in tmp_path.iterdir()) == ["liveness", f"liveness.{owner}.tmp"]
+
+
 def test_a_report_after_remove_is_refused_and_writes_nothing(tmp_path: Path) -> None:
     path = tmp_path / "liveness"
     clock = _Clock()

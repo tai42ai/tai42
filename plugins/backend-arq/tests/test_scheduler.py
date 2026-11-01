@@ -379,7 +379,7 @@ async def test_task_scheduler_runs_target_and_reschedules(fake_redis, monkeypatc
     key = _seed(fake_redis, "s1")
     redis = _EnqueueRecordingRedis(fake_redis)
 
-    out = await scheduler.task_scheduler({"redis": redis, "job_id": "pending-1"}, "s1")
+    out = await scheduler.task_scheduler({"redis": redis, "job_id": "pending-1", "job_try": 1}, "s1")
 
     assert out == "ran"
     assert redis.targets == [("tool_execution", ("a",), {"_queue_name": "arq:queue", "backend_tool_name": "t"})]
@@ -398,7 +398,7 @@ async def test_task_scheduler_aborted_target_records_failure_and_reschedules(fak
     redis = _EnqueueRecordingRedis(fake_redis, result=asyncio.CancelledError("CancelledError()"))
 
     with pytest.raises(TaskFailedError, match=r"CancelledError\(\)"):
-        await scheduler.task_scheduler({"redis": redis, "job_id": "pending-1"}, "s1")
+        await scheduler.task_scheduler({"redis": redis, "job_id": "pending-1", "job_try": 1}, "s1")
 
     assert fake_redis._store[key][b"job_id"] != b"pending-1"
 
@@ -408,7 +408,7 @@ async def test_task_scheduler_disabled_skips_target_but_reschedules(fake_redis, 
     key = _seed(fake_redis, "s1", enabled=b"false")
     redis = _EnqueueRecordingRedis(fake_redis)
 
-    out = await scheduler.task_scheduler({"redis": redis, "job_id": "pending-1"}, "s1")
+    out = await scheduler.task_scheduler({"redis": redis, "job_id": "pending-1", "job_try": 1}, "s1")
 
     assert out is None
     assert redis.targets == []
@@ -416,7 +416,7 @@ async def test_task_scheduler_disabled_skips_target_but_reschedules(fake_redis, 
 
 
 async def test_task_scheduler_missing_key_fast_exits(fake_redis) -> None:
-    out = await scheduler.task_scheduler({"redis": fake_redis, "job_id": "j"}, "absent")
+    out = await scheduler.task_scheduler({"redis": fake_redis, "job_id": "j", "job_try": 1}, "absent")
     assert out is None
     assert fake_redis.enqueued == []
 
@@ -429,7 +429,7 @@ async def test_task_scheduler_stale_job_skips_without_duplicate_run(fake_redis, 
     key = _seed(fake_redis, "s1", job_id=b"replacement-2")
     redis = _EnqueueRecordingRedis(fake_redis)
 
-    out = await scheduler.task_scheduler({"redis": redis, "job_id": "pending-1"}, "s1")
+    out = await scheduler.task_scheduler({"redis": redis, "job_id": "pending-1", "job_try": 1}, "s1")
 
     assert out is None
     assert redis.targets == []
@@ -442,7 +442,7 @@ async def test_task_scheduler_aborted_marker_stops_run(fake_redis, monkeypatch) 
     _seed(fake_redis, "s1", aborted=b"pending-1")
     redis = _EnqueueRecordingRedis(fake_redis)
 
-    out = await scheduler.task_scheduler({"redis": redis, "job_id": "pending-1"}, "s1")
+    out = await scheduler.task_scheduler({"redis": redis, "job_id": "pending-1", "job_try": 1}, "s1")
 
     assert out is None
     assert redis.targets == []
@@ -459,7 +459,7 @@ async def test_task_scheduler_crontab_realigns_past_slot(fake_redis, monkeypatch
     )
     redis = _EnqueueRecordingRedis(fake_redis)
 
-    await scheduler.task_scheduler({"redis": redis, "job_id": "pending-1"}, "s1")
+    await scheduler.task_scheduler({"redis": redis, "job_id": "pending-1", "job_try": 1}, "s1")
 
     assert float(fake_redis._store[key][b"last_scheduled_ts"]) > datetime.now(UTC).timestamp()
 
@@ -470,7 +470,7 @@ async def test_task_scheduler_interval_realigns_when_far_behind(fake_redis, monk
     key = _seed(fake_redis, "s1", last_scheduled_ts=str(behind).encode())
     redis = _EnqueueRecordingRedis(fake_redis)
 
-    await scheduler.task_scheduler({"redis": redis, "job_id": "pending-1"}, "s1")
+    await scheduler.task_scheduler({"redis": redis, "job_id": "pending-1", "job_try": 1}, "s1")
 
     # Realigned to now + 60, not the stale base + 60.
     assert float(fake_redis._store[key][b"last_scheduled_ts"]) > datetime.now(UTC).timestamp() + 30
@@ -481,7 +481,7 @@ async def test_task_scheduler_bad_last_scheduled_ts_treated_as_unset(fake_redis,
     key = _seed(fake_redis, "s1", last_scheduled_ts=b"not-a-number")
     redis = _EnqueueRecordingRedis(fake_redis)
 
-    await scheduler.task_scheduler({"redis": redis, "job_id": "pending-1"}, "s1")
+    await scheduler.task_scheduler({"redis": redis, "job_id": "pending-1", "job_try": 1}, "s1")
 
     assert float(fake_redis._store[key][b"last_scheduled_ts"]) > datetime.now(UTC).timestamp() + 30
 
@@ -694,7 +694,7 @@ async def test_a_schedule_fire_enqueues_its_target_on_the_settings_queue(
     _seed(fake_redis, "s1")
     redis = _EnqueueRecordingRedis(fake_redis)
 
-    await scheduler.task_scheduler({"redis": redis, "job_id": "pending-1"}, "s1")
+    await scheduler.task_scheduler({"redis": redis, "job_id": "pending-1", "job_try": 1}, "s1")
 
     [(_function, _args, kwargs)] = redis.targets
     assert kwargs["_queue_name"] == settings_queue

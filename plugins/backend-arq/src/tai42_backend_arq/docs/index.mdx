@@ -79,6 +79,18 @@ that blocks the loop stops them, and the probe then reports not alive. The
 worker removes the file when it exits. Each worker on one filesystem needs its
 own `TAI_BACKEND_LIVENESS_PATH`.
 
+The worker forks no child. Its jobs run as coroutines on the loop a config
+reload rebuilds on, and a sync tool a job runs off the loop goes on running
+while that loop is busy, so each job that runs manifest code (`tool_execution`,
+`callback_job`) holds the fork gate for its whole run, as the in-process pools
+of the other backends do. The schedule driver `task_scheduler` runs platform
+code only and holds none, so a reload never waits on a schedule that is waiting
+for its target. A reload that re-imports the manifest modules waits for the
+running jobs first, up to 30s, and past that logs an error and goes ahead. A
+job that arrives while a reload is pending starts after it, waiting up to 120s
+without holding up the loop. A job waiting on a config reload's lock does not
+hold that reload up.
+
 ## Send a task to a chosen worker
 
 The `sync_task` and `async_task` branches take an optional `queue` argument, a
@@ -138,6 +150,9 @@ healthy or restarts it.
   and the record of them (`<ARQ_QUEUE_NAME>:queues`) are named from it.
 - A tool with its own `queue` parameter cannot take a `sync_task` or
   `async_task` branch.
+- A job does not wait for another job: it chains the next one with
+  `callback_kwargs`. `sync_task` and `backend_task_result` (given a `timeout`)
+  are for callers outside a job and raise `RuntimeError` inside one.
 - `ARQ_MANIFEST_KEY`, `ARQ_TASK_TIMEOUT`, and `ARQ_TOOL_NAME_ARG` mirror the
   host's own `BACKEND_` group. Change them in lockstep or the worker and the
   server stop agreeing. `ARQ_MANIFEST_KEY` and `ARQ_TOOL_NAME_ARG` pin wiring
@@ -148,8 +163,11 @@ healthy or restarts it.
 - The schedule store holds the typed cadence; a hash in an earlier format raises
   `ScheduleStoreFormatError` on list, export, get and update until the keys matching
   `ArqSettings.arq_schedule_pattern` are deleted and the schedules re-created.
-- A dispatched tool runs once; arq re-runs a job cut by a cold stop, bounded by
-  `--max-tries`.
+- A dispatched tool runs once. A job cut by a worker death or a cold stop is
+  never run again: arq's next pickup ends it failed, and its result reads back
+  as `TaskFailedError` with the type `JobRunCutError` and the detail
+  `JobRunCutError('the run was cut (its worker died or was stopped mid-run) and is not run again')`.
+  A cut schedule run is never fired again; its schedule moves on to the next run.
 - `ARQ_JOB_COMPLETION_WAIT` must cover the longest job, and the deployment's
   termination grace period must be at least as long, or a drain still severs
   running work. arq cancels running jobs on signal unless this is non-zero.

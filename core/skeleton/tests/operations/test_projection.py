@@ -132,7 +132,6 @@ def test_projected_tool_reload_gate_raises_toolerror():
     wrapper = app.tools.registered["reloady"]["func"]
 
     async def run():
-        reload_gate.bind_to_running_loop()
         async with reload_gate.synchronized():
             with pytest.raises(ToolError):
                 await wrapper()

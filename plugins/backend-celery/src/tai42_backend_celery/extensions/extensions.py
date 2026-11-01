@@ -34,6 +34,7 @@ from tai42_contract.backend import (
 )
 from tai42_contract.extensions import ExtensionKind
 from tai42_kit.backend import CallbackSchema, carry_forwarded_fire, prepare_backend_kwargs
+from tai42_kit.backend.job_context import assert_not_in_job
 from tai42_kit.utils.data import makefun_func_name
 from tai42_kit.utils.schedule_subject import SCHEDULE_STAMPED_DOOR_OPTS
 
@@ -64,12 +65,17 @@ def _apply_task_opts(kwargs: dict[str, Any]) -> dict[str, Any]:
 
 @tai42_app.extensions.extension(kind=ExtensionKind.BACKEND, name="sync_task")
 def sync_task(func: Callable[..., Any], name: str, description: str) -> Callable[..., Any]:
-    """Branch ``func`` into ``<name>_sync_task``: dispatch and wait for the result."""
+    """Branch ``func`` into ``<name>_sync_task``: dispatch and wait for the result.
+
+    Inside a job it raises ``RuntimeError`` and dispatches nothing: a job chains the next one
+    with ``callback_kwargs``.
+    """
     raw_name = f"{name}_sync_task"
     safe_name = makefun_func_name(raw_name)
     sig = add_signature_params(func, CELERY_TASK_OPTS, exclude_fastmcp_ctx=True)
 
     async def func_impl(*args: Any, **kwargs: Any) -> Any:
+        assert_not_in_job(raw_name)
         kwargs = await prepare_backend_kwargs(func, celery_settings().tool_name_arg, name, kwargs)
         apply_async_opts = _apply_task_opts(kwargs)
         result = tool_execution.apply_async(args=args, kwargs=kwargs, **apply_async_opts)

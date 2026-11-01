@@ -28,6 +28,7 @@ import logging
 from typing import TYPE_CHECKING, Final
 
 from tai42_kit.clients import drain_epoch
+from tai42_kit.fork_gate import fork_gate
 from tai42_kit.settings import reset_all_settings
 
 from tai42_skeleton.app.retired_generations import arm_retired_generation_certification
@@ -154,11 +155,14 @@ async def retire_epoch(old: Epoch, retired: int, deadline: float | None) -> None
     if deferred:
         # The tail and its done-callback start from an empty context: either would
         # otherwise copy the driving request's, and with it keep the retired generation
-        # reachable after the retire.
+        # reachable after the retire. The tail is still the rebuild's own work, so it
+        # starts from the fork gate's rebuild context: a fork it makes while that rebuild
+        # holds the gate does not wait on it. It outlives the rebuild and the job that may
+        # have driven it, so the context carries no job span of that job's.
         task = asyncio.create_task(
             _deferred_drain_and_close(old, retired, budget),
             name=f"tai-epoch-{old.number}-deferred-retire",
-            context=contextvars.Context(),
+            context=fork_gate.rebuild_context(),
         )
         _deferred_retire_tasks.add(task)
         task.add_done_callback(_deferred_retire_tasks.discard, context=contextvars.Context())

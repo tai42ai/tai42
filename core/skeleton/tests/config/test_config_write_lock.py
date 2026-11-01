@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import time
 from collections.abc import Awaitable, Callable, Iterator
 from contextlib import contextmanager
 from typing import Any, cast
@@ -28,6 +29,7 @@ from tai42_skeleton.app.bus.ops import FleetOp
 from tai42_skeleton.app.epoch import Epoch
 from tai42_skeleton.config.deployment_env import DeploymentOwnership
 from tai42_skeleton.config.service import ConfigService
+from tai42_skeleton.config.service import service as service_mod
 
 from .._fakes.bus import FakeBus
 from .fake_pipeline import (
@@ -228,8 +230,7 @@ async def test_a_profile_apply_waits_for_a_write_inside_its_listing(monkeypatch:
 
 
 def _write_lock_held() -> bool:
-    lock = ConfigService._config_write_lock
-    return lock is not None and lock.locked()
+    return service_mod._config_write_lock.locked
 
 
 class _LockProbingBus(FakeBus):
@@ -663,3 +664,78 @@ async def test_a_writer_cancelled_again_during_its_exit_returns_only_once_the_sp
     assert spans[1][-1] == "write_env"
     assert world.log == ["write_env"]
     assert store.env_writes == [{"OTHER": "v"}]
+
+
+class _WritersPastTheLockStore(_LoggingStore):
+    """A store counting the writers past the config-write lock at once.
+
+    A writer asks for the store's span only once it holds the lock, so every writer between
+    asking for the span and leaving it is past the lock. Each persist of the env signals
+    ``persisting`` and then takes a while, so a second writer has time to arrive.
+    """
+
+    def __init__(self, log: list[str], **kwargs: Any) -> None:
+        super().__init__(log, **kwargs)
+        self._count_guard = threading.Lock()
+        self._past_the_lock = 0
+        self.most_past_the_lock = 0
+        self.persisting = threading.Event()
+
+    @contextmanager
+    def exclusive_write(self) -> Iterator[None]:
+        with self._count_guard:
+            self._past_the_lock += 1
+            self.most_past_the_lock = max(self.most_past_the_lock, self._past_the_lock)
+        try:
+            with super().exclusive_write():
+                yield
+        finally:
+            with self._count_guard:
+                self._past_the_lock -= 1
+
+    def write_env(self, config: dict[str, str]) -> None:
+        self.persisting.set()
+        time.sleep(0.3)
+        super().write_env(config)
+
+
+async def test_two_writers_on_two_loops_in_two_threads_write_one_at_a_time(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A serving-loop writer and a writer on a job's private loop: one holds the config-write
+    lock at a time, and the other loop reads it as held while the first writes."""
+    world = _World(monkeypatch)
+    store = _WritersPastTheLockStore(world.log, manifest=_manifest(), env={"M_PICK": "m_a", "M_GONE": "1"})
+    world.store = store
+    seen_held: list[bool] = []
+
+    async def first() -> None:
+        await world.service().apply_env_change({"FIRST": "v"})
+
+    async def second() -> None:
+        assert await asyncio.to_thread(store.persisting.wait, 10)
+        seen_held.append(_write_lock_held())
+        await world.service().apply_env_change({"SECOND": "v"})
+
+    errors: list[BaseException] = []
+
+    def on_a_loop_of_its_own(work: Callable[[], Awaitable[None]]) -> threading.Thread:
+        async def run() -> None:
+            await work()
+
+        def target() -> None:
+            try:
+                asyncio.run(run())
+            except BaseException as exc:
+                errors.append(exc)
+
+        thread = threading.Thread(target=target, name="test-own-loop")
+        thread.start()
+        return thread
+
+    threads = [on_a_loop_of_its_own(first), on_a_loop_of_its_own(second)]
+    for thread in threads:
+        await asyncio.to_thread(thread.join, 30)
+    assert errors == []
+    assert seen_held == [True]
+    assert store.most_past_the_lock == 1
+    assert world.log == ["write_env", "write_env"]
+    assert store.env_writes == [{"FIRST": "v"}, {"SECOND": "v"}]

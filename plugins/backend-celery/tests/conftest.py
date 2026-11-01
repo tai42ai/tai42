@@ -304,13 +304,20 @@ def liveness_path(monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.Temp
 @pytest.fixture(autouse=True)
 def _fresh_progress_registrations(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """No reporter registered with the worker step or the beat scheduler, no embedded beat or job slots
-    watched, and the app's consumer and worker steps restored.
+    watched, no fork guard installed, and the app's consumer and worker steps and the ``beat_init``
+    receivers restored.
 
     A launch registers its runtime's reporter process-wide, as one process runs one runtime; each
-    test stands for its own process.
+    test stands for its own process. The fork gate's guard a worker build installs and the beat's
+    lock receiver a registration swaps in are process-wide too, so they are undone as well.
     """
+    from celery.signals import beat_init
+    from tai42_kit.fork_gate import fork_gate
+
     from tai42_backend_celery.core import beat_scheduler, embedded_beat, job_slots, liveness_step
     from tai42_backend_celery.core.app import celery_app
+
+    monkeypatch.setattr(fork_gate._fork_hooks, "guard", None)
 
     monkeypatch.setattr(liveness_step, "_report", None)
     monkeypatch.setattr(liveness_step, "_task_timeout", 0.0)
@@ -321,7 +328,12 @@ def _fresh_progress_registrations(monkeypatch: pytest.MonkeyPatch) -> Iterator[N
     monkeypatch.setattr(job_slots, "_watch", None)
     blueprints = [liveness_step.consumer_steps(celery_app), embedded_beat.worker_steps(celery_app)]
     before = [set(steps) for steps in blueprints]
+    # A Signal instance always holds a receivers list; only the class attribute is None.
+    assert beat_init.receivers is not None
+    receivers = list(beat_init.receivers)
     yield
+    beat_init.receivers = receivers
+    beat_init.sender_receivers_cache.clear()
     for steps, kept in zip(blueprints, before, strict=True):
         steps.clear()
         steps.update(kept)

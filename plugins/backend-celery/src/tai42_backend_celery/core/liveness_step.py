@@ -6,9 +6,13 @@ progress too, so each tick, before it reports:
 - reads the embedded beat's liveness file when the worker runs one (``-B``,
   :mod:`~tai42_backend_celery.core.embedded_beat`), and withholds the report while the beat's
   promise is overdue;
-- on a pool that cannot end a job at its budget (``solo``, ``threads``), withholds the report once
-  every slot holds a job past ``CELERY_TASK_TIMEOUT`` (:mod:`~tai42_backend_celery.core.job_slots`).
+- on a pool that cannot end a job at its budget (``solo``, ``threads``, ``eventlet``), withholds the report once
+  a job runs past ``CELERY_TASK_TIMEOUT`` (:mod:`~tai42_backend_celery.core.job_slots`).
   On ``solo`` the job runs on the hub thread, so the running job makes this same tick itself.
+
+The same tick reports while a fork or an in-process job waits for a config reload's re-import
+(the fork gate's guard, installed by the worker runtime's build, and
+:func:`~tai42_backend_celery.core.job_slots.in_process_job`).
 
 On an async transport the worker's hub loop drives the timer and the timer has no thread of
 its own, so a tick fires only while the loop passes. The step registers one repeating timer
@@ -25,10 +29,10 @@ which is what the probe reads.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, cast
 
 from celery import Celery, bootsteps
-from celery.concurrency import solo, thread
 from celery.worker.consumer.connection import Connection
 from tai42_contract.backend.runtime import ProgressReporter
 
@@ -36,10 +40,30 @@ from tai42_backend_celery.core import embedded_beat, job_slots
 
 # Seconds between two ticks of the step, and so the promise of each report. The liveness file
 # throttles its writes to its own interval, so a faster tick costs one clock read.
-_PROGRESS_TICK_SECONDS = 1.0
+PROGRESS_TICK_SECONDS = 1.0
 
-# The pools that run a job until it returns, whatever its time limit, by the name the docs use.
-_UNBOUNDED_POOLS: dict[type[Any], str] = {solo.TaskPool: "solo", thread.TaskPool: "threads"}
+
+@dataclass(frozen=True)
+class _Pool:
+    """How a celery pool runs its jobs, under the name the docs use."""
+
+    name: str
+    # Its jobs run in the worker process itself, not in forked children.
+    in_process: bool
+    # It ends a job at its time limit; the others run a job until it returns (the eventlet
+    # pool takes no time limit at all).
+    ends_jobs: bool
+
+
+# Every pool celery ships, keyed by the module of its class: celery names its pools by module
+# too, and the green pools are named without importing their optional extras.
+_POOLS: dict[str, _Pool] = {
+    "celery.concurrency.prefork": _Pool("prefork", in_process=False, ends_jobs=True),
+    "celery.concurrency.solo": _Pool("solo", in_process=True, ends_jobs=False),
+    "celery.concurrency.thread": _Pool("threads", in_process=True, ends_jobs=False),
+    "celery.concurrency.gevent": _Pool("gevent", in_process=True, ends_jobs=True),
+    "celery.concurrency.eventlet": _Pool("eventlet", in_process=True, ends_jobs=False),
+}
 
 _report: ProgressReporter | None = None
 _task_timeout: float = 0.0
@@ -69,7 +93,7 @@ def consumer_steps(app: Celery) -> set[type[bootsteps.Step]]:
     return cast("dict[str, set[type[bootsteps.Step]]]", app.steps)["consumer"]
 
 
-def _tick() -> None:
+def tick() -> None:
     """Report one pass of the worker, promising the next within one tick, unless what it cannot end is stuck."""
     if _report is None:
         raise RuntimeError(
@@ -78,7 +102,7 @@ def _tick() -> None:
         )
     embedded_beat.check()
     job_slots.check_wedged()
-    _report(next_within=_PROGRESS_TICK_SECONDS)
+    _report(next_within=PROGRESS_TICK_SECONDS)
 
 
 class ProgressStep(bootsteps.StartStopStep):
@@ -92,17 +116,26 @@ class ProgressStep(bootsteps.StartStopStep):
         super().__init__(parent, **kwargs)
 
     def start(self, parent: Any) -> None:
-        """Watch the pool's jobs, then register the repeating tick."""
-        pool_name = next((name for cls, name in _UNBOUNDED_POOLS.items() if isinstance(parent.pool, cls)), None)
-        if pool_name is not None:
-            job_slots.watch(
-                pool_name=pool_name,
-                slots=parent.pool.limit,
-                budget=_task_timeout,
-                ticks_in_job=pool_name == "solo",
-                tick=_tick,
+        """Watch the pool's jobs, then register the repeating tick.
+
+        A pool whose class is not one celery ships raises ``RuntimeError``: how it runs its jobs,
+        and so how to report for them, is unknown.
+        """
+        module = type(parent.pool).__module__
+        pool = _POOLS.get(module)
+        if pool is None:
+            raise RuntimeError(
+                f"the celery worker's pool {type(parent.pool).__qualname__} from {module} is not one celery ships "
+                f"({', '.join(entry.name for entry in _POOLS.values())}); its progress cannot be reported"
             )
-        self.tref = parent.timer.call_repeatedly(_PROGRESS_TICK_SECONDS, _tick)
+        job_slots.watch(
+            pool_name=pool.name,
+            in_process=pool.in_process,
+            budget=None if pool.ends_jobs else _task_timeout,
+            ticks_in_job=pool.name == "solo",
+            tick=tick,
+        )
+        self.tref = parent.timer.call_repeatedly(PROGRESS_TICK_SECONDS, tick)
 
     def stop(self, parent: Any) -> None:
         """Cancel the tick, so a restarted consumer registers exactly one."""

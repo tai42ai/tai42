@@ -15,7 +15,7 @@ from typing import Any, cast
 
 import pytest
 from click.testing import CliRunner
-from tai42_kit.fork_gate import fork_gate
+from tai42_kit.fork_gate import JOB_SPAN_WAIT_SECONDS, fork_gate
 
 from tai42_backend_rq import worker as worker_module
 from tai42_backend_rq import worker_pools
@@ -86,22 +86,6 @@ def test_after_fork_in_child_evicts_monitoring(app):
     assert app.monitoring.active.writer.shutdown_calls == 1
 
 
-def test_after_fork_in_child_resets_the_inherited_fork_gate(app):
-    """The fork happens INSIDE a job span, so the child inherits that span. Left in
-    place it would block the child's own gate use against a hold only the parent can
-    release."""
-    # The child's inherited copy, as the fork leaves it: this span is open and only the
-    # PARENT will ever close it. Set directly rather than through a real ``job_span``,
-    # whose exit would then decrement the freshly-reset counter below zero.
-    fork_gate._live_spans = 1
-    try:
-        worker_module._after_fork_in_child()
-        assert fork_gate.live_spans == 0
-        assert not fork_gate.blocked
-    finally:
-        fork_gate.reset_after_fork()
-
-
 def test_install_fork_hooks_registers_once(monkeypatch):
     registered: list[dict[str, Any]] = []
     monkeypatch.setattr(worker_module, "_fork_hooks_installed", False)
@@ -169,20 +153,131 @@ def test_work_horse_flush_failure_is_logged_not_raised(app, monkeypatch, caplog)
 # --- the fork gate: no job child alive during a manifest re-import -----------
 
 
-def test_prefork_holds_the_span_around_the_fork_instant(monkeypatch):
-    """The prefork pool gates ``fork_work_horse`` — the ``os.fork()`` call itself. The
-    child inherits a SNAPSHOT of the import locks, so that instant is the whole
-    exposure."""
+@pytest.mark.parametrize("cls", [worker_pools.CustomRQWorker, worker_pools.CustomRQSimpleWorker])
+def test_a_worker_guards_every_fork_reporting_its_progress_while_one_waits(cls):
+    """The guard spans each fork instant — a work-horse's or a scheduler spawn's. A forked child
+    inherits a SNAPSHOT of the import locks, so that instant is the whole exposure."""
+    worker = object.__new__(cls)
+
+    worker.guard_forks()
+
+    guard = fork_gate._fork_hooks.guard
+    assert guard is not None
+    assert guard.timeout == JOB_SPAN_WAIT_SECONDS
+    assert guard.tick == worker._tick_gate_wait
+    assert guard.tick_every == worker_pools._REFRESH_TICK_SECONDS
+
+
+# Each fork this worker makes itself: the work-horse, the scheduler rq starts with the work loop,
+# and the scheduler re-spawn from rq's maintenance pass.
+_OWN_FORKS = [
+    pytest.param("fork_work_horse", ("job", "queue"), id="work-horse"),
+    pytest.param("_start_scheduler", (False, "INFO"), id="scheduler-start"),
+    pytest.param("run_maintenance_tasks", (), id="maintenance"),
+]
+
+
+@pytest.mark.parametrize(("seam", "args"), _OWN_FORKS)
+def test_each_fork_the_worker_makes_runs_inside_a_job_span(monkeypatch, seam: str, args: tuple[Any, ...]):
     spans: list[int] = []
-    monkeypatch.setattr(
-        worker_pools.Worker, "fork_work_horse", lambda self, job, queue: spans.append(fork_gate.live_spans)
-    )
+    monkeypatch.setattr(worker_pools.Worker, seam, lambda self, *a, **kw: spans.append(fork_gate.live_spans))
     worker = object.__new__(worker_pools.CustomRQWorker)
 
-    worker.fork_work_horse("job", "queue")
+    getattr(worker, seam)(*args)
+
     assert spans == [1]
     assert fork_gate.live_spans == 0
-    # The custom override still does its own bookkeeping.
+
+
+@pytest.mark.parametrize(("seam", "args"), _OWN_FORKS)
+def test_a_fork_the_worker_makes_releases_its_span_when_it_raises(monkeypatch, seam: str, args: tuple[Any, ...]):
+    def boom(self: Any, *a: Any, **kw: Any) -> None:
+        raise RuntimeError("fork blew up")
+
+    monkeypatch.setattr(worker_pools.Worker, seam, boom)
+    worker = object.__new__(worker_pools.CustomRQWorker)
+
+    with pytest.raises(RuntimeError, match="fork blew up"):
+        getattr(worker, seam)(*args)
+    assert fork_gate.live_spans == 0
+
+
+@pytest.mark.skipif(threading.current_thread() is not threading.main_thread(), reason="signals reach the main thread")
+@pytest.mark.parametrize(("seam", "args"), _OWN_FORKS)
+def test_a_stop_while_a_fork_waits_on_a_reimport_propagates_and_forks_nothing(
+    monkeypatch, seam: str, args: tuple[Any, ...]
+):
+    """A stop signal's exception raised while the fork waits for a running re-import ends
+    the wait and reaches the work loop, so nothing is forked into the re-import."""
+    from rq.exceptions import StopRequested
+
+    reached: list[str] = []
+    monkeypatch.setattr(worker_pools.Worker, seam, lambda self, *a, **kw: reached.append(seam))
+    worker = object.__new__(worker_pools.CustomRQWorker)
+    worker.name = "w"
+    worker._report_progress = _no_report
+    worker._liveness_failure = None
+    held = threading.Event()
+    release = threading.Event()
+
+    def rebuild() -> None:
+        with fork_gate.exclusive(timeout=5.0):
+            held.set()
+            release.wait(5.0)
+
+    def stop(signum: int, frame: Any) -> None:
+        raise StopRequested()
+
+    rebuilder = threading.Thread(target=rebuild, daemon=True)
+    rebuilder.start()
+    assert held.wait(5.0)
+    previous = signal.signal(signal.SIGUSR1, stop)
+    sender = threading.Timer(0.3, os.kill, (os.getpid(), signal.SIGUSR1))
+    try:
+        sender.start()
+        started = time.monotonic()
+        with pytest.raises(StopRequested):
+            getattr(worker, seam)(*args)
+        assert time.monotonic() - started < 3.0
+        assert reached == []
+    finally:
+        sender.cancel()
+        signal.signal(signal.SIGUSR1, previous)
+        release.set()
+        rebuilder.join(5.0)
+    assert fork_gate.live_spans == 0
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="os.fork is not available on this platform")
+def test_the_guard_takes_no_second_span_for_the_work_horse_fork(monkeypatch):
+    """The horse's fork runs inside the worker's own span, so the guard's hook nests in it."""
+    spans: list[int] = []
+
+    def fork(self: Any, job: Any, queue: Any) -> None:
+        pid = os.fork()
+        if pid == 0:  # pragma: no cover - runs in the child
+            os._exit(0)
+        spans.append(fork_gate.live_spans)
+        os.waitpid(pid, 0)
+
+    monkeypatch.setattr(worker_pools.Worker, "fork_work_horse", fork)
+    worker = object.__new__(worker_pools.CustomRQWorker)
+    worker.guard_forks()
+
+    worker.fork_work_horse("job", "queue")
+
+    assert spans == [1]
+    assert fork_gate.live_spans == 0
+    assert fork_gate._fork_hooks.fork_spans == {}
+
+
+def test_fork_work_horse_starts_each_horse_un_killed(monkeypatch):
+    monkeypatch.setattr(worker_pools.Worker, "fork_work_horse", lambda self, job, queue: None)
+    worker = object.__new__(worker_pools.CustomRQWorker)
+    worker._killed_horse_pid = 4242
+
+    worker.fork_work_horse("job", "queue")
+
     assert worker._killed_horse_pid == 0
 
 
@@ -204,18 +299,6 @@ def test_prefork_does_not_hold_the_span_across_the_horses_whole_run(monkeypatch)
     # rq's own execute_job runs unwrapped: only the fork instant inside it is gated.
     worker.execute_job(SimpleNamespace(id="job", timeout=None), "queue")
     assert during_monitor == [0], "the gate is still held while the horse runs"
-    assert fork_gate.live_spans == 0
-
-
-def test_prefork_releases_its_span_when_the_fork_raises(monkeypatch):
-    def boom(self: Any, job: Any, queue: Any) -> None:
-        raise RuntimeError("fork blew up")
-
-    monkeypatch.setattr(worker_pools.Worker, "fork_work_horse", boom)
-    worker = object.__new__(worker_pools.CustomRQWorker)
-
-    with pytest.raises(RuntimeError, match="fork blew up"):
-        worker.fork_work_horse("job", "queue")
     assert fork_gate.live_spans == 0
 
 
@@ -246,32 +329,6 @@ def test_simple_pool_releases_its_span_when_the_job_body_raises(monkeypatch):
 
     with pytest.raises(RuntimeError, match="job blew up"):
         worker.execute_job("job", "queue")
-    assert fork_gate.live_spans == 0
-
-
-def test_start_scheduler_runs_inside_a_fork_gate_span(monkeypatch):
-    """``work()`` spawns the scheduler process before its dequeue loop — the worker's
-    FIRST child, and a spawn like any other."""
-    spans: list[int] = []
-    monkeypatch.setattr(
-        worker_pools.Worker, "_start_scheduler", lambda self, *a, **kw: spans.append(fork_gate.live_spans)
-    )
-    worker = object.__new__(worker_pools.CustomRQWorker)
-
-    worker._start_scheduler(False, "INFO")
-    assert spans == [1]
-    assert fork_gate.live_spans == 0
-
-
-def test_run_maintenance_tasks_runs_inside_a_fork_gate_span(monkeypatch):
-    """rq's maintenance pass re-spawns a dead scheduler process — the same hazard as
-    a work-horse fork, so it takes the same span."""
-    spans: list[int] = []
-    monkeypatch.setattr(worker_pools.Worker, "run_maintenance_tasks", lambda self: spans.append(fork_gate.live_spans))
-    worker = object.__new__(worker_pools.CustomRQWorker)
-
-    worker.run_maintenance_tasks()
-    assert spans == [1]
     assert fork_gate.live_spans == 0
 
 
@@ -309,6 +366,9 @@ def _fake_worker_class(record: dict[str, Any]) -> type:
             record["connection"] = connection
             record["default_result_ttl"] = default_result_ttl
             self.name = name
+
+        def guard_forks(self) -> None:
+            record["guarded"] = True
 
         def work(self, **kwargs: Any) -> None:
             record["work"] = kwargs
@@ -348,6 +408,7 @@ def test_start_rq_worker_prefork(worker_env):
     assert worker_env["prepared"] == 1
     assert worker_env["gevent"] == 0
     assert worker_env["hooks"] == 1
+    assert worker_env["guarded"] is True
     assert worker_env["name"] == "w1"
     # The worker consumes the queue named by the ``queue_name`` setting (default
     # ``default``), the same queue the enqueue side and scheduler bind.
@@ -399,8 +460,9 @@ def test_the_redis_url_flag_wins_for_the_worker_connection(worker_env):
 def test_start_rq_worker_solo(worker_env):
     worker_module.start_rq_worker("redis://custom", "w2", "debug", True, 100, "solo", None)
     assert worker_env["prepared"] == 0
-    # The non-forking pools still spawn the rq-scheduler child, so they need the hook.
+    # The non-forking pools still spawn the rq-scheduler child, so they need the hook and the guard.
     assert worker_env["hooks"] == 1
+    assert worker_env["guarded"] is True
     assert worker_env["default_result_ttl"] == 100
     assert worker_env["work"] == {"burst": True, "logging_level": "DEBUG", "with_scheduler": True}
 
@@ -410,6 +472,7 @@ def test_start_rq_worker_gevent(worker_env):
     assert worker_env["gevent"] == 1
     assert worker_env["prepared"] == 0
     assert worker_env["hooks"] == 1
+    assert worker_env["guarded"] is True
 
 
 def test_main_cli_invokes_start(monkeypatch):
