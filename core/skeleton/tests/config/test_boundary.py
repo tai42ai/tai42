@@ -41,7 +41,7 @@ import tai42_skeleton.app.bus_settings
 import tai42_skeleton.backend.settings
 import tai42_skeleton.config.config_mode
 import tai42_skeleton.connectors.settings
-import tai42_skeleton.marketplace.prefix
+import tai42_skeleton.marketplace.environments.settings
 import tai42_skeleton.routers.metrics_settings
 import tai42_skeleton.settings.settings  # noqa: F401
 from tai42_skeleton.config.boundary import (
@@ -359,7 +359,7 @@ _CORE_EXCLUDED_INVENTORY = frozenset(
         "BACKEND_METRICS_HOST",
         "BACKEND_METRICS_PORT",
         "PROMETHEUS_MULTIPROC_DIR",
-        "TAI_PLUGINS_PREFIX",
+        "TAI_PLUGINS_DIR",
     }
 )
 

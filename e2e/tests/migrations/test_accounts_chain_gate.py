@@ -59,7 +59,7 @@ def scratch_store(
     monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_DB", name)
     monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_USER", harness_settings.pg_user)
     monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", harness_settings.pg_password)
-    monkeypatch.delenv("TAI_PLUGINS_PREFIX", raising=False)
+    monkeypatch.delenv("TAI_PLUGINS_DIR", raising=False)
     reset_all_settings()
     try:
         yield

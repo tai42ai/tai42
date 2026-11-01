@@ -8,13 +8,13 @@ infra."""
 
 from __future__ import annotations
 
-import threading
 from dataclasses import dataclass
 
 import pytest
 
 from tai42_e2e.readiness import wait_full_census
 from tai42_e2e.stack import TaiStack
+from tai42_e2e.supervisor import RespawnSupervisor
 from tai42_e2e.topology import StackConfig, Topology
 from tai42_e2e.variants import BusWorker
 from tai42_e2e.waiting import WaitTimeoutError
@@ -53,12 +53,11 @@ def _stack(census: list[BusWorker]) -> TaiStack:
         run_backend=True,
         queue_workers=("b",),
     )
-    stack._procs = {  # type: ignore[attr-defined]
+    stack.procs = {  # type: ignore[attr-defined]
         "backend": _Running("backend", _BACKEND_PID),
         "backend-queue-b": _Running("backend-queue-b", _QUEUE_WORKER_PID),
     }
-    stack._supervisor_lock = threading.RLock()  # type: ignore[attr-defined]
-    stack._supervised_names = set()  # type: ignore[attr-defined]
+    stack.supervisor = RespawnSupervisor(stack)
     stack.census = lambda: census  # type: ignore[method-assign]
     return stack
 

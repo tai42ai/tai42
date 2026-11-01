@@ -18,6 +18,7 @@ import json
 import os
 import sys
 from collections.abc import Callable
+from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
 
@@ -33,6 +34,8 @@ from tai42_skeleton.access_control.setup_recovery import SetupRecoveryError
 from tai42_skeleton.app.server import TaiMCP
 from tai42_skeleton.cli.native import setup_recover
 from tai42_skeleton.manifest import Manifest
+from tai42_skeleton.marketplace.environments.layout import BUILD_RECORD, layer_dir
+from tai42_skeleton.marketplace.environments.swap import point_current
 
 _RESULT = {
     "owner_user_id": "owner",
@@ -123,13 +126,13 @@ def test_recover_runs_the_bridge_and_the_recovery_on_one_event_loop(
     assert seen["recover_loop"] is fake_deployment["bridge_loop"]
 
 
-def test_recover_activates_the_prefix_before_importing_lifecycle_modules(
+def test_recover_activates_the_plugins_dir_before_importing_lifecycle_modules(
     monkeypatch: pytest.MonkeyPatch, fake_deployment: dict
 ) -> None:
-    import tai42_skeleton.marketplace.prefix as prefix
+    from tai42_skeleton.marketplace.environments import activate
 
     calls: list[str] = []
-    monkeypatch.setattr(prefix, "activate_prefix", lambda: calls.append("activate_prefix"))
+    monkeypatch.setattr(activate, "activate_plugins_dir", lambda: calls.append("activate_plugins_dir"))
     monkeypatch.setattr(
         setup_recover.importlib, "import_module", _recording_import(lambda name: calls.append(f"import:{name}"))
     )
@@ -145,8 +148,8 @@ def test_recover_activates_the_prefix_before_importing_lifecycle_modules(
     )
 
     assert result.exit_code == 0, result.output
-    # The prefix goes on sys.path before any lifecycle module imports, exactly as at serving boot.
-    assert calls == ["activate_prefix", "import:deployment.lifecycle.module"]
+    # The plugin layer goes on sys.path before any lifecycle module imports, exactly as at serving boot.
+    assert calls == ["activate_plugins_dir", "import:deployment.lifecycle.module"]
 
 
 def test_recover_refusal_exits_non_zero(monkeypatch: pytest.MonkeyPatch, fake_deployment: dict) -> None:
@@ -162,6 +165,22 @@ def test_recover_refusal_exits_non_zero(monkeypatch: pytest.MonkeyPatch, fake_de
 
     assert result.exit_code == 1, result.output
     assert "already holds a live key (owner-key)" in result.output
+
+
+def test_recover_whose_config_provider_is_absent_exits_non_zero_naming_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _absent_provider() -> TaiMCP:
+        raise ImportError("config mode 'vault' needs the 'tai42_config_vault' provider (install tai42-config-vault)")
+
+    monkeypatch.delattr(instance, "app", raising=False)
+    monkeypatch.setattr(instance, "build_app", _absent_provider)
+
+    result = CliRunner().invoke(
+        app_module.app,
+        ["setup", "--recover", "--token", "t", "--manifest-path", "/deploy/manifest.yaml"],
+    )
+
+    assert result.exit_code == 1, result.output
+    assert "needs the 'tai42_config_vault' provider" in result.output
 
 
 def test_recover_missing_manifest_path_uses_the_serve_wording(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -190,6 +209,49 @@ def test_recover_postgres_connection_failure_is_credential_free(
 
     assert result.exit_code == 1, result.output
     assert "could not connect to Postgres db-host:5432/tai" in result.output
+
+
+def test_recover_whose_plugin_layer_record_is_unreadable_exits_non_zero_naming_the_rebuild(
+    monkeypatch: pytest.MonkeyPatch, fake_deployment: dict, tmp_path: Path
+) -> None:
+    from tai42_skeleton.marketplace import compat
+
+    environment = layer_dir(tmp_path)
+    build = environment.build("b1")
+    build.mkdir(parents=True)
+    (build / BUILD_RECORD).write_text("{truncated", encoding="utf-8")
+    point_current(environment, "b1")
+    monkeypatch.setattr(compat, "configured_plugins_dir", lambda: tmp_path)
+
+    result = CliRunner().invoke(
+        app_module.app, ["setup", "--recover", "--token", "t", "--manifest-path", "/deploy/manifest.yaml"]
+    )
+
+    assert result.exit_code == 1, result.output
+    assert result.output.startswith(
+        f"Error: plugin environment has an unreadable build record {build / BUILD_RECORD} — refusing to start: "
+    ), result.output
+    assert "Run 'tai plugins rebuild' against this deployment, then start again" in result.output
+    assert fake_deployment["imported"] == []
+
+
+def test_recover_whose_preflight_cannot_reach_postgres_is_credential_free(
+    monkeypatch: pytest.MonkeyPatch, fake_deployment: dict
+) -> None:
+    from tai42_skeleton.marketplace.environments import activate
+
+    def _unreachable() -> None:
+        raise psycopg.OperationalError("connection refused")
+
+    monkeypatch.setattr(setup_recover, "_pg_target", lambda: "db-host:5432/tai")
+    monkeypatch.setattr(activate, "activate_plugins_dir", _unreachable)
+
+    result = CliRunner().invoke(
+        app_module.app, ["setup", "--recover", "--token", "t", "--manifest-path", "/deploy/manifest.yaml"]
+    )
+
+    assert result.exit_code == 1, result.output
+    assert result.output == "Error: could not connect to Postgres db-host:5432/tai: connection refused\n"
 
 
 def test_recover_redis_connection_failure_names_the_ac_redis(
@@ -285,6 +347,58 @@ def test_recover_refuses_a_pending_schema_before_importing_lifecycle_modules(
         result.output
     )
     assert "Run 'tai db migrate'" in result.output
+    assert fake_deployment["imported"] == []
+    assert recovered == []
+
+
+def test_recover_refuses_an_out_of_date_plugin_environment_before_importing_lifecycle_modules(
+    monkeypatch: pytest.MonkeyPatch, fake_deployment: dict, tmp_path
+) -> None:
+    from collections.abc import AsyncIterator
+    from contextlib import asynccontextmanager
+
+    from tai42_skeleton.marketplace.environments import boot_verification
+    from tai42_skeleton.marketplace.environments.findings import Finding
+    from tai42_skeleton.marketplace.environments.layout import layer_dir
+    from tai42_skeleton.marketplace.environments.targets import Targets
+    from tai42_skeleton.marketplace.environments.verify import EnvironmentStatus, Verification
+
+    stale = Finding(
+        head="plugin environment is out of date",
+        detail="the install store records acme-relay 1.0.0, the plugin layer holds none",
+        tail=". Run 'tai plugins rebuild' against this deployment, then start again",
+    )
+
+    @asynccontextmanager
+    async def _shared_lock() -> AsyncIterator[None]:
+        yield
+
+    class _Store:
+        async def list_installed(self) -> list[object]:
+            return []
+
+    def _verify(plugins_dir: object, rows: object) -> Verification:
+        status = EnvironmentStatus(label="layer", environment=layer_dir(tmp_path), pins=(), record=None, finding=stale)
+        return Verification(plugins_dir=tmp_path, targets=Targets(), environments=(status,))
+
+    monkeypatch.setattr(boot_verification, "component_store_configured", lambda component: component == "skeleton")
+    monkeypatch.setattr(boot_verification, "fleet_lock_shared", _shared_lock)
+    monkeypatch.setattr(boot_verification, "MarketplaceInstallStore", _Store)
+    monkeypatch.setattr(boot_verification, "verify_environments", _verify)
+    recovered: list[str] = []
+
+    async def _fake_recover(setup_token: str, *, key_user_id: str | None, key_description: str) -> dict:
+        recovered.append(setup_token)
+        return _RESULT
+
+    monkeypatch.setattr(setup_recover, "recover_owner_key", _fake_recover)
+
+    result = CliRunner().invoke(
+        app_module.app, ["setup", "--recover", "--token", "t", "--manifest-path", "/deploy/manifest.yaml"]
+    )
+
+    assert result.exit_code == 1, result.output
+    assert f"Error: {stale.boot_text()}" in result.output
     assert fake_deployment["imported"] == []
     assert recovered == []
 

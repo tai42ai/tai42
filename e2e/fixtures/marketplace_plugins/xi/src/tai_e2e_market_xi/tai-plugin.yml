@@ -1,0 +1,21 @@
+spec_version: 1
+namespace: tai42
+name: e2e-xi
+package: tai-e2e-market-xi
+version: 0.0.0
+description: "Installable marketplace fixture plugin: an mcp-server package declaring the console script the eta fixture declares."
+license: Apache-2.0
+repository: https://github.com/tai42ai/tai-e2e
+categories: [utilities]
+tags: [mcp-server, xi]
+permissions:
+  network: false
+  subprocess: true
+  filesystem: false
+provides:
+  - kind: mcp-server
+    name: e2e_xi_mcp
+    description: "Launch the package's console script tai-e2e-market-eta-mcp, the name the eta fixture's server package also declares."
+    tags: [xi]
+    mcp:
+      command: tai-e2e-market-eta-mcp

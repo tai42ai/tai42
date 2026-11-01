@@ -40,7 +40,7 @@ def installed_override_plugin(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -
     importlib.invalidate_caches()
     monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "secret")
     monkeypatch.delenv(_chain_plugin.BINDING_ENV, raising=False)
-    monkeypatch.setattr("tai42_skeleton.marketplace.prefix.configured_prefix", lambda: None)
+    monkeypatch.setattr("tai42_skeleton.marketplace.environments.current_builds.configured_plugins_dir", lambda: None)
     monkeypatch.setattr(db, "component_migrator_settings", lambda component: _TARGET)
     reset_all_settings()
 

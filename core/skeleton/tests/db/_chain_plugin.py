@@ -52,6 +52,27 @@ def spec_yaml(*, migrations_component: str | None = COMPONENT) -> str:
     )
 
 
+def server_spec_yaml() -> str:
+    """The packaged ``tai-plugin.yml`` of an ``mcp-server`` package declaring a ``migrations`` chain."""
+    return (
+        "spec_version: 1\n"
+        "namespace: tai42\n"
+        "name: chainprobe\n"
+        f"package: {DIST}\n"
+        "version: 1.0.0\n"
+        "description: A neutral chain-declaring test server package\n"
+        "license: Apache-2.0\n"
+        "categories: [dev]\n"
+        "provides:\n"
+        "  - kind: mcp-server\n"
+        "    name: chainprobe_mcp\n"
+        "    description: d\n"
+        "    mcp:\n"
+        "      command: tai42-chainprobe-mcp\n"
+        "migrations: migrations\n"
+    )
+
+
 def lay_out(
     site: Path,
     *,

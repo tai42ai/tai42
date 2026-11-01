@@ -61,7 +61,7 @@ def _stack_report(stack: TaiStack) -> str:
         lines.append(f"  {key}={_mask(key, value)}")
     lines.append("manifest:")
     lines.append("  " + repr(stack.config.manifest))
-    for name, handle in stack._procs.items():
+    for name, handle in stack.procs.items():
         lines.append(f"--- {name} log tail ---")
         lines.append(handle.log_tail())
     return "\n".join(lines)

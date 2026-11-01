@@ -43,7 +43,7 @@ pytestmark = [
         "helper:package-index",
         "setting:MARKETPLACE_URL",
         "setting:PIP_INDEX_URL",
-        "setting:shared-venv",
+        "setting:TAI_PLUGINS_DIR",
         "setting:fixture-plugin:alpha",
     ),
 ]

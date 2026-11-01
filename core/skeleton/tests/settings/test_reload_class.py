@@ -19,7 +19,7 @@ import tai42_skeleton.app.bus_settings
 import tai42_skeleton.backend.settings
 import tai42_skeleton.config.config_mode
 import tai42_skeleton.connectors.settings
-import tai42_skeleton.marketplace.prefix
+import tai42_skeleton.marketplace.environments.settings
 import tai42_skeleton.routers.metrics_settings
 import tai42_skeleton.settings.settings  # noqa: F401
 
@@ -43,7 +43,7 @@ def _field(cls_name: str, field_name: str) -> SettingsFieldInfo:
         ("BusRedisSettings", "recycle"),
         ("BusSettings", "recycle"),
         ("ConfigModeSettings", "excluded"),
-        ("PluginPrefixSettings", "excluded"),
+        ("PluginsDirSettings", "excluded"),
     ],
 )
 def test_class_level_reload_class(cls_name: str, expected: str) -> None:

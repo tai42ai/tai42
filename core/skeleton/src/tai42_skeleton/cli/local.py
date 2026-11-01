@@ -3,10 +3,11 @@
 :func:`register` is the ``tai.commands`` entry point. It receives the compiled
 root click group and mounts every command the server adds beyond the remote
 client: the local Typer commands (``db``, ``doctor``, ``catalog``, ``openapi``),
-the runtime launchers (``serve``, ``backend``, ``metrics``), and the offline
-validators (``config lint``, ``manifest validate``) attached onto the client's own
-``config``/``manifest`` groups. A missing attach target is a wiring error and
-raises loudly.
+the runtime launchers (``serve``, ``backend``, ``metrics``), the offline
+validators (``config lint``, ``manifest validate``) and ``plugins rebuild`` attached
+onto the client's own ``config``/``manifest``/``plugins`` groups. A missing attach target is a wiring error and
+raises loudly. It also registers the host-side handlers of ``tai setup --recover`` and
+``tai plugins uninstall --offline``.
 """
 
 from __future__ import annotations
@@ -19,13 +20,21 @@ import typer
 from typer.main import get_command
 
 from tai42_skeleton.cli import backend, mcp_app, metrics, offline
-from tai42_skeleton.cli.native import catalog, db, doctor, openapi, setup_recover
+from tai42_skeleton.cli.native import (
+    catalog,
+    db,
+    doctor,
+    openapi,
+    plugins_rebuild,
+    plugins_uninstall,
+    setup_recover,
+)
 
 
-def _attach_offline(root: click.Group, parent_name: str, fn: Callable[..., None], name: str) -> None:
-    """Compile the offline command ``fn`` and add it as ``name`` under the client's ``parent_name`` group.
+def _attach_leaf(root: click.Group, parent_name: str, fn: Callable[..., None], name: str) -> None:
+    """Compile the command ``fn`` and add it as ``name`` under the client's ``parent_name`` group.
 
-    The offline validators emit human diagnostics and an exit code only — no JSON output — so no ``--json``
+    An attached command emits human diagnostics and an exit code only — no JSON output — so no ``--json``
     flag is injected. The parent group is created by the client; if it is absent the wiring is broken, so raise.
     """
     parent = root.commands.get(parent_name)
@@ -45,12 +54,14 @@ def _attach_offline(root: click.Group, parent_name: str, fn: Callable[..., None]
 def register(group: click.Group) -> None:
     """Mount the server's local and runtime commands onto the ``tai`` root group."""
     from tai42_cli.app import inject_json_flag, mount_launcher
+    from tai42_cli.commands.plugins import register_offline_uninstall
     from tai42_cli.commands.setup import register_recovery
 
-    # ``tai setup --recover`` is a host-side action: the cli's ``setup`` command holds the
-    # flag and its user-facing shaping, and the server package fills the handler that reads
-    # the deployment and re-mints the owner's key.
+    # ``tai setup --recover`` and ``tai plugins uninstall --offline`` are host-side actions:
+    # the cli's command holds the flag and its user-facing shaping, and the server package
+    # fills the handler that runs on the deployment.
     register_recovery(setup_recover.recover)
+    register_offline_uninstall(plugins_uninstall.uninstall)
 
     # Local Typer commands: compile them together, give every leaf the trailing
     # ``--json`` form, then move each onto the root group.
@@ -69,6 +80,7 @@ def register(group: click.Group) -> None:
     mount_launcher(group, backend.main, "backend")
     mount_launcher(group, metrics.main, "metrics")
 
-    # Offline validators attach onto the client's own remote groups.
-    _attach_offline(group, "config", offline.config_lint, "lint")
-    _attach_offline(group, "manifest", offline.manifest_validate, "validate")
+    # Offline validators and the plugins rebuild attach onto the client's own remote groups.
+    _attach_leaf(group, "config", offline.config_lint, "lint")
+    _attach_leaf(group, "manifest", offline.manifest_validate, "validate")
+    _attach_leaf(group, "plugins", plugins_rebuild.rebuild, "rebuild")

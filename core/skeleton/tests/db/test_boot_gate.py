@@ -30,6 +30,7 @@ from tai42_kit.db import (
     discover_migrations,
 )
 from tai42_kit.settings import reset_all_settings
+from tests._fakes.plugin_environment_dists import current_layer_build
 
 from tai42_skeleton.app.epoch import current_epoch
 from tai42_skeleton.app.instance import app
@@ -317,18 +318,20 @@ async def test_malformed_packaged_spec_refuses_naming_the_distribution(
         await boot_gate.assert_deployment_schemas_applied(_manifest_loading_probe(), _installed())
 
 
-def test_prefix_only_distribution_is_gated(
+def test_layer_only_distribution_is_gated(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, isolated_imports: None
 ) -> None:
-    # A plugin installed only into the plugins prefix becomes importable when boot puts the
-    # prefix on ``sys.path``; the gate resolves its spec after that, so its chain is checked.
+    # A plugin installed only into the plugin layer becomes importable when boot puts the
+    # layer on ``sys.path``; the gate resolves its spec after that, so its chain is checked.
     import asyncio
 
-    from tai42_skeleton.marketplace.prefix import prefix_site_dirs
+    from tai42_skeleton.marketplace.environments import activate
+    from tai42_skeleton.marketplace.environments.layout import layer_site_dirs
 
-    prefix = tmp_path / "prefix"
-    _install_probe(Path(prefix_site_dirs(str(prefix))[0]), on_path=False)
-    monkeypatch.setattr("tai42_skeleton.marketplace.prefix.configured_prefix", lambda: str(prefix))
+    plugins_dir = tmp_path / "plugins"
+    _install_probe(layer_site_dirs(current_layer_build(plugins_dir))[0], on_path=False)
+    monkeypatch.setattr(activate, "configured_plugins_dir", lambda: plugins_dir)
+    monkeypatch.setattr(activate._ACTIVE, "target", None)
     _configure(monkeypatch, configured={probe.COMPONENT})
     _fake_status(monkeypatch, pending={probe.COMPONENT: None})
 
@@ -402,7 +405,7 @@ async def test_distribution_with_a_second_top_level_package_is_gated_as_migrate_
     _configure(monkeypatch, configured={probe.COMPONENT})
     checked = _fake_status(monkeypatch, pending={probe.COMPONENT: None})
     monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "secret")
-    monkeypatch.setattr("tai42_skeleton.marketplace.prefix.configured_prefix", lambda: None)
+    monkeypatch.setattr("tai42_skeleton.marketplace.environments.current_builds.configured_plugins_dir", lambda: None)
     reset_all_settings()
 
     applied = {entry.component: entry for entry in installed_plugin_entries()}

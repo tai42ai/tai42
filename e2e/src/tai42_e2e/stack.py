@@ -13,28 +13,26 @@ per-run-family dir gives that family its own multiproc dir without the harness e
 setting ``PROMETHEUS_MULTIPROC_DIR`` — stamping that env var is the entrypoint's own job.
 The harness asserts it never sets it (see :func:`tai42_e2e.child_env.child_env`).
 
-The process spawning, child-env construction, and readiness waits live in the
-:mod:`~tai42_e2e.spawning`, :mod:`~tai42_e2e.child_env`, and
-:mod:`~tai42_e2e.readiness` modules as free functions this class drives; the frozen
+The process spawning, child-env construction, readiness waits, port-ownership heal and
+restarts live in the :mod:`~tai42_e2e.spawning`, :mod:`~tai42_e2e.child_env`,
+:mod:`~tai42_e2e.readiness`, :mod:`~tai42_e2e.port_ownership` and
+:mod:`~tai42_e2e.restarts` modules as free functions this class drives; the
+respawn-on-exit supervisor is :class:`~tai42_e2e.supervisor.RespawnSupervisor`; the frozen
 config/resource/infra descriptions live in :mod:`~tai42_e2e.topology`."""
 
 from __future__ import annotations
 
-import contextlib
-import logging
-import os
 import shutil
-import signal
-import threading
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import yaml
 
-from tai42_e2e import child_env, ports, readiness, spawning
+from tai42_e2e import child_env, port_ownership, ports, readiness, restarts, spawning
 from tai42_e2e.httpapi import ApiClient
 from tai42_e2e.mcp import McpClient, mcp_read_timeout
 from tai42_e2e.metrics import Scrape, scrape
+from tai42_e2e.supervisor import RespawnSupervisor
 from tai42_e2e.topology import Infra, StackConfig, StackResources, Topology, _ProcSpec
 from tai42_e2e.waiting import wait_for
 
@@ -44,8 +42,6 @@ if TYPE_CHECKING:
     from tai42_e2e.procs import ProcessHandle
     from tai42_e2e.tcprelay import TcpRelay
     from tai42_e2e.variants import BusWorker
-
-logger = logging.getLogger(__name__)
 
 
 class TaiStack:
@@ -74,27 +70,22 @@ class TaiStack:
 
         self.app_ports: list[int] = []
         self.metrics_port: int | None = None
-        self._procs: dict[str, ProcessHandle] = {}
-        self._specs: dict[str, _ProcSpec] = {}
-        self._allocated_ports: list[int] = []
+        self.procs: dict[str, ProcessHandle] = {}
+        self.specs: dict[str, _ProcSpec] = {}
+        self.allocated_ports: list[int] = []
         # Per-stack TCP relays (the infra-outage tests front Redis/PG with one).
         # Attached before boot; stopped and leak-checked in teardown like a port.
         self._relays: list[TcpRelay] = []
         # The main run family's multiproc dir (MULTIWORKER: the shared dir;
         # REPLICAS: replica A's dir, which the backend + metrics join).
         self.metrics_dir: str = ""
-        self._config_dir = root / "config"
-        self._logs_dir = root / "logs"
+        self.config_dir = root / "config"
+        self.logs_dir = root / "logs"
         # One backend liveness file per child process (``child_env``).
         self.liveness_dir = root / "liveness"
-        # Respawn-on-exit supervisor (opt-in ``config.supervised``). Serialises every
-        # ``_procs``/``_specs`` mutation the supervisor and teardown/restart race on.
-        self._supervisor_lock = threading.RLock()
-        self._supervisor_stop = threading.Event()
-        self._supervisor_thread: threading.Thread | None = None
-        self._supervised_names: set[str] = set()
-        # Set once boot has converged; before it the supervisor respawns only a graceful exit.
-        self._booted = False
+        # Respawn-on-exit supervisor (opt-in ``config.supervised``); its lock serialises every
+        # ``procs``/``specs`` mutation the supervisor and teardown/restart race on.
+        self.supervisor = RespawnSupervisor(self)
 
     # ---- lifecycle -------------------------------------------------------
 
@@ -109,9 +100,23 @@ class TaiStack:
     def __exit__(self, *exc: object) -> None:
         self.teardown()
 
+    def render_config(self) -> Path:
+        """Write the deployment's config directory: the manifest and the stored env file. A
+        host-side command run before the first boot reads them as a server does. Returns the
+        manifest path."""
+        self.config_dir.mkdir(parents=True, exist_ok=True)
+        manifest_path = self.config_dir / "manifest.yml"
+        # Seed the manifest verbatim when a raw document is supplied (the
+        # comment-preservation scenario), else dump the config dict.
+        if self.config.raw_manifest is not None:
+            manifest_path.write_text(self.config.raw_manifest, encoding="utf-8")
+        else:
+            manifest_path.write_text(yaml.safe_dump(self.config.manifest, sort_keys=False), encoding="utf-8")
+        child_env.render_env_file(self)
+        return manifest_path
+
     def boot(self) -> None:
-        self._config_dir.mkdir(parents=True, exist_ok=True)
-        self._logs_dir.mkdir(parents=True, exist_ok=True)
+        self.logs_dir.mkdir(parents=True, exist_ok=True)
         self.liveness_dir.mkdir(parents=True, exist_ok=True)
 
         n_app = 2 if self.config.topology is Topology.REPLICAS else 1
@@ -124,19 +129,12 @@ class TaiStack:
             self.app_ports = [self._pinned_app_port]
         else:
             self.app_ports = [ports.allocate_port() for _ in range(n_app)]
-        self._allocated_ports.extend(self.app_ports)
+        self.allocated_ports.extend(self.app_ports)
         if self.config.run_metrics:
             self.metrics_port = ports.allocate_port()
-            self._allocated_ports.append(self.metrics_port)
+            self.allocated_ports.append(self.metrics_port)
 
-        manifest_path = self._config_dir / "manifest.yml"
-        # Seed the manifest verbatim when a raw document is supplied (the
-        # comment-preservation scenario), else dump the config dict.
-        if self.config.raw_manifest is not None:
-            manifest_path.write_text(self.config.raw_manifest, encoding="utf-8")
-        else:
-            manifest_path.write_text(yaml.safe_dump(self.config.manifest, sort_keys=False), encoding="utf-8")
-        child_env.render_env_file(self)
+        manifest_path = self.render_config()
 
         # One run family per metrics dir. REPLICAS: replica A + backend + metrics
         # share family "a"; replica B is family "b" with no scraper.
@@ -144,179 +142,18 @@ class TaiStack:
         self.metrics_dir = str(Path(family_dirs[0]) / "tai42_prometheus")
 
         spawning.spawn_all(self, manifest_path, family_dirs)
-        self._ensure_own_ports()
+        port_ownership.ensure_own_ports(self)
         # A supervised stack runs its supervisor from the first spawn, like the process
         # manager of a deployment: a worker can be recycled while the fleet boots (a
         # worker joining the bus rolls a recycle over the workers that ran a stored copy of
         # a key its deployment sets). Until boot has converged the supervisor respawns only
         # a graceful exit; a failed exit stays down so readiness surfaces it.
-        self._start_supervisor()
+        self.supervisor.start()
         readiness.wait_ready(self)
-        with self._supervisor_lock:
-            self._booted = True
+        self.supervisor.mark_booted()
 
-    # ---- port-ownership heal ---------------------------------------------
-
-    # How many fresh ports one process may be handed before its bind is declared a
-    # genuine failure rather than an ephemeral-port collision.
-    _PORT_OWNERSHIP_ATTEMPTS = 6
-
-    def _ensure_own_ports(self) -> None:
-        """Confirm every port-binding process listens on the port THIS stack allocated it, healing a collision.
-
-        The allocator probes a free ephemeral port then closes the socket before the
-        child binds it, so a foreign process on the shared host can seize that port in the
-        gap; the child then fails to bind (``EADDRINUSE``) and exits. A busless stack's
-        HTTP-only readiness would pass against the foreign listener and the test would talk
-        to the wrong server. For each spawned process that binds a port — the serve fleet,
-        the embed host, the metrics server alike — wait until the port is held by this
-        process's own session; on the child's bind-failure exit, or a foreign pid holding
-        the port, re-allocate a fresh port and respawn, and after the attempts are spent
-        raise loudly naming the port and the foreign holder. Runs at the one boot seam, so
-        every stack shape is covered without a per-stack copy.
-        """
-        for name in [n for n in list(self._procs) if self._ports_for(n)]:
-            self._heal_process_port(name)
-
-    def _heal_process_port(self, name: str) -> None:
-        for _ in range(self._PORT_OWNERSHIP_ATTEMPTS):
-            port = self._ports_for(name)[0]
-            if self._await_port_binding(name, port) != "collision":
-                # "owned": the process holds its own port. "released": the child exited for
-                # its OWN reason (not a bind collision) — leave it untouched so readiness
-                # surfaces the child's failure unchanged; NEVER respawn a child that died on
-                # its own, and log no heal warning.
-                return
-            logger.warning(
-                "stack %r: process %r did not own its port %d (foreign pid(s) %s) — re-allocating and respawning",
-                self.config.name,
-                name,
-                port,
-                self._foreign_holder_text(port),
-            )
-            self._reallocate_and_respawn(name, port)
-        port = self._ports_for(name)[0]
-        raise RuntimeError(
-            f"stack {self.config.name!r}: process {name!r} could not bind an owned port after "
-            f"{self._PORT_OWNERSHIP_ATTEMPTS} re-allocations — port {port} held by foreign pid(s) "
-            f"{self._foreign_holder_text(port)}"
-        )
-
-    @staticmethod
-    def _foreign_holder_text(port: int) -> str:
-        """The pid(s) holding ``port`` as a plain, comma-joined string for a loud error, or
-        ``unknown`` when no diagnostic tool could attribute the listener."""
-        pids = ports.listening_pids(port)
-        return ", ".join(str(pid) for pid in pids) if pids else "unknown"
-
-    def _await_port_binding(self, name: str, port: int) -> str:
-        """Decide the port's fate, distinguishing a bind COLLISION (the heal's to fix) from
-        the child's own early exit (readiness's to surface):
-
-        - ``"owned"`` — a listener in this process's session holds the port.
-        - ``"collision"`` — a FOREIGN pid holds the port, or the child exited having logged
-          the bind error (``EADDRINUSE``); re-allocate and respawn.
-        - ``"released"`` — the child exited for its OWN reason with no foreign listener on
-          the port (a bad manifest, a missing secret); leave it so readiness raises the
-          child's failure unchanged.
-
-        A process that never begins listening within the boot timeout is a genuine bind
-        hang and raises through :func:`wait_for`."""
-        handle = self._procs[name]
-
-        def decide() -> str | None:
-            # Cheap gate first: only reach for the (subprocess-priced) pid attribution once
-            # something is actually listening on the port.
-            if ports.is_free(port):
-                if handle.is_running():
-                    return None  # nothing bound yet; keep waiting
-                # Exited without ever binding: only a recorded bind failure (a foreign
-                # holder since gone) is the heal's; any other exit is the child's own.
-                return "collision" if self._exited_on_bind_error(handle) else "released"
-            pids = ports.listening_pids(port)
-            if pids:
-                return "owned" if self._pids_in_session(pids, handle.pid) else "collision"
-            # Bound but the diagnostic tools cannot attribute it: ours while our child is
-            # alive (a foreign holder would have failed our bind and exited it); a foreign
-            # holder once our child has exited.
-            return "owned" if handle.is_running() else "collision"
-
-        return wait_for(
-            decide,
-            deadline=self.infra.settings.boot_timeout,
-            message=f"process {name!r} never began listening on port {port}",
-        )
-
-    @staticmethod
-    def _exited_on_bind_error(handle: ProcessHandle) -> bool:
-        """Whether an exited child's output shows it failed to BIND its port (``EADDRINUSE``)
-        — the only early exit the port heal owns; every other exit is the child's own boot
-        failure, which readiness surfaces unchanged."""
-        tail = handle.log_tail().lower()
-        return "address already in use" in tail or "[errno 98]" in tail
-
-    @staticmethod
-    def _pids_in_session(pids: list[int], leader_pid: int) -> bool:
-        """Whether every listener pid belongs to ``leader_pid``'s session — the spawned
-        master is a session leader (``start_new_session=True``), so its sid equals its pid
-        and its uvicorn worker children inherit that session. A pid that vanished mid-check
-        is skipped; confirming none is not ownership."""
-        confirmed = False
-        for pid in pids:
-            try:
-                if os.getsid(pid) != leader_pid:
-                    return False
-            except (ProcessLookupError, PermissionError):
-                continue
-            confirmed = True
-        return confirmed
-
-    def _reallocate_and_respawn(self, name: str, old_port: int) -> None:
-        """Reap the child, drop the lost port, allocate a fresh one, rewrite the spec's
-        ``--port``, refresh every port-derived env value, and respawn under the same name."""
-        self._procs[name].terminate()
-        if old_port in self._allocated_ports:
-            self._allocated_ports.remove(old_port)
-        # The lost port is held by a foreign process, so do NOT assert it frees.
-        ports.release_port(old_port)
-        new_port = ports.allocate_port()
-        self._allocated_ports.append(new_port)
-        self._set_port(name, new_port)
-        argv = self._specs[name].argv
-        for i in range(len(argv) - 1):
-            if argv[i] == "--port":
-                argv[i + 1] = str(new_port)
-                break
-        # The port-derived env (origin allowlist, own-origin, replica-B origin — see
-        # ``child_env.dynamic_env``) was baked from the OLD port into every spec's process
-        # env. Re-derive it now so neither this process nor any already-running sibling that
-        # inherited a port-derived value advertises or allows the seized port; the
-        # freshly-terminated target then respawns with it.
-        self._refresh_port_derived_env(target=name)
-        spawning.spawn(self, self._specs[name])
-
-    def _refresh_port_derived_env(self, *, target: str) -> None:
-        """Re-derive the port-keyed env into every spec, respawning each RUNNING process
-        whose port-derived values changed (they are deployment env, so a process takes a
-        new value only at its spawn).
-
-        One seam over ``child_env.dynamic_env`` (no per-profile branch): bus keys do not
-        depend on a port so they never trigger a respawn; only a profile that carries a
-        port-derived origin (all-ports allowlist, own-origin, replica-B origin) has a
-        process to refresh. The ``target`` was reaped by the caller and is respawned by it
-        with the updated spec, so it is not respawned here even if still winding down.
-        """
-        fresh = child_env.dynamic_env(self)
-        for pname, spec in list(self._specs.items()):
-            if all(spec.env.get(key) == value for key, value in fresh.items()):
-                continue
-            spec.env.update(fresh)
-            if pname != target and self._procs[pname].is_running():
-                self._procs[pname].terminate()
-                spawning.spawn(self, spec)
-
-    def _set_port(self, name: str, new_port: int) -> None:
-        """Point the stack's port record for ``name`` at ``new_port`` (mirrors :meth:`_ports_for`)."""
+    def set_port(self, name: str, new_port: int) -> None:
+        """Point the stack's port record for ``name`` at ``new_port`` (mirrors :meth:`ports_for`)."""
         if name == "metrics":
             self.metrics_port = new_port
             return
@@ -329,14 +166,14 @@ class TaiStack:
         self._torn_down = True
         # Stop the respawn supervisor FIRST and wait for any in-flight respawn to finish, so
         # it never re-launches a process this teardown is about to reap (a leak).
-        self._stop_supervisor()
+        self.supervisor.stop()
         errors: list[str] = []
         errors.extend(self._reap_processes())
         errors.extend(self._release_ports())
         errors.extend(self._release_infra())
         errors.extend(self._reap_relays())
 
-        self._procs.clear()
+        self.procs.clear()
         if not self.infra.settings.keep_stacks:
             shutil.rmtree(self.root, ignore_errors=True)
         if errors:
@@ -345,7 +182,7 @@ class TaiStack:
     def _reap_processes(self) -> list[str]:
         """Stop every process group (SIGTERM -> SIGKILL) and assert each was reaped."""
         errors: list[str] = []
-        for handle in list(self._procs.values()):
+        for handle in list(self.procs.values()):
             try:
                 handle.terminate()
             except Exception as exc:
@@ -359,7 +196,7 @@ class TaiStack:
         asynchronously (uvicorn workers hold the shared fd and die a beat after the
         master is reaped), so poll briefly before declaring a real leak."""
         errors: list[str] = []
-        for port in self._allocated_ports:
+        for port in self.allocated_ports:
             try:
                 wait_for(lambda p=port: ports.is_free(p), deadline=5.0, message=f"port {port} never freed")
             except TimeoutError:
@@ -410,7 +247,7 @@ class TaiStack:
         :func:`tai42_e2e.readiness.wait_workers`)."""
         return await readiness.wait_workers(self, n, port=port, deadline=deadline)
 
-    def _wait_fresh_lives(
+    def wait_fresh_lives(
         self,
         kind: str,
         deadline: float,
@@ -481,104 +318,39 @@ class TaiStack:
         return self.infra.redis.record_keys()
 
     def process(self, name: str) -> ProcessHandle:
-        return self._procs[name]
+        return self.procs[name]
 
-    # ---- restart / rotation ----------------------------------------------
+    # ---- restart / rotation delegators -----------------------------------
 
     def restart(self, name: str) -> None:
-        """Stop and respawn one process from its saved spec (component-restart
-        tests). The new process re-enters readiness for its own port kind."""
-        if self.config.supervised:
-            # The respawn-on-exit supervisor would observe the terminated handle and
-            # double-spawn a second replacement — a supervised stack recycles through the
-            # supervisor (a graceful self-exit), never a manual restart.
-            raise RuntimeError(f"restart({name!r}) is unsupported on a supervised stack; recycle via the supervisor")
-        handle = self._procs[name]
-        # A restarted worker answers requests before it has claimed its bus slot, so the
-        # post-restart wait keys on the restarted process's fresh census LIVES. A worker
-        # reuses its stable slot name at an incremented generation, so capture the
-        # pre-restart lives of its kind (``{name: generation}``) and the names this process
-        # holds BEFORE the kill; the wait then holds until those lives are gone and its fresh
-        # READY lives have joined, keying on the generation not a new string.
-        before, replaced = self._restart_baseline(name, handle)
-        handle.terminate()
-        # The respawn reuses the same port; wait for the killed process to release
-        # it before rebinding, else the new process fails to bind and exits early.
-        for port in self._ports_for(name):
-            wait_for(lambda p=port: ports.is_free(p), deadline=5.0, message=f"port {port} never freed before restart")
-        spec = self._specs[name]
-        spawning.spawn(self, spec)
-        self._wait_after_restart(name, before, replaced)
+        """Stop and respawn one process from its saved spec (see :func:`tai42_e2e.restarts.restart`)."""
+        restarts.restart(self, name)
 
     def restart_with_env(self, changes: Mapping[str, str | None]) -> None:
-        """Apply env ``changes`` (``None`` removes a key) to every serve replica and the backend, then restart them.
-
-        Models an operator changing a deployment setting: the keys are deployment env, so the
-        change reaches each process through its process env at the restart.
-        """
-        for key, value in changes.items():
-            if value is None:
-                self.config.env.pop(key, None)
-            else:
-                self.config.env[key] = value
-        for name in [n for n in self._specs if n.startswith("serve") or n == "backend"]:
-            env = self._specs[name].env
-            for key, value in changes.items():
-                if value is None:
-                    env.pop(key, None)
-                else:
-                    env[key] = value
-            self.restart(name)
+        """Apply env ``changes`` to every serve replica and the backend, then restart them
+        (see :func:`tai42_e2e.restarts.restart_with_env`)."""
+        restarts.restart_with_env(self, changes)
 
     def respawn_with_process_env(self, name: str, changes: Mapping[str, str | None]) -> None:
-        """Apply env ``changes`` (``None`` removes a key) to one supervised process, then let the supervisor respawn it.
-
-        Models an operator changing one process's deployment env on a supervised deployment:
-        the process's spec gains the changes, the process is stopped, and the respawn-on-exit
-        supervisor starts it again from that spec. Returns once the fresh life is ready.
-        """
-        if not self.config.supervised:
-            raise RuntimeError(f"respawn_with_process_env({name!r}) needs a supervised stack; use restart_with_env")
-        with self._supervisor_lock:
-            if name not in self._supervised_names:
-                raise RuntimeError(f"respawn_with_process_env({name!r}): the supervisor does not watch {name!r}")
-            handle = self._procs[name]
-            before, replaced = self._restart_baseline(name, handle)
-            env = self._specs[name].env
-            for key, value in changes.items():
-                if value is None:
-                    env.pop(key, None)
-                else:
-                    env[key] = value
-            # Stopped under the supervisor lock, so the supervisor's next pass respawns it from
-            # the changed spec.
-            handle.terminate()
-        self._wait_after_restart(name, before, replaced)
+        """Apply env ``changes`` to one supervised process and let the supervisor respawn it
+        (see :func:`tai42_e2e.restarts.respawn_with_process_env`)."""
+        restarts.respawn_with_process_env(self, name, changes)
 
     def rotate_connectors_kek(self, *, new_kek: str, previous: list[str]) -> None:
-        """Rotate ``CONNECTORS_KEK`` across every serve replica and the backend worker.
+        """Rotate ``CONNECTORS_KEK`` across every serve replica and the backend worker
+        (see :func:`tai42_e2e.restarts.rotate_connectors_kek`)."""
+        restarts.rotate_connectors_kek(self, new_kek=new_kek, previous=previous)
 
-        Sets the new current key and the previous-key ring in each running process's env,
-        then restarts it so the new keys take effect — modelling an operator rotating the
-        deployment's KEK. An empty ``previous`` clears ``CONNECTORS_KEK_PREVIOUS`` (the old
-        key retired after the re-encrypt sweep converged)."""
-        # The KEK is deployment env: ``config.env`` carries the rotated keys so a process the
-        # harness spawns later boots with them too.
-        self.config.env["CONNECTORS_KEK"] = new_kek
-        if previous:
-            self.config.env["CONNECTORS_KEK_PREVIOUS"] = ",".join(previous)
-        else:
-            self.config.env.pop("CONNECTORS_KEK_PREVIOUS", None)
-        for name in [n for n in self._specs if n.startswith("serve") or n == "backend"]:
-            env = self._specs[name].env
-            env["CONNECTORS_KEK"] = new_kek
-            if previous:
-                env["CONNECTORS_KEK_PREVIOUS"] = ",".join(previous)
-            else:
-                env.pop("CONNECTORS_KEK_PREVIOUS", None)
-            self.restart(name)
+    def wait_generation_bump(
+        self, kind_or_name: str, baseline: int | Mapping[str, int], *, deadline: float = 90.0
+    ) -> dict[str, BusWorker]:
+        """Wait until a fresh READY life supersedes the baseline generation(s), returning the
+        matching census rows keyed by slot name (see :func:`tai42_e2e.restarts.wait_generation_bump`)."""
+        return restarts.wait_generation_bump(self, kind_or_name, baseline, deadline=deadline)
 
-    def _ports_for(self, name: str) -> list[int]:
+    # ---- processes and their ports ---------------------------------------
+
+    def ports_for(self, name: str) -> list[int]:
         """The loopback ports a process kind binds (empty for the backend worker,
         which joins the worker bus over Redis rather than binding a port)."""
         if name.startswith("serve"):
@@ -592,9 +364,9 @@ class TaiStack:
 
     def process_on_port(self, port: int) -> ProcessHandle:
         """The process currently serving the loopback ``port``."""
-        with self._supervisor_lock:
-            for name, handle in self._procs.items():
-                if port in self._ports_for(name):
+        with self.supervisor.lock:
+            for name, handle in self.procs.items():
+                if port in self.ports_for(name):
                     return handle
         raise RuntimeError(f"stack {self.config.name!r}: no process serves port {port}")
 
@@ -605,7 +377,7 @@ class TaiStack:
             # The supervisor would respawn the killed process, defeating the dead-worker
             # scenario — a supervised stack must not be manually killed.
             raise RuntimeError(f"kill({name!r}) is unsupported on a supervised stack; the supervisor would respawn it")
-        self._procs[name].kill_now()
+        self.procs[name].kill_now()
 
     def attach_relay(self, relay: TcpRelay) -> None:
         """Register a per-stack TCP relay for teardown reap + leak-check. The
@@ -613,167 +385,3 @@ class TaiStack:
         sever the connection mid-run; attaching it here means teardown stops it
         and asserts it left nothing listening (like a leaked port)."""
         self._relays.append(relay)
-
-    def _restart_census_kind(self, name: str) -> str | None:
-        """The bus-census kind a restarted process rejoins as, or ``None`` when it joins no
-        bus (the metrics server, or a busless stack's serve/embed process)."""
-        if name == "backend":
-            return "backend"
-        if (name.startswith("serve") or name == "embed") and child_env.needs_bus(self.config):
-            return "serve"
-        return None
-
-    def _restart_baseline(self, name: str, handle: ProcessHandle) -> tuple[dict[str, int], set[str]]:
-        """The pre-restart ``{name: generation}`` of the restarted process's census kind and
-        the slot names the process itself holds. Every backend-kind row counts as the
-        restarted backend worker's, which holds only on a stack with no queue workers; a
-        serve/embed process holds the serve lives whose pid belongs to its session
-        (the spawned master is a session leader and its uvicorn workers inherit the session),
-        so another replica's worker is never taken for one of its lives."""
-        kind = self._restart_census_kind(name)
-        if kind is None:
-            return {}, set()
-        rows = [w for w in self.census() if w.kind == kind]
-        before = {w.name: w.generation for w in rows}
-        if kind == "backend":
-            return before, set(before)
-        return before, {w.name for w in rows if self._pids_in_session([w.pid], handle.pid)}
-
-    def _wait_after_restart(
-        self,
-        name: str,
-        before: Mapping[str, int] | None = None,
-        replaced: Collection[str] | None = None,
-    ) -> None:
-        deadline = self.infra.settings.boot_timeout
-        if name.startswith("serve") or name == "embed":
-            idx = 0 if name in ("serve", "serve-a", "embed") else 1
-            port = self.app_ports[idx]
-            readiness.wait_http_ok(self, f"{self.base_url(port)}/health", deadline, "app health")
-            if child_env.needs_bus(self.config):
-                # The respawned process answers /health and MCP requests before its workers
-                # have claimed their bus slots; hold until every fresh worker is on the census,
-                # then drain its boot self-resync gate (where the profile carries the probe) so
-                # a test acting right after the restart races neither.
-                count = 1 if name == "embed" else readiness.serve_workers_on_port(self)
-                self._wait_fresh_lives("serve", deadline, before=before, replaced=replaced, count=count)
-                readiness.run_readiness_coro(readiness.drain_gate_coro(self, [port], deadline))
-        elif name == "metrics":
-            assert self.metrics_port is not None
-            readiness.wait_http_ok(self, f"http://{self.host}:{self.metrics_port}/metrics", deadline, "metrics")
-        elif name == "backend":
-            self._wait_fresh_lives("backend", deadline, before=before, replaced=replaced)
-
-    # ---- respawn-on-exit supervisor (opt-in ``config.supervised``) --------
-
-    # A graceful stop ends with status 0, or with the SIGTERM that started it when the
-    # server re-raises the signal after its shutdown completes (uvicorn does).
-    _GRACEFUL_EXIT_CODES = frozenset({0, -signal.SIGTERM})
-
-    def _start_supervisor(self) -> None:
-        """Start the respawn-on-exit supervisor once every process is spawned. Only the
-        recyclable kinds (serve + backend) are watched — metrics is not a recycle
-        target and joins no bus census."""
-        if not self.config.supervised:
-            return
-        with self._supervisor_lock:
-            self._supervised_names = {name for name in self._procs if name.startswith("serve") or name == "backend"}
-        self._supervisor_thread = threading.Thread(
-            target=self._supervisor_loop, name=f"tai-e2e-supervisor-{self.config.name}", daemon=True
-        )
-        self._supervisor_thread.start()
-
-    def _stop_supervisor(self) -> None:
-        """Stop the supervisor and wait for any in-flight respawn to finish, so teardown
-        never races a re-launch. Idempotent."""
-        self._supervisor_stop.set()
-        thread = self._supervisor_thread
-        if thread is not None:
-            thread.join(timeout=30.0)
-            self._supervisor_thread = None
-
-    def _supervisor_loop(self) -> None:
-        while not self._supervisor_stop.wait(0.2):
-            with self._supervisor_lock:
-                if self._supervisor_stop.is_set():
-                    return
-                for name in list(self._supervised_names):
-                    handle = self._procs.get(name)
-                    if handle is not None and self._supervisor_respawns(handle):
-                        self._respawn_supervised(name)
-
-    def _supervisor_respawns(self, handle: ProcessHandle) -> bool:
-        """Whether the supervisor brings this exited handle back: a watched process that
-        exited — any exit once boot has converged, a graceful exit (a recycle) while the
-        fleet boots. The caller holds ``_supervisor_lock``."""
-        code = handle.poll()
-        if code is None or handle.name not in self._supervised_names:
-            return False
-        return self._booted or code in self._GRACEFUL_EXIT_CODES
-
-    def _respawn_supervised(self, name: str) -> None:
-        """Re-launch a self-exited supervised process from its saved spec — the external
-        supervisor a graceful recycle self-exit assumes. The caller holds
-        ``_supervisor_lock``. Reaps the exited handle, waits for its port to free, then
-        respawns; the replacement rejoins the bus census under its stable slot name at an
-        incremented generation (a new pid)."""
-        old = self._procs.get(name)
-        if old is not None:
-            with contextlib.suppress(Exception):
-                old.terminate()
-        for port in self._ports_for(name):
-            with contextlib.suppress(TimeoutError):
-                wait_for(lambda p=port: ports.is_free(p), deadline=15.0, message=f"port {port} never freed for respawn")
-        spawning.spawn(self, self._specs[name])
-
-    def wait_generation_bump(
-        self, kind_or_name: str, baseline: int | Mapping[str, int], *, deadline: float = 90.0
-    ) -> dict[str, BusWorker]:
-        """Wait until a fresh READY life supersedes the baseline generation(s), returning
-        the matching census rows keyed by slot name.
-
-        A worker's slot name is STABLE across lives; a new life bumps its generation. Two
-        forms distinguished by ``baseline``:
-
-        * Single-life (``baseline`` an ``int``): ``kind_or_name`` is a slot NAME. Waits
-          until that name shows a READY row at a generation greater than ``baseline`` — the
-          scenario-scoped deterministic wait for one named slot's next life.
-        * Fleet (``baseline`` a ``{name: generation}`` map): ``kind_or_name`` is a worker
-          KIND. Waits until EVERY baseline name shows a READY row of that kind at a
-          generation greater than its baseline — proves a recycle/respawn rolled every
-          targeted life without keying on a fresh unrelated id."""
-        if isinstance(baseline, int):
-            name, base_gen = kind_or_name, baseline
-
-            def one_probe() -> bool:
-                early = readiness.early_exit_detail(self)
-                if early is not None:
-                    raise RuntimeError(f"generation-bump wait: {early}")
-                row = next((w for w in self.census() if w.name == name), None)
-                return row is not None and row.state == "ready" and row.generation > base_gen
-
-            wait_for(
-                one_probe, deadline=deadline, message=f"{name!r} never reached a ready life past generation {base_gen}"
-            )
-            row = next(w for w in self.census() if w.name == name)
-            return {name: row}
-
-        kind, targets = kind_or_name, dict(baseline)
-
-        def fleet_probe() -> bool:
-            early = readiness.early_exit_detail(self)
-            if early is not None:
-                raise RuntimeError(f"generation-bump wait: {early}")
-            rows = {w.name: w for w in self.census() if w.kind == kind}
-            return all(
-                name in rows and rows[name].state == "ready" and rows[name].generation > gen
-                for name, gen in targets.items()
-            )
-
-        wait_for(
-            fleet_probe,
-            deadline=deadline,
-            message=f"not every {kind!r} life bumped past its baseline generation ({targets})",
-        )
-        rows = {w.name: w for w in self.census() if w.kind == kind}
-        return {name: rows[name] for name in targets if name in rows}

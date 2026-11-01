@@ -8,7 +8,8 @@ from typing import Any
 import pytest
 
 from tai42_skeleton.app.boot_rules import BackendNeedsBusError
-from tai42_skeleton.marketplace import package_ops
+from tai42_skeleton.marketplace.environments.change import OperationChange
+from tai42_skeleton.marketplace.environments.settings import PLUGINS_DIR_UNSET
 from tai42_skeleton.marketplace.errors import (
     ArtifactIntegrityError,
     ContractIncompatibleError,
@@ -18,17 +19,21 @@ from tai42_skeleton.marketplace.errors import (
     ManifestCollisionError,
     ManifestComposeError,
     PipFailedError,
+    PluginsDirError,
     RegistryResponseError,
     VersionRefusedError,
 )
 from tai42_skeleton.operations._broadcast import FleetBroadcastError
 
-from ._specs import make_resolved, make_spec
+from ._specs import make_resolved, make_spec, mcp_server_item
 from .test_installer import (
     _GH_ARTIFACT,
     Harness,
     _assert_no_pip,
     _fake_verified_fetch,
+    build_module,
+    layer_inputs,
+    server_inputs,
 )
 
 # -- install: happy ----------------------------------------------------------
@@ -59,6 +64,54 @@ async def test_install_happy_step_order_manifest_response(monkeypatch: pytest.Mo
         "mode": "local-only",
         "note": "no worker bus configured; only this worker reloaded",
     }
+
+
+async def test_a_packaged_install_without_a_plugins_directory_refuses_before_any_change(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(importlib.metadata, "version", lambda name: "0.1.0")
+    h = Harness()
+    h.plugins_dir = None
+    h.registry.resolved = make_resolved(make_spec())
+
+    with pytest.raises(PluginsDirError) as caught:
+        await h.installer().install("tai42/toolbox")
+
+    assert str(caught.value) == PLUGINS_DIR_UNSET
+    _assert_no_pip(h)
+    assert h.svc.writes == []
+    assert h.store.record_calls == []
+
+
+async def test_a_descriptor_install_needs_no_plugins_directory(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(importlib.metadata, "version", lambda name: "0.1.0")
+    h = Harness()
+    h.plugins_dir = None
+    spec = make_spec(package=None, provides=[mcp_server_item()], contract=None)
+    h.registry.resolved = make_resolved(spec, contract_range=None)
+
+    result = await h.installer().install("tai42/toolbox")
+
+    assert result["version"] == "1.0.0"
+    _assert_no_pip(h)
+    assert h.store.record_calls != []
+
+
+async def test_installing_a_server_package_builds_its_own_environment_and_leaves_the_layer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(importlib.metadata, "version", lambda name: "0.1.0")
+    h = Harness()
+    spec = make_spec(provides=[mcp_server_item()], contract=None)
+    h.registry.resolved = make_resolved(spec, contract_range=None)
+
+    await h.installer().install("tai42/toolbox")
+
+    assert server_inputs(h, "tai42-toolbox") == ["tai42/toolbox 1.0.0"]
+    assert layer_inputs(h) is None
+    (call,) = h.pip.calls
+    assert call[0] == "--python"
+    assert call[-1] == "tai42-toolbox==1.0.0"
 
 
 async def test_install_config_item_contributes_a_note(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -99,9 +152,12 @@ async def test_install_github_fetches_verifies_and_installs_local_tarball(monkey
     # The verified fetch was driven with the registry artifact_ref + sha256.
     assert calls[0]["artifact_ref"] == _GH_ARTIFACT
     assert calls[0]["sha256"] == "a" * 64
-    # pip installed the verified LOCAL tarball path, never a git+url clone.
-    assert h.pip.calls[0][-1] == str(calls[0]["path"])
-    assert not h.pip.calls[0][-1].startswith("git+")
+    # pip installed the verified archive, kept under the plugins directory by its content
+    # hash, never a git+url clone.
+    assert h.plugins_dir is not None
+    archive = h.plugins_dir / "artifacts" / f"{'a' * 64}.tar.gz"
+    assert h.pip.calls[0][-1] == str(archive)
+    assert archive.read_bytes() == b"verified archive"
     # The attribution row keeps the github provenance AND the verified pin, so a
     # later update-unwind can re-fetch and re-verify the old artifact.
     row = h.store.record_calls[-1]
@@ -116,7 +172,7 @@ async def test_install_github_integrity_mismatch_never_calls_pip(monkeypatch: py
     async def mismatch(package, version, artifact_ref, sha256, dest_dir):
         raise ArtifactIntegrityError(expected_sha256="a" * 64, actual_sha256="b" * 64, artifact_ref=artifact_ref)
 
-    monkeypatch.setattr(package_ops, "fetch_verified_artifact", mismatch)
+    monkeypatch.setattr(build_module, "fetch_verified_artifact", mismatch)
     h = Harness()
     spec = make_spec(version="2.0.0")
     h.registry.resolved = make_resolved(
@@ -136,7 +192,7 @@ async def test_install_github_fetch_failure_never_calls_pip(monkeypatch: pytest.
     async def boom(package, version, artifact_ref, sha256, dest_dir):
         raise RuntimeError("network down")
 
-    monkeypatch.setattr(package_ops, "fetch_verified_artifact", boom)
+    monkeypatch.setattr(build_module, "fetch_verified_artifact", boom)
     h = Harness()
     spec = make_spec(version="2.0.0")
     h.registry.resolved = make_resolved(
@@ -267,24 +323,56 @@ async def test_install_pip_failure_leaves_manifest_and_store_untouched(monkeypat
     assert h.store.record_calls == []
 
 
-async def test_install_manifest_persist_failure_unwinds_with_pip_uninstall(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_install_manifest_persist_failure_swaps_the_layer_back(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(importlib.metadata, "version", lambda name: "0.1.0")
     h = Harness()
     # The manifest persist fails BEFORE the change lands (nothing persisted), so the
-    # pipeline aborts and the installer needs no manifest restore — just the pip
-    # uninstall of the freshly-installed package.
+    # pipeline aborts and the installer needs no manifest restore — just the swap back
+    # of the plugin layer, which deletes the new build with no pip call.
     h.svc.fail_persist_on = {0}
     spec = make_spec()
     h.registry.resolved = make_resolved(spec)
     with pytest.raises(RuntimeError, match="manifest persist failed"):
         await h.installer().install("tai42/toolbox")
-    # pip install then the unwind pip uninstall; nothing persisted, so no restore.
-    assert h.pip.calls[0][0] == "install"
-    assert h.pip.calls[1] == ["uninstall", "--yes", "tai42-toolbox"]
+    # The layer build was the only pip call; nothing persisted, so no restore.
+    assert [c[0] for c in h.pip.calls] == ["install"]
     assert h.svc.writes == []
+    assert h.plugins_dir is not None
+    assert layer_inputs(h) is None
+    # The first layer build made the layer's directory, so the swap back removes it whole.
+    assert not (h.plugins_dir / "layer").exists()
 
 
-async def test_install_reload_failure_restores_manifest_and_uninstalls(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_install_unwind_restores_the_layer_build_in_use_before(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(importlib.metadata, "version", lambda name: "0.1.0")
+    h = Harness()
+    other = make_spec(
+        name="other",
+        package="tai42-other",
+        provides=[{"kind": "tool", "name": "other-tool", "module": "other.tools", "description": "d"}],
+    )
+    h.registry.resolved = make_resolved(other, version="2.0.0")
+    await h.installer().install("tai42/other")
+    before = layer_inputs(h)
+    h.svc.fail_persist_on = {h.svc.calls}
+    h.registry.resolved = make_resolved(make_spec())
+
+    with pytest.raises(RuntimeError, match="manifest persist failed") as caught:
+        await h.installer().install("tai42/toolbox")
+
+    # One pip call built the layer from both plugins; the unwind put the earlier build
+    # back as current with no pip call, and says so on the raised error.
+    assert before == ["tai42/other 2.0.0"]
+    assert len(h.pip.calls) == 2
+    assert "tai42-other==2.0.0" in h.pip.calls[1]
+    assert "tai42-toolbox==1.0.0" in h.pip.calls[1]
+    assert layer_inputs(h) == before
+    assert "the previous plugin environment was restored" in (caught.value.__notes__ or [])
+
+
+async def test_install_reload_failure_restores_manifest_and_swaps_the_layer_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(importlib.metadata, "version", lambda name: "0.1.0")
     h = Harness()
     # The apply persists but its local reload fails afterwards (FleetBroadcastError):
@@ -296,12 +384,14 @@ async def test_install_reload_failure_restores_manifest_and_uninstalls(monkeypat
         await h.installer().install("tai42/toolbox")
     # Manifest patched then restored (the saved pre-patch dict = {}).
     assert h.svc.writes[-1] == {}
-    # Two applies (forward + converge-back), pip install then uninstall.
+    # Two applies (forward + converge-back); the layer build was the only pip call and
+    # was swapped back.
     assert h.svc.calls == 2
-    assert h.pip.calls[-1] == ["uninstall", "--yes", "tai42-toolbox"]
+    assert len(h.pip.calls) == 1
+    assert layer_inputs(h) is None
 
 
-async def test_install_broadcast_failure_after_persist_restores_manifest_and_uninstalls(
+async def test_install_broadcast_failure_after_persist_restores_manifest_and_swaps_the_layer_back(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(importlib.metadata, "version", lambda name: "0.1.0")
@@ -310,8 +400,8 @@ async def test_install_broadcast_failure_after_persist_restores_manifest_and_uni
     # raises. ConfigService wraps that raw broadcast fault as a FleetBroadcastError with
     # the bus-unreachable report — so the change LANDED and the installer's persist
     # detector (persisted=True on a FleetBroadcastError) MUST restore the manifest. This
-    # is the exact half-write the fix closes: without the wrap the raw error would read
-    # persisted=False, skip the restore, yet still pip-uninstall the package.
+    # is the half-write the wrap prevents: without it the raw error would read
+    # persisted=False, skip the restore, yet still swap the layer back.
     h.svc.fail_broadcast_on = {0}
     spec = make_spec()
     h.registry.resolved = make_resolved(spec)
@@ -319,10 +409,10 @@ async def test_install_broadcast_failure_after_persist_restores_manifest_and_uni
         await h.installer().install("tai42/toolbox")
     # Manifest patched then RESTORED to the saved pre-patch dict ({}): no half-write.
     assert h.svc.writes[-1] == {}
-    # Two applies (forward patch + converge-back restore), and the freshly-installed
-    # package is pip-uninstalled — the manifest never references a pip-removed package.
+    # Two applies (forward patch + converge-back restore), and the layer is swapped back —
+    # the manifest never references a package the layer no longer holds.
     assert h.svc.calls == 2
-    assert h.pip.calls[-1] == ["uninstall", "--yes", "tai42-toolbox"]
+    assert layer_inputs(h) is None
 
 
 async def test_install_store_failure_full_unwind(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -335,7 +425,7 @@ async def test_install_store_failure_full_unwind(monkeypatch: pytest.MonkeyPatch
         await h.installer().install("tai42/toolbox")
     assert h.svc.writes[-1] == {}  # restored
     assert h.svc.calls == 2  # restore apply (converge-back)
-    assert h.pip.calls[-1] == ["uninstall", "--yes", "tai42-toolbox"]
+    assert layer_inputs(h) is None
 
 
 def _another_door_writes_during_the_row_record(h: Harness, entry: dict[str, Any]) -> None:
@@ -366,22 +456,26 @@ async def test_install_unwind_substep_failure_escalates(monkeypatch: pytest.Monk
     monkeypatch.setattr(importlib.metadata, "version", lambda name: "0.1.0")
     h = Harness()
     h.svc.fail_reload_on = {0}  # forward apply persists then its reload fails
-    h.pip.fail_on = {1}  # the unwind pip uninstall also fails
+
+    def _swap_back_fails(self: OperationChange) -> None:
+        raise OSError("current symlink not writable")
+
+    monkeypatch.setattr(OperationChange, "swap_back", _swap_back_fails)
     spec = make_spec()
     h.registry.resolved = make_resolved(spec)
     with pytest.raises(InstallUnwindError) as exc:
         await h.installer().install("tai42/toolbox")
-    # FleetBroadcastError is a RuntimeError; the restore apply succeeded, so the
-    # escalating sub-step is the failing pip uninstall.
+    # The swap back runs first and fails, so it escalates before any manifest restore.
     assert isinstance(exc.value.step_error, FleetBroadcastError)
-    assert isinstance(exc.value.unwind_error, PipFailedError)
+    assert isinstance(exc.value.unwind_error, OSError)
+    assert h.svc.calls == 1
 
 
 async def test_install_compose_failure_is_manifest_compose_error(monkeypatch: pytest.MonkeyPatch) -> None:
     # A composed manifest whose RESOLVED projection fails the schema is a registry-spec
     # + local-manifest fault: the pipeline raises inside the transaction (nothing
     # persists) and the installer maps that ValidationError to the typed compose error
-    # (a 500), then unwinds the pip install. Here a pre-existing api_tools entry carries
+    # (a 500), then swaps the plugin layer back. Here a pre-existing api_tools entry carries
     # a non-bool literal, so the resolved compose fails Manifest.model_validate.
     monkeypatch.setattr(importlib.metadata, "version", lambda name: "0.1.0")
     h = Harness(manifest={"api_tools": {"expose_destructive": "not-a-bool"}})
@@ -389,10 +483,10 @@ async def test_install_compose_failure_is_manifest_compose_error(monkeypatch: py
     h.registry.resolved = make_resolved(spec)
     with pytest.raises(ManifestComposeError):
         await h.installer().install("tai42/toolbox")
-    # Nothing persisted; the freshly-installed package is unwound.
+    # Nothing persisted; the layer is swapped back.
     assert h.svc.writes == []
-    assert h.pip.calls[0][0] == "install"
-    assert h.pip.calls[-1] == ["uninstall", "--yes", "tai42-toolbox"]
+    assert [c[0] for c in h.pip.calls] == ["install"]
+    assert layer_inputs(h) is None
 
 
 async def test_install_env_marker_on_non_string_field_validates_resolved(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -427,7 +521,7 @@ async def test_install_backend_needs_bus_maps_to_manifest_compose_error(monkeypa
     # backend-needs-bus invariant. The marketplace surface translates only its own error
     # family, so the installer maps that refusal to the typed compose error — a loud,
     # attributed 500 carrying the "Set TAI_BUS_REDIS_URL" message — rather than letting
-    # the RuntimeError escape untyped. Nothing persists; the pip install unwinds.
+    # the RuntimeError escape untyped. Nothing persists; the layer is swapped back.
     monkeypatch.setattr(importlib.metadata, "version", lambda name: "0.1.0")
     h = Harness()
     h.svc.raise_on_validate = BackendNeedsBusError(
@@ -438,7 +532,7 @@ async def test_install_backend_needs_bus_maps_to_manifest_compose_error(monkeypa
     with pytest.raises(ManifestComposeError, match="TAI_BUS_REDIS_URL"):
         await h.installer().install("tai42/toolbox")
     assert h.svc.writes == []
-    assert h.pip.calls[-1] == ["uninstall", "--yes", "tai42-toolbox"]
+    assert layer_inputs(h) is None
 
 
 # -- install: unwind reload-back escalation ----------------------------------
@@ -446,9 +540,8 @@ async def test_install_backend_needs_bus_maps_to_manifest_compose_error(monkeypa
 
 async def test_install_unwind_reload_back_failure_escalates(monkeypatch: pytest.MonkeyPatch) -> None:
     # The forward apply (call 0) persists then its reload fails, triggering the
-    # unwind; the unwind's restore apply (call 1) then fails its reload too. That
-    # failed sub-step escalates to InstallUnwindError before the pip uninstall is
-    # ever attempted.
+    # unwind; the layer is swapped back, then the unwind's restore apply (call 1) fails
+    # its reload too. That failed sub-step escalates to InstallUnwindError.
     monkeypatch.setattr(importlib.metadata, "version", lambda name: "0.1.0")
     h = Harness()
     h.svc.fail_reload_on = {0, 1}  # forward apply AND the unwind restore apply both fail their reload
@@ -458,8 +551,9 @@ async def test_install_unwind_reload_back_failure_escalates(monkeypatch: pytest.
         await h.installer().install("tai42/toolbox")
     assert isinstance(exc.value.step_error, FleetBroadcastError)
     assert isinstance(exc.value.unwind_error, FleetBroadcastError)
-    # The manifest restore apply failed, so the pip uninstall was never reached.
+    # The layer build was the only pip call, and it was swapped back before the restore.
     assert [c[0] for c in h.pip.calls] == ["install"]
+    assert layer_inputs(h) is None
 
 
 # -- install: forward-reload route-collision recovery ------------------------
@@ -519,7 +613,7 @@ async def test_commit_install_recovers_a_remapped_route_collision(monkeypatch: p
     _collision_forward(monkeypatch)
 
     result = await inst._commit_install(
-        "tai42/toolbox", "1.0.0", spec, "pypi", resolved, {"r": "remap"}, [_route("remap")], None, None
+        "tai42/toolbox", "1.0.0", spec, "pypi", resolved, {"r": "remap"}, [_route("remap")], None, None, None
     )
 
     # The row was recorded with the resolved mounts, and the result is the remount's apply.
@@ -561,7 +655,7 @@ async def test_a_recovered_collision_keeps_the_forward_write_s_span_release_erro
     monkeypatch.setattr(h.svc, "reapply_manifest", _reapply)
 
     result = await inst._commit_install(
-        "tai42/toolbox", "1.0.0", spec, "pypi", resolved, {"r": "remap"}, [_route("remap")], None, None
+        "tai42/toolbox", "1.0.0", spec, "pypi", resolved, {"r": "remap"}, [_route("remap")], None, None, None
     )
 
     assert result.span_release_error == expected
@@ -585,7 +679,7 @@ async def test_commit_install_unwinds_when_the_recovery_remount_fails(monkeypatc
 
     with pytest.raises(RuntimeError, match="remount build failed"):
         await inst._commit_install(
-            "tai42/toolbox", "1.0.0", spec, "pypi", resolved, {"r": "remap"}, [_route("remap")], None, None
+            "tai42/toolbox", "1.0.0", spec, "pypi", resolved, {"r": "remap"}, [_route("remap")], None, None, None
         )
 
     assert "store:delete" in h.events  # the row recorded before the failed remount is dropped

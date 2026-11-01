@@ -63,7 +63,7 @@ def _default_database(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     # writes it.
     monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "secret")
     monkeypatch.setenv("TAI_MANIFEST_PATH", str(tmp_path / "absent-manifest.yml"))
-    monkeypatch.setattr("tai42_skeleton.marketplace.prefix.configured_prefix", lambda: None)
+    monkeypatch.setattr("tai42_skeleton.marketplace.environments.current_builds.configured_plugins_dir", lambda: None)
     monkeypatch.setattr(ConfigManagerFactory, "create", lambda: FileConfigManager(config_dir_path=str(tmp_path)))
     reset_all_settings()
 

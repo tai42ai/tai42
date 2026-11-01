@@ -8,31 +8,9 @@ a no-side-effect install/update route preview) and four environment-mutating flo
 (install, uninstall, update, upgrade-all) driven by
 :class:`~tai42_skeleton.marketplace.installer.Installer`.
 
-The internal :class:`~tai42_skeleton.marketplace.errors.MarketplaceError` family is
-load-bearing inside the marketplace package (it carries the not-installed flag,
-the pip argv/return code, the two errors of a failed unwind). At THIS boundary
-each is translated to the shared operation-error vocabulary
-(:func:`_to_operation_error`): a dead or garbled registry is an
-:class:`UpstreamError` (502 — this surface proxies the registry, so an upstream
-failure is never a this-server 500); an in-progress operation elsewhere in the
-fleet is an :class:`UnavailableError` (503, retriable); an unknown listing or a
-not-installed ref is a :class:`NotFoundError` (404); a version/collision/contract,
-already-installed, or environment-shadowed-prefix conflict is a
-:class:`ConflictError` (409); a pip failure,
-a github artifact-integrity mismatch, a failed unwind, a manifest-compose fault,
-an unknown-item-kind binding drift, or corrupt local
-state is an :class:`OperationFailedError` (500). A malformed ``ref`` is the caller's
-own author error — a typed :class:`~tai42_skeleton.marketplace.errors.MalformedRefError`
-the boundary maps to :class:`BadRequestError` (400).
-
-Retry-After limitation: the 503 an in-progress operation answers carries no
-``Retry-After`` header. The route adapter stamps static headers on the SUCCESS
-response only; an error response is header-less by construction, and the typed
-error's ``extra`` dict merges into the JSON body, not the headers. The retriable
-signal therefore rides the message and the 503 status, not a header. (The
-reload-gate 503 — a separate concern the adapter honors from ``reload_gated``
-metadata — DOES carry ``Retry-After: 5``, since that response is built by the
-reload gate itself, not the error path.)
+Every internal :class:`~tai42_skeleton.marketplace.errors.MarketplaceError` an
+operation meets is raised as the operation error
+:func:`~tai42_skeleton.operations._marketplace_errors.to_operation_error` classifies it to.
 
 install/uninstall/update/upgrade-all mutate the running environment by running
 arbitrary third-party code, so each is ``destructive`` and ``authority_changing``
@@ -43,14 +21,12 @@ so the adapter answers a retriable 503 while a reload is in flight).
 
 from __future__ import annotations
 
-import logging
-from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import Any, cast
+from typing import Any
 
 from pydantic import BaseModel, Field
 from tai42_contract.app.responses import OpaqueJson
-from tai42_contract.errors import OperationError, UnavailableError
+from tai42_contract.errors import UnavailableError
 from tai42_kit.db import component_store_configured
 
 from tai42_skeleton.db import SKELETON_COMPONENT, not_configured_message
@@ -59,31 +35,15 @@ from tai42_skeleton.marketplace.client import RegistryClient
 from tai42_skeleton.marketplace.compat import (
     CompatVerdict,
     UpdateTargets,
-    dist_compat,
+    declared_compat,
     running_contract_version,
     update_targets,
 )
 from tai42_skeleton.marketplace.errors import (
-    ArtifactIntegrityError,
-    ContractIncompatibleError,
-    EnvironmentShadowError,
-    InstallEnvError,
-    InstallStateError,
     ListingNotFoundError,
     LocalStateError,
     MalformedRefError,
-    ManifestCollisionError,
-    ManifestRefusedError,
     MarketplaceError,
-    OperationInProgressError,
-    PipFailedError,
-    PublicRoutesNotAcceptedError,
-    RegistryResponseError,
-    RegistryUnreachableError,
-    ReservedRoutePrefixError,
-    RouteCollisionError,
-    RouteMountError,
-    VersionRefusedError,
 )
 from tai42_skeleton.marketplace.installer import Installer
 from tai42_skeleton.marketplace.resolve import parse_ref, spec_from_row
@@ -100,6 +60,7 @@ from tai42_skeleton.operations import (
     operation,
 )
 from tai42_skeleton.operations._broadcast import apply_response, translate_orphan_env_write, writer_exit_response
+from tai42_skeleton.operations._marketplace_errors import to_operation_error
 from tai42_skeleton.operations.response_models.marketplace import (
     AdvisorySnapshot,
     InstalledInventory,
@@ -110,136 +71,11 @@ from tai42_skeleton.operations.response_models.marketplace import (
 )
 from tai42_skeleton.operations.response_models.shared import StringList
 
-logger = logging.getLogger(__name__)
-
 # The machine-readable code every marketplace mutation OFF refusal carries when the
 # install-attribution store is unconfigured; the message is rendered from the live
 # binding at raise time. Hoisted so the four mutation refusals read one way.
 _NOT_CONFIGURED_CODE = "marketplace-not-configured"
 _NOT_CONFIGURED_NOUN = "marketplace install store"
-
-# Keep the tail of an oversized detail (a pip failure's captured output) for the
-# error envelope; the full text is logged whole. The prefix marks a cut.
-_ENVELOPE_DETAIL_CHARS = 4000
-
-
-def _truncate(text: str) -> str:
-    """The last ``_ENVELOPE_DETAIL_CHARS`` of ``text``, with a visible cut marker when text was dropped."""
-    if len(text) <= _ENVELOPE_DETAIL_CHARS:
-        return text
-    return f"... (truncated) {text[-_ENVELOPE_DETAIL_CHARS:]}"
-
-
-def _pip_failed_error(exc: MarketplaceError) -> OperationError:
-    """A pip failure → 500.
-
-    The full captured output stays in the log; the envelope carries the summary plus
-    a truncated tail so the operator sees the failing lines.
-    """
-    pip = cast("PipFailedError", exc)
-    logger.error("marketplace pip failure: %s\n%s", pip, pip.output)
-    return OperationFailedError(str(pip), extra={"pip_output": _truncate(pip.output)})
-
-
-def _artifact_integrity_error(exc: MarketplaceError) -> OperationError:
-    """A github artifact whose sha256 disagrees with the registry's ingest digest.
-
-    An install-integrity failure (a possibly re-pointed release tag), a loud terminal
-    500 carrying the digests and the rejected URL.
-    """
-    art = cast("ArtifactIntegrityError", exc)
-    logger.error("marketplace artifact integrity failure: %s", art)
-    return OperationFailedError(
-        str(art),
-        extra={
-            "artifact_ref": art.artifact_ref,
-            "expected_sha256": art.expected_sha256,
-            "actual_sha256": art.actual_sha256,
-        },
-    )
-
-
-def _public_routes_error(exc: MarketplaceError) -> OperationError:
-    """Declared public routes need the operator's explicit acceptance — a 400.
-
-    Carries a stable code + the rows so the UI can render the acceptance gate.
-    """
-    err = cast("PublicRoutesNotAcceptedError", exc)
-    return BadRequestError(str(err), extra={"code": "PUBLIC_ROUTES_NOT_ACCEPTED", "public_routes": err.public_routes})
-
-
-def _route_collision_error(exc: MarketplaceError) -> OperationError:
-    """A declared route clashes with an already-owned one — a 409 carrying the collision list.
-
-    The remedy is to remap the item's base.
-    """
-    err = cast("RouteCollisionError", exc)
-    return ConflictError(str(err), extra={"code": "ROUTE_COLLISION", "collisions": err.collisions})
-
-
-def _reserved_prefix_error(exc: MarketplaceError) -> OperationError:
-    """A declared public route resolves under a reserved never-public prefix — a 409.
-
-    Carries the offending paths; the remedy is to remap the base.
-    """
-    err = cast("ReservedRoutePrefixError", exc)
-    return ConflictError(str(err), extra={"code": "ROUTE_RESERVED_PREFIX", "routes": err.offenders})
-
-
-def _install_state_error(exc: MarketplaceError) -> OperationError:
-    """A not-installed ref is a 404; every other state conflict is a 409."""
-    err = cast("InstallStateError", exc)
-    return NotFoundError(str(err)) if err.not_installed else ConflictError(str(err))
-
-
-# Ordered (predicate, builder) pairs in classification precedence order; the FIRST
-# matching predicate wins, so the classification keys on the typed class (and, for a
-# state conflict, its ``not_installed`` flag) — never on message text. A failure matching
-# none is the terminal ``OperationFailedError`` below.
-_ERROR_RULES: tuple[tuple[Callable[[MarketplaceError], bool], Callable[[MarketplaceError], OperationError]], ...] = (
-    # The caller's own author error — a malformed ref, an mcp-server install missing a
-    # required !ENV value, a composed manifest the config pipeline refuses, or a
-    # route_mounts override naming a non-route item / bad base.
-    (
-        lambda e: isinstance(e, MalformedRefError | InstallEnvError | ManifestRefusedError | RouteMountError),
-        lambda e: BadRequestError(str(e)),
-    ),
-    (lambda e: isinstance(e, PublicRoutesNotAcceptedError), _public_routes_error),
-    (lambda e: isinstance(e, RouteCollisionError), _route_collision_error),
-    (lambda e: isinstance(e, ReservedRoutePrefixError), _reserved_prefix_error),
-    # The registry is this surface's upstream; a dead/garbled upstream is a 502, never a
-    # this-server 500 and never a promise that retry fixes it.
-    (lambda e: isinstance(e, RegistryUnreachableError | RegistryResponseError), lambda e: UpstreamError(str(e))),
-    (lambda e: isinstance(e, ListingNotFoundError), lambda e: NotFoundError(str(e))),
-    # Another worker (or this one) holds the fleet-wide marketplace lock — retriable. See
-    # the module docstring's Retry-After limitation.
-    (lambda e: isinstance(e, OperationInProgressError), lambda e: UnavailableError(str(e))),
-    (lambda e: isinstance(e, InstallStateError), _install_state_error),
-    # State conflicts the operator resolves, not by retrying as-is (an environment-shadowed
-    # prefix version is re-pinned or the image rebuilt).
-    (
-        lambda e: isinstance(
-            e, VersionRefusedError | ManifestCollisionError | ContractIncompatibleError | EnvironmentShadowError
-        ),
-        lambda e: ConflictError(str(e)),
-    ),
-    (lambda e: isinstance(e, PipFailedError), _pip_failed_error),
-    (lambda e: isinstance(e, ArtifactIntegrityError), _artifact_integrity_error),
-)
-
-
-def _to_operation_error(exc: MarketplaceError) -> OperationError:
-    """Translate an internal marketplace failure to its honest operation error.
-
-    The classification keys on the typed class (and, for a state conflict, its
-    ``not_installed`` flag) — never on message text.
-    """
-    for predicate, build in _ERROR_RULES:
-        if predicate(exc):
-            return build(exc)
-    # PipUnavailableError / InstallUnwindError / ManifestComposeError /
-    # LocalStateError / the base: the deployment environment failed the operation.
-    return OperationFailedError(_truncate(str(exc)))
 
 
 class MarketplaceInstall(BaseModel):
@@ -390,7 +226,7 @@ async def marketplace_search(
     try:
         return await RegistryClient().search(params)
     except MarketplaceError as exc:
-        raise _to_operation_error(exc) from exc
+        raise to_operation_error(exc) from exc
 
 
 @operation(
@@ -411,7 +247,7 @@ async def marketplace_plugin_detail(ns: str, name: str) -> dict[str, Any]:
         listing = await registry.plugin(ns, name)
         versions = await registry.versions(ns, name)
     except MarketplaceError as exc:
-        raise _to_operation_error(exc) from exc
+        raise to_operation_error(exc) from exc
     return {**listing, "versions": versions}
 
 
@@ -426,7 +262,7 @@ async def marketplace_categories() -> list[str]:
     try:
         return await RegistryClient().categories()
     except MarketplaceError as exc:
-        raise _to_operation_error(exc) from exc
+        raise to_operation_error(exc) from exc
 
 
 @operation(
@@ -440,7 +276,7 @@ async def marketplace_kinds() -> list[str]:
     try:
         return await RegistryClient().kinds()
     except MarketplaceError as exc:
-        raise _to_operation_error(exc) from exc
+        raise to_operation_error(exc) from exc
 
 
 @operation(
@@ -460,8 +296,9 @@ async def marketplace_installed() -> dict[str, Any]:
     version exists — an incompatible newer version never advertises as an
     update), ``incompatible_newer`` (the newest such blocked version, so "an
     update exists but needs a newer core" is visible, or ``null``), and
-    ``compat`` — the live ``{status, reason}`` verdict of the row's installed
-    distribution against the running contract. A per-row not-found — the
+    ``compat`` — the ``{status, reason}`` verdict of the row's declared
+    ``tai42-contract`` range against the running contract (a row the plugin layer
+    leaves out for that range reads ``incompatible`` with the same reason). A per-row not-found — the
     upstream listing vanished or was suspended — is row STATE, not a route
     failure: that row answers ``latest: null``, ``update_available: false``,
     ``missing_upstream: true``, so one dead listing never fails the whole
@@ -498,7 +335,7 @@ async def marketplace_installed() -> dict[str, Any]:
             except MalformedRefError as exc:
                 raise LocalStateError(f"the stored ref {record.ref!r} is corrupt") from exc
         except LocalStateError as exc:
-            raise _to_operation_error(exc) from exc
+            raise to_operation_error(exc) from exc
         missing_upstream = False
         targets: UpdateTargets | None = None
         try:
@@ -507,9 +344,9 @@ async def marketplace_installed() -> dict[str, Any]:
         except ListingNotFoundError:
             missing_upstream = True
         except MarketplaceError as exc:
-            raise _to_operation_error(exc) from exc
+            raise to_operation_error(exc) from exc
         if spec.package is not None:
-            compat = dist_compat(spec.package)
+            compat = declared_compat(spec.package, spec.contract)
         else:
             # A row whose stored spec names no package distribution cannot be
             # verdicted — surfaced as unknown, never a silent "compatible".
@@ -553,7 +390,7 @@ async def marketplace_advisories() -> dict[str, Any]:
     try:
         state = await advisories.current(marketplace_settings().advisories_interval_s)
     except MarketplaceError as exc:
-        raise _to_operation_error(exc) from exc
+        raise to_operation_error(exc) from exc
     return {"advisories": state.advisories, "fetched_at": state.fetched_at.isoformat()}
 
 
@@ -626,7 +463,7 @@ async def marketplace_install(
                 accept_public_routes=accept_public_routes,
             )
         except MarketplaceError as exc:
-            raise _to_operation_error(exc) from exc
+            raise to_operation_error(exc) from exc
     return render_receipt(receipt)
 
 
@@ -656,7 +493,7 @@ async def marketplace_install_preview(
     try:
         return await Installer().preview(ref, version, route_mounts=route_mounts)
     except MarketplaceError as exc:
-        raise _to_operation_error(exc) from exc
+        raise to_operation_error(exc) from exc
 
 
 @operation(
@@ -670,7 +507,7 @@ async def marketplace_install_preview(
     response_model=UninstallResult,
 )
 async def marketplace_uninstall(ref: str) -> OperationResponse:
-    """Unpatch the manifest, reload, pip uninstall, and drop attribution.
+    """Swap in the plugin environment without the plugin, unpatch the manifest and reload, then drop its record.
 
     Convergent and registry-free (see :meth:`Installer.uninstall`).
     """
@@ -682,7 +519,7 @@ async def marketplace_uninstall(ref: str) -> OperationResponse:
         try:
             receipt = await Installer().uninstall(ref)
         except MarketplaceError as exc:
-            raise _to_operation_error(exc) from exc
+            raise to_operation_error(exc) from exc
     return render_receipt(receipt)
 
 
@@ -738,7 +575,7 @@ async def marketplace_update(
                 accept_public_routes=accept_public_routes,
             )
         except MarketplaceError as exc:
-            raise _to_operation_error(exc) from exc
+            raise to_operation_error(exc) from exc
     return render_receipt(receipt)
 
 
@@ -771,4 +608,4 @@ async def marketplace_upgrade_all() -> dict[str, Any]:
     try:
         return {"results": await Installer().upgrade_all()}
     except MarketplaceError as exc:
-        raise _to_operation_error(exc) from exc
+        raise to_operation_error(exc) from exc

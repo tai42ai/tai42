@@ -1,6 +1,6 @@
 """get_mcp_transport: a URL server gets fastmcp's HTTP or SSE transport built on the
 kit's MCP HTTP client; a UDS server gets the transport for the selected wire protocol;
-a command server gets fastmcp's stdio transport carrying its resolved command and child env.
+a command server gets fastmcp's stdio transport carrying its resolved command and its declared env.
 Every kit-built MCP HTTP client keeps its idle connections for
 ``MCP_CLIENT_KEEPALIVE_EXPIRY_SECONDS``."""
 

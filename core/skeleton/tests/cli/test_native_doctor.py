@@ -20,6 +20,7 @@ from redis.exceptions import ConnectionError as RedisConnectionError
 from tai42_cli import app as app_module
 from tai42_kit.clients import PostgresConnectionSettings
 from tai42_kit.db import AdminIdentityIncompleteError, DatabaseNotConfiguredError
+from tests.marketplace._specs import install_row, make_spec
 
 import tai42_skeleton.app.instance as instance
 from tai42_skeleton.app.server import TaiMCP
@@ -27,6 +28,8 @@ from tai42_skeleton.cli.native import doctor
 from tai42_skeleton.cli.native.doctor import Check
 from tai42_skeleton.db import MigrationChainDiscovery
 from tai42_skeleton.manifest import Manifest
+from tai42_skeleton.marketplace.environments.layout import BuildInput, server_dir, write_build_record
+from tai42_skeleton.marketplace.environments.swap import point_current
 
 
 def test_redact_url_masks_userinfo() -> None:
@@ -324,13 +327,17 @@ def test_run_checks_includes_schema_when_postgres_up(monkeypatch: pytest.MonkeyP
     async def _redis() -> Check:
         return Check("redis", doctor._OK, "connected")
 
+    async def _plugins() -> list[Check]:
+        return [Check("plugins: layer", doctor._OK, "0 plugins, no build")]
+
     monkeypatch.setattr(doctor, "_probe_postgres", _pg)
     monkeypatch.setattr(doctor, "_probe_schema", _schema)
     monkeypatch.setattr(doctor, "_probe_redis", _redis)
+    monkeypatch.setattr(doctor, "_probe_plugins", _plugins)
 
     checks = asyncio.run(doctor._run_checks())
     names = [c.name for c in checks]
-    assert names == ["python", "config-mode", "postgres", "schema", "redis"]
+    assert names == ["python", "config-mode", "postgres", "schema", "plugins: layer", "redis"]
 
 
 def test_run_checks_skips_schema_when_postgres_down(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -450,7 +457,7 @@ def test_broken_installed_metadata_is_a_clean_failure(
     # Every door reading the installed metadata names the broken file and exits non-zero
     # without a traceback.
     monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "secret")
-    monkeypatch.setattr("tai42_skeleton.marketplace.prefix.configured_prefix", lambda: None)
+    monkeypatch.setattr("tai42_skeleton.marketplace.environments.settings.configured_plugins_dir", lambda: None)
     manifest = tmp_path / "manifest.yml"
     manifest.write_text("default_routers: none\n")
     # ``setup --recover`` stamps the path it is given into the environment; set here, the
@@ -485,3 +492,127 @@ def test_broken_installed_metadata_is_a_clean_failure(
     assert isinstance(result.exception, SystemExit), result.exception
     assert result.exit_code == 1
     assert expected in result.output
+
+
+# -- the plugin environment checks -----------------------------------------------------
+
+
+class _Store:
+    def __init__(self, rows: list[object], events: list[str]) -> None:
+        self._rows = rows
+        self._events = events
+
+    async def list_installed(self) -> list[object]:
+        self._events.append("store:list")
+        return self._rows
+
+
+def _plugin_probe_seams(monkeypatch: pytest.MonkeyPatch, plugins_dir: Path | None, rows: list[object]) -> list[str]:
+    """Serve ``_probe_plugins`` from ``rows`` and ``plugins_dir``; return the lock and store events."""
+    events: list[str] = []
+
+    @asynccontextmanager
+    async def _shared():
+        events.append("lock:shared")
+        yield
+        events.append("lock:release")
+
+    monkeypatch.setattr("tai42_skeleton.marketplace.locks.fleet_lock_shared", _shared)
+    monkeypatch.setattr("tai42_skeleton.marketplace.store.MarketplaceInstallStore", lambda: _Store(rows, events))
+    monkeypatch.setattr("tai42_skeleton.marketplace.environments.settings.configured_plugins_dir", lambda: plugins_dir)
+    return events
+
+
+def _toolbox_row() -> object:
+    return install_row(make_spec(name="toolbox", package="tai42-fixture-toolbox"))
+
+
+def test_probe_plugins_reads_the_store_under_the_shared_lock_and_fails_a_stale_layer(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    events = _plugin_probe_seams(monkeypatch, tmp_path, [_toolbox_row()])
+
+    checks = asyncio.run(doctor._probe_plugins())
+
+    assert events == ["lock:shared", "store:list", "lock:release"]
+    assert [(c.name, c.status) for c in checks] == [("plugins: layer", doctor._FAIL)]
+    assert checks[0].detail == (
+        f"plugin environment is out of date: the plugins directory {tmp_path} does not match the install store "
+        "(no current build, missing tai42/toolbox 1.0.0). Run 'tai plugins rebuild' against this deployment, "
+        "then start again"
+    )
+
+
+def test_probe_plugins_passes_an_empty_store(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _plugin_probe_seams(monkeypatch, tmp_path, [])
+
+    checks = asyncio.run(doctor._probe_plugins())
+
+    assert [(c.name, c.status, c.detail) for c in checks] == [("plugins: layer", doctor._OK, "0 plugins, no build")]
+
+
+def test_probe_plugins_fails_a_server_directory_the_store_does_not_name_holding_a_current_build(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    environment = server_dir(tmp_path, "tai42-fixture-srv")
+    left = BuildInput(ref="tai42/srv", package="tai42-fixture-srv", version="1.0.0", source="pypi", sha256=None)
+    environment.build("s1").mkdir(parents=True)
+    write_build_record(environment.build("s1"), [left], [])
+    point_current(environment, "s1")
+    _plugin_probe_seams(monkeypatch, tmp_path, [])
+
+    checks = asyncio.run(doctor._probe_plugins())
+
+    assert [(c.name, c.status, c.detail) for c in checks] == [
+        ("plugins: layer", doctor._OK, "0 plugins, no build"),
+        (
+            "plugins: server tai42-fixture-srv",
+            doctor._FAIL,
+            "plugin environment of server package tai42-fixture-srv is out of date: the plugins directory "
+            f"{tmp_path} does not match the install store (holds tai42/srv 1.0.0 not recorded). "
+            "Run 'tai plugins rebuild' against this deployment, then start again",
+        ),
+    ]
+
+
+def test_probe_plugins_reports_a_left_over_server_directory_with_no_current_build(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    server_dir(tmp_path, "tai42-fixture-srv").builds.mkdir(parents=True)
+    _plugin_probe_seams(monkeypatch, tmp_path, [])
+
+    checks = asyncio.run(doctor._probe_plugins())
+
+    assert [(c.name, c.status, c.detail) for c in checks] == [
+        ("plugins: layer", doctor._OK, "0 plugins, no build"),
+        (
+            "plugins: server tai42-fixture-srv",
+            doctor._INFO,
+            "left over: the install store names no plugin in it; the next install, update or uninstall of a "
+            "packaged plugin, or 'tai plugins rebuild', deletes it",
+        ),
+    ]
+
+
+def test_probe_plugins_fails_packaged_plugins_with_no_plugins_directory(monkeypatch: pytest.MonkeyPatch) -> None:
+    _plugin_probe_seams(monkeypatch, None, [_toolbox_row()])
+
+    checks = asyncio.run(doctor._probe_plugins())
+
+    assert [(c.name, c.status) for c in checks] == [("plugins", doctor._FAIL)]
+    assert checks[0].detail.startswith("installed plugins need TAI_PLUGINS_DIR: 1 packaged plugins are recorded")
+
+
+def test_probe_plugins_reports_an_unreachable_store_as_a_failing_check(monkeypatch: pytest.MonkeyPatch) -> None:
+    @asynccontextmanager
+    async def _down():
+        raise psycopg.OperationalError("connection refused")
+        yield
+
+    monkeypatch.setattr("tai42_skeleton.marketplace.locks.fleet_lock_shared", _down)
+
+    checks = asyncio.run(doctor._probe_plugins())
+
+    assert [(c.name, c.status, c.detail) for c in checks] == [
+        ("plugins", doctor._FAIL, "cannot read the plugin environments: connection refused")
+    ]

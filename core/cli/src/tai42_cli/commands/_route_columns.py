@@ -604,7 +604,7 @@ ROUTE_TABLE_SHAPES: dict[tuple[str, str], RouteShape] = {
     ),
     ("POST", "/api/manifest/replace"): RouteShape(items_key="awaiting_respawn", columns=("name", "keys")),
     ("POST", "/api/marketplace/uninstall"): RouteShape(
-        items_key=None, columns=("ref", "uninstalled", "reload", "notes")
+        items_key=None, columns=("ref", "uninstalled", "manifest_written", "reload", "notes")
     ),
     ("POST", "/api/marketplace/upgrade-all"): RouteShape(
         items_key="results", columns=("ref", "outcome", "detail", "span_release_error")

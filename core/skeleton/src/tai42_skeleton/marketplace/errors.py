@@ -10,9 +10,13 @@ vocabulary; nothing here leaks a raw third-party exception.
 
 from __future__ import annotations
 
-from typing import Any
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 from tai42_skeleton.exceptions.exceptions import TaiMCPServerError
+
+if TYPE_CHECKING:
+    from tai42_skeleton.marketplace.environments.findings import Finding
 
 
 class MarketplaceError(TaiMCPServerError):
@@ -203,24 +207,83 @@ class LocalStateError(MarketplaceError):
     """
 
 
-class PluginPrefixError(MarketplaceError):
-    """The configured plugin prefix cannot serve the operation.
+class PluginsDirError(MarketplaceError):
+    """The plugins directory (``TAI_PLUGINS_DIR``) cannot serve the operation.
 
-    It is set but not writable when an install needs it, or a plugin the caller
-    asked to remove is not present in the prefix (so removing it would mean
-    touching the environment, which is refused). A deployment/local fault, never
-    the caller's request.
+    It is unset when a packaged plugin needs it, not writable when an operation builds an
+    environment in it, it resolves onto the running environment itself, a build record in it
+    cannot be read, a distribution an environment build reads reports no version, a server
+    package's current build holds no distribution of that package, or two server packages
+    declare the same console script. A deployment/local fault, never the caller's request.
     """
 
 
-class EnvironmentShadowError(MarketplaceError):
-    """The running environment already provides the target distribution at a DIFFERENT version than requested.
+class UnreadableBuildRecordError(PluginsDirError):
+    """An environment build's record (``tai42-build.json``) is not the document a build writes.
 
-    The plugin prefix sits at the END of ``sys.path`` — so a prefix install of
-    the requested version would be shadowed by the environment copy and never
-    import. Refused before any state change; the message names both versions. A
-    deployment/state conflict the operator resolves (re-pin to the environment
-    version or rebuild the image), never the caller's request.
+    ``path`` is the record file and ``reason`` why it does not read; the message names both.
+    """
+
+    def __init__(self, path: Path, reason: str) -> None:
+        """Build the error for the record at ``path`` that does not read for ``reason``."""
+        super().__init__(f"plugin build record {path} is unreadable: {reason}")
+        self.path = path
+        self.reason = reason
+
+
+class CurrentRecordError(PluginsDirError):
+    """An environment's ``current`` build has no record, or one that does not read, where its record is needed.
+
+    ``finding`` is the verification's finding for it
+    (:func:`~tai42_skeleton.marketplace.environments.current_record.current_record`); the
+    message is its report text.
+    """
+
+    def __init__(self, finding: Finding) -> None:
+        """Build the error for ``finding``."""
+        super().__init__(finding.report_text())
+        self.finding = finding
+
+
+class PluginMigrationError(MarketplaceError):
+    """The migration runner refused or failed the plugin's schema chain during an install or update.
+
+    The message names the plugin and carries the runner's own text (a rewritten chain, an
+    out-of-order migration, a malformed migrations directory); the runner's error is the
+    ``__cause__``. Raised after the new environment was current, so the operation's unwind
+    swaps it back and notes that on this error.
+    """
+
+
+class PluginDependencyConflictError(MarketplaceError):
+    """A plugin's dependencies cannot sit in the plugin layer with the installed plugins and this image.
+
+    pip found no resolution of the layer's plugins together with the image's pinned
+    distributions, or a build would add a distribution beside the image's own copy. Refused
+    before the new build is used; the message names the plugin and the conflict. A state
+    conflict the operator resolves (another version, another plugin, another image), never a
+    retry.
+    """
+
+
+class UndeclaredServerCommandError(MarketplaceError):
+    """An ``mcp-server`` item names a ``command`` that is not a console script of the package built for it.
+
+    A server package's environment exposes only the console scripts its package declares, so
+    such a command could never launch from it. Refused after the build and before it is used;
+    the message names the plugin, the item, the command and the package's scripts. A plugin
+    spec fault the operator resolves by choosing another version or plugin, never a retry.
+    """
+
+
+class ServerCommandCollisionError(MarketplaceError):
+    """Two server packages would expose one console script name.
+
+    A bare ``mcp`` command names one package's script, so a second server package declaring a
+    script another installed server package already exposes would leave that name with two
+    owners. Refused after the build and before it is used; the earlier package stays live. The
+    message names the plugin, both packages and the script. A state conflict the operator
+    resolves by uninstalling the other plugin or choosing another release, never a retry.
     """
 
 

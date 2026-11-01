@@ -140,6 +140,49 @@ async def _probe_redis() -> Check:
     return Check("redis", _OK, f"connected to {target}")
 
 
+async def _probe_plugins() -> list[Check]:
+    """One check per plugin environment and per server directory the store does not name, read under the shared lock.
+
+    The checks share :func:`~tai42_skeleton.marketplace.environments.verify.verify_environments`
+    with ``tai plugins rebuild``; a failing one reads as the refusal a server start would
+    print, without the refusal. A server directory the store does not name fails when it holds
+    a ``current`` build and is an ``info`` line saying it is left over when it holds none. An
+    unset ``TAI_PLUGINS_DIR`` with packaged plugins recorded is one failing ``plugins`` check.
+    """
+    import psycopg
+
+    from tai42_skeleton.marketplace.environments.settings import configured_plugins_dir
+    from tai42_skeleton.marketplace.environments.verify import LEFT_OVER, verify_environments
+    from tai42_skeleton.marketplace.errors import MarketplaceError
+    from tai42_skeleton.marketplace.locks import fleet_lock_shared
+    from tai42_skeleton.marketplace.store import MarketplaceInstallStore
+
+    try:
+        async with fleet_lock_shared():
+            rows = await MarketplaceInstallStore().list_installed()
+            verification = verify_environments(configured_plugins_dir(), rows)
+    except (OSError, MarketplaceError, psycopg.OperationalError) as exc:
+        return [Check("plugins", _FAIL, f"cannot read the plugin environments: {exc}")]
+    if verification.unset is not None:
+        return [Check("plugins", _FAIL, verification.unset.report_text())]
+    checks = [
+        Check(
+            f"plugins: {status.label}",
+            _OK if status.finding is None else _FAIL,
+            status.summary() if status.finding is None else status.finding.report_text(),
+        )
+        for status in verification.environments
+    ]
+    return checks + [
+        Check(
+            f"plugins: {orphan.label}",
+            _INFO if orphan.finding is None else _FAIL,
+            LEFT_OVER if orphan.finding is None else orphan.finding.report_text(),
+        )
+        for orphan in verification.orphans
+    ]
+
+
 async def _run_checks() -> list[Check]:
     checks = [
         Check("python", _INFO, platform.python_version()),
@@ -159,7 +202,11 @@ async def _run_checks() -> list[Check]:
     # The schema probe needs a live connection; skip it (rather than double-report
     # the connection failure) when Postgres itself is unreachable.
     if postgres.status == _OK:
-        checks.append(await _probe_schema(settings))
+        schema = await _probe_schema(settings)
+        checks.append(schema)
+        # The plugin checks read the install store, a table of the skeleton schema.
+        if schema.status == _OK:
+            checks += await _probe_plugins()
     checks.append(await _probe_redis())
     return checks
 
@@ -167,8 +214,9 @@ async def _run_checks() -> list[Check]:
 def doctor(ctx: typer.Context) -> None:
     """Run read-only health diagnostics against the environment.
 
-    Probes Python version, config mode, Postgres and Redis connectivity, and
-    whether the schema is applied. Purely read-only. Credentials are redacted:
+    Probes Python version, config mode, Postgres and Redis connectivity, whether
+    the schema is applied, and whether each plugin environment matches the install
+    store and this image. Purely read-only. Credentials are redacted:
     connection-URL userinfo is masked and no DSN is echoed. Exits non-zero when
     any dependency check fails.
     """

@@ -5,7 +5,7 @@
  * version honestly), then pins alpha `0.1.0` through the API — the arc the page
  * itself cannot select a non-latest version for — to exercise the advisory and
  * update affordances. Every effect is asserted through BOTH the UI and the API,
- * and the arc uninstalls everything so the shared venv is left clean. The beta
+ * and the arc uninstalls everything so the stack serves no plugin afterwards. The beta
  * install and uninstall receipts are also checked for their converged fleet
  * reload, and their result card for a clean receipt with no fleet warning.
  *
@@ -236,7 +236,7 @@ test('browse, install beta via UI, then the API-pinned alpha advisory + update a
     .poll(() => installedRefs(page.request), { timeout: 30_000 })
     .toContain(`${ALPHA_REF}@0.2.0`);
 
-  // 9. Uninstall alpha through the UI — the venv is left clean.
+  // 9. Uninstall alpha through the UI — the stack serves no plugin afterwards.
   await page.getByRole('button', { name: 'Uninstall', exact: true }).click();
   await confirmDialog(page, 'Uninstall plugin', 'Uninstall');
   await expect

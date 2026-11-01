@@ -21,6 +21,7 @@ from tai42_kit.plugins import parse_plugin_spec
 from tai42_kit.settings import reset_all_settings
 
 from tai42_skeleton.marketplace import installer_base as installer_base_module
+from tai42_skeleton.marketplace.errors import PluginMigrationError
 from tai42_skeleton.marketplace.installer import Installer
 
 from ..db import _chain_plugin
@@ -31,7 +32,7 @@ _RAISING_INIT = "raise RuntimeError('resolving the chain must never import the p
 @pytest.fixture(autouse=True)
 def _default_database(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("TAI_DATABASE_DEFAULT_PG_PASSWORD", "secret")
-    monkeypatch.setattr("tai42_skeleton.marketplace.prefix.configured_prefix", lambda: None)
+    monkeypatch.setattr("tai42_skeleton.marketplace.environments.current_builds.configured_plugins_dir", lambda: None)
     reset_all_settings()
 
 
@@ -86,7 +87,8 @@ async def test_installer_refuses_a_chain_whose_distribution_is_not_installed(
 ) -> None:
     spec = parse_plugin_spec(_chain_plugin.spec_yaml(migrations_component=None).encode(), source="registry")
 
-    with pytest.raises(MigrationDiscoveryError, match=f"{_chain_plugin.DIST}.*not installed"):
+    with pytest.raises(PluginMigrationError, match=f"{_chain_plugin.DIST}.*not installed") as caught:
         await Installer()._run_plugin_migrations(spec)
 
+    assert isinstance(caught.value.__cause__, MigrationDiscoveryError)
     assert applied == []

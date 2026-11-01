@@ -4,7 +4,7 @@
 pre-flights, in one manifest read-modify-write) and ``upgrade_all`` (every installed
 plugin to its latest compatible version under one lock hold) as abort-on-any-step
 sequences with an explicit reverse unwind, delegating each concern to a sibling module.
-It inherits the shared config, pip and prefix seams from
+It inherits the shared config, pip and plugins-directory seams from
 :class:`~tai42_skeleton.marketplace.installer_base._InstallerBase`.
 """
 
@@ -18,19 +18,19 @@ from tai42_contract.plugins import PluginSpec
 from tai42_skeleton.config.service import ApplyResult, joined_span_release_errors
 from tai42_skeleton.marketplace import (
     env_apply,
-    locks,
     manifest_apply,
     notes,
-    package_ops,
     resolve,
     route_preflight,
-    unwind,
 )
 from tai42_skeleton.marketplace import routes as routes_mod
 from tai42_skeleton.marketplace.compat import UpgradeOutcome, running_contract_version, update_targets
+from tai42_skeleton.marketplace.environments.change import OperationChange
+from tai42_skeleton.marketplace.environments.targets import place, place_row
 from tai42_skeleton.marketplace.errors import InstallStateError, InstallUnwindError, ManifestCollisionError
 from tai42_skeleton.marketplace.installer_base import _InstallerBase
 from tai42_skeleton.marketplace.manifest_patch import ProvidesUndo, collisions, remove_provides, update_provides
+from tai42_skeleton.marketplace.operation_roll import guarded_operation
 from tai42_skeleton.marketplace.pip import ensure_pip_available
 from tai42_skeleton.marketplace.store import InstallRecord
 from tai42_skeleton.operations._broadcast import FleetBroadcastError
@@ -76,19 +76,25 @@ class _UpdateFlow(_InstallerBase):
         resolve the target (target == installed → state error, a delivery-form switch
         refused); collision pre-flight for the NEW spec against the manifest with the
         OLD entries removed in memory (a rename must not self-collide); ``route_mounts``
-        remap keeping surviving items' stored bases; ``pip install`` the new pin; one
-        pipeline apply removing the old entries and applying the new; upsert the row.
+        remap keeping surviving items' stored bases; build the plugin's environment with the
+        new pin (the layer rebuilt whole, or a fresh server environment) beside the one in
+        use and swap it in — nothing is uninstalled; plugin migrations; one pipeline apply
+        removing the old entries and applying the new; upsert the row; delete the unused
+        builds; then, with the fleet key downgraded to shared, roll the fleet recycle the change
+        owes (:func:`guarded_operation`), so a worker it restarts verifies the finished update.
 
-        A Step 5/6 failure unwinds in order — reinstall the OLD pin (the old wheel back
-        BEFORE the reversal's reload), then reverse the provides swap — and a failed sub-step
-        escalates to :class:`InstallUnwindError`.
+        A failure after the swap unwinds in order — swap the environment back to the build
+        that served the OLD pin (BEFORE the reversal's reload), then reverse the provides
+        swap — and a failed sub-step escalates to :class:`InstallUnwindError`.
         """
-        async with locks.operation_guard(self._fleet_lock):
+        async with guarded_operation(self._fleet_lock, self._svc, change=f"the update of {ref}") as operation:
             # A failed update answers non-2xx, so the release errors its landed writes collect
             # are not part of its answer (each failed release is logged at ERROR by the span).
-            return await self._update_locked(
+            receipt = await self._update_locked(
                 ref, version, env, secret_keys, route_mounts, accept_public_routes, landed_release_errors=[]
             )
+        receipt["reload"] = operation.settled(receipt["reload"])
+        return receipt
 
     async def _update_locked(
         self,
@@ -121,7 +127,7 @@ class _UpdateFlow(_InstallerBase):
             raise InstallStateError(f"{ref} is already at {pinned_version}")
 
         # A version may not switch delivery form (packaged <-> descriptor-only) in
-        # place — an in-place pip upgrade has no meaning across the boundary.
+        # place: a packaged plugin and a descriptor-only one change different things.
         if (old_spec.package is None) != (new_spec.package is None):
             raise InstallStateError("delivery form changed between versions; uninstall then install")
 
@@ -129,8 +135,7 @@ class _UpdateFlow(_InstallerBase):
         # installs nothing). Done after the resolve so the delivery form is known.
         if new_spec.package is not None:
             ensure_pip_available()
-            if self._prefix is not None:
-                self._prefix_ensure_writable(self._prefix)
+            self._require_plugins_dir()
 
         # Early, readable env pre-check before any pip work (mirrors install).
         env_apply.precheck_required_env(self._cm(), new_spec, env)
@@ -154,7 +159,7 @@ class _UpdateFlow(_InstallerBase):
             reserved_prefixes=self._reserved_prefixes,
         )
 
-        pip_output = await self._update_package_steps(old_spec, new_spec, source, resolved, pinned_version, row)
+        change = await self._update_package_steps(row, new_spec, source, resolved, pinned_version)
         apply_result = await self._commit_update(
             ref,
             pinned_version,
@@ -166,109 +171,52 @@ class _UpdateFlow(_InstallerBase):
             resolved_route_list,
             env,
             secret_keys,
-            row,
+            change,
             landed_release_errors=landed_release_errors,
         )
+        environment_notes = [] if change is None else change.finish()
 
         return {
             "ref": ref,
             "version": pinned_version,
             "package": new_spec.package,
             "advisories": resolve.require_list(resolved, "advisories"),
-            "notes": notes.install_notes(new_spec),
+            "notes": [*notes.install_notes(new_spec), *environment_notes],
             "reload": apply_result,
-            "pip_output": pip_output,
+            "pip_output": None if change is None else change.pip_output,
             "routes": routes_mod.mounted_rows(resolved_route_list),
         }
 
     async def _update_package_steps(
         self,
-        old_spec: PluginSpec,
+        row: InstallRecord,
         new_spec: PluginSpec,
         source: str,
         resolved: dict[str, Any],
         pinned_version: str,
-        row: InstallRecord,
-    ) -> str | None:
-        """Move the venv to the new pin.
+    ) -> OperationChange | None:
+        """Build and swap in the environments the move from ``row``'s pin to the new pin changes, then migrate.
 
-        Env-shadow guard; on the prefix path remove the old wheel first and reinstall it if the
-        new install fails; pip install the new pin; plugin migrations, unwinding to the old pin on
-        migration failure. Returns the pip output, or ``None`` for a descriptor-only update.
+        A descriptor-only update builds nothing and returns ``None``. A migration failure swaps
+        the environments back to the builds serving the old pin and re-raises.
         """
-        if new_spec.package is None:
+        _repo_url, _tag, artifact_ref, sha256 = resolve.pin_provenance(resolved, source)
+        placed = place(row.ref, new_spec, pinned_version, source, artifact_ref, sha256)
+        if placed is None:
             return None
-        # The delivery-form check guarantees the old spec is packaged too.
-        if old_spec.package is None:
-            raise AssertionError
-        if self._prefix is not None:
-            # Refused before any state change, and before the old prefix wheel is
-            # removed below, when the environment shadows the prefix at another version.
-            package_ops.guard_env_shadow(
-                new_spec.package, pinned_version, self._prefix, env_dist_version=self._env_dist_version
-            )
+        change = await self._prepare_environment(
+            row.ref, place_row(row), placed, subject=f"cannot update {row.ref} {pinned_version}"
+        )
+        change.swap()
 
-        # On the prefix path pip cannot upgrade a distribution it does not see on its
-        # own path, so the old version is removed first and reinstalled if the new
-        # install then fails (a failed restore escalates to a loud unwind error). The
-        # environment path pip upgrades in place; a failure propagates as-is.
-        if self._prefix is not None:
-            self._prefix_uninstall(old_spec.package, self._prefix)
-            try:
-                pip_output = await package_ops.pip_install(
-                    self._pip_runner,
-                    self._prefix,
-                    new_spec.package,
-                    pinned_version,
-                    source,
-                    resolved.get("artifact_ref"),
-                    resolved.get("sha256"),
-                    env_constraints=self._env_constraints,
-                )
-            except Exception as install_error:
-                try:
-                    await package_ops.pip_install(
-                        self._pip_runner,
-                        self._prefix,
-                        old_spec.package,
-                        row.version,
-                        row.source,
-                        row.artifact_ref,
-                        row.sha256,
-                        env_constraints=self._env_constraints,
-                    )
-                except Exception as restore_error:
-                    raise InstallUnwindError(install_error, restore_error) from install_error
-                raise
-        else:
-            pip_output = await package_ops.pip_install(
-                self._pip_runner,
-                self._prefix,
-                new_spec.package,
-                pinned_version,
-                source,
-                resolved.get("artifact_ref"),
-                resolved.get("sha256"),
-                env_constraints=self._env_constraints,
-            )
-
-        # Migrations run before the manifest patch (the new wheel is landed but inert),
-        # so a failure unwinds to the OLD pin with the manifest untouched.
+        # Migrations run before the manifest patch (the new environment is current but the
+        # plugin inert), so a failure swaps back with the manifest untouched.
         try:
             await self._run_plugin_migrations(new_spec)
         except Exception as migration_error:
-            # No manifest or env to restore, so this unwind writes no config.
-            await unwind.unwind_update(
-                migration_error,
-                old_package=old_spec.package,
-                new_package=new_spec.package,
-                row=row,
-                provides_undo=None,
-                env_written=None,
-                **self._update_unwind_seams(),
-            )
+            await self._unwind(migration_error, change=change, provides_undo=None, env_written=None)
             raise
-        return pip_output
+        return change
 
     async def _commit_update(
         self,
@@ -282,7 +230,7 @@ class _UpdateFlow(_InstallerBase):
         resolved_route_list: list[routes_mod.ResolvedRoute],
         env: dict[str, str] | None,
         secret_keys: list[str] | None,
-        row: InstallRecord,
+        change: OperationChange | None,
         *,
         landed_release_errors: list[str | None],
     ) -> ApplyResult:
@@ -296,7 +244,6 @@ class _UpdateFlow(_InstallerBase):
         """
         manifest_persisted = False
         forward_release_error: str | None = None
-        env_values = env_apply.env_to_write(env)
         env_written = env_apply.EnvWrite()
         provides_undo: list[ProvidesUndo] = []
         try:
@@ -311,7 +258,6 @@ class _UpdateFlow(_InstallerBase):
                 mutator,
                 env=env,
                 secret_keys=secret_keys,
-                env_to_write=env_values,
                 env_written=env_written,
             )
             manifest_persisted = True
@@ -341,14 +287,11 @@ class _UpdateFlow(_InstallerBase):
                 forward_release_error = step_error.span_release_error
             landed_release_errors.append(forward_release_error)
             try:
-                restore_release_error = await unwind.unwind_update(
+                restore_release_error = await self._unwind(
                     step_error,
-                    old_package=old_spec.package,
-                    new_package=new_spec.package,
-                    row=row,
+                    change=change,
                     provides_undo=provides_undo[0] if persisted else None,
                     env_written=env_written,
-                    **self._update_unwind_seams(),
                 )
             except InstallUnwindError as unwind_failure:
                 landed_release_errors.append(unwind_failure.span_release_error)
@@ -369,8 +312,15 @@ class _UpdateFlow(_InstallerBase):
         release, joined in write order — an ``upgraded`` ref's manifest write, or a ``failed``
         ref's forward write and its unwind's restore writes — else ``None``. A per-ref failure
         NEVER aborts the batch — it is logged and reported so one broken ref never hides the rest.
+
+        The fleet recycle every ref's change owes — an upgrade's, or a failed one's unwind — is
+        rolled ONCE, after the whole batch, with the fleet key downgraded to shared
+        (:func:`guarded_operation`): a worker it restarts verifies the batch's finished rows, and
+        the hold is never re-taken between refs, so no other operation runs inside the batch. The
+        batch arms no self-exit of the writer, so the roll recycles no writer and its verdict is
+        logged (the report entries carry no roll).
         """
-        async with locks.operation_guard(self._fleet_lock):
+        async with guarded_operation(self._fleet_lock, self._svc, change="the upgrade-all batch", writer_exits=False):
             return await self._upgrade_all_locked()
 
     async def _upgrade_all_locked(self) -> list[dict[str, Any]]:

@@ -7,6 +7,8 @@ projection surfaces the same message as a loud ``ToolError``. The classification
 operation as a typed raise, so the same decision serves the route, the CLI, and
 the projected tool. The base ``OperationError`` and its ``503`` member
 ``UnavailableError`` are the contract's (``tai42_contract.errors``).
+:func:`operator_message` is the text an operator reads for any exception a door
+renders into the error envelope.
 """
 
 from __future__ import annotations
@@ -143,6 +145,17 @@ class OperationFailedError(OperationError):
     __tai_error_kind__: ClassVar[ErrorKind] = ErrorKind.UPSTREAM_ERROR
 
 
+def operator_message(exc: BaseException, *, text: str | None = None) -> str:
+    """The text an operator reads for ``exc``: its message, then each of its notes.
+
+    Notes (PEP 678, ``add_note``) are context added to an existing error without changing
+    it; they are rendered after the message, one per line, in the order they were added, as
+    the traceback module prints them. ``text`` stands in for the message when a door shows
+    another text for ``exc`` (a wrapper surfacing its cause's text); ``exc``'s notes follow it.
+    """
+    return "\n".join([str(exc) if text is None else text, *getattr(exc, "__notes__", ())])
+
+
 __all__ = [
     "BadRequestError",
     "ConflictError",
@@ -154,4 +167,5 @@ __all__ = [
     "PermissionDeniedError",
     "UpstreamError",
     "ValidationRejectedError",
+    "operator_message",
 ]

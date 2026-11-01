@@ -257,11 +257,11 @@ def _raise_on_early_exit(stack: TaiStack, port: int) -> None:
 def early_exit_detail(stack: TaiStack) -> str | None:
     """The first process that exited and stays down, with its log tail, or ``None``.
 
-    A supervised process the supervisor is bringing back (``TaiStack._supervisor_respawns``)
+    A supervised process the supervisor is bringing back (:meth:`~tai42_e2e.supervisor.RespawnSupervisor.respawns`)
     is churn, not a failure."""
-    with stack._supervisor_lock:
-        for handle in stack._procs.values():
-            if handle.is_running() or stack._supervisor_respawns(handle):
+    with stack.supervisor.lock:
+        for handle in stack.procs.values():
+            if handle.is_running() or stack.supervisor.respawns(handle):
                 continue
             return f"process {handle.name!r} exited early (code {handle.poll()}):\n{handle.log_tail()}"
     return None

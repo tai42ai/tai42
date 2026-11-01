@@ -120,7 +120,7 @@ async def assert_deployment_schemas_applied(manifest: Manifest, installed: Insta
     The platform chains (skeleton, ``states``) and the chain of every plugin a deployment of
     ``manifest`` loads, checked together so one :class:`SchemaOutOfDateError` names every stale chain.
     ``installed`` is the :func:`~tai42_skeleton.marketplace.compat.distribution_map` snapshot
-    the build takes after the plugins prefix is on ``sys.path``. Run in ``BootMixin.start()``
+    the build takes after the plugin layer is on ``sys.path``. Run in ``BootMixin.start()``
     before any store read and before any manifest module imports, so a pending chain refuses
     with the ``tai db migrate`` fix and a plugin never runs against tables its chain has not
     created.

@@ -373,10 +373,10 @@ CREATE TABLE IF NOT EXISTS marketplace_installs (
     tag            TEXT,
     -- The github artifact tarball URL the verified install fetched, and the
     -- sha256 the registry captured for it at ingest (both NULL for a pypi
-    -- source, whose immutable `package==version` needs no fetch). Update's unwind
-    -- reinstalls the old pin by re-fetching `artifact_ref` and re-checking
-    -- `sha256`, so a re-pointed release tag can never smuggle unverified code
-    -- back in during a rollback.
+    -- source, whose immutable `package==version` needs no fetch). A plugin
+    -- environment rebuild fetches a github pin by re-fetching `artifact_ref` and
+    -- re-checking `sha256`, so a re-pointed release tag can never smuggle
+    -- unverified code into a rebuilt environment.
     artifact_ref   TEXT,
     sha256         TEXT,
     spec           JSONB        NOT NULL,

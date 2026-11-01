@@ -12,11 +12,10 @@ from __future__ import annotations
 import importlib.metadata
 from typing import Any
 
-from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from pydantic import ValidationError
 from tai42_contract.plugins import PluginSpec
 
-from tai42_skeleton.marketplace.compat import running_contract_version
+from tai42_skeleton.marketplace.compat import registry_range_admits, running_contract_version
 from tai42_skeleton.marketplace.errors import (
     ContractIncompatibleError,
     LocalStateError,
@@ -79,25 +78,14 @@ def prepare_resolved(resolved: dict[str, Any]) -> tuple[PluginSpec, str]:
 
 
 def check_contract(contract_range: str) -> None:
-    """Require the installed ``tai42-contract`` version to satisfy the plugin's declared ``contract_range``.
+    """Require the running ``tai42-contract`` version to satisfy the plugin's declared ``contract_range``.
 
-    ``prereleases=True`` so a dev-versioned tai42-contract (an editable checkout
-    reporting e.g. ``0.5.0.dev3``) inside the range still passes — a developer
-    environment is not spuriously refused. A malformed range is registry data
-    → 502, never a caller 400.
+    The verdict is :func:`~tai42_skeleton.marketplace.compat.registry_range_admits`'s, so a
+    malformed range is registry data → 502, never a caller 400. The caller only invokes this with
+    a PRESENT (non-null) range — a contract-less plugin is skipped upstream.
     """
-    # The caller only invokes this with a PRESENT (non-null) range — a contract-less
-    # plugin is skipped upstream — and the registry client's resolve boundary types
-    # the field when present, so this check owns only the string's FORMAT: a non-PEP440
-    # specifier set is garbled registry data → 502, never a caller 400.
-    try:
-        specifier = SpecifierSet(contract_range)
-    except InvalidSpecifier as exc:
-        raise RegistryResponseError(
-            f"registry served an unusable contract_range {contract_range!r}: {exc}", status=None
-        ) from exc
     installed = running_contract_version()
-    if not specifier.contains(installed, prereleases=True):
+    if not registry_range_admits(contract_range, installed):
         raise ContractIncompatibleError(
             f"plugin requires tai42-contract {contract_range}, but {installed} is installed"
         )
@@ -138,8 +126,8 @@ def pin_provenance(resolved: dict[str, Any], source: str) -> tuple[str | None, s
     The resolve values for a github OR a ``spec`` source (both carry the pointer
     fields), else all ``None`` — so a pypi row keeps every pin column NULL even when
     the resolve response carries them. The stored ``artifact_ref`` + ``sha256`` are
-    what let update-unwind reinstall the prior github pin through the same verified
-    fetch path (a descriptor ``spec`` pin stores them for provenance/integrity).
+    what let a plugin environment rebuild fetch the github pin's archive through the
+    same verified path (a descriptor ``spec`` pin stores them for provenance/integrity).
     """
     if source in ("github", "spec"):
         return (

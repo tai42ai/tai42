@@ -1,7 +1,8 @@
 """The registry seeding pipeline: stage forged fixture artifacts on the package
 index and drive the marketplace's real admin-seed + ingest until each version
 publishes — the shared browse catalog plus the per-scenario listings (zeta compat,
-epsilon/theta routers, eta mcp-server, iota/kappa descriptors)."""
+epsilon/theta routers, eta, xi, omicron and pi mcp-server, mu/nu plugin-layer resolution, iota/kappa
+descriptors)."""
 
 from __future__ import annotations
 
@@ -39,8 +40,20 @@ from tai42_e2e.fixture_catalog import (
     KAPPA_VERSION,
     LAMBDA_PACKAGE,
     LAMBDA_REF,
+    MU_PACKAGE,
+    MU_REF,
+    NU_PACKAGE,
+    NU_REF,
+    OMICRON_PACKAGE,
+    OMICRON_REF,
+    OMICRON_VERSION,
+    PI_PACKAGE,
+    PI_REF,
     THETA_PACKAGE,
     THETA_REF,
+    XI_PACKAGE,
+    XI_REF,
+    XI_VERSION,
     ZETA_NARROW_CONTRACT_RANGE,
     ZETA_PACKAGE,
     ZETA_REF,
@@ -260,7 +273,9 @@ async def seed_eta_listing(mp: MarketplaceService, index: FixturePackageIndex, a
     only the mcp-server spec's own registry carries it, exactly as delta/epsilon are
     seeded by their own specs rather than the shared seed. Its spec carries no
     ``contract`` (an all-mcp-server package), so the registry ingests it under the
-    contract-less mcp-server kind branch."""
+    contract-less mcp-server kind branch. The index also serves the etalib library
+    eta depends on, which its server environment resolves at install."""
+    index.register(artifacts.etalib)
     index.register(artifacts.eta_v1)
     await _admin_seed(mp, ((ETA_PACKAGE, artifacts.eta_v1.plugin_yml),))
     await _wait_published(mp, ETA_REF, "0.1.0")
@@ -274,6 +289,86 @@ async def publish_eta_v2(mp: MarketplaceService, index: FixturePackageIndex, art
     index.register(artifacts.eta_v2)
     await _admin_seed(mp, ((ETA_PACKAGE, artifacts.eta_v2.plugin_yml),))
     await _wait_published(mp, ETA_REF, "0.2.0")
+
+
+def forge_eta_wheel(version: str, out_dir: Path, *, mcp_command: str, fixtures_dir: Path | None = None) -> BuiltWheel:
+    """Forge one eta wheel whose mcp-server item names ``mcp_command`` as its command.
+
+    Reads the eta source from ``fixtures_dir`` (or ``TAI_E2E_MARKETPLACE_FIXTURES``). The
+    package's own console script stays ``tai-e2e-market-eta-mcp``, so any other command is
+    one the package does not declare."""
+    src = _resolve_fixtures_dir(fixtures_dir)
+    return build_fixture_wheel(src / "eta", version, out_dir, mcp_command=mcp_command)
+
+
+async def publish_eta_wheel(mp: MarketplaceService, index: FixturePackageIndex, wheel: BuiltWheel) -> None:
+    """Publish a forged eta ``wheel`` (:func:`forge_eta_wheel`) over a seeded eta listing
+    (:func:`seed_eta_listing`): register the wheel and re-seed eta with its stamped spec."""
+    index.register(wheel)
+    await _admin_seed(mp, ((ETA_PACKAGE, wheel.plugin_yml),))
+    await _wait_published(mp, ETA_REF, wheel.version)
+
+
+def forge_xi_wheel(out_dir: Path, fixtures_dir: Path | None = None) -> BuiltWheel:
+    """Forge xi's ``XI_VERSION`` wheel from the xi source in ``fixtures_dir`` (or
+    ``TAI_E2E_MARKETPLACE_FIXTURES``), contract-less like eta (an all-mcp-server package)."""
+    return build_fixture_wheel(_resolve_fixtures_dir(fixtures_dir) / "xi", XI_VERSION, out_dir)
+
+
+async def seed_xi_listing(mp: MarketplaceService, index: FixturePackageIndex, wheel: BuiltWheel) -> None:
+    """Stage xi's forged ``wheel`` (:func:`forge_xi_wheel`) and drive the real admin-seed +
+    ingest pipeline until it publishes, in the calling spec's registry only."""
+    index.register(wheel)
+    await _admin_seed(mp, ((XI_PACKAGE, wheel.plugin_yml),))
+    await _wait_published(mp, XI_REF, wheel.version)
+
+
+def forge_pi_wheel(version: str, out_dir: Path, fixtures_dir: Path | None = None) -> BuiltWheel:
+    """Forge pi's wheel at ``version`` from the pi source in ``fixtures_dir`` (or
+    ``TAI_E2E_MARKETPLACE_FIXTURES``), contract-less like eta (an all-mcp-server package)."""
+    return build_fixture_wheel(_resolve_fixtures_dir(fixtures_dir) / "pi", version, out_dir)
+
+
+async def seed_pi_listing(mp: MarketplaceService, index: FixturePackageIndex, wheels: Sequence[BuiltWheel]) -> None:
+    """Stage pi's forged ``wheels`` (:func:`forge_pi_wheel`) and publish each, in order, through
+    the real admin-seed + ingest pipeline, in the calling spec's registry only."""
+    for wheel in wheels:
+        index.register(wheel)
+        await _admin_seed(mp, ((PI_PACKAGE, wheel.plugin_yml),))
+        await _wait_published(mp, PI_REF, wheel.version)
+
+
+def forge_omicron_wheel(out_dir: Path, fixtures_dir: Path | None = None) -> BuiltWheel:
+    """Forge omicron's ``OMICRON_VERSION`` wheel from the omicron source in ``fixtures_dir`` (or
+    ``TAI_E2E_MARKETPLACE_FIXTURES``), contract-less like eta (an all-mcp-server package)."""
+    return build_fixture_wheel(_resolve_fixtures_dir(fixtures_dir) / "omicron", OMICRON_VERSION, out_dir)
+
+
+async def seed_omicron_listing(mp: MarketplaceService, index: FixturePackageIndex, wheel: BuiltWheel) -> None:
+    """Stage omicron's forged ``wheel`` (:func:`forge_omicron_wheel`) and drive the real admin-seed +
+    ingest pipeline until it publishes, in the calling spec's registry only. Its server
+    environment resolves the eta package it depends on, so seed eta first
+    (:func:`seed_eta_listing`)."""
+    index.register(wheel)
+    await _admin_seed(mp, ((OMICRON_PACKAGE, wheel.plugin_yml),))
+    await _wait_published(mp, OMICRON_REF, wheel.version)
+
+
+async def seed_mu_nu_listings(mp: MarketplaceService, index: FixturePackageIndex, artifacts: FixtureArtifacts) -> None:
+    """Stage mu's and nu's ``0.1.0`` and ``0.2.0`` wheels with both sharedlib versions,
+    and drive the real admin-seed + ingest pipeline until all four versions publish.
+
+    Mu and nu are the plugin-layer resolution fixtures (see ``SHAREDLIB_PACKAGE``),
+    kept OUT of :func:`seed_fixture_catalog` so they never pollute the shared browse
+    catalog. Each version is installed by an explicit ``version`` pin."""
+    index.register(artifacts.sharedlib_v1)
+    index.register(artifacts.sharedlib_v2)
+    for mu, nu, version in ((artifacts.mu_v1, artifacts.nu_v1, "0.1.0"), (artifacts.mu_v2, artifacts.nu_v2, "0.2.0")):
+        index.register(mu)
+        index.register(nu)
+        await _admin_seed(mp, ((MU_PACKAGE, mu.plugin_yml), (NU_PACKAGE, nu.plugin_yml)))
+        await _wait_published(mp, MU_REF, version)
+        await _wait_published(mp, NU_REF, version)
 
 
 # ---- descriptor-only (source='spec') seeding ----------------------------

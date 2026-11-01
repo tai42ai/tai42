@@ -15,6 +15,8 @@ from pathlib import Path
 from tai42_e2e.pkgsource import (
     BuiltTarball,
     BuiltWheel,
+    IndexWheel,
+    build_dependency_wheel,
     build_fixture_source_tarball,
     build_fixture_wheel,
 )
@@ -55,6 +57,8 @@ THETA_PACKAGE = "tai-e2e-market-theta"
 ZETA_PACKAGE = "tai-e2e-market-zeta"
 ETA_PACKAGE = "tai-e2e-market-eta"
 LAMBDA_PACKAGE = "tai-e2e-market-lambda"
+MU_PACKAGE = "tai-e2e-market-mu"
+NU_PACKAGE = "tai-e2e-market-nu"
 ALPHA_REF = "tai42/e2e-alpha"
 BETA_REF = "tai42/e2e-beta"
 GAMMA_REF = "tai42/e2e-gamma"
@@ -64,12 +68,31 @@ THETA_REF = "tai42/e2e-theta"
 ZETA_REF = "tai42/e2e-zeta"
 ETA_REF = "tai42/e2e-eta"
 LAMBDA_REF = "tai42/e2e-lambda"
+MU_REF = "tai42/e2e-mu"
+NU_REF = "tai42/e2e-nu"
 
 # Lambda is the late-loaded settings fixture: its tool module defines a settings group
 # whose one field, ``LAMBDA_POOL_URL_ENV``, is recycle-class. Installing it loads that
 # group into running workers after they booted.
 LAMBDA_POOL_URL_ENV = "E2E_LAMBDA_POOL_URL"
 LAMBDA_TOOL = "e2e_market_lambda_probe"
+
+# Mu and nu are the plugin-layer resolution fixtures: two in-process plugins whose
+# versions pin the dependency-only ``tai-e2e-market-sharedlib`` (published at
+# ``SHAREDLIB_V1_VERSION`` and ``SHAREDLIB_V2_VERSION``). Mu 0.1.0 needs it below 2 and
+# mu 0.2.0 drops it; nu 0.1.0 needs it at 1 or above and nu 0.2.0 at 2 or above. So mu
+# 0.1.0 + nu 0.1.0 share one copy, mu 0.1.0 + nu 0.2.0 cannot resolve together, and an
+# update to mu 0.2.0 leaves the layer without it.
+SHAREDLIB_PACKAGE = "tai-e2e-market-sharedlib"
+SHAREDLIB_V1_VERSION = "1.0.0"
+SHAREDLIB_V2_VERSION = "2.0.0"
+MU_TOOL = "e2e_market_mu_probe"
+NU_TOOL = "e2e_market_nu_probe"
+
+# Eta's server implements its one tool through this dependency-only library, which
+# its own server environment resolves from the package index.
+ETALIB_PACKAGE = "tai-e2e-market-etalib"
+ETALIB_VERSION = "1.0.0"
 
 # Epsilon's second published version: a router item bumped to carry an additional
 # declared PUBLIC route the 0.1.0 spec does not. Forged from its own source tree
@@ -86,6 +109,36 @@ EPSILON_V2_VERSION = "0.2.0"
 # ``mcp`` entry titled by the item name, under which the mounted tool binds.
 ETA_MCP_TITLE = "e2e_eta_mcp"
 ETA_MCP_TOOL = "e2e_eta_mcp_ping"
+# The console script the eta distribution installs (its ``[project.scripts]`` entry).
+ETA_SCRIPT = "tai-e2e-market-eta-mcp"
+
+# Xi is the second mcp-server fixture: its package declares ``ETA_SCRIPT``, the console
+# script name eta's server package declares, so its install beside an installed eta is
+# refused. Contract-less like eta, forged per spec via :func:`~tai42_e2e.catalog_seed.forge_xi_wheel`.
+XI_PACKAGE = "tai-e2e-market-xi"
+XI_REF = "tai42/e2e-xi"
+XI_VERSION = "0.1.0"
+
+# Omicron is a second mcp-server fixture that installs beside eta: its package declares a
+# console script of its own, ``OMICRON_SCRIPT``, which serves eta's one-tool server from
+# the eta package, a dependency in omicron's server environment. Contract-less like eta,
+# forged per spec via :func:`~tai42_e2e.catalog_seed.forge_omicron_wheel`.
+OMICRON_PACKAGE = "tai-e2e-market-omicron"
+OMICRON_REF = "tai42/e2e-omicron"
+OMICRON_VERSION = "0.1.0"
+OMICRON_MCP_TITLE = "e2e_omicron_mcp"
+OMICRON_MCP_TOOL = "e2e_omicron_mcp_ping"
+OMICRON_SCRIPT = "tai-e2e-market-omicron-mcp"
+
+# Pi is the mcp-server fixture over the lambda fixture's recycle-class key: its item's
+# ``mcp.env`` reads ``LAMBDA_POOL_URL_ENV`` through a required ``!ENV`` marker, so its
+# install and its update each take that key's value as install-time env, and with lambda
+# installed that value is recycle-class. Contract-less like eta, published at
+# ``PI_V1_VERSION`` and ``PI_V2_VERSION`` via :func:`~tai42_e2e.catalog_seed.forge_pi_wheel`.
+PI_PACKAGE = "tai-e2e-market-pi"
+PI_REF = "tai42/e2e-pi"
+PI_V1_VERSION = "0.1.0"
+PI_V2_VERSION = "0.2.0"
 
 # Zeta is the plugin-compat fixture: two published versions whose DECLARED
 # contract ranges straddle the running tai42-contract major. 0.1.0 declares the
@@ -186,8 +239,9 @@ _DESCRIPTOR_TOKEN_RE = re.compile(r"\{\{([A-Z_]+)\}\}")
 class FixtureArtifacts:
     """The forged fixture artifacts a marketplace-area run needs: the pypi-sourced
     wheels (alpha 0.1.0/0.2.0, beta 0.1.0, gamma 0.1.0, epsilon 0.1.0/0.2.0,
-    theta 0.1.0, eta 0.1.0/0.2.0, lambda 0.1.0) and the github-sourced delta source tarballs
-    (0.1.0/0.2.0).
+    theta 0.1.0, eta 0.1.0/0.2.0, lambda 0.1.0, mu 0.1.0/0.2.0, nu 0.1.0/0.2.0), the
+    dependency-only library wheels the index serves beside them (etalib 1.0.0, sharedlib
+    1.0.0/2.0.0) and the github-sourced delta source tarballs (0.1.0/0.2.0).
     Immutable and shareable across modules — forging is pure and the built files never
     change. ``epsilon_v2`` is the same distribution as ``epsilon_v1`` at a bumped
     version whose spec declares an extra public route (see ``EPSILON_V2_VERSION``);
@@ -203,6 +257,13 @@ class FixtureArtifacts:
     eta_v1: BuiltWheel
     eta_v2: BuiltWheel
     lambda_v1: BuiltWheel
+    mu_v1: BuiltWheel
+    mu_v2: BuiltWheel
+    nu_v1: BuiltWheel
+    nu_v2: BuiltWheel
+    etalib: IndexWheel
+    sharedlib_v1: IndexWheel
+    sharedlib_v2: IndexWheel
     delta_v1: BuiltTarball
     delta_v2: BuiltTarball
 
@@ -210,11 +271,11 @@ class FixtureArtifacts:
 def _workspace_contract_range() -> str:
     """The tai42-contract version specifier the running tai42-skeleton declares.
 
-    The fixture plugins import ``tai42_contract`` and install into the skeleton's
-    environment, so their declared contract range must CONTAIN the workspace
-    contract at every release-version window — otherwise a release-PR bump moves
-    the workspace contract past a fixture's static cap and the install can no
-    longer resolve it against the environment's own contract. Mirroring the
+    The fixture plugins import ``tai42_contract`` and install into the plugin layer,
+    which resolves against the serving environment's own contract, so their
+    declared contract range must CONTAIN the workspace contract at every
+    release-version window — otherwise a release-PR bump moves the workspace
+    contract past a fixture's static cap and the install can no longer resolve. Mirroring the
     skeleton's declared range tracks the workspace automatically (the skeleton's
     cap is the authoritative compat band). Raises loudly if the skeleton declares
     no tai42-contract specifier, or declares more than one distinct specifier
@@ -275,9 +336,9 @@ def contract_facet_probe_versions() -> tuple[str, str]:
 
 
 def forge_fixture_artifacts(out_dir: Path, fixtures_dir: Path | None = None) -> FixtureArtifacts:
-    """Forge every fixture artifact into ``out_dir``: the ten wheels and the two
-    delta source tarballs (delta is the github-sourced listing and gets no
-    wheel). Reads the fixture-plugin sources from ``fixtures_dir`` (or
+    """Forge every fixture artifact into ``out_dir``: the plugin wheels, the
+    dependency-only library wheels and the two delta source tarballs (delta is the
+    github-sourced listing and gets no wheel). Reads the fixture-plugin sources from ``fixtures_dir`` (or
     ``TAI_E2E_MARKETPLACE_FIXTURES``); each build stamps its version into a copy of
     the source, never mutating the source tree.
 
@@ -301,6 +362,19 @@ def forge_fixture_artifacts(out_dir: Path, fixtures_dir: Path | None = None) -> 
         eta_v1=build_fixture_wheel(src / "eta", "0.1.0", out_dir),
         eta_v2=build_fixture_wheel(src / "eta", "0.2.0", out_dir),
         lambda_v1=build_fixture_wheel(src / "lambda", "0.1.0", out_dir, contract_range=contract_range),
+        mu_v1=build_fixture_wheel(
+            src / "mu", "0.1.0", out_dir, contract_range=contract_range, requires=(f"{SHAREDLIB_PACKAGE}<2",)
+        ),
+        mu_v2=build_fixture_wheel(src / "mu", "0.2.0", out_dir, contract_range=contract_range),
+        nu_v1=build_fixture_wheel(
+            src / "nu", "0.1.0", out_dir, contract_range=contract_range, requires=(f"{SHAREDLIB_PACKAGE}>=1",)
+        ),
+        nu_v2=build_fixture_wheel(
+            src / "nu", "0.2.0", out_dir, contract_range=contract_range, requires=(f"{SHAREDLIB_PACKAGE}>=2",)
+        ),
+        etalib=build_dependency_wheel(src / "etalib", ETALIB_VERSION, out_dir),
+        sharedlib_v1=build_dependency_wheel(src / "sharedlib", SHAREDLIB_V1_VERSION, out_dir),
+        sharedlib_v2=build_dependency_wheel(src / "sharedlib", SHAREDLIB_V2_VERSION, out_dir),
         delta_v1=build_fixture_source_tarball(src / "delta", "0.1.0", out_dir, contract_range=contract_range),
         delta_v2=build_fixture_source_tarball(src / "delta", "0.2.0", out_dir, contract_range=contract_range),
     )

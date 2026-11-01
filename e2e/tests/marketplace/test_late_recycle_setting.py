@@ -68,7 +68,7 @@ async def _probe_pool_url(stack: TaiStack) -> str:
 
 
 @pytest.mark.timeout(600)
-@pytest.mark.needs("setting:shared-venv")
+@pytest.mark.needs("setting:TAI_PLUGINS_DIR")
 async def test_a_recycle_class_setting_an_install_loads_awaits_nothing_until_its_value_moves(
     marketplace_supervised_stack: TaiStack, market_installer: MarketInstaller, uniq: Callable[[str], str]
 ) -> None:

@@ -1,0 +1,21 @@
+spec_version: 1
+namespace: tai42
+name: e2e-omicron
+package: tai-e2e-market-omicron
+version: 0.0.0
+description: "Installable marketplace fixture plugin: a second mcp-server package, serving the eta fixture's one-tool stdio MCP server under a console script of its own."
+license: Apache-2.0
+repository: https://github.com/tai42ai/tai-e2e
+categories: [utilities]
+tags: [mcp-server, omicron]
+permissions:
+  network: false
+  subprocess: true
+  filesystem: false
+provides:
+  - kind: mcp-server
+    name: e2e_omicron_mcp
+    description: "Launch the package's console script, which serves the eta fixture's one-tool stdio MCP server (a ping tool)."
+    tags: [omicron]
+    mcp:
+      command: tai-e2e-market-omicron-mcp

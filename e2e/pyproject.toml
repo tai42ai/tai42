@@ -239,6 +239,9 @@ ignore = [
 
 [tool.pyright]
 include = ["src", "tests", "fixtures"]
+# Import roots: the harness source, and the etalib fixture distribution's source tree,
+# which the eta fixture server imports as the dependency installed beside it at run time.
+extraPaths = ["src", "fixtures/marketplace_plugins/etalib/src"]
 pythonVersion = "3.13"
 typeCheckingMode = "basic"
 reportMissingImports = "warning"

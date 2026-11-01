@@ -2,7 +2,8 @@
 
 :func:`install_error_handlers` installs, on a freshly built base app (``sse_app`` and
 ``http_app`` alike), the handlers that render an unexpected exception as the generic masked
-``500``, a plugin-load failure or a schema-gate refusal of a live rebuild verbatim, a work
+``500``, a plugin-load failure or a schema-gate refusal of a live rebuild verbatim (with its
+notes), a work
 refusal during a config reload as the reload gate's retriable ``503``, and the router's native ``404`` as
 ``{"error": "not found"}``.
 """
@@ -20,6 +21,7 @@ from tai42_contract.errors import ServerReloadingError
 from tai42_kit.db import MigrationDiscoveryError, SchemaOutOfDateError
 
 from tai42_skeleton.app.reload_gate import reload_gate
+from tai42_skeleton.operations.errors import operator_message
 
 logger = logging.getLogger(__name__)
 
@@ -71,10 +73,11 @@ async def core_plugin_boot_error_handler(request: Request, exc: Exception) -> Re
     aborts THAT rebuild, the previous generation keeps serving, and the failure must reach
     the caller instead of the generic masked 500. The message is operator-facing by
     construction — it names what cannot load, why, and the remedy, with no host/path/stack
-    detail — so it is surfaced as the shared ``{"error": ...}`` envelope. The status is 500:
-    the reload did not apply.
+    detail — so it is surfaced as the shared ``{"error": ...}`` envelope, its notes after it
+    (:func:`~tai42_skeleton.operations.errors.operator_message`). The status is 500: the
+    reload did not apply.
     """
-    return JSONResponse({"error": str(exc)}, status_code=500)
+    return JSONResponse({"error": operator_message(exc)}, status_code=500)
 
 
 async def schema_gate_error_handler(request: Request, exc: Exception) -> Response:
@@ -87,9 +90,11 @@ async def schema_gate_error_handler(request: Request, exc: Exception) -> Respons
     chain it cannot resolve (``MigrationDiscoveryError``: a malformed packaged plugin spec
     naming its distribution and file, or a missing or malformed migrations directory). Both
     messages are operator-facing by construction, so they are surfaced as the shared
-    ``{"error": ...}`` envelope. The status is 500: the reload did not apply.
+    ``{"error": ...}`` envelope, the error's notes after the message
+    (:func:`~tai42_skeleton.operations.errors.operator_message`). The status is 500: the
+    reload did not apply.
     """
-    return JSONResponse({"error": str(exc)}, status_code=500)
+    return JSONResponse({"error": operator_message(exc)}, status_code=500)
 
 
 async def fleet_broadcast_error_handler(request: Request, exc: Exception) -> Response:
@@ -99,8 +104,10 @@ async def fleet_broadcast_error_handler(request: Request, exc: Exception) -> Res
     ``FleetBroadcastError``. When the underlying cause is a plugin that could not load
     (``CorePluginBootError``), a route mount collision (``CrossOwnerRouteCollisionError``,
     whose message names the remap remedy) or a schema-gate refusal (``SchemaOutOfDateError`` or
-    ``MigrationDiscoveryError``, see :func:`schema_gate_error_handler`), that message plus the fleet report reach the
-    caller (the CLI prints it and exits non-zero). Any other cause — a bus transport error
+    ``MigrationDiscoveryError``, see :func:`schema_gate_error_handler`), that message plus the
+    fleet report reach the caller (the CLI prints it and exits non-zero); the cause's notes and
+    then the broadcast error's own notes (a marketplace unwind notes the restored plugin
+    environment there) follow the message. Any other cause — a bus transport error
     naming internal hosts — keeps the generic masked 500, so internal detail never leaks.
     """
     from tai42_skeleton.app.route_registry import CrossOwnerRouteCollisionError
@@ -115,7 +122,8 @@ async def fleet_broadcast_error_handler(request: Request, exc: Exception) -> Res
         MigrationDiscoveryError,
     )
     if isinstance(exc, FleetBroadcastError) and isinstance(cause, operator_facing):
-        return JSONResponse({"error": str(cause), "report": exc.report.model_dump(mode="json")}, status_code=500)
+        error = operator_message(exc, text=operator_message(cause))
+        return JSONResponse({"error": error, "report": exc.report.model_dump(mode="json")}, status_code=500)
     return await internal_error_handler(request, exc)
 
 

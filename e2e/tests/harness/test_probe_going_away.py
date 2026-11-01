@@ -12,7 +12,6 @@ infra.
 from __future__ import annotations
 
 import asyncio
-import threading
 from dataclasses import dataclass
 
 import httpx
@@ -20,6 +19,7 @@ import pytest
 
 from tai42_e2e.readiness import _unless_its_process_exits
 from tai42_e2e.stack import TaiStack
+from tai42_e2e.supervisor import RespawnSupervisor
 
 pytestmark = pytest.mark.needs("no-stack")
 
@@ -52,9 +52,8 @@ def _stack(port: int) -> TaiStack:
     """A bare stack whose one serve process, still running, serves ``port``."""
     stack = object.__new__(TaiStack)
     handle = _Running("serve")
-    stack._procs = {"serve": handle}  # type: ignore[attr-defined]
-    stack._supervisor_lock = threading.RLock()  # type: ignore[attr-defined]
-    stack._supervised_names = {"serve"}  # type: ignore[attr-defined]
+    stack.procs = {"serve": handle}  # type: ignore[attr-defined]
+    stack.supervisor = RespawnSupervisor(stack)
     stack.process_on_port = lambda _port: handle  # type: ignore[method-assign,assignment,return-value]
     stack.base_url = lambda _port=None: f"http://127.0.0.1:{port}"  # type: ignore[method-assign]
     return stack

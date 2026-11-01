@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import importlib.metadata
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from tai42_contract.plugins import PluginSpec
@@ -15,12 +15,14 @@ from tai42_skeleton.marketplace.errors import (
     MalformedRefError,
     ManifestCollisionError,
     OperationInProgressError,
+    PipFailedError,
     PipUnavailableError,
+    PluginDependencyConflictError,
     RegistryResponseError,
 )
 from tai42_skeleton.operations._broadcast import FleetBroadcastError
 
-from ._specs import make_resolved, make_spec
+from ._specs import make_resolved, make_spec, mcp_server_item
 from .test_installer import (
     _GH_ARTIFACT,
     _GH_ARTIFACT_OLD,
@@ -28,6 +30,8 @@ from .test_installer import (
     _assert_no_pip,
     _fake_verified_fetch,
     _tool_provides,
+    layer_inputs,
+    server_inputs,
 )
 
 # -- update ------------------------------------------------------------------
@@ -91,6 +95,65 @@ async def test_update_keeps_an_mcp_entrys_tool_selection(monkeypatch: pytest.Mon
     assert (relay["include"], relay["exclude"]) == (selection["include"], selection["exclude"])
 
 
+async def test_an_update_moving_a_plugin_from_the_layer_to_its_own_server_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(importlib.metadata, "version", lambda name: "0.1.0")
+    h = Harness()
+    old = make_spec(version="1.0.0", provides=_tool_provides("pkg.old"))
+    h.registry.resolved = make_resolved(old, version="1.0.0")
+    await h.installer().install("tai42/toolbox")
+    assert layer_inputs(h) == ["tai42/toolbox 1.0.0"]
+    new = make_spec(version="2.0.0", provides=[mcp_server_item()], contract=None)
+    h.registry.resolved = make_resolved(new, version="2.0.0", contract_range=None)
+
+    await h.installer().update("tai42/toolbox")
+
+    # The layer is rebuilt without the plugin and the server package gets its own
+    # environment; no pip call ever uninstalls.
+    assert layer_inputs(h) == []
+    assert server_inputs(h, "tai42-toolbox") == ["tai42/toolbox 2.0.0"]
+    assert all("uninstall" not in call for call in h.pip.calls)
+    assert h.store.rows["tai42/toolbox"].version == "2.0.0"
+
+
+async def test_an_update_of_an_in_process_plugin_rebuilds_the_layer_and_never_uninstalls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(importlib.metadata, "version", lambda name: "0.1.0")
+    old = make_spec(version="1.0.0", provides=_tool_provides("pkg.old"))
+    new = make_spec(version="2.0.0", provides=_tool_provides("pkg.new"))
+    h = Harness(manifest={"tools": [{"title": "pkg.old", "module": "pkg.old"}]})
+    h.store.preload(old, version="1.0.0")
+    h.registry.resolved = make_resolved(new, version="2.0.0")
+
+    await h.installer().update("tai42/toolbox")
+
+    (call,) = h.pip.calls
+    assert call[0] == "install"
+    assert call[-1] == "tai42-toolbox==2.0.0"
+    assert layer_inputs(h) == ["tai42/toolbox 2.0.0"]
+
+
+async def test_a_refused_update_build_opens_with_cannot_update(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(importlib.metadata, "version", lambda name: "0.1.0")
+    old = make_spec(version="1.0.0", provides=_tool_provides("pkg.old"))
+    new = make_spec(version="2.0.0", provides=_tool_provides("pkg.new"))
+    h = Harness(manifest={"tools": [{"title": "pkg.old", "module": "pkg.old"}]})
+    h.store.preload(old, version="1.0.0")
+    h.registry.resolved = make_resolved(new, version="2.0.0")
+
+    async def unresolvable(args: list[str], /, *, env: Any = None) -> str:
+        raise PipFailedError(args, 1, "ERROR: Cannot install tai42-toolbox==2.0.0\nERROR: ResolutionImpossible")
+
+    h.pip = cast(Any, unresolvable)
+
+    with pytest.raises(PluginDependencyConflictError) as caught:
+        await h.installer().update("tai42/toolbox")
+
+    assert str(caught.value).startswith("cannot update tai42/toolbox 2.0.0: its dependencies conflict")
+
+
 async def test_update_same_version_is_state_error(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(importlib.metadata, "version", lambda name: "0.1.0")
     spec = make_spec(version="1.0.0")
@@ -137,25 +200,24 @@ async def test_update_pipless_fails_after_resolve_for_packaged_spec(monkeypatch:
     assert h.pip.calls == []
 
 
-async def test_update_unwind_reinstalls_old_github_pin_through_verified_fetch(
+async def test_update_unwind_restores_the_old_github_build_with_no_fetch_or_pip(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(importlib.metadata, "version", lambda name: "0.1.0")
     calls = _fake_verified_fetch(monkeypatch)
     old = make_spec(version="1.0.0")
     new = make_spec(version="2.0.0")
-    h = Harness(manifest={"tools": [{"title": "pkg.tools.gen_uuid", "module": "pkg.tools.gen_uuid"}]})
-    # The stored row is a github pin carrying the OLD artifact_ref + sha256, so the
-    # unwind re-fetches and re-verifies exactly that old artifact.
-    h.store.preload(
+    h = Harness()
+    h.registry.resolved = make_resolved(
         old,
-        version="1.0.0",
         source="github",
+        version="1.0.0",
         repository_url="https://github.com/tai42ai/toolbox",
         tag="v1.0.0",
         artifact_ref=_GH_ARTIFACT_OLD,
         sha256="1" * 64,
     )
+    await h.installer().install("tai42/toolbox")
     h.registry.resolved = make_resolved(
         new,
         source="github",
@@ -165,24 +227,21 @@ async def test_update_unwind_reinstalls_old_github_pin_through_verified_fetch(
         artifact_ref=_GH_ARTIFACT,
         sha256="2" * 64,
     )
-    h.svc.fail_reload_on = {0}  # the update apply persists then its reload fails -> unwind
+    h.svc.fail_reload_on = {h.svc.calls}  # the update apply persists then its reload fails -> unwind
 
-    with pytest.raises(FleetBroadcastError, match="reload failed"):
+    with pytest.raises(FleetBroadcastError, match="reload failed") as caught:
         await h.installer().update("tai42/toolbox")
 
-    # Verified fetch: first the NEW pin (from resolve), then the OLD pin (from the
-    # stored row's artifact_ref + sha256), never a mutable git+url clone.
-    assert (calls[0]["artifact_ref"], calls[0]["sha256"]) == (_GH_ARTIFACT, "2" * 64)
-    assert (calls[1]["artifact_ref"], calls[1]["sha256"]) == (_GH_ARTIFACT_OLD, "1" * 64)
-    # pip installed each verified LOCAL tarball, in that order.
-    assert h.pip.calls[0][-1] == str(calls[0]["path"])
-    assert h.pip.calls[1][-1] == str(calls[1]["path"])
-    assert not h.pip.calls[1][-1].startswith("git+")
-    # Ordering: old-pin reinstall -> manifest reversal apply (persist + reload-back).
-    # The old wheel is back BEFORE the reversal's reload loads the old manifest.
+    # Verified fetch: the old pin at install, then the new pin at update; the unwind
+    # fetches nothing.
+    assert [(c["artifact_ref"], c["sha256"]) for c in calls] == [(_GH_ARTIFACT_OLD, "1" * 64), (_GH_ARTIFACT, "2" * 64)]
+    # One pip call per build; the unwind swaps the old build back with no pip call, before
+    # the manifest reversal's write and reload.
+    assert len(h.pip.calls) == 2
     tail = [e for e in h.events if e in ("cm:write", "pip", "reload")]
-    # ... write(new), reload(fail), pip(old), write(reversed), reload(back)
-    assert tail[-3:] == ["pip", "cm:write", "reload"]
+    assert tail[-4:] == ["cm:write", "reload", "cm:write", "reload"]
+    assert layer_inputs(h) == ["tai42/toolbox 1.0.0"]
+    assert "the previous plugin environment was restored" in (caught.value.__notes__ or [])
 
 
 # -- update: collision pre-flight --------------------------------------------
@@ -203,7 +262,7 @@ async def test_update_same_module_rename_does_not_self_collide(monkeypatch: pyte
     result = await h.installer().update("tai42/toolbox")
 
     assert result["version"] == "2.0.0"
-    assert h.pip.calls  # proceeded past the (non-)collision to the pip upgrade
+    assert h.pip.calls  # proceeded past the (non-)collision to the layer build
     # One RMW keeps the single shared-module entry (removed then re-applied).
     assert h.svc.writes[-1]["tools"] == [{"title": "pkg.same", "module": "pkg.same"}]
 
@@ -271,8 +330,10 @@ async def test_update_unwind_reload_back_failure_escalates(monkeypatch: pytest.M
         await h.installer().update("tai42/toolbox")
     assert isinstance(exc.value.step_error, FleetBroadcastError)
     assert isinstance(exc.value.unwind_error, FleetBroadcastError)
-    # The old pin WAS reinstalled before the failing restore apply (unwind reached it).
-    assert h.pip.calls[-1][0] == "install"
+    # The update's layer build was the only pip call; the unwind swapped it back before
+    # the failing restore apply.
+    assert len(h.pip.calls) == 1
+    assert layer_inputs(h) is None
 
 
 # -- upgrade-all --------------------------------------------------------------
@@ -374,13 +435,13 @@ async def test_upgrade_all_row_carries_its_write_s_span_release_error(monkeypatc
         "tai42/current": [_published_row("1.0.0")],
     }
     h.registry.resolved = make_resolved(make_spec(name="up", package="pkg-up"), version="1.2.0")
-    original = h.svc.apply_change
+    original = h.svc.converge
 
-    async def _change(mutator: Any) -> Any:
-        result = await original(mutator)
+    async def _converge(persisted: Any) -> Any:
+        result = await original(persisted)
         return dataclasses.replace(result, span_release_error="OSError: the release failed")
 
-    monkeypatch.setattr(h.svc, "apply_change", _change)
+    monkeypatch.setattr(h.svc, "converge", _converge)
 
     report = await h.installer().upgrade_all()
 
@@ -437,16 +498,16 @@ def _propagation_fails(error: str, release_error: str) -> Any:
 
 
 def _on_each_landed_change(monkeypatch: pytest.MonkeyPatch, h: Harness, *outcomes: Any) -> None:
-    # The forward swap is the first apply_change and the unwind's reversal the second; each
+    # The forward swap is the first convergence and the unwind's reversal the second; each
     # outcome maps that write's landed result (or raises), in that order.
-    original = h.svc.apply_change
+    original = h.svc.converge
     pending = list(outcomes)
 
-    async def _change(mutator: Any) -> Any:
-        result = await original(mutator)
+    async def _converge(persisted: Any) -> Any:
+        result = await original(persisted)
         return pending.pop(0)(result)
 
-    monkeypatch.setattr(h.svc, "apply_change", _change)
+    monkeypatch.setattr(h.svc, "converge", _converge)
 
 
 def _lands(result: Any) -> Any:

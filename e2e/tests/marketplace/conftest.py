@@ -9,10 +9,11 @@ artifacts are session-shared (forging is pure and expensive), but the package
 index, registry, and stack reset per module so the staged ``0.1.0``→``0.2.0``
 publish dance starts against a clean, empty catalog every time.
 
-``pip install`` mutates the ONE shared venv, which no per-stack isolation can
-scope, so :func:`_venv_state_guard` asserts the fixture distributions are absent
-before the area runs AND after it finishes, raising loudly (never auto-cleaning)
-on a leftover.
+Every marketplace stack builds its plugin environments under its own plugins
+directory (``TAI_PLUGINS_DIR``), never in the image — the harness interpreter's own
+environment, the one every stack serves from. :func:`_image_state_guard` proves it:
+it asserts the fixture distributions are absent from that environment before the
+area runs AND after it finishes, raising loudly (never auto-cleaning) on a find.
 """
 
 from __future__ import annotations
@@ -36,6 +37,7 @@ from tai42_e2e.catalog_seed import (
     forge_zeta_wheel,
     seed_fixture_catalog,
     seed_lambda_listing,
+    seed_mu_nu_listings,
     seed_zeta_listing,
 )
 from tai42_e2e.fixture_catalog import (
@@ -44,8 +46,13 @@ from tai42_e2e.fixture_catalog import (
     DELTA_PACKAGE,
     EPSILON_PACKAGE,
     ETA_PACKAGE,
+    ETALIB_PACKAGE,
     GAMMA_PACKAGE,
     LAMBDA_PACKAGE,
+    MU_PACKAGE,
+    NU_PACKAGE,
+    OMICRON_PACKAGE,
+    SHAREDLIB_PACKAGE,
     THETA_PACKAGE,
     ZETA_COMPAT_VERSION,
     ZETA_INCOMPAT_VERSION,
@@ -58,7 +65,6 @@ from tai42_e2e.fixture_catalog import (
 from tai42_e2e.manifests import (
     build_marketplace_authz_stack,
     build_marketplace_connectors_stack,
-    build_marketplace_prefix_stack,
     build_marketplace_stack,
     build_marketplace_supervised_stack,
     build_router_merge_stack,
@@ -100,8 +106,8 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
         item.add_marker(skip)
 
 
-# The fixture distributions a marketplace install pip-installs into the shared
-# venv. The venv guard asserts none of them linger before or after the area.
+# The fixture distributions a marketplace install builds into a plugin environment.
+# The image guard asserts none of them ever reaches the image.
 _FIXTURE_DISTRIBUTIONS = (
     ALPHA_PACKAGE,
     BETA_PACKAGE,
@@ -111,31 +117,36 @@ _FIXTURE_DISTRIBUTIONS = (
     THETA_PACKAGE,
     ZETA_PACKAGE,
     ETA_PACKAGE,
+    ETALIB_PACKAGE,
     LAMBDA_PACKAGE,
+    MU_PACKAGE,
+    NU_PACKAGE,
+    OMICRON_PACKAGE,
+    SHAREDLIB_PACKAGE,
 )
 
 
 def _assert_fixture_distributions_absent() -> None:
-    """Raise if any fixture distribution resolves in the venv. Distribution
-    lookup re-scans sys.path per call and the harness process never imports the
-    fixture packages, so the check is accurate."""
+    """Raise if any fixture distribution resolves in the image. Distribution
+    lookup re-scans sys.path per call and the harness process never puts a plugin
+    layer on its own path, so the check is accurate."""
     for name in _FIXTURE_DISTRIBUTIONS:
         try:
             importlib.metadata.distribution(name)
         except importlib.metadata.PackageNotFoundError:
             continue
         raise RuntimeError(
-            f"fixture distribution {name} is installed in the venv (leftover from an aborted run?); "
-            f"remove it with: uv pip uninstall {name}"
+            f"fixture distribution {name} is installed in the image environment, which no marketplace "
+            f"install may reach; remove it with: uv pip uninstall {name}"
         )
 
 
 @pytest.fixture(scope="session", autouse=True)
-def _venv_state_guard() -> Iterator[None]:
-    """Assert the fixture distributions are ABSENT before the first marketplace
-    test and after the last — every lifecycle spec is responsible for its own
-    uninstall, so a leftover here is a real leak, raised loudly, never
-    auto-cleaned."""
+def _image_state_guard() -> Iterator[None]:
+    """Assert the fixture distributions are ABSENT from the image before the first
+    marketplace test and after the last — an install builds only plugin
+    environments, so a find here is a real leak into the image, raised loudly,
+    never auto-cleaned."""
     _assert_fixture_distributions_absent()
     yield
     _assert_fixture_distributions_absent()
@@ -147,7 +158,7 @@ def _pip_preflight() -> None:
 
     A uv-synced venv ships no pip of its own; it is present here only because
     tai42-skeleton declares ``pip>=25`` as a runtime dependency, which the editable
-    sibling carries into the shared venv. A failure means that runtime dep was
+    sibling carries into the harness venv. A failure means that runtime dep was
     dropped — a regression in the installer's own contract, named loudly rather
     than papered over by adding pip to this repo's deps."""
     proc = subprocess.run([sys.executable, "-m", "pip", "--version"], capture_output=True, text=True, check=False)
@@ -162,8 +173,8 @@ def _pip_preflight() -> None:
 @pytest.fixture
 def market_installer() -> Iterator[MarketInstaller]:
     """Per-test install ledger whose teardown uninstalls every install even on a mid-body
-    failure — so an aborted spec never leaves a fixture distribution in the shared venv to
-    cascade into the next module (or trip the session venv guard)."""
+    failure — so an aborted spec never leaves an installed plugin on the module's stack to
+    cascade into the next spec."""
     installer = MarketInstaller()
     try:
         yield installer
@@ -210,6 +221,19 @@ def zeta_catalog(
     assert_zeta_ranges_bracket_running_contract()
     asyncio.run(seed_zeta_listing(marketplace_service, package_index, zeta_compat_wheels))
     return zeta_compat_wheels
+
+
+@pytest.fixture(scope="module")
+def mu_nu_catalog(
+    marketplace_service: MarketplaceService,
+    package_index: FixturePackageIndex,
+    fixture_artifacts: FixtureArtifacts,
+) -> None:
+    """Publish mu and nu at ``0.1.0`` and ``0.2.0`` into this module's registry, with
+    both sharedlib versions on its index (:func:`seed_mu_nu_listings`). Requested only
+    by the plugin-layer resolution specs — the shared browse catalog stays
+    alpha/beta/gamma."""
+    asyncio.run(seed_mu_nu_listings(marketplace_service, package_index, fixture_artifacts))
 
 
 @pytest.fixture(scope="module")
@@ -297,30 +321,6 @@ def marketplace_supervised_stack(
         infra,
         tmp_path_factory.mktemp("marketplace-supervised"),
         build_marketplace_supervised_stack,
-        resource_kwargs=resource_kwargs,
-    )
-
-
-@pytest.fixture(scope="module")
-def marketplace_prefix_stack(
-    infra: Infra,
-    tmp_path_factory: pytest.TempPathFactory,
-    marketplace_service: MarketplaceService,
-    package_index: FixturePackageIndex,
-) -> Iterator[TaiStack]:
-    """The marketplace stack with a persistent plugin prefix — the home of the
-    restart-survival spec. Wired at the harness-run registry + fixture index exactly
-    like ``marketplace_stack`` so its install door resolves and installs the fixture
-    wheel, but with ``TAI_PLUGINS_PREFIX`` set so the install lands under the stack
-    root (never the shared venv) and survives a serve restart."""
-    resource_kwargs = {
-        "marketplace_url": marketplace_service.base_url,
-        "package_index_url": package_index.url,
-    }
-    yield from boot_stack(
-        infra,
-        tmp_path_factory.mktemp("marketplace-prefix"),
-        build_marketplace_prefix_stack,
         resource_kwargs=resource_kwargs,
     )
 

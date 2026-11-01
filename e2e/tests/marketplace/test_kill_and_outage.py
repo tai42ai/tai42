@@ -15,7 +15,7 @@ from tai42_e2e.fixture_catalog import GAMMA_PACKAGE, GAMMA_REF
 from tai42_e2e.marketplace import MarketplaceService
 from tai42_e2e.stack import TaiStack
 
-from ._market_support import api_tool_names, distribution_absent, installed_refs
+from ._market_support import api_tool_names, installed_refs, plugin_absent
 
 pytestmark = [
     pytest.mark.backendless,
@@ -30,7 +30,7 @@ pytestmark = [
 _TOOL = "e2e_market_gamma_probe"
 
 
-@pytest.mark.needs("setting:shared-venv")
+@pytest.mark.needs("setting:TAI_PLUGINS_DIR")
 async def test_killed_version_refuses_install(
     marketplace_service: MarketplaceService, marketplace_stack: TaiStack
 ) -> None:
@@ -56,7 +56,7 @@ async def test_killed_version_refuses_install(
     # Nothing was installed.
     assert GAMMA_REF not in await installed_refs(stack)
     assert _TOOL not in await api_tool_names(stack)
-    assert distribution_absent(GAMMA_PACKAGE)
+    assert plugin_absent(stack, GAMMA_PACKAGE)
 
 
 async def test_registry_outage_fails_loudly_then_recovers(

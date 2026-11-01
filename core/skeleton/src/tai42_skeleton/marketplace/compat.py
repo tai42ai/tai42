@@ -11,9 +11,8 @@ BEFORE a core upgrade (the stale-plugin case this mechanism exists for).
 Verdict semantics (:class:`CompatVerdict`):
 
 * ``compatible`` — the dist declares a ``tai42-contract`` requirement and the
-  running version satisfies it. ``prereleases=True`` everywhere, the same
-  semantics as the installer's install-time contract check, so a dev-versioned
-  editable contract checkout is never spuriously refused.
+  running version satisfies it. ``prereleases=True`` everywhere, so a
+  dev-versioned editable contract checkout is never spuriously refused.
 * ``incompatible`` — declared and NOT satisfied. The reason names both versions
   and the remedy, because it becomes the boot-abort message the
   operator acts on.
@@ -21,6 +20,16 @@ Verdict semantics (:class:`CompatVerdict`):
   the dist has no metadata, or it declares no ``tai42-contract`` requirement.
   Treated as compatible (a plugin that predates the declaration must keep
   loading), but the caller logs a note — never a silent pass.
+
+The same verdict is given for a DECLARED range — an install-store row's
+``spec.contract`` (:func:`declared_compat`) — in the same words. The plugin layer
+build leaves out every plugin whose declared range the running contract is
+outside and records it in the layer's build record; the import seam's snapshot
+(:func:`distribution_map`) carries those records, so a module of a plugin left
+out reads ``incompatible`` with the recorded reason. A range the registry serves —
+the resolve response's ``contract_range`` the installer checks before an install, and
+each published version's range the update picture is computed from — is judged by
+:func:`registry_range_admits` with the same semantics.
 
 A requirement line gated behind an extra (``; extra == "dev"``) is not part of
 the runtime dependency set and is skipped; a malformed requirement line in a
@@ -31,7 +40,7 @@ garbled metadata line would be the crash-loop this module removes).
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from importlib import metadata
 from logging import getLogger
 from typing import Any, Literal
@@ -41,10 +50,15 @@ from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.utils import canonicalize_name
 from packaging.version import InvalidVersion, Version
 
-from tai42_skeleton.marketplace.errors import LocalStateError, RegistryResponseError
+from tai42_skeleton.marketplace.environments.current_record import current_record
+from tai42_skeleton.marketplace.environments.findings import LAYER_SUBJECT
+from tai42_skeleton.marketplace.environments.layout import layer_dir
+from tai42_skeleton.marketplace.environments.settings import configured_plugins_dir
+from tai42_skeleton.marketplace.errors import CurrentRecordError, LocalStateError, RegistryResponseError
 from tai42_skeleton.marketplace.installed_packages import (
     InstalledDistribution,
     InstalledPackages,
+    LeftOutModule,
     installed_packages,
 )
 
@@ -110,8 +124,35 @@ def distribution_map() -> InstalledPackages:
     editable install that records only a ``.pth``, and one served by an import hook, map to
     their distribution too. The read walks every installed dist, so per-module fresh reads
     would be quadratic; one boot pass reuses this snapshot across every manifest module.
+    The snapshot's ``quarantined`` holds each module item of a plugin the current plugin layer
+    left out (:func:`layer_exclusions`).
     """
-    return installed_packages()
+    return replace(installed_packages(), quarantined=layer_exclusions())
+
+
+def layer_exclusions() -> dict[str, LeftOutModule]:
+    """Each module item of a plugin the current plugin layer build left out, by import path, with its distribution.
+
+    Read from the build record of the layer's ``current`` build through
+    :func:`~tai42_skeleton.marketplace.environments.current_record.current_record`; empty when
+    ``TAI_PLUGINS_DIR`` is unset or the layer has no current build. A current build without its
+    record, or with one that does not read, raises
+    :class:`~tai42_skeleton.marketplace.errors.CurrentRecordError` carrying the verification's
+    finding, which names ``tai plugins rebuild``.
+    """
+    plugins_dir = configured_plugins_dir()
+    if plugins_dir is None:
+        return {}
+    current = current_record(layer_dir(plugins_dir), LAYER_SUBJECT)
+    if current.finding is not None:
+        raise CurrentRecordError(current.finding)
+    if current.record is None:
+        return {}
+    return {
+        module: LeftOutModule(distribution=excluded.input.package, reason=excluded.reason)
+        for excluded in current.record.excluded
+        for module in excluded.modules
+    }
 
 
 def _declared_contract_specifier(dist_name: str, requires: list[str] | None) -> SpecifierSet | None:
@@ -142,30 +183,34 @@ def _declared_contract_specifier(dist_name: str, requires: list[str] | None) -> 
     return combined
 
 
-def dist_compat(dist_name: str) -> CompatVerdict:
-    """The verdict for one installed distribution, found by name on ``sys.path``, by its declared range."""
-    try:
-        requires = metadata.requires(dist_name)
-    except metadata.PackageNotFoundError:
-        requires = None
-    return _verdict(dist_name, requires)
-
-
 def distribution_compat(read: InstalledDistribution) -> CompatVerdict:
     """The verdict for an installed distribution already read, wherever it is installed, by its declared range."""
     return _verdict(read.name, read.dist.requires)
 
 
+def declared_compat(dist_name: str, contract_range: str | None) -> CompatVerdict:
+    """The verdict for distribution ``dist_name`` declaring ``contract_range``, a plugin spec's ``contract``.
+
+    ``None`` declares no range (``unknown``). The range is the validated spec field, so it
+    always parses.
+    """
+    return _range_verdict(dist_name, None if contract_range is None else SpecifierSet(contract_range))
+
+
 def _verdict(dist_name: str, requires: list[str] | None) -> CompatVerdict:
     """The verdict for distribution ``dist_name`` whose ``Requires-Dist`` lines are ``requires``."""
-    specifier = _declared_contract_specifier(dist_name, requires)
+    return _range_verdict(dist_name, _declared_contract_specifier(dist_name, requires))
+
+
+def _range_verdict(dist_name: str, specifier: SpecifierSet | None) -> CompatVerdict:
+    """The verdict for distribution ``dist_name`` whose ``tai42-contract`` range is ``specifier`` (``None``: none)."""
     if specifier is None:
         return CompatVerdict(
             "unknown",
             f"distribution {dist_name!r} declares no tai42-contract requirement; treating it as compatible",
         )
     installed = running_contract_version()
-    if specifier.contains(installed, prereleases=True):
+    if _admits(specifier, installed):
         return CompatVerdict("compatible")
     return CompatVerdict(
         "incompatible",
@@ -182,13 +227,22 @@ def module_compat(module: str, installed: InstalledPackages | None = None) -> Co
     :func:`distribution_map` and each mapped dist is evaluated from the snapshot's own read
     of it (:func:`distribution_compat`), so the verdict holds for a distribution wherever the
     snapshot found it — any incompatible dist decides the verdict (naming that dist), else
-    compatible when at least one dist declared a range, else unknown. ``installed`` lets one
+    compatible when at least one dist declared a range, else unknown. A module the snapshot
+    records as a module item of a plugin left out of the plugin layer, or a submodule of one,
+    is incompatible with the recorded reason unless that plugin's own distribution provides
+    the top-level package (a copy the import system serves from elsewhere decides); a
+    namespace package other plugins share does not hide it. ``installed`` lets one
     boot pass snapshot the (sys.path-scan-priced) mapping once and reuse it across every
     manifest module; omitted, the mapping is read fresh.
     """
     top_level = module.partition(".")[0]
     snapshot = distribution_map() if installed is None else installed
     dists = snapshot.distributions_for(top_level)
+    left_out = _left_out(module, snapshot)
+    if left_out is not None and canonicalize_name(left_out.distribution) not in {
+        canonicalize_name(dist_name) for dist_name in dists
+    }:
+        return CompatVerdict("incompatible", left_out.reason)
     if not dists:
         return CompatVerdict(
             "unknown",
@@ -201,6 +255,14 @@ def module_compat(module: str, installed: InstalledPackages | None = None) -> Co
     if any(verdict.status == "compatible" for verdict in verdicts):
         return CompatVerdict("compatible")
     return verdicts[0]
+
+
+def _left_out(module: str, snapshot: InstalledPackages) -> LeftOutModule | None:
+    """The left-out module item ``module`` is or lies under, from the snapshot's ``quarantined``."""
+    for item, left_out in snapshot.quarantined.items():
+        if module == item or module.startswith(f"{item}."):
+            return left_out
+    return None
 
 
 def refuse_incompatible(module: str, kind: str, installed: InstalledPackages | None = None) -> None:
@@ -284,13 +346,33 @@ def _row_compatible(row: dict[str, Any], version: Version, contract_version: str
         raise RegistryResponseError(
             f"registry versions response contract_range for {version} is not a string", status=None
         )
+    return registry_range_admits(contract_range, contract_version, version=version)
+
+
+def registry_range_admits(contract_range: str, contract_version: str, *, version: Version | None = None) -> bool:
+    """Whether a registry-served ``contract_range`` admits ``contract_version``, by the verdict's own semantics.
+
+    ``version`` names the published version the range was served for, when there is one, in the
+    error. A range that does not parse as a PEP 440 specifier set is garbled registry data → the
+    typed registry-data fault (502), never a caller 400.
+    """
     try:
-        return SpecifierSet(contract_range).contains(contract_version, prereleases=True)
+        specifier = SpecifierSet(contract_range)
     except InvalidSpecifier as exc:
+        served_for = "" if version is None else f" for version {version}"
         raise RegistryResponseError(
-            f"registry served an unusable contract_range {contract_range!r} for version {version}: {exc}",
-            status=None,
+            f"registry served an unusable contract_range {contract_range!r}{served_for}: {exc}", status=None
         ) from exc
+    return _admits(specifier, contract_version)
+
+
+def _admits(specifier: SpecifierSet, contract_version: str) -> bool:
+    """Whether ``specifier`` admits ``contract_version``.
+
+    ``prereleases=True``, so a dev-versioned contract (an editable checkout reporting e.g.
+    ``0.5.0.dev3``) inside the range is admitted.
+    """
+    return specifier.contains(contract_version, prereleases=True)
 
 
 def update_targets(version_rows: list[Any], *, installed_version: str, contract_version: str) -> UpdateTargets:

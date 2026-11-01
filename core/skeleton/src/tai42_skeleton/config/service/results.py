@@ -6,7 +6,7 @@ it returns.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Protocol
 
 from tai42_skeleton.app.bus.ops import FleetOp
@@ -22,6 +22,7 @@ if TYPE_CHECKING:
 
     from tai42_skeleton.app.bus import FleetResult, LocalApplyResult, WorkerIdentity, WorkerRow
     from tai42_skeleton.app.recycle import RecycleReport
+    from tai42_skeleton.config.service.deferred_roll import RollOutcome
 
 
 def joined_span_release_errors(*errors: str | None) -> str | None:
@@ -99,6 +100,20 @@ class _FleetPublisher(Protocol):
 
 
 @dataclass(frozen=True)
+class PersistedChange:
+    """A manifest mutation the pipeline validated, sealed and persisted; nothing has converged on it yet.
+
+    ``document`` is the persisted PRESERVED-view manifest; ``recycle_keys`` the recycle-class keys
+    the write carried (a leaving oauth connector's marks write); ``span_release_error`` the store's
+    error when its exclusive write span failed to release after the persist, ``None`` when it released.
+    """
+
+    document: dict[str, Any]
+    recycle_keys: tuple[str, ...] = ()
+    span_release_error: str | None = None
+
+
+@dataclass(frozen=True)
 class ApplyResult:
     """The structured outcome of one pipeline run.
 
@@ -120,6 +135,11 @@ class ApplyResult:
     ``span_release_error`` is the store's error when its exclusive write span failed to release
     after the persist (``<ErrorType>: <message>``), ``None`` when it released — the change stands
     and the reload, broadcast and roll above still ran.
+
+    ``roll_deferred`` is set when the run owed a roll and ran inside a
+    :func:`~tai42_skeleton.config.service.deferred_roll.deferring_rolls` scope: the roll is
+    recorded there, ``recycle`` is ``None`` and ``awaiting_respawn`` is not judged yet, until the
+    caller folds the scope's roll in with :meth:`rolled`.
     """
 
     fleet: FleetResult
@@ -130,6 +150,23 @@ class ApplyResult:
     serve_affecting: bool = False
     awaiting_respawn: list[AwaitingWorker] = field(default_factory=list)
     span_release_error: str | None = None
+    roll_deferred: bool = False
+
+    def rolled(self, roll: RollOutcome | None) -> ApplyResult:
+        """This result with its scope's deferred roll folded in: the roll's report, writer and verdict.
+
+        ``None`` (the scope deferred no roll) returns the result as it is.
+        """
+        if roll is None:
+            return self
+        return replace(
+            self,
+            recycle=roll.recycle,
+            self_identity=roll.self_identity,
+            serve_affecting=True,
+            awaiting_respawn=roll.awaiting_respawn,
+            roll_deferred=False,
+        )
 
     @property
     def self_exit_armed(self) -> bool:

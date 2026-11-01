@@ -1,12 +1,15 @@
 """Forge real plugin artifacts from the checked-in fixture sources and serve
 them over a thread-hosted package index.
 
-Three pieces power the marketplace area's honest install path:
+Four pieces power the marketplace area's honest install path:
 
 * :func:`build_fixture_wheel` copies a fixture source tree, stamps a version
   into its ``pyproject.toml`` and both ``tai-plugin.yml`` copies, builds a real
   wheel with ``uv build``, and carries the stamped root ``tai-plugin.yml`` on the
   built artifact — the inline spec the registry's admin-seed route requires.
+* :func:`build_dependency_wheel` builds a plain library wheel the same way — a
+  dependency a fixture plugin declares, which the index serves for pip to resolve
+  but the registry never lists.
 * :func:`build_fixture_source_tarball` builds the github-sourced counterpart: a
   gzipped tar of the version-stamped source tree, shaped like a GitHub tag
   tarball (a top-level prefix directory carrying the whole source, both
@@ -63,15 +66,21 @@ README_MARKDOWN = (
 
 
 @dataclass(frozen=True)
-class BuiltWheel:
-    """A forged wheel: its pip distribution name, stamped version, on-disk path,
-    the sha256 of the wheel bytes, and the stamped root ``tai-plugin.yml`` text
-    (the inline spec the admin-seed route registers this version from)."""
+class IndexWheel:
+    """A wheel the package index serves: its pip distribution name, stamped
+    version, on-disk path and the sha256 of the wheel bytes."""
 
     project: str
     version: str
     path: Path
     sha256: str
+
+
+@dataclass(frozen=True)
+class BuiltWheel(IndexWheel):
+    """A forged plugin wheel, carrying its stamped root ``tai-plugin.yml`` text
+    (the inline spec the admin-seed route registers this version from)."""
+
     plugin_yml: str
 
 
@@ -116,6 +125,47 @@ def _stamp(path: Path, pattern: str, replacement: str) -> None:
     path.write_text(new_text, encoding="utf-8")
 
 
+def _copy_stamped_project(source_dir: Path, version: str, out_dir: Path, *, requires: tuple[str, ...] = ()) -> Path:
+    """Copy ``source_dir`` into a fresh temp dir under ``out_dir``, stamp ``version``
+    into the copy's ``pyproject.toml`` and add ``requires`` to its
+    ``[project].dependencies``; return the copied tree root. Never mutates the
+    checked-in source."""
+    work = Path(tempfile.mkdtemp(dir=out_dir))
+    tree = work / source_dir.name
+    shutil.copytree(source_dir, tree)
+    _stamp(tree / "pyproject.toml", r'^version = "[^"]*"', f'version = "{version}"')
+    if requires:
+        lines = "".join(f'\n    "{requirement}",' for requirement in requires)
+        _stamp(tree / "pyproject.toml", r"^dependencies = \[$", f"dependencies = [{lines}")
+    return tree
+
+
+def _uv_build_wheel(tree: Path, version: str, out_dir: Path, *, label: str) -> tuple[str, Path, str]:
+    """Build ``tree`` with ``uv build --wheel`` into ``out_dir``; return the project
+    name, the wheel path and the sha256 of its bytes.
+
+    A build failure raises with the captured stderr; a missing ``uv`` raises loudly
+    with that hint (``uv`` is the ecosystem toolchain, present locally and in CI)."""
+    try:
+        proc = subprocess.run(
+            ["uv", "build", "--wheel", "--out-dir", str(out_dir), str(tree)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError("uv is required to build fixture wheels but was not found on PATH") from exc
+    if proc.returncode != 0:
+        raise RuntimeError(f"uv build --wheel failed for {label} {version}:\n{proc.stderr}")
+    project = _project_name(tree / "pyproject.toml")
+    dist = _normalize_project(project).replace("-", "_")
+    matches = sorted(out_dir.glob(f"{dist}-{version}-*.whl"))
+    if not matches:
+        raise RuntimeError(f"uv build produced no wheel for {dist} {version} in {out_dir}")
+    wheel_path = matches[-1]
+    return project, wheel_path, hashlib.sha256(wheel_path.read_bytes()).hexdigest()
+
+
 def _prepare_stamped_tree(
     source_dir: Path,
     version: str,
@@ -123,6 +173,8 @@ def _prepare_stamped_tree(
     *,
     contract_range: str | None = None,
     requires_dist_range: str | None = None,
+    requires: tuple[str, ...] = (),
+    mcp_command: str | None = None,
 ) -> tuple[Path, str]:
     """Copy ``source_dir`` into a fresh temp dir under ``out_dir`` and stamp
     ``version`` into the copy's ``pyproject.toml`` and every ``tai-plugin.yml``.
@@ -140,11 +192,15 @@ def _prepare_stamped_tree(
     defaults to ``contract_range``, keeping the artifact's spec and its built
     ``Requires-Dist`` metadata in lockstep). Passing a DIFFERENT
     ``requires_dist_range`` forges a deliberately mismatched artifact — the
-    shape the registry's ingest lockstep gate must reject."""
-    work = Path(tempfile.mkdtemp(dir=out_dir))
-    tree = work / source_dir.name
-    shutil.copytree(source_dir, tree)
-    _stamp(tree / "pyproject.toml", r'^version = "[^"]*"', f'version = "{version}"')
+    shape the registry's ingest lockstep gate must reject.
+
+    ``requires`` adds each requirement to the copy's ``[project].dependencies``, so
+    two versions of one fixture source can declare different dependencies.
+
+    ``mcp_command`` stamps the ``mcp.command`` of the spec's mcp-server item into every
+    ``tai-plugin.yml`` copy, so one fixture source can name a command its package does not
+    declare."""
+    tree = _copy_stamped_project(source_dir, version, out_dir, requires=requires)
     specs = sorted(tree.rglob(_PLUGIN_SPEC_FILENAME))
     if not specs:
         raise RuntimeError(f"no {_PLUGIN_SPEC_FILENAME} to stamp under {tree}")
@@ -153,6 +209,9 @@ def _prepare_stamped_tree(
     if contract_range is not None:
         for spec in specs:
             _stamp(spec, r"^contract: .*$", f'contract: "{contract_range}"')
+    if mcp_command is not None:
+        for spec in specs:
+            _stamp(spec, r"^      command: .*$", f"      command: {mcp_command}")
     dependency_range = requires_dist_range if requires_dist_range is not None else contract_range
     if dependency_range is not None:
         _stamp(tree / "pyproject.toml", r'^\s*"tai42-contract[^"]*",$', f'    "tai42-contract{dependency_range}",')
@@ -169,38 +228,38 @@ def build_fixture_wheel(
     *,
     contract_range: str | None = None,
     requires_dist_range: str | None = None,
+    requires: tuple[str, ...] = (),
+    mcp_command: str | None = None,
 ) -> BuiltWheel:
     """Forge a real wheel from a fixture source tree at ``version``.
 
     Copies the tree, stamps the version into ``pyproject.toml`` and both
-    ``tai-plugin.yml`` copies, then builds with ``uv build --wheel``. A build
-    failure raises with the captured stderr; a missing ``uv`` raises loudly with
-    that hint (``uv`` is the ecosystem toolchain, present locally and in CI).
-    ``contract_range`` / ``requires_dist_range`` stamp the declared contract
-    range and the built ``Requires-Dist`` specifier (see
-    :func:`_prepare_stamped_tree`)."""
+    ``tai-plugin.yml`` copies, then builds with ``uv build --wheel``
+    (:func:`_uv_build_wheel`). ``contract_range`` / ``requires_dist_range`` stamp
+    the declared contract range and the built ``Requires-Dist`` specifier,
+    ``requires`` adds dependencies and ``mcp_command`` stamps the mcp-server item's
+    command (see :func:`_prepare_stamped_tree`)."""
     tree, plugin_yml = _prepare_stamped_tree(
-        source_dir, version, out_dir, contract_range=contract_range, requires_dist_range=requires_dist_range
+        source_dir,
+        version,
+        out_dir,
+        contract_range=contract_range,
+        requires_dist_range=requires_dist_range,
+        requires=requires,
+        mcp_command=mcp_command,
     )
-    try:
-        proc = subprocess.run(
-            ["uv", "build", "--wheel", "--out-dir", str(out_dir), str(tree)],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-    except FileNotFoundError as exc:
-        raise RuntimeError("uv is required to build fixture wheels but was not found on PATH") from exc
-    if proc.returncode != 0:
-        raise RuntimeError(f"uv build --wheel failed for {source_dir.name} {version}:\n{proc.stderr}")
-    project = _project_name(tree / "pyproject.toml")
-    dist = _normalize_project(project).replace("-", "_")
-    matches = sorted(out_dir.glob(f"{dist}-{version}-*.whl"))
-    if not matches:
-        raise RuntimeError(f"uv build produced no wheel for {dist} {version} in {out_dir}")
-    wheel_path = matches[-1]
-    sha256 = hashlib.sha256(wheel_path.read_bytes()).hexdigest()
+    project, wheel_path, sha256 = _uv_build_wheel(tree, version, out_dir, label=source_dir.name)
     return BuiltWheel(project=project, version=version, path=wheel_path, sha256=sha256, plugin_yml=plugin_yml)
+
+
+def build_dependency_wheel(source_dir: Path, version: str, out_dir: Path) -> IndexWheel:
+    """Forge a plain library wheel from a fixture dependency source tree at ``version``.
+
+    A dependency carries no ``tai-plugin.yml``: only its ``pyproject.toml`` version
+    is stamped before the build (:func:`_uv_build_wheel`)."""
+    tree = _copy_stamped_project(source_dir, version, out_dir)
+    project, wheel_path, sha256 = _uv_build_wheel(tree, version, out_dir, label=source_dir.name)
+    return IndexWheel(project=project, version=version, path=wheel_path, sha256=sha256)
 
 
 def build_fixture_source_tarball(
@@ -281,9 +340,9 @@ class FixturePackageIndex:
         self.port = allocate_port()
         self.requests: list[str] = []
         # Registered wheels keyed by PEP 503-normalized project name.
-        self._wheels: dict[str, list[BuiltWheel]] = {}
+        self._wheels: dict[str, list[IndexWheel]] = {}
         # Wheel bytes keyed by filename, for the /wheels/ handler.
-        self._wheel_by_filename: dict[str, BuiltWheel] = {}
+        self._wheel_by_filename: dict[str, IndexWheel] = {}
         # Staged github releases keyed by tag; each serves its own stamped spec.
         self._gh_releases: dict[str, _GithubRelease] = {}
         # The repo's default-branch ``tai-plugin.yml`` (served for a ref-less contents
@@ -317,8 +376,8 @@ class FixturePackageIndex:
     def stop(self) -> None:
         self._server.stop()
 
-    def register(self, wheel: BuiltWheel) -> None:
-        """Publish a wheel on the PyPI/PEP 503 surfaces."""
+    def register(self, wheel: IndexWheel) -> None:
+        """Publish a wheel (a plugin's or a dependency's) on the PyPI/PEP 503 surfaces."""
         key = _normalize_project(wheel.project)
         self._wheels.setdefault(key, []).append(wheel)
         self._wheel_by_filename[wheel.path.name] = wheel
