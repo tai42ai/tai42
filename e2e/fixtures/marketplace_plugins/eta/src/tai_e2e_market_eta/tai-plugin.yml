@@ -19,3 +19,4 @@ provides:
     tags: [eta]
     mcp:
       command: tai-e2e-market-eta-mcp
+migrations: migrations

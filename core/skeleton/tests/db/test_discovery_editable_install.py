@@ -103,7 +103,7 @@ def editable_probe(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPat
     (dist_info / "RECORD").write_text("\n".join(rows) + "\n")
 
     monkeypatch.setattr(sys, "path", [str(site), str(source), *sys.path])
-    monkeypatch.setattr("tai42_skeleton.marketplace.prefix.configured_prefix", lambda: None)
+    monkeypatch.setattr("tai42_skeleton.marketplace.environments.current_builds.configured_plugins_dir", lambda: None)
     importlib.invalidate_caches()
     yield package
     sys.modules.pop(_TOP_LEVEL, None)

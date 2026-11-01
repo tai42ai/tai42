@@ -113,6 +113,27 @@ async def test_fleet_lock_autocommit_before_trylock_and_unlock_in_finally(monkey
     assert closed == [True]
 
 
+async def test_fleet_lock_downgrade_takes_shared_before_dropping_exclusive_and_releases_shared(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    log: list[str] = []
+    closed: list[bool] = []
+    _patch_fleet_client(monkeypatch, log, closed)
+    async with locks.fleet_lock() as hold:
+        await hold.downgrade()
+        await hold.downgrade()  # a hold already shared stays as it is
+    calls = [statement.split("(")[0].removeprefix("SELECT ") for statement in log[1:]]
+    # Shared is taken while the exclusive hold is still held, then the exclusive one drops, and
+    # the context's exit releases the shared hold: at no point is the key held in neither mode.
+    assert calls == [
+        "pg_try_advisory_lock",
+        "pg_advisory_lock_shared",
+        "pg_advisory_unlock",
+        "pg_advisory_unlock_shared",
+    ]
+    assert closed == [True]
+
+
 async def test_fleet_lock_closes_on_body_exception(monkeypatch: pytest.MonkeyPatch) -> None:
     log: list[str] = []
     closed: list[bool] = []

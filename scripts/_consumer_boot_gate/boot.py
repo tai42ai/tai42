@@ -259,11 +259,6 @@ def _boot_env(
         "TAI_CONFIG_MODE": "file",
         "TAI_CONFIG_DIR_PATH": str(config_dir),
         "TAI_MANIFEST_PATH": str(manifest_path),
-        # Point the plugin-prefix scan at the boot venv so ``tai db migrate`` discovers
-        # every installed consumer's migration chain (the discovery scans a prefix's
-        # site dirs, and the venv is exactly such a prefix); without it a pip-installed
-        # store-backed consumer's schema stays pending and its boot gate refuses.
-        "TAI_PLUGINS_PREFIX": str(venv_bin.parent),
         "TAI_DATABASE_DEFAULT_PG_HOST": infra.pg_host,
         "TAI_DATABASE_DEFAULT_PG_PORT": infra.pg_port,
         "TAI_DATABASE_DEFAULT_PG_USER": infra.pg_user,

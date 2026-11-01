@@ -1,4 +1,4 @@
-"""Harness self-tests for the serve/embed restart wait (:meth:`TaiStack._wait_after_restart`).
+"""Harness self-tests for the serve/embed restart wait (:func:`tai42_e2e.restarts.wait_after_restart`).
 
 A restarted serve worker answers ``/health`` and MCP requests before it has claimed its
 worker-bus slot: the claim runs on the bus subscription task the app spawns at the end of
@@ -10,15 +10,15 @@ lives only after a few reads and a ``/health`` that answers at once, no infra.""
 
 from __future__ import annotations
 
-import threading
 from collections.abc import Coroutine
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
-from tai42_e2e import readiness
+from tai42_e2e import readiness, restarts
 from tai42_e2e.stack import TaiStack
+from tai42_e2e.supervisor import RespawnSupervisor
 from tai42_e2e.topology import Topology
 from tai42_e2e.variants import BusWorker
 
@@ -46,9 +46,8 @@ class _Census:
 
 def _stack(census: _Census, *, topology: Topology, workers: int, ports: int) -> TaiStack:
     stack = object.__new__(TaiStack)
-    stack._procs = {}  # type: ignore[attr-defined]
-    stack._supervisor_lock = threading.RLock()  # type: ignore[attr-defined]
-    stack._supervised_names = set()  # type: ignore[attr-defined]
+    stack.procs = {}  # type: ignore[attr-defined]
+    stack.supervisor = RespawnSupervisor(stack)
     stack.census = census  # type: ignore[method-assign]
     stack.host = "127.0.0.1"  # type: ignore[attr-defined]
     stack.app_ports = [40001 + i for i in range(ports)]  # type: ignore[attr-defined]
@@ -90,7 +89,7 @@ def test_serve_restart_drains_only_after_every_fresh_worker_is_on_the_census(
     # workers claim their slots (same names, next generation) only after a few reads.
     fresh = [_worker("serve-1", 2, pid=11), _worker("serve-2", 2, pid=12)]
     stack = _stack(_Census([], fresh), topology=Topology.MULTIWORKER, workers=2, ports=1)
-    stack._wait_after_restart("serve", {"serve-1": 1, "serve-2": 1})
+    restarts.wait_after_restart(stack, "serve", {"serve-1": 1, "serve-2": 1})
     assert drained == [fresh]
 
 
@@ -98,7 +97,7 @@ def test_serve_restart_waits_out_a_resyncing_fresh_worker(drained: list[list[Bus
     resyncing = [_worker("serve-1", 2, state="resyncing", pid=11)]
     ready = [_worker("serve-1", 2, pid=11)]
     stack = _stack(_Census(resyncing, ready), topology=Topology.REPLICAS, workers=1, ports=2)
-    stack._wait_after_restart("serve-a", {"serve-1": 1})
+    restarts.wait_after_restart(stack, "serve-a", {"serve-1": 1})
     assert drained == [ready]
 
 
@@ -108,7 +107,7 @@ def test_replica_restart_does_not_count_the_other_replica_as_fresh(drained: list
     other = _worker("serve-2", 1, pid=22)
     rejoined = [other, _worker("serve-1", 2, pid=11)]
     stack = _stack(_Census([other], rejoined), topology=Topology.REPLICAS, workers=1, ports=2)
-    stack._wait_after_restart("serve-a", {"serve-1": 1, "serve-2": 1}, {"serve-1"})
+    restarts.wait_after_restart(stack, "serve-a", {"serve-1": 1, "serve-2": 1}, {"serve-1"})
     assert drained == [rejoined]
 
 
@@ -119,5 +118,5 @@ def test_embed_restart_drains_only_after_its_fresh_worker_is_on_the_census(
     stack = _stack(_Census([], fresh), topology=Topology.MULTIWORKER, workers=2, ports=1)
     stack.config.workers = 1  # type: ignore[attr-defined]
     stack.config.run_backend = True  # type: ignore[attr-defined]
-    stack._wait_after_restart("embed", {"serve-1": 1})
+    restarts.wait_after_restart(stack, "embed", {"serve-1": 1})
     assert drained == [fresh]

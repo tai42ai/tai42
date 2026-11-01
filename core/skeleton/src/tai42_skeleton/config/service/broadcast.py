@@ -26,7 +26,8 @@ from tai42_skeleton.app.recycle import RecycleError, RecycleReport, RecycleStop
 from tai42_skeleton.app.reload_gate import reload_gate
 from tai42_skeleton.config.recycle_policy import CENSUS_TARGET_KINDS, _recycle_step_timeout
 from tai42_skeleton.config.service.base import _ConfigServiceBase
-from tai42_skeleton.config.service.results import ApplyResult, joined_span_release_errors
+from tai42_skeleton.config.service.deferred_roll import DeferredRolls, PendingRoll, RollOutcome, active_deferral
+from tai42_skeleton.config.service.results import ApplyResult, joined_span_release_errors, self_exit_armed
 from tai42_skeleton.operations._broadcast import (
     FleetBroadcastError,
     awaiting_respawn_after,
@@ -43,7 +44,9 @@ class _BroadcastMixin(_ConfigServiceBase):
 
     The tail also carries the fleet recycle roll: an env change that changes recycle-class keys
     pins its recycle targets before the local apply (:meth:`_pin_recycle_targets`) and rolls the
-    recycle after the broadcast (:meth:`_roll_recycle`) — one step every env door reaches.
+    recycle after the broadcast (:meth:`_roll_recycle`) — one step every env door reaches. Inside
+    a :func:`~tai42_skeleton.config.service.deferred_roll.deferring_rolls` scope the roll is
+    recorded instead, and :meth:`run_deferred_rolls` runs the scope's rolls as one.
     """
 
     _orchestrate: Callable[..., Awaitable[RecycleReport]]
@@ -71,6 +74,24 @@ class _BroadcastMixin(_ConfigServiceBase):
             )
             return {}
         return _pinned_recycle_targets(rows, identity.name)
+
+    async def _roll_or_defer(
+        self,
+        identity: WorkerIdentity | None,
+        pinned: Mapping[str, tuple[WorkerKind, int]],
+        deferral: DeferredRolls | None,
+    ) -> tuple[RecycleReport | None, bool]:
+        """Run the roll a run owes now, or record it in the active ``deferral``.
+
+        Returns the roll's report and whether it was deferred. ``identity`` is ``None`` for a
+        run that owes no roll: nothing rolls and nothing is recorded.
+        """
+        if identity is None:
+            return None, False
+        if deferral is not None:
+            deferral.rolls.append(PendingRoll(identity=identity, pinned=pinned))
+            return None, True
+        return await self._roll_recycle(identity, pinned, serve_affecting=True, change="this env change"), False
 
     async def _roll_recycle(
         self,
@@ -183,12 +204,19 @@ class _BroadcastMixin(_ConfigServiceBase):
         recycle deferred to its post-response self-exit (every recycle-class change is taken as
         affecting the writer's serve surface); the result carries the roll's report.
 
-        ``continues`` is the result of an earlier run of the SAME change whose roll already ran
-        (the marketplace's post-record remount): this run pins and rolls nothing, carries that
-        roll, the writer's identity and ``serve_affecting``, and judges its reload with them — one
-        verdict for the change. ``recycle_keys`` and ``continues`` are exclusive. A local reload
-        failure raises :class:`FleetBroadcastError` carrying ``recycle_keys`` as the change's
-        unrolled keys, so a caller that recovers hands them to the reload that continues it.
+        Inside a :func:`~tai42_skeleton.config.service.deferred_roll.deferring_rolls` scope every
+        run's reload report is recorded as the scope's latest, and a run that owes a roll records
+        it there (the writer and the pinned targets) instead of rolling: its result reads
+        ``roll_deferred``, carries no roll and no verdict, and logs none — the scope's roll judges
+        the verdict once it ran (:meth:`run_deferred_rolls`).
+
+        ``continues`` is the result of an earlier run of the SAME change whose roll already ran or
+        was deferred (the marketplace's post-record remount): this run pins and rolls nothing,
+        carries that roll (or its deferral), the writer's identity and ``serve_affecting``, and,
+        when the roll ran, judges its reload with them — one verdict for the change.
+        ``recycle_keys`` and ``continues`` are exclusive. A local reload failure raises
+        :class:`FleetBroadcastError` carrying ``recycle_keys`` as the change's unrolled keys, so
+        a caller that recovers hands them to the reload that continues it.
 
         ``span_release_error`` is the store's error when the write's exclusive span failed to
         release after the persist. The span's exit is a post-persist step too: its failure is
@@ -260,6 +288,9 @@ class _BroadcastMixin(_ConfigServiceBase):
         # The report rides the response, but an unconfirmed worker is also a loud,
         # visible failure — never a silently stale sibling.
         log_non_convergence(report)
+        deferral = active_deferral()
+        if deferral is not None:
+            deferral.last_fleet = report
         if local_failure is not None:
             if span_release_error is not None:
                 report = report.model_copy(update={"error": _noting_span_release(report.error, span_release_error)})
@@ -270,11 +301,10 @@ class _BroadcastMixin(_ConfigServiceBase):
                 unrolled_recycle_keys=tuple(recycle_keys),
                 span_release_error=span_release_error,
             ) from local_failure
-        recycle: RecycleReport | None = None
-        if identity is not None:
-            recycle = await self._roll_recycle(identity, pinned, serve_affecting=True, change="this env change")
+        recycle, roll_deferred = await self._roll_or_defer(identity, pinned, deferral)
         if continues is not None:
             recycle, identity = continues.recycle, continues.self_identity
+            roll_deferred = continues.roll_deferred
             # The continued run's failed release is the same change's, so the result keeps it.
             span_release_error = joined_span_release_errors(continues.span_release_error, span_release_error)
         # local_result is set on the success path (no local_failure).
@@ -286,12 +316,40 @@ class _BroadcastMixin(_ConfigServiceBase):
             self_identity=identity,
             serve_affecting=continues.serve_affecting if continues is not None else identity is not None,
             span_release_error=span_release_error,
+            roll_deferred=roll_deferred,
         )
+        if roll_deferred:
+            return result
         # The verdict belongs to this operation, which knows what its roll carried: the workers
         # whose reload stated a moved recycle-class env and that nothing here respawns.
         verdict = awaiting_respawn_after(report, recycle, result.self_identity, self_exit_armed=result.self_exit_armed)
         log_awaiting_respawn(verdict)
         return dataclasses.replace(result, awaiting_respawn=verdict)
+
+    async def run_deferred_rolls(
+        self, deferral: DeferredRolls, *, writer_exits: bool, change: str
+    ) -> RollOutcome | None:
+        """Run the rolls a :func:`~tai42_skeleton.config.service.deferred_roll.deferring_rolls` scope recorded, as one.
+
+        ``None`` when no run in the scope deferred a roll. Otherwise one roll over every target
+        the runs pinned (:meth:`DeferredRolls.merged`), the writer excluded, then the verdict over
+        the scope's latest reload report, logged as every operation's verdict is. ``writer_exits``
+        says whether the writer's own recycle follows as its post-reply self-exit, the way every
+        env door arms it from a converged roll; a caller that arms none (a failed operation)
+        passes ``False``, so the roll defers no self recycle and a writer still bound to a moved
+        key is listed in the verdict. A roll that stops is logged at ERROR naming ``change`` and
+        returned as the partial report, as an inline roll is.
+        """
+        roll = deferral.merged()
+        if roll is None:
+            return None
+        recycle = await self._roll_recycle(roll.identity, roll.pinned, serve_affecting=writer_exits, change=change)
+        armed = self_exit_armed(writer_exits, recycle)
+        # A scope that recorded a roll recorded the reload report of the run that deferred it.
+        report = cast("FleetResult", deferral.last_fleet)
+        verdict = awaiting_respawn_after(report, recycle, roll.identity, self_exit_armed=armed)
+        log_awaiting_respawn(verdict)
+        return RollOutcome(recycle=recycle, self_identity=roll.identity, awaiting_respawn=verdict)
 
 
 def _noting_span_release(error: str | None, span_release_error: str | None) -> str | None:

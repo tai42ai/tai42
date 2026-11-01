@@ -30,7 +30,7 @@ pytestmark = [
         "setting:PIP_INDEX_URL",
         "setting:MARKETPLACE_ADVISORIES_POLL=true",
         "setting:MARKETPLACE_ADVISORIES_INTERVAL_S=1",
-        "setting:shared-venv",
+        "setting:TAI_PLUGINS_DIR",
         "setting:fixture-plugin:alpha",
     ),
 ]

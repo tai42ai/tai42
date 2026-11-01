@@ -103,7 +103,7 @@ def _run_tai(stack: TaiStack, argv: list[str]) -> subprocess.CompletedProcess[st
     child-env seam — the SAME env the served processes get (the deployment env plus the
     config-dir/manifest bindings and PATH/HOME, never an ``os.environ`` passthrough) — with
     the config dir as the working directory."""
-    config_dir = str(stack._config_dir)
+    config_dir = str(stack.config_dir)
     return subprocess.run(
         [tai_bin(), *argv],
         env=child_env(stack, str(stack.root), "cli"),

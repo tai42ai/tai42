@@ -2,9 +2,10 @@
 
 :class:`_InstallFlow` orders ``preview`` / ``install`` / ``uninstall`` as
 abort-on-any-step sequences with an explicit reverse unwind, delegating each concern to
-a sibling module (``locks``, ``resolve``, ``package_ops``, ``manifest_apply``,
+a sibling module (``locks``, ``resolve``, ``environments``, ``manifest_apply``,
 ``env_apply``, ``route_preflight``, ``notes``, ``unwind``). It inherits the shared config,
-pip and prefix seams from :class:`~tai42_skeleton.marketplace.installer_base._InstallerBase`.
+pip and plugins-directory seams from
+:class:`~tai42_skeleton.marketplace.installer_base._InstallerBase`.
 """
 
 from __future__ import annotations
@@ -18,19 +19,19 @@ from tai42_skeleton.app.route_registry import CrossOwnerRouteCollisionError
 from tai42_skeleton.config.service import ApplyResult, joined_span_release_errors
 from tai42_skeleton.marketplace import (
     env_apply,
-    locks,
     manifest_apply,
     notes,
-    package_ops,
     provides,
     resolve,
     route_preflight,
-    unwind,
 )
 from tai42_skeleton.marketplace import routes as routes_mod
+from tai42_skeleton.marketplace.environments.change import OperationChange
+from tai42_skeleton.marketplace.environments.targets import place, place_row
 from tai42_skeleton.marketplace.errors import InstallStateError, ManifestCollisionError
 from tai42_skeleton.marketplace.installer_base import _InstallerBase
 from tai42_skeleton.marketplace.manifest_patch import ProvidesUndo, apply_provides, collisions, remove_provides
+from tai42_skeleton.marketplace.operation_roll import guarded_operation
 from tai42_skeleton.marketplace.pip import ensure_pip_available
 from tai42_skeleton.operations._broadcast import FleetBroadcastError
 
@@ -85,17 +86,24 @@ class _InstallFlow(_InstallerBase):
 
         Ordered steps: not-installed + pip pre-flight; resolve the pinned version
         (the ONE pinning call, advisory/spec/contract checks included); collision +
-        declared-route pre-flight BEFORE pip; ``pip install``; patch the manifest
-        through the one door and reload; write the attribution row.
+        declared-route pre-flight BEFORE pip; build the plugin's environment (the layer
+        rebuilt with it, or its own server environment) beside the one in use and swap it
+        in; plugin migrations; patch the manifest through the one door and reload; write
+        the attribution row; delete the unused builds; then, with the fleet key downgraded to
+        shared, roll the fleet recycle the change owes (:func:`guarded_operation`), so a worker
+        it restarts verifies the finished install.
 
         ``env`` / ``secret_keys`` land in the env store in the SAME combined
         transaction as the provides entry when the spec declares install-time env;
         ``route_mounts`` remaps a route-carrying item's base and any public route
         requires ``accept_public_routes`` — both checked BEFORE pip. Each step past
-        pip unwinds in reverse on failure (a failed unwind → :class:`InstallUnwindError`).
+        the swap unwinds in reverse on failure, the environment swapped back first (a failed
+        unwind → :class:`InstallUnwindError`).
         """
-        async with locks.operation_guard(self._fleet_lock):
-            return await self._install_locked(ref, version, env, secret_keys, route_mounts, accept_public_routes)
+        async with guarded_operation(self._fleet_lock, self._svc, change=f"the install of {ref}") as operation:
+            receipt = await self._install_locked(ref, version, env, secret_keys, route_mounts, accept_public_routes)
+        receipt["reload"] = operation.settled(receipt["reload"])
+        return receipt
 
     async def _install_locked(
         self,
@@ -121,13 +129,11 @@ class _InstallFlow(_InstallerBase):
         pinned_version = resolve.require(resolved, "version")
 
         # Package prep runs only for a packaged spec: a descriptor-only plugin
-        # (``spec.package is None``) installs nothing, so pip need not be present nor
-        # the prefix writable. A set-but-unwritable prefix fails HERE for a packaged
-        # spec, before any state change — never a silent fall back to the environment.
+        # (``spec.package is None``) installs nothing, so needs neither pip nor the
+        # plugins directory. An unset plugins directory refuses HERE, before any state change.
         if spec.package is not None:
             ensure_pip_available()
-            if self._prefix is not None:
-                self._prefix_ensure_writable(self._prefix)
+            self._require_plugins_dir()
 
         # Early, readable env pre-check before any pip work: a required var neither
         # supplied, stored, nor in the process env fails now, naming it.
@@ -150,7 +156,7 @@ class _InstallFlow(_InstallerBase):
             reserved_prefixes=self._reserved_prefixes,
         )
 
-        pip_output = await self._install_package_steps(spec, source, resolved, pinned_version)
+        change = await self._install_package_steps(ref, spec, source, resolved, pinned_version)
         apply_result = await self._commit_install(
             ref,
             pinned_version,
@@ -161,64 +167,45 @@ class _InstallFlow(_InstallerBase):
             resolved_route_list,
             env,
             secret_keys,
+            change,
         )
+        environment_notes = [] if change is None else change.finish()
 
         return {
             "ref": ref,
             "version": pinned_version,
             "package": spec.package,
             "advisories": resolve.require_list(resolved, "advisories"),
-            "notes": notes.install_notes(spec),
+            "notes": [*notes.install_notes(spec), *environment_notes],
             "reload": apply_result,
-            "pip_output": pip_output,
+            "pip_output": None if change is None else change.pip_output,
             "routes": routes_mod.mounted_rows(resolved_route_list),
         }
 
     async def _install_package_steps(
-        self, spec: PluginSpec, source: str, resolved: dict[str, Any], pinned_version: str
-    ) -> str | None:
-        """Land the package (or no-op for a descriptor-only spec).
+        self, ref: str, spec: PluginSpec, source: str, resolved: dict[str, Any], pinned_version: str
+    ) -> OperationChange | None:
+        """Build the plugin's environment and make it current, then run its migrations.
 
-        Env-shadow guard, pip install, plugin migrations; on migration failure unwind the
-        just-installed package and re-raise. Returns the pip output, or ``None`` when nothing was
-        installed.
+        A descriptor-only spec builds nothing and returns ``None``. A migration failure swaps
+        the environment back and re-raises. Returns the change for the commit to unwind or
+        finish.
         """
-        if spec.package is None:
+        _repo_url, _tag, artifact_ref, sha256 = resolve.pin_provenance(resolved, source)
+        placed = place(ref, spec, pinned_version, source, artifact_ref, sha256)
+        if placed is None:
             return None
-        if self._prefix is not None:
-            # A prefix install of a version the environment already shadows at a
-            # DIFFERENT version is refused here, before any package/manifest/store write.
-            package_ops.guard_env_shadow(
-                spec.package, pinned_version, self._prefix, env_dist_version=self._env_dist_version
-            )
+        change = await self._prepare_environment(ref, None, placed, subject=f"cannot install {ref} {pinned_version}")
+        change.swap()
 
-        # pip install (github: fetch + verify + install the local tarball). A failure
-        # propagates as-is; pip's own transaction handling is the boundary.
-        pip_output = await package_ops.pip_install(
-            self._pip_runner,
-            self._prefix,
-            spec.package,
-            pinned_version,
-            source,
-            resolved.get("artifact_ref"),
-            resolved.get("sha256"),
-            env_constraints=self._env_constraints,
-        )
-
-        # Migrations run while the plugin is inert (package landed, manifest not yet
-        # patched): a failure aborts with the manifest untouched, unwinding the package.
+        # Migrations run while the plugin is inert (environment current, manifest not yet
+        # patched): a failure swaps the environment back with the manifest untouched.
         try:
             await self._run_plugin_migrations(spec)
         except Exception as migration_error:
-            await unwind.unwind_install(
-                migration_error,
-                package=spec.package,
-                provides_undo=None,
-                env_written=None,
-                **self._install_unwind_seams(),
-            )
+            await self._unwind(migration_error, change=change, provides_undo=None, env_written=None)
             raise
-        return pip_output
+        return change
 
     async def _commit_install(
         self,
@@ -231,11 +218,12 @@ class _InstallFlow(_InstallerBase):
         resolved_route_list: list[routes_mod.ResolvedRoute],
         env: dict[str, str] | None,
         secret_keys: list[str] | None,
+        change: OperationChange | None,
     ) -> ApplyResult:
         """Commit the manifest+env+row transactionally.
 
-        Apply provides+env, write the attribution row, post-record remount reload; unwind on any
-        failure.
+        Apply provides+env, write the attribution row, post-record remount reload; on any
+        failure swap ``change`` back and unwind the config writes.
 
         The forward provides reload runs BEFORE the attribution row exists, so its mount map
         (which reads the store) mounts every route-carrying item at its DECLARED base. A
@@ -250,7 +238,6 @@ class _InstallFlow(_InstallerBase):
         row_persisted = False
         # ``env_written`` records what the env write changes, so the unwind reverts exactly
         # that rather than blind-deleting a key.
-        env_values = env_apply.env_to_write(env)
         env_written = env_apply.EnvWrite()
         provides_undo: list[ProvidesUndo] = []
         try:
@@ -266,7 +253,6 @@ class _InstallFlow(_InstallerBase):
                     mutator,
                     env=env,
                     secret_keys=secret_keys,
-                    env_to_write=env_values,
                     env_written=env_written,
                 )
             except FleetBroadcastError as reload_error:
@@ -300,12 +286,11 @@ class _InstallFlow(_InstallerBase):
             # The pipeline aborts a failed mutation with nothing persisted, so the
             # manifest needs restoring only when the change actually landed.
             persisted = manifest_persisted or isinstance(step_error, FleetBroadcastError)
-            await unwind.unwind_install(
+            await self._unwind(
                 step_error,
-                package=spec.package,
+                change=change,
                 provides_undo=provides_undo[0] if persisted else None,
                 env_written=env_written,
-                **self._install_unwind_seams(),
             )
             # The row is written only after the manifest reload, so it needs dropping only on
             # the collision-recovery path, where it precedes the authoritative remount.
@@ -345,66 +330,75 @@ class _InstallFlow(_InstallerBase):
     async def uninstall(self, ref: str) -> dict[str, Any]:
         """Uninstall a marketplace-installed plugin — convergent and registry-free.
 
-        Order: pip pre-flight; read the stored record (unknown ref → not-installed);
-        reconstruct the spec from LOCAL truth; unpatch the manifest through the one
-        door and reload to CONVERGENCE (a re-run re-attempts a prior failed deregister
-        reload; skipped only for an all-env-selected plugin); pip uninstall; drop the
-        row. There is no unwind-to-installed — re-running forward is the recovery.
+        Order: read the stored record (unknown ref → not-installed); reconstruct the spec
+        from LOCAL truth; for a packaged plugin, rebuild the layer without it and swap it in
+        (an ``mcp-server`` package builds nothing and its ``current`` is withdrawn); unpatch
+        the manifest through the one door and converge it the way this installer's door
+        converges — the fleet reloads now, or the deployment loads it at its next start (a
+        re-run re-attempts a prior failed deregister; skipped only for an all-env-selected
+        plugin); drop the row; delete the unused builds, or the server package's whole
+        environment; then, with the fleet key downgraded to shared, roll the fleet recycle the
+        convergence owes (:func:`guarded_operation`). A failed deregister or row delete swaps the
+        environment back and re-raises, leaving whatever manifest change landed in place;
+        re-running forward is the recovery. The receipt's ``manifest_written`` says whether the
+        manifest was written.
         """
-        async with locks.operation_guard(self._fleet_lock):
-            return await self._uninstall_locked(ref)
+        async with guarded_operation(self._fleet_lock, self._svc, change=f"the uninstall of {ref}") as operation:
+            receipt = await self._uninstall_locked(ref)
+        receipt["reload"] = operation.settled(receipt["reload"])
+        return receipt
 
     async def _uninstall_locked(self, ref: str) -> dict[str, Any]:
         row = await self._store.get(ref)
         if row is None:
             raise InstallStateError(f"{ref} is not installed", not_installed=True)
         spec = resolve.spec_from_row(row)
-        if spec.package is not None and self._prefix is None:
-            # The environment path shells ``pip uninstall``; the prefix path removes
-            # the plugin's files by its RECORD and needs no pip. A descriptor-only
-            # plugin (``spec.package is None``) removes no package, so needs no pip.
-            ensure_pip_available()
+        placed = place_row(row)
+        change: OperationChange | None = None
+        if placed is not None:
+            if not placed.runs_as_server:
+                ensure_pip_available()
+            change = await self._prepare_environment(ref, placed, None, subject=f"cannot uninstall {ref} {row.version}")
+            change.swap()
 
-        reload_result: ApplyResult | None
+        try:
+            manifest_written, reload_result = await self._deregister(spec)
+        except Exception as deregister_error:
+            await self._unwind(deregister_error, change=change, provides_undo=None, env_written=None)
+            raise
+        try:
+            await self._store.delete(ref)
+        except Exception as delete_error:
+            await self._unwind(delete_error, change=change, provides_undo=None, env_written=None)
+            raise
+
+        removal_notes = notes.uninstall_notes(spec)
+        if change is not None:
+            removal_notes += change.finish()
+        return {
+            "ref": ref,
+            "uninstalled": True,
+            "manifest_written": manifest_written,
+            "reload": reload_result,
+            "notes": removal_notes,
+        }
+
+    async def _deregister(self, spec: PluginSpec) -> tuple[bool, ApplyResult | None]:
+        """Persist the manifest without ``spec``'s entries and converge it the way this door converges.
+
+        Returns whether the manifest was written and the convergence's result: ``None`` when
+        nothing was written (every provide is env-selected) or when the door's convergence is
+        the deployment's next start.
+        """
         changed = remove_provides(self._svc().read_manifest_document(), spec)
         if changed or provides.has_manifest_provides(spec):
-            # Converge the live registration to the stripped manifest BEFORE removing
-            # the package. The apply runs even when nothing changed now but the spec
-            # targets manifest fields, so a prior run's failed deregister reload is
-            # re-attempted (idempotent) before the pip uninstall + row drop.
+            # The write runs even when nothing changed now but the spec targets manifest
+            # fields, so a prior run's failed deregister is re-attempted (idempotent).
             def mutator(document: dict[str, Any]) -> None:
                 remove_provides(document, spec)
 
-            reload_result = await manifest_apply.apply_composed(self._svc(), mutator)
-        else:
-            # A plugin whose provides are all env-selected wrote no manifest
-            # entry, so there is nothing to deregister — no apply, no reload.
-            reload_result = None
-
-        # A failure here leaves the app converged but the package present;
-        # re-running uninstall (step 3 now a no-op) completes the removal. A
-        # descriptor-only plugin installed no package, so there is nothing to remove.
-        removed = (
-            await package_ops.remove_package(
-                spec.package,
-                prefix=self._prefix,
-                pip_runner=self._pip_runner,
-                prefix_uninstall=self._prefix_uninstall,
-                prefix_has_dist=self._prefix_has_dist,
-                env_dist_version=self._env_dist_version,
-            )
-            if spec.package is not None
-            else False
-        )
-        await self._store.delete(ref)
-
-        removal_notes = notes.uninstall_notes(spec)
-        if spec.package is not None and self._prefix is not None and not removed:
-            # The env-shadowed no-op install landed nothing in the prefix; surface the
-            # deregister-only removal in the result, never only a log line.
-            env_version = self._env_dist_version(spec.package, self._prefix)
-            removal_notes.append(
-                f"{spec.package!r} was absent from the plugin prefix; the environment provides it at "
-                f"{env_version} — removed no files, only deregistered and dropped the attribution record"
-            )
-        return {"ref": ref, "uninstalled": True, "reload": reload_result, "notes": removal_notes}
+            persisted = await manifest_apply.persist_composed(self._svc(), mutator)
+            return True, await self._converge(self._svc(), persisted)
+        # A plugin whose provides are all env-selected wrote no manifest entry, so there is
+        # nothing to deregister — no write, no convergence.
+        return False, None

@@ -467,6 +467,57 @@ def test_fleet_broadcast_error_masks_a_transport_cause():
     assert "internal-host" not in bytes(resp.body).decode()
 
 
+_RESTORED = "the previous plugin environment was restored"
+
+
+def test_core_plugin_boot_error_handler_renders_the_notes_after_the_reason():
+    import json as _json
+
+    from starlette.requests import Request
+
+    scope = {"type": "http", "method": "POST", "path": "/api/marketplace/install", "query_string": b"", "headers": []}
+    exc = CorePluginBootError("tools plugin 'acme_tools' failed to import: boom")
+    exc.add_note(_RESTORED)
+    resp = asyncio.run(error_envelope.core_plugin_boot_error_handler(Request(scope), exc))
+    assert _json.loads(bytes(resp.body)) == {"error": f"tools plugin 'acme_tools' failed to import: boom\n{_RESTORED}"}
+
+
+def test_schema_gate_error_handler_renders_the_notes_after_the_refusal():
+    import json as _json
+
+    from starlette.requests import Request
+    from tai42_kit.db import SchemaOutOfDateError
+
+    scope = {"type": "http", "method": "POST", "path": "/api/marketplace/install", "query_string": b"", "headers": []}
+    exc = SchemaOutOfDateError(_SCHEMA_REFUSAL)
+    exc.add_note(_RESTORED)
+    resp = asyncio.run(error_envelope.schema_gate_error_handler(Request(scope), exc))
+    assert _json.loads(bytes(resp.body)) == {"error": f"{_SCHEMA_REFUSAL}\n{_RESTORED}"}
+
+
+def test_fleet_broadcast_error_renders_the_notes_of_the_cause_and_of_the_broadcast_error():
+    # The unwind notes the raised FleetBroadcastError; its cause may carry notes of its own.
+    import json as _json
+
+    from starlette.requests import Request
+
+    from tai42_skeleton.app.bus.models import FleetResult
+    from tai42_skeleton.operations._broadcast import FleetBroadcastError
+
+    cause = CorePluginBootError("tools plugin 'acme_tools' failed to import: boom")
+    cause.add_note("cause context")
+    report = FleetResult(op="reload_config", reachable=True)
+    exc = FleetBroadcastError("reload_config", report, cause)
+    exc.__cause__ = cause
+    exc.add_note(_RESTORED)
+
+    scope = {"type": "http", "method": "POST", "path": "/api/marketplace/install", "query_string": b"", "headers": []}
+    resp = asyncio.run(error_envelope.fleet_broadcast_error_handler(Request(scope), exc))
+    body = _json.loads(bytes(resp.body))
+    assert body["error"] == f"tools plugin 'acme_tools' failed to import: boom\ncause context\n{_RESTORED}"
+    assert body["report"]["op"] == "reload_config"
+
+
 def test_internal_error_handler_survives_unstampable_exception():
     # S1: a future exception that cannot accept the id stamp — here a read-only
     # ``error_id`` property, whose assignment raises AttributeError — must not make

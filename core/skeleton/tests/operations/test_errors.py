@@ -12,6 +12,7 @@ from tai42_skeleton.operations.errors import (
     OperationFailedError,
     PermissionDeniedError,
     ValidationRejectedError,
+    operator_message,
 )
 
 
@@ -34,3 +35,15 @@ def test_error_class_status(cls, status):
     assert exc.message == "boom"
     assert str(exc) == "boom"
     assert isinstance(exc, OperationError)
+
+
+def test_operator_message_of_an_exception_without_notes_is_its_text() -> None:
+    assert operator_message(RuntimeError("the step failed")) == "the step failed"
+
+
+def test_operator_message_renders_each_note_after_the_text_in_the_order_added() -> None:
+    exc = RuntimeError("the step failed")
+    exc.add_note("first context")
+    exc.add_note("second context")
+
+    assert operator_message(exc) == "the step failed\nfirst context\nsecond context"

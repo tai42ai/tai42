@@ -27,8 +27,8 @@ def make_family_dirs(root: Path, n_app: int) -> list[str]:
 
 def spawn(stack: TaiStack, spec: _ProcSpec) -> None:
     handle = ProcessHandle(name=spec.name, argv=spec.argv, cwd=spec.cwd, env=spec.env, log_path=spec.log_path)
-    stack._specs[spec.name] = spec
-    stack._procs[spec.name] = handle
+    stack.specs[spec.name] = spec
+    stack.procs[spec.name] = handle
     handle.start()
 
 
@@ -43,7 +43,7 @@ def spawn_all(stack: TaiStack, manifest_path: Path, family_dirs: list[str]) -> N
     if stack.config.run_backend:
         name = "backend"
         cwd_override = stack.config.cwd_overrides.get(name)
-        cwd = Path(cwd_override) if cwd_override else stack._config_dir
+        cwd = Path(cwd_override) if cwd_override else stack.config_dir
         spawn(
             stack,
             _ProcSpec(
@@ -51,7 +51,7 @@ def spawn_all(stack: TaiStack, manifest_path: Path, family_dirs: list[str]) -> N
                 argv=[tai, "backend", "worker", "--manifest-path", str(manifest_path)],
                 cwd=cwd,
                 env=child_env(stack, family_dirs[0], name),
-                log_path=stack._logs_dir / "backend.log",
+                log_path=stack.logs_dir / "backend.log",
             ),
         )
         # Extra backend processes the variant requires alongside the worker
@@ -77,16 +77,16 @@ def spawn_all(stack: TaiStack, manifest_path: Path, family_dirs: list[str]) -> N
                 _ProcSpec(
                     name=extra_name,
                     argv=[tai, "backend", *extra_args, "--manifest-path", str(manifest_path)],
-                    cwd=Path(extra_cwd) if extra_cwd else stack._config_dir,
+                    cwd=Path(extra_cwd) if extra_cwd else stack.config_dir,
                     env=child_env(stack, family_dirs[0], extra_name, variant_env=variant_env),
-                    log_path=stack._logs_dir / f"{extra_name}.log",
+                    log_path=stack.logs_dir / f"{extra_name}.log",
                 ),
             )
     if stack.config.run_metrics:
         assert stack.metrics_port is not None
         name = "metrics"
         cwd_override = stack.config.cwd_overrides.get(name)
-        cwd = Path(cwd_override) if cwd_override else stack._config_dir
+        cwd = Path(cwd_override) if cwd_override else stack.config_dir
         spawn(
             stack,
             _ProcSpec(
@@ -94,14 +94,14 @@ def spawn_all(stack: TaiStack, manifest_path: Path, family_dirs: list[str]) -> N
                 argv=[tai, "metrics", "--host", stack.host, "--port", str(stack.metrics_port)],
                 cwd=cwd,
                 env=child_env(stack, family_dirs[0], name),
-                log_path=stack._logs_dir / "metrics.log",
+                log_path=stack.logs_dir / "metrics.log",
             ),
         )
-    unknown = sorted(set(stack.config.process_env) - set(stack._specs))
+    unknown = sorted(set(stack.config.process_env) - set(stack.specs))
     if unknown:
         raise RuntimeError(
             f"process_env names processes the {stack.config.name!r} stack does not spawn: {unknown}; "
-            f"it spawns {sorted(stack._specs)}"
+            f"it spawns {sorted(stack.specs)}"
         )
 
 
@@ -139,7 +139,7 @@ def spawn_serve_fleet(stack: TaiStack, tai: str, manifest_path: Path, family_dir
         if stack.config.transport != "http":
             argv.extend(["--transport", stack.config.transport])
         cwd_override = stack.config.cwd_overrides.get(name)
-        cwd = Path(cwd_override) if cwd_override else stack._config_dir
+        cwd = Path(cwd_override) if cwd_override else stack.config_dir
         spawn(
             stack,
             _ProcSpec(
@@ -147,7 +147,7 @@ def spawn_serve_fleet(stack: TaiStack, tai: str, manifest_path: Path, family_dir
                 argv=argv,
                 cwd=cwd,
                 env=child_env(stack, family_dirs[i], name),
-                log_path=stack._logs_dir / f"{name}.log",
+                log_path=stack.logs_dir / f"{name}.log",
             ),
         )
 
@@ -161,7 +161,7 @@ def spawn_embed_host(stack: TaiStack, family_dir: str) -> None:
     name = "embed"
     port = stack.app_ports[0]
     cwd_override = stack.config.cwd_overrides.get(name)
-    cwd = Path(cwd_override) if cwd_override else stack._config_dir
+    cwd = Path(cwd_override) if cwd_override else stack.config_dir
     argv = [
         uvicorn_bin(),
         stack.config.embed_app,
@@ -177,6 +177,6 @@ def spawn_embed_host(stack: TaiStack, family_dir: str) -> None:
             argv=argv,
             cwd=cwd,
             env=child_env(stack, family_dir, name),
-            log_path=stack._logs_dir / f"{name}.log",
+            log_path=stack.logs_dir / f"{name}.log",
         ),
     )

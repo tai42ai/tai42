@@ -19,17 +19,23 @@ An mcp-server install routes through the COMBINED env+manifest pipeline: the req
 from __future__ import annotations
 
 import copy
+import shutil
+import tempfile
+import weakref
+from collections.abc import Mapping
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, cast
 
 import pytest
 from tai42_contract.plugins import PluginSpec
+from tests._fakes.plugin_environment_dists import lay_server_requirement
 
 from tai42_skeleton.app.bus import FleetResult
 from tai42_skeleton.config.boundary import refuse_dangling_env_markers
 from tai42_skeleton.config.deployment_env import DeploymentOwnership
-from tai42_skeleton.config.service import ApplyResult, OrphanEnvWriteError
+from tai42_skeleton.config.service import ApplyResult, OrphanEnvWriteError, PersistedChange
 from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.marketplace.errors import InstallEnvError, InstallStateError, InstallUnwindError
 from tai42_skeleton.marketplace.installer import Installer
@@ -73,7 +79,10 @@ class _FakeRegistry:
 
 
 class _FakePip:
-    async def __call__(self, args: list[str]) -> str:
+    """Lays the server package a build pins into its venv, declaring the spec's command as its script."""
+
+    async def __call__(self, args: list[str], /, *, env: Mapping[str, str] | None = None) -> str:
+        lay_server_requirement(args, {"tai42-pg-mcp": ["pg-mcp-server"]})
         return "pip ok"
 
 
@@ -153,10 +162,16 @@ class _FakeSvc:
         return copy.deepcopy(self._cm.read_manifest_preserved())
 
     async def apply_change(self, mutator: Any) -> ApplyResult:
+        return await self.converge(await self.persist_change(mutator))
+
+    async def persist_change(self, mutator: Any) -> PersistedChange:
         document = copy.deepcopy(self._cm._manifest)
         mutator(document)
         self._cm._manifest = document
-        return ApplyResult(fleet=_fleet_report(), local={"reloaded": True}, document=document)
+        return PersistedChange(document=document)
+
+    async def converge(self, persisted: PersistedChange) -> ApplyResult:
+        return ApplyResult(fleet=_fleet_report(), local={"reloaded": True}, document=persisted.document)
 
     async def deployment_ownership(self, op_name: str) -> DeploymentOwnership:
         return DeploymentOwnership()
@@ -193,17 +208,26 @@ class _FakeSvc:
         return ApplyResult(fleet=_fleet_report(), local={"reloaded": True}, document=candidate)
 
 
+class _FakeFleetHold:
+    shared = False
+
+    async def downgrade(self) -> None:
+        self.shared = True
+
+
 class _FakeFleetLock:
     def __call__(self):
         return self._cm()
 
     @asynccontextmanager
     async def _cm(self):
-        yield
+        yield _FakeFleetHold()
 
 
 class Harness:
     def __init__(self, manifest: dict[str, Any] | None = None, env: dict[str, str] | None = None) -> None:
+        self.plugins_dir = Path(tempfile.mkdtemp(prefix="tai42-plugins-"))
+        weakref.finalize(self, shutil.rmtree, self.plugins_dir, True)
         self.registry = _FakeRegistry()
         self.pip = _FakePip()
         self.store = _FakeStore()
@@ -218,6 +242,7 @@ class Harness:
             config_service=cast(Any, self.svc),
             fleet_lock=_FakeFleetLock(),
             config_manager=self.cm,
+            plugins_dir=lambda: self.plugins_dir,
         )
 
 
@@ -435,6 +460,38 @@ async def test_upgrade_adding_a_required_var_is_refused_without_it(monkeypatch: 
         await h.installer().update(old.ref)
     # Refused before persist: the manifest still carries the OLD entry, the row is unchanged.
     assert h.store.rows[old.ref].version == "1.0.0"
+
+
+async def test_an_update_writes_a_new_value_for_a_stored_key_the_process_applied(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Every boot and reload applies the stored env to the process env, so a stored key is in
+    # os.environ; a value the update supplies for it still lands in the store.
+    old = _mcp_spec(version="1.0.0", env={"PGPASSWORD": "!ENV ${GUARD_PG_PW}"})
+    new = _mcp_spec(version="2.0.0", env={"PGPASSWORD": "!ENV ${GUARD_PG_PW}"})
+    entry = {"title": "postgres", "config": {"command": "pg-mcp-server", "env": {"PGPASSWORD": "!ENV ${GUARD_PG_PW}"}}}
+    h = Harness(manifest={"mcp": [entry]}, env={"GUARD_PG_PW": "old"})
+    monkeypatch.setenv("GUARD_PG_PW", "old")
+    h.store.preload(old)
+    h.registry.resolved = make_resolved(new, version="2.0.0")
+
+    await h.installer().update(old.ref, env={"GUARD_PG_PW": "new"})
+
+    assert h.cm._env["GUARD_PG_PW"] == "new"
+    assert h.store.rows[old.ref].version == "2.0.0"
+
+
+async def test_an_install_writes_a_new_value_for_a_stored_key_the_process_applied(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spec = _mcp_spec(env={"PGPASSWORD": "!ENV ${GUARD_PG_PW}"})
+    h = Harness(env={"GUARD_PG_PW": "old"})
+    monkeypatch.setenv("GUARD_PG_PW", "old")
+    h.registry.resolved = make_resolved(spec)
+
+    await h.installer().install(spec.ref, env={"GUARD_PG_PW": "new"})
+
+    assert h.cm._env["GUARD_PG_PW"] == "new"
 
 
 async def test_uninstall_leaves_env_and_surfaces_orphans(monkeypatch: pytest.MonkeyPatch) -> None:

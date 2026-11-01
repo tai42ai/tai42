@@ -4,7 +4,7 @@ collects only with ``TAI_E2E_MARKETPLACE=1``.
 iota is a yml-only OAuth connector and kappa a yml-only no-auth (``kind: none``)
 connector: neither ships a package, so the registry classifies them ``source='spec'``
 (the raw ``tai-plugin.yml`` at the tag is the artifact) and the installer writes only a
-manifest ``connectors`` entry — no pip, no venv distribution, no migrations. This module
+manifest ``connectors`` entry — no pip, no plugin environment, no migrations. This module
 drives that landed contract end to end:
 
 * iota with ``--env`` only (no ``--secret``): ``GET /api/connectors/providers`` lists it;
@@ -110,8 +110,8 @@ async def _env_view(stack: TaiStack) -> dict[str, Any]:
 async def descriptor_cleanup(marketplace_connectors_stack: TaiStack) -> AsyncIterator[list[str]]:
     """A per-test uninstall ledger: every descriptor ref appended is best-effort
     uninstalled on teardown, so an aborted spec never leaves a connector in the shared
-    stack's manifest to cascade into the next test (a descriptor install touches no venv,
-    so the session venv guard cannot catch it)."""
+    stack's manifest to cascade into the next test (a descriptor install builds no plugin
+    environment, so no environment check would catch it)."""
     refs: list[str] = []
     try:
         yield refs
@@ -368,7 +368,7 @@ def kappa_seeded(marketplace_service: MarketplaceService, package_index: Fixture
     asyncio.run(seed_kappa_listing(marketplace_service, package_index, sys.executable))
 
 
-@pytest.mark.needs("mutable", "setting:shared-venv", "helper:fixture-stdio-mcp-server")
+@pytest.mark.needs("mutable", "setting:TAI_PLUGINS_DIR", "helper:fixture-stdio-mcp-server")
 async def test_kappa_installs_with_no_env_and_connects_with_config(
     kappa_seeded: None, marketplace_connectors_stack: TaiStack, descriptor_cleanup: list[str]
 ) -> None:

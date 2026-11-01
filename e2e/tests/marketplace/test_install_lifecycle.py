@@ -1,15 +1,14 @@
 """Skeleton ↔ tai42-marketplace registry over HTTP. Opt-in: collects only with
 ``TAI_E2E_MARKETPLACE=1``.
 
-The core promise as one self-contained arc: a real wheel is pip-installed into the
-serving venv, its tool imports and goes live over MCP and ``GET /api/tools``, the
-attribution store records it with update availability, and uninstall reverts every
-one of those — the venv included.
+The core promise as one self-contained arc: a real wheel is built into the stack's
+plugin layer (never the image), its tool imports and goes live over MCP and
+``GET /api/tools``, the attribution store records it with update availability, and
+uninstall reverts every one of those — the layer included. A second arc proves the
+layer outlives a serve-process restart.
 """
 
 from __future__ import annotations
-
-from pathlib import Path
 
 import pytest
 
@@ -19,8 +18,10 @@ from tai42_e2e.stack import TaiStack
 
 from ._market_support import (
     api_tool_names,
-    distribution_absent,
+    image_holds,
     installed_refs,
+    layer_holds,
+    plugin_absent,
     uninstall_and_assert_clean,
     wait_tool_live,
 )
@@ -34,24 +35,12 @@ pytestmark = [
         "helper:package-index",
         "setting:MARKETPLACE_URL",
         "setting:PIP_INDEX_URL",
-        "setting:shared-venv",
+        "setting:TAI_PLUGINS_DIR",
         "setting:fixture-plugin:alpha",
     ),
 ]
 
 _TOOL = "e2e_market_probe"
-
-# The alpha fixture's importable package; its ``.dist-info`` lands under the prefix
-# when a prefix is configured (normalized name — dashes become underscores).
-_ALPHA_DIST = "tai_e2e_market_alpha"
-
-
-def _prefix_dist_present(stack: TaiStack) -> bool:
-    """Whether the alpha distribution is installed UNDER the stack's plugin prefix
-    (the persistent install root, a sibling of ``storage/``) — read from disk, so it
-    reflects a real ``pip install --prefix`` and a real RECORD-based removal."""
-    prefix = Path(stack.resources.storage_root).parent / "plugin-prefix"
-    return any(list(site.glob(f"{_ALPHA_DIST}*")) for site in prefix.glob("lib/python*/site-packages"))
 
 
 async def test_install_go_live_and_uninstall(
@@ -59,18 +48,21 @@ async def test_install_go_live_and_uninstall(
 ) -> None:
     stack = marketplace_stack
 
-    # Precondition (negative first): the fixture tool is absent everywhere and the
-    # distribution is not in the venv.
+    # Precondition (negative first): the fixture tool is absent everywhere and no
+    # plugin environment holds the distribution.
     assert _TOOL not in await api_tool_names(stack)
     async with stack.mcp() as mcp:
         assert _TOOL not in await mcp.tool_names()
-    assert distribution_absent(ALPHA_PACKAGE)
+    assert plugin_absent(stack, ALPHA_PACKAGE)
 
     await stack.api().post("/api/marketplace/install", json={"ref": ALPHA_REF, "version": "0.1.0"})
 
     # The wheel is really installed, the module really imported, the app really
     # reloaded: the SAME process answers 0.1.0 from the installed distribution.
     await wait_tool_live(stack, _TOOL, dist_version="0.1.0")
+    # It was built into the plugin layer, and the image never gained it.
+    assert layer_holds(stack, ALPHA_PACKAGE)
+    assert not image_holds(ALPHA_PACKAGE)
 
     installed = await installed_refs(stack)
     assert set(installed) == {ALPHA_REF}
@@ -82,34 +74,33 @@ async def test_install_go_live_and_uninstall(
     await uninstall_and_assert_clean(stack, ALPHA_REF, package=ALPHA_PACKAGE, tool_name=_TOOL)
 
 
-@pytest.mark.needs("process", "files", "setting:TAI_PLUGINS_PREFIX")
-async def test_prefix_install_survives_a_serve_restart(marketplace_prefix_stack: TaiStack) -> None:
-    stack = marketplace_prefix_stack
+@pytest.mark.needs("process", "files")
+async def test_the_plugin_layer_survives_a_serve_restart(marketplace_stack: TaiStack) -> None:
+    stack = marketplace_stack
 
-    # Precondition: the tool is absent, nothing is in the prefix, and the shared
-    # editable venv does not carry the distribution.
+    # Precondition: the tool is absent and neither the layer nor the image holds it.
     assert _TOOL not in await api_tool_names(stack)
-    assert not _prefix_dist_present(stack)
-    assert distribution_absent(ALPHA_PACKAGE)
+    assert plugin_absent(stack, ALPHA_PACKAGE)
+    assert not image_holds(ALPHA_PACKAGE)
 
     await stack.api().post("/api/marketplace/install", json={"ref": ALPHA_REF, "version": "0.1.0"})
     await wait_tool_live(stack, _TOOL, dist_version="0.1.0")
 
-    # The install landed IN THE PREFIX, not the shared venv: the distribution is on
-    # disk under the stack's plugin prefix, and the harness (venv-only path) still
-    # cannot resolve it.
-    assert _prefix_dist_present(stack)
-    assert distribution_absent(ALPHA_PACKAGE)
+    # The install landed IN THE LAYER, not the image: the distribution is on disk in
+    # the layer's current build under the stack's plugins directory, and the harness
+    # (image-only path) still cannot resolve it.
+    assert layer_holds(stack, ALPHA_PACKAGE)
+    assert not image_holds(ALPHA_PACKAGE)
 
     # A real serve-process restart — a fresh interpreter with empty import state.
     stack.restart("serve")
 
-    # The plugin re-imports from the persistent prefix and serves again: boot put the
-    # prefix back on sys.path BEFORE importing the manifest's modules, so the tool is
-    # live over MCP and /api/tools after the restart.
+    # The plugin re-imports from the persistent layer and serves again: boot put the
+    # layer's current build on sys.path BEFORE importing the manifest's modules, so the
+    # tool is live over MCP and /api/tools after the restart.
     await wait_tool_live(stack, _TOOL, dist_version="0.1.0")
 
-    # Uninstall removes the plugin's files from the prefix (a real RECORD-based delete)
-    # and drops the row; the tool goes away and the prefix is clean again.
+    # Uninstall rebuilds the layer without the plugin and drops the row; the tool goes
+    # away and the layer no longer holds it.
     await uninstall_and_assert_clean(stack, ALPHA_REF, package=ALPHA_PACKAGE, tool_name=_TOOL)
-    assert not _prefix_dist_present(stack)
+    assert not layer_holds(stack, ALPHA_PACKAGE)

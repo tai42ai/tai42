@@ -1,0 +1,21 @@
+spec_version: 1
+namespace: tai42
+name: e2e-mu
+package: tai-e2e-market-mu
+version: 0.0.0
+description: "Installable marketplace fixture plugin: a probe tool, its version pinning a shared fixture dependency."
+license: Apache-2.0
+repository: https://github.com/tai42ai/tai-e2e
+contract: ">=0.3,<0.4"
+categories: [utilities]
+tags: [probe, mu]
+permissions:
+  network: false
+  subprocess: false
+  filesystem: false
+provides:
+  - kind: tool
+    name: e2e_market_mu_probe
+    module: tai_e2e_market_mu.tools
+    description: "Report the installed distribution version and the serving pid."
+    tags: [probe]

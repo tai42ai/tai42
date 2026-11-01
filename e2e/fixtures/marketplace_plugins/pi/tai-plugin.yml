@@ -1,0 +1,23 @@
+spec_version: 1
+namespace: tai42
+name: e2e-pi
+package: tai-e2e-market-pi
+version: 0.0.0
+description: "Installable marketplace fixture plugin: an mcp-server item whose server env reads the lambda fixture's recycle-class key."
+license: Apache-2.0
+repository: https://github.com/tai42ai/tai-e2e
+categories: [utilities]
+tags: [mcp-server, pi]
+permissions:
+  network: false
+  subprocess: true
+  filesystem: false
+provides:
+  - kind: mcp-server
+    name: e2e_pi_mcp
+    description: "Launch the fixture's one-tool stdio MCP server, its env carrying the lambda fixture's pool URL."
+    tags: [pi]
+    mcp:
+      command: tai-e2e-market-pi-mcp
+      env:
+        E2E_PI_POOL_URL: "!ENV ${E2E_LAMBDA_POOL_URL}"

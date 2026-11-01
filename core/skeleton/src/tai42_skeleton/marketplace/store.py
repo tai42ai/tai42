@@ -9,8 +9,8 @@ verified install fetched from (both ``None`` for a pypi source, whose immutable
 version shipped (``spec``, JSONB). Storing the spec locally is what lets
 uninstall unpatch the manifest without asking the registry, and lets
 ``installed``/``update``/``advisories`` answer from local truth; storing the
-github artifact_ref + sha256 is what lets update-unwind reinstall the old pin
-through the same download-and-verify path the forward install took.
+github artifact_ref + sha256 is what lets a plugin environment rebuild fetch and
+verify the pin's archive through the same path the forward install took.
 
 Written only by the installer: :meth:`~MarketplaceInstallStore.record` serves
 both install and update (the update flow replaces the row), :meth:`delete`

@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tai-e2e-market-omicron"
+version = "0.0.0"
+description = "Installable marketplace fixture plugin: a second mcp-server package, serving the eta fixture's one-tool stdio MCP server under a console script of its own."
+requires-python = ">=3.13"
+license = "Apache-2.0"
+dependencies = [
+    "tai-e2e-market-eta>=0.1",
+]
+
+[project.scripts]
+tai-e2e-market-omicron-mcp = "tai_e2e_market_eta.server:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["tai_e2e_market_omicron*"]
+
+[tool.setuptools.package-data]
+tai_e2e_market_omicron = ["tai-plugin.yml", "docs/index.mdx"]

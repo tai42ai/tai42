@@ -1,12 +1,13 @@
 """The pip subprocess seam: pre-flights, the runner, and pin-argv composition.
 
-Install and uninstall shell out to ``sys.executable -m pip`` — the one mechanism
-that installs into exactly the interpreter environment serving the app, working
-identically in a pip-made venv, a uv-made venv, and a container. There is no uv
-path and no fallback chain: one door, honest failure.
+Every plugin environment is built by ``sys.executable -m pip``, working identically
+in a pip-made venv, a uv-made venv, and a container: the plugin layer with
+``--prefix`` (:func:`layer_install_args`), a server package's own virtual
+environment with ``--python`` (:func:`server_install_args`). There is no uv path
+and no fallback chain: one door, honest failure.
 
-The pin handed to pip is composed LOCALLY from the registry resolve response's
-validated fields (:func:`install_args`), never taken as an opaque
+Each pin handed to pip is composed LOCALLY from the registry resolve response's
+validated fields (:func:`pin_requirement`), never taken as an opaque
 registry-provided string — a registry compromise must not become an
 arbitrary-package install. A pypi source pins ``package==version``; a github
 source installs a LOCAL tarball that :func:`fetch_verified_artifact` has already
@@ -44,8 +45,9 @@ import os
 import re
 import signal
 import sys
-from collections.abc import Awaitable, Callable
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Protocol
 
 from packaging.version import InvalidVersion, Version
 from tai42_kit.net import fetch_url
@@ -58,9 +60,18 @@ from tai42_skeleton.marketplace.errors import (
     RegistryUnreachableError,
 )
 
-# ``run_pip``-shaped runner: the argv tail after ``-m pip`` → the combined
-# stdout/stderr output. Injected into the installer so tests fake the subprocess.
-PipRunner = Callable[[list[str]], Awaitable[str]]
+
+class PipRunner(Protocol):
+    """A :func:`run_pip`-shaped runner, injected so tests fake the subprocess.
+
+    Takes the argv tail after ``-m pip`` and, optionally, the child's whole environment;
+    returns the combined stdout/stderr output.
+    """
+
+    async def __call__(self, args: list[str], /, *, env: Mapping[str, str] | None = None) -> str:
+        """Run pip with ``args`` (and ``env`` when given) and return its output."""
+        ...
+
 
 # PEP 508 distribution name — a letter/digit, then name characters, ending on a
 # letter/digit. The pin is composed from registry data; this stops a poisoned
@@ -84,7 +95,7 @@ def ensure_pip_available() -> None:
         )
 
 
-async def run_pip(args: list[str]) -> str:
+async def run_pip(args: list[str], *, env: Mapping[str, str] | None = None) -> str:
     """Run ``sys.executable -m pip <args>`` and return its combined output.
 
     No shell, ever. A non-zero exit raises :class:`PipFailedError` carrying the
@@ -93,9 +104,9 @@ async def run_pip(args: list[str]) -> str:
     the operator's own request timeout and the install lock's retriable refusal
     for followers.
 
-    The pip subprocess is spawned WITHOUT ``env=``, so it inherits the worker's
-    environment and the operator's pip configuration (``PIP_INDEX_URL``, proxies,
-    …) reaches pip unchanged.
+    With ``env`` unset the pip subprocess inherits the worker's environment, so the
+    operator's pip configuration (``PIP_INDEX_URL``, proxies, …) reaches pip
+    unchanged; a given ``env`` is the child's whole environment.
 
     Spawned in a NEW session (``start_new_session=True``), so pip is a
     process-group leader: on ``CancelledError`` (a client disconnect mid-run
@@ -115,6 +126,7 @@ async def run_pip(args: list[str]) -> str:
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
         start_new_session=True,
+        env=None if env is None else dict(env),
     )
     try:
         stdout, _ = await proc.communicate()
@@ -220,16 +232,8 @@ async def fetch_verified_artifact(package: str, version: str, artifact_ref: str,
     return dest
 
 
-def install_args(
-    package: str,
-    version: str,
-    source: str,
-    verified_path: Path | None = None,
-    *,
-    prefix: str | None = None,
-    constraints: Path | None = None,
-) -> list[str]:
-    """Validate the registry-supplied pin fields, then build the ``pip install`` argv.
+def pin_requirement(package: str, version: str, source: str, verified_path: Path | None = None) -> str:
+    """Validate the registry-supplied pin fields, then build the one requirement pip installs for them.
 
     ``package`` must be a PEP 508 name and ``version`` PEP 440-parseable. A pypi
     source pins ``package==version`` (PyPI enforces file immutability). A github
@@ -238,34 +242,37 @@ def install_args(
     plain absolute path, so pip runs only the vouched-for bytes and never clones a
     mutable tag. A validation deviation raises :class:`RegistryResponseError`
     (``status=None``) — these are registry data, not caller input.
-
-    When ``prefix`` is set, ``--prefix <prefix>`` is added. A ``constraints`` path
-    then appends ``--constraint <path>`` after it: the file pins every environment
-    distribution to its installed version, so pip installs only the plugin's
-    genuinely-new dependencies under the prefix and refuses a conflicting closure
-    loudly rather than silently replacing an environment package with a prefix copy.
-    Both ``prefix`` and ``constraints`` are deployment paths, not registry data, so
-    they are not shape-validated here.
     """
     _validate_package(package)
     _validate_version(version)
-    flags = ["install", "--no-input", "--disable-pip-version-check"]
-    if prefix is not None:
-        flags += ["--prefix", prefix]
-    if constraints is not None:
-        flags += ["--constraint", str(constraints)]
     if source == "pypi":
-        return [*flags, f"{package}=={version}"]
+        return f"{package}=={version}"
     if source == "github":
         if verified_path is None:
             raise RegistryResponseError(
                 "a github install needs a verified artifact path, but none was supplied", status=None
             )
-        return [*flags, str(verified_path)]
+        return str(verified_path)
     raise RegistryResponseError(f"registry returned an unknown install source {source!r}", status=None)
 
 
-def uninstall_args(package: str) -> list[str]:
-    """Validate the distribution name, then build the ``pip uninstall`` argv."""
-    _validate_package(package)
-    return ["uninstall", "--yes", package]
+_INSTALL_FLAGS = ("install", "--no-input", "--disable-pip-version-check")
+
+
+def layer_install_args(build: Path, constraints: Path, requirements: list[str]) -> list[str]:
+    """The ``pip install`` argv building the plugin layer into ``build`` from ``requirements`` in one resolution.
+
+    ``--prefix <build>`` installs into the build directory alone; ``--constraint <constraints>``
+    pins every image distribution at its installed version, so pip takes the image's copy as
+    the only candidate, places no second copy in the layer, and refuses a closure that would
+    need another version of one.
+    """
+    return [*_INSTALL_FLAGS, "--prefix", str(build), "--constraint", str(constraints), *requirements]
+
+
+def server_install_args(python: Path, requirement: str) -> list[str]:
+    """The ``pip`` argv installing ``requirement`` into the virtual environment whose interpreter is ``python``.
+
+    ``--python`` is a pip global option, so it precedes the ``install`` subcommand.
+    """
+    return ["--python", str(python), *_INSTALL_FLAGS, requirement]

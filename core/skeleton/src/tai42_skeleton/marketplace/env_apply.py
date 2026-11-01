@@ -58,16 +58,6 @@ def precheck_required_env(cm: Any, spec: PluginSpec, env: dict[str, str] | None)
         )
 
 
-def env_to_write(env: dict[str, str] | None) -> dict[str, str]:
-    """The subset of ``env`` this install actually writes to the store.
-
-    Keys the process env does not already provide. A deployment/already-set var is omitted
-    (its marker resolves from the live env), so no pre-existing marker can end up
-    referencing a key this install owns.
-    """
-    return {key: value for key, value in (env or {}).items() if key not in os.environ}
-
-
 @dataclass
 class EnvWrite:
     """What one operation's env write changed, so :func:`revert_env_write` reverses exactly that.
@@ -154,7 +144,6 @@ async def apply_provides_change(
     *,
     env: dict[str, str] | None,
     secret_keys: list[str] | None,
-    env_to_write: dict[str, str],
     env_written: EnvWrite,
 ) -> ApplyResult:
     """Persist a provides patch through the pipeline.
@@ -165,7 +154,10 @@ async def apply_provides_change(
     (:meth:`~tai42_skeleton.config.service.ConfigService.apply_env_and_change`): the
     supplied env values land in the store and the provides entry is written in ONE
     unit, so the entry is written exactly once (the standalone ``apply_provides``
-    never runs a second time). ``manifest_pointer`` is the binding field of the
+    never runs a second time). Every supplied value is written, a key the stored env
+    already holds included; a new value for a key the deployment sets is the
+    pipeline's deployment-owned refusal (:func:`~tai42_skeleton.config.boundary.refuse_deployment_owned`),
+    before anything persists. ``manifest_pointer`` is the binding field of the
     spec's data items (``mcp`` / ``connectors``), named in the orphan report. An
     unsatisfied required marker or connector-env is the pipeline's unresolved-env
     refusal, surfaced as :class:`InstallEnvError` naming each missing var +
@@ -195,7 +187,7 @@ async def apply_provides_change(
     manifest_pointer = env_manifest_pointer(spec)
 
     async def prepare(stored: dict[str, str]) -> tuple[dict[str, str], Callable[[dict[str, Any]], None]]:
-        changes = dict(env_to_write)
+        changes = dict(env or {})
         # Record what this write changes, from the STORED snapshot it derives from: each
         # value key's prior string (``""`` when absent) beside the value written, and the
         # marks the merge adds.

@@ -1,4 +1,4 @@
-"""The pip seam: pin-argv composition, the verified github artifact fetch, the
+"""The pip seam: pin and argv composition, the verified github artifact fetch, the
 pip pre-flight, and the runner's subprocess lifecycle including cancellation
 reaping.
 
@@ -33,89 +33,55 @@ from tai42_skeleton.marketplace.errors import (
 from tai42_skeleton.marketplace.pip import (
     ensure_pip_available,
     fetch_verified_artifact,
-    install_args,
+    layer_install_args,
+    pin_requirement,
     run_pip,
-    uninstall_args,
+    server_install_args,
 )
 
 # -- pin composition ---------------------------------------------------------
 
-
-def test_pypi_install_args() -> None:
-    args = install_args("tai42-toolbox", "1.2.3", "pypi")
-    assert args == ["install", "--no-input", "--disable-pip-version-check", "tai42-toolbox==1.2.3"]
+_FLAGS = ["install", "--no-input", "--disable-pip-version-check"]
 
 
-def test_github_install_args_is_the_verified_local_tarball(tmp_path: Path) -> None:
-    # The github pin is the verified LOCAL tarball path — a plain absolute path,
+def test_a_pypi_pin_is_the_exact_version_requirement() -> None:
+    assert pin_requirement("tai42-toolbox", "1.2.3", "pypi") == "tai42-toolbox==1.2.3"
+
+
+def test_a_github_pin_is_the_verified_local_archive(tmp_path: Path) -> None:
+    # The github pin is the verified LOCAL archive path — a plain absolute path,
     # never a ``git+url@tag`` clone.
-    tarball = tmp_path / "tai42-toolbox-1.2.3.tar.gz"
-    args = install_args("tai42-toolbox", "1.2.3", "github", tarball)
-    assert args == ["install", "--no-input", "--disable-pip-version-check", str(tarball)]
-    assert not args[-1].startswith("git+")
+    archive = tmp_path / "tai42-toolbox-1.2.3.tar.gz"
+    assert pin_requirement("tai42-toolbox", "1.2.3", "github", archive) == str(archive)
 
 
-def test_github_install_args_without_verified_path_raises() -> None:
+def test_a_github_pin_without_a_verified_path_raises() -> None:
     # A github install with no verified artifact path is refused, never falling
     # through to some unverified pin.
     with pytest.raises(RegistryResponseError, match="verified artifact path"):
-        install_args("tai42-toolbox", "1.2.3", "github")
+        pin_requirement("tai42-toolbox", "1.2.3", "github")
 
 
-def test_pypi_install_args_with_prefix_targets_the_prefix() -> None:
-    # A configured prefix adds ``--prefix <dir>``; pip then resolves shared deps
-    # against the environment and installs only new dists under the prefix.
-    args = install_args("tai42-toolbox", "1.2.3", "pypi", prefix="/opt/plugins")
+def test_layer_install_args_build_into_the_build_constrained_to_the_image(tmp_path: Path) -> None:
+    # One pip call: ``--prefix <build>`` installs into the build alone, and the image
+    # constraints follow before every requirement.
+    build = tmp_path / "layer" / "builds" / ".tmp-x"
+    constraints = tmp_path / "image-constraints.txt"
+    args = layer_install_args(build, constraints, ["tai42-a==1.0.0", "tai42-b==2.0.0"])
     assert args == [
-        "install",
-        "--no-input",
-        "--disable-pip-version-check",
+        *_FLAGS,
         "--prefix",
-        "/opt/plugins",
-        "tai42-toolbox==1.2.3",
-    ]
-
-
-def test_github_install_args_with_prefix_targets_the_prefix(tmp_path: Path) -> None:
-    tarball = tmp_path / "tai42-toolbox-1.2.3.tar.gz"
-    args = install_args("tai42-toolbox", "1.2.3", "github", tarball, prefix="/opt/plugins")
-    assert args == [
-        "install",
-        "--no-input",
-        "--disable-pip-version-check",
-        "--prefix",
-        "/opt/plugins",
-        str(tarball),
-    ]
-
-
-def test_prefix_install_args_append_constraint_after_prefix(tmp_path: Path) -> None:
-    # A prefix install with a constraints file adds ``--constraint <path>`` right
-    # after the ``--prefix`` pair, so pip pins the environment versions and refuses a
-    # conflicting closure instead of silently replacing an environment package.
-    cfile = tmp_path / "environment-constraints.txt"
-    args = install_args("tai42-toolbox", "1.2.3", "pypi", prefix="/opt/plugins", constraints=cfile)
-    assert args == [
-        "install",
-        "--no-input",
-        "--disable-pip-version-check",
-        "--prefix",
-        "/opt/plugins",
+        str(build),
         "--constraint",
-        str(cfile),
-        "tai42-toolbox==1.2.3",
+        str(constraints),
+        "tai42-a==1.0.0",
+        "tai42-b==2.0.0",
     ]
 
 
-def test_install_args_without_constraints_emit_none(tmp_path: Path) -> None:
-    # No constraints path (the no-prefix door, or a prefix install given none):
-    # no ``--constraint`` flag is emitted at all.
-    assert "--constraint" not in install_args("tai42-toolbox", "1.2.3", "pypi")
-    assert "--constraint" not in install_args("tai42-toolbox", "1.2.3", "pypi", prefix="/opt/plugins")
-
-
-def test_uninstall_args() -> None:
-    assert uninstall_args("tai42-toolbox") == ["uninstall", "--yes", "tai42-toolbox"]
+def test_server_install_args_target_the_venv_interpreter_before_the_subcommand(tmp_path: Path) -> None:
+    python = tmp_path / "builds" / "x" / "bin" / "python"
+    assert server_install_args(python, "tai42-srv==1.0.0") == ["--python", str(python), *_FLAGS, "tai42-srv==1.0.0"]
 
 
 # -- rejection: registry-data faults, never ValueError -----------------------
@@ -123,17 +89,17 @@ def test_uninstall_args() -> None:
 
 def test_malformed_package_name_raises_response_error() -> None:
     with pytest.raises(RegistryResponseError, match="package name"):
-        install_args("bad name; rm -rf", "1.0.0", "pypi")
+        pin_requirement("bad name; rm -rf", "1.0.0", "pypi")
 
 
 def test_unparseable_version_raises_response_error() -> None:
     with pytest.raises(RegistryResponseError, match="version"):
-        install_args("tai42-toolbox", "not-a-version", "pypi")
+        pin_requirement("tai42-toolbox", "not-a-version", "pypi")
 
 
 def test_unknown_source_raises_response_error() -> None:
     with pytest.raises(RegistryResponseError, match="unknown install source"):
-        install_args("tai42-toolbox", "1.0.0", "svn")
+        pin_requirement("tai42-toolbox", "1.0.0", "svn")
 
 
 # -- fetch_verified_artifact -------------------------------------------------
@@ -371,6 +337,14 @@ async def test_run_pip_returns_output_and_spawns_no_shell(monkeypatch: pytest.Mo
     assert captured["args"][1:3] == ("-m", "pip")
     assert captured["args"][-2:] == ("install", "x")
     assert captured["kwargs"]["start_new_session"] is True
+    # No env given: pip inherits this process's environment.
+    assert captured["kwargs"]["env"] is None
+
+
+async def test_run_pip_runs_with_exactly_the_given_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured = _patch_exec(monkeypatch, _FakeProc(returncode=0, output=b"ok"))
+    await run_pip(["install", "x"], env={"PATH": "/usr/bin"})
+    assert captured["kwargs"]["env"] == {"PATH": "/usr/bin"}
 
 
 async def test_run_pip_nonzero_raises_pip_failed_carrying_argv_code_output(monkeypatch: pytest.MonkeyPatch) -> None:

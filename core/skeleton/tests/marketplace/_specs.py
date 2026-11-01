@@ -7,9 +7,12 @@ minimal-but-valid instances so a test states only the fields it cares about.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 
 from tai42_contract.plugins import PluginSpec
+
+from tai42_skeleton.marketplace.store import InstallRecord
 
 # The default models a COMPATIBLE plugin: the range admits ANY running contract
 # version, real or test-pinned, so only tests that choose an explicit range
@@ -20,6 +23,25 @@ DEFAULT_CONTRACT_RANGE = ">=0.1,<999"
 def tool_item(module: str = "tai42_toolbox.tools.gen_uuid", name: str = "gen-uuid") -> dict[str, Any]:
     """A ``tool``-kind provides item."""
     return {"kind": "tool", "name": name, "module": module, "description": "Generate a UUID"}
+
+
+def mcp_server_item(name: str = "srv", command: str = "srv-mcp") -> dict[str, Any]:
+    """An ``mcp-server``-kind provides item launching ``command``."""
+    return {"kind": "mcp-server", "name": name, "mcp": {"command": command}, "description": "A stdio MCP server"}
+
+
+def install_row(spec: PluginSpec, *, version: str | None = None, sha256: str | None = None) -> InstallRecord:
+    """The install-store row a pypi install of ``spec`` at ``version`` (default: its own) records."""
+    return InstallRecord(
+        ref=spec.ref,
+        version=version or spec.version,
+        source="pypi",
+        repository_url=None,
+        tag=None,
+        sha256=sha256,
+        spec=spec.model_dump(mode="json"),
+        installed_at=datetime.now(UTC),
+    )
 
 
 def router_item(
@@ -136,12 +158,13 @@ def make_spec(
     package: str | None = "tai42-toolbox",
     version: str = "1.0.0",
     provides: list[dict[str, Any]] | None = None,
-    contract: str = DEFAULT_CONTRACT_RANGE,
+    contract: str | None = DEFAULT_CONTRACT_RANGE,
 ) -> PluginSpec:
     """A valid :class:`PluginSpec` with one tool item unless ``provides`` is given.
 
     ``package=None`` builds a descriptor-only plugin (valid only when every provides item
-    is a data item — an mcp-server or a connector)."""
+    is a data item — an mcp-server or a connector); ``contract=None`` declares no contract
+    range, as an all-mcp-server spec must."""
     document: dict[str, Any] = {
         "spec_version": 1,
         "namespace": namespace,
@@ -149,10 +172,11 @@ def make_spec(
         "version": version,
         "description": "A test plugin",
         "license": "Apache-2.0",
-        "contract": contract,
         "categories": ["dev"],
         "provides": provides if provides is not None else [tool_item()],
     }
+    if contract is not None:
+        document["contract"] = contract
     if package is not None:
         document["package"] = package
     return PluginSpec.model_validate(document)

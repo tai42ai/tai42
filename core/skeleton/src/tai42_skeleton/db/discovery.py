@@ -4,9 +4,10 @@ The skeleton's own chain lives at a fixed packaged path and is registered
 directly. A table-owning plugin declares its chain OPT-IN via the contract's
 ``migrations`` field (a package-relative directory); its component identity is its
 pip distribution name. ``tai db migrate`` discovers the chain of every INSTALLED plugin
-whose packages its metadata records — every distribution in the environment or the plugins
-prefix that packages a ``tai-plugin.yml``, read from installed metadata and never imported,
-whether or not a manifest loads it, so the schema follows what is installed — plus the chain
+whose packages its metadata records — every distribution in the environment or the plugin
+layer's current build, and each server package from its own current environment, that packages
+a ``tai-plugin.yml``, read from installed metadata and never imported, whether or not a manifest
+loads it, so the schema follows what is installed — plus the chain
 of every plugin the persisted manifest loads. An editable install served by an import hook
 records its packages nowhere, so the enumeration cannot list them: such a distribution the
 manifest does not load is named in the result (:class:`UnlocatablePackages`), and its chain
@@ -31,7 +32,6 @@ import importlib.resources
 import importlib.util
 import logging
 import re
-import sys
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -406,7 +406,7 @@ def manifest_plugin_specs(manifest: Manifest, installed: InstalledPackages) -> d
     against another contract may package a spec this one cannot parse. ``installed`` is the
     :class:`~tai42_skeleton.marketplace.installed_packages.InstalledPackages` snapshot the
     caller took for this pass (boot's :func:`~tai42_skeleton.marketplace.compat.distribution_map`,
-    migrate's read of :func:`_installed_search_path`).
+    migrate's read of :func:`~tai42_skeleton.marketplace.environments.current_builds.process_search_path`).
     """
     from tai42_skeleton.marketplace.compat import module_compat
 
@@ -433,31 +433,17 @@ def _installed_metadata_read() -> Iterator[None]:
     An :class:`~tai42_skeleton.marketplace.installed_packages.InstalledMetadataError` (a
     metadata file that exists but breaks its standard, such as a ``direct_url.json`` that is
     not JSON) stops discovery like a malformed spec does, and every door maps a discovery
-    error to a clean failure naming the distribution.
+    error to a clean failure naming the distribution. A server environment whose ``current``
+    build holds no distribution of its package
+    (:class:`~tai42_skeleton.marketplace.errors.PluginsDirError`) stops it the same way.
     """
+    from tai42_skeleton.marketplace.errors import PluginsDirError
     from tai42_skeleton.marketplace.installed_packages import InstalledMetadataError
 
     try:
         yield
-    except InstalledMetadataError as exc:
+    except (InstalledMetadataError, PluginsDirError) as exc:
         raise MigrationDiscoveryError(str(exc)) from exc
-
-
-def _installed_search_path() -> list[str]:
-    """Where installed distributions are looked up: ``sys.path``, then the plugins prefix's site directories.
-
-    The prefix goes last, where :func:`~tai42_skeleton.marketplace.prefix.activate_prefix`
-    puts it, so for a distribution present in both the copy the deployment imports is the one
-    discovered. The prefix's site directories are added here because a CLI process never
-    activates the prefix; a site directory that does not exist yet holds nothing.
-    """
-    from tai42_skeleton.marketplace.prefix import configured_prefix, prefix_site_dirs
-
-    path = list(sys.path)
-    prefix = configured_prefix()
-    if prefix is not None:
-        path.extend(site for site in prefix_site_dirs(prefix) if site not in path and Path(site).is_dir())
-    return path
 
 
 def _distribution_spec(read: InstalledDistribution) -> LocatedSpec | UnlocatablePackages | None:
@@ -493,19 +479,21 @@ def _distribution_spec(read: InstalledDistribution) -> LocatedSpec | Unlocatable
     return _parse_packaged_spec(roots[0], read), roots[0]
 
 
-def _installed_plugin_specs(installed: InstalledPackages) -> tuple[list[LocatedSpec], list[UnlocatablePackages]]:
-    """The spec and import-package root of every installed distribution that packages a ``tai-plugin.yml``.
+def _installed_plugin_specs(
+    reads: Iterable[InstalledDistribution],
+) -> tuple[list[LocatedSpec], list[UnlocatablePackages]]:
+    """The spec and import-package root of every installed distribution in ``reads`` that packages a ``tai-plugin.yml``.
 
-    Every distribution ``installed`` holds is read from its metadata, never imported
-    (:func:`_distribution_spec`); one that packages ``<top_level>/tai-plugin.yml``
-    contributes its parsed spec and the directory holding it, against which its
-    package-relative ``migrations`` path resolves. A distribution installed twice counts
-    once, as the first copy on the search path (the copy the snapshot holds). Returned with
+    Every distribution is read from its metadata, never imported (:func:`_distribution_spec`);
+    one that packages ``<top_level>/tai-plugin.yml`` contributes its parsed spec and the
+    directory holding it, against which its package-relative ``migrations`` path resolves.
+    ``reads`` holds a distribution installed twice once: a server package as its own
+    environment's copy, anything else as the first copy on the search path. Returned with
     every distribution whose packages could not be enumerated.
     """
     found: list[LocatedSpec] = []
     unlocatable: list[UnlocatablePackages] = []
-    for read in installed.distributions.values():
+    for read in reads:
         located = _distribution_spec(read)
         if isinstance(located, UnlocatablePackages):
             unlocatable.append(located)
@@ -548,20 +536,30 @@ def _persisted_manifest() -> Manifest | None:
 def _discovered_plugin_specs() -> tuple[list[LocatedSpec], list[UnlocatablePackages]]:
     """The installed plugins' specs plus the specs of the plugins the persisted manifest loads.
 
-    One read of the installed metadata on :func:`_installed_search_path`
-    (:func:`~tai42_skeleton.marketplace.installed_packages.installed_packages`) serves both
-    routes. The installed scan (:func:`_installed_plugin_specs`) comes first; each plugin the
+    One read of the installed metadata on the process search path
+    (:func:`~tai42_skeleton.marketplace.environments.current_builds.process_search_path`, read by
+    :func:`~tai42_skeleton.marketplace.installed_packages.installed_packages`) serves both
+    routes. The installed scan (:func:`_installed_plugin_specs`) comes first and reads those
+    distributions with each server package taken from its own environment
+    (:func:`~tai42_skeleton.marketplace.environments.current_builds.current_server_distributions`)
+    in place of a copy of the same name; each plugin the
     manifest route (:func:`manifest_plugin_specs`, the function the boot-time schema gate
     checks through) finds is added unless the scan already holds a spec declaring that
     distribution. A distribution a module the manifest loads maps to is located through that
     module, whether or not it packages a spec, so it is no longer unlocatable. So every chain
     the gate checks for this manifest is one migrate applies.
     """
-    from tai42_skeleton.marketplace.installed_packages import installed_packages
+    from tai42_skeleton.marketplace.environments.current_builds import (
+        current_server_distributions,
+        process_search_path,
+    )
+    from tai42_skeleton.marketplace.installed_packages import installed_packages, read_distribution
 
     with _installed_metadata_read():
-        installed = installed_packages(_installed_search_path())
-        specs, unlocatable = _installed_plugin_specs(installed)
+        installed = installed_packages(process_search_path())
+        reads = dict(installed.distributions)
+        reads.update({name: read_distribution(dist) for name, dist in current_server_distributions().items()})
+        specs, unlocatable = _installed_plugin_specs(reads.values())
     manifest = _persisted_manifest()
     if manifest is None:
         return specs, unlocatable
@@ -605,14 +603,15 @@ def _resolve_chain_discovery(specs: Iterable[LocatedSpec]) -> MigrationChainDisc
 def discover_plugin_chains() -> MigrationChainDiscovery:
     """Discovery result for every installed plugin that declares a chain, one entry per distribution.
 
-    Every distribution installed in this environment or in the plugins prefix that packages a
-    ``tai-plugin.yml`` declaring ``migrations``, whether or not a manifest loads it — the
-    schema follows what is installed, so a plugin's tables exist before a manifest change
-    loads it — plus every plugin the persisted manifest loads (:func:`_discovered_plugin_specs`).
-    Empty when the skeleton database is not configured — with no database there is nowhere to
-    migrate. A declared chain whose override binding is unset is carried in ``skipped``, and an
-    installed distribution whose packages cannot be enumerated and the manifest does not load
-    in ``unlocatable``; neither is silently dropped. Each plugin chain runs under its own
+    Every distribution installed in this environment or in the plugin layer's current build, and
+    each server package in its own current environment, that packages a ``tai-plugin.yml``
+    declaring ``migrations``, whether or not a manifest loads it — the schema follows what is
+    installed, so a plugin's tables exist before a manifest change loads it — plus every plugin
+    the persisted manifest loads (:func:`_discovered_plugin_specs`). Empty when the skeleton
+    database is not configured — with no database there is nowhere to migrate. A declared
+    chain whose override binding is unset is carried in ``skipped``, and an installed
+    distribution whose packages cannot be enumerated and the manifest does not load in
+    ``unlocatable``; neither is silently dropped. Each plugin chain runs under its own
     component's bound migrator identity.
     """
     from tai42_kit.db import component_store_configured
@@ -628,7 +627,9 @@ def installed_plugin_entry(distribution: str) -> MigrationEntry | None:
     """The runner entry for installed distribution ``distribution``'s chain, resolved import-free.
 
     The marketplace installer's resolution, after ``pip`` lands a plugin: the distribution is
-    found on :func:`_installed_search_path` and its packaged spec located and parsed
+    read from the environment that runs it — a server package from its own ``current``
+    environment, anything else from the process search path (both read by
+    :mod:`~tai42_skeleton.marketplace.environments.current_builds`) — and its packaged spec located and parsed
     (:func:`_distribution_spec`), exactly as ``tai db migrate`` finds it, so the folder the
     installer applies is the folder migrate applies and boot checks. ``None`` when the
     packaged spec declares no chain, or declares an override whose binding is unset (a skip
@@ -636,7 +637,17 @@ def installed_plugin_entry(distribution: str) -> MigrationEntry | None:
     is an editable install whose packages no metadata records, is a loud
     :class:`~tai42_kit.db.MigrationDiscoveryError` naming why.
     """
-    dist = next(iter(importlib.metadata.distributions(name=distribution, path=_installed_search_path())), None)
+    from packaging.utils import canonicalize_name
+
+    from tai42_skeleton.marketplace.environments.current_builds import (
+        current_server_distributions,
+        process_search_path,
+    )
+
+    with _installed_metadata_read():
+        dist = current_server_distributions([distribution]).get(canonicalize_name(distribution))
+    if dist is None:
+        dist = next(iter(importlib.metadata.distributions(name=distribution, path=process_search_path())), None)
     if dist is None:
         raise MigrationDiscoveryError(
             f"distribution {distribution!r} is not installed; its migrations cannot be located"

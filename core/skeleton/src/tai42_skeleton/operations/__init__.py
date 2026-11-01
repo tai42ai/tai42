@@ -48,6 +48,7 @@ _INFRA_MODULES = frozenset(
         "registry",
         "_authority",
         "_broadcast",
+        "_marketplace_errors",
     }
 )
 

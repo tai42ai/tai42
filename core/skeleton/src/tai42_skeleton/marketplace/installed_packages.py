@@ -23,8 +23,8 @@ source directory holds it. The reverse direction — listing such a distribution
 has no standard source; :func:`hook_served_editable` recognises the distribution so a caller
 can name it.
 
-The plugins prefix is put on ``sys.path`` as plain directories, so a ``.pth`` there is never
-processed: an editable install in the prefix is served by nothing.
+The plugin layer's site directories are added with :func:`site.addsitedir`, so a ``.pth``
+there is processed as one in the image's is.
 """
 
 from __future__ import annotations
@@ -255,6 +255,14 @@ def read_distribution(dist: metadata.Distribution) -> InstalledDistribution:
 
 
 @dataclass(frozen=True)
+class LeftOutModule:
+    """A module item of a plugin the plugin layer left out: the plugin's distribution and the recorded reason."""
+
+    distribution: str
+    reason: str
+
+
+@dataclass(frozen=True)
 class InstalledPackages:
     """One read of the installed distributions: which distribution provides each top-level import package.
 
@@ -265,12 +273,15 @@ class InstalledPackages:
     (PEP 503), in search-path order; a distribution installed twice is held as its first copy
     on the path, the one the import system serves. :meth:`distributions_for` answers a
     recorded name from ``top_levels`` and any other name through the import system, once per
-    name.
+    name. ``quarantined`` maps the import path of each module item of a plugin the current
+    plugin layer left out to its :class:`LeftOutModule`, as the layer's build record gives it;
+    :func:`installed_packages` reads distributions only and leaves it empty.
     """
 
     top_levels: Mapping[str, Sequence[str]]
     editable_sources: Mapping[str, Path]
     distributions: Mapping[str, InstalledDistribution]
+    quarantined: Mapping[str, LeftOutModule] = field(default_factory=dict)
     _resolved: dict[str, list[str]] = field(default_factory=dict, init=False, repr=False, compare=False)
 
     def distribution(self, name: str) -> InstalledDistribution:

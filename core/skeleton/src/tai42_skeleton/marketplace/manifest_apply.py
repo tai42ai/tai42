@@ -6,20 +6,22 @@ reloads locally through the reload gate, and broadcasts the confirmed change on 
 worker bus — so a compose the resolved schema or the backend-needs-bus invariant
 rejects raises loudly inside the transaction instead of corrupting the stored
 manifest, mapped here to the typed :class:`ManifestComposeError`; a boundary refusal of
-the composed document maps to the typed :class:`ManifestRefusedError`.
+the composed document maps to the typed :class:`ManifestRefusedError`. The write stage
+(:func:`persist_composed`) and the convergence are separate, so a door with no serving
+surface converges at the deployment's next start (:data:`Convergence`).
 """
 
 from __future__ import annotations
 
 import dataclasses
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from pydantic import ValidationError
 
 from tai42_skeleton.app.boot_rules import translate_config_invariants
-from tai42_skeleton.config.service import ApplyResult, ConfigService, joined_span_release_errors
+from tai42_skeleton.config.service import ApplyResult, ConfigService, PersistedChange, joined_span_release_errors
 from tai42_skeleton.marketplace.errors import ManifestComposeError, ManifestRefusedError
 from tai42_skeleton.operations._broadcast import FleetBroadcastError
 
@@ -31,8 +33,8 @@ def composed_manifest_invalid(detail: str) -> ManifestComposeError:
     return ManifestComposeError(f"the composed manifest is invalid: {detail}")
 
 
-async def apply_composed(svc: ConfigService, mutator: Callable[[dict[str, Any]], None]) -> ApplyResult:
-    """Apply a manifest mutation through the pipeline, mapping a composed-manifest fault to the typed compose error.
+async def persist_composed(svc: ConfigService, mutator: Callable[[dict[str, Any]], None]) -> PersistedChange:
+    """Persist a manifest mutation through the pipeline's write stage, mapping a composed-manifest fault to its type.
 
     The pipeline validates the RESOLVED projection of the mutated document (``!ENV``
     markers materialized) before it persists, so a marker on a non-string field
@@ -54,11 +56,32 @@ async def apply_composed(svc: ConfigService, mutator: Callable[[dict[str, Any]],
     """
     with translate_config_invariants(composed_manifest_invalid):
         try:
-            return await svc.apply_change(mutator)
+            return await svc.persist_change(mutator)
         except ValidationError as exc:
             raise composed_manifest_invalid(str(exc)) from exc
         except ValueError as exc:
             raise ManifestRefusedError(str(exc)) from exc
+
+
+async def apply_composed(svc: ConfigService, mutator: Callable[[dict[str, Any]], None]) -> ApplyResult:
+    """Persist a manifest mutation (:func:`persist_composed`), then converge the fleet on it now."""
+    return await svc.converge(await persist_composed(svc, mutator))
+
+
+Convergence = Callable[[ConfigService, PersistedChange], Awaitable[ApplyResult | None]]
+"""How a door converges a persisted manifest change: the fleet now, or the deployment's next start."""
+
+
+async def converge_fleet(svc: ConfigService, persisted: PersistedChange) -> ApplyResult:
+    """The live door's convergence: reload locally and broadcast to the fleet now."""
+    return await svc.converge(persisted)
+
+
+async def converge_at_next_start(svc: ConfigService, persisted: PersistedChange) -> None:
+    """A host-side write converges nothing now.
+
+    The deployment loads the persisted manifest at its next start, as the command that ran it states.
+    """
 
 
 async def remount_reload(svc: ConfigService, prior: ApplyResult) -> ApplyResult:
@@ -82,8 +105,8 @@ async def remount_reload(svc: ConfigService, prior: ApplyResult) -> ApplyResult:
     serving at their declared base until the next reboot re-reads the store, and MUST NOT
     unwind a good install. The failure is logged; the forward reload's ``prior`` result
     stands in for the receipt. The remount is the same change continued: it hands the
-    pipeline ``prior`` — the change's already-run roll — so the remount pins and rolls nothing
-    and judges its reload with that roll (one verdict). Returns the remount's result on
+    pipeline ``prior`` — the change's roll, already run or deferred to the operation's end — so
+    the remount pins and rolls nothing and carries that roll (one verdict). Returns the remount's result on
     success, else ``prior`` — carrying, beside its own, the remount's failed span release when
     the remount's write landed and its propagation raised :class:`FleetBroadcastError`.
     """

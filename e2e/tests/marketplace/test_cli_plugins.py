@@ -32,9 +32,9 @@ from tai42_e2e.waiting import wait_for_async
 
 from ._market_support import (
     cli_env,
-    distribution_absent,
     installed_refs,
     ok_json,
+    plugin_absent,
     run_cli,
     tai_bin,
     wait_tool_absent,
@@ -50,7 +50,7 @@ pytestmark = [
         "helper:package-index",
         "setting:MARKETPLACE_URL",
         "setting:PIP_INDEX_URL",
-        "setting:shared-venv",
+        "setting:TAI_PLUGINS_DIR",
         "cli",
     ),
 ]
@@ -132,7 +132,7 @@ async def test_cli_plugins_parity(
     async def gone() -> bool:
         if ALPHA_REF in await installed_refs(stack):
             return False
-        return distribution_absent(ALPHA_PACKAGE)
+        return plugin_absent(stack, ALPHA_PACKAGE)
 
     await wait_for_async(gone, deadline=30.0, message=f"{ALPHA_REF} never fully uninstalled via the CLI")
 
@@ -198,7 +198,7 @@ async def test_cli_plugins_route_mounting(
     # The table renders the HTTP method(s) column beside each resolved path.
     assert "GET /api/e2e-epsilon/ping [authed]" in out, out
     assert "pass --accept-public-routes" in out, out
-    assert distribution_absent(EPSILON_PACKAGE), "dry-run must not install"
+    assert plugin_absent(stack, EPSILON_PACKAGE), "dry-run must not install"
 
     # --dry-run with --mount: the table resolves the routes under the remapped base.
     remapped = _run_cli_plain(
@@ -213,7 +213,7 @@ async def test_cli_plugins_route_mounting(
     refused = run_cli(env, "install", EPSILON_REF, "--version", "0.1.0")
     assert refused.returncode != 0, f"install without acceptance should refuse: {refused.stdout}\n{refused.stderr}"
     assert "accept" in (refused.stdout + refused.stderr).lower(), refused.stdout + refused.stderr
-    assert distribution_absent(EPSILON_PACKAGE), "a refused install must leave nothing behind"
+    assert plugin_absent(stack, EPSILON_PACKAGE), "a refused install must leave nothing behind"
 
     # Install WITH --accept-public-routes and a remapped base: the receipt carries the
     # mounted routes at the remapped base.
@@ -238,7 +238,7 @@ async def test_cli_plugins_route_mounting(
     async def gone() -> bool:
         if EPSILON_REF in await installed_refs(stack):
             return False
-        return distribution_absent(EPSILON_PACKAGE)
+        return plugin_absent(stack, EPSILON_PACKAGE)
 
     await wait_for_async(gone, deadline=30.0, message=f"{EPSILON_REF} never fully uninstalled via the CLI")
 
@@ -274,13 +274,13 @@ async def test_cli_plugins_dry_run_collision(
         assert "collision:" in out, out
         assert "GET /api/e2e-epsilon/{slug}" in out, out
         assert "remap the item base" in out, out
-        assert distribution_absent(THETA_PACKAGE), "a dry-run must not install theta"
+        assert plugin_absent(stack, THETA_PACKAGE), "a dry-run must not install theta"
     finally:
         ok_json(run_cli(env, "uninstall", EPSILON_REF))
 
     async def gone() -> bool:
         if EPSILON_REF in await installed_refs(stack):
             return False
-        return distribution_absent(EPSILON_PACKAGE)
+        return plugin_absent(stack, EPSILON_PACKAGE)
 
     await wait_for_async(gone, deadline=30.0, message=f"{EPSILON_REF} never fully uninstalled via the CLI")

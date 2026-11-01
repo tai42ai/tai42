@@ -21439,8 +21439,12 @@
         "type": "object"
       },
       "UninstallResult": {
-        "description": "The uninstall receipt.\n\n``reload`` is ``null`` when the plugin wrote no manifest entry to remove; ``notes`` are removal notes\n(e.g. orphaned env vars left in place).",
+        "description": "The uninstall receipt.\n\n``manifest_written`` is whether the manifest was written (a re-run writes it again even when\nthe plugin's entries are already gone); ``reload`` is ``null`` when nothing was written.\n``notes`` are removal notes (e.g. orphaned env vars left in place).",
         "properties": {
+          "manifest_written": {
+            "title": "Manifest Written",
+            "type": "boolean"
+          },
           "notes": {
             "items": {
               "type": "string"
@@ -21470,6 +21474,7 @@
         "required": [
           "ref",
           "uninstalled",
+          "manifest_written",
           "reload",
           "notes"
         ],
@@ -32631,7 +32636,7 @@
     },
     "/api/marketplace/installed": {
       "get": {
-        "description": "The installed inventory.\n\nShaped ``{\"installed\": [...]}``.\n\nEach installed row carries the update picture computed from the registry's\nversion rows against the RUNNING contract: ``latest`` (newest published\nversion, or ``null`` with none), ``update_available`` (a newer COMPATIBLE\nversion exists — an incompatible newer version never advertises as an\nupdate), ``incompatible_newer`` (the newest such blocked version, so \"an\nupdate exists but needs a newer core\" is visible, or ``null``), and\n``compat`` — the live ``{status, reason}`` verdict of the row's installed\ndistribution against the running contract. A per-row not-found — the\nupstream listing vanished or was suspended — is row STATE, not a route\nfailure: that row answers ``latest: null``, ``update_available: false``,\n``missing_upstream: true``, so one dead listing never fails the whole\ninventory. A transport/garbled-upstream failure still surfaces as a 502,\nand a garbled LOCAL row (a stored spec that no longer validates, a malformed\nstored ref, an unparsable stored version) as a 500 naming the row — serving\nrows without their update picture would be a silent degrade of the spec'd\nshape.\n\nEach row also carries ``items`` — the ``{kind, name}`` of every item its\nstored spec provides (from LOCAL truth, never the registry). Studio joins\nthese against the manifest's ``mcp`` entry titles to render an\ninstaller-written entry read-only.\n\nEach row also carries ``route_mounts`` — the persisted ``{item_name: base}``\nmount the row is installed at (empty means every item at its declared base),\nso Studio seeds its update flow and renders routes at the ACTUAL mounted base.\n\nEach row also carries ``delivery`` — ``package`` for a pip-installed plugin,\n``descriptor`` for a descriptor-only plugin whose stored spec names no package.",
+        "description": "The installed inventory.\n\nShaped ``{\"installed\": [...]}``.\n\nEach installed row carries the update picture computed from the registry's\nversion rows against the RUNNING contract: ``latest`` (newest published\nversion, or ``null`` with none), ``update_available`` (a newer COMPATIBLE\nversion exists — an incompatible newer version never advertises as an\nupdate), ``incompatible_newer`` (the newest such blocked version, so \"an\nupdate exists but needs a newer core\" is visible, or ``null``), and\n``compat`` — the ``{status, reason}`` verdict of the row's declared\n``tai42-contract`` range against the running contract (a row the plugin layer\nleaves out for that range reads ``incompatible`` with the same reason). A per-row not-found — the\nupstream listing vanished or was suspended — is row STATE, not a route\nfailure: that row answers ``latest: null``, ``update_available: false``,\n``missing_upstream: true``, so one dead listing never fails the whole\ninventory. A transport/garbled-upstream failure still surfaces as a 502,\nand a garbled LOCAL row (a stored spec that no longer validates, a malformed\nstored ref, an unparsable stored version) as a 500 naming the row — serving\nrows without their update picture would be a silent degrade of the spec'd\nshape.\n\nEach row also carries ``items`` — the ``{kind, name}`` of every item its\nstored spec provides (from LOCAL truth, never the registry). Studio joins\nthese against the manifest's ``mcp`` entry titles to render an\ninstaller-written entry read-only.\n\nEach row also carries ``route_mounts`` — the persisted ``{item_name: base}``\nmount the row is installed at (empty means every item at its declared base),\nso Studio seeds its update flow and renders routes at the ACTUAL mounted base.\n\nEach row also carries ``delivery`` — ``package`` for a pip-installed plugin,\n``descriptor`` for a descriptor-only plugin whose stored spec names no package.",
         "operationId": "get_api_marketplace_installed",
         "responses": {
           "200": {
@@ -32994,7 +32999,7 @@
     },
     "/api/marketplace/uninstall": {
       "post": {
-        "description": "Unpatch the manifest, reload, pip uninstall, and drop attribution.\n\nConvergent and registry-free (see :meth:`Installer.uninstall`).",
+        "description": "Swap in the plugin environment without the plugin, unpatch the manifest and reload, then drop its record.\n\nConvergent and registry-free (see :meth:`Installer.uninstall`).",
         "operationId": "post_api_marketplace_uninstall",
         "requestBody": {
           "content": {

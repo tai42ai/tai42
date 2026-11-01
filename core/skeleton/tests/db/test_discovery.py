@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 from tai42_contract.plugins import PluginSpec
 from tai42_kit.db import MigrationDiscoveryError
+from tests._fakes.plugin_environment_dists import current_layer_build
 
 from tai42_skeleton.db import (
     SKELETON_COMPONENT,
@@ -99,13 +100,13 @@ def environment(monkeypatch: pytest.MonkeyPatch) -> Callable[..., None]:
     """Make the given site directories the whole environment: ``sys.path`` holds them alone.
 
     The modules discovery imports lazily are imported first, so narrowing ``sys.path`` only
-    changes which distributions are installed. The plugins prefix is unset unless a test
+    changes which distributions are installed. The plugins directory is unset unless a test
     configures one.
     """
-    import tai42_skeleton.marketplace.prefix
+    import tai42_skeleton.marketplace.environments.current_builds
     import tai42_skeleton.states.db
 
-    monkeypatch.setattr(tai42_skeleton.marketplace.prefix, "configured_prefix", lambda: None)
+    monkeypatch.setattr(tai42_skeleton.marketplace.environments.current_builds, "configured_plugins_dir", lambda: None)
 
     def _set(*sites: Path) -> None:
         monkeypatch.setattr(sys, "path", [str(site) for site in sites])
@@ -114,12 +115,11 @@ def environment(monkeypatch: pytest.MonkeyPatch) -> Callable[..., None]:
     return _set
 
 
-def _prefix_site(prefix: Path) -> Path:
-    from tai42_skeleton.marketplace.prefix import prefix_site_dirs
+def _layer_site(plugins_dir: Path, build_id: str = "20260101T000000Z-000000") -> Path:
+    """The first site directory of a new layer build under ``plugins_dir``, made ``current``."""
+    from tai42_skeleton.marketplace.environments.layout import layer_site_dirs
 
-    site = Path(prefix_site_dirs(str(prefix))[0])
-    site.mkdir(parents=True, exist_ok=True)
-    return site
+    return layer_site_dirs(current_layer_build(plugins_dir, build_id))[0]
 
 
 def _write_dist_info(site: Path, dist_name: str, version: str, files: list[Path]) -> None:
@@ -164,8 +164,10 @@ def _install_widget(
     return pkg
 
 
-def _configure_prefix(monkeypatch: pytest.MonkeyPatch, prefix: Path) -> None:
-    monkeypatch.setattr("tai42_skeleton.marketplace.prefix.configured_prefix", lambda: str(prefix))
+def _configure_plugins_dir(monkeypatch: pytest.MonkeyPatch, plugins_dir: Path) -> None:
+    monkeypatch.setattr(
+        "tai42_skeleton.marketplace.environments.current_builds.configured_plugins_dir", lambda: plugins_dir
+    )
 
 
 def test_all_entries_two_skeleton_chains_without_installed_plugins(environment: Callable[..., None]) -> None:
@@ -201,31 +203,51 @@ def test_installed_plugin_entries_empty_when_database_not_configured(
     assert installed_plugin_entries() == []
 
 
-def test_prefix_preinstalled_plugin_discovered(
+def test_plugin_in_the_current_layer_build_is_discovered(
     monkeypatch: pytest.MonkeyPatch, environment: Callable[..., None], tmp_path: Path
 ) -> None:
-    # A plugin pip-installed into the prefix is discovered although the prefix is not on
-    # ``sys.path`` (a CLI process never activates it), resolved against the prefix filesystem.
+    # A plugin built into the layer is discovered although the layer is not on ``sys.path``
+    # (a CLI process never activates it), resolved against the layer's current build.
+    from tai42_skeleton.marketplace.environments.layout import layer_dir, layer_site_dirs
+
     environment()
-    pkg = _install_widget(_prefix_site(tmp_path / "prefix"))
-    _configure_prefix(monkeypatch, tmp_path / "prefix")
+    pkg = _install_widget(_layer_site(tmp_path / "plugins"))
+    _configure_plugins_dir(monkeypatch, tmp_path / "plugins")
 
     entries = installed_plugin_entries()
 
+    # The chain is read through ``current``, so a later swap moves discovery with it.
+    through_current = layer_site_dirs(layer_dir(tmp_path / "plugins").current)[0] / pkg.name / "migrations"
     assert [entry.component for entry in entries] == ["tai42-widget"]
-    assert Path(str(entries[0].migrations_dir)) == pkg / "migrations"
+    assert Path(str(entries[0].migrations_dir)) == through_current
     assert entries[0].migrations_dir.is_dir()
 
 
-def test_distribution_in_environment_and_prefix_is_one_entry_from_the_environment(
+def test_discovery_reads_the_build_current_names(
     monkeypatch: pytest.MonkeyPatch, environment: Callable[..., None], tmp_path: Path
 ) -> None:
-    # The environment shadows the prefix for a package present in both, so the copy the
-    # deployment imports is the one whose chain is discovered, once.
+    # After a swap the search path follows ``current``: the older build is no longer read.
+    environment()
+    _layer_site(tmp_path / "plugins", "20260101T000000Z-000001")
+    _configure_plugins_dir(monkeypatch, tmp_path / "plugins")
+    assert installed_plugin_entries() == []
+
+    pkg = _install_widget(_layer_site(tmp_path / "plugins", "20260101T000000Z-000002"))
+
+    entries = installed_plugin_entries()
+    assert [entry.component for entry in entries] == ["tai42-widget"]
+    assert Path(str(entries[0].migrations_dir)).resolve() == (pkg / "migrations").resolve()
+
+
+def test_distribution_in_environment_and_layer_is_one_entry_from_the_environment(
+    monkeypatch: pytest.MonkeyPatch, environment: Callable[..., None], tmp_path: Path
+) -> None:
+    # The image's copy comes first on the search path, so for a package present in both
+    # the copy the deployment imports is the one whose chain is discovered, once.
     env_pkg = _install_widget(tmp_path / "site")
-    _install_widget(_prefix_site(tmp_path / "prefix"))
+    _install_widget(_layer_site(tmp_path / "plugins"))
     environment(tmp_path / "site")
-    _configure_prefix(monkeypatch, tmp_path / "prefix")
+    _configure_plugins_dir(monkeypatch, tmp_path / "plugins")
 
     entries = installed_plugin_entries()
 
@@ -286,13 +308,13 @@ def test_malformed_spec_is_a_loud_discovery_error(environment: Callable[..., Non
         installed_plugin_entries()
 
 
-def test_prefix_unset_or_never_created_adds_nothing(
+def test_plugins_dir_unset_or_without_a_layer_build_adds_nothing(
     monkeypatch: pytest.MonkeyPatch, environment: Callable[..., None], tmp_path: Path
 ) -> None:
     environment()
     assert installed_plugin_entries() == []
-    # A configured prefix whose site dirs do not exist (never installed into).
-    _configure_prefix(monkeypatch, tmp_path / "never-created")
+    # A configured plugins directory whose layer has no ``current`` build.
+    _configure_plugins_dir(monkeypatch, tmp_path / "never-created")
     assert installed_plugin_entries() == []
 
 

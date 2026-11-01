@@ -117,7 +117,7 @@ def test_boot_reallocates_off_a_foreign_listener(
         stack = fresh_stack(build_minimal_stack)
         app_port = stack.app_ports[0]
         assert app_port != seize.port, "the stack kept the seized port instead of re-allocating"
-        serve = stack._procs["serve"]
+        serve = stack.procs["serve"]
         assert serve.is_running()
         # Readiness passed from OUR process: the app port is held by the serve session.
         holders = ports.listening_pids(app_port)
@@ -140,10 +140,10 @@ def test_heal_refreshes_the_origin_allowlist_to_the_new_port(
         new_origin = stack.origin(app_port)
         seized_origin = f"http://{stack.host}:{seize.port}"
         # The serve process was (re)spawned advertising its NEW origin, never the seized one.
-        assert stack._specs["serve"].env[_ALLOWLIST_KEY] == new_origin, stack._specs["serve"].env[_ALLOWLIST_KEY]
+        assert stack.specs["serve"].env[_ALLOWLIST_KEY] == new_origin, stack.specs["serve"].env[_ALLOWLIST_KEY]
         # No value in its process env (the deployment env, which wins at every reload) names
         # the seized port.
-        stale = {key: value for key, value in stack._specs["serve"].env.items() if seized_origin in value}
+        stale = {key: value for key, value in stack.specs["serve"].env.items() if seized_origin in value}
         assert not stale, stale
     finally:
         seize.close()
@@ -156,7 +156,7 @@ def test_non_bind_early_exit_propagates_unchanged(
     # op) is NOT a port collision: the original readiness error carrying the child's
     # failure must propagate untouched, with no re-allocation and no heal warning.
     with (
-        caplog.at_level(logging.WARNING, logger="tai42_e2e.stack"),
+        caplog.at_level(logging.WARNING, logger="tai42_e2e.port_ownership"),
         pytest.raises(RuntimeError, match="totally_unknown_op"),
     ):
         fresh_stack(partial(build_projection_stack, api_tools={"enabled": True, "include": ["totally_unknown_op"]}))

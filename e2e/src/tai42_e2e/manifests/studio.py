@@ -13,6 +13,7 @@ from tai42_e2e.manifests.connectors import (
     _fixture_connector_descriptors,
 )
 from tai42_e2e.manifests.feature_env import _base_env, _memory_agent_state_env
+from tai42_e2e.manifests.marketplace import stack_plugins_dir
 from tai42_e2e.manifests.tool_entries import (
     _EXTENSION_MODULES,
     _PROJECTED_API_TOOLS,
@@ -184,6 +185,8 @@ def build_studio_stack(res: StackResources, variants: Variants) -> StackConfig:
         env["MARKETPLACE_URL"] = res.marketplace_url
         env["MARKETPLACE_ADVISORIES_POLL"] = "true"
         env["MARKETPLACE_ADVISORIES_INTERVAL_S"] = "1"
+        # The browser leg installs packaged plugins, which build the plugin environments here.
+        env["TAI_PLUGINS_DIR"] = stack_plugins_dir(res)
         # The attribution store binds to the ``default`` database (skeleton component)
         # _base_env already declares — the stack's own PG clone.
         if res.package_index_url is not None:

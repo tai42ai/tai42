@@ -9,7 +9,7 @@ from tai42_contract.manifest import TaiMCPConfig
 from tai42_kit.transport.http_uds_transport import HTTPUDSTransport
 from tai42_kit.transport.mcp_http import mcp_http_client
 from tai42_kit.transport.sse_uds_transport import SSEUDSTransport
-from tai42_kit.transport.stdio_launch import resolve_stdio_command, stdio_child_env, stdio_child_stderr
+from tai42_kit.transport.stdio_launch import resolve_stdio_command, stdio_child_stderr
 
 
 def get_mcp_transport(
@@ -25,11 +25,8 @@ def get_mcp_transport(
     headers and built on :func:`mcp_http_client`; it ignores ``uds_protocol``. A
     command server gets fastmcp's stdio transport running the executable
     :func:`~tai42_kit.transport.stdio_launch.resolve_stdio_command` finds for it (a bare
-    name with no executable match raises) with the config's ``args``, and an ``env`` that
-    is the config's, carrying the import directories of the install location the command
-    was found in, when that location declares any
-    (:func:`~tai42_kit.transport.stdio_launch.stdio_child_env`); the child's stderr is
-    this process's standard error descriptor
+    name with no executable match raises) with the config's ``args`` and its ``env``
+    exactly as declared; the child's stderr is this process's standard error descriptor
     (:func:`~tai42_kit.transport.stdio_launch.stdio_child_stderr`). A config that sets
     none of ``uds``, ``url`` and ``command`` raises :class:`ValueError` naming the server.
     """
@@ -49,10 +46,9 @@ def get_mcp_transport(
     command = config.config.command
     if not command:
         raise ValueError(f"MCP server {config.title!r} declares none of url, uds or command")
-    resolved = resolve_stdio_command(command, config.config.env)
     return StdioTransport(
-        command=resolved.executable,
+        command=resolve_stdio_command(command, config.config.env),
         args=list(config.config.args),
-        env=stdio_child_env(config.config.env, resolved.import_dirs),
+        env=dict(config.config.env),
         log_file=stdio_child_stderr(),
     )

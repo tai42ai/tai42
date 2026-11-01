@@ -67,6 +67,7 @@ import tai42_skeleton.access_control.store as access_control_store
 import tai42_skeleton.connectors.store.catalog_store as catalog_store
 import tai42_skeleton.db.boot_gate as boot_gate
 import tai42_skeleton.db.locks as db_locks
+import tai42_skeleton.marketplace.environments.boot_verification as boot_verification
 import tai42_skeleton.runs.store as runs_store
 import tai42_skeleton.states.db as states_db
 import tai42_skeleton.tool_meta.store as tool_meta_store
@@ -397,6 +398,20 @@ def _offline_schema_gate(monkeypatch: pytest.MonkeyPatch) -> None:
     # another feature ON) does not have it reach a Postgres it never provided. The states
     # store/service suites drive the configured behavior directly (fake store / real PG).
     monkeypatch.setattr(states_db, "states_store_configured", lambda: False)
+
+
+@pytest.fixture(autouse=True)
+def _offline_boot_verification(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The once-per-process plugin environment verification at the first epoch build reads
+    the install store under the shared fleet lock whenever the skeleton database is
+    configured. An offline app-boot test that sets the database password (to turn a feature
+    ON) would otherwise have it reach a Postgres it never provided. Report the database as
+    unconfigured to it, and start every test with the process unverified so each boot
+    meets the gate as a first boot. Its own suites
+    (``tests/marketplace/test_environments_boot_verification.py``,
+    ``tests/app/lifecycle/test_manifest_imports_verification.py``) re-patch this seam."""
+    monkeypatch.setattr(boot_verification, "component_store_configured", lambda component: False)
+    monkeypatch.setattr(boot_verification._VERIFIED, "done", False)
 
 
 @pytest.fixture(autouse=True)

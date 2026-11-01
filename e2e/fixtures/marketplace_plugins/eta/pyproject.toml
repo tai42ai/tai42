@@ -8,6 +8,9 @@ version = "0.0.0"
 description = "Installable marketplace fixture plugin: an mcp-server item launching a one-tool stdio MCP server."
 requires-python = ">=3.13"
 license = "Apache-2.0"
+dependencies = [
+    "tai-e2e-market-etalib>=1",
+]
 
 [project.scripts]
 tai-e2e-market-eta-mcp = "tai_e2e_market_eta.server:main"
@@ -20,4 +23,4 @@ where = ["src"]
 include = ["tai_e2e_market_eta*"]
 
 [tool.setuptools.package-data]
-tai_e2e_market_eta = ["tai-plugin.yml", "docs/index.mdx"]
+tai_e2e_market_eta = ["tai-plugin.yml", "docs/index.mdx", "migrations/*.sql"]

@@ -170,8 +170,8 @@ def child_env(
         "HOME": os.environ.get("HOME", str(stack.root)),
         "TMPDIR": tmpdir,
         "TAI_CONFIG_MODE": "file",
-        "TAI_CONFIG_DIR_PATH": str(stack._config_dir),
-        "TAI_MANIFEST_PATH": str(stack._config_dir / "manifest.yml"),
+        "TAI_CONFIG_DIR_PATH": str(stack.config_dir),
+        "TAI_MANIFEST_PATH": str(stack.config_dir / "manifest.yml"),
         "TAI_BACKEND_LIVENESS_PATH": str(stack.liveness_dir / process),
     }
     env.update(stack.config.env)
@@ -203,4 +203,4 @@ def render_env_file(stack: TaiStack) -> None:
     through its process env only (:func:`child_env`)."""
     stored = {**stored_bus_env(stack.config, stack.resources), **stack.config.stored_env}
     lines = [f"{key}={_env_file_literal(value)}" for key, value in sorted(stored.items())]
-    (stack._config_dir / ".env").write_text("".join(f"{line}\n" for line in lines), encoding="utf-8")
+    (stack.config_dir / ".env").write_text("".join(f"{line}\n" for line in lines), encoding="utf-8")

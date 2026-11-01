@@ -60,13 +60,13 @@ async def test_stack_boots_and_tears_down_leak_free(fresh_stack: Callable[..., T
     # The minimal stack this boots runs no backend worker, so it exercises no
     # backend seam and buys nothing on the non-default legs.
     stack = fresh_stack(build_minimal_stack)
-    assert all(handle.is_running() for handle in stack._procs.values())
+    assert all(handle.is_running() for handle in stack.procs.values())
     allocated = list(stack.app_ports) + ([stack.metrics_port] if stack.metrics_port else [])
     stack.teardown()
     # After teardown every port is free and no child survives.
     for port in allocated:
         assert ports.is_free(port), f"port {port} still bound after teardown"
-    assert not any(handle.is_running() for handle in stack._procs.values())
+    assert not any(handle.is_running() for handle in stack.procs.values())
 
 
 @pytest.mark.backendless
@@ -78,10 +78,10 @@ async def test_a_multi_worker_serve_gets_the_worker_healthcheck_window(
     # the serve stack; the harness hands ``tai serve`` its configured window for that.
     stack = fresh_stack(build_core_stack)
     assert stack.config.workers > 1
-    argv = stack._specs["serve"].argv
+    argv = stack.specs["serve"].argv
     flag = argv.index("--timeout-worker-healthcheck")
     assert argv[flag + 1] == str(infra.settings.worker_healthcheck_timeout)
-    assert all(handle.is_running() for handle in stack._procs.values())
+    assert all(handle.is_running() for handle in stack.procs.values())
 
 
 @pytest.mark.needs("no-stack")

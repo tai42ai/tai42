@@ -157,12 +157,14 @@ class InstallPreview(BaseModel):
 class UninstallResult(BaseModel):
     """The uninstall receipt.
 
-    ``reload`` is ``null`` when the plugin wrote no manifest entry to remove; ``notes`` are removal notes
-    (e.g. orphaned env vars left in place).
+    ``manifest_written`` is whether the manifest was written (a re-run writes it again even when
+    the plugin's entries are already gone); ``reload`` is ``null`` when nothing was written.
+    ``notes`` are removal notes (e.g. orphaned env vars left in place).
     """
 
     ref: str
     uninstalled: bool
+    manifest_written: bool
     reload: ApplyResponse | None
     notes: list[str]
 

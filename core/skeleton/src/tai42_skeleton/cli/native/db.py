@@ -2,13 +2,13 @@
 
 ``migrate`` applies every pending migration across every discovered component (the
 skeleton chains plus the chain of every installed plugin that declares one, in the
-environment or the plugins prefix, whether or not the manifest loads it, and of every
-plugin the persisted manifest loads) through the kit migration runner; ``--plan`` prints what WOULD be applied without
-touching the database. ``status`` reports each component's applied / pending /
-checksum verdict. Every command names each plugin component that is off (its override
-binding unset) and each installed distribution whose packages no installed metadata records
-(an editable install served by an import hook) and the manifest does not load; neither
-changes the exit code.
+environment, the plugin layer or its own server environment, whether or not the manifest
+loads it, and of every plugin the persisted manifest loads) through the kit migration
+runner; ``--plan`` prints what WOULD be applied without touching the database.
+``status`` reports each component's applied / pending / checksum verdict. Every command
+names each plugin component that is off (its override binding unset) and each installed
+distribution whose packages no installed metadata records (an editable install served by
+an import hook) and the manifest does not load; neither changes the exit code.
 
 Each component connects through its bound database's migrator (DDL-privileged)
 identity, resolved through the central registry — distinct from the app's runtime
@@ -195,7 +195,7 @@ def migrate_command(
     """Apply every pending migration across all discovered components.
 
     Discovery covers the skeleton chains plus the chain of every installed plugin that
-    declares one, in the environment or the plugins prefix, whether or not the manifest loads
+    declares one, in the environment or the plugin layer, whether or not the manifest loads
     it, and of every plugin the persisted manifest loads. ``--plan`` lists what would be
     applied and changes nothing. Idempotent: with nothing pending it reports so and exits 0.
     A plugin component whose override binding is unset is off: its chain is not applied, a
@@ -218,7 +218,7 @@ def status_command(ctx: typer.Context) -> None:
     """Report each component's applied / pending / checksum verdict.
 
     Reports every discovered component: the skeleton chains plus the chain of every
-    installed plugin that declares one, in the environment or the plugins prefix, whether or
+    installed plugin that declares one, in the environment or the plugin layer, whether or
     not the manifest loads it, and of every plugin the persisted manifest loads. Exits
     non-zero when any component has pending migrations or a checksum mismatch, so it doubles
     as a CI / pre-deploy gate. A plugin component whose override binding is unset is off, a

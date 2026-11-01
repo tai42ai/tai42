@@ -10,8 +10,11 @@ from __future__ import annotations
 import json
 
 import httpx
+import pytest
 
-from .remote_harness import data_response, error_response, run_cli, strip_ansi
+from tai42_cli.commands import plugins as plugins_cmd
+
+from .remote_harness import data_response, error_response, run_cli, strip_ansi, visible
 
 
 def _capture():
@@ -344,6 +347,44 @@ def test_uninstall_posts_ref(monkeypatch) -> None:
     assert captured["body"] == {"ref": "tai42/toolbox"}
 
 
+def _no_http(request: httpx.Request) -> httpx.Response:
+    raise AssertionError(f"--offline made an HTTP request: {request.method} {request.url}")
+
+
+_OFFLINE_RECEIPT = {"ref": "tai42/toolbox", "uninstalled": True, "manifest_written": True, "notes": ["next start"]}
+
+
+def test_register_offline_uninstall_installs_the_handler(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(plugins_cmd, "_offline_uninstall", None)
+
+    def handler(ref: str) -> dict:
+        return {}
+
+    plugins_cmd.register_offline_uninstall(handler)
+    assert plugins_cmd._offline_uninstall is handler
+
+
+def test_uninstall_offline_unregistered_reports_the_missing_server_package(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(plugins_cmd, "_offline_uninstall", None)
+    result = run_cli(monkeypatch, _no_http, ["plugins", "uninstall", "tai42/toolbox", "--offline"])
+    assert result.exit_code != 0
+    assert "needs the server package" in visible(result.output)
+
+
+def test_uninstall_offline_runs_the_registered_handler_with_no_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[str] = []
+
+    def handler(ref: str) -> dict:
+        seen.append(ref)
+        return _OFFLINE_RECEIPT
+
+    monkeypatch.setattr(plugins_cmd, "_offline_uninstall", handler)
+    result = run_cli(monkeypatch, _no_http, ["plugins", "uninstall", "tai42/toolbox", "--offline"], json_output=True)
+    assert result.exit_code == 0, result.output
+    assert seen == ["tai42/toolbox"]
+    assert json.loads(result.output) == _OFFLINE_RECEIPT
+
+
 def test_update_posts_ref_without_version_when_omitted(monkeypatch) -> None:
     handler, captured = _capture()
     captured["_payload"] = {"ref": "tai42/toolbox"}
@@ -392,6 +433,20 @@ def test_conflict_error_envelope_surfaces_nonzero(monkeypatch) -> None:
     result = run_cli(monkeypatch, handler, ["plugins", "install", "tai42/toolbox"])
     assert result.exit_code != 0
     assert "already installed" in result.output
+
+
+def test_install_failure_prints_the_restored_notice_on_its_own_line(monkeypatch) -> None:
+    message = "manifest reload failed\nthe previous plugin environment was restored"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return error_response(message, 500)
+
+    result = run_cli(monkeypatch, handler, ["plugins", "install", "tai42/toolbox"])
+    assert result.exit_code == 1
+    assert strip_ansi(result.output).splitlines() == [
+        "Error (HTTP 500): manifest reload failed",
+        "the previous plugin environment was restored",
+    ]
 
 
 def test_advisories_issues_the_get(monkeypatch) -> None:

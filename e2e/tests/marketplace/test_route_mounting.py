@@ -44,9 +44,9 @@ from tai42_e2e.stack import TaiStack
 from tai42_e2e.waiting import wait_for_async
 
 from ._market_support import (
-    distribution_absent,
     installed_refs,
     persisted_manifest,
+    plugin_absent,
 )
 
 pytestmark = [
@@ -58,7 +58,7 @@ pytestmark = [
         "helper:package-index",
         "setting:MARKETPLACE_URL",
         "setting:PIP_INDEX_URL",
-        "setting:shared-venv",
+        "setting:TAI_PLUGINS_DIR",
         "setting:fixture-plugin:epsilon",
     ),
 ]
@@ -133,15 +133,14 @@ async def _install(
 
 
 async def _uninstall_clean(stack: TaiStack, ref: str, package: str) -> None:
-    """Uninstall and prove the clean tail: the attribution row is gone and the
-    distribution no longer resolves in the shared venv (the venv guard would
-    otherwise raise for the whole area)."""
+    """Uninstall and prove the clean tail: the attribution row is gone and no plugin
+    environment of the stack holds the distribution."""
     await stack.api().post("/api/marketplace/uninstall", json={"ref": ref}, timeout=240.0)
 
     async def gone() -> bool:
         if ref in await installed_refs(stack):
             return False
-        return distribution_absent(package)
+        return plugin_absent(stack, package)
 
     await wait_for_async(gone, deadline=30.0, message=f"{ref} never fully uninstalled (row or {package!r} lingered)")
 
@@ -159,7 +158,7 @@ async def test_remap_serves_at_new_base_and_survives_restart(
     remapped_ping = "/api/e2e-epsilon-moved/ping"
     remapped_open = "/api/e2e-epsilon-moved/open"
 
-    assert distribution_absent(EPSILON_PACKAGE)
+    assert plugin_absent(stack, EPSILON_PACKAGE)
     assert (await _settled(stack.api(), "GET", remapped_ping)).status_code == 404
 
     result = await _install(stack, EPSILON_REF, version="0.1.0", mounts={_EPSILON_ITEM: remapped_base}, accept=True)
@@ -217,7 +216,7 @@ async def test_plugin_routes_survive_in_process_config_reload(
     # re-imported only the manifest leaf, so a plugin whose routes register in a sibling
     # module dropped every route from the new epoch and 404ed until a full restart.
     stack = router_merge_stack
-    assert distribution_absent(EPSILON_PACKAGE)
+    assert plugin_absent(stack, EPSILON_PACKAGE)
 
     await _install(stack, EPSILON_REF, version="0.1.0", accept=True)
     try:

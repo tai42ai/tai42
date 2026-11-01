@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from tai42_e2e.manifests.feature_env import _base_env, _switch
@@ -12,10 +13,18 @@ if TYPE_CHECKING:
     from tai42_e2e.variants import Variants
 
 
+def stack_plugins_dir(res: StackResources) -> str:
+    """The stack's plugins directory (``TAI_PLUGINS_DIR``): a sibling of ``storage/``
+    under the stack root, so the plugin environments outlive a serve-process restart
+    and are torn down only with the stack."""
+    return str(Path(res.storage_root).parent / "plugins")
+
+
 def build_marketplace_stack(res: StackResources, variants: Variants) -> StackConfig:
     """MULTIWORKER(1) with the marketplace client wired at the harness-run
     registry: the marketplace router, a short advisories poll, and the package
-    index the installer resolves wheels from.
+    index the installer resolves wheels from, and the plugins directory a packaged
+    install builds the plugin environments in.
 
     One worker so an install's manifest patch + reload is observed on a deterministic
     process (a fleet could serve the post-reload tool listing off a not-yet-reloaded
@@ -41,10 +50,11 @@ def build_marketplace_stack(res: StackResources, variants: Variants) -> StackCon
     env["MARKETPLACE_URL"] = res.marketplace_url
     env["MARKETPLACE_ADVISORIES_POLL"] = "true"
     env["MARKETPLACE_ADVISORIES_INTERVAL_S"] = "1"
+    env["TAI_PLUGINS_DIR"] = stack_plugins_dir(res)
     # The attribution store binds to the ``default`` database (skeleton component)
     # _base_env already declares — the stack's own per-run clone.
-    # The installer shells ``sys.executable -m pip install`` inheriting the worker env,
-    # so this pip knob reaches it; the PEP 503 root is /simple/. REAL marketplace-pypi
+    # The installer runs pip inheriting the worker env, so this pip knob reaches
+    # every plugin environment build; the PEP 503 root is /simple/. REAL marketplace-pypi
     # drops the fixture index so pip resolves the tai42 packages from real pypi.org (the
     # registry-side ingest repoint — MP_PYPI_BASE_URL / MP_GITHUB_API_BASE — lives in the
     # harness-run marketplace runner, ``marketplace.py``, outside these two files).
@@ -78,41 +88,23 @@ def build_marketplace_supervised_stack(res: StackResources, variants: Variants) 
     return replace(base, name="marketplace-supervised", manifest=manifest, env=env, run_backend=True, supervised=True)
 
 
-def build_marketplace_prefix_stack(res: StackResources, variants: Variants) -> StackConfig:
-    """The marketplace stack with a persistent plugin prefix configured
-    (``TAI_PLUGINS_PREFIX``) — the restart-survival home.
-
-    The prefix is a directory under the stack root (a sibling of ``storage/``), so
-    it OUTLIVES a serve-process restart and is torn down only with the stack. With
-    it set, an install lands the plugin's own distribution UNDER the prefix (never
-    in the shared editable venv), and boot re-adds the prefix to ``sys.path`` so the
-    plugin's tools re-import after a restart. Same single-worker, backendless shape
-    as the marketplace stack it derives from."""
-    from dataclasses import replace
-    from pathlib import Path
-
-    base = build_marketplace_stack(res, variants)
-    prefix_dir = Path(res.storage_root).parent / "plugin-prefix"
-    env = {**base.env, "TAI_PLUGINS_PREFIX": str(prefix_dir)}
-    return replace(base, name="marketplace-prefix", env=env)
-
-
 def build_marketplace_quarantine_stack(res: StackResources, variants: Variants) -> StackConfig:
-    """The marketplace-prefix stack with the zeta compat fixture's tool module
+    """The marketplace stack with the zeta compat fixture's tool module
     already wired into the manifest — the home of the boot-abort spec.
 
     The manifest carries the installer-shaped config row
     (``{"title": <module>, "module": <module>}``) for zeta's tool module, exactly
     what an install's manifest patch persists. The spec's fixture completes the
-    picture BEFORE boot: it installs the zeta wheel into the plugin prefix and
+    picture BEFORE boot: it lays the zeta wheel into the current plugin layer build and
     seeds its attribution row, forging the state a core upgrade strands an
     installed plugin in — present on disk, wired in the manifest, attributed in
-    the store, its declared contract range excluding the running contract."""
+    the store, its declared contract range excluding the running contract — then runs
+    ``tai plugins rebuild``, which leaves zeta out of the layer."""
     from dataclasses import replace
 
     from tai42_e2e.fixture_catalog import ZETA_TOOLS_MODULE
 
-    base = build_marketplace_prefix_stack(res, variants)
+    base = build_marketplace_stack(res, variants)
     manifest = {
         **base.manifest,
         "tools": [*base.manifest["tools"], {"title": ZETA_TOOLS_MODULE, "module": ZETA_TOOLS_MODULE}],
@@ -175,6 +167,7 @@ def build_marketplace_connectors_stack(res: StackResources, variants: Variants) 
     env["MARKETPLACE_URL"] = res.marketplace_url
     env["MARKETPLACE_ADVISORIES_POLL"] = "true"
     env["MARKETPLACE_ADVISORIES_INTERVAL_S"] = "1"
+    env["TAI_PLUGINS_DIR"] = stack_plugins_dir(res)
     if not _switch().is_real("marketplace-pypi"):
         env["PIP_INDEX_URL"] = f"{res.package_index_url}/simple/"
     # The connector store binds to the ``default`` database (skeleton component) _base_env

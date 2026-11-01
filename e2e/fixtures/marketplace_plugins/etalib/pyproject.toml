@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tai-e2e-market-etalib"
+version = "0.0.0"
+description = "Dependency-only marketplace fixture library: the eta fixture server's one tool."
+requires-python = ">=3.13"
+license = "Apache-2.0"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["tai_e2e_market_etalib*"]

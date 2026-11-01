@@ -18,7 +18,7 @@ immediately, no restart — and this test asserts that landed contract:
 * A subsequent RESTART re-boots on the now-persisted manifest and STILL serves the route.
 * Uninstall HOT-UNLOADS: its reload rebuilds the serving surface WITHOUT the module, so the
   route 404s again with no restart, the module leaves the manifest (catch-all still last),
-  and the venv guard confirms the distribution is gone.
+  and the plugin layer no longer holds the distribution.
 """
 
 from __future__ import annotations
@@ -35,7 +35,7 @@ from tai42_e2e.stack import TaiStack
 
 from ._market_support import (
     MarketInstaller,
-    distribution_absent,
+    plugin_absent,
 )
 
 pytestmark = [
@@ -47,7 +47,7 @@ pytestmark = [
         "helper:package-index",
         "setting:MARKETPLACE_URL",
         "setting:PIP_INDEX_URL",
-        "setting:shared-venv",
+        "setting:TAI_PLUGINS_DIR",
         "setting:fixture-plugin:epsilon",
         "setting:router-spa-catch-all-last",
         "process",
@@ -107,7 +107,7 @@ async def test_router_and_middleware_merge_hot_loads_then_survives_restart(
     # distribution is absent.
     assert await _route_status(stack, _PING) == 404
     assert await _route_status(stack, _OPEN) == 404
-    assert distribution_absent(EPSILON_PACKAGE)
+    assert plugin_absent(stack, EPSILON_PACKAGE)
 
     # Install through the abort-safe ledger so a mid-body failure still uninstalls.
     # Epsilon declares a PUBLIC route (GET /api/e2e-epsilon/open), so acceptance is
@@ -152,7 +152,7 @@ async def test_router_and_middleware_merge_hot_loads_then_survives_restart(
 
     # Uninstall HOT-UNLOADS: the reload rebuilds the surface without the module, so the
     # route 404s again with no restart, the module leaves the manifest (catch-all still
-    # last), and the distribution is gone from the venv.
+    # last), and the plugin layer no longer holds the distribution.
     await stack.api().post("/api/marketplace/uninstall", json={"ref": EPSILON_REF})
     await _wait_route(stack, _PING, 404)
     await _wait_route(stack, _OPEN, 404)
@@ -160,4 +160,4 @@ async def test_router_and_middleware_merge_hot_loads_then_survives_restart(
     routers_after = after.get("routers_modules") or []
     assert _ROUTER_MODULE not in routers_after, f"router module lingered after uninstall: {routers_after}"
     assert routers_after[-1] == _SPA_CATCH_ALL, f"SPA catch-all is no longer last after uninstall: {routers_after}"
-    assert distribution_absent(EPSILON_PACKAGE)
+    assert plugin_absent(stack, EPSILON_PACKAGE)

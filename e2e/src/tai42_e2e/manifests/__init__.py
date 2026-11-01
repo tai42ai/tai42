@@ -122,7 +122,6 @@ from tai42_e2e.manifests.manifest_mcp import (
 from tai42_e2e.manifests.marketplace import (
     build_marketplace_authz_stack,
     build_marketplace_connectors_stack,
-    build_marketplace_prefix_stack,
     build_marketplace_quarantine_stack,
     build_marketplace_stack,
     build_marketplace_supervised_stack,
@@ -255,7 +254,6 @@ __all__ = [
     "build_hook_runs_stack",
     "build_marketplace_authz_stack",
     "build_marketplace_connectors_stack",
-    "build_marketplace_prefix_stack",
     "build_marketplace_quarantine_stack",
     "build_marketplace_stack",
     "build_marketplace_supervised_stack",

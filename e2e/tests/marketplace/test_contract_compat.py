@@ -36,7 +36,7 @@ from ._market_support import resolve_path
 # skip on non-default backend legs.
 pytestmark = [
     pytest.mark.backendless,
-    pytest.mark.needs("helper:registry", "helper:package-index", "setting:shared-venv", "no-stack"),
+    pytest.mark.needs("helper:registry", "helper:package-index", "setting:TAI_PLUGINS_DIR", "no-stack"),
 ]
 
 

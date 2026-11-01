@@ -246,9 +246,11 @@ Postgres database: **no extra compose profile**; it rides the core
 tarball) from the in-repo `fixtures/marketplace_plugins` tree
 (`TAI_E2E_MARKETPLACE_FIXTURES` overrides it), served over a local package index,
 seeds them through the registry's real ingest pipeline, which publishes each version
-synchronously, and the skeleton REALLY pip-installs them into the one shared venv —
-so every lifecycle spec ends with its own uninstall and a session guard raises loudly
-on any leftover distribution (never auto-cleaning). The ui leg additionally
+synchronously, and the skeleton REALLY pip-builds them into each stack's own
+`TAI_PLUGINS_DIR` — in-process plugins into its plugin layer, an `mcp-server` package
+into its own environment there — so every lifecycle spec ends with its own uninstall,
+and a session guard raises loudly if any fixture distribution ever lands in the
+harness's own venv, which stands in for the image (never auto-cleaning). The ui leg additionally
 pnpm-builds and serves the public `tai-marketplace/web` checkout and drives the Studio
 marketplace page and the public site over a browser.
 

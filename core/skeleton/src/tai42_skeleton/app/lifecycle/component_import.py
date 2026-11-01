@@ -25,7 +25,7 @@ class ComponentImportMixin(LifecycleState):
     def _initialize_components(self, installed: "InstalledPackages"):
         """Import the live manifest's modules; ``installed`` is the build's package→dist snapshot.
 
-        ``start()`` takes the snapshot once, after the plugins prefix is on ``sys.path``,
+        ``start()`` takes the snapshot once, after the plugin layer is on ``sys.path``,
         and the same snapshot serves the schema gate and every compat verdict of the pass.
         """
         manifest = self._require_live_manifest()

@@ -95,7 +95,7 @@ from tai42_skeleton.config.service.broadcast import _BroadcastMixin
 from tai42_skeleton.config.service.exclusion import WriteSpan, write_exclusion
 from tai42_skeleton.config.service.profile_apply import _ProfileApplyMixin
 from tai42_skeleton.config.service.resolution import _environ, _ResolutionMixin
-from tai42_skeleton.config.service.results import ApplyResult, OrphanEnvWriteError
+from tai42_skeleton.config.service.results import ApplyResult, OrphanEnvWriteError, PersistedChange
 from tai42_skeleton.config.service.validation import _ValidationMixin
 from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.settings.env_secret_marks import SECRET_MARKS_ENV_VAR, format_secret_marks, parse_secret_marks
@@ -220,6 +220,28 @@ class ConfigService(_ProfileApplyMixin, _ValidationMixin, _ResolutionMixin, _Bro
             combo_check=instance.app.extensions.check_combo,
         )
 
+    @classmethod
+    def host_side(cls) -> ConfigService:
+        """Wire the pipeline for a host-side process, after the boot read ran on the process app.
+
+        A host-side process serves nothing: it runs the pipeline's write stage
+        (:meth:`persist_change`) and the deployment converges on the change at its next start.
+        It writes through the deployment's config manager, and reads the bus the boot read built
+        for the deployment-ownership census only. Its admin and combo check are the host-side
+        ones (:mod:`~tai42_skeleton.config.service.host_side`). Raises when the boot read did not
+        run, as the process app's bus does.
+        """
+        from tai42_skeleton.app import instance
+        from tai42_skeleton.config.service.host_side import HostSideAdmin, host_side_combo_check
+
+        app = instance.app
+        return cls(
+            config_manager=app.config.config_manager,
+            admin=HostSideAdmin(),
+            bus=app.bus,
+            combo_check=host_side_combo_check,
+        )
+
     def read_manifest_document(self) -> dict[str, Any]:
         """The persisted manifest in its PRESERVED view (empty when none exists yet), a copy the caller owns.
 
@@ -231,12 +253,19 @@ class ConfigService(_ProfileApplyMixin, _ValidationMixin, _ResolutionMixin, _Bro
     async def apply_change(self, mutator: Callable[[dict[str, Any]], None]) -> ApplyResult:
         """Read-modify-write the manifest, then persist, reload, and broadcast to the fleet.
 
+        The write stage (:meth:`persist_change`) followed by the live convergence of what it
+        persisted (:meth:`converge`).
+        """
+        return await self.converge(await self.persist_change(mutator))
+
+    async def persist_change(self, mutator: Callable[[dict[str, Any]], None]) -> PersistedChange:
+        """Read-modify-write the manifest and persist it; nothing converges on the change here.
+
         Under the write exclusion, runs ``mutator`` on a copy of the PRESERVED manifest and
         VALIDATEs the resolved projection of the result before the held-unpick check lists any
         MCP server, then runs it again inside the config-manager transaction (validating the
         result anew when the stored manifest, the process env, the bus setting or the live
-        serving generation changed meanwhile) and persists; then, the exclusion released, locally
-        reloads and broadcasts to the whole fleet.
+        serving generation changed meanwhile) and persists.
 
         ``mutator`` edits the passed document IN PLACE and must be pure / re-runnable
         (the transaction may re-run it on a concurrency conflict). An invalid mutation
@@ -261,8 +290,17 @@ class ConfigService(_ProfileApplyMixin, _ValidationMixin, _ResolutionMixin, _Bro
             else:
                 persisted = await self._apply_change_locked(mutator, preserved, candidate, ownership)
                 recycle_keys = ()
+        return PersistedChange(persisted, tuple(recycle_keys), span.release_error)
+
+    async def converge(self, persisted: PersistedChange) -> ApplyResult:
+        """Locally reload and broadcast ``persisted`` to the whole fleet, rolling a recycle when its keys owe one.
+
+        The live convergence of a persisted manifest change (:meth:`_reload_and_broadcast`).
+        """
         return await self._reload_and_broadcast(
-            document=persisted, recycle_keys=recycle_keys, span_release_error=span.release_error
+            document=persisted.document,
+            recycle_keys=persisted.recycle_keys,
+            span_release_error=persisted.span_release_error,
         )
 
     async def _apply_change_locked(
@@ -306,9 +344,9 @@ class ConfigService(_ProfileApplyMixin, _ValidationMixin, _ResolutionMixin, _Bro
         :meth:`apply_change`.
 
         ``continues`` / ``recycle_keys`` (exclusive) make the reload the continuation of an
-        earlier change: ``continues`` carries that change's already-run roll (no pin, no second
-        roll, one verdict), ``recycle_keys`` its recycle-class keys whose roll never ran (this
-        reload rolls them).
+        earlier change: ``continues`` carries that change's roll, already run or deferred (no pin,
+        no second roll, one verdict), ``recycle_keys`` its recycle-class keys whose roll never ran
+        (this reload rolls them, or defers the roll inside a deferral scope).
         """
         async with self._write_exclusion() as span:
             ownership = await self.deployment_ownership("reapply_manifest")

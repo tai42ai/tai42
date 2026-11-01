@@ -17,6 +17,7 @@ import pytest
 from tai42_kit.utils.data import dump_manifest
 
 from tai42_skeleton.marketplace.installer import Installer
+from tai42_skeleton.marketplace.unwind import ENVIRONMENT_RESTORED
 from tai42_skeleton.operations import BadRequestError
 from tai42_skeleton.operations import config as config_ops
 from tai42_skeleton.operations import marketplace as marketplace_ops
@@ -29,12 +30,15 @@ from tai42_skeleton.operations.manifest import sections as section_ops
 
 from .._fakes.combo_check_app import CHECK_DOCUMENT, LiveStore, booted_check_app, clean_server, live_store
 from ..marketplace._specs import make_resolved, make_spec, tool_item
-from ..marketplace.test_installer import Harness
+from ..marketplace.test_installer import Harness, layer_inputs
 
 pytestmark = pytest.mark.usefixtures(clean_server.__name__, live_store.__name__)
 
 _REFUSED = {"name": "refusing", "config": {"label": "x"}}
 _REFUSAL = "tools[a].extensions[echo][0]: extension 'refusing' on tool 'echo' cannot bind: bad label"
+# A marketplace door's refusal comes after its plugin environment change, which is swapped
+# back: the operator reads the gate text, then the restored notice.
+_RESTORED_REFUSAL = f"{_REFUSAL}\n{ENVIRONMENT_RESTORED}"
 _MARKED = {"name": "refusing", "config": {"label": "!ENV ${EXT_L}"}}
 
 
@@ -193,6 +197,7 @@ def _marketplace(monkeypatch: pytest.MonkeyPatch, harness: Harness) -> None:
             pip_runner=harness.pip,
             store=cast("Any", harness.store),
             fleet_lock=harness.fleet,
+            plugins_dir=lambda: harness.plugins_dir,
         ),
     )
 
@@ -209,10 +214,11 @@ def test_the_marketplace_install_door_refuses_with_the_gate_text(
     async def body() -> None:
         with pytest.raises(BadRequestError) as caught:
             await marketplace_ops.marketplace_install("tai42/toolbox")
-        assert str(caught.value) == _REFUSAL
+        assert str(caught.value) == _RESTORED_REFUSAL
         _assert_untouched(live_store, stored, {})
-        # The refusal unwinds the install: the just-installed package is removed, no row is recorded.
-        assert harness.pip.calls[-1] == ["uninstall", "--yes", "tai42-toolbox"]
+        # The refusal unwinds the install: the plugin layer build is swapped back, no row is recorded.
+        assert len(harness.pip.calls) == 1
+        assert layer_inputs(harness) is None
         assert harness.store.record_calls == []
 
     _booted(body)
@@ -231,11 +237,12 @@ def test_the_marketplace_update_door_refuses_with_the_gate_text(
     async def body() -> None:
         with pytest.raises(BadRequestError) as caught:
             await marketplace_ops.marketplace_update("tai42/toolbox")
-        assert str(caught.value) == _REFUSAL
+        assert str(caught.value) == _RESTORED_REFUSAL
         _assert_untouched(live_store, stored, {})
-        # The refusal unwinds the update: the prior version is reinstalled and its row stays.
-        assert harness.pip.calls[-1][0] == "install"
-        assert "tai42-toolbox==1.0.0" in harness.pip.calls[-1]
+        # The refusal unwinds the update: the new layer build is swapped back with no further
+        # pip call, and the prior version's row stays.
+        assert len(harness.pip.calls) == 1
+        assert "tai42-toolbox==2.0.0" in harness.pip.calls[0]
         assert harness.store.rows["tai42/toolbox"].version == "1.0.0"
         assert harness.store.record_calls == []
 
@@ -254,7 +261,7 @@ def test_the_marketplace_uninstall_door_refuses_with_the_gate_text(
     async def body() -> None:
         with pytest.raises(BadRequestError) as caught:
             await marketplace_ops.marketplace_uninstall("tai42/toolbox")
-        assert str(caught.value) == _REFUSAL
+        assert str(caught.value) == _RESTORED_REFUSAL
         _assert_untouched(live_store, stored, {})
         # Refused before anything changed: the package stays installed and its row stays.
         assert harness.pip.calls == []

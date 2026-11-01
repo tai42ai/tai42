@@ -10,7 +10,9 @@ reachable from the terminal.
 The mutating commands run arbitrary third-party code in the serving environment
 by design; typed :class:`ApiError` results (a 409 collision, a 502 registry
 failure, a 503 in-progress) surface through the root group's handler, so these
-commands add no error handling of their own.
+commands add no error handling of their own. ``uninstall --offline`` runs on the
+deployment host with no server, through the handler the server package registers
+(:func:`register_offline_uninstall`); that handler's refusals reach the same root handler.
 """
 
 from __future__ import annotations
@@ -18,7 +20,7 @@ from __future__ import annotations
 from importlib import resources
 from importlib.resources.abc import Traversable
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Protocol
 
 import typer
 from tai42_contract.plugins import LISTING_SLUG_RE, PluginSpec
@@ -377,17 +379,71 @@ def install(
     emit_result(ctx_obj, data)
 
 
+class OfflineUninstallHandler(Protocol):
+    """The host-side ``--offline`` handler the server package registers.
+
+    It uninstalls one plugin on the deployment host with no server and returns the receipt
+    payload. The cli stays skeleton-agnostic and reaches it only through
+    :func:`register_offline_uninstall`.
+    """
+
+    def __call__(self, ref: str) -> dict[str, Any]:
+        """Uninstall ``ref`` on the deployment host and return the receipt payload."""
+        ...
+
+
+_offline_uninstall: OfflineUninstallHandler | None = None
+
+
+def register_offline_uninstall(handler: OfflineUninstallHandler) -> None:
+    """Register the host-side ``--offline`` handler; the server package calls this at CLI load."""
+    global _offline_uninstall
+    _offline_uninstall = handler
+
+
 @app.command("uninstall")
 @covers(("POST", "/api/marketplace/uninstall"))
-def uninstall(ctx: typer.Context, ref: Annotated[str, typer.Argument(help="Plugin ref 'namespace/name'.")]) -> None:
+def uninstall(
+    ctx: typer.Context,
+    ref: Annotated[str, typer.Argument(help="Plugin ref 'namespace/name'.")],
+    offline: Annotated[
+        bool,
+        typer.Option(
+            "--offline",
+            help="Run on the deployment host with no server: remove the plugin from the install store, the "
+            "plugin environments and the manifest under the fleet lock; a server loads the change on its "
+            "next start. Needs the server package (tai42-skeleton) installed with the CLI.",
+        ),
+    ] = False,
+) -> None:
     """Uninstall a marketplace-installed plugin by ref.
+
+    Against the running server by default; with ``--offline``, on the deployment host with no
+    server (the way out when the server cannot start because of the plugin).
 
     Example: ``tai plugins uninstall tai42/toolbox``
     """
     ctx_obj = app_context(ctx)
+    if offline:
+        _run_offline_uninstall(ctx_obj, ref)
+        return
     with ctx_obj.client() as client:
         data = client.post("/api/marketplace/uninstall", json={"ref": ref})
     emit_result(ctx_obj, data)
+
+
+def _run_offline_uninstall(ctx_obj: AppContext, ref: str) -> None:
+    """Uninstall ``ref`` through the host-side handler and render its receipt.
+
+    The handler is filled by the server package's ``tai.commands`` entry point at CLI load;
+    its absence means the deployment's server package is not installed alongside the CLI, which
+    is a usage error rather than a crash. No HTTP request is made on this path.
+    """
+    if _offline_uninstall is None:
+        raise typer.BadParameter(
+            "--offline runs on the deployment host and needs the server package (tai42-skeleton) installed with the CLI"
+        )
+    emit_result(ctx_obj, _offline_uninstall(ref))
 
 
 @app.command("update")

@@ -557,7 +557,7 @@ def remove_provides(manifest_dict: dict[str, Any], spec: PluginSpec) -> bool:
 
     Convergent — an already-removed entry is skipped, so a re-run after a partial
     uninstall completes the removal. ``config_row`` entries are dropped by
-    matching ``module`` regardless of title, because after the pip uninstall the
+    matching ``module`` regardless of title, because once the plugin leaves its environment the
     import fails and a leftover entry bricks the next boot; any operator
     include/exclude/extensions customization on such an entry is removed with it
     (inherent to uninstalling the plugin). A ``scalar_module`` slot is cleared to

@@ -25,11 +25,10 @@ import tai42_skeleton.operations.marketplace as mkt_ops
 import tai42_skeleton.routers.marketplace as router
 from tai42_skeleton.app.reload_gate import reload_gate
 from tai42_skeleton.marketplace.advisories import AdvisoryState
-from tai42_skeleton.marketplace.compat import CompatVerdict
+from tai42_skeleton.marketplace.compat import declared_compat
 from tai42_skeleton.marketplace.errors import (
     ArtifactIntegrityError,
     ContractIncompatibleError,
-    EnvironmentShadowError,
     InstallStateError,
     InstallUnwindError,
     ListingNotFoundError,
@@ -40,17 +39,22 @@ from tai42_skeleton.marketplace.errors import (
     OperationInProgressError,
     PipFailedError,
     PipUnavailableError,
+    PluginDependencyConflictError,
+    PluginMigrationError,
+    PluginsDirError,
     PublicRoutesNotAcceptedError,
     RegistryUnreachableError,
     ReservedRoutePrefixError,
     RouteCollisionError,
     RouteMountError,
+    ServerCommandCollisionError,
+    UndeclaredServerCommandError,
     VersionRefusedError,
 )
 from tai42_skeleton.marketplace.store import InstallRecord
 from tai42_skeleton.operations import NotSupportedError
 
-from ..marketplace._specs import make_spec, tool_item
+from ..marketplace._specs import make_spec, mcp_server_item, tool_item
 
 
 @pytest.fixture(autouse=True)
@@ -435,28 +439,44 @@ async def test_installed_garbled_local_version_is_500(monkeypatch: pytest.Monkey
     assert "error" in _data(resp)
 
 
-async def test_installed_serves_per_row_compat_verdict(monkeypatch: pytest.MonkeyPatch) -> None:
-    record = InstallRecord(
-        ref="tai42/toolbox",
-        version="1.0.0",
+def _installed_record(spec: PluginSpec) -> InstallRecord:
+    return InstallRecord(
+        ref=spec.ref,
+        version=spec.version,
         source="pypi",
-        spec=make_spec(package="acme-toolbox", provides=[tool_item()]).model_dump(mode="json"),
+        spec=spec.model_dump(mode="json"),
         installed_at=datetime(2026, 1, 1, tzinfo=UTC),
     )
-    _use_store(monkeypatch, [record])
+
+
+async def test_installed_serves_the_verdict_of_each_row_s_declared_contract_range(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A range no running tai42-contract is inside, as a core upgrade leaves a store row.
+    spec = make_spec(package="acme-toolbox", provides=[tool_item()], contract=">=99,<100")
+    _use_store(monkeypatch, [_installed_record(spec)])
     _use_registry(monkeypatch, _FakeRegistry(versions=[_published("1.0.0")]))
-    seen: list[str] = []
 
-    def _dist_compat(dist_name: str):
-        seen.append(dist_name)
-        return CompatVerdict("incompatible", "acme-toolbox requires tai42-contract <0.3, but 0.3.0 is running")
-
-    monkeypatch.setattr(mkt_ops, "dist_compat", _dist_compat)
     resp = await router.marketplace_installed(_get())
+
     row = _data(resp)["data"]["installed"][0]
-    assert seen == ["acme-toolbox"]  # verdicted by the stored spec's package dist
+    assert row["compat"] == declared_compat("acme-toolbox", ">=99,<100").as_payload()
     assert row["compat"]["status"] == "incompatible"
-    assert "requires tai42-contract" in row["compat"]["reason"]
+    assert row["compat"]["reason"].startswith("acme-toolbox requires tai42-contract <100,>=99, but ")
+
+
+async def test_installed_serves_unknown_for_a_row_declaring_no_contract_range(monkeypatch: pytest.MonkeyPatch) -> None:
+    spec = make_spec(package="acme-srv", provides=[mcp_server_item()], contract=None)
+    _use_store(monkeypatch, [_installed_record(spec)])
+    _use_registry(monkeypatch, _FakeRegistry(versions=[_published("1.0.0")]))
+
+    resp = await router.marketplace_installed(_get())
+
+    row = _data(resp)["data"]["installed"][0]
+    assert row["compat"] == {
+        "status": "unknown",
+        "reason": "distribution 'acme-srv' declares no tai42-contract requirement; treating it as compatible",
+    }
 
 
 # -- advisories --------------------------------------------------------------
@@ -650,7 +670,9 @@ async def test_install_operation_in_progress_is_retriable_503(monkeypatch: pytes
         (VersionRefusedError("killed"), 409),
         (ManifestCollisionError("collides"), 409),
         (ContractIncompatibleError("range"), 409),
-        (EnvironmentShadowError("env 1.0 shadows prefix 2.0"), 409),
+        (PluginDependencyConflictError("cannot install tai42/toolbox 1.0.0: its dependencies conflict"), 409),
+        (UndeclaredServerCommandError("tai42/srv: mcp-server item srv names command 'python'"), 409),
+        (ServerCommandCollisionError("cannot install tai42/b 1.0.0: its package tai42-b declares 'x'"), 409),
         (RouteCollisionError([{"item": "relay", "full_path": "/api/x", "methods": ["GET"]}]), 409),
         (ReservedRoutePrefixError(["/api/auth/x"], ["/api/auth"]), 409),
         (RouteMountError("unknown item"), 400),
@@ -664,12 +686,14 @@ async def test_install_operation_in_progress_is_retriable_503(monkeypatch: pytes
             ArtifactIntegrityError(expected_sha256="a" * 64, actual_sha256="b" * 64, artifact_ref="https://x/y.tgz"),
             500,
         ),
-        # The _to_operation_error else-branch: an environment/invariant fault the
+        # The to_operation_error fall-through: an environment/invariant fault the
         # operation could not complete maps to a terminal 500.
         (ManifestComposeError("composed manifest invalid"), 500),
         (LocalStateError("stored spec corrupt"), 500),
         (InstallUnwindError(RuntimeError("step"), RuntimeError("unwind")), 500),
         (PipUnavailableError("no pip"), 500),
+        (PluginsDirError("packaged plugins need TAI_PLUGINS_DIR"), 500),
+        (PluginMigrationError("tai42/acct: its migrations failed"), 500),
     ],
 )
 async def test_install_error_families_map_to_status(
@@ -682,6 +706,47 @@ async def test_install_error_families_map_to_status(
     resp = await router.marketplace_install(_post({"ref": "tai42/toolbox"}))
     assert resp.status_code == status
     assert "error" in _data(resp)
+
+
+_RESTORED = "the previous plugin environment was restored"
+
+
+def _restored(error: Exception) -> Exception:
+    error.add_note(_RESTORED)
+    return error
+
+
+@pytest.mark.parametrize(
+    ("error", "text", "status"),
+    [
+        (ManifestCollisionError("collides"), "collides", 409),
+        (LocalStateError("stored spec corrupt"), "stored spec corrupt", 500),
+        (PluginMigrationError("tai42/acct: its migrations failed"), "tai42/acct: its migrations failed", 500),
+    ],
+)
+async def test_install_error_envelope_ends_with_the_restored_notice(
+    monkeypatch: pytest.MonkeyPatch, error: Exception, text: str, status: int
+) -> None:
+    async def _raise(ref, version):
+        raise _restored(error)
+
+    _use_installer(monkeypatch, install=_raise)
+    resp = await router.marketplace_install(_post({"ref": "tai42/toolbox"}))
+    assert resp.status_code == status
+    assert _data(resp)["error"] == f"{text}\n{_RESTORED}"
+
+
+async def test_install_pip_failure_keeps_its_output_and_ends_with_the_restored_notice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _raise(ref, version):
+        raise _restored(PipFailedError(["install", "x"], 1, "pip said no"))
+
+    _use_installer(monkeypatch, install=_raise)
+    resp = await router.marketplace_install(_post({"ref": "tai42/toolbox"}))
+    body = _data(resp)
+    assert body["error"].endswith(f"\n{_RESTORED}")
+    assert body["pip_output"] == "pip said no"
 
 
 async def test_install_artifact_integrity_carries_digests_in_envelope(monkeypatch: pytest.MonkeyPatch) -> None:

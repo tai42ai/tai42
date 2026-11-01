@@ -242,6 +242,45 @@ async def test_run_backend_installs_process_scope_redactor(fake_app: _FakeApp, m
     assert scopes == ["process"]
 
 
+@pytest.fixture
+def _cli_process_state_of_its_own(monkeypatch: pytest.MonkeyPatch):
+    """The process state a real ``run_backend`` changes, as it stood before the test, comes back after it.
+
+    ``run_backend`` registers the CLI process handlers on the process app
+    (:func:`~tai42_skeleton.app.instance.register_cli_process_state`), and its boot manifest read
+    runs them: the root logger is configured again, fastmcp's settings are read again and
+    fastmcp's logger is configured from them. Its lifespan exit leaves the serving core it started
+    on the app as the read target of a later read, holding every registration ``start()`` made.
+    Every handler registry of the app, the app's serving core, the root and fastmcp loggers and
+    every fastmcp setting are restored, so a later boot on the same app runs none of those
+    handlers, a later read finds none of those registrations, and the host's logging and fastmcp
+    settings are as they were.
+    """
+    import fastmcp
+    from fastmcp.settings import Settings
+
+    from tai42_skeleton.app import instance
+
+    real_app = instance.build_app()
+    for name, value in list(vars(real_app).items()):
+        if name.endswith("_handlers") and isinstance(value, dict):
+            monkeypatch.setattr(real_app, name, dict(value))
+    monkeypatch.setattr(real_app, "_building", real_app._building)
+    loggers = [logging.getLogger(), logging.getLogger("fastmcp")]
+    saved_loggers = [(logger, logger.handlers[:], logger.level, logger.propagate) for logger in loggers]
+    saved_settings = {name: getattr(fastmcp.settings, name) for name in Settings.model_fields}
+    try:
+        yield
+    finally:
+        for logger, handlers, level, propagate in saved_loggers:
+            logger.handlers[:] = handlers
+            logger.setLevel(level)
+            logger.propagate = propagate
+        for name, value in saved_settings.items():
+            fastmcp.settings.set_setting(name, value)
+
+
+@pytest.mark.usefixtures("_cli_process_state_of_its_own")
 async def test_run_backend_beat_reaches_import_registered_backend(monkeypatch: pytest.MonkeyPatch) -> None:
     """A beat-style (non-worker) invocation with a REAL app and a plugin module
     that registers its Backend at import: ``run_backend`` must bind the app
@@ -257,10 +296,6 @@ async def test_run_backend_beat_reaches_import_registered_backend(monkeypatch: p
     monkeypatch.setattr(real_app, "_bus", None)
     saved_backend = real_app._backend_holder._backend
     real_app._backend_holder._backend = None
-    # ``run_backend`` registers the CLI root-logger reload handler on the process app.
-    # Scope it to this test: a later reload on the same app would otherwise re-run
-    # ``setup_logging(force=True)`` and replace the root handlers pytest captures through.
-    monkeypatch.setattr(real_app, "_reload_handlers", dict(real_app._reload_handlers))
     # Model a fresh process: the handle is unbound until start() binds it, so an
     # import-before-bind registration raises instead of landing anywhere. The
     # plugin module is therefore NOT imported here — start() imports it, after

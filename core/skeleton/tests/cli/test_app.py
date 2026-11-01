@@ -119,14 +119,20 @@ def test_offline_validators_attach_onto_client_groups() -> None:
     assert manifest_validate.exit_code == 0, manifest_validate.output
 
 
-def test_attach_offline_raises_naming_missing_group() -> None:
+def test_plugins_rebuild_attaches_onto_the_client_plugins_group() -> None:
+    result = CliRunner().invoke(app_module.app, ["plugins", "rebuild", "--help"])
+    assert result.exit_code == 0, result.output
+    assert "install store" in result.output
+
+
+def test_attach_leaf_raises_naming_missing_group() -> None:
     # A root group lacking the client's ``config``/``manifest`` groups is a wiring
     # error: the attach must raise loudly, naming the group it could not find.
     from tai42_skeleton.cli import offline
-    from tai42_skeleton.cli.local import _attach_offline
+    from tai42_skeleton.cli.local import _attach_leaf
 
     with pytest.raises(RuntimeError, match="manifest"):
-        _attach_offline(click.Group("tai"), "manifest", offline.manifest_validate, "validate")
+        _attach_leaf(click.Group("tai"), "manifest", offline.manifest_validate, "validate")
 
 
 def test_register_raises_when_client_groups_absent() -> None:

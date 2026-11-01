@@ -10,27 +10,34 @@ from __future__ import annotations
 
 import copy
 import os
-from collections.abc import Sequence
+import shutil
+import tempfile
+import weakref
+from collections.abc import Mapping, Sequence
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, cast
 
 import pytest
 from pyaml_env import parse_config
 from tai42_contract.plugins import PluginSpec
 from tai42_kit.utils.data import dump_manifest
+from tests._fakes.plugin_environment_dists import lay_server_requirement
 
 from tai42_skeleton.app.bus import FleetResult
 from tai42_skeleton.config.deployment_env import DeploymentOwnership
-from tai42_skeleton.config.service import ApplyResult
+from tai42_skeleton.config.service import ApplyResult, PersistedChange
 from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.marketplace import installer as installer_module
-from tai42_skeleton.marketplace import package_ops
+from tai42_skeleton.marketplace.environments import build as build_module
+from tai42_skeleton.marketplace.environments.layout import EnvironmentDir, layer_dir, read_build_record, server_dir
 from tai42_skeleton.marketplace.errors import (
     OperationInProgressError,
     PipFailedError,
 )
 from tai42_skeleton.marketplace.installer import Installer
+from tai42_skeleton.marketplace.manifest_apply import Convergence
 from tai42_skeleton.marketplace.store import InstallRecord
 from tai42_skeleton.operations._broadcast import FleetBroadcastError
 
@@ -47,8 +54,10 @@ __all__ = [
     "FakeStore",
     "Harness",
     "_assert_no_pip",
+    "build_module",
     "installer_module",
-    "package_ops",
+    "layer_inputs",
+    "server_inputs",
 ]
 
 
@@ -62,6 +71,29 @@ _GH_ARTIFACT_OLD = "https://codeload.github.com/tai42ai/toolbox/tar.gz/refs/tags
 
 def _assert_no_pip(h: Harness) -> None:
     assert h.pip.calls == []
+
+
+def current_inputs(environment: EnvironmentDir) -> list[str] | None:
+    """The ``<ref> <version>`` labels the build ``environment``'s ``current`` names was made from.
+
+    ``None`` when the environment has no current build."""
+    if not environment.current.is_symlink():
+        return None
+    record = read_build_record(environment.current)
+    assert record is not None, f"{environment.current} names a build with no record"
+    return [item.label() for item in record.inputs]
+
+
+def layer_inputs(h: Harness) -> list[str] | None:
+    """The plugins the harness's current plugin layer build was made from."""
+    assert h.plugins_dir is not None
+    return current_inputs(layer_dir(h.plugins_dir))
+
+
+def server_inputs(h: Harness, package: str) -> list[str] | None:
+    """The plugin the harness's current build of server package ``package`` was made from."""
+    assert h.plugins_dir is not None
+    return current_inputs(server_dir(h.plugins_dir, package))
 
 
 class FakeRegistry:
@@ -90,17 +122,30 @@ class FakeRegistry:
 
 
 class FakePip:
+    """Records each pip call's args and the env it ran with.
+
+    A server build's call lays the package it pins into the venv, declaring the scripts
+    ``console_scripts`` names for it: by default the server package :func:`make_spec` and
+    :func:`mcp_server_item` describe, declaring ``srv-mcp``. ``server_files`` maps a server
+    package to further files it installs. Nothing else is installed.
+    """
+
     def __init__(self, events: list[str]) -> None:
         self._events = events
         self.calls: list[list[str]] = []
+        self.envs: list[Mapping[str, str] | None] = []
         self.fail_on: set[int] = set()
+        self.console_scripts: dict[str, list[str]] = {"tai42-toolbox": ["srv-mcp"]}
+        self.server_files: dict[str, dict[str, str]] = {}
 
-    async def __call__(self, args: list[str]) -> str:
+    async def __call__(self, args: list[str], /, *, env: Mapping[str, str] | None = None) -> str:
         idx = len(self.calls)
         self.calls.append(args)
+        self.envs.append(env)
         self._events.append("pip")
         if idx in self.fail_on:
             raise PipFailedError(args, 1, "pip boom")
+        lay_server_requirement(args, self.console_scripts, self.server_files)
         return "pip ok"
 
 
@@ -110,6 +155,7 @@ class FakeStore:
         self.rows: dict[str, InstallRecord] = {}
         self.record_calls: list[tuple] = []
         self.record_error: Exception | None = None
+        self.delete_error: Exception | None = None
 
     async def get(self, ref: str) -> InstallRecord | None:
         self._events.append("store:get")
@@ -165,6 +211,8 @@ class FakeStore:
 
     async def delete(self, ref: str) -> bool:
         self._events.append("store:delete")
+        if self.delete_error is not None:
+            raise self.delete_error
         return self.rows.pop(ref, None) is not None
 
     async def list_installed(self) -> list[InstallRecord]:
@@ -242,8 +290,9 @@ class FakeConfigService:
     succeeded, but the FLEET BROADCAST then raised — ConfigService wraps that raw
     broadcast fault as a :class:`FleetBroadcastError` carrying the honest
     bus-unreachable report, so it too surfaces as a landed-but-propagation-failed
-    change. Each apply appends ``cm:write`` then ``reload`` to the shared event log,
-    mirroring the pipeline's persist-then-reload order, and increments ``calls``."""
+    change. Like the real pipeline, ``apply_change`` is ``converge(persist_change(...))``:
+    ``persist_change`` appends ``cm:write`` to the shared event log and increments ``calls``,
+    ``converge`` appends ``reload``, mirroring the pipeline's persist-then-reload order."""
 
     def __init__(self, events: list[str], cm: FakeCM) -> None:
         self._events = events
@@ -262,10 +311,16 @@ class FakeConfigService:
         return copy.deepcopy(self._cm.read_manifest_preserved())
 
     async def apply_change(self, mutator: Any) -> ApplyResult:
+        return await self.converge(await self.persist_change(mutator))
+
+    async def persist_change(self, mutator: Any) -> PersistedChange:
         document = copy.deepcopy(self._cm._manifest)
         mutator(document)  # the structural provides patch (may raise, e.g. a collision)
         self._validate_resolved(document)  # the pipeline's pre-persist RESOLVED-projection gate
-        return self._persist(document)
+        return self._write(document)
+
+    async def converge(self, persisted: PersistedChange) -> ApplyResult:
+        return self._reload(persisted)
 
     def _validate_resolved(self, document: dict[str, Any]) -> None:
         # Materialize the ``!ENV`` markers exactly as ConfigService does, then validate
@@ -290,9 +345,9 @@ class FakeConfigService:
         self, *, continues: ApplyResult | None = None, recycle_keys: Sequence[str] = ()
     ) -> ApplyResult:
         self.reapply_calls.append({"continues": continues, "recycle_keys": tuple(recycle_keys)})
-        return self._persist(copy.deepcopy(self._cm._manifest))
+        return self._reload(self._write(copy.deepcopy(self._cm._manifest)))
 
-    def _persist(self, document: dict[str, Any]) -> ApplyResult:
+    def _write(self, document: dict[str, Any]) -> PersistedChange:
         idx = self.calls
         self.calls += 1
         if idx in self.fail_persist_on:
@@ -300,6 +355,12 @@ class FakeConfigService:
         self._events.append("cm:write")
         self._cm._manifest = copy.deepcopy(document)
         self.writes.append(copy.deepcopy(document))
+        return PersistedChange(document=document)
+
+    def _reload(self, persisted: PersistedChange) -> ApplyResult:
+        # The persist this convergence follows is the latest one.
+        idx = self.calls - 1
+        document = persisted.document
         self._events.append("reload")
         if idx in self.fail_reload_on:
             raise FleetBroadcastError("reload_config", _fleet_report(), RuntimeError(f"reload failed at call {idx}"))
@@ -308,6 +369,18 @@ class FakeConfigService:
                 "reload_config", _unreachable_report(), RuntimeError(f"broadcast failed at call {idx}")
             )
         return ApplyResult(fleet=_fleet_report(), local={"reloaded": True}, document=document)
+
+
+class FakeFleetHold:
+    """A held fake fleet lock: records its downgrade to shared."""
+
+    def __init__(self, events: list[str]) -> None:
+        self._events = events
+        self.shared = False
+
+    async def downgrade(self) -> None:
+        self._events.append("lock:downgrade")
+        self.shared = True
 
 
 class FakeFleetLock:
@@ -324,13 +397,20 @@ class FakeFleetLock:
             raise OperationInProgressError("another marketplace operation is in progress; retry shortly")
         self._events.append("lock:acquire")
         try:
-            yield
+            yield FakeFleetHold(self._events)
         finally:
             self._events.append("lock:release")
 
 
 class Harness:
+    """The recording fakes wired into one :class:`Installer`.
+
+    ``plugins_dir`` is a fresh temporary plugins directory, removed with the harness; a test
+    sets it to ``None`` to run with ``TAI_PLUGINS_DIR`` unset."""
+
     def __init__(self, **cm_kwargs) -> None:
+        self.plugins_dir: Path | None = Path(tempfile.mkdtemp(prefix="tai42-plugins-"))
+        weakref.finalize(self, shutil.rmtree, self.plugins_dir, True)
         self.events: list[str] = []
         self.registry = FakeRegistry(self.events)
         self.pip = FakePip(self.events)
@@ -339,15 +419,20 @@ class Harness:
         self.cm = FakeCM(self.events, **cm_kwargs)
         self.svc = FakeConfigService(self.events, self.cm)
 
-    def installer(self, *, owned_routes: Any = None, reserved_prefixes: Any = None) -> Installer:
+    def installer(
+        self, *, owned_routes: Any = None, reserved_prefixes: Any = None, converge: Convergence | None = None
+    ) -> Installer:
         # The fakes duck-type the real collaborators; cast past the typed params.
         # ``owned_routes`` / ``reserved_prefixes`` default to the live seams; a route
         # test injects a deterministic set instead of the process registry/settings.
+        # ``converge`` defaults to the fleet convergence; the host-side door injects its own.
         extra: dict[str, Any] = {}
         if owned_routes is not None:
             extra["owned_routes"] = owned_routes
         if reserved_prefixes is not None:
             extra["reserved_prefixes"] = reserved_prefixes
+        if converge is not None:
+            extra["converge"] = converge
         return Installer(
             registry=cast(Any, self.registry),
             pip_runner=self.pip,
@@ -355,23 +440,25 @@ class Harness:
             config_service=cast(Any, self.svc),
             fleet_lock=self.fleet,
             config_manager=self.cm,
+            plugins_dir=lambda: self.plugins_dir,
             **extra,
         )
 
 
 def _fake_verified_fetch(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
-    """Patch the installer's ``fetch_verified_artifact`` to record its args and
-    return the local tarball path it would have written, without a real download.
+    """Patch the environment build's ``fetch_verified_artifact`` to record its args and
+    write a stand-in archive where the real fetch writes the verified download.
     Lets a test assert the installer fetched the registry artifact_ref + sha256
-    and pip-installed the LOCAL tarball."""
+    and pip-installed the archive it keeps under the plugins directory."""
     calls: list[dict[str, Any]] = []
 
     async def fake(package, version, artifact_ref, sha256, dest_dir):
         path = dest_dir / f"{package}-{version}.tar.gz"
+        path.write_bytes(b"verified archive")
         calls.append(
             {"package": package, "version": version, "artifact_ref": artifact_ref, "sha256": sha256, "path": path}
         )
         return path
 
-    monkeypatch.setattr(package_ops, "fetch_verified_artifact", fake)
+    monkeypatch.setattr(build_module, "fetch_verified_artifact", fake)
     return calls
