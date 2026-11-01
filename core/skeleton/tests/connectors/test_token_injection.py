@@ -17,7 +17,7 @@ import pytest
 from tai42_contract.connectors.models import ConnectorRef
 from tai42_contract.connectors.providers import ProviderDescriptor
 from tai42_contract.errors import ClientConnectError, ErrorKind, error_kind
-from tai42_contract.manifest import MCPConfig, TaiMCPConfig
+from tai42_contract.manifest import MCPConfig, MCPTransport, TaiMCPConfig
 from tai42_kit.clients.impl.mcp import FastMCPClient
 
 import tai42_skeleton.connectors.token_injection as ti
@@ -174,11 +174,11 @@ def test_check_managed_transport_allows_http():
 
 def test_check_managed_transport_rejects_unsupported():
     with pytest.raises(RuntimeError, match="not supported"):
-        check_managed_transport(_managed_http(), "websocket")
+        check_managed_transport(_managed_http(), "uds")
 
 
 def test_check_managed_transport_ignores_unmanaged():
-    check_managed_transport(_unmanaged(), "websocket")  # no raise
+    check_managed_transport(_unmanaged(), "uds")  # no raise
 
 
 # -- extract_connector_error_payload -----------------------------------------
@@ -372,7 +372,9 @@ def acme(monkeypatch) -> ProviderDescriptor:
     return descriptor
 
 
-def _acme_entry(*, url: str = "https://acme.test/mcp/mail", title: str = "acme_mail_work", type_: str | None = "http"):
+def _acme_entry(
+    *, url: str = "https://acme.test/mcp/mail", title: str = "acme_mail_work", type_: MCPTransport | None = "http"
+):
     return TaiMCPConfig(
         title=title,
         config=MCPConfig(type=type_, url=url),
@@ -680,7 +682,7 @@ def test_the_scope_error_becomes_the_insufficient_scope_result():
 # -- the provider's own server -----------------------------------------------------------------
 
 
-@pytest.mark.parametrize("type_", ["http", None, "stdio"], ids=["type http", "no type", "type says stdio"])
+@pytest.mark.parametrize("type_", ["http", None], ids=["type http", "no type"])
 async def test_a_call_to_another_url_is_refused_before_anything_is_resolved(monkeypatch, acme, type_):
     resolver = _Resolver(monkeypatch, initial=ManagedAuth(access_token="secret"))
     pool = _FakePool([_ok()])
@@ -891,7 +893,7 @@ def _payload(result) -> dict:
 
 
 @pytest.mark.usefixtures("closed_pools")
-@pytest.mark.parametrize("type_", ["http", None, "stdio"], ids=["type http", "no type", "type says stdio"])
+@pytest.mark.parametrize("type_", ["http", None], ids=["type http", "no type"])
 async def test_a_forged_entry_never_reaches_its_server(monkeypatch, acme, server, type_):
     _Resolver(monkeypatch, initial=ManagedAuth(access_token="secret"))
     result = await _through_adapter(_acme_entry(url=server.url, title="forged", type_=type_))

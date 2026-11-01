@@ -478,7 +478,7 @@ async def test_mcp_config_schema_round_trip():
     # An entry shaped per the served schema's required fields (``title`` + a
     # ``config`` MCPConfig with exactly one transport) must pass full manifest
     # validation.
-    entry = {"title": "x", "config": {"type": "streamable_http", "url": "https://example.com/mcp"}}
+    entry = {"title": "x", "config": {"type": "http", "url": "https://example.com/mcp"}}
     manifest = Manifest.model_validate({"mcp": [entry], "tools": [{"title": "t", "module": "m"}]})
     assert manifest.mcp[0].title == "x"
     assert manifest.mcp[0].config.url == "https://example.com/mcp"
@@ -556,7 +556,7 @@ async def test_mcp_config_valid_persists_and_reloads(fake):
 
 
 def _mcp_entry(title, url="https://x/mcp"):
-    return {"title": title, "config": {"type": "streamable_http", "url": url}}
+    return {"title": title, "config": {"type": "http", "url": url}}
 
 
 async def test_add_mcp_entries_route_persists(fake):

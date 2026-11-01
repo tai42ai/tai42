@@ -51,7 +51,7 @@ _NOTIFY_MESSAGE = (
 def _entry(title: str = "acme", *, include: list[str] | None = None, exclude: list[str] | None = None) -> dict:
     return {
         "title": title,
-        "config": {"type": "streamable_http", "url": _URL},
+        "config": {"type": "http", "url": _URL},
         "include": include or [],
         "exclude": exclude or [],
     }

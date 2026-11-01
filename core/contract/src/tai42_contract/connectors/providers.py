@@ -30,14 +30,14 @@ SLUG_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 class McpServerDescriptor(BaseModel):
     """MCP server endpoint for one sub-service.
 
-    Transport is either ``http``/``websocket`` (hosted out-of-band, set ``url``)
+    Transport is either ``http`` (hosted out-of-band, set ``url``)
     or ``stdio`` (launched as a child process, set ``command`` + ``args``).
     Exactly one configuration is allowed: ``url`` xor (``command`` + ``args``).
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    type: Literal["http", "websocket", "stdio"] = "http"
+    type: Literal["http", "stdio"] = "http"
     url: str | None = None
     command: str | None = None
     args: list[str] = Field(default_factory=list)
@@ -49,12 +49,12 @@ class McpServerDescriptor(BaseModel):
     def _check_url(cls, value: str | None) -> str | None:
         if not value:
             return None
-        if not value.startswith(("http://", "https://", "ws://", "wss://")):
-            raise ValueError("MCP server url must use http(s):// or ws(s):// scheme")
+        if not value.startswith(("http://", "https://")):
+            raise ValueError("MCP server url must use http(s):// scheme")
         return value
 
     def model_post_init(self, _ctx: Any) -> None:
-        """Enforce the transport rule: ``url`` for http/websocket, ``command`` + ``args`` for stdio."""
+        """Enforce the transport rule: ``url`` for http, ``command`` + ``args`` for stdio."""
         if self.type == "stdio":
             if not self.command:
                 raise ValueError("stdio MCP server requires command")
@@ -71,7 +71,7 @@ class ConfigFieldSpec(BaseModel):
     """One client-supplied static config value for a no-auth provider.
 
     ``target`` picks the injection channel and MUST match the server transport
-    (``env`` for stdio, ``header`` for http/websocket). ``secret`` flags a value
+    (``env`` for stdio, ``header`` for http). ``secret`` flags a value
     masked in the UI and never logged; ``required`` gates connect-time validation.
     """
 
@@ -281,7 +281,7 @@ class ProviderDescriptor(BaseModel):
             if server is None or server.type != "http" or server.url is None:
                 raise ValueError(
                     f"discovered oauth provider: sub-service {sub.id!r} must declare an http mcp_server "
-                    "(no entry_point, stdio or websocket)"
+                    "(no entry_point or stdio)"
                 )
             urls.add(server.url)
         if len(urls) != 1:

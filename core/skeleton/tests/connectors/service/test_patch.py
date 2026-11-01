@@ -6,11 +6,12 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+from tai42_contract.connectors.providers import SubServiceDescriptor
 
 from tai42_skeleton.connectors.oauth import client as oauth_client
 from tai42_skeleton.connectors.service.connection_service import ConcurrentConnectionUpdateError, patch_sub_services
 
-from ..conftest import CID, make_noauth_record, make_oauth_record
+from ..conftest import CID, make_noauth_record, make_noauth_stdio_descriptor, make_oauth_record
 from .conftest import _FANOUT, ORIGIN, REDIRECT, _noauth_multi_descriptor
 
 
@@ -253,3 +254,31 @@ async def test_patch_no_auth_toggles_on_inline_ignoring_scopes(harness):
     assert result.flow_id is None
     assert "extra" in result.enabled_sub_services
     assert events["added"]
+
+
+async def test_patch_refuses_unlaunchable_sub_service_before_saving(harness):
+    """Toggling ON a sub-service whose launch command the resolver refuses (a
+    ``pkg_version`` that would read as a launcher flag) is rejected at validation,
+    before the record is saved or the manifest touched."""
+    _, records, store, _, events, providers = harness
+    base = make_noauth_stdio_descriptor()
+    providers["widgets"] = base.model_copy(
+        update={
+            "pkg_version": "-evil",
+            "sub_services": {
+                **base.sub_services,
+                "lookup": SubServiceDescriptor(id="lookup", display_name="Lookup", entry_point="tai-mcp-lookup"),
+            },
+        }
+    )
+    records[CID] = make_noauth_record(connection_id=CID, enabled_sub_services=["search"])
+    with pytest.raises(ValueError, match="pkg_version"):
+        await patch_sub_services(
+            connection_id=CID,
+            desired=["search", "lookup"],
+            return_url="/x",
+            redirect_uri=REDIRECT,
+            origin=ORIGIN,
+        )
+    assert store.puts == []
+    assert events["added"] == []

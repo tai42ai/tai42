@@ -94,3 +94,55 @@ def test_mcpconfig_command_with_args_env_valid():
 def test_mcpconfig_url_with_headers_valid():
     cfg = MCPConfig(url="https://x", headers={"H": "v"})
     assert cfg.headers == {"H": "v"}
+
+
+# -- type agrees with the transport address ----------------------------------
+
+
+@pytest.mark.parametrize(
+    ("address", "expected_type"),
+    [
+        ({"url": "https://x/mcp"}, "http"),
+        ({"uds": "/tmp/s.sock"}, "uds"),
+        ({"command": "run"}, "stdio"),
+    ],
+)
+def test_mcpconfig_type_matching_the_address_is_accepted(address: dict[str, str], expected_type: str):
+    cfg = MCPConfig.model_validate({"type": expected_type, **address})
+    assert cfg.type == expected_type
+
+
+@pytest.mark.parametrize(
+    ("address", "wrong_type", "expected_type"),
+    [
+        ({"url": "https://x/mcp"}, "stdio", "http"),
+        ({"uds": "/tmp/s.sock"}, "http", "uds"),
+        ({"command": "run"}, "uds", "stdio"),
+    ],
+)
+def test_mcpconfig_type_disagreeing_with_the_address_is_refused(
+    address: dict[str, str], wrong_type: str, expected_type: str
+):
+    (field,) = address
+    with pytest.raises(ValueError, match="type") as excinfo:
+        MCPConfig.model_validate({"type": wrong_type, **address})
+    message = str(excinfo.value)
+    assert f"type={wrong_type!r}" in message
+    assert f"``{field}``" in message
+    assert f"{expected_type!r}" in message
+
+
+@pytest.mark.parametrize("unknown", ["sse", "streamable_http", "streamable-http", "websocket", ""])
+def test_mcpconfig_type_outside_the_closed_set_is_refused(unknown: str):
+    with pytest.raises(ValueError, match="type"):
+        MCPConfig.model_validate({"type": unknown, "url": "https://x/mcp"})
+
+
+@pytest.mark.parametrize("address", [{"url": "https://x/mcp"}, {"uds": "/tmp/s.sock"}, {"command": "run"}])
+def test_mcpconfig_type_is_optional_and_the_address_decides(address: dict[str, str]):
+    assert MCPConfig.model_validate(address).type is None
+
+
+def test_mcpconfig_type_without_an_address_is_accepted():
+    # Zero-transport is permitted at construction; with no address there is nothing to disagree with.
+    assert MCPConfig.model_validate({"type": "stdio"}).type == "stdio"

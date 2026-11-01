@@ -30,7 +30,7 @@ provides:
       description: Connect your Acme account with a static token.
       icon_url: https://example.invalid/icon.png
       # ``target`` MUST match the sub-service transport channel: ``header`` for an
-      # http/websocket MCP server, ``env`` for a stdio one.
+      # http MCP server, ``env`` for a stdio one.
       config_fields:
         - key: api_token
           label: API token

@@ -6,6 +6,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from pydantic import ValidationError
 
 from tai42_contract.connectors.providers import (
     ConfigFieldSpec,
@@ -22,7 +23,7 @@ from tai42_contract.connectors.providers import (
 
 
 def test_mcp_url_valid_schemes_pass():
-    for url in ("http://x", "https://x", "ws://x", "wss://x"):
+    for url in ("http://x", "https://x"):
         d = McpServerDescriptor(type="http", url=url)
         assert d.url == url
 
@@ -35,9 +36,10 @@ def test_mcp_url_empty_normalizes_to_none():
     assert d.url is None
 
 
-def test_mcp_url_bad_scheme_raises():
-    with pytest.raises(ValueError, match="http"):
-        McpServerDescriptor(type="http", url="ftp://x")
+@pytest.mark.parametrize("url", ["ftp://x", "ws://x", "wss://x"])
+def test_mcp_url_non_http_scheme_raises(url: str) -> None:
+    with pytest.raises(ValueError, match=r"MCP server url must use http\(s\):// scheme"):
+        McpServerDescriptor(type="http", url=url)
 
 
 # -- McpServerDescriptor.model_post_init -------------------------------------
@@ -76,6 +78,18 @@ def test_mcp_http_requires_url():
 def test_mcp_http_forbids_command_args_env():
     with pytest.raises(ValueError, match="must not set command/args/env"):
         McpServerDescriptor(type="http", url="https://x", command="run")
+
+
+def test_mcp_transport_type_outside_http_and_stdio_raises():
+    with pytest.raises(ValidationError, match="Input should be 'http' or 'stdio'"):
+        McpServerDescriptor.model_validate({"type": "websocket", "url": "https://x"})
+
+
+def test_provider_sub_service_transport_error_names_its_field_path():
+    raw = _noauth_provider().model_dump()
+    raw["sub_services"]["files"]["mcp_server"] = {"type": "sse", "url": "https://x"}
+    with pytest.raises(ValidationError, match=r"sub_services\.files\.mcp_server\.type"):
+        ProviderDescriptor.model_validate(raw)
 
 
 # -- ConfigFieldSpec._check_key ----------------------------------------------
@@ -416,14 +430,6 @@ def test_discovered_refuses_a_stdio_sub_service():
     )
     with pytest.raises(ValueError, match="http mcp_server"):
         _discovered(sub_services={"files": stdio})
-
-
-def test_discovered_refuses_a_websocket_sub_service():
-    ws = SubServiceDescriptor(
-        id="files", display_name="Files", mcp_server=McpServerDescriptor(type="websocket", url="wss://m")
-    )
-    with pytest.raises(ValueError, match="http mcp_server"):
-        _discovered(sub_services={"files": ws})
 
 
 def test_discovered_refuses_an_entry_point_sub_service():

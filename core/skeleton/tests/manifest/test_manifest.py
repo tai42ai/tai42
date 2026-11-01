@@ -241,7 +241,7 @@ def test_selection_admits_matches_the_manifest_mcp_filter(include, exclude, admi
             "mcp": [
                 {
                     "title": "acme",
-                    "config": {"type": "streamable_http", "url": "https://example.com/mcp"},
+                    "config": {"type": "http", "url": "https://example.com/mcp"},
                     "include": include,
                     "exclude": exclude,
                 }

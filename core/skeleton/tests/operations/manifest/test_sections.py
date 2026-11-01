@@ -19,7 +19,7 @@ from .conftest import _install_mutate_pipeline, _MutateStore, _ReloadAdmin
 
 
 def _mcp_entry(title: str, url: str = "https://example.com/mcp") -> dict:
-    return {"title": title, "config": {"type": "streamable_http", "url": url}}
+    return {"title": title, "config": {"type": "http", "url": url}}
 
 
 def _tools_entry(title: str, module: str | None = None) -> dict:
@@ -211,7 +211,7 @@ async def test_remove_mcp_entry_pipeline_400_on_dangling_marker_elsewhere(monkey
     dangling = {
         "title": "b",
         "config": {
-            "type": "streamable_http",
+            "type": "http",
             "url": "https://x/mcp",
             "headers": {"Authorization": "!ENV ${MISSING_XYZ}"},
         },

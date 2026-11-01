@@ -3560,7 +3560,7 @@
       },
       "ConfigFieldSpec": {
         "additionalProperties": false,
-        "description": "One client-supplied static config value for a no-auth provider.\n\n``target`` picks the injection channel and MUST match the server transport\n(``env`` for stdio, ``header`` for http/websocket). ``secret`` flags a value\nmasked in the UI and never logged; ``required`` gates connect-time validation.",
+        "description": "One client-supplied static config value for a no-auth provider.\n\n``target`` picks the injection channel and MUST match the server transport\n(``env`` for stdio, ``header`` for http). ``secret`` flags a value\nmasked in the UI and never logged; ``required`` gates connect-time validation.",
         "properties": {
           "key": {
             "title": "Key",
@@ -8427,7 +8427,7 @@
       },
       "MCPConfig": {
         "additionalProperties": false,
-        "description": "Transport config for one MCP server: exactly one of ``url``/``uds``/``command``.",
+        "description": "Transport config for one MCP server: exactly one of ``url``/``uds``/``command``.\n\nThe address field that is set decides the transport. ``type`` is optional; when\ngiven it must name the transport of that address (``http`` for ``url``, ``uds``\nfor ``uds``, ``stdio`` for ``command``) — a disagreement is refused.",
         "properties": {
           "args": {
             "items": {
@@ -8465,6 +8465,11 @@
           "type": {
             "anyOf": [
               {
+                "enum": [
+                  "http",
+                  "uds",
+                  "stdio"
+                ],
                 "type": "string"
               },
               {
