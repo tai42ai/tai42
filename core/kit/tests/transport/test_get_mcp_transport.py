@@ -57,13 +57,13 @@ def test_sse_url_gets_the_sse_transport_on_the_kit_client():
     assert transport.httpx_client_factory is mcp_http_client
 
 
-def test_the_transport_follows_the_url_not_the_type_field():
-    # fastmcp's own URL inference picks the wire protocol; the type field is not read.
-    sse_typed = TaiMCPConfig(title="srv", config=MCPConfig(url="http://host/mcp", type="sse"))
-    http_typed = TaiMCPConfig(title="srv", config=MCPConfig(url="http://host/sse", type="http"))
+def test_an_http_typed_url_server_takes_its_wire_protocol_from_the_url():
+    # ``type: http`` covers every URL server; fastmcp's own URL inference picks streamable-http or SSE.
+    streamable = TaiMCPConfig(title="srv", config=MCPConfig(url="http://host/mcp", type="http"))
+    sse = TaiMCPConfig(title="srv", config=MCPConfig(url="http://host/sse", type="http"))
 
-    assert isinstance(get_mcp_transport(sse_typed), StreamableHttpTransport)
-    assert isinstance(get_mcp_transport(http_typed), SSETransport)
+    assert isinstance(get_mcp_transport(streamable), StreamableHttpTransport)
+    assert isinstance(get_mcp_transport(sse), SSETransport)
 
 
 def test_url_server_ignores_uds_protocol():

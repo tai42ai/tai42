@@ -1,14 +1,15 @@
-"""Generic stdio launch-spec synthesis (resolve_mcp_server)."""
+"""The MCP server a sub-service runs on: launch-spec synthesis (resolve_mcp_server) and its config (mcp_config_for)."""
 
 from __future__ import annotations
 
 import pytest
 from tai42_contract.connectors.providers import (
+    McpServerDescriptor,
     ProviderDescriptor,
     SubServiceDescriptor,
 )
 
-from tai42_skeleton.connectors.runtime.launch import resolve_mcp_server
+from tai42_skeleton.connectors.runtime.launch import mcp_config_for, resolve_mcp_server
 
 from .conftest import make_noauth_http_descriptor, make_noauth_stdio_descriptor
 
@@ -105,3 +106,18 @@ def test_leading_dash_pkg_version_rejected():
     object.__setattr__(desc, "pkg_version", "-1.0")
     with pytest.raises(ValueError, match="pkg_version"):
         resolve_mcp_server(desc, "svc")
+
+
+# -- mcp_config_for -------------------------------------------------------------------------
+
+
+def test_a_stdio_server_becomes_a_stdio_typed_command_config():
+    server = McpServerDescriptor(type="stdio", command="run", args=["--x"], env={"A": "1"})
+    cfg = mcp_config_for(server)
+    assert (cfg.type, cfg.command, cfg.args, cfg.env, cfg.url) == ("stdio", "run", ["--x"], {"A": "1"}, None)
+
+
+def test_an_http_server_becomes_an_http_typed_url_config():
+    server = McpServerDescriptor(type="http", url="https://acme.test/mcp", extra_headers={"H": "v"})
+    cfg = mcp_config_for(server)
+    assert (cfg.type, cfg.url, cfg.headers, cfg.command) == ("http", "https://acme.test/mcp", {"H": "v"}, None)

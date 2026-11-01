@@ -28,11 +28,11 @@ import logging
 from typing import Any
 
 from tai42_contract.connectors.providers import ProviderDescriptor
-from tai42_contract.manifest import MCPConfig, TaiMCPConfig
+from tai42_contract.manifest import TaiMCPConfig
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.mcp import FastMCPClient
 
-from tai42_skeleton.connectors.runtime.launch import resolve_mcp_server
+from tai42_skeleton.connectors.runtime.launch import mcp_config_for, resolve_mcp_server
 from tai42_skeleton.connectors.runtime.resolver import ManagedAuth
 from tai42_skeleton.connectors.token_injection import prepare_managed_request
 from tai42_skeleton.settings.cache import mcp_probe_timeout
@@ -54,11 +54,7 @@ def _build_probe_config(descriptor: ProviderDescriptor, sub_service: str, auth: 
     request preparation. Read-only: no refresh, no retry.
     """
     server = resolve_mcp_server(descriptor, sub_service)
-    if server.type == "stdio":
-        inner = MCPConfig(type="stdio", command=server.command, args=list(server.args), env=dict(server.env))
-    else:
-        inner = MCPConfig(type=server.type, url=server.url, headers=dict(server.extra_headers))
-    base = TaiMCPConfig(title=f"probe_{descriptor.id}_{sub_service}", config=inner)
+    base = TaiMCPConfig(title=f"probe_{descriptor.id}_{sub_service}", config=mcp_config_for(server))
     return prepare_managed_request(base, auth, server.type)[0]
 
 

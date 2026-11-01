@@ -36,7 +36,6 @@ from tai42_kit.clients.impl.mcp import FastMCPClient
 from tai42_skeleton.connectors.oauth.discovery import parse_www_authenticate
 from tai42_skeleton.connectors.providers.registry import get_provider_staged
 from tai42_skeleton.connectors.runtime.http_status import mcp_http_response, mcp_http_status
-from tai42_skeleton.connectors.runtime.launch import SUPPORTED_MANAGED_TRANSPORTS
 from tai42_skeleton.connectors.runtime.own_server import own_server_refusal
 from tai42_skeleton.connectors.runtime.resolver import (
     ConnectorAuthExpiredError,
@@ -377,9 +376,14 @@ def mcp_dispatch_failed_result(config: TaiMCPConfig, tool_name: str) -> mcp.type
     return mcp.types.CallToolResult(isError=True, content=[mcp.types.TextContent(type="text", text=text)])
 
 
+# Manifest MCP transports with a token-injection path: a Bearer header for http,
+# JSON-RPC ``_meta`` for stdio.
+_MANAGED_TRANSPORTS = frozenset({"stdio", "http"})
+
+
 def check_managed_transport(config: TaiMCPConfig, transport: str) -> None:
     """Allow managed entries only on transports with a token-injection path."""
-    if config.is_managed and transport not in SUPPORTED_MANAGED_TRANSPORTS:
+    if config.is_managed and transport not in _MANAGED_TRANSPORTS:
         raise RuntimeError(
             f"managed transport {transport!r} is not supported; connector-"
             "managed entries must be http (header auth) or stdio (_meta auth)."

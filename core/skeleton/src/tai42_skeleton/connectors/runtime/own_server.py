@@ -16,8 +16,8 @@ from tai42_skeleton.manifest.transport import detect_transport
 def own_server_refusal(config: TaiMCPConfig, descriptor: ProviderDescriptor | None) -> str | None:
     """Why the managed entry ``config`` must not receive its connection's credential, or ``None``.
 
-    An entry that talks to a ``url`` (the transport its request follows: which field is set, never its
-    free-text ``type``) must carry, exactly, the ``url`` ``descriptor`` defines for the referenced
+    An entry that talks to a ``url`` (the transport its address field sets, which a stated ``type``
+    must agree with) must carry, exactly, the ``url`` ``descriptor`` defines for the referenced
     sub-service — the value the managed-entry builder copies verbatim. Any other entry is not checked.
     ``descriptor`` is ``None`` when the referenced provider is not registered.
     """

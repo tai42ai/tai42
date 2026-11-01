@@ -5,13 +5,14 @@ from __future__ import annotations
 from urllib.parse import parse_qs, urlparse
 
 import pytest
+from tai42_contract.connectors.providers import SubServiceDescriptor
 from tai42_contract.connectors.service import AliasInUseError, NoAuthConnectResult, StartConnectResult
 
 from tai42_skeleton.connectors.oauth import client as oauth_client
 from tai42_skeleton.connectors.oauth.state import decode as decode_state
 from tai42_skeleton.connectors.service.connection_service import start_connect, start_reconnect
 
-from ..conftest import CID, make_noauth_record, make_oauth_record
+from ..conftest import CID, make_noauth_record, make_noauth_stdio_descriptor, make_oauth_descriptor, make_oauth_record
 from .conftest import _FANOUT, ORIGIN, REDIRECT
 
 
@@ -168,41 +169,55 @@ async def test_start_connect_rejects_off_list_origin(harness):
     assert events["state_put"] == []
 
 
-async def test_start_connect_rejects_websocket_sub_service(harness):
-    """A websocket sub-service probes healthy but every managed call raises, so a
-    Connect for it is rejected at validation (fail-loud) before any OAuth flow."""
-    from tai42_contract.connectors.providers import (
-        McpServerDescriptor,
-        ProviderDescriptor,
-        SubServiceDescriptor,
-    )
-
-    _, _, _, _, _, providers = harness
-    providers["wsprov"] = ProviderDescriptor(
-        id="wsprov",
-        display_name="WS",
-        icon_url="https://ws.test/icon.png",
-        kind="none",
-        origin="system",
-        category="data",
-        sub_services={
-            "live": SubServiceDescriptor(
-                id="live",
-                display_name="Live",
-                mcp_server=McpServerDescriptor(type="websocket", url="wss://ws.test/mcp"),
-            ),
-        },
-    )
-    with pytest.raises(ValueError, match="transport 'websocket'"):
+async def test_start_connect_no_auth_refuses_unlaunchable_sub_service_before_saving(harness):
+    """A sub-service whose launch command the resolver refuses (a ``pkg_version``
+    that would read as a launcher flag) is rejected at validation, before the
+    connection record is saved or the manifest touched."""
+    _, _, store, _, events, providers = harness
+    providers["widgets"] = make_noauth_stdio_descriptor().model_copy(update={"pkg_version": "-evil"})
+    with pytest.raises(ValueError, match="pkg_version"):
         await start_connect(
-            provider_id="wsprov",
-            alias="live",
-            enabled_sub_services=["live"],
-            config_values={},
+            provider_id="widgets",
+            alias="main",
+            enabled_sub_services=["search"],
+            config_values={"api_key": "k"},
             return_url="/x",
             redirect_uri=REDIRECT,
             origin=ORIGIN,
         )
+    assert store.puts == []
+    assert events["added"] == []
+
+
+def _unlaunchable_oauth_descriptor():
+    """The OAuth provider with its ``mail`` sub-service pkg-launched under a flag-like ``pkg_version``."""
+    return make_oauth_descriptor().model_copy(
+        update={
+            "pkg_manager": "uvx",
+            "pkg_version": "-evil",
+            "sub_services": {
+                "mail": SubServiceDescriptor(
+                    id="mail", display_name="Mail", scopes=["mail.read"], entry_point="tai-mcp-mail"
+                ),
+            },
+        }
+    )
+
+
+async def test_start_connect_oauth_refuses_unlaunchable_sub_service_before_consent(harness):
+    """On the OAuth door the same refusal comes before any consent flow is stored."""
+    _, _, _, _, events, providers = harness
+    providers["acme"] = _unlaunchable_oauth_descriptor()
+    with pytest.raises(ValueError, match="pkg_version"):
+        await start_connect(
+            provider_id="acme",
+            alias="work",
+            enabled_sub_services=["mail"],
+            return_url="/x",
+            redirect_uri=REDIRECT,
+            origin=ORIGIN,
+        )
+    assert events["state_put"] == []
 
 
 async def test_start_reconnect_no_auth_rejected(harness):
@@ -229,6 +244,22 @@ async def test_start_reconnect_oauth(harness):
         origin=ORIGIN,
     )
     assert isinstance(result, StartConnectResult)
+
+
+async def test_start_reconnect_refuses_unlaunchable_sub_service_before_consent(harness):
+    """A reconnect choosing a sub-service the resolver refuses is rejected before any consent flow is stored."""
+    _, records, _, _, events, providers = harness
+    providers["acme"] = _unlaunchable_oauth_descriptor()
+    records[CID] = make_oauth_record(alias="work", enabled_sub_services=["mail"])
+    with pytest.raises(ValueError, match="pkg_version"):
+        await start_reconnect(
+            connection_id=CID,
+            enabled_sub_services=["mail"],
+            return_url="/x",
+            redirect_uri=REDIRECT,
+            origin=ORIGIN,
+        )
+    assert events["state_put"] == []
 
 
 async def test_start_reconnect_provider_removed_raises_value_error(harness, monkeypatch):

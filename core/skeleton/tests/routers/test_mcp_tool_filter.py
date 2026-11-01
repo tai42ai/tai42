@@ -20,7 +20,7 @@ from ..config.fake_pipeline import FakeConfigStore, FakeReloadAdmin, _service, _
 
 _ENTRY = {
     "title": "acme",
-    "config": {"type": "streamable_http", "url": "https://example.com/mcp"},
+    "config": {"type": "http", "url": "https://example.com/mcp"},
     "include": [],
     "exclude": [],
     "extensions": {"acme_send": [["cache"]]},

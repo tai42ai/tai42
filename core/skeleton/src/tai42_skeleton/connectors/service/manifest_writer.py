@@ -24,9 +24,9 @@ from typing import Any
 
 from tai42_contract.connectors.models import ConnectorRef
 from tai42_contract.connectors.providers import ProviderDescriptor
-from tai42_contract.manifest import MCPConfig, TaiMCPConfig
+from tai42_contract.manifest import TaiMCPConfig
 
-from tai42_skeleton.connectors.runtime.launch import resolve_mcp_server
+from tai42_skeleton.connectors.runtime.launch import mcp_config_for, resolve_mcp_server
 from tai42_skeleton.connectors.runtime.own_server import own_server_refusal
 
 logger = logging.getLogger(__name__)
@@ -45,27 +45,11 @@ def _build_entry(
     connection_id: str,
 ) -> TaiMCPConfig:
     server = resolve_mcp_server(descriptor, sub_service_id)
-    if server.type == "stdio":
-        # env carries static transport config only; the access token is injected
-        # per-call via JSON-RPC _meta, never via env.
-        inner = MCPConfig(
-            type="stdio",
-            command=server.command,
-            args=list(server.args),
-            env=dict(server.env),
-        )
-    else:
-        inner = MCPConfig(
-            type=server.type,
-            url=server.url,
-            headers=dict(server.extra_headers),
-            env={},
-        )
     return TaiMCPConfig(
         title=managed_title(descriptor.id, sub_service_id, alias),
         include=[],
         exclude=[],
-        config=inner,
+        config=mcp_config_for(server),
         managed=ConnectorRef(
             connection_id=connection_id,
             provider_id=descriptor.id,

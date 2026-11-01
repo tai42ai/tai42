@@ -24,6 +24,15 @@ from tai42_contract.connectors.providers import ProviderDescriptor
 # LLM-facing tool param.
 ExtensionElement = str | dict[str, Any]
 
+# The transport kind of one MCP server. Each kind has exactly one address field:
+# ``url`` is ``http`` (the HTTP wire protocol, streamable-http or SSE, follows the
+# URL), ``uds`` is ``uds`` (a unix socket) and ``command`` is ``stdio`` (a launched
+# child process).
+MCPTransport = Literal["http", "uds", "stdio"]
+
+# The transport kind each address field carries — the one owner of that mapping.
+MCP_TRANSPORT_BY_ADDRESS: dict[str, MCPTransport] = {"url": "http", "uds": "uds", "command": "stdio"}
+
 
 class BaseConfig(BaseModel):
     """Shared config fields: a ``title`` plus ``include``/``exclude`` selection lists."""
@@ -39,13 +48,18 @@ class BaseConfig(BaseModel):
 
 
 class MCPConfig(BaseModel):
-    """Transport config for one MCP server: exactly one of ``url``/``uds``/``command``."""
+    """Transport config for one MCP server: exactly one of ``url``/``uds``/``command``.
+
+    The address field that is set decides the transport. ``type`` is optional; when
+    given it must name the transport of that address (``http`` for ``url``, ``uds``
+    for ``uds``, ``stdio`` for ``command``) — a disagreement is refused.
+    """
 
     # ``extra="forbid"``: an unknown transport key is a misconfig — fail loudly
     # naming the key rather than silently dropping it.
     model_config = ConfigDict(extra="forbid")
 
-    type: str | None = None
+    type: MCPTransport | None = None
     url: str | None = None
     uds: str | None = None
     command: str | None = None
@@ -97,7 +111,7 @@ class MCPConfig(BaseModel):
 
     @model_validator(mode="after")
     def _exactly_one_transport(self):
-        """Reject manifests that set more than one transport field at once.
+        """Reject manifests that set more than one transport field at once, or a ``type`` that disagrees.
 
         ``url`` / ``uds`` / ``command`` are mutually exclusive — the downstream
         MCP adapter dispatches on whichever is set first, so an entry with both
@@ -110,6 +124,10 @@ class MCPConfig(BaseModel):
         ``args`` / ``env`` are launcher-only (require ``command``); ``headers`` is
         HTTP-only (requires ``url``). The check is permissive: empty containers
         count as "not set" — only a NON-EMPTY mismatched auxiliary field rejects.
+
+        A set ``type`` must equal the transport of the set address field
+        (:data:`MCP_TRANSPORT_BY_ADDRESS`); with no address set there is nothing
+        for it to disagree with.
         """
         configured = [
             name
@@ -125,6 +143,12 @@ class MCPConfig(BaseModel):
 
         if configured:
             transport = configured[0]
+            expected_type = MCP_TRANSPORT_BY_ADDRESS[transport]
+            if self.type is not None and self.type != expected_type:
+                raise ValueError(
+                    f"MCPConfig: type={self.type!r} disagrees with the address "
+                    f"``{transport}``, whose transport type is {expected_type!r}",
+                )
             if transport != "command":
                 if self.args:
                     raise ValueError(
@@ -467,12 +491,14 @@ class Manifest(BaseModel):
 
 
 __all__ = [
+    "MCP_TRANSPORT_BY_ADDRESS",
     "AgentsConfig",
     "ApiToolsConfig",
     "BaseConfig",
     "ExtensionElement",
     "ExtensionsConfigMixin",
     "MCPConfig",
+    "MCPTransport",
     "Manifest",
     "TaiMCPConfig",
     "ToolsConfig",

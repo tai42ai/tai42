@@ -1,13 +1,13 @@
 """Client-input validators for the connection lifecycle.
 
-Return-URL shape, sub-service membership and transport support, and config-value presence.
+Return-URL shape, sub-service membership and launchability, and config-value presence.
 """
 
 from __future__ import annotations
 
 from tai42_contract.connectors.providers import ProviderDescriptor
 
-from tai42_skeleton.connectors.runtime.launch import SUPPORTED_MANAGED_TRANSPORTS, resolve_mcp_server
+from tai42_skeleton.connectors.runtime.launch import resolve_mcp_server
 from tai42_skeleton.plugins.settings import hosted_ui_settings, is_same_origin_path
 
 
@@ -30,17 +30,11 @@ def _validate_sub_services(descriptor: ProviderDescriptor, sub_services: list[st
     extra = set(sub_services) - set(descriptor.sub_services.keys())
     if extra:
         raise ValueError(f"unknown sub-services for provider {descriptor.id!r}: {sorted(extra)}")
-    # Reject a sub-service on a transport managed calls cannot drive (e.g.
-    # websocket) at connect time: it would probe healthy but raise on every real
-    # tool call, so the user must never be able to complete a Connect for it.
+    # Resolve each chosen sub-service's MCP server now, so a launch the resolver
+    # refuses (an unknown pkg_manager, a value that would read as a launcher flag)
+    # is rejected before any record, flow state or manifest entry is written.
     for sub_id in sub_services:
-        server = resolve_mcp_server(descriptor, sub_id)
-        if server.type not in SUPPORTED_MANAGED_TRANSPORTS:
-            raise ValueError(
-                f"sub-service {sub_id!r} of provider {descriptor.id!r} uses transport "
-                f"{server.type!r}, which connector-managed calls do not support "
-                f"(supported: {sorted(SUPPORTED_MANAGED_TRANSPORTS)})"
-            )
+        resolve_mcp_server(descriptor, sub_id)
 
 
 def _validate_config_values(descriptor: ProviderDescriptor, config_values: dict[str, str]) -> None:

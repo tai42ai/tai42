@@ -1,14 +1,13 @@
 """The transport an MCP entry's outbound request uses, decided by which transport field is set."""
 
-from tai42_contract.manifest import MCPConfig
-
-_FIELD_TO_TRANSPORT = {"command": "stdio", "url": "http", "uds": "uds"}
+from tai42_contract.manifest import MCP_TRANSPORT_BY_ADDRESS, MCPConfig, MCPTransport
 
 
-def detect_transport(inner: MCPConfig) -> str:
+def detect_transport(inner: MCPConfig) -> MCPTransport:
     """Return ``"stdio"`` | ``"http"`` | ``"uds"`` from the set transport field.
 
-    The entry's free-text ``type`` decides nothing. Raises if no field or more than one is set.
+    The address field decides; a set ``type`` has already been checked to agree with it.
+    Raises if no field or more than one is set.
     """
     flags = [
         k
@@ -23,4 +22,4 @@ def detect_transport(inner: MCPConfig) -> str:
         raise RuntimeError("MCPConfig has no transport set (need command, url, or uds)")
     if len(flags) > 1:
         raise RuntimeError(f"MCPConfig has ambiguous transport: {flags!r}")
-    return _FIELD_TO_TRANSPORT[flags[0]]
+    return MCP_TRANSPORT_BY_ADDRESS[flags[0]]

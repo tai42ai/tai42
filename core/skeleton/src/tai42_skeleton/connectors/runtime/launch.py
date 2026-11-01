@@ -1,4 +1,4 @@
-"""Generic stdio launch-spec synthesis for pkg-launched sub-services.
+"""The MCP server a sub-service runs on: stdio launch-spec synthesis and its transport config.
 
 A ``SubServiceDescriptor`` declares exactly one launch path: either a fully
 built ``mcp_server``, or a pkg-launched stdio service via ``entry_point`` (with
@@ -12,6 +12,9 @@ For the pkg-launched case the command is synthesized from the provider-level
 ``pkg_manager`` (``uvx`` / ``npx``) + ``pkg_version`` and the sub-service
 ``entry_point``. Every interpolated value passes the argv-injection guard
 (:func:`reject_leading_dash`) so a value can't be parsed as a launcher flag.
+
+:func:`mcp_config_for` turns the resolved server into the manifest ``MCPConfig``
+every connector-built entry (managed entry, liveness probe) dispatches on.
 """
 
 from __future__ import annotations
@@ -20,13 +23,9 @@ from tai42_contract.connectors.providers import (
     McpServerDescriptor,
     ProviderDescriptor,
 )
+from tai42_contract.manifest import MCPConfig
 
 from tai42_skeleton.connectors.stdio.launcher import reject_leading_dash
-
-# MCP transports a connector-managed call can actually drive. A sub-service on
-# any other transport (e.g. ``websocket``) probes healthy but raises on every
-# real call, so connect-time validation rejects it and token injection guards it.
-SUPPORTED_MANAGED_TRANSPORTS = frozenset({"stdio", "http"})
 
 
 def resolve_mcp_server(descriptor: ProviderDescriptor, sub_service_id: str) -> McpServerDescriptor:
@@ -71,3 +70,12 @@ def resolve_mcp_server(descriptor: ProviderDescriptor, sub_service_id: str) -> M
         )
 
     return McpServerDescriptor(type="stdio", command=command, args=args)
+
+
+def mcp_config_for(server: McpServerDescriptor) -> MCPConfig:
+    """Return the manifest ``MCPConfig`` for ``server``: ``command`` for stdio, ``url`` for http."""
+    if server.type == "stdio":
+        # env carries static transport config only; the access token is injected
+        # per-call via JSON-RPC _meta, never via env.
+        return MCPConfig(type="stdio", command=server.command, args=list(server.args), env=dict(server.env))
+    return MCPConfig(type="http", url=server.url, headers=dict(server.extra_headers))
