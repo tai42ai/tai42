@@ -7,11 +7,14 @@ promote are exercised end to end.
 
 from __future__ import annotations
 
+import inspect
 import io
+import sys
 import time
 import zipfile
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import asynccontextmanager
+from typing import Any
 
 import pytest
 from fakeredis import aioredis
@@ -354,6 +357,37 @@ async def test_streamed_body_over_cap_raises_not_truncates(provider, monkeypatch
             origin=_origin(),
         )
     assert provider.blobs == {}
+
+
+async def test_an_over_cap_body_closes_the_ingest_reader_before_the_raise(provider, monkeypatch):
+    """The cap raise leaves the ingest with every reader it opened already closed."""
+    monkeypatch.setenv("MEDIA_INGEST_MAX_IMAGE_BYTES", "10000")
+    media_ingest_cap_settings.cache_clear()
+    source = _gen(_PNG + b"\x00" * 20000)
+    opened: list[AsyncGenerator[Any]] = []
+    firstiter, finalizer = sys.get_asyncgen_hooks()
+
+    def _record(agen: AsyncGenerator[Any]) -> None:
+        opened.append(agen)
+        if firstiter is not None:
+            firstiter(agen)
+
+    sys.set_asyncgen_hooks(firstiter=_record, finalizer=finalizer)
+    try:
+        with pytest.raises(MediaTooLargeError):
+            await ingest_media(
+                source=source,
+                kind_hint="image",
+                declared_mime="image/png",
+                filename=None,
+                declared_size=None,
+                origin=_origin(),
+            )
+    finally:
+        sys.set_asyncgen_hooks(firstiter=firstiter, finalizer=finalizer)
+    readers = [agen for agen in opened if agen is not source]
+    assert readers
+    assert all(inspect.getasyncgenstate(agen) == inspect.AGEN_CLOSED for agen in readers)
 
 
 async def test_sniffed_kind_cap_applies_after_early_sniff(provider, monkeypatch):

@@ -13,8 +13,9 @@ The park machinery is the production one: the agent delegates every run to the r
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Mapping
-from typing import Any, ClassVar
+from collections.abc import AsyncGenerator, AsyncIterator, Mapping
+from contextlib import aclosing
+from typing import Any, ClassVar, cast
 
 from pydantic import BaseModel, Field
 from tai42_contract.agent import AddressedMemory, Agent
@@ -61,8 +62,12 @@ class E2eDoorAgent(Agent):
         return await self._delegate().run(tool_names=list(BAKED_TOOL_NAMES), **kwargs)
 
     async def astream(self, **kwargs: Any) -> AsyncIterator[StreamEvent]:
-        async for event in self._delegate().astream(tool_names=list(BAKED_TOOL_NAMES), **kwargs):
-            yield event
+        delegate = cast(
+            "AsyncGenerator[StreamEvent]", self._delegate().astream(tool_names=list(BAKED_TOOL_NAMES), **kwargs)
+        )
+        async with aclosing(delegate) as events:
+            async for event in events:
+                yield event
 
     @staticmethod
     def _delegate() -> Agent:
@@ -97,8 +102,10 @@ class E2eExtrasAgent(Agent):
 
     async def astream(self, **kwargs: Any) -> AsyncIterator[StreamEvent]:
         await self._record_extras()
-        async for event in self._delegate().astream(**kwargs):
-            yield event
+        delegate = cast("AsyncGenerator[StreamEvent]", self._delegate().astream(**kwargs))
+        async with aclosing(delegate) as events:
+            async for event in events:
+                yield event
 
     @staticmethod
     async def _record_extras() -> None:

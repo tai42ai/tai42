@@ -15,7 +15,8 @@ import hashlib
 import mimetypes
 import secrets
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
+from contextlib import aclosing
 from typing import TYPE_CHECKING, cast
 
 import filetype
@@ -234,25 +235,27 @@ async def _read_capped(
     digest = hashlib.sha256()
     classified: tuple[MediaKind, str] | None = None
 
-    async def _read() -> AsyncIterator[bytes]:
+    async def _read() -> AsyncGenerator[bytes]:
         # Translate a fault raised BY THE SOURCE (a vendor fetch / a torn upload) into the typed
         # MediaSourceReadError; the cap/sniff raises below happen on already-read bytes, outside this.
+        # The caller owns ``source`` and closes it; this closes only its own reader.
         try:
             async for chunk in source:
                 yield chunk
         except Exception as exc:
             raise MediaSourceReadError(f"media source read failed: {type(exc).__name__}") from exc
 
-    async for chunk in _read():
-        buffer.extend(chunk)
-        digest.update(chunk)
-        if len(buffer) > cap:
-            raise MediaTooLargeError(f"media exceeds the {cap}-byte cap")
-        if classified is None and len(buffer) >= _SNIFF_WINDOW:
-            classified = _classify(bytes(buffer), declared_mime, settings)
-            cap = cap_settings.cap_for(classified[0])
+    async with aclosing(_read()) as chunks:
+        async for chunk in chunks:
+            buffer.extend(chunk)
+            digest.update(chunk)
             if len(buffer) > cap:
-                raise MediaTooLargeError(f"media exceeds the {cap}-byte cap for {classified[0].value}")
+                raise MediaTooLargeError(f"media exceeds the {cap}-byte cap")
+            if classified is None and len(buffer) >= _SNIFF_WINDOW:
+                classified = _classify(bytes(buffer), declared_mime, settings)
+                cap = cap_settings.cap_for(classified[0])
+                if len(buffer) > cap:
+                    raise MediaTooLargeError(f"media exceeds the {cap}-byte cap for {classified[0].value}")
     if classified is None:
         classified = _classify(bytes(buffer), declared_mime, settings)
         if len(buffer) > cap_settings.cap_for(classified[0]):

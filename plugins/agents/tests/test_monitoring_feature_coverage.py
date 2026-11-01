@@ -17,6 +17,8 @@ recorded through the kit's monitoring callback handler) and a scripted real chat
   loop's async-generator finalizer) and acloseed from another task after its first item: the
   consumer's deposit and current span never change across an item, nothing raises, the loop's
   exception handler receives nothing, and the ``run`` span ends with no error level.
+* Every stream drive closed after its first item closes every agent stream it forwards from
+  before the close returns.
 * Driven inside a run attribution, every span the run writes carries it.
 
 The tools-agent reference case drives two tool turns and proves every chain record of the
@@ -28,11 +30,14 @@ from __future__ import annotations
 
 import asyncio
 import gc
+import inspect
+import sys
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
-from types import SimpleNamespace
+from pathlib import Path
+from types import AsyncGeneratorType, SimpleNamespace
 from typing import Any, cast
 
 import orjson
@@ -60,6 +65,7 @@ from tai42_kit.monitoring import encode_payload, resolve_refs
 from tai42_kit.monitoring.otel import attributes as attr
 from tai42_kit.monitoring.testing import span_to_observation
 
+import tai42_agents
 import tai42_agents.claude_code.agent as claude_code_mod
 import tai42_agents.claude_code.workspace as claude_workspace_mod
 from tai42_agents._internal import base_tool_agent as bta
@@ -686,6 +692,42 @@ def test_a_stream_closed_from_another_task_after_its_first_item_ends_its_run_cle
 
     assert _run_leg(leg) == []
     _assert_the_run_span_ended_clean()
+
+
+@pytest.mark.parametrize("drive", _STREAM_DRIVES, ids=lambda d: d.name)
+def test_a_stream_closed_after_its_first_item_closes_every_agent_stream_inside_the_close(
+    drive: _Drive, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Closing the outer stream closes every agent stream it forwards from before the close returns."""
+    opener = drive.prepare(monkeypatch)
+    package_dir = str(Path(tai42_agents.__file__).parent)
+
+    async def leg() -> None:
+        opened: list[AsyncGeneratorType[Any, Any]] = []
+        firstiter, finalizer = sys.get_asyncgen_hooks()
+
+        def _record(agen: AsyncGenerator[Any]) -> None:
+            opened.append(cast("AsyncGeneratorType[Any, Any]", agen))
+            if firstiter is not None:
+                firstiter(agen)
+
+        sys.set_asyncgen_hooks(firstiter=_record, finalizer=finalizer)
+        try:
+            stream = await opener()
+            async for _ in stream:
+                break
+            await stream.aclose()
+        finally:
+            sys.set_asyncgen_hooks(firstiter=firstiter, finalizer=finalizer)
+        agent_streams = [agen for agen in opened if agen.ag_code.co_filename.startswith(package_dir)]
+        assert agent_streams
+        still_open = [
+            agen.ag_code.co_qualname for agen in agent_streams if inspect.getasyncgenstate(agen) != inspect.AGEN_CLOSED
+        ]
+        assert still_open == []
+        _assert_the_run_span_ended_clean()
+
+    assert _run_leg(leg) == []
 
 
 # --- claude_code: its one usage span ---------------------------------------------------

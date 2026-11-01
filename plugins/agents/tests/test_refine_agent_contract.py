@@ -39,7 +39,7 @@ def test_tool_names_honored_on_run_face(monkeypatch: pytest.MonkeyPatch, app_too
         invoke_contents=["draft"],
         stream_items=[("messages", (AIMessageChunk(content="ok"), {}))],
     )
-    critic = FakeAgent(invoke_contents=[f"approved {CRITIC_APPROVAL_MESSAGE}"])
+    critic = FakeAgent(invoke_contents=[CRITIC_APPROVAL_MESSAGE])
     recorder = _patch_loop(monkeypatch, [evaluator, critic])
 
     agent = tai42_app.agents.get_agent(AGENT_NAME)
@@ -107,7 +107,7 @@ def test_both_faces_refuse_an_undeclared_keyword(param: str, value: Any, app_too
 
 def test_the_not_requested_sentinels_pass_the_guard(monkeypatch: pytest.MonkeyPatch) -> None:
     evaluator = FakeAgent(invoke_contents=["draft"], stream_items=[("messages", (AIMessageChunk(content="ok"), {}))])
-    critic = FakeAgent(invoke_contents=[f"approved {CRITIC_APPROVAL_MESSAGE}"])
+    critic = FakeAgent(invoke_contents=[CRITIC_APPROVAL_MESSAGE])
     _patch_loop(monkeypatch, [evaluator, critic])
 
     agent = tai42_app.agents.get_agent(AGENT_NAME)
@@ -124,7 +124,7 @@ def test_run_raises_when_required_evaluator_message_slot_is_unset(
     passthrough the loop would instead run to approval — a dropped passthrough turns
     this red rather than letting the empty prompt slip through."""
     evaluator = FakeAgent(invoke_contents=["draft"], stream_items=[("messages", (AIMessageChunk(content="ok"), {}))])
-    critic = FakeAgent(invoke_contents=[f"approved {CRITIC_APPROVAL_MESSAGE}"])
+    critic = FakeAgent(invoke_contents=[CRITIC_APPROVAL_MESSAGE])
     _patch_loop(monkeypatch, [evaluator, critic])
 
     agent = tai42_app.agents.get_agent(AGENT_NAME)

@@ -18,14 +18,12 @@ reattach the same volume); ephemeral ones die with the session.
 
 from __future__ import annotations
 
-import asyncio
 import contextlib
 import os
 import shutil
-import signal
 import tempfile
 import uuid
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import Sequence
 from pathlib import Path
 
 from pydantic import SecretStr
@@ -33,122 +31,22 @@ from tai42_contract.sandbox import (
     ExecResult,
     SandboxError,
     SandboxExecHandle,
-    SandboxExecTimeoutError,
     SandboxFileNotFoundError,
     SandboxPolicy,
     SandboxSessionSpec,
-    SandboxStreamChunk,
-    SandboxStreamExit,
 )
-from tai42_kit.sandbox import ManagedSandbox, ManagedSandboxSession, SandboxDispatchSettings
+from tai42_kit.sandbox import (
+    ExecDeadline,
+    HostExecHandle,
+    HostProcess,
+    ManagedSandbox,
+    ManagedSandboxSession,
+    SandboxDispatchSettings,
+    run_host_process,
+)
 
-_READ_CHUNK = 65536
 # A fixed PATH base so a spawned subprocess never inherits the host environment.
 _BASE_PATH = os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin")
-
-
-def _returncode(proc: asyncio.subprocess.Process) -> int:
-    code = proc.returncode
-    if code is None:  # pragma: no cover - every caller awaits exit first
-        raise SandboxError("sandbox exec exit code read before the process exited")
-    return code
-
-
-def _kill_group(proc: asyncio.subprocess.Process) -> None:
-    if proc.returncode is not None:
-        return
-    with contextlib.suppress(ProcessLookupError):
-        os.killpg(proc.pid, signal.SIGKILL)
-
-
-class FakeExecHandle(SandboxExecHandle):
-    """An interactive host-subprocess handle over separate stdin/stdout/stderr pipes."""
-
-    def __init__(self, proc: asyncio.subprocess.Process, *, timeout_seconds: float) -> None:
-        self._proc = proc
-        self._timeout_seconds = timeout_seconds
-        self._write_lock = asyncio.Lock()
-        self._output_iter: AsyncIterator[SandboxStreamChunk | SandboxStreamExit] | None = None
-        self._stdout_len = 0
-        self._stderr_len = 0
-
-    async def write_stdin(self, data: bytes) -> None:
-        async with self._write_lock:
-            stdin = self._proc.stdin
-            if stdin is None or self._proc.returncode is not None or stdin.is_closing():
-                raise SandboxError("sandbox exec stdin is closed or the exec has exited; cannot write")
-            try:
-                stdin.write(data)
-                await stdin.drain()
-            except (BrokenPipeError, ConnectionResetError, ProcessLookupError) as exc:
-                raise SandboxError(f"sandbox exec stdin write failed: {exc}") from exc
-
-    async def close_stdin(self) -> None:
-        stdin = self._proc.stdin
-        if stdin is not None and not stdin.is_closing():
-            stdin.close()
-
-    @property
-    def output(self) -> AsyncIterator[SandboxStreamChunk | SandboxStreamExit]:
-        if self._output_iter is None:
-            self._output_iter = self._stream_output()
-        return self._output_iter
-
-    async def kill(self) -> None:
-        _kill_group(self._proc)
-
-    async def _stream_output(self) -> AsyncIterator[SandboxStreamChunk | SandboxStreamExit]:
-        queue: asyncio.Queue[SandboxStreamChunk | None] = asyncio.Queue()
-
-        async def _reader(stream: asyncio.StreamReader | None, name: str) -> None:
-            if stream is None:  # pragma: no cover
-                return
-            while True:
-                chunk = await stream.read(_READ_CHUNK)
-                if not chunk:
-                    break
-                if name == "stdout":
-                    self._stdout_len += len(chunk)
-                else:
-                    self._stderr_len += len(chunk)
-                await queue.put(SandboxStreamChunk(stream="stdout" if name == "stdout" else "stderr", data=chunk))
-
-        async def _drive() -> None:
-            await asyncio.gather(_reader(self._proc.stdout, "stdout"), _reader(self._proc.stderr, "stderr"))
-            await self._proc.wait()
-            await queue.put(None)
-
-        driver = asyncio.ensure_future(_drive())
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + self._timeout_seconds
-        try:
-            while True:
-                remaining = deadline - loop.time()
-                if remaining <= 0:
-                    await self._timeout(driver)
-                try:
-                    item = await asyncio.wait_for(queue.get(), timeout=remaining)
-                except TimeoutError:
-                    await self._timeout(driver)
-                if item is None:
-                    break
-                yield item
-            yield SandboxStreamExit(exit_code=_returncode(self._proc))
-        finally:
-            driver.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await driver
-
-    async def _timeout(self, driver: asyncio.Future[None]) -> None:
-        await self.kill()
-        with contextlib.suppress(ProcessLookupError):
-            await self._proc.wait()
-        driver.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await driver
-        raise SandboxExecTimeoutError(
-            timeout_seconds=self._timeout_seconds, stdout_len=self._stdout_len, stderr_len=self._stderr_len
-        )
 
 
 class FakeSandboxSession(ManagedSandboxSession):
@@ -165,7 +63,7 @@ class FakeSandboxSession(ManagedSandboxSession):
         super().__init__(sandbox=sandbox, session_id=session_id)
         self._workspace_path = workspace_path
         self._spec_env = dict(spec_env)
-        self._handles: list[FakeExecHandle] = []
+        self._handles: list[HostExecHandle] = []
 
     @property
     def workspace_path(self) -> str:
@@ -193,21 +91,11 @@ class FakeSandboxSession(ManagedSandboxSession):
             raise SandboxError(f"path {path!r} escapes the sandbox workspace")
         return resolved
 
-    async def _spawn(
-        self, argv: Sequence[str], *, cwd: str, env: dict[str, str], stdin: bool
-    ) -> asyncio.subprocess.Process:
+    async def _spawn(self, argv: Sequence[str], *, cwd: str, env: dict[str, str], stdin: bool) -> HostProcess:
         if not argv:
             raise SandboxError("sandbox exec requires a non-empty argv")
         try:
-            return await asyncio.create_subprocess_exec(
-                *argv,
-                cwd=cwd,
-                env=env,
-                stdin=asyncio.subprocess.PIPE if stdin else None,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                start_new_session=True,
-            )
+            return await HostProcess.spawn(argv, cwd=cwd, env=env, stdin=stdin)
         except OSError as exc:
             raise SandboxError(f"sandbox exec could not spawn {argv[0]!r}: {exc}") from exc
 
@@ -220,42 +108,8 @@ class FakeSandboxSession(ManagedSandboxSession):
         stdin: bytes | None = None,
         timeout_seconds: float,
     ) -> ExecResult:
-        proc = await self._spawn(argv, cwd=self._resolve_cwd(cwd), env=self._build_env(env), stdin=stdin is not None)
-        stdout_buf = bytearray()
-        stderr_buf = bytearray()
-
-        async def _pump(stream: asyncio.StreamReader | None, buf: bytearray) -> None:
-            if stream is None:  # pragma: no cover
-                return
-            while True:
-                chunk = await stream.read(_READ_CHUNK)
-                if not chunk:
-                    break
-                buf.extend(chunk)
-
-        async def _communicate() -> None:
-            pumps = asyncio.gather(_pump(proc.stdout, stdout_buf), _pump(proc.stderr, stderr_buf))
-            if stdin is not None and proc.stdin is not None:
-                proc.stdin.write(stdin)
-                await proc.stdin.drain()
-                proc.stdin.close()
-            await pumps
-            await proc.wait()
-
-        try:
-            await asyncio.wait_for(_communicate(), timeout=timeout_seconds)
-        except TimeoutError:
-            _kill_group(proc)
-            with contextlib.suppress(ProcessLookupError):
-                await proc.wait()
-            raise SandboxExecTimeoutError(
-                timeout_seconds=timeout_seconds, stdout_len=len(stdout_buf), stderr_len=len(stderr_buf)
-            ) from None
-        return ExecResult(
-            exit_code=_returncode(proc),
-            stdout=stdout_buf.decode("utf-8", "replace"),
-            stderr=stderr_buf.decode("utf-8", "replace"),
-        )
+        process = await self._spawn(argv, cwd=self._resolve_cwd(cwd), env=self._build_env(env), stdin=stdin is not None)
+        return await run_host_process(process, stdin=stdin, timeout_seconds=timeout_seconds)
 
     async def exec_start(
         self,
@@ -265,8 +119,9 @@ class FakeSandboxSession(ManagedSandboxSession):
         env: dict[str, SecretStr] | None = None,
         timeout_seconds: float,
     ) -> SandboxExecHandle:
-        proc = await self._spawn(argv, cwd=self._resolve_cwd(cwd), env=self._build_env(env), stdin=True)
-        handle = FakeExecHandle(proc, timeout_seconds=timeout_seconds)
+        deadline = ExecDeadline.from_now(timeout_seconds)
+        process = await self._spawn(argv, cwd=self._resolve_cwd(cwd), env=self._build_env(env), stdin=True)
+        handle = HostExecHandle(process, deadline=deadline)
         self._handles.append(handle)
         return handle
 

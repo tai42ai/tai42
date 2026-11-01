@@ -18,6 +18,7 @@ that produces none raises rather than silently omitting it.
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -545,19 +546,22 @@ class DeepAgent(Agent):
                     # detached on the way out.
                     claims: dict[str, datetime | None] = {}
                     try:
-                        async for event in bind_resume_per_step(
-                            lambda: step_bindings(root.step, lambda: park_step_binding(park, claims)),
-                            self._astream_built(
-                                agent,
-                                agent_input,
-                                config,
-                                interrupt_on,
-                                response_format=response_format,
-                                structured_strategy=strategy,
-                                park=park,
-                            ),
-                        ):
-                            yield terminals.note(event)
+                        async with contextlib.aclosing(
+                            bind_resume_per_step(
+                                lambda: step_bindings(root.step, lambda: park_step_binding(park, claims)),
+                                self._astream_built(
+                                    agent,
+                                    agent_input,
+                                    config,
+                                    interrupt_on,
+                                    response_format=response_format,
+                                    structured_strategy=strategy,
+                                    park=park,
+                                ),
+                            )
+                        ) as stream:
+                            async for event in stream:
+                                yield terminals.note(event)
                     finally:
                         with root.step():
                             await detach_dead_chains(claims)
@@ -610,10 +614,13 @@ class DeepAgent(Agent):
         suppresses match by identity.
         """
         await _repair_dangling_tool_calls(agent, config)
-        async for event in aproject_agent_events(
-            agent, agent_input, config, response_format=response_format, structured_strategy=structured_strategy
-        ):
-            yield event
+        async with contextlib.aclosing(
+            aproject_agent_events(
+                agent, agent_input, config, response_format=response_format, structured_strategy=structured_strategy
+            )
+        ) as stream:
+            async for event in stream:
+                yield event
         for event in await finalize_drive(agent, config, interrupt_on, park):
             yield event
 

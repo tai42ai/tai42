@@ -50,7 +50,7 @@ async def test_refine_agent_loop_to_approval_over_mcp(
             # Evaluator iteration 0: a draft.
             {"content": draft},
             # Critic iteration 0: emit the exact approval token -> loop breaks.
-            {"content": f"looks good {CRITIC_APPROVAL_MESSAGE}"},
+            {"content": CRITIC_APPROVAL_MESSAGE},
             # Final approved Evaluator pass (the streamed stage).
             {"content": final},
         ]

@@ -64,7 +64,10 @@ class SandboxExecTimeoutError(SandboxError):
 
     Carries the partial-output LENGTHS (never the content — output may hold
     secrets read from ``env``) so a caller can log the shape of what was produced
-    before the kill.
+    before the kill. When the exec's output ended with the kill, they count every
+    byte the exec produced; when a process the command started still held the
+    output after the kill, they count the output received up to the stop, and a
+    note on the error says so.
     """
 
     # An exec exceeded its timeout budget.

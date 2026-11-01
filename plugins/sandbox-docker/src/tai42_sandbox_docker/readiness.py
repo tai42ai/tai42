@@ -11,17 +11,15 @@ create, exec, teardown, and the one-probe-per-burst lock) lives on the provider.
 from __future__ import annotations
 
 import socket
-from urllib.parse import urlsplit
 
 from tai42_contract.sandbox import SandboxError
+
+from tai42_sandbox_docker.engine_endpoint import TcpEndpoint, resolve_engine_endpoint
 
 # aiodocker re-types an aiohttp connection failure raised mid-request as a
 # ``DockerError`` with this status; it is the observable that the engine daemon went
 # away and readiness must be re-proven before the next create.
 ENGINE_UNREACHABLE_STATUS = 900
-
-# The engine control API's TLS port, used when the configured endpoint names no port.
-DEFAULT_CONTROL_PORT = 2376
 
 # Every DNS resolver listens here; the ALLOW target is the probe container's own
 # resolver on this port.
@@ -41,24 +39,22 @@ def is_engine_unreachable(status: int) -> bool:
     return status == ENGINE_UNREACHABLE_STATUS
 
 
-def engine_control_address(host: str) -> tuple[str, int]:
-    """The engine control endpoint the provider itself dials, as ``(host, port)``.
+def engine_control_address(host: str, *, tls: bool) -> tuple[str, int]:
+    """The address the provider dials the engine ``SANDBOX_DOCKER_HOST`` ``host`` names, as ``(host, port)``.
 
-    This is the readiness DENY target: a session on the egress tier must NOT reach the
-    engine's own control address across the firewall. A local-socket endpoint
-    (``unix://`` / ``npipe://`` / a bare path) has no network address to probe, so an
-    enabled probe against one is refused loudly rather than run against a target that
-    does not exist.
+    ``tls`` is the provider's mTLS setting, which the endpoint is resolved under. This is the
+    readiness DENY target: a session on the egress tier must NOT reach the engine's own
+    control address across the firewall. A local-socket endpoint (a unix socket) has no
+    network address to probe, so an enabled probe against one is refused loudly, naming the
+    setting as written, rather than run against a target that does not exist.
     """
-    if host.startswith(("unix://", "npipe://", "/")):
+    endpoint = resolve_engine_endpoint(host, tls=tls)
+    if not isinstance(endpoint, TcpEndpoint):
         raise SandboxError(
             "the egress-firewall readiness probe needs a network engine endpoint to derive its deny "
-            f"target, but SANDBOX_DOCKER_HOST {host!r} is a local socket"
+            f"target, but SANDBOX_DOCKER_HOST names the local socket {host}"
         )
-    parts = urlsplit(host if "://" in host else f"//{host}")
-    if not parts.hostname:
-        raise SandboxError(f"cannot derive the readiness-probe deny target: SANDBOX_DOCKER_HOST {host!r} names no host")
-    return parts.hostname, parts.port or DEFAULT_CONTROL_PORT
+    return endpoint.address()
 
 
 def resolve_ipv4(host: str) -> str:

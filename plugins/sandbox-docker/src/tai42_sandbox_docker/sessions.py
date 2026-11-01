@@ -6,20 +6,22 @@ base it extends owns ``id`` / ``info()`` / ``touch()`` / ``destroy()`` (all rout
 through the owning sandbox's ledger), so this module carries only the container I/O.
 
 Every ``timeout_seconds`` is enforced HOST-SIDE (an ``asyncio`` deadline around the
-attach/drain), never by trusting the engine: on expiry the exec's process is killed
+attach/drain), never by trusting the engine: on expiry the exec's command is killed
 and a :class:`SandboxExecTimeoutError` is raised carrying the partial-output LENGTHS
-only. A ``spec.env`` value is a :class:`~pydantic.SecretStr` unwrapped ONLY at the
-engine call and never placed in a repr, log, or error message.
+only. Every exec runs under the wrapper of :mod:`~tai42_sandbox_docker.exec_control`,
+which runs the command in a process group of its own and records it, so a sibling exec can
+kill that group. A ``spec.env`` value is a :class:`~pydantic.SecretStr` unwrapped ONLY at
+the engine call and never placed in a repr, log, or error message.
 """
 
 from __future__ import annotations
 
 import asyncio
-import contextlib
+import functools
 import posixpath
-import socket
-from collections.abc import AsyncIterator, Mapping, Sequence
-from typing import TYPE_CHECKING, Any
+import uuid
+from collections.abc import Mapping, Sequence
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from aiodocker.exceptions import DockerError  # pyright: ignore[reportMissingImports]
 from pydantic import SecretStr
@@ -27,17 +29,22 @@ from tai42_contract.sandbox import (
     ExecResult,
     SandboxDurability,
     SandboxError,
-    SandboxExecHandle,
     SandboxExecTimeoutError,
     SandboxFileNotFoundError,
     SandboxStreamChunk,
-    SandboxStreamExit,
 )
-from tai42_kit.sandbox import ManagedSandboxSession
+from tai42_kit.sandbox import ExecDeadline, ManagedSandboxSession, read_while_feeding, resolve_workspace_path
+from tai42_kit.sandbox.exec_kill import KillResult, kill_on_failure
+from tai42_kit.sandbox.sibling_kill_handle import SiblingKillExecHandle
+from tai42_kit.sandbox.sibling_kill_one_shot import OneShotOutput, run_one_shot
+
+from tai42_sandbox_docker.exec_control import kill_exec_group, wrap_command
+from tai42_sandbox_docker.exec_status import EngineErrorMapper, read_exit_code
 
 if TYPE_CHECKING:
     from tai42_kit.sandbox import ManagedSandbox
 
+    from tai42_sandbox_docker.attach import ExecAttacher, ExecAttachment
     from tai42_sandbox_docker.provider import DockerSandbox
 
 # The absolute container path the session workspace mounts at. A workspace-RELATIVE
@@ -45,15 +52,12 @@ if TYPE_CHECKING:
 # as given (the caller's own responsibility, per the contract path rule).
 WORKSPACE_PATH = "/workspace"
 
-# The Docker exec multiplex frame stream ids (see the Docker Engine attach "Stream
-# Format"): 1 is stdout, 2 is stderr.
-_STREAM_STDERR = 2
-
-# Bound on the post-EOF exit-code poll: the attach stream has ended, so the exec is
-# finishing; a few short reads cover the brief window before the engine records the
-# exit code, without an unbounded wait.
-_EXIT_CODE_POLLS = 50
-_EXIT_CODE_POLL_INTERVAL = 0.02
+# How long the engine keeps the stream of an exited exec open, at most, before it closes it.
+_ENGINE_STREAM_CLOSE_SECONDS = 2.0
+# How long an exec's stream may take to end once the exec is over or killed: the engine's close of
+# an exited exec's stream, with as much again for the close to reach the attach. A stream still
+# open after that, the exec over, is the engine failing to end it.
+_STREAM_END_GRACE_SECONDS = 2 * _ENGINE_STREAM_CLOSE_SECONDS
 
 
 def engine_error(exc: DockerError) -> SandboxError:
@@ -63,21 +67,6 @@ def engine_error(exc: DockerError) -> SandboxError:
     engine message describes the API failure, not the credential channel).
     """
     return SandboxError(f"docker engine error [{exc.status}]: {exc.message}")
-
-
-def resolve_workspace_path(path: str) -> str:
-    """Resolve a ``cwd`` / file ``path`` against the workspace root.
-
-    A relative value resolves under :data:`WORKSPACE_PATH` with containment enforced
-    (an escaping ``..`` is a loud :class:`SandboxError`); an absolute value is returned
-    unchanged as the caller's own responsibility (the contract path rule).
-    """
-    if path.startswith("/"):
-        return path
-    resolved = posixpath.normpath(posixpath.join(WORKSPACE_PATH, path))
-    if resolved != WORKSPACE_PATH and not resolved.startswith(WORKSPACE_PATH + "/"):
-        raise SandboxError(f"path {path!r} escapes the workspace root {WORKSPACE_PATH!r}")
-    return resolved
 
 
 def merge_env(base: Mapping[str, SecretStr], overlay: Mapping[str, SecretStr] | None) -> dict[str, str]:
@@ -92,184 +81,108 @@ def merge_env(base: Mapping[str, SecretStr], overlay: Mapping[str, SecretStr] | 
     return merged
 
 
-async def read_exit_code(exec_obj: Any) -> int:
-    """Read the finished exec's exit code, polling briefly past the attach EOF."""
-    for _ in range(_EXIT_CODE_POLLS):
-        info = await exec_obj.inspect()
-        if not info.get("Running", False) and info.get("ExitCode") is not None:
-            return int(info["ExitCode"])
-        await asyncio.sleep(_EXIT_CODE_POLL_INTERVAL)
-    raise SandboxError("sandbox exec ended without reporting an exit code")
-
-
-async def half_close_stdin(stream: Any) -> None:
-    """Half-close the write (stdin) side of a live attach stream, leaving the read side open.
-
-    Remaining output still drains — this is what delivers EOF to the in-session process,
-    so a ``cat``-style reader exits instead of hanging.
-
-    The aiodocker ``Stream`` exposes only a full ``close()`` (which tears down the
-    read side too), so the half-close is issued on the underlying transport directly
-    (the ``aiodocker~=0.27`` pin holds this private ``_resp`` shape stable):
-
-    - Plain TCP: ``write_eof()`` sends a FIN on the write half — the clean half-close.
-    - mTLS (``tcp://`` normalized to ``https://``): an asyncio SSL transport reports
-      ``can_write_eof() == False`` (TLS has no half-close), so ``write_eof()`` never
-      fires and the process's stdin never sees EOF. Signal it by shutting the WRITE
-      half of the UNDERLYING socket: the daemon reads a FIN on the hijacked stream
-      and closes the process's stdin, while the socket's read half stays open so the
-      remaining stdout/stderr still drains. This is how the docker CLI half-closes an
-      interactive exec over a TLS control API.
-    """
-    resp = stream._resp
-    if resp is None or resp.connection is None:
-        return
-    transport = resp.connection.transport
-    if transport is None:
-        return
-    if transport.can_write_eof():
-        transport.write_eof()
-        return
-    sock = transport.get_extra_info("socket")
-    if sock is not None:
-        with contextlib.suppress(OSError):
-            sock.shutdown(socket.SHUT_WR)
-
-
-class DockerSandboxExecHandle(SandboxExecHandle):
+class DockerSandboxExecHandle(SiblingKillExecHandle):
     """A live interactive exec attached over one demultiplexed engine stream.
 
-    Reads and writes ride ONE attach stream: a write lock keeps a ``write_stdin``
-    from interleaving with another and never splits a call's bytes, while reads drain
-    concurrently. The ``timeout_seconds`` deadline is enforced host-side around the
-    output drain; on expiry the exec is killed and the iterator raises
-    :class:`SandboxExecTimeoutError`.
+    Reads and writes ride ONE :class:`~tai42_sandbox_docker.attach.ExecAttachment`; the kit
+    :class:`~tai42_kit.sandbox.SiblingKillExecHandle` it extends holds the deadline, the stops
+    and the grace after a caller's kill. The exec's wrapper ends only once nothing holds the
+    exec's output, so an exec the engine records as ended has nothing holding it. An exec its
+    kill signalled is over by its kill, whether or not a process the command started still
+    holds its output: its stream is closed, and its output ends at once with the status the
+    kill reported for its command — the killed status, or the command's own when it ended by
+    itself before the kill landed. A kill that found nothing left to kill while a process the
+    command started still holds the exec's output closes its stream and ends the output at once
+    with a :class:`SandboxError`: the exec's status cannot be known, since the kill read none
+    and the engine records no exit code for the exec while its output is held. A kill that found
+    nothing running, the exec not started, or the exec ended, as when its container stopped,
+    with no process holding the exec's output, leaves the stream open for the exec's own end:
+    the output ends with the exec's exit code (the killed status for an exec that never
+    started). A stream still open past the grace then is a :class:`SandboxError`.
     """
 
-    def __init__(self, *, container: Any, exec_obj: Any, stream: Any, timeout_seconds: float) -> None:
-        """Bind the handle to a started exec's ``stream`` on ``container`` with the host-side ``timeout_seconds``."""
+    _status_grace_seconds: ClassVar[float] = _STREAM_END_GRACE_SECONDS
+
+    def __init__(
+        self,
+        *,
+        container: Any,
+        exec_obj: Any,
+        exec_id: str,
+        attachment: ExecAttachment,
+        deadline: ExecDeadline,
+        retype: EngineErrorMapper,
+        attach: ExecAttacher,
+    ) -> None:
+        """Bind the handle to the started exec ``exec_id``'s ``attachment`` on ``container``.
+
+        The exec is bounded by its ``deadline``; ``retype`` re-types every engine error the handle
+        meets, and ``attach`` opens the stream of its sibling kill.
+        """
+        super().__init__(exec_id=exec_id, deadline=deadline)
         self._container = container
+        self._engine_error = retype
+        self._attach = attach
         self._exec = exec_obj
-        self._stream = stream
-        self._timeout_seconds = timeout_seconds
-        self._write_lock = asyncio.Lock()
-        self._finished = False
-        self._output_iter: AsyncIterator[SandboxStreamChunk | SandboxStreamExit] | None = None
-        self._stdout_len = 0
-        self._stderr_len = 0
+        self._attachment = attachment
+        # The status a kill that signalled the exec's group reported for its command: the output
+        # ends with it.
+        self._killed_status: int | None = None
+        # Set once a kill that found nothing left to kill has closed the stream of an exec whose
+        # output a process the command started still held: the output then ends with a
+        # :class:`SandboxError`.
+        self._held_at_kill = False
 
-    async def write_stdin(self, data: bytes) -> None:
-        """Write ``data`` to the exec's stdin; raises once the exec has exited or its stream is closed."""
-        if self._finished:
-            raise SandboxError("cannot write stdin: the sandbox exec has exited")
-        async with self._write_lock:
-            try:
-                await self._stream.write_in(data)
-            except RuntimeError as exc:
-                # aiodocker raises RuntimeError once the transport is closed.
-                self._finished = True
-                raise SandboxError("cannot write stdin: the sandbox exec stream is closed") from exc
-            except DockerError as exc:
-                raise engine_error(exc) from exc
+    async def _write(self, data: bytes) -> None:
+        if not await self._attachment.write(data):
+            raise self._stdin_lost()
 
-    async def close_stdin(self) -> None:
-        """Half-close the exec's stdin so the in-session process reads EOF, leaving output draining."""
-        if self._finished:
-            return
-        async with self._write_lock:
-            await self._stream._init()
-            await half_close_stdin(self._stream)
+    async def _end_input(self) -> None:
+        self._attachment.end_input()
 
-    @property
-    def output(self) -> AsyncIterator[SandboxStreamChunk | SandboxStreamExit]:
-        """The exec's demultiplexed output stream (stdout/stderr chunks then an exit), iterated once."""
-        if self._output_iter is None:
-            self._output_iter = self._iter_output()
-        return self._output_iter
+    async def _receive(self) -> SandboxStreamChunk | None:
+        return await self._attachment.read()
 
-    async def _iter_output(self) -> AsyncIterator[SandboxStreamChunk | SandboxStreamExit]:
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + self._timeout_seconds
-        async with self._stream:
-            while True:
-                remaining = deadline - loop.time()
-                if remaining <= 0:
-                    await self.kill()
-                    raise self._timeout_error()
-                try:
-                    message = await asyncio.wait_for(self._stream.read_out(), remaining)
-                except TimeoutError as exc:
-                    await self.kill()
-                    raise self._timeout_error() from exc
-                if message is None:
-                    break
-                if message.stream == _STREAM_STDERR:
-                    self._stderr_len += len(message.data)
-                    yield SandboxStreamChunk(stream="stderr", data=message.data)
-                else:
-                    self._stdout_len += len(message.data)
-                    yield SandboxStreamChunk(stream="stdout", data=message.data)
-        self._finished = True
-        yield SandboxStreamExit(exit_code=await read_exit_code(self._exec))
+    def _take_buffered(self) -> list[SandboxStreamChunk]:
+        return self._attachment.take_received()
 
-    def _timeout_error(self) -> SandboxExecTimeoutError:
-        return SandboxExecTimeoutError(
-            timeout_seconds=self._timeout_seconds,
-            stdout_len=self._stdout_len,
-            stderr_len=self._stderr_len,
-        )
-
-    async def kill(self) -> None:
-        """Kill the running exec's process; a no-op once the exec has already exited (idempotent)."""
-        if self._finished:
-            return
-        info = await _inspect_exec(self._exec)
-        if info is not None and not info.get("Running", True):
-            # The exec has already exited: kill is an idempotent no-op.
-            self._finished = True
-            return
-        pid = info.get("Pid") if info else None
-        await kill_exec_process(self._container, int(pid) if pid else None)
-        self._finished = True
-
-
-async def _inspect_exec(exec_obj: Any) -> dict[str, Any] | None:
-    try:
-        return await exec_obj.inspect()
-    except DockerError:
-        return None
-
-
-async def _signal_pid(container: Any, pid: int) -> bool:
-    """Kill the exec's process via a sibling ``kill`` exec. Returns whether it ran."""
-    try:
-        killer = await container.exec(
-            cmd=["kill", "-KILL", str(pid)],
-            stdin=False,
-            stdout=True,
-            stderr=True,
-            tty=False,
-        )
-        async with killer.start(detach=False) as stream:
-            while await stream.read_out() is not None:
-                pass
-    except DockerError:
+    def _ended_in_stream(self) -> bool:
+        # The attach stream carries no exit status: only the engine's inspect shows the exec ended.
         return False
-    return True
 
+    def _demux(self, message: SandboxStreamChunk) -> SandboxStreamChunk:
+        return message
 
-async def kill_exec_process(container: Any, pid: int | None) -> None:
-    """Terminate an exec's process, falling back to killing the container's main process.
+    async def _close_stream(self) -> None:
+        self._attachment.close()
 
-    The container-kill last resort runs only when the process cannot be signalled.
-    """
-    if pid is not None and await _signal_pid(container, pid):
-        return
-    try:
-        await container.kill(signal="SIGKILL")
-    except DockerError as exc:
-        if exc.status not in (404, 409):
-            raise engine_error(exc) from exc
+    async def _exit_status(self) -> int:
+        if self._killed_status is not None:
+            return self._killed_status
+        if self._held_at_kill:
+            raise SandboxError(
+                "sandbox exec output ended by the kill while a process the command started still holds it, "
+                "and the exec's exit status cannot be known: the kill found nothing of the exec left to kill, "
+                "so it read no status, and the engine records no exit code for the exec until nothing holds "
+                "its output"
+            )
+        return await read_exit_code(self._exec, self._engine_error)
+
+    def _grace_error(self) -> SandboxError:
+        # The exec is over, its process exited with nothing holding its output, and the engine
+        # reports no exit code for an exec whose stream it has not ended: none is invented.
+        return SandboxError(
+            f"sandbox exec stream did not end within {self._status_grace_seconds:g}s of the exec's end: "
+            "the engine did not close the stream of an exec that has exited with nothing holding its output"
+        )
+
+    async def _kill_exec(self) -> KillResult:
+        return await kill_exec_group(self._container, self._exec, self._exec_id, self._engine_error, self._attach)
+
+    async def _end_killed(self, result: KillResult) -> None:
+        self._killed_status = result.exit_code
+        self._held_at_kill = result.output_held and result.exit_code is None
+        self._attachment.close()
 
 
 class DockerSandboxSession(ManagedSandboxSession):
@@ -310,23 +223,33 @@ class DockerSandboxSession(ManagedSandboxSession):
         stdin: bytes | None = None,
         timeout_seconds: float,
     ) -> ExecResult:
-        """Run ``argv`` to completion and return its :class:`ExecResult`; a host-side timeout kills it and raises."""
-        exec_obj = await self._make_exec(argv, cwd=cwd, env=env, stdin=stdin is not None)
-        stdout = bytearray()
-        stderr = bytearray()
-        try:
-            exit_code = await asyncio.wait_for(self._drain(exec_obj, stdin, stdout, stderr), timeout_seconds)
-        except TimeoutError as exc:
-            await self._kill_exec(exec_obj)
-            raise SandboxExecTimeoutError(
-                timeout_seconds=timeout_seconds,
-                stdout_len=len(stdout),
-                stderr_len=len(stderr),
-            ) from exc
+        """Run ``argv`` to completion and return its :class:`ExecResult`.
+
+        A host-side timeout kills the exec and raises :class:`SandboxExecTimeoutError`, its
+        counts taken as the kit's :func:`~tai42_kit.sandbox.sibling_kill_one_shot.run_one_shot`
+        states; any other failure (an engine error, a stdin it cannot close, a cancelled call)
+        kills it and propagates. A kill that fails, or finds a process still holding the exec's
+        output, then is logged and noted on the raised error.
+        """
+        exec_id, exec_obj = await self._make_exec(argv, cwd=cwd, env=env, stdin=stdin is not None)
+        output = OneShotOutput()
+        exit_code = await run_one_shot(
+            self._drain(exec_obj, stdin, output),
+            output,
+            timeout_seconds=timeout_seconds,
+            kill=lambda: kill_exec_group(
+                self._container, exec_obj, exec_id, self._sandbox._engine_error, self._sandbox._attach_exec
+            ),
+            exec_id=exec_id,
+            grace_seconds=_STREAM_END_GRACE_SECONDS,
+            timeout_error=lambda: SandboxExecTimeoutError(
+                timeout_seconds=timeout_seconds, stdout_len=output.stdout_len, stderr_len=output.stderr_len
+            ),
+        )
         return ExecResult(
             exit_code=exit_code,
-            stdout=bytes(stdout).decode("utf-8", "replace"),
-            stderr=bytes(stderr).decode("utf-8", "replace"),
+            stdout=bytes(output.stdout).decode("utf-8", "replace"),
+            stderr=bytes(output.stderr).decode("utf-8", "replace"),
         )
 
     async def exec_start(
@@ -337,19 +260,52 @@ class DockerSandboxSession(ManagedSandboxSession):
         env: dict[str, SecretStr] | None = None,
         timeout_seconds: float,
     ) -> DockerSandboxExecHandle:
-        """Start ``argv`` as a live interactive exec and return its :class:`DockerSandboxExecHandle`."""
-        exec_obj = await self._make_exec(argv, cwd=cwd, env=env, stdin=True)
-        stream = exec_obj.start(detach=False)
+        """Start ``argv`` as a live interactive exec and return its :class:`DockerSandboxExecHandle`.
+
+        Attaching starts the exec, so an attach that fails or is cancelled kills it, aborts the
+        attach connection and propagates its own error, an engine error as :class:`SandboxError`.
+        The exec's one deadline runs from the attach: an attach still unanswered when it passes
+        kills the exec and raises :class:`SandboxExecTimeoutError`, and the handle's output
+        is bounded by what is left of it. A kill that fails, or finds a process still holding the exec's output, then is
+        logged and noted on the raised error.
+        """
+        exec_id, exec_obj = await self._make_exec(argv, cwd=cwd, env=env, stdin=True)
+        # Attaching starts the exec, so it runs, and its deadline with it, from here on.
+        deadline = ExecDeadline.from_now(timeout_seconds)
+
+        def failure_of(exc: BaseException) -> BaseException:
+            # The only TimeoutError the block can raise is the passed deadline's: _attach_exec
+            # re-types every error of the attach, a TimeoutError (an OSError) included, as
+            # SandboxError. A caller's cancel landing in the deadline's own tick leaves the
+            # deadline's scope as the CancelledError it is, so it stays the caller's cancellation.
+            if isinstance(exc, TimeoutError):
+                return SandboxExecTimeoutError(timeout_seconds=timeout_seconds, stdout_len=0, stderr_len=0)
+            return exc
+
+        async with (
+            kill_on_failure(
+                lambda: kill_exec_group(
+                    self._container, exec_obj, exec_id, self._sandbox._engine_error, self._sandbox._attach_exec
+                ),
+                exec_id,
+                failure_of=failure_of,
+            ),
+            asyncio.timeout_at(deadline.at),
+        ):
+            attachment = await self._sandbox._attach_exec(exec_obj.id)
         return DockerSandboxExecHandle(
             container=self._container,
             exec_obj=exec_obj,
-            stream=stream,
-            timeout_seconds=timeout_seconds,
+            exec_id=exec_id,
+            attachment=attachment,
+            deadline=deadline,
+            retype=self._sandbox._engine_error,
+            attach=self._sandbox._attach_exec,
         )
 
     async def put_file(self, path: str, data: bytes) -> None:
         """Write ``data`` to ``path`` in the workspace, creating intermediate directories."""
-        target = resolve_workspace_path(path)
+        target = resolve_workspace_path(path, root=WORKSPACE_PATH)
         # docker's put_archive extracts a tar at ``base`` and requires that dir to
         # exist. For a workspace path we extract at the workspace ROOT with the member
         # path RELATIVE to it, and the tar carries its parent-dir entries, so a nested
@@ -370,7 +326,7 @@ class DockerSandboxSession(ManagedSandboxSession):
 
     async def get_file(self, path: str) -> bytes:
         """Read and return the bytes of ``path`` in the workspace; a missing file is a loud :class:`SandboxError`."""
-        target = resolve_workspace_path(path)
+        target = resolve_workspace_path(path, root=WORKSPACE_PATH)
         try:
             tar = await self._container.get_archive(target)
         except DockerError as exc:
@@ -390,12 +346,14 @@ class DockerSandboxSession(ManagedSandboxSession):
         cwd: str | None,
         env: dict[str, SecretStr] | None,
         stdin: bool,
-    ) -> Any:
-        workdir = resolve_workspace_path(cwd) if cwd is not None else WORKSPACE_PATH
+    ) -> tuple[str, Any]:
+        """Create the engine exec running ``argv`` under the exec wrapper; returns its id and the exec."""
+        workdir = resolve_workspace_path(cwd, root=WORKSPACE_PATH) if cwd is not None else WORKSPACE_PATH
         environment = merge_env(self._base_env, env)
+        exec_id = uuid.uuid4().hex
         try:
-            return await self._container.exec(
-                cmd=list(argv),
+            exec_obj = await self._container.exec(
+                cmd=wrap_command(exec_id, argv),
                 stdin=stdin,
                 stdout=True,
                 stderr=True,
@@ -405,28 +363,45 @@ class DockerSandboxSession(ManagedSandboxSession):
             )
         except DockerError as exc:
             raise self._sandbox._engine_error(exc) from exc
+        return exec_id, exec_obj
 
-    async def _drain(self, exec_obj: Any, stdin: bytes | None, stdout: bytearray, stderr: bytearray) -> int:
-        stream = exec_obj.start(detach=False)
-        async with stream:
-            if stdin is not None:
-                await stream.write_in(stdin)
-                await half_close_stdin(stream)
-            while True:
-                message = await stream.read_out()
-                if message is None:
-                    break
-                if message.stream == _STREAM_STDERR:
-                    stderr.extend(message.data)
-                else:
-                    stdout.extend(message.data)
-        return await read_exit_code(exec_obj)
+    async def _drain(self, exec_obj: Any, stdin: bytes | None, output: OneShotOutput) -> int:
+        """Attach to ``exec_obj``, feed it ``stdin`` while reading its output into ``output``; returns its exit code.
 
-    async def _kill_exec(self, exec_obj: Any) -> None:
-        """Best-effort kill of a timed-out one-shot exec's process."""
-        info = await _inspect_exec(exec_obj)
-        pid = info.get("Pid") if info else None
-        await kill_exec_process(self._container, int(pid) if pid else None)
+        The stdin is written, then ended, while the output is read, so a command that echoes
+        its input never blocks the write, and the engine's end of the output aborts the attach
+        connection, so stdin the command never took does not hold the output open. A read that
+        ends early, cancelled included, adds the output the attachment had already received
+        before it closes. An engine error, from the attach to the exit code, raises as
+        :class:`SandboxError`.
+        """
+        attachment = await self._sandbox._attach_exec(exec_obj.id)
+
+        async def read() -> None:
+            while (chunk := await attachment.read()) is not None:
+                output.add(chunk)
+
+        feed = functools.partial(_feed_stdin, attachment, stdin) if stdin is not None else None
+        try:
+            await read_while_feeding(read, feed)
+        finally:
+            for chunk in attachment.take_received():
+                output.add(chunk)
+            attachment.close()
+        return await read_exit_code(exec_obj, self._sandbox._engine_error)
+
+
+async def _feed_stdin(attachment: ExecAttachment, data: bytes) -> None:
+    """Write a one-shot exec's stdin ``data`` to its ``attachment``, then end it.
+
+    A stream that closes before it took all of ``data`` stops the feed, as ``communicate`` stops
+    at a child's closed stdin: the engine closes it at the end of the exec's output, when the
+    command exited without reading the rest, and the exit code the engine records then tells how
+    the command ended. A connection lost while the command runs on leaves that exit code
+    unrecorded, which raises.
+    """
+    if await attachment.write(data):
+        attachment.end_input()
 
 
 def _tar_single_member(name: str, data: bytes) -> bytes:

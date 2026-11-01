@@ -442,3 +442,66 @@ async def test_the_conversation_door_reads_the_park_off_the_terminal_with_no_sto
         caller_interaction_ids=["i2"],
         expiry_at=datetime(2030, 1, 1, tzinfo=UTC),
     )
+
+
+async def test_the_conversation_door_closes_the_agent_stream_before_it_returns():
+    # The drive returns at the terminal event; the agent stream is closed before the drive
+    # returns, so its cleanup runs inside the turn and a cleanup failure raises out of it.
+    from tests.agent._memoryless import MemorylessTestAgent
+
+    from tai42_skeleton.conversations.turn import agent_turn
+
+    closed: list[bool] = []
+
+    class _CleanupFails(MemorylessTestAgent):
+        tool_name = "cleanup_fails"
+        ToolInput = _NoFields
+
+        async def run(self, **_kwargs):  # pragma: no cover - astream is overridden
+            raise NotImplementedError
+
+        async def astream(self, **_kwargs):
+            try:
+                yield MessageFinal(text="done")
+                yield MessageFinal(text="never read")
+            finally:
+                closed.append(True)
+                raise RuntimeError("stream cleanup failed")
+
+    with pytest.raises(RuntimeError, match="stream cleanup failed"):
+        await agent_turn._drive_agent_terminal(_CleanupFails(), {})
+    assert closed == [True]
+
+
+async def test_the_conversation_door_drives_a_plain_async_iterator_stream():
+    # The contract types ``astream`` as an async iterator; one without ``aclose`` is driven to
+    # its terminal, and the door returns that terminal.
+    from tests.agent._memoryless import MemorylessTestAgent
+
+    from tai42_skeleton.conversations.turn import agent_turn
+
+    class _Events:
+        def __init__(self) -> None:
+            self._sent = False
+
+        def __aiter__(self) -> _Events:
+            return self
+
+        async def __anext__(self) -> MessageFinal:
+            if self._sent:
+                raise StopAsyncIteration
+            self._sent = True
+            return MessageFinal(text="done")
+
+    class _PlainIterator(MemorylessTestAgent):
+        tool_name = "plain_iterator"
+        ToolInput = _NoFields
+
+        async def run(self, **_kwargs):  # pragma: no cover - astream is overridden
+            raise NotImplementedError
+
+        def astream(self, **_kwargs):
+            return _Events()
+
+    terminal = await agent_turn._drive_agent_terminal(_PlainIterator(), {})
+    assert terminal == MessageFinal(text="done")

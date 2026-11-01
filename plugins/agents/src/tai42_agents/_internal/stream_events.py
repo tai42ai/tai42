@@ -31,7 +31,8 @@ raises from validation.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Iterator
+import contextlib
+from collections.abc import AsyncGenerator, AsyncIterator, Iterator
 from datetime import datetime
 from typing import Any
 
@@ -145,7 +146,7 @@ async def astream_tools_agent_events(
     user_content_kwargs: dict[str, Any] | None = None,
     park_builder: ParkBuilder | None = None,
     resume: Any = None,
-) -> AsyncIterator[StreamEvent]:
+) -> AsyncGenerator[StreamEvent]:
     """Run the tools agent and yield a normalized :class:`StreamEvent` stream.
 
     Runs ``agent.astream`` with ``stream_mode=["updates", "messages"]``: the
@@ -192,10 +193,13 @@ async def astream_tools_agent_events(
             agent_input: Any = await resume_command(agent, run_config, resume) if resume is not None else messages
 
         async def _drive() -> AsyncIterator[StreamEvent]:
-            async for event in aproject_agent_events(
-                agent, agent_input, run_config, response_format=response_format, structured_strategy=strategy
-            ):
-                yield event
+            async with contextlib.aclosing(
+                aproject_agent_events(
+                    agent, agent_input, run_config, response_format=response_format, structured_strategy=strategy
+                )
+            ) as stream:
+                async for event in stream:
+                    yield event
             pauses = await finalize_drive(agent, run_config, None, park)
             if not any(isinstance(event, SuspendedFinal | InterruptFinal) for event in pauses):
                 await mark_minted_thread_finished(minted_thread, provider=graph.checkpoint_provider)
@@ -207,10 +211,13 @@ async def astream_tools_agent_events(
         # the bindings into the consumer's task (PEP 568 is unimplemented) and strand them on an
         # abandoned stream.
         try:
-            async for event in bind_resume_per_step(
-                lambda: step_bindings(root.step, lambda: park_step_binding(park, claims)), _drive()
-            ):
-                yield terminals.note(event)
+            async with contextlib.aclosing(
+                bind_resume_per_step(
+                    lambda: step_bindings(root.step, lambda: park_step_binding(park, claims)), _drive()
+                )
+            ) as stream:
+                async for event in stream:
+                    yield terminals.note(event)
         finally:
             with root.step():
                 await detach_dead_chains(claims)
@@ -404,7 +411,7 @@ async def aproject_agent_events(
     config: dict[str, Any],
     response_format: Any = None,
     structured_strategy: Any = None,
-) -> AsyncIterator[StreamEvent]:
+) -> AsyncGenerator[StreamEvent]:
     """Project a compiled LangGraph agent's ``astream`` into :class:`StreamEvent`s.
 
     Provider- and harness-agnostic: works for any ``create_agent`` /
@@ -440,23 +447,26 @@ async def aproject_agent_events(
     # structured-output rail of the graph counts per drive, not per compiled graph.
     counters: dict[int, RepromptCounter] = {}
     try:
-        async for item in bind_resume_per_step(
-            lambda: drive_reprompt_scope(counters),
-            agent.astream(agent_input, config, stream_mode=["updates", "messages"]),
-        ):
-            mode, chunk = _split_stream_item(item)
+        async with contextlib.aclosing(
+            bind_resume_per_step(
+                lambda: drive_reprompt_scope(counters),
+                agent.astream(agent_input, config, stream_mode=["updates", "messages"]),
+            )
+        ) as stream:
+            async for item in stream:
+                mode, chunk = _split_stream_item(item)
 
-            if mode == "messages":
-                delta = _message_delta_text(chunk)
-                if delta and not projection.native:
-                    projection.answer_parts.append(delta)
-                    yield MessageDelta(text=delta)
-                continue
+                if mode == "messages":
+                    delta = _message_delta_text(chunk)
+                    if delta and not projection.native:
+                        projection.answer_parts.append(delta)
+                        yield MessageDelta(text=delta)
+                    continue
 
-            # mode == "updates": chunk == {node_name: {"messages": [...], ...}, ...}
-            for update in _normalize_node_updates(chunk):
-                for event in _project_update_events(update, projection):
-                    yield event
+                # mode == "updates": chunk == {node_name: {"messages": [...], ...}, ...}
+                for update in _normalize_node_updates(chunk):
+                    for event in _project_update_events(update, projection):
+                        yield event
     except (RepromptCapError, GraphRecursionError) as exc:
         # A capped structured-output loop or a tripped recursion limit ends the run with a
         # typed, non-fatal terminal event (logged once) in place of the normal final — never

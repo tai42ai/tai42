@@ -124,8 +124,9 @@ async def open_sandbox(*, readiness: bool = False) -> AsyncIterator[DockerSandbo
     persistent allowed) so only a PROVIDER limitation — never the policy chokepoint
     — shapes what a session gets; the negatives below prove the ENGINE topology, not
     the operator policy. ``readiness`` turns on the egress-firewall readiness probe
-    (see :func:`build_sandbox`). The client close keeps the suite clean under the
-    harness's ``filterwarnings=error`` (an unclosed aiohttp session is a hard error)."""
+    (see :func:`build_sandbox`). Closing the client and its connector keeps the suite clean
+    under the harness's ``filterwarnings=error`` (an unclosed aiohttp session or connector is
+    a hard error)."""
     sandbox = build_sandbox(readiness=readiness)
     sandbox.bind_policy(permissive_policy())
     try:
@@ -134,11 +135,12 @@ async def open_sandbox(*, readiness: bool = False) -> AsyncIterator[DockerSandbo
         for info in await sandbox.list_sessions():
             with contextlib.suppress(SandboxError):
                 await sandbox.destroy_session(info.id)
-        # The provider exposes no public close; the aiodocker client it lazily built
-        # is the one resource to release, and closing it twice is a documented no-op.
+        # The provider exposes no public close; the aiodocker client it lazily built and the
+        # connector it dials through are the resources to release.
         client = sandbox._client
         if client is not None:
             await client.close()
+            await client.connector.close()
 
 
 def egress_spec(*, workspace_key: str) -> SandboxSessionSpec:

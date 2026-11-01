@@ -116,9 +116,10 @@ exactly the ones a deployment wants:
   over one prompt, then a judge LLM decides by majority vote (breaking ties with
   its own reasoning). Returns a `VotingOutput`; only the judge streams.
 - **`refine_agent`** (`tai42_agents.refine_agent`) — an Evaluator↔Critic loop: the
-  evaluator drafts, the critic reviews, and they alternate until the critic emits
-  the approval token or the iteration budget is exhausted (a loud `RuntimeError`,
-  never an unapproved draft). Only the final approved pass streams.
+  evaluator drafts, the critic reviews, and they alternate until the critic's whole
+  reply, surrounding whitespace aside, is the approval token (a reply that only
+  contains it is not an approval) or the iteration budget is exhausted (a loud
+  `RuntimeError`, never an unapproved draft). Only the final approved pass streams.
 - **`vqa_agent`** (`tai42_agents.vqa_agent`) — visual question answering: a single
   multimodal completion over an `image_url` and a `query`. No tools, no graph.
 

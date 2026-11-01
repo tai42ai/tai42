@@ -86,22 +86,38 @@ async def turn_budget() -> AsyncIterator[None]:
         _turn_budget_armed.reset(token)
 
 
-async def drive_live_caller_astream[EventT](stream: AsyncIterator[EventT]) -> AsyncIterator[EventT]:
+@asynccontextmanager
+async def drive_live_caller_astream[EventT](stream: AsyncIterator[EventT]) -> AsyncIterator[AsyncIterator[EventT]]:
     """Drive a live-caller agent ``astream`` under the turn budget and the attribution scope.
 
-    The ONE shared seam every live-caller agent-run door routes through.
+    The ONE shared seam every live-caller agent-run door routes through::
+
+        async with drive_live_caller_astream(agent.astream(**run_kwargs)) as events:
+            async for event in events:
+                ...
 
     The three live-caller doors that call ``agent.astream`` directly (the conversation
     bridge and both agent-run SSE routes) hold a live client connection, so they are NOT
     in the design-exempt detached set and MUST be budgeted; routing them here keeps the
     budget single-sourced and stamps their run's trace with its attribution, so no future
-    door can add an unbudgeted/unattributed astream. On expiry :func:`turn_budget` raises
-    ``TurnTimeoutError`` out through this iterator to the door's existing raise path;
+    door can add an unbudgeted/unattributed astream. The budget window spans the whole
+    block, the door's own handling of each event included. On expiry :func:`turn_budget`
+    raises ``TurnTimeoutError`` out of the block to the door's existing raise path;
     ``turn_budget``'s re-entrancy guard keeps a nested tool re-dispatch from opening a
     second window. Detached runs stay exempt by ``turn_budget``'s own ``in_detached_run``
     no-op — this seam never arms a budget there.
+
+    Leaving the block closes the agent stream right there, whether the door read it to its
+    end, stopped at a terminal event, raised, or was cancelled: the agent's own cleanup runs
+    inside the door's request, and a cleanup failure raises out of the block to the door.
+    ``stream`` is an agent's ``astream``, an async iterator: one with an ``aclose`` (an async
+    generator) is closed by it; a plain async iterator has nothing to close and is left as is.
     """
     with stamp_run_attribution():
         async with turn_budget():
-            async for event in stream:
-                yield event
+            try:
+                yield stream
+            finally:
+                aclose = getattr(stream, "aclose", None)
+                if aclose is not None:
+                    await aclose()

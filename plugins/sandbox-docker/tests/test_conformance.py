@@ -43,4 +43,13 @@ async def test_docker_sandbox_conformance() -> None:
         ttl_seconds=300,
     )
     config = SandboxConformanceConfig(image=_TEST_IMAGE, reject_specs=(reject,))
-    await run_sandbox_conformance(sandbox, config)
+    try:
+        await run_sandbox_conformance(sandbox, config)
+    finally:
+        # The provider exposes no public close; the aiodocker client it lazily built and the
+        # connector it dials through are the resources to release, and an unclosed aiohttp
+        # session or connector fails the run under ``filterwarnings = ["error"]``.
+        client = sandbox._client
+        if client is not None:
+            await client.close()
+            await client.connector.close()

@@ -5,14 +5,16 @@ from __future__ import annotations
 import pytest
 from aiodocker.exceptions import DockerError  # pyright: ignore[reportMissingImports]
 from tai42_contract.sandbox import SandboxError, SandboxSessionSpec, SandboxSpecRejectedError
-from tai42_kit.sandbox import LABEL_DURABILITY, LABEL_SANDBOX, LABEL_WORKSPACE, permissive_policy
+from tai42_kit.sandbox import LABEL_DURABILITY, LABEL_SANDBOX, LABEL_WORKSPACE, ExecDeadline, permissive_policy
 
+from tai42_sandbox_docker.exec_control import EXEC_WRAPPER
 from tai42_sandbox_docker.provider import DockerSandbox, volume_name
 from tai42_sandbox_docker.provider import _network_mode as network_mode
-from tai42_sandbox_docker.sessions import DockerSandboxExecHandle, DockerSandboxSession, kill_exec_process
+from tai42_sandbox_docker.readiness import ENGINE_UNREACHABLE_STATUS
+from tai42_sandbox_docker.sessions import DockerSandboxExecHandle, DockerSandboxSession, engine_error
 from tai42_sandbox_docker.settings import DockerSandboxSettings
 
-from .conftest import FakeContainer, FakeDocker, FakeExec
+from .conftest import FakeContainer, FakeDocker, FakeExec, attach_fake
 
 
 def _settings() -> DockerSandboxSettings:
@@ -20,7 +22,7 @@ def _settings() -> DockerSandboxSettings:
 
 
 def _sandbox(fake_docker: FakeDocker) -> DockerSandbox:
-    sandbox = DockerSandbox(docker=fake_docker, settings=_settings())
+    sandbox = DockerSandbox(docker=fake_docker, attach=fake_docker.attach_exec, settings=_settings())
     sandbox.bind_policy(permissive_policy())
     return sandbox
 
@@ -42,7 +44,7 @@ def _container() -> FakeContainer:
 
 
 def _session(container: FakeContainer) -> DockerSandboxSession:
-    sandbox = DockerSandbox(docker=object(), settings=_settings())
+    sandbox = DockerSandbox(docker=object(), attach=container.attach_exec, settings=_settings())
     return DockerSandboxSession(
         sandbox=sandbox,
         session_id=container.id,
@@ -53,9 +55,20 @@ def _session(container: FakeContainer) -> DockerSandboxSession:
     )
 
 
+async def _wrapped_cat(container: FakeContainer) -> FakeExec:
+    return await container.exec(cmd=["sh", "-c", EXEC_WRAPPER, "x1", "cat"])
+
+
 def _handle(container: FakeContainer, exec_obj: FakeExec) -> DockerSandboxExecHandle:
-    stream = exec_obj.start(detach=False)
-    return DockerSandboxExecHandle(container=container, exec_obj=exec_obj, stream=stream, timeout_seconds=5)
+    return DockerSandboxExecHandle(
+        container=container,
+        exec_obj=exec_obj,
+        exec_id="x1",
+        attachment=attach_fake(exec_obj),
+        deadline=ExecDeadline.from_now(5),
+        retype=engine_error,
+        attach=container.attach_exec,
+    )
 
 
 # -- defensive provider branches -------------------------------------------------
@@ -110,28 +123,34 @@ async def test_reconcile_swallows_missing_ephemeral_orphan(fake_docker: FakeDock
 # -- exec handle lifetime --------------------------------------------------------
 
 
-async def test_write_stdin_on_closed_transport_raises() -> None:
+async def test_write_stdin_on_a_closed_stream_raises() -> None:
     container = _container()
-    exec_obj = await container.exec(cmd=["cat"])
+    exec_obj = await _wrapped_cat(container)
     handle = _handle(container, exec_obj)
-    handle._stream.write_error = RuntimeError("Cannot write to closed transport")
+    assert exec_obj.attachment is not None
+    exec_obj.attachment.engine_ends()  # the connection is lost under the handle
     with pytest.raises(SandboxError, match="closed"):
         await handle.write_stdin(b"x")
-    assert handle._finished is True
+    with pytest.raises(SandboxError, match="stream is closed"):
+        await handle.write_stdin(b"y")
+    assert exec_obj.attachment.written == []
 
 
-async def test_write_stdin_engine_error_is_typed() -> None:
+async def test_a_kill_that_loses_the_engine_makes_the_next_create_re_prove_the_firewall() -> None:
     container = _container()
-    exec_obj = await container.exec(cmd=["cat"])
-    handle = _handle(container, exec_obj)
-    handle._stream.write_error = DockerError(500, "attach failed")
+    session = _session(container)
+    session._sandbox._engine_verified = True
+    handle = await session.exec_start(["cat"], timeout_seconds=5)
+    container.exec_error = ENGINE_UNREACHABLE_STATUS
+    container.execs[0].inspect_raises = True
     with pytest.raises(SandboxError, match="docker engine error"):
-        await handle.write_stdin(b"x")
+        await handle.kill()
+    assert session._sandbox._engine_verified is False
 
 
 async def test_close_stdin_after_finished_is_noop() -> None:
     container = _container()
-    exec_obj = await container.exec(cmd=["cat"])
+    exec_obj = await _wrapped_cat(container)
     handle = _handle(container, exec_obj)
     handle._finished = True
     await handle.close_stdin()  # returns without touching the stream
@@ -139,36 +158,37 @@ async def test_close_stdin_after_finished_is_noop() -> None:
 
 async def test_kill_when_already_exited() -> None:
     container = _container()
-    exec_obj = await container.exec(cmd=["cat"])
+    exec_obj = await _wrapped_cat(container)
     exec_obj.running = False
     handle = _handle(container, exec_obj)
     await handle.kill()
-    assert handle._finished is True
-    assert container.killed_signals == []  # no signal needed; the exec is gone
+    # Nothing was left to kill: the stream, stdin included, stays as it was until it ends.
+    assert handle._finished is False
+    assert handle._killed_status is None
+    assert exec_obj.attachment is not None
+    assert not exec_obj.attachment.closed.is_set()
 
 
-async def test_kill_when_inspect_fails_falls_back_to_container() -> None:
-    container = _container()
-    exec_obj = await container.exec(cmd=["cat"])
-    exec_obj.inspect_raises = True
-    handle = _handle(container, exec_obj)
+async def test_kill_after_the_session_is_destroyed_is_a_no_op(fake_docker: FakeDocker) -> None:
+    # The container is gone, and every process in it with it: the exec has certainly exited.
+    fake_docker.seed_image("img:1")
+    sandbox = _sandbox(fake_docker)
+    session = await sandbox.create_session(_spec())
+    handle = await session.exec_start(["sleep", "9"], timeout_seconds=30)
+    await session.destroy()
     await handle.kill()
-    assert container.killed_signals == ["SIGKILL"]
+    await handle.kill()
 
 
-async def test_kill_exec_process_reraises_engine_error() -> None:
+async def test_kill_engine_error_is_typed() -> None:
     container = _container()
+    exec_obj = await _wrapped_cat(container)
+    exec_obj.started = True  # the engine runs it, as once its attach is made
+    handle = _handle(container, exec_obj)
     container.exec_raises = True  # the sibling kill exec cannot be created
-    container.kill_error = 500  # and the container kill itself errors
     with pytest.raises(SandboxError, match="docker engine error"):
-        await kill_exec_process(container, 123)
-
-
-async def test_kill_exec_process_swallows_gone_container() -> None:
-    container = _container()
-    container.exec_raises = True
-    container.kill_error = 404  # a gone container is a no-op fallback
-    await kill_exec_process(container, 123)
+        await handle.kill()
+    assert handle._stopped is False
 
 
 # -- file transfer misses --------------------------------------------------------

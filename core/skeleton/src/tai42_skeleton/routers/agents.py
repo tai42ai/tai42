@@ -253,14 +253,15 @@ async def _drive_capturing_terminal(
     frame. ``None`` when the drive ended on an interrupt (already streamed) — ``visit`` classifies it
     ``none``.
     """
-    async for event in drive_live_caller_astream(agent.astream(**run_kwargs)):
-        if isinstance(
-            event,
-            SuspendedFinal | StructuredFinal | MessageFinal | StructuredOutputUnresolvedFinal | RecursionLimitFinal,
-        ):
-            captured["terminal"] = event
-            return event.to_suspended_interaction() if isinstance(event, SuspendedFinal) else event
-        await queue.put(("event", event))
+    async with drive_live_caller_astream(agent.astream(**run_kwargs)) as events:
+        async for event in events:
+            if isinstance(
+                event,
+                SuspendedFinal | StructuredFinal | MessageFinal | StructuredOutputUnresolvedFinal | RecursionLimitFinal,
+            ):
+                captured["terminal"] = event
+                return event.to_suspended_interaction() if isinstance(event, SuspendedFinal) else event
+            await queue.put(("event", event))
     return None
 
 

@@ -15,6 +15,7 @@ events and ends with a terminal ``StructuredFinal`` carrying the full
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from collections.abc import AsyncIterator, Mapping, Sequence
 from typing import Any, ClassVar
 
@@ -291,20 +292,23 @@ class VotingAgent(Agent):
 
             judge_verdict = ""
             judge_model: str | None = None
-            async for event in bind_resume_per_step(
-                root.step,
-                astream_tools_agent_events(
-                    graph=judge_graph,
-                    user_message=user_messages,
-                    config=judge_config,
-                    user_content_kwargs=user_content_kwargs,
-                ),
-            ):
-                if isinstance(event, MessageFinal):
-                    judge_verdict = event.text
-                elif isinstance(event, RunUsage):
-                    judge_model = event.model
-                yield terminals.note(event)
+            async with contextlib.aclosing(
+                bind_resume_per_step(
+                    root.step,
+                    astream_tools_agent_events(
+                        graph=judge_graph,
+                        user_message=user_messages,
+                        config=judge_config,
+                        user_content_kwargs=user_content_kwargs,
+                    ),
+                )
+            ) as stream:
+                async for event in stream:
+                    if isinstance(event, MessageFinal):
+                        judge_verdict = event.text
+                    elif isinstance(event, RunUsage):
+                        judge_model = event.model
+                    yield terminals.note(event)
 
             yield terminals.note(
                 StructuredFinal(

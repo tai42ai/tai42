@@ -14,7 +14,8 @@ exclude = [
 # script tests (scripts/tests/) plus the
 # cross-package test deps that a single ``uv sync --all-packages`` must carry so
 # every member's suite collects. ``fakeredis[lua]`` backs the skeleton's Redis
-# suites and ``trustme`` the toolbox HTTPS-proxy path; each member also keeps its
+# suites and ``trustme`` the toolbox HTTPS-proxy path and the sandbox-docker
+# exec-attachment mTLS peer; each member also keeps its
 # own copy in ``[project.optional-dependencies].dev`` for the scoped
 # ``--package <member> --extra dev`` CI leg.
 dev = [

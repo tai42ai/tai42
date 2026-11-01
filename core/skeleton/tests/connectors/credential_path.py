@@ -235,7 +235,13 @@ class CredentialPath:
 
 @contextmanager
 def owner_loop() -> Iterator[asyncio.AbstractEventLoop]:
-    """A long-lived loop in its own thread, bound as the refresh owner (the serving loop's stand-in)."""
+    """A long-lived loop in its own thread, bound as the refresh owner (the serving loop's stand-in).
+
+    It closes as ``asyncio.run`` closes its loop: once the refresh owner and the clients are shut
+    down, every task still on the loop (a late start's apply the test did not wait out, say) is
+    cancelled and run to its end, so whatever it holds is released before the loop closes. A
+    task that fails instead of ending on its cancellation fails the teardown.
+    """
     loop = asyncio.new_event_loop()
     thread = threading.Thread(target=loop.run_forever, daemon=True)
     thread.start()
@@ -252,11 +258,27 @@ def owner_loop() -> Iterator[asyncio.AbstractEventLoop]:
         async def _close() -> None:
             await refresh_owner.aclose()
             await shutdown_all_clients()
+            await _end_left_tasks()
+            await loop.shutdown_asyncgens()
+            await loop.shutdown_default_executor()
 
-        asyncio.run_coroutine_threadsafe(_close(), loop).result(30)
-        loop.call_soon_threadsafe(loop.stop)
-        thread.join(5)
-        loop.close()
+        try:
+            asyncio.run_coroutine_threadsafe(_close(), loop).result(30)
+        finally:
+            loop.call_soon_threadsafe(loop.stop)
+            thread.join(5)
+            loop.close()
+
+
+async def _end_left_tasks() -> None:
+    """Cancel every other task on the running loop and wait for each to end; one that failed instead raises."""
+    left = asyncio.all_tasks() - {asyncio.current_task()}
+    for task in left:
+        task.cancel()
+    await asyncio.gather(*left, return_exceptions=True)
+    failures = [error for task in left if not task.cancelled() and (error := task.exception()) is not None]
+    if failures:
+        raise BaseExceptionGroup("tasks left on the owner loop failed when cancelled", failures)
 
 
 def on_loop(loop: asyncio.AbstractEventLoop, coro: Any, timeout: float = 30.0) -> Any:

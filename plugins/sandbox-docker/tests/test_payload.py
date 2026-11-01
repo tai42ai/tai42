@@ -93,6 +93,11 @@ def test_hardening_and_single_mount_invariant() -> None:
     assert config["Cmd"] == ["sleep", "infinity"]
 
 
+def test_the_container_runs_an_init_as_its_main_process() -> None:
+    # The init reaps the processes an exec leaves behind, its group's anchor among them.
+    assert build_container_config(_spec())["HostConfig"]["Init"] is True
+
+
 def test_env_secrets_unwrapped_only_in_payload() -> None:
     config = build_container_config(_spec(env={"TOKEN": SecretStr("s3cr3t")}))
     assert "TOKEN=s3cr3t" in config["Env"]

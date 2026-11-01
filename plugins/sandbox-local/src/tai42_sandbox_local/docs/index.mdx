@@ -76,6 +76,45 @@ deliberate operation the consumer issues outside a live turn — guarded by the
 consumer's per-`workspace_key` lease (the same lease that serializes turns), not by
 a filesystem lock.
 
+## Stopping a command
+
+The provider starts every command in a process group of its own and keeps a small
+shell process in that group, so the group keeps its id after the command itself has
+exited. Stopping a command (a `kill()`, a timeout, a one-shot call that fails or is
+cancelled, an interactive start that is cancelled, or the session's teardown, which
+stops the session's interactive commands) kills its whole process group: the command
+stops, and so does every process it started that is still in its group, even when
+the command itself has already exited. After a `kill()`, an interactive command's
+output still gives every chunk the provider had received from the command before the
+kill, read or not, in order, before it ends. The teardown does not stop a one-shot
+call: one still running when its session is torn down runs on until it ends or
+reaches its timeout. For an interactive command the provider keeps that hold — one
+shell process and one descriptor — until `kill()` or the session's teardown, so a
+finished interactive command's group stays reachable until then; a consumer done
+with a handle calls `kill()`. A stop never signals anything outside the command's
+process group: the group is signalled only while the provider's shell process still
+holds it, so a group id the host has since given to other processes is never
+signalled. A process that left the command's group (a `setsid` daemon, for example)
+is not stopped. Once a one-shot command has completed, the provider lets go of its
+group, and processes the command left running keep running. Should the provider's
+shell process have been ended from outside, a stop kills the command alone and logs
+a warning that processes it started may still be running. The small shell process
+the provider keeps in each command's process group ends when the provider lets the
+group go and is reaped by the init process (PID 1); a container that runs the server
+as its PID 1 therefore needs an init (`docker run --init`, or an init as the
+entrypoint — the published `tai` image runs under `tini`).
+
+## A command's input
+
+The provider writes a command's stdin while the command runs. A command that closes
+its stdin, or exits, before reading all of it has chosen not to read the rest: the
+call returns as usual. A command that exits while a process it started still holds its
+stdin, with input the provider has not written yet, fails instead: a one-shot call
+raises a `SandboxError`, and an interactive command's output ends with a
+`SandboxError` in place of its exit. A stop never causes such a failure and never
+clears one: an interactive command whose exit cut its input before `kill()` still
+ends its output with that `SandboxError`.
+
 ## Host runtime
 
 This provider ships **no runtime**: it simply execs whatever `argv` the consumer

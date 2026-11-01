@@ -1,10 +1,12 @@
-"""The host-subprocess session and its interactive exec handle.
+"""The host-subprocess session.
 
 ``LocalSandboxSession`` implements only the runtime I/O the contract asks of a
 :class:`~tai42_contract.sandbox.SandboxSession` — ``workspace_path``, ``exec``,
-``exec_start``, ``put_file``, ``get_file`` — over a plain host subprocess and the
-host filesystem; the ledger/TTL bookkeeping (``id`` / ``info`` / ``touch`` /
-``destroy``) is inherited from :class:`~tai42_kit.sandbox.ManagedSandboxSession`.
+``exec_start``, ``put_file``, ``get_file`` — over a plain host subprocess (a
+:class:`~tai42_kit.sandbox.HostProcess`, its interactive exec a
+:class:`~tai42_kit.sandbox.HostExecHandle`) and the host filesystem; the ledger/TTL
+bookkeeping (``id`` / ``info`` / ``touch`` / ``destroy``) is inherited from
+:class:`~tai42_kit.sandbox.ManagedSandboxSession`.
 
 SECURITY INVARIANTS held here:
 
@@ -15,18 +17,16 @@ SECURITY INVARIANTS held here:
   path resolves against ``workspace_path`` and a resolved path escaping the workspace
   root raises loudly, so a ``..`` component cannot walk out of the workspace.
 - LOUD failure — every host error surfaces as a typed
-  :class:`~tai42_contract.sandbox.SandboxError`; the only swallowed cases are the
-  contract's two idempotent no-ops (already-exited process on kill, already-gone
-  directory on destroy).
+  :class:`~tai42_contract.sandbox.SandboxError`; the only swallowed case is the
+  contract's idempotent no-op on destroy (an already-gone directory). A kill reaches a
+  process group only while the kit's anchor holds it (:class:`~tai42_kit.sandbox.HostProcess`),
+  so a released group is never signalled and a kill is never a shot at a reused id.
 """
 
 from __future__ import annotations
 
-import asyncio
-import contextlib
 import os
-import signal
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -36,169 +36,12 @@ from tai42_contract.sandbox import (
     SandboxDurability,
     SandboxError,
     SandboxExecHandle,
-    SandboxExecTimeoutError,
     SandboxFileNotFoundError,
-    SandboxStreamChunk,
-    SandboxStreamExit,
 )
-from tai42_kit.sandbox import ManagedSandboxSession
+from tai42_kit.sandbox import ExecDeadline, HostExecHandle, HostProcess, ManagedSandboxSession, run_host_process
 
 if TYPE_CHECKING:
     from tai42_sandbox_local.provider import LocalSandbox
-
-# Read granularity for draining a pipe. A fixed chunk keeps memory bounded while
-# a reader keeps pace with a fast producer.
-_READ_CHUNK = 65536
-
-
-def _returncode(proc: asyncio.subprocess.Process) -> int:
-    """The exit code of an already-exited process.
-
-    An unfinished process is a programming error at every call site here, which all await
-    the process first.
-    """
-    code = proc.returncode
-    if code is None:  # pragma: no cover - defensive; every caller awaits exit first
-        raise SandboxError("sandbox exec exit code read before the process exited")
-    return code
-
-
-def _kill_process_group(proc: asyncio.subprocess.Process) -> None:
-    """SIGKILL the child's whole process group, reaping grandchildren too.
-
-    The child was spawned with ``start_new_session=True``, so its process-group id
-    equals its pid. Idempotent: an already-exited process is a no-op, and a racing
-    reap surfaces as :class:`ProcessLookupError`, swallowed.
-    """
-    if proc.returncode is not None:
-        return
-    with contextlib.suppress(ProcessLookupError):
-        os.killpg(proc.pid, signal.SIGKILL)
-
-
-class LocalSandboxExecHandle(SandboxExecHandle):
-    """A live interactive host subprocess started by :meth:`LocalSandboxSession.exec_start`.
-
-    A host subprocess exposes SEPARATE stdin/stdout/stderr pipes, so a write never
-    interleaves with a read and the concurrency contract is met without demuxing one
-    shared attach stream. Two reader tasks drain stdout and stderr concurrently into
-    one queue; ``output`` yields each frame and one terminal
-    :class:`SandboxStreamExit`. A total ``timeout_seconds`` deadline bounds the whole
-    interactive exec; on expiry the process group is killed and the iterator raises
-    :class:`SandboxExecTimeoutError`.
-    """
-
-    def __init__(self, proc: asyncio.subprocess.Process, *, timeout_seconds: float) -> None:
-        """Bind the handle to a started ``proc`` with the total ``timeout_seconds`` deadline."""
-        self._proc = proc
-        self._timeout_seconds = timeout_seconds
-        # Serializes concurrent write_stdin calls so a single call's bytes are never
-        # interleaved with another's; the provider does no framing beyond this.
-        self._write_lock = asyncio.Lock()
-        self._output_iter: AsyncIterator[SandboxStreamChunk | SandboxStreamExit] | None = None
-        # Cumulative bytes seen per stream, for the timeout error's LENGTHS (never content).
-        self._stdout_len = 0
-        self._stderr_len = 0
-
-    async def write_stdin(self, data: bytes) -> None:
-        """Write ``data`` to the exec's stdin; raises once stdin is closed or the exec has exited."""
-        async with self._write_lock:
-            stdin = self._proc.stdin
-            if stdin is None or self._proc.returncode is not None or stdin.is_closing():
-                raise SandboxError("sandbox exec stdin is closed or the exec has exited; cannot write")
-            try:
-                stdin.write(data)
-                await stdin.drain()
-            except (BrokenPipeError, ConnectionResetError, ProcessLookupError) as exc:
-                raise SandboxError(f"sandbox exec stdin write failed: {exc}") from exc
-
-    async def close_stdin(self) -> None:
-        """Close the exec's stdin so the in-session process reads EOF."""
-        stdin = self._proc.stdin
-        if stdin is not None and not stdin.is_closing():
-            stdin.close()
-
-    @property
-    def output(self) -> AsyncIterator[SandboxStreamChunk | SandboxStreamExit]:
-        """The exec's merged output stream (stdout/stderr chunks then an exit), iterated once."""
-        if self._output_iter is None:
-            self._output_iter = self._stream_output()
-        return self._output_iter
-
-    async def kill(self) -> None:
-        """Kill the exec's whole process group and REAP it; idempotent once it has exited.
-
-        The ``wait`` is what reaps: it sets the process ``returncode`` and closes the
-        asyncio transport, so no child outlives the handle as an unreaped process with an
-        open transport. Idempotent — ``wait`` on an already-exited process returns its
-        cached code at once.
-        """
-        _kill_process_group(self._proc)
-        await self._proc.wait()
-
-    async def _drain_stream(
-        self,
-        reader: asyncio.StreamReader | None,
-        stream_name: str,
-        queue: asyncio.Queue[SandboxStreamChunk | None],
-    ) -> None:
-        """Drain one pipe into ``queue``, tallying its cumulative byte length."""
-        if reader is None:  # pragma: no cover - exec_start always opens both pipes
-            return
-        is_stdout = stream_name == "stdout"
-        while True:
-            chunk = await reader.read(_READ_CHUNK)
-            if not chunk:
-                break
-            if is_stdout:
-                self._stdout_len += len(chunk)
-            else:
-                self._stderr_len += len(chunk)
-            await queue.put(SandboxStreamChunk(stream="stdout" if is_stdout else "stderr", data=chunk))
-
-    async def _start_drain(self, queue: asyncio.Queue[SandboxStreamChunk | None]) -> None:
-        """Drain both pipes concurrently, await exit, then post the terminal sentinel."""
-        await asyncio.gather(
-            self._drain_stream(self._proc.stdout, "stdout", queue),
-            self._drain_stream(self._proc.stderr, "stderr", queue),
-        )
-        await self._proc.wait()
-        await queue.put(None)
-
-    async def _stream_output(self) -> AsyncIterator[SandboxStreamChunk | SandboxStreamExit]:
-        queue: asyncio.Queue[SandboxStreamChunk | None] = asyncio.Queue()
-        driver = asyncio.ensure_future(self._start_drain(queue))
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + self._timeout_seconds
-        try:
-            while True:
-                remaining = deadline - loop.time()
-                if remaining <= 0:
-                    await self._timeout(driver)
-                try:
-                    item = await asyncio.wait_for(queue.get(), timeout=remaining)
-                except TimeoutError:
-                    await self._timeout(driver)
-                if item is None:
-                    break
-                yield item
-            yield SandboxStreamExit(exit_code=_returncode(self._proc))
-        finally:
-            driver.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await driver
-
-    async def _timeout(self, driver: asyncio.Future[None]) -> None:
-        """Kill the process group and raise the timeout error carrying LENGTHS only."""
-        await self.kill()
-        driver.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await driver
-        raise SandboxExecTimeoutError(
-            timeout_seconds=self._timeout_seconds,
-            stdout_len=self._stdout_len,
-            stderr_len=self._stderr_len,
-        )
 
 
 class LocalSandboxSession(ManagedSandboxSession):
@@ -228,7 +71,7 @@ class LocalSandboxSession(ManagedSandboxSession):
         # persistent dir otherwise) and the sidecar to remove alongside a persistent one.
         self._teardown_dir = teardown_dir
         self._sidecar_path = sidecar_path
-        self._handles: list[LocalSandboxExecHandle] = []
+        self._handles: list[HostExecHandle] = []
 
     @property
     def workspace_path(self) -> str:
@@ -300,25 +143,18 @@ class LocalSandboxSession(ManagedSandboxSession):
         cwd: str,
         env: dict[str, str],
         stdin: bool,
-    ) -> asyncio.subprocess.Process:
-        """Spawn a host subprocess in its own session/process-group.
+    ) -> HostProcess:
+        """Spawn a host subprocess in its own session/process-group, anchored by the kit.
 
-        A spawn failure (a missing binary, an unwritable cwd) raises a typed error NAMING
-        the binary, never any env value.
+        The anchor lets a later kill reach what the command leaves in its group. A spawn
+        failure (a missing binary, an unwritable cwd, an env the host cannot hold) raises a
+        typed error NAMING the binary, never any env value.
         """
         if not argv:
             raise SandboxError("sandbox exec requires a non-empty argv")
         try:
-            return await asyncio.create_subprocess_exec(
-                *argv,
-                cwd=cwd,
-                env=env,
-                stdin=asyncio.subprocess.PIPE if stdin else None,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                start_new_session=True,
-            )
-        except OSError as exc:
+            return await HostProcess.spawn(argv, cwd=cwd, env=env, stdin=stdin)
+        except (OSError, ValueError) as exc:
             raise SandboxError(f"sandbox exec could not spawn {argv[0]!r}: {exc}") from exc
 
     async def exec(
@@ -330,50 +166,18 @@ class LocalSandboxSession(ManagedSandboxSession):
         stdin: bytes | None = None,
         timeout_seconds: float,
     ) -> ExecResult:
-        """Run ``argv`` to completion and return its :class:`ExecResult`; a host-side timeout kills it and raises."""
-        proc = await self._spawn(
+        """Run ``argv`` to completion and return its :class:`ExecResult`.
+
+        A host-side timeout kills the process and raises :class:`SandboxExecTimeoutError`; any other
+        failure (a failed stdin write, a cancelled call) kills it and propagates.
+        """
+        process = await self._spawn(
             argv,
             cwd=self._resolve_cwd(cwd),
             env=self._build_env(env),
             stdin=stdin is not None,
         )
-        stdout_buf = bytearray()
-        stderr_buf = bytearray()
-
-        async def _pump(stream: asyncio.StreamReader | None, buf: bytearray) -> None:
-            if stream is None:  # pragma: no cover - both pipes are always opened
-                return
-            while True:
-                chunk = await stream.read(_READ_CHUNK)
-                if not chunk:
-                    break
-                buf.extend(chunk)
-
-        async def _communicate() -> None:
-            pumps = asyncio.gather(_pump(proc.stdout, stdout_buf), _pump(proc.stderr, stderr_buf))
-            if stdin is not None and proc.stdin is not None:
-                proc.stdin.write(stdin)
-                await proc.stdin.drain()
-                proc.stdin.close()
-            await pumps
-            await proc.wait()
-
-        try:
-            await asyncio.wait_for(_communicate(), timeout=timeout_seconds)
-        except TimeoutError:
-            _kill_process_group(proc)
-            with contextlib.suppress(ProcessLookupError):
-                await proc.wait()
-            raise SandboxExecTimeoutError(
-                timeout_seconds=timeout_seconds,
-                stdout_len=len(stdout_buf),
-                stderr_len=len(stderr_buf),
-            ) from None
-        return ExecResult(
-            exit_code=_returncode(proc),
-            stdout=stdout_buf.decode("utf-8", "replace"),
-            stderr=stderr_buf.decode("utf-8", "replace"),
-        )
+        return await run_host_process(process, stdin=stdin, timeout_seconds=timeout_seconds)
 
     async def exec_start(
         self,
@@ -383,14 +187,19 @@ class LocalSandboxSession(ManagedSandboxSession):
         env: dict[str, SecretStr] | None = None,
         timeout_seconds: float,
     ) -> SandboxExecHandle:
-        """Start ``argv`` as a live interactive subprocess and return its :class:`SandboxExecHandle`."""
-        proc = await self._spawn(
+        """Start ``argv`` as a live interactive subprocess and return its :class:`SandboxExecHandle`.
+
+        The exec's ``timeout_seconds`` deadline is fixed as it is spawned, so the handle's output
+        is bounded by what is left of it whenever the caller first reads.
+        """
+        deadline = ExecDeadline.from_now(timeout_seconds)
+        process = await self._spawn(
             argv,
             cwd=self._resolve_cwd(cwd),
             env=self._build_env(env),
             stdin=True,
         )
-        handle = LocalSandboxExecHandle(proc, timeout_seconds=timeout_seconds)
+        handle = HostExecHandle(process, deadline=deadline)
         self._handles.append(handle)
         return handle
 
@@ -431,9 +240,9 @@ class LocalSandboxSession(ManagedSandboxSession):
     # -- teardown -----------------------------------------------------------------
 
     async def terminate_handles(self) -> None:
-        """Kill every live interactive subprocess this session started.
+        """Kill every interactive subprocess this session started, and whatever each left running in its process group.
 
-        Idempotent on an already-exited process. Called by the provider teardown primitive.
+        Idempotent on an already-killed handle. Called by the provider teardown primitive.
         """
         for handle in self._handles:
             await handle.kill()

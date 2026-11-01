@@ -1,8 +1,9 @@
 """The ``refine_agent`` — an Evaluator↔Critic refinement loop.
 
 The Evaluator drafts, the Critic reviews, the Evaluator revises; the two alternate
-until the Critic emits the approval token
-(:data:`~tai42_agents.refine_agent.prompt.CRITIC_APPROVAL_MESSAGE`) or the
+until the Critic replies with the approval token alone
+(:data:`~tai42_agents.refine_agent.prompt.CRITIC_APPROVAL_MESSAGE`; a reply that
+only contains it among other text is feedback, not approval) or the
 iteration budget is exhausted — which fails loudly with a ``RuntimeError`` rather
 than returning an unapproved draft. An empty critic response also raises.
 
@@ -17,6 +18,7 @@ fed the negotiation history explicitly on a fresh thread, surfaced as a terminal
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import AsyncIterator, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -261,7 +263,7 @@ async def _run_refine_loop(
         if not critic_output:
             raise RuntimeError("No critic feedback found.")
 
-        if CRITIC_APPROVAL_MESSAGE in critic_output:
+        if critic_output.strip() == CRITIC_APPROVAL_MESSAGE:
             break
 
         evaluator_input = {"messages": [{"role": "user", "content": critic_output}]}
@@ -494,21 +496,24 @@ class RefineAgent(Agent):
                 return
             saw_structured = False
             saw_outcome = False
-            async for event in bind_resume_per_step(
-                root.step,
-                aproject_agent_events(
-                    final_agent,
-                    final_input,
-                    final_config,
-                    response_format=response_format,
-                    structured_strategy=strategy,
-                ),
-            ):
-                if isinstance(event, StructuredFinal):
-                    saw_structured = True
-                elif isinstance(event, StructuredOutputUnresolvedFinal | RecursionLimitFinal):
-                    saw_outcome = True
-                yield terminals.note(event)
+            async with contextlib.aclosing(
+                bind_resume_per_step(
+                    root.step,
+                    aproject_agent_events(
+                        final_agent,
+                        final_input,
+                        final_config,
+                        response_format=response_format,
+                        structured_strategy=strategy,
+                    ),
+                )
+            ) as stream:
+                async for event in stream:
+                    if isinstance(event, StructuredFinal):
+                        saw_structured = True
+                    elif isinstance(event, StructuredOutputUnresolvedFinal | RecursionLimitFinal):
+                        saw_outcome = True
+                    yield terminals.note(event)
             _require_structured_result(response_format, saw_structured=saw_structured, saw_outcome=saw_outcome)
             # The run reached its terminal: every role thread it minted is finished.
             with root.step():

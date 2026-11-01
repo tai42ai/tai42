@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import ssl
 from typing import Any
 
+import aiohttp  # pyright: ignore[reportMissingImports]
 import pytest
 from aiodocker.exceptions import DockerError  # pyright: ignore[reportMissingImports]
 from tai42_contract.sandbox import SandboxError, SandboxFileNotFoundError, SandboxSessionSpec
@@ -35,12 +37,6 @@ def _spec(**overrides) -> SandboxSessionSpec:
     return SandboxSessionSpec(**base)
 
 
-class _DockerRecorder:
-    def __init__(self, *, url=None, ssl_context=None) -> None:
-        self.url = url
-        self.ssl_context = ssl_context
-
-
 def _session(container: FakeContainer) -> DockerSandboxSession:
     sandbox = DockerSandbox(docker=object(), settings=_settings())
     return DockerSandboxSession(
@@ -63,46 +59,48 @@ async def test_engine_returns_injected_client_cached() -> None:
     assert await sandbox._engine() is client  # cached
 
 
-@pytest.mark.parametrize(
-    ("host", "expected_url"),
-    [
-        ("unix:///var/run/docker.sock", "unix:///var/run/docker.sock"),
-        ("/var/run/docker.sock", "unix:///var/run/docker.sock"),
-    ],
-)
-async def test_create_engine_socket_hosts(monkeypatch: pytest.MonkeyPatch, host: str, expected_url: str) -> None:
-    monkeypatch.setattr(provider_module, "Docker", _DockerRecorder)
+@pytest.mark.parametrize("host", ["unix:///var/run/docker.sock", "/var/run/docker.sock"])
+async def test_a_socket_host_is_dialed_through_a_unix_connector(host: str) -> None:
     sandbox = DockerSandbox(settings=_settings(host=host))
     client = await sandbox._engine()
-    assert client.url == expected_url
-    assert client.ssl_context is None
+    assert client.docker_host == "unix://localhost"
+    assert isinstance(client.connector, aiohttp.UnixConnector)
+    assert client.connector.path == "/var/run/docker.sock"
+    await client.close()
+    await client.connector.close()
 
 
-async def test_create_engine_tcp_with_mtls(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(provider_module, "Docker", _DockerRecorder)
+async def test_an_mtls_host_is_dialed_over_https_through_a_tcp_connector(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     sandbox = DockerSandbox(settings=_settings(host="tcp://engine:2376", tls_verify=True))
-    monkeypatch.setattr(sandbox, "_build_ssl_context", lambda settings: "SSL-CONTEXT")
+    monkeypatch.setattr(sandbox, "_build_ssl_context", lambda settings: ssl.create_default_context())
     client = await sandbox._engine()
     # Under mTLS the tcp:// endpoint is normalized to https:// so aiodocker runs TLS
     # over the client identity (a bare tcp:// would dial plaintext against :2376).
-    assert client.url == "https://engine:2376"
-    assert client.ssl_context == "SSL-CONTEXT"
+    assert client.docker_host == "https://engine:2376"
+    assert isinstance(client.connector, aiohttp.TCPConnector)
+    await client.close()
+    await client.connector.close()
 
 
-async def test_create_engine_tcp_without_verify(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(provider_module, "Docker", _DockerRecorder)
-    sandbox = DockerSandbox(settings=_settings(host="tcp://engine:2376", tls_verify=False))
+@pytest.mark.parametrize("host", ["tcp://engine:2375", "https://engine:2376"])
+async def test_a_network_host_without_verify_is_dialed_as_given_through_a_tcp_connector(host: str) -> None:
+    sandbox = DockerSandbox(settings=_settings(host=host, tls_verify=False))
     client = await sandbox._engine()
-    assert client.ssl_context is None
+    assert client.docker_host == host
+    assert isinstance(client.connector, aiohttp.TCPConnector)
+    await client.close()
+    await client.connector.close()
 
 
 async def test_engine_connection_failure_names_host(monkeypatch: pytest.MonkeyPatch) -> None:
-    def _boom(**_):
+    def _boom(*_, **__):
         raise OSError("connection refused")
 
-    monkeypatch.setattr(provider_module, "Docker", _boom)
+    monkeypatch.setattr(provider_module, "rest_connector", _boom)
     sandbox = DockerSandbox(settings=_settings(host="tcp://engine:2376"))
-    # The mTLS identity loads cleanly; the engine construction ITSELF refuses the
+    # The mTLS identity loads cleanly; the engine client's construction ITSELF refuses the
     # connection, so the raised error names SANDBOX_DOCKER_HOST — not the cert paths.
     monkeypatch.setattr(sandbox, "_build_ssl_context", lambda settings: None)
     with pytest.raises(SandboxError, match="SANDBOX_DOCKER_HOST"):
@@ -141,7 +139,7 @@ async def test_create_or_adopt_loses_name_race(fake_docker: FakeDocker) -> None:
     existing.running = True  # already running: no re-start needed
     fake_docker.containers = _RaceContainers(existing)  # type: ignore[assignment]
 
-    sandbox = DockerSandbox(docker=fake_docker, settings=_settings())
+    sandbox = DockerSandbox(docker=fake_docker, attach=fake_docker.attach_exec, settings=_settings())
     sandbox.bind_policy(permissive_policy())
     session = await sandbox.create_session(_spec(workspace_key="wsR", durability="persistent"))
     assert session.id == "race"
@@ -152,7 +150,7 @@ async def test_create_or_adopt_reraises_non_409_create_error(fake_docker: FakeDo
         raise DockerError(500, "daemon error creating container")
 
     fake_docker.containers.create = _fail  # type: ignore[method-assign]
-    sandbox = DockerSandbox(docker=fake_docker, settings=_settings())
+    sandbox = DockerSandbox(docker=fake_docker, attach=fake_docker.attach_exec, settings=_settings())
     # No existing container of the name: the create is attempted and a non-409 engine
     # failure is surfaced loudly, not adopted.
     with pytest.raises(SandboxError, match="docker engine error"):
@@ -164,7 +162,7 @@ async def test_get_container_reraises_non_404(fake_docker: FakeDocker) -> None:
         raise DockerError(500, "engine down")
 
     fake_docker.containers.get = _boom  # type: ignore[method-assign]
-    sandbox = DockerSandbox(docker=fake_docker, settings=_settings())
+    sandbox = DockerSandbox(docker=fake_docker, attach=fake_docker.attach_exec, settings=_settings())
     with pytest.raises(SandboxError, match="docker engine error"):
         await sandbox._get_container(fake_docker, "any")
 
@@ -176,7 +174,7 @@ async def test_ensure_volume_adopts_existing(fake_docker: FakeDocker) -> None:
     from .conftest import FakeVolume
 
     fake_docker.store_volumes[volume_name("wsX")] = FakeVolume(volume_name("wsX"))
-    sandbox = DockerSandbox(docker=fake_docker, settings=_settings())
+    sandbox = DockerSandbox(docker=fake_docker, attach=fake_docker.attach_exec, settings=_settings())
     await sandbox._ensure_volume(fake_docker, _spec(workspace_key="wsX", durability="persistent"))
     # No second volume created; the existing one is adopted.
     assert list(fake_docker.store_volumes) == [volume_name("wsX")]
@@ -187,7 +185,7 @@ async def test_ensure_volume_reraises_non_404(fake_docker: FakeDocker) -> None:
         raise DockerError(500, "volume backend down")
 
     fake_docker.volumes.get = _boom  # type: ignore[method-assign]
-    sandbox = DockerSandbox(docker=fake_docker, settings=_settings())
+    sandbox = DockerSandbox(docker=fake_docker, attach=fake_docker.attach_exec, settings=_settings())
     with pytest.raises(SandboxError, match="docker engine error"):
         await sandbox._ensure_volume(fake_docker, _spec(workspace_key="wsVe", durability="persistent"))
 
@@ -197,7 +195,7 @@ async def test_ensure_image_reraises_non_404(fake_docker: FakeDocker) -> None:
         raise DockerError(500, "registry error")
 
     fake_docker.images.inspect = _boom  # type: ignore[method-assign]
-    sandbox = DockerSandbox(docker=fake_docker, settings=_settings())
+    sandbox = DockerSandbox(docker=fake_docker, attach=fake_docker.attach_exec, settings=_settings())
     with pytest.raises(SandboxError, match="docker engine error"):
         await sandbox._ensure_image(fake_docker, "img:1", "missing")
 
@@ -207,7 +205,7 @@ async def test_ensure_image_pull_error_is_loud(fake_docker: FakeDocker) -> None:
         raise DockerError(500, "registry unreachable")
 
     fake_docker.images.pull = _boom  # type: ignore[method-assign]
-    sandbox = DockerSandbox(docker=fake_docker, settings=_settings())
+    sandbox = DockerSandbox(docker=fake_docker, attach=fake_docker.attach_exec, settings=_settings())
     # Image absent and pull_policy allows pulling: a pull engine error is surfaced loudly.
     with pytest.raises(SandboxError, match="docker engine error"):
         await sandbox._ensure_image(fake_docker, "absent:1", "missing")
@@ -215,7 +213,7 @@ async def test_ensure_image_pull_error_is_loud(fake_docker: FakeDocker) -> None:
 
 async def test_ensure_internal_network_adopts_existing(fake_docker: FakeDocker) -> None:
     fake_docker.store_networks.add(INTERNAL_NETWORK)
-    sandbox = DockerSandbox(docker=fake_docker, settings=_settings())
+    sandbox = DockerSandbox(docker=fake_docker, attach=fake_docker.attach_exec, settings=_settings())
     await sandbox._ensure_internal_network(fake_docker)
     assert fake_docker.network_configs == []  # nothing created
 
@@ -225,7 +223,7 @@ async def test_ensure_internal_network_loses_create_race(fake_docker: FakeDocker
         raise DockerError(409, "network already exists")
 
     fake_docker.networks.create = _conflict  # type: ignore[method-assign]
-    sandbox = DockerSandbox(docker=fake_docker, settings=_settings())
+    sandbox = DockerSandbox(docker=fake_docker, attach=fake_docker.attach_exec, settings=_settings())
     await sandbox._ensure_internal_network(fake_docker)  # adopts, no raise
 
 
@@ -234,7 +232,7 @@ async def test_ensure_internal_network_create_error_is_loud(fake_docker: FakeDoc
         raise DockerError(500, "network driver failure")
 
     fake_docker.networks.create = _boom  # type: ignore[method-assign]
-    sandbox = DockerSandbox(docker=fake_docker, settings=_settings())
+    sandbox = DockerSandbox(docker=fake_docker, attach=fake_docker.attach_exec, settings=_settings())
     # A non-409 create failure is a genuine engine error, not a lost race: surfaced loudly.
     with pytest.raises(SandboxError, match="docker engine error"):
         await sandbox._ensure_internal_network(fake_docker)
@@ -250,7 +248,7 @@ async def test_create_session_connection_failure_is_loud(fake_docker: FakeDocker
         raise OSError("connection reset")
 
     fake_docker.containers.create = _refuse  # type: ignore[method-assign]
-    sandbox = DockerSandbox(docker=fake_docker, settings=_settings())
+    sandbox = DockerSandbox(docker=fake_docker, attach=fake_docker.attach_exec, settings=_settings())
     sandbox.bind_policy(permissive_policy())
     with pytest.raises(SandboxError, match="SANDBOX_DOCKER_HOST"):
         await sandbox.create_session(_spec(workspace_key="wsC"))
@@ -263,7 +261,7 @@ async def test_create_session_engine_error_is_typed(fake_docker: FakeDocker) -> 
         raise DockerError(500, "daemon error creating container")
 
     fake_docker.containers.create = _fail  # type: ignore[method-assign]
-    sandbox = DockerSandbox(docker=fake_docker, settings=_settings())
+    sandbox = DockerSandbox(docker=fake_docker, attach=fake_docker.attach_exec, settings=_settings())
     sandbox.bind_policy(permissive_policy())
     with pytest.raises(SandboxError, match="docker engine error"):
         await sandbox.create_session(_spec(workspace_key="wsErr"))
@@ -274,7 +272,7 @@ async def test_orphan_sweep_connection_failure_is_loud(fake_docker: FakeDocker) 
         raise OSError("connection reset")
 
     fake_docker.containers.list = _refuse  # type: ignore[method-assign]
-    sandbox = DockerSandbox(docker=fake_docker, settings=_settings())
+    sandbox = DockerSandbox(docker=fake_docker, attach=fake_docker.attach_exec, settings=_settings())
     with pytest.raises(SandboxError, match="SANDBOX_DOCKER_HOST"):
         await sandbox.recover_orphans()
 
@@ -284,7 +282,7 @@ async def test_orphan_sweep_connection_failure_is_loud(fake_docker: FakeDocker) 
 
 async def test_reap_does_not_swallow_missing_container(fake_docker: FakeDocker) -> None:
     fake_docker.seed_image("img:1")
-    sandbox = DockerSandbox(docker=fake_docker, settings=_settings())
+    sandbox = DockerSandbox(docker=fake_docker, attach=fake_docker.attach_exec, settings=_settings())
     sandbox.bind_policy(permissive_policy())
     session = await sandbox.create_session(_spec(workspace_key="wsRp"))
     fake_docker.store_containers[0].delete_error = 404
@@ -299,7 +297,7 @@ async def test_reap_does_not_swallow_missing_container(fake_docker: FakeDocker) 
 
 async def test_destroy_reraises_non_404_container_error(fake_docker: FakeDocker) -> None:
     fake_docker.seed_image("img:1")
-    sandbox = DockerSandbox(docker=fake_docker, settings=_settings())
+    sandbox = DockerSandbox(docker=fake_docker, attach=fake_docker.attach_exec, settings=_settings())
     sandbox.bind_policy(permissive_policy())
     session = await sandbox.create_session(_spec(workspace_key="wsDe"))
     fake_docker.store_containers[0].delete_error = 500
@@ -309,7 +307,7 @@ async def test_destroy_reraises_non_404_container_error(fake_docker: FakeDocker)
 
 async def test_destroy_reraises_non_404_volume_get_error(fake_docker: FakeDocker) -> None:
     fake_docker.seed_image("img:1")
-    sandbox = DockerSandbox(docker=fake_docker, settings=_settings())
+    sandbox = DockerSandbox(docker=fake_docker, attach=fake_docker.attach_exec, settings=_settings())
     sandbox.bind_policy(permissive_policy())
     session = await sandbox.create_session(_spec(workspace_key="wsVg", durability="persistent"))
 
@@ -328,7 +326,7 @@ async def test_destroy_reraises_non_404_volume_get_error(fake_docker: FakeDocker
 
 async def test_reconcile_orphans_skips_ledgered_and_sweeps_orphan(fake_docker: FakeDocker) -> None:
     fake_docker.seed_image("img:1")
-    sandbox = DockerSandbox(docker=fake_docker, settings=_settings())
+    sandbox = DockerSandbox(docker=fake_docker, attach=fake_docker.attach_exec, settings=_settings())
     sandbox.bind_policy(permissive_policy())
     session = await sandbox.create_session(_spec(workspace_key="wsLive"))
     ledgered = fake_docker.store_containers[0]
@@ -350,7 +348,7 @@ async def test_reconcile_orphans_skips_ledgered_and_sweeps_orphan(fake_docker: F
 
 
 async def test_reconcile_orphans_delete_error_is_loud(fake_docker: FakeDocker) -> None:
-    sandbox = DockerSandbox(docker=fake_docker, settings=_settings())
+    sandbox = DockerSandbox(docker=fake_docker, attach=fake_docker.attach_exec, settings=_settings())
     orphan = FakeContainer(
         container_id="orphan-2",
         name="tai-sbx-bad",

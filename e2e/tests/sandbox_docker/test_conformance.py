@@ -1,11 +1,18 @@
 """The kit sandbox conformance suite against the REAL Docker provider over a live engine.
 
-One full lifecycle pass — create, exec + ``spec.env`` credential channel, interactive
-byte-stream, put/get, workspace-path resolution, consumer-label round-trip, touch,
-persistent-survives-reap, ttl reap + idempotent destroy, loud spec rejection, and
-exec-timeout kill — driven by :func:`tai42_kit.sandbox.run_sandbox_conformance` against
-:class:`~tai42_sandbox_docker.provider.DockerSandbox` connected to the rootless-dind
-engine the harness ``sandbox`` compose profile stands up. An empty return is the
+One full lifecycle pass — create, exec + ``spec.env`` credential channel, one-shot large
+and unread stdin, interactive byte-stream, the output received before a kill read after
+it, a late read after the exit, a late read of an in-time exec's large output, a kill past
+the deadline, put/get, workspace-path resolution,
+consumer-label round-trip, touch, persistent-survives-reap, ttl reap + idempotent destroy,
+loud spec rejection, one-shot and interactive exec-timeout kills, the timeout's count of the
+output produced (a large unread output included), the kill at its deadline of an exec
+nothing reads, and of an exec that closed its output but still runs, the timeout of an exec
+whose output a process still holds at the deadline, and the stop of every process a command
+left in its group — driven by
+:func:`tai42_kit.sandbox.run_sandbox_conformance` against
+:class:`~tai42_sandbox_docker.provider.DockerSandbox` connected to the rootless-dind engine
+the harness ``sandbox`` compose profile stands up. An empty return is the
 certification that the docker provider gives every consumer the same session contract the
 process-based fake does on every other e2e leg.
 

@@ -100,13 +100,16 @@ async def _drive_agent_terminal(agent: Agent, run_kwargs: dict[str, Any]) -> Any
     raised. Routed through the shared live-caller seam so the turn is budgeted and its trace
     attributed.
     """
-    async for event in drive_live_caller_astream(agent.astream(**run_kwargs)):
-        if isinstance(event, SuspendedFinal):
-            return event.to_suspended_interaction()
-        if isinstance(event, InterruptFinal):
-            raise RuntimeError(f"agent raised an interrupt ({event.interrupt_id}) a background turn cannot answer")  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
-        if isinstance(event, StructuredFinal | MessageFinal | StructuredOutputUnresolvedFinal | RecursionLimitFinal):
-            return event
+    async with drive_live_caller_astream(agent.astream(**run_kwargs)) as events:
+        async for event in events:
+            if isinstance(event, SuspendedFinal):
+                return event.to_suspended_interaction()
+            if isinstance(event, InterruptFinal):
+                raise RuntimeError(f"agent raised an interrupt ({event.interrupt_id}) a background turn cannot answer")  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
+            if isinstance(
+                event, StructuredFinal | MessageFinal | StructuredOutputUnresolvedFinal | RecursionLimitFinal
+            ):
+                return event
     return None
 
 

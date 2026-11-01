@@ -44,7 +44,7 @@ def test_final_pass_emits_the_full_event_taxonomy(
     monkeypatch: pytest.MonkeyPatch, app_tools: Any, resource_manager: Any
 ) -> None:
     evaluator = FakeAgent(invoke_contents=["draft"], stream_items=_final_pass_script())
-    critic = FakeAgent(invoke_contents=[f"approved {CRITIC_APPROVAL_MESSAGE}"])
+    critic = FakeAgent(invoke_contents=[CRITIC_APPROVAL_MESSAGE])
     _patch_loop(monkeypatch, [evaluator, critic])
 
     agent = tai42_app.agents.get_agent(AGENT_NAME)
@@ -89,7 +89,7 @@ def test_run_drains_stream_to_final_text(
             ("messages", (AIMessageChunk(content="answer"), {})),
         ],
     )
-    critic = FakeAgent(invoke_contents=[f"approved {CRITIC_APPROVAL_MESSAGE}"])
+    critic = FakeAgent(invoke_contents=[CRITIC_APPROVAL_MESSAGE])
     _patch_loop(monkeypatch, [evaluator, critic])
 
     agent = tai42_app.agents.get_agent(AGENT_NAME)
@@ -114,7 +114,7 @@ def test_run_with_response_format_forces_final_answer_on_a_fresh_thread(
     checkpoint resume, and ``run`` returns the validated structured object."""
     history = [AIMessage(content="draft under negotiation")]
     evaluator = FakeAgent(invoke_contents=["draft"], history=history)
-    critic = FakeAgent(invoke_contents=[f"approved {CRITIC_APPROVAL_MESSAGE}"])
+    critic = FakeAgent(invoke_contents=[CRITIC_APPROVAL_MESSAGE])
     structured = FakeAgent(invoke_contents=[], stream_items=_structured_stream_items({"answer": "final"}))
     recorder = _patch_loop(monkeypatch, [evaluator, critic, structured])
 
@@ -158,7 +158,7 @@ def test_role_prompts_are_per_run_config_with_purge_middleware_and_system_free_i
     system message ever enters checkpointed thread state."""
     history = [AIMessage(content="draft under negotiation")]
     evaluator = FakeAgent(invoke_contents=["draft"], history=history)
-    critic = FakeAgent(invoke_contents=[f"approved {CRITIC_APPROVAL_MESSAGE}"])
+    critic = FakeAgent(invoke_contents=[CRITIC_APPROVAL_MESSAGE])
     structured = FakeAgent(invoke_contents=[], stream_items=_structured_stream_items({"answer": "final"}))
     recorder = _patch_loop(monkeypatch, [evaluator, critic, structured])
 
@@ -203,7 +203,7 @@ def test_run_with_response_format_but_no_structured_raises_loudly(
     """A requested ``response_format`` the final pass produced none for raises loudly
     rather than returning the approved text."""
     evaluator = FakeAgent(invoke_contents=["draft"], history=[AIMessage(content="ctx")])
-    critic = FakeAgent(invoke_contents=[f"approved {CRITIC_APPROVAL_MESSAGE}"])
+    critic = FakeAgent(invoke_contents=[CRITIC_APPROVAL_MESSAGE])
     # The structured pass streams only text — no structured_response is written.
     structured = FakeAgent(invoke_contents=[], stream_items=[("messages", (AIMessageChunk(content="text"), {}))])
     _patch_loop(monkeypatch, [evaluator, critic, structured])
@@ -225,7 +225,7 @@ def test_astream_with_response_format_emits_one_structured_final(
     """The stream face surfaces exactly one terminal ``StructuredFinal`` from the
     structured final pass."""
     evaluator = FakeAgent(invoke_contents=["draft"], history=[AIMessage(content="ctx")])
-    critic = FakeAgent(invoke_contents=[f"approved {CRITIC_APPROVAL_MESSAGE}"])
+    critic = FakeAgent(invoke_contents=[CRITIC_APPROVAL_MESSAGE])
     structured = FakeAgent(invoke_contents=[], stream_items=_structured_stream_items({"answer": "final"}))
     _patch_loop(monkeypatch, [evaluator, critic, structured])
 
@@ -248,7 +248,7 @@ def test_astream_with_response_format_but_no_structured_raises_loudly(
     for raises loudly after the stream drains — in parity with ``run`` — rather than
     silently omitting the frame."""
     evaluator = FakeAgent(invoke_contents=["draft"], history=[AIMessage(content="ctx")])
-    critic = FakeAgent(invoke_contents=[f"approved {CRITIC_APPROVAL_MESSAGE}"])
+    critic = FakeAgent(invoke_contents=[CRITIC_APPROVAL_MESSAGE])
     # The structured pass streams only text — no structured_response is written.
     structured = FakeAgent(invoke_contents=[], stream_items=[("messages", (AIMessageChunk(content="text"), {}))])
     _patch_loop(monkeypatch, [evaluator, critic, structured])
@@ -276,7 +276,7 @@ def test_astream_nonconforming_structured_raises(
         "required": ["answer"],
     }
     evaluator = FakeAgent(invoke_contents=["draft"], history=[AIMessage(content="ctx")])
-    critic = FakeAgent(invoke_contents=[f"approved {CRITIC_APPROVAL_MESSAGE}"])
+    critic = FakeAgent(invoke_contents=[CRITIC_APPROVAL_MESSAGE])
     structured = FakeAgent(invoke_contents=[], stream_items=_structured_stream_items({"answer": ""}))
     _patch_loop(monkeypatch, [evaluator, critic, structured])
 

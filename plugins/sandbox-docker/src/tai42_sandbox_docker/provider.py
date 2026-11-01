@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import re
 import ssl
 from typing import TYPE_CHECKING, Any
 
@@ -37,6 +36,8 @@ from tai42_kit.sandbox import (
     ManagedSandbox,
 )
 
+from tai42_sandbox_docker.attach import ExecAttacher, ExecAttachment
+from tai42_sandbox_docker.engine_endpoint import EngineEndpoint, TcpEndpoint, resolve_engine_endpoint, rest_connector
 from tai42_sandbox_docker.readiness import (
     PROBE_DIAL_WAIT_SECONDS,
     PROBE_EXEC_TIMEOUT_SECONDS,
@@ -60,8 +61,9 @@ if TYPE_CHECKING:
 # ``workspace_key`` so two workers on one key converge on ONE container over ONE volume.
 RESOURCE_PREFIX = "tai-sbx-"
 
-# The idle init: real work is driven through the exec API, never the container's main
-# process, so PID 1 just sleeps and keeps the session container alive.
+# The idle command: real work is driven through the exec API, never the container's main
+# process, so the command the engine's init starts just sleeps and keeps the session container
+# alive.
 IDLE_COMMAND = ("sleep", "infinity")
 
 # The isolated inner bridge a ``network="internal"`` session joins — a docker network
@@ -75,33 +77,6 @@ _NETWORK_MODES = {"none": "none", "egress": "bridge", "internal": INTERNAL_NETWO
 
 _NANO = 1_000_000_000
 _MEBI = 1024 * 1024
-
-# A ``tcp://``/``http://`` scheme carrying an mTLS control API. aiodocker upgrades
-# such a scheme to ``https://`` ONLY when it builds the SSL context itself (from
-# DOCKER_TLS_VERIFY or a docker context); with a caller-supplied ssl_context it
-# leaves the scheme untouched and would dial PLAINTEXT against the TLS port — the
-# daemon then answers "Client sent an HTTP request to an HTTPS server". We hand
-# aiodocker a normalized ``https://`` URL so an operator's canonical ``tcp://``
-# endpoint speaks mTLS without them having to write ``https://``.
-_TLS_SCHEME_RX = re.compile(r"^(?:tcp|http)://")
-
-
-def resolve_engine_url(host: str, *, tls: bool) -> str:
-    """The URL to hand aiodocker for ``host``.
-
-    ``unix://``/``npipe://`` and a bare filesystem path address a local socket and
-    pass through unchanged (a bare path becomes ``unix://<path>``). A ``tcp://`` /
-    ``http://`` endpoint under mTLS (``tls`` true — cert paths in force) is
-    normalized to ``https://`` so aiodocker actually runs TLS over it; without TLS
-    the scheme is left as-is for aiodocker's own handling.
-    """
-    if host.startswith(("unix://", "npipe://")):
-        return host
-    if host.startswith("/"):
-        return f"unix://{host}"
-    if tls:
-        return _TLS_SCHEME_RX.sub("https://", host)
-    return host
 
 
 def container_name(workspace_key: str) -> str:
@@ -169,7 +144,8 @@ def build_container_config(
     Rejects what the provider cannot enforce.
     Hardening is stamped on EVERY container (``no-new-privileges``, all capabilities
     dropped, never privileged, a writable rootfs only so ``/workspace`` is writable),
-    and the mount set is exactly the one workspace volume. A ``spec.env`` value is a
+    and the mount set is exactly the one workspace volume. The engine's init is the
+    container's main process, reaping what the execs leave behind. A ``spec.env`` value is a
     ``SecretStr`` unwrapped ONLY here at the engine call.
     """
     _reject_vm(spec.isolation)
@@ -181,6 +157,10 @@ def build_container_config(
         "ReadonlyRootfs": False,
         "NetworkMode": _network_mode(spec.network),
         "Mounts": [_workspace_mount(spec)],
+        # The engine's init runs as PID 1 and starts the idle command: it reaps every process
+        # reparented to it, as the anchor of each exec's process group and any process an exec
+        # leaves behind once it ends.
+        "Init": True,
     }
 
     cpu = spec.cpu if spec.cpu is not None else default_cpu
@@ -243,12 +223,23 @@ class DockerSandbox(ManagedSandbox):
     removal while another worker's container still mounts it.
     """
 
-    def __init__(self, *, docker: Any | None = None, settings: DockerSandboxSettings | None = None) -> None:
-        """Store the optional injected ``docker`` client and ``settings`` override, deferring engine connect."""
+    def __init__(
+        self,
+        *,
+        docker: Any | None = None,
+        attach: ExecAttacher | None = None,
+        settings: DockerSandboxSettings | None = None,
+    ) -> None:
+        """Store the optional injected ``docker`` client, exec ``attach`` and ``settings`` override.
+
+        The engine is connected to only when first used.
+        """
         super().__init__()
         self._injected_client = docker
+        self._injected_attach = attach
         self._settings_override = settings
         self._client: Any | None = None
+        self._connection: tuple[EngineEndpoint, ssl.SSLContext | None] | None = None
         # Egress-firewall readiness. FALSE until a probe proves the firewall in force;
         # reset to FALSE whenever an engine call observes the daemon gone (see
         # ``_engine_error`` / ``_connect_error``) so the next create re-proves it. The
@@ -274,15 +265,45 @@ class DockerSandbox(ManagedSandbox):
                     raise self._connect_error(exc) from exc
         return self._client
 
-    def _create_engine(self) -> Any:
-        settings = self._settings()
-        host = settings.host
-        local = host.startswith(("unix://", "npipe://", "/"))
-        # mTLS applies only to a remote tcp:// endpoint; a local socket carries no
-        # client identity (and must not try to load one).
-        ssl_context = None if local else (self._build_ssl_context(settings) if settings.tls_verify else None)
-        url = resolve_engine_url(host, tls=ssl_context is not None)
-        return Docker(url=url, ssl_context=ssl_context)
+    def _create_engine(self) -> Docker:
+        """The aiodocker client of the configured engine, its endpoint and TLS taken from the settings only.
+
+        Every endpoint kind is dialed through the connector the endpoint builds
+        (:func:`rest_connector`), so aiodocker never picks a socket from a docker context nor
+        builds a TLS context from ``DOCKER_TLS_VERIFY`` / ``DOCKER_CERT_PATH``.
+        """
+        endpoint, ssl_context = self._engine_connection()
+        return Docker(url=endpoint.rest_base_url, connector=rest_connector(endpoint, ssl_context=ssl_context))
+
+    def _engine_connection(self) -> tuple[EngineEndpoint, ssl.SSLContext | None]:
+        """The engine endpoint and its mTLS client identity, resolved once for every client of the engine."""
+        if self._connection is None:
+            settings = self._settings()
+            endpoint = resolve_engine_endpoint(settings.host, tls=settings.tls_verify)
+            # mTLS applies only to a remote tcp:// endpoint; a local socket carries no
+            # client identity (and must not try to load one).
+            remote_mtls = isinstance(endpoint, TcpEndpoint) and settings.tls_verify
+            self._connection = (endpoint, self._build_ssl_context(settings) if remote_mtls else None)
+        return self._connection
+
+    async def _attach_exec(self, exec_id: str) -> ExecAttachment:
+        """Start the engine exec ``exec_id`` attached to its stream.
+
+        An engine refusal raises as an engine error, and a connection or TLS failure before the
+        engine answers (the TLS 1.3 alert of an engine that refuses the client's certificate
+        after the handshake included) as the engine being unreachable, both
+        :class:`SandboxError` with the failure as their cause, as the REST client's own
+        connection and TLS failures raise.
+        """
+        try:
+            if self._injected_attach is not None:
+                return await self._injected_attach(exec_id)
+            endpoint, ssl_context = self._engine_connection()
+            return await ExecAttachment.open(endpoint, exec_id, ssl_context=ssl_context)
+        except DockerError as exc:
+            raise self._engine_error(exc) from exc
+        except OSError as exc:
+            raise self._connect_error(exc) from exc
 
     def _build_ssl_context(self, settings: DockerSandboxSettings) -> ssl.SSLContext:
         """The mTLS client identity that speaks the engine control API.
@@ -382,11 +403,11 @@ class DockerSandbox(ManagedSandbox):
     async def _run_readiness_probe(self, settings: DockerSandboxSettings) -> None:
         """Run the egress probe once, bounded by ``readiness_probe_timeout_seconds``.
 
-        Derives the DENY target (the configured engine control address, resolved to an
-        IP) and hands the probe to :meth:`_probe_egress`; on the bound expiring the
+        Derives the DENY target (the address the engine endpoint is dialled on, resolved
+        to an IP) and hands the probe to :meth:`_probe_egress`; on the bound expiring the
         create is refused loudly.
         """
-        deny_host, deny_port = engine_control_address(settings.host)
+        deny_host, deny_port = engine_control_address(settings.host, tls=settings.tls_verify)
         deny_ip = await self._resolve_deny_ip(deny_host)
         docker = await self._engine()
         try:

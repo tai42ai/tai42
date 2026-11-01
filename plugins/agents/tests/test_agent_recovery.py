@@ -474,7 +474,7 @@ class TestRefineAgentRecovery:
     def test_repair_heals_evaluator_thread_through_run(self, monkeypatch: pytest.MonkeyPatch) -> None:
         saver = InMemorySaver()
         eval_model = ScriptedChatModel([AIMessage(content="draft"), AIMessage(content="final answer")])
-        crit_model = ScriptedChatModel([AIMessage(content=f"approved {self._approval()}")])
+        crit_model = ScriptedChatModel([AIMessage(content=self._approval())])
 
         seed = create_agent(eval_model, tools=[], checkpointer=saver)
         asyncio.run(
@@ -503,7 +503,7 @@ class TestRefineAgentRecovery:
         eval_model = ScriptedChatModel(
             [_tool_call("failing", "call_1"), AIMessage(content="draft"), AIMessage(content="final answer")]
         )
-        crit_model = ScriptedChatModel([AIMessage(content=f"approved {self._approval()}")])
+        crit_model = ScriptedChatModel([AIMessage(content=self._approval())])
         self._seams(monkeypatch, {"google": eval_model, "openai": crit_model}, saver)
 
         with caplog.at_level(logging.WARNING, logger=_RECOVERY_LOGGER):
@@ -519,7 +519,7 @@ class TestRefineAgentRecovery:
         saver = InMemorySaver()
         app_tools.client_tools["failing"] = _raising_handle(RuntimeError("infra down"))
         eval_model = ScriptedChatModel([_tool_call("failing", "call_1"), AIMessage(content="unreached")])
-        crit_model = ScriptedChatModel([AIMessage(content=f"approved {self._approval()}")])
+        crit_model = ScriptedChatModel([AIMessage(content=self._approval())])
         self._seams(monkeypatch, {"google": eval_model, "openai": crit_model}, saver)
 
         with pytest.raises(RuntimeError, match="infra down"):
