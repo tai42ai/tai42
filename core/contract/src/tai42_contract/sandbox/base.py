@@ -45,9 +45,13 @@ class SandboxExecHandle(ABC):
     them); a consumer multiplexing a line protocol holds its OWN single-writer
     lock so each message is one atomic call — the provider does no framing.
 
-    LIFETIME CONTRACT: after the exec has exited, :meth:`kill` is idempotent (a
-    safe no-op) and :meth:`write_stdin` raises a typed :class:`SandboxError`
-    (never an arbitrary exception).
+    LIFETIME CONTRACT: :meth:`kill` may be called at any time and more than once.
+    Once the exec has exited it is idempotent and never raises, and the exit status
+    :attr:`output` reports stays the exec's own; :meth:`write_stdin` then raises a
+    typed :class:`SandboxError` (never an arbitrary exception). A handle may keep
+    provider resources until :meth:`kill` has returned or its session is destroyed,
+    and the exec's own exit releases none of them: a consumer done with a handle
+    calls :meth:`kill`.
     """
 
     @abstractmethod
@@ -64,12 +68,32 @@ class SandboxExecHandle(ABC):
         """The interleaved stdout/stderr stream, terminated by one :class:`SandboxStreamExit`.
 
         On ``timeout_seconds`` expiry the provider kills the exec and the iterator raises
-        :class:`SandboxExecTimeoutError`.
+        :class:`SandboxExecTimeoutError`. A provider that reports a failure of the exec itself,
+        such as stdin input it accepted that the exec never got, ends the stream with a
+        :class:`SandboxError` instead of the exit item. Once :meth:`kill` has returned, the
+        stream ends as that method states, after the output the provider received before the
+        kill, which it still yields, in order.
         """
 
     @abstractmethod
     async def kill(self) -> None:
-        """Terminate the exec. Idempotent once the exec has exited."""
+        """Terminate the exec. Idempotent, never raising once the exec has exited, and callable at any time.
+
+        Once this returns, :attr:`output` ends promptly and raises no timeout, even past the
+        deadline. The output the provider received before the kill, read or not, is still
+        yielded, in order: every whole unit of output (a chunk, a frame, a message) its own
+        process had already taken in from the exec's transport, its buffered and queued output
+        included. Output not yet taken in at the kill, still on its way or held by the operating
+        system or the exec's runtime, and the part of a unit still arriving, may end with the
+        exec. The stream then ends with exactly one :class:`SandboxStreamExit` carrying the
+        exec's exit status, or with a :class:`SandboxError` when the provider cannot read that
+        status, which it never invents. A failure of the exec itself that the provider reported
+        before the kill, as :attr:`output` describes, still ends the stream with that
+        :class:`SandboxError`: the kill never clears it. Whether a kill also stops processes the
+        command started and left running, before or after the command's own exit, is the
+        provider's behaviour, stated in its documentation; the contract promises the exec's own
+        end only.
+        """
 
 
 class SandboxSession(ABC):

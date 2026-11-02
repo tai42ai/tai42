@@ -13,8 +13,9 @@ carry the baked tool names). Nothing here participates in the resume.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Mapping
-from typing import Any, ClassVar
+from collections.abc import AsyncGenerator, AsyncIterator, Mapping
+from contextlib import aclosing
+from typing import Any, ClassVar, cast
 
 from pydantic import BaseModel, Field
 from tai42_contract.agent import AddressedMemory, Agent
@@ -62,8 +63,12 @@ class E2eParkAgent(Agent):
     async def astream(self, **kwargs: Any) -> AsyncIterator[StreamEvent]:
         # Straight passthrough — including the ``SuspendedFinal`` a park emits, which is what the
         # conversation door reads to end the turn silently.
-        async for event in self._delegate().astream(tool_names=list(BAKED_TOOL_NAMES), **kwargs):
-            yield event
+        delegate = cast(
+            "AsyncGenerator[StreamEvent]", self._delegate().astream(tool_names=list(BAKED_TOOL_NAMES), **kwargs)
+        )
+        async with aclosing(delegate) as events:
+            async for event in events:
+                yield event
 
     @staticmethod
     def _delegate() -> Agent:

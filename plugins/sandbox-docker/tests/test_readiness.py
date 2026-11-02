@@ -19,6 +19,7 @@ from tai42_contract.sandbox import SandboxError, SandboxSessionSpec
 from tai42_kit.sandbox import LABEL_DURABILITY, LABEL_SANDBOX, permissive_policy
 
 from tai42_sandbox_docker import readiness
+from tai42_sandbox_docker.engine_endpoint import TcpEndpoint, resolve_engine_endpoint
 from tai42_sandbox_docker.provider import DockerSandbox
 from tai42_sandbox_docker.readiness import (
     engine_control_address,
@@ -28,7 +29,7 @@ from tai42_sandbox_docker.readiness import (
 from tai42_sandbox_docker.sessions import DockerSandboxSession
 from tai42_sandbox_docker.settings import DockerSandboxSettings
 
-from .conftest import FakeDocker
+from .conftest import FakeDocker, wrapped_exec_id
 
 SESSION_IMAGE = "img:1"
 PROBE_IMAGE = "probe:nc"
@@ -43,7 +44,7 @@ def _sandbox(fake_docker: FakeDocker, **overrides: Any) -> DockerSandbox:
         "readiness_probe_image": PROBE_IMAGE,
     }
     base.update(overrides)
-    sandbox = DockerSandbox(docker=fake_docker, settings=DockerSandboxSettings(**base))
+    sandbox = DockerSandbox(docker=fake_docker, attach=fake_docker.attach_exec, settings=DockerSandboxSettings(**base))
     sandbox.bind_policy(permissive_policy())
     return sandbox
 
@@ -76,9 +77,10 @@ def _probe_responder(
     ``deny_exit`` and any other dial (the resolver on :53) returns ``allow_exit``."""
 
     def responder(cmd: list[str]) -> tuple[list[tuple[int, bytes]], int]:
-        if cmd[0] == "cat":
+        argv = cmd[4:] if wrapped_exec_id(cmd) is not None else cmd
+        if argv[0] == "cat":
             return ([(1, resolv_conf.encode())], 0)
-        return ([], deny_exit if cmd[-1] == "2376" else allow_exit)
+        return ([], deny_exit if argv[-1] == "2376" else allow_exit)
 
     return responder
 
@@ -180,14 +182,43 @@ async def test_first_create_after_disconnect_reprobes(fake_docker: FakeDocker) -
     assert len(_probes(fake_docker)) == 2
 
 
+@pytest.mark.parametrize(("tls_verify", "port"), [(True, 2376), (False, 2375)])
+async def test_the_deny_target_is_the_address_the_engine_is_dialled_on(
+    fake_docker: FakeDocker, tls_verify: bool, port: int
+) -> None:
+    """An engine host naming no port is dialled on the engine's default port, TLS or plain,
+    and the probe's deny target is that same address."""
+    _seed(fake_docker)
+    host = "tcp://10.1.2.3"
+    sandbox = _sandbox(fake_docker, host=host, tls_verify=tls_verify)
+    dials: list[list[str]] = []
+    respond = _probe_responder()
+
+    def recording(cmd: list[str]) -> tuple[list[tuple[int, bytes]], int]:
+        argv = cmd[4:] if wrapped_exec_id(cmd) is not None else cmd
+        if argv[0] != "cat":
+            dials.append(argv[-2:])
+            return ([], 1 if argv[-2:] == ["10.1.2.3", str(port)] else 0)
+        return respond(cmd)
+
+    fake_docker.default_exec_by_cmd = recording
+    await sandbox.create_session(_spec())
+
+    dialled = resolve_engine_endpoint(host, tls=tls_verify)
+    assert isinstance(dialled, TcpEndpoint)
+    assert dialled.address() == ("10.1.2.3", port)
+    assert ["10.1.2.3", str(port)] in dials
+
+
 async def test_gate_refuses_when_engine_host_is_a_local_socket(fake_docker: FakeDocker) -> None:
     """Enabled against a ``unix://`` engine, the deny target cannot be derived (a socket
     has no network address) — refuse loudly and never reach a probe container."""
     _seed(fake_docker)
     sandbox = _sandbox(fake_docker, host="unix:///var/run/docker.sock")
 
-    with pytest.raises(SandboxError, match="local socket"):
+    with pytest.raises(SandboxError) as raised:
         await sandbox.create_session(_spec())
+    assert str(raised.value) == _LOCAL_SOCKET_REFUSAL + "unix:///var/run/docker.sock"
 
     assert not _probes(fake_docker)
     assert sandbox._engine_verified is False
@@ -370,22 +401,21 @@ async def test_destroy_disconnect_surfaces_and_resets_readiness(fake_docker: Fak
 # -- the derivation/predicate helpers --------------------------------------------
 
 
-def test_engine_control_address_parses_host_and_port() -> None:
-    assert engine_control_address("tcp://10.1.2.3:2376") == ("10.1.2.3", 2376)
+def test_engine_control_address_is_the_address_the_endpoint_is_dialled_on() -> None:
+    assert engine_control_address("tcp://10.1.2.3:2376", tls=True) == ("10.1.2.3", 2376)
 
 
-def test_engine_control_address_defaults_control_port() -> None:
-    assert engine_control_address("tcp://engine") == ("engine", 2376)
+_LOCAL_SOCKET_REFUSAL = (
+    "the egress-firewall readiness probe needs a network engine endpoint to derive its deny "
+    "target, but SANDBOX_DOCKER_HOST names the local socket "
+)
 
 
-def test_engine_control_address_rejects_local_socket() -> None:
-    with pytest.raises(SandboxError, match="local socket"):
-        engine_control_address("unix:///var/run/docker.sock")
-
-
-def test_engine_control_address_rejects_no_host() -> None:
-    with pytest.raises(SandboxError, match="names no host"):
-        engine_control_address("tcp://:2376")
+@pytest.mark.parametrize("host", ["unix:///var/run/docker.sock", "/var/run/docker.sock"])
+def test_engine_control_address_rejects_local_socket_naming_the_setting_as_written(host: str) -> None:
+    with pytest.raises(SandboxError) as raised:
+        engine_control_address(host, tls=True)
+    assert str(raised.value) == _LOCAL_SOCKET_REFUSAL + host
 
 
 def test_resolver_from_resolv_conf_takes_first_nameserver() -> None:

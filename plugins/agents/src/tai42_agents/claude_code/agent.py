@@ -22,18 +22,16 @@ from __future__ import annotations
 
 import contextlib
 import json
-from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
-from datetime import UTC, datetime, timedelta
+from collections.abc import AsyncGenerator, AsyncIterator, Iterator, Mapping, Sequence
 from typing import Any, ClassVar, Final, cast
 from uuid import uuid4
 
 from pydantic import BaseModel, SecretStr
 from tai42_contract.access_control.context import get_current_user_id
 from tai42_contract.agent import AddressedMemory, Agent
-from tai42_contract.agent.events import StreamEvent, SuspendedFinal
+from tai42_contract.agent.events import StreamEvent
 from tai42_contract.app import tai42_app
 from tai42_contract.interactions import (
-    SuspendedInteraction,
     reset_resume_continuation_tool,
     set_resume_continuation_tool,
 )
@@ -46,11 +44,7 @@ from tai42_kit.monitoring import resolve_trace_context
 
 from tai42_agents._internal.park import (
     AGENT_RESUME_TOOL_NAME,
-    ParkIdentity,
-    assert_park_capable,
     bind_resume_per_step,
-    chain_routing_slots,
-    persist_park,
     register_agent_resume_tool,
     workspace_lease,
 )
@@ -60,15 +54,12 @@ from tai42_agents._internal.render import render_message
 from tai42_agents._internal.run_kwargs import guard_run_kwargs
 from tai42_agents._internal.sandbox_util import build_policied_spec, workspace_key_for
 from tai42_agents._internal.session_cred import SessionCredMaterial
-from tai42_agents.claude_code.credentials import (
-    redact_transcript,
-    resolve_creds,
-    scrub_credentials,
-)
+from tai42_agents.claude_code.credentials import resolve_creds
 from tai42_agents.claude_code.errors import ClaudeCodeError
-from tai42_agents.claude_code.frames import drain_handle, iter_up_frames, map_event, terminal_event
+from tai42_agents.claude_code.frames import iter_up_frames, map_event, terminal_event
 from tai42_agents.claude_code.inputs import ClaudeCodeInput, InlineSkillShape, SubagentSpecShape
 from tai42_agents.claude_code.live_sessions import live_session
+from tai42_agents.claude_code.park import park_async_ask, park_on_interaction, session_park_identity
 from tai42_agents.claude_code.protocol import (
     CLAUDE_AGENT_SDK_VERSION,
     AnswerFrame,
@@ -79,7 +70,6 @@ from tai42_agents.claude_code.protocol import (
     ProtocolError,
     ResultFrame,
     StartFrame,
-    StopFrame,
     ToolCallFrame,
     dump_frame,
 )
@@ -96,6 +86,7 @@ from tai42_agents.claude_code.settings import (
     claude_code_settings,
 )
 from tai42_agents.claude_code.skills_sync import validate_name
+from tai42_agents.claude_code.teardown import tear_down_session
 from tai42_agents.claude_code.tool_call import run_proxied_tool_call
 from tai42_agents.claude_code.workspace import _RUNNER_PAYLOAD_DIR, build_payload, materialize, proxy_tool_specs
 
@@ -106,7 +97,7 @@ AGENT_NAME: Final[str] = "claude_code"
 def _resume_continuation(threaded: bool) -> Iterator[None]:
     """Bind the agent-resume continuation for the duration of a THREADED drive.
 
-    A platform ``ask(mode="async")`` — the agent's OWN async ask (``_park_async_ask``)
+    A platform ``ask(mode="async")`` — the agent's OWN async ask (``park_async_ask``)
     OR one a proxied tool this drive runs raises — reads the bound continuation to stamp
     ``continuation_tool`` onto the parked interaction, so a later ``agent_resume`` re-enters
     this agent. Without it, the async ask refuses loudly ("async ask requires a resuming
@@ -186,7 +177,7 @@ class ClaudeCodeAgent(Agent):
         subagents: Sequence[dict[str, Any] | SubagentSpecShape] = (),
         thread_id: str | None = None,
         **unknown: Any,
-    ) -> AsyncIterator[StreamEvent]:
+    ) -> AsyncGenerator[StreamEvent]:
         """Drive one turn inside a sandbox session, yielding contract stream events.
 
         Resolves the sandbox (the one raising chokepoint), derives the workspace (deterministic
@@ -251,13 +242,16 @@ class ClaudeCodeAgent(Agent):
             "subagents": subagent_defs,
         }
 
-        async for event in self._drive_workspace(
-            settings=settings,
-            thread_id=thread_id,
-            prompt={"text": rendered_user},
-            options_snapshot=options_snapshot,
-        ):
-            yield event
+        async with contextlib.aclosing(
+            self._drive_workspace(
+                settings=settings,
+                thread_id=thread_id,
+                prompt={"text": rendered_user},
+                options_snapshot=options_snapshot,
+            )
+        ) as stream:
+            async for event in stream:
+                yield event
 
     async def aresume_park(
         self,
@@ -314,7 +308,7 @@ class ClaudeCodeAgent(Agent):
         prompt: dict[str, Any],
         options_snapshot: dict[str, Any],
         terminal_key: str | None = None,
-    ) -> AsyncIterator[StreamEvent]:
+    ) -> AsyncGenerator[StreamEvent]:
         threaded = thread_id is not None
         workspace_key = workspace_key_for(AGENT_NAME, thread_id) if threaded else str(uuid4())
 
@@ -328,17 +322,20 @@ class ClaudeCodeAgent(Agent):
             if threaded:
                 lease_ms = (settings.run_timeout_seconds + LEASE_HEADROOM_SECONDS) * 1000
                 await stack.enter_async_context(workspace_lease(workspace_key, lease_ms=lease_ms))
-            async for event in self._drive_session(
-                settings=settings,
-                thread_id=thread_id,
-                workspace_key=workspace_key,
-                material=material,
-                model_env_name=model_env_name,
-                prompt=prompt,
-                options_snapshot=options_snapshot,
-                terminal_key=terminal_key,
-            ):
-                yield event
+            async with contextlib.aclosing(
+                self._drive_session(
+                    settings=settings,
+                    thread_id=thread_id,
+                    workspace_key=workspace_key,
+                    material=material,
+                    model_env_name=model_env_name,
+                    prompt=prompt,
+                    options_snapshot=options_snapshot,
+                    terminal_key=terminal_key,
+                )
+            ) as stream:
+                async for event in stream:
+                    yield event
 
     async def _drive_session(
         self,
@@ -351,7 +348,7 @@ class ClaudeCodeAgent(Agent):
         prompt: dict[str, Any],
         options_snapshot: dict[str, Any],
         terminal_key: str | None = None,
-    ) -> AsyncIterator[StreamEvent]:
+    ) -> AsyncGenerator[StreamEvent]:
         threaded = thread_id is not None
         durability = cast("Any", "persistent" if threaded else "ephemeral")
         sandbox = tai42_app.sandboxes.require_sandbox()
@@ -421,41 +418,41 @@ class ClaudeCodeAgent(Agent):
             await handle.write_stdin(dump_frame(start))
 
             # Bind the resume continuation for the drive so a threaded run's async ask — the
-            # agent's OWN (_park_async_ask) or a proxied tool's — can actually park+resume
+            # agent's OWN (park_async_ask) or a proxied tool's — can actually park+resume
             # (mirror the LangGraph driver's park_continuation). Threaded-only: an ephemeral run
             # cannot resume, so its async ask refuses loudly rather than binding. Bound around each
             # drive step, NOT in this generator's body: a ``with`` wrapping the ``yield`` would
             # leak the binding into the consumer's task (PEP 568) and strand it on an abandoned
             # stream.
-            async for event, is_park in bind_resume_per_step(
-                lambda: _resume_continuation(threaded),
-                self._drive_runner(
-                    handle=handle,
-                    session=session,
-                    settings=settings,
-                    thread_id=thread_id,
-                    resume_id=resume_id,
-                    tool_names=options_snapshot["tool_names"],
-                    options_snapshot=options_snapshot,
-                    terminal_key=terminal_key,
-                ),
-            ):
-                if is_park:
-                    park_suspended = True
-                yield event
+            async with contextlib.aclosing(
+                bind_resume_per_step(
+                    lambda: _resume_continuation(threaded),
+                    self._drive_runner(
+                        handle=handle,
+                        session=session,
+                        settings=settings,
+                        thread_id=thread_id,
+                        resume_id=resume_id,
+                        tool_names=options_snapshot["tool_names"],
+                        options_snapshot=options_snapshot,
+                        terminal_key=terminal_key,
+                    ),
+                )
+            ) as stream:
+                async for event, is_park in stream:
+                    if is_park:
+                        park_suspended = True
+                    yield event
         finally:
-            # (i) kill the exec and AWAIT the runner's death before any volume-mutating cleanup.
-            if handle is not None:
-                await handle.kill()
-                await drain_handle(handle)
-            # (ii) credential scrub + (iii) transcript redaction — TERMINAL exits only; a
-            # park-suspend keeps the bearer file for the door-less expiry resume to reuse.
-            if not park_suspended:
-                await scrub_credentials(session, ws=ws)
-                await redact_transcript(session, ws=ws, policy=policy, secrets=material.secret_values())
-                if not threaded:
-                    # An ephemeral session is not cached; destroy it so its volume is reaped now.
-                    await session.destroy()
+            await tear_down_session(
+                session,
+                handle=handle,
+                ws=ws,
+                policy=policy,
+                secrets=material.secret_values(),
+                terminal=not park_suspended,
+                ephemeral=not threaded,
+            )
 
     async def _drive_runner(
         self,
@@ -468,7 +465,7 @@ class ClaudeCodeAgent(Agent):
         tool_names: list[str],
         options_snapshot: dict[str, Any],
         terminal_key: str | None = None,
-    ) -> AsyncIterator[tuple[StreamEvent, bool]]:
+    ) -> AsyncGenerator[tuple[StreamEvent, bool]]:
         """Consume the runner's up-frames, mapping each to a contract event (paired with a park flag).
 
         A thin per-frame dispatch. Handles the hello version/session gate, sync
@@ -482,29 +479,33 @@ class ClaudeCodeAgent(Agent):
         allowlist = set(tool_names)
         text_parts: list[str] = []
         seen_hello = False
-        async for frame in iter_up_frames(handle):
-            if isinstance(frame, HelloFrame):
-                seen_hello = await self._on_hello(frame, session=session, thread_id=thread_id, resume_id=resume_id)
-                continue
-            parked = False
-            async for event, is_park in self._project_frame(
-                frame,
-                handle=handle,
-                session=session,
-                settings=settings,
-                thread_id=thread_id,
-                allowlist=allowlist,
-                options_snapshot=options_snapshot,
-                text_parts=text_parts,
-                terminal_key=terminal_key,
-            ):
-                if is_park:
-                    parked = True
-                yield event, is_park
-            # A park (the agent's own async ask or a tool that parked) and the clean terminal
-            # both stop the drive: the finally kills the runner. Every other frame drains on.
-            if parked or isinstance(frame, ResultFrame):
-                return
+        async with contextlib.aclosing(iter_up_frames(handle)) as frames:
+            async for frame in frames:
+                if isinstance(frame, HelloFrame):
+                    seen_hello = await self._on_hello(frame, session=session, thread_id=thread_id, resume_id=resume_id)
+                    continue
+                parked = False
+                async with contextlib.aclosing(
+                    self._project_frame(
+                        frame,
+                        handle=handle,
+                        session=session,
+                        settings=settings,
+                        thread_id=thread_id,
+                        allowlist=allowlist,
+                        options_snapshot=options_snapshot,
+                        text_parts=text_parts,
+                        terminal_key=terminal_key,
+                    )
+                ) as projected:
+                    async for event, is_park in projected:
+                        if is_park:
+                            parked = True
+                        yield event, is_park
+                # A park (the agent's own async ask or a tool that parked) and the clean terminal
+                # both stop the drive: the finally kills the runner. Every other frame drains on.
+                if parked or isinstance(frame, ResultFrame):
+                    return
         if not seen_hello:
             raise ProtocolError("runner stream ended before the hello init frame")
 
@@ -520,7 +521,7 @@ class ClaudeCodeAgent(Agent):
         options_snapshot: dict[str, Any],
         text_parts: list[str],
         terminal_key: str | None,
-    ) -> AsyncIterator[tuple[StreamEvent, bool]]:
+    ) -> AsyncGenerator[tuple[StreamEvent, bool]]:
         """Map one non-hello up-frame to its ``(event, is_park)`` pairs.
 
         An event frame's stream event, a sync/async ask, a proxied tool call (with its park tail),
@@ -531,20 +532,26 @@ class ClaudeCodeAgent(Agent):
             if event is not None:
                 yield event, False
         elif isinstance(frame, AskFrame):
-            async for pair in self._on_ask(
-                frame, handle=handle, thread_id=thread_id, settings=settings, options_snapshot=options_snapshot
-            ):
-                yield pair
+            async with contextlib.aclosing(
+                self._on_ask(
+                    frame, handle=handle, thread_id=thread_id, settings=settings, options_snapshot=options_snapshot
+                )
+            ) as stream:
+                async for pair in stream:
+                    yield pair
         elif isinstance(frame, ToolCallFrame):
-            async for pair in self._on_tool_call_frame(
-                frame,
-                handle=handle,
-                allowlist=allowlist,
-                thread_id=thread_id,
-                settings=settings,
-                options_snapshot=options_snapshot,
-            ):
-                yield pair
+            async with contextlib.aclosing(
+                self._on_tool_call_frame(
+                    frame,
+                    handle=handle,
+                    allowlist=allowlist,
+                    thread_id=thread_id,
+                    settings=settings,
+                    options_snapshot=options_snapshot,
+                )
+            ) as stream:
+                async for pair in stream:
+                    yield pair
         elif isinstance(frame, ResultFrame):
             event = await self._on_result_frame(
                 frame,
@@ -567,7 +574,7 @@ class ClaudeCodeAgent(Agent):
         thread_id: str | None,
         settings: ClaudeCodeSettings,
         options_snapshot: dict[str, Any],
-    ) -> AsyncIterator[tuple[StreamEvent, bool]]:
+    ) -> AsyncGenerator[tuple[StreamEvent, bool]]:
         """Run one proxied tool call and, when it async-parked, take the park tail.
 
         Builds the park identity, gates capability, and records it into the durable index — the same
@@ -582,22 +589,13 @@ class ClaudeCodeAgent(Agent):
         # is not None here (a thread-less park was refused to the model inside run_proxied_tool_call).
         if thread_id is None:
             raise AssertionError
-        horizon = datetime.now(UTC) + timedelta(seconds=settings.session_ttl_seconds)
-        completion_tool, completion_context = chain_routing_slots()
-        identity = ParkIdentity(
-            agent_name=AGENT_NAME,
-            thread_id=thread_id,
-            rebuild_kwargs={"thread_id": thread_id, "options_snapshot": options_snapshot},
-            bind=True,
-            completion_tool=completion_tool,
-            completion_context=completion_context,
-            retention_bound=horizon,
+        identity, horizon = session_park_identity(
+            agent_name=AGENT_NAME, thread_id=thread_id, settings=settings, options_snapshot=options_snapshot
         )
-        assert_park_capable(identity, durable=True, retention_bound=horizon)
-        async for event in self._park_on_interaction(
-            parked, identity=identity, handle=handle, thread_id=thread_id, horizon=horizon
-        ):
-            yield event, True
+        yield (
+            await park_on_interaction(parked, identity=identity, handle=handle, thread_id=thread_id, horizon=horizon),
+            True,
+        )
 
     async def _on_result_frame(
         self,
@@ -644,7 +642,7 @@ class ClaudeCodeAgent(Agent):
         thread_id: str | None,
         settings: ClaudeCodeSettings,
         options_snapshot: dict[str, Any],
-    ) -> AsyncIterator[tuple[StreamEvent, bool]]:
+    ) -> AsyncGenerator[tuple[StreamEvent, bool]]:
         if frame.mode == "sync":
             answer = await tai42_app.interactions.ask(
                 frame.question,
@@ -674,84 +672,12 @@ class ClaudeCodeAgent(Agent):
                 )
             )
             return
-        async for event in self._park_async_ask(
-            frame, handle=handle, thread_id=thread_id, settings=settings, options_snapshot=options_snapshot
-        ):
-            yield event, True
-
-    async def _park_async_ask(
-        self,
-        frame: AskFrame,
-        *,
-        handle: Any,
-        thread_id: str,
-        settings: ClaudeCodeSettings,
-        options_snapshot: dict[str, Any],
-    ) -> AsyncIterator[StreamEvent]:
-        horizon = datetime.now(UTC) + timedelta(seconds=settings.session_ttl_seconds)
-        completion_tool, completion_context = chain_routing_slots()
-        identity = ParkIdentity(
-            agent_name=AGENT_NAME,
-            thread_id=thread_id,
-            rebuild_kwargs={"thread_id": thread_id, "options_snapshot": options_snapshot},
-            bind=True,
-            completion_tool=completion_tool,
-            completion_context=completion_context,
-            retention_bound=horizon,
+        identity, horizon = session_park_identity(
+            agent_name=AGENT_NAME, thread_id=thread_id, settings=settings, options_snapshot=options_snapshot
         )
-        assert_park_capable(identity, durable=True, retention_bound=horizon)
-        suspended = await tai42_app.interactions.ask(
-            frame.question,
-            answer_format=frame.answer_format,
-            options=frame.options,
-            schema=frame.form_schema,
-            data=frame.data,
-            pages=frame.pages,
-            reaction_tool=frame.reaction_tool,
-            reactions=frame.reactions,
-            wording=frame.wording,
-            mode="async",
-            expiry_at=horizon,
-        )
-        if not (isinstance(suspended, SuspendedInteraction)):
-            raise AssertionError  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
-        async for event in self._park_on_interaction(
-            suspended, identity=identity, handle=handle, thread_id=thread_id, horizon=horizon
-        ):
-            yield event
-
-    async def _park_on_interaction(
-        self,
-        suspended: SuspendedInteraction,
-        *,
-        identity: ParkIdentity,
-        handle: Any,
-        thread_id: str,
-        horizon: datetime,
-    ) -> AsyncIterator[StreamEvent]:
-        """Record an already-created parked interaction into the durable index, stop the runner, and suspend.
-
-        The shared park tail BOTH the agent's OWN
-        async ask and a tool the agent drives that async-parks cross into the index through —
-        each supplies its interaction, this persists + stops + suspends uniformly.
-
-        ``horizon`` is this session's retention bound; the interaction's own deadline (bounded
-        by the retention gate) is what the entry is keyed to, falling back to the horizon when
-        the sentinel carried none.
-        """
-        interaction_id = suspended.interaction_id
-        deadline = (suspended.expiry_at or horizon).isoformat()
-        # interrupt_id == interaction_id (a one-ask park); persist BEFORE the stop/drain so an
-        # instant human answer never waits on the reaper.
-        await persist_park(identity, [(interaction_id, {interaction_id: deadline})])
-        await handle.write_stdin(dump_frame(StopFrame(reason="park")))
-        yield SuspendedFinal(
-            interaction_ids=[interaction_id],
-            thread_id=thread_id,
-            # The caller subset the parked sentinel carried (``[id]`` for a ``to="caller"`` ask,
-            # empty for a user ask), so the receipt partitions caller from user asks.
-            caller_interaction_ids=suspended.caller_interaction_ids,
-            expiry_at=deadline,
+        yield (
+            await park_async_ask(frame, identity=identity, handle=handle, thread_id=thread_id, horizon=horizon),
+            True,
         )
 
     def _emit_usage(self, frame: ResultFrame, *, settings: ClaudeCodeSettings) -> None:

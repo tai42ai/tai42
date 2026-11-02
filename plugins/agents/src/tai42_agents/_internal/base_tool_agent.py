@@ -10,6 +10,7 @@ through the kit's run-trace opener and binds the graph's monitoring callbacks to
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import AsyncIterator, Callable
 from typing import TYPE_CHECKING, Any
 
@@ -306,12 +307,15 @@ async def astream_tools_agent(
         # across a yield).
         counters: dict[int, RepromptCounter] = {}
         last: Any = None
-        async for chunk in bind_resume_per_step(
-            lambda: step_bindings(root.step, lambda: drive_reprompt_scope(counters)),
-            graph.agent.astream(messages, run_config, stream_mode=stream_mode),
-        ):
-            last = chunk
-            yield chunk
+        async with contextlib.aclosing(
+            bind_resume_per_step(
+                lambda: step_bindings(root.step, lambda: drive_reprompt_scope(counters)),
+                graph.agent.astream(messages, run_config, stream_mode=stream_mode),
+            )
+        ) as stream:
+            async for chunk in stream:
+                last = chunk
+                yield chunk
         with root.step():
             await mark_minted_thread_finished(minted_thread, provider=graph.checkpoint_provider)
         root.record_output(last)

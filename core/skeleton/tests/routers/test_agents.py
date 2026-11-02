@@ -34,6 +34,7 @@ from tai42_contract.agent.events import (
 )
 from tai42_contract.interactions import ParkedEntry
 from tai42_contract.tools import current_call_chain, get_run_delivery_id
+from tai42_kit.settings import reset_all_settings
 from tests.agent._memoryless import MemorylessTestAgent
 
 from tai42_skeleton.agent import (
@@ -405,6 +406,81 @@ async def test_run_agent_exception_yields_stream_error(one_agent):
     assert frames[-1] == {"type": "stream.error", "message": "boom"}
     # No stream.end after an error — the error frame is the terminal one.
     assert not any(f["type"] == "stream.end" for f in frames)
+
+
+class _CleanupFailingAgent(_FakeAgent):
+    """Yields its scripted events, then its stream's own cleanup raises once the stream is closed."""
+
+    def __init__(self, events: list[Any]) -> None:
+        super().__init__(events)
+        self.closed = False
+
+    async def astream(self, **kwargs: Any):  # type: ignore[override]
+        try:
+            for event in self._events:
+                yield event
+        finally:
+            self.closed = True
+            raise RuntimeError("stream cleanup failed")
+
+
+async def test_run_closes_the_agent_stream_inside_the_request(one_agent):
+    # The drive stops reading at the terminal event; the agent stream is closed right there, so
+    # its cleanup runs inside the request and a cleanup failure is the stream's terminal error frame.
+    agent = _CleanupFailingAgent([MessageFinal(text="done")])
+    one_agent(agent)
+    resp = await router.run_agent(_make_run_request("faker", b'{"prompt":"hi"}'))
+    frames = _data_frames(await _collect(resp))
+    assert agent.closed is True
+    assert frames[-1] == {"type": "stream.error", "message": "stream cleanup failed"}
+    assert not any(f["type"] == "stream.end" for f in frames)
+
+
+class _PlainIteratorAgent(_FakeAgent):
+    """Streams its scripted events through a plain async iterator, which has no ``aclose``."""
+
+    def astream(self, **kwargs: Any):  # type: ignore[override]
+        events = iter(self._events)
+
+        class _Events:
+            def __aiter__(self) -> _Events:
+                return self
+
+            async def __anext__(self) -> Any:
+                try:
+                    return next(events)
+                except StopIteration:
+                    raise StopAsyncIteration from None
+
+        return _Events()
+
+
+async def test_run_drives_a_plain_async_iterator_stream_to_its_end(one_agent):
+    # The contract types ``astream`` as an async iterator; one without ``aclose`` is driven to
+    # its terminal and the stream ends clean.
+    one_agent(_PlainIteratorAgent([MessageFinal(text="done")]))
+    resp = await router.run_agent(_make_run_request("faker", b'{"prompt":"hi"}'))
+    frames = _data_frames(await _collect(resp))
+    assert [f["type"] for f in frames][-1] == "stream.end"
+    assert not any(f["type"] == "stream.error" for f in frames)
+
+
+async def test_run_turn_budget_expiry_is_the_stream_error(one_agent, monkeypatch):
+    # The live-caller seam arms the turn budget over the drive: an agent still working when the
+    # budget expires ends the stream on the typed turn-timeout error.
+    monkeypatch.setenv("TAI_TURN_TIMEOUT_SECONDS", "0.05")
+    reset_all_settings()
+    try:
+        agent = _FakeAgent([ReasoningStep(text="working")], block=True)
+        one_agent(agent)
+        resp = await router.run_agent(_make_run_request("faker", b'{"prompt":"hi"}'))
+        frames = _data_frames(await _collect(resp))
+    finally:
+        monkeypatch.delenv("TAI_TURN_TIMEOUT_SECONDS")
+        reset_all_settings()
+    assert agent.cancelled is True
+    assert frames[-1]["type"] == "stream.error"
+    assert "turn timeout" in frames[-1]["message"]
 
 
 async def test_run_disconnect_cancels_underlying_run(one_agent):

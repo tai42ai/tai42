@@ -13,6 +13,7 @@ the run into the contract ``StreamEvent`` taxonomy; ``run`` drains it.
 
 from __future__ import annotations
 
+import contextlib
 import json
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Mapping, Sequence
@@ -370,10 +371,13 @@ class RetrievalToolsAgent(Agent):
                     context=root.context,
                 )
             # The run's trace root is current only inside each step, never across a yield.
-            async for event in bind_resume_per_step(
-                root.step, self._run_events(agent, messages, config, llm, llm_provider, resolved_response_format)
-            ):
-                yield terminals.note(event)
+            async with contextlib.aclosing(
+                bind_resume_per_step(
+                    root.step, self._run_events(agent, messages, config, llm, llm_provider, resolved_response_format)
+                )
+            ) as stream:
+                async for event in stream:
+                    yield terminals.note(event)
             # The run reached its terminal: a thread it minted is finished.
             with root.step():
                 await mark_minted_thread_finished(minted, provider=checkpoint_provider)
@@ -395,18 +399,19 @@ class RetrievalToolsAgent(Agent):
     ) -> AsyncIterator[StreamEvent]:
         """Drive the built retrieval graph and yield its events up to and including the terminal."""
         terminal: MessageFinal | None = None
-        async for event in aproject_agent_events(agent, messages, config):
-            if isinstance(event, MessageDelta):
-                continue
-            if isinstance(event, MessageFinal):
-                terminal = event
-                continue
-            if isinstance(event, RecursionLimitFinal):
-                # The retrieval graph tripped the recursion limit: surface the named, non-fatal
-                # outcome as the run's terminal instead of running the finalization pass.
+        async with contextlib.aclosing(aproject_agent_events(agent, messages, config)) as stream:
+            async for event in stream:
+                if isinstance(event, MessageDelta):
+                    continue
+                if isinstance(event, MessageFinal):
+                    terminal = event
+                    continue
+                if isinstance(event, RecursionLimitFinal):
+                    # The retrieval graph tripped the recursion limit: surface the named, non-fatal
+                    # outcome as the run's terminal instead of running the finalization pass.
+                    yield event
+                    return
                 yield event
-                return
-            yield event
         if terminal is None:
             raise ValueError(
                 "retrieval agent run produced no terminal message; the required status envelope was never emitted"

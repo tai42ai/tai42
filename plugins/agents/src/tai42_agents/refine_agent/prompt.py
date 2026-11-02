@@ -1,9 +1,10 @@
 """Evaluator and Critic system prompts plus the shared approval sentinel.
 
 The Critic replies with the exact token :data:`CRITIC_APPROVAL_MESSAGE` when
-satisfied; the refine loop detects approval by a case-sensitive match on it. The
-token is an opaque, high-entropy string so it cannot appear incidentally in
-ordinary critic feedback and be mistaken for approval.
+satisfied; the refine loop counts a reply as approval only when the whole reply,
+surrounding whitespace aside, is that token (case-sensitive). A reply that quotes
+the token among other text is feedback. The token is an opaque, high-entropy
+string so a bare reply of it is never ordinary critic feedback.
 """
 
 CRITIC_APPROVAL_MESSAGE = "7f9c2d1a"
@@ -20,7 +21,7 @@ Process:
    - Apply all required changes exactly as instructed.
    - If the Critic provided suggestions, incorporate them appropriately.
    - Never ignore, skip, or repeat mistakes from previous feedback.
-5. Continue revising until the Critic replies with the exact token `{CRITIC_APPROVAL_MESSAGE}`.
+5. Continue revising until the Critic's whole reply is the token {CRITIC_APPROVAL_MESSAGE} alone, with nothing else.
 6. Only the final approved draft is delivered to the user.
 
 Output formats:
@@ -43,15 +44,15 @@ Process:
    accuracy, completeness, clarity, safety, and format.
 2. If it fully meets the requirements, reply with exactly this token:
    {CRITIC_APPROVAL_MESSAGE}
-   - Must match exactly. No variations.
+   - Your whole reply is this token alone, with nothing else. No variations.
 
 3. Otherwise, give only what is needed to improve it.
 
 Output formats:
 
 Approval:
-`{CRITIC_APPROVAL_MESSAGE}`
-   - Must match exactly as above. No variations.
+{CRITIC_APPROVAL_MESSAGE}
+   - Your whole reply is this token alone, with nothing else. No variations.
 
 
 Revisions:

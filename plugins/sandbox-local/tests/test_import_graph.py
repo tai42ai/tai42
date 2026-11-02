@@ -23,12 +23,14 @@ PACKAGE = "tai42_sandbox_local"
 ALLOWED_FIRST_PARTY = frozenset({PACKAGE, "tai42_contract", "tai42_kit"})
 
 # Every third-party root the shipped graph pulls in — the declared runtime
-# dependencies (pydantic / pydantic-settings) plus their resolved closure. The
+# dependencies (pydantic / pydantic-settings) plus their resolved closure, and
+# anyio, which tai42-kit's sandbox substrate imports for its shielded waits. The
 # provider adds NO third-party root of its own (it uses only the standard library
 # for host subprocesses and filesystem work).
 ALLOWED_THIRD_PARTY = frozenset(
     {
         "annotated_types",
+        "anyio",
         "dotenv",
         "pydantic",
         "pydantic_core",

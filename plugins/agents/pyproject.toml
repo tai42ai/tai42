@@ -55,6 +55,9 @@ dependencies = [
     # with ``BRACE | GLOBSTAR``). Imported directly, so declared here rather than
     # leaned on as a transitive of the runtime.
     "wcmatch>=11.0.1",
+    # Shielded cancel scope: the claude_code session teardown finishes under an anyio
+    # cancellation, which re-delivers at every wake-up.
+    "anyio>=4.14",
 ]
 
 [project.urls]

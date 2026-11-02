@@ -33,9 +33,10 @@ included, at INFO (``_client.py:1026`` / ``:1741``) — is closed at the logging
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Mapping
-from contextlib import AsyncExitStack, asynccontextmanager
+from collections.abc import AsyncGenerator, AsyncIterator, Mapping
+from contextlib import AsyncExitStack, aclosing, asynccontextmanager
 from dataclasses import dataclass
+from typing import cast
 
 import httpx
 
@@ -168,12 +169,14 @@ def _transient_for_transport(exc: BaseException) -> bool | None:
     return None
 
 
-async def _iter_body(response: httpx.Response, host: str) -> AsyncIterator[bytes]:
+async def _iter_body(response: httpx.Response, host: str) -> AsyncGenerator[bytes]:
     """Yield the response body chunks, re-wrapping a mid-body fault as a URL-free transient error."""
     fault_class: str | None = None
     try:
-        async for chunk in response.aiter_bytes():
-            yield chunk
+        # httpx builds ``aiter_bytes`` as an async generator, typed as a plain iterator.
+        async with aclosing(cast("AsyncGenerator[bytes]", response.aiter_bytes())) as body:
+            async for chunk in body:
+                yield chunk
     except (MediaFetchError, UrlGuardError):
         raise
     except Exception as exc:
@@ -252,12 +255,13 @@ async def _stream_media(
             raise MediaFetchError(host=_host(current_url), cause_class=transport_class, transient=transport_transient)
 
         host = _host(current_url)
-        yield MediaStream(
-            content_type=_media_type(response),
-            content_length=_content_length(response, host),
-            host=host,
-            chunks=_iter_body(response, host),
-        )
+        async with aclosing(_iter_body(response, host)) as chunks:
+            yield MediaStream(
+                content_type=_media_type(response),
+                content_length=_content_length(response, host),
+                host=host,
+                chunks=chunks,
+            )
 
 
 @asynccontextmanager

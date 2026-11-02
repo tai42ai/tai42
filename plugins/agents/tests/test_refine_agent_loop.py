@@ -20,6 +20,8 @@ from tai42_contract.template import TemplatedText
 from tai42_agents.refine_agent.agent import RefineAgent
 from tai42_agents.refine_agent.prompt import (
     CRITIC_APPROVAL_MESSAGE,
+    CRITIC_SYSTEM_MESSAGE,
+    EVALUATOR_SYSTEM_MESSAGE,
 )
 
 from ._delivery_scope import assert_delivery_scoped, probe_tool
@@ -49,7 +51,7 @@ def test_tools_are_resolved_by_name_and_passed_to_both_agents(
     tool = _a_tool()
     app_tools.client_tools["t1"] = tool
     evaluator = FakeAgent(invoke_contents=["draft"], stream_items=[("messages", (AIMessageChunk(content="ok"), {}))])
-    critic = FakeAgent(invoke_contents=[f"approved {CRITIC_APPROVAL_MESSAGE}"])
+    critic = FakeAgent(invoke_contents=[CRITIC_APPROVAL_MESSAGE])
     recorder = _patch_loop(monkeypatch, [evaluator, critic])
 
     agent = tai42_app.agents.get_agent(AGENT_NAME)
@@ -79,7 +81,7 @@ def test_dispatched_tools_are_delivery_scoped(
     probe, seen = probe_tool("t1")
     app_tools.client_tools["t1"] = probe
     evaluator = FakeAgent(invoke_contents=["draft"], stream_items=[("messages", (AIMessageChunk(content="ok"), {}))])
-    critic = FakeAgent(invoke_contents=[f"approved {CRITIC_APPROVAL_MESSAGE}"])
+    critic = FakeAgent(invoke_contents=[CRITIC_APPROVAL_MESSAGE])
     recorder = _patch_loop(monkeypatch, [evaluator, critic])
 
     agent = tai42_app.agents.get_agent(AGENT_NAME)
@@ -95,7 +97,7 @@ def test_dispatched_tools_are_delivery_scoped(
 
 def test_unknown_tool_name_raises(monkeypatch: pytest.MonkeyPatch, app_tools: Any, resource_manager: Any) -> None:
     evaluator = FakeAgent(invoke_contents=["draft"])
-    critic = FakeAgent(invoke_contents=[f"approved {CRITIC_APPROVAL_MESSAGE}"])
+    critic = FakeAgent(invoke_contents=[CRITIC_APPROVAL_MESSAGE])
     _patch_loop(monkeypatch, [evaluator, critic])
 
     agent = tai42_app.agents.get_agent(AGENT_NAME)
@@ -112,7 +114,7 @@ def test_approval_on_first_iteration_streams_the_final_pass(
     monkeypatch: pytest.MonkeyPatch, app_tools: Any, resource_manager: Any
 ) -> None:
     evaluator = FakeAgent(invoke_contents=["draft"], stream_items=_final_pass_script())
-    critic = FakeAgent(invoke_contents=[f"looks great {CRITIC_APPROVAL_MESSAGE}"])
+    critic = FakeAgent(invoke_contents=[CRITIC_APPROVAL_MESSAGE])
     _patch_loop(monkeypatch, [evaluator, critic])
 
     agent = tai42_app.agents.get_agent(AGENT_NAME)
@@ -133,7 +135,7 @@ def test_user_content_kwargs_mark_the_evaluators_first_user_turn(
     """``user_content_kwargs`` makes the evaluator's first user turn a content block
     (the run's primary caller message); the internal system prompts are untouched."""
     evaluator = FakeAgent(invoke_contents=["draft"], stream_items=_final_pass_script())
-    critic = FakeAgent(invoke_contents=[f"looks great {CRITIC_APPROVAL_MESSAGE}"])
+    critic = FakeAgent(invoke_contents=[CRITIC_APPROVAL_MESSAGE])
     _patch_loop(monkeypatch, [evaluator, critic])
 
     agent = tai42_app.agents.get_agent(AGENT_NAME)
@@ -156,7 +158,7 @@ def test_approval_on_a_later_iteration(monkeypatch: pytest.MonkeyPatch, app_tool
         invoke_contents=["draft-1", "draft-2", "draft-3"],
         stream_items=[("messages", (AIMessageChunk(content="done"), {}))],
     )
-    critic = FakeAgent(invoke_contents=["needs work", "still off", f"ok {CRITIC_APPROVAL_MESSAGE}"])
+    critic = FakeAgent(invoke_contents=["needs work", "still off", CRITIC_APPROVAL_MESSAGE])
     _patch_loop(monkeypatch, [evaluator, critic])
 
     agent = tai42_app.agents.get_agent(AGENT_NAME)
@@ -206,13 +208,39 @@ def test_empty_critic_feedback_raises(monkeypatch: pytest.MonkeyPatch, app_tools
         )
 
 
-def test_exact_token_substring_is_recognized_as_approval(
-    monkeypatch: pytest.MonkeyPatch, app_tools: Any, resource_manager: Any
+@pytest.mark.parametrize(
+    "critic_reply",
+    [
+        f"All good here: {CRITIC_APPROVAL_MESSAGE} — ship it",
+        f"Required changes:\n- do not reply {CRITIC_APPROVAL_MESSAGE} yet",
+        f"`{CRITIC_APPROVAL_MESSAGE}`",
+    ],
+)
+def test_token_inside_other_text_is_not_approval(
+    monkeypatch: pytest.MonkeyPatch, app_tools: Any, resource_manager: Any, critic_reply: str
 ) -> None:
-    """The exact token embedded in surrounding text counts as approval, even at
-    the last budgeted iteration — the check must actually detect it."""
+    """Approval is a critic reply that is exactly the token: a reply that only
+    contains it among other text is feedback, so the run fails loudly at
+    max_iterations instead of returning the unapproved draft."""
+    evaluator = FakeAgent(invoke_contents=["draft"])
+    critic = FakeAgent(invoke_contents=[critic_reply])
+    _patch_loop(monkeypatch, [evaluator, critic])
+
+    agent = tai42_app.agents.get_agent(AGENT_NAME)
+    with pytest.raises(RuntimeError, match="Max iterations"):
+        _collect(
+            agent,
+            evaluator_message=TemplatedText(content="write it"),
+            critic_message=TemplatedText(content="review it"),
+            max_iterations=1,
+        )
+
+
+def test_exact_token_reply_is_approval(monkeypatch: pytest.MonkeyPatch, app_tools: Any, resource_manager: Any) -> None:
+    """A critic reply that is the token alone, surrounding whitespace aside,
+    is approval even at the last budgeted iteration."""
     evaluator = FakeAgent(invoke_contents=["draft"], stream_items=[("messages", (AIMessageChunk(content="done"), {}))])
-    critic = FakeAgent(invoke_contents=[f"All good here: {CRITIC_APPROVAL_MESSAGE} — ship it"])
+    critic = FakeAgent(invoke_contents=[f"\n {CRITIC_APPROVAL_MESSAGE}\n"])
     _patch_loop(monkeypatch, [evaluator, critic])
 
     agent = tai42_app.agents.get_agent(AGENT_NAME)
@@ -224,6 +252,27 @@ def test_exact_token_substring_is_recognized_as_approval(
     )
 
     assert any(isinstance(e, MessageFinal) and e.text == "done" for e in events)
+
+
+@pytest.mark.parametrize("prompt", [CRITIC_SYSTEM_MESSAGE, EVALUATOR_SYSTEM_MESSAGE], ids=["critic", "evaluator"])
+def test_the_prompts_show_the_approval_token_bare(prompt: str) -> None:
+    """The prompts show the approval reply exactly as the loop accepts it: the bare token,
+    never wrapped in backticks a critic would copy into a reply that then reads as feedback."""
+    assert CRITIC_APPROVAL_MESSAGE in prompt
+    assert f"`{CRITIC_APPROVAL_MESSAGE}`" not in prompt
+
+
+def test_the_critic_approval_format_is_the_bare_token() -> None:
+    approval_block = CRITIC_SYSTEM_MESSAGE.split("Approval:\n", 1)[1]
+    assert approval_block.splitlines()[0] == CRITIC_APPROVAL_MESSAGE
+
+
+def test_the_prompts_say_an_approval_is_the_token_alone() -> None:
+    """Both prompts state the rule the loop applies: an approval reply is the token alone."""
+    approval_block = CRITIC_SYSTEM_MESSAGE.split("Approval:\n", 1)[1].split("\n\n", 1)[0]
+    assert "whole reply is this token alone, with nothing else" in approval_block
+    [step_5] = [line for line in EVALUATOR_SYSTEM_MESSAGE.splitlines() if line.startswith("5. ")]
+    assert f"whole reply is the token {CRITIC_APPROVAL_MESSAGE} alone, with nothing else" in step_5
 
 
 def test_wrong_case_token_is_not_approval(
@@ -253,7 +302,7 @@ def test_evaluator_graph_rolls_accumulated_cache_marks_on_a_reused_thread(monkey
     older mark at the model call, so the second run's draft call sends exactly one —
     the newest — while the checkpointed thread keeps both."""
     evaluator_model = _RecordingChatModel("draft")
-    critic_model = _RecordingChatModel(f"ok {CRITIC_APPROVAL_MESSAGE}")
+    critic_model = _RecordingChatModel(CRITIC_APPROVAL_MESSAGE)
     saver = InMemorySaver()
     created = _patch_loop_real(monkeypatch, evaluator_model, critic_model, saver)
 
@@ -296,7 +345,7 @@ def test_the_role_threads_the_run_minted_are_marked_finished_at_its_end(
     monkeypatch: pytest.MonkeyPatch, app_tools: Any, resource_manager: Any, ledger_book: Any
 ) -> None:
     evaluator = FakeAgent(invoke_contents=["draft"], stream_items=_final_pass_script())
-    critic = FakeAgent(invoke_contents=[f"looks great {CRITIC_APPROVAL_MESSAGE}"])
+    critic = FakeAgent(invoke_contents=[CRITIC_APPROVAL_MESSAGE])
     _patch_loop(monkeypatch, [evaluator, critic])
 
     agent = tai42_app.agents.get_agent(AGENT_NAME)
@@ -314,7 +363,7 @@ def test_caller_role_threads_leave_the_ledger_and_are_never_marked(
     monkeypatch: pytest.MonkeyPatch, app_tools: Any, resource_manager: Any, ledger_book: Any
 ) -> None:
     evaluator = FakeAgent(invoke_contents=["draft"], stream_items=_final_pass_script())
-    critic = FakeAgent(invoke_contents=[f"looks great {CRITIC_APPROVAL_MESSAGE}"])
+    critic = FakeAgent(invoke_contents=[CRITIC_APPROVAL_MESSAGE])
     _patch_loop(monkeypatch, [evaluator, critic])
 
     async def premark() -> None:

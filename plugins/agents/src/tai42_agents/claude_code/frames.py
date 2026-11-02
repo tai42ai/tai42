@@ -6,7 +6,7 @@ terminal frame to a contract stream event.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from typing import Any
 
 from tai42_contract.agent.events import (
@@ -18,21 +18,18 @@ from tai42_contract.agent.events import (
     ToolCallStep,
     ToolResultStep,
 )
-from tai42_contract.sandbox import (
-    SandboxExecTimeoutError,
-    SandboxStreamChunk,
-    SandboxStreamExit,
-)
+from tai42_contract.sandbox import SandboxStreamChunk, SandboxStreamExit
 from tai42_kit.llm.runtime import validate_structured_output
 
 from tai42_agents.claude_code.protocol import ProtocolError, ResultFrame, parse_up_frame
 
 
-async def iter_up_frames(handle: Any) -> AsyncIterator[Any]:
+async def iter_up_frames(handle: Any) -> AsyncGenerator[Any]:
     """Yield parsed up-frames off the exec handle's byte stream.
 
     Buffers whole JSON lines and ignores stderr (diagnostics). A ``SandboxStreamExit`` ends the
-    stream.
+    stream. Closing this generator leaves ``handle.output`` open: the handle owns its output, and
+    the session teardown kills the exec and drains that output to its exit marker.
     """
     buffer = bytearray()
     async for chunk in handle.output:
@@ -52,11 +49,11 @@ async def iter_up_frames(handle: Any) -> AsyncIterator[Any]:
 
 
 async def drain_handle(handle: Any) -> None:
-    """Await the killed handle's stream to completion so no runner code is still mid-drive."""
-    try:
-        async for _ in handle.output:
-            pass
-    except (SandboxExecTimeoutError, ProtocolError):
+    """Await the killed handle's stream to completion so no runner code is still mid-drive.
+
+    A killed exec's stream ends with its exit marker; a stream that fails instead raises.
+    """
+    async for _ in handle.output:
         pass
 
 

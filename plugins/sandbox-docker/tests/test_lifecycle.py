@@ -36,7 +36,9 @@ def _settings(**overrides: Any) -> DockerSandboxSettings:
 
 
 def _sandbox(fake_docker: FakeDocker, **settings_overrides) -> DockerSandbox:
-    sandbox = DockerSandbox(docker=fake_docker, settings=_settings(**settings_overrides))
+    sandbox = DockerSandbox(
+        docker=fake_docker, attach=fake_docker.attach_exec, settings=_settings(**settings_overrides)
+    )
     sandbox.bind_policy(permissive_policy())
     return sandbox
 

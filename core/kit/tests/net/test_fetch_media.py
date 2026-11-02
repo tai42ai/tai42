@@ -10,12 +10,13 @@ distinct origin (a different port) to cross.
 from __future__ import annotations
 
 import http.server
+import inspect
 import logging
 import subprocess
 import sys
 import threading
-from collections.abc import Iterator
-from typing import Any
+from collections.abc import AsyncGenerator, Iterator
+from typing import Any, cast
 
 import httpx
 import pytest
@@ -722,6 +723,18 @@ async def test_open_media_stream_closes_the_response_on_early_exit(
         async for _chunk in stream.chunks:
             break  # leave the body undrained
     assert closed  # the exit stack closed the final response even though it was not read to completion
+
+
+async def test_open_media_stream_closes_its_body_reader_on_early_exit(
+    monkeypatch: pytest.MonkeyPatch, media_server: _MediaServer
+) -> None:
+    """Leaving the context with the body undrained closes the ``chunks`` reader before the context returns."""
+    _enable(monkeypatch, allow_cidrs=["127.0.0.0/8"])
+    media_server.configure(body=bytes(512 * 1024), content_type="video/mp4")
+    async with open_media_stream(f"{media_server.base_url}/obj") as stream:
+        async for _chunk in stream.chunks:
+            break  # leave the body undrained
+    assert inspect.getasyncgenstate(cast("AsyncGenerator[bytes]", stream.chunks)) == inspect.AGEN_CLOSED
 
 
 async def test_open_media_stream_ssrf_blocks_private_target(monkeypatch: pytest.MonkeyPatch) -> None:

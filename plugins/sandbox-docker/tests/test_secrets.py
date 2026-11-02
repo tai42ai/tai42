@@ -42,7 +42,9 @@ async def test_connection_error_never_leaks_env(fake_docker: FakeDocker) -> None
         raise OSError("connection reset")
 
     fake_docker.containers.create = _refuse  # type: ignore[method-assign]
-    sandbox = DockerSandbox(docker=fake_docker, settings=DockerSandboxSettings(host="tcp://engine:2376"))
+    sandbox = DockerSandbox(
+        docker=fake_docker, attach=fake_docker.attach_exec, settings=DockerSandboxSettings(host="tcp://engine:2376")
+    )
     sandbox.bind_policy(permissive_policy())
 
     spec = SandboxSessionSpec(

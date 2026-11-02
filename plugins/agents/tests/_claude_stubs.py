@@ -273,6 +273,16 @@ emit({"type": "result", "terminal_reason": "completed", "session_id": "sess-1",
 )
 
 
+# A turn that never finishes: hello + one text event, then block on stdin for good.
+HANGS_AFTER_TEXT = (
+    _PREAMBLE
+    + """emit({"type": "hello", "sdk_version": "0.2.144", "session_id": "sess-1"})
+emit({"type": "event", "event": {"kind": "text", "text": "working"}})
+readline()
+"""
+)
+
+
 def payload_for(script: str) -> object:
     """A ``runner_payload_files`` replacement that ships exactly this stub as ``tai_runner.py``."""
 

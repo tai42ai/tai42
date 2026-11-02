@@ -32,6 +32,7 @@ no resume path bound an async ask refuses loudly pre-persist.
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import AsyncIterator, Mapping, Sequence
 from typing import Any, ClassVar
 
@@ -504,19 +505,22 @@ class ToolsAgent(Agent):
         )
         saw_structured = False
         saw_outcome = False
-        async for event in astream_tools_agent_events(
-            graph=graph,
-            user_message=[rendered_user],
-            config=config,
-            user_content_kwargs=user_content_kwargs,
-            park_builder=park_builder,
-            resume=resume,
-        ):
-            if isinstance(event, StructuredFinal):
-                saw_structured = True
-            elif isinstance(event, StructuredOutputUnresolvedFinal | RecursionLimitFinal):
-                saw_outcome = True
-            yield event
+        async with contextlib.aclosing(
+            astream_tools_agent_events(
+                graph=graph,
+                user_message=[rendered_user],
+                config=config,
+                user_content_kwargs=user_content_kwargs,
+                park_builder=park_builder,
+                resume=resume,
+            )
+        ) as stream:
+            async for event in stream:
+                if isinstance(event, StructuredFinal):
+                    saw_structured = True
+                elif isinstance(event, StructuredOutputUnresolvedFinal | RecursionLimitFinal):
+                    saw_outcome = True
+                yield event
         # Structured-final parity with the invoke face: a requested response_format
         # that produced no StructuredFinal fails loudly after the stream drains
         # rather than silently omitting the frame — unless the run ended on a typed

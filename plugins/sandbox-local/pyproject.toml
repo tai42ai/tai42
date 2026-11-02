@@ -29,9 +29,10 @@ dependencies = [
     # The contract floor is rewritten by scripts/range_sync.py at release.
     "tai42-contract>=28.1,<29",
     # ManagedSandbox / ManagedSandboxSession (the ledger, TTL, reap, orphan-recovery
-    # and the session-create policy chokepoint), SandboxDispatchSettings, and the
-    # importable conformance suite. The floor names the first release carrying
-    # `tai42_kit.sandbox`, which this provider builds on.
+    # and the session-create policy chokepoint), SandboxDispatchSettings, HostProcess /
+    # HostExecHandle (the exec as a host child process, and its handle), and the
+    # importable conformance suite. The floor is rewritten by scripts/range_sync.py at
+    # release, so it names the kit release this provider was built against.
     "tai42-kit>=16.0,<17",
     # SettingsConfigDict / SecretStr for the settings model and the env credential
     # channel; imported directly, so declared directly rather than leaned on as a

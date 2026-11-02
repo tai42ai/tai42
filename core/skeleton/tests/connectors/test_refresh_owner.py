@@ -27,6 +27,7 @@ from tai42_skeleton.connectors.runtime import refresh_owner
 from tai42_skeleton.connectors.runtime.resolver import ConnectorReconnectRequiredError, resolve_managed_auth
 
 from .conftest import CID, CID2, make_discovered_descriptor
+from .credential_path import owner_loop as serving_stand_in
 from .oauth_fakes import FakeOAuthServer, Reply, serve
 
 
@@ -164,28 +165,8 @@ def _slow_token(fake: FakeOAuthServer, *, delay: float = 0.6, body: dict | None 
 
 @pytest.fixture
 def owner_loop() -> Iterator[asyncio.AbstractEventLoop]:
-    """A long-lived loop in its own thread, bound as the refresh owner (the serving loop's stand-in)."""
-    loop = asyncio.new_event_loop()
-    thread = threading.Thread(target=loop.run_forever, daemon=True)
-    thread.start()
-
-    async def _bind() -> None:
-        refresh_owner.bind_to_running_loop()
-
-    asyncio.run_coroutine_threadsafe(_bind(), loop).result(5)
-    try:
+    with serving_stand_in() as loop:
         yield loop
-    finally:
-        from tai42_kit.clients.base import shutdown_all_clients
-
-        async def _close() -> None:
-            await refresh_owner.aclose()
-            await shutdown_all_clients()
-
-        asyncio.run_coroutine_threadsafe(_close(), loop).result(10)
-        loop.call_soon_threadsafe(loop.stop)
-        thread.join(5)
-        loop.close()
 
 
 async def _eventually_rotated(store: _Store, timeout: float = 5.0) -> None:

@@ -20,6 +20,7 @@ With a ``response_format`` set, the completion emits exactly one
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import AsyncIterator, Mapping, Sequence
 from typing import Any, ClassVar, cast
 
@@ -256,14 +257,15 @@ class VqaAgent(Agent):
 
             parts: list[str] = []
             accumulated: Any = None
-            async for chunk in bind_resume_per_step(
-                root.step, llm.astream([message], config=cast(RunnableConfig, trace_config))
-            ):
-                accumulated = chunk if accumulated is None else accumulated + chunk
-                text = chunk.text
-                if text:
-                    parts.append(text)
-                    yield MessageDelta(text=text)
+            async with contextlib.aclosing(
+                bind_resume_per_step(root.step, llm.astream([message], config=cast(RunnableConfig, trace_config)))
+            ) as stream:
+                async for chunk in stream:
+                    accumulated = chunk if accumulated is None else accumulated + chunk
+                    text = chunk.text
+                    if text:
+                        parts.append(text)
+                        yield MessageDelta(text=text)
 
             if accumulated is not None:
                 usage = usage_event(accumulated)
