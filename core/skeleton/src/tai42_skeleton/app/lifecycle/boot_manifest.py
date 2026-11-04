@@ -127,12 +127,27 @@ class BootManifestMixin(LifecycleState):
                 ", ".join(dangling),
             )
 
-    def _require_live_manifest(self) -> Manifest:
-        """The live in-process manifest, or a loud error if the app is not started.
+    def _require_manifest(self) -> Manifest:
+        """The manifest of the generation this work belongs to, or a loud error if the app is not started.
 
-        The typed accessor behind ``app.admin.live_manifest_typed``.
+        Resolved through :attr:`_serving_core`: in a rebuild's own work this is the manifest the
+        build's ``start()`` recorded on the core under construction, which the build's own steps
+        (the component imports, the per-epoch handlers) read; elsewhere the live generation's.
         """
         manifest = self._manifest
+        if manifest is None:
+            raise RuntimeError("TaiMCP is not started — call start()/app_context first.")
+        return manifest
+
+    def _require_live_manifest(self) -> Manifest:
+        """The manifest of the LIVE serving generation, or a loud error if the app is not started.
+
+        Resolved through :attr:`_live_serving_core`, so a request that interleaves with an in-flight
+        rebuild reads the manifest of the generation still serving, never the core under
+        construction (whose manifest is unset until the build's ``start()`` records it). The typed
+        accessor behind ``app.admin.live_manifest_typed``.
+        """
+        manifest = self._live_serving_core._manifest
         if manifest is None:
             raise RuntimeError("TaiMCP is not started — call start()/app_context first.")
         return manifest

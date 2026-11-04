@@ -26,9 +26,9 @@ package is one such backend
 (Celery); siblings can back the same contract with other queues. The
 documentation site covers the platform-level story:
 
-- Backend & fleet-control concept: https://tai42.ai/concepts/backends
-- Build an execution backend (author guide): https://tai42.ai/guides/authors/backend
-- Ecosystem catalog: https://tai42.ai/reference/catalog
+- Backend & fleet-control concept: https://docs.tai42.ai/concepts/backends
+- Writing a backend (section of the backend concept): https://docs.tai42.ai/concepts/backends#writing-a-backend
+- Plugin catalog: https://docs.tai42.ai/plugins
 
 Its only tai-* dependencies are `tai42-contract` (the `Backend` ABC, the
 `CallbackSchema` field shape, `Manifest`, `ExtensionKind`, and the `tai42_app`
@@ -81,10 +81,40 @@ registered through the server.
 The worker runtime is started through the host's backend launcher with one of:
 
 ```bash
-tai backend worker [celery worker options...]
+tai backend worker [--queue LABEL] [celery worker options...]
 tai backend beat
 tai backend flower
 ```
+
+A worker consumes one queue: `CELERY_QUEUE_NAME`, or with `--queue <label>` the
+queue `<CELERY_QUEUE_NAME>.<label>` alone (one label, letters, digits, `_` or
+`-`; any other value is refused before the worker starts). Celery's own
+`-Q`/`--queues` option, and `CELERY_WORKER_QUEUES` in the environment, are
+refused: the queue a worker consumes comes from its label.
+
+### Green pools
+
+```bash
+tai backend worker -P gevent
+tai backend worker -P eventlet
+```
+
+On `-P gevent` or `-P eventlet` the worker must be patched by Celery's own
+patch (`celery.maybe_patch_concurrency`) before anything else is imported. The
+worker declares that patch as its process prelude, so `tai backend worker` reads
+its configuration, then restarts itself once, in place, with the patch applied
+first: the same process id and the same arguments, and one
+`restarting with process prelude celery:maybe_patch_concurrency` log line.
+
+- The patch reads the pool only from the first `-P <pool>`, `--pool <pool>` or
+  `--pool=<pool>` argument. A green pool given any other way (`-Pgevent`,
+  combined short flags such as `-EPgevent`, `CELERY_WORKER_POOL`) or two different pools
+  given where one is green is refused at launch, naming those spellings.
+- Celery refuses `-B` on a green pool; run the beat as `tai backend beat`.
+- Every job's coroutine runs on the host's event loop, the one loop the
+  process's OS thread runs, beside the process's own work on it (the worker
+  bus subscription). The kit resources bound to that loop (pooled clients,
+  checkpoint savers, stores) are the host's, released at its stop.
 
 ## Fleet ops and the worker bus
 
@@ -98,9 +128,11 @@ compiled-template cache changed) the backend re-forks this worker's pool (see
 [Live reload and the prefork pool](#live-reload-and-the-prefork-pool)).
 
 The worker runs on a background thread so this process's event loop stays alive
-to keep reading the bus subscription; `launch` installs SIGTERM/SIGINT handlers
-that request a warm (then cold) Celery shutdown, since Celery skips its own
-signal handlers off the main thread.
+to keep reading the bus subscription. The host owns the process's signals on
+every pool: `launch` routes SIGTERM/SIGINT to a warm (then cold) Celery
+shutdown, and the app's worker application installs no signal handler of its
+own (neither Celery's stop handlers nor its SIGHUP restart, its SIGUSR1 stack
+dump or its SIGUSR2 remote debugger).
 
 ## Liveness
 
@@ -130,10 +162,14 @@ file when it exits.
     beside it end with the worker and are not retried, as celery acknowledges a
     task when it picks it up; a thread cannot be ended on its own).
   - `gevent`, `eventlet`: the timer runs on its own green thread, so there a
-    report proves the process and that thread. The `gevent` pool ends a job at
-    `CELERY_TASK_TIMEOUT`; the `eventlet` pool cannot, so there, as on
-    `threads`, once one job runs past it the worker reports nothing and the
-    probe ends it.
+    report proves the process and that thread. On these pools every job of a
+    worker runs on the host's event loop, so a blocking step in one job's
+    coroutine stalls the async work of the others and the host's own. The `gevent` pool ends a job's
+    wait at `CELERY_TASK_TIMEOUT` and cancels its async work; the job holds its
+    slot until that work has ended. On `gevent`, as on `solo`, `threads` and
+    `eventlet`, once a job still runs a tick past the budget the worker reports
+    nothing and the probe ends it: on `gevent` because the cancel did not end
+    the work, on the others because they cannot end a job at all.
 - `worker -B` embeds a beat, which reports each tick into its own file,
   `<TAI_BACKEND_LIVENESS_PATH>-beat`, with its own pid. The worker reports
   nothing while its beat's promise is overdue, so the one probe on the
@@ -163,13 +199,25 @@ retries are declared per tool with a `ToolRetryPolicy` and applied by the
 platform, never by Celery (Celery still retries publishing the task message on
 connection loss, the `retry` option below). Every task — dispatched or fired by
 beat — is bounded by the dispatch job budget `CELERY_TASK_TIMEOUT` (Celery's
-`task_time_limit`, enforced by the prefork and gevent pools; the `solo`, `threads` and `eventlet` pools
-cannot end a job, and there the worker's liveness stops reporting once a job
-runs past the budget, see [Liveness](#liveness)). Task options exposed on every branch: `queue`,
-`countdown`, `priority`, `retry`, `routing_key`, `expires`, `eta`, and
-`callback_kwargs` — a callback schema chained via a Celery `link` that runs
-`celery.callback_task` on the result (jq condition gate, jq expression
-transform, optional follow-up tool).
+`task_time_limit`: the prefork pool enforces it by ending the child, the `gevent`
+pool cancels the job's work at it, and on every in-process pool a job still
+running a tick past the budget stops the worker's liveness reports, see
+[Liveness](#liveness)). Task options exposed on every branch: `queue` (a worker
+queue label; see below), `countdown`, `priority`, `retry`, `routing_key`,
+`expires`, `eta`, and `callback_kwargs` — a callback schema chained via a
+Celery `link` that runs `celery.callback_task` on the result (jq condition
+gate, jq expression transform, optional follow-up tool). The callback runs only
+when the task succeeds; a failed task chains none.
+
+`queue` sends the task, and its callback, to the worker started with `--queue <label>`: a label of
+letters, digits, `_` and `-` derives the queue `<CELERY_QUEUE_NAME>.<label>`,
+and any other value raises `ValueError` before anything is sent. Unset, the
+task goes to `CELERY_QUEUE_NAME`. A task sent to a queue no worker consumes
+waits: a `sync_task` raises `TimeoutError` after `CELERY_TASK_TIMEOUT`, and an
+`async_task` id stays pending. A tool with its own `queue` parameter cannot
+take a `sync_task` or `async_task` branch. Schedules carry no queue: beat sends
+every fire to `CELERY_QUEUE_NAME`, so recurring schedules need a worker without
+a label.
 
 A job does not wait for another job: it chains the next one with
 `callback_kwargs`. `sync_task` and `backend_task_result` (given a `timeout`) are
@@ -184,34 +232,75 @@ crontab with `kind: "crontab"`). The backend maps the cadence to RedBeat's own
 stored shape, so RedBeat's entries are unchanged. Beat must run with the RedBeat
 scheduler, which `launch("beat")` configures automatically.
 
-Worker fork safety: each freshly forked pool child evicts the monitoring
-vendor client through the contract's fork-safe `writer.shutdown()` (logged,
-never a silent telemetry disable) and, at child exit, flushes buffered spans
-and closes its task loops' pooled clients. On macOS a warning names the
-platform's fork/DNS hazard; prefer the `solo` or `threads` pool there.
+Worker fork safety: every child the worker process forks (the pool children and
+the `-B` beat child among them) evicts the monitoring vendor client through the
+contract's fork-safe `writer.shutdown()` (logged, never a silent telemetry
+disable), from the kit's fork guard. On macOS each freshly forked pool child
+logs a warning naming the platform's fork/DNS hazard; prefer the `solo` or
+`threads` pool there.
+
+Worker shutdown: the process that ran the jobs shuts their work down once,
+whenever Celery runs its warm stop: on `prefork` in each child as it exits, and
+on `solo`, `threads`, `gevent` and `eventlet` in the worker process once the
+pool has stopped (`shut_down_jobs`). The step closes the jobs' own task loops
+with the kit resources bound to them (pooled clients, checkpoint savers, stores)
+and lets the host's loop go (a later job on a green pool is refused; the loop
+and its resources are the host's, released at its stop), then flushes buffered
+spans. A stop Celery takes as a cold stop, or a child
+killed at the hard time limit, may cut the step short or skip it.
 
 ## Tools
 
+The kit registers the `backend_*` tool surface over this backend's worker
+inspection and schedule store (`tai42_kit.backend.register_inspection_tools`
+and `register_schedule_tools`), as tools of `tai42_backend_celery`: each tool
+takes the same arguments and gives the same reply shape on every backend, and a
+tool or form of it the backend cannot serve raises
+`tai42_kit.backend.UnsupportedBackendTool` (a `NotImplementedError`).
+
 Task/worker tools: `backend_ping_worker`, `backend_list_active_workers`,
-`backend_task_status`, `backend_task_result` (timeout-aware; re-raises task
-exceptions), `backend_cancel_task`, `backend_active_tasks`,
-`backend_reserved_tasks`, `backend_scheduled_tasks`,
-`backend_registered_tasks`, `backend_worker_stats`, `backend_worker_queues`.
-The fleet-view tools return Celery's inspect shape — a mapping of worker name
-to that worker's entries — so the keying is per worker.
-`backend_list_failed_tasks` raises `NotImplementedError` — Celery keeps no
-queryable failed-task index.
+`backend_task_status` (the result backend's state, `PENDING` for a task it does
+not know), `backend_task_result` (timeout-aware; re-raises task exceptions; an
+unfinished task replies `Task <id> is not ready (status: <state>)`),
+`backend_cancel_task` (a revoke, awaited for the workers' replies within the
+fleet-view timeout; `terminate=True` also ends the running task where its
+worker's pool can: the `prefork` pool signals the task's child process, the
+`gevent` and `eventlet` pools kill the task's greenlet, which the job's wait
+turns into the cancel of its async work; the `threads` pool cannot end a thread,
+so its worker refuses the stop and the tool raises that refusal, the task
+revoked and running to its end; a `solo` worker reads no control message while
+it runs a job, so a stop reaches it only once the job has ended, and the reply
+says the stop is not confirmed; the workers' answers come only from the workers
+that heard the revoke, so a stop is confirmed only by the worker that ended the
+task; a task that has already ended gets no revoke and is reported with its
+state; the state a reply carries is the result backend's at that moment, and it
+reads `REVOKED` from the moment any worker has heard the revoke, whether or not
+the task has ended; the reply names what was done — `revoked`, `revoked and
+stopped`, `cannot be canceled (status: …)`, `cannot be stopped (status: …)`,
+`revoke requested but not confirmed (status: …)` or `stop requested but not
+confirmed (status: …)`), `backend_active_tasks`,
+`backend_reserved_tasks`, `backend_scheduled_tasks`, `backend_registered_tasks`,
+`backend_worker_stats`, `backend_worker_queues`. The fleet-view tools return
+Celery's inspect shape — a mapping of worker name to that worker's entries — and
+`backend_ping_worker`, `backend_active_tasks`, `backend_registered_tasks`,
+`backend_worker_stats` and `backend_worker_queues` take a `worker_name` that
+narrows the call to one worker. `backend_list_failed_tasks` raises
+`UnsupportedBackendTool` — Celery keeps no queryable failed-task index.
 
 Schedule tools (RedBeat): `backend_list_schedules` (the contract's
 `ScheduleListRow`: `name` / `tool` / `cadence` / `enabled` / `next_run_at_ts` /
-`next_run_at_iso`, never the stored arguments), `backend_get_schedule`,
+`next_run_at_iso` / `error`, never the stored arguments), `backend_get_schedule`
+(the contract's `ScheduleDetail`: the row plus `args` and `kwargs`),
 `backend_schedule_exists`, `backend_enable_schedule`,
 `backend_disable_schedule`, `backend_run_schedule_now`,
 `backend_update_schedule`, `backend_delete_schedule`, plus the backup round
 trip `backend_export_schedules` / `backend_import_schedules` (the contract's
 `ScheduleRecord` rows, the fired `tool` split out of the stored kwargs; a
 `ScheduleImportReport` with skip/overwrite import mode keyed by name; per-row
-errors surfaced as `{"index", "name", "error"}`, never swallowed).
+errors surfaced as `{"index", "name", "error"}`, never swallowed). A status
+reply is `{"status", "name"}` (`not_found` when no schedule has the name); an
+update given no change replies `skipped` with `No changes provided; nothing
+updated.`
 
 ## Configuration
 
@@ -237,6 +326,7 @@ Settings are read from the `CELERY_` environment group (see `CelerySettings`):
 | `CELERY_BROKER_SOCKET_TIMEOUT` | — | A Redis broker: seconds a command may wait on its socket; kombu's default when unset |
 | `CELERY_BROKER_SOCKET_CONNECT_TIMEOUT` | — | A Redis broker: seconds a connect may take; kombu's default when unset |
 | `CELERY_BEAT_MAX_LOOP_INTERVAL` | `60` | Maximum seconds between beat scheduler ticks |
+| `CELERY_QUEUE_NAME` | `celery` | The Celery queue the host sends to, beat fires on, and a worker started without `--queue` consumes; a `--queue <label>` worker consumes `<CELERY_QUEUE_NAME>.<label>`. Every process of one stack sets the same value. Stacks sharing one broker set distinct values, and no stack's value is another stack's value followed by `.<label>`. |
 | `CELERY_TOOL_NAME_ARG` | `backend_tool_name` | Kwarg name the dispatch injects the target tool into |
 | `CELERY_TASK_TIMEOUT` | `300` | The dispatch job budget in seconds: the longest a task may run on the worker (`task_time_limit`), and how long a `sync_task` branch waits for the result |
 | `CELERY_MANIFEST_KEY` | `MANIFEST_KEY` | Env var carrying the live manifest JSON (prefork inheritance) |
@@ -318,6 +408,14 @@ the confirm or raise reaches the publisher before its report cut, so a stalled t
 recorded as a truthful `failed` rather than a `timed_out` guess. Raising
 `TAI_BUS_APPLY_TIMEOUT` raises the turnover budget under it.
 
+A worker that leaves (its drain is requested, or its Celery worker exits) abandons a
+turnover in flight and any that starts after: its consumer stops answering the
+`stats` and `active` polls, and its pool takes no new task, so no pre-restart child
+serves another one. The turnover logs a WARNING naming the worker and the op and
+returns once the control round in flight ends (its `stats` and `active` polls
+wait at most 2 s each for a reply), so the worker exits within its drain rather
+than holding the process open for the rest of the turnover budget.
+
 ### Config reloads and the fork gate
 
 A config reload pops the manifest modules out of `sys.modules` and re-imports
@@ -330,11 +428,14 @@ gate is the mutual exclusion between this worker and a config reload:
   worker forks — the `prefork` pool's children, the ones a pool turnover forks,
   and the beat child of `-B` — through the kit's fork guard (an
   `os.register_at_fork` hook). A fork that arrives mid-reload waits for the
-  re-import to finish, up to 120s, and the worker reports its progress each
-  second while it waits, so the probe reads it alive.
+  re-import to finish, up to 120s. A fork waiting on the worker's hub thread
+  holds up the hub's next pass, so the worker reports its progress each second
+  while it waits and the probe reads it alive; a fork waiting on any other
+  thread reports nothing, since the hub passes or stalls without it.
 - **solo / threads / gevent / eventlet** run jobs in the worker process, so
   each job holds the gate for its whole run. A job that arrives mid-reload
-  waits for the re-import the same way, reporting each second; a config reload
+  waits for the re-import the same way, reporting each second when it waits on
+  the hub's thread (`solo`) and nothing on a thread of its own; a config reload
   arriving while jobs run waits for them, up to 30s. A fork a job makes
   itself, on its own thread or in a sync tool it runs off the event loop,
   falls inside the job's span and goes ahead at once; a fork from a thread the
@@ -351,6 +452,19 @@ gate is the mutual exclusion between this worker and a config reload:
 
 Both waits are bounded and proceed loudly (ERROR) rather than deadlocking if
 the budget is exhausted.
+
+The re-import refreshes what the package registers for the new configuration
+(its tools and task branches) and nothing the running process launched: the
+worker, `beat` and `flower` run on the Celery app object their launch built,
+handed to Celery's CLI as the object rather than as an import path, and the
+worker's liveness steps and reporters, its embedded beat's file and its host
+loop live on that app, and its signal receivers are connected by the launch's
+build and close over that app. Celery takes two of the package's
+classes only by import path, the Redis result backend and the beat's scheduler,
+so a thread or a beat that starts after a reload may resolve them from the
+re-imported package; neither keeps state of its own, so that copy behaves as the
+built one. A reload, including the one a worker's first connect makes before it
+reads ready when it withdraws a stored key, leaves the running worker whole.
 
 ## Development
 

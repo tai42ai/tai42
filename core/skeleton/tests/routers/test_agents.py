@@ -35,6 +35,7 @@ from tai42_contract.agent.events import (
 from tai42_contract.interactions import ParkedEntry
 from tai42_contract.tools import current_call_chain, get_run_delivery_id
 from tai42_kit.settings import reset_all_settings
+from tai42_kit.utils.run_bound import in_bounded_run
 from tests.agent._memoryless import MemorylessTestAgent
 
 from tai42_skeleton.agent import (
@@ -689,6 +690,43 @@ async def test_run_opens_the_push_frame_of_the_target_agent(one_agent):
     resp = await router.run_agent(_make_run_request("faker", b'{"prompt":"hi"}'))
     await _collect(resp)
     assert agent.chain == ("faker",)
+
+
+class _BoundRecordingAgent(_FakeAgent):
+    """Records whether its drive runs as a bounded run, so the door's bounded mark is observable."""
+
+    def __init__(self, events: list[Any] | None = None) -> None:
+        super().__init__(events)
+        self.bounded: bool | None = None
+
+    async def astream(self, **kwargs: Any):  # type: ignore[override]
+        self.bounded = in_bounded_run()
+        async for event in super().astream(**kwargs):
+            yield event
+
+
+@pytest.mark.parametrize(("timeout", "bounded"), [("5", True), (None, False)], ids=["armed", "unset"])
+async def test_run_drives_the_agent_as_a_bounded_run_only_under_an_armed_turn_budget(
+    one_agent, monkeypatch, timeout, bounded
+):
+    # The SSE door drives the agent through the live-caller seam, which arms the turn budget: under
+    # a set budget the drive is a bounded run, so a fleet recycle a tool call starts there hands its
+    # roll to the worker it acts for; with no budget the drive is unbounded and rolls inline.
+    if timeout is None:
+        monkeypatch.delenv("TAI_TURN_TIMEOUT_SECONDS", raising=False)
+    else:
+        monkeypatch.setenv("TAI_TURN_TIMEOUT_SECONDS", timeout)
+    reset_all_settings()
+    try:
+        agent = _BoundRecordingAgent([MessageFinal(text="ok")])
+        one_agent(agent)
+        resp = await router.run_agent(_make_run_request("faker", b'{"prompt":"hi"}'))
+        frames = _data_frames(await _collect(resp))
+    finally:
+        monkeypatch.delenv("TAI_TURN_TIMEOUT_SECONDS", raising=False)
+        reset_all_settings()
+    assert not any(f["type"] == "stream.error" for f in frames)
+    assert agent.bounded is bounded
 
 
 class _RunDeliveryRecordingAgent(_FakeAgent):

@@ -69,12 +69,12 @@ def test_the_admin_pair_refusal_refuses_a_lower_case_half() -> None:
 
 
 def test_a_lower_case_spelling_of_a_recycle_key_classes_as_recycle() -> None:
-    hot, recycle = refuse_unrecyclable_env_change(
+    hot = refuse_unrecyclable_env_change(
         {}, {"tai_bus_redis_max_connections": "9"}, DeploymentOwnership(), change="this env change"
     )
 
     assert hot == []
-    assert recycle == ["tai_bus_redis_max_connections"]
+    assert EnvKeyClasses().reload_class("tai_bus_redis_max_connections") == "recycle"
 
 
 def test_a_nested_group_s_json_name_classes_as_the_group_s_field() -> None:

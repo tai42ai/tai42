@@ -23,9 +23,9 @@ over Redis); any package
 can back the same contract, so this repo is this provider's own full doc home,
 and the documentation site covers the platform-level story:
 
-- Backend concept: https://tai42.ai/concepts/backends
-- Build a backend (author guide): https://tai42.ai/guides/authors/backend
-- Ecosystem catalog: https://tai42.ai/reference/catalog
+- Backend concept: https://docs.tai42.ai/concepts/backends
+- Writing a backend (section of the backend concept): https://docs.tai42.ai/concepts/backends#writing-a-backend
+- Plugin catalog: https://docs.tai42.ai/plugins
 
 Its only tai-* dependencies are `tai42-contract` (the `Backend` ABC,
 `CallbackSchema`, `Manifest`, and the `tai42_app` handle) and `tai42-kit[jq]`
@@ -76,7 +76,7 @@ against its own hooks registry, so an in-memory one would run none of the hooks
 registered through the server.
 
 Start a worker through the host's backend CLI; everything after `worker` is
-this backend's own option surface (see `tai42_backend_arq.worker.main`):
+this backend's own option surface (see `tai42_backend_arq.worker.worker_options`):
 
 ```bash
 tai backend worker --max-jobs 10
@@ -163,13 +163,27 @@ job that arrives while a reload is pending starts after it, waiting up to 120s
 without holding up the loop. A job waiting on a config reload's lock does not
 hold that reload up.
 
+Code a job runs may still fork: a tool that starts a `multiprocessing` child, or
+a `subprocess` with a `preexec_fn`. The worker installs the kit's fork guard
+(an `os.register_at_fork` hook) at its build, as the other backends' workers do,
+so every child forked that way resets the fork-gate state it inherited and shuts
+down the monitoring writer it inherited (the vendor client's background threads
+do not survive `fork()`), then rebuilds a clean client lazily. A fork from inside
+a job nests in that job's span. A fork on another thread outside any job waits
+for a running re-import to finish, up to 120s, and reports no progress while it
+waits: the worker's poll loop runs on the event loop, which that wait does not
+hold up, so the liveness file tracks the loop's own passes alone. A fork on the
+loop's own thread never waits, since waiting would block the loop. A
+`subprocess` started without a `preexec_fn` runs no fork hooks and no Python
+before it execs, so nothing applies to it.
+
 ## Fleet ops
 
 Config-change propagation across the worker fleet (manifest updates,
 config/tool/MCP reloads) is the app's own internal worker bus, not a backend
 concern — a backend-runtime process receives those ops through the app's bus
 subscription exactly like a serving HTTP worker. See the skeleton's worker-bus
-concept: https://tai42.ai/concepts/worker-bus
+concept: https://docs.tai42.ai/concepts/worker-bus
 
 ## Schedules
 
@@ -178,13 +192,16 @@ driven by a self-rescheduling `task_scheduler` job; a startup watchdog
 restarts schedules whose pending job was lost. The schedule tools
 (`backend_list_schedules` — the contract's `ScheduleListRow`: `name` / `tool` /
 `cadence` / `enabled` / `next_run_at_ts` / `next_run_at_iso` / `error`, never the
-stored arguments —, `backend_get_schedule`, `backend_delete_schedule`,
+stored arguments —, `backend_get_schedule` — the contract's `ScheduleDetail`: the
+row plus `args` and `kwargs` —, `backend_delete_schedule`,
 `backend_enable_schedule`, `backend_disable_schedule`,
 `backend_run_schedule_now`, `backend_schedule_exists`,
 `backend_update_schedule`) operate on those hashes, and
 `backend_export_schedules` / `backend_import_schedules` round-trip the
 contract's `ScheduleRecord` rows for backup (per-row import errors surfaced as
-`{"index", "name", "error"}`, never swallowed). A schedule's cadence is the
+`{"index", "name", "error"}`, never swallowed). A status reply is
+`{"status", "name"}`; an update given no change replies `skipped` with `No
+changes provided; nothing updated.` A schedule's cadence is the
 contract's typed `ScheduleCadence` (`tai42_contract.backend.scheduling`); the hash
 stores its JSON dump in the `schedule` field. arq cannot honour a relative
 interval, so `relative: true` is refused on create, update and import.
@@ -213,6 +230,8 @@ options exposed on every branch:
 label; see below), and `callback_kwargs` — a
 callback schema chained via a `callback_job` that runs over the primary job's
 result (jq condition gate, jq expression transform, optional follow-up tool).
+The callback job is chained only when the job succeeds; a callback job that
+finds its predecessor failed, aborted or still unfinished raises.
 `schedule_task` registers a recurring schedule (see above).
 
 `queue` sends the job to the worker started with `--queue <label>`: a label of
@@ -233,22 +252,35 @@ works anywhere.
 
 ## Tools
 
+The kit registers the `backend_*` tool surface over this backend's worker
+inspection and schedule store (`tai42_kit.backend.register_inspection_tools`
+and `register_schedule_tools`), as tools of `tai42_backend_arq`: each tool takes
+the same arguments and gives the same reply shape on every backend, and a tool
+or form of it the backend cannot serve raises
+`tai42_kit.backend.UnsupportedBackendTool` (a `NotImplementedError`).
+
 Task/worker tools use arq's public `Job` status/result API; a tool given a job
 id reads it on the queue that holds it:
-`backend_task_status`, `backend_task_result` (timeout-aware; a task's stored
+`backend_task_status` (arq's status word: `deferred`, `queued`, `in_progress`,
+`complete` or `not_found`), `backend_task_result` (timeout-aware; a task's stored
 failure re-raises as `TaskFailedError` carrying the original exception's type,
 `repr`, and traceback text — result payloads describe an unserializable value
-in a tagged JSON shape the deserializer revives on read), `backend_cancel_task`
-(a stored abort replays as arq's confirmed-abort verdict; stored failures are
-reported with their detail; inside a job it requests the abort and returns
-without waiting for it), `backend_active_tasks` (a flat
+in a tagged JSON shape the deserializer revives on read; an unfinished task
+replies `Task <id> is not ready (status: <status>)`), `backend_cancel_task`
+(arq's abort mark, awaited for its outcome: a stored abort replays as arq's
+confirmed-abort verdict; stored failures are reported with their detail; inside
+a job it requests the abort and returns without waiting. `terminate=True` also
+stops a running job; without `terminate` a job that has not started is kept
+from running, and a running job is refused with `UnsupportedBackendTool`,
+because arq cannot cancel a running job without stopping it), `backend_active_tasks` (a flat
 job-id-keyed map — arq has no per-worker attribution), `backend_reserved_tasks`
 (due job ids keyed by queue: `ARQ_QUEUE_NAME` and every labelled queue a task
 was sent to, an empty queue as `[]`), `backend_scheduled_tasks` (job id → due
 time in epoch milliseconds, across every queue), `backend_list_failed_tasks` (failed/aborted results
 within the keep-result window, as `{"task_id", "error"}` rows carrying the
-stored failure detail). Capabilities arq has no reliable data model
-for raise `NotImplementedError` loudly: `backend_registered_tasks`,
+stored failure detail). arq keeps no per-worker record, so no tool narrows to a
+worker: a `worker_name` is refused, and the capabilities arq has no reliable
+data model for raise `UnsupportedBackendTool`: `backend_registered_tasks`,
 `backend_worker_stats`, `backend_worker_queues`, `backend_ping_worker`,
 `backend_list_active_workers`.
 

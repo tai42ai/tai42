@@ -37,6 +37,11 @@ async def internal_error_handler(request: Request, exc: Exception) -> Response:
     net, which sees the same exception re-raised by ``ServerErrorMiddleware``,
     correlates its own log line and skips a duplicate response.
     """
+    return JSONResponse(_masked_error_body(request, exc), status_code=500)
+
+
+def _masked_error_body(request: Request, exc: Exception) -> dict[str, Any]:
+    """The generic masked envelope for ``exc``: a fresh ``error_id``, logged with its traceback, stamped on ``exc``."""
     error_id = uuid4().hex
     logger.error(
         "unhandled application error [error_id=%s] on %s %s",
@@ -51,7 +56,7 @@ async def internal_error_handler(request: Request, exc: Exception) -> Response:
     # and the log line, so a failed stamp must never break this last-resort handler.
     with contextlib.suppress(AttributeError):
         exc.error_id = error_id  # pyright: ignore[reportAttributeAccessIssue]
-    return JSONResponse({"error": "Internal Server Error", "error_id": error_id}, status_code=500)
+    return {"error": "Internal Server Error", "error_id": error_id}
 
 
 async def not_found_handler(request: Request, exc: Exception) -> Response:
@@ -109,11 +114,19 @@ async def fleet_broadcast_error_handler(request: Request, exc: Exception) -> Res
     then the broadcast error's own notes (a marketplace unwind notes the restored plugin
     environment there) follow the message. Any other cause — a bus transport error
     naming internal hosts — keeps the generic masked 500, so internal detail never leaks.
+
+    Either way, the recycle roll the failed door still ran (``exc.roll``) rides the body as the
+    ``recycle``, ``awaiting_respawn``, ``roll_deferred`` and ``roll_deferred_to`` fields
+    (:func:`~tai42_skeleton.operations._broadcast.roll_outcome_body`), and the writer's own exit that roll owes runs
+    once the reply is sent (:mod:`~tai42_skeleton.app.writer_exit`): this handler runs inside the
+    base app's middleware stack, so the request's writer-exit scope settles after this reply.
     """
     from tai42_skeleton.app.route_registry import CrossOwnerRouteCollisionError
     from tai42_skeleton.marketplace.compat import CorePluginBootError
-    from tai42_skeleton.operations._broadcast import FleetBroadcastError
+    from tai42_skeleton.operations._broadcast import FleetBroadcastError, roll_outcome_body
 
+    if not isinstance(exc, FleetBroadcastError):
+        return await internal_error_handler(request, exc)
     cause = exc.__cause__
     operator_facing = (
         CorePluginBootError,
@@ -121,10 +134,14 @@ async def fleet_broadcast_error_handler(request: Request, exc: Exception) -> Res
         SchemaOutOfDateError,
         MigrationDiscoveryError,
     )
-    if isinstance(exc, FleetBroadcastError) and isinstance(cause, operator_facing):
+    if isinstance(cause, operator_facing):
         error = operator_message(exc, text=operator_message(cause))
-        return JSONResponse({"error": error, "report": exc.report.model_dump(mode="json")}, status_code=500)
-    return await internal_error_handler(request, exc)
+        body: dict[str, Any] = {"error": error, "report": exc.report.model_dump(mode="json")}
+    else:
+        body = _masked_error_body(request, exc)
+    if exc.roll is not None:
+        body.update(roll_outcome_body(exc.roll))
+    return JSONResponse(body, status_code=500)
 
 
 async def server_reloading_handler(request: Request, exc: Exception) -> Response:

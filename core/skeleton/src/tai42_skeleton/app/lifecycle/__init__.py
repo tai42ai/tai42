@@ -4,9 +4,8 @@ Also holds the module-global seam the tests patch at this package path.
 """
 
 from tai42_kit.access_control.registry import reset_registry as reset_identity_registry
-from tai42_kit.clients import shutdown_all_clients
 from tai42_kit.clients.impl.mcp import FastMCPClient
-from tai42_kit.llm import release_loop_bound_resources
+from tai42_kit.loop_bound import release_loop_bound_resources
 
 from tai42_skeleton.app.epoch import is_epoch_rebuild_in_progress
 from tai42_skeleton.app.importer import import_or_reload_package
@@ -14,6 +13,7 @@ from tai42_skeleton.app.kind_status import collect_kind_status
 from tai42_skeleton.app.lifecycle.boot import BootMixin
 from tai42_skeleton.app.lifecycle.boot_manifest import BootManifestMixin
 from tai42_skeleton.app.lifecycle.bus_subscription import BusSubscriptionMixin
+from tai42_skeleton.app.lifecycle.carried_roll import CarriedRollMixin
 from tai42_skeleton.app.lifecycle.component_import import ComponentImportMixin
 from tai42_skeleton.app.lifecycle.config_reload import ConfigReloadMixin
 from tai42_skeleton.app.lifecycle.handlers import LifecycleHandlersMixin
@@ -43,7 +43,6 @@ __all__ = [
     "release_loop_bound_resources",
     "reset_identity_registry",
     "route_registry",
-    "shutdown_all_clients",
 ]
 
 
@@ -53,6 +52,7 @@ class TaiMCPLifecycleMixin(
     BootManifestMixin,
     LifespanMixin,
     BusSubscriptionMixin,
+    CarriedRollMixin,
     BootMixin,
     RouterModulesMixin,
     ComponentImportMixin,

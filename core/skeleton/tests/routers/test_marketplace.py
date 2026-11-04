@@ -24,6 +24,7 @@ from tai42_contract.plugins.spec import PluginSpec
 import tai42_skeleton.operations.marketplace as mkt_ops
 import tai42_skeleton.routers.marketplace as router
 from tai42_skeleton.app.reload_gate import reload_gate
+from tai42_skeleton.app.writer_exit import WRITER_EXIT_REASON
 from tai42_skeleton.marketplace.advisories import AdvisoryState
 from tai42_skeleton.marketplace.compat import declared_compat
 from tai42_skeleton.marketplace.errors import (
@@ -507,7 +508,6 @@ async def test_install_happy_wraps_data(monkeypatch: pytest.MonkeyPatch) -> None
     resp = await router.marketplace_install(_post({"ref": "tai42/toolbox"}))
     assert resp.status_code == 200
     assert _data(resp)["data"]["ref"] == "tai42/toolbox"
-    assert resp.background is None
 
 
 def _install_result(*, stopped: bool) -> Any:
@@ -520,7 +520,16 @@ def _install_result(*, stopped: bool) -> Any:
 
     if stopped:
         roll = RecycleReport(
-            rows=[RecycleRow(name="backend-1", kind="backend", generation_before=1, status=TIMED_OUT, detail="slow")],
+            rows=[
+                RecycleRow(
+                    name="backend-1",
+                    kind="backend",
+                    generation_before=1,
+                    status=TIMED_OUT,
+                    detail="slow",
+                    keys=["BACKEND_MANIFEST_KEY"],
+                )
+            ],
             stopped=RecycleStop(kind="backend", name="backend-1", detail="slow"),
         )
         verdict = [
@@ -528,34 +537,58 @@ def _install_result(*, stopped: bool) -> Any:
             AwaitingWorker(name="serve-1", keys=["BACKEND_MANIFEST_KEY"]),
         ]
     else:
-        roll = RecycleReport(rows=[RecycleRow(name="backend-1", kind="backend", generation_before=1, status=RECYCLED)])
+        roll = RecycleReport(
+            rows=[
+                RecycleRow(
+                    name="backend-1",
+                    kind="backend",
+                    generation_before=1,
+                    status=RECYCLED,
+                    keys=["BACKEND_MANIFEST_KEY"],
+                )
+            ]
+        )
         verdict = []
     return ApplyResult(
         fleet=FleetResult(op="reload_config", results=[]),
-        local={"status": "ok", "env_keys": 2},
+        local={"status": "ok", "env_keys": 2, "awaiting_respawn": []},
+        decision=_writer_moved_decision(WorkerIdentity(name="serve-1", kind=WorkerKind.serve, pid=1, generation=2)),
         recycle=roll,
-        self_identity=WorkerIdentity(name="serve-1", kind=WorkerKind.serve, pid=1, generation=2),
-        serve_affecting=True,
         awaiting_respawn=verdict,
+        self_exit_armed=not stopped,
+    )
+
+
+def _writer_moved_decision(writer: Any) -> Any:
+    """The decision of a reload whose writer and ``backend-1`` report BACKEND_MANIFEST_KEY moved."""
+    from tai42_skeleton.config.recycle_policy import RecycleDecision, RecycleReason, ReportedKeys
+
+    return RecycleDecision(
+        writer=writer,
+        reported={"backend-1": ReportedKeys(generation=1, keys=("BACKEND_MANIFEST_KEY",))},
+        unconfirmed={},
+        clean=frozenset(),
+        writer_reason=RecycleReason(keys=("BACKEND_MANIFEST_KEY",)),
+        withheld={},
+        addressed=None,
+        report_unreachable=False,
     )
 
 
 def _with_bus(monkeypatch: pytest.MonkeyPatch) -> list[str]:
-    from tai42_skeleton.app import graceful_exit, instance
+    """Serve the routes over a fake bus; the graceful exits asked of its latch, by reason."""
+    from tai42_skeleton.app import instance
 
     from .._fakes.bus import FakeBus
 
-    monkeypatch.setattr(instance.app, "_bus", FakeBus(origin="serve-1"))
-    exits: list[str] = []
-    monkeypatch.setattr(graceful_exit.os, "kill", lambda pid, sig: exits.append("sigterm"))
-    return exits
+    bus = FakeBus(origin="serve-1")
+    monkeypatch.setattr(instance.app, "_bus", bus)
+    return bus.exit_requests
 
 
-async def test_an_install_whose_env_recycle_converged_arms_the_writer_self_exit(
+async def test_an_install_whose_env_recycle_converged_carries_the_writers_own_deferred_row(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from tai42_skeleton.app.graceful_exit import request_graceful_exit
-
     _with_bus(monkeypatch)
 
     async def _ok(ref, version):
@@ -567,11 +600,9 @@ async def test_an_install_whose_env_recycle_converged_arms_the_writer_self_exit(
     reload = _data(resp)["data"]["reload"]
     assert [entry["status"] for entry in reload["recycle"]["recycle"]] == ["recycled", "self-deferred"]
     assert reload["awaiting_respawn"] == []
-    assert resp.background is not None
-    assert resp.background.func is request_graceful_exit
 
 
-async def test_an_install_whose_env_recycle_stopped_names_the_workers_awaiting_and_arms_nothing(
+async def test_an_install_whose_env_recycle_stopped_names_the_workers_awaiting(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _with_bus(monkeypatch)
@@ -583,7 +614,6 @@ async def test_an_install_whose_env_recycle_stopped_names_the_workers_awaiting_a
     resp = await router.marketplace_install(_post({"ref": "tai42/toolbox"}))
     reload = _data(resp)["data"]["reload"]
     assert [w["name"] for w in reload["awaiting_respawn"]] == ["backend-1", "serve-1"]
-    assert resp.background is None
 
 
 async def test_a_projected_install_whose_env_recycle_converged_runs_the_writer_self_exit_after_its_reply(
@@ -598,6 +628,15 @@ async def test_a_projected_install_whose_env_recycle_converged_runs_the_writer_s
     exits = _with_bus(monkeypatch)
 
     async def _ok(ref, version):
+        # The install's env roll converged with the writer needing its own restart: the roll owes
+        # the writer's exit into the call's open scope, as ``decide_and_roll`` does.
+        from tai42_skeleton.app import instance
+        from tai42_skeleton.app.writer_exit import open_writer_exit_scope
+
+        bus = instance.app.bus
+        scope = open_writer_exit_scope("the install")
+        scope.hold_exit(bus, "the install")
+        scope.owe(bus)
         return {"ref": ref, "version": "1.0.0", "reload": _install_result(stopped=False)}
 
     _use_installer(monkeypatch, install=_ok)
@@ -623,7 +662,7 @@ async def test_a_projected_install_whose_env_recycle_converged_runs_the_writer_s
 
     assert [entry["status"] for entry in reply["reload"]["recycle"]["recycle"]] == ["recycled", "self-deferred"]
     assert reply["reload"]["awaiting_respawn"] == []
-    assert exits == ["sigterm"]
+    assert exits == [WRITER_EXIT_REASON]
 
 
 async def test_install_malformed_body_is_422(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -823,18 +862,71 @@ async def test_install_preview_wraps_data(monkeypatch: pytest.MonkeyPatch) -> No
 
 
 async def test_upgrade_all_wraps_the_per_ref_report(monkeypatch: pytest.MonkeyPatch) -> None:
+    from tai42_skeleton.marketplace.installer_update import UpgradeAllReport
+
     report = [
         {"ref": "tai42/a", "outcome": "upgraded", "detail": "1.0.0 -> 1.2.0"},
         {"ref": "tai42/b", "outcome": "no-compatible-version", "detail": "no published version supports 0.3.0"},
     ]
 
     async def _run(ref, version):
-        return report
+        return UpgradeAllReport(results=report, roll=None)
 
     _use_installer(monkeypatch, install=_run)
     resp = await router.marketplace_upgrade_all(_post({}))
     assert resp.status_code == 200
-    assert _data(resp)["data"] == {"results": report}
+    # The batch reloaded nothing, so no roll ran and nobody awaits a respawn.
+    assert _data(resp)["data"] == {
+        "results": report,
+        "recycle": None,
+        "awaiting_respawn": [],
+        "roll_deferred": False,
+        "roll_deferred_to": None,
+    }
+
+
+async def test_an_upgrade_all_whose_roll_converged_carries_it_with_the_writers_own_deferred_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tai42_skeleton.app.bus import WorkerIdentity, WorkerKind
+    from tai42_skeleton.app.recycle import RECYCLED, RecycleReport, RecycleRow
+    from tai42_skeleton.config.recycle_roll import RollOutcome
+    from tai42_skeleton.marketplace.installer_update import UpgradeAllReport
+
+    _with_bus(monkeypatch)
+    rows = [{"ref": "tai42/a", "outcome": "upgraded", "detail": "1.0.0 -> 1.2.0"}]
+    roll = RollOutcome(
+        decision=_writer_moved_decision(WorkerIdentity(name="serve-1", kind=WorkerKind.serve, pid=1, generation=2)),
+        recycle=RecycleReport(
+            rows=[
+                RecycleRow(
+                    name="backend-1",
+                    kind="backend",
+                    generation_before=1,
+                    status=RECYCLED,
+                    keys=["BACKEND_MANIFEST_KEY"],
+                )
+            ]
+        ),
+        awaiting_respawn=[],
+        self_exit_armed=True,
+    )
+
+    async def _run(ref, version):
+        return UpgradeAllReport(results=rows, roll=roll)
+
+    _use_installer(monkeypatch, install=_run)
+    monkeypatch.setattr(mkt_ops, "component_store_configured", lambda _component: True)
+    resp = await router.marketplace_upgrade_all(_post({}))
+
+    assert resp.status_code == 200
+    data = _data(resp)["data"]
+    assert data["results"] == rows
+    assert [(e["name"], e["status"], e["keys"]) for e in data["recycle"]["recycle"]] == [
+        ("backend-1", "recycled", ["BACKEND_MANIFEST_KEY"]),
+        ("serve-1", "self-deferred", ["BACKEND_MANIFEST_KEY"]),
+    ]
+    assert data["awaiting_respawn"] == []
 
 
 async def test_upgrade_all_busy_fleet_lock_is_retriable_503(monkeypatch: pytest.MonkeyPatch) -> None:

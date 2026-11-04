@@ -15,9 +15,10 @@ from celery import _state
 from celery.concurrency import gevent
 from celery.result import assert_will_not_block
 
-import tai42_backend_celery.extensions.extensions as extensions
+from tai42_backend_celery.core import inspection, task_door
 from tai42_backend_celery.core.tasks import tool_execution
-from tai42_backend_celery.tools import tools
+
+from .conftest import stub_app_instance
 
 _REFUSED = "cannot wait for another job's result from inside a job: chain it with a callback instead"
 
@@ -54,17 +55,18 @@ class _FakeTask:
 @pytest.fixture
 def fake(monkeypatch: pytest.MonkeyPatch) -> _FakeTask:
     task = _FakeTask()
-    monkeypatch.setattr(extensions, "tool_execution", task)
-    monkeypatch.setattr(tools, "AsyncResult", lambda task_id, app=None: _FakeAsyncResult())
+    monkeypatch.setattr(task_door, "tool_execution", task)
+    monkeypatch.setattr(inspection, "AsyncResult", lambda task_id, app=None: _FakeAsyncResult())
     return task
 
 
 async def _sync_task() -> Any:
-    return await extensions.sync_task(sample_tool, "sample_tool", "doc")(text="hi")
+    _kind, sync_task = stub_app_instance.extensions.registered["sync_task"]
+    return await sync_task(sample_tool, "sample_tool", "doc")(text="hi")
 
 
 async def _task_result() -> Any:
-    return tools.backend_task_result("task-1", timeout=5)
+    return await stub_app_instance.tools.registered["backend_task_result"]("task-1", timeout=5)
 
 
 _WAITS: dict[str, Callable[[], Any]] = {
@@ -99,7 +101,7 @@ def test_a_job_reads_another_jobs_finished_result_without_waiting(fake: _FakeTas
     """With no ``timeout`` the tool only reads the result's current state, which a job may do."""
 
     async def read() -> Any:
-        return tools.backend_task_result("task-1")
+        return await stub_app_instance.tools.registered["backend_task_result"]("task-1")
 
     assert _in_job(read) == "done"
 

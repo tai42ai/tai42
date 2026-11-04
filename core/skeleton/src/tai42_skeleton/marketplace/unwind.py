@@ -27,7 +27,7 @@ ENVIRONMENT_RESTORED = "the previous plugin environment was restored"
 
 
 async def unwind_operation(
-    step_error: Exception,
+    step_error: BaseException,
     *,
     change: OperationChange | None,
     provides_undo: ProvidesUndo | None,
@@ -35,7 +35,7 @@ async def unwind_operation(
     svc: ConfigService,
     cm: Any,
 ) -> str | None:
-    """Reverse an operation whose step after the environment swap failed.
+    """Reverse an operation whose step after the environment swap failed or was cancelled.
 
     Swaps the environments ``change`` made back (``None`` when the operation changed no
     environment), reverses the provides patch when it had persisted (``provides_undo`` is

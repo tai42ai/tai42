@@ -13,12 +13,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import signal
 import threading
 
 import pytest
 
-from tai42_kit.signals import SignalChain, signal_chain
+from tai42_kit.signals import STOP_SIGNALS, SignalChain, signal_chain
 
 
 def _sigterm_installed() -> bool:
@@ -297,3 +298,93 @@ async def test_subscription_repr_names_the_subscriber_and_signal() -> None:
 
 def test_the_module_singleton_is_the_process_owner() -> None:
     assert isinstance(signal_chain, SignalChain)
+
+
+async def test_a_release_hands_the_signals_their_default_dispositions_and_takes_them_back() -> None:
+    # A body that blocks the loop could never run a chain subscriber, so for its span the
+    # process's default disposition is back in force: SIGINT raises ``KeyboardInterrupt``.
+    chain = SignalChain()
+    fired = asyncio.Event()
+    sub = chain.add(signal.SIGINT, fired.set, name="host")
+    try:
+        assert signal.getsignal(signal.SIGINT) is not signal.default_int_handler
+        with chain.released(signal.SIGINT):
+            assert signal.getsignal(signal.SIGINT) is signal.default_int_handler
+            # The subscriber table is untouched by the span.
+            assert chain.subscribers(signal.SIGINT) == ("host",)
+
+        # Reinstalled: a real delivery reaches the subscriber again.
+        assert signal.getsignal(signal.SIGINT) is not signal.default_int_handler
+        os.kill(os.getpid(), signal.SIGINT)
+        await asyncio.wait_for(fired.wait(), timeout=5)
+    finally:
+        sub.cancel()
+
+
+async def test_a_release_leaves_a_signal_without_subscribers_alone() -> None:
+    loop = asyncio.get_running_loop()
+    removed: list[signal.Signals] = []
+    real_remove = loop.remove_signal_handler
+
+    def _record(sig):
+        removed.append(sig)
+        return real_remove(sig)
+
+    chain = SignalChain()
+    sub = chain.add(signal.SIGINT, lambda: None, name="host")
+    loop.remove_signal_handler = _record  # pyright: ignore[reportAttributeAccessIssue]
+    try:
+        with chain.released(signal.SIGINT, signal.SIGTERM):
+            assert _sigterm_installed() is False
+    finally:
+        loop.remove_signal_handler = real_remove  # pyright: ignore[reportAttributeAccessIssue]
+        sub.cancel()
+
+    assert removed == [signal.SIGINT]
+
+
+async def test_a_subscriber_that_leaves_during_a_release_is_not_reinstalled() -> None:
+    chain = SignalChain()
+    sub = chain.add(signal.SIGTERM, lambda: None, name="only")
+    with chain.released(signal.SIGTERM):
+        sub.cancel()
+
+    assert _sigterm_installed() is False
+    assert chain.subscribers(signal.SIGTERM) == ()
+
+
+async def test_a_nested_release_raises() -> None:
+    chain = SignalChain()
+    sub = chain.add(signal.SIGTERM, lambda: None, name="only")
+    try:
+        with (
+            chain.released(signal.SIGTERM),
+            pytest.raises(RuntimeError, match="already released"),
+            chain.released(signal.SIGTERM),
+        ):
+            pass
+        # The outer span still took the signal back.
+        assert _sigterm_installed() is True
+    finally:
+        sub.cancel()
+
+
+async def test_a_refused_reinstall_propagates() -> None:
+    loop = asyncio.get_running_loop()
+    real_add = loop.add_signal_handler
+
+    def _refuse(sig, callback, *args):
+        raise RuntimeError("add_signal_handler() can only be called from the main thread")
+
+    chain = SignalChain()
+    sub = chain.add(signal.SIGTERM, lambda: None, name="only")
+    try:
+        with pytest.raises(RuntimeError, match="main thread"), chain.released(signal.SIGTERM):
+            loop.add_signal_handler = _refuse  # pyright: ignore[reportAttributeAccessIssue]
+    finally:
+        loop.add_signal_handler = real_add  # pyright: ignore[reportAttributeAccessIssue]
+        sub.cancel()
+
+
+def test_the_stop_signals_are_the_terminate_and_interrupt_pair() -> None:
+    assert STOP_SIGNALS == (signal.SIGTERM, signal.SIGINT)

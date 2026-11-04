@@ -682,7 +682,7 @@ def _drip_server():
 async def test_a_declared_token_endpoint_that_drips_ends_at_the_total_deadline(monkeypatch, oauth_client_env):
     import time
 
-    from tai42_kit.clients.base import shutdown_all_clients
+    from tai42_kit.loop_bound import release_loop_bound_resources
 
     server = _drip_server()
     try:
@@ -698,7 +698,7 @@ async def test_a_declared_token_endpoint_that_drips_ends_at_the_total_deadline(m
         assert info.value.reason == "transient"
         assert time.monotonic() - started < 2.0
     finally:
-        await shutdown_all_clients()
+        await release_loop_bound_resources()
         server.shutdown()
         server.server_close()
 

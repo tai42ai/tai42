@@ -232,10 +232,11 @@ class SubMcpAppRouter:
         # generation counter above and every read that spans more than one dict
         # operation. A single
         # atomic ``dict.get`` on the dispatch fast path may read lock-free (a
-        # stale hit or miss just yields a clean 404). The reload path drives
-        # register/unregister/reset from a throwaway loop while _get_or_build_app
-        # serves requests on the owner loop, so the guard must NOT be an
-        # asyncio.Lock (which binds to one loop and raises when contended
+        # stale hit or miss just yields a clean 404). A sub-MCP register or unregister
+        # run from an in-process backend job (the sub-MCP operations, a backup restore)
+        # drives bind_route/unregister_sub_mcp_app on that job's own loop while
+        # _get_or_build_app serves requests on the owner loop, so the guard
+        # must NOT be an asyncio.Lock (which binds to one loop and raises when contended
         # cross-loop). It is only ever held for quick, synchronous dict work,
         # never across an await.
         self._state_lock = threading.Lock()
@@ -245,8 +246,8 @@ class SubMcpAppRouter:
         self._build_lock = asyncio.Lock()
         # The loop the router's lifespan runs on — the same loop that lazily
         # builds each sub-app and enters its lifespan. A sub-app's exit stack MUST
-        # be closed on this loop, even when the reload path drives register /
-        # reset from a throwaway loop, or the sub-app's task group is torn down
+        # be closed on this loop, even when a sub-MCP register or unregister runs
+        # from a backend job's own loop, or the sub-app's task group is torn down
         # cross-loop.
         self._owner_loop: asyncio.AbstractEventLoop | None = None
         # How many lifespans hold the router open (one per serving generation whose
@@ -326,9 +327,8 @@ class SubMcpAppRouter:
             await self._aclose_on_owner(slug, stack)
         except Exception:
             # Log for the shutdown trail, then re-raise: a sub-app whose teardown
-            # failed on the inline (owner-loop) branch must never be reported as
-            # cleanly removed. The cross-loop branch never raises here — it schedules
-            # the close and surfaces any failure through its done-callback instead.
+            # failed, inline or on the owner loop, must never be reported as cleanly
+            # removed.
             logger.exception(f"Error shutting down MCP app {slug}")
             raise
 
@@ -336,29 +336,20 @@ class SubMcpAppRouter:
         """Close a per-slug lifespan stack on the loop that entered it.
 
         The stack's lifespan (and its task group) was entered on the owner loop, so
-        closing it must happen there or the task group is torn down cross-loop. Two
-        cases:
-
-        * On the owner loop (or with no live owner loop — a direct test): close
-          inline and let any failure RAISE, so a caller that reports a slug removed
-          (the HTTP ``DELETE`` path) never reports a failed teardown as clean.
-        * On a DIFFERENT loop while the owner loop is live: the reload path drives
-          register/unregister from a throwaway loop while the owner loop's thread is
-          PARKED in ``_run_blocking`` waiting on that same reload. A block-wait on the
-          owner loop's future would deadlock — the parked owner loop can never run the
-          scheduled close. So schedule the close onto the owner loop and surface any
-          failure through a logged done-callback, WITHOUT waiting on the future.
+        closing it must happen there or the task group is torn down cross-loop. On the
+        owner loop, or with no live owner loop (a direct test), the close runs inline. On
+        a DIFFERENT loop while the owner loop is live (a sub-MCP register or unregister run
+        from an in-process backend job's own loop), the close runs on the owner loop and
+        this caller awaits it from its own loop
+        (:func:`~tai42_skeleton.app.lifecycle.state.run_on_serving_loop`). Either way a
+        failure RAISES here, so a caller that reports a slug removed never reports a
+        failed teardown as clean.
         """
+        from tai42_skeleton.app.lifecycle.state import run_on_serving_loop
+
         loop = self._owner_loop
-        try:
-            current = asyncio.get_running_loop()
-        except RuntimeError:
-            current = None
-        if loop is not None and loop.is_running() and loop is not current:
-            future = asyncio.run_coroutine_threadsafe(stack.aclose(), loop)
-            future.add_done_callback(lambda f, s=slug: self._log_teardown_result(s, f))
-        else:
-            await stack.aclose()
+        owner = loop if loop is not None and loop.is_running() else None
+        await run_on_serving_loop(owner, stack.aclose)
 
     def reset(self) -> None:
         """Drop all routes + cached sub-apps and hand their lifespans to the generation they served.
@@ -420,8 +411,9 @@ class SubMcpAppRouter:
                     task.add_done_callback(lambda t, s=slug: self._log_teardown_result(s, t))
                 else:
                     # Owner loop is a different running loop: SCHEDULE the close onto
-                    # it and never block-wait — a ``.result()`` here would deadlock if
-                    # that loop is parked. Failures surface via the logged callback.
+                    # it and never block-wait — reset is synchronous, and a ``.result()``
+                    # here would hold this thread's own loop until the owner loop ran the
+                    # close. Failures surface via the logged callback.
                     future = asyncio.run_coroutine_threadsafe(stack.aclose(), close_loop)
                     future.add_done_callback(lambda f, s=slug: self._log_teardown_result(s, f))
             except Exception as e:
@@ -655,7 +647,7 @@ class SubMcpAppRouter:
         registered now serve the generation that is still live.
         """
         # Record the loop that owns every lazily-built sub-app lifespan so a
-        # reload driven from a throwaway loop closes them here instead.
+        # reload driven from another loop closes them here instead.
         self._owner_loop = asyncio.get_running_loop()
         self._lifespan_holders += 1
         try:

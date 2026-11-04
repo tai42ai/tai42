@@ -12,16 +12,17 @@ import pytest
 from tai42_contract.manifest import MCPConfig, TaiMCPConfig
 from tai42_contract.manifest.errors import McpListingUnavailableError
 
+from tai42_skeleton.app import instance
 from tai42_skeleton.app.lifecycle import mcp_probe as mcp_probe_module
-from tai42_skeleton.app.lifecycle.off_loop import run_blocking
 from tai42_skeleton.app.reload_gate import reload_gate
 from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.tools.mcp_start import McpStartPending, StartId
 
-from ...connectors.credential_path import on_loop, owner_loop
+from ...connectors.credential_path import bind_as_serving, job_loop, on_loop, owner_loop
 from ._doubles import _cfg, _failed_row, _mixin
 from ._late_starts import (
     _CountingListing,
+    _listing_of_rebuild,
     _next_generation,
     _rebuild_listing,
     _SequencedListing,
@@ -43,7 +44,7 @@ def test_a_start_past_the_reload_wait_is_recorded_starting_and_not_cancelled(sho
     server = _SlowListing(0.5)
     m = _slow_mixin(monkeypatch, server)
     with owner_loop() as loop:
-        m._serving_loop = loop
+        bind_as_serving(m, loop)
         assert _rebuild_listing(m, loop) == []
         record = m._failed_mcps["svc"]
         assert (record["status"], record["category"], record["http_status"]) == ("unavailable", "starting", None)
@@ -61,7 +62,7 @@ def test_a_starting_record_logs_at_info_that_the_server_binds_once_its_start_lis
     server = _SlowListing(0.3)
     m = _slow_mixin(monkeypatch, server)
     with owner_loop() as loop, caplog.at_level(logging.INFO, logger=mcp_probe_module.__name__):
-        m._serving_loop = loop
+        bind_as_serving(m, loop)
         _rebuild_listing(m, loop)
         _until(lambda: "svc" not in m._failed_mcps)
     [record] = [r for r in caplog.records if "start still in progress" in r.getMessage()]
@@ -85,7 +86,7 @@ def test_a_start_that_completes_after_the_reload_wait_binds_through_the_apply_se
 
     monkeypatch.setattr(m, "_apply_reloaded_mcp", recording_apply)
     with owner_loop() as loop:
-        m._serving_loop = loop
+        bind_as_serving(m, loop)
         _rebuild_listing(m, loop)
         assert m._failed_mcps["svc"]["category"] == "starting"
         _until(lambda: "svc" not in m._failed_mcps)
@@ -97,7 +98,7 @@ def test_a_late_failure_is_recorded_through_the_failed_record(short_reload_wait,
     server = _SlowListing(0.4, error=ConnectionError("Connection closed"))
     m = _slow_mixin(monkeypatch, server)
     with owner_loop() as loop:
-        m._serving_loop = loop
+        bind_as_serving(m, loop)
         _rebuild_listing(m, loop)
         assert m._failed_mcps["svc"]["category"] == "starting"
         _until(lambda: m._failed_mcps["svc"]["category"] != "starting")
@@ -126,7 +127,7 @@ def test_a_late_outcome_for_a_title_no_longer_as_probed_is_not_applied(
     server = _SlowListing(0.4)
     m = _slow_mixin(monkeypatch, server)
     with caplog.at_level(logging.INFO), owner_loop() as loop:
-        m._serving_loop = loop
+        bind_as_serving(m, loop)
         _rebuild_listing(m, loop)
         m._manifest = Manifest.model_validate(manifest_after)
         _until(lambda: any("probe outcome not applied" in r.getMessage() for r in caplog.records))
@@ -152,24 +153,26 @@ def test_with_no_serving_loop_a_rebuild_waits_the_start_budget_and_leaves_no_sta
 ):
     # A late outcome has no serving loop to be applied on, so the start is waited for whole.
     m = _slow_mixin(monkeypatch, server)
-    assert m._serving_loop is None
-    successes, failures = run_blocking(m._load_mcps)
+    assert m.serving_loop() is None
+    successes, failures = asyncio.run(m._load_mcps())
     for config, exc in failures:
         m._record_failed_mcp(config, exc)
     assert {"successes": [config.title for config, _tools in successes], "failed": m._failed_mcps} == expected
     assert not server.cancelled.is_set()
 
 
-def test_a_late_outcome_after_the_serving_loop_stopped_is_logged_at_error_naming_the_title(
+def test_a_late_outcome_after_the_serving_loop_was_unbound_is_logged_at_error_naming_the_title(
     short_reload_wait, monkeypatch, caplog
 ):
-    server = _SlowListing(0.6)
+    # The start runs on the serving loop; the serving loop is unbound (``app_context`` leaving) while the start
+    # is still in progress, so its late outcome finds no serving loop to be applied on.
+    server = _SlowListing(0.4)
     m = _slow_mixin(monkeypatch, server)
-    with caplog.at_level(logging.ERROR):
-        with owner_loop() as loop:
-            m._serving_loop = loop
-            _rebuild_listing(m, loop)
-            assert m._failed_mcps["svc"]["category"] == "starting"
+    with caplog.at_level(logging.ERROR), owner_loop() as loop:
+        bind_as_serving(m, loop)
+        _rebuild_listing(m, loop)
+        assert m._failed_mcps["svc"]["category"] == "starting"
+        m.unbind_serving_loop()
         assert server.listed.wait(5)
         _until(lambda: any(r.levelno == logging.ERROR and "'svc'" in r.getMessage() for r in caplog.records))
     [record] = [r for r in caplog.records if r.levelno == logging.ERROR and "'svc'" in r.getMessage()]
@@ -199,11 +202,60 @@ def test_a_late_outcome_is_applied_on_the_serving_loop_from_no_callers_context(s
             await m._probe_mcp(_cfg("svc"), wait=0.05)
         m._record_failed_mcp(_cfg("svc"), pending.value)
 
-    with owner_loop() as loop:
-        m._serving_loop = loop
-        asyncio.run(request())
+    # The request is an in-process job's reload body, driven through the reload gate from the job's own loop.
+    with owner_loop() as loop, job_loop() as job:
+        bind_as_serving(m, loop)
+        job.run(reload_gate.run(request, reimports=False))
         _until(lambda: seen != [])
     assert seen == [("<none>", loop)]
+
+
+# -- a reload body an in-process job drives from its own loop -----------------------------------
+
+
+def test_a_rebuild_driven_from_a_job_loop_binds_its_late_start_with_the_job_loop_never_run_again(
+    short_reload_wait, monkeypatch
+):
+    # The job's loop runs the job and stops, as rq runs a coroutine job; the start outlives the reload wait.
+    server = _SlowListing(0.4)
+    m = _slow_mixin(monkeypatch, server)
+    with owner_loop() as loop, job_loop() as job:
+        bind_as_serving(m, loop)
+        assert job.run(reload_gate.run(functools.partial(_listing_of_rebuild, m), reimports=False)) == []
+        assert m._failed_mcps["svc"]["category"] == "starting"
+        _until(lambda: "svc" not in m._failed_mcps)
+        assert m._mcp_bound_tools["svc"] == {"svc_t"}
+
+
+def test_a_reload_from_the_serving_loop_after_a_job_driven_rebuild_binds_and_joins_no_frozen_start(
+    short_reload_wait, monkeypatch
+):
+    server = _SlowListing(0.4)
+    m = _slow_mixin(monkeypatch, server)
+    with owner_loop() as loop, job_loop() as job:
+        bind_as_serving(m, loop)
+        job.run(reload_gate.run(functools.partial(_listing_of_rebuild, m), reimports=False))
+        result = on_loop(loop, reload_gate.run(functools.partial(m._reload_mcp, "svc"), reimports=False), timeout=5)
+        assert result["status"] == "ok"
+        assert m._mcp_bound_tools["svc"] == {"svc_t"}
+
+
+def test_a_probe_driven_from_a_job_loop_lists_on_the_serving_loop(monkeypatch):
+    server = _SlowListing(0.0)
+    m = _slow_mixin(monkeypatch, server)
+    listed_on: list[asyncio.AbstractEventLoop] = []
+    list_tools = server.list_tools
+
+    async def recording_list_tools():
+        listed_on.append(asyncio.get_running_loop())
+        return await list_tools()
+
+    monkeypatch.setattr(server, "list_tools", recording_list_tools)
+    with owner_loop() as loop, job_loop() as job:
+        bind_as_serving(m, loop)
+        tools = job.run(reload_gate.run(functools.partial(m._probe_mcp, _cfg("svc")), reimports=False))
+    assert [tool.name for tool in tools] == ["ping"]
+    assert listed_on == [loop]
 
 
 def _reload_title(m, loop, title: str = "svc") -> None:
@@ -214,7 +266,7 @@ def test_a_bound_servers_read_answers_its_retained_listing_and_launches_no_start
     server = _CountingListing((0.0, None))
     m = _slow_mixin(monkeypatch, server)
     with owner_loop() as loop:
-        m._serving_loop = loop
+        bind_as_serving(m, loop)
         _reload_title(m, loop)
         assert server.started == 1
         rows = on_loop(loop, m._advertised_mcp_tools("svc"))
@@ -226,7 +278,7 @@ def test_a_late_start_that_binds_retains_its_listing_for_the_read(short_reload_w
     server = _CountingListing((0.4, None))
     m = _slow_mixin(monkeypatch, server)
     with owner_loop() as loop:
-        m._serving_loop = loop
+        bind_as_serving(m, loop)
         _rebuild_listing(m, loop)
         assert m._failed_mcps["svc"]["category"] == "starting"
         _until(lambda: "svc" not in m._failed_mcps)
@@ -239,7 +291,7 @@ def test_a_new_generation_holds_no_listing_until_its_own_build_lists(short_reloa
     server = _CountingListing((0.0, None), (0.4, None))
     m = _slow_mixin(monkeypatch, server)
     with owner_loop() as loop:
-        m._serving_loop = loop
+        bind_as_serving(m, loop)
         _reload_title(m, loop)
         _next_generation(m)
         with pytest.raises(McpListingUnavailableError) as caught:
@@ -259,7 +311,7 @@ def test_an_older_generations_late_outcome_leaves_the_record_of_the_newer_genera
     server = _SequencedListing((0.3, ConnectionError("Connection closed")), (0.8, None))
     m = _slow_mixin(monkeypatch, server)
     with caplog.at_level(logging.INFO), owner_loop() as loop:
-        m._serving_loop = loop
+        bind_as_serving(m, loop)
         _rebuild_listing(m, loop)
         _next_generation(m)
         _rebuild_listing(m, loop)
@@ -280,7 +332,7 @@ def test_a_late_start_whose_bind_fails_records_the_bind_failure(short_reload_wai
 
     monkeypatch.setattr(m, "_apply_reloaded_mcp", failing_apply)
     with owner_loop() as loop:
-        m._serving_loop = loop
+        bind_as_serving(m, loop)
         _rebuild_listing(m, loop)
         assert m._failed_mcps["svc"]["category"] == "starting"
         _until(lambda: m._failed_mcps["svc"]["category"] != "starting")
@@ -297,7 +349,7 @@ def test_an_older_reprobe_failure_leaves_the_newer_starts_record_and_that_start_
     m = _slow_mixin(monkeypatch, server)
     m._failed_mcps["svc"] = _failed_row(category="unreachable", message="down")
     with caplog.at_level(logging.INFO), owner_loop() as loop:
-        m._serving_loop = loop
+        bind_as_serving(m, loop)
         reprobe = asyncio.run_coroutine_threadsafe(m._probe_and_apply_failed({"svc": _cfg("svc")}), loop)
         _until(lambda: len(server.listings) == 1)
         _next_generation(m)
@@ -320,12 +372,13 @@ def test_a_late_starts_credential_demand_is_noted_on_the_core_that_launched_it(s
 
     monkeypatch.setattr(mcp_probe_module, "list_with_managed_auth", demanding_listing)
     m = _mixin(_cfg("svc"))
+    monkeypatch.setattr(instance, "_app", m)
     launching = m._serving_core
     with owner_loop() as loop:
-        m._serving_loop = loop
+        bind_as_serving(m, loop)
         with pytest.raises(McpStartPending):
             on_loop(loop, m._probe_mcp(_cfg("svc"), wait=0.05))
-        m._building = next_core = m._build_serving_core()
+        m._scaffold_core = next_core = m._build_serving_core()
         _until(lambda: "svc" in launching._mcp_credential_demanded | next_core._mcp_credential_demanded)
     assert launching._mcp_credential_demanded == {"svc"}
     assert next_core._mcp_credential_demanded == set()

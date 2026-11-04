@@ -178,6 +178,9 @@ class StackConfig:
     # Run the backend variant's liveness process shapes (``BackendVariant.liveness_processes``),
     # each one more ``tai backend`` process named ``backend-<name>``, beside the worker.
     liveness_processes: bool = False
+    # Run the backend variant's green-pool workers (``BackendVariant.green_pool_workers``),
+    # each one more ``tai backend`` process named ``backend-<pool>``, beside the worker.
+    green_pool_workers: bool = False
     run_metrics: bool = True
     auth: bool = False
     # Serve the SUT as a user-owned embed host (uvicorn running the host FastAPI
@@ -195,11 +198,13 @@ class StackConfig:
     # The MCP transport the ``tai serve`` fleet runs (``tai serve --transport``).
     transport: str = "http"
     # Run a respawn-on-exit supervisor that re-launches a serve/backend process the instant
-    # it exits — the process manager a deployment runs the app under, which a recycle-class
-    # change relies on: the applier and each sibling it recycles exit gracefully and the
-    # supervisor starts them again. It runs from the first spawn; while the fleet boots it
-    # brings back only a graceful exit, so a boot failure stays down and is reported. Off
-    # by default: a stack without it does not bring an exited process back.
+    # it exits — the process manager a deployment runs the app under, which every restart a
+    # reload decides relies on (a worker reporting a recycle-class key off its bound value, or
+    # that, its state unknown, did not confirm clean when asked once ready): the writer and
+    # each sibling it recycles exit gracefully and the supervisor starts them again. It runs
+    # from the first spawn; while the fleet boots it brings back only a graceful exit, so a
+    # boot failure stays down and is reported. Off by default: a stack without it does not
+    # bring an exited process back.
     supervised: bool = False
     # Keep the worker bus URL in the stored ``.env`` instead of the deployment env: no process is
     # started with ``TAI_BUS_REDIS_URL``, and each reaches the bus through the stored copy the
@@ -258,6 +263,8 @@ class StackConfig:
             raise ValueError(f"stack {self.name!r}: queue_workers {self.queue_workers} need run_backend=True")
         if self.liveness_processes and not self.run_backend:
             raise ValueError(f"stack {self.name!r}: liveness_processes need run_backend=True")
+        if self.green_pool_workers and not self.run_backend:
+            raise ValueError(f"stack {self.name!r}: green_pool_workers need run_backend=True")
 
 
 @dataclass

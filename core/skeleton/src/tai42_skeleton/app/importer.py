@@ -7,12 +7,12 @@ registers no ``os.register_at_fork`` handler — a child forked here inherits th
 with an owner thread that does not exist post-fork and blocks forever on the same import;
 an in-process job imports against the half-torn ``sys.modules`` this leaves behind.
 
-Two RELOAD doors reach this, and each holds ``tai42_kit.fork_gate``'s exclusive side for
-its whole body: ``reload_gate.run(..., reimports=True)`` (every ``reload_config``) and
-``ConfigService.apply_replace_env``, which drives ``build_and_swap_epoch`` directly and
-takes ``fork_gate.exclusive_async``. The other side is held by the backend worker: a
+Every RELOAD door reaches this through ``reload_gate.run(..., reimports=True)`` (every
+``reload_config`` and the settings-profile apply's build), which holds
+``tai42_kit.fork_gate``'s exclusive side for the whole body. The other side is held by the backend worker: a
 forking backend installs the gate's fork guard (``ForkGate.guard_forks``), which holds a
-job span across every fork of the process but one a reload body makes itself, and a pool
+job span across every fork of the process but one the reload's own work makes (its body,
+and the tasks it starts from ``ForkGate.rebuild_context``), and a pool
 that runs jobs in the worker process holds a job span for each whole job.
 
 BOOT is exempt and reaches this un-gated. That is safe by sequencing, not by luck: every

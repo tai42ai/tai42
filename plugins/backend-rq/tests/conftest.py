@@ -11,22 +11,25 @@ fixture resets per-test knobs.
 from __future__ import annotations
 
 import fnmatch
+import os
 import threading
 import time
 from collections.abc import AsyncIterator, Callable, Iterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from redis import Redis
 from rq.exceptions import NoSuchJobError
 from tai42_contract.access_control import caller_may_read_secrets
 from tai42_contract.app import tai42_app
 from tai42_contract.interactions import VisitOutcome
 from tai42_contract.template import TemplatedText
 from tai42_kit.utils.detached_util import in_detached_run
+from tai42_kit.utils.run_bound import in_bounded_run
 from tai42_kit.utils.state_context import current_state_context
 
 
@@ -34,7 +37,7 @@ class RecordingTools:
     """Records ``@tai42_app.tools.tool`` registrations and ``run_tool`` calls."""
 
     def __init__(self) -> None:
-        self.registered: list[str] = []
+        self.registered: dict[str, Any] = {}
         self.tags: dict[str, set[str]] = {}
         self.run_calls: list[tuple[str, dict[str, Any]]] = []
         self.run_result: Any = None
@@ -42,6 +45,8 @@ class RecordingTools:
         # The detached flag observed inside each call — a worker execution has no
         # live caller, so the tool must run detached and the turn budget be skipped.
         self.detached_seen: list[bool] = []
+        # The bounded flag observed inside each call — a worker execution runs under its job budget.
+        self.bounded_seen: list[bool] = []
         # The ``offload_sync`` value each call received — a worker execution runs a
         # blocking sync tool off the shared event loop.
         self.offloads: list[bool] = []
@@ -52,12 +57,12 @@ class RecordingTools:
     def tool(self, *args: Any, **kwargs: Any) -> Any:
         tags = kwargs.get("tags", set())
         if len(args) == 1 and callable(args[0]) and not kwargs:
-            self.registered.append(args[0].__name__)
+            self.registered[args[0].__name__] = args[0]
             self.tags[args[0].__name__] = tags
             return args[0]
 
         def decorator(func: Any) -> Any:
-            self.registered.append(func.__name__)
+            self.registered[func.__name__] = func
             self.tags[func.__name__] = tags
             return func
 
@@ -68,6 +73,7 @@ class RecordingTools:
     ) -> Any:
         self.run_calls.append((key, arguments))
         self.detached_seen.append(in_detached_run())
+        self.bounded_seen.append(in_bounded_run())
         self.offloads.append(offload_sync)
         self.secret_capability_seen.append(caller_may_read_secrets())
         if self.run_error is not None:
@@ -76,14 +82,16 @@ class RecordingTools:
 
 
 class RecordingExtensions:
-    """Records ``@tai42_app.extensions.extension`` registrations."""
+    """Records ``@tai42_app.extensions.extension`` registrations and keeps each factory by name."""
 
     def __init__(self) -> None:
         self.registered: list[tuple[str | None, Any]] = []
+        self.factories: dict[str, Any] = {}
 
     def extension(self, f: Any = None, *, kind: Any, name: str | None = None) -> Any:
         def decorator(func: Any) -> Any:
             self.registered.append((name or func.__name__, kind))
+            self.factories[name or func.__name__] = func
             return func
 
         return decorator(f) if f is not None else decorator
@@ -152,10 +160,29 @@ class StubMonitoring:
 class StubLifecycle:
     """The app double is always ready, so ``wait_until_ready`` resolves at once —
     the readiness gate the shared launch base awaits before a consuming runtime
-    starts."""
+    starts. ``waiting_on_fleet`` is set inside a ``waiting_on_fleet_work`` span and
+    ``fleet_waits`` counts the spans. ``admitted_job`` admits nothing: no serving
+    generation counts the stub's jobs."""
+
+    def __init__(self) -> None:
+        self.fleet_waits = 0
+        self.waiting_on_fleet = False
 
     async def wait_until_ready(self) -> None:
         return None
+
+    @asynccontextmanager
+    async def waiting_on_fleet_work(self) -> AsyncIterator[None]:
+        self.fleet_waits += 1
+        self.waiting_on_fleet = True
+        try:
+            yield
+        finally:
+            self.waiting_on_fleet = False
+
+    @contextmanager
+    def admitted_job(self) -> Iterator[None]:
+        yield
 
 
 class RecordingInteractions:
@@ -262,6 +289,7 @@ def _reset_stub() -> AsyncIterator[None] | Any:
     stub_app.tools.run_result = None
     stub_app.tools.run_error = None
     stub_app.tools.detached_seen.clear()
+    stub_app.tools.bounded_seen.clear()
     stub_app.tools.offloads.clear()
     stub_app.tools.secret_capability_seen.clear()
     stub_app.interactions.visit_calls.clear()
@@ -287,11 +315,19 @@ def _reset_process_state(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _no_host_loop_handed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Start each test with no host loop handed to the gevent pool's jobs; a gevent runtime's build hands one."""
+    from tai42_backend_rq.job_loop import HostLoopJob
+
+    monkeypatch.setattr(HostLoopJob, "_shared_loop", None)
+
+
+@pytest.fixture(autouse=True)
 def _unguarded_fork_gate(monkeypatch: pytest.MonkeyPatch) -> None:
     """Start each test with no fork guard installed, and drop the one a built worker installs when it ends.
 
-    The guard is process-wide and accepts one configuration; every built worker brings its own
-    tick, so a guard kept across tests would refuse the next worker.
+    The guard is process-wide and each test stands for its own process, so a test's forks are
+    guarded only by the guard that test installs.
     """
     from tai42_kit.fork_gate import fork_gate
 
@@ -445,10 +481,18 @@ class FakeAsyncRedis:
 
 
 def _patch_redis(monkeypatch: pytest.MonkeyPatch, redis: Any) -> None:
-    """Make ``client_ctx(...)`` inside the tools module yield the fake."""
-    from tai42_backend_rq import tools
+    """Make ``client_ctx(...)`` inside the schedule store and the inspection yield the fake."""
+    from tai42_backend_rq import inspection, schedule_store
 
-    monkeypatch.setattr(tools, "client_ctx", make_client_ctx(redis))
+    monkeypatch.setattr(schedule_store, "client_ctx", make_client_ctx(redis))
+    monkeypatch.setattr(inspection, "client_ctx", make_client_ctx(redis))
+
+
+def backend_tools() -> SimpleNamespace:
+    """The registered ``backend_*`` tools, each an attribute by its name."""
+    import tai42_backend_rq  # noqa: F401  (import-time tool registration)
+
+    return SimpleNamespace(**stub_app.tools.registered)
 
 
 class FakeSyncRedis:
@@ -466,6 +510,9 @@ class FakeSyncRedis:
 
     def zscore(self, key: str, member: str) -> float | None:
         return self.zsets.get(key, {}).get(member)
+
+    def zrem(self, key: str, member: str) -> int:
+        return int(self.zsets.get(key, {}).pop(member, None) is not None)
 
 
 class FakeJob:
@@ -566,3 +613,45 @@ def scheduler_factory(scheduler_cls: Callable[..., Any]) -> Callable[[Any], Any]
         return scheduler_cls(queue_name="default", connection=connection)
 
     return _factory
+
+
+@pytest.fixture
+def rq_server(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """One fakeredis server behind both pooled clients the inspection leases, plus a sync client on it."""
+    import fakeredis
+    from tai42_kit.clients.impl.redis import RedisClient, SyncRedisClient
+
+    from tai42_backend_rq import inspection
+
+    server = fakeredis.FakeServer()
+    clients = {
+        RedisClient: fakeredis.FakeAsyncRedis(server=server),
+        SyncRedisClient: fakeredis.FakeRedis(server=server),
+    }
+
+    @asynccontextmanager
+    async def _ctx(client_cls: Any, settings: Any = None, **kwargs: Any) -> AsyncIterator[Any]:
+        yield clients[client_cls]
+
+    monkeypatch.setattr(inspection, "client_ctx", _ctx)
+    return clients[SyncRedisClient]
+
+
+# -- The real Redis of the live tests ---------------------------------------------------
+
+#: The real Redis the live tests run against; set ``TAI_TEST_RQ_REDIS`` to run them.
+LIVE_REDIS_URL = os.environ.get("TAI_TEST_RQ_REDIS", "redis://localhost:6379/15")
+
+
+def _redis_reachable(url: str) -> bool:
+    try:
+        Redis.from_url(url).ping()
+    except Exception:
+        return False
+    return True
+
+
+#: Skips a live test when no Redis answers at :data:`LIVE_REDIS_URL`.
+needs_live_redis = pytest.mark.skipif(
+    not _redis_reachable(LIVE_REDIS_URL), reason=f"no Redis reachable at {LIVE_REDIS_URL}"
+)

@@ -11,11 +11,9 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from croniter import croniter
-from pydantic import TypeAdapter, ValidationError
-from tai42_contract.backend import CrontabCadence, IntervalCadence, ScheduleCadence
+from pydantic import ValidationError
+from tai42_contract.backend import SCHEDULE_CADENCE_ADAPTER, CrontabCadence, IntervalCadence
 from tai42_contract.errors import ErrorKind
-
-_CADENCE: TypeAdapter[IntervalCadence | CrontabCadence] = TypeAdapter(ScheduleCadence)
 
 
 class ScheduleStoreFormatError(RuntimeError):
@@ -37,19 +35,13 @@ def read_stored_cadence(name: str, raw: bytes | str | None, pattern: str) -> Int
     cause: ValidationError | None = None
     if raw is not None:
         try:
-            return _CADENCE.validate_json(raw)
+            return SCHEDULE_CADENCE_ADAPTER.validate_json(raw)
         except ValidationError as exc:
             cause = exc
     raise ScheduleStoreFormatError(
         f"arq schedule {name!r} is stored in a format this backend no longer reads; delete the keys "
         f"matching {pattern!r} and re-create the schedules"
     ) from cause
-
-
-def refuse_relative(cadence: IntervalCadence | CrontabCadence) -> None:
-    """Raise for a relative interval: the arq scheduler cannot honour ``relative=True``."""
-    if isinstance(cadence, IntervalCadence) and cadence.relative:
-        raise ValueError("the arq backend does not support relative interval schedules (relative=True)")
 
 
 def derive_cron_or_interval(cadence: IntervalCadence | CrontabCadence) -> int | float | str:
@@ -61,7 +53,7 @@ def derive_cron_or_interval(cadence: IntervalCadence | CrontabCadence) -> int | 
     if isinstance(cadence, IntervalCadence):
         every = cadence.every
         return int(every) if every.is_integer() else every
-    return f"{cadence.minute} {cadence.hour} {cadence.day_of_month} {cadence.month_of_year} {cadence.day_of_week}"
+    return cadence.expression
 
 
 def parse_cron_or_interval(raw: str) -> int | float | str:

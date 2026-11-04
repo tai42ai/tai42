@@ -12,15 +12,19 @@ from typing import Any
 
 import pytest
 
-from tai42_backend_rq import tools
+from tai42_backend_rq import schedule_store
+from tai42_backend_rq.settings import rq_settings
 
 from .conftest import (
     FakeSyncRedis,
     _make_stateful_scheduler,
     _patch_redis,
     _StatefulScheduledJob,
+    backend_tools,
     scheduler_factory,
 )
+
+tools = backend_tools()
 
 _TOOL_ARG = "custom_target"
 _INTERVAL_60 = {"kind": "interval", "every": 60.0, "relative": False}
@@ -58,8 +62,10 @@ def _record(name: str, *, tool: str = "do_thing", **overrides: Any) -> dict[str,
 
 
 def _bind(monkeypatch: pytest.MonkeyPatch, store: dict[str, _StatefulScheduledJob]) -> None:
-    monkeypatch.setattr(tools, "scheduler_for", scheduler_factory(_make_stateful_scheduler(store)))
-    _patch_redis(monkeypatch, FakeSyncRedis())
+    """A stateful scheduler over ``store`` and a sync Redis sharing its scheduled-jobs zset."""
+    zset: dict[str, float] = dict.fromkeys(store, 1.0)
+    monkeypatch.setattr(schedule_store, "scheduler_for", scheduler_factory(_make_stateful_scheduler(store, zset)))
+    _patch_redis(monkeypatch, FakeSyncRedis(zsets={rq_settings().rq_scheduler_zset: zset}))
 
 
 _CLEAN = {"created": 1, "updated": 0, "skipped": 0, "skipped_existing": 0, "errors": []}
@@ -246,8 +252,8 @@ async def test_import_apply_failure_preserves_existing_schedule(monkeypatch):
         def cron(self, *args, **kwargs):
             raise RuntimeError("apply boom")
 
-    monkeypatch.setattr(tools, "scheduler_for", scheduler_factory(FailingScheduler))
-    _patch_redis(monkeypatch, FakeSyncRedis())
+    monkeypatch.setattr(schedule_store, "scheduler_for", scheduler_factory(FailingScheduler))
+    _patch_redis(monkeypatch, FakeSyncRedis(zsets={rq_settings().rq_scheduler_zset: {"sched-1": 1.0}}))
 
     result = await tools.backend_import_schedules(
         [_record("sched-1", tool="new", cadence={"kind": "interval", "every": 300})], "overwrite"

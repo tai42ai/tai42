@@ -15,7 +15,11 @@ an ``mcp-server`` command its package does not declare as a console script, or a
 script another installed server package already exposes, is a :class:`ConflictError`
 (409); a pip failure, a github artifact-integrity mismatch, a failed unwind, a plugin
 migration the runner refused, a manifest-compose fault, an unknown-item-kind binding
-drift, or corrupt local state is an :class:`OperationFailedError` (500). A malformed
+drift, corrupt local state, or landed config changes whose fleet recycle roll did not
+complete is an :class:`OperationFailedError` (500). A failed operation whose landed changes
+still ran their fleet recycle roll carries that roll in its error body; the writer's own
+restart that roll owes runs after the error reply as after a success reply
+(:mod:`~tai42_skeleton.app.writer_exit`). A malformed
 ``ref`` is the caller's own author error — a typed
 :class:`~tai42_skeleton.marketplace.errors.MalformedRefError` the boundary maps to
 :class:`BadRequestError` (400).
@@ -61,6 +65,7 @@ from tai42_skeleton.marketplace.errors import (
     UndeclaredServerCommandError,
     VersionRefusedError,
 )
+from tai42_skeleton.operations._broadcast import roll_outcome_body
 from tai42_skeleton.operations.errors import (
     BadRequestError,
     ConflictError,
@@ -200,11 +205,32 @@ def to_operation_error(exc: MarketplaceError) -> OperationError:
     """Translate an internal marketplace failure to its honest operation error.
 
     The classification keys on the typed class (and, for a state conflict, its
-    ``not_installed`` flag) — never on message text.
+    ``not_installed`` flag) — never on message text. A failure that still ran a fleet recycle
+    roll (``exc.roll``) carries it in the error body (:func:`_with_roll`).
     """
+    return _with_roll(_classified(exc), exc)
+
+
+def _classified(exc: MarketplaceError) -> OperationError:
+    """The operation error ``exc``'s class (and flags) map to."""
     for predicate, build in _ERROR_RULES:
         if predicate(exc):
             return build(exc)
     # PipUnavailableError / InstallUnwindError / PluginMigrationError / ManifestComposeError /
-    # LocalStateError / the base: the deployment environment failed the operation.
+    # LocalStateError / UnrunRollError / the base: the deployment environment failed the operation.
     return OperationFailedError(_truncate(operator_message(exc)))
+
+
+def _with_roll(error: OperationError, exc: MarketplaceError) -> OperationError:
+    """``error`` carrying the roll the failed operation ran in its body.
+
+    The roll (:func:`~tai42_skeleton.operations._broadcast.roll_outcome_body`: ``recycle``,
+    ``awaiting_respawn``, ``roll_deferred`` and ``roll_deferred_to``) merges into the error body.
+    The writer's own restart that roll owes is recorded by the roll itself and runs after the
+    error reply.
+    """
+    roll = exc.roll
+    if roll is None:
+        return error
+    error.extra.update(roll_outcome_body(roll))
+    return error

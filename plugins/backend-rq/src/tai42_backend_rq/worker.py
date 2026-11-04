@@ -16,16 +16,32 @@ nothing for the whole span.
 
 ``tai42_kit.fork_gate`` holds the invariant (canonical statement in its module
 docstring): while a re-import runs, no child may be FORKED and no in-process job may
-RUN. The worker holds the work-loop side around the ``fork()`` instant of every child it
-forks — each work-horse and every scheduler spawn (a child forked outside the window
-inherits unlocked copies and is immune thereafter) — and installs the gate's fork guard,
-which holds it around every other fork of the process; the solo/gevent pools also gate
-each whole in-process job. The worker classes that take that
-side live in :mod:`tai42_backend_rq.worker_pools`.
+RUN. Every pool installs the kit's fork safety (:mod:`tai42_kit.backend.fork_safety`): a fork
+guard over every fork of the process that runs the interpreter's fork hooks (``os.fork``,
+``multiprocessing``'s fork context, a ``subprocess`` with a ``preexec_fn``; a ``subprocess``
+started without one runs no hooks and no Python before it execs). Each such child resets its
+inherited copy of the fork gate and evicts the monitoring writer it inherited.
+
+On prefork and solo the guard also holds the work-loop side around the ``fork()`` instant: each
+prefork work-horse, every ``rq-scheduler`` spawn, and any other fork made off an event loop's
+thread waits out a running re-import (a child forked outside the window inherits unlocked copies
+and is immune thereafter). A fork waiting on the work loop's own thread reports the worker's
+progress meanwhile, as that wait holds up the loop's next pass; one waiting on any other thread
+reports nothing. The gevent worker forks no child of its own (it runs rq's scheduler as a thread
+of its own process). Under its patch a thread ``threading`` starts is a greenlet on the OS thread
+that runs the host's loop, so the kit's guard, which never blocks a loop, enters the span of a
+fork made on one at once and logs at ERROR such a fork that lands while a re-import holds the
+gate. A native OS thread in that process (the refresher each in-process job starts, gevent's own
+threadpool) runs no loop, so a fork from one waits out a running re-import, reporting nothing;
+the refresher itself never forks. On every pool the guard resets each child's gate copy and
+evicts its monitoring writer, for the Python-level forks other code in the process makes. The
+solo/gevent pools also gate each whole in-process job. The worker classes that take that side
+live in :mod:`tai42_backend_rq.worker_pools`.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import sys
@@ -35,13 +51,12 @@ from typing import Any, Self
 
 import click
 from redis import Redis
-from tai42_contract.app import tai42_app
 from tai42_contract.backend.runtime import BackendRuntime, ExecutionMode, ProgressLiveness, ProgressReporter
+from tai42_kit.backend.queue_labels import derived_queue, queue_label_option
 from tai42_kit.clients.impl.redis import KitSyncRedis, redis_from_url_kwargs
-from tai42_kit.liveness import LivenessFile, backend_liveness_settings
 
+from tai42_backend_rq.job_loop import HostLoopJob
 from tai42_backend_rq.queue import TaskBudgetQueue
-from tai42_backend_rq.queues import check_queue_label, derived_queue
 from tai42_backend_rq.settings import rq_client_kwargs, rq_settings
 from tai42_backend_rq.worker_pools import (
     CustomRQGeventWorker,
@@ -51,74 +66,18 @@ from tai42_backend_rq.worker_pools import (
 
 logger = logging.getLogger(__name__)
 
-
-def setup_gevent() -> None:
-    """Monkey-patch blocking primitives for the gevent pool, which runs one job at a time in the worker process.
-
-    The worker's loop is rq's sequential one, as on ``solo``; the patch makes blocking I/O
-    cooperative, so the greenlets a job spawns overlap their I/O inside that job.
-
-    ``patch_all`` runs before the fork gate's ``Condition`` is first used, so the waiter
-    locks that ``Condition.wait`` allocates per wait are green ones: a gate wait yields
-    to the hub instead of blocking it. It also patches ``threading.get_ident`` to return
-    a per-GREENLET identity, so the gate's ``_owner`` becomes a greenlet identity — which
-    is the correct granularity here, since a greenlet is what runs a rebuild body or a
-    job under this pool.
-
-    The Condition's OUTER lock is the plain ``threading.RLock`` created when
-    ``tai42_kit.fork_gate`` was imported (before patching), so it stays a native RLock
-    reentrant per OS THREAD. Every greenlet here shares one OS thread, so that lock would
-    NOT exclude them from each other: a greenlet that yielded while holding it would let
-    another greenlet re-enter the critical section and see half-updated counters. What
-    makes the design safe is that the gate's ``_cond`` critical sections contain no yield
-    points — ``Condition.wait`` releases the outer lock before parking, and the report
-    strings are deliberately logged outside the lock. Do not add an await, a log, or any
-    other yielding call under ``_cond`` on the strength of this note.
-    """
-    from gevent import monkey
-
-    monkey.patch_all()
-
-
-def _after_fork_in_child() -> None:
-    """Evict the inherited monitoring writer in EVERY child this process forks — a work-horse or the ``rq-scheduler``.
-
-    Its parent-owned background threads do not survive ``fork()`` and would hang flushes
-    here; the child rebuilds a clean client on first use. The child's copy of the fork gate
-    is reset by the gate's own fork guard (:meth:`~tai42_kit.fork_gate.ForkGate.guard_forks`).
-    """
-    logger.info("forked child %s: evicting inherited monitoring client (fork safety); it rebuilds lazily", os.getpid())
-    tai42_app.monitoring.active.writer.shutdown()
-
-
-_fork_hooks_installed = False
-
-
-def install_fork_hooks() -> None:
-    """Register the after-fork child hook, once per process.
-
-    EVERY pool needs this, not just prefork: ``work(with_scheduler=True)`` spawns the
-    ``rq-scheduler`` child on solo and gevent too, and that child inherits the same
-    unusable monitoring writer. Called from :func:`_build_worker`,
-    the one seam every pool passes through. Idempotent — ``os.register_at_fork`` has no
-    deregister, so a second registration would run the hook twice per child.
-    """
-    global _fork_hooks_installed
-    if _fork_hooks_installed:
-        return
-    os.register_at_fork(after_in_child=_after_fork_in_child)
-    _fork_hooks_installed = True
+# The gevent pool's process prelude: gevent's patch of the interpreter's blocking primitives.
+_GEVENT_PRELUDE = "gevent.monkey:patch_all"
 
 
 def prepare_forking_worker() -> None:
     """Run fork-safety setup specific to the PREFORK pool, before it forks a work-horse per job.
 
-    Drops the parent's monitoring client (its exporter thread would not survive ``fork()``) and
-    on macOS disables system proxy detection (``urllib``'s proxy lookup deadlocks in a forked
-    child during SSL setup).
+    On macOS it disables system proxy detection: ``urllib``'s proxy lookup deadlocks in a forked
+    work-horse during SSL setup. Elsewhere it does nothing.
 
-    The after-fork child hook is NOT installed here — every pool needs it, so it is
-    registered in :func:`install_fork_hooks` from the shared build seam.
+    Each child's monitoring eviction is the kit's fork safety, which every pool installs from the
+    shared build seam (:func:`_build_worker`).
     """
     if sys.platform == "darwin":
         logger.warning(
@@ -127,11 +86,6 @@ def prepare_forking_worker() -> None:
         )
         os.environ["no_proxy"] = "*"
         urllib.request.getproxies = dict
-    logger.warning(
-        "forking worker: shutting down the monitoring writer before the first fork; "
-        "each work-horse rebuilds its own client lazily"
-    )
-    tai42_app.monitoring.active.writer.shutdown()
 
 
 def rq_redis_connection(redis_url: str | None) -> KitSyncRedis:
@@ -165,15 +119,17 @@ def _build_worker(
     read from the settings here at build time. The worker reports each pass of its work
     loop to ``report_progress``.
 
-    Every pool installs the after-fork child hook and the fork gate's guard here: even the
-    non-forking pools spawn the ``rq-scheduler`` child, which inherits the same unusable
-    monitoring writer and must not be forked into a running re-import. Only prefork
-    additionally runs :func:`prepare_forking_worker`.
+    Every pool installs the kit's fork safety here (the worker's ``guard_forks``; the module
+    docstring tells what it does on each pool): prefork forks a work-horse per job, and prefork
+    and solo spawn the ``rq-scheduler`` child, each of which must not be forked into a running
+    re-import and evicts the monitoring writer it inherited. The gevent worker runs rq's scheduler
+    on a thread and forks no child of its own; there the guard makes a fork wait only on a native
+    OS thread, and resets the gate copy and evicts the monitoring writer of each Python-level fork
+    other code in the process makes. Only prefork additionally runs :func:`prepare_forking_worker`.
+    The gevent pool's patch is no step here: its process prelude applies it before the process
+    imports anything (:meth:`RqWorkerRuntime.from_args`).
     """
-    install_fork_hooks()
-
     if pool == "gevent":
-        setup_gevent()
         worker_class: type[CustomRQWorker | CustomRQSimpleWorker] = CustomRQGeventWorker
     elif pool == "solo":
         worker_class = CustomRQSimpleWorker
@@ -182,7 +138,7 @@ def _build_worker(
         prepare_forking_worker()
 
     redis_conn = rq_redis_connection(redis_url)
-    queue = TaskBudgetQueue(derived_queue(label), connection=redis_conn)
+    queue = TaskBudgetQueue(derived_queue(rq_settings().queue_name, label), connection=redis_conn)
     worker = worker_class(
         [queue], name=name, connection=redis_conn, default_result_ttl=results_ttl, report_progress=report_progress
     )
@@ -203,6 +159,13 @@ class RqWorkerRuntime(BackendRuntime):
     registry mutation applied, and the non-forking pools run jobs in this very
     process where the mutation already landed. There is no pool of persistent
     workers holding a stale snapshot, so there is nothing to turn over.
+
+    The run uses the worker, its job class and its death penalty class as :meth:`build`
+    made them, across a config reload's re-import of this package. rq itself resolves a job's
+    function by the import path the job stores, so a job taken after a reload calls the
+    re-imported :mod:`~tai42_backend_rq.tasks` function. Those functions keep no state of their
+    own: they read their arguments and the settings, and run on the loop of the job object the
+    worker built from its job class.
     """
 
     name = "worker"
@@ -219,15 +182,28 @@ class RqWorkerRuntime(BackendRuntime):
 
     @classmethod
     def from_args(cls, args: Sequence[str]) -> Self:
-        """Parse the worker CLI's own options strictly; an unknown or malformed option raises out of click."""
-        ctx = main.make_context("rq-worker", list(args))
-        return cls(ctx.params)
+        """Parse the worker CLI's own options strictly; an unknown or malformed option raises out of click.
+
+        The gevent pool declares gevent's patch as its process prelude: the host starts the process
+        with it applied before anything else is imported.
+        """
+        ctx = worker_options.make_context("rq-worker", list(args))
+        runtime = cls(ctx.params)
+        if ctx.params["pool"] == "gevent":
+            runtime.process_prelude = _GEVENT_PRELUDE
+        else:
+            runtime.process_prelude = None
+        return runtime
 
     async def build(self) -> None:
         """Construct the worker and its dedicated connection, pool-specific fork-safety setup included.
 
-        Runs before the readiness gate: building an engine object consumes nothing.
+        Runs before the readiness gate: building an engine object consumes nothing. On the gevent
+        pool the jobs are handed the host's running loop first, the one loop the process's OS
+        thread runs, which their coroutines run on (:class:`~tai42_backend_rq.job_loop.HostLoopJob`).
         """
+        if self._params["pool"] == "gevent":
+            HostLoopJob.share_loop(asyncio.get_running_loop())
         self._worker, self._redis_conn = _build_worker(
             self._params["redis_url"],
             self._params["name"],
@@ -294,48 +270,7 @@ class RqWorkerRuntime(BackendRuntime):
         return self._worker
 
 
-def start_rq_worker(
-    redis_url: str | None,
-    name: str | None,
-    loglevel: str,
-    burst: bool,
-    results_ttl: int,
-    pool: str,
-    queue: str | None,
-) -> None:
-    """Build and run the RQ worker inline, blocking the calling thread.
-
-    The direct CLI path: on the main thread rq installs its own signal handlers, so
-    warm/cold shutdown behaves exactly as a plain ``rq worker``. Nothing else runs
-    in that process, so rq owning the signals is correct there. (The host
-    ``launch`` path drives :class:`RqWorkerRuntime` instead, where the host owns
-    them.)
-
-    The work loop refreshes the liveness file (``TAI_BACKEND_LIVENESS_``) on every pass, as
-    the host path does; the file is removed when the loop exits.
-    """
-    liveness = LivenessFile.from_settings(backend_liveness_settings())
-    worker, redis_conn = _build_worker(redis_url, name, results_ttl, pool, queue, liveness.report)
-    try:
-        try:
-            worker.work(burst=burst, logging_level=loglevel.upper(), with_scheduler=True)
-        finally:
-            redis_conn.close()
-        worker.raise_for_liveness_failure()
-    finally:
-        liveness.remove()
-
-
-def _queue_label_option(ctx: click.Context, param: click.Parameter, value: str | None) -> str | None:
-    if value is None:
-        return None
-    try:
-        return check_queue_label(value)
-    except ValueError as exc:
-        raise click.BadParameter(str(exc), ctx=ctx, param=param) from exc
-
-
-@click.command("tai42-backend-rq-worker")
+@click.command("rq-worker")
 @click.option("--redis-url", default=None, help="Redis URL (default: the RQ_REDIS_URL setting)")
 @click.option(
     "--name",
@@ -357,17 +292,12 @@ def _queue_label_option(ctx: click.Context, param: click.Parameter, value: str |
 @click.option(
     "--queue",
     default=None,
-    callback=_queue_label_option,
+    callback=queue_label_option,
     help="Queue label: serve <RQ_QUEUE_NAME>.<label> instead of RQ_QUEUE_NAME",
 )
-def main(
-    redis_url: str | None,
-    name: str | None,
-    loglevel: str,
-    burst: bool,
-    results_ttl: int,
-    pool: str,
-    queue: str | None,
-) -> None:
-    """Run an RQ worker; ``launch(["worker", ...])`` parses its args here."""
-    start_rq_worker(redis_url, name, loglevel, burst, results_ttl, pool, queue)
+def worker_options(**options: Any) -> None:
+    """The RQ worker's option surface.
+
+    :meth:`RqWorkerRuntime.from_args` parses through it with ``make_context`` and never
+    invokes it; ``tai backend worker`` runs the worker.
+    """

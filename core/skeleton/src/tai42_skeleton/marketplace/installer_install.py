@@ -3,13 +3,14 @@
 :class:`_InstallFlow` orders ``preview`` / ``install`` / ``uninstall`` as
 abort-on-any-step sequences with an explicit reverse unwind, delegating each concern to
 a sibling module (``locks``, ``resolve``, ``environments``, ``manifest_apply``,
-``env_apply``, ``route_preflight``, ``notes``, ``unwind``). It inherits the shared config,
-pip and plugins-directory seams from
+``env_apply``, ``route_preflight``, ``notes``, ``unwind``, ``cancel_hold``). It inherits
+the shared config, pip and plugins-directory seams from
 :class:`~tai42_skeleton.marketplace.installer_base._InstallerBase`.
 """
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 from typing import Any
 
@@ -26,6 +27,7 @@ from tai42_skeleton.marketplace import (
     route_preflight,
 )
 from tai42_skeleton.marketplace import routes as routes_mod
+from tai42_skeleton.marketplace.cancel_hold import run_to_end
 from tai42_skeleton.marketplace.environments.change import OperationChange
 from tai42_skeleton.marketplace.environments.targets import place, place_row
 from tai42_skeleton.marketplace.errors import InstallStateError, ManifestCollisionError
@@ -98,7 +100,9 @@ class _InstallFlow(_InstallerBase):
         ``route_mounts`` remaps a route-carrying item's base and any public route
         requires ``accept_public_routes`` — both checked BEFORE pip. Each step past
         the swap unwinds in reverse on failure, the environment swapped back first (a failed
-        unwind → :class:`InstallUnwindError`).
+        unwind → :class:`InstallUnwindError`). A cancellation while the migrations run swaps
+        the environment back; one that lands while the change is written waits for that write
+        to end whole — complete, or unwound when it fails — and then propagates.
         """
         async with guarded_operation(self._fleet_lock, self._svc, change=f"the install of {ref}") as operation:
             receipt = await self._install_locked(ref, version, env, secret_keys, route_mounts, accept_public_routes)
@@ -157,19 +161,21 @@ class _InstallFlow(_InstallerBase):
         )
 
         change = await self._install_package_steps(ref, spec, source, resolved, pinned_version)
-        apply_result = await self._commit_install(
-            ref,
-            pinned_version,
-            spec,
-            source,
-            resolved,
-            resolved_mounts,
-            resolved_route_list,
-            env,
-            secret_keys,
-            change,
+        # A cancellation landing while the change is written waits for the commit to end whole.
+        apply_result, environment_notes = await run_to_end(
+            self._commit_install(
+                ref,
+                pinned_version,
+                spec,
+                source,
+                resolved,
+                resolved_mounts,
+                resolved_route_list,
+                env,
+                secret_keys,
+                change,
+            )
         )
-        environment_notes = [] if change is None else change.finish()
 
         return {
             "ref": ref,
@@ -187,9 +193,9 @@ class _InstallFlow(_InstallerBase):
     ) -> OperationChange | None:
         """Build the plugin's environment and make it current, then run its migrations.
 
-        A descriptor-only spec builds nothing and returns ``None``. A migration failure swaps
-        the environment back and re-raises. Returns the change for the commit to unwind or
-        finish.
+        A descriptor-only spec builds nothing and returns ``None``. A migration failure or a
+        cancellation while the migrations run swaps the environment back and re-raises. Returns
+        the change for the commit to unwind or finish.
         """
         _repo_url, _tag, artifact_ref, sha256 = resolve.pin_provenance(resolved, source)
         placed = place(ref, spec, pinned_version, source, artifact_ref, sha256)
@@ -202,7 +208,7 @@ class _InstallFlow(_InstallerBase):
         # patched): a failure swaps the environment back with the manifest untouched.
         try:
             await self._run_plugin_migrations(spec)
-        except Exception as migration_error:
+        except (Exception, asyncio.CancelledError) as migration_error:
             await self._unwind(migration_error, change=change, provides_undo=None, env_written=None)
             raise
         return change
@@ -219,11 +225,13 @@ class _InstallFlow(_InstallerBase):
         env: dict[str, str] | None,
         secret_keys: list[str] | None,
         change: OperationChange | None,
-    ) -> ApplyResult:
-        """Commit the manifest+env+row transactionally.
+    ) -> tuple[ApplyResult, list[str]]:
+        """Commit the manifest+env+row transactionally, then finish ``change``.
 
         Apply provides+env, write the attribution row, post-record remount reload; on any
-        failure swap ``change`` back and unwind the config writes.
+        failure swap ``change`` back and unwind the config writes. Once the row is written the
+        unused builds are deleted (:meth:`OperationChange.finish`); returns the change's result
+        and the environment notes of that finish.
 
         The forward provides reload runs BEFORE the attribution row exists, so its mount map
         (which reads the store) mounts every route-carrying item at its DECLARED base. A
@@ -265,23 +273,25 @@ class _InstallFlow(_InstallerBase):
                 manifest_persisted = True
                 await self._record_install_row(ref, pinned_version, spec, source, resolved, resolved_mounts)
                 row_persisted = True
-                # The failed forward reload rolled nothing: hand the change's recycle-class keys
-                # to the recovery reload, which rolls them. The forward write landed, so its failed
-                # span release is the change's too and rides beside the recovery's own.
-                recovered = await self._svc().reapply_manifest(recycle_keys=reload_error.unrolled_recycle_keys)
-                return dataclasses.replace(
+                # The recovery reload records its report in the operation's deferred scope like
+                # the forward one, so the operation's one recycle decision reads it. The forward
+                # write landed, so its failed span release is the change's too and rides beside
+                # the recovery's own.
+                recovered = await self._svc().reapply_manifest()
+                apply_result = dataclasses.replace(
                     recovered,
                     span_release_error=joined_span_release_errors(
                         reload_error.span_release_error, recovered.span_release_error
                     ),
                 )
-            manifest_persisted = True
-            await self._record_install_row(ref, pinned_version, spec, source, resolved, resolved_mounts)
-            row_persisted = True
-            # With the row persisted, re-reload so the mount map remounts each route at
-            # its remapped base. Route-declaring specs only; best-effort (never unwinds).
-            if resolved_route_list:
-                apply_result = await manifest_apply.remount_reload(self._svc(), apply_result)
+            else:
+                manifest_persisted = True
+                await self._record_install_row(ref, pinned_version, spec, source, resolved, resolved_mounts)
+                row_persisted = True
+                # With the row persisted, re-reload so the mount map remounts each route at
+                # its remapped base. Route-declaring specs only; best-effort (never unwinds).
+                if resolved_route_list:
+                    apply_result = await manifest_apply.remount_reload(self._svc(), apply_result)
         except Exception as step_error:
             # The pipeline aborts a failed mutation with nothing persisted, so the
             # manifest needs restoring only when the change actually landed.
@@ -297,7 +307,7 @@ class _InstallFlow(_InstallerBase):
             if row_persisted:
                 await self._store.delete(ref)
             raise
-        return apply_result
+        return apply_result, [] if change is None else change.finish()
 
     async def _record_install_row(
         self,
@@ -340,8 +350,9 @@ class _InstallFlow(_InstallerBase):
         environment; then, with the fleet key downgraded to shared, roll the fleet recycle the
         convergence owes (:func:`guarded_operation`). A failed deregister or row delete swaps the
         environment back and re-raises, leaving whatever manifest change landed in place;
-        re-running forward is the recovery. The receipt's ``manifest_written`` says whether the
-        manifest was written.
+        re-running forward is the recovery. A cancellation that lands once the environment is
+        swapped waits for the removal to end whole and then propagates. The receipt's
+        ``manifest_written`` says whether the manifest was written.
         """
         async with guarded_operation(self._fleet_lock, self._svc, change=f"the uninstall of {ref}") as operation:
             receipt = await self._uninstall_locked(ref)
@@ -360,7 +371,25 @@ class _InstallFlow(_InstallerBase):
                 ensure_pip_available()
             change = await self._prepare_environment(ref, placed, None, subject=f"cannot uninstall {ref} {row.version}")
             change.swap()
+        # A cancellation landing while the removal is written waits for the commit to end whole.
+        manifest_written, reload_result, environment_notes = await run_to_end(self._commit_uninstall(ref, spec, change))
+        return {
+            "ref": ref,
+            "uninstalled": True,
+            "manifest_written": manifest_written,
+            "reload": reload_result,
+            "notes": [*notes.uninstall_notes(spec), *environment_notes],
+        }
 
+    async def _commit_uninstall(
+        self, ref: str, spec: PluginSpec, change: OperationChange | None
+    ) -> tuple[bool, ApplyResult | None, list[str]]:
+        """Deregister ``spec``, drop its row, then finish ``change``.
+
+        A failed deregister or row delete swaps ``change`` back and re-raises. Returns whether
+        the manifest was written, the deregister's convergence result and the environment notes
+        of the finish (:meth:`OperationChange.finish`).
+        """
         try:
             manifest_written, reload_result = await self._deregister(spec)
         except Exception as deregister_error:
@@ -371,17 +400,7 @@ class _InstallFlow(_InstallerBase):
         except Exception as delete_error:
             await self._unwind(delete_error, change=change, provides_undo=None, env_written=None)
             raise
-
-        removal_notes = notes.uninstall_notes(spec)
-        if change is not None:
-            removal_notes += change.finish()
-        return {
-            "ref": ref,
-            "uninstalled": True,
-            "manifest_written": manifest_written,
-            "reload": reload_result,
-            "notes": removal_notes,
-        }
+        return manifest_written, reload_result, [] if change is None else change.finish()
 
     async def _deregister(self, spec: PluginSpec) -> tuple[bool, ApplyResult | None]:
         """Persist the manifest without ``spec``'s entries and converge it the way this door converges.

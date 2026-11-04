@@ -150,16 +150,17 @@ EXPECTED_FACADE = {
     "mount_base",
     "use_raw_path_key",
     "hosted_ui",
-    # clients (2)
+    # clients (1)
     "client_ctx",
-    "shutdown_clients",
-    # lifecycle (6)
+    # lifecycle (8)
     "on_startup",
     "on_shutdown",
     "on_reload",
     "on_post_swap",
     "on_fleet_op_applied",
     "wait_until_ready",
+    "waiting_on_fleet_work",
+    "admitted_job",
     # admin (11)
     "reload_mcp",
     "deregister_mcp",
@@ -366,11 +367,11 @@ def test_facade_partition_against_frozen_surface():
     assert union == EXPECTED_FACADE, (
         f"only-facade={sorted(union - EXPECTED_FACADE)} only-frozen={sorted(EXPECTED_FACADE - union)}"
     )
-    # 175 (sub-protocol, member) pairs over 171 distinct names — ``store`` is exposed
+    # 176 (sub-protocol, member) pairs over 172 distinct names — ``store`` is exposed
     # by AppVersioning, AppPresets and AppToolMeta (two duplicate pairs), and
     # ``register``/``get`` by both AppWebhookVerifiers and AppChannels (one each).
-    assert len(union) == 171, f"union={len(union)}"
-    assert total == 175 == len(union) + 4, f"partition broken: sum={total} union={len(union)}"
+    assert len(union) == 172, f"union={len(union)}"
+    assert total == 176 == len(union) + 4, f"partition broken: sum={total} union={len(union)}"
 
 
 def test_taiapp_exposes_twenty_five_namespaces():
@@ -406,19 +407,23 @@ def test_taiapp_exposes_twenty_five_namespaces():
 
 
 def test_backend_surface_is_task_runtime_only():
-    # The Backend ABC is a task-execution contract: ``launch`` is its ONLY
-    # abstract member, carrying no fleet control-plane surface — a concrete
-    # backend implementing only ``launch`` instantiates cleanly.
+    # The Backend ABC is a task-execution contract: ``launch`` and the backend's own
+    # ``drain_timeout`` are its ONLY abstract members, carrying no fleet control-plane
+    # surface — a concrete backend implementing just those instantiates cleanly.
     from collections.abc import Sequence
 
     from tai42_contract.backend import Backend
 
-    assert Backend.__abstractmethods__ == frozenset({"launch"})
+    assert Backend.__abstractmethods__ == frozenset({"launch", "drain_timeout"})
 
     class TaskOnlyBackend(Backend):
+        @property
+        def drain_timeout(self) -> float:
+            return 30.0
+
         async def launch(self, args: Sequence[str]) -> None: ...
 
-    TaskOnlyBackend()  # implementing only ``launch`` satisfies the ABC
+    TaskOnlyBackend()  # implementing ``launch`` and ``drain_timeout`` satisfies the ABC
 
 
 def test_config_manager_both_transaction_seams_required():
@@ -530,6 +535,12 @@ def test_app_lifecycle_fleet_op_handler_takes_the_applied_op():
         async def wait_until_ready(self) -> None:
             return None
 
+        def waiting_on_fleet_work(self) -> object:
+            return nullcontext()
+
+        def admitted_job(self) -> object:
+            return nullcontext()
+
     registrar = Registrar()
     assert isinstance(registrar, AppLifecycle)
 
@@ -560,6 +571,40 @@ def test_app_lifecycle_fleet_op_handler_takes_the_applied_op():
             return func
 
     assert not isinstance(MissingHook(), AppLifecycle)
+
+
+def test_app_lifecycle_waiting_on_fleet_work_is_an_argless_async_span():
+    # A plugin wraps a wait on work outside the process in this span; the retire of a reload
+    # that work drives neither counts the waiter against its drain budget nor severs it.
+    from tai42_contract.app import AppLifecycle
+
+    sig = inspect.signature(AppLifecycle.waiting_on_fleet_work)
+    assert list(sig.parameters) == ["self"]
+    assert sig.return_annotation == "AbstractAsyncContextManager[None]"
+    doc = AppLifecycle.waiting_on_fleet_work.__doc__ or ""
+    assert "drain budget" in doc
+    assert "never severs" in doc
+
+
+def test_app_lifecycle_admitted_job_is_an_argless_sync_span():
+    # The kit's job chokepoint enters this span around every backend job's run; the retire of a
+    # reload on the serving loop waits for the job before it closes the generation's resources.
+    from tai42_contract.app import AppLifecycle
+
+    sig = inspect.signature(AppLifecycle.admitted_job)
+    assert list(sig.parameters) == ["self"]
+    assert sig.return_annotation == "AbstractContextManager[None]"
+    doc = AppLifecycle.admitted_job.__doc__ or ""
+    assert "drain budget" in doc
+    assert "serving loop" in doc
+
+
+@pytest.mark.parametrize("door", ["reload_mcp", "deregister_mcp", "reload_config", "reload_failed_mcps"])
+def test_app_admin_reload_doors_are_coroutines(door: str):
+    # A reload door runs on the caller's event loop: the host awaits it, it never blocks a thread.
+    from tai42_contract.app import AppAdmin
+
+    assert inspect.iscoroutinefunction(getattr(AppAdmin, door))
 
 
 def test_custom_route_carries_self_describing_metadata():

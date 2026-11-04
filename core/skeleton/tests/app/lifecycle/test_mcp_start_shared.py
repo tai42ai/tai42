@@ -14,7 +14,7 @@ from tai42_contract.manifest.errors import McpListingUnavailableError
 from tai42_skeleton.app.reload_gate import reload_gate
 from tai42_skeleton.manifest import Manifest
 
-from ...connectors.credential_path import on_loop, owner_loop
+from ...connectors.credential_path import bind_as_serving, on_loop, owner_loop
 from ._late_starts import _CountingListing, _rebuild_listing, _slow_mixin, _until
 
 
@@ -32,7 +32,7 @@ def test_a_reload_door_joins_the_start_a_starting_record_waits_on_and_the_server
     server = _CountingListing((0.6, None), (0.05, ConnectionError("another instance is starting")))
     m = _slow_mixin(monkeypatch, server)
     with caplog.at_level(logging.INFO), owner_loop() as loop:
-        m._serving_loop = loop
+        bind_as_serving(m, loop)
         _rebuild_listing(m, loop)
         assert m._failed_mcps["svc"]["category"] == "starting"
         on_loop(loop, reload_gate.run(door(m), reimports=False))
@@ -53,7 +53,7 @@ def test_a_read_during_a_rebuilds_start_answers_starting_and_a_retry_after_it_bo
     server = _CountingListing(*[(0.4, None)] * 4)
     m = _slow_mixin(monkeypatch, server)
     with owner_loop() as loop:
-        m._serving_loop = loop
+        bind_as_serving(m, loop)
         _rebuild_listing(m, loop)
         with pytest.raises(McpListingUnavailableError) as caught:
             on_loop(loop, m._advertised_mcp_tools("svc"))
@@ -86,7 +86,7 @@ def test_a_start_whose_outcome_is_not_applied_leaves_a_record_that_says_it_ended
     server = _CountingListing((0.4, None))
     m = _slow_mixin(monkeypatch, server)
     with owner_loop() as loop:
-        m._serving_loop = loop
+        bind_as_serving(m, loop)
         _rebuild_listing(m, loop)
         m._manifest = Manifest.model_validate(manifest_after)
         _until(lambda: m._failed_mcps["svc"]["category"] != "starting")
@@ -104,7 +104,7 @@ def test_a_start_whose_outcome_is_not_applied_for_an_edited_config_is_re_probed_
     m = _slow_mixin(monkeypatch, server)
     monkeypatch.setattr(m, "_refresh_manifest_mcp", lambda: None)
     with owner_loop() as loop:
-        m._serving_loop = loop
+        bind_as_serving(m, loop)
         _rebuild_listing(m, loop)
         m._manifest = Manifest.model_validate({"mcp": [edited.model_dump()]})
         _until(lambda: m._failed_mcps["svc"]["category"] != "starting")
@@ -120,7 +120,7 @@ def test_a_late_outcome_for_a_record_that_waits_on_no_start_says_so(short_reload
     server = _CountingListing((0.4, ConnectionError("Connection closed")))
     m = _slow_mixin(monkeypatch, server)
     with caplog.at_level(logging.INFO), owner_loop() as loop:
-        m._serving_loop = loop
+        bind_as_serving(m, loop)
         _rebuild_listing(m, loop)
         assert m._failed_mcps["svc"]["category"] == "starting"
         on_loop(loop, reload_gate.run(functools.partial(m._reload_mcp, "svc"), reimports=False))

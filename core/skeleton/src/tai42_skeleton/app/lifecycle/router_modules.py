@@ -2,7 +2,6 @@
 
 from typing import TYPE_CHECKING
 
-from tai42_skeleton.app.lifecycle.off_loop import run_blocking
 from tai42_skeleton.app.lifecycle.state import LifecycleState
 from tai42_skeleton.app.mount_map import MountBinding, build_mount_map
 from tai42_skeleton.app.route_defaults import effective_router_modules
@@ -32,7 +31,7 @@ class RouterModulesMixin(LifecycleState):
             return None
         return self._effective_router_modules()
 
-    def _build_mount_map(self, installed: "InstalledPackages") -> dict[str, MountBinding]:
+    async def _build_mount_map(self, installed: "InstalledPackages") -> dict[str, MountBinding]:
         """The module → :class:`MountBinding` map for this registration pass.
 
         Built from the manifest's channel/router modules' packaged ``tai-plugin.yml``
@@ -53,14 +52,13 @@ class RouterModulesMixin(LifecycleState):
         for module, kind in kinds.items():
             refuse_incompatible_verdict(module, kind, module_compat(module, installed))
         reserved = access_control_settings().reserved_public_pin_prefixes
-        return build_mount_map(list(kinds), reserved, self._installed_route_mounts)
+        return await build_mount_map(list(kinds), reserved, self._installed_route_mounts)
 
-    def _installed_route_mounts(self) -> dict[str, dict[str, str]]:
+    async def _installed_route_mounts(self) -> dict[str, dict[str, str]]:
         """Every marketplace-install row's ``{ref: {item_name: base}}`` route-mount overrides.
 
         The persisted operator remaps the boot mount-map reproduces. Empty when the
-        skeleton database is not configured (a file-mode deployment has no rows). Read
-        off-loop so a sync/serving caller both resolve it.
+        skeleton database is not configured (a file-mode deployment has no rows).
         """
         from tai42_kit.db import component_store_configured
 
@@ -69,5 +67,5 @@ class RouterModulesMixin(LifecycleState):
 
         if not component_store_configured(SKELETON_COMPONENT):
             return {}
-        records = run_blocking(lambda: MarketplaceInstallStore().list_installed())
+        records = await MarketplaceInstallStore().list_installed()
         return {record.ref: dict(record.route_mounts) for record in records}

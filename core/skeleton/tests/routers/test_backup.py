@@ -20,6 +20,7 @@ from __future__ import annotations
 import base64
 import json
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from starlette.requests import Request
@@ -39,6 +40,9 @@ from tai42_skeleton.template import TemplateNotFoundError
 from .._fakes.bus import FakeBus
 from .._fakes.mcp_listing import no_mcp_listing
 from .._fakes.write_span import ExclusiveWriteStore
+
+# The door's edge settles the writer's exit its change owes; these tests drive the door below it.
+pytestmark = pytest.mark.usefixtures("writer_exit_edge")
 
 # -- request builders --------------------------------------------------------
 
@@ -74,8 +78,9 @@ def _report(*, created: int = 0, updated: int = 0, skipped: int = 0, skipped_exi
     """The section report's wire shape, defaulting every count to zero — the router tests
     assert exact reports, so this keeps them terse and one place to evolve. The platform
     reads the typed counts; ``skipped_existing`` rides the open ``details`` map, and
-    ``fanout``, ``recycle`` and ``span_release_error`` are ``null`` and ``awaiting_respawn`` is
-    empty for a section whose restore broadcasts nothing."""
+    ``fanout``, ``recycle``, ``roll_deferred_to`` and ``span_release_error`` are ``null``,
+    ``awaiting_respawn`` is empty and ``roll_deferred`` is false for a section whose restore
+    broadcasts nothing."""
     return {
         "created": created,
         "updated": updated,
@@ -85,6 +90,8 @@ def _report(*, created: int = 0, updated: int = 0, skipped: int = 0, skipped_exi
         "fanout": None,
         "recycle": None,
         "awaiting_respawn": [],
+        "roll_deferred": False,
+        "roll_deferred_to": None,
         "span_release_error": None,
     }
 
@@ -224,10 +231,10 @@ def _install(monkeypatch, *, registry=None, **facets) -> SimpleNamespace:
     # resolves the admin reload seam off ``tai42_app`` and the worker bus off the app
     # singleton — wire a local-reload admin and a recording bus so a restore runs the
     # real pipeline (validate + reload + broadcast) against the faked config manager.
-    facets.setdefault(
-        "admin",
-        SimpleNamespace(reload_config=lambda: {"status": "ok", "reloaded": True}, served_mcp_names=no_mcp_listing),
-    )
+    async def reload_config() -> dict[str, Any]:
+        return {"status": "ok", "reloaded": True}
+
+    facets.setdefault("admin", SimpleNamespace(reload_config=reload_config, served_mcp_names=no_mcp_listing))
     impl = SimpleNamespace(backup=registry or _registry(), **facets)
     monkeypatch.setattr(tai42_app, "_impl", impl)
     if "sub_app" in facets:
@@ -1135,6 +1142,8 @@ async def test_plugin_section_round_trips_through_both_doors(monkeypatch):
         "fanout": None,
         "recycle": None,
         "awaiting_respawn": [],
+        "roll_deferred": False,
+        "roll_deferred_to": None,
         "span_release_error": None,
     }
     assert store == {"value": "seeded"}

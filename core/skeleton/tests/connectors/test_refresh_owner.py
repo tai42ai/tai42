@@ -21,12 +21,12 @@ from tai42_contract.connectors.models import AuthHealthState, ConnectionGrant, C
 from tai42_kit.settings import reset_all_settings
 
 import tai42_skeleton.connectors.runtime.resolver as resolver_mod
-from tai42_skeleton.app.lifecycle.off_loop import run_blocking
 from tai42_skeleton.connectors.oauth import crypto, discovery
 from tai42_skeleton.connectors.runtime import refresh_owner
 from tai42_skeleton.connectors.runtime.resolver import ConnectorReconnectRequiredError, resolve_managed_auth
 
 from .conftest import CID, CID2, make_discovered_descriptor
+from .credential_path import job_loop
 from .credential_path import owner_loop as serving_stand_in
 from .oauth_fakes import FakeOAuthServer, Reply, serve
 
@@ -209,7 +209,7 @@ async def _the_held_refresh_runs_on(store: _Store, loop: asyncio.AbstractEventLo
     assert store.writes == 1
 
 
-async def test_a_throwaway_loop_caller_leaves_at_its_budget_and_the_refresh_still_completes(
+async def test_a_job_loop_caller_leaves_at_its_budget_and_the_refresh_still_completes(
     wiring: _Wiring, fake: FakeOAuthServer, owner_loop
 ):
     # The refresh's write-back is held until released, so it cannot finish within the caller's budget.
@@ -224,7 +224,8 @@ async def test_a_throwaway_loop_caller_leaves_at_its_budget_and_the_refresh_stil
         return time.monotonic() - started
 
     # The outer bound only stops a caller that never leaves from hanging the test.
-    elapsed = await asyncio.wait_for(asyncio.to_thread(run_blocking, _caller), 10)
+    with job_loop() as job:
+        elapsed = await job.run_awaited(_caller(), 10)
     assert elapsed < 1.0
     await _the_held_refresh_runs_on(store, owner_loop)
 
@@ -484,8 +485,8 @@ async def test_a_blocked_owner_loop_holds_no_caller_past_its_budget(wiring: _Wir
         return await asyncio.wait_for(resolve_managed_auth(CID, "remote", "files"), 0.2)
 
     started = time.monotonic()
-    with pytest.raises(TimeoutError):
-        await asyncio.to_thread(run_blocking, _caller)
+    with job_loop() as job, pytest.raises(TimeoutError):
+        await job.run_awaited(_caller())
     assert time.monotonic() - started < 0.5
     assert fake.requests_to("/a/token") == []
     release.set()

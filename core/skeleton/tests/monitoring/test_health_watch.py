@@ -417,8 +417,11 @@ def test_in_process_family_totals_read_this_process_registry(monkeypatch: pytest
 
 def test_cancelling_a_watch_that_died_completes_the_shutdown(monkeypatch: pytest.MonkeyPatch):
     import asyncio
+    from typing import cast
 
-    from tai42_skeleton.app.lifecycle import TaiMCPLifecycleMixin, lifespan
+    from tai42_skeleton.app.lifecycle import TaiMCPLifecycleMixin
+
+    from .._fakes.bus import FakeBus
 
     class _M(TaiMCPLifecycleMixin):
         def _mcp_tools(self, config, tools, preset_names):  # pragma: no cover - unused here
@@ -428,10 +431,11 @@ def test_cancelling_a_watch_that_died_completes_the_shutdown(monkeypatch: pytest
         raise RuntimeError("watch broke")
 
     monkeypatch.setattr(hw, "run_monitoring_health_watch", dies)
-    monkeypatch.setattr(lifespan, "request_graceful_exit", lambda pid: None)
 
     async def run() -> tuple[str, str] | None:
         m = _M()
+        # A recording bus takes the exit the death requests, so no real SIGTERM is sent.
+        m._bus = cast("Any", FakeBus())
         m._spawn_monitoring_health_watch()
         await asyncio.sleep(0)
         await asyncio.sleep(0)

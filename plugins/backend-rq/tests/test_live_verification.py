@@ -10,48 +10,36 @@ asserts the next job's real ``os.fork()`` child reads the mutated registry. The
 teardown cancels the launch, which is the real warm-drain path: the base requests
 the drain and awaits the work loop's own exit.
 
-Skipped when no Redis is reachable — set ``TAI_TEST_RQ_REDIS``
-(default ``redis://localhost:6379/15``) to run it.
+Skipped when no Redis is reachable (see ``needs_live_redis`` in the conftest).
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
-import os
 import uuid
 from typing import Any, cast
 
-import pytest
 from redis import Redis
 from rq import Queue
 
 from tai42_backend_rq.backend import RqBackend
+
+from .conftest import LIVE_REDIS_URL, needs_live_redis
 
 # The registry a fleet op would mutate in the worker's MAIN process. A work-horse
 # child inherits its value AT FORK, so the value a job observes is the one the
 # main process held when that job's child was forked.
 _APPLIED_REGISTRY = "registry-v0"
 
-_REDIS_URL = os.environ.get("TAI_TEST_RQ_REDIS", "redis://localhost:6379/15")
-
-
-def _redis_reachable(url: str) -> bool:
-    try:
-        Redis.from_url(url).ping()
-    except Exception:
-        return False
-    return True
-
-
-pytestmark = pytest.mark.skipif(not _redis_reachable(_REDIS_URL), reason=f"no Redis reachable at {_REDIS_URL}")
+pytestmark = needs_live_redis
 
 
 def observe_registry(list_key: str) -> str:
     """RQ job body (runs in a forked work-horse): record the registry value this
     child inherited by pushing it onto ``list_key``, using its own post-fork Redis
     connection."""
-    conn = Redis.from_url(_REDIS_URL)
+    conn = Redis.from_url(LIVE_REDIS_URL)
     try:
         conn.rpush(list_key, _APPLIED_REGISTRY)
     finally:
@@ -75,7 +63,7 @@ async def _await_list(conn: Redis, list_key: str, length: int, timeout: float = 
 async def test_next_task_forked_child_sees_a_main_process_apply() -> None:
     global _APPLIED_REGISTRY
 
-    conn = Redis.from_url(_REDIS_URL)
+    conn = Redis.from_url(LIVE_REDIS_URL)
     list_key = f"tai-live-verify:{uuid.uuid4().hex}"
     queue = Queue(connection=conn)
 
@@ -88,7 +76,7 @@ async def test_next_task_forked_child_sees_a_main_process_apply() -> None:
             [
                 "worker",
                 "--redis-url",
-                _REDIS_URL,
+                LIVE_REDIS_URL,
                 "--name",
                 f"live-verify-{uuid.uuid4().hex}",
                 "--loglevel",

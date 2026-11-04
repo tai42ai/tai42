@@ -18,9 +18,9 @@ async def drive_reload() -> dict:
     old = epoch_mod.current_epoch()
     seen: dict[str, object] = {}
 
-    def _body() -> object:
+    async def _body() -> object:
         seen["engaged"] = old.engaged
-        return tai42_app.admin.reload_config()
+        return await tai42_app.admin.reload_config()
 
     start = time.monotonic()
     await reload_gate.run(_body, reimports=False)

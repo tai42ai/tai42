@@ -10,7 +10,6 @@ all exercised against the shipped code, not a stand-in.
 from __future__ import annotations
 
 import asyncio
-import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
@@ -369,15 +368,19 @@ async def test_media_reaper_noop_when_no_provider(monkeypatch: pytest.MonkeyPatc
 async def test_media_reaper_dead_task_marks_readiness(monkeypatch: pytest.MonkeyPatch) -> None:
     # The reaper registers the SAME _on_perpetual_task_done seam as the other perpetual tasks, so a
     # death (here a normal return) marks readiness named by its task and requests a graceful exit.
-    from tai42_skeleton.app.lifecycle import TaiMCPLifecycleMixin, lifespan
+    from typing import Any, cast
+
+    from tai42_skeleton.app.lifecycle import TaiMCPLifecycleMixin
+
+    from .._fakes.bus import FakeBus
 
     class _M(TaiMCPLifecycleMixin):
         def _mcp_tools(self, config, tools, preset_names):  # pragma: no cover - unused here
             self._mcp_bound_tools[config.title] = set()
 
     m = _M()
-    exits: list[int] = []
-    monkeypatch.setattr(lifespan, "request_graceful_exit", exits.append)
+    bus = FakeBus()
+    m._bus = cast("Any", bus)
 
     async def _returns_immediately() -> None:
         return None
@@ -390,4 +393,4 @@ async def test_media_reaper_dead_task_marks_readiness(monkeypatch: pytest.Monkey
     await asyncio.sleep(0)  # let the done-callback run
 
     assert m._dead_perpetual_task == ("tai-media-retention-reaper", "returned")
-    assert exits == [os.getpid()]
+    assert bus.exit_requests == ["perpetual task tai-media-retention-reaper returned"]

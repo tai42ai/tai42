@@ -4127,7 +4127,7 @@
     },
     "ScheduleListRow": {
       "additionalProperties": false,
-      "description": "One row of the schedule listing: no arguments, no kwargs.",
+      "description": "One row of the schedule listing: no arguments, no kwargs.\n\n``next_run_at_ts`` is the next run's POSIX timestamp, ``None`` when the schedule has no next\nrun (``0.0`` is a timestamp like any other). ``next_run_at_iso`` is derived from it, the UTC\nISO-8601 form or ``None``: a row is built without it, and a given value that disagrees with\nthe timestamp is refused.",
       "properties": {
         "cadence": {
           "discriminator": {

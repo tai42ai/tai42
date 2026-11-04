@@ -42,30 +42,43 @@ responder's ``(name, generation)`` and the echoed ``op_id``. ``_collect`` keys t
 expected set on ``(name, generation)`` and DISCARDS a reply whose generation or
 op_id does not match — a worker that lost its slot but has not yet discovered it (up
 to one heartbeat of detection lag) can still reply under its stale life; the
-generation gate drops exactly those. The census is a scan of the per-name presence
-keys. Two wire messages come back from a subscriber per op: a ``received`` ack the
-instant the op is delivered and exactly one terminal ``applied``/``failed`` once the
-op has fully applied. ``timed_out`` and ``departed`` are never wire replies — the
-publisher computes them from the presence census at the report cut.
+generation gate drops exactly those. The census reads the presence index
+(``SMEMBERS``), then ``GET`` and ``PTTL`` on each member's presence key. Two wire
+messages come back from a subscriber per op: a ``received`` ack the instant the op is
+delivered and exactly one terminal ``applied``/``failed`` once the op has fully
+applied. ``missing``, ``timed_out`` and ``departed`` are never wire
+replies — the publisher computes them from the bus's record of each life. While it
+collects, it re-reads each unanswered worker's slot claim and generation counter once
+per heartbeat interval; a life whose claim is gone, or whose slot a greater generation
+holds, can never answer, so it is reported ``departed`` then and no longer awaited. A
+worker still holding its claim is awaited to the apply deadline, the report cut, where
+``missing`` / ``timed_out`` are assigned.
 
 That census is taken inside :meth:`WorkerBus.publish`, which for most callers is
 AFTER their own local apply — so a publisher that must not lose a worker to a
 presence TTL fading across a slow apply hands :meth:`WorkerBus.publish` its own
-op-start census as ``expected_at_start``, and those names stay expected here.
+op-start census as ``expected_at_start``, and those names stay expected here. A named
+target the census does not see, and that no op-start census carries, is expected at the
+last generation its slot minted, so every expected worker is a known life.
 
 Presence lifecycle
 ------------------
 Presence is written under ``{ns}:v{major}:bus:presence:{name}`` (the namespace and the
 running skeleton major, :attr:`BusSettings.key_root`) with a value carrying
 ``{kind, pid, generation, joined_at, beat_at, state, deployment_keys, env_readers,
-last_op?}`` and refreshed at ``ttl/3``. Workers of another skeleton major write under
-their own root, so the census never reads their rows. It is NOT force-deleted on a
-reconnect: the TTL carries the row across a blip so a reader can tell "same worker,
-still here on TTL" from "new life". A transport-error or lost-slot exit leaves the
-keys to their TTL; only a deliberate stop deletes the presence row, and only after
-the compare-token claim release succeeds (an absent/foreign claim means the slot
-already belongs to a new holder, whose row must not be deleted). The row's ``state`` is ``resyncing`` before the boot
-resync, ``ready`` after, and ``recycling`` before a graceful self-exit.
+drain_seconds, last_op?}`` and refreshed at ``ttl/3``. Workers of another skeleton
+major write under their own root, so the census never reads their rows. The row is the
+record of one process life (:mod:`~tai42_skeleton.app.bus.life`) and lives as long as
+that life. It is NOT force-deleted on a reconnect: the TTL carries the row across a blip
+so a reader can tell "same worker, still here on TTL" from "new life". A transport-error
+or lost-slot exit leaves the keys to their TTL. A stop keeps the row through its shutdown
+handlers; then, before the resources are torn down, :meth:`WorkerBus.leave_census`
+deletes the row, only after the compare-token claim release succeeds (an absent/foreign
+claim means the slot already belongs to a new holder, whose row must not be deleted).
+The row's ``state`` is
+``resyncing`` before the boot resync, ``ready`` after, and ``recycling``, with the drain
+the process announced, from its departure decision or the start of its stop until the
+life ends.
 
 Fork safety
 -----------
@@ -86,6 +99,7 @@ from __future__ import annotations
 # pooled connection every mixin opens.
 from tai42_kit.clients import client_ctx
 
+from tai42_skeleton.app.bus.exit_latch import ExitHold, ExitRefusal
 from tai42_skeleton.app.bus.models import (
     TRANSPORT_ERRORS,
     FleetResult,
@@ -111,6 +125,8 @@ WorkerBus.__module__ = __name__
 
 __all__ = [
     "TRANSPORT_ERRORS",
+    "ExitHold",
+    "ExitRefusal",
     "FleetResult",
     "LastOp",
     "LocalApplyResult",

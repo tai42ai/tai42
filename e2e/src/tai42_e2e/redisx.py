@@ -145,7 +145,7 @@ class RedisAdmin:
         return cast(list[str], self._probe.lrange(f"e2e:rec:{key}", 0, -1))
 
     def release(self, key: str) -> None:
-        """Release an ``e2e_hold_until_released`` probe held on ``key`` (logical DB 0)."""
+        """Release an ``e2e_hold_until_released`` or ``e2e_drain_hold`` probe held on ``key`` (logical DB 0)."""
         self._probe.rpush(f"e2e:rel:{key}", "1")
 
     def open_gate(self, key: str) -> None:

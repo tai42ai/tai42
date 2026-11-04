@@ -207,7 +207,7 @@ def test_an_embedded_beat_reports_into_its_own_file_which_the_worker_reads(
 
     state.should_stop = 0
     _until(lambda: not worker.beat.is_alive(), "the embedded beat ending with its worker")
-    embedded_beat.release()
+    embedded_beat.release(app)
     assert not beat_path.exists()
 
 
@@ -242,7 +242,7 @@ def test_a_second_beat_waiting_on_the_lock_keeps_its_file_fresh(monkeypatch, run
 
         state.should_stop = 0
         _until(lambda: not worker.beat.is_alive(), "the embedded beat ending with its worker")
-        embedded_beat.release()
+        embedded_beat.release(app)
     finally:
         client.delete(lock_key)
         client.close()
@@ -301,6 +301,6 @@ def test_a_worker_stopped_before_its_consumer_starts_reaps_its_embedded_beat_and
     _until(
         lambda: not any(thread.name == "live-seam-worker" for thread in threading.enumerate()), "the worker stopping"
     )
-    embedded_beat.release()
+    embedded_beat.release(app)
 
     assert not beat_path.exists(), check_liveness(beat_path, _GRACE).describe()

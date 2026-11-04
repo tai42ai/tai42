@@ -60,7 +60,13 @@ from tai42_skeleton.config.recycle_policy import X_CLASSIFIED_DEPLOYMENT_BARE_RE
 from tai42_skeleton.config.service import ConfigService
 
 from .._helpers import recapture_deployment_env
-from .fake_pipeline import ComboChecks, FakeConfigStore, FakeReloadAdmin, RecordingBus, _oauth_descriptor
+from .fake_pipeline import (
+    ComboChecks,
+    FakeConfigStore,
+    FakeReloadAdmin,
+    RecordingBus,
+    _oauth_descriptor,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -117,12 +123,12 @@ async def test_apply_env_change_refuses_x_band_key(monkeypatch: pytest.MonkeyPat
 
 
 @pytest.mark.parametrize("x_key", _X_KEYS)
-def test_validate_replace_refuses_x_band_key(x_key: str) -> None:
+async def test_validate_replace_refuses_x_band_key(x_key: str) -> None:
     store = FakeConfigStore(manifest={}, env={"EXISTING": "1"})
     service, _admin, _bus = _service(store)
 
     with pytest.raises(ValueError, match=x_key):
-        service._validate_replace({x_key: "carried-value"}, DeploymentOwnership())
+        await service.validate_profile_env({x_key: "carried-value"}, DeploymentOwnership())
 
 
 def test_refuse_x_band_names_every_offender() -> None:
@@ -138,12 +144,12 @@ def test_refuse_x_band_allows_a_plain_payload() -> None:
     refuse_x_band(["OK_KEY", "ANOTHER"])  # no raise
 
 
-def test_validate_replace_allows_a_plain_profile_env() -> None:
+async def test_validate_replace_allows_a_plain_profile_env() -> None:
     # A profile carrying only ordinary keys (no X band, no manifest markers) and no
     # backend registered passes without a bus configured.
     store = FakeConfigStore(manifest={}, env={"OLD": "1"})
     service, _admin, _bus = _service(store)
-    service._validate_replace({"NEW_KEY": "v"}, DeploymentOwnership())  # no raise
+    await service.validate_profile_env({"NEW_KEY": "v"}, DeploymentOwnership())  # no raise
 
 
 # ---------------------------------------------------------------------------
@@ -213,22 +219,22 @@ async def test_apply_env_change_allows_unchanged_key_material_carry(
 
 
 @pytest.mark.parametrize("km_key", _KEY_MATERIAL_KEYS)
-def test_validate_replace_refuses_changed_key_material_key(km_key: str) -> None:
+async def test_validate_replace_refuses_changed_key_material_key(km_key: str) -> None:
     store = FakeConfigStore(manifest={}, env={km_key: "old-kek", "EXISTING": "1"})
     service, _admin, _bus = _service(store)
 
     with pytest.raises(ValueError, match=km_key):
-        service._validate_replace({km_key: "rotated-value", "EXISTING": "1"}, DeploymentOwnership())
+        await service.validate_profile_env({km_key: "rotated-value", "EXISTING": "1"}, DeploymentOwnership())
 
 
 @pytest.mark.parametrize("km_key", _KEY_MATERIAL_KEYS)
-def test_validate_replace_allows_unchanged_key_material_carry(km_key: str) -> None:
+async def test_validate_replace_allows_unchanged_key_material_carry(km_key: str) -> None:
     # A profile snapshotted from the stored env carries the KEK unchanged (studio
     # ``config-profiles.spec.ts:147``) — allowed.
     store = FakeConfigStore(manifest={}, env={km_key: "provisioned", "EXISTING": "1"})
     service, _admin, _bus = _service(store)
 
-    service._validate_replace({km_key: "provisioned", "EXISTING": "1"}, DeploymentOwnership())  # no raise
+    await service.validate_profile_env({km_key: "provisioned", "EXISTING": "1"}, DeploymentOwnership())  # no raise
 
 
 def test_refuse_key_material_names_offenders_and_the_rotation_path() -> None:
@@ -305,21 +311,21 @@ async def test_apply_env_change_refuses_half_set_admin_pair(monkeypatch: pytest.
     assert bus.publish_calls == []
 
 
-def test_validate_replace_refuses_half_set_admin_pair() -> None:
+async def test_validate_replace_refuses_half_set_admin_pair() -> None:
     # Wired into the profile-apply validate entry: a profile carrying only the admin USER
     # (no PASSWORD) is refused, naming the incomplete pair.
     store = FakeConfigStore(manifest={}, env={"EXISTING": "1"})
     service, _admin, _bus = _service(store)
 
     with pytest.raises(ValueError, match="TAI_DATABASE_DEFAULT_PG_ADMIN_PASSWORD"):
-        service._validate_replace({"TAI_DATABASE_DEFAULT_PG_ADMIN_USER": "migrator"}, DeploymentOwnership())
+        await service.validate_profile_env({"TAI_DATABASE_DEFAULT_PG_ADMIN_USER": "migrator"}, DeploymentOwnership())
 
 
-def test_validate_replace_allows_complete_admin_pair() -> None:
+async def test_validate_replace_allows_complete_admin_pair() -> None:
     store = FakeConfigStore(manifest={}, env={"EXISTING": "1"})
     service, _admin, _bus = _service(store)
 
-    service._validate_replace(
+    await service.validate_profile_env(
         {"TAI_DATABASE_DEFAULT_PG_ADMIN_USER": "m", "TAI_DATABASE_DEFAULT_PG_ADMIN_PASSWORD": "pw"},
         DeploymentOwnership(),
     )  # no raise
@@ -510,7 +516,7 @@ def test_refuse_unresolved_env_resolves_connectors_against_the_wider_connector_e
 # ---------------------------------------------------------------------------
 
 
-def test_validate_replace_allows_omitting_a_connector_cred_live_in_process_env(
+async def test_validate_replace_allows_omitting_a_connector_cred_live_in_process_env(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # An oauth connector's client-credential env is deployment-supplied: it is live in the
@@ -526,10 +532,10 @@ def test_validate_replace_allows_omitting_a_connector_cred_live_in_process_env(
     )
     service, _admin, _bus = _service(store)
 
-    service._validate_replace({"APP_FLAG": "v"}, DeploymentOwnership())  # no raise
+    await service.validate_profile_env({"APP_FLAG": "v"}, DeploymentOwnership())  # no raise
 
 
-def test_validate_replace_refuses_a_connector_cred_unset_in_every_source(
+async def test_validate_replace_refuses_a_connector_cred_unset_in_every_source(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # The guard is not defanged: with the client secret absent from the process env, the stored
@@ -544,7 +550,7 @@ def test_validate_replace_refuses_a_connector_cred_unset_in_every_source(
     service, _admin, _bus = _service(store)
 
     with pytest.raises(ValueError, match="ACME_CLIENT_SECRET") as exc:
-        service._validate_replace({"APP_FLAG": "v"}, DeploymentOwnership())
+        await service.validate_profile_env({"APP_FLAG": "v"}, DeploymentOwnership())
     message = str(exc.value)
     assert "/connectors/0/client_secret_env" in message
     # The set credential is not named.
@@ -577,7 +583,7 @@ async def test_apply_env_change_dropping_a_referenced_key_is_refused(monkeypatch
     assert bus.publish_calls == []
 
 
-def test_validate_replace_dropping_a_referenced_key_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_validate_replace_dropping_a_referenced_key_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("SECRET_TOKEN", raising=False)
     # A profile that omits SECRET_TOKEN (replace DELETES omitted keys) leaves the
     # manifest marker dangling — refused.
@@ -588,7 +594,7 @@ def test_validate_replace_dropping_a_referenced_key_is_refused(monkeypatch: pyte
     service, _admin, _bus = _service(store)
 
     with pytest.raises(ValueError, match="SECRET_TOKEN"):
-        service._validate_replace({"OTHER": "v"}, DeploymentOwnership())
+        await service.validate_profile_env({"OTHER": "v"}, DeploymentOwnership())
 
 
 # ---------------------------------------------------------------------------
@@ -658,15 +664,21 @@ async def test_backup_import_setting_a_key_the_deployment_sets_is_refused(monkey
 
 def test_removing_or_carrying_a_dead_copy_is_not_a_change(monkeypatch: pytest.MonkeyPatch) -> None:
     # The deployment sets the bus URL and a recycle-class key; their stored copies never count, so
-    # dropping one and carrying the other is no hot key, no recycle key and no bus-key refusal.
+    # dropping one and carrying the other is no hot key and no bus-key refusal.
     monkeypatch.setenv("TAI_BUS_REDIS_URL", "redis://deployment.invalid/0")
     monkeypatch.setenv("TAI_BUS_NAMESPACE", "from-deployment")
     recapture_deployment_env()
     stored = {"TAI_BUS_REDIS_URL": "redis://stale.invalid/0", "TAI_BUS_NAMESPACE": "stale"}
 
-    assert refuse_unrecyclable_env_change(
-        stored, {"TAI_BUS_NAMESPACE": "stale"}, DeploymentOwnership(), change="this change"
-    ) == ([], [])
-    assert refuse_unrecyclable_env_change(
-        stored, {"TAI_BUS_REDIS_URL": "redis://stale.invalid/0"}, DeploymentOwnership(), change="this change"
-    ) == ([], [])
+    assert (
+        refuse_unrecyclable_env_change(
+            stored, {"TAI_BUS_NAMESPACE": "stale"}, DeploymentOwnership(), change="this change"
+        )
+        == []
+    )
+    assert (
+        refuse_unrecyclable_env_change(
+            stored, {"TAI_BUS_REDIS_URL": "redis://stale.invalid/0"}, DeploymentOwnership(), change="this change"
+        )
+        == []
+    )

@@ -1157,7 +1157,7 @@ async def test_a_waiter_cancelled_on_the_span_keeps_the_next_writer_of_its_proce
     @asynccontextmanager
     async def write_exclusion() -> AsyncIterator[None]:
         async with (
-            hold_recorded(queue, GateParty(request=None, task=None, task_epoch=None)) as party,
+            hold_recorded(queue, GateParty(admission=None, task=None, task_epoch=None)) as party,
             hold_recorded_blocking(mgr.exclusive_write(), party),
         ):
             yield

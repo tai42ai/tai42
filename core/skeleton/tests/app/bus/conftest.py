@@ -2,8 +2,8 @@
 
 The bus is exercised over a real Redis pub/sub model — a shared ``fakeredis``
 ``FakeServer`` behind the bus's ``client_ctx`` seam. ``fakeredis`` genuinely models
-pub/sub delivery, key TTL expiry (so missing-vs-departed is decided by a real
-presence-key expiry, not a stub), the compare-token ``EVAL`` claim scripts, and
+pub/sub delivery, key TTL expiry, the compare-token ``EVAL`` claim scripts (so
+missing-vs-departed is decided by a real slot claim and generation counter, not a stub), and
 connection drops (``server.connected = False`` raises the same ``ConnectionError``
 the real client does), so the reconnect, claim, and departed paths are driven, not
 mocked away.
@@ -16,7 +16,7 @@ import contextlib
 import itertools
 import json
 import os
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -28,7 +28,7 @@ from tai42_contract.errors import ClientDisconnectedError
 
 import tai42_skeleton.app.bus as bus_module
 from tai42_skeleton.app.bus import WorkerBus, WorkerIdentity, WorkerKind, WorkerState
-from tai42_skeleton.app.bus.subscribe import OpApplier
+from tai42_skeleton.app.bus.subscribe import OpApplier, OpFailurePayload
 from tai42_skeleton.app.bus_settings import BusRedisSettings, BusSettings
 from tai42_skeleton.config.deployment_env import published_env_readers
 
@@ -86,7 +86,6 @@ def make_settings(namespace: str = "tai", **over: float) -> BusSettings:
     return BusSettings(
         redis=BusRedisSettings(redis_url="redis://fake"),
         namespace=namespace,
-        ack_timeout=over.get("ack_timeout", 0.05),
         apply_timeout=over.get("apply_timeout", 0.3),
         heartbeat_ttl=over.get("heartbeat_ttl", 0.5),
     )
@@ -95,10 +94,14 @@ def make_settings(namespace: str = "tai", **over: float) -> BusSettings:
 _pub_counter = itertools.count(1)
 
 
-def make_bus(namespace: str = "tai", kind: WorkerKind = WorkerKind.serve, **over: float) -> WorkerBus:
+def make_bus(
+    namespace: str = "tai", kind: WorkerKind = WorkerKind.serve, *, drain: float | None = None, **over: float
+) -> WorkerBus:
+    """A test bus whose process declared ``drain`` as its exit drain (none by default)."""
     bus = WorkerBus(
         make_settings(namespace, **over),
         kind=kind,
+        exit_drain=lambda: drain,
         reconnect_backoff_initial=0.02,
         reconnect_backoff_max=0.05,
     )
@@ -110,9 +113,29 @@ def make_bus(namespace: str = "tai", kind: WorkerKind = WorkerKind.serve, **over
     return bus
 
 
+# The bus each subscriber task :func:`_start` spawned runs, so :func:`_stop` ends that bus's
+# census life after its subscription, as the process's stop does.
+_SUBSCRIBED: dict[asyncio.Task[None], WorkerBus] = {}
+
+
+def _start(
+    bus: WorkerBus,
+    callback: OpApplier,
+    on_ready: Callable[[], Awaitable[None]] | None = None,
+    *,
+    failure_payload: OpFailurePayload | None = None,
+) -> asyncio.Task[None]:
+    """Start ``bus``'s subscription as a task :func:`_stop` stops the way the process's stop does."""
+    task = asyncio.create_task(bus.subscribe(callback, on_ready, failure_payload=failure_payload))
+    _SUBSCRIBED[task] = bus
+    return task
+
+
 async def _spawn_subscriber(
     bus: WorkerBus,
     callback: OpApplier,
+    *,
+    failure_payload: OpFailurePayload | None = None,
 ) -> tuple[asyncio.Task[None], WorkerIdentity]:
     """Start a subscriber and wait until it is counted READY in the census (slot
     claimed, self-resync fired, presence written ready), so a subsequent whole-fleet
@@ -122,7 +145,7 @@ async def _spawn_subscriber(
     async def on_ready() -> None:
         ready.set()
 
-    task = asyncio.create_task(bus.subscribe(callback, on_ready))
+    task = _start(bus, callback, on_ready, failure_payload=failure_payload)
     await asyncio.wait_for(ready.wait(), timeout=2.0)
 
     async def _counted() -> bool:
@@ -135,11 +158,19 @@ async def _spawn_subscriber(
 
 
 async def _stop(*tasks: asyncio.Task[None]) -> None:
+    """Stop each worker as its process's stop does: cancel the subscription, then end the census life.
+
+    A task :func:`_start` did not start has no bus on record, so only its cancel runs.
+    """
     for task in tasks:
         task.cancel()
     for task in tasks:
         with contextlib.suppress(asyncio.CancelledError):
             await task
+    for task in tasks:
+        bus = _SUBSCRIBED.pop(task, None)
+        if bus is not None:
+            await bus.leave_census()
 
 
 async def _until(pred: Callable[[], bool]) -> None:
@@ -156,7 +187,11 @@ async def _register_bare_presence(
     state: WorkerState = WorkerState.ready,
 ) -> None:
     """Write a presence key with no live subscriber behind it (models a worker that
-    is counted by the census but will not reply)."""
+    is counted by the census but will not reply).
+
+    The life behind the row holds its slot claim, with the row's TTL, at generation 1, as a
+    live worker's claim does; :func:`_end_life` ends it.
+    """
     client: Any = aioredis.FakeRedis(server=server, decode_responses=True)
     now = "2026-01-01T00:00:00+00:00"
     value = json.dumps(
@@ -169,12 +204,12 @@ async def _register_bare_presence(
             "state": state.value,
             "deployment_keys": [],
             "env_readers": published_env_readers().digest,
+            "drain_seconds": None,
         }
     )
-    if ttl_ms is None:
-        await client.set(settings.presence_key(name), value)
-    else:
-        await client.set(settings.presence_key(name), value, px=ttl_ms)
+    await client.set(settings.slot_key(name), f"claim-of-{name}", px=ttl_ms)
+    await client.set(settings.gen_key(name), 1)
+    await client.set(settings.presence_key(name), value, px=ttl_ms)
     # The census reads names from the presence index, so a bare presence key is only
     # counted once its name is a member — exactly as a live subscriber's atomic write registers it.
     await client.sadd(settings.presence_index, name)
@@ -182,10 +217,18 @@ async def _register_bare_presence(
 
 
 async def _drop_presence(server: fakeredis.FakeServer, settings: BusSettings, name: str) -> None:
-    """Delete a presence key out from under the census — the TTL fading (or a deliberate
-    stop) during the publisher's local apply, as publish's own census would see it."""
+    """Delete a presence key out from under the census, leaving its slot claim — the row's TTL
+    fading during the publisher's local apply, as publish's own census would see it."""
     client = KitFakeRedis(server=server, decode_responses=True)
     await client.delete(settings.presence_key(name))
+    await client.aclose()
+
+
+async def _end_life(server: fakeredis.FakeServer, settings: BusSettings, name: str) -> None:
+    """End the life :func:`_register_bare_presence` wrote, as a stop does: release its claim, delete its row."""
+    client: Any = aioredis.FakeRedis(server=server, decode_responses=True)
+    await client.delete(settings.slot_key(name), settings.presence_key(name))
+    await client.srem(settings.presence_index, name)
     await client.aclose()
 
 

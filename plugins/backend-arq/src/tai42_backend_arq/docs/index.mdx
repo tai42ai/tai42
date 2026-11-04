@@ -91,6 +91,20 @@ job that arrives while a reload is pending starts after it, waiting up to 120s
 without holding up the loop. A job waiting on a config reload's lock does not
 hold that reload up.
 
+Code a job runs may still fork: a tool that starts a `multiprocessing` child, or
+a `subprocess` with a `preexec_fn`. The worker installs the kit's fork guard
+(an `os.register_at_fork` hook) at its build, as the other backends' workers do,
+so every child forked that way resets the fork-gate state it inherited and shuts
+down the monitoring writer it inherited (the vendor client's background threads
+do not survive `fork()`), then rebuilds a clean client lazily. A fork from inside
+a job nests in that job's span. A fork on another thread outside any job waits
+for a running re-import to finish, up to 120s, and reports no progress while it
+waits: the worker's poll loop runs on the event loop, which that wait does not
+hold up, so the liveness file tracks the loop's own passes alone. A fork on the
+loop's own thread never waits, since waiting would block the loop. A
+`subprocess` started without a `preexec_fn` runs no fork hooks and no Python
+before it execs, so nothing applies to it.
+
 ## Send a task to a chosen worker
 
 The `sync_task` and `async_task` branches take an optional `queue` argument, a
@@ -124,8 +138,15 @@ Everything around the arq worker is the shared backend lifecycle every backend
 gets, not this plugin's own: the launch waits for the app's boot self-resync
 before the worker consumes (a worker running against a half-built tool registry
 would fail its jobs permanently), the first SIGTERM or SIGINT asks arq for a
-warm drain, a repeated one escalates to a cold stop, and the drain is awaited to
-completion before the process tears down.
+warm drain, a repeated one escalates to a cold stop, and the drain is awaited
+before the process tears down for at most the backend's drain bound,
+`ARQ_JOB_COMPLETION_WAIT` plus a 30 s grace. A drain that overruns the bound is
+logged at ERROR and the wait abandoned, so teardown still runs. A worker leaving
+gracefully announces that bound plus the app's own shutdown bounds, which run
+after the drain, on its census row (`drain_seconds`, with `state: recycling`),
+and a fleet restart waits that long, plus the start-and-rejoin step, for the
+worker to go and its replacement to join. The deployment's termination grace
+must be at least that sum, or the supervisor's kill lands first.
 
 arq is deliberately built with its own signal handlers disabled. The host owns
 the process's signal disposition and composes every subscriber onto one handler
@@ -133,16 +154,32 @@ per signal; arq's install would replace that outright and take the server's
 teardown with it, which is what makes a recycle drain cleanly instead of
 severing in-flight jobs.
 
+A settings change that restarts the fleet (a profile apply, an env write, a
+config reload) run as a job on this backend — a `sync_task` or `async_task`
+branch, a schedule, a callback — runs under the job's budget, which cannot wait
+out the restart's drains, nor the wait the restart of the `tai backend worker`
+that ran the job takes for that worker's other changes in flight. So the change
+hands the restart to that worker, even when it is the only one to restart, and
+answers at once with `roll_deferred: true`, `roll_deferred_to` naming that
+worker, and no restart rows. The worker carries the restart out on its own, outside the job's budget,
+and, when it needs its own restart, restarts itself last; the outcome is in its
+log. A hand-off that fails fails the change loudly, naming the worker; the change
+is saved and reloaded. When the worker refused the restart (it failed to take it,
+or it is already leaving), the restart did not start; when its answer is not
+known (the bus unreachable, no answer came), whether it started is unknown, and
+the worker's log and the fleet census tell. A `sync_task` caller's wait on
+the job's result is recorded as fleet work, so a reload of the `tai serve`
+worker it waits in does not cut it.
+
 ## Schedule recovery
 
 On startup a watchdog restarts enabled schedules whose pending job was lost,
 never found, or completed without rescheduling. A schedule it cannot recover
 (its record throws every tick) is recorded as an operator-visible error state
 rather than only logged: its `backend_list_schedules` row carries `error`
-(`message`, the failure detail, and `at_iso`, an ISO-8601 timestamp), and
-`backend_get_schedule` carries `recovery_error` and `recovery_failed_at`. They are
-null on a healthy schedule and are cleared on any later tick that finds the schedule
-healthy or restarts it.
+(`message`, the failure detail, and `at_iso`, an ISO-8601 timestamp), and so does
+`backend_get_schedule`. It is null on a healthy schedule and is cleared on any later
+tick that finds the schedule healthy or restarts it.
 
 ## Quirks
 
@@ -151,7 +188,9 @@ healthy or restarts it.
 - A tool with its own `queue` parameter cannot take a `sync_task` or
   `async_task` branch.
 - A job does not wait for another job: it chains the next one with
-  `callback_kwargs`. `sync_task` and `backend_task_result` (given a `timeout`)
+  `callback_kwargs`, which runs only when the job succeeds (a callback job that
+  finds its predecessor failed or unfinished raises). `sync_task` and
+  `backend_task_result` (given a `timeout`)
   are for callers outside a job and raise `RuntimeError` inside one.
 - `ARQ_MANIFEST_KEY`, `ARQ_TASK_TIMEOUT`, and `ARQ_TOOL_NAME_ARG` mirror the
   host's own `BACKEND_` group. Change them in lockstep or the worker and the
@@ -160,6 +199,13 @@ healthy or restarts it.
   rather than in place.
 - arq cannot honour a relative interval: a schedule with `relative: true` is
   refused on create, update and import.
+- arq keeps no per-worker record: `backend_ping_worker`, `backend_list_active_workers`,
+  `backend_registered_tasks`, `backend_worker_stats` and `backend_worker_queues` raise
+  `UnsupportedBackendTool`, and so does a `worker_name`.
+- arq's abort stops a running job: `backend_cancel_task(terminate=True)` does so;
+  `backend_cancel_task` without `terminate` keeps a job that has not started from running
+  and refuses a running job with `UnsupportedBackendTool`, because arq cannot cancel a
+  running job without stopping it.
 - The schedule store holds the typed cadence; a hash in an earlier format raises
   `ScheduleStoreFormatError` on list, export, get and update until the keys matching
   `ArqSettings.arq_schedule_pattern` are deleted and the schedules re-created.

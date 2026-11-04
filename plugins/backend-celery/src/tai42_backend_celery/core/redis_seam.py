@@ -59,7 +59,10 @@ from tai42_kit.clients.impl.redis_connections import KitSyncConnectionPool, kit_
 
 from tai42_backend_celery.core.settings import celery_settings
 
-# The import path celery's backend aliases resolve for a Redis result backend URL.
+# The import path celery's backend aliases resolve for a Redis result backend URL. celery's loader
+# takes the alias as an import path only, and resolves it in each thread that first uses the result
+# backend: after a config reload's re-import that is the re-imported class, which keeps no state of
+# its own (it reads its connection settings from the environment), so it behaves as the built one.
 KIT_REDIS_BACKEND = "tai42_backend_celery.core.redis_seam:KitRedisBackend"
 
 # The env name the result backend's retry WARNINGs carry: the URL setting celery reads

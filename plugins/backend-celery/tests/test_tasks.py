@@ -1,19 +1,27 @@
-"""Task plumbing: the per-task loop, the stream-capture guard, and run_tool."""
+"""Task plumbing: the per-task loops, the stream-capture guard, and run_tool."""
 
 from __future__ import annotations
 
 import asyncio
+import inspect
 import sys
 from typing import Any
 
 import pytest
 from tai42_contract.access_control import caller_may_read_secrets
-from tai42_contract.backend import SCHEDULE_CADENCE_KEY, SCHEDULE_NAME_KEY
 from tai42_contract.template import TemplatedText
-from tai42_kit.utils.detached_util import in_detached_run
+from tai42_kit.backend import SharedLoop
 
 from tai42_backend_celery.core import tasks as tasks_module
-from tai42_backend_celery.core.tasks import AsyncTask, prevent_celery_stream_capture, run_tool, tool_execution
+from tai42_backend_celery.core.app import celery_app
+from tai42_backend_celery.core.task_loops import PrivateLoops
+from tai42_backend_celery.core.tasks import (
+    AsyncTask,
+    callback_task,
+    prevent_celery_stream_capture,
+    run_tool,
+    tool_execution,
+)
 
 
 def test_prevent_stream_capture_restores_real_fds_then_proxies() -> None:
@@ -33,75 +41,135 @@ def test_prevent_stream_capture_restores_real_fds_then_proxies() -> None:
         sys.stdout, sys.stderr = old_out, old_err
 
 
-def test_a_free_loop_serves_the_next_job_and_close_shuts_it_down(stub_app) -> None:
+def test_close_loop_without_loop_is_a_noop(loop_releases) -> None:
     task = AsyncTask()
-    with task.loops.take() as first:
-        pass
-    with task.loops.take() as second:
-        assert asyncio.get_event_loop() is second
-    assert second is first
-
     task.close_loop()
-
-    assert first.is_closed()
-    assert stub_app.clients.shutdown_calls == 1
-    with task.loops.take() as rebuilt:
-        assert rebuilt is not first
-        assert not rebuilt.is_closed()
-    task.close_loop()
+    assert loop_releases.calls == 0
 
 
-def test_jobs_at_once_each_hold_a_loop_of_their_own(stub_app) -> None:
+def test_with_no_pool_watched_a_task_runs_its_jobs_on_private_loops(stub_app) -> None:
     task = AsyncTask()
-    with task.loops.take() as first, task.loops.take() as second:
-        assert second is not first
-    with task.loops.take() as third:
-        assert third in (first, second)
 
-    assert task.loops.count == 2
-    task.close_loop()
-    assert first.is_closed()
-    assert second.is_closed()
-    assert stub_app.clients.shutdown_calls == 2
+    assert isinstance(task.loops, PrivateLoops)
 
 
-def test_a_closed_free_loop_is_replaced(stub_app) -> None:
+def _watch_a_green_pool() -> None:
+    from tai42_backend_celery.core import job_slots
+
+    job_slots.watch(
+        celery_app, pool_name="gevent", in_process=True, green=True, budget=300.0, ticks_in_job=False, tick=lambda: None
+    )
+
+
+def test_on_a_pool_that_runs_a_job_per_os_thread_a_task_runs_its_jobs_on_private_loops(
+    stub_app, host_loop: asyncio.AbstractEventLoop
+) -> None:
+    from tai42_backend_celery.core import job_slots
+
+    job_slots.watch(
+        celery_app,
+        pool_name="threads",
+        in_process=True,
+        green=False,
+        budget=300.0,
+        ticks_in_job=False,
+        tick=lambda: None,
+    )
+    AsyncTask.share_loop(celery_app, host_loop)
     task = AsyncTask()
-    with task.loops.take() as first:
-        pass
-    first.close()
 
-    with task.loops.take() as replaced:
-        assert replaced is not first
-        assert not replaced.is_closed()
-
-    assert task.loops.count == 1
-    task.close_loop()
-
-
-def test_close_closes_every_loop_and_raises_each_failed_shutdown(stub_app, monkeypatch: pytest.MonkeyPatch) -> None:
-    async def _fail() -> None:
-        stub_app.clients.shutdown_calls += 1
-        raise RuntimeError("pool close failed")
-
-    task = AsyncTask()
-    with task.loops.take() as first, task.loops.take() as second:
-        pass
-    monkeypatch.setattr(stub_app.clients, "shutdown_clients", _fail)
-
-    with pytest.raises(ExceptionGroup) as raised:
+    try:
+        assert isinstance(task.loops, PrivateLoops)
+    finally:
         task.close_loop()
 
-    assert [str(failure) for failure in raised.value.exceptions] == ["pool close failed", "pool close failed"]
-    assert first.is_closed()
-    assert second.is_closed()
-    assert task.loops.count == 0
+
+def test_on_a_green_pool_a_task_runs_its_jobs_on_the_loop_handed_to_them(
+    stub_app, host_loop: asyncio.AbstractEventLoop
+) -> None:
+    _watch_a_green_pool()
+    AsyncTask.share_loop(celery_app, host_loop)
+
+    assert isinstance(AsyncTask().loops, SharedLoop)
 
 
-def test_close_loop_without_loop_is_a_noop(stub_app) -> None:
+def test_on_a_green_pool_with_no_loop_handed_a_task_s_jobs_are_refused(stub_app) -> None:
+    _watch_a_green_pool()
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"^a green pool's jobs run on the host's event loop, and none was handed to them; the launch hands it "
+        r"with AsyncTask\.share_loop before the worker starts$",
+    ):
+        _ = tool_execution.loops
+
+
+def test_on_a_green_pool_every_task_s_jobs_run_on_the_host_s_loop(
+    stub_app, host_loop: asyncio.AbstractEventLoop
+) -> None:
+    _watch_a_green_pool()
+    AsyncTask.share_loop(celery_app, host_loop)
+
+    async def _on_the_host_s_loop() -> bool:
+        return asyncio.get_running_loop() is host_loop
+
+    assert [task.run_async(_on_the_host_s_loop()) for task in (tool_execution, callback_task)] == [True, True]
+
+
+def test_letting_the_shared_loop_go_refuses_every_task_s_later_job_and_leaves_the_host_s_loop_and_clients(
+    loop_releases, host_loop: asyncio.AbstractEventLoop
+) -> None:
+    _watch_a_green_pool()
+    AsyncTask.share_loop(celery_app, host_loop)
+    assert tool_execution.run_async(asyncio.sleep(0, result=1)) == 1
+
+    AsyncTask.close_shared_loop(celery_app)
+    AsyncTask.close_shared_loop(celery_app)
+
+    for task in (tool_execution, callback_task):
+        with pytest.raises(RuntimeError, match=r"^the jobs' shared event loop was let go; it runs no further job$"):
+            task.run_async(asyncio.sleep(0, result=1))
+    assert asyncio.run_coroutine_threadsafe(asyncio.sleep(0, result=2), host_loop).result(5) == 2
+    assert loop_releases.calls == 0
+
+
+@pytest.mark.parametrize("handed", ["no loop", "a loop let go"])
+def test_a_job_refused_before_its_coroutine_started_closes_the_coroutine(
+    stub_app, host_loop: asyncio.AbstractEventLoop, handed: str
+) -> None:
+    _watch_a_green_pool()
+    if handed == "a loop let go":
+        AsyncTask.share_loop(celery_app, host_loop)
+        AsyncTask.close_shared_loop(celery_app)
+    coroutine = asyncio.sleep(0, result=1)
+
+    with pytest.raises(RuntimeError):
+        tool_execution.run_async(coroutine)
+
+    assert inspect.getcoroutinestate(coroutine) == inspect.CORO_CLOSED
+
+
+def test_closing_a_task_s_loops_leaves_the_shared_loop_to_the_other_tasks(
+    stub_app, host_loop: asyncio.AbstractEventLoop
+) -> None:
+    _watch_a_green_pool()
+    AsyncTask.share_loop(celery_app, host_loop)
+    shared = tool_execution.loops
+
+    tool_execution.close_loop()
+
+    assert callback_task.loops is shared
+    assert callback_task.run_async(asyncio.sleep(0, result=1)) == 1
+
+
+def test_close_loop_drops_the_loops_so_the_next_job_makes_them_anew(stub_app) -> None:
     task = AsyncTask()
+    closed = task.loops
+
     task.close_loop()
-    assert stub_app.clients.shutdown_calls == 0
+
+    assert task.loops is not closed
+    task.close_loop()
 
 
 def test_run_async_runs_on_the_task_loop() -> None:
@@ -121,38 +189,6 @@ async def test_run_tool_pops_tool_name_arg(stub_app) -> None:
     assert stub_app.tools.run_tool_calls == [("my_tool", {"a": 1})]
 
 
-async def test_run_tool_missing_tool_name_raises(stub_app) -> None:
-    with pytest.raises(KeyError):
-        await run_tool(a=1)
-
-
-async def test_run_tool_runs_the_tool_detached(stub_app) -> None:
-    # A worker execution has no live caller, so the tool observes the detached
-    # flag set; the flag never leaks past the run.
-    await run_tool(backend_tool_name="my_tool", backend_secret_capability=False, a=1)
-    assert stub_app.tools.detached_seen == [True]
-    assert stub_app.tools.offloads == [True]
-    assert in_detached_run() is False
-
-
-@pytest.mark.parametrize("capability", [True, False])
-async def test_run_tool_binds_the_carried_capability(stub_app, capability: bool) -> None:
-    # The worker binds the capability the job carried verbatim, never passes the reserved
-    # kwarg to the tool, and the bind never leaks past the run.
-    stub_app.tools.run_tool_result = "result"
-    out = await run_tool(backend_tool_name="my_tool", backend_secret_capability=capability, a=1)
-    assert out == "result"
-    assert stub_app.tools.secret_capability_seen == [capability]
-    assert stub_app.tools.run_tool_calls == [("my_tool", {"a": 1})]
-    assert caller_may_read_secrets() is False
-
-
-async def test_run_tool_without_a_carried_capability_raises(stub_app) -> None:
-    with pytest.raises(KeyError, match="backend_secret_capability"):
-        await run_tool(backend_tool_name="my_tool", a=1)
-    assert stub_app.tools.run_tool_calls == []
-
-
 def test_tool_execution_runs_tool_through_app(stub_app) -> None:
     stub_app.tools.run_tool_result = {"ok": True}
     try:
@@ -163,20 +199,6 @@ def test_tool_execution_runs_tool_through_app(stub_app) -> None:
         tool_execution.close_loop()  # close the task loop opened by apply()
     assert out == {"ok": True}
     assert stub_app.tools.run_tool_calls == [("my_tool", {"x": 2})]
-
-
-def test_task_opts_expose_callback_kwargs() -> None:
-    assert set(tasks_module.CELERY_TASK_OPTS) == {
-        "queue",
-        "countdown",
-        "priority",
-        "retry",
-        "routing_key",
-        "expires",
-        "eta",
-        "callback_kwargs",
-    }
-    assert set(tasks_module.CELERY_SCHEDULE_OPTS) == {SCHEDULE_NAME_KEY, SCHEDULE_CADENCE_KEY}
 
 
 def test_neither_task_carries_an_autoretry_wrapper() -> None:
@@ -253,18 +275,23 @@ def test_callback_task_with_a_transient_error_runs_once_with_the_carried_capabil
     assert attempts == [capability]
 
 
-def test_run_async_counts_the_job_in_the_worker_s_job_slots_and_holds_the_fork_gate() -> None:
-    """On a pool that cannot end a job, every task body passes through the slot accounting and the fork gate."""
+def test_run_async_counts_the_job_in_the_worker_s_job_slots_and_holds_the_fork_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """On an in-process pool, every task body passes through the slot accounting and the fork gate."""
     from tai42_kit.fork_gate import fork_gate
 
     from tai42_backend_celery.core import job_slots
 
-    job_slots.watch(pool_name="solo", in_process=True, budget=0.0, ticks_in_job=False, tick=lambda: None)
+    monkeypatch.setattr(job_slots, "PROGRESS_TICK_SECONDS", 0.01)
+    job_slots.watch(
+        celery_app, pool_name="solo", in_process=True, green=False, budget=0.0, ticks_in_job=False, tick=lambda: None
+    )
 
     async def _coro() -> int:
-        await asyncio.sleep(0.01)
+        await asyncio.sleep(0.05)
         with pytest.raises(RuntimeError, match=rf"on the solo pool, .*: {tool_execution.name} req-1$"):
-            job_slots.check_wedged()
+            job_slots.check_wedged(celery_app)
         assert fork_gate.live_spans == 1, "the in-process job does not hold the fork gate"
         return 41
 
@@ -275,5 +302,5 @@ def test_run_async_counts_the_job_in_the_worker_s_job_slots_and_holds_the_fork_g
         tool_execution.pop_request()
         tool_execution.close_loop()
 
-    job_slots.check_wedged()
+    job_slots.check_wedged(celery_app)
     assert fork_gate.live_spans == 0

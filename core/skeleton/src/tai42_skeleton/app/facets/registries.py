@@ -194,7 +194,11 @@ class MonitoringFacet(_Facet):
 
 
 class ExtensionsFacet(_Facet):
-    """``app.extensions`` — extension registration + listing (``AppExtensions``)."""
+    """``app.extensions`` — extension registration + listing (``AppExtensions``), and the dry-run combo check.
+
+    The check (:meth:`check_combo`) binds a combo over a base its caller hands it; the bases the
+    live serving generation serves are read through :meth:`served_bases`.
+    """
 
     def extension(
         self,
@@ -246,11 +250,20 @@ class ExtensionsFacet(_Facet):
             raise TaiValidationError(f"unknown extension(s): {', '.join(unknown)}")
         registry.validate(combo)
 
-    def check_combo(self, tool: str, combo: Sequence[ExtensionElement], *, base: Tool | None = None) -> None:
+    async def served_bases(self) -> dict[str, Tool]:
+        """Every tool the LIVE serving generation serves, by name, as its bind registered it.
+
+        The registered object, not the client-shaped listing, because the dry run binds over the
+        same object the bind after a reload binds over.
+        """
+        return await self._app._live_serving_core._tool_binding.served_bases()
+
+    def check_combo(self, tool: str, combo: Sequence[ExtensionElement], *, base: Tool | None) -> None:
         """Dry-run bind one extension combo on ``tool`` against the LIVE registry; nothing is mounted or stored.
 
-        ``base`` is the tool the combo binds over; without it the live server's tool named ``tool`` is used.
-        Raises :class:`~tai42_skeleton.tools.binding.errors.ExtensionComboRefusedError` with the refusal text.
+        ``base`` is the tool the combo binds over; ``None`` is a tool the live server does not serve,
+        which leaves the rest to the bind after the reload. Raises
+        :class:`~tai42_skeleton.tools.binding.errors.ExtensionComboRefusedError` with the refusal text.
         """
         self._app._live_serving_core._tool_binding.check_combo(tool, combo, base=base)
 

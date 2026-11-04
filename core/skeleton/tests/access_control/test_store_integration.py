@@ -23,9 +23,9 @@ from psycopg.errors import UniqueViolation
 from tai42_contract.access_control import KEY_FINGERPRINT_CLAIM
 from tai42_contract.accounts.errors import LastAdminError
 from tai42_kit.clients import client_ctx
-from tai42_kit.clients.base import shutdown_all_clients
 from tai42_kit.clients.impl.postgres import PostgresClient
 from tai42_kit.db import apply_migrations, component_store_settings
+from tai42_kit.loop_bound import release_loop_bound_resources
 from tai42_kit.settings import reset_all_settings
 
 from tai42_skeleton.access_control.roles import ROLE_POINTER_KEY
@@ -64,7 +64,7 @@ async def store(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[tuple[Postgres
     await _wipe(token)
     yield PostgresAccessControlStore(), token
     await _wipe(token)
-    await shutdown_all_clients()
+    await release_loop_bound_resources()
 
 
 async def _wipe(token: str) -> None:

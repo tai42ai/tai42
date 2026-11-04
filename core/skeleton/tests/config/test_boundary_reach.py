@@ -26,6 +26,7 @@ from tai42_kit.settings import (
 
 from tai42_skeleton.app.lifecycle.config_reload import awaiting_respawn
 from tai42_skeleton.config.boundary import (
+    EnvKeyClasses,
     refuse_key_material,
     refuse_unrecyclable_env_change,
     refuse_x_band,
@@ -72,9 +73,10 @@ def _no_reach_env(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_a_name_that_sets_a_recycle_class_field_classes_as_recycle(key: str) -> None:
     value = json.dumps({"size": 4}) if key.endswith("POOL") else "4"
 
-    hot, recycle = refuse_unrecyclable_env_change({}, {key: value}, DeploymentOwnership(), change="this env change")
+    hot = refuse_unrecyclable_env_change({}, {key: value}, DeploymentOwnership(), change="this env change")
 
-    assert (hot, recycle) == ([], [key])
+    assert hot == []
+    assert EnvKeyClasses().reload_class(key) == "recycle"
 
 
 @pytest.mark.parametrize("key", ["BOUNDARY_REACH_TEST_BOOT", "boundary_reach_test_boot__path"])

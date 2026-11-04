@@ -21,6 +21,7 @@ from tai42_contract.backend import Backend
 from tai42_contract.backend.runtime import ExecutionMode
 
 import tai42_backend_celery.core.backend as backend_module
+from tai42_backend_celery.core.app import celery_app
 from tai42_backend_celery.core.backend import (
     CeleryBackend,
     CeleryBeatRuntime,
@@ -28,13 +29,6 @@ from tai42_backend_celery.core.backend import (
     CeleryWorkerRuntime,
 )
 from tai42_backend_celery.core.settings import celery_settings
-
-
-@pytest.fixture
-def restore_argv() -> Iterator[None]:
-    old = sys.argv
-    yield
-    sys.argv = old
 
 
 @pytest.fixture
@@ -52,11 +46,34 @@ def celery_stop_flags() -> Iterator[Any]:
 
 @pytest.fixture
 def quiet_prefork(monkeypatch: pytest.MonkeyPatch) -> list[str]:
-    """Record the worker's ``prefork.register()`` without connecting Celery's
-    process-wide signals for the rest of the suite."""
+    """Record the worker's turnover registration without connecting Celery's setup/ready signals."""
     calls: list[str] = []
-    monkeypatch.setattr(backend_module.prefork, "register", lambda: calls.append("register"))
+    monkeypatch.setattr(backend_module.prefork.PoolTurnover, "register", lambda self: calls.append("register"))
     return calls
+
+
+@pytest.fixture
+def celery_command(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    """A ``probe`` subcommand on Celery's umbrella CLI, recording the app it runs on and the options it reads.
+
+    Its ``--pool`` option reads ``CELERY_PROBE_POOL`` under the CLI's ``CELERY`` envvar prefix;
+    ``--exit-code`` makes it exit with that code.
+    """
+    import click
+    from celery.bin.celery import celery
+
+    seen: list[dict[str, Any]] = []
+
+    @click.command("probe")
+    @click.option("--pool", default=None)
+    @click.option("--exit-code", type=int, default=0)
+    @click.pass_context
+    def probe(ctx: click.Context, pool: str | None, exit_code: int) -> None:
+        seen.append({"app": ctx.obj.app, "pool": pool})
+        ctx.exit(exit_code)
+
+    monkeypatch.setitem(celery.commands, "probe", probe)
+    return seen
 
 
 # -- registration ---------------------------------------------------------------
@@ -83,6 +100,57 @@ def test_top_package_import_is_the_whole_discovery_surface(stub_app) -> None:
         assert marker in stub_app.tools.registered
     for extension_name in ("sync_task", "schedule_task", "async_task"):
         assert extension_name in stub_app.extensions.registered
+
+
+def test_a_celery_command_runs_on_the_app_object_it_is_handed(
+    celery_command: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The CLI runs on the app itself: no module is looked up, and no ``APP`` or ``CELERY_APP`` replaces it."""
+    from tai42_backend_celery.core.app import HostedCelery
+
+    monkeypatch.setenv("APP", "tai42_absent_module.app")
+    monkeypatch.setenv("CELERY_APP", "tai42_absent_module.app")
+    app = HostedCelery("probe-app", set_as_current=False)
+
+    with pytest.raises(SystemExit) as exited:
+        backend_module._run_celery_command(app, "probe", [])
+
+    assert exited.value.code == 0
+    assert [entry["app"] for entry in celery_command] == [app]
+
+
+def test_a_celery_command_reads_its_options_under_the_celery_envvar_prefix(
+    celery_command: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CELERY_PROBE_POOL", "solo")
+
+    with pytest.raises(SystemExit):
+        backend_module._run_celery_command(celery_app, "probe", [])
+
+    assert [entry["pool"] for entry in celery_command] == ["solo"]
+
+
+@pytest.mark.parametrize(("args", "code"), [(["--exit-code", "3"], 3), (["--no-such-option"], 2)])
+def test_a_celery_command_exits_with_its_exit_code(
+    celery_command: list[dict[str, Any]], args: list[str], code: int
+) -> None:
+    with pytest.raises(SystemExit) as exited:
+        backend_module._run_celery_command(celery_app, "probe", args)
+
+    assert exited.value.code == code
+
+
+def test_a_celery_command_gives_the_cli_s_app_option_back_as_it_was(celery_command: list[dict[str, Any]]) -> None:
+    import click
+    from celery.bin.celery import celery
+
+    option = next(param for param in celery.params if isinstance(param, click.Option) and param.name == "app")
+    held = (option.default, option.envvar, option.allow_from_autoenv)
+
+    with pytest.raises(SystemExit):
+        backend_module._run_celery_command(celery_app, "probe", [])
+
+    assert (option.default, option.envvar, option.allow_from_autoenv) == held
 
 
 def test_the_three_launch_subcommands_are_declared() -> None:
@@ -120,23 +188,23 @@ async def test_launch_rejects_unknown_subcommand() -> None:
 
 
 @pytest.mark.parametrize("subcmd", ["beat", "flower"])
-@pytest.mark.usefixtures("restore_argv")
 async def test_launch_beat_and_flower_run_inline(subcmd: str, monkeypatch: pytest.MonkeyPatch) -> None:
     # Nothing else runs on this loop, so they block it and keep Celery's own
     # signal handling — which means the CLI runs on the loop's own thread.
-    seen: list[tuple[list[str], threading.Thread]] = []
+    seen: list[tuple[Any, str, list[str], threading.Thread]] = []
     monkeypatch.setattr(
-        backend_module, "_celery_cli_main", lambda: seen.append((list(sys.argv), threading.current_thread()))
+        backend_module,
+        "_run_celery_command",
+        lambda app, name, args: seen.append((app, name, list(args), threading.current_thread())),
     )
 
     await CeleryBackend().launch([subcmd, "--extra"])
 
-    argv, thread = seen[0]
-    assert argv == ["celery", "-A", "tai42_backend_celery.core.app", subcmd, "--extra"]
+    [(app, name, args, thread)] = seen
+    assert (app, name, args) == (celery_app, subcmd, ["--extra"])
     assert thread is threading.main_thread()
 
 
-@pytest.mark.usefixtures("restore_argv")
 async def test_launch_worker_builds_its_argv_then_runs_the_cli_off_loop(
     monkeypatch: pytest.MonkeyPatch, quiet_prefork: list[str]
 ) -> None:
@@ -144,18 +212,20 @@ async def test_launch_worker_builds_its_argv_then_runs_the_cli_off_loop(
     process's loop (and its worker-bus subscription) stays responsive."""
     release = threading.Event()
     body_thread: list[threading.Thread] = []
+    commands: list[tuple[Any, str, list[str]]] = []
 
-    def _cli() -> None:
+    def _cli(app: Any, name: str, args: list[str]) -> None:
+        commands.append((app, name, list(args)))
         body_thread.append(threading.current_thread())
         release.wait()
 
-    monkeypatch.setattr(backend_module, "_celery_cli_main", _cli)
+    monkeypatch.setattr(backend_module, "_run_celery_command", _cli)
     task = asyncio.ensure_future(CeleryBackend().launch(["worker", "--concurrency=1"]))
     try:
         for _ in range(3):
             await asyncio.sleep(0.01)
             assert not task.done()
-        assert sys.argv == ["celery", "-A", "tai42_backend_celery.core.app", "worker", "--concurrency=1"]
+        assert commands == [(celery_app, "worker", ["--concurrency=1", "-Q", "celery"])]
         # The pool turnover is prepared before the worker boots past Celery's
         # setup/ready signals.
         assert quiet_prefork == ["register"]
@@ -163,6 +233,57 @@ async def test_launch_worker_builds_its_argv_then_runs_the_cli_off_loop(
         release.set()
     await asyncio.wait_for(task, timeout=5)
     assert body_thread[0] is not threading.main_thread()
+
+
+@pytest.fixture
+def process_logging() -> Iterator[None]:
+    """The process-wide logging state a Celery command's start touches, restored after."""
+    import logging
+
+    from celery import signals
+    from celery.app.log import Logging
+
+    root = logging.getLogger()
+    old = (list(root.handlers), root.level, sys.stdout, sys.stderr, Logging._setup)
+    Logging._setup = False
+    yield
+    receiver = getattr(backend_module, "_leave_logging_to_the_launch", None)
+    if receiver is not None:
+        signals.setup_logging.disconnect(receiver)
+    logging.captureWarnings(False)
+    root.handlers[:], root.level = old[0], old[1]
+    sys.stdout, sys.stderr, Logging._setup = old[2], old[3], old[4]
+
+
+def test_a_celery_command_leaves_the_root_logger_to_the_launch(
+    process_logging: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The launch configured the root logger before it runs the Celery CLI, and re-applies it on a
+    config reload: Celery neither replaces its handlers nor redirects ``sys.stderr`` into logging
+    (a re-applied root handler would then write into that redirect, which logs back into the root
+    and drops every line)."""
+    import logging
+
+    import click
+    from celery.bin.celery import celery
+
+    root = logging.getLogger()
+    handlers = list(root.handlers)
+    stderr = sys.stderr
+
+    @click.command("start")
+    @click.pass_context
+    def _command_start(ctx: click.Context) -> None:
+        # What a Celery worker's start does to the process's logging.
+        ctx.obj.app.log.setup(loglevel="WARNING", redirect_stdouts=True)
+
+    monkeypatch.setitem(celery.commands, "start", _command_start)
+
+    with pytest.raises(SystemExit):
+        backend_module._run_celery_command(celery_app, "start", [])
+
+    assert root.handlers == handlers
+    assert sys.stderr is stderr
 
 
 # -- stopping --------------------------------------------------------------------
@@ -183,12 +304,40 @@ def test_request_drain_is_idempotent(celery_stop_flags: Any) -> None:
     assert celery_stop_flags.should_terminate is None
 
 
+def test_the_drain_request_marks_the_worker_leaving(celery_stop_flags: Any) -> None:
+    """A draining worker's consumer stops answering control commands, so a pool turnover
+    in flight must not keep polling it."""
+    runtime = CeleryWorkerRuntime.from_args([])
+    runtime.request_drain()
+    assert runtime._turnover._worker_leaving.is_set()
+
+
+@pytest.mark.parametrize("exit_with", [None, SystemExit(0), RuntimeError("worker crashed")])
+def test_every_end_of_the_run_body_marks_the_worker_leaving(
+    exit_with: BaseException | None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A worker stopped by Celery itself (a remote shutdown, an unrecoverable error) has left
+    as surely as a drained one."""
+
+    def _run(*_: object) -> None:
+        if exit_with is not None:
+            raise exit_with
+
+    monkeypatch.setattr(backend_module, "_run_celery_command", _run)
+    runtime = CeleryWorkerRuntime.from_args([])
+    if exit_with is None:
+        runtime.run_blocking()
+    else:
+        with pytest.raises(type(exit_with)):
+            runtime.run_blocking()
+    assert runtime._turnover._worker_leaving.is_set()
+
+
 def test_request_terminate_is_the_cold_stop(celery_stop_flags: Any) -> None:
     CeleryWorkerRuntime.from_args([]).request_terminate()
     assert celery_stop_flags.should_terminate == 0
 
 
-@pytest.mark.usefixtures("restore_argv")
 async def test_cancellation_drains_the_worker_and_waits_for_its_exit(
     monkeypatch: pytest.MonkeyPatch, celery_stop_flags: Any, quiet_prefork: list[str]
 ) -> None:
@@ -198,11 +347,11 @@ async def test_cancellation_drains_the_worker_and_waits_for_its_exit(
     release = threading.Event()
     running = threading.Event()
 
-    def _run() -> None:
+    def _run(*_: object) -> None:
         running.set()
         release.wait()
 
-    monkeypatch.setattr(backend_module, "_celery_cli_main", _run)
+    monkeypatch.setattr(backend_module, "_run_celery_command", _run)
     drained: list[str] = []
     original = CeleryWorkerRuntime.request_drain
 
@@ -237,7 +386,7 @@ async def test_turn_over_pool_runs_the_prefork_turnover_off_the_loop(monkeypatch
         seen["call"] = (reason, budget)
         seen["thread"] = threading.current_thread()
 
-    monkeypatch.setattr(backend_module.prefork, "turnover_local_pool", _turnover)
+    monkeypatch.setattr(backend_module.prefork.PoolTurnover, "turnover_local_pool", staticmethod(_turnover))
 
     await CeleryWorkerRuntime.from_args([]).turn_over_pool(reason="reload_config", budget=27.0)
 
@@ -251,7 +400,7 @@ async def test_a_failing_turnover_propagates_to_the_caller(monkeypatch: pytest.M
     def _boom(reason: str, budget: float) -> None:
         raise RuntimeError("prefork pool did not fully recycle")
 
-    monkeypatch.setattr(backend_module.prefork, "turnover_local_pool", _boom)
+    monkeypatch.setattr(backend_module.prefork.PoolTurnover, "turnover_local_pool", staticmethod(_boom))
 
     with pytest.raises(RuntimeError, match="did not fully recycle"):
         await CeleryWorkerRuntime.from_args([]).turn_over_pool(reason="reload_tool", budget=5.0)
@@ -273,6 +422,126 @@ def test_the_drain_budget_tracks_the_live_task_timeout(monkeypatch: pytest.Monke
     finally:
         monkeypatch.delenv("CELERY_TASK_TIMEOUT", raising=False)
         reset_all_settings()
+
+
+# -- the green pools' process prelude -------------------------------------------------
+
+
+@pytest.mark.parametrize("pool", ["gevent", "eventlet"])
+@pytest.mark.parametrize("spelling", [["-P", "{}"], ["--pool", "{}"], ["--pool={}"]])
+def test_the_worker_on_a_green_pool_declares_celery_s_patch_as_its_prelude(pool: str, spelling: list[str]) -> None:
+    argv = ["-l", "info", *(part.format(pool) for part in spelling), "-c", "4"]
+
+    assert CeleryWorkerRuntime.from_args(argv).process_prelude == "celery:maybe_patch_concurrency"
+
+
+@pytest.mark.parametrize(
+    "argv", [[], ["-P", "prefork"], ["-P", "solo"], ["--pool=threads"], ["-Psolo"], ["-B", "-c", "2"]]
+)
+def test_the_worker_on_any_other_pool_declares_no_prelude(argv: list[str]) -> None:
+    assert CeleryWorkerRuntime.from_args(argv).process_prelude is None
+
+
+@pytest.mark.parametrize("runtime_cls", [CeleryBeatRuntime, CeleryFlowerRuntime])
+def test_the_beat_and_flower_declare_no_prelude(runtime_cls: Any) -> None:
+    assert runtime_cls.from_args([]).process_prelude is None
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        [],
+        ["-P", "gevent"],
+        ["--pool", "eventlet"],
+        ["--pool=gevent", "-c", "8"],
+        ["-l", "info", "-P", "eventlet"],
+        ["-P", "solo"],
+        ["--pool=prefork"],
+        ["--queue", "a", "-P", "threads"],
+    ],
+)
+def test_the_worker_declares_the_prelude_exactly_when_celery_s_patch_patches(
+    argv: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The prelude reads the argv the way Celery's patch does: the two agree on every argv the worker takes."""
+    import celery
+    from celery import concurrency
+
+    patched: list[str] = []
+    # The patch imports the pool's implementation after patching; this process stays unpatched.
+    monkeypatch.setattr(concurrency, "get_implementation", lambda name: None)
+    celery.maybe_patch_concurrency(
+        ["tai42_cli.process_prelude", "backend", "worker", *argv],
+        patches={pool: (lambda pool=pool: patched.append(pool)) for pool in ("gevent", "eventlet")},
+    )
+
+    prelude = CeleryWorkerRuntime.from_args(argv).process_prelude
+
+    assert (prelude is not None) == bool(patched)
+
+
+def _green_pool_refusal(pool: str, given: str) -> str:
+    """The pattern of the whole refusal of the green pool ``pool`` handed to ``tai backend worker`` as ``given``."""
+    return (
+        "^"
+        + re.escape(
+            f"tai backend worker patches the process for a green pool before anything else is imported, reading "
+            f"the pool only from the first -P {pool}, --pool {pool} or --pool={pool} argument, and {given}; "
+            f"give the pool once, in one of those spellings"
+        )
+        + "$"
+    )
+
+
+@pytest.mark.parametrize(
+    ("argv", "pool", "parsed", "sniffed"),
+    [
+        (["-Pgevent"], "gevent", "gevent", None),
+        (["-BPeventlet"], "eventlet", "eventlet", None),
+        (["-BP", "gevent"], "gevent", "gevent", None),
+        (["-P", "gevent", "-P", "solo"], "gevent", "solo", "gevent"),
+        (["-P", "solo", "--pool=eventlet"], "eventlet", "eventlet", "solo"),
+        (["-P", "gevent", "--pool", "eventlet"], "eventlet", "eventlet", "gevent"),
+    ],
+)
+def test_the_worker_refuses_a_green_pool_spelled_as_celery_s_patch_cannot_read_it(
+    argv: list[str], pool: str, parsed: str, sniffed: str | None
+) -> None:
+    given = f"these arguments give the worker the pool {parsed!r} and the patch {sniffed!r}"
+    with pytest.raises(ValueError, match=_green_pool_refusal(pool, given)):
+        CeleryWorkerRuntime.from_args(argv)
+
+
+@pytest.mark.parametrize("pool", ["gevent", "eventlet"])
+def test_the_worker_refuses_a_green_pool_set_in_the_environment(pool: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CELERY_WORKER_POOL", pool)
+
+    with pytest.raises(
+        ValueError, match=_green_pool_refusal(pool, f"CELERY_WORKER_POOL={pool} sets it from the environment")
+    ):
+        CeleryWorkerRuntime.from_args(["-l", "info"])
+
+
+def test_the_worker_takes_a_green_pool_in_the_argv_over_another_in_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CELERY_WORKER_POOL", "solo")
+
+    assert CeleryWorkerRuntime.from_args(["-P", "gevent"]).process_prelude == "celery:maybe_patch_concurrency"
+
+
+@pytest.mark.usefixtures("quiet_prefork")
+async def test_the_worker_build_hands_the_jobs_the_host_s_loop(monkeypatch: pytest.MonkeyPatch) -> None:
+    from tai42_backend_celery.core.tasks import AsyncTask
+
+    handed: list[tuple[Any, asyncio.AbstractEventLoop]] = []
+    monkeypatch.setattr(AsyncTask, "share_loop", staticmethod(lambda app, loop: handed.append((app, loop))))
+    runtime = CeleryWorkerRuntime.from_args(["-P", "gevent"])
+    runtime.bind_progress(lambda *, next_within: None)
+
+    await runtime.build()
+
+    assert handed == [(celery_app, asyncio.get_running_loop())]
 
 
 # -- the reporting scheduler -----------------------------------------------------
@@ -336,44 +605,98 @@ def test_the_worker_and_the_beat_refuse_a_scheduler_set_as_command_line_configur
 
 
 @pytest.mark.parametrize(
-    ("runtime_cls", "argv"),
+    ("runtime_cls", "argv", "expected"),
     [
-        (CeleryWorkerRuntime, ["-B", "-l", "info", "worker_prefetch_multiplier=2"]),
-        (CeleryBeatRuntime, ["-l", "info", "beat_max_loop_interval=2"]),
+        (
+            CeleryWorkerRuntime,
+            ["-B", "-l", "info", "worker_prefetch_multiplier=2"],
+            ["-B", "-l", "info", "worker_prefetch_multiplier=2", "-Q", "celery"],
+        ),
+        (CeleryBeatRuntime, ["-l", "info", "beat_max_loop_interval=2"], ["-l", "info", "beat_max_loop_interval=2"]),
     ],
 )
-def test_the_worker_and_the_beat_take_other_command_line_configuration(runtime_cls: Any, argv: list[str]) -> None:
-    assert runtime_cls.from_args(argv)._args == argv
+def test_the_worker_and_the_beat_take_other_command_line_configuration(
+    runtime_cls: Any, argv: list[str], expected: list[str]
+) -> None:
+    assert runtime_cls.from_args(argv)._args == expected
 
 
 @pytest.mark.parametrize(
-    ("runtime_cls", "argv"),
+    ("runtime_cls", "argv", "expected"),
     [
-        (CeleryWorkerRuntime, ["-B", "-P", "solo", "-c", "1", "-Q", "a,b", "-n", "w@%h", "-s", "/tmp/schedule"]),
-        (CeleryBeatRuntime, ["-i", "3", "-l", "info", "-s", "/tmp/schedule"]),
+        (
+            CeleryWorkerRuntime,
+            ["-B", "-P", "solo", "-c", "1", "-n", "w@%h", "-s", "/tmp/schedule"],
+            ["-B", "-P", "solo", "-c", "1", "-n", "w@%h", "-s", "/tmp/schedule", "-Q", "celery"],
+        ),
+        (
+            CeleryBeatRuntime,
+            ["-i", "3", "-l", "info", "-s", "/tmp/schedule"],
+            ["-i", "3", "-l", "info", "-s", "/tmp/schedule"],
+        ),
     ],
 )
-def test_the_worker_and_the_beat_take_every_other_option(runtime_cls: Any, argv: list[str]) -> None:
-    runtime = runtime_cls.from_args(argv)
+def test_the_worker_and_the_beat_take_every_other_option(
+    runtime_cls: Any, argv: list[str], expected: list[str]
+) -> None:
+    assert runtime_cls.from_args(argv)._args == expected
 
-    assert runtime._args == argv
+
+@pytest.mark.parametrize("spelling", [["--queue", "gpu"], ["--queue=gpu"]])
+def test_the_worker_consumes_the_queue_its_label_derives(spelling: list[str]) -> None:
+    runtime = CeleryWorkerRuntime.from_args(["-P", "solo", *spelling, "-c", "1"])
+
+    assert runtime._args == ["-P", "solo", "-c", "1", "-Q", "celery.gpu"]
+
+
+def test_the_worker_queue_derives_from_the_queue_name_setting(monkeypatch: pytest.MonkeyPatch) -> None:
+    from tai42_kit.settings import reset_all_settings
+
+    monkeypatch.setenv("CELERY_QUEUE_NAME", "stack-1")
+    reset_all_settings()
+    try:
+        assert CeleryWorkerRuntime.from_args(["--queue", "gpu"])._args == ["-Q", "stack-1.gpu"]
+        assert CeleryWorkerRuntime.from_args([])._args == ["-Q", "stack-1"]
+    finally:
+        reset_all_settings()
+
+
+@pytest.mark.parametrize("label", ["", "a.b", "a:b"])
+def test_the_worker_refuses_a_label_outside_the_grammar(label: str) -> None:
+    import click
+
+    with pytest.raises(click.BadParameter, match=r"must match \[A-Za-z0-9_-\]\+"):
+        CeleryWorkerRuntime.from_args(["--queue", label])
+
+
+@pytest.mark.parametrize("spelling", [["-Q", "a,b"], ["--queues", "a"], ["--queues=a"]])
+def test_the_worker_refuses_celery_s_own_queue_option(spelling: list[str]) -> None:
+    queues = spelling[-1].partition("=")[2] or spelling[-1]
+    with pytest.raises(ValueError, match=re.escape(f"drop -Q {queues} and give the label as --queue <label>")):
+        CeleryWorkerRuntime.from_args(["-P", "solo", *spelling])
+
+
+def test_the_worker_refuses_celery_s_queues_set_in_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CELERY_WORKER_QUEUES", "a,b")
+
+    with pytest.raises(ValueError, match=re.escape("drop CELERY_WORKER_QUEUES=a,b and give the label as --queue")):
+        CeleryWorkerRuntime.from_args([])
 
 
 def test_flower_takes_its_options_unread() -> None:
     assert CeleryFlowerRuntime.from_args(["--port=5555"])._args == ["--port=5555"]
 
 
-@pytest.mark.usefixtures("restore_argv", "quiet_prefork")
+@pytest.mark.usefixtures("quiet_prefork")
 async def test_the_worker_build_hands_the_embedded_beat_its_reporter(liveness_path: Any) -> None:
-    from tai42_backend_celery.core import beat_scheduler, embedded_beat
-    from tai42_backend_celery.core.app import celery_app
+    from tai42_backend_celery.core import embedded_beat
 
     runtime = CeleryWorkerRuntime.from_args(["-B"])
     runtime.bind_progress(lambda *, next_within: None)
 
     await runtime.build()
 
-    reporter = beat_scheduler._report
+    reporter = celery_app.beat_reporter
     assert reporter is not None
     reporter(next_within=2.0)
     assert liveness_path.with_name(liveness_path.name + "-beat").read_text() == f"{os.getpid()}\n7\n"
@@ -383,11 +706,12 @@ async def test_the_worker_build_hands_the_embedded_beat_its_reporter(liveness_pa
 async def test_the_worker_aclose_releases_its_embedded_beat(monkeypatch: pytest.MonkeyPatch) -> None:
     from tai42_backend_celery.core import embedded_beat
 
-    released: list[threading.Thread] = []
-    monkeypatch.setattr(embedded_beat, "release", lambda: released.append(threading.current_thread()))
+    released: list[tuple[Any, threading.Thread]] = []
+    monkeypatch.setattr(embedded_beat, "release", lambda app: released.append((app, threading.current_thread())))
 
     await CeleryWorkerRuntime.from_args([]).aclose()
 
     # The release joins the beat, which blocks, so it runs off the loop.
-    assert len(released) == 1
-    assert released[0] is not threading.main_thread()
+    [(app, thread)] = released
+    assert app is celery_app
+    assert thread is not threading.main_thread()

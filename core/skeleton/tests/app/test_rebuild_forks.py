@@ -1,11 +1,9 @@
-"""A fork made in a context emptied of its caller still belongs to the rebuild or the job span it runs under.
+"""A fork made in a context emptied of its caller still belongs to the rebuild it runs under.
 
 The re-import's steps run in contexts emptied of the driving request — the serving-app step
-(``_outside_any_request``), the off-loop runner (``run_blocking``) and the deferred tail of an
-engaged generation's retire — and the process's fork
-gate must still recognise a fork there as the rebuild's own, never as a job racing it. The
-off-loop runner called inside a job keeps that job's span the same way: a fork there nests in
-the open span instead of queueing behind a rebuild that waits for the span to close.
+(``_outside_any_request``) and the deferred tail of an engaged generation's retire — and the
+process's fork gate must still recognise a fork there as the rebuild's own, never as a job
+racing it.
 """
 
 from __future__ import annotations
@@ -14,7 +12,6 @@ import asyncio
 import contextvars
 import logging
 import os
-import threading
 import time
 from collections.abc import Iterator
 
@@ -23,7 +20,6 @@ from tai42_kit.fork_gate import fork_gate
 
 from tai42_skeleton.app import epoch_retire
 from tai42_skeleton.app.epoch import Epoch, _outside_any_request
-from tai42_skeleton.app.lifecycle.off_loop import run_blocking
 
 pytestmark = pytest.mark.skipif(not hasattr(os, "fork"), reason="os.fork is not available on this platform")
 
@@ -37,7 +33,7 @@ _request_scope: contextvars.ContextVar[str | None] = contextvars.ContextVar("req
 @pytest.fixture
 def guarded() -> Iterator[None]:
     """Guard the process's forks for one test; the fork hooks stay registered but do nothing after it."""
-    fork_gate.guard_forks(timeout=_GUARD_WAIT, tick=lambda: None)
+    fork_gate.guard_forks(timeout=_GUARD_WAIT)
     yield
     fork_gate._fork_hooks.guard = None
 
@@ -66,46 +62,6 @@ async def test_a_fork_in_the_serving_app_step_does_not_wait_on_its_rebuild(caplo
 
     assert waited < _PROMPT
     assert "could not enter" not in caplog.text
-
-
-@pytest.mark.usefixtures("guarded")
-async def test_a_fork_in_the_off_loop_runner_does_not_wait_on_its_rebuild(caplog: pytest.LogCaptureFixture) -> None:
-    async def step() -> float:
-        return _fork_and_time()
-
-    with caplog.at_level(logging.ERROR, logger="tai42_kit.fork_gate"):
-        async with fork_gate.exclusive_async(timeout=_PROMPT):
-            waited = await asyncio.to_thread(run_blocking, step)
-
-    assert waited < _PROMPT
-    assert "could not enter" not in caplog.text
-
-
-@pytest.mark.usefixtures("guarded")
-def test_a_fork_in_the_off_loop_runner_inside_a_job_span_does_not_wait_behind_a_pending_rebuild(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    async def step() -> float:
-        return _fork_and_time()
-
-    def rebuild() -> None:
-        with fork_gate.exclusive(timeout=_GUARD_WAIT):
-            pass
-
-    rebuilder = threading.Thread(target=rebuild, daemon=True)
-    with caplog.at_level(logging.ERROR, logger="tai42_kit.fork_gate"):
-        with fork_gate.job_span(timeout=_PROMPT):
-            rebuilder.start()
-            deadline = time.monotonic() + _PROMPT
-            while not fork_gate.blocked:
-                assert time.monotonic() < deadline, "the rebuild never registered"
-                time.sleep(0.01)
-            waited = run_blocking(step)
-        rebuilder.join(timeout=_GUARD_WAIT)
-
-    assert not rebuilder.is_alive()
-    assert waited < _PROMPT
-    assert "could not" not in caplog.text
 
 
 @pytest.mark.usefixtures("guarded")

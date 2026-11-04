@@ -24,7 +24,6 @@ from tai42_skeleton.app.boot_rules import (
 )
 from tai42_skeleton.app.kind_status import warn_if_noop_monitoring
 from tai42_skeleton.app.lifecycle.manifest_imports import prepare_manifest_imports
-from tai42_skeleton.app.lifecycle.off_loop import run_blocking
 from tai42_skeleton.app.lifecycle.state import LifecycleState
 from tai42_skeleton.connectors.providers.registry import reset_registry
 from tai42_skeleton.extensions import ExtensionRegistry
@@ -41,7 +40,7 @@ logger = logging.getLogger(__name__)
 class BootMixin(LifecycleState):
     """Lifecycle mixin that boots the app: claims the global handle and brings up the manifest's components."""
 
-    def start(self, manifest: Manifest):
+    async def start(self, manifest: Manifest):
         """Boot the app from ``manifest``: claim the global ``tai42_app`` handle and bring up its components."""
         # Booting is the composition root: this is where the running impl claims
         # the global ``tai42_app`` handle. Constructing a ``TaiMCP`` must not — only
@@ -54,7 +53,7 @@ class BootMixin(LifecycleState):
         # chain whose component database is not configured is not checked, so an all-off
         # deployment is a no-op. The returned package→dist snapshot serves every compat
         # verdict of the build.
-        installed = run_blocking(lambda: prepare_manifest_imports(manifest))
+        installed = await prepare_manifest_imports(manifest)
         self._manifest = manifest
         # Every per-title MCP record restarts empty, so this start's binds and failures are
         # the only ones the generation reports.
@@ -112,7 +111,7 @@ class BootMixin(LifecycleState):
         # being atomic with the reimport — an interleaving reload whose caller-side
         # removal had not fully cleared the surface would otherwise re-add a
         # still-present tool and crash the reload with "Component already exists".
-        self._reset_component_surface()
+        await self._reset_component_surface()
 
         # Clear the operation registry's write-target generation before
         # _initialize_components() re-imports the router modules, which re-fire their
@@ -132,7 +131,7 @@ class BootMixin(LifecycleState):
         _lifecycle.route_registry.reset_shape_index()
 
         self._initialize_registries()
-        self._initialize_components(installed)
+        await self._initialize_components(installed)
 
         # Drop the route index once the reimport has re-attached every route, so the next
         # lookup rebuilds it against this surface.
@@ -146,7 +145,7 @@ class BootMixin(LifecycleState):
         refuse_unknown_owned_applied_env(applied_env_keys())
 
         logger.info("[tools]")
-        for t in sorted(self._registry_names_sync()["tool"]):
+        for t in sorted((await self._registry_names())["tool"]):
             logger.info(f"\t. {t}")
 
         # The pluggable-kind summary: one line per kind's live active/default/off
@@ -244,7 +243,7 @@ class BootMixin(LifecycleState):
         self._states_consumer_listers.reset()
         self._states_template_seeds.reset()
 
-    def _reload_registries(self, manifest: Manifest) -> dict[str, Any]:
+    async def _reload_registries(self, manifest: Manifest) -> dict[str, Any]:
         """Re-initialise the process registries from ``manifest`` and run the per-epoch handler list ONCE.
 
         The rebuild step the epoch build+swap primitive calls.
@@ -270,8 +269,8 @@ class BootMixin(LifecycleState):
         # Reload-time re-check of the apply-window invariant under the env about to be
         # persisted: a window below the retire's drain floor is refused before the rebuild.
         require_apply_window_covers_drain()
-        self.start(manifest)
-        run_blocking(lambda: self._run_handlers(self._epoch_handlers(), raise_on_error=True))
+        await self.start(manifest)
+        await self._run_handlers(self._epoch_handlers(), raise_on_error=True)
         # Audit the STAGED route generation before the build commits it: fail the rebuild
         # loudly if a plugin still declared in the manifest lost every one of its routes on
         # the re-import, so the atomic swap never installs a route-dropping epoch (the old
@@ -304,7 +303,7 @@ class BootMixin(LifecycleState):
         )
         self._extension_registry = ExtensionRegistry(self._tool_registry.used_extensions)
 
-    def _reset_component_surface(self) -> None:
+    async def _reset_component_surface(self) -> None:
         """Clear every tool / prompt / resource / resource template off the live ``local_provider``.
 
         Called at the top of ``start()`` (before ``_initialize_components``
@@ -322,12 +321,10 @@ class BootMixin(LifecycleState):
         included, after the provider's own transforms — and the skeleton adds none to its
         provider — which is exactly the set the re-fired decorators (re-)populate. Names /
         URIs are de-duplicated so a versioned/unversioned mix cannot double-remove one name
-        (``remove_*`` clears all versions by name in one call). Synchronous: the async
-        listings are gathered through the one off-loop runner, so it runs wherever
-        ``start()`` runs (the serving loop at cold boot, a worker thread on reload).
+        (``remove_*`` clears all versions by name in one call).
         """
         provider = self._fast_mcp.local_provider
-        tools, prompts, resources, templates = run_blocking(lambda: _provider_surface(provider))
+        tools, prompts, resources, templates = await _provider_surface(provider)
         for name in {tool.name for tool in tools}:
             remove_surface_tool(self._fast_mcp, name)
         for name in {prompt.name for prompt in prompts}:
@@ -337,22 +334,16 @@ class BootMixin(LifecycleState):
         for uri in {str(resource.uri) for resource in resources}:
             provider.remove_resource(uri)
 
-    def _registry_names_sync(self) -> dict[str, set[str]]:
-        """Snapshot the live server's tool / prompt / resource names off-loop.
+    async def _registry_names(self) -> dict[str, set[str]]:
+        """Snapshot the live server's tool / prompt / resource names.
 
-        Used by ``start()``'s tool log. Keyed by the SINGULAR kind. Runs through the
-        one off-loop ``run_blocking`` runner, safe from a loop-less caller and from
-        inside the server loop.
+        Used by ``start()``'s tool log. Keyed by the SINGULAR kind.
         """
-
-        async def snapshot() -> dict[str, set[str]]:
-            return {
-                "tool": {t.name for t in await self._fast_mcp.list_tools()},
-                "prompt": {p.name for p in await self._fast_mcp.list_prompts()},
-                "resource": {str(r.uri) for r in await self._fast_mcp.list_resources()},
-            }
-
-        return run_blocking(snapshot)
+        return {
+            "tool": {t.name for t in await self._fast_mcp.list_tools()},
+            "prompt": {p.name for p in await self._fast_mcp.list_prompts()},
+            "resource": {str(r.uri) for r in await self._fast_mcp.list_resources()},
+        }
 
 
 async def _provider_surface(

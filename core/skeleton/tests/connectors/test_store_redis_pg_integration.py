@@ -24,10 +24,10 @@ import pytest
 from tai42_contract.connectors.errors import ConnectorError
 from tai42_contract.connectors.service import AliasInUseError
 from tai42_kit.clients import client_ctx
-from tai42_kit.clients.base import shutdown_all_clients
 from tai42_kit.clients.impl.postgres import PostgresClient
 from tai42_kit.clients.impl.redis import RedisClient
 from tai42_kit.db import apply_migrations, component_store_settings
+from tai42_kit.loop_bound import release_loop_bound_resources
 from tai42_kit.settings import reset_all_settings
 
 from tai42_skeleton.connectors.settings import connector_store_settings
@@ -79,7 +79,7 @@ async def token_store() -> AsyncIterator[_Fixture]:
         async with client_ctx(RedisClient, connector_store_settings().redis) as client:
             for cid in fix.cids:
                 await client.delete(fix.store._rec_key(cid))
-    await shutdown_all_clients()
+    await release_loop_bound_resources()
 
 
 async def test_alias_unique_constraint_surfaces_as_alias_in_use(token_store: _Fixture) -> None:

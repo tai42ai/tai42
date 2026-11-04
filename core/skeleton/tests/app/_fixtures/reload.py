@@ -28,20 +28,11 @@ async def reload_with(app: Any, manifest: Any, env: Mapping[str, str] | None = N
     """Rebuild a fresh epoch under ``manifest`` and the proposed ``env`` and swap it in, or
     discard it and re-raise on a failed build (the live epoch keeps serving untouched)."""
 
-    def _rebuild() -> None:
-        app._building = app._build_serving_core()
-        try:
-            app.lifecycle.reload_registries(manifest)
-        except BaseException:
-            app._building = None
-            raise
+    async def _rebuild(epoch: Epoch) -> None:
+        epoch.core = app._build_serving_core()
+        await app.lifecycle.reload_registries(manifest)
 
     async def _build_serving_app(epoch: Epoch):
-        core = app._building
-        try:
-            epoch.core = core
-        finally:
-            app._building = None
         return _SentinelServingApp()
 
     return await epoch_mod.build_and_swap_epoch(

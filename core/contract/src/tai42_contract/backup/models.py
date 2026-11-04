@@ -42,7 +42,11 @@ class BackupSectionReport(BaseModel):
     ``recycle`` the fleet recycle roll a section's restore ran for a recycle-class env
     change (``None`` for every section that ran none), and ``awaiting_respawn`` the workers
     still awaiting a respawn after the section's env change (name + keys; empty for every
-    section that ran none), and ``span_release_error`` ``None`` when the config store released
+    section that ran none), and ``roll_deferred`` set with ``roll_deferred_to`` naming the bus
+    member the restore deferred the section's roll to — one handed off, which that member
+    carries out after the reply and judges, or one that may have been sent with its answer not
+    known, which is left to that member to carry out and judge (``False`` / ``None``
+    otherwise), and ``span_release_error`` ``None`` when the config store released
     its exclusive write span after a section's config write (and for every section that writes
     no config), otherwise the store's error — the section's change landed and the reload,
     broadcast and roll reported here still ran, but the store may still hold its write span
@@ -67,4 +71,6 @@ class BackupSectionReport(BaseModel):
     fanout: FanoutSummary | None = None
     recycle: RecycleRoll | None = None
     awaiting_respawn: list[AwaitingWorker] = Field(default_factory=list[AwaitingWorker])
+    roll_deferred: bool = False
+    roll_deferred_to: str | None = None
     span_release_error: str | None = None

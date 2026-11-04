@@ -20,8 +20,8 @@ endpoints, scopes, and the MCP servers that expose it as tools. This listing is
 one such provider (Google); a sibling backs the same contract for Atlassian
 (`tai42/connector-atlassian`).
 
-- Connectors concept: https://tai42.ai/concepts/connectors
-- Ecosystem catalog: https://tai42.ai/reference/catalog
+- Connectors concept: https://docs.tai42.ai/concepts/connectors
+- Plugin catalog: https://docs.tai42.ai/plugins
 
 ## What it declares
 

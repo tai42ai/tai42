@@ -88,13 +88,6 @@ class BusSettings(TaiBaseSettings):
         ),
     )
 
-    # Short liveness deadline: reaching it only ends the brief ack wait — the
-    # collector stops waiting on the fast ``received`` acks and budgets the rest of
-    # its wait toward the apply/report cut. The missing/departed presence re-check
-    # and verdict assignment happen once, in the finalize pass at the report cut
-    # (apply deadline) — not here.
-    ack_timeout: float = Field(default=2.0, gt=0)
-
     # Long apply deadline — the report cut. Never below the retire's drain floor
     # (three drains of the declared drain budget): the boot rules refuse a lower
     # value at boot, on every reload and on every env change, so a worker draining
@@ -103,15 +96,19 @@ class BusSettings(TaiBaseSettings):
     # platform defaults: three default drains (3 x 10 s), the fork quiesce (30 s),
     # the credential refresh and the MCP re-probes (3 s each), the post-apply
     # ``on_fleet_op_applied`` hook (the pool turnover, 5 s + 3 s) and the rebuild
-    # (about 2 s) — 76 s, with headroom for a loaded host. A worker that acked but
-    # exceeds this is re-checked against presence: expired ⇒ departed,
-    # alive ⇒ timed_out.
+    # (about 2 s) — 76 s, with headroom for a loaded host. It bounds the wait on a
+    # live worker only: a worker whose life ends mid-collection (its slot claim gone, or a
+    # newer life in its slot) is reported departed once seen, without waiting it out.
+    # A worker with no terminal reply by then is re-checked against its slot: ended ⇒
+    # departed, still held ⇒ timed_out when it acked, missing when it never did.
     apply_timeout: float = Field(default=90.0, gt=0)
 
-    # Presence-key TTL; a subscriber's heartbeat thread refreshes it at a third of this,
-    # so a killed or stopped process, or one whose heartbeat thread died, leaves the
-    # census within one TTL instead of blocking every op. A config reload's rebuild
-    # blocks the serving loop, not the heartbeat thread, so it never lapses the row.
+    # Presence-key TTL; a subscriber's heartbeat refreshes it at a third of this, so a
+    # killed or stopped process, or one whose heartbeat died, leaves the census within
+    # one TTL instead of blocking every op. A config reload's rebuild holds the serving
+    # loop, not the heartbeat's own thread, so it does not lapse the row; under a process
+    # prelude the heartbeat is a task of that loop, and a rebuild that holds it until the
+    # time since the last beat passes this TTL lapses the row.
     heartbeat_ttl: float = Field(default=15.0, gt=0)
 
     # The skeleton major these settings were built under, read by looking up

@@ -75,8 +75,8 @@ uv run --no-sync pytest --cov --cov-report=term-missing                         
 The whole platform — concepts, guides, and the generated reference — lives in
 the unified documentation site:
 
-- Layering & the contract/kit/cli/skeleton split: https://tai42.ai/concepts/layering
-- Python SDK reference (this package's public API): https://tai42.ai/reference/python-sdk
+- Layering & the contract/kit/cli/skeleton split: https://docs.tai42.ai/concepts/layering
+- Python SDK reference (this package's public API): https://docs.tai42.ai/reference/python-sdk
 
 ## License
 

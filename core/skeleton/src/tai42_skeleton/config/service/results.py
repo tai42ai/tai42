@@ -1,7 +1,7 @@
 """The manifest-mutation pipeline's structural seams and result DTOs.
 
-The config-manager / reload / fleet-publish Protocols the pipeline drives, and the structured outcomes
-it returns.
+The config-manager / reload / fleet-publish / combo-check Protocols the pipeline drives, and the
+structured outcomes it returns.
 """
 
 from __future__ import annotations
@@ -13,16 +13,18 @@ from tai42_skeleton.app.bus.ops import FleetOp
 from tai42_skeleton.operations._broadcast import fleet_fanout
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Mapping, Sequence
     from contextlib import AbstractContextManager
 
+    from fastmcp.tools.base import Tool
     from tai42_contract.app.responses import AwaitingWorker
-    from tai42_contract.manifest import TaiMCPConfig
+    from tai42_contract.manifest import ExtensionElement, TaiMCPConfig
     from tai42_kit.settings import EnvReader
 
-    from tai42_skeleton.app.bus import FleetResult, LocalApplyResult, WorkerIdentity, WorkerRow
+    from tai42_skeleton.app.bus import FleetResult, LocalApplyResult, WorkerRow
     from tai42_skeleton.app.recycle import RecycleReport
-    from tai42_skeleton.config.service.deferred_roll import RollOutcome
+    from tai42_skeleton.config.recycle_policy import RecycleDecision
+    from tai42_skeleton.config.recycle_roll import RollOutcome
 
 
 def joined_span_release_errors(*errors: str | None) -> str | None:
@@ -71,21 +73,36 @@ class _ManifestStore(Protocol):
 class _ReloadAdmin(Protocol):
     """The reload seam the pipeline drives on the local worker after a persist."""
 
-    def reload_config(self) -> dict[str, Any]: ...
+    async def reload_config(self) -> dict[str, Any]: ...
 
     async def served_mcp_names(self, config: TaiMCPConfig) -> list[str]: ...
+
+
+class _ComboCheck(Protocol):
+    """The dry-run combo check the validation runs on every extension combo of a candidate manifest.
+
+    ``served_bases`` is the live serving generation's served tools by name, read once as a
+    validation input; ``check_combo`` dry-run binds one combo over the ``base`` taken from it
+    (``None`` for a tool the generation does not serve) and raises
+    :class:`~tai42_skeleton.tools.binding.errors.ExtensionComboRefusedError` on a refusal.
+    """
+
+    async def served_bases(self) -> Mapping[str, Tool]: ...
+
+    def check_combo(self, tool: str, combo: Sequence[ExtensionElement], *, base: Tool | None) -> None: ...
 
 
 class _FleetPublisher(Protocol):
     """The worker-bus surface the pipeline publishes through, and the census and env-reader reads it judges by.
 
-    The census is read BEFORE each local apply — ``publish`` censuses only when it is called, so the
-    membership a report is judged against is captured through ``expected_at_start`` and handed back in.
+    The census is read ONCE before each local apply — ``publish`` censuses only when it is called, so
+    the membership a report is judged against is derived from that read (``expected_from_census``)
+    and handed back in, and the recycle targets are pinned from the same rows.
     """
 
-    async def expected_at_start(self) -> dict[str, int]: ...
-
     async def census(self) -> list[WorkerRow]: ...
+
+    def expected_from_census(self, rows: Sequence[WorkerRow]) -> dict[str, int]: ...
 
     async def env_readers(self, digests: Sequence[str]) -> dict[str, tuple[EnvReader, ...]]: ...
 
@@ -103,13 +120,11 @@ class _FleetPublisher(Protocol):
 class PersistedChange:
     """A manifest mutation the pipeline validated, sealed and persisted; nothing has converged on it yet.
 
-    ``document`` is the persisted PRESERVED-view manifest; ``recycle_keys`` the recycle-class keys
-    the write carried (a leaving oauth connector's marks write); ``span_release_error`` the store's
+    ``document`` is the persisted PRESERVED-view manifest; ``span_release_error`` the store's
     error when its exclusive write span failed to release after the persist, ``None`` when it released.
     """
 
     document: dict[str, Any]
-    recycle_keys: tuple[str, ...] = ()
     span_release_error: str | None = None
 
 
@@ -126,55 +141,55 @@ class ApplyResult:
     bus with an unconfirmed worker named in ``fleet.results`` (``fleet.ok`` is then
     ``False``), or a bus-unreachable result (``fleet.reachable`` is ``False`` with only
     ``fleet.error``). Both are returned successes: persist + local reload landed, and
-    recovery is a fleet reload. ``recycle`` is the fleet recycle roll an env change
-    carrying a recycle-class key ran (``None`` when it carried none, so nothing rolled),
-    ``self_identity`` the writer's own identity for that roll, and ``serve_affecting``
-    whether the change carries recycle-class keys (every one is taken as affecting the
-    writer's own serve surface). ``awaiting_respawn`` is the operation's verdict after the roll:
-    the workers still awaiting a respawn (``operations._broadcast.awaiting_respawn_after``).
+    recovery is a fleet reload. ``decision`` is which workers the reload report says need a
+    restart (:func:`~tai42_skeleton.config.recycle_policy.recycle_decision`) and ``recycle``
+    the fleet recycle roll it ran (``None`` when the roll had no worker to visit: every worker's
+    reload confirmed no recycle-class key, or the only ones naming one were refused at their epoch build
+    or are the writer whose own restart cannot follow as its exit, so nothing rolled).
+    ``awaiting_respawn`` is the operation's verdict after the roll: the workers still awaiting a
+    respawn (``operations._broadcast.awaiting_respawn_after``).
     ``span_release_error`` is the store's error when its exclusive write span failed to release
     after the persist (``<ErrorType>: <message>``), ``None`` when it released — the change stands
     and the reload, broadcast and roll above still ran.
 
-    ``roll_deferred`` is set when the run owed a roll and ran inside a
-    :func:`~tai42_skeleton.config.service.deferred_roll.deferring_rolls` scope: the roll is
-    recorded there, ``recycle`` is ``None`` and ``awaiting_respawn`` is not judged yet, until the
-    caller folds the scope's roll in with :meth:`rolled`.
+    ``roll_deferred`` is set when the roll is not judged in this result: the run ran inside a
+    :func:`~tai42_skeleton.config.service.deferred_roll.deferring_rolls` scope, its reload is
+    recorded there, ``decision`` and ``recycle`` are ``None`` and ``awaiting_respawn`` is not
+    judged yet, until the caller folds the scope's outcome in with :meth:`rolled`; or the run's
+    roll was handed to the bus member ``roll_deferred_to`` names, which carries it out on
+    its own (:attr:`~tai42_skeleton.config.recycle_roll.RollOutcome.deferred_to`), so ``recycle`` is
+    ``None`` and ``awaiting_respawn`` empty. ``roll_deferred_to`` is ``None`` otherwise.
+    ``self_exit_armed`` is whether the writer's own post-reply self-exit follows the roll, as the
+    roll's outcome states it (:attr:`~tai42_skeleton.config.recycle_roll.RollOutcome.self_exit_armed`).
     """
 
     fleet: FleetResult
     local: dict[str, Any]
     document: dict[str, Any] | None = None
+    decision: RecycleDecision | None = None
     recycle: RecycleReport | None = None
-    self_identity: WorkerIdentity | None = None
-    serve_affecting: bool = False
     awaiting_respawn: list[AwaitingWorker] = field(default_factory=list)
     span_release_error: str | None = None
     roll_deferred: bool = False
+    roll_deferred_to: str | None = None
+    self_exit_armed: bool = False
 
     def rolled(self, roll: RollOutcome | None) -> ApplyResult:
-        """This result with its scope's deferred roll folded in: the roll's report, writer and verdict.
+        """This result with its scope's recycle outcome folded in: the decision, the roll's report and the verdict.
 
-        ``None`` (the scope deferred no roll) returns the result as it is.
+        ``None`` (the scope recorded no reload) returns the result as it is.
         """
         if roll is None:
             return self
         return replace(
             self,
+            decision=roll.decision,
             recycle=roll.recycle,
-            self_identity=roll.self_identity,
-            serve_affecting=True,
             awaiting_respawn=roll.awaiting_respawn,
-            roll_deferred=False,
+            roll_deferred=roll.deferred,
+            roll_deferred_to=roll.deferred_to,
+            self_exit_armed=roll.self_exit_armed,
         )
-
-    @property
-    def self_exit_armed(self) -> bool:
-        """Whether the writer's own deferred recycle (the post-response self-exit) happens.
-
-        The predicate :attr:`ProfileApplyOutcome.self_exit_armed` applies, shared.
-        """
-        return self_exit_armed(self.serve_affecting, self.recycle)
 
     @property
     def fanout(self) -> dict[str, Any]:
@@ -193,12 +208,22 @@ class ProfileApplyOutcome:
 
     The raw material the operations layer folds into the dedicated ``profileApplyResponse``.
 
-    ``hot`` is the hot-class diff key NAMES (names only — never values). ``recycle`` is
-    the fleet recycle report (``None`` when the diff carried no recycle-class key, so no
-    recycle rolled), each row carrying its own kind. ``self_identity`` is the applying
+    ``hot`` is the hot-class diff key NAMES (names only — never values). ``decision`` is which
+    workers the reload report says need a restart
+    (:func:`~tai42_skeleton.config.recycle_policy.recycle_decision`), its ``writer`` the applying
     worker's own identity (name + generation) — the source for the self-deferred row's
-    ``generation_before``. ``serve_affecting`` is whether the diff carries recycle keys
-    that affect the applier's own serve surface. ``fleet`` is the reload broadcast report.
+    ``generation_before``. ``recycle`` is the fleet recycle report (``None`` when the roll had no
+    worker to visit: every worker's reload confirmed no recycle-class key, or the only ones naming
+    one were refused at their epoch build or are the writer whose own restart cannot follow as its exit,
+    so no recycle rolled), each row carrying its own kind. ``fleet`` is the reload
+    broadcast report. ``roll_deferred`` is set when the roll is not judged in this outcome: the
+    apply ran inside a :func:`~tai42_skeleton.config.service.deferred_roll.deferring_rolls` scope,
+    its reload is recorded there and ``decision``, ``recycle`` and ``awaiting_respawn`` wait on the
+    scope; or its roll was handed to the bus member ``roll_deferred_to`` names, which carries it
+    out on its own, so ``recycle`` is ``None`` and ``awaiting_respawn`` empty.
+    ``roll_deferred_to`` is ``None`` otherwise.
+    ``self_exit_armed`` is whether the applier's own post-reply self-exit follows the roll, as the
+    roll's outcome states it (:attr:`~tai42_skeleton.config.recycle_roll.RollOutcome.self_exit_armed`).
     ``awaiting_respawn`` is the operation's verdict after the roll: the workers still awaiting a
     respawn. ``span_release_error`` is the store's error when its exclusive write span failed to
     release after the env persisted (``<ErrorType>: <message>``), ``None`` when it released — the
@@ -206,27 +231,24 @@ class ProfileApplyOutcome:
     """
 
     hot: list[str]
+    decision: RecycleDecision | None
     recycle: RecycleReport | None
-    self_identity: WorkerIdentity
-    serve_affecting: bool
     fleet: FleetResult
     awaiting_respawn: list[AwaitingWorker] = field(default_factory=list)
     span_release_error: str | None = None
-
-    @property
-    def self_exit_armed(self) -> bool:
-        """Whether the applier's own deferred recycle (the post-response self-exit) happens.
-
-        Only for a serve-affecting diff whose roll converged: a roll that stopped never
-        recycles anything past the row it stopped at, the applier's self-exit included.
-        """
-        return self_exit_armed(self.serve_affecting, self.recycle)
+    roll_deferred: bool = False
+    roll_deferred_to: str | None = None
+    self_exit_armed: bool = False
 
 
-def self_exit_armed(serve_affecting: bool, recycle: RecycleReport | None) -> bool:
-    """Whether the writer's own deferred recycle (the post-response self-exit) happens.
+@dataclass(frozen=True)
+class FleetReloadOutcome:
+    """What a fleet soft-restart did: its reload report and the recycle decision it settled.
 
-    Only for a serve-affecting change whose roll converged: a roll that stopped never
-    recycles anything past the row it stopped at, the writer's self-exit included.
+    ``fleet`` is the reload broadcast's report; ``roll`` which of the workers it addressed need a
+    restart (:func:`~tai42_skeleton.config.recycle_policy.recycle_decision`), the roll it ran
+    over them, the verdict after it and whether the writer's own post-reply self-exit follows.
     """
-    return serve_affecting and recycle is not None and recycle.converged
+
+    fleet: FleetResult
+    roll: RollOutcome

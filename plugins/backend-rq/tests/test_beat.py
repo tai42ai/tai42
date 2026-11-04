@@ -20,7 +20,7 @@ from redis import Redis
 from tai42_kit.clients.impl.redis import _LoggedSyncRetry
 
 from tai42_backend_rq import beat
-from tai42_backend_rq.queue import TASK_BUDGET_QUEUE_PATH
+from tai42_backend_rq.queue import TaskBudgetQueue
 from tai42_backend_rq.settings import rq_settings
 
 
@@ -88,7 +88,7 @@ def test_the_scheduler_runs_on_a_connection_with_the_kit_sync_retry(scheduler, m
     assert retry._budget == 2
     assert retry._label == "RQ_REDIS_URL"
     assert instance.kwargs["interval"] == 5.0
-    assert instance.kwargs["queue_class"] == TASK_BUDGET_QUEUE_PATH
+    assert instance.kwargs["queue_class"] is TaskBudgetQueue
     assert instance.kwargs["job_class"] is None
     assert instance.ran == {"burst": False}
     assert scheduler.levels == ["INFO"]  # type: ignore[attr-defined]

@@ -46,6 +46,30 @@ backend. A backend that names its consuming runtime anything else does not get
 the manifest export."""
 
 
+PROCESS_PRELUDE_ENV: Final[str] = "TAI_PROCESS_PRELUDE"
+"""The environment variable naming the process prelude the running process was started with.
+
+The host's entry sets it once it has run the prelude, before it imports anything else
+(:attr:`BackendRuntime.process_prelude`); the launch compares it with the prelude the selected
+runtime declares."""
+
+
+class ProcessPreludeRequired(RuntimeError):  # noqa: N818 - a restart the host answers, not an error condition
+    """The selected runtime declares a process prelude this process was not started with.
+
+    Raised by the launch before anything of the runtime starts. The host answers it by starting
+    the process again with the prelude run first; :attr:`prelude` names it.
+    """
+
+    def __init__(self, prelude: str) -> None:
+        """Name the ``module:callable`` prelude the process must be started with."""
+        super().__init__(
+            f"this runtime must run in a process started with the process prelude {prelude!r}, "
+            f"run before any other import; this process was not ({PROCESS_PRELUDE_ENV} names no such prelude)"
+        )
+        self.prelude = prelude
+
+
 class FleetOpEffect(StrEnum):
     """What applying a worker-bus op changed in this process — the vocabulary a post-apply handler decides on."""
 
@@ -96,7 +120,12 @@ Liveness = ProgressLiveness | HttpLiveness
 
 
 class ProgressReporter(Protocol):
-    """The host's receiver of a loop runtime's progress reports."""
+    """The host's receiver of a loop runtime's progress reports.
+
+    ``next_within`` is a positive number of seconds. A loop whose own interval is zero (it passes
+    again without sleeping) promises a fixed positive floor instead: its engine's own floor for the
+    wait, where the engine has one, else a bound its next pass returns within.
+    """
 
     def __call__(self, *, next_within: float) -> None:
         """Record one pass of the loop, whose next pass is due within ``next_within`` seconds."""
@@ -111,6 +140,23 @@ class BackendRuntime(ABC):
     turnover belong to the host base that drives this object. The liveness
     signal is the host's too: the runtime declares which kind it has
     (:attr:`liveness`), and a progress runtime reports from its own loop.
+
+    A runtime runs only on the objects its :meth:`build` produced. The host re-imports the
+    package a runtime comes from on every config reload, so that the package's registrations
+    re-fire into the new configuration, and a reload can land between :meth:`build` and the run
+    body as well as during it. The runtime is a process-lifetime object and stays whole across
+    those re-imports: it holds what it built and never resolves its own objects again through
+    the import system. It hands its engine the objects themselves wherever the engine's interface
+    takes an object; it imports nothing of its own package after :meth:`build`; the state its
+    engine reads lives on the objects it built, never in its package's module globals; and it
+    connects receivers to an engine's process-wide signals from :meth:`build`, never at import.
+
+    Where an engine's interface takes only an import path (a setting that names a class, a stored
+    job that names its function), the engine resolves that name itself, possibly after a reload,
+    and so may reach the re-imported copy. An object handed over by name therefore keeps no state
+    of its own: it reads what it needs from its arguments, from the objects the build produced
+    that the engine passes it, or from the process environment, so the re-imported copy behaves
+    as the built one.
     """
 
     name: ClassVar[str]
@@ -133,6 +179,16 @@ class BackendRuntime(ABC):
     Declared per class like the rest, but deliberately NOT a ``ClassVar``: a
     launch option can decide whether this engine's pool persists, so an instance
     may set it. The host therefore reads it off the live runtime."""
+
+    process_prelude: str | None = None
+    """The ``module:callable`` the process must have run before any other import, or ``None``.
+
+    Declared by a runtime whose engine reshapes the interpreter's blocking primitives (its
+    threads, locks, sockets and sleeps) and so must do it before any other module has bound
+    them. The host's entry runs it, with no arguments, first thing in a fresh process, and the
+    launch refuses a runtime whose prelude this process was not started with
+    (:class:`ProcessPreludeRequired`). Not a ``ClassVar``, like :attr:`pool_turnover_required`:
+    a launch option can decide it, so the host reads it off the live runtime."""
 
     liveness: ClassVar[Liveness]
     """How this process signals it is alive. REQUIRED: the host refuses a runtime without it.
@@ -183,6 +239,9 @@ class BackendRuntime(ABC):
 
         Runs BEFORE the readiness gate — building is not consuming — and before any
         run body. Default: nothing to build.
+
+        What it builds is everything the run body and the stop path use: a config reload
+        re-imports this runtime's package after it returns (see the class docstring).
 
         Concrete rather than abstract: a runtime whose engine object is built by
         ``from_args`` alone must not be forced to declare an empty override.

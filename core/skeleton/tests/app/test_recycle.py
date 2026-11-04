@@ -21,7 +21,16 @@ from redis.exceptions import ResponseError as RedisResponseError
 from redis.exceptions import TimeoutError as RedisTimeoutError
 from tai42_contract.errors import ClientDisconnectedError
 
-from tai42_skeleton.app.bus import FleetResult, OpOutcome, WorkerBus, WorkerKind, WorkerResult, WorkerRow, WorkerState
+from tai42_skeleton.app.bus import (
+    FleetResult,
+    OpOutcome,
+    WorkerBus,
+    WorkerIdentity,
+    WorkerKind,
+    WorkerResult,
+    WorkerRow,
+    WorkerState,
+)
 from tai42_skeleton.app.bus.ops import FleetOp
 from tai42_skeleton.app.recycle import (
     FAILED,
@@ -36,10 +45,13 @@ from tai42_skeleton.app.recycle import (
     RecycleTimeoutError,
     orchestrate_recycle,
 )
+from tai42_skeleton.config.recycle_policy import RecycleDecision, ReportedKeys
 
 _NOW = "2026-01-01T00:00:00+00:00"
 _TTL = 15.0
 _FRESH_PTTL = int(_TTL * 1000)
+_KEY = "RECYCLE_TEST_KEY"
+_WRITER = "serve-1"
 
 
 def _row(
@@ -111,7 +123,7 @@ class _ScriptedBus:
     census (defaulting to slot-name reuse). The ``*_fault`` knobs drive loud paths.
 
     ``target_outcome`` is the verdict every recycle publish returns, with
-    ``outcome_detail`` / ``outcome_error`` riding on it. ``transform_after_reads``
+    ``outcome_detail`` / ``outcome_error`` / ``outcome_payload`` riding on it. ``transform_after_reads``
     models a target that takes the recycle op up late: instead of applying the
     transform at publish time, it is applied on that many-th census read after the
     publish, whatever the verdict was. ``census_raises`` makes the N-th census read raise
@@ -125,6 +137,7 @@ class _ScriptedBus:
         target_outcome: OpOutcome = OpOutcome.applied,
         outcome_detail: str | None = None,
         outcome_error: str | None = None,
+        outcome_payload: Any = None,
         transform_after_reads: int | None = None,
         census_raises: tuple[int, Exception] | None = None,
         reachable: bool = True,
@@ -135,6 +148,7 @@ class _ScriptedBus:
         self._target_outcome = target_outcome
         self._outcome_detail = outcome_detail
         self._outcome_error = outcome_error
+        self._outcome_payload = outcome_payload
         self._transform_after_reads = transform_after_reads
         self._reachable = reachable
         self._empty_results = empty_results
@@ -167,6 +181,8 @@ class _ScriptedBus:
         self.published.append((op.op, tuple(targets or ())))
         if not self._reachable:
             return FleetResult(op=op.op, reachable=False, error="bus unreachable")
+        if op.op == "reload_config":
+            return _ask_answer(target)
         if self._empty_results:
             return FleetResult(op=op.op, results=[])
         if self._transform_after_reads is not None:
@@ -181,24 +197,64 @@ class _ScriptedBus:
                     outcome=self._target_outcome,
                     detail=self._outcome_detail,
                     error=self._outcome_error,
+                    payload=self._outcome_payload,
                 )
             ],
         )
+
+
+def _ask_answer(target: str) -> FleetResult:
+    """A worker the roll asks once ready states ``_KEY`` still off its bound value."""
+    payload = {"status": "ok", "awaiting_respawn": [_KEY]}
+    return FleetResult(
+        op="reload_config", results=[WorkerResult(name=target, outcome=OpOutcome.applied, payload=payload)]
+    )
 
 
 def _bus(fake: _ScriptedBus) -> WorkerBus:
     return cast("WorkerBus", fake)
 
 
-async def _run(fake: _ScriptedBus, *, excluded_name: str, kinds: list[WorkerKind], deferred: bool) -> RecycleReport:
+def _decision(
+    fake: _ScriptedBus, expected: dict[str, tuple[WorkerKind, int]] | None, clean: frozenset[str]
+) -> RecycleDecision:
+    """Every worker but the writer and ``clean`` reported ``_KEY`` from the life the roll starts on (census or pin)."""
+    lives = {row.name: row.generation for row in fake._rows}
+    lives.update({name: generation for name, (_kind, generation) in (expected or {}).items()})
+    return RecycleDecision(
+        writer=WorkerIdentity(name=_WRITER, kind=WorkerKind.serve, pid=1, generation=7),
+        reported={
+            name: ReportedKeys(generation, (_KEY,))
+            for name, generation in lives.items()
+            if name != _WRITER and name not in clean
+        },
+        unconfirmed={},
+        clean=clean,
+        writer_reason=None,
+        withheld={},
+        addressed=None,
+        report_unreachable=False,
+    )
+
+
+async def _run(
+    fake: _ScriptedBus,
+    *,
+    kinds: list[WorkerKind],
+    deferred: bool,
+    step_timeout: float = 1.0,
+    poll_interval: float = 0.001,
+    expected: dict[str, tuple[WorkerKind, int]] | None = None,
+    clean: frozenset[str] = frozenset(),
+) -> RecycleReport:
     return await orchestrate_recycle(
         _bus(fake),
-        excluded_name=excluded_name,
-        applier_generation=7,
+        decision=_decision(fake, expected, clean),
         target_kinds=kinds,
         applier_self_deferred=deferred,
-        step_timeout=1.0,
-        poll_interval=0.001,
+        step_timeout=step_timeout,
+        expected=expected,
+        poll_interval=poll_interval,
     )
 
 
@@ -213,9 +269,9 @@ async def test_rolls_each_kind_and_records_the_report() -> None:
             _row("serve-1", WorkerKind.serve),
         ]
     )
-    report = await _run(fake, excluded_name="serve-1", kinds=[WorkerKind.backend, WorkerKind.serve], deferred=True)
+    report = await _run(fake, kinds=[WorkerKind.backend, WorkerKind.serve], deferred=True)
 
-    # Both backend workers recycled one at a time; the only serve is the excluded applier.
+    # Both backend workers recycled one at a time; the only serve is the applier, never a target.
     assert [(r.name, r.status) for r in report.rows] == [("backend-1", RECYCLED), ("backend-2", RECYCLED)]
     assert all(r.kind == "backend" for r in report.rows)
     assert [r.generation_before for r in report.rows] == [1, 1]
@@ -232,25 +288,77 @@ async def test_rolls_each_kind_and_records_the_report() -> None:
 
 async def test_backend_only_diff_produces_no_applier_entry() -> None:
     fake = _ScriptedBus([_row("backend-1", WorkerKind.backend), _row("serve-1", WorkerKind.serve)])
-    report = await _run(fake, excluded_name="serve-1", kinds=[WorkerKind.backend], deferred=False)
+    report = await _run(fake, kinds=[WorkerKind.backend], deferred=False)
     assert [r.name for r in report.rows] == ["backend-1"]
     assert report.applier is None
 
 
-async def test_the_excluded_applier_is_never_targeted_even_within_its_kind() -> None:
+async def test_the_applier_is_never_targeted_even_within_its_kind() -> None:
     fake = _ScriptedBus([_row("serve-1", WorkerKind.serve), _row("serve-2", WorkerKind.serve)])
-    report = await _run(fake, excluded_name="serve-1", kinds=[WorkerKind.serve], deferred=True)
+    report = await _run(fake, kinds=[WorkerKind.serve], deferred=True)
     assert [r.name for r in report.rows] == ["serve-2"]
     assert all(target != ("serve-1",) for _op, target in fake.published)
 
 
 async def test_report_carries_no_generation_after_and_no_replacements() -> None:
     fake = _ScriptedBus([_row("backend-1", WorkerKind.backend), _row("serve-1", WorkerKind.serve)])
-    report = await _run(fake, excluded_name="serve-1", kinds=[WorkerKind.backend], deferred=True)
+    report = await _run(fake, kinds=[WorkerKind.backend], deferred=True)
     blob = report.model_dump_json()
     assert report.rows[0].detail is None
     assert "generation_after" not in blob
     assert "replacements" not in blob
+
+
+async def test_a_target_already_leaving_converges_to_a_recycled_row_naming_why() -> None:
+    # The target's exit latch was already set by another door: it answers ``applied`` with
+    # ``already_leaving`` and arms nothing; its one exit still ends the old life, so the row
+    # converges on the same facts and says the worker was already leaving, and for what.
+    fake = _ScriptedBus(
+        [_row("backend-1", WorkerKind.backend), _row("serve-1", WorkerKind.serve)],
+        outcome_payload={"recycling": "backend", "already_leaving": "the writer's own restart"},
+    )
+    report = await _run(fake, kinds=[WorkerKind.backend], deferred=False)
+    assert [(r.name, r.status, r.detail) for r in report.rows] == [
+        ("backend-1", RECYCLED, "already leaving: the writer's own restart")
+    ]
+    assert report.converged
+
+
+class _DeferringTargetBus(_ScriptedBus):
+    """A target whose exit is deferred to its own in-flight change answers ``exit_deferred`` and
+    stays on the census; every other target recycles by slot reuse."""
+
+    def __init__(self, rows: list[WorkerRow], *, deferring: str) -> None:
+        super().__init__(rows)
+        self._deferring = deferring
+
+    async def publish(self, op: FleetOp, targets: list[str] | None, local: Any) -> FleetResult:
+        if op.op == "recycle" and targets == [self._deferring]:
+            self.published.append((op.op, (self._deferring,)))
+            payload = {"recycling": "serve", "exit_deferred": "the env change"}
+            return FleetResult(
+                op=op.op, results=[WorkerResult(name=self._deferring, outcome=OpOutcome.applied, payload=payload)]
+            )
+        return await super().publish(op, targets, local)
+
+
+async def test_a_target_whose_exit_is_deferred_to_its_own_change_is_recorded_self_deferred_and_not_awaited() -> None:
+    # The target writes a change of its own and exits after that change's reply: the roll
+    # records it ``self-deferred``, does not wait on its old life, and does not count it among
+    # the lives fresh capacity must cover, so the next target converges on one new life.
+    fake = _DeferringTargetBus(
+        [_row("serve-1", WorkerKind.serve), _row("serve-2", WorkerKind.serve), _row("serve-3", WorkerKind.serve)],
+        deferring="serve-2",
+    )
+    report = await _run(fake, kinds=[WorkerKind.serve], deferred=False, step_timeout=0.2)
+
+    assert [(r.name, r.status, r.detail) for r in report.rows] == [
+        ("serve-2", SELF_DEFERRED, "its exit is deferred to its own in-flight change: the env change"),
+        ("serve-3", RECYCLED, None),
+    ]
+    assert report.stopped is None
+    assert report.converged
+    assert fake.published == [("recycle", ("serve-2",)), ("recycle", ("serve-3",))]
 
 
 # -- the two acceptance facts -------------------------------------------------
@@ -260,7 +368,7 @@ async def test_old_life_gone_by_superseding_generation_confirms() -> None:
     # The target's row stays under its NAME but at a higher generation — old life gone by
     # supersession, and that new life is the counted fresh capacity.
     fake = _ScriptedBus([_row("backend-1", WorkerKind.backend)], transform=supersede_in_place)
-    report = await _run(fake, excluded_name="serve-1", kinds=[WorkerKind.backend], deferred=False)
+    report = await _run(fake, kinds=[WorkerKind.backend], deferred=False)
     assert [(r.name, r.status) for r in report.rows] == [("backend-1", RECYCLED)]
     assert [(f.name, f.generation) for f in report.fresh] == [("backend-1", 2)]
 
@@ -269,7 +377,7 @@ async def test_double_fault_old_gone_and_fresh_under_a_different_name_confirms()
     # The old NAME is gone AND the fresh life joined under a DIFFERENT name — both facts
     # met, so convergence CONFIRMS (never aborts on the name mismatch).
     fake = _ScriptedBus([_row("backend-1", WorkerKind.backend)], transform=different_name_replacement)
-    report = await _run(fake, excluded_name="serve-1", kinds=[WorkerKind.backend], deferred=False)
+    report = await _run(fake, kinds=[WorkerKind.backend], deferred=False)
     assert [(r.name, r.status) for r in report.rows] == [("backend-1", RECYCLED)]
     assert [(f.name, f.generation) for f in report.fresh] == [("backend-99", 1)]
 
@@ -277,12 +385,10 @@ async def test_double_fault_old_gone_and_fresh_under_a_different_name_confirms()
 async def test_timeout_when_fresh_capacity_stays_short_names_that_fact() -> None:
     fake = _ScriptedBus([_row("backend-1", WorkerKind.backend)], transform=old_gone_no_capacity)
     with pytest.raises(RecycleTimeoutError) as excinfo:
-        await orchestrate_recycle(
-            _bus(fake),
-            excluded_name="serve-1",
-            applier_generation=1,
-            target_kinds=[WorkerKind.backend],
-            applier_self_deferred=False,
+        await _run(
+            fake,
+            kinds=[WorkerKind.backend],
+            deferred=False,
             step_timeout=0.05,
             poll_interval=0.01,
         )
@@ -301,12 +407,10 @@ async def test_timeout_when_fresh_capacity_stays_short_names_that_fact() -> None
 async def test_timeout_when_old_life_stays_present_names_that_fact() -> None:
     fake = _ScriptedBus([_row("backend-1", WorkerKind.backend)], transform=capacity_but_old_stays)
     with pytest.raises(RecycleTimeoutError) as excinfo:
-        await orchestrate_recycle(
-            _bus(fake),
-            excluded_name="serve-1",
-            applier_generation=1,
-            target_kinds=[WorkerKind.backend],
-            applier_self_deferred=False,
+        await _run(
+            fake,
+            kinds=[WorkerKind.backend],
+            deferred=False,
             step_timeout=0.05,
             poll_interval=0.01,
         )
@@ -341,12 +445,10 @@ class _GapThenReadyBus(_ScriptedBus):
 
 async def test_gap_row_target_is_waited_to_ready_before_recycle() -> None:
     fake = _GapThenReadyBus(ready_after=3)
-    report = await orchestrate_recycle(
-        _bus(fake),
-        excluded_name="serve-1",
-        applier_generation=1,
-        target_kinds=[WorkerKind.backend],
-        applier_self_deferred=False,
+    report = await _run(
+        fake,
+        kinds=[WorkerKind.backend],
+        deferred=False,
         step_timeout=1.0,
         poll_interval=0.001,
     )
@@ -360,12 +462,10 @@ async def test_gap_row_that_never_readies_times_out_naming_its_state() -> None:
     # op is published, and the error names the slot and its last-seen state.
     fake = _ScriptedBus([_row("backend-1", WorkerKind.backend, state=WorkerState.resyncing)])
     with pytest.raises(RecycleTimeoutError) as excinfo:
-        await orchestrate_recycle(
-            _bus(fake),
-            excluded_name="serve-1",
-            applier_generation=1,
-            target_kinds=[WorkerKind.backend],
-            applier_self_deferred=False,
+        await _run(
+            fake,
+            kinds=[WorkerKind.backend],
+            deferred=False,
             step_timeout=0.05,
             poll_interval=0.01,
         )
@@ -377,11 +477,13 @@ async def test_gap_row_that_never_readies_times_out_naming_its_state() -> None:
 
 # -- a computed bus verdict is awaited on reality -------------------------------
 
-_SILENT = "no received-ack within the ack timeout while presence stayed live — worker missing (alive but silent)"
+_SILENT = (
+    "no received-ack within the apply timeout while its slot claim stayed held — worker missing (alive but silent)"
+)
 
 _COMPUTED = [
     pytest.param(OpOutcome.missing, _SILENT, id="missing"),
-    pytest.param(OpOutcome.departed, "presence expired before a reply — worker departed", id="departed"),
+    pytest.param(OpOutcome.departed, "no reply and its slot holds no claim — worker departed", id="departed"),
     pytest.param(
         OpOutcome.timed_out,
         "acked but did not apply within the apply timeout, which covers the worker's full drain budget",
@@ -403,7 +505,7 @@ async def test_a_target_the_bus_could_not_confirm_recycles_once_reality_follows(
         outcome_detail=detail,
         transform_after_reads=3,
     )
-    report = await _run(fake, excluded_name="serve-1", kinds=[WorkerKind.backend], deferred=False)
+    report = await _run(fake, kinds=[WorkerKind.backend], deferred=False)
     assert [(r.name, r.status) for r in report.rows] == [("backend-1", RECYCLED)]
     assert report.rows[0].detail is None
     assert report.converged is True
@@ -420,12 +522,10 @@ async def test_a_target_the_bus_could_not_confirm_that_never_converges_lands_as_
         outcome_detail=detail,
     )
     with pytest.raises(RecycleTimeoutError) as excinfo:
-        await orchestrate_recycle(
-            _bus(fake),
-            excluded_name="serve-1",
-            applier_generation=1,
-            target_kinds=[WorkerKind.backend],
-            applier_self_deferred=True,
+        await _run(
+            fake,
+            kinds=[WorkerKind.backend],
+            deferred=True,
             step_timeout=0.05,
             poll_interval=0.01,
         )
@@ -453,7 +553,7 @@ async def test_a_failed_recycle_terminal_stops_the_roll_with_its_row() -> None:
         outcome_error="RuntimeError: boom",
     )
     with pytest.raises(RecycleError) as excinfo:
-        await _run(fake, excluded_name="serve-1", kinds=[WorkerKind.backend], deferred=False)
+        await _run(fake, kinds=[WorkerKind.backend], deferred=False)
     report = excinfo.value.report
     assert [(r.name, r.status, r.detail) for r in report.rows] == [("backend-1", FAILED, "RuntimeError: boom")]
     assert report.stopped == RecycleStop(kind="backend", name="backend-1", detail="RuntimeError: boom")
@@ -466,7 +566,7 @@ async def test_a_failed_recycle_terminal_stops_the_roll_with_its_row() -> None:
 async def test_a_reply_naming_no_target_raises() -> None:
     fake = _ScriptedBus([_row("backend-1", WorkerKind.backend)], empty_results=True)
     with pytest.raises(RecycleError, match="did not apply") as excinfo:
-        await _run(fake, excluded_name="serve-1", kinds=[WorkerKind.backend], deferred=False)
+        await _run(fake, kinds=[WorkerKind.backend], deferred=False)
     # A bus contract violation records no stop: the report reads converged and the caller re-raises it.
     assert excinfo.value.report.stopped is None
     assert excinfo.value.report.rows == []
@@ -475,7 +575,7 @@ async def test_a_reply_naming_no_target_raises() -> None:
 async def test_an_unreachable_bus_stops_the_roll_with_its_row() -> None:
     fake = _ScriptedBus([_row("backend-1", WorkerKind.backend)], reachable=False)
     with pytest.raises(RecycleError, match="unreachable") as excinfo:
-        await _run(fake, excluded_name="serve-1", kinds=[WorkerKind.backend], deferred=False)
+        await _run(fake, kinds=[WorkerKind.backend], deferred=False)
     report = excinfo.value.report
     assert [(r.name, r.status, r.detail) for r in report.rows] == [("backend-1", FAILED, "bus unreachable")]
     assert report.stopped == RecycleStop(kind="backend", name="backend-1", detail="bus unreachable")
@@ -509,20 +609,23 @@ class _AbsentThenBackBus(_ScriptedBus):
         return list(self._rows)
 
 
-async def test_a_pinned_target_absent_at_roll_time_is_waited_for_and_recycled() -> None:
+async def test_a_pinned_target_absent_at_roll_time_is_waited_for_asked_once_ready_and_recycled() -> None:
     fake = _AbsentThenBackBus(absent_reads=3)
-    report = await orchestrate_recycle(
-        _bus(fake),
-        excluded_name="serve-1",
-        applier_generation=1,
-        target_kinds=[WorkerKind.backend],
-        applier_self_deferred=False,
+    report = await _run(
+        fake,
+        kinds=[WorkerKind.backend],
+        deferred=False,
         step_timeout=1.0,
         poll_interval=0.001,
         expected={"backend-1": (WorkerKind.backend, 1)},
     )
-    assert fake.published == [("recycle", ("backend-1",))]
+    # It returned as a new life, not the one that reported: that life is asked before its recycle.
+    assert fake.published == [("reload_config", ("backend-1",)), ("recycle", ("backend-1",))]
     assert [(r.name, r.status, r.generation_before) for r in report.rows] == [("backend-1", RECYCLED, 2)]
+    assert report.rows[0].keys == [_KEY]
+    assert report.rows[0].detail == (
+        f"its reload reported {_KEY} as generation 1, a life no longer on the census; confirmed once ready"
+    )
     # The life it returned with is not fresh capacity; the life after its recycle is.
     assert [(f.name, f.generation) for f in report.fresh] == [("backend-1", 3)]
 
@@ -530,12 +633,10 @@ async def test_a_pinned_target_absent_at_roll_time_is_waited_for_and_recycled() 
 async def test_a_pinned_target_that_never_returns_lands_as_a_timed_out_row() -> None:
     fake = _AbsentThenBackBus(absent_reads=0, returns=False)
     with pytest.raises(RecycleTimeoutError) as excinfo:
-        await orchestrate_recycle(
-            _bus(fake),
-            excluded_name="serve-1",
-            applier_generation=1,
-            target_kinds=[WorkerKind.backend],
-            applier_self_deferred=False,
+        await _run(
+            fake,
+            kinds=[WorkerKind.backend],
+            deferred=False,
             step_timeout=0.05,
             poll_interval=0.01,
             expected={"backend-1": (WorkerKind.backend, 1)},
@@ -567,6 +668,8 @@ class _PinnedReturnsMidRollBus(_ScriptedBus):
         target = (targets or [None])[0]
         assert target is not None
         self.published.append((op.op, (target,)))
+        if op.op == "reload_config":
+            return _ask_answer(target)
         transform = reuse_freed_slot if target == "backend-1" else old_gone_no_capacity
         self._rows = transform(list(self._rows), target)
         return FleetResult(op=op.op, results=[WorkerResult(name=target, outcome=OpOutcome.applied)])
@@ -577,12 +680,10 @@ async def test_a_pinned_target_returning_mid_roll_is_not_counted_as_another_targ
     # for backend-2: backend-2's step must time out short of capacity.
     fake = _PinnedReturnsMidRollBus()
     with pytest.raises(RecycleTimeoutError) as excinfo:
-        await orchestrate_recycle(
-            _bus(fake),
-            excluded_name="serve-1",
-            applier_generation=1,
-            target_kinds=[WorkerKind.backend],
-            applier_self_deferred=False,
+        await _run(
+            fake,
+            kinds=[WorkerKind.backend],
+            deferred=False,
             step_timeout=0.2,
             poll_interval=0.001,
             expected={"backend-1": (WorkerKind.backend, 1), "backend-2": (WorkerKind.backend, 1)},
@@ -596,7 +697,7 @@ async def test_a_pinned_target_returning_mid_roll_is_not_counted_as_another_targ
 # -- the converged predicate ------------------------------------------------------
 
 
-def test_converged_is_every_row_recycled_and_ignores_the_applier_entry() -> None:
+def test_converged_is_every_row_recycled_or_self_deferred_and_ignores_the_applier_entry() -> None:
     def report(*statuses: str) -> RecycleReport:
         return RecycleReport(
             rows=[
@@ -608,6 +709,7 @@ def test_converged_is_every_row_recycled_and_ignores_the_applier_entry() -> None
 
     assert report().converged is True
     assert report(RECYCLED, RECYCLED).converged is True
+    assert report(RECYCLED, SELF_DEFERRED).converged is True
     assert report(RECYCLED, TIMED_OUT).converged is False
     assert report(FAILED).converged is False
     stopped = report(RECYCLED)
@@ -629,7 +731,7 @@ _OUTAGES = [
 async def test_an_outage_on_the_kind_start_read_stops_the_roll_with_no_target_in_hand(outage: Exception) -> None:
     fake = _ScriptedBus([_row("backend-1", WorkerKind.backend)], census_raises=(1, outage))
     with pytest.raises(RecycleError) as excinfo:
-        await _run(fake, excluded_name="serve-1", kinds=[WorkerKind.backend], deferred=True)
+        await _run(fake, kinds=[WorkerKind.backend], deferred=True)
     report = excinfo.value.report
     assert excinfo.value.__cause__ is outage
     assert report.rows == []
@@ -647,7 +749,7 @@ async def test_an_outage_while_waiting_for_a_target_to_return_fails_its_row() ->
     outage = RedisConnectionError("Error 111 connecting to redis:6379. Connection refused.")
     fake = _ScriptedBus([_row("backend-1", WorkerKind.backend, state=WorkerState.resyncing)], census_raises=(2, outage))
     with pytest.raises(RecycleError) as excinfo:
-        await _run(fake, excluded_name="serve-1", kinds=[WorkerKind.backend], deferred=False)
+        await _run(fake, kinds=[WorkerKind.backend], deferred=False)
     report = excinfo.value.report
     assert [(r.name, r.status, r.generation_before) for r in report.rows] == [("backend-1", FAILED, 1)]
     detail = report.rows[0].detail
@@ -675,7 +777,7 @@ async def test_an_outage_while_awaiting_convergence_fails_the_row_and_says_what_
         census_raises=(3, outage),
     )
     with pytest.raises(RecycleError) as excinfo:
-        await _run(fake, excluded_name="serve-1", kinds=[WorkerKind.backend], deferred=False)
+        await _run(fake, kinds=[WorkerKind.backend], deferred=False)
     report = excinfo.value.report
     assert [(r.name, r.status) for r in report.rows] == [("backend-1", FAILED)]
     detail = report.rows[0].detail
@@ -693,7 +795,7 @@ async def test_an_outage_on_the_fresh_read_keeps_the_recycled_rows_and_stops_the
         census_raises=(4, outage),
     )
     with pytest.raises(RecycleError) as excinfo:
-        await _run(fake, excluded_name="serve-1", kinds=[WorkerKind.backend, WorkerKind.serve], deferred=True)
+        await _run(fake, kinds=[WorkerKind.backend, WorkerKind.serve], deferred=True)
     report = excinfo.value.report
     assert [(r.name, r.status, r.detail) for r in report.rows] == [("backend-1", RECYCLED, None)]
     assert report.stopped is not None
@@ -712,11 +814,11 @@ async def test_a_bus_fault_that_is_not_an_outage_passes_through() -> None:
     fault = RedisResponseError("WRONGTYPE Operation against a key holding the wrong kind of value")
     fake = _ScriptedBus([_row("backend-1", WorkerKind.backend)], census_raises=(1, fault))
     with pytest.raises(RedisResponseError) as excinfo:
-        await _run(fake, excluded_name="serve-1", kinds=[WorkerKind.backend], deferred=False)
+        await _run(fake, kinds=[WorkerKind.backend], deferred=False)
     assert excinfo.value is fault
 
 
-async def test_a_pinned_only_roll_recycles_the_pinned_names_and_leaves_the_other_rows_of_the_kind() -> None:
+async def test_a_worker_the_decision_confirmed_clean_is_neither_recycled_nor_counted_as_a_new_life() -> None:
     fake = _ScriptedBus(
         [
             _row("backend-1", WorkerKind.backend),
@@ -724,19 +826,38 @@ async def test_a_pinned_only_roll_recycles_the_pinned_names_and_leaves_the_other
             _row("serve-1", WorkerKind.serve),
         ]
     )
-    report = await orchestrate_recycle(
-        _bus(fake),
-        excluded_name="serve-1",
-        applier_generation=7,
-        target_kinds=[WorkerKind.backend],
-        applier_self_deferred=False,
+    report = await _run(
+        fake,
+        clean=frozenset({"backend-1"}),
+        kinds=[WorkerKind.backend],
+        deferred=False,
         step_timeout=1.0,
-        expected={"backend-2": (WorkerKind.backend, 1)},
-        pinned_only=True,
+        expected={"backend-1": (WorkerKind.backend, 1), "backend-2": (WorkerKind.backend, 1)},
         poll_interval=0.001,
     )
 
     assert [(r.name, r.status) for r in report.rows] == [("backend-2", RECYCLED)]
     assert fake.published == [("recycle", ("backend-2",))]
-    # The unpinned worker of the kind is neither recycled nor counted as a new life.
     assert [(f.name, f.generation) for f in report.fresh] == [("backend-2", 2)]
+
+
+async def test_a_pinned_target_absent_from_the_census_is_waited_back_while_a_confirmed_clean_one_is_not() -> None:
+    fake = _ScriptedBus(
+        [
+            _row("backend-1", WorkerKind.backend),
+            _row("serve-1", WorkerKind.serve),
+        ]
+    )
+    report = await _run(
+        fake,
+        clean=frozenset({"backend-9"}),
+        kinds=[WorkerKind.backend],
+        deferred=False,
+        step_timeout=1.0,
+        # backend-9 is pinned but confirmed clean: its absence from the census is not waited on.
+        expected={"backend-1": (WorkerKind.backend, 1), "backend-9": (WorkerKind.backend, 1)},
+        poll_interval=0.001,
+    )
+
+    assert [(r.name, r.status) for r in report.rows] == [("backend-1", RECYCLED)]
+    assert report.converged

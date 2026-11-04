@@ -14,6 +14,7 @@ import logging
 import os
 import socket
 import types
+from collections.abc import Callable
 
 import click
 import pytest
@@ -23,6 +24,7 @@ from starlette.testclient import TestClient
 from tai42_kit.logging import redaction as kit_redaction
 
 import tai42_skeleton.cli.mcp_app as mcp_app
+from tai42_skeleton.app.lifecycle.exit_drain import ExitDrain
 
 from .conftest import (  # noqa: F401
     _HTTP_SCOPE,
@@ -361,20 +363,28 @@ def test_wrapper_enables_the_fault_handler(
 
 
 def test_wrapper_arms_the_serve_exit_once_the_app_is_built(
-    patch_app_seam, root_logger_restored, serve_exit_arms: list[bool], monkeypatch: pytest.MonkeyPatch
+    patch_app_seam,
+    root_logger_restored,
+    serve_exit_arms: list[tuple[ExitDrain, Callable[[str], object]]],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # The served worker ends its event streams only once its in-flight replies are written.
+    # The served worker begins its leaving through the app at the first stop signal, ends its
+    # event streams only once its in-flight replies are written, and declares its server's
+    # graceful-shutdown cap as the app's exit drain.
     monkeypatch.setenv("TAI_TRANSPORT", "http")
     monkeypatch.delenv("TAI_STATELESS_HTTP", raising=False)
-    patch_app_seam(_FakeApp(_FakeInnerApp()))
+    app = patch_app_seam(_FakeApp(_FakeInnerApp()))
 
     mcp_app.create_app()
 
-    assert serve_exit_arms == [True]
+    assert serve_exit_arms == [(app.exit_drain, app.stop_began)]
 
 
 def test_wrapper_arms_nothing_when_the_app_build_fails(
-    patch_app_seam, root_logger_restored, serve_exit_arms: list[bool], monkeypatch: pytest.MonkeyPatch
+    patch_app_seam,
+    root_logger_restored,
+    serve_exit_arms: list[tuple[ExitDrain, Callable[[str], object]]],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("TAI_TRANSPORT", "garbage")
     patch_app_seam(_FakeApp(_FakeInnerApp()))
@@ -386,14 +396,14 @@ def test_wrapper_arms_nothing_when_the_app_build_fails(
 
 
 async def test_run_debug_arms_the_serve_exit_inside_the_server(
-    patch_app_seam, serve_exit_arms: list[bool], monkeypatch: pytest.MonkeyPatch
+    patch_app_seam, serve_exit_arms: list[tuple[ExitDrain, Callable[[str], object]]], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    patch_app_seam(_FakeApp(_FakeInnerApp()))
+    app = patch_app_seam(_FakeApp(_FakeInnerApp()))
     monkeypatch.setattr(mcp_app, "uvicorn", _FakeUvicorn())
 
     await mcp_app.run_debug({"host": "127.0.0.1", "port": 8000})
 
-    assert serve_exit_arms == [True]
+    assert serve_exit_arms == [(app.exit_drain, app.stop_began)]
 
 
 async def test_run_stdio_registers_cli_logging(patch_app_seam) -> None:

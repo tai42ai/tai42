@@ -1,6 +1,6 @@
 """PooledClient lifecycle edge paths: disconnection eviction, close misses, the
 base NotImplementedError stubs, the facade settings-xor-kwargs guard, and the
-shutdown_all_clients early-exit + ExceptionGroup error path.
+_shutdown_all_clients early-exit + ExceptionGroup error path.
 
 All in-process — no external driver. A fresh subclass per test keeps the
 module-global, class-keyed pool from leaking state across tests.
@@ -12,7 +12,8 @@ import contextvars
 import pytest
 from tai42_contract.errors import ClientDisconnectedError
 
-from tai42_kit.clients import ClientSettings, PooledClient, advance_client_epoch, client_ctx, shutdown_all_clients
+from tai42_kit.clients import ClientSettings, PooledClient, advance_client_epoch, client_ctx
+from tai42_kit.clients.base import _shutdown_all_clients
 
 
 class _Conn:
@@ -212,12 +213,12 @@ async def test_facade_rejects_settings_and_kwargs_together():
 
 async def test_shutdown_all_clients_empty_is_noop():
     # No live pools on this loop -> early return, no error.
-    await shutdown_all_clients()
+    await _shutdown_all_clients()
 
 
 async def test_shutdown_during_in_flight_create_does_not_orphan_client():
     # Interleave: a `current()` enter is mid-`_create` (client built but not yet
-    # pooled) when `shutdown_all_clients()` runs on the same loop. Shutdown
+    # pooled) when `_shutdown_all_clients()` runs on the same loop. Shutdown
     # detaches the loop's (empty) pool and closes nothing. The created client
     # must NOT be written into the detached, now-unreachable dict (that would
     # orphan it, never closed); it must land in the live pool, closable by a
@@ -250,7 +251,7 @@ async def test_shutdown_during_in_flight_create_does_not_orphan_client():
     await started.wait()  # create is in flight, before the client is pooled
 
     # Shutdown interleaves here: the inner pool dict exists but is empty.
-    await shutdown_all_clients()
+    await _shutdown_all_clients()
     assert _SlowClient.closed == 0  # nothing pooled yet, so nothing to close
 
     release.set()
@@ -260,14 +261,14 @@ async def test_shutdown_during_in_flight_create_does_not_orphan_client():
 
     # The created client is reachable and closable: a later shutdown closes it.
     # Without the re-fetch fix it would sit in the detached dict and leak here.
-    await shutdown_all_clients()
+    await _shutdown_all_clients()
     assert _SlowClient.closed == 1
     assert conn.closed is True
 
 
 async def test_two_waiters_with_shutdown_mid_create_no_duplicate_or_orphan():
     # Two waiters race on the same key. Waiter A holds the per-(class, key) create
-    # lock and is suspended mid-`_create` when `shutdown_all_clients()` runs on
+    # lock and is suspended mid-`_create` when `_shutdown_all_clients()` runs on
     # the same loop, detaching and clearing this loop's pool dict. A's create then
     # finishes and its client lands in the re-registered pool. Waiter B captured
     # that now-stale, cleared dict BEFORE parking on the (surviving) lock; after
@@ -308,7 +309,7 @@ async def test_two_waiters_with_shutdown_mid_create_no_duplicate_or_orphan():
     await asyncio.sleep(0)  # let B run up to the lock acquire and park
 
     # Shutdown interleaves: detaches + clears this loop's pool (empty so far).
-    await shutdown_all_clients()
+    await _shutdown_all_clients()
     assert _SlowClient.closed == 0  # nothing pooled yet, so nothing to close
 
     release.set()
@@ -320,7 +321,7 @@ async def test_two_waiters_with_shutdown_mid_create_no_duplicate_or_orphan():
     assert ca is cb
 
     # The single client is reachable and closable by a later shutdown.
-    await shutdown_all_clients()
+    await _shutdown_all_clients()
     assert _SlowClient.closed == 1
     assert ca.closed is True
 
@@ -332,7 +333,7 @@ async def test_shutdown_all_clients_collects_errors_into_group():
     async with cls().current(url="b"):
         pass
     with pytest.raises(ExceptionGroup) as ei:
-        await shutdown_all_clients()
+        await _shutdown_all_clients()
     # Every close was attempted; both failures collected, none dropped.
     assert cls.closed == 2
     assert len(ei.value.exceptions) == 2
@@ -365,7 +366,7 @@ async def test_a_pooled_client_is_created_outside_the_first_callers_context():
         for task in spawned:
             task.cancel()
         await asyncio.gather(*spawned, return_exceptions=True)
-        await shutdown_all_clients()
+        await _shutdown_all_clients()
 
 
 async def test_a_first_caller_cancelled_after_creation_finished_leaves_the_client_pooled():
@@ -398,7 +399,7 @@ async def test_a_first_caller_cancelled_after_creation_finished_leaves_the_clien
         assert conn.closed is False
     assert _SignallingClient.created == 1
 
-    await shutdown_all_clients()
+    await _shutdown_all_clients()
     assert _SignallingClient.closed == 1
 
 
@@ -431,7 +432,7 @@ async def test_a_cancelled_first_caller_closes_a_client_created_under_a_retired_
     assert _SignallingClient.created == 1
     assert _SignallingClient.closed == 1
     assert closed_conns[0].closed is True
-    await shutdown_all_clients()
+    await _shutdown_all_clients()
     assert _SignallingClient.closed == 1
 
 
@@ -463,5 +464,5 @@ async def test_a_first_caller_cancelled_during_creation_cancels_the_creation():
         await caller
     assert creation_cancelled.is_set()
     assert _BlockingClient.created == 0
-    await shutdown_all_clients()
+    await _shutdown_all_clients()
     assert _BlockingClient.closed == 0

@@ -22,7 +22,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-import os
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock
@@ -31,10 +30,12 @@ import pytest
 from tai42_contract.manifest import MCPConfig, TaiMCPConfig
 
 from tai42_skeleton.app.instance import app
-from tai42_skeleton.app.lifecycle import TaiMCPLifecycleMixin, lifespan
+from tai42_skeleton.app.lifecycle import TaiMCPLifecycleMixin
 from tai42_skeleton.app.reload_gate import reload_gate
 from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.tools.mcp_start import McpStartPending, StartId
+
+from .._fakes.bus import FakeBus
 
 
 def _row(category: str = "error", message: str = "", http_status: int | None = None) -> dict:
@@ -80,10 +81,10 @@ class _Mixin(TaiMCPLifecycleMixin):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        # The forwarding properties resolve through ``_building`` when set — install a
+        # With no epoch installed the forwarding properties resolve ``_scaffold_core`` — install a
         # stub core so ``_manifest``/``_failed_mcps``/``_mcp_bound_tools`` are read/written
         # here without a real epoch.
-        self._building = _stub_core()
+        self._scaffold_core = _stub_core()
         self._config_manager = _NoManifestConfig()  # pyright: ignore[reportAttributeAccessIssue]
         # No presets are bound in these network-free tests, so the post-reload
         # reconciliation is a no-op stub (a bare mixin has no preset manager).
@@ -255,7 +256,7 @@ async def test_a_pass_that_probes_nothing_leaves_the_backoff_alone(monkeypatch):
 
 async def test_reprobe_snapshots_failed_set_under_the_gate_lock(monkeypatch, caplog):
     """The pass snapshots ``_failed_mcps`` only while holding the reload gate, so a
-    concurrent worker-thread reload (which holds the same lock) can never mutate the
+    concurrent reload body (which holds the same lock) can never mutate the
     dict mid-snapshot — the dictionary-changed-size race the lock removes.
 
     Asserts on the value the pass ACTUALLY snapshotted (the ``probed=`` set it logs,
@@ -447,9 +448,9 @@ async def test_cancel_reprobe_task_swallows_non_cancel_error(caplog, monkeypatch
     by the perpetual-task done-callback, and re-raising here (inside the app_context
     shutdown ``finally``) would skip the remaining teardown steps."""
     m = _Mixin()
-    # The death routes through the done-callback, which requests a graceful exit; stub
-    # it so the unit test never self-delivers a real SIGTERM.
-    monkeypatch.setattr(lifespan, "request_graceful_exit", lambda pid: None)
+    # The death routes through the done-callback, which requests a graceful exit of the
+    # bus; a recording bus, so the unit test never self-delivers a real SIGTERM.
+    m._bus = cast("Any", FakeBus())
 
     async def boom():
         raise RuntimeError("task died")
@@ -475,9 +476,9 @@ async def test_reprobe_task_death_is_logged_at_error(caplog, monkeypatch):
     dead recovery loop is loud. Defensive: the loop itself already catches per-pass
     errors, so only an unexpected escape reaches here."""
     m = _Mixin()
-    # The death also requests a graceful exit; stub it so the unit test never
-    # self-delivers a real SIGTERM.
-    monkeypatch.setattr(lifespan, "request_graceful_exit", lambda pid: None)
+    # The death also requests a graceful exit of the bus; a recording bus, so the unit
+    # test never self-delivers a real SIGTERM.
+    m._bus = cast("Any", FakeBus())
 
     async def boom():
         raise RuntimeError("reprobe loop escaped")
@@ -516,8 +517,8 @@ async def test_dead_reprobe_marks_and_requests_graceful_exit(monkeypatch, caplog
     task name + exception type, and the process requests its own graceful exit.
     A cancellation (shutdown) instead sets no marker and requests no exit."""
     m = _Mixin()
-    exits: list[int] = []
-    monkeypatch.setattr(lifespan, "request_graceful_exit", exits.append)
+    bus = FakeBus()
+    m._bus = cast("Any", bus)
 
     async def boom():
         raise RuntimeError("reprobe loop escaped")
@@ -530,13 +531,13 @@ async def test_dead_reprobe_marks_and_requests_graceful_exit(monkeypatch, caplog
         await asyncio.sleep(0)  # let the done-callback run
 
     assert m._dead_perpetual_task == ("tai-failed-mcp-reprobe", "RuntimeError")
-    assert exits == [os.getpid()]
+    assert bus.exit_requests == ["perpetual task tai-failed-mcp-reprobe RuntimeError"]
     assert "terminated with an exception" in caplog.text
 
     # A cancellation (shutdown) is not death: no marker, no exit.
     m2 = _Mixin()
-    exits.clear()
-    monkeypatch.setattr(lifespan, "request_graceful_exit", exits.append)
+    bus2 = FakeBus()
+    m2._bus = cast("Any", bus2)
 
     async def runs():
         await asyncio.sleep(3600)
@@ -548,15 +549,15 @@ async def test_dead_reprobe_marks_and_requests_graceful_exit(monkeypatch, caplog
         await cancelled
     await asyncio.sleep(0)
     assert m2._dead_perpetual_task is None
-    assert exits == []
+    assert bus2.exit_requests == []
 
 
 async def test_clean_return_of_perpetual_task_marks_returned(monkeypatch, caplog):
     """A perpetual task that RETURNS cleanly is also a death: the marker reason is
     the literal ``"returned"`` and the process still requests its graceful exit."""
     m = _Mixin()
-    exits: list[int] = []
-    monkeypatch.setattr(lifespan, "request_graceful_exit", exits.append)
+    bus = FakeBus()
+    m._bus = cast("Any", bus)
 
     async def returns():
         return None
@@ -568,7 +569,7 @@ async def test_clean_return_of_perpetual_task_marks_returned(monkeypatch, caplog
         await asyncio.sleep(0)  # let the done-callback run
 
     assert m._dead_perpetual_task == ("tai-interactions-expiry-reaper", "returned")
-    assert exits == [os.getpid()]
+    assert bus.exit_requests == ["perpetual task tai-interactions-expiry-reaper returned"]
     assert "returned unexpectedly" in caplog.text
 
 
@@ -727,7 +728,7 @@ async def test_the_loop_the_reload_failed_door_and_a_late_start_share_one_apply_
     m._manifest = Manifest.model_validate({"mcp": [_cfg(t).model_dump() for t in ("loop", "door", "late")]})
     m._failed_mcps = {"loop": _row()}
     m._probe_mcp = AsyncMock(return_value=[_FakeMcpTool()])
-    m._serving_loop = asyncio.get_running_loop()
+    m.bind_serving_loop()
     seam: list[str] = []
     apply = m._apply_probe_outcome
 
@@ -739,7 +740,7 @@ async def test_the_loop_the_reload_failed_door_and_a_late_start_share_one_apply_
 
     await m._probe_and_apply_failed({"loop": _cfg("loop")})
     m._failed_mcps = {"door": _row()}
-    await asyncio.to_thread(m._reload_failed_mcps)
+    await m._reload_failed_mcps()
     start = StartId()
     m._failed_mcps = {}
     m._record_failed_mcp(_cfg("late"), McpStartPending("late", 3.0, 15.0, start=start))

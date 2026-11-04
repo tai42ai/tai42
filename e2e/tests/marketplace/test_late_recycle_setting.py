@@ -105,6 +105,7 @@ async def test_a_recycle_class_setting_an_install_loads_awaits_nothing_until_its
     backend_rows = [row for row in roll["recycle"] if row["kind"] == "backend"]
     assert backend_rows, roll
     assert all(row["status"] == "recycled" for row in backend_rows), roll
+    assert all(row["keys"] == [LAMBDA_POOL_URL_ENV] for row in roll["recycle"]), roll
     assert [row["kind"] for row in roll["recycle"] if row["status"] == "self-deferred"] == ["serve"], roll
     assert changed["awaiting_respawn"] == [], changed
     stack.wait_generation_bump("serve", {n: g for n, (k, g) in before.items() if k == "serve"}, deadline=150.0)

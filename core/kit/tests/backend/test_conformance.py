@@ -14,7 +14,13 @@ from typing import ClassVar, Self
 import pytest
 from tai42_contract.backend.runtime import BackendRuntime, ExecutionMode, HttpLiveness, ProgressLiveness
 
-from tai42_kit.backend import ManagedBackend, check_backend_declarations, check_runtime_declarations
+from tai42_kit.backend import (
+    BACKEND_TOOLS,
+    ManagedBackend,
+    check_backend_declarations,
+    check_runtime_declarations,
+    check_tool_surface,
+)
 
 from ._self_wiring import DelegatingBackend, SelfWiringBackend
 from .fakes import (
@@ -252,3 +258,19 @@ def test_a_non_consuming_runtime_may_declare_either_liveness_kind(
     runtime.liveness = liveness  # pyright: ignore[reportAttributeAccessIssue]
 
     assert check_runtime_declarations(runtime) == []
+
+
+def test_the_full_surface_tagged_backend_is_certified() -> None:
+    assert check_tool_surface({tool: {"backend"} for tool in BACKEND_TOOLS} | {"other_tool": set()}) == []
+
+
+def test_a_missing_an_untagged_and_an_extra_backend_tool_are_reported() -> None:
+    missing, untagged, *kept = BACKEND_TOOLS
+    tools: dict[str, set[str]] = {tool: {"backend"} for tool in kept}
+    tools[untagged] = {"other"}
+    tools["backend_extra"] = {"backend"}
+    assert check_tool_surface(tools) == [
+        f"{missing} is not registered",
+        f"{untagged} is registered without the 'backend' tag",
+        "backend_extra is registered outside the backend tool surface",
+    ]

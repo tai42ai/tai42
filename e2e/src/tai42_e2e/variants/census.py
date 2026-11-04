@@ -19,7 +19,10 @@ class BusWorker:
     off the key, and the presence value's ``kind`` (``serve`` for an HTTP worker,
     ``backend`` for a runtime worker), ``pid``, ``generation`` (the monotonic life counter
     minted with the claim), lifecycle ``state`` (``ready`` / ``resyncing`` / ``recycling``),
-    the ``joined_at`` / ``beat_at`` timestamps, and the optional ``last_op`` summary."""
+    the ``joined_at`` / ``beat_at`` timestamps, the optional ``last_op`` summary, and the
+    ``drain_seconds`` a leaving worker announces with ``state=recycling`` (how long it may take
+    to finish its in-flight work and exit; ``None`` while it is not leaving or its stop has no
+    bound)."""
 
     name: str
     kind: str
@@ -29,6 +32,7 @@ class BusWorker:
     beat_at: str
     state: str
     last_op: dict[str, Any] | None = None
+    drain_seconds: float | None = None
 
 
 def bus_key_root(namespace: str) -> str:
@@ -44,7 +48,7 @@ def bus_key_root(namespace: str) -> str:
 def bus_census(bus_redis_url: str, namespace: str) -> list[BusWorker]:
     """The live fleet on the worker bus: scan the per-name presence keys under this
     stack's bus key root (:func:`bus_key_root`) on the bus Redis and parse each value's
-    ``{kind, pid, generation, joined_at, beat_at, state, last_op?}``.
+    ``{kind, pid, generation, joined_at, beat_at, state, drain_seconds, last_op?}``.
 
     Backend-independent — every subscribed worker (both the HTTP ``serve`` workers and
     the ``backend`` runtime) advertises exactly one presence key under its slot name, so
@@ -73,6 +77,7 @@ def bus_census(bus_redis_url: str, namespace: str) -> list[BusWorker]:
                     beat_at=meta["beat_at"],
                     state=meta["state"],
                     last_op=meta.get("last_op"),
+                    drain_seconds=meta["drain_seconds"],
                 )
             )
         return workers

@@ -1,43 +1,22 @@
-"""Worker functions and the enqueue helper.
+"""Worker functions: the dispatched tool's job and the callback job chained onto it.
 
-``tool_execution`` runs one tool by name and, when a callback schema rode along,
-chains a ``callback_job`` over this job's result. ``enqueue_task`` maps the
-backend task options (``eta`` / ``countdown`` / ``expires`` / ``callback_kwargs`` /
-``queue``) onto arq's enqueue API; ``queue`` is a worker queue label.
+``tool_execution`` runs one tool by name and, when a callback schema rode along and the tool
+succeeded, chains a ``callback_job`` over this job's result.
 """
 
 from __future__ import annotations
 
 import asyncio
 import time
-from datetime import datetime
 from typing import Any
 
-from arq.connections import ArqRedis
 from arq.jobs import JobStatus
-from tai42_contract.backend import SCHEDULE_CADENCE_KEY, SCHEDULE_NAME_KEY
-from tai42_kit.backend import CallbackSchema, backend_fire, callback_execution, carry_forwarded_fire
-from tai42_kit.utils.detached_util import mark_detached_run, reset_detached_run
-from tai42_kit.utils.worker_secret_capability import WORKER_SECRET_CAPABILITY_ARG, bind_worker_secret_capability
+from tai42_kit.backend import CALLBACK_OPTION, CallbackSchema, callback_execution
+from tai42_kit.backend.job_run import run_dispatched_tool
 
-from tai42_backend_arq.jobs import job_handle, register_queue
-from tai42_backend_arq.queues import derived_queue
+from tai42_backend_arq.jobs import job_handle
 from tai42_backend_arq.scheduler import wait_job_result
-from tai42_backend_arq.settings import TaskFailedError, arq_settings
-
-# Task options every backend extension appends to its branch tool's signature.
-ARQ_TASK_OPTS: dict[str, Any] = {
-    "countdown": int | None,
-    "expires": str | float | None,  # Seconds the queued job stays runnable.
-    "eta": str | None,  # ISO-format datetime string.
-    "callback_kwargs": CallbackSchema | None,
-    "queue": str | None,  # Worker queue label; None = the settings queue.
-}
-
-ARQ_SCHEDULE_OPTS: dict[str, Any] = {
-    SCHEDULE_NAME_KEY: str,
-    SCHEDULE_CADENCE_KEY: dict[str, Any],
-}
+from tai42_backend_arq.settings import arq_settings
 
 
 async def callback_job(
@@ -47,9 +26,10 @@ async def callback_job(
 ) -> Any:
     """Wait for ``previous_job_id`` to complete, then run ``callback`` over its result.
 
-    A missing, timed-out, or failed predecessor is a domain outcome returned as a
-    status dict. An unexpected polling error, and any failure of the callback's own
-    execution, raise so arq records this callback a failed job.
+    A predecessor that is missing raises ``RuntimeError``, one still unfinished at the settings'
+    ``callback_timeout`` raises ``TimeoutError``, and one that failed raises its
+    ``TaskFailedError``: arq records this callback a failed job in each case, as it does a
+    failure of the callback's own execution.
     """
     # The schema crosses the queue as JSON, so it arrives as a plain mapping.
     if not isinstance(callback, CallbackSchema):
@@ -60,93 +40,29 @@ async def callback_job(
 
     while True:
         status = await job.status()
-
         if status == JobStatus.complete:
             break
-
         if status == JobStatus.not_found:
-            return {"status": "error", "job_id": previous_job_id, "error": "Job not found"}
-
+            raise RuntimeError(f"callback predecessor job {previous_job_id} not found")
         if (time.time() - start_time) > timeout:
-            return {
-                "status": "not_finished",
-                "job_id": previous_job_id,
-                "error": f"Job status '{status}' did not complete within {timeout}s",
-            }
-
+            raise TimeoutError(
+                f"callback predecessor job {previous_job_id} still {status.value} after {timeout} seconds"
+            )
         await asyncio.sleep(0.1)
 
-    try:
-        # wait_job_result surfaces a failed or aborted predecessor as TaskFailedError:
-        # the predecessor's own failure is a domain outcome reported as a status dict.
-        result = await wait_job_result(job)
-    except TaskFailedError as e:
-        return {"status": "failure", "job_id": previous_job_id, "error": repr(e)}
-
-    # The follow-up delivery is left to raise into arq's failed-job machinery.
+    result = await wait_job_result(job)
     return await callback_execution(result, callback)
 
 
 async def tool_execution(ctx: dict[str, Any], *args: Any, **kwargs: Any) -> Any:
     """Run the tool named by the ``tool_name_arg`` kwarg.
 
-    When ``callback_kwargs`` rode along, chain a callback job keyed to this job's id — even
-    when the tool raised, so the callback can react to the failure.
+    When ``callback_kwargs`` rode along and the tool succeeded, chain a callback job keyed to
+    this job's id; a tool that raised chains nothing.
     """
-    callback = kwargs.pop("callback_kwargs", None)
-
-    try:
-        tool_name = kwargs.pop(arq_settings().tool_name_arg)
-        # A worker executes a dequeued task with no live caller holding a
-        # connection, so the turn budget does not apply, and no HTTP request bound
-        # the secret-read capability — the worker binds the one the job carried (a job
-        # without it raises ``KeyError``).
-        secret_capability = kwargs.pop(WORKER_SECRET_CAPABILITY_ARG)
-        # ``backend_fire`` pops the reserved ``backend_schedule_*`` job kwargs and either binds the
-        # stamped firing identity and drives the schedule door (a contract-bearing schedule, or a task
-        # that forwarded the ambient subject/identity), or runs the tool plainly when the job carries no
-        # door signal. A park comes back as the re-park sentinel it returns.
-        detached_token = mark_detached_run()
-        try:
-            with bind_worker_secret_capability(secret_capability):
-                return await backend_fire(tool_name, kwargs)
-        finally:
-            reset_detached_run(detached_token)
-    finally:
-        if callback:
-            # The worker pool's default queue is this worker's queue: the job's own.
-            await ctx["redis"].enqueue_job("callback_job", ctx["job_id"], callback)
-
-
-async def enqueue_task(arq_redis: ArqRedis, *args: Any, **kwargs: Any) -> Any:
-    """Enqueue one ``tool_execution`` job, honoring the backend task options.
-
-    ``eta`` (ISO datetime) defers until that moment, ``countdown`` (seconds)
-    defers by that long, ``expires`` (seconds) bounds how long the job stays
-    runnable, ``callback_kwargs`` stays a job kwarg, ``queue`` (a label) sends the job
-    to ``<ARQ_QUEUE_NAME>.<label>``. ``None`` options are dropped. A label outside
-    ``[A-Za-z0-9_-]+`` raises ``ValueError`` before anything is written.
-    """
-    task_kwargs = {k: kwargs.pop(k) for k in ARQ_TASK_OPTS if k in kwargs}
-    opts = {k: v for k, v in task_kwargs.items() if v is not None}
-    target = derived_queue(opts.pop("queue", None))
-
-    callback = opts.pop("callback_kwargs", None)
+    callback = kwargs.pop(CALLBACK_OPTION, None)
+    result = await run_dispatched_tool(kwargs, tool_name_arg=arq_settings().tool_name_arg)
     if callback is not None:
-        carry_forwarded_fire(callback, kwargs)
-        kwargs["callback_kwargs"] = callback
-
-    enqueue_opts: dict[str, Any] = {}
-    eta = opts.pop("eta", None)
-    countdown = opts.pop("countdown", None)
-    expires = opts.pop("expires", None)
-    if eta:
-        enqueue_opts["_defer_until"] = datetime.fromisoformat(eta)
-    elif countdown:
-        enqueue_opts["_defer_by"] = countdown
-    if expires is not None:
-        enqueue_opts["_expires"] = int(float(expires))
-
-    # Registered before the enqueue, so a by-id lookup never misses a sent job.
-    await register_queue(arq_redis, target)
-    return await arq_redis.enqueue_job("tool_execution", *args, _queue_name=target, **kwargs, **enqueue_opts)
+        # The worker pool's default queue is this worker's queue: the job's own.
+        await ctx["redis"].enqueue_job("callback_job", ctx["job_id"], callback)
+    return result

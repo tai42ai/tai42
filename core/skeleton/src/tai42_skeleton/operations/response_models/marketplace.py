@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, JsonValue
-from tai42_contract.app.responses import ApplyResponse
+from pydantic import BaseModel, Field, JsonValue
+from tai42_contract.app.responses import ApplyResponse, AwaitingWorker, RecycleRoll
 from tai42_contract.plugins import PluginDelivery, RouteMethod
 
 from tai42_skeleton.marketplace.compat import CompatState, UpgradeOutcome
@@ -188,6 +188,19 @@ class UpgradeRow(BaseModel):
 
 
 class UpgradeAllResult(BaseModel):
-    """The complete per-ref upgrade-all report."""
+    """The complete per-ref upgrade-all report and the one fleet recycle roll the batch settled.
+
+    ``recycle`` is the roll over the workers the batch's latest reload report says need a restart
+    (``null`` when the roll had no worker to visit — every worker's reload confirmed no recycle-class
+    key, or the only ones naming one were refused at their epoch build or are the writer whose own restart
+    cannot follow as its exit — or the batch reloaded nothing); ``awaiting_respawn`` the workers still
+    awaiting a respawn after it. ``roll_deferred`` is ``true`` when the roll was handed to the
+    worker ``roll_deferred_to`` names, which carries it out after the reply (``recycle`` is
+    ``null`` and ``awaiting_respawn`` empty); ``roll_deferred_to`` is ``null`` otherwise.
+    """
 
     results: list[UpgradeRow]
+    recycle: RecycleRoll | None = None
+    awaiting_respawn: list[AwaitingWorker] = Field(default_factory=list)
+    roll_deferred: bool = False
+    roll_deferred_to: str | None = None

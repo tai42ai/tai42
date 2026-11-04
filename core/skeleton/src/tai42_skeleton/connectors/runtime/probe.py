@@ -4,12 +4,14 @@
 path). Best-effort: it never raises and logs at DEBUG.
 
 It opens the same MCP transport the runtime uses for the sub-service and runs the
-MCP handshake plus a ``tools/list`` round-trip on the MCP start loop
+MCP handshake plus a ``tools/list`` round-trip as an MCP start
 (:func:`~tai42_skeleton.tools.mcp_start.start_listing`), waiting a short time for the
 answer. A start still in progress when the wait ends reads as not live, but it is never
 torn down for that: it goes on up to the start budget (``mcp_probe_timeout``), closes its
-client itself, and its late outcome is logged at INFO. A probe of the same config while
-such a start is in flight joins it instead of starting the server again. The
+client itself, and its late outcome is logged at INFO. With no serving loop bound (a forked
+job child), the start runs on the probe's own loop and the probe waits it out instead. A
+probe of the same config while such a start is in flight joins it instead of starting the
+server again. The
 credential is applied by :func:`prepare_managed_request`, the preparation every
 managed dispatch uses: an OAuth token rides the ``authorization`` header on http,
 a no-auth client config merges into the headers (http) or the launch env (stdio).

@@ -35,12 +35,12 @@ class _Mixin(TaiMCPLifecycleMixin):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        # The forwarding properties resolve through ``_building`` when set — install a
+        # With no epoch installed the forwarding properties resolve ``_scaffold_core`` — install a
         # stub core so the failed-MCP maps are read/written here without a real epoch.
         from types import SimpleNamespace
         from unittest.mock import MagicMock
 
-        self._building = SimpleNamespace(  # pyright: ignore[reportAttributeAccessIssue]
+        self._scaffold_core = SimpleNamespace(  # pyright: ignore[reportAttributeAccessIssue]
             _manifest=None,
             _tool_registry=MagicMock(),
             _extension_registry=MagicMock(),
@@ -114,7 +114,7 @@ class TestReloadShapes:
     def test_unknown_title_is_structured_error(self):
         m = _Mixin()
         m._manifest = Manifest.model_validate({})
-        r = asyncio.run(m._reload_mcp_async("nope"))
+        r = asyncio.run(m._reload_mcp("nope"))
         assert r["title"] == "nope"
         assert r["status"] == "error"
         assert r["error"].startswith("Unknown MCP 'nope'")
@@ -133,7 +133,7 @@ class TestReloadShapes:
             return {"title": title, "status": "ok"}
 
         m._apply_reloaded_mcp = fake_apply
-        out = asyncio.run(m._reload_failed_mcps_async())
+        out = asyncio.run(m._reload_failed_mcps())
         # One bad title must not discard the other; the failure is coarse in the
         # RESULT (no exception text — strip policy); the trace goes to the log only.
         assert out == [

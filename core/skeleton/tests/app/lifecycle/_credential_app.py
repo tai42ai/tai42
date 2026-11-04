@@ -3,9 +3,9 @@
 The connection is :mod:`tests.connectors.credential_path`'s (a loopback MCP server, a loopback token
 endpoint, a sealed record under the real resolver). The app boots with ``app_context`` on the test's
 own event loop, which is the serving loop the refresh owner is bound to; a reload is driven through
-``reload_config`` (the reload-gate worker thread, the swap marshalled onto the serving loop) or through
-the profile apply (``ConfigService.apply_replace_env`` awaited on the serving loop), each running the
-real ``build_and_swap_epoch`` whose build blocks the serving loop while it lists.
+``reload_config`` or through the profile apply (``ConfigService.apply_replace_env``), each a body
+``reload_gate.run`` awaits on the serving loop, running the real ``build_and_swap_epoch`` whose
+build awaits its listings on the serving loop.
 """
 
 from __future__ import annotations

@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager, contextmanager
 from typing import TYPE_CHECKING
 
+from tai42_skeleton.app import admission
 from tai42_skeleton.app.bus import WorkerKind
+from tai42_skeleton.app.reload_gate import recorded_wait
 
 from .base import _Facet
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import AsyncIterator, Callable, Iterator
     from typing import Any
 
     from tai42_contract.backend import FleetOpApplied
@@ -38,8 +41,8 @@ class LifecycleFacet(_Facet):
     def on_post_swap(self, func: Callable[[], Any]) -> Callable[[], Any]:
         """Register an establisher for a loop-affine background loop.
 
-        Run on the serving loop at boot and after every epoch swap — never on
-        the throwaway build-thread loop the per-epoch handlers run on.
+        Run on the serving loop at boot and after every epoch swap — never by the
+        per-epoch handlers, which run while the generation is still being built.
         """
         return self._app._on_post_swap(func)
 
@@ -47,16 +50,28 @@ class LifecycleFacet(_Facet):
         """Register ``func`` to run after a fleet op is applied, given the applied op with its effects and budget."""
         return self._app._on_fleet_op_applied(func)
 
-    def reload_registries(self, manifest: ManifestImpl) -> dict[str, Any]:
+    async def reload_registries(self, manifest: ManifestImpl) -> dict[str, Any]:
         """Re-initialise the registries from ``manifest`` and run the per-epoch handler list once.
 
         The rebuild step the epoch build+swap primitive calls.
         """
-        return self._app._reload_registries(manifest)
+        return await self._app._reload_registries(manifest)
 
     async def wait_until_ready(self) -> None:
         """Block until the app has finished starting up."""
         await self._app._wait_until_ready()
+
+    @asynccontextmanager
+    async def waiting_on_fleet_work(self) -> AsyncIterator[None]:
+        """Span a wait on work outside this process as a recorded wait of the current admitted work or run."""
+        async with recorded_wait():
+            yield
+
+    @contextmanager
+    def admitted_job(self) -> Iterator[None]:
+        """Admit the enclosed backend job's run on the live serving generation while it runs on the serving loop."""
+        with admission.admitted_job():
+            yield
 
     async def read_boot_manifest(self, *, kind: WorkerKind = WorkerKind.serve) -> ManifestImpl:
         """Build the worker bus, bridge the persisted env store into ``os.environ``, read + validate the boot manifest.
@@ -71,17 +86,17 @@ class LifecycleFacet(_Facet):
 class AdminFacet(_Facet):
     """``app.admin`` — runtime management surface (``AppAdmin``)."""
 
-    def reload_mcp(self, title: str) -> dict[str, Any]:
+    async def reload_mcp(self, title: str) -> dict[str, Any]:
         """Reload the sub-MCP app titled ``title`` and report the outcome."""
-        return self._app._reload_mcp(title)
+        return await self._app._reload_mcp(title)
 
-    def deregister_mcp(self, title: str) -> dict[str, Any]:
+    async def deregister_mcp(self, title: str) -> dict[str, Any]:
         """Deregister the sub-MCP app titled ``title`` and report the outcome."""
-        return self._app._deregister_mcp(title)
+        return await self._app._deregister_mcp(title)
 
-    def reload_config(self) -> dict[str, Any]:
+    async def reload_config(self) -> dict[str, Any]:
         """Reload the process config in place and report the outcome."""
-        return self._app._reload_config()
+        return await self._app._reload_config()
 
     def tool_reloader(self, kind: str) -> Callable[..., Any]:
         """Return the reload callable for tools of the given ``kind``."""
@@ -91,9 +106,9 @@ class AdminFacet(_Facet):
         """Run a tool reload ``action`` for ``name`` of ``kind`` and report the outcome."""
         return await self._app._run_tool_reload(kind, action, name)
 
-    def reload_failed_mcps(self) -> list[dict[str, Any]]:
+    async def reload_failed_mcps(self) -> list[dict[str, Any]]:
         """Retry every sub-MCP app that failed to load and report each outcome."""
-        return self._app._reload_failed_mcps()
+        return await self._app._reload_failed_mcps()
 
     async def reprobe_failed_mcps(self, titles: list[str]) -> list[dict[str, Any]]:
         """Re-probe those of ``titles`` that failed to load, bind the recovered ones, and report each outcome.
@@ -132,12 +147,18 @@ class AdminFacet(_Facet):
 
     @property
     def live_manifest(self) -> dict[str, Any]:
-        """The live in-process manifest as an emitted, model-dumped dict."""
+        """The live serving generation's manifest as an emitted, model-dumped dict.
+
+        A request read: while a rebuild is in flight it answers the generation still serving,
+        never the one under construction.
+        """
         return self._app._live_manifest
 
     @property
     def live_manifest_typed(self) -> ManifestImpl:
-        """The live in-process manifest as the skeleton ``Manifest``, raising if the app is not started.
+        """The live serving generation's manifest as the skeleton ``Manifest``, raising if the app is not started.
+
+        A request read like :attr:`live_manifest`: a rebuild in flight does not change it.
 
         Carries the resolved selection maps + predicates — the typed companion
         to :attr:`live_manifest` (the emitted, model-dumped dict). This is the

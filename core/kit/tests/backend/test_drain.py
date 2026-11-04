@@ -24,7 +24,7 @@ from typing import ClassVar
 import pytest
 from tai42_contract.backend.runtime import BackendRuntime
 
-from tai42_kit.signals import signal_chain
+from tai42_kit.signals import STOP_SIGNALS, signal_chain
 
 from .fakes import (
     FakeApp,
@@ -118,7 +118,9 @@ async def test_an_overrunning_drain_is_reported_and_abandoned(
     # Bounded and loud: a wedged engine must not hold teardown open, so the wait
     # is abandoned with an ERROR and the supervisor's kill becomes the backstop.
     class _ImpatientBackend(backend_cls):  # type: ignore[valid-type, misc]
-        drain_timeout = 0.05
+        @property
+        def drain_timeout(self) -> float:
+            return 0.05
 
     backend = _ImpatientBackend()
     task = asyncio.create_task(backend.launch(["worker"]))
@@ -201,6 +203,20 @@ async def test_sigint_is_wired_alongside_sigterm(app: FakeApp) -> None:
 
     await asyncio.wait_for(task, timeout=5)
     assert runtime.drain_requests == 1
+
+
+async def test_the_drain_is_wired_to_exactly_the_stop_signals(app: FakeApp) -> None:
+    # The stop pair has one owner: the wiring subscribes what the signals module names.
+    backend = FakeOnLoopBackend()
+    task = asyncio.create_task(backend.launch(["worker"]))
+    app.lifecycle.mark_ready()
+    runtime = await running_runtime(FakeOnLoopWorker)
+
+    wired = {sig for sig in signal.Signals if "fake-on-loop-worker-drain" in signal_chain.subscribers(sig)}
+
+    runtime.release()
+    await asyncio.wait_for(task, timeout=5)
+    assert wired == set(STOP_SIGNALS)
 
 
 async def test_the_wiring_leaves_the_chain_when_the_body_is_out(app: FakeApp) -> None:
@@ -371,7 +387,10 @@ async def test_a_cancelled_aclose_after_an_overrun_is_expected_noise(
     # cancellation out of its teardown says nothing new — WARNING, not ERROR, and
     # the launch still ends as the cancellation it was.
     class _Backend(FakeOnLoopBackend):
-        drain_timeout = 0.05
+        @property
+        def drain_timeout(self) -> float:
+            return 0.05
+
         runtimes: ClassVar[_Runtimes] = {"worker": _AcloseCancels}
 
     task = asyncio.create_task(_Backend().launch(["worker"]))
@@ -478,7 +497,10 @@ async def test_a_relaunch_after_an_overrun_starts_from_a_clean_drain_state(app: 
     # a real cancellation, so a launch that overran must not leave the next one
     # absorbing a genuine one.
     class _Backend(FakeOnLoopBackend):
-        drain_timeout = 0.05
+        @property
+        def drain_timeout(self) -> float:
+            return 0.05
+
         runtimes: ClassVar[_Runtimes] = {"worker": FakeOnLoopWorker}
 
     backend = _Backend()

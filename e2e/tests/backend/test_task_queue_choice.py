@@ -30,10 +30,11 @@ _QUEUE_WORKER = f"backend-queue-{_LABEL}"
 # answer to a cancel of that held job.
 _DONE = {"arq": "complete", "rq": "finished", "celery": "SUCCESS"}
 _HELD = {"arq": "deferred", "rq": "scheduled", "celery": "PENDING"}
-_CANCELLED = {"arq": "Task {} aborted", "rq": "Task {} canceled", "celery": "Task {} revoked (terminate=False)"}
-# The status after the cancel: arq stores the abort as the job's outcome, RQ deletes the
-# job, and the Celery worker holding the job records it revoked once the revoke reaches it.
-_AFTER_CANCEL = {"arq": "complete", "rq": "unknown", "celery": "REVOKED"}
+_CANCELLED = {"arq": "Task {} aborted", "rq": "Task {} canceled", "celery": "Task {} revoked"}
+# The status after the cancel: arq stores the abort as the job's outcome, RQ keeps the job
+# marked canceled, and the Celery worker holding the job records it revoked once the revoke
+# reaches it.
+_AFTER_CANCEL = {"arq": "complete", "rq": "canceled", "celery": "REVOKED"}
 
 # The worker serves a created preset within this.
 _PRESET_SERVED_DEADLINE = 15.0
@@ -198,7 +199,5 @@ async def test_a_job_held_for_later_on_a_queue_is_read_listed_and_cancelled_by_i
 @pytest.mark.timeout(345)
 async def test_a_queue_that_is_not_a_label_is_refused(queue_choice_stack: TaiStack) -> None:
     stack = queue_choice_stack
-    if _engine(stack) == "celery":
-        pytest.skip("celery: a queue name is free-form, so no value is refused")
     with pytest.raises(ToolError, match="queue label 'b:x' must match"):
         await _call(stack, "e2e_worker_info_async_task", {"queue": "b:x"})

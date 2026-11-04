@@ -12,20 +12,26 @@ import asyncio
 import contextvars
 import gc
 import os
+import sys
 from collections.abc import Awaitable, Callable, Iterator
 from contextvars import ContextVar
+from pathlib import Path
 
 import pytest
 from pydantic_settings import BaseSettings
 from tai42_contract.app import tai42_app
 from tai42_kit.clients.base import advance_client_epoch, current_client_epoch
+from tai42_kit.fork_gate import fork_gate
 from tai42_kit.process_lock import ProcessLock
-from tai42_kit.settings import reset_all_settings
+from tai42_kit.settings import bind_respawn_class_env, reset_all_settings
+from tai42_kit.settings import registry as settings_registry
 from tai42_kit.settings.cache_registry import (
     _stamp_settings,
     settings_cache,
     sweep_stale_settings,
 )
+from tests._fakes.rebuild import no_rebuild
+from tests._fakes.virtual_clock import run_on_virtual_clock
 
 from tai42_skeleton.app import admission as admission_mod
 from tai42_skeleton.app import applied_env
@@ -33,22 +39,28 @@ from tai42_skeleton.app import epoch as epoch_mod
 from tai42_skeleton.app import epoch_retire as epoch_retire_mod
 from tai42_skeleton.app import retired_generations as retired_mod
 from tai42_skeleton.app.admission import EpochAdmissionApp, mark_current_request_drain_exempt
+from tai42_skeleton.app.discarded_build import is_discarded_build_failure
 from tai42_skeleton.app.epoch import (
     Epoch,
     build_and_swap_epoch,
     current_epoch,
     current_epoch_or_none,
 )
+from tai42_skeleton.app.importer import import_or_reload_package
 from tai42_skeleton.app.instance import build_app
 from tai42_skeleton.app.lifecycle import TaiMCPLifecycleMixin
-from tai42_skeleton.app.reload_gate import hold_recorded, reload_gate
+from tai42_skeleton.app.lifecycle.config_reload import awaiting_respawn
+from tai42_skeleton.app.reload_gate import hold_recorded, recorded_wait, reload_gate
 from tai42_skeleton.config.deployment_env import DeploymentOwnership
 
+from ._deferred_retire_tail import DEFERRED_TAIL_BOUND_S
 from ._served_app import RELOAD_SWAP_BOUND_S
 
-# Bind the process app handle so the retire path's ``tool_runs`` import (which
-# registers an ``on_shutdown`` handler on the bound handle) resolves.
-tai42_app.bind(build_app())
+# The process app, bound so the retire path's ``tool_runs`` import (which registers an
+# ``on_shutdown`` handler on the bound handle) resolves; ``_install_boot`` builds each
+# boot generation's serving core from it.
+_APP = build_app()
+tai42_app.bind(_APP)
 
 
 class _Serving:
@@ -109,17 +121,17 @@ def _reset_epoch_state() -> Iterator[None]:
     try:
         yield
     finally:
-        for name in ("_current", "_serving_slot", "_building_epoch"):
+        for name in ("_current", "_serving_slot"):
             setattr(epoch_mod, name, None)
         applied_env._loaded_env_keys = set()
         retired_mod.detach_retired_generations()
 
 
 def _install_boot(name: str = "boot-app") -> dict:
-    """Install a boot epoch over a fake dispatch slot and return that slot."""
+    """Install a boot epoch with a fresh serving core over a fake dispatch slot and return that slot."""
     app_state: dict = {}
     serving = _Serving(name)
-    epoch_mod._current = Epoch(number=current_client_epoch(), serving_app=serving)
+    epoch_mod._current = Epoch(number=current_client_epoch(), serving_app=serving, core=_APP._build_serving_core())
     epoch_mod._serving_slot = app_state
     app_state["app"] = serving
     return app_state
@@ -134,7 +146,7 @@ async def test_failed_build_keeps_old_surface_and_restores_env_and_raises_loudly
     os.environ["TAI_EPOCH_TEST_EXISTING"] = "old"
     env_before = dict(os.environ)
 
-    def _rebuild() -> None:
+    async def _rebuild(_epoch: Epoch) -> None:
         # By now the primitive has applied the proposed env; the failure must leave
         # zero live-state mutation once it unwinds.
         assert os.environ["TAI_EPOCH_TEST_KEY"] == "proposed"
@@ -165,12 +177,121 @@ async def test_failed_build_does_not_advance_the_live_epoch_pointer() -> None:
     with pytest.raises(ValueError, match="boom"):
         await build_and_swap_epoch(
             {"K": "v"},
-            rebuild=lambda: (_ for _ in ()).throw(ValueError("boom")),
+            rebuild=lambda _epoch: (_ for _ in ()).throw(ValueError("boom")),
             build_serving_app=_serve("x"),
             ownership=DeploymentOwnership(),
         )
 
     assert current_epoch().number == boot_number
+
+
+async def test_a_failed_build_raises_a_failure_marked_as_a_discarded_build() -> None:
+    _install_boot("boot-app")
+
+    with pytest.raises(RuntimeError, match="deliberate build failure") as raised:
+        await build_and_swap_epoch(
+            {"K": "v"},
+            rebuild=lambda _epoch: (_ for _ in ()).throw(RuntimeError("deliberate build failure")),
+            build_serving_app=_serve("x"),
+            ownership=DeploymentOwnership(),
+        )
+
+    assert is_discarded_build_failure(raised.value)
+
+
+_PLUG_KEY = "TAI_EPOCHPLUG_POOL_SIZE"
+
+
+def _write_plugin_package(root: Path) -> None:
+    """A plugin package laid out like an in-repo provider: its manifest leaf is a plain module.
+
+    The package ``__init__`` imports the ``settings`` sibling holding a recycle-class group, and
+    the leaf ``provider`` imports it too, so re-importing the leaf leaves the sibling cached.
+    """
+    package = root / "epochplug"
+    package.mkdir()
+    (package / "__init__.py").write_text("from epochplug.settings import EpochPlugSettings  # noqa: F401\n")
+    (package / "provider.py").write_text("from epochplug.settings import EpochPlugSettings  # noqa: F401\n")
+    (package / "settings.py").write_text(
+        "from typing import ClassVar\n"
+        "from pydantic_settings import SettingsConfigDict\n"
+        "from tai42_kit.settings import ReloadClass, TaiBaseSettings\n"
+        "class EpochPlugSettings(TaiBaseSettings):\n"
+        "    model_config = SettingsConfigDict(env_prefix='TAI_EPOCHPLUG_')\n"
+        "    reload_class: ClassVar[ReloadClass] = 'recycle'\n"
+        "    pool_size: int = 1\n"
+    )
+
+
+async def test_a_group_a_discarded_build_registered_is_bound_at_the_next_swap_and_its_key_change_reported(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _write_plugin_package(tmp_path)
+    monkeypatch.syspath_prepend(str(tmp_path))
+    monkeypatch.setattr(settings_registry, "_REGISTRY", dict(settings_registry._REGISTRY))
+    monkeypatch.setattr(settings_registry, "_BOUND_ENV", None)
+    # Set through monkeypatch before any build writes it, so the key is put back as it was found.
+    monkeypatch.setenv(_PLUG_KEY, "1")
+    _install_boot("boot-app")
+    bind_respawn_class_env()
+
+    def _import_plugin() -> None:
+        import_or_reload_package("epochplug.provider")
+
+    async def _failing_rebuild(_epoch: Epoch) -> None:
+        _import_plugin()
+        raise RuntimeError("deliberate build failure")
+
+    async def _rebuild(_epoch: Epoch) -> None:
+        _import_plugin()
+
+    try:
+        with pytest.raises(RuntimeError, match="deliberate build failure"):
+            await build_and_swap_epoch(
+                {_PLUG_KEY: "4"},
+                rebuild=_failing_rebuild,
+                build_serving_app=_serve("should-not-build"),
+                ownership=DeploymentOwnership(),
+            )
+        # The discarded build's binding is dropped: nothing reports a key it never served under.
+        assert awaiting_respawn() == []
+        assert _PLUG_KEY not in (settings_registry._BOUND_ENV or {})
+
+        await build_and_swap_epoch(
+            {_PLUG_KEY: "4"},
+            rebuild=_rebuild,
+            build_serving_app=_serve("new-app"),
+            ownership=DeploymentOwnership(),
+        )
+        # The cached settings sibling never registers again; the swap binds it under the
+        # env the live generation was built under.
+        assert awaiting_respawn() == []
+        assert _PLUG_KEY in (settings_registry._BOUND_ENV or {})
+
+        monkeypatch.setenv(_PLUG_KEY, "9")
+        assert awaiting_respawn() == [_PLUG_KEY]
+    finally:
+        for name in [name for name in sys.modules if name == "epochplug" or name.startswith("epochplug.")]:
+            del sys.modules[name]
+
+
+async def test_a_failure_after_the_swap_is_not_a_discarded_build() -> None:
+    app_state = _install_boot("boot-app")
+
+    async def _loops() -> None:
+        raise RuntimeError("deliberate loop failure")
+
+    with pytest.raises(RuntimeError, match="deliberate loop failure") as raised:
+        await build_and_swap_epoch(
+            {"K": "v"},
+            rebuild=no_rebuild,
+            build_serving_app=_serve("new-app"),
+            establish_background_loops=_loops,
+            ownership=DeploymentOwnership(),
+        )
+
+    assert app_state["app"].name == "new-app"
+    assert not is_discarded_build_failure(raised.value)
 
 
 async def test_route_audit_failure_in_rebuild_keeps_old_epoch_serving(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -209,7 +330,7 @@ async def test_route_audit_failure_in_rebuild_keeps_old_epoch_serving(monkeypatc
     app_state = _install_boot("boot-app")
     boot_epoch = current_epoch()
 
-    def _rebuild() -> None:
+    async def _rebuild(_epoch: Epoch) -> None:
         # The re-import left the plugin's route module cached, so the staged generation
         # dropped its route while the manifest still declares it — the audit raises.
         registry.reset_shape_index()
@@ -237,7 +358,7 @@ async def test_successful_build_flips_slot_and_epoch_pointer() -> None:
 
     new = await build_and_swap_epoch(
         {"TAI_EPOCH_LIVE": "yes"},
-        rebuild=lambda: None,
+        rebuild=no_rebuild,
         build_serving_app=_serve("new-app"),
         ownership=DeploymentOwnership(),
     )
@@ -255,7 +376,7 @@ async def test_env_applied_on_build_stays_live_on_success() -> None:
 
     await build_and_swap_epoch(
         {"TAI_EPOCH_STAYS": "live-value"},
-        rebuild=lambda: None,
+        rebuild=no_rebuild,
         build_serving_app=_serve("new-app"),
         ownership=DeploymentOwnership(),
     )
@@ -270,7 +391,7 @@ async def test_removed_key_reconciled_across_builds() -> None:
 
     await build_and_swap_epoch(
         {"TAI_EPOCH_DROPPED": "first"},
-        rebuild=lambda: None,
+        rebuild=no_rebuild,
         build_serving_app=_serve("a"),
         ownership=DeploymentOwnership(),
     )
@@ -279,7 +400,7 @@ async def test_removed_key_reconciled_across_builds() -> None:
     # A second build whose proposed env omits the previously-loaded key drops it.
     await build_and_swap_epoch(
         {"TAI_EPOCH_OTHER": "second"},
-        rebuild=lambda: None,
+        rebuild=no_rebuild,
         build_serving_app=_serve("b"),
         ownership=DeploymentOwnership(),
     )
@@ -324,7 +445,7 @@ async def test_retire_cancels_periodic_loops_and_calls_drain_epoch(monkeypatch: 
     retired_number = boot_epoch.number
     await build_and_swap_epoch(
         {"K": "v"},
-        rebuild=lambda: None,
+        rebuild=no_rebuild,
         build_serving_app=_serve("new-app"),
         drain_deadline=0.01,
         ownership=DeploymentOwnership(),
@@ -336,7 +457,7 @@ async def test_retire_cancels_periodic_loops_and_calls_drain_epoch(monkeypatch: 
     assert drained_supervisors == [0.01]
 
 
-async def test_a_retire_whose_three_drains_each_use_most_of_the_budget_fits_the_drain_floor(
+def test_a_retire_whose_three_drains_each_use_most_of_the_budget_fits_the_drain_floor(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """The retire's legal spend is three sequential drains, each bounded by the drain budget.
@@ -345,6 +466,9 @@ async def test_a_retire_whose_three_drains_each_use_most_of_the_budget_fits_the_
     finish at 0.8 of the budget: every drain finishes legally, in sequence, and the whole retire
     fits ``retire_drain_floor_seconds(budget)`` with no overrun logged. A drain bounded tighter
     than the budget would log an overrun; a fourth drain would overrun the floor.
+
+    The retire runs on a virtual clock, so every step takes exactly its loop time and the
+    measure does not depend on how loaded the host is.
     """
     import logging
 
@@ -352,67 +476,77 @@ async def test_a_retire_whose_three_drains_each_use_most_of_the_budget_fits_the_
 
     budget = 1.0
     step = 0.8 * budget
-    _install_boot("boot-app")
-    boot = current_epoch()
-    boot.admit()  # an ordinary in-flight request of the retiring generation
-
-    async def _finish_the_request() -> None:
-        await asyncio.sleep(step)
-        boot.release()
-
-    finishers: list[asyncio.Task[None]] = []
-    drain_in_flight = boot._drain_in_flight
-
-    async def _request_finishes_inside_its_drain(deadline: float, **kwargs: bool) -> bool:
-        # The request runs 0.8 of the budget from the moment its drain starts waiting.
-        if not finishers:
-            finishers.append(asyncio.create_task(_finish_the_request()))
-        return await drain_in_flight(deadline, **kwargs)
-
-    monkeypatch.setattr(boot, "_drain_in_flight", _request_finishes_inside_its_drain)
-
-    async def _supervisors_write_their_terminals(
-        deadline: float | None = None, *, epoch: int | None = None, reason: str = "", exclude: object = ()
-    ) -> None:
-        assert deadline == budget
-        await asyncio.sleep(step)
-
-    async def _pool_leases_return(number: int, deadline: float) -> None:
-        assert deadline == budget
-        await asyncio.sleep(step)
-
-    monkeypatch.setattr(epoch_retire_mod, "drain_epoch", _pool_leases_return)
-    monkeypatch.setattr("tai42_skeleton.operations.tool_runs.drain_supervisors", _supervisors_write_their_terminals)
-
     retire_durations: list[float] = []
-    retire = epoch_mod.retire_epoch
+    in_flight_drains: list[float] = []
 
-    async def _timed_retire(old: Epoch, retired: int, deadline: float | None) -> None:
+    async def _scenario() -> None:
         loop = asyncio.get_running_loop()
-        start = loop.time()
-        try:
-            await retire(old, retired, deadline)
-        finally:
-            retire_durations.append(loop.time() - start)
+        _install_boot("boot-app")
+        boot = current_epoch()
+        boot.admit()  # an ordinary in-flight request of the retiring generation
 
-    monkeypatch.setattr(epoch_mod, "retire_epoch", _timed_retire)
+        async def _finish_the_request() -> None:
+            await asyncio.sleep(step)
+            boot.release()
 
-    with caplog.at_level(logging.WARNING):
-        await build_and_swap_epoch(
-            {"K": "v"},
-            rebuild=lambda: None,
-            build_serving_app=_serve("new-app"),
-            drain_deadline=budget,
-            ownership=DeploymentOwnership(),
-        )
-    await asyncio.gather(*finishers)
+        finishers: list[asyncio.Task[None]] = []
+        drain_in_flight = boot._drain_in_flight
 
-    assert len(retire_durations) == 1
-    assert retire_durations[0] >= 3 * step, "the three drains did not run in sequence"
-    assert retire_durations[0] <= retire_drain_floor_seconds(budget)
+        async def _request_finishes_inside_its_drain(deadline: float, **kwargs: bool) -> bool:
+            # The request runs 0.8 of the budget from the moment its drain starts waiting.
+            if not finishers:
+                finishers.append(asyncio.create_task(_finish_the_request()))
+            start = loop.time()
+            try:
+                return await drain_in_flight(deadline, **kwargs)
+            finally:
+                in_flight_drains.append(loop.time() - start)
+
+        monkeypatch.setattr(boot, "_drain_in_flight", _request_finishes_inside_its_drain)
+
+        async def _supervisors_write_their_terminals(
+            deadline: float | None = None, *, epoch: int | None = None, reason: str = "", exclude: object = ()
+        ) -> None:
+            assert deadline == budget
+            await asyncio.sleep(step)
+
+        async def _pool_leases_return(number: int, deadline: float) -> None:
+            assert deadline == budget
+            await asyncio.sleep(step)
+
+        monkeypatch.setattr(epoch_retire_mod, "drain_epoch", _pool_leases_return)
+        monkeypatch.setattr("tai42_skeleton.operations.tool_runs.drain_supervisors", _supervisors_write_their_terminals)
+
+        retire = epoch_mod.retire_epoch
+
+        async def _timed_retire(old: Epoch, retired: int, deadline: float | None) -> None:
+            start = loop.time()
+            try:
+                await retire(old, retired, deadline)
+            finally:
+                retire_durations.append(loop.time() - start)
+
+        monkeypatch.setattr(epoch_mod, "retire_epoch", _timed_retire)
+
+        with caplog.at_level(logging.WARNING):
+            await build_and_swap_epoch(
+                {"K": "v"},
+                rebuild=no_rebuild,
+                build_serving_app=_serve("new-app"),
+                drain_deadline=budget,
+                ownership=DeploymentOwnership(),
+            )
+        await asyncio.gather(*finishers)
+        assert boot.in_flight == 0
+
+    run_on_virtual_clock(_scenario)
+
     assert retire_drain_floor_seconds(budget) == 3 * budget
-    assert boot.in_flight == 0
+    assert len(retire_durations) == 1
+    assert retire_durations[0] <= retire_drain_floor_seconds(budget), "the retire overran the drain floor"
     assert [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR] == []
+    assert in_flight_drains == [pytest.approx(step)], "the in-flight drain did not wait out the request"
+    assert retire_durations[0] == pytest.approx(3 * step), "the three drains did not run in sequence"
 
 
 async def test_admission_counter_tracks_in_flight() -> None:
@@ -464,7 +598,7 @@ async def test_a_drain_exempt_stream_does_not_block_the_retire_drain(monkeypatch
 
     boot.supervisor = _FakeSupervisor()  # type: ignore[assignment]
     boot.admit()  # the SSE request, admitted on this generation
-    token = admission_mod._admission.set(admission_mod.RequestAdmission(epoch=boot))
+    token = admission_mod._admission.set(admission_mod.Admission(epoch=boot, kind="served_request"))
     try:
         state = admission_mod._admission.get()
         admission_mod.mark_current_request_drain_exempt()
@@ -478,7 +612,7 @@ async def test_a_drain_exempt_stream_does_not_block_the_retire_drain(monkeypatch
     drains = _time_drains(monkeypatch, boot)
     await build_and_swap_epoch(
         {"K": "v"},
-        rebuild=lambda: None,
+        rebuild=no_rebuild,
         build_serving_app=_serve("new-app"),
         drain_deadline=5.0,
         ownership=DeploymentOwnership(),
@@ -517,7 +651,7 @@ async def test_a_non_exempt_in_flight_request_is_drained_before_aclose() -> None
     finisher = asyncio.create_task(_finish_shortly())
     await build_and_swap_epoch(
         {"K": "v"},
-        rebuild=lambda: None,
+        rebuild=no_rebuild,
         build_serving_app=_serve("new-app"),
         drain_deadline=5.0,
         ownership=DeploymentOwnership(),
@@ -548,7 +682,7 @@ async def test_exemption_takes_effect_through_a_real_streaming_response() -> Non
     ``_admission`` ContextVar or call the exempt in the wrapper's own frame — but in production
     the exempt call runs INSIDE a ``StreamingResponse`` body, which Starlette iterates in a
     CHILD task (uvicorn's ASGI spec_version 2.3 branch). The whole fix therefore rests on (a) the
-    admission ContextVar propagating INTO that child task and (b) the shared ``RequestAdmission``
+    admission ContextVar propagating INTO that child task and (b) the shared ``Admission``
     mutation flowing back to the wrapper's frame. A future Starlette/uvicorn/middleware change
     that ran the body in a context the mark could not reach would silently no-op the exemption
     and every hand-set test would still pass — this one would fail. It drives a REAL
@@ -601,25 +735,34 @@ async def test_exemption_takes_effect_through_a_real_streaming_response() -> Non
             await served
 
 
-async def test_cancel_periodic_loops_bounded_by_budget() -> None:
+def test_cancel_periodic_loops_bounded_by_budget() -> None:
     """A periodic loop whose cancel-await WEDGES (e.g. an outbound-HTTP poll blocking on
     its client close during the cancellation unwind) must NOT hang the synchronous retire
     — and with it a door-driven reload's own request. Each cancel is bounded by the drain
-    budget; an overrun is abandoned so the retire makes progress."""
-    import asyncio
+    budget; an overrun is abandoned so the retire makes progress.
 
-    ep = Epoch(number=current_client_epoch())
+    The cancel runs on a virtual clock, so its wait is exactly its loop time, however loaded
+    the host is, and an unbounded cancel reaches the outer timeout instead of hanging."""
+    budget = 0.05
+    spent: list[float] = []
 
-    async def _wedged_cancel() -> None:
-        await asyncio.Event().wait()  # never set — a cancel-await that never completes
+    async def _scenario() -> None:
+        ep = Epoch(number=current_client_epoch())
 
-    ep.register_periodic_loop(_wedged_cancel)
-    loop = asyncio.get_running_loop()
-    start = loop.time()
-    # Bounded: returns after the budget, abandoning the wedged cancel, rather than
-    # wedging the retire forever.
-    await ep._cancel_periodic_loops(0.05)
-    assert loop.time() - start < 1.0, "a wedged periodic-loop cancel wedged the retire"
+        async def _wedged_cancel() -> None:
+            await asyncio.Event().wait()  # never set — a cancel-await that never completes
+
+        ep.register_periodic_loop(_wedged_cancel)
+        loop = asyncio.get_running_loop()
+        start = loop.time()
+        # Bounded: returns after the budget, abandoning the wedged cancel, rather than
+        # wedging the retire forever.
+        async with asyncio.timeout(20 * budget):
+            await ep._cancel_periodic_loops(budget)
+        spent.append(loop.time() - start)
+
+    run_on_virtual_clock(_scenario)
+    assert spent == [pytest.approx(budget)], "a wedged periodic-loop cancel was not bounded by the budget"
 
 
 def _served_request(
@@ -654,12 +797,6 @@ class _ClosingSupervisor:
 
 # The drain budget of the reload that defers its retire to a background tail.
 _DEFERRED_DRAIN_BUDGET_S = 5.0
-# How long the deferred tail may take once its driver answered: twice the drain budget, the one
-# phase of the tail that can wait (the gate turnover, the wait on the finished driver and the
-# close do not). The tail's slowest run measures 5.8 s with the host at load 200; the bound
-# leaves a margin for a loaded CI runner. A tail that never ends (a driver or gate waiter never
-# released) fails here.
-_DEFERRED_TAIL_BOUND_S = 2 * _DEFERRED_DRAIN_BUDGET_S
 
 
 async def test_reload_over_session_manager_defers_supervisor_close(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -682,7 +819,7 @@ async def test_reload_over_session_manager_defers_supervisor_close(monkeypatch: 
         async with reload_gate.driving():
             await build_and_swap_epoch(
                 {"TAI_EPOCH_DRIVER": "v"},
-                rebuild=lambda: None,
+                rebuild=no_rebuild,
                 build_serving_app=_serve("new-app"),
                 drain_deadline=_DEFERRED_DRAIN_BUDGET_S,
                 ownership=DeploymentOwnership(),
@@ -704,12 +841,12 @@ async def test_reload_over_session_manager_defers_supervisor_close(monkeypatch: 
         assert closed == [], "reload aclose()d the session manager serving its own driving request"
         answer.set()  # the driver finishes (its response flushed) -> the deferred task closes
         try:
-            async with asyncio.timeout(_DEFERRED_TAIL_BOUND_S):
+            async with asyncio.timeout(DEFERRED_TAIL_BOUND_S):
                 await request
                 await deferred
         except TimeoutError:
             pytest.fail(
-                f"the deferred retire did not finish within {_DEFERRED_TAIL_BOUND_S} s of the driver answering: "
+                f"the deferred retire did not finish within {DEFERRED_TAIL_BOUND_S} s of the driver answering: "
                 f"in flight {boot.in_flight}, engaged {boot.engaged}, gate waiters {boot.gate_waiters}"
             )
         assert closed == ["closed"]
@@ -736,7 +873,7 @@ async def test_a_driver_answering_past_the_drain_budget_keeps_its_transport(capl
         async with reload_gate.driving():
             await build_and_swap_epoch(
                 {"TAI_EPOCH_DRIVER": "v"},
-                rebuild=lambda: None,
+                rebuild=no_rebuild,
                 build_serving_app=_serve("new-app"),
                 drain_deadline=budget,
                 ownership=DeploymentOwnership(),
@@ -747,7 +884,7 @@ async def test_a_driver_answering_past_the_drain_budget_keeps_its_transport(capl
     try:
         with caplog.at_level(logging.ERROR):
             await _served_request(boot, _driver)
-            async with asyncio.timeout(2.0):
+            async with asyncio.timeout(DEFERRED_TAIL_BOUND_S):
                 await asyncio.gather(*epoch_retire_mod._deferred_retire_tasks)
     finally:
         os.environ.pop("TAI_EPOCH_DRIVER", None)
@@ -777,14 +914,14 @@ async def test_a_request_waiting_on_the_gate_is_never_severed() -> None:
             await asyncio.sleep(0)
         await build_and_swap_epoch(
             {},
-            rebuild=lambda: None,
+            rebuild=no_rebuild,
             build_serving_app=_serve("new-app"),
             drain_deadline=0.05,
             ownership=DeploymentOwnership(),
         )
         assert log == [], "the retire closed (or let run) before the gate turned over"
     await request
-    async with asyncio.timeout(2.0):
+    async with asyncio.timeout(DEFERRED_TAIL_BOUND_S):
         await asyncio.gather(*epoch_retire_mod._deferred_retire_tasks)
     assert log == ["waiter ran its gated body", "waiter answered", "closed"]
 
@@ -822,7 +959,7 @@ async def test_a_request_waiting_on_a_recorded_lock_held_outside_the_generation_
             await build_and_swap_epoch(
                 {},
                 ownership=DeploymentOwnership(),
-                rebuild=lambda: None,
+                rebuild=no_rebuild,
                 build_serving_app=_serve("new-app"),
                 drain_deadline=0.05,
             )
@@ -832,10 +969,147 @@ async def test_a_request_waiting_on_a_recorded_lock_held_outside_the_generation_
     finally:
         let_go.set()
         await holder
-    async with asyncio.timeout(2.0):
+    async with asyncio.timeout(DEFERRED_TAIL_BOUND_S):
         await request
         await asyncio.gather(*epoch_retire_mod._deferred_retire_tasks)
     assert log == ["waiter held the lock", "waiter answered", "closed"]
+
+
+async def test_a_request_in_a_recorded_wait_past_the_drain_budget_is_never_severed(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A request of the retiring generation that waits, in a recorded wait, on work outside the
+    process (a queued job whose change drove this reload) is not counted against the drain
+    budget while it waits: the retire defers its close, and the request answers on its own
+    transport once the wait ends, however long past the budget that is."""
+    import logging
+
+    _install_boot("boot-app")
+    boot = current_epoch()
+    log: list[str] = []
+    boot.supervisor = _ClosingSupervisor(log)  # type: ignore[assignment]
+    budget = 0.05
+    job_done = asyncio.Event()
+
+    async def _waiter() -> None:
+        async with tai42_app.lifecycle.waiting_on_fleet_work():
+            assert boot.in_flight == 0, "a recorded wait still counts against the drain budget"
+            await job_done.wait()
+        log.append("waiter answered")
+
+    with caplog.at_level(logging.ERROR):
+        request = _served_request(boot, _waiter)
+        while not boot.waiting:
+            await asyncio.sleep(0)
+        async with reload_gate.synchronized():  # the bus-delivered reload, no request of its own
+            await build_and_swap_epoch(
+                {},
+                ownership=DeploymentOwnership(),
+                rebuild=no_rebuild,
+                build_serving_app=_serve("new-app"),
+                drain_deadline=budget,
+            )
+        await asyncio.sleep(budget * 4)
+        assert log == [], "the retire closed the transport under a request in a recorded wait"
+        job_done.set()
+        async with asyncio.timeout(DEFERRED_TAIL_BOUND_S):
+            await request
+            await asyncio.gather(*epoch_retire_mod._deferred_retire_tasks)
+    assert log == ["waiter answered", "closed"]
+    assert "still in flight after the drain budget" not in caplog.text
+
+
+async def test_an_engaged_retire_drains_its_client_pools_only_after_the_recorded_wait_and_the_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A request in a recorded wait may hold a lease on the retired generation's client pools
+    for the whole wait (a backend's result wait on its queue connection): the retire neither
+    waits on that lease nor closes those pools while the wait lasts. The deferred tail closes
+    the transports, then drains the retired client pools, then arms the certification."""
+    _install_boot("boot-app")
+    boot = current_epoch()
+    retired_number = boot.number
+    log: list[str] = []
+    boot.supervisor = _ClosingSupervisor(log)  # type: ignore[assignment]
+    job_done = asyncio.Event()
+
+    async def _record_pool_drain(number: int, deadline: float) -> None:
+        log.append(f"pools of {number} drained")
+
+    arm_certification = epoch_retire_mod.arm_retired_generation_certification
+
+    def _record_certification(old: Epoch, retired: int) -> None:
+        log.append(f"{retired} certified")
+        arm_certification(old, retired)
+
+    monkeypatch.setattr(epoch_retire_mod, "drain_epoch", _record_pool_drain)
+    monkeypatch.setattr(epoch_retire_mod, "arm_retired_generation_certification", _record_certification)
+
+    async def _waiter() -> None:
+        async with recorded_wait():
+            await job_done.wait()
+        log.append("waiter answered")
+
+    request = _served_request(boot, _waiter)
+    while not boot.waiting:
+        await asyncio.sleep(0)
+    async with reload_gate.synchronized():  # the bus-delivered reload, no request of its own
+        await build_and_swap_epoch(
+            {},
+            ownership=DeploymentOwnership(),
+            rebuild=no_rebuild,
+            build_serving_app=_serve("new-app"),
+            drain_deadline=0.05,
+        )
+    [tail] = epoch_retire_mod.deferred_retires()
+    for _ in range(20):
+        await asyncio.sleep(0)
+    assert log == [], "the retire drained or closed the client pools under a request in a recorded wait"
+    job_done.set()
+    async with asyncio.timeout(DEFERRED_TAIL_BOUND_S):
+        await request
+        await tail
+    assert log == [
+        "waiter answered",
+        "closed",
+        f"pools of {retired_number} drained",
+        f"{retired_number} certified",
+    ]
+
+
+async def test_a_recorded_wait_off_a_request_records_nothing() -> None:
+    """Off a served request and a supervised run (a backend job's nested call) the recorded wait
+    is a plain span: nothing of the generation is engaged while it runs."""
+    _install_boot("boot-app")
+    boot = current_epoch()
+    async with recorded_wait() as party:
+        assert party.admission is None
+        assert party.task is None
+        assert not boot.engaged
+    assert not boot.engaged
+
+
+async def test_a_recorded_wait_ends_when_its_body_raises() -> None:
+    """A wait whose body fails stops waiting: the request is ordinary in-flight work again."""
+    _install_boot("boot-app")
+    boot = current_epoch()
+
+    seen_waiting: list[bool] = []
+
+    async def _failing_wait() -> None:
+        async with recorded_wait():
+            seen_waiting.append(bool(boot.waiting))
+            raise RuntimeError("job failed")
+
+    async def _waiter() -> None:
+        with pytest.raises(RuntimeError, match="job failed"):
+            await _failing_wait()
+        assert seen_waiting == [True]
+        assert not boot.waiting
+        assert boot.in_flight == 1
+
+    await _served_request(boot, _waiter)
+    assert not boot.engaged
 
 
 @pytest.mark.parametrize("held_past_budget", [False, True], ids=["within-budget", "past-budget"])
@@ -866,23 +1140,23 @@ async def test_a_pass_through_waiter_is_ordinary_work_once_the_gate_turns_over(
                 await asyncio.sleep(0)
             await build_and_swap_epoch(
                 {},
-                rebuild=lambda: None,
+                rebuild=no_rebuild,
                 build_serving_app=_serve("new-app"),
                 drain_deadline=budget,
                 ownership=DeploymentOwnership(),
             )
         if held_past_budget:
-            async with asyncio.timeout(2.0):
+            async with asyncio.timeout(DEFERRED_TAIL_BOUND_S):
                 await asyncio.gather(*epoch_retire_mod._deferred_retire_tasks)
             release.set()
             await request
             assert log == ["waited the reload out", "closed", "answered"]
-            assert "1 request(s) still in flight after the drain budget" in caplog.text
+            assert "1 unit(s) of work still in flight after the drain budget" in caplog.text
         else:
             await asyncio.sleep(0)
             release.set()
             await request
-            async with asyncio.timeout(2.0):
+            async with asyncio.timeout(DEFERRED_TAIL_BOUND_S):
                 await asyncio.gather(*epoch_retire_mod._deferred_retire_tasks)
             assert log == ["waited the reload out", "answered", "closed"]
             assert "still in flight after the drain budget" not in caplog.text
@@ -897,12 +1171,15 @@ async def test_the_supervised_run_driving_a_reload_survives_its_own_retire() -> 
     boot = current_epoch()
     outcome: list[str] = []
 
+    async def _unrelated_gated_body() -> None:
+        """An unrelated gated body the run enters before it drives the reload."""
+
     async def _supervised_reload() -> None:
-        await reload_gate.run(lambda: None, reimports=False)  # an unrelated gated body first
+        await reload_gate.run(_unrelated_gated_body, reimports=False)
         async with reload_gate.driving():
             await build_and_swap_epoch(
                 {},
-                rebuild=lambda: None,
+                rebuild=no_rebuild,
                 build_serving_app=_serve("new-app"),
                 drain_deadline=0.5,
                 ownership=DeploymentOwnership(),
@@ -919,8 +1196,9 @@ async def test_the_supervised_run_driving_a_reload_survives_its_own_retire() -> 
         outcome.append(f"cancelled: {exc}")
     assert current_epoch() is not boot
     assert outcome == ["completed"]
-    async with asyncio.timeout(2.0):
-        await asyncio.gather(*epoch_retire_mod._deferred_retire_tasks)
+    [tail] = epoch_retire_mod.deferred_retires()
+    async with asyncio.timeout(DEFERRED_TAIL_BOUND_S):
+        await tail
     assert not boot.driving_tasks
 
 
@@ -969,7 +1247,7 @@ async def test_retire_closes_the_previous_generations_serving_lifespan() -> None
 
     await build_and_swap_epoch(
         {"K": "v"},
-        rebuild=lambda: None,
+        rebuild=no_rebuild,
         build_serving_app=_serve("new-app"),
         drain_deadline=0.01,
         ownership=DeploymentOwnership(),
@@ -1014,7 +1292,7 @@ async def test_a_reload_cancelled_after_the_build_finished_closes_the_new_genera
     reload = asyncio.create_task(
         build_and_swap_epoch(
             {"TAI_EPOCH_CANCELLED": "v"},
-            rebuild=lambda: None,
+            rebuild=no_rebuild,
             build_serving_app=_build,
             ownership=DeploymentOwnership(),
         )
@@ -1045,7 +1323,7 @@ async def test_a_build_failing_after_its_lifespan_entered_closes_that_lifespan()
 
     with pytest.raises(RuntimeError, match="after the lifespan entered"):
         await build_and_swap_epoch(
-            {"K": "v"}, rebuild=lambda: None, build_serving_app=_build, ownership=DeploymentOwnership()
+            {"K": "v"}, rebuild=no_rebuild, build_serving_app=_build, ownership=DeploymentOwnership()
         )
 
     assert closed == ["closed"]
@@ -1071,7 +1349,7 @@ async def test_a_proven_build_is_discarded_with_the_live_epoch_untouched(caplog:
         async def aclose(self) -> None:
             closed.append("closed")
 
-    def _rebuild() -> None:
+    async def _rebuild(_epoch: Epoch) -> None:
         seen.append(os.environ["TAI_EPOCH_TEST_KEY"])
 
     async def _build(epoch: Epoch) -> _Serving:
@@ -1092,7 +1370,7 @@ async def test_a_proven_build_is_discarded_with_the_live_epoch_untouched(caplog:
     assert current_client_epoch() == client_epoch
     assert dict(os.environ) == env_before
     assert applied_env._loaded_env_keys == loaded_before
-    assert epoch_mod._building_epoch is None
+    assert epoch_mod.epoch_being_built() is None
     assert closed == ["closed"]
     assert [r for r in caplog.records if r.levelname == "ERROR"] == []
 
@@ -1108,7 +1386,7 @@ async def test_a_proof_build_that_fails_raises_and_discards_like_the_swap_form(
     boot_epoch = current_epoch()
     env_before = dict(os.environ)
 
-    def _rebuild() -> None:
+    async def _rebuild(_epoch: Epoch) -> None:
         raise RuntimeError("deliberate proof failure")
 
     with caplog.at_level("ERROR"), pytest.raises(RuntimeError, match="deliberate proof failure"):
@@ -1136,23 +1414,21 @@ async def test_a_clean_build_and_swap_cycle_leaves_no_stale_settings() -> None:
     retired_number = current_epoch().number
     await build_and_swap_epoch(
         {"K": "v"},
-        rebuild=lambda: None,
+        rebuild=no_rebuild,
         build_serving_app=_serve("new-app"),
         ownership=DeploymentOwnership(),
     )
     assert sweep_stale_settings(retired_number) == []
 
 
-def _install_boot_generation(rebuild) -> None:
+async def _install_boot_generation(rebuild: Callable[[Epoch], Awaitable[None]]) -> None:
     """Install a boot epoch whose core the given ``rebuild`` seam builds, holding no local reference to it."""
-    from tai42_skeleton.app import instance
-
-    rebuild()
-    epoch_mod._current = Epoch(number=current_client_epoch(), core=instance.app._building, serving_app=_Serving("boot"))
-    instance.app._building = None
+    boot = Epoch(number=current_client_epoch(), serving_app=_Serving("boot"))
+    await rebuild(boot)
+    epoch_mod._current = boot
 
 
-def _serving_core_rebuild() -> None:
+async def _serving_core_rebuild(epoch: Epoch) -> None:
     """The default rebuild's serving-core step plus the identity provider a build instantiates per generation.
 
     The core carries the access-control adapter chain read under the applied env, and the
@@ -1166,18 +1442,14 @@ def _serving_core_rebuild() -> None:
 
     core = instance.app._build_serving_core()
     core.active_auth_providers["redis"] = RedisApiKeyProvider(access_control_settings())
-    instance.app._building = core
+    epoch.core = core
 
 
 async def _record_built_core(epoch: Epoch) -> _Serving:
-    """The default build's bookkeeping: the built core recorded on its epoch, the build slot cleared.
+    """The default build's serving step: a serving surface that reaches the epoch's core.
 
     The returned serving surface reaches the core, as a real one reaches its FastMCP.
     """
-    from tai42_skeleton.app import instance
-
-    epoch.core = instance.app._building
-    instance.app._building = None
     return _Serving("new-app", core=epoch.core)
 
 
@@ -1186,12 +1458,9 @@ _KEPT_GENERATIONS: list[object] = []
 
 @pytest.fixture
 def _access_control_on(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Access control and the redis identity provider on, the app's build slot restored after the test."""
-    from tai42_skeleton.app import instance
-
+    """Access control and the redis identity provider on."""
     monkeypatch.setenv("ACCESS_CONTROL_ENABLE", "true")
     monkeypatch.setenv("TAI_IDENTITY_REDIS_URL", "redis://127.0.0.1:1/0")
-    monkeypatch.setattr(instance.app, "_building", instance.app._building)
     reset_all_settings()
     # The app bound at import holds its own scaffold core's settings for the process life;
     # move past the epoch it was read under so only this test's generations are swept.
@@ -1202,7 +1471,7 @@ def _access_control_on(monkeypatch: pytest.MonkeyPatch) -> None:
 async def test_reloads_with_access_control_on_report_no_stale_settings(caplog: pytest.LogCaptureFixture) -> None:
     import logging
 
-    _install_boot_generation(_serving_core_rebuild)
+    await _install_boot_generation(_serving_core_rebuild)
     with caplog.at_level(logging.ERROR, logger="tai42_kit.settings.cache_registry"):
         for _ in range(3):
             await build_and_swap_epoch(
@@ -1264,7 +1533,7 @@ async def test_a_retired_generation_still_reachable_from_a_request_context_is_no
     import gc
     import logging
 
-    _install_boot_generation(_serving_core_rebuild)
+    await _install_boot_generation(_serving_core_rebuild)
     with caplog.at_level(logging.ERROR, logger="tai42_kit.settings.cache_registry"):
         await _reload_access_control_generation()
         served = current_epoch()
@@ -1296,7 +1565,7 @@ async def test_a_captured_settings_singleton_is_reported_when_its_generation_is_
     import gc
     import logging
 
-    _install_boot_generation(_serving_core_rebuild)
+    await _install_boot_generation(_serving_core_rebuild)
     try:
         with caplog.at_level(logging.ERROR, logger="tai42_kit.settings.cache_registry"):
             await _reload_access_control_generation()
@@ -1326,7 +1595,7 @@ async def test_a_reload_still_reports_a_retired_generation_something_keeps(caplo
     import gc
     import logging
 
-    _install_boot_generation(_serving_core_rebuild)
+    await _install_boot_generation(_serving_core_rebuild)
     try:
         with caplog.at_level(logging.ERROR, logger="tai42_kit.settings.cache_registry"):
             await _reload_access_control_generation()
@@ -1352,12 +1621,12 @@ async def test_a_surface_collected_on_another_thread_is_certified_on_the_serving
         return _Serving("new-app")
 
     await build_and_swap_epoch(
-        {}, rebuild=lambda: None, build_serving_app=_build, drain_deadline=0.1, ownership=DeploymentOwnership()
+        {}, rebuild=no_rebuild, build_serving_app=_build, drain_deadline=0.1, ownership=DeploymentOwnership()
     )
     retired = current_epoch().number
     held.append(current_epoch().serving_app)
     await build_and_swap_epoch(
-        {}, rebuild=lambda: None, build_serving_app=_build, drain_deadline=0.1, ownership=DeploymentOwnership()
+        {}, rebuild=no_rebuild, build_serving_app=_build, drain_deadline=0.1, ownership=DeploymentOwnership()
     )
     assert [generation.surface_alive for generation in _pending(retired)] == [True]
 
@@ -1381,7 +1650,7 @@ async def test_clear_epoch_disarms_the_pending_certifications() -> None:
     _install_boot("boot-app")
     await build_and_swap_epoch(
         {},
-        rebuild=lambda: None,
+        rebuild=no_rebuild,
         build_serving_app=_serve("served-app"),
         drain_deadline=0.1,
         ownership=DeploymentOwnership(),
@@ -1390,7 +1659,7 @@ async def test_clear_epoch_disarms_the_pending_certifications() -> None:
     retired = current_epoch().number
     await build_and_swap_epoch(
         {},
-        rebuild=lambda: None,
+        rebuild=no_rebuild,
         build_serving_app=_serve("new-app"),
         drain_deadline=0.1,
         ownership=DeploymentOwnership(),
@@ -1423,7 +1692,7 @@ async def _door_reload_with_a_concurrent_request(release_within_budget: bool) ->
     _install_boot("boot-app")
     await build_and_swap_epoch(
         {},
-        rebuild=lambda: None,
+        rebuild=no_rebuild,
         build_serving_app=_serve("served-app"),
         drain_deadline=0.1,
         ownership=DeploymentOwnership(),
@@ -1449,7 +1718,7 @@ async def _door_reload_with_a_concurrent_request(release_within_budget: bool) ->
         async with reload_gate.driving():
             await build_and_swap_epoch(
                 {"TAI_EPOCH_DOOR_RELOAD": "v"},
-                rebuild=lambda: None,
+                rebuild=no_rebuild,
                 build_serving_app=_serve("new-app"),
                 drain_deadline=0.5,
                 ownership=DeploymentOwnership(),
@@ -1473,7 +1742,7 @@ async def _door_reload_with_a_concurrent_request(release_within_budget: bool) ->
         await asyncio.sleep(0.7)
     driver_answers.set()
     await driver
-    async with asyncio.timeout(5.0):
+    async with asyncio.timeout(DEFERRED_TAIL_BOUND_S):
         await asyncio.gather(*epoch_retire_mod._deferred_retire_tasks)
     if not release_within_budget:
         answered.set_result(None)
@@ -1507,7 +1776,7 @@ async def test_a_door_driven_reload_reports_a_request_past_the_drain_budget_and_
     # it does not count — and the close waits for the driver's answer. The request releases its
     # settings when it ends, so nothing is reported while it runs on the retired generation or
     # once that generation is certified.
-    assert "1 request(s) still in flight after the drain budget" in caplog.text
+    assert "1 unit(s) of work still in flight after the drain budget" in caplog.text
     assert order == ["driver answered", "closed"]
     assert "Stale settings instance" not in caplog.text
 
@@ -1548,7 +1817,7 @@ async def test_a_door_driven_reload_starts_the_new_generations_tasks_outside_the
             async with reload_gate.driving():
                 await build_and_swap_epoch(
                     {"TAI_EPOCH_DOOR_RELOAD": "v"},
-                    rebuild=lambda: None,
+                    rebuild=no_rebuild,
                     build_serving_app=_build,
                     establish_background_loops=_establish,
                     drain_deadline=1.0,
@@ -1575,6 +1844,38 @@ async def test_a_door_driven_reload_starts_the_new_generations_tasks_outside_the
         for task in generation_tasks:
             task.cancel()
         await asyncio.gather(*generation_tasks, return_exceptions=True)
+
+
+_rebuild_driver: ContextVar[str | None] = ContextVar("test_rebuild_driver", default=None)
+
+
+async def test_the_rebuild_runs_on_the_serving_loop_as_the_reimports_own_work_outside_the_driving_request() -> None:
+    """The rebuild is a coroutine the build awaits on the loop that drives it, in a task that
+    starts from no request's context and belongs to the re-import holding the fork gate."""
+    _install_boot("boot-app")
+    seen: dict[str, object] = {}
+
+    async def _rebuild(_epoch: Epoch) -> None:
+        seen["loop"] = asyncio.get_running_loop()
+        seen["driver"] = _rebuild_driver.get()
+        with fork_gate._cond:
+            seen["own_work"] = fork_gate._runs_own_work()
+
+    token = _rebuild_driver.set("driving-request")
+    try:
+        async with fork_gate.exclusive_async(timeout=5.0):
+            await build_and_swap_epoch(
+                {"TAI_EPOCH_REBUILD_LOOP": "v"},
+                rebuild=_rebuild,
+                build_serving_app=_serve("new-app"),
+                drain_deadline=0.1,
+                ownership=DeploymentOwnership(),
+            )
+    finally:
+        _rebuild_driver.reset(token)
+        os.environ.pop("TAI_EPOCH_REBUILD_LOOP", None)
+
+    assert seen == {"loop": asyncio.get_running_loop(), "driver": None, "own_work": True}
 
 
 def test_the_sweep_flags_a_leaked_retired_settings_instance() -> None:
@@ -1644,7 +1945,7 @@ async def test_is_epoch_rebuild_in_progress_true_only_during_a_build() -> None:
 
     seen: list[bool] = []
 
-    def _rebuild() -> None:
+    async def _rebuild(_epoch: Epoch) -> None:
         seen.append(epoch_mod.is_epoch_rebuild_in_progress())
 
     await build_and_swap_epoch(

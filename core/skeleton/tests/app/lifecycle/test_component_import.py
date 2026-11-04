@@ -174,12 +174,12 @@ def test_initialize_components_prunes_health_to_configured_titles(monkeypatch):
         mcp_health._HEALTH.clear()
 
 
-def test_initialize_helpers_require_started():
+async def test_initialize_helpers_require_started():
     m = _Mixin()  # _manifest is None
     with pytest.raises(RuntimeError, match="not started"):
         m._initialize_registries()
     with pytest.raises(RuntimeError, match="not started"):
-        m._initialize_components(InstalledPackages(top_levels={}, editable_sources={}, distributions={}))
+        await m._initialize_components(InstalledPackages(top_levels={}, editable_sources={}, distributions={}))
 
 
 def test_start_imports_lifecycle_router_and_middleware_modules():

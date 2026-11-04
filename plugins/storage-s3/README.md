@@ -19,9 +19,9 @@ filesystem. The ecosystem is open-ended: any package can back the same contract,
 so this repo is this provider's own full doc home, and the documentation site
 covers the platform-level story:
 
-- Storage & resources concept: https://tai42.ai/concepts/storage-and-resources
-- Build a storage provider (author guide): https://tai42.ai/guides/authors/storage-provider
-- Ecosystem catalog: https://tai42.ai/reference/catalog
+- Storage & resources concept: https://docs.tai42.ai/concepts/storage-and-resources
+- The storage provider (section of the storage & resources concept): https://docs.tai42.ai/concepts/storage-and-resources#the-storage-provider
+- Plugin catalog: https://docs.tai42.ai/plugins
 
 Its only tai-* dependencies are `tai42-contract` (the `Storage` ABC, `ObjectStat`,
 `assert_not_root`, and the `tai42_app` handle) and `tai42-kit` (`PooledClient`,

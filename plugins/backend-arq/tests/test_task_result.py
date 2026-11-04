@@ -9,10 +9,10 @@ from unittest.mock import patch
 import pytest
 from arq.jobs import JobStatus, ResultNotFound
 
-from tai42_backend_arq import pool, tools
+from tai42_backend_arq import inspection, pool
 from tai42_backend_arq.settings import TaskFailedError
 
-from .conftest import handle_of, lease_of
+from .conftest import backend_tools, handle_of, lease_of
 
 
 class _FakeJob:
@@ -39,14 +39,14 @@ async def _run(*, statuses: list[JobStatus], result: Any, timeout: float | None)
     job = _FakeJob(statuses=statuses, result=result)
     with (
         patch.object(pool, "arq_connection", lease_of(object())),
-        patch.object(tools, "job_handle", handle_of(lambda *_: job)),
+        patch.object(inspection, "job_handle", handle_of(lambda *_: job)),
     ):
-        return await tools.backend_task_result("task-1", timeout=timeout)
+        return await backend_tools().backend_task_result("task-1", timeout=timeout)
 
 
 async def test_no_timeout_returns_snapshot_when_not_complete() -> None:
     out = await _run(statuses=[JobStatus.in_progress], result="ignored", timeout=None)
-    assert out == "Task task-1 is not ready (status: JobStatus.in_progress)"
+    assert out == "Task task-1 is not ready (status: in_progress)"
 
 
 async def test_no_timeout_returns_result_when_complete() -> None:
@@ -72,7 +72,7 @@ async def test_timeout_elapsed_returns_not_ready() -> None:
         result=TimeoutError(),
         timeout=1,
     )
-    assert out == "Task task-1 is not ready (status: JobStatus.in_progress)"
+    assert out == "Task task-1 is not ready (status: in_progress)"
 
 
 async def test_result_not_found_returns_clear_value() -> None:
@@ -122,9 +122,9 @@ async def test_own_cancellation_propagates_never_reads_as_stored_abort() -> None
 
     with (
         patch.object(pool, "arq_connection", lease_of(object())),
-        patch.object(tools, "job_handle", handle_of(lambda *_: _HangingJob())),
+        patch.object(inspection, "job_handle", handle_of(lambda *_: _HangingJob())),
     ):
-        task = asyncio.get_running_loop().create_task(tools.backend_task_result("task-1", timeout=5))
+        task = asyncio.get_running_loop().create_task(backend_tools().backend_task_result("task-1", timeout=5))
         await entered.wait()
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -135,6 +135,6 @@ async def test_task_status_returns_enum_value() -> None:
     job = _FakeJob(statuses=[JobStatus.queued], result=None)
     with (
         patch.object(pool, "arq_connection", lease_of(object())),
-        patch.object(tools, "job_handle", handle_of(lambda *_: job)),
+        patch.object(inspection, "job_handle", handle_of(lambda *_: job)),
     ):
-        assert await tools.backend_task_status("task-1") == "queued"
+        assert await backend_tools().backend_task_status("task-1") == "queued"

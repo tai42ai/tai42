@@ -500,7 +500,10 @@ def upgrade(
     """Upgrade every installed plugin to its latest compatible version.
 
     ``--all`` is required: the batch is deliberately explicit, and a single
-    plugin is upgraded with ``tai plugins update REF`` instead.
+    plugin is upgraded with ``tai plugins update REF`` instead. The report
+    names each plugin's outcome, the one fleet recycle roll the batch ran over
+    the workers its reload reported as needing a restart, and the workers
+    still awaiting a respawn after it.
 
     Example: ``tai plugins upgrade --all``
     """
@@ -512,7 +515,7 @@ def upgrade(
     ctx_obj = app_context(ctx)
     with ctx_obj.client() as client:
         data = client.post("/api/marketplace/upgrade-all", json={})
-    emit_records(ctx_obj, data, route=("POST", "/api/marketplace/upgrade-all"))
+    emit_result(ctx_obj, data)
 
 
 @app.command("advisories")

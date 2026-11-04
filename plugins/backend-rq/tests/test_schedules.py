@@ -1,4 +1,4 @@
-"""The shared schedule-apply path, the relative refusal, and the scheduler factory."""
+"""The shared schedule-apply path and the scheduler factory."""
 
 from __future__ import annotations
 
@@ -10,9 +10,7 @@ from tai42_contract.backend import CrontabCadence, IntervalCadence
 from tai42_backend_rq.queue import TaskBudgetQueue
 from tai42_backend_rq.schedules import (
     apply_normalized_schedule,
-    crontab_string,
     interval_seconds,
-    refuse_relative,
     scheduler_for,
 )
 
@@ -29,19 +27,6 @@ def test_interval_seconds_rejects_unrepresentable_values(every: float):
     and never recur — both must raise instead."""
     with pytest.raises(ValueError, match="whole seconds"):
         interval_seconds(IntervalCadence(every=every))
-
-
-def test_crontab_string_builds_five_fields():
-    assert crontab_string(CrontabCadence(minute="0", hour="9", day_of_week="1")) == "0 9 * * 1"
-
-
-def test_refuse_relative():
-    refuse_relative(IntervalCadence(every=5))
-    refuse_relative(CrontabCadence())
-    with pytest.raises(
-        ValueError, match=r"the rq backend does not support relative interval schedules \(relative=True\)"
-    ):
-        refuse_relative(IntervalCadence(every=5, relative=True))
 
 
 def test_the_scheduler_moves_jobs_onto_the_task_budget_queue():
@@ -85,13 +70,6 @@ async def test_apply_interval_rejects_fractional_seconds():
     with pytest.raises(ValueError, match="whole seconds"):
         await apply_normalized_schedule(scheduler, IntervalCadence(every=0.5), _func, [], {}, "s1")
     # Nothing was written for the rejected schedule.
-    assert scheduler.schedule_calls == []
-
-
-async def test_apply_refuses_a_relative_interval():
-    scheduler = RecordingScheduler()
-    with pytest.raises(ValueError, match="does not support relative interval schedules"):
-        await apply_normalized_schedule(scheduler, IntervalCadence(every=60, relative=True), _func, [], {}, "s1")
     assert scheduler.schedule_calls == []
 
 

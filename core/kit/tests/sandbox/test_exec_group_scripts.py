@@ -1,4 +1,8 @@
-"""The exec group scripts, run by a host shell with their files in a temporary directory."""
+"""The exec group scripts, run by a shell in a process namespace of their own.
+
+Their files sit in a temporary directory. Their ``/proc`` scan must see only the test's own processes,
+as inside the exec's container it sees only that container's.
+"""
 
 from __future__ import annotations
 
@@ -28,6 +32,10 @@ from tai42_kit.sandbox.exec_group_scripts import (
     wait_output_released,
 )
 from tai42_kit.sandbox.exec_kill import KillOutcome, KillResult
+
+from .process_namespace import PROCESS_NAMESPACE_MARKS
+
+pytestmark = PROCESS_NAMESPACE_MARKS
 
 _SCRIPT_TIMEOUT = 10
 

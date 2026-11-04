@@ -1,4 +1,4 @@
-"""The recorded auth providers: written to the building core, read building-first, read-only."""
+"""The serving-core accessor resolves by the reading work; the recorded auth providers ride on it, read-only."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ import pytest
 from tai42_contract.access_control.identity import IdentityProvider
 from tai42_contract.accounts import LoginAttachingProvider
 
+from tai42_skeleton.app.epoch import Epoch, building
 from tai42_skeleton.app.lifecycle import serving_core_access
 from tai42_skeleton.app.lifecycle.serving_core_access import ServingCoreAccessMixin
 
@@ -19,10 +20,10 @@ def _never_called(*_args: Any, **_kwargs: Any) -> Any:
 
 
 class _ProbeBase(ServingCoreAccessMixin):
-    """The access mixin alone, over a stand-in building core and live epoch."""
+    """The access mixin alone, over a stand-in scaffold core and live epoch."""
 
-    def __init__(self, building: Any) -> None:
-        self._building = building
+    def __init__(self, scaffold: Any = None) -> None:
+        self._scaffold_core = scaffold
 
 
 # The lifecycle's other abstract members are never reached by the accessor under test.
@@ -33,50 +34,97 @@ def _core() -> Any:
     return SimpleNamespace(active_auth_providers={})
 
 
+def _epoch(core: Any) -> Epoch:
+    return Epoch(number=0, core=core)
+
+
 def _provider() -> IdentityProvider:
     return SimpleNamespace()  # type: ignore[return-value]
 
 
 @pytest.fixture
-def live_core(monkeypatch: pytest.MonkeyPatch) -> Any:
-    core = _core()
-    epoch = SimpleNamespace(core=core)
-    monkeypatch.setattr(serving_core_access, "current_epoch", lambda: epoch)
-    return core
+def live_epoch(monkeypatch: pytest.MonkeyPatch) -> Epoch:
+    epoch = _epoch(_core())
+    monkeypatch.setattr(serving_core_access, "current_epoch_or_none", lambda: epoch)
+    return epoch
 
 
-def test_record_during_a_build_writes_the_building_core(live_core: Any) -> None:
-    building = _core()
-    probe = _Probe(building)
+@pytest.fixture
+def live_core(live_epoch: Epoch) -> Any:
+    return live_epoch.core
+
+
+def test_the_builds_work_resolves_the_core_under_construction(live_core: Any) -> None:
+    built = _core()
+    with building(_epoch(built)):
+        assert _Probe()._serving_core is built
+
+
+def test_a_build_read_before_its_core_is_installed_raises(live_core: Any) -> None:
+    with building(_epoch(None)), pytest.raises(RuntimeError, match="the generation this build work belongs to"):
+        _Probe()._serving_core  # noqa: B018
+
+
+def test_unmarked_work_resolves_the_live_core(live_core: Any) -> None:
+    assert _Probe(scaffold=_core())._serving_core is live_core
+
+
+def test_unmarked_work_with_no_epoch_resolves_the_scaffold(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(serving_core_access, "current_epoch_or_none", lambda: None)
+    scaffold = _core()
+    assert _Probe(scaffold=scaffold)._serving_core is scaffold
+
+
+def test_no_epoch_and_no_scaffold_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(serving_core_access, "current_epoch_or_none", lambda: None)
+    with pytest.raises(RuntimeError, match="no serving epoch is installed and no boot scaffold"):
+        _Probe()._serving_core  # noqa: B018
+
+
+def test_an_installed_epoch_without_a_core_raises_even_with_a_scaffold(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(serving_core_access, "current_epoch_or_none", lambda: _epoch(None))
+    with pytest.raises(RuntimeError, match="the live epoch has no serving core installed"):
+        _Probe(scaffold=_core())._serving_core  # noqa: B018
+
+
+def test_the_live_accessor_ignores_the_build_mark(live_core: Any) -> None:
+    with building(_epoch(_core())):
+        assert _Probe()._live_serving_core is live_core
+
+
+def test_record_in_the_builds_work_writes_the_building_core(live_core: Any) -> None:
+    built = _core()
     provider = _provider()
-    probe.record_auth_provider("p1", provider)
-    assert building.active_auth_providers == {"p1": provider}
+    with building(_epoch(built)):
+        _Probe().record_auth_provider("p1", provider)
+    assert built.active_auth_providers == {"p1": provider}
     assert live_core.active_auth_providers == {}
 
 
-def test_read_is_building_first(live_core: Any) -> None:
+def test_read_in_the_builds_work_is_the_building_core(live_core: Any) -> None:
     live_provider, built_provider = _provider(), _provider()
     live_core.active_auth_providers["p1"] = live_provider
-    building = _core()
-    building.active_auth_providers["p1"] = built_provider
-    assert _Probe(building).recorded_auth_providers()["p1"] is built_provider
+    built = _core()
+    built.active_auth_providers["p1"] = built_provider
+    with building(_epoch(built)):
+        assert _Probe().recorded_auth_providers()["p1"] is built_provider
 
 
 def test_read_outside_a_build_is_the_live_core(live_core: Any) -> None:
     provider = _provider()
     live_core.active_auth_providers["p1"] = provider
-    recorded = _Probe(None).recorded_auth_providers()
+    recorded = _Probe().recorded_auth_providers()
     assert dict(recorded) == {"p1": provider}
 
 
 def test_recorded_providers_are_read_only(live_core: Any) -> None:
-    recorded = _Probe(None).recorded_auth_providers()
+    recorded = _Probe().recorded_auth_providers()
     with pytest.raises(TypeError):
         recorded["p2"] = _provider()  # type: ignore[index]
 
 
 def test_recorded_providers_follow_later_records(live_core: Any) -> None:
-    probe = _Probe(None)
+    probe = _Probe()
     recorded = probe.recorded_auth_providers()
     provider = _provider()
     probe.record_auth_provider("late", provider)

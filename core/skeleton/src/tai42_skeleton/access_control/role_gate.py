@@ -190,8 +190,8 @@ def _build_index() -> None:
     mounted_concrete: dict[tuple[str, str], RouteMetadata] = {}
     mounted_templated: list[tuple[re.Pattern[str], frozenset[str], RouteMetadata]] = []
     # Read the version BEFORE the enumeration, so the index can only ever UNDER-claim: a
-    # route recorded while it builds (``load_all_routes`` may import router modules; an epoch
-    # build records on its own thread) leaves the stored version behind the registry's and
+    # route recorded while it builds (``load_all_routes`` may import router modules, and a
+    # module records its routes as it imports) leaves the stored version behind the registry's and
     # the next lookup rebuilds. Reading it after would stamp the index with a version whose
     # routes it does not hold.
     version = route_registry.version

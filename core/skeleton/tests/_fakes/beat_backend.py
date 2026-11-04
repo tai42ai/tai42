@@ -10,7 +10,7 @@ backend.
 
 from __future__ import annotations
 
-from typing import Any, ClassVar
+from typing import ClassVar
 
 from tai42_contract.app import tai42_app
 from tai42_contract.backend import Backend
@@ -22,29 +22,9 @@ class LaunchRecordingBackend(Backend):
     # registration decorator constructed.
     launched: ClassVar[list[list[str]]] = []
 
+    @property
+    def drain_timeout(self) -> float:
+        return 30.0
+
     async def launch(self, args) -> None:
         type(self).launched.append(list(args))
-
-    async def reload_mcp(self, title, targets=None) -> Any:
-        return None
-
-    async def deregister_mcp(self, title, targets=None) -> Any:
-        return None
-
-    async def reload_tool(self, kind, name, targets=None) -> Any:
-        return None
-
-    async def remove_tool(self, kind, name, targets=None) -> Any:
-        return None
-
-    async def reload_config(self, targets=None) -> Any:
-        return None
-
-    async def reload_failed_mcps(self, targets=None) -> Any:
-        return None
-
-    async def list_failed_mcps(self, targets=None) -> Any:
-        return {}
-
-    async def list_workers(self) -> list[str]:
-        return []

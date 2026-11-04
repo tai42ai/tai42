@@ -1,5 +1,6 @@
 """The process app singleton and its startup/reload handlers."""
 
+import asyncio
 import functools
 import inspect
 import logging
@@ -37,6 +38,7 @@ from tai42_skeleton.connectors.meta_log_redactor import (
     follow_connector_meta_token_key,
     register_connector_log_redaction,
 )
+from tai42_skeleton.connectors.runtime import refresh_owner
 from tai42_skeleton.conversations import settings as conversations_readiness
 from tai42_skeleton.conversations.lifecycle import (
     redrive_pending_conversations,
@@ -73,12 +75,19 @@ def built_app() -> TaiMCP | None:
     return _app
 
 
+def bound_serving_loop() -> asyncio.AbstractEventLoop | None:
+    """The built app's serving loop, or ``None`` with no app built or none bound."""
+    app = built_app()
+    return None if app is None else app.serving_loop()
+
+
 def _declare_platform_readiness_and_drain(app: TaiMCP) -> None:
-    """Register each platform subsystem's own readiness contributor and the tool-runs drain budget on ``app``.
+    """Register each platform subsystem's own readiness contributor and the tool-runs drains on ``app``.
 
     Every subsystem owns the gate that decides whether its backing store is wired; ``/ready``
     reads them through the app's readiness registry. The tool-runs module declares the drain
-    budget a retire or recycle waits for its supervisors.
+    budget a retire or recycle waits for its supervisors, and the same figure as its
+    shutdown step's bound in the process's exit drain.
     """
     readiness = app.readiness
     readiness.register("access_control", access_control_readiness.readiness_targets)
@@ -97,6 +106,21 @@ def _declare_platform_readiness_and_drain(app: TaiMCP) -> None:
     # Constructed fresh on every read, so the budget follows the env current at the call —
     # including a proposed env a config change is validated under.
     app.drain_budgets.register("tool_runs", lambda: tool_runs_settings.ToolRunsSettings().shutdown_drain_seconds)
+    # The supervisors' terminal-write wait at shutdown and the credential refreshes' close wait
+    # are part of the drain a leaving worker announces.
+    app.exit_drain.declare_shutdown("tool_runs", _tool_runs_shutdown_drain_seconds)
+    app.exit_drain.declare_shutdown("credential_refresh", lambda: refresh_owner.ACLOSE_TIMEOUT_SECONDS)
+
+
+def _tool_runs_shutdown_drain_seconds() -> float:
+    """The bound of the tool-run supervisors' shutdown drain, read from the module that spends it.
+
+    The supervisor module registers its shutdown handler on the bound app as it loads, so it is
+    imported here, at read time, under the binding a started app holds.
+    """
+    from tai42_skeleton.operations.tool_runs.supervisor import shutdown_drain_seconds
+
+    return shutdown_drain_seconds()
 
 
 def connectors_in_use() -> bool:
@@ -267,10 +291,12 @@ def _register_feature_lifecycles(app: TaiMCP) -> None:
     app.lifecycle.on_shutdown(stop_advisories_poll)
     # Every process that runs the app lifespan sweeps the kept hook runs, so any serve process
     # or backend worker runs, retries and reclaims them. Its stop is the lifespan's own
-    # ordered shutdown step, ahead of the shutdown handlers.
-    from tai42_skeleton.hooks.runs.sweep import start_hook_runs_sweep
+    # ordered shutdown step, ahead of the shutdown handlers, and its bound is part of the drain a
+    # leaving worker announces.
+    from tai42_skeleton.hooks.runs.sweep import shutdown_drain_seconds, start_hook_runs_sweep
 
     app.lifecycle.on_post_swap(start_hook_runs_sweep)
+    app.exit_drain.declare_shutdown("hook_runs", shutdown_drain_seconds)
 
 
 def _register_states_lifecycles(app: TaiMCP) -> None:
@@ -281,10 +307,16 @@ def _register_states_lifecycles(app: TaiMCP) -> None:
     """
     # Every process that runs the app lifespan sweeps the states outbox (pending saves applied
     # after the reply), so any serve process or backend worker recovers any pending save.
-    from tai42_skeleton.states.outbox.sweep import start_state_outbox_sweep, stop_state_outbox_sweep
+    # Its shutdown grace is part of the drain a leaving worker announces.
+    from tai42_skeleton.states.outbox.sweep import (
+        shutdown_drain_seconds,
+        start_state_outbox_sweep,
+        stop_state_outbox_sweep,
+    )
 
     app.lifecycle.on_post_swap(start_state_outbox_sweep)
     app.lifecycle.on_shutdown(stop_state_outbox_sweep)
+    app.exit_drain.declare_shutdown("states_outbox", shutdown_drain_seconds)
 
     # Reconcile the shipped state-template seeds once the store is live (a no-op while
     # the feature is off). A closure over the persistent app reads the LIVE per-epoch

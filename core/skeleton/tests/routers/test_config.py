@@ -125,9 +125,9 @@ class _FakeAdmin:
         self.reloads = 0
         self._live_manifest = live_manifest if live_manifest is not None else {}
 
-    def reload_config(self):
+    async def reload_config(self):
         self.reloads += 1
-        return {"status": "ok", "env_keys": len(self._manager._env)}
+        return {"status": "ok", "env_keys": len(self._manager._env), "awaiting_respawn": []}
 
     served_mcp_names = staticmethod(no_mcp_listing)
 
@@ -489,6 +489,8 @@ async def test_write_env_happy(install):
             "fanout": {"mode": "local-only", "note": "no worker bus configured; only this worker reloaded"},
             "recycle": None,
             "awaiting_respawn": [],
+            "roll_deferred": False,
+            "roll_deferred_to": None,
             "span_release_error": None,
         }
     }

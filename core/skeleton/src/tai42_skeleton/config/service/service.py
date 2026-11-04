@@ -3,13 +3,13 @@
 Every manifest / env mutation crosses one pipeline so no writer can forget a step:
 
     [write exclusion: read → mutate → VALIDATE → held-unpick check → re-VALIDATE when
-     its inputs moved → SEAL → persist] → local reload → broadcast
+     its inputs moved → SEAL → persist] → local reload → broadcast → recycle settle
 
 A settings-profile apply (:meth:`ConfigService.apply_replace_env`) crosses its variant:
 
     [write exclusion: VALIDATE → held-unpick check → re-VALIDATE when its inputs moved
      → ``@previous`` snapshot → (reload gate + fork gate: re-VALIDATE when its inputs
-     moved → build) → persist] → broadcast → recycle roll
+     moved → build) → persist] → broadcast → recycle settle
 
 Every write entry holds the write exclusion from its first store read through its persist,
 so no other write lands between a write's last validation and its persist; it is released
@@ -77,8 +77,13 @@ bus-unreachable report, that too is re-raised as a ``FleetBroadcastError`` with 
 unreachable report shape — a stranded fleet never hides behind a local error, and a
 committed persist never escapes as a raw broadcast fault.
 
-The settings-profile apply and its recycle roll are kept by
-:mod:`~tai42_skeleton.config.service.profile_apply`.
+Once the broadcast returned, every pipeline settles the fleet recycle in one place
+(:meth:`~tai42_skeleton.config.service.broadcast._BroadcastMixin._settle_recycle`): the
+reload's report decides which workers need a restart and the recycle rolls over them. The
+fleet soft-restart door (:meth:`ConfigService.reload_fleet`) settles through the same
+decision.
+
+The settings-profile apply is kept by :mod:`~tai42_skeleton.config.service.profile_apply`.
 """
 
 from __future__ import annotations
@@ -92,6 +97,7 @@ from typing import TYPE_CHECKING, Any, cast
 from tai42_kit.process_lock import ProcessLock
 
 from tai42_skeleton.app.recycle import RecycleReport, orchestrate_recycle
+from tai42_skeleton.app.writer_exit import hold_writer_exit
 from tai42_skeleton.config.deployment_env import DeploymentOwnership, resolve_deployment_ownership
 from tai42_skeleton.config.secret_seal import _leaving_connector_secrets
 from tai42_skeleton.config.service.broadcast import _BroadcastMixin
@@ -104,12 +110,12 @@ from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.settings.env_secret_marks import SECRET_MARKS_ENV_VAR, format_secret_marks, parse_secret_marks
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Mapping, Sequence
+    from collections.abc import Awaitable, Callable, Mapping
     from contextlib import AbstractAsyncContextManager
 
-    from tai42_contract.manifest import ExtensionElement
-
-    from tai42_skeleton.config.service.results import _FleetPublisher, _ManifestStore, _ReloadAdmin
+    from tai42_skeleton.app.bus import WorkerBus
+    from tai42_skeleton.config.service.results import _ComboCheck, _FleetPublisher, _ManifestStore, _ReloadAdmin
+    from tai42_skeleton.config.service.validation import _ManifestValidationInputs
 
 logger = logging.getLogger(__name__)
 
@@ -156,14 +162,15 @@ class ConfigService(_ProfileApplyMixin, _ValidationMixin, _ResolutionMixin, _Bro
         admin: _ReloadAdmin,
         bus: _FleetPublisher,
         *,
-        combo_check: Callable[[str, Sequence[ExtensionElement]], None],
+        combo_check: _ComboCheck,
         orchestrate: Callable[..., Awaitable[RecycleReport]] = orchestrate_recycle,
     ) -> None:
         """Bind the config manager, the admin reload seam, the worker bus, the combo check and the recycle roll.
 
-        ``combo_check`` dry-run binds one extension combo of a tool and raises on a refusal; the
-        gate runs it on every combo of a candidate manifest. ``orchestrate`` is the fleet recycle
-        roll an env change carrying a recycle-class key runs; it defaults to the running primitive
+        ``combo_check`` lists the live serving generation's served tools, read once as a validation
+        input, and dry-run binds one extension combo of a tool over its served base, raising on a
+        refusal; the gate runs it on every combo of a candidate manifest. ``orchestrate`` is the fleet recycle
+        roll a reload's recycle decision runs; it defaults to the running primitive
         and is injectable so the roll is exercised in isolation.
         """
         self._config_manager = config_manager
@@ -178,7 +185,12 @@ class ConfigService(_ProfileApplyMixin, _ValidationMixin, _ResolutionMixin, _Bro
         Every write entry holds this from before its first store read through its persist, its
         last statement inside it, and hands the yielded :class:`WriteSpan`'s ``release_error``
         to its tail. A caller waiting on either hold is recorded on its generation as waiting.
+        Asking for it is where every write entry's change begins: the worker's exit is held in
+        the open writer-exit scope from here until the edge answering the change settles
+        (:func:`~tai42_skeleton.app.writer_exit.hold_writer_exit`), so a recycle op from another
+        worker's roll never ends this worker mid-change.
         """
+        hold_writer_exit(cast("WorkerBus", self._bus), "this config change")
         return write_exclusion(_config_write_lock, self._config_manager.exclusive_write())
 
     async def deployment_ownership(self, op_name: str) -> DeploymentOwnership:
@@ -205,7 +217,7 @@ class ConfigService(_ProfileApplyMixin, _ValidationMixin, _ResolutionMixin, _Bro
             # The bound app's admin facet is the skeleton's, which also lists a server's served names.
             admin=cast("_ReloadAdmin", tai42_app.admin),
             bus=instance.app.bus,
-            combo_check=instance.app.extensions.check_combo,
+            combo_check=instance.app.extensions,
         )
 
     @classmethod
@@ -220,14 +232,14 @@ class ConfigService(_ProfileApplyMixin, _ValidationMixin, _ResolutionMixin, _Bro
         run, as the process app's bus does.
         """
         from tai42_skeleton.app import instance
-        from tai42_skeleton.config.service.host_side import HostSideAdmin, host_side_combo_check
+        from tai42_skeleton.config.service.host_side import HostSideAdmin, HostSideComboCheck
 
         app = instance.app
         return cls(
             config_manager=app.config.config_manager,
             admin=HostSideAdmin(),
             bus=app.bus,
-            combo_check=host_side_combo_check,
+            combo_check=HostSideComboCheck(),
         )
 
     def read_manifest_document(self) -> dict[str, Any]:
@@ -252,8 +264,9 @@ class ConfigService(_ProfileApplyMixin, _ValidationMixin, _ResolutionMixin, _Bro
         Under the write exclusion, runs ``mutator`` on a copy of the PRESERVED manifest and
         VALIDATEs the resolved projection of the result before the held-unpick check lists any
         MCP server, then runs it again inside the config-manager transaction (validating the
-        result anew when the stored manifest, the process env, the bus setting or the live
-        serving generation changed meanwhile) and persists.
+        result anew when the stored manifest, the process env, the bus setting, the live
+        serving generation or its tool surface changed meanwhile, against the served tools
+        taken by the last await before the transaction) and persists.
 
         ``mutator`` edits the passed document IN PLACE and must be pure / re-runnable
         (the transaction may re-run it on a concurrency conflict). An invalid mutation
@@ -274,21 +287,18 @@ class ConfigService(_ProfileApplyMixin, _ValidationMixin, _ResolutionMixin, _Bro
             candidate = copy.deepcopy(preserved)
             mutator(candidate)
             if _leaving_connector_secrets(preserved, candidate):
-                persisted, recycle_keys = await self._apply_change_with_leaving(mutator, ownership)
+                persisted = await self._apply_change_with_leaving(mutator, ownership)
             else:
                 persisted = await self._apply_change_locked(mutator, preserved, candidate, ownership)
-                recycle_keys = ()
-        return PersistedChange(persisted, tuple(recycle_keys), span.release_error)
+        return PersistedChange(persisted, span.release_error)
 
     async def converge(self, persisted: PersistedChange) -> ApplyResult:
-        """Locally reload and broadcast ``persisted`` to the whole fleet, rolling a recycle when its keys owe one.
+        """Locally reload and broadcast ``persisted`` to the whole fleet, then settle the recycle its report calls for.
 
         The live convergence of a persisted manifest change (:meth:`_reload_and_broadcast`).
         """
         return await self._reload_and_broadcast(
-            document=persisted.document,
-            recycle_keys=persisted.recycle_keys,
-            span_release_error=persisted.span_release_error,
+            document=persisted.document, span_release_error=persisted.span_release_error
         )
 
     async def _apply_change_locked(
@@ -304,8 +314,11 @@ class ConfigService(_ProfileApplyMixin, _ValidationMixin, _ResolutionMixin, _Bro
         the write exclusion.
         """
         # An invalid mutation is refused before the held-unpick check lists any MCP server.
-        validated = self._validate_manifest_noting_inputs(candidate, ownership)
+        validated = await self._validate_manifest_noting_inputs(candidate, ownership)
         await self._refuse_held_unpicks(preserved, candidate)
+        # The inputs a re-validation inside the transaction reads: the candidate's when nothing
+        # moved, else a fresh snapshot taken by the last await before the transaction.
+        inputs = validated if validated.unchanged() else await self._manifest_validation_inputs()
 
         def guarded(document: dict[str, Any]) -> None:
             # Snapshot the preserved document the mutator received BEFORE it runs, so
@@ -314,34 +327,31 @@ class ConfigService(_ProfileApplyMixin, _ValidationMixin, _ResolutionMixin, _Bro
             current = copy.deepcopy(document)
             mutator(document)
             # ``candidate`` was validated; the result is validated again when it differs (the
-            # manifest changed since ``candidate`` was built) or when the env, the bus setting
-            # or the live serving generation changed during the listing.
+            # manifest changed since ``candidate`` was built) or when the env, the bus setting,
+            # the live serving generation or its tool surface changed during the listing.
             if document != candidate or not validated.unchanged():
-                self._validate_manifest(document, ownership)
+                self._validate_manifest(document, ownership, inputs)
             self._seal_secrets(document, current)
 
         return self._config_manager.mutate_manifest(guarded)
 
-    async def reapply_manifest(
-        self, *, continues: ApplyResult | None = None, recycle_keys: Sequence[str] = ()
-    ) -> ApplyResult:
+    async def reapply_manifest(self, *, continues: ApplyResult | None = None) -> ApplyResult:
         """Persist the stored manifest unchanged, then reload locally and broadcast to the fleet.
 
         The manifest is read under the write exclusion, so every write that landed before it
         stands; it crosses the same validate, held-unpick, seal and persist steps as
         :meth:`apply_change`.
 
-        ``continues`` / ``recycle_keys`` (exclusive) make the reload the continuation of an
-        earlier change: ``continues`` carries that change's roll, already run or deferred (no pin,
-        no second roll, one verdict), ``recycle_keys`` its recycle-class keys whose roll never ran
-        (this reload rolls them, or defers the roll inside a deferral scope).
+        ``continues`` makes the reload the continuation of an earlier run of the same change,
+        whose failed span release the result keeps beside its own. Its recycle is settled from
+        its own reload report, as every run's is.
         """
         async with self._write_exclusion() as span:
             ownership = await self.deployment_ownership("reapply_manifest")
             preserved = self._read_preserved_manifest()
             persisted = await self._apply_change_locked(_unchanged, preserved, copy.deepcopy(preserved), ownership)
         return await self._reload_and_broadcast(
-            document=persisted, recycle_keys=recycle_keys, continues=continues, span_release_error=span.release_error
+            document=persisted, continues=continues, span_release_error=span.release_error
         )
 
     async def apply_replace(self, document: dict[str, Any]) -> ApplyResult:
@@ -367,26 +377,23 @@ class ConfigService(_ProfileApplyMixin, _ValidationMixin, _ResolutionMixin, _Bro
         async with self._write_exclusion() as span:
             ownership = await self.deployment_ownership("apply_replace")
             preserved = self._read_preserved_manifest()
-            recycle_keys: Sequence[str] = ()
             if _leaving_connector_secrets(preserved, document):
 
                 def replace_mutator(doc: dict[str, Any]) -> None:
                     doc.clear()
                     doc.update(document)
 
-                persisted, recycle_keys = await self._apply_change_with_leaving(replace_mutator, ownership)
+                persisted = await self._apply_change_with_leaving(replace_mutator, ownership)
             else:
-                validated = self._validate_manifest_noting_inputs(document, ownership)
+                validated = await self._validate_manifest_noting_inputs(document, ownership)
                 await self._refuse_held_unpicks(preserved, document)
-                # Validated again when the env, the bus setting or the live serving generation
-                # changed during the listing.
+                # Validated again, against a fresh snapshot of its inputs, when the env, the bus
+                # setting, the live serving generation or its tool surface changed during the listing.
                 if not validated.unchanged():
-                    self._validate_manifest(document, ownership)
+                    self._validate_manifest(document, ownership, await self._manifest_validation_inputs())
                 self._seal_secrets(document, preserved)
                 persisted = self._config_manager.replace_manifest(document)
-        return await self._reload_and_broadcast(
-            document=persisted, recycle_keys=recycle_keys, span_release_error=span.release_error
-        )
+        return await self._reload_and_broadcast(document=persisted, span_release_error=span.release_error)
 
     async def _refuse_held_unpicks(
         self, before: Mapping[str, Any], after: Mapping[str, Any], *, env: Mapping[str, str] | None = None
@@ -417,13 +424,13 @@ class ConfigService(_ProfileApplyMixin, _ValidationMixin, _ResolutionMixin, _Bro
 
     async def _apply_change_with_leaving(
         self, mutator: Callable[[dict[str, Any]], None], ownership: DeploymentOwnership
-    ) -> tuple[dict[str, Any], Sequence[str]]:
+    ) -> dict[str, Any]:
         """Persist a manifest mutation that drops an oauth connector through the combined env+manifest seam.
 
         The leaving ``client_secret_env`` names are folded into the stored
         ``TAI_ENV_SECRET_KEYS`` marks and the manifest mutation land atomically. The caller
         holds the write exclusion and runs the reload tail on the returned persisted
-        document and recycle-class keys once it has released it.
+        document once it has released it.
 
         ``prepare`` returns an EMPTY change set and the caller's own ``mutator``:
         :meth:`apply_env_and_change` itself computes the leaving names from the mutated
@@ -454,10 +461,8 @@ class ConfigService(_ProfileApplyMixin, _ValidationMixin, _ResolutionMixin, _Bro
             changes = {**changes, SECRET_MARKS_ENV_VAR: format_secret_marks(dict.fromkeys(secret_keys))}
         async with self._write_exclusion() as span:
             ownership = await self.deployment_ownership("apply_env_change")
-            recycle_keys = await self._apply_env_change_locked(changes, ownership)
-        return await self._reload_and_broadcast(
-            document=None, recycle_keys=recycle_keys, span_release_error=span.release_error
-        )
+            await self._apply_env_change_locked(changes, ownership)
+        return await self._reload_and_broadcast(document=None, span_release_error=span.release_error)
 
     async def apply_derived_env_change(self, derive: Callable[[dict[str, str]], dict[str, str]]) -> ApplyResult:
         """Apply env changes derived from the stored env, read under the write exclusion.
@@ -470,26 +475,23 @@ class ConfigService(_ProfileApplyMixin, _ValidationMixin, _ResolutionMixin, _Bro
         """
         async with self._write_exclusion() as span:
             ownership = await self.deployment_ownership("apply_derived_env_change")
-            recycle_keys = await self._apply_env_change_locked(derive(self._read_stored_env()), ownership)
-        return await self._reload_and_broadcast(
-            document=None, recycle_keys=recycle_keys, span_release_error=span.release_error
-        )
+            await self._apply_env_change_locked(derive(self._read_stored_env()), ownership)
+        return await self._reload_and_broadcast(document=None, span_release_error=span.release_error)
 
-    async def _apply_env_change_locked(self, changes: dict[str, str], ownership: DeploymentOwnership) -> list[str]:
-        """Validate and write env ``changes`` judged by ``ownership``, the write exclusion held by the caller.
+    async def _apply_env_change_locked(self, changes: dict[str, str], ownership: DeploymentOwnership) -> None:
+        """Validate and write env ``changes`` judged by ``ownership``, the write exclusion held by the caller."""
 
-        Returns the change's recycle-class keys for the caller's reload tail.
-        """
-        validated = self._env_validation_inputs()
-        recycle_keys = self._validate_env(changes, ownership)
+        def validate(inputs: _ManifestValidationInputs) -> None:
+            self._validate_env(changes, ownership, inputs)
+
+        validated = await self._env_validation_inputs()
+        validate(validated.process)
         document = self._read_preserved_manifest()
         await self._refuse_held_unpicks(document, document, env=self.effective_env(changes, ownership))
-        # Validated again when the process env, the stored env or manifest, or the live
-        # serving generation changed while the held-unpick check awaited.
-        if not self._env_validation_inputs_unchanged(validated):
-            recycle_keys = self._validate_env(changes, ownership)
+        # Validated again when the process env, the stored env or manifest, or the live serving
+        # generation or its tool surface changed while the held-unpick check awaited.
+        await self._validate_again_if_moved(validated, validate)
         self._config_manager.write_env(changes)
-        return recycle_keys
 
     async def apply_env_and_change(
         self,
@@ -514,7 +516,11 @@ class ConfigService(_ProfileApplyMixin, _ValidationMixin, _ResolutionMixin, _Bro
         0. Acquire the write exclusion, read the stored env ONCE, and call
            ``prepare(stored)`` to build the changes + mutator against that snapshot.
         1. Build the candidate mutated manifest and validate it against the effective
-           env — a failure raises before any write.
+           env, and validate the candidate again when its inputs moved during the
+           held-unpick check — a failure raises before any write. The candidate is built
+           from the manifest read in this step; the transaction (step 3) re-applies the
+           mutator to the live document and validates that result, so a stored manifest
+           that moved is checked there.
         2. Write the env FIRST. Env-first (not manifest-first) guarantees there is never
            a persisted ``!ENV`` marker referencing an env key that is not yet stored (a
            marker that would silently resolve to ``"N/A"``); the reverse ordering would.
@@ -541,13 +547,9 @@ class ConfigService(_ProfileApplyMixin, _ValidationMixin, _ResolutionMixin, _Bro
         # exclusion so ``reload_gate`` is never acquired while it is held.
         async with self._write_exclusion() as span:
             ownership = await self.deployment_ownership("apply_env_and_change")
-            persisted, recycle_keys = await self._apply_env_and_change_locked(
-                prepare, ownership, manifest_pointer=manifest_pointer
-            )
+            persisted = await self._apply_env_and_change_locked(prepare, ownership, manifest_pointer=manifest_pointer)
         # STEP 4 — lock RELEASED; reload + broadcast (acquires reload_gate) runs outside it.
-        return await self._reload_and_broadcast(
-            document=persisted, recycle_keys=recycle_keys, span_release_error=span.release_error
-        )
+        return await self._reload_and_broadcast(document=persisted, span_release_error=span.release_error)
 
     async def _apply_env_and_change_locked(
         self,
@@ -555,11 +557,10 @@ class ConfigService(_ProfileApplyMixin, _ValidationMixin, _ResolutionMixin, _Bro
         ownership: DeploymentOwnership,
         *,
         manifest_pointer: str | None = None,
-    ) -> tuple[dict[str, Any], Sequence[str]]:
+    ) -> dict[str, Any]:
         """STEP 0-3 of :meth:`apply_env_and_change` judged by ``ownership``, the write exclusion held by the caller.
 
-        Returns the persisted manifest and the env change's recycle-class keys for the caller's
-        reload tail.
+        Returns the persisted manifest for the caller's reload tail.
         """
         # STEP 0 — read the stored env ONCE under the exclusion; the caller derives the
         # changes + mutator from it (the key generation and the secret-marks append are
@@ -581,8 +582,20 @@ class ConfigService(_ProfileApplyMixin, _ValidationMixin, _ResolutionMixin, _Bro
         # union (stored union caller marks union leaving; written only when it grows the stored
         # set) BEFORE the env write, so the value stays masked after the connector goes.
         self._fold_leaving_secret_marks(changes, stored, preserved, candidate)
-        recycle_keys = self._validate_env_and_manifest(changes, candidate, ownership)
+
+        def validate(inputs: _ManifestValidationInputs) -> None:
+            self._validate_env_and_manifest(changes, candidate, ownership, inputs)
+
+        validated = await self._env_validation_inputs()
+        validate(validated.process)
         await self._refuse_held_unpicks(preserved, candidate, env=self.effective_env(changes, ownership))
+        # The candidate is validated again before the env write when the process env, the stored
+        # env, or the live serving generation or its tool surface changed while the held-unpick
+        # check awaited. A moved stored manifest is checked inside the transaction, which
+        # re-applies the mutator to the live document and validates the result. The inputs
+        # returned are current at the last await before the transaction, whose validation
+        # binds over their served tools.
+        inputs = (await self._validate_again_if_moved(validated, validate)).process
 
         # STEP 2 — env-write-FIRST. Env-first (not manifest-first) guarantees there is
         # never a persisted ``!ENV`` marker referencing an env key not yet stored.
@@ -603,8 +616,9 @@ class ConfigService(_ProfileApplyMixin, _ValidationMixin, _ResolutionMixin, _Bro
             # concurrently-changed manifest never persists an unvalidated result. ONE
             # validator for every caller — the env-aware ``_validate_env_and_manifest``
             # (``_validate_manifest`` would wrongly reject the just-written store key its
-            # os.environ marker resolution cannot see).
-            self._validate_env_and_manifest(changes, document, ownership)
+            # os.environ marker resolution cannot see). It binds the combos over the served
+            # tools taken by the last await before the transaction.
+            self._validate_env_and_manifest(changes, document, ownership, inputs)
             self._seal_secrets(document, current)
 
         try:
@@ -623,7 +637,7 @@ class ConfigService(_ProfileApplyMixin, _ValidationMixin, _ResolutionMixin, _Bro
                 f"re-runnable). Orphan env key(s) now referencing no persisted manifest marker: "
                 f"{label}{pointer}. Re-run the op to complete the manifest write."
             ) from exc
-        return persisted, recycle_keys
+        return persisted
 
     @staticmethod
     def _fold_leaving_secret_marks(

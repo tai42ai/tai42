@@ -314,7 +314,7 @@ def test_a_config_reload_refuses_an_unknown_name_read_from_a_non_file_store(
             # The store gains a mistyped owned name outside every env-write door.
             store._env = {"ACCESS_CONTROL_ENABEL": "true"}
             with pytest.raises(UnknownOwnedSettingError, match=r"^stored env: .*ACCESS_CONTROL_ENABEL"):
-                await asyncio.to_thread(app._reload_config)
+                await app._reload_config()
             assert epoch_mod.current_epoch() is live
 
     asyncio.run(run())

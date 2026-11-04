@@ -9,8 +9,19 @@ callback, ``tool_execution`` the tool) hold the process's fork-gate job span for
 whole run; ``task_scheduler`` runs platform code only and waits for the target it
 enqueued, so it holds none: a span there would wait on a job that waits behind the
 rebuild. Each
-pass of arq's poll loop reports the worker's progress. Readiness gating, signal
-wiring and drain-on-cancellation belong to
+pass of arq's poll loop reports the worker's progress.
+
+The worker forks no child of its own, but code it runs may fork (a tool that starts a
+``multiprocessing`` child, a ``subprocess`` with a ``preexec_fn``). The build installs the kit's
+fork safety (:mod:`tai42_kit.backend.fork_safety`) over every fork of the process that runs the
+interpreter's fork hooks: each child resets its inherited copy of the fork gate and evicts the
+monitoring writer it inherited. A fork from a job's own context nests in that job's span; a
+fork on the loop's thread enters its span at once, as the kit's guard never blocks a loop; a
+fork on another thread outside any job span waits out a running re-import and reports no
+progress meanwhile: arq's poll loop runs on the event loop, which that wait does not hold up,
+so the loop's own passes are the only progress the worker reports.
+
+Readiness gating, signal wiring and drain-on-cancellation belong to
 :class:`~tai42_kit.backend.ManagedBackend`, which drives this object.
 
 A job runs at most once. arq picks a job up again after its run was cut (a worker died
@@ -18,9 +29,9 @@ inside it, or a cold stop cancelled it); that pickup ends the job failed with
 :class:`JobRunCutError`, without entering its body. The schedule driver's later pickups
 only move its schedule on.
 
-The ``main`` click command defines the CLI option surface twice over: it is what
-``launch`` parses its subcommand args through, and it is the direct entry point
-for running a worker outside a host process.
+The :func:`worker_options` click command is the worker's option surface:
+:meth:`ArqWorkerRuntime.from_args` parses ``launch``'s subcommand args through it and
+never runs it. A worker is started with ``tai backend worker``.
 """
 
 from __future__ import annotations
@@ -44,13 +55,13 @@ from tai42_contract.backend.runtime import (
     ProgressLiveness,
     ProgressReporter,
 )
+from tai42_kit.backend import fork_safety
 from tai42_kit.backend.job_context import running_job
+from tai42_kit.backend.queue_labels import derived_queue, queue_label_option
 from tai42_kit.clients.impl.redis import async_redis_from_url, redis_from_url_kwargs
 from tai42_kit.fork_gate import JOB_SPAN_WAIT_SECONDS, fork_gate
-from tai42_kit.liveness import LivenessFile, backend_liveness_settings
 
 from tai42_backend_arq.pool import arq_redis_over, enqueue_client_kwargs
-from tai42_backend_arq.queues import check_queue_label, derived_queue
 from tai42_backend_arq.scheduler import recover_stalled_schedules, task_scheduler
 from tai42_backend_arq.settings import arq_settings, job_deserializer, job_serializer
 from tai42_backend_arq.tasks import callback_job, tool_execution
@@ -106,7 +117,11 @@ def _in_job_span(function: Callable[..., Awaitable[Any]]) -> Function:
     functions that run manifest code take it (see the module docstring).
 
     The body runs marked as a backend job (:func:`~tai42_kit.backend.job_context.running_job`),
-    so a tool it runs that would wait for another job's result refuses.
+    so a tool it runs that would wait for another job's result refuses. The body runs its tool
+    inside :func:`~tai42_kit.backend.job_run.dispatched_job`, which admits that run on the
+    serving generation, so a reload's retire drains it before it closes that generation's
+    loop-bound resources. Only that run is admitted: the rest of the job runs unadmitted, and a
+    callback with no tool runs no ``dispatched_job`` at all, so a retire drains none of it.
     """
 
     @functools.wraps(function)
@@ -151,17 +166,9 @@ class ArqWorkerRuntime(BackendRuntime):
     consumes_work = True
     liveness = ProgressLiveness()
 
-    def __init__(self, options: Mapping[str, Any], *, vendor_signals: bool = False) -> None:
-        """``options`` is a parsed :func:`main` option set.
-
-        ``vendor_signals`` lets arq install its OWN signal handlers, and is for
-        the direct-CLI entry point only: there, no host chain exists to compose
-        with and arq's handler is the only thing that would drain a SIGTERM. On
-        the ``launch`` path it stays False — the host owns the process's signal
-        disposition, and arq's install is last-writer-wins over it.
-        """
+    def __init__(self, options: Mapping[str, Any]) -> None:
+        """``options`` is a parsed :func:`worker_options` option set."""
         self._options = dict(options)
-        self._vendor_signals = vendor_signals
         self._worker: _ProgressReportingWorker | None = None
         # arq schedules a fresh wait-then-cancel task on every warm-shutdown
         # call, so the second one would open a second completion window and cut
@@ -178,13 +185,17 @@ class ArqWorkerRuntime(BackendRuntime):
         # Parse strictly through the CLI's own option surface: an unknown or
         # malformed option aborts the launch loudly rather than starting a worker
         # configured differently than the operator asked for.
-        return cls(main.make_context("arq-worker", list(args)).params)
+        return cls(worker_options.make_context("arq-worker", list(args)).params)
 
     async def build(self) -> None:
-        """Construct the arq ``Worker`` from settings and the parsed options."""
+        """Construct the arq ``Worker`` from settings and the parsed options, and guard the process's forks.
+
+        The kit's fork safety is installed last (see the module docstring): a fork that waits on a
+        re-import waits for up to ``JOB_SPAN_WAIT_SECONDS``.
+        """
         settings = arq_settings()
         options = self._options
-        queue_name = derived_queue(options["queue"])
+        queue_name = derived_queue(settings.queue_name, options["queue"])
         self._worker = _ProgressReportingWorker(
             report_progress=self.report_progress,
             job_serializer=job_serializer,
@@ -233,8 +244,11 @@ class ArqWorkerRuntime(BackendRuntime):
             # Required for the scheduler and cancel/delete tools to abort jobs
             # through ``Job.abort``; without it abort requests are never processed.
             allow_abort_jobs=True,
-            handle_signals=self._vendor_signals,
+            # The host owns the process's signal disposition; arq's own install would be
+            # last-writer-wins over it.
+            handle_signals=False,
         )
+        fork_safety.guard_forks(fork_gate, timeout=JOB_SPAN_WAIT_SECONDS)
 
     @property
     def worker(self) -> _ProgressReportingWorker:
@@ -286,58 +300,23 @@ class ArqWorkerRuntime(BackendRuntime):
             await self._worker.close()
 
 
-async def _run_standalone(options: Mapping[str, Any]) -> None:
-    """Run one worker outside a host process, for :func:`main`.
-
-    No readiness gate and no composed signal chain: this process has no app
-    booting alongside the worker to wait for, and nothing else on its loop to
-    compose signals with, so arq keeps its own handlers. The liveness file is
-    bound here as the launch path binds it, and removed on every way out.
-    """
-    liveness = LivenessFile.from_settings(backend_liveness_settings())
-    runtime = ArqWorkerRuntime(options, vendor_signals=True)
-    runtime.bind_progress(liveness.report)
-    try:
-        await runtime.build()
-        try:
-            await runtime.run_on_loop()
-        finally:
-            await runtime.aclose()
-    finally:
-        liveness.remove()
-
-
-def _queue_label_option(ctx: click.Context, param: click.Parameter, value: str | None) -> str | None:
-    if value is None:
-        return None
-    try:
-        return check_queue_label(value)
-    except ValueError as exc:
-        raise click.BadParameter(str(exc), ctx=ctx, param=param) from exc
-
-
-@click.command("tai42-backend-arq")
+@click.command("arq-worker")
 @click.option("--redis-url", default=None, help="Redis URL (defaults to ARQ_REDIS_URL)")
 @click.option("--burst", is_flag=True, help="Run in burst mode")
 @click.option("--keep-result", type=int, default=3600, help="Keep result seconds")
 @click.option(
     "--queue",
     default=None,
-    callback=_queue_label_option,
+    callback=queue_label_option,
     help="Queue label: consume <ARQ_QUEUE_NAME>.<label> instead of ARQ_QUEUE_NAME",
 )
 @click.option("--max-jobs", type=int, default=10, help="Max concurrent jobs")
 @click.option("--job-timeout", type=int, default=None, help="Job timeout seconds (defaults to ARQ_TASK_TIMEOUT)")
 @click.option("--poll-delay", type=float, default=0.5, help="Poll delay seconds")
 @click.option("--health-check-interval", type=int, default=60, help="Health check interval seconds")
-def main(**options: Any) -> None:
-    """Run one arq worker standalone from the command line."""
-    try:
-        asyncio.run(_run_standalone(options))
-    except KeyboardInterrupt:
-        logger.info("KeyboardInterrupt")
-        sys.exit(130)
+def worker_options(**options: Any) -> None:
+    """The arq worker's option surface.
 
-
-if __name__ == "__main__":
-    main()
+    :meth:`ArqWorkerRuntime.from_args` parses through it with ``make_context`` and never
+    invokes it; ``tai backend worker`` runs the worker.
+    """

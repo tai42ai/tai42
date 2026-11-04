@@ -362,19 +362,37 @@ async def test_preview_update_narrows_new_public_rows() -> None:
 async def test_the_remount_reload_continues_the_forward_apply_with_its_recycle_roll() -> None:
     from tai42_skeleton.app.bus import FleetResult, WorkerIdentity, WorkerKind
     from tai42_skeleton.app.recycle import RECYCLED, RecycleReport, RecycleRow
+    from tai42_skeleton.config.recycle_policy import RecycleDecision, RecycleReason, ReportedKeys
     from tai42_skeleton.config.service import ApplyResult
     from tai42_skeleton.marketplace import manifest_apply
 
-    roll = RecycleReport(rows=[RecycleRow(name="backend-1", kind="backend", generation_before=1, status=RECYCLED)])
+    roll = RecycleReport(
+        rows=[
+            RecycleRow(
+                name="backend-1", kind="backend", generation_before=1, status=RECYCLED, keys=["BACKEND_MANIFEST_KEY"]
+            )
+        ]
+    )
     writer = WorkerIdentity(name="serve-writer", kind=WorkerKind.serve, pid=1, generation=2)
+    decision = RecycleDecision(
+        writer=writer,
+        reported={"backend-1": ReportedKeys(generation=1, keys=("BACKEND_MANIFEST_KEY",))},
+        unconfirmed={},
+        clean=frozenset(),
+        writer_reason=RecycleReason(keys=("BACKEND_MANIFEST_KEY",)),
+        withheld={},
+        addressed=None,
+        report_unreachable=False,
+    )
     prior = ApplyResult(
         fleet=FleetResult(op="reload_config", results=[]),
-        local={"status": "ok", "env_keys": 1},
+        local={"status": "ok", "env_keys": 1, "awaiting_respawn": []},
+        decision=decision,
         recycle=roll,
-        self_identity=writer,
-        serve_affecting=True,
     )
-    remounted = ApplyResult(fleet=FleetResult(op="reload_config", results=[]), local={"status": "ok", "env_keys": 2})
+    remounted = ApplyResult(
+        fleet=FleetResult(op="reload_config", results=[]), local={"status": "ok", "env_keys": 2, "awaiting_respawn": []}
+    )
     handed: list[ApplyResult | None] = []
 
     class _Svc:
@@ -396,7 +414,7 @@ async def test_a_failed_remount_keeps_its_span_release_error_on_the_forward_resu
 
     prior = ApplyResult(
         fleet=FleetResult(op="reload_config", results=[]),
-        local={"status": "ok", "env_keys": 1},
+        local={"status": "ok", "env_keys": 1, "awaiting_respawn": []},
         span_release_error="OSError: the forward release failed",
     )
 

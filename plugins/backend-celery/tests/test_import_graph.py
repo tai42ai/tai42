@@ -47,6 +47,8 @@ ALLOWED_THIRD_PARTY = frozenset(
         "dateutil",
         "dotenv",
         "fastmcp",
+        # celery.utils.threads imports it whenever it is installed, as it is with gevent for the gevent pool.
+        "greenlet",
         "h11",
         "httpcore",
         "httpx",

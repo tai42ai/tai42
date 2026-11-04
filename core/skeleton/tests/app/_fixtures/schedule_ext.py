@@ -16,23 +16,19 @@ from collections.abc import Callable
 from typing import Any
 
 from makefun import create_function
-from pydantic import TypeAdapter
 from tai42_contract.app import tai42_app
 from tai42_contract.backend import (
     SCHEDULE_BRANCH_SUFFIX,
+    SCHEDULE_CADENCE_ADAPTER,
     SCHEDULE_CADENCE_KEY,
     SCHEDULE_EXTENSION,
     SCHEDULE_NAME_KEY,
-    CrontabCadence,
-    IntervalCadence,
-    ScheduleCadence,
 )
 from tai42_contract.extensions import ExtensionKind
 from tai42_kit.utils.data import makefun_func_name
 from tai42_kit.utils.schedule_subject import SCHEDULE_STAMPED_DOOR_OPTS, SCHEDULE_STATE_BINDING_REQUEST_KEY
 
 _BACKEND_MODULE = "tests.app._fixtures.schedule_tools"
-_CADENCE: TypeAdapter[IntervalCadence | CrontabCadence] = TypeAdapter(ScheduleCadence)
 
 captured_schedules: list[dict] = []
 
@@ -63,7 +59,7 @@ def schedule_task(func: Callable[..., Any], name: str, description: str) -> Call
     def func_impl(*args: Any, **kwargs: Any) -> dict[str, Any]:
         backend = importlib.import_module(_BACKEND_MODULE)
         schedule_name = kwargs.pop(SCHEDULE_NAME_KEY)
-        cadence = _CADENCE.validate_python(kwargs.pop(SCHEDULE_CADENCE_KEY))
+        cadence = SCHEDULE_CADENCE_ADAPTER.validate_python(kwargs.pop(SCHEDULE_CADENCE_KEY))
         stored = {key: value for key, value in kwargs.items() if value is not None}
         captured_schedules.append({"name": schedule_name, "cadence": cadence, "kwargs": dict(stored)})
         backend.store[schedule_name] = {

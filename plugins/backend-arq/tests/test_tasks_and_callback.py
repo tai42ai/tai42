@@ -39,17 +39,6 @@ _FORWARDED = {
 _CARRIED = {WORKER_SECRET_CAPABILITY_ARG: False}
 
 
-class _RecordingRedis:
-    """Captures the ``tool_execution`` job the enqueue path submits."""
-
-    def __init__(self) -> None:
-        self.jobs: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
-
-    async def enqueue_job(self, *args: Any, **kwargs: Any) -> Any:
-        self.jobs.append((args, kwargs))
-        return None
-
-
 class _Ctx:
     def __init__(self) -> None:
         self.enqueued: list[tuple[Any, ...]] = []
@@ -72,7 +61,19 @@ async def test_tool_execution_runs_named_tool(stub_app) -> None:
     stub_app.tools.run_tool_mock.assert_awaited_once_with("mytool", {"text": "hi"})
 
 
-async def test_tool_execution_chains_callback_even_on_failure(stub_app) -> None:
+async def test_tool_execution_chains_the_callback_after_the_tool_succeeds(stub_app) -> None:
+    stub_app.tools.run_tool_mock = AsyncMock(return_value={"out": 1})
+    redis = _Ctx()
+    ctx = {"redis": redis, "job_id": "job-9"}
+
+    await tasks.tool_execution(
+        ctx, backend_tool_name="mytool", backend_secret_capability=False, callback_kwargs={"tool": "next"}
+    )
+
+    assert redis.enqueued == [("callback_job", "job-9", {"tool": "next"})]
+
+
+async def test_tool_execution_chains_no_callback_when_the_tool_fails(stub_app) -> None:
     stub_app.tools.run_tool_mock = AsyncMock(side_effect=RuntimeError("tool blew up"))
     redis = _Ctx()
     ctx = {"redis": redis, "job_id": "job-9"}
@@ -82,46 +83,7 @@ async def test_tool_execution_chains_callback_even_on_failure(stub_app) -> None:
             ctx, backend_tool_name="mytool", backend_secret_capability=False, callback_kwargs={"tool": "next"}
         )
 
-    assert redis.enqueued == [("callback_job", "job-9", {"tool": "next"})]
-
-
-async def test_tool_execution_missing_tool_name_raises(stub_app) -> None:
-    with pytest.raises(KeyError):
-        await tasks.tool_execution({"redis": _Ctx(), "job_id": "j"}, text="hi")
-
-
-async def test_tool_execution_runs_the_tool_detached(stub_app) -> None:
-    # A worker execution has no live caller, so the tool observes the detached
-    # flag set; the flag never leaks past the job.
-    ctx = {"redis": _Ctx(), "job_id": "job-9"}
-
-    await tasks.tool_execution(ctx, backend_tool_name="mytool", backend_secret_capability=False, text="hi")
-
-    assert stub_app.tools.detached_seen == [True]
-    assert stub_app.tools.offloads == [True]
-    assert in_detached_run() is False
-
-
-@pytest.mark.parametrize("capability", [True, False])
-async def test_tool_execution_binds_the_carried_capability(stub_app, capability: bool) -> None:
-    # The worker binds the capability the job carried verbatim, never passes the reserved
-    # kwarg to the tool, and the bind never leaks past the job.
-    ctx = {"redis": _Ctx(), "job_id": "job-9"}
-
-    await tasks.tool_execution(ctx, backend_tool_name="mytool", backend_secret_capability=capability, text="hi")
-
-    assert stub_app.tools.secret_capability_seen == [capability]
-    stub_app.tools.run_tool_mock.assert_awaited_once_with("mytool", {"text": "hi"})
-    assert caller_may_read_secrets() is False
-
-
-async def test_tool_execution_without_a_carried_capability_raises(stub_app) -> None:
-    ctx = {"redis": _Ctx(), "job_id": "job-9"}
-
-    with pytest.raises(KeyError, match=WORKER_SECRET_CAPABILITY_ARG):
-        await tasks.tool_execution(ctx, backend_tool_name="mytool", text="hi")
-
-    stub_app.tools.run_tool_mock.assert_not_called()
+    assert redis.enqueued == []
 
 
 # -- callback_job ------------------------------------------------------------------------
@@ -163,17 +125,16 @@ async def test_callback_job_runs_callback_over_result(monkeypatch, stub_app) -> 
     stub_app.tools.run_tool_mock.assert_awaited_once_with("next_tool", {"v": 3})
 
 
-async def test_callback_job_not_found(monkeypatch) -> None:
+async def test_callback_job_raises_on_a_missing_predecessor(monkeypatch) -> None:
     _bind_job(monkeypatch, _FakeJob(statuses=[JobStatus.not_found], result=None))
-    out = await tasks.callback_job({"redis": object()}, "job-1", CallbackSchema())
-    assert out == {"status": "error", "job_id": "job-1", "error": "Job not found"}
+    with pytest.raises(RuntimeError, match=r"^callback predecessor job job-1 not found$"):
+        await tasks.callback_job({"redis": object()}, "job-1", CallbackSchema())
 
 
-async def test_callback_job_timeout_reports_not_finished(monkeypatch) -> None:
+async def test_callback_job_raises_on_a_predecessor_unfinished_at_the_timeout(monkeypatch) -> None:
     _bind_job(monkeypatch, _FakeJob(statuses=[JobStatus.in_progress], result=None), callback_timeout=0)
-    out = await tasks.callback_job({"redis": object()}, "job-1", CallbackSchema())
-    assert out["status"] == "not_finished"
-    assert "did not complete within 0s" in out["error"]
+    with pytest.raises(TimeoutError, match=r"^callback predecessor job job-1 still in_progress after 0 seconds$"):
+        await tasks.callback_job({"redis": object()}, "job-1", CallbackSchema())
 
 
 async def test_callback_job_propagates_unexpected_poll_error(monkeypatch) -> None:
@@ -184,17 +145,13 @@ async def test_callback_job_propagates_unexpected_poll_error(monkeypatch) -> Non
         await tasks.callback_job({"redis": object()}, "job-1", CallbackSchema())
 
 
-async def test_callback_job_reports_failed_predecessor(monkeypatch) -> None:
-    # A failed predecessor replays out of wait_job_result as TaskFailedError, a
-    # domain outcome reported in the returned status dict.
+async def test_callback_job_raises_the_failed_predecessors_failure(monkeypatch) -> None:
     _bind_job(
         monkeypatch,
         _FakeJob(statuses=[JobStatus.complete], result=TaskFailedError("ValueError", "ValueError('job failed')", None)),
     )
-    out = await tasks.callback_job({"redis": object()}, "job-1", CallbackSchema())
-    assert out["status"] == "failure"
-    assert out["job_id"] == "job-1"
-    assert "job failed" in out["error"]
+    with pytest.raises(TaskFailedError, match="job failed"):
+        await tasks.callback_job({"redis": object()}, "job-1", CallbackSchema())
 
 
 async def test_callback_job_raises_when_callback_execution_fails(monkeypatch, stub_app) -> None:
@@ -207,15 +164,13 @@ async def test_callback_job_raises_when_callback_execution_fails(monkeypatch, st
         await tasks.callback_job({"redis": object()}, "job-1", CallbackSchema(tool="next", carried_kwargs=_CARRIED))
 
 
-async def test_callback_job_aborted_predecessor_reported_as_failure(monkeypatch) -> None:
-    """An aborted predecessor replays its stored abort as a revived
-    ``CancelledError``; the callback job reports it as a failure with the
-    stored detail instead of letting it read as a cancellation of the callback
-    job itself."""
+async def test_callback_job_raises_an_aborted_predecessor_as_a_failure(monkeypatch) -> None:
+    """An aborted predecessor replays its stored abort as a revived ``CancelledError``; the
+    callback job raises it as ``TaskFailedError`` with the stored detail instead of letting it
+    read as a cancellation of the callback job itself."""
     _bind_job(monkeypatch, _FakeJob(statuses=[JobStatus.complete], result=asyncio.CancelledError("CancelledError()")))
-    out = await tasks.callback_job({"redis": object()}, "job-1", CallbackSchema())
-    assert out["status"] == "failure"
-    assert "CancelledError()" in out["error"]
+    with pytest.raises(TaskFailedError, match=r"CancelledError\(\)"):
+        await tasks.callback_job({"redis": object()}, "job-1", CallbackSchema())
 
 
 # -- callback_execution -------------------------------------------------------------------
@@ -391,36 +346,6 @@ async def test_rendered_condition_unknown_id_raises(stub_app) -> None:
 
 
 # -- the callback carries the followed run's door context --------------------------------
-
-
-async def test_enqueue_carries_the_forwarded_pair_onto_the_callback(stub_app) -> None:
-    # A task fired from within a door forwards its subject/identity onto the job; the callback runs as a
-    # SEPARATE job, so the same pair is carried on its spec or the follow-up loses the door context.
-    redis: Any = _RecordingRedis()
-    await tasks.enqueue_task(
-        redis, backend_tool_name="greet", callback_kwargs=CallbackSchema(tool="next"), **_FORWARDED
-    )
-    (_, job_kwargs) = redis.jobs[0]
-    assert job_kwargs["callback_kwargs"].carried_kwargs == {**_FORWARDED, **_CARRIED}
-
-
-@pytest.mark.parametrize(("gate_enabled", "capability"), [(True, False), (False, True)])
-async def test_enqueue_carries_the_gate_state_onto_a_plain_callback(
-    stub_app, access_control, gate_enabled: bool, capability: bool
-) -> None:
-    # A plain background task forwards no door context; its callback still carries the gate state
-    # decided in this, the submitting process: ON fail-closes, OFF is the synthetic admin.
-    access_control(gate_enabled)
-    redis: Any = _RecordingRedis()
-    await tasks.enqueue_task(
-        redis,
-        backend_tool_name="greet",
-        backend_secret_capability=True,
-        callback_kwargs=CallbackSchema(tool="next"),
-        text="hi",
-    )
-    (_, job_kwargs) = redis.jobs[0]
-    assert job_kwargs["callback_kwargs"].carried_kwargs == {WORKER_SECRET_CAPABILITY_ARG: capability}
 
 
 async def test_callback_job_that_asks_parks_under_the_forwarded_identity(monkeypatch, stub_app) -> None:

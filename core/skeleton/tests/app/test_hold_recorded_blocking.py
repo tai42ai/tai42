@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 
-from tai42_skeleton.app.admission import RequestAdmission
+from tai42_skeleton.app.admission import Admission
 from tai42_skeleton.app.epoch import Epoch
 from tai42_skeleton.app.reload_gate import GateParty, hold_recorded_blocking
 
@@ -62,11 +62,11 @@ class _Span:
             raise self._exit_error
 
 
-def _waiting_party() -> tuple[GateParty, Epoch, RequestAdmission]:
+def _waiting_party() -> tuple[GateParty, Epoch, Admission]:
     serving = Epoch(number=0)
     serving.admit()
-    request = RequestAdmission(epoch=serving)
-    return GateParty(request=request, task=None, task_epoch=None), serving, request
+    request = Admission(epoch=serving, kind="served_request")
+    return GateParty(admission=request, task=None, task_epoch=None), serving, request
 
 
 async def test_the_span_is_entered_and_exited_off_the_loop_with_its_waiter_recorded() -> None:
@@ -128,7 +128,7 @@ async def test_a_holder_cancelled_inside_the_span_still_exits_it() -> None:
     inside = asyncio.Event()
 
     async def hold() -> None:
-        async with hold_recorded_blocking(span.hold(), GateParty(request=None, task=None, task_epoch=None)):
+        async with hold_recorded_blocking(span.hold(), GateParty(admission=None, task=None, task_epoch=None)):
             inside.set()
             await asyncio.Event().wait()
 
@@ -163,7 +163,7 @@ def _holder_inside_the_span(span: _Span) -> tuple[asyncio.Task[None], asyncio.Ev
     inside = asyncio.Event()
 
     async def hold() -> None:
-        async with hold_recorded_blocking(span.hold(), GateParty(request=None, task=None, task_epoch=None)):
+        async with hold_recorded_blocking(span.hold(), GateParty(admission=None, task=None, task_epoch=None)):
             inside.set()
             await asyncio.Event().wait()
 

@@ -42,6 +42,15 @@ def test_create_celery_app_namespaces_redbeat_from_settings(monkeypatch) -> None
     assert app.conf["redbeat_key_prefix"] == "tai42_e2e_abc123:redbeat:"
 
 
+def test_the_default_queue_is_the_queue_name_setting(monkeypatch) -> None:
+    """A task sent without a queue (a RedBeat fire) lands on the settings queue the unlabelled worker consumes."""
+    from tai42_backend_celery.core.settings import CelerySettings
+
+    monkeypatch.setattr(app_module, "celery_settings", lambda: CelerySettings(queue_name="stack-1"))
+    app = app_module.create_celery_app()
+    assert app.conf["task_default_queue"] == "stack-1"
+
+
 def test_the_job_budget_follows_the_dispatch_setting(monkeypatch) -> None:
     from tai42_backend_celery.core.settings import CelerySettings
 
@@ -101,3 +110,52 @@ def test_a_redis_app_builds_without_the_base_redis_namespace(monkeypatch: pytest
     channel = object.__new__(connection.transport.Channel)
     channel.connection = connection.transport
     assert channel._connparams()["host"] == "broker.example"
+
+
+# The process's signals the host owns, every one Celery's stock worker application handles.
+_HOST_SIGNALS = ("SIGTERM", "SIGINT", "SIGQUIT", "SIGHUP", "SIGUSR1", "SIGUSR2")
+
+
+@pytest.fixture
+def host_signal_handlers() -> Iterator[dict[str, Any]]:
+    """The handlers of the host's signals as the test starts, put back after it."""
+    import signal
+
+    before = {name: signal.getsignal(getattr(signal, name)) for name in _HOST_SIGNALS}
+    yield before
+    for name, handler in before.items():
+        signal.signal(getattr(signal, name), handler)
+
+
+def test_the_app_s_worker_application_is_the_hosted_worker() -> None:
+    assert issubclass(app_module.celery_app.Worker, app_module.HostedWorker)
+    assert app_module.celery_app.Worker.app is app_module.celery_app
+
+
+@pytest.fixture
+def join_block_restored() -> Iterator[None]:
+    """Celery's process-wide "a task join would block" flag as the test starts, put back after it.
+
+    Building a real ``Worker`` sets the flag for the whole process; left set, a later
+    ``AsyncResult.get`` in another test refuses with "Never call result.get() within a task!".
+    """
+    from celery._state import _set_task_join_will_block, task_join_will_block
+
+    before = task_join_will_block()
+    yield
+    _set_task_join_will_block(before)
+
+
+@pytest.mark.usefixtures("join_block_restored")
+def test_the_hosted_worker_s_platform_tweaks_leave_the_process_s_signals_to_the_host(
+    host_signal_handlers: dict[str, Any],
+) -> None:
+    import signal
+
+    worker = app_module.celery_app.Worker(pool_cls="solo", quiet=True, redirect_stdouts=False, hostname="w@test")
+    # Detached from a terminal: the case in which Celery's own worker also installs its SIGHUP restart.
+    worker._isatty = False
+
+    worker.install_platform_tweaks(worker)
+
+    assert {name: signal.getsignal(getattr(signal, name)) for name in _HOST_SIGNALS} == host_signal_handlers

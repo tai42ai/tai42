@@ -44,6 +44,7 @@ from tai42_e2e import child_env, wait_for_async
 from tai42_e2e.binaries import spawn_expect_refusal, tai_bin
 from tai42_e2e.llmstub import LlmStub
 from tai42_e2e.manifests import build_recycle_stack
+from tai42_e2e.readiness import expected_fleet_present
 from tai42_e2e.stack import TaiStack
 from tai42_e2e.topology import StackConfig
 from tai42_e2e.variants import bus_key_root
@@ -194,29 +195,55 @@ def _lives(stack: TaiStack) -> dict[str, tuple[str, int]]:
     return {worker.name: (worker.kind, worker.generation) for worker in stack.census()}
 
 
-async def _awaiting_respawn(stack: TaiStack) -> dict[str, list[str]] | None:
-    """Each worker's ``awaiting_respawn`` from one fleet reload, or ``None`` when not every worker applied it."""
-    report = await stack.api().post("/api/fleet/reload-config", json={"targets": None}, retry_on_reloading=True)
-    if report["ok"] is not True or any(row["outcome"] != "applied" for row in report["results"]):
+# Reload outcomes of a fleet still settling: a life that ended mid-op (``departed``) or a row
+# outside the ready+fresh gate (a gap outcome). Any other non-applied outcome is a failure.
+_SETTLING_OUTCOMES = frozenset({"departed", "resyncing", "recycling", "stale"})
+
+
+async def _fleet_reload(stack: TaiStack) -> dict[str, Any]:
+    """The report of one fleet reload over every worker."""
+    return await stack.api().post("/api/fleet/reload-config", json={"targets": None}, retry_on_reloading=True)
+
+
+def _awaiting_respawn(report: dict[str, Any]) -> dict[str, list[str]] | None:
+    """Each worker's ``awaiting_respawn`` in a fleet reload ``report``, or ``None`` while the fleet is still settling.
+
+    A row the fleet's settling explains (a departed life, a gap outcome) gives ``None``; a
+    ``failed``, ``missing`` or ``timed_out`` row raises with the report, and so does a report
+    that is not ok although every row applied.
+    """
+    outcomes = {row["outcome"] for row in report["results"]} - {"applied"}
+    if outcomes - _SETTLING_OUTCOMES:
+        raise AssertionError(f"the fleet reload reported an outcome no settling explains: {report}")
+    if outcomes:
         return None
+    if report["ok"] is not True:
+        raise AssertionError(f"the fleet reload applied on every worker yet is not ok: {report}")
     return {row["name"]: row["payload"]["awaiting_respawn"] for row in report["results"]}
 
 
 async def _wait_no_worker_awaits_a_respawn(stack: TaiStack) -> None:
-    """Hold until every census row is ready and a fleet reload names no worker awaiting a respawn."""
-    last: list[dict[str, list[str]] | None] = []
+    """Hold until the whole expected fleet is ready and a fleet reload names no worker awaiting a respawn.
+
+    A worker being respawned has no census row and is no reload target, so the fleet counts
+    only once every expected process is present.
+    """
+    last: list[dict[str, Any]] = []
 
     async def converged() -> bool:
-        if any(worker.state != "ready" for worker in stack.census()):
+        census = stack.census()
+        if not expected_fleet_present(stack, census) or any(worker.state != "ready" for worker in census):
             return False
-        awaiting = await _awaiting_respawn(stack)
-        last[:] = [awaiting]
+        report = await _fleet_reload(stack)
+        last[:] = [report]
+        awaiting = _awaiting_respawn(report)
         return awaiting is not None and all(keys == [] for keys in awaiting.values())
 
     try:
         await wait_for_async(converged, deadline=240.0, interval=2.0, message="a worker still awaits a respawn")
     except WaitTimeoutError as exc:
-        raise AssertionError(f"{exc}; the last fleet reload: {last}") from exc
+        reload = last[0] if last else "none ran: the expected fleet was never present and ready"
+        raise AssertionError(f"{exc}; the last fleet reload: {reload}") from exc
 
 
 async def _assert_serve_runs_the_field_default(stack: TaiStack) -> None:
@@ -255,8 +282,9 @@ async def test_a_worker_that_ran_a_stored_copy_is_recycled_when_a_deployment_sta
         resource_kwargs={"llm_base_url": llm_stub.base_url},
     )
     # No deployment sets the key: every worker runs the stored value, and none awaits a respawn.
-    awaiting = await _awaiting_respawn(stack)
-    assert awaiting is not None, "not every worker applied the fleet reload"
+    report = await _fleet_reload(stack)
+    awaiting = _awaiting_respawn(report)
+    assert awaiting is not None, f"not every worker applied the fleet reload: {report}"
     assert all(keys == [] for keys in awaiting.values()), awaiting
     field = await _schema_field(stack, _RECYCLE_KEY)
     assert (field["value_source"], field["value"]) == ("stored", _RECYCLE_STORED), field
@@ -311,7 +339,6 @@ async def test_a_fleet_that_reaches_its_bus_through_a_stored_url_settles_and_sta
         resource_kwargs={"llm_base_url": llm_stub.base_url},
         process_env_overrides={"backend": {_HEARTBEAT_KEY: _HEARTBEAT_DEPLOYED}},
     )
-    booted = _lives(stack)
     for name in ("serve", "backend"):
         assert _BUS_URL_KEY not in stack.process(name).env, f"{name} must start without the bus URL"
     assert _HEARTBEAT_KEY not in stack.process("serve").env, "the serve worker must start without the heartbeat"
@@ -319,20 +346,20 @@ async def test_a_fleet_that_reaches_its_bus_through_a_stored_url_settles_and_sta
     await _wait_no_worker_awaits_a_respawn(stack)
     settled = _lives(stack)
     # A worker that booted before another worker's row existed may run a stored copy of a key
-    # that worker's deployment sets; that worker's join recycles it once, never more.
-    assert settled.keys() == booted.keys(), (booted, settled)
-    for name, (kind, generation) in settled.items():
-        assert 0 <= generation - booted[name][1] <= 1, (name, kind, booted[name], generation)
+    # that worker's deployment sets; that worker's join recycles it once, never more, and may do
+    # so while the stack is already booted. Each slot of the stack's own bus starts at generation
+    # 1, so a slot recycled at most once settles at generation 1 or 2.
+    assert all(generation in (1, 2) for _kind, generation in settled.values()), settled
 
-    largest_pttls_ms: dict[str, tuple[str, int]] = {}
+    largest_pttls_ms: dict[str, tuple[int, int]] = {}
 
     async def a_worker_left_ready_or_its_life() -> dict[str, Any] | None:
         census = stack.census()
         lives = _lives(stack)
         if any(worker.state != "ready" for worker in census) or lives != settled:
             return {"census": census, "lives": lives}
-        for name, (kind, pttl) in _presence_pttls_ms(stack).items():
-            largest_pttls_ms[name] = (kind, max(pttl, largest_pttls_ms.get(name, (kind, 0))[1]))
+        for name, (pid, pttl) in _presence_pttls_ms(stack).items():
+            largest_pttls_ms[name] = (pid, max(pttl, largest_pttls_ms.get(name, (pid, 0))[1]))
         return None
 
     # Over two heartbeat TTLs every worker stays ready on the same life.
@@ -343,18 +370,26 @@ async def test_a_fleet_that_reaches_its_bus_through_a_stored_url_settles_and_sta
         message=f"a worker left ready or its life {settled}",
     )
 
-    awaiting = await _awaiting_respawn(stack)
-    assert awaiting is not None, "not every worker applied the fleet reload"
+    report = await _fleet_reload(stack)
+    awaiting = _awaiting_respawn(report)
+    assert awaiting is not None, f"not every worker applied the fleet reload: {report}"
     assert all(keys == [] for keys in awaiting.values()), awaiting
     assert _lives(stack) == settled, (settled, _lives(stack))
 
-    # Each worker heartbeats with the TTL it runs: the serve worker the field default, not the
-    # stored copy it withdrew, and the backend the value its deployment sets. Sampled every
-    # second across several refreshes, the largest PTTL is within a second of the running TTL.
-    heartbeat_ms = {"serve": _HEARTBEAT_DEFAULT * 1000, "backend": float(_HEARTBEAT_DEPLOYED) * 1000}
-    assert {kind for kind, _ in largest_pttls_ms.values()} == set(heartbeat_ms), largest_pttls_ms
-    for name, (kind, pttl) in largest_pttls_ms.items():
-        assert heartbeat_ms[kind] - 1500 < pttl <= heartbeat_ms[kind], (name, kind, pttl)
+    # Each worker heartbeats with the TTL it runs: the process whose deployment sets the heartbeat
+    # runs that value, and every other process (the serve worker, the queue worker) the field
+    # default, not the stored copy it withdrew. Sampled every second across several refreshes,
+    # the largest PTTL is within a second of the running TTL.
+    deployed_ms = {
+        handle.pid: float(handle.env[_HEARTBEAT_KEY]) * 1000
+        for handle in stack.procs.values()
+        if _HEARTBEAT_KEY in handle.env
+    }
+    assert largest_pttls_ms.keys() == settled.keys(), (largest_pttls_ms, settled)
+    assert set(deployed_ms) <= {pid for pid, _ in largest_pttls_ms.values()}, (deployed_ms, largest_pttls_ms)
+    for name, (pid, pttl) in largest_pttls_ms.items():
+        running_ms = deployed_ms.get(pid, _HEARTBEAT_DEFAULT * 1000)
+        assert running_ms - 1500 < pttl <= running_ms, (name, pid, pttl)
 
     # The serve worker withdrew the stored heartbeat the backend's deployment sets, and kept
     # the stored bus URL no deployment sets.
@@ -364,8 +399,8 @@ async def test_a_fleet_that_reaches_its_bus_through_a_stored_url_settles_and_sta
     assert not any(_BUS_URL_KEY in line for line in withdrawn), withdrawn
 
 
-def _presence_pttls_ms(stack: TaiStack) -> dict[str, tuple[str, int]]:
-    """Each live worker's kind and the remaining PTTL of its presence key, by slot name.
+def _presence_pttls_ms(stack: TaiStack) -> dict[str, tuple[int, int]]:
+    """Each live worker's pid and the remaining PTTL of its presence key, by slot name.
 
     A worker sets its presence key with its running heartbeat TTL as the PTTL and refreshes it
     every third of that TTL, so the largest PTTL seen across a refresh is that TTL.
@@ -373,13 +408,13 @@ def _presence_pttls_ms(stack: TaiStack) -> dict[str, tuple[str, int]]:
     resources = stack.resources
     client = redis.Redis.from_url(resources.bus_redis_url, decode_responses=True)
     try:
-        pttls: dict[str, tuple[str, int]] = {}
+        pttls: dict[str, tuple[int, int]] = {}
         for worker in stack.census():
             pttl = client.pttl(f"{bus_key_root(resources.bus_namespace)}:bus:presence:{worker.name}")
             if not isinstance(pttl, int):
                 raise TypeError(f"PTTL of {worker.name!r} is not an integer: {pttl!r}")
             if pttl > 0:
-                pttls[worker.name] = (worker.kind, pttl)
+                pttls[worker.name] = (worker.pid, pttl)
         return pttls
     finally:
         client.close()

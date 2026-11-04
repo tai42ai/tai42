@@ -16,24 +16,24 @@ from arq.jobs import JobStatus
 from tai42_kit.settings import reset_all_settings
 from tai42_kit.utils.worker_secret_capability import WORKER_SECRET_CAPABILITY_ARG
 
-from tai42_backend_arq import scheduler, tasks, tools
+from tai42_backend_arq import scheduler, tasks
 from tai42_backend_arq.jobs import job_handle, known_queues, register_queue
 
-from .conftest import SETTINGS_QUEUE
+from .conftest import SETTINGS_QUEUE, backend_tools, submit_job
 
 _GPU = f"{SETTINGS_QUEUE}.gpu"
 
 
 async def test_the_status_tool_reads_a_labelled_job_on_its_queue(arq_redis) -> None:
-    job = await tasks.enqueue_task(arq_redis, queue="gpu", backend_tool_name="t")
+    job = await submit_job(queue="gpu")
 
-    assert await tools.backend_task_status(job.job_id) == JobStatus.queued.value
+    assert await backend_tools().backend_task_status(job.job_id) == JobStatus.queued.value
 
 
 async def test_the_result_tool_waits_on_a_labelled_job(arq_redis) -> None:
-    job = await tasks.enqueue_task(arq_redis, queue="gpu", backend_tool_name="t")
+    job = await submit_job(queue="gpu")
 
-    answer = await tools.backend_task_result(job.job_id, timeout=0.2)
+    answer = await backend_tools().backend_task_result(job.job_id, timeout=0.2)
 
     assert answer.startswith(f"Task {job.job_id} is not ready")
     assert "queued" in answer
@@ -42,18 +42,18 @@ async def test_the_result_tool_waits_on_a_labelled_job(arq_redis) -> None:
 async def test_the_cancel_tool_aborts_a_labelled_job_on_its_queue(arq_redis, monkeypatch) -> None:
     monkeypatch.setenv("ARQ_TASK_TIMEOUT", "1")
     reset_all_settings()
-    job = await tasks.enqueue_task(arq_redis, queue="gpu", countdown=30, backend_tool_name="t")
+    job = await submit_job(queue="gpu", countdown=30)
 
-    answer = await tools.backend_cancel_task(job.job_id)
+    answer = await backend_tools().backend_cancel_task(job.job_id)
 
-    assert answer == f"Task {job.job_id} abort requested but not confirmed"
+    assert answer == f"Task {job.job_id} abort requested but not confirmed (status: queued)"
     # arq moves a deferred job to the front of its own queue so a worker picks up the abort.
     assert await arq_redis.zscore(_GPU, job.job_id) == 1
 
 
 async def test_a_job_on_the_settings_queue_resolves_there(arq_redis) -> None:
     await register_queue(arq_redis, _GPU)
-    job = await tasks.enqueue_task(arq_redis, backend_tool_name="t")
+    job = await submit_job()
 
     handle = await job_handle(arq_redis, job.job_id)
 
@@ -68,7 +68,7 @@ async def test_an_unknown_id_resolves_to_the_settings_queue_as_not_found(arq_red
 
     assert handle._queue_name == SETTINGS_QUEUE
     assert await handle.status() == JobStatus.not_found
-    assert await tools.backend_task_status("no-such-job") == JobStatus.not_found.value
+    assert await backend_tools().backend_task_status("no-such-job") == JobStatus.not_found.value
 
 
 async def test_a_job_id_on_two_queues_raises_naming_both(arq_redis) -> None:

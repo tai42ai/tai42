@@ -4,6 +4,7 @@ idempotence, connector registration at boot, and the kind-status startup summary
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock
@@ -28,17 +29,17 @@ if TYPE_CHECKING:
 _BOOT_LOGGER = "tai42_skeleton.app.lifecycle.boot"
 
 
-def test_registry_names_sync_on_empty_server():
+async def test_registry_names_on_empty_server():
     m = _Mixin()
-    assert m._registry_names_sync()["tool"] == set()
+    assert (await m._registry_names())["tool"] == set()
 
 
-def test_registry_names_sync_raises_when_list_tools_fails():
-    # A failing list_tools() must propagate through the off-loop runner — never
+async def test_registry_names_raises_when_list_tools_fails():
+    # A failing list_tools() must propagate to the awaiting caller — never
     # leave the caller blocked.
     m = _Mixin()
-    assert m._building is not None
-    m._building._fast_mcp = cast(
+    assert m._scaffold_core is not None
+    m._scaffold_core._fast_mcp = cast(
         "FastMCP",
         MagicMock(
             list_tools=AsyncMock(side_effect=RuntimeError("list_tools boom")),
@@ -47,7 +48,30 @@ def test_registry_names_sync_raises_when_list_tools_fails():
         ),
     )
     with pytest.raises(RuntimeError, match="list_tools boom"):
-        m._registry_names_sync()
+        await m._registry_names()
+
+
+def test_start_is_a_coroutine_the_lifespan_awaits_on_its_serving_loop(monkeypatch):
+    # The boot runs on the one loop that serves: ``start`` is a coroutine, and
+    # ``app_context`` awaits it on the loop it then serves from.
+    from tai42_skeleton.app.lifecycle.boot import BootMixin
+
+    assert inspect.iscoroutinefunction(BootMixin.start)
+    original = BootMixin.start
+    seen: dict[str, object] = {}
+
+    async def recording_start(self, manifest):
+        seen["loop"] = asyncio.get_running_loop()
+        return await original(self, manifest)
+
+    monkeypatch.setattr(BootMixin, "start", recording_start)
+
+    async def run():
+        async with app.app_context(Manifest.model_validate({})):
+            seen["serving"] = app.serving_loop()
+
+    asyncio.run(run())
+    assert seen["loop"] is seen["serving"]
 
 
 def test_start_binds_global_handle_and_loads_tools():

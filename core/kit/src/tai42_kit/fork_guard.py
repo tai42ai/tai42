@@ -5,14 +5,18 @@ and from then on every fork of the process waits out a running re-import, whiche
 forks. The guard works through ``os.register_at_fork``:
 
 * the ``before`` hook enters a job span on the forking thread, waiting as
-  :meth:`~tai42_kit.fork_gate.ForkGate.job_span` waits with the guard's ``timeout``,
-  ``tick`` and ``tick_every``, so a fork waits out a running re-import and reports while it
-  waits; a fork in a context that carries an open job span nests in it and enters none;
-  a fork on a thread that runs an event loop never waits (below);
+  :meth:`~tai42_kit.fork_gate.ForkGate.job_span` waits with the guard's ``timeout``, so a
+  fork waits out a running re-import; a fork on the engine loop's thread reports the loop's
+  progress while it waits, and a fork on any other thread reports nothing
+  (:meth:`~tai42_kit.fork_gate.ForkGate.engine_loop`); a fork in a context that carries an
+  open job span nests in it and enters none; a fork on a thread that runs an event loop never
+  waits (below);
 * ``after_in_parent`` leaves that span (CPython runs the parent hooks on a failed fork too);
 * ``after_in_child`` resets the child's copy of the gate
   (:meth:`~tai42_kit.fork_gate.ForkGate.reset_after_fork`): a child inherits whatever holds
-  were live at the fork instant, and only the parent can ever release them.
+  were live at the fork instant, and only the parent can ever release them. It then runs the
+  guard's own ``after_in_child``, when the guard has one: what the installer resets in every
+  child of the process.
 
 Every fork that runs the interpreter's fork hooks is covered (``os.fork``,
 ``multiprocessing``'s fork context and the libraries built on it, and a ``subprocess``
@@ -58,6 +62,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from tai42_kit.logging.fork_safety import install_logging_fork_safety
+
 if TYPE_CHECKING:
     from tai42_kit.fork_gate import ForkGate
 
@@ -66,11 +72,13 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class ForkGuard:
-    """The job span the fork guard holds around each fork of the process: its wait and its progress report."""
+    """The job span the fork guard holds around each fork of the process: how long it waits.
+
+    ``after_in_child`` runs in every child once the child's gate is reset, when given.
+    """
 
     timeout: float
-    tick: Callable[[], None]
-    tick_every: float
+    after_in_child: Callable[[], None] | None = None
 
 
 class ForkHooks:
@@ -95,7 +103,11 @@ class ForkHooks:
         """Hold ``guard``'s span around every fork from now on.
 
         One guard per gate: installing the same guard again changes nothing, another one
-        raises ``RuntimeError`` (a process has one work loop to report for).
+        raises ``RuntimeError`` (each fork of the process waits as the one guard says).
+
+        Logging's fork hook (:func:`~tai42_kit.logging.fork_safety.install_logging_fork_safety`)
+        is registered first. CPython runs child hooks in registration order, so the child's
+        streams are rebuilt before the guard's ``after_in_child`` runs.
         """
         with self._gate._cond:
             if self.guard is not None:
@@ -106,6 +118,7 @@ class ForkHooks:
             register = not self._registered
             self._registered = True
         if register:
+            install_logging_fork_safety()
             os.register_at_fork(
                 before=self.before, after_in_parent=self.after_in_parent, after_in_child=self.after_in_child
             )
@@ -139,7 +152,7 @@ class ForkHooks:
             self.fork_spans.setdefault(tid, []).append((span, generation))
 
         if not _runs_an_event_loop():
-            self._gate._enter_reported_span(span, guard.timeout, guard.tick, guard.tick_every, record)
+            self._gate._enter_reported_span(span, guard.timeout, record)
         elif self._gate._enter_span_at_once(span, record):
             logger.error(
                 "fork gate: a fork on an event loop's thread while a module re-import holds the gate "
@@ -161,9 +174,13 @@ class ForkHooks:
             self._gate._leave_span(*span)
 
     def after_in_child(self) -> None:
-        """Reset the child's copy of the gate (the child's fork hook)."""
-        if self.guard is not None:
-            self._gate.reset_after_fork()
+        """Reset the child's copy of the gate, then run the guard's ``after_in_child`` (the child's fork hook)."""
+        guard = self.guard
+        if guard is None:
+            return
+        self._gate.reset_after_fork()
+        if guard.after_in_child is not None:
+            guard.after_in_child()
 
 
 def _runs_an_event_loop() -> bool:

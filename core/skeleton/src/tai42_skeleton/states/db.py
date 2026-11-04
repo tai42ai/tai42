@@ -57,7 +57,8 @@ class StatesSettings(TaiBaseSettings):
     # backoff from ``outbox_retry_base_seconds`` capped at ``outbox_retry_cap_seconds``; a
     # reader waits at most ``outbox_drain_timeout_seconds`` for a subject's pending save,
     # polling a running deferred call every ``outbox_drain_poll_seconds``; shutdown awaits
-    # in-flight applies for ``outbox_shutdown_grace_seconds``.
+    # in-flight applies for ``outbox_shutdown_grace_seconds``, a grace that is part of the
+    # drain a leaving worker announces to a fleet restart.
     outbox_sweep_seconds: float = Field(default=5.0, gt=0)
     outbox_claim_lease_seconds: float = Field(default=60.0, gt=0)
     outbox_max_attempts: int = Field(default=5, gt=0)

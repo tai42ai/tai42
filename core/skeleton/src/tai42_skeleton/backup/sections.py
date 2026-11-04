@@ -12,7 +12,10 @@ An exporter returns a JSON-safe payload; an importer returns a
 section's own counts (the ``skipped_existing`` tally, ``access_control``'s minted
 ``new_api_keys``) ride the open ``details`` map. A section whose backing subsystem is
 absent lets the seam raise; the router catches it per-section — these functions never
-swallow it.
+swallow it. The ``manifest`` and ``env`` sections also fill ``recycle`` and ``awaiting_respawn``
+with the fleet recycle roll their change ran. A change of theirs that landed but whose fleet
+propagation failed is reported, not raised: its counts, its failure as the section's error, and
+the fleet report and roll it still ran, so the roll is never lost to a zero-count report.
 """
 
 from __future__ import annotations
@@ -20,7 +23,7 @@ from __future__ import annotations
 import base64
 import binascii
 import logging
-from typing import Any, Self
+from typing import TYPE_CHECKING, Any, Self
 
 from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError, model_validator
 from pydantic_core import PydanticCustomError
@@ -46,6 +49,10 @@ from tai42_skeleton.states.backup import register_states_backup_section
 from tai42_skeleton.storage.prefix_marks import covering_prefix
 from tai42_skeleton.tools.state_binding import is_binding_refusal
 
+if TYPE_CHECKING:
+    from tai42_skeleton.config.service import ApplyResult
+    from tai42_skeleton.operations._broadcast import FleetBroadcastError
+
 logger = logging.getLogger(__name__)
 
 _SCHEDULE_RECORDS: TypeAdapter[list[ScheduleRecord]] = TypeAdapter(list[ScheduleRecord])
@@ -62,7 +69,7 @@ def _export_manifest() -> dict[str, Any]:
 
 async def _import_manifest(payload: dict[str, Any]) -> BackupSectionReport:
     from tai42_skeleton.config.service import ConfigService
-    from tai42_skeleton.operations._broadcast import translate_orphan_env_write
+    from tai42_skeleton.operations._broadcast import FleetBroadcastError, translate_orphan_env_write
 
     # Replaces the persisted manifest as a whole through the pipeline (validate on the
     # resolved projection, persist, reload, broadcast). Validation failure raises here
@@ -70,11 +77,12 @@ async def _import_manifest(payload: dict[str, Any]) -> BackupSectionReport:
     # replacement DROPS an oauth connector the replace crosses the combined env+manifest
     # seam (to keep the leaving secret masked), so a manifest-persist partial failure is
     # mapped to a loud, typed OperationFailedError exactly as the marketplace / manifest doors.
-    with translate_orphan_env_write():
-        result = await ConfigService.from_app().apply_replace(payload)
-    return BackupSectionReport(
-        updated=1, fanout=FanoutSummary.model_validate(result.fanout), span_release_error=result.span_release_error
-    )
+    try:
+        with translate_orphan_env_write():
+            result = await ConfigService.from_app().apply_replace(payload)
+    except FleetBroadcastError as exc:
+        return _landed_change_report("manifest", exc, updated=1)
+    return _applied_change_report(result, updated=1)
 
 
 # -- env ---------------------------------------------------------------------
@@ -90,7 +98,7 @@ def _export_env() -> dict[str, str]:
 
 async def _import_env(payload: dict[str, str]) -> BackupSectionReport:
     from tai42_skeleton.config.service import ConfigService
-    from tai42_skeleton.operations._broadcast import result_recycle_roll
+    from tai42_skeleton.operations._broadcast import FleetBroadcastError
 
     config_manager = tai42_app.config.config_manager
     try:
@@ -100,7 +108,20 @@ async def _import_env(payload: dict[str, str]) -> BackupSectionReport:
     created = sum(1 for key in payload if key not in existing)
     updated = sum(1 for key in payload if key in existing)
     # Apply through the pipeline: validated, reloaded, broadcast to the fleet.
-    result = await ConfigService.from_app().apply_env_change(payload)
+    try:
+        result = await ConfigService.from_app().apply_env_change(payload)
+    except FleetBroadcastError as exc:
+        return _landed_change_report("env", exc, created=created, updated=updated)
+    return _applied_change_report(result, created=created, updated=updated)
+
+
+# -- the config sections' reports ---------------------------------------------
+
+
+def _applied_change_report(result: ApplyResult, *, created: int = 0, updated: int = 0) -> BackupSectionReport:
+    """The report of a config section whose change applied: its counts, fan-out, roll and span release."""
+    from tai42_skeleton.operations._broadcast import result_recycle_roll
+
     roll = result_recycle_roll(result)
     return BackupSectionReport(
         created=created,
@@ -108,7 +129,31 @@ async def _import_env(payload: dict[str, str]) -> BackupSectionReport:
         fanout=FanoutSummary.model_validate(result.fanout),
         recycle=None if roll is None else RecycleRoll.model_validate(roll),
         awaiting_respawn=list(result.awaiting_respawn),
+        roll_deferred=result.roll_deferred,
+        roll_deferred_to=result.roll_deferred_to,
         span_release_error=result.span_release_error,
+    )
+
+
+def _landed_change_report(
+    section: str, exc: FleetBroadcastError, *, created: int = 0, updated: int = 0
+) -> BackupSectionReport:
+    """The report of a config section whose change landed but whose propagation failed (``exc``).
+
+    The change is persisted, so its counts stand; the failure is the section's error (WARNING-logged
+    with its traceback), next to the fleet report, the recycle roll the change still ran and the
+    workers awaiting a respawn after it, and the span release.
+    """
+    from tai42_skeleton.operations._broadcast import fleet_fanout, roll_outcome_body
+
+    logger.warning("backup import of section %r: %s", section, exc, exc_info=exc)
+    return BackupSectionReport(
+        created=created,
+        updated=updated,
+        errors=[str(exc)],
+        fanout=FanoutSummary.model_validate(fleet_fanout(exc.report)),
+        **roll_outcome_body(exc.roll),
+        span_release_error=exc.span_release_error,
     )
 
 

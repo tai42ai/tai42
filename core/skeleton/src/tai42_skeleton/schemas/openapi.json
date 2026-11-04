@@ -1634,7 +1634,7 @@
         "type": "object"
       },
       "ApplyResponse": {
-        "description": "The standard mutation-op response: this worker's local reload result merged with the fleet fan-out summary.\n\n``env_keys`` is the count of env keys the reload loaded. ``recycle`` is the fleet recycle\nroll the change ran — ``null`` when it carried no recycle-class key. ``awaiting_respawn`` is\nthe operation's verdict: the workers still awaiting a respawn after it (name + keys) — empty\nwhen the change rolled a recycle that converged and this worker recycles itself; a worker the\nroll did not reach, and every listed worker of a change that rolls nothing, keep their keys.\n``span_release_error`` is ``null`` when the config store released its\nexclusive write span after the persist; otherwise the store's error — the change landed and\nthe reload, broadcast and roll reported here still ran, but the store may still hold its write\nspan until the writer process exits, so a later write can block or be refused until then.",
+        "description": "The standard mutation-op response: this worker's local reload result merged with the fleet fan-out summary.\n\n``env_keys`` is the count of env keys the reload loaded. ``recycle`` is the fleet recycle roll\nthe change ran — ``null`` when it had no worker to visit: every worker's reload confirmed no\nrecycle-class key moved off its bound value, or the only ones naming one were refused at their epoch\nbuild or are the writer whose own restart cannot follow as its exit. ``awaiting_respawn`` is the\noperation's verdict: the workers still awaiting a respawn after it (name + keys) — when the roll\nconverged and this worker recycles itself, only the workers whose reload was refused at their epoch\nbuild: the stored config did not build on them and a restart may fail the same way, so the roll\nleaves them running and lists them; a worker the roll did not reach keeps its keys.\n``roll_deferred`` is ``true``\nwhen the roll is not judged in this reply: ``roll_deferred_to`` then names the worker that\ncarries it out after the reply (``recycle`` is ``null`` and ``awaiting_respawn`` empty), and\nis ``null`` otherwise. ``span_release_error`` is ``null`` when the config store released its\nexclusive write span after the persist; otherwise the store's error — the change landed and\nthe reload, broadcast and roll reported here still ran, but the store may still hold its write\nspan until the writer process exits, so a later write can block or be refused until then.",
         "properties": {
           "awaiting_respawn": {
             "items": {
@@ -1660,6 +1660,23 @@
               }
             ],
             "default": null
+          },
+          "roll_deferred": {
+            "default": false,
+            "title": "Roll Deferred",
+            "type": "boolean"
+          },
+          "roll_deferred_to": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Roll Deferred To"
           },
           "span_release_error": {
             "anyOf": [
@@ -2110,7 +2127,7 @@
       },
       "BackupSectionReport": {
         "additionalProperties": false,
-        "description": "One section's import outcome — the typed result every importer returns.\n\nThe platform reads ONLY these fields: ``created``/``updated``/``skipped`` are\nthe per-record counts (``skipped`` is the per-record REJECTION count, each also\ncarried in ``errors``), ``errors`` is the per-record failure messages, and\n``fanout`` is the platform's own per-worker report for a section whose restore\nbroadcasts a fleet eviction (``None`` for every section that does not), and\n``recycle`` the fleet recycle roll a section's restore ran for a recycle-class env\nchange (``None`` for every section that ran none), and ``awaiting_respawn`` the workers\nstill awaiting a respawn after the section's env change (name + keys; empty for every\nsection that ran none), and ``span_release_error`` ``None`` when the config store released\nits exclusive write span after a section's config write (and for every section that writes\nno config), otherwise the store's error — the section's change landed and the reload,\nbroadcast and roll reported here still ran, but the store may still hold its write span\nuntil the writer process exits, so a later write can block or be refused until then.\n\n``details`` is an OPEN map for an importer's OWN counts and data — a\nper-entity breakdown, a ``skipped_existing`` tally, minted credentials to\nsurface once — so a backend declares its own shape there without the platform\nknowing it. The typed surface is CLOSED (``extra=\"forbid\"``): an importer that\nreturns a stray top-level field is a wrong shape the registry refuses loudly\nrather than silently dropping. ``validate_assignment`` coerces ``fanout`` and ``recycle`` on\nassignment, so a mutation building the report cannot leave an unvalidated shape.",
+        "description": "One section's import outcome — the typed result every importer returns.\n\nThe platform reads ONLY these fields: ``created``/``updated``/``skipped`` are\nthe per-record counts (``skipped`` is the per-record REJECTION count, each also\ncarried in ``errors``), ``errors`` is the per-record failure messages, and\n``fanout`` is the platform's own per-worker report for a section whose restore\nbroadcasts a fleet eviction (``None`` for every section that does not), and\n``recycle`` the fleet recycle roll a section's restore ran for a recycle-class env\nchange (``None`` for every section that ran none), and ``awaiting_respawn`` the workers\nstill awaiting a respawn after the section's env change (name + keys; empty for every\nsection that ran none), and ``roll_deferred`` set with ``roll_deferred_to`` naming the bus\nmember the restore deferred the section's roll to — one handed off, which that member\ncarries out after the reply and judges, or one that may have been sent with its answer not\nknown, which is left to that member to carry out and judge (``False`` / ``None``\notherwise), and ``span_release_error`` ``None`` when the config store released\nits exclusive write span after a section's config write (and for every section that writes\nno config), otherwise the store's error — the section's change landed and the reload,\nbroadcast and roll reported here still ran, but the store may still hold its write span\nuntil the writer process exits, so a later write can block or be refused until then.\n\n``details`` is an OPEN map for an importer's OWN counts and data — a\nper-entity breakdown, a ``skipped_existing`` tally, minted credentials to\nsurface once — so a backend declares its own shape there without the platform\nknowing it. The typed surface is CLOSED (``extra=\"forbid\"``): an importer that\nreturns a stray top-level field is a wrong shape the registry refuses loudly\nrather than silently dropping. ``validate_assignment`` coerces ``fanout`` and ``recycle`` on\nassignment, so a mutation building the report cannot leave an unvalidated shape.",
         "properties": {
           "awaiting_respawn": {
             "items": {
@@ -2157,6 +2174,23 @@
               }
             ],
             "default": null
+          },
+          "roll_deferred": {
+            "default": false,
+            "title": "Roll Deferred",
+            "type": "boolean"
+          },
+          "roll_deferred_to": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Roll Deferred To"
           },
           "skipped": {
             "default": 0,
@@ -5893,6 +5927,91 @@
           }
         },
         "title": "FieldWording",
+        "type": "object"
+      },
+      "FleetReloadResponse": {
+        "description": "A fleet soft restart's per-worker reload report, the recycle roll it ran, and its verdict.\n\nAn applied worker's ``payload`` is ``{status: \"ok\", env_keys, awaiting_respawn}``; a worker\nwhose reload was refused at its epoch build (the build discarded before its swap) replies\n``failed`` with ``{status: \"discarded\", awaiting_respawn}``, serving its previous epoch with\nthat drift standing; any other failed reload, a failed discard among them, carries no payload.\n``recycle`` is the roll that restarted the workers the reload addressed whose reload built and\nwhose ``awaiting_respawn`` named a recycle-class key, or whose state was unknown: a worker other\nthan the answering one is asked once ready and restarted when its reply neither confirms it\nclean nor states a refused build; the answering worker is never asked, and when its own state is\nunknown its restart is its ``self-deferred`` line, present when the roll converged. A worker\nwhose reload was refused at its epoch build is never restarted: the stored config did not build\non it and a restart may fail the same way, so the roll leaves it running and lists it.\n``recycle`` is ``null`` when the roll had no worker to visit: every addressed worker confirmed\nno recycle-class key, or the only ones naming one were refused at their epoch build.\n``awaiting_respawn`` the workers still awaiting a respawn after the roll (name + keys), those\nleft running after a refused epoch build among them. ``roll_deferred`` is ``true`` when the roll\nwas handed to the worker ``roll_deferred_to`` names, which carries it out after the reply\n(``recycle`` is ``null`` and ``awaiting_respawn`` empty); ``roll_deferred_to`` is ``null``\notherwise.",
+        "properties": {
+          "awaiting_respawn": {
+            "items": {
+              "$ref": "#/components/schemas/AwaitingWorker"
+            },
+            "title": "Awaiting Respawn",
+            "type": "array"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Error"
+          },
+          "local_only": {
+            "default": false,
+            "title": "Local Only",
+            "type": "boolean"
+          },
+          "ok": {
+            "description": "True when the bus was reachable and every worker applied.",
+            "readOnly": true,
+            "title": "Ok",
+            "type": "boolean"
+          },
+          "op": {
+            "title": "Op",
+            "type": "string"
+          },
+          "reachable": {
+            "default": true,
+            "title": "Reachable",
+            "type": "boolean"
+          },
+          "recycle": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RecycleRoll"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "results": {
+            "items": {
+              "$ref": "#/components/schemas/WorkerResult"
+            },
+            "title": "Results",
+            "type": "array"
+          },
+          "roll_deferred": {
+            "default": false,
+            "title": "Roll Deferred",
+            "type": "boolean"
+          },
+          "roll_deferred_to": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Roll Deferred To"
+          }
+        },
+        "required": [
+          "op",
+          "ok"
+        ],
+        "title": "FleetReloadResponse",
         "type": "object"
       },
       "FleetResult": {
@@ -10503,7 +10622,7 @@
         "type": "object"
       },
       "OpOutcome": {
-        "description": "Per-worker outcome of a fleet op.\n\n``applied`` / ``failed`` are terminal WIRE replies from a subscriber.\n``missing`` / ``departed`` / ``timed_out`` are publisher-COMPUTED from the\npresence census (a silent worker never sends them). ``resyncing`` /\n``recycling`` / ``stale`` are the gap outcomes for a row that fails the ready+\nfresh gate: it is not an expected worker, so instead of being dropped it is\nlanded as its own actual condition — ``resyncing`` (the worker wrote that state\nand converges on its resync), ``recycling`` (departing, converging by\nold-life-gone + fresh capacity), or ``stale`` (a quiet row past the freshness\nbound — reconnecting or dead, carrying no convergence promise). A decayed row is\n``stale`` regardless of its written state.",
+        "description": "Per-worker outcome of a fleet op.\n\n``applied`` / ``failed`` are terminal WIRE replies from a subscriber.\n``missing`` / ``departed`` / ``timed_out`` are publisher-COMPUTED from the bus's\nrecord of each life (a silent worker never sends them): ``departed`` once a read of\nthe worker's slot shows the expected life ended (its claim gone, or a newer life in the\nslot), the other two at the report cut. ``resyncing`` /\n``recycling`` / ``stale`` are the gap outcomes for a row that fails the ready+\nfresh gate: it is not an expected worker, so instead of being dropped it is\nlanded as its own actual condition — ``resyncing`` (the worker wrote that state\nand converges on its resync), ``recycling`` (departing, converging by\nold-life-gone + fresh capacity), or ``stale`` (a quiet row past the freshness\nbound — reconnecting or dead, carrying no convergence promise). A decayed row is\n``stale`` regardless of its written state. An expected worker that began leaving after\npublish and sent no terminal reply is ``recycling`` too, computed at the report cut from\nits row and its still-held slot claim.",
         "enum": [
           "applied",
           "failed",
@@ -12899,7 +13018,7 @@
         "type": "object"
       },
       "ProfileApplyResponse": {
-        "description": "The dedicated profile-apply response.\n\n``hot`` are the hot-class diff key names; ``recycle`` the worker lines of the recycle roll;\n``fresh`` the new ready lives seen since the pre-apply snapshot; ``refused`` is empty on success\n(any refusal aborts the pipeline before a response is built); ``recycle_stopped`` is ``null``\nwhen the roll ran to its end, otherwise where it stopped and why; ``awaiting_respawn`` the\nworkers still awaiting a respawn after the apply (name + keys; empty when the roll converged);\n``fanout`` the reload broadcast's fleet summary. Names only — never env values.\n``span_release_error`` is ``null`` when the config store released its\nexclusive write span after the persist; otherwise the store's error — the change landed and\nthe reload, broadcast and roll reported here still ran, but the store may still hold its write\nspan until the writer process exits, so a later write can block or be refused until then.",
+        "description": "The dedicated profile-apply response.\n\n``hot`` are the hot-class diff key names; ``recycle`` the worker lines of the recycle roll\n(empty when the roll had no worker to visit: every worker's reload confirmed no recycle-class\nkey moved off its bound value, or the only ones naming one were refused at their epoch build or are\nthe writer whose own restart cannot follow as its exit);\n``skipped`` the workers so confirmed, left running; ``fresh`` the new ready lives seen since\nthe pre-apply snapshot; ``refused`` is empty on success\n(any refusal aborts the pipeline before a response is built); ``recycle_stopped`` is ``null``\nwhen the roll ran to its end, otherwise where it stopped and why; ``awaiting_respawn`` the\nworkers still awaiting a respawn after the apply (name + keys; when the roll converged, only\nthe workers whose reload was refused at their epoch build: the stored config did not build on them\nand a restart may fail the same way, so the roll leaves them running and lists them);\n``fanout`` the reload broadcast's fleet summary. Names only — never env values.\n``roll_deferred`` is ``true`` when the roll is not judged in this reply: ``roll_deferred_to``\nthen names the worker that carries it out after the reply (``recycle`` and\n``awaiting_respawn`` empty), and is ``null`` otherwise.\n``span_release_error`` is ``null`` when the config store released its\nexclusive write span after the persist; otherwise the store's error — the change landed and\nthe reload, broadcast and roll reported here still ran, but the store may still hold its write\nspan until the writer process exits, so a later write can block or be refused until then.",
         "properties": {
           "awaiting_respawn": {
             "items": {
@@ -12950,6 +13069,30 @@
             "title": "Refused",
             "type": "array"
           },
+          "roll_deferred": {
+            "default": false,
+            "title": "Roll Deferred",
+            "type": "boolean"
+          },
+          "roll_deferred_to": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Roll Deferred To"
+          },
+          "skipped": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Skipped",
+            "type": "array"
+          },
           "span_release_error": {
             "anyOf": [
               {
@@ -12966,6 +13109,7 @@
         "required": [
           "hot",
           "recycle",
+          "skipped",
           "fresh",
           "refused",
           "fanout"
@@ -13650,7 +13794,7 @@
         "type": "object"
       },
       "RecycleEntry": {
-        "description": "One worker line in a profile-apply report.\n\n``status`` is ``recycled`` (confirmed on reality), ``timed-out`` or ``failed`` (the\ntarget the roll stopped at), or ``self-deferred`` (the applier's own post-response\nself-exit). ``detail`` names why a ``timed-out`` / ``failed`` target did not\nconverge, and is ``null`` otherwise.",
+        "description": "One worker line of a fleet recycle roll.\n\n``status`` is ``recycled`` (confirmed on reality), ``timed-out`` or ``failed`` (the target the\nroll stopped at), ``self-deferred`` (a restart the roll cannot confirm: the writer's own\npost-response self-exit, or a target whose exit is held by its own in-flight change and runs\nonce that change's reply is answered), or ``withheld``\n(a worker asked once ready whose reload was refused at its epoch build — the build discarded\nbefore its swap — yet reports a recycle-class key: the stored config did not build on it and a\nrestart may fail the same way, so the roll leaves it running on its current config). ``keys``\nare the recycle-class keys that worker's reload reported as moved off the value it bound them\nunder — the reason it was restarted, or for a ``withheld`` worker the keys it still awaits;\nempty for a worker restarted because its state stayed unknown. A worker other than the writer\nwhose state was unknown is asked once it is ready and restarted unless its reply confirms it\nclean or states a refused build (its line then ``withheld``). The writer is never asked at its\nown roll: when its own state is unknown, its restart is left to its post-response self-exit,\narmed only when the roll converged and the reply can carry one (then its ``self-deferred``\nline). ``detail`` names what left that\nworker's state unknown (its reload outcome, no report row, a malformed reply, an unreachable\nbus) with what it answered when asked once ready, and why a ``timed-out`` / ``failed`` target\ndid not converge, joined with ``\"; \"``; ``null`` when none applies.",
         "properties": {
           "detail": {
             "anyOf": [
@@ -13667,6 +13811,13 @@
           "generation_before": {
             "title": "Generation Before",
             "type": "integer"
+          },
+          "keys": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Keys",
+            "type": "array"
           },
           "kind": {
             "title": "Kind",
@@ -13685,13 +13836,14 @@
           "name",
           "kind",
           "status",
-          "generation_before"
+          "generation_before",
+          "keys"
         ],
         "title": "RecycleEntry",
         "type": "object"
       },
       "RecycleRoll": {
-        "description": "The report of a fleet recycle roll an env change carrying a recycle-class key ran.\n\n``recycle`` the worker lines of the roll (the writer's own ``self-deferred`` line when its\npost-response self-exit is armed); ``fresh`` the new ready lives seen since the change began;\n``recycle_stopped`` is ``null`` when the roll ran to its end, otherwise where it stopped and\nwhy. Names only — never env values.",
+        "description": "The report of a fleet recycle roll a reload ran for the workers that needed a restart.\n\nA worker needs a restart when its reload reported a recycle-class key moved off the value it\nbound. A worker whose reload was refused at its epoch build (the build discarded before its\nswap) is never restarted, even when it reports such a key: the stored config did not build on it\nand a restart may fail the same way, so it keeps serving its current config; a failed discard is\nno refused build, and leaves the worker's state unknown. A worker other than the writer whose\nstate was unknown is asked once it is ready and restarted unless its reply confirms it clean or\nstates a refused build (its line then ``withheld``). The writer is never asked at its own roll:\nwhen its own state is unknown, its restart is left to its post-response self-exit, armed only\nwhen the roll converged and the reply can carry one (then its ``self-deferred`` line).\n``recycle`` the worker lines of the roll\n(the writer's own ``self-deferred`` line when its post-response self-exit is armed); ``skipped``\nthe workers whose reload confirmed no such key, at the reload or when asked once ready, left\nrunning; ``fresh`` the new ready lives seen since the change began; ``recycle_stopped`` is\n``null`` when the roll ran to its end, otherwise where it stopped and why. Names only — never\nenv values.",
         "properties": {
           "fresh": {
             "items": {
@@ -13717,10 +13869,18 @@
               }
             ],
             "default": null
+          },
+          "skipped": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Skipped",
+            "type": "array"
           }
         },
         "required": [
           "recycle",
+          "skipped",
           "fresh"
         ],
         "title": "RecycleRoll",
@@ -15648,7 +15808,7 @@
       },
       "ScheduleListRow": {
         "additionalProperties": false,
-        "description": "One row of the schedule listing: no arguments, no kwargs.",
+        "description": "One row of the schedule listing: no arguments, no kwargs.\n\n``next_run_at_ts`` is the next run's POSIX timestamp, ``None`` when the schedule has no next\nrun (``0.0`` is a timestamp like any other). ``next_run_at_iso`` is derived from it, the UTC\nISO-8601 form or ``None``: a row is built without it, and a given value that disagrees with\nthe timestamp is refused.",
         "properties": {
           "cadence": {
             "discriminator": {
@@ -21487,14 +21647,49 @@
         "type": "object"
       },
       "UpgradeAllResult": {
-        "description": "The complete per-ref upgrade-all report.",
+        "description": "The complete per-ref upgrade-all report and the one fleet recycle roll the batch settled.\n\n``recycle`` is the roll over the workers the batch's latest reload report says need a restart\n(``null`` when the roll had no worker to visit — every worker's reload confirmed no recycle-class\nkey, or the only ones naming one were refused at their epoch build or are the writer whose own restart\ncannot follow as its exit — or the batch reloaded nothing); ``awaiting_respawn`` the workers still\nawaiting a respawn after it. ``roll_deferred`` is ``true`` when the roll was handed to the\nworker ``roll_deferred_to`` names, which carries it out after the reply (``recycle`` is\n``null`` and ``awaiting_respawn`` empty); ``roll_deferred_to`` is ``null`` otherwise.",
         "properties": {
+          "awaiting_respawn": {
+            "items": {
+              "$ref": "#/components/schemas/AwaitingWorker"
+            },
+            "title": "Awaiting Respawn",
+            "type": "array"
+          },
+          "recycle": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RecycleRoll"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
           "results": {
             "items": {
               "$ref": "#/components/schemas/UpgradeRow"
             },
             "title": "Results",
             "type": "array"
+          },
+          "roll_deferred": {
+            "default": false,
+            "title": "Roll Deferred",
+            "type": "boolean"
+          },
+          "roll_deferred_to": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Roll Deferred To"
           }
         },
         "required": [
@@ -21809,7 +22004,7 @@
         "type": "object"
       },
       "WorkerState": {
-        "description": "The lifecycle state a worker advertises in its presence value.\n\n``resyncing`` while its boot/reconnect resync runs, ``ready`` once converged,\n``recycling`` once it has begun a graceful self-exit.",
+        "description": "The lifecycle state a worker advertises in its presence value.\n\n``resyncing`` while its boot/reconnect resync runs, ``ready`` once converged,\n``recycling`` while it stops: from its departure decision, or the start of its stop,\nuntil its process life ends.",
         "enum": [
           "ready",
           "resyncing",
@@ -25180,7 +25375,7 @@
     },
     "/api/backup/import": {
       "post": {
-        "description": "Import each SELECTED section of ``document`` in registration order and return a per-section report.\n\n``mode`` is the per-record policy (``skip`` or ``overwrite``). A ``version`` other than 1\nraises ``BadRequestError``; an unknown, absent, or failing section carries its error in\nthe report and makes ``ok`` false. A section whose restore rolled a worker recycle (an env\nsection changing a recycle-class key) carries the roll in its\n``recycle``; when that roll converged, this worker recycles itself after replying.",
+        "description": "Import each SELECTED section of ``document`` in registration order and return a per-section report.\n\n``mode`` is the per-record policy (``skip`` or ``overwrite``). A ``version`` other than 1\nraises ``BadRequestError``; an unknown, absent, or failing section carries its error in\nthe report and makes ``ok`` false. A section whose restore rolled a worker recycle (a manifest\nor env section changing a recycle-class key) carries the roll in its ``recycle``, also when the\nchange landed but its fleet propagation failed; when that roll converged with this worker\nneeding its own restart, this worker recycles itself after replying. A section whose roll was\ndeferred to the bus member a bounded run acts for (a dispatched job's budget, an armed turn\nbudget) — handed off, or one that may have been sent with its answer not known — carries\n``roll_deferred`` set and ``roll_deferred_to`` naming that member instead.",
         "operationId": "post_api_backup_import",
         "requestBody": {
           "content": {
@@ -25506,7 +25701,7 @@
         ]
       },
       "post": {
-        "description": "Merge env changes into the stored env and reload this worker and the fleet.\n\nA hot-class key is re-read in place. A recycle-class key rolls a worker recycle across the\nfleet: the response's ``recycle`` carries the roll's rows (``null`` when the change carried no\nrecycle-class key), and when the roll converged this worker recycles itself after replying —\non the HTTP edge and on every projected tool door alike (a post-reply graceful self-exit its\nsupervisor respawns).\nA change that cannot take effect is refused with a 400 before anything is written, naming\nthe key, under any spelling of its name: a key that locates the worker bus (a bus URL or the\nbus namespace), a deployment / boot-identity (X-band) key no editor may set, and a key the\ndeployment sets (set it in the deployment's environment and restart; removing its stored\ncopy is allowed).\n\n``secret_keys`` (when not ``None``) replaces the operator's secret marks in the same write;\nthe marks variable itself is never accepted as an ``env`` key.\nAn ``mcp`` selection list whose ``!ENV`` marker would resolve so that a tool something still\nuses stops being picked is refused with a 409 naming the holders, a 503 with ``code``\n``mcp-server-starting`` while the server's start is in progress or ``mcp-server-not-loaded``\nwhile this worker has not loaded the server, or a 502 with the recorded cause when this worker\nholds no listing for the server and its last start or bind failed, before anything is written.\n\nCalled over MCP, the reload answers on the session that called it and then retires that session with\nthe generation it ran on: a later call on the same session fails (streamable HTTP answers it 404,\nand an SSE session's stream closes), so the client starts a new session to go on.",
+        "description": "Merge env changes into the stored env and reload this worker and the fleet.\n\nA hot-class key is re-read in place. A recycle-class key rolls a worker recycle across the\nfleet: the response's ``recycle`` carries the roll's rows (``null`` when the roll had no worker\nto visit: every worker's reload confirmed no recycle-class key moved off its bound value, or the\nonly ones naming one were refused at their epoch build or are the writer whose own restart cannot\nfollow as its exit), and when the roll converged and this worker needs its own restart, it\nrecycles itself after replying — on the HTTP edge and on every projected tool door alike\n(a post-reply graceful self-exit its supervisor respawns). A write run under a bound the roll's\nwaits can outlast (a dispatched job's budget, an armed turn budget) hands the roll to the bus\nmember it acts for, which carries it out after the reply and departs itself last, once the roll\nconverged, when it needs its own restart: ``roll_deferred`` is then ``true`` and\n``roll_deferred_to`` names that member, ``recycle`` ``null`` and ``awaiting_respawn`` empty.\nA change that cannot take effect is refused with a 400 before anything is written, naming\nthe key, under any spelling of its name: a key that locates the worker bus (a bus URL or the\nbus namespace), a deployment / boot-identity (X-band) key no editor may set, and a key the\ndeployment sets (set it in the deployment's environment and restart; removing its stored\ncopy is allowed).\n\n``secret_keys`` (when not ``None``) replaces the operator's secret marks in the same write;\nthe marks variable itself is never accepted as an ``env`` key.\nAn ``mcp`` selection list whose ``!ENV`` marker would resolve so that a tool something still\nuses stops being picked is refused with a 409 naming the holders, a 503 with ``code``\n``mcp-server-starting`` while the server's start is in progress or ``mcp-server-not-loaded``\nwhile this worker has not loaded the server, or a 502 with the recorded cause when this worker\nholds no listing for the server and its last start or bind failed, before anything is written.\n\nCalled over MCP, the reload answers on the session that called it and then retires that session with\nthe generation it ran on: a later call on the same session fails (streamable HTTP answers it 404,\nand an SSE session's stream closes), so the client starts a new session to go on.",
         "operationId": "post_api_config_env",
         "requestBody": {
           "content": {
@@ -25854,7 +26049,7 @@
         ]
       },
       "put": {
-        "description": "Create the profile, or append a new version when it exists (whole-body replace).\n\nReturns ``{ok: true, version}`` — NEVER the stored body, so a secret never re-emits on the write path.\nA reserved ``@``-prefixed name is a loud 400. The profile's DECLARED env is run through the shared\nboundary validator (``ConfigService._validate_replace``): a payload carrying an X-band key, setting a\nkey the deployment sets to a value other than its stored one, or leaving a manifest ``!ENV`` marker\ndangling is refused at save time, naming the key.",
+        "description": "Create the profile, or append a new version when it exists (whole-body replace).\n\nReturns ``{ok: true, version}`` — NEVER the stored body, so a secret never re-emits on the write path.\nA reserved ``@``-prefixed name is a loud 400. The profile's DECLARED env is run through the shared\nboundary validator (``ConfigService.validate_profile_env``): a payload carrying an X-band key, setting a\nkey the deployment sets to a value other than its stored one, or leaving a manifest ``!ENV`` marker\ndangling is refused at save time, naming the key.",
         "operationId": "put_api_config_profiles_name",
         "parameters": [
           {
@@ -25939,7 +26134,7 @@
     },
     "/api/config/profiles/{name}/apply": {
       "post": {
-        "description": "Apply the profile's active env as the WHOLE stored env band and reload the fleet.\n\nThe profile's ``secret_keys`` are written as the stored secret marks in the same replace.\n\nA key the profile omits is deleted, save the carried deployment X band; build+swap a fresh serving\nepoch under it, persist env-write-LAST, broadcast the reload, and recycle the fleet for recycle-class\ndiffs. NO request body.\n\nThe response is the dedicated ``profileApplyResponse`` ``{hot, recycle:[{name, kind, status,\ngeneration_before, detail}], fresh:[{name, kind, generation}], refused:[],\nrecycle_stopped:{kind, name, detail} | null, awaiting_respawn:[{name, keys}], span_release_error, fanout}``\n— key names + worker identities only,\nnever env values. ``recycle`` is one line per sibling the roll reached (plus the applier's\nown deferred self-exit line when it is armed). A ``recycled`` line is confirmed on reality;\nthe roll stops at the first line that is not: ``timed-out`` (its old life did not go, fresh\ncapacity did not boot, or it never returned to ready, within the step budget) or ``failed``\n(the worker refused the op, or the bus could not be reached while it was in hand), its\n``detail`` naming why — or when the bus could not be read before a target was reached.\n``recycle_stopped`` names where the roll stopped and why (``null`` when it ran to its end; a\n``null`` name when no target was in hand). Later siblings and the applier's own recycle are\nthen not attempted, and the call still answers with the report: the env is persisted and the\nfleet reloaded. ``fresh`` is the per-kind new ready lives observed since the pre-apply\nsnapshot, capacity evidence never claimed as any target's successor. ``refused`` is ``[]``:\na refusal (X-band key, a key the deployment sets, dangling ``!ENV``, a bus-reaching key no\nrecycle can carry) aborts upfront with a loud 400 naming the key, before anything is snapshotted, built,\nor persisted. ``awaiting_respawn`` names the workers (name + keys) still awaiting a respawn\nafter the roll — empty when it converged. ``span_release_error`` is ``null`` when the config\nstore released its exclusive write span after the env persisted, otherwise the store's error:\nthe env is persisted and the broadcast and roll reported here still ran, but the store may still\nhold its write span until this worker exits. When the diff carries serve-affecting recycle keys\nand the roll converged, the applier's OWN recycle is armed as a post-reply graceful self-exit\n— after the HTTP body flushes, or once a projected tool call (MCP, ``tai tools run``, an\nagent, a preset, a schedule, a hook) returned — and its supervisor respawns it on the new\nenv. 404 for an absent name.\nAn ``mcp`` selection list whose ``!ENV`` marker would resolve so that a tool something still\nuses stops being picked is refused with a 409 naming the holders, a 503 with ``code``\n``mcp-server-starting`` while the server's start is in progress or ``mcp-server-not-loaded``\nwhile this worker has not loaded the server, or a 502 with the recorded cause when this worker\nholds no listing for the server and its last start or bind failed, before anything is snapshotted.\n\nCalled over MCP, the reload answers on the session that called it and then retires that session with\nthe generation it ran on: a later call on the same session fails (streamable HTTP answers it 404,\nand an SSE session's stream closes), so the client starts a new session to go on.",
+        "description": "Apply the profile's active env as the WHOLE stored env band and reload the fleet.\n\nThe profile's ``secret_keys`` are written as the stored secret marks in the same replace.\n\nA key the profile omits is deleted, save the carried deployment X band; build+swap a fresh serving\nepoch under it, persist env-write-LAST, broadcast the reload, and recycle the fleet for recycle-class\ndiffs. NO request body.\n\nThe response is the dedicated ``profileApplyResponse`` ``{hot, recycle:[{name, kind, status,\ngeneration_before, keys, detail}], skipped:[name], fresh:[{name, kind, generation}], refused:[],\nrecycle_stopped:{kind, name, detail} | null, awaiting_respawn:[{name, keys}], roll_deferred,\nroll_deferred_to, span_release_error, fanout}`` — key names + worker identities only,\nnever env values. ``recycle`` is one line per sibling the roll reached (plus the applier's\nown deferred self-exit line when it is armed), its ``keys`` the recycle-class keys that\nworker's reload reported moved off its bound value; ``skipped`` names the workers whose reload\nconfirmed no such key, at the reload or when asked once ready, left running. A ``recycled``\nline is confirmed on reality; the roll stops at the first line that is not: ``timed-out``\n(its old life did not go, fresh capacity did not boot, or it never returned to ready, within\nthe step budget) or ``failed`` (the worker refused the op, or the bus could not be reached\nwhile it was in hand), its ``detail`` naming why — or when the bus could not be read before a\ntarget was reached.\n``recycle_stopped`` names where the roll stopped and why (``null`` when it ran to its end; a\n``null`` name when no target was in hand). Later siblings and the applier's own recycle are\nthen not attempted, and the call still answers with the report: the env is persisted, and\n``fanout`` says what the reload broadcast reached. ``fresh`` is the per-kind new ready lives\nobserved since the pre-apply snapshot, capacity evidence never claimed as any target's\nsuccessor. ``refused`` is ``[]``:\na refusal (X-band key, a key the deployment sets, dangling ``!ENV``, a bus-reaching key no\nrecycle can carry) aborts upfront with a loud 400 naming the key, before anything is snapshotted, built,\nor persisted. ``awaiting_respawn`` names the workers (name + keys) still awaiting a respawn\nafter the roll — when it converged, only the workers whose reload failed at their epoch\nbuild: the stored config did not build on them and a restart may fail the same way, so the\nroll leaves them running and lists them. ``span_release_error`` is ``null`` when the config\nstore released its exclusive write span after the env persisted, otherwise the store's error:\nthe env is persisted and the broadcast and roll reported here still ran, but the store may still\nhold its write span until this worker exits. When the applier's own row reports a\nserve-affecting recycle key (or its state is unknown) and the roll converged, the applier's\nOWN recycle is armed as a post-reply graceful self-exit\n— after the HTTP body flushes, or once a projected tool call (MCP, ``tai tools run``, an\nagent, a preset, a schedule, a hook) returned — and its supervisor respawns it on the new\nenv. An apply run under a bound the roll's waits can outlast (a dispatched job's budget, an\narmed turn budget) runs no roll itself: it hands the roll to the bus member it acts for, which\ncarries it out after the reply and departs itself last, once the roll converged, when it needs\nits own restart; ``roll_deferred`` is then ``true``, ``roll_deferred_to`` names that member, and ``recycle`` and\n``awaiting_respawn`` are empty, the roll not judged in this reply. Otherwise ``roll_deferred``\nis ``false`` and ``roll_deferred_to`` ``null``. 404 for an absent name.\nAn ``mcp`` selection list whose ``!ENV`` marker would resolve so that a tool something still\nuses stops being picked is refused with a 409 naming the holders, a 503 with ``code``\n``mcp-server-starting`` while the server's start is in progress or ``mcp-server-not-loaded``\nwhile this worker has not loaded the server, or a 502 with the recorded cause when this worker\nholds no listing for the server and its last start or bind failed, before anything is snapshotted.\n\nCalled over MCP, the reload answers on the session that called it and then retires that session with\nthe generation it ran on: a later call on the same session fails (streamable HTTP answers it 404,\nand an SSE session's stream closes), so the client starts a new session to go on.",
         "operationId": "post_api_config_profiles_name_apply",
         "parameters": [
           {
@@ -26398,7 +26593,7 @@
     },
     "/api/config/reload": {
       "post": {
-        "description": "Soft-restart the process from its manifest, in-process with no pod restart.\n\nRefreshes env from the config manager, resets every settings cache, and re-initializes from the\nmanifest. Applied on this worker (when it is a target) and broadcast to the fleet (all workers, or only\n``targets``); the response embeds the per-worker fleet report.\n\nHeavy (a full re-init); meant for env/config saves, not tool edits. A convergence\nop: its whole purpose is aligning siblings to persisted state, so a failed local\nreload still broadcasts and then re-raises with the fleet report attached.\n\nCalled over MCP on a worker the reload applies to (no ``targets``, or ``targets`` naming that\nworker), the reload answers on the session that called it and then retires that session with the\ngeneration it ran on: a later call on the same session fails (streamable HTTP answers it 404, and an\nSSE session's stream closes), so the client starts a new session to go on. When ``targets`` leave\nthat worker out, nothing reloads there and the session keeps working.\n\nEach worker's payload is ``{status, env_keys, awaiting_respawn}``: ``awaiting_respawn`` names the\nrecycle-class keys whose value now differs from the one that worker bound (at boot, or when the\nplugin that declares them was loaded) — the soft\nrestart carries every hot key in place, and those keys take effect only when the worker is\nrespawned through the deployment's supervisor. This\noperation ERROR-logs one line naming every such worker and its keys.",
+        "description": "Soft-restart the fleet from its manifest, then restart the workers whose env needs a restart.\n\nRefreshes env from the config manager, resets every settings cache, and re-initializes from the\nmanifest, in-process. Applied on this worker (when it is a target) and broadcast to the fleet (all\nworkers, or only ``targets``); the response embeds the per-worker fleet report.\n\nHeavy (a full re-init); meant for env/config saves, not tool edits. A convergence\nop: its whole purpose is aligning siblings to persisted state, so a failed local\nreload still broadcasts and then re-raises with the fleet report attached.\n\nCalled over MCP on a worker the reload applies to (no ``targets``, or ``targets`` naming that\nworker), the reload answers on the session that called it and then retires that session with the\ngeneration it ran on: a later call on the same session fails (streamable HTTP answers it 404, and an\nSSE session's stream closes), so the client starts a new session to go on. When ``targets`` leave\nthat worker out, nothing reloads there and the session keeps working.\n\nAn applied worker's payload is ``{status: \"ok\", env_keys, awaiting_respawn}``; a worker whose\nreload was refused at its epoch build (the build discarded before its swap) replies ``failed``\nwith ``{status: \"discarded\", awaiting_respawn}``, serving its previous epoch with that drift\nstanding; any other failed reload, a failed discard among them, carries no payload.\n``awaiting_respawn`` names the recycle-class keys whose value now differs from the one that\nworker bound (at boot, or when the plugin that declares them was loaded) — the soft restart\ncarries every hot key in place, and those keys take effect only on a restart. Once the reports\nare in, every worker the reload addressed that names such a key is restarted one at a time\nthrough the deployment's supervisor, except a worker whose reload was refused at its epoch\nbuild: the stored config did not build on it and a restart may fail the same way, so it keeps\nserving its current config and is named in ``awaiting_respawn``. Any worker other than this one\nwhose state is unknown (its reload failed otherwise or did not finish, it has no row, its reply\ncarries no ``awaiting_respawn`` list, or the bus was unreachable) is asked once it is ready and\nrestarted unless its reply confirms it clean or states a refused build (its restart then\nwithheld); the workers that confirmed none are left running. This worker is never asked: when\nits own state is unknown, it needs its own restart. ``recycle`` reports that roll (``null`` when\nthe roll had no worker to visit: every addressed worker confirmed no recycle-class key, or the\nonly ones naming one were refused at their epoch build) and ``awaiting_respawn`` the workers\nstill awaiting a respawn after it. When this worker needs its own restart and the roll\nconverged, it exits gracefully once the reply is answered and its supervisor starts it again. A\nsoft restart run under a bound the roll's waits can outlast (a dispatched job's budget, an armed\nturn budget) runs no roll itself: it hands the roll to the bus member it acts for, which carries\nit out after the reply and departs itself last, once the roll converged, when it needs its own\nrestart; ``roll_deferred`` is then ``true``, ``roll_deferred_to`` names that member, ``recycle`` is ``null`` and\n``awaiting_respawn`` empty, the roll not judged in this reply. Otherwise ``roll_deferred`` is\n``false`` and ``roll_deferred_to`` ``null``.",
         "operationId": "post_api_config_reload",
         "requestBody": {
           "content": {
@@ -26417,7 +26612,7 @@
                 "schema": {
                   "properties": {
                     "data": {
-                      "$ref": "#/components/schemas/FleetResult"
+                      "$ref": "#/components/schemas/FleetReloadResponse"
                     }
                   },
                   "required": [
@@ -26463,7 +26658,7 @@
             "ApiKeyAuth": []
           }
         ],
-        "summary": "Soft-restart the process from its manifest",
+        "summary": "Soft-restart the fleet from its manifest, restarting the drifted workers whose reload built",
         "tags": [
           "config"
         ],
@@ -30056,7 +30251,7 @@
     },
     "/api/fleet/reload-config": {
       "post": {
-        "description": "Soft-restart the worker fleet, optionally restricted to the named ``targets``.\n\nCalled over MCP on a worker the reload applies to (no ``targets``, or ``targets`` naming that\nworker), the reload answers on the session that called it and then retires that session with the\ngeneration it ran on: a later call on the same session fails (streamable HTTP answers it 404, and an\nSSE session's stream closes), so the client starts a new session to go on. When ``targets`` leave\nthat worker out, nothing reloads there and the session keeps working.\n\nEach worker's payload is ``{status, env_keys, awaiting_respawn}``: ``awaiting_respawn`` names the\nrecycle-class keys whose value now differs from the one that worker bound (at boot, or when the\nplugin that declares them was loaded) — the soft\nrestart carries every hot key in place, and those keys take effect only when the worker is\nrespawned through the deployment's supervisor. This\noperation ERROR-logs one line naming every such worker and its keys.",
+        "description": "Soft-restart the worker fleet, optionally restricted to the named ``targets``, then restart the drifted.\n\nCalled over MCP on a worker the reload applies to (no ``targets``, or ``targets`` naming that\nworker), the reload answers on the session that called it and then retires that session with the\ngeneration it ran on: a later call on the same session fails (streamable HTTP answers it 404, and an\nSSE session's stream closes), so the client starts a new session to go on. When ``targets`` leave\nthat worker out, nothing reloads there and the session keeps working.\n\nAn applied worker's payload is ``{status: \"ok\", env_keys, awaiting_respawn}``; a worker whose\nreload was refused at its epoch build (the build discarded before its swap) replies ``failed``\nwith ``{status: \"discarded\", awaiting_respawn}``, serving its previous epoch with that drift\nstanding; any other failed reload, a failed discard among them, carries no payload.\n``awaiting_respawn`` names the recycle-class keys whose value now differs from the one that\nworker bound (at boot, or when the plugin that declares them was loaded) — the soft restart\ncarries every hot key in place, and those keys take effect only on a restart. Once the reports\nare in, every worker the reload addressed that names such a key is restarted one at a time\nthrough the deployment's supervisor, except a worker whose reload was refused at its epoch\nbuild: the stored config did not build on it and a restart may fail the same way, so it keeps\nserving its current config and is named in ``awaiting_respawn``. Any worker other than this one\nwhose state is unknown (its reload failed otherwise or did not finish, it has no row, its reply\ncarries no ``awaiting_respawn`` list, or the bus was unreachable) is asked once it is ready and\nrestarted unless its reply confirms it clean or states a refused build (its restart then\nwithheld); the workers that confirmed none are left running. This worker is never asked: when\nits own state is unknown, it needs its own restart. ``recycle`` reports that roll (``null`` when\nthe roll had no worker to visit: every addressed worker confirmed no recycle-class key, or the\nonly ones naming one were refused at their epoch build) and ``awaiting_respawn`` the workers\nstill awaiting a respawn after it. When this worker needs its own restart and the roll\nconverged, it exits gracefully once the reply is answered and its supervisor starts it again. A\nsoft restart run under a bound the roll's waits can outlast (a dispatched job's budget, an armed\nturn budget) runs no roll itself: it hands the roll to the bus member it acts for, which carries\nit out after the reply and departs itself last, once the roll converged, when it needs its own\nrestart; ``roll_deferred`` is then ``true``, ``roll_deferred_to`` names that member, ``recycle`` is ``null`` and\n``awaiting_respawn`` empty, the roll not judged in this reply. Otherwise ``roll_deferred`` is\n``false`` and ``roll_deferred_to`` ``null``.",
         "operationId": "post_api_fleet_reload_config",
         "requestBody": {
           "content": {
@@ -30075,7 +30270,7 @@
                 "schema": {
                   "properties": {
                     "data": {
-                      "$ref": "#/components/schemas/FleetResult"
+                      "$ref": "#/components/schemas/FleetReloadResponse"
                     }
                   },
                   "required": [
@@ -30113,7 +30308,7 @@
             "ApiKeyAuth": []
           }
         ],
-        "summary": "Soft-restart the worker fleet",
+        "summary": "Soft-restart the worker fleet, restarting the drifted workers whose reload built",
         "tags": [
           "backend"
         ],
@@ -32395,7 +32590,7 @@
     },
     "/api/marketplace/install": {
       "post": {
-        "description": "Resolve, pip install, patch the manifest, reload, and record attribution.\n\nNothing is pip-installed for a descriptor-only plugin; aborts and unwinds on any\nfailure (see :meth:`Installer.install`). When the spec declares install-time env\n``env`` / ``secret_keys`` satisfy the required ``!ENV`` markers or connector-env in\nthe same combined transaction. ``route_mounts`` remaps declared route bases;\n``accept_public_routes`` acknowledges public routes. The result's ``routes`` lists\nevery route the install mounted. An install-time env change carrying a recycle-class key\nrolls a worker recycle (the receipt's ``reload.recycle``); when it converged this worker\nrecycles itself after replying.",
+        "description": "Resolve, pip install, patch the manifest, reload, and record attribution.\n\nNothing is pip-installed for a descriptor-only plugin; aborts and unwinds on any\nfailure (see :meth:`Installer.install`). When the spec declares install-time env\n``env`` / ``secret_keys`` satisfy the required ``!ENV`` markers or connector-env in\nthe same combined transaction. ``route_mounts`` remaps declared route bases;\n``accept_public_routes`` acknowledges public routes. The result's ``routes`` lists\nevery route the install mounted. An install-time env change carrying a recycle-class key\nrolls a worker recycle (the receipt's ``reload.recycle``); when it converged and this worker\nneeds its own restart, it recycles itself after replying.",
         "operationId": "post_api_marketplace_install",
         "requestBody": {
           "content": {
@@ -33125,7 +33320,7 @@
     },
     "/api/marketplace/update": {
       "post": {
-        "description": "Resolve the target, pip upgrade, re-patch the manifest, reload, and upsert attribution.\n\nNothing is pip-upgraded for a descriptor-only plugin; the same pre-flights apply\nas install (see :meth:`Installer.update`). ``env`` / ``secret_keys`` satisfy a new\nversion's required ``!ENV`` markers or connector-env. ``route_mounts`` remaps\ndeclared route bases (surviving items keep their stored base);\n``accept_public_routes`` acknowledges public routes not already approved. The\nresult's ``routes`` lists every route the update mounted. An update-time env change\ncarrying a recycle-class key rolls a worker recycle (the receipt's ``reload.recycle``);\nwhen it converged this worker recycles itself after replying.",
+        "description": "Resolve the target, pip upgrade, re-patch the manifest, reload, and upsert attribution.\n\nNothing is pip-upgraded for a descriptor-only plugin; the same pre-flights apply\nas install (see :meth:`Installer.update`). ``env`` / ``secret_keys`` satisfy a new\nversion's required ``!ENV`` markers or connector-env. ``route_mounts`` remaps\ndeclared route bases (surviving items keep their stored base);\n``accept_public_routes`` acknowledges public routes not already approved. The\nresult's ``routes`` lists every route the update mounted. An update-time env change\ncarrying a recycle-class key rolls a worker recycle (the receipt's ``reload.recycle``);\nwhen it converged and this worker needs its own restart, it recycles itself after replying.",
         "operationId": "post_api_marketplace_update",
         "requestBody": {
           "content": {
@@ -33266,7 +33461,7 @@
     },
     "/api/marketplace/upgrade-all": {
       "post": {
-        "description": "Move every installed plugin onto its latest COMPATIBLE version in one lock-held batch.\n\nAnswers ``{\"results\": [{ref, outcome, detail, span_release_error}, ...]}``; a row's\n``span_release_error`` names the failed config-store span releases of the config writes its ref\nlanded — an upgrade's write, or a failed upgrade's forward and restore writes — joined in write\norder (``null`` when each released or the ref wrote nothing).\n\nPer-ref failures (including a ref with NO compatible version) are report\nentries, never a batch abort — the ONE operation-level failure is the\nfleet marketplace lock being held elsewhere (the retriable 503). See\n:meth:`Installer.upgrade_all` for the outcome vocabulary.",
+        "description": "Move every installed plugin onto its latest COMPATIBLE version in one lock-held batch.\n\nAnswers ``{\"results\": [{ref, outcome, detail, span_release_error}, ...], \"recycle\", \"awaiting_respawn\",\n\"roll_deferred\", \"roll_deferred_to\"}``;\na row's ``span_release_error`` names the failed config-store span releases of the config writes\nits ref landed — an upgrade's write, or a failed upgrade's forward and restore writes — joined in\nwrite order (``null`` when each released or the ref wrote nothing). ``recycle`` is the one fleet\nrecycle roll the batch's reloads settled once it ended (``null`` when the roll had no\nworker to visit — every worker's reload confirmed no recycle-class key, or the only ones naming\none were refused at their epoch build or are the writer whose own restart cannot follow as its exit —\nor the batch reloaded nothing) and ``awaiting_respawn`` the workers still awaiting a\nrespawn after it; when the roll converged, this worker's own restart, when it needs one,\nfollows as its exit once the reply is sent. ``roll_deferred`` is ``true`` when the roll was handed to the worker\n``roll_deferred_to`` names, which carries it out after the reply.\n\nPer-ref failures (including a ref with NO compatible version) are report\nentries, never a batch abort. The operation-level failures are the fleet\nmarketplace lock being held elsewhere (the retriable 503) and the batch's\nlanded config changes whose fleet recycle roll did not complete (a 500 saying\nso). See :meth:`Installer.upgrade_all` for the outcome vocabulary.",
         "operationId": "post_api_marketplace_upgrade_all",
         "responses": {
           "200": {
@@ -33296,6 +33491,16 @@
               }
             },
             "description": "Missing or invalid api key."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Internal server error."
           },
           "501": {
             "content": {
@@ -33839,7 +34044,7 @@
     },
     "/api/mcp-config/secret-env": {
       "post": {
-        "description": "Store a pasted secret as an env value and reference it from the manifest by a marker.\n\nThe env KEY is EITHER an explicit ``key`` OR generated from ``key_hint`` — exactly one\n(``key | key_hint``). Writes the secret ``value`` to the env store under that key AND\nmarks the key secret (adding it to ``TAI_ENV_SECRET_KEYS``), and writes an ``!ENV ${KEY}``\nMARKER at ``manifest_pointer`` — all through the combined\n``ConfigService.apply_env_and_change`` pipeline so the env write and the manifest mutate\nstay consistent. Partial-failure: a manifest-persist failure after the env write does\nNO rollback — the env write stands as an inert, re-runnable orphan and the op raises\nloudly. An explicit ``key`` colliding with an existing stored key holding a DIFFERENT value\nis a loud 400 naming the key; a generated key never shadows a registered settings\n``env_var``. The pointer's HEAD segment MUST be ``mcp`` (loud 400 otherwise). The response\nis the ``reloadConfigResult`` shape; the resolved key is NEVER returned. A dangling\n``!ENV`` / X-band refusal surfaces as a loud 400 naming the key (the shared boundary\nvalidator, same as ``POST /api/mcp-config``). An explicit ``key`` that is a recycle-class\nsetting rolls a worker recycle as every env write does (the response's ``recycle``; this\nworker recycles itself after replying when the roll converged).\nAn ``mcp`` selection list whose ``!ENV`` marker would resolve so that a tool something still\nuses stops being picked is refused with a 409 naming the holders, a 503 with ``code``\n``mcp-server-starting`` while the server's start is in progress or ``mcp-server-not-loaded``\nwhile this worker has not loaded the server, or a 502 with the recorded cause when this worker\nholds no listing for the server and its last start or bind failed, before anything is written.",
+        "description": "Store a pasted secret as an env value and reference it from the manifest by a marker.\n\nThe env KEY is EITHER an explicit ``key`` OR generated from ``key_hint`` — exactly one\n(``key | key_hint``). Writes the secret ``value`` to the env store under that key AND\nmarks the key secret (adding it to ``TAI_ENV_SECRET_KEYS``), and writes an ``!ENV ${KEY}``\nMARKER at ``manifest_pointer`` — all through the combined\n``ConfigService.apply_env_and_change`` pipeline so the env write and the manifest mutate\nstay consistent. Partial-failure: a manifest-persist failure after the env write does\nNO rollback — the env write stands as an inert, re-runnable orphan and the op raises\nloudly. An explicit ``key`` colliding with an existing stored key holding a DIFFERENT value\nis a loud 400 naming the key; a generated key never shadows a registered settings\n``env_var``. The pointer's HEAD segment MUST be ``mcp`` (loud 400 otherwise). The response\nis the ``reloadConfigResult`` shape; the resolved key is NEVER returned. A dangling\n``!ENV`` / X-band refusal surfaces as a loud 400 naming the key (the shared boundary\nvalidator, same as ``POST /api/mcp-config``). An explicit ``key`` that is a recycle-class\nsetting rolls a worker recycle as every env write does (the response's ``recycle``; this\nworker recycles itself after replying when the roll converged and it needs its own restart).\nAn ``mcp`` selection list whose ``!ENV`` marker would resolve so that a tool something still\nuses stops being picked is refused with a 409 naming the holders, a 503 with ``code``\n``mcp-server-starting`` while the server's start is in progress or ``mcp-server-not-loaded``\nwhile this worker has not loaded the server, or a 502 with the recorded cause when this worker\nholds no listing for the server and its last start or bind failed, before anything is written.",
         "operationId": "post_api_mcp_config_secret_env",
         "requestBody": {
           "content": {

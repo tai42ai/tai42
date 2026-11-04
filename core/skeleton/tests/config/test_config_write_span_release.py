@@ -18,7 +18,7 @@ import pytest
 # ``bus_settings`` is imported for its registration side effect — the apply's recycle
 # classification reflects only IMPORTED settings classes, and TAI_BUS_* are recycle-class.
 import tai42_skeleton.app.bus_settings  # noqa: F401
-from tai42_skeleton.app.bus import FleetResult, WorkerIdentity, WorkerKind
+from tai42_skeleton.app.bus import FleetResult
 from tai42_skeleton.app.epoch import Epoch
 from tai42_skeleton.config.deployment_env import DeploymentOwnership
 from tai42_skeleton.config.service import ApplyResult, OrphanEnvWriteError, ProfileApplyOutcome
@@ -35,6 +35,9 @@ from .fake_pipeline import (
     _with_bus,
 )
 from .test_config_write_lock import _CountingSpanStore, _doors, _LoggingStore, _manifest, _World
+
+# The door's edge settles the writer's exit its change owes; these tests drive the door below it.
+pytestmark = pytest.mark.usefixtures("writer_exit_edge")
 
 _RELEASE_ERROR = "OSError: releasing the span failed"
 _EXCLUSION_LOGGER = "tai42_skeleton.config.service.exclusion"
@@ -96,8 +99,10 @@ async def test_a_write_whose_span_fails_to_release_returns_its_result_after_its_
 async def test_a_profile_apply_whose_span_fails_to_release_still_saves_previous_and_rolls_the_recycle(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    store = FakeConfigStore(env={"TAI_BUS_ACK_TIMEOUT": "5"}, fail_exit=_release_failure())
+    store = FakeConfigStore(env={"TAI_BUS_HEARTBEAT_TTL": "5"}, fail_exit=_release_failure())
     bus = FakeBus(origin="serve-applier", remotes=["serve-b"])
+    # serve-b reports the recycle-class key off the value it bound it under, so it is restarted.
+    bus.remote_payloads["serve-b"] = {"status": "ok", "awaiting_respawn": ["TAI_BUS_HEARTBEAT_TTL"]}
     orchestrate, seen = _orchestrate_spy()
     service, _admin, _bus = _service(store, bus=bus, orchestrate=orchestrate)
     saved: list[dict[str, str]] = []
@@ -110,13 +115,13 @@ async def test_a_profile_apply_whose_span_fails_to_release_still_saves_previous_
 
     with caplog.at_level(logging.ERROR, logger=_EXCLUSION_LOGGER):
         outcome = await service.apply_replace_env(
-            {"TAI_BUS_ACK_TIMEOUT": "7"}, save_previous=save_previous, build_and_swap=build_and_swap
+            {"TAI_BUS_HEARTBEAT_TTL": "7"}, save_previous=save_previous, build_and_swap=build_and_swap
         )
 
-    assert saved == [{"TAI_BUS_ACK_TIMEOUT": "5"}]
-    assert store.env == {"TAI_BUS_ACK_TIMEOUT": "7"}
+    assert saved == [{"TAI_BUS_HEARTBEAT_TTL": "5"}]
+    assert store.env == {"TAI_BUS_HEARTBEAT_TTL": "7"}
     assert [wire["op"] for wire, _targets, _local in bus.publish_calls] == ["reload_config"]
-    assert seen["excluded_name"] == "serve-applier"
+    assert seen["decision"].writer.name == "serve-applier"
     assert outcome.recycle is not None
     assert [row.name for row in outcome.recycle.rows] == ["serve-b"]
     assert outcome.span_release_error == _RELEASE_ERROR
@@ -262,7 +267,7 @@ async def test_a_writer_cancelled_while_its_span_fails_to_release_stays_cancelle
 
 def test_the_apply_response_carries_the_span_release_error() -> None:
     fleet = FleetResult(op="reload_config", results=[])
-    local = {"status": "ok", "env_keys": 1}
+    local = {"status": "ok", "env_keys": 1, "awaiting_respawn": []}
     held = ApplyResult(fleet=fleet, local=local, span_release_error=_RELEASE_ERROR)
     assert apply_response(held)["span_release_error"] == _RELEASE_ERROR
     assert apply_response(ApplyResult(fleet=fleet, local=local))["span_release_error"] is None
@@ -271,9 +276,8 @@ def test_the_apply_response_carries_the_span_release_error() -> None:
 def test_the_profile_apply_response_carries_the_span_release_error() -> None:
     outcome = ProfileApplyOutcome(
         hot=["A"],
+        decision=None,
         recycle=None,
-        self_identity=WorkerIdentity(name="serve-applier", kind=WorkerKind.serve, pid=1, generation=1),
-        serve_affecting=False,
         fleet=FleetResult(op="reload_config", results=[]),
         span_release_error=_RELEASE_ERROR,
     )

@@ -10,11 +10,14 @@ It inherits the shared config, pip and plugins-directory seams from
 
 from __future__ import annotations
 
+import asyncio
 import logging
+from dataclasses import dataclass
 from typing import Any
 
 from tai42_contract.plugins import PluginSpec
 
+from tai42_skeleton.config.recycle_roll import RollOutcome
 from tai42_skeleton.config.service import ApplyResult, joined_span_release_errors
 from tai42_skeleton.marketplace import (
     env_apply,
@@ -24,6 +27,7 @@ from tai42_skeleton.marketplace import (
     route_preflight,
 )
 from tai42_skeleton.marketplace import routes as routes_mod
+from tai42_skeleton.marketplace.cancel_hold import run_to_end
 from tai42_skeleton.marketplace.compat import UpgradeOutcome, running_contract_version, update_targets
 from tai42_skeleton.marketplace.environments.change import OperationChange
 from tai42_skeleton.marketplace.environments.targets import place, place_row
@@ -36,6 +40,17 @@ from tai42_skeleton.marketplace.store import InstallRecord
 from tai42_skeleton.operations._broadcast import FleetBroadcastError
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class UpgradeAllReport:
+    """An upgrade-all batch's per-ref report entries and the one fleet recycle roll the batch ran.
+
+    ``roll`` is ``None`` when no ref's change reloaded the config.
+    """
+
+    results: list[dict[str, Any]]
+    roll: RollOutcome | None
 
 
 def _upgrade_row(
@@ -82,6 +97,9 @@ class _UpdateFlow(_InstallerBase):
         removing the old entries and applying the new; upsert the row; delete the unused
         builds; then, with the fleet key downgraded to shared, roll the fleet recycle the change
         owes (:func:`guarded_operation`), so a worker it restarts verifies the finished update.
+        A cancellation while the migrations run swaps the environment back; one that
+        lands while the change is written waits for that write to end whole — complete, or
+        unwound when it fails — and then propagates.
 
         A failure after the swap unwinds in order — swap the environment back to the build
         that served the OLD pin (BEFORE the reversal's reload), then reverse the provides
@@ -160,21 +178,23 @@ class _UpdateFlow(_InstallerBase):
         )
 
         change = await self._update_package_steps(row, new_spec, source, resolved, pinned_version)
-        apply_result = await self._commit_update(
-            ref,
-            pinned_version,
-            old_spec,
-            new_spec,
-            source,
-            resolved,
-            resolved_mounts,
-            resolved_route_list,
-            env,
-            secret_keys,
-            change,
-            landed_release_errors=landed_release_errors,
+        # A cancellation landing while the change is written waits for the commit to end whole.
+        apply_result, environment_notes = await run_to_end(
+            self._commit_update(
+                ref,
+                pinned_version,
+                old_spec,
+                new_spec,
+                source,
+                resolved,
+                resolved_mounts,
+                resolved_route_list,
+                env,
+                secret_keys,
+                change,
+                landed_release_errors=landed_release_errors,
+            )
         )
-        environment_notes = [] if change is None else change.finish()
 
         return {
             "ref": ref,
@@ -197,8 +217,9 @@ class _UpdateFlow(_InstallerBase):
     ) -> OperationChange | None:
         """Build and swap in the environments the move from ``row``'s pin to the new pin changes, then migrate.
 
-        A descriptor-only update builds nothing and returns ``None``. A migration failure swaps
-        the environments back to the builds serving the old pin and re-raises.
+        A descriptor-only update builds nothing and returns ``None``. A migration failure or a
+        cancellation while the migrations run swaps the environments back to the builds serving
+        the old pin and re-raises.
         """
         _repo_url, _tag, artifact_ref, sha256 = resolve.pin_provenance(resolved, source)
         placed = place(row.ref, new_spec, pinned_version, source, artifact_ref, sha256)
@@ -213,7 +234,7 @@ class _UpdateFlow(_InstallerBase):
         # plugin inert), so a failure swaps back with the manifest untouched.
         try:
             await self._run_plugin_migrations(new_spec)
-        except Exception as migration_error:
+        except (Exception, asyncio.CancelledError) as migration_error:
             await self._unwind(migration_error, change=change, provides_undo=None, env_written=None)
             raise
         return change
@@ -233,11 +254,13 @@ class _UpdateFlow(_InstallerBase):
         change: OperationChange | None,
         *,
         landed_release_errors: list[str | None],
-    ) -> ApplyResult:
-        """Commit the swap transactionally.
+    ) -> tuple[ApplyResult, list[str]]:
+        """Commit the swap transactionally, then finish ``change``.
 
         One combined remove-old+apply-new manifest/env apply, upsert the row, remount reload;
-        unwind on failure. A failure appends to ``landed_release_errors`` the span release error of
+        unwind on failure. Once the row is written the unused builds are deleted
+        (:meth:`OperationChange.finish`); returns the change's result and the environment notes
+        of that finish. A failure appends to ``landed_release_errors`` the span release error of
         the forward write (from its result, or from the :class:`FleetBroadcastError` it raised after
         landing), then those of the unwind's restore writes (returned, or carried on the escalated
         :class:`InstallUnwindError`), and re-raises.
@@ -298,11 +321,11 @@ class _UpdateFlow(_InstallerBase):
                 raise
             landed_release_errors.append(restore_release_error)
             raise
-        return apply_result
+        return apply_result, [] if change is None else change.finish()
 
     # -- upgrade-all --------------------------------------------------------
 
-    async def upgrade_all(self) -> list[dict[str, Any]]:
+    async def upgrade_all(self) -> UpgradeAllReport:
         """Upgrade every installed plugin to its latest COMPATIBLE version under one lock hold.
 
         Held across the per-worker + fleet locks, returning one report entry per ref
@@ -313,15 +336,16 @@ class _UpdateFlow(_InstallerBase):
         ref's forward write and its unwind's restore writes — else ``None``. A per-ref failure
         NEVER aborts the batch — it is logged and reported so one broken ref never hides the rest.
 
-        The fleet recycle every ref's change owes — an upgrade's, or a failed one's unwind — is
-        rolled ONCE, after the whole batch, with the fleet key downgraded to shared
+        The fleet recycle decision over every reload the batch made — an upgrade's, or a failed
+        one's unwind — runs ONCE, after the whole batch, with the fleet key downgraded to shared
         (:func:`guarded_operation`): a worker it restarts verifies the batch's finished rows, and
         the hold is never re-taken between refs, so no other operation runs inside the batch. The
-        batch arms no self-exit of the writer, so the roll recycles no writer and its verdict is
-        logged (the report entries carry no roll).
+        report carries that roll (``roll``, ``None`` when the batch reloaded nothing), whose
+        ``self_exit_armed`` states whether the writer's own post-reply exit follows it.
         """
-        async with guarded_operation(self._fleet_lock, self._svc, change="the upgrade-all batch", writer_exits=False):
-            return await self._upgrade_all_locked()
+        async with guarded_operation(self._fleet_lock, self._svc, change="the upgrade-all batch") as operation:
+            results = await self._upgrade_all_locked()
+        return UpgradeAllReport(results=results, roll=operation.roll)
 
     async def _upgrade_all_locked(self) -> list[dict[str, Any]]:
         contract = running_contract_version()

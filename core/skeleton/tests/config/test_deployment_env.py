@@ -10,6 +10,7 @@ from tai42_kit.settings import TaiBaseSettings
 from tai42_skeleton.config.deployment_env import (
     DeploymentOwnership,
     capture_deployment_env,
+    captured_deployment_env,
     deployment_env_keys,
     deployment_env_value,
     reset_deployment_env,
@@ -33,6 +34,8 @@ def test_an_uncaptured_deployment_env_raises() -> None:
         deployment_env_keys()
     with pytest.raises(RuntimeError, match="deployment env is not captured"):
         DeploymentOwnership()
+    with pytest.raises(RuntimeError, match="deployment env is not captured"):
+        captured_deployment_env()
 
 
 def test_the_capture_is_taken_once(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -44,6 +47,20 @@ def test_the_capture_is_taken_once(monkeypatch: pytest.MonkeyPatch) -> None:
 
     assert "DEPLOYMENT_ENV_TEST_FIRST" in deployment_env_keys()
     assert "DEPLOYMENT_ENV_TEST_LATER" not in deployment_env_keys()
+
+
+def test_the_captured_env_is_a_copy_of_the_env_at_the_capture(monkeypatch: pytest.MonkeyPatch) -> None:
+    reset_deployment_env()
+    monkeypatch.setenv("DEPLOYMENT_ENV_TEST_FIRST", "1")
+    capture_deployment_env()
+    monkeypatch.setenv("DEPLOYMENT_ENV_TEST_LATER", "2")
+
+    captured = captured_deployment_env()
+    captured["DEPLOYMENT_ENV_TEST_ADDED"] = "3"
+
+    assert captured_deployment_env()["DEPLOYMENT_ENV_TEST_FIRST"] == "1"
+    assert "DEPLOYMENT_ENV_TEST_LATER" not in captured_deployment_env()
+    assert "DEPLOYMENT_ENV_TEST_ADDED" not in captured_deployment_env()
 
 
 def test_an_empty_container_value_is_not_set_by_the_deployment(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -32,8 +32,8 @@ class LifecycleHandlersMixin(LifecycleState):
     def _on_post_swap(self, func: Callable):
         """Register a handler that establishes a loop-affine background loop on the serving loop.
 
-        Run at boot and after every epoch swap, never on the throwaway build-thread loop the
-        per-epoch handlers run on.
+        Run at boot and after every epoch swap, never by the per-epoch handlers, which run while
+        the generation is still being built.
         """
         self._post_swap_handlers[f"{func.__module__}.{func.__qualname__}"] = func
         return func

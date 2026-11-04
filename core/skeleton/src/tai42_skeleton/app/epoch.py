@@ -4,11 +4,12 @@ An **epoch** is the process's live serving generation. A settings-profile apply
 builds a NEW epoch off to the side under a proposed env and — only if the build
 succeeds — swaps it in atomically (the ASGI dispatch slot plus the current-epoch
 pointer) and retires the previous one. A failed build is DISCARDED with zero
-mutation of the live epoch and the process env restored exactly, so the old epoch
-keeps serving. The one build has two endings: a bus member swaps it in
-(:func:`build_and_swap_epoch`); a process that is not a bus member (a job child a
-backend worker forked) has no serving surface to swap into and discards the proven
-build (:func:`build_and_discard_epoch`), so the env is proven to build there too. The
+mutation of the live epoch and the process env restored from its pre-build snapshot
+(:func:`~tai42_skeleton.app.applied_env.restore_env`), so the old epoch keeps serving.
+The one build has two endings: a bus member swaps it in (:func:`build_and_swap_epoch`);
+a process that is not a bus member (a job child a backend worker forked) has no
+serving surface to swap into and discards the proven build
+(:func:`build_and_discard_epoch`), so the env is proven to build there too. The
 stored env a build applies and a discard restores is kept by
 :mod:`~tai42_skeleton.app.applied_env`.
 
@@ -23,13 +24,13 @@ accounting, and the periodic loops that must retire with it.
 FORK INVARIANT (canonical statement in ``tai42_kit.fork_gate``): the build's
 ``rebuild`` step re-imports the manifest modules (``import_or_reload_package``), so while
 a build runs no backend child may be FORKED and no in-process job may RUN — a child
-forked mid-reimport deadlocks on an inherited ``importlib`` per-module lock. Both routes
-into a build hold ``tai42_kit.fork_gate``'s exclusive side against a backend's job
-span: ``reload_gate.run(..., reimports=True)``
-(the ``reload_config`` doors, which marshal the build back onto the serving loop) and
-``ConfigService.apply_replace_env`` (the profile-apply door, which awaits
-``build_and_swap_epoch`` or ``build_and_discard_epoch`` under ``fork_gate.exclusive_async``). A
-build reached by any other route must take that same exclusive side.
+forked mid-reimport deadlocks on an inherited ``importlib`` per-module lock. Every route
+into a build goes through ``reload_gate.run(..., reimports=True)``, which holds
+``tai42_kit.fork_gate``'s exclusive side against a backend's job span and awaits the build
+on the serving loop: the ``reload_config`` doors, and ``ConfigService.apply_replace_env``
+(the profile-apply door, whose body awaits ``build_and_swap_epoch`` or
+``build_and_discard_epoch``). A build reached by any other route must take that same
+exclusive side.
 """
 
 from __future__ import annotations
@@ -39,13 +40,22 @@ import logging
 import os
 import weakref
 from collections import Counter
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Iterator, Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from tai42_kit.clients import advance_client_epoch, current_client_epoch
 from tai42_kit.fork_gate import fork_gate
-from tai42_kit.settings import reset_all_settings, unbind_respawn_class_env
+from tai42_kit.settings import (
+    RespawnClassBindings,
+    bind_unbound_respawn_class_env,
+    reset_all_settings,
+    respawn_class_bindings,
+    restore_respawn_class_bindings,
+    unbind_respawn_class_env,
+)
 from tai42_kit.settings.cache_registry import restamp_settings_born_after, settings_birth_mark
 
 from tai42_skeleton.app import epoch_defaults
@@ -55,13 +65,14 @@ from tai42_skeleton.app.applied_env import (
     clear_applied_env,
     restore_env,
 )
+from tai42_skeleton.app.discarded_build import mark_discarded_build
 from tai42_skeleton.app.epoch_retire import retire_epoch
 from tai42_skeleton.app.retired_generations import detach_retired_generations
 
 if TYPE_CHECKING:
     from starlette.types import ASGIApp
 
-    from tai42_skeleton.app.admission import RequestAdmission
+    from tai42_skeleton.app.admission import Admission
     from tai42_skeleton.app.server import ServingCore
     from tai42_skeleton.app.sub_mcp_app import SubAppLifespan
     from tai42_skeleton.config.deployment_env import DeploymentOwnership
@@ -77,8 +88,9 @@ class Epoch:
     (``current_client_epoch``), so its retired pools and its stale-settings sweep key
     on it. ``serving_app`` is the ASGI handle the dispatch slot serves for this
     generation; its serving surface (:meth:`record_serving_surface`) is the object every
-    request it serves points at. In-flight requests are counted against the epoch that
-    admitted them, so a retire drains exactly this generation's live work.
+    request it serves points at. In-flight work (served requests, session calls and backend
+    jobs on the serving loop) is counted against the epoch that admitted it, so a retire
+    drains exactly this generation's live work.
     """
 
     number: int
@@ -92,15 +104,15 @@ class Epoch:
     # ``aclose()``s it, terminating this generation's transports.
     supervisor: SubAppLifespan | None = None
     # The work engaged with the reload gate on behalf of this generation (see
-    # :func:`gate_party`): the requests and tool-run supervisors that drive a gated body
+    # :func:`gate_party`): the admitted work and tool-run supervisors that drive a gated body
     # (until they finish) and those waiting to acquire the gate or another lock whose holder
     # may drive this generation's retire (:func:`hold_recorded`). A retire never counts them
     # against the drain budget and never closes this generation's transports under them.
-    # A request or task can wait more than once at a time (two calls of one SSE session share
-    # the session stream's record; two child tasks of one supervised run share the run), so
-    # ``waiting_tasks`` counts each task's concurrent waits and a request record counts its own.
-    driving: set[RequestAdmission] = field(default_factory=set)
-    waiting: set[RequestAdmission] = field(default_factory=set)
+    # Admitted work or a task can wait more than once at a time (two calls of one SSE session
+    # share the session stream's record; two child tasks of one supervised run share the run),
+    # so ``waiting_tasks`` counts each task's concurrent waits and an admission record its own.
+    driving: set[Admission] = field(default_factory=set)
+    waiting: set[Admission] = field(default_factory=set)
     driving_tasks: set[asyncio.Task[Any]] = field(default_factory=set)
     waiting_tasks: Counter[asyncio.Task[Any]] = field(default_factory=Counter)
     _surface: weakref.ref[object] | None = None
@@ -118,19 +130,19 @@ class Epoch:
     _adopted_transports: list[SubAppLifespan] = field(default_factory=list)
 
     def __post_init__(self) -> None:
-        """Start the generation idle, before any request has entered it."""
-        # Born idle: no request has entered this generation yet.
+        """Start the generation idle, before any work has entered it."""
+        # Born idle: no work has been admitted on this generation yet.
         self._idle.set()
 
     # -- per-epoch in-flight accounting ----------------------------------------
 
     def admit(self) -> None:
-        """Count one admitted request against this generation."""
+        """Count one unit of admitted work against this generation."""
         self._in_flight += 1
         self._idle.clear()
 
     def release(self) -> None:
-        """Release one admitted request, marking the generation idle when none remain."""
+        """Release one unit of admitted work, marking the generation idle when none remain."""
         # Never drops below zero: a double release would falsely mark the epoch idle
         # while work is still in flight and let the retire force-close under it.
         self._in_flight = max(0, self._in_flight - 1)
@@ -139,7 +151,7 @@ class Epoch:
 
     @property
     def in_flight(self) -> int:
-        """The count of requests currently admitted on this generation."""
+        """The count of units of work (requests, session calls, backend jobs) currently admitted on this generation."""
         return self._in_flight
 
     def record_serving_surface(self, surface: object) -> None:
@@ -206,7 +218,7 @@ class Epoch:
 
     @property
     def gate_waiters(self) -> bool:
-        """Whether a request or tool-run supervisor of this generation is waiting to acquire a recorded lock."""
+        """Whether admitted work or a tool-run supervisor of this generation is waiting to acquire a recorded lock."""
         return bool(self.waiting or self.waiting_tasks)
 
     def note_gate_wait(self) -> None:
@@ -230,7 +242,7 @@ class Epoch:
         self._wait_ended.set()
 
     async def _wait_gate_waiters(self) -> None:
-        """Wait until no request or tool-run supervisor of this generation waits on a recorded lock.
+        """Wait until no admitted work or tool-run supervisor of this generation waits on a recorded lock.
 
         Unbounded here by design, as :meth:`_wait_driving` is: a waiter moves once the lock's
         holder releases it, and the holder's own bounds bound that. Suspends on each wait's
@@ -241,12 +253,12 @@ class Epoch:
             await self._wait_ended.wait()
 
     async def _wait_driving(self) -> None:
-        """Wait for every request and tool-run supervisor driving a gated body of this generation to finish.
+        """Wait for all admitted work and every tool-run supervisor driving a gated body of this generation to finish.
 
         The wait has no bound of its own. A driver's remaining work is the reload's own tail,
         which the gated body's own bounds bound (the rebuild, the fleet apply timeout, a
-        recycle step), and then the writing of its reply. A call of an SSE session is a
-        request of its own here, and its record finishes only once its session stream's
+        recycle step), and then the writing of its reply. A call of an SSE session is
+        admitted work of its own here, and its record finishes only once its session stream's
         ASGI ``send`` of the reply has returned; that send waits on the client's reads, so a
         connected SSE client that stops reading holds this wait (and the deferred retire tail
         behind it) until it reads again or its connection drops. On a serve worker's stop,
@@ -255,11 +267,11 @@ class Epoch:
         that engages during the wait is seen.
         """
         while True:
-            requests = list(self.driving)
+            admitted = list(self.driving)
             tasks = list(self.driving_tasks)
-            if not requests and not tasks:
+            if not admitted and not tasks:
                 return
-            for state in requests:
+            for state in admitted:
                 await state.finished.wait()
                 self.driving.discard(state)
             for task in tasks:
@@ -268,13 +280,13 @@ class Epoch:
 
     @property
     def answered(self) -> bool:
-        """Whether no request of this generation is in flight and none of its work drives or waits on a lock."""
+        """Whether no admitted work of this generation is in flight and none of its work drives or waits on a lock."""
         return self._idle.is_set() and not self.engaged
 
     async def wait_answered(self) -> None:
         """Wait until this generation is :attr:`answered`.
 
-        Covers the counted requests, the work driving a gated body and the work waiting on a
+        Covers the counted admitted work, the work driving a gated body and the work waiting on a
         recorded lock (uncounted while it waits, counted again once it moves); a drain-exempt
         stream is not counted, so it never holds the wait. Unbounded here, as
         :meth:`_wait_driving` is: the work's own bounds bound it.
@@ -287,19 +299,19 @@ class Epoch:
     def register_periodic_loop(self, cancel: Callable[[], Awaitable[None]]) -> None:
         """Register a cancel-and-await callback for a periodic loop this generation owns.
 
-        Covers the failed-MCP reprobe, the marketplace advisories poll, and the
-        conversations delivery sweep. Every registered loop is cancelled when the
+        Covers the marketplace advisories poll, the conversations delivery sweep, the hook-runs
+        sweep and the states outbox sweep. Every registered loop is cancelled when the
         epoch retires, so a retired generation leaves no timer running against the
         fresh one.
         """
         self._periodic_cancels.append(cancel)
 
     async def _drain_in_flight(self, deadline: float, *, until_gate_wait: bool = False) -> bool:
-        """Wait, bounded by ``deadline``, for this generation's admitted requests to finish.
+        """Wait, bounded by ``deadline``, for this generation's admitted work to finish.
 
-        Counts only the work that can finish on its own: a request driving a gated body has
-        released its slot (:func:`gate_party`), as has a drain-exempt stream, and a request
-        waiting on a recorded lock is not counted while it waits. A request still in flight past
+        Counts only the work that can finish on its own: work driving a gated body has
+        released its slot (:func:`gate_party`), as has a drain-exempt stream, and work
+        waiting on a recorded lock is not counted while it waits. Work still in flight past
         the budget is logged loudly and the retire proceeds (the fresh epoch already serves new
         traffic). With ``until_gate_wait`` the wait also ends, unreported, as soon as work of
         this generation starts waiting on a recorded lock, and the call returns ``True``: the drain
@@ -320,7 +332,7 @@ class Epoch:
                 wait.cancel()
         if not done:
             logger.error(
-                "epoch %d retire: %d request(s) still in flight after the drain budget",
+                "epoch %d retire: %d unit(s) of work still in flight after the drain budget",
                 self.number,
                 self._in_flight,
             )
@@ -381,12 +393,17 @@ _serving_app_builder: Callable[[], ASGIApp] = epoch_defaults.default_streamable_
 # pinned to one worker.
 _boot_stateless_http: bool | None = None
 
-# The epoch a build is populating, for the span of ``build_and_swap_epoch``'s build
-# step (``None`` otherwise). A per-epoch startup handler that spawns a periodic loop
-# registers its cancel with THIS epoch, so the loop retires with the generation that
-# started it rather than leaking onto the next — the build's new epoch is not yet the
-# live ``_current`` during the build.
-_building_epoch: Epoch | None = None
+# The epoch a build's work in this context belongs to; ``None`` for work no build started.
+# Set by :func:`building` in the build's own steps; a task those steps start keeps it after the
+# epoch is swapped in, when it serves that same generation live (a sub-app's lifespan
+# supervisor, :mod:`~tai42_skeleton.app.sub_mcp_app`). Work sees it when it runs in a
+# context that carries it: an asyncio task or an ``asyncio.to_thread`` call those steps start
+# copies the current context and sees it; one run in a context built without it (passed as
+# ``context=`` or entered with ``Context.run``, as ``fork_gate.rebuild_context()`` is), a
+# ``threading.Thread`` and a ``loop.run_in_executor`` call do not, nor does a request, a worker
+# or a loop started anywhere else. The serving-core accessor resolves the core of this epoch,
+# which is not yet the live ``_current`` while it is built.
+_building_epoch: ContextVar[Epoch | None] = ContextVar("tai42_building_epoch", default=None)
 
 
 def current_epoch() -> Epoch:
@@ -407,38 +424,31 @@ def current_epoch_or_none() -> Epoch | None:
     return _current
 
 
-def epoch_under_construction() -> Epoch:
-    """The epoch a build is populating, else the live epoch.
-
-    The accessor a per-epoch startup handler uses to register a periodic loop's
-    cancel with the generation that owns it. During ``build_and_swap_epoch``
-    this is the new epoch (not yet ``_current``); at boot it falls back to the
-    just-installed boot epoch.
-    """
-    return _building_epoch if _building_epoch is not None else current_epoch()
+def epoch_being_built() -> Epoch | None:
+    """The epoch the work in this context is building, or ``None`` for work that serves the live generation."""
+    return _building_epoch.get()
 
 
-def epoch_under_construction_or_none() -> Epoch | None:
-    """Like :func:`epoch_under_construction`, but ``None`` (never raising) when no epoch is installed.
-
-    For a periodic-loop spawn that may run in a loop-less / pre-epoch context (a
-    bare unit test), where there is no generation to register the loop with.
-    """
-    return _building_epoch if _building_epoch is not None else _current
+@contextmanager
+def building(epoch: Epoch) -> Iterator[None]:
+    """Mark the enclosed work as the build of ``epoch``: its serving-core reads resolve ``epoch.core``."""
+    token = _building_epoch.set(epoch)
+    try:
+        yield
+    finally:
+        _building_epoch.reset(token)
 
 
 def is_epoch_rebuild_in_progress() -> bool:
-    """True only while ``build_and_swap_epoch`` is populating a new generation.
+    """True in the work of a build populating a new generation, and in the tasks it starts in its own context.
 
-    True during a RELOAD, and never at cold boot or steady serving.
-    (``_building_epoch`` is set only for the span of the build; cold boot
-    installs its core through ``install_boot_core`` without it.) Lets a
-    build-time step (the MCP viability probe) wait the short reload wait instead of
-    the whole start budget, so an unreachable server can't stall a live reload.
-    Read safely from the off-loop build worker: it is a GIL-atomic reference read
-    of a process global.
+    True in a RELOAD's build steps and in a task they start in their own context, which keeps
+    the mark after the swap; never in work no build started: cold boot (it installs its core
+    through ``install_boot_core`` without the mark), requests and workers. Lets a build-time
+    step (the MCP viability probe) wait the short reload wait instead of the whole start
+    budget, so an unreachable server can't stall a live reload.
     """
-    return _building_epoch is not None
+    return _building_epoch.get() is not None
 
 
 def install_boot_core(core: ServingCore) -> Epoch:
@@ -535,7 +545,7 @@ def _swap(new_epoch: Epoch) -> Epoch:
     return old
 
 
-async def _outside_any_request[T](step: Callable[[], Awaitable[T]]) -> T:
+async def _outside_any_request[T](step: Callable[[], Awaitable[T]], *, builds: Epoch | None = None) -> T:
     """Await ``step`` in a task that starts from no request's context.
 
     A task copies the context it is created in. A door-driven reload runs inside the
@@ -548,10 +558,17 @@ async def _outside_any_request[T](step: Callable[[], Awaitable[T]]) -> T:
     holds the gate is the rebuild's own and does not wait on it. The tasks it creates outlive
     the rebuild and the job that may have driven it, so the context carries no job span:
     a span or a fork they make later is one of their own.
+
+    When ``builds`` is given, the step is the build of that epoch (:func:`building`): a
+    serving-core read in it, and in every task it creates without a fresh context, resolves
+    the generation under construction. Without it the step's reads resolve the live generation.
     """
 
     async def _step() -> T:
-        return await step()
+        if builds is None:
+            return await step()
+        with building(builds):
+            return await step()
 
     return await asyncio.create_task(_step(), context=fork_gate.rebuild_context())
 
@@ -565,12 +582,13 @@ class _EpochBuild:
     settings_mark: Any
     env_snapshot: dict[str, str]
     loaded_before: set[str]
+    bindings_before: RespawnClassBindings
 
 
 async def _build_epoch(
     proposed_env: Mapping[str, str],
     ownership: DeploymentOwnership,
-    rebuild: Callable[[], Any] | None,
+    rebuild: Callable[[Epoch], Awaitable[Any]] | None,
     build_serving_app: Callable[[Epoch], Awaitable[ASGIApp]] | None,
 ) -> _EpochBuild:
     """Build a fresh generation under ``proposed_env`` OFF TO THE SIDE, with zero mutation of the live epoch.
@@ -579,7 +597,9 @@ async def _build_epoch(
     settings accessor cache so the build reads it, opens a staged generation for every
     per-generation global, then runs ``rebuild`` and ``build_serving_app``. All of it runs
     before the client epoch advances. A failure is discarded (:func:`_discard_build`) with the
-    ERROR line and re-raised; the applied env stays live on success, for the caller's ending.
+    ERROR line and re-raised, marked as a discarded build's failure once the discard completed
+    (:func:`~tai42_skeleton.app.discarded_build.mark_discarded_build`); the applied env stays live
+    on success, for the caller's ending.
     """
     from tai42_skeleton.app.registry_staging import begin_staging_all
 
@@ -588,10 +608,9 @@ async def _build_epoch(
 
     snapshot = dict(os.environ)
     loaded_before = set(applied_env_keys())
+    bindings_before = respawn_class_bindings()
 
-    global _building_epoch
     new_epoch = Epoch(number=current_client_epoch())
-    _building_epoch = new_epoch
     try:
         apply_env_and_reset_settings(proposed_env, ownership)
         # Every settings instance read from here on is read under the proposed env for the
@@ -601,28 +620,31 @@ async def _build_epoch(
         # epoch handlers populate the generation being built and the live epoch's globals
         # stay untouched until a commit.
         begin_staging_all()
-        rebuild()
-        serving_app = await _outside_any_request(lambda: build_serving_app(new_epoch))
+        await _outside_any_request(lambda: rebuild(new_epoch), builds=new_epoch)
+        serving_app = await _outside_any_request(lambda: build_serving_app(new_epoch), builds=new_epoch)
         if new_epoch._surface is None:
             new_epoch.record_serving_surface(serving_app)
-    except BaseException:
+    except BaseException as failure:
         logger.error(
             "epoch build failed under the proposed env — discarded; the previous epoch keeps serving",
             exc_info=True,
         )
-        await _discard_build(new_epoch, snapshot, loaded_before)
+        await _discard_build(new_epoch, snapshot, loaded_before, bindings_before)
+        mark_discarded_build(failure)
         raise
-    finally:
-        _building_epoch = None
-    return _EpochBuild(new_epoch, serving_app, settings_mark, snapshot, loaded_before)
+    return _EpochBuild(new_epoch, serving_app, settings_mark, snapshot, loaded_before, bindings_before)
 
 
-async def _discard_build(new_epoch: Epoch, snapshot: dict[str, str], loaded_before: set[str]) -> None:
+async def _discard_build(
+    new_epoch: Epoch, snapshot: dict[str, str], loaded_before: set[str], bindings_before: RespawnClassBindings
+) -> None:
     """Discard a generation built off to the side; the live epoch keeps serving with zero mutation.
 
     Drops every staged generation and re-derives the process caches from the untouched
     committed state: the staged registrations are discarded, the env is restored
-    (:func:`~tai42_skeleton.app.applied_env.restore_env`), the settings accessor cache is cleared,
+    (:func:`~tai42_skeleton.app.applied_env.restore_env`), the respawn-class bindings a settings
+    group the build registered made are dropped
+    (:func:`~tai42_kit.settings.restore_respawn_class_bindings`), the settings accessor cache is cleared,
     and the route index is re-derived from the live route registry (a partial reimport may have
     added routes — the spine route registry dedups and is never rolled back). A lifespan the
     build entered belongs to the discarded generation and is closed with it.
@@ -632,10 +654,11 @@ async def _discard_build(new_epoch: Epoch, snapshot: dict[str, str], loaded_befo
     from tai42_skeleton.tools.binding.surface import bump_tool_surface_generation
 
     abort_staging_all()
-    # The discarded build's core is dropped, so the listed tool set reverts to the live
-    # core's: a cache filled from the building core during the build never matches again.
+    # The listed tool set reverts to the live core's: a cache filled in the build's own work
+    # from the core under construction never matches again.
     bump_tool_surface_generation()
     restore_env(snapshot, loaded_before)
+    restore_respawn_class_bindings(bindings_before)
     reset_all_settings()
     reset_route_index()
     await new_epoch.close_transports()
@@ -645,7 +668,7 @@ async def build_and_discard_epoch(
     proposed_env: Mapping[str, str],
     *,
     ownership: DeploymentOwnership,
-    rebuild: Callable[[], Any] | None = None,
+    rebuild: Callable[[Epoch], Awaitable[Any]] | None = None,
     build_serving_app: Callable[[Epoch], Awaitable[ASGIApp]] | None = None,
 ) -> None:
     """Prove ``proposed_env`` builds a serving epoch, then discard the build; the live epoch is untouched.
@@ -657,7 +680,7 @@ async def build_and_discard_epoch(
     ERROR and re-raised; a success is logged at INFO.
     """
     build = await _build_epoch(proposed_env, ownership, rebuild, build_serving_app)
-    await _discard_build(build.epoch, build.env_snapshot, build.loaded_before)
+    await _discard_build(build.epoch, build.env_snapshot, build.loaded_before, build.bindings_before)
     logger.info("epoch built under the proposed env and discarded: this process is not a bus member and swaps nothing")
 
 
@@ -666,7 +689,7 @@ async def build_and_swap_epoch(
     *,
     ownership: DeploymentOwnership,
     bring_credentials_up_to_date: Callable[[], Awaitable[Any]] | None = None,
-    rebuild: Callable[[], Any] | None = None,
+    rebuild: Callable[[Epoch], Awaitable[Any]] | None = None,
     build_serving_app: Callable[[Epoch], Awaitable[ASGIApp]] | None = None,
     establish_background_loops: Callable[[], Awaitable[None]] | None = None,
     drain_deadline: float | None = None,
@@ -688,7 +711,8 @@ async def build_and_swap_epoch(
       handle and may record its serving surface on the epoch (when it records none, the
       handle it returns is the surface) — with ZERO mutation of the live epoch;
     - SUCCESS: advance the client epoch, stamp the settings the build read with it, swap
-      the dispatch slot and the current-epoch pointer together, retire the previous
+      the dispatch slot and the current-epoch pointer together, bind every registered
+      respawn-class field left unbound under the applied env, retire the previous
       generation (:func:`~tai42_skeleton.app.epoch_retire.retire_epoch`: periodic loops
       cancelled, in-flight work + supervisors drained, transports closed once the work
       that drives or waits on the reload gate has answered, retired pools closed, and its
@@ -697,8 +721,11 @@ async def build_and_swap_epoch(
       loop (registered with the new epoch). The applied env STAYS live; the caller
       persists it;
     - FAILURE: the half-built epoch is DISCARDED (a lifespan it entered is closed),
-      ``os.environ`` is restored EXACTLY from the snapshot (restore-on-failure only),
-      the old epoch keeps serving untouched, and the build failure is re-raised loudly.
+      ``os.environ`` is restored from the snapshot (restore-on-failure only,
+      :func:`~tai42_skeleton.app.applied_env.restore_env`),
+      the old epoch keeps serving untouched, and the build failure is re-raised loudly, marked
+      as a discarded build's failure
+      (:func:`~tai42_skeleton.app.discarded_build.is_discarded_build_failure`).
 
     The ``bring_credentials_up_to_date`` / ``rebuild`` / ``build_serving_app`` / ``establish_background_loops``
     seams default to the running app; injectable so the build/swap/discard contract is exercised in isolation.
@@ -721,6 +748,10 @@ async def build_and_swap_epoch(
     # dispatch-slot swap, so no request ever sees a mix of the old and new generations.
     commit_staging_all()
     old_epoch = _swap(new_epoch)
+    # A settings group a discarded build first registered holds no binding; a module that stays
+    # imported never registers again, so its group binds here under the env the generation now
+    # serving was built under.
+    bind_unbound_respawn_class_env()
     await retire_epoch(old_epoch, retired, drain_deadline)
     # Post-swap, ON the serving loop: (re)establish this generation's loop-affine
     # background loops and register them with the now-current epoch. Runs AFTER the

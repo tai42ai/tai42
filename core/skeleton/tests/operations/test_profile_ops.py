@@ -5,7 +5,7 @@ store is faked in-memory (a ``SettingsProfileStoreView`` over a minimal generic
 store), the store-configured predicate is forced on, and ``ConfigService`` is wired
 to a fake config manager so ``put_profile``'s save-time boundary validation runs the
 real refusal logic. ``apply_profile`` is covered at the op edge (404, error mapping, and
-the self-exit BackgroundTask arming decision) with the pipeline itself stubbed — the
+the writer's own exit the outcome's roll owes) with the pipeline itself stubbed — the
 pipeline's ordering / failure contract is oracled in ``tests/config/test_profile_apply``.
 """
 
@@ -29,13 +29,14 @@ from tai42_contract.versioning.errors import (
 )
 from tai42_contract.versioning.models import DocumentRecord, DocumentVersion
 
-from tai42_skeleton.app import graceful_exit, instance
+from tai42_skeleton.app import instance
 from tai42_skeleton.app.bus import WorkerRow
 from tai42_skeleton.app.recycle import RECYCLED, TIMED_OUT, RecycleReport, RecycleRow, RecycleStop
+from tai42_skeleton.app.writer_exit import WRITER_EXIT_REASON, open_writer_exit_scope, writer_exit_scope
 from tai42_skeleton.config.deployment_env import fleet_deployment_ownership
 from tai42_skeleton.config.service import ConfigService, ProfileApplyOutcome
-from tai42_skeleton.operations import BadRequestError, NotFoundError, NotSupportedError, OperationResponse
-from tai42_skeleton.operations import config as config_ops
+from tai42_skeleton.operations import BadRequestError, NotFoundError, NotSupportedError
+from tai42_skeleton.operations import settings_profiles as profile_ops
 from tai42_skeleton.settings_profiles.store import SettingsProfileStoreView
 
 from .._fakes.bus import FakeBus
@@ -145,14 +146,14 @@ def view() -> SettingsProfileStoreView:
 
 @pytest.fixture(autouse=True)
 def _wire(monkeypatch: pytest.MonkeyPatch, view: SettingsProfileStoreView) -> None:
-    monkeypatch.setattr(config_ops, "component_store_configured", lambda _component: True)
-    monkeypatch.setattr(config_ops, "settings_profile_store", lambda: view)
+    monkeypatch.setattr(profile_ops, "component_store_configured", lambda _component: True)
+    monkeypatch.setattr(profile_ops, "settings_profile_store", lambda: view)
     # ``put_profile`` and ``diff_profile`` judge ownership over this process's own deployment,
     # a one-worker fleet, so only an X-band, deployment-set or dangling payload is refused.
     bus = FakeBus()
     monkeypatch.setattr(instance.app, "_bus", bus)
     monkeypatch.setattr(
-        config_ops.ConfigService,
+        profile_ops.ConfigService,
         "from_app",
         classmethod(
             lambda cls: ConfigService(config_manager=_FakeManager(), admin=None, bus=bus, combo_check=ComboChecks())  # type: ignore[arg-type]
@@ -172,12 +173,12 @@ def _body(*, description: str = "d", env: dict[str, str] | None = None, secret_k
 
 
 async def test_put_creates_then_versions_and_never_emits_body() -> None:
-    created = await config_ops.put_profile("p", **_body(env={"A": "1"}, secret_keys=["A"]))
+    created = await profile_ops.put_profile("p", **_body(env={"A": "1"}, secret_keys=["A"]))
     assert created == {"ok": True, "version": 1}
     # A second PUT appends a version — never re-emits the stored body/secret.
-    updated = await config_ops.put_profile("p", **_body(env={"A": "2"}, secret_keys=["A"]))
+    updated = await profile_ops.put_profile("p", **_body(env={"A": "2"}, secret_keys=["A"]))
     assert updated == {"ok": True, "version": 2}
-    got = await config_ops.get_profile("p")
+    got = await profile_ops.get_profile("p")
     assert got == {"description": "d", "env": {"A": "2"}, "secret_keys": ["A"]}
 
 
@@ -202,20 +203,20 @@ async def test_put_converges_on_a_concurrent_create_race(
     monkeypatch.setattr(view, "create_profile", _create_loses)
 
     # The loser falls through to save_version (real) — appends v2, no 500.
-    result = await config_ops.put_profile("p", **_body(env={"A": "2"}))
+    result = await profile_ops.put_profile("p", **_body(env={"A": "2"}))
     assert result == {"ok": True, "version": 2}
 
 
 async def test_put_rejects_reserved_at_prefixed_name() -> None:
     with pytest.raises(BadRequestError, match="reserved"):
-        await config_ops.put_profile("@previous", **_body())
+        await profile_ops.put_profile("@previous", **_body())
 
 
 async def test_put_refuses_an_x_band_key_naming_it() -> None:
     # A profile carrying a deployment X-band key (the readiness sentinel path) is refused at
     # save time, naming the key — never persisted.
     with pytest.raises(BadRequestError, match="TAI_READY_SENTINEL_PATH"):
-        await config_ops.put_profile("p", **_body(env={"TAI_READY_SENTINEL_PATH": "/tmp/ready"}, secret_keys=[]))
+        await profile_ops.put_profile("p", **_body(env={"TAI_READY_SENTINEL_PATH": "/tmp/ready"}, secret_keys=[]))
 
 
 async def test_put_refuses_a_dangling_env_marker(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -226,14 +227,14 @@ async def test_put_refuses_a_dangling_env_marker(monkeypatch: pytest.MonkeyPatch
             return {"mcp": {"url": "!ENV ${NEEDED}"}}
 
     monkeypatch.setattr(
-        config_ops.ConfigService,
+        profile_ops.ConfigService,
         "from_app",
         classmethod(
             lambda cls: ConfigService(config_manager=_Manager(), admin=None, bus=FakeBus(), combo_check=ComboChecks())  # type: ignore[arg-type]
         ),
     )
     with pytest.raises(BadRequestError, match="NEEDED"):
-        await config_ops.put_profile("p", **_body(env={"OTHER": "1"}, secret_keys=[]))
+        await profile_ops.put_profile("p", **_body(env={"OTHER": "1"}, secret_keys=[]))
 
 
 async def test_put_refuses_a_key_the_deployment_sets_naming_it(
@@ -245,7 +246,7 @@ async def test_put_refuses_a_key_the_deployment_sets_naming_it(
     recapture_deployment_env()
 
     with pytest.raises(BadRequestError, match=r"set by the deployment: PROFILE_PUT_DEPLOYED"):
-        await config_ops.put_profile("p", **_body(env={"PROFILE_PUT_DEPLOYED": "profile"}, secret_keys=[]))
+        await profile_ops.put_profile("p", **_body(env={"PROFILE_PUT_DEPLOYED": "profile"}, secret_keys=[]))
     with pytest.raises(SettingsProfileNotFoundError):
         await view.get_profile("p")
 
@@ -255,14 +256,14 @@ async def test_put_refuses_a_key_the_deployment_sets_naming_it(
 
 async def test_get_absent_is_404() -> None:
     with pytest.raises(NotFoundError):
-        await config_ops.get_profile("nope")
+        await profile_ops.get_profile("nope")
 
 
 async def test_list_excludes_reserved_at_profiles(view: SettingsProfileStoreView) -> None:
     await view.create_profile("beta", SettingsProfileBody(**_body(description="B")))
     await view.create_profile("alpha", SettingsProfileBody(**_body(description="A")))
     await view.create_profile("@previous", SettingsProfileBody(**_body(description="X")))
-    rows = await config_ops.list_profiles()
+    rows = await profile_ops.list_profiles()
     assert rows == [{"name": "beta", "description": "B"}, {"name": "alpha", "description": "A"}] or rows == [
         {"name": "alpha", "description": "A"},
         {"name": "beta", "description": "B"},
@@ -272,9 +273,9 @@ async def test_list_excludes_reserved_at_profiles(view: SettingsProfileStoreView
 
 async def test_delete_then_absent(view: SettingsProfileStoreView) -> None:
     await view.create_profile("p", SettingsProfileBody(**_body()))
-    assert await config_ops.delete_profile("p") == {"ok": True}
+    assert await profile_ops.delete_profile("p") == {"ok": True}
     with pytest.raises(NotFoundError):
-        await config_ops.delete_profile("p")
+        await profile_ops.delete_profile("p")
 
 
 # -- diff --------------------------------------------------------------------
@@ -305,7 +306,7 @@ async def test_diff_reports_added_removed_changed_recycle_and_refused(
     monkeypatch.delenv("TAI_BUS_NAMESPACE", raising=False)
     recapture_deployment_env()
     monkeypatch.setattr(
-        config_ops,
+        profile_ops,
         "_stored_env",
         lambda: {
             "KEEP": "1",
@@ -317,8 +318,8 @@ async def test_diff_reports_added_removed_changed_recycle_and_refused(
         },
     )
     # Deterministic classification: CH is a recycle-class key.
-    monkeypatch.setattr(config_ops, "_recycle_class_keys", lambda keys: sorted(key for key in keys if key == "CH"))
-    diff = await config_ops.diff_profile("p")
+    monkeypatch.setattr(profile_ops, "_recycle_class_keys", lambda keys: sorted(key for key in keys if key == "CH"))
+    diff = await profile_ops.diff_profile("p")
     assert diff["added"] == ["ADD", "DEPLOYED_SET", "TAI_BUS_NAMESPACE"]
     assert diff["removed"] == ["DEPLOYED_DROPPED", "GONE"]
     assert diff["changed"] == [
@@ -354,8 +355,8 @@ async def test_diff_classifies_a_key_under_any_spelling_the_settings_layer_reads
     monkeypatch.delenv("TAI_BUS_REDIS", raising=False)
     monkeypatch.delenv("TAI_BUS_REDIS_MAX_CONNECTIONS", raising=False)
     recapture_deployment_env()
-    monkeypatch.setattr(config_ops, "_stored_env", dict)
-    diff = await config_ops.diff_profile("p")
+    monkeypatch.setattr(profile_ops, "_stored_env", dict)
+    diff = await profile_ops.diff_profile("p")
     assert diff["recycle_keys"] == ["TAI_BUS_REDIS", "tai_bus_namespace", "tai_bus_redis_max_connections"]
     assert diff["refused_keys"] == ["TAI_BUS_REDIS", "tai_bus_namespace"]
 
@@ -368,11 +369,11 @@ async def test_diff_classifies_a_dropped_dead_copy_as_no_recycle(
     await view.create_profile("p", SettingsProfileBody(description="d", env={"KEEP": "1"}, secret_keys=[]))
     monkeypatch.setenv("DEPLOYED_RECYCLE", "from-deployment")
     recapture_deployment_env()
-    monkeypatch.setattr(config_ops, "_stored_env", lambda: {"KEEP": "1", "DEPLOYED_RECYCLE": "stale"})
+    monkeypatch.setattr(profile_ops, "_stored_env", lambda: {"KEEP": "1", "DEPLOYED_RECYCLE": "stale"})
     monkeypatch.setattr(
-        config_ops, "_recycle_class_keys", lambda keys: sorted(key for key in keys if key == "DEPLOYED_RECYCLE")
+        profile_ops, "_recycle_class_keys", lambda keys: sorted(key for key in keys if key == "DEPLOYED_RECYCLE")
     )
-    diff = await config_ops.diff_profile("p")
+    diff = await profile_ops.diff_profile("p")
     assert diff["removed"] == ["DEPLOYED_RECYCLE"]
     assert diff["recycle_keys"] == []
     assert diff["refused_keys"] == []
@@ -387,17 +388,17 @@ async def test_diff_previews_the_marks_the_apply_writes(
     await view.create_profile(
         "more", SettingsProfileBody(description="d", env={"FOO": "x"}, secret_keys=["FOO", "BAR"])
     )
-    monkeypatch.setattr(config_ops, "_stored_env", lambda: {"FOO": "x", "TAI_ENV_SECRET_KEYS": "FOO"})
-    monkeypatch.setattr(config_ops, "_recycle_class_keys", lambda keys: [])
-    same = await config_ops.diff_profile("same")
+    monkeypatch.setattr(profile_ops, "_stored_env", lambda: {"FOO": "x", "TAI_ENV_SECRET_KEYS": "FOO"})
+    monkeypatch.setattr(profile_ops, "_recycle_class_keys", lambda keys: [])
+    same = await profile_ops.diff_profile("same")
     assert (same["added"], same["removed"], same["changed"]) == ([], [], [])
-    more = await config_ops.diff_profile("more")
+    more = await profile_ops.diff_profile("more")
     assert more["changed"] == [{"key": "TAI_ENV_SECRET_KEYS", "old": "FOO", "new": "FOO,BAR"}]
 
 
 async def test_diff_absent_is_404() -> None:
     with pytest.raises(NotFoundError):
-        await config_ops.diff_profile("nope")
+        await profile_ops.diff_profile("nope")
 
 
 # -- versions / rollback -----------------------------------------------------
@@ -406,14 +407,14 @@ async def test_diff_absent_is_404() -> None:
 async def test_list_versions_strips_body_and_marks_current(view: SettingsProfileStoreView) -> None:
     await view.create_profile("p", SettingsProfileBody(**_body(env={"A": "1"})))
     await view.save_version("p", SettingsProfileBody(**_body(env={"A": "2"})))
-    rows = await config_ops.list_profile_versions("p")
+    rows = await profile_ops.list_profile_versions("p")
     assert [(r["version"], r["is_current"]) for r in rows] == [(1, False), (2, True)]
     assert all("body" not in r for r in rows)
 
 
 async def test_get_version_includes_body(view: SettingsProfileStoreView) -> None:
     await view.create_profile("p", SettingsProfileBody(**_body(env={"A": "1"}, secret_keys=["A"])))
-    row = await config_ops.get_profile_version("p", "1")
+    row = await profile_ops.get_profile_version("p", "1")
     assert row["version"] == 1
     assert row["body"] == {"description": "d", "env": {"A": "1"}, "secret_keys": ["A"]}
 
@@ -421,42 +422,42 @@ async def test_get_version_includes_body(view: SettingsProfileStoreView) -> None
 async def test_get_version_non_integer_is_400(view: SettingsProfileStoreView) -> None:
     await view.create_profile("p", SettingsProfileBody(**_body()))
     with pytest.raises(BadRequestError, match="integer"):
-        await config_ops.get_profile_version("p", "notint")
+        await profile_ops.get_profile_version("p", "notint")
 
 
 async def test_get_version_unknown_is_404(view: SettingsProfileStoreView) -> None:
     await view.create_profile("p", SettingsProfileBody(**_body()))
     with pytest.raises(NotFoundError):
-        await config_ops.get_profile_version("p", "99")
+        await profile_ops.get_profile_version("p", "99")
 
 
 async def test_rollback_repoints_active(view: SettingsProfileStoreView) -> None:
     await view.create_profile("p", SettingsProfileBody(**_body(env={"A": "1"})))
     await view.save_version("p", SettingsProfileBody(**_body(env={"A": "2"})))
-    assert await config_ops.rollback_profile("p", 1) == {"ok": True, "version": 1}
-    assert (await config_ops.get_profile("p"))["env"] == {"A": "1"}
+    assert await profile_ops.rollback_profile("p", 1) == {"ok": True, "version": 1}
+    assert (await profile_ops.get_profile("p"))["env"] == {"A": "1"}
 
 
 async def test_rollback_unknown_version_is_404(view: SettingsProfileStoreView) -> None:
     await view.create_profile("p", SettingsProfileBody(**_body()))
     with pytest.raises(NotFoundError):
-        await config_ops.rollback_profile("p", 99)
+        await profile_ops.rollback_profile("p", 99)
 
 
 # -- store-unconfigured gating -----------------------------------------------
 
 
 async def test_list_empty_when_store_unconfigured(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(config_ops, "component_store_configured", lambda _component: False)
-    assert await config_ops.list_profiles() == []
+    monkeypatch.setattr(profile_ops, "component_store_configured", lambda _component: False)
+    assert await profile_ops.list_profiles() == []
 
 
 async def test_reads_refuse_501_when_store_unconfigured(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(config_ops, "component_store_configured", lambda _component: False)
+    monkeypatch.setattr(profile_ops, "component_store_configured", lambda _component: False)
     with pytest.raises(NotSupportedError):
-        await config_ops.get_profile("p")
+        await profile_ops.get_profile("p")
     with pytest.raises(NotSupportedError):
-        await config_ops.put_profile("p", **_body())
+        await profile_ops.put_profile("p", **_body())
 
 
 # -- apply --------------------------------------------------------------
@@ -472,24 +473,42 @@ def _stub_apply_service(monkeypatch: pytest.MonkeyPatch, outcome: ProfileApplyOu
         async def apply_replace_env(self, env, *, save_previous):  # type: ignore[no-untyped-def]
             seen["env"] = env
             seen["save_previous"] = save_previous
+            if outcome.self_exit_armed:
+                # Stand in for the pipeline's roll: an armed roll owes the applier's exit into the open scope.
+                bus = instance.app.bus
+                scope = open_writer_exit_scope("this profile apply")
+                scope.hold_exit(bus, "this profile apply")
+                scope.owe(bus)
             return outcome
 
-    monkeypatch.setattr(config_ops.ConfigService, "from_app", classmethod(lambda cls: _Svc()))
+    monkeypatch.setattr(profile_ops.ConfigService, "from_app", classmethod(lambda cls: _Svc()))
     return seen
 
 
 def _apply_outcome(
-    *, serve_affecting: bool, recycle: RecycleReport | None = None, span_release_error: str | None = None
+    *, writer_needs: bool, recycle: RecycleReport | None = None, span_release_error: str | None = None
 ) -> ProfileApplyOutcome:
+    """An apply whose ``backend-1`` (and, when ``writer_needs``, the applier) reported TAI_X moved."""
     from tai42_skeleton.app.bus import FleetResult, WorkerIdentity, WorkerKind
+    from tai42_skeleton.config.recycle_policy import RecycleDecision, RecycleReason, ReportedKeys
 
+    decision = RecycleDecision(
+        writer=WorkerIdentity(name="serve-applier", kind=WorkerKind.serve, pid=1, generation=1),
+        reported={"backend-1": ReportedKeys(generation=1, keys=("TAI_X",))} if recycle is not None else {},
+        unconfirmed={},
+        clean=frozenset(),
+        writer_reason=RecycleReason(keys=("TAI_X",)) if writer_needs else None,
+        withheld={},
+        addressed=None,
+        report_unreachable=False,
+    )
     return ProfileApplyOutcome(
         hot=["A"],
+        decision=decision,
         recycle=recycle,
-        self_identity=WorkerIdentity(name="serve-applier", kind=WorkerKind.serve, pid=1, generation=1),
-        serve_affecting=serve_affecting,
         fleet=FleetResult(op="reload_config", results=[]),
         span_release_error=span_release_error,
+        self_exit_armed=writer_needs and recycle is not None and recycle.converged,
     )
 
 
@@ -497,35 +516,33 @@ def _converged() -> RecycleReport:
     return RecycleReport(rows=[RecycleRow(name="backend-1", kind="backend", generation_before=1, status=RECYCLED)])
 
 
-async def test_apply_arms_self_exit_when_serve_affecting(
+async def test_apply_runs_the_applier_exit_after_the_change_when_it_needs_its_restart(
     monkeypatch: pytest.MonkeyPatch, view: SettingsProfileStoreView
 ) -> None:
     await view.create_profile("p", SettingsProfileBody(**_body(env={"A": "1"}, secret_keys=[])))
-    seen = _stub_apply_service(monkeypatch, _apply_outcome(serve_affecting=True, recycle=_converged()))
+    seen = _stub_apply_service(monkeypatch, _apply_outcome(writer_needs=True, recycle=_converged()))
     # The armed self-exit names this process's bus member, so the test runs with its own bus.
     bus = FakeBus(origin="serve-test")
     monkeypatch.setattr(instance.app, "_bus", bus)
-    response = await config_ops.apply_profile("p")
-    assert isinstance(response, OperationResponse)
-    # A serve-affecting recycle arms the applier's OWN deferred self-exit as a post-flush
-    # BackgroundTask wrapping ``request_graceful_exit`` — never an inline create_task.
-    assert response.background is not None
-    assert response.background.func is graceful_exit.request_graceful_exit
-    assert response.background.args == (bus.member_identity.pid,)
-    assert response.payload["refused"] == []
-    assert response.payload["hot"] == ["A"]
+    with writer_exit_scope() as exits:
+        response = await profile_ops.apply_profile("p")
+        # The applier's own departure runs once the edge answered the change, never inline.
+        assert bus.exit_requests == []
+        await exits.settle()
+    assert bus.exit_requests == [WRITER_EXIT_REASON]
+    assert response["refused"] == []
+    assert response["hot"] == ["A"]
     # The profile's active env is what the pipeline was handed.
     assert seen["env"] == {"A": "1"}
 
 
-async def test_apply_no_self_exit_when_not_serve_affecting(
+async def test_apply_renders_no_self_deferred_line_when_the_applier_is_clean(
     monkeypatch: pytest.MonkeyPatch, view: SettingsProfileStoreView
 ) -> None:
     await view.create_profile("p", SettingsProfileBody(**_body(env={"A": "1"}, secret_keys=[])))
-    _stub_apply_service(monkeypatch, _apply_outcome(serve_affecting=False))
-    response = await config_ops.apply_profile("p")
-    assert isinstance(response, OperationResponse)
-    assert response.background is None  # hot-only / backend-only / bare → no self-exit
+    _stub_apply_service(monkeypatch, _apply_outcome(writer_needs=False))
+    response = await profile_ops.apply_profile("p")
+    assert [entry["status"] for entry in response["recycle"]] == []
 
 
 async def test_apply_reports_the_store_span_release_error(
@@ -533,15 +550,12 @@ async def test_apply_reports_the_store_span_release_error(
 ) -> None:
     await view.create_profile("p", SettingsProfileBody(**_body(env={"A": "1"}, secret_keys=[])))
     error = "OSError: releasing the span failed"
-    _stub_apply_service(monkeypatch, _apply_outcome(serve_affecting=False, span_release_error=error))
-    response = await config_ops.apply_profile("p")
-    assert isinstance(response, OperationResponse)
-    assert response.payload["span_release_error"] == error
+    _stub_apply_service(monkeypatch, _apply_outcome(writer_needs=False, span_release_error=error))
+    response = await profile_ops.apply_profile("p")
+    assert response["span_release_error"] == error
 
 
-async def test_apply_does_not_arm_self_exit_when_the_roll_stopped(
-    monkeypatch: pytest.MonkeyPatch, view: SettingsProfileStoreView
-) -> None:
+async def test_apply_renders_the_stopped_roll(monkeypatch: pytest.MonkeyPatch, view: SettingsProfileStoreView) -> None:
     await view.create_profile("p", SettingsProfileBody(**_body(env={"A": "1"}, secret_keys=[])))
     stopped = RecycleReport(
         rows=[
@@ -550,36 +564,34 @@ async def test_apply_does_not_arm_self_exit_when_the_roll_stopped(
                 kind="backend",
                 generation_before=1,
                 status=TIMED_OUT,
+                keys=["TAI_X"],
                 detail="old life still present",
             )
         ]
     )
-    _stub_apply_service(monkeypatch, _apply_outcome(serve_affecting=True, recycle=stopped))
-    response = await config_ops.apply_profile("p")
-    assert isinstance(response, OperationResponse)
-    assert response.background is None
-    assert response.payload["recycle"] == [
+    _stub_apply_service(monkeypatch, _apply_outcome(writer_needs=True, recycle=stopped))
+    response = await profile_ops.apply_profile("p")
+    assert response["recycle"] == [
         {
             "name": "backend-1",
             "kind": "backend",
             "status": "timed-out",
             "generation_before": 1,
+            "keys": ["TAI_X"],
             "detail": "old life still present",
         }
     ]
 
 
-async def test_apply_does_not_arm_self_exit_when_the_roll_stopped_with_no_target_in_hand(
+async def test_apply_renders_a_roll_stopped_with_no_target_in_hand(
     monkeypatch: pytest.MonkeyPatch, view: SettingsProfileStoreView
 ) -> None:
     await view.create_profile("p", SettingsProfileBody(**_body(env={"A": "1"}, secret_keys=[])))
     stopped = _converged()
     stopped.stopped = RecycleStop(kind="backend", name=None, detail="bus unreachable while reading the census")
-    _stub_apply_service(monkeypatch, _apply_outcome(serve_affecting=True, recycle=stopped))
-    response = await config_ops.apply_profile("p")
-    assert isinstance(response, OperationResponse)
-    assert response.background is None
-    assert response.payload["recycle_stopped"] == {
+    _stub_apply_service(monkeypatch, _apply_outcome(writer_needs=True, recycle=stopped))
+    response = await profile_ops.apply_profile("p")
+    assert response["recycle_stopped"] == {
         "kind": "backend",
         "name": None,
         "detail": "bus unreachable while reading the census",
@@ -588,7 +600,7 @@ async def test_apply_does_not_arm_self_exit_when_the_roll_stopped_with_no_target
 
 async def test_apply_absent_is_404() -> None:
     with pytest.raises(NotFoundError):
-        await config_ops.apply_profile("nope")
+        await profile_ops.apply_profile("nope")
 
 
 @pytest.mark.parametrize(
@@ -611,12 +623,12 @@ async def test_save_previous_version_snapshots_the_stored_band_as_a_profile(
     # pre-apply band back exactly, whatever the live manifest's connectors declare.
     live_manifest = {"connectors": [{"id": "acme", "kind": "oauth", "client_secret_env": "ACME_CLIENT_SECRET"}]}
     monkeypatch.setattr(tai42_app, "_impl", SimpleNamespace(admin=SimpleNamespace(live_manifest=live_manifest)))
-    await config_ops._save_previous_version(dict(stored))
+    await profile_ops._save_previous_version(dict(stored))
 
     body = await view.get_active_body("@previous")
     assert body.env == expected_env
     assert body.secret_keys == expected_marks
-    assert config_ops._profile_env(body) == stored
+    assert profile_ops._profile_env(body) == stored
 
 
 async def test_apply_maps_refusal_to_400(monkeypatch: pytest.MonkeyPatch, view: SettingsProfileStoreView) -> None:
@@ -626,9 +638,9 @@ async def test_apply_maps_refusal_to_400(monkeypatch: pytest.MonkeyPatch, view: 
         async def apply_replace_env(self, env, *, save_previous):  # type: ignore[no-untyped-def]
             raise ValueError("Refusing to apply: SUB_MCP_REDIS_URL is set by the deployment.")
 
-    monkeypatch.setattr(config_ops.ConfigService, "from_app", classmethod(lambda cls: _Svc()))
+    monkeypatch.setattr(profile_ops.ConfigService, "from_app", classmethod(lambda cls: _Svc()))
     with pytest.raises(BadRequestError, match="SUB_MCP_REDIS_URL"):
-        await config_ops.apply_profile("p")
+        await profile_ops.apply_profile("p")
 
 
 async def test_apply_carries_the_profile_secret_marks_into_the_replaced_env(
@@ -637,8 +649,8 @@ async def test_apply_carries_the_profile_secret_marks_into_the_replaced_env(
     # A profile saved with its marks in ``secret_keys`` (the env rows never carry the marks
     # variable) keeps those keys masked once applied: the replace writes the marks with the env.
     await view.create_profile("p", SettingsProfileBody(**_body(env={"FOO": "x"}, secret_keys=["FOO"])))
-    seen = _stub_apply_service(monkeypatch, _apply_outcome(serve_affecting=False))
-    await config_ops.apply_profile("p")
+    seen = _stub_apply_service(monkeypatch, _apply_outcome(writer_needs=False))
+    await profile_ops.apply_profile("p")
     assert seen["env"] == {"FOO": "x", "TAI_ENV_SECRET_KEYS": "FOO"}
 
 
@@ -647,8 +659,8 @@ async def test_apply_unions_marks_already_in_the_profile_env(
 ) -> None:
     body = _body(env={"FOO": "x", "BAR": "y", "TAI_ENV_SECRET_KEYS": "BAR"}, secret_keys=["FOO"])
     await view.create_profile("p", SettingsProfileBody(**body))
-    seen = _stub_apply_service(monkeypatch, _apply_outcome(serve_affecting=False))
-    await config_ops.apply_profile("p")
+    seen = _stub_apply_service(monkeypatch, _apply_outcome(writer_needs=False))
+    await profile_ops.apply_profile("p")
     assert seen["env"]["TAI_ENV_SECRET_KEYS"] == "BAR,FOO"
 
 
@@ -656,8 +668,8 @@ async def test_apply_without_marks_writes_no_marks_variable(
     monkeypatch: pytest.MonkeyPatch, view: SettingsProfileStoreView
 ) -> None:
     await view.create_profile("p", SettingsProfileBody(**_body(env={"A": "1"}, secret_keys=[])))
-    seen = _stub_apply_service(monkeypatch, _apply_outcome(serve_affecting=False))
-    await config_ops.apply_profile("p")
+    seen = _stub_apply_service(monkeypatch, _apply_outcome(writer_needs=False))
+    await profile_ops.apply_profile("p")
     assert seen["env"] == {"A": "1"}
 
 
@@ -685,14 +697,14 @@ def _live_check_service(monkeypatch: pytest.MonkeyPatch) -> None:
     """
     monkeypatch.setattr(instance.app, "_bus", None)
     monkeypatch.setattr(
-        config_ops.ConfigService,
+        profile_ops.ConfigService,
         "from_app",
         classmethod(
             lambda cls: ConfigService(
                 config_manager=_MarkedManager(),  # type: ignore[arg-type]
                 admin=None,  # type: ignore[arg-type]
                 bus=FakeBus(),  # type: ignore[arg-type]
-                combo_check=instance.app.extensions.check_combo,
+                combo_check=instance.app.extensions,
             )
         ),
     )
@@ -705,9 +717,9 @@ async def test_put_profile_refuses_an_env_the_combo_check_refuses(
     _live_check_service(monkeypatch)
     async with booted_check_app():
         with pytest.raises(BadRequestError) as caught:
-            await config_ops.put_profile("p", **_body(env={"EXT_L": "x"}, secret_keys=[]))
+            await profile_ops.put_profile("p", **_body(env={"EXT_L": "x"}, secret_keys=[]))
         assert str(caught.value) == _REFUSAL
-        await config_ops.put_profile("p", **_body(env={"EXT_L": "fine"}, secret_keys=[]))
+        await profile_ops.put_profile("p", **_body(env={"EXT_L": "fine"}, secret_keys=[]))
     assert (await view.get_active_body("p")).env == {"EXT_L": "fine"}
 
 
@@ -719,7 +731,7 @@ async def test_apply_profile_refuses_an_env_the_combo_check_refuses(
     _live_check_service(monkeypatch)
     async with booted_check_app():
         with pytest.raises(BadRequestError) as caught:
-            await config_ops.apply_profile("p")
+            await profile_ops.apply_profile("p")
         assert str(caught.value) == _REFUSAL
 
 
@@ -744,7 +756,7 @@ async def _sibling_read_then_outage(monkeypatch: pytest.MonkeyPatch, key: str) -
     bus.down = True
     monkeypatch.setattr(instance.app, "_bus", bus)
     monkeypatch.setattr(
-        config_ops.ConfigService,
+        profile_ops.ConfigService,
         "from_app",
         classmethod(
             lambda cls: ConfigService(config_manager=_FakeManager(), admin=None, bus=bus, combo_check=ComboChecks())  # type: ignore[arg-type]
@@ -759,11 +771,11 @@ async def test_diff_during_an_outage_refuses_a_key_last_read_as_a_sibling_s(
         "p", SettingsProfileBody(description="d", env={"KEEP": "1", "SIBLING_SET": "v"}, secret_keys=[])
     )
     await _sibling_read_then_outage(monkeypatch, "SIBLING_SET")
-    monkeypatch.setattr(config_ops, "_stored_env", lambda: {"KEEP": "1"})
-    monkeypatch.setattr(config_ops, "_recycle_class_keys", lambda keys: [])
+    monkeypatch.setattr(profile_ops, "_stored_env", lambda: {"KEEP": "1"})
+    monkeypatch.setattr(profile_ops, "_recycle_class_keys", lambda keys: [])
 
     with caplog.at_level(logging.WARNING):
-        diff = await config_ops.diff_profile("p")
+        diff = await profile_ops.diff_profile("p")
 
     assert diff["added"] == ["SIBLING_SET"]
     assert diff["refused_keys"] == ["SIBLING_SET"]
@@ -776,6 +788,6 @@ async def test_put_during_an_outage_refuses_a_key_last_read_as_a_sibling_s(
     await _sibling_read_then_outage(monkeypatch, "SIBLING_SET")
 
     with caplog.at_level(logging.WARNING), pytest.raises(BadRequestError, match="set by the deployment: SIBLING_SET"):
-        await config_ops.put_profile("p", **_body(env={"SIBLING_SET": "v"}, secret_keys=[]))
+        await profile_ops.put_profile("p", **_body(env={"SIBLING_SET": "v"}, secret_keys=[]))
 
     assert any("'put_profile'" in r.getMessage() for r in caplog.records if r.levelno == logging.WARNING)

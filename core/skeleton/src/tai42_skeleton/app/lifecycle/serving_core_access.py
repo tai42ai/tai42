@@ -1,4 +1,8 @@
-"""Read/write the live epoch's serving core through the per-epoch forwarding accessors."""
+"""Read/write the serving core of the generation the calling work belongs to, through forwarding accessors.
+
+Build work resolves the core of the epoch under construction; every other work resolves the
+live epoch's core, or the boot scaffold while no epoch is installed.
+"""
 
 from collections.abc import Mapping
 from types import MappingProxyType
@@ -7,7 +11,7 @@ from typing import TYPE_CHECKING, Any
 from fastmcp import FastMCP
 from tai42_contract.access_control.identity import IdentityProvider
 
-from tai42_skeleton.app.epoch import current_epoch, current_epoch_or_none
+from tai42_skeleton.app.epoch import current_epoch_or_none, epoch_being_built
 from tai42_skeleton.app.lifecycle.state import LifecycleState
 from tai42_skeleton.extensions import ExtensionRegistry
 from tai42_skeleton.tools import ToolRegistry
@@ -60,66 +64,79 @@ class ServingCoreAccessMixin(LifecycleState):
     """Lifecycle mixin exposing per-epoch serving-core collaborators as forwarding reads."""
 
     # -- per-epoch serving core (forwarding reads) -----------------------------
-    # Every collaborator the lifecycle swaps per epoch is read through the live
-    # serving generation's ``ServingCore``: the half-built core during a build (so
-    # ``start()`` and the epoch handlers register into the epoch being built), else the
-    # installed epoch's core. A reload that swaps in a fresh epoch is therefore visible
-    # at every read site with no rebinding.
+    # Every collaborator the lifecycle swaps per epoch is read through the serving
+    # generation the reading work belongs to: the build's own work reads the core of the
+    # epoch under construction (so ``start()`` and the epoch handlers register into it),
+    # every other piece of work the installed epoch's core. A reload that swaps in a fresh
+    # epoch is therefore visible at every read site with no rebinding.
 
     @property
     def _serving_core(self) -> "ServingCore":
-        if self._building is not None:
-            return self._building
-        core = current_epoch().core
-        if core is None:
-            raise RuntimeError("the live epoch has no serving core installed")
-        return core
+        """The serving core of the generation this work belongs to.
+
+        Work marked as a build (:func:`~tai42_skeleton.app.epoch.building`) resolves the core
+        of the generation under construction, so ``start()``, the component imports, the epoch
+        handlers and the bindings register into it. A task such work starts in a copy of its own
+        context keeps the mark and goes on reading that same generation, the live one once it is
+        swapped in; one started in a context built without the mark reads as unmarked work. A
+        marked read of an epoch with no core — before ``rebuild()`` installed it, or after its
+        retire dropped it — is a fault and raises. Every other read — a request on any door, a worker, a hook, a
+        scheduler, a channel turn — resolves :attr:`_live_serving_core`.
+        """
+        building = epoch_being_built()
+        if building is None:
+            return self._live_serving_core
+        if building.core is None:
+            raise RuntimeError(
+                f"epoch {building.number}, the generation this build work belongs to, has no serving core"
+            )
+        return building.core
 
     @property
     def _live_serving_core(self) -> "ServingCore":
-        """The LIVE epoch's core once one is installed; the pre-boot core before that.
+        """The LIVE generation's core, or the boot scaffold while no epoch is installed; else a loud error.
 
-        Request-path reads of per-epoch provider state resolve THIS, not the
-        ``_building``-first :attr:`_serving_core`. During a reload a live epoch is ALWAYS
-        installed (``current_epoch()`` is the outgoing generation until the atomic swap),
-        so a request that interleaves with an in-flight build's serving-app enter sees the
-        LIVE core and NEVER the generation under construction — a build that then FAILS can
-        never leave a surviving epoch's memoized verifier bound onto the discarded
-        generation's provider instances (the zero-mutation invariant). Before the boot
-        epoch is installed there is no live generation, so this falls back to the sole
-        pre-boot core (``_building``), which registration and the pre-boot harness read;
-        no request is served in that window, so the being-built generation is never
-        exposed here.
+        Reads that mean the live generation whoever asks resolve THIS. During a reload a
+        live epoch is ALWAYS installed (``current_epoch()`` is the outgoing generation until
+        the atomic swap), so such a read never sees the generation under construction — a
+        build that then FAILS can never leave a surviving epoch's memoized verifier bound
+        onto the discarded generation's provider instances (the zero-mutation invariant).
+        An installed epoch without a core is a fault and raises. Before the boot epoch is
+        installed, and after the worker lifespan has cleared it, reads resolve the boot
+        scaffold, which registration and the pre-boot harness read; no request is served in
+        that window.
         """
         epoch = current_epoch_or_none()
-        if epoch is not None and epoch.core is not None:
+        if epoch is not None:
+            if epoch.core is None:
+                raise RuntimeError("the live epoch has no serving core installed")
             return epoch.core
-        if self._building is not None:
-            return self._building
-        raise RuntimeError("the live epoch has no serving core installed")
+        if self._scaffold_core is not None:
+            return self._scaffold_core
+        raise RuntimeError("no serving epoch is installed and no boot scaffold exists")
 
     # -- recorded auth providers -------------------------------------------------
 
     def record_auth_provider(self, name: str, provider: IdentityProvider) -> None:
         """Record the identity provider instantiated for ``name`` on the serving core.
 
-        Written to the core under construction during a build (else the live one), so a
-        failed build's providers are discarded with its core.
+        Written to the core under construction by the build's own work (else the live one),
+        so a failed build's providers are discarded with its core.
         """
         self._serving_core.active_auth_providers[name] = provider
 
     def recorded_auth_providers(self) -> Mapping[str, IdentityProvider]:
-        """The recorded identity providers by name, read-only, building core first.
+        """The recorded identity providers by name, read-only, of the generation this work belongs to.
 
-        A build in flight resolves the epoch being built, else the live one. The view
-        follows later records on the same core.
+        The build's own work resolves the epoch being built, every other read the live one.
+        The view follows later records on the same core.
         """
         return MappingProxyType(self._serving_core.active_auth_providers)
 
     # Generation state on the epoch's core, reached read/write through these forwarding
     # properties: ``start()`` and the runtime MCP mutators write the epoch under
-    # construction during a build (``_building``) and the live epoch's core otherwise, so
-    # a failed build never touches the serving generation. ``_manifest is None`` on a
+    # construction in the build's own work and the live epoch's core otherwise, so a
+    # failed build never touches the serving generation. ``_manifest is None`` on a
     # fresh core is the pre-boot no-op contract the registration decorators check.
 
     @property

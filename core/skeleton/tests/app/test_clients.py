@@ -1,5 +1,5 @@
 """``ClientsFacet`` delegate: it forwards the app client surface onto the tai42-kit
-pool (per-key pooling, fresh off-pool clients, shutdown, settings/kwargs guard).
+pool (per-key pooling, fresh off-pool clients, settings/kwargs guard).
 """
 
 from __future__ import annotations
@@ -7,6 +7,7 @@ from __future__ import annotations
 import pytest
 from tai42_contract.app.facets import AppClients as AppClientsProtocol
 from tai42_kit.clients import PooledClient
+from tai42_kit.loop_bound import release_loop_bound_resources
 
 from tai42_skeleton.app.clients import ClientsFacet
 
@@ -27,14 +28,14 @@ def test_satisfies_contract_protocol():
     assert isinstance(ClientsFacet(), AppClientsProtocol)
 
 
-async def test_pools_same_client_per_key_and_shutdown_closes():
+async def test_pools_same_client_per_key_and_the_kit_pool_closes_it():
     _DummyClient.creates = _DummyClient.closes = 0
     app = ClientsFacet()
     async with app.client_ctx(_DummyClient, host="a") as c1, app.client_ctx(_DummyClient, host="a") as c2:
         assert c1 is c2  # reused from the pool, not recreated
     assert _DummyClient.creates == 1
     assert _DummyClient.closes == 0  # pooled clients outlive the context
-    await app.shutdown_clients()
+    await release_loop_bound_resources()
     assert _DummyClient.closes == 1
 
 
@@ -44,7 +45,7 @@ async def test_fresh_is_off_pool_and_closed_on_exit():
     async with app.client_ctx(_DummyClient, fresh=True, host="b") as c:
         assert c["id"] == 1
     assert _DummyClient.closes == 1  # one-shot closed on exit
-    await app.shutdown_clients()
+    await release_loop_bound_resources()
     assert _DummyClient.closes == 1  # nothing left pooled to close
 
 

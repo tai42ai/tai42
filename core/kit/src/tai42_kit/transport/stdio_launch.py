@@ -112,5 +112,9 @@ def stdio_child_stderr() -> TextIO:
     A stream over file descriptor 2 that leaves the descriptor open when it is closed. The child
     writes where this process's own standard error goes, whatever object stands at
     ``sys.stderr``. A process whose descriptor 2 is not open raises :class:`OSError`.
+
+    The stream is built with :func:`open` (CPython's :func:`io.open`), not :func:`os.fdopen`,
+    because a green process prelude replaces :func:`os.fdopen` with a stream that owns and closes
+    its descriptor whatever ``closefd`` says, and sets it non-blocking.
     """
-    return os.fdopen(2, "w", closefd=False)
+    return open(2, "w", closefd=False)

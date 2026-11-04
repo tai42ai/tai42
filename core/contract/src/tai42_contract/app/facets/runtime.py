@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from contextlib import AbstractAsyncContextManager
+from contextlib import AbstractAsyncContextManager, AbstractContextManager
 from typing import Any, Protocol, runtime_checkable
 
 from tai42_contract.backend.runtime import FleetOpApplied
@@ -30,7 +30,7 @@ class AppMonitoring(Protocol):
 
 @runtime_checkable
 class AppClients(Protocol):
-    """Pooled async client lifecycle for the process."""
+    """Pooled async clients for the process."""
 
     def client_ctx[ClientT](
         self,
@@ -46,10 +46,6 @@ class AppClients(Protocol):
         ``settings`` is a kit ``ClientSettings`` whose ``client_kwargs()`` supplies
         the connection key.
         """
-        ...
-
-    async def shutdown_clients(self) -> None:
-        """Close every live client pool for the running loop."""
         ...
 
 
@@ -75,9 +71,8 @@ class AppLifecycle(Protocol):
     def on_post_swap(self, func: Callable[[], Any]) -> Callable[[], Any]:
         """Register an establisher for a loop-affine background loop (a periodic poll or sweep).
 
-        Run on the real serving loop at boot and after every epoch swap — never on
-        the throwaway build-thread loop the per-epoch handlers run on — so the loop
-        it spawns attaches to the serving loop and retires with its generation.
+        Run on the serving loop at boot and after every epoch swap, so the loop it
+        spawns attaches to the serving loop and retires with its generation.
         """
         ...
 
@@ -106,20 +101,44 @@ class AppLifecycle(Protocol):
         """
         ...
 
+    def waiting_on_fleet_work(self) -> AbstractAsyncContextManager[None]:
+        """Span a wait of the current request, supervised tool run or admitted job on work outside this process.
+
+        For work that may drive this process's reload, such as a queued job whose change the
+        fleet applies. While the wait lasts, the reload's retire neither counts it against the
+        drain budget nor closes its transport, so it never severs the waiting work; once the wait
+        ends that work is drained like any other. Off a served request, supervised run or
+        admitted job nothing is recorded. The span adds no bound: the wait keeps its own.
+        """
+        ...
+
+    def admitted_job(self) -> AbstractContextManager[None]:
+        """Admit the enclosed body, one backend job's run, as the live serving generation's work.
+
+        The admission holds while the body runs on the serving loop. A config reload's retire then
+        drains it: it waits, within the drain budget, for the job to end before it closes the
+        generation's loop-bound resources (its transports, client pools, checkpoint savers and
+        stores). While the job waits on a recorded lock (``waiting_on_fleet_work``, the reload
+        gate) it is not counted, and a reload the job itself drives does not wait on it. A job on
+        any other event loop is not the serving generation's work: nothing is recorded, and that
+        loop's end releases its resources.
+        """
+        ...
+
 
 @runtime_checkable
 class AppAdmin(Protocol):
     """In-process admin operations: MCP binding, tool reload, config reload."""
 
-    def reload_mcp(self, title: str) -> dict[str, Any]:
+    async def reload_mcp(self, title: str) -> dict[str, Any]:
         """Rebind the MCP server titled ``title`` and return its status."""
         ...
 
-    def deregister_mcp(self, title: str) -> dict[str, Any]:
+    async def deregister_mcp(self, title: str) -> dict[str, Any]:
         """Remove the MCP server titled ``title`` and return its status."""
         ...
 
-    def reload_config(self) -> dict[str, Any]:
+    async def reload_config(self) -> dict[str, Any]:
         """Re-init the process config in place and return the reload report."""
         ...
 
@@ -131,7 +150,7 @@ class AppAdmin(Protocol):
         """Run the registered ``kind`` reloader for ``action`` on ``name``."""
         ...
 
-    def reload_failed_mcps(self) -> list[dict[str, Any]]:
+    async def reload_failed_mcps(self) -> list[dict[str, Any]]:
         """Retry every MCP that failed to bind and return their statuses."""
         ...
 

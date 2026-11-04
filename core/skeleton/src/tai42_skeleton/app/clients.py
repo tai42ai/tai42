@@ -2,17 +2,17 @@
 
 Surfaces the pooling on the app: ``client_ctx(SomeClient, settings=…, fresh=…)``
 yields a connected client, pooled per event loop + connection params (or a one-shot
-off-pool client when ``fresh=True``); ``shutdown_clients()`` closes every live pool
-for the running loop at teardown. The pooling itself lives in ``tai42_kit.clients`` —
-this only exposes it on the app, so callers reach a client by class and never import
-a concrete client here.
+off-pool client when ``fresh=True``). The pooling itself lives in ``tai42_kit.clients``,
+and a loop's end releases its pools through ``tai42_kit.loop_bound`` — this only exposes
+the client door on the app, so callers reach a client by class and never import a
+concrete client here.
 """
 
 from contextlib import AbstractAsyncContextManager
 from typing import Any, cast
 
 from tai42_contract.clients import BaseClient
-from tai42_kit.clients import PooledClient, shutdown_all_clients
+from tai42_kit.clients import PooledClient
 from tai42_kit.clients import client_ctx as _pool_client_ctx
 
 
@@ -33,7 +33,3 @@ class ClientsFacet:
         # client subclasses PooledClient). This delegate is the seam that knows the
         # two are the same object.
         return _pool_client_ctx(cast("type[PooledClient[ClientT]]", client_cls), settings, fresh=fresh, **kwargs)
-
-    async def shutdown_clients(self) -> None:
-        """Close every live client pool for the running event loop."""
-        await shutdown_all_clients()

@@ -36,6 +36,13 @@ class _NoManifestConfig:
         raise FileNotFoundError("no stored env")
 
 
+class _EnvConfig:
+    """A config manager whose stored env is one key, so a reload reports ``env_keys`` of 1."""
+
+    def read_env(self) -> dict[str, str]:
+        return {"A": "1"}
+
+
 class _StubPresetManager:
     """A no-op preset manager: the network-free ``_Mixin`` binds no presets, so the
     post-reload/deregister reconciliation has nothing to do. Records the calls so a
@@ -62,7 +69,7 @@ class _Mixin(TaiMCPLifecycleMixin):
         # A minimal serving core so the per-epoch forwarding reads (``_fast_mcp`` &c)
         # resolve without a full ``TaiMCP``; the network-free tests only touch its
         # FastMCP surface.
-        self._building = ServingCore(cast("Any", self), args=(), auth=None, kwargs={"name": "mixin-under-test"})
+        self._scaffold_core = ServingCore(cast("Any", self), args=(), auth=None, kwargs={"name": "mixin-under-test"})
 
     def _build_serving_core(self) -> ServingCore:
         return ServingCore(cast("Any", self), args=(), auth=None, kwargs={"name": "mixin-under-test"})

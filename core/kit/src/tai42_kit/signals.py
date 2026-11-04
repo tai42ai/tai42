@@ -13,6 +13,12 @@ module is that owner: ONE asyncio handler per signal, many independent
 subscribers, LIFO delivery, and the handler uninstalled only when its LAST
 subscriber leaves.
 
+A body that blocks the loop thread can run no subscriber until it returns, so a
+signal the chain owns would wait the body out. For such a span the chain
+releases its signals (:meth:`SignalChain.released`): the process's default
+dispositions are in force, and the chain takes the signals back when the span
+ends. It also names the pair a process is stopped with, :data:`STOP_SIGNALS`.
+
 Pure stdlib, so a process that never subscribes pays one unused module.
 """
 
@@ -21,9 +27,14 @@ from __future__ import annotations
 import asyncio
 import logging
 import signal
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from typing import Final
 
 logger = logging.getLogger(__name__)
+
+STOP_SIGNALS: Final = (signal.SIGTERM, signal.SIGINT)
+"""The two signals a process is stopped with: the orchestrator's ``SIGTERM`` and the terminal's ``SIGINT``."""
 
 
 class SignalSubscription:
@@ -77,6 +88,9 @@ class SignalChain:
         # The loop the installed handlers belong to. Handlers are loop-owned, so
         # a chain spanning two live loops would deliver to the wrong one.
         self._loop: asyncio.AbstractEventLoop | None = None
+        # The signals handed back to their default dispositions by the open
+        # :meth:`released` span, or ``None`` while no span is open.
+        self._released: tuple[signal.Signals, ...] | None = None
 
     def add(self, sig: signal.Signals, callback: Callable[[], object], *, name: str) -> SignalSubscription:
         """Subscribe ``callback`` to ``sig`` and return the handle that leaves again.
@@ -111,6 +125,42 @@ class SignalChain:
     def subscribers(self, sig: signal.Signals) -> tuple[str, ...]:
         """The names currently subscribed to ``sig``, in registration order."""
         return tuple(sub.name for sub in self._subs.get(sig, ()))
+
+    @contextmanager
+    def released(self, *sigs: signal.Signals) -> Iterator[None]:
+        """Hand each of ``sigs`` the chain owns back to its default disposition for the span.
+
+        For a body that blocks the loop thread: no subscriber can run until it returns,
+        so a signal kept on the chain would be deferred for the body's whole span. On
+        entry the chain's handler is uninstalled for each of ``sigs`` that has
+        subscribers (``SIGINT`` gets ``default_int_handler`` back, any other signal
+        ``SIG_DFL``); a signal without subscribers is left as it is. On exit the handler
+        is installed again for each of those signals that still has subscribers. The
+        subscriber table is not touched.
+
+        One span at a time: a nested span raises ``RuntimeError``. A refused reinstall
+        propagates, as a refused install does in :meth:`add`.
+        """
+        if self._released is not None:
+            raise RuntimeError(
+                f"signal chain is already released for {', '.join(sig.name for sig in self._released)}; "
+                "one release span may be open at a time"
+            )
+        # A chain bound to no loop has no subscribers, so it owns none of ``sigs``.
+        loop = self._loop
+        held = tuple(sig for sig in sigs if sig in self._subs) if loop is not None else ()
+        self._released = held
+        try:
+            if loop is not None:
+                for sig in held:
+                    loop.remove_signal_handler(sig)
+            yield
+        finally:
+            self._released = None
+            if loop is not None:
+                for sig in held:
+                    if sig in self._subs:
+                        loop.add_signal_handler(sig, self._dispatch, sig)
 
     def _adopt(self, loop: asyncio.AbstractEventLoop) -> None:
         """Bind this chain to ``loop``, refusing a second LIVE loop.

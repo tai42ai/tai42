@@ -9,8 +9,9 @@ job. Every process that runs the app lifespan sweeps.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
+
+from tai42_skeleton.utils.tasks import cancel_and_wait
 
 from . import runtime
 from .metrics import hook_run_metrics
@@ -62,7 +63,7 @@ def _on_sweep_done(task: asyncio.Task[None]) -> None:
 
 
 def start_hook_runs_sweep() -> None:
-    """(Re)start the sweep on the serving loop and register its cancel with the epoch under construction.
+    """(Re)start the sweep on the serving loop and register its cancel with the current epoch.
 
     It also clears the runtime's stopping flag, so a lifespan that starts again serves again.
     """
@@ -76,21 +77,29 @@ def start_hook_runs_sweep() -> None:
     task = asyncio.create_task(_sweep_loop(interval), name="tai-hook-runs-sweep")
     task.add_done_callback(_on_sweep_done)
     _sweep_task = task
-    from tai42_skeleton.app.epoch import epoch_under_construction_or_none
+    from tai42_skeleton.app.epoch import current_epoch_or_none
 
-    epoch = epoch_under_construction_or_none()
+    epoch = current_epoch_or_none()
     if epoch is None:
         return
 
     async def _cancel() -> None:
         if task.done():
             return
-        task.cancel()
-        if task.get_loop() is asyncio.get_running_loop():
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
+        await cancel_and_wait(task)
 
     epoch.register_periodic_loop(_cancel)
+
+
+def shutdown_drain_seconds() -> float:
+    """The bound of a healthy :func:`stop_hook_runs_sweep`: twice the shutdown grace.
+
+    The attempts' grace to finish on their own, plus the grace the cancelled attempts get to
+    settle their jobs by the interrupted-attempt rule. The third grace, after the first ERROR,
+    is a wedge guard outside this bound: an attempt there has already been reported as failing
+    to end.
+    """
+    return 2 * runtime.manager().settings.run_shutdown_grace_seconds
 
 
 async def stop_hook_runs_sweep() -> None:
@@ -98,8 +107,9 @@ async def stop_hook_runs_sweep() -> None:
 
     From the moment it begins, an accept in this process writes its jobs unclaimed and due now and
     spawns no attempt. Each cancelled attempt frees its job by the interrupted-attempt rule: it is
-    released for the next process, or held as failed. An attempt still running one more grace
-    after its cancel is logged at ERROR and cancelled again. One still running a grace after
+    released for the next process, or held as failed. These two first waits are the module's
+    declared shutdown drain (:func:`shutdown_drain_seconds`). An attempt still running one more
+    grace after its cancel is logged at ERROR and cancelled again. One still running a grace after
     that is logged at ERROR and left in flight: the stop returns, and the lease reclaims its job.
     """
     global _sweep_task
@@ -107,9 +117,7 @@ async def stop_hook_runs_sweep() -> None:
     task = _sweep_task
     _sweep_task = None
     if task is not None and not task.done():
-        task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await task
+        await cancel_and_wait(task)
     grace = runtime.manager().settings.run_shutdown_grace_seconds
     still = await runtime.drain_hook_runs(timeout=grace)
     if not still:
@@ -145,4 +153,4 @@ async def stop_hook_runs_sweep() -> None:
     )
 
 
-__all__ = ["start_hook_runs_sweep", "stop_hook_runs_sweep", "sweep_tick"]
+__all__ = ["shutdown_drain_seconds", "start_hook_runs_sweep", "stop_hook_runs_sweep", "sweep_tick"]

@@ -1,8 +1,8 @@
 """Fetch, render, schema-infer, and cache stored (and inline) templates.
 
 :class:`ResourceManager` is the resource feature's one entry point. It renders here, in the
-sandboxed engine whose ``{% include %}``/``{% extends %}`` dependencies resolve through one event
-loop per render, and composes the rest: the render caches and their eviction
+sandboxed engine whose ``{% include %}``/``{% extends %}`` dependencies load on the loop that
+awaits the render, and composes the rest: the render caches and their eviction
 (:mod:`~tai42_skeleton.template.render_cache`), the subject's locale
 (:mod:`~tai42_skeleton.template.render_locale`), content and image loading
 (:mod:`~tai42_skeleton.template.sources`), store writes and deletes
@@ -12,7 +12,6 @@ loop per render, and composes the rest: the render caches and their eviction
 
 import asyncio
 import itertools
-import logging
 import threading
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -21,7 +20,6 @@ from typing import Any
 from jinja2 import FunctionLoader
 from tai42_contract.storage import Storage
 from tai42_contract.template import ImageReference, TemplatedText, TemplateEviction
-from tai42_kit.clients import shutdown_all_clients
 
 from tai42_skeleton.template.errors import TemplateNotFoundError, TemplateNotTextError
 from tai42_skeleton.template.input_schema import template_input_schema, undeclared_variables
@@ -33,8 +31,6 @@ from tai42_skeleton.template.render_locale import compiled_for_locale, list_form
 from tai42_skeleton.template.settings import template_cache_settings
 from tai42_skeleton.template.sources import SourceLoader
 from tai42_skeleton.template.store_writes import StoreWrites
-
-logger = logging.getLogger(__name__)
 
 #: The process-wide source of :attr:`ResourceManager.epoch`: never reset, so every manager built in
 #: this process (at boot or after a reload) carries a value no earlier manager had.
@@ -71,9 +67,9 @@ class ResourceManager:
         # the render's resolved locale from the reserved context key, never a template arg.
         self._env.filters["list_format"] = list_format
 
-        # Per-render event loop bound to the rendering thread so every
-        # {% include %}/{% extends %} dependency resolves through one loop — hence
-        # one storage client per render instead of one opened+closed per include.
+        # The render a rendering thread runs, with the loop that drives it: every
+        # {% include %}/{% extends %} dependency loads on that loop, through its pooled
+        # storage client.
         self._render_loop = threading.local()
 
         self._render_cache = RenderCache(self._env, self._load_by_id, template_cache_settings())
@@ -102,32 +98,20 @@ class ResourceManager:
         return self._provider
 
     @contextmanager
-    def _render_scope(self) -> Iterator[None]:
-        """Mark this render thread as inside a render so every dependency shares one event loop.
+    def _render_scope(self, loop: asyncio.AbstractEventLoop) -> Iterator[None]:
+        """Mark this render thread as inside a render whose dependencies load on ``loop``.
 
-        The storage client opened for the first {% include %}/{% extends %} is reused and
-        closed once when the scope exits, instead of a fresh loop + connection per
-        dependency.
-
-        The loop is created lazily by ``_sync_loader`` on the first dependency, so an
-        include-free render creates no loop at all.
+        ``loop`` is the loop that awaits the render: the render runs on a thread of its own,
+        and each {% include %}/{% extends %} dependency is loaded on ``loop`` while the
+        thread waits for it.
         """
         self._render_loop.active = True
-        self._render_loop.loop = None
+        self._render_loop.loop = loop
         try:
             yield
         finally:
             self._render_loop.active = False
-            loop = self._render_loop.loop
             self._render_loop.loop = None
-            if loop is not None:
-                # Close the render loop's pooled clients once. A cleanup failure is
-                # logged loudly but must not mask the render's result/exception.
-                try:
-                    loop.run_until_complete(shutdown_all_clients())
-                except Exception:
-                    logger.exception("Error closing pooled clients after template render")
-                loop.close()
 
     async def _load_by_id(self, template_id: str) -> str:
         """Read a template by its bare storage id, root-contained.
@@ -154,7 +138,10 @@ class ResourceManager:
     def _sync_loader(self, template_id: str) -> str | None:
         """Synchronous bridge for Jinja2's FunctionLoader, fetching a dependency from async storage.
 
-        Lets {% extends %} and {% include %} fetch their dependency from async storage.
+        Lets {% extends %} and {% include %} fetch their dependency from async storage: called
+        on the render's thread, it loads the dependency on the loop that drives the render
+        (:meth:`_render_scope`) and waits for it. Called outside a render it raises
+        ``RuntimeError``.
 
         A genuinely missing dependency becomes ``None`` so Jinja raises
         ``TemplateNotFound`` (keeping ``{% include ... ignore missing %}``
@@ -165,32 +152,13 @@ class ResourceManager:
         absent = self._render_cache.absent
         if template_id in absent:
             return None
-        if getattr(self._render_loop, "active", False):
-            # Inside a render scope (the normal path): reuse the per-render loop so
-            # sibling includes share one storage client. Create it on first use.
-            loop = self._render_loop.loop
-            if loop is None:
-                loop = asyncio.new_event_loop()
-                self._render_loop.loop = loop
-            try:
-                return loop.run_until_complete(self._load_by_id(template_id))
-            except FileNotFoundError:
-                absent.add(template_id)
-                return None
-
-        # Standalone fallback (no active render scope): a one-shot loop that
-        # closes its own pooled client, mirroring the render-scope teardown.
-        async def _load() -> str | None:
-            try:
-                return await self._load_by_id(template_id)
-            finally:
-                try:
-                    await shutdown_all_clients()
-                except Exception:
-                    logger.exception("Error closing pooled clients after template load")
-
+        if not getattr(self._render_loop, "active", False):
+            raise RuntimeError(
+                f"template dependency '{template_id}' was loaded outside a render: a dependency loads only "
+                "while render_by_id or render_templated_text drives the render"
+            )
         try:
-            return asyncio.run(_load())
+            return asyncio.run_coroutine_threadsafe(self._load_by_id(template_id), self._render_loop.loop).result()
         except FileNotFoundError:
             absent.add(template_id)
             return None
@@ -297,8 +265,10 @@ class ResourceManager:
         template = await compiled_for_locale(template_id, locale, self._render_cache.compiled)
         context = with_locale(kwargs or {}, locale)
 
+        loop = asyncio.get_running_loop()
+
         def _render() -> str:
-            with self._render_scope():
+            with self._render_scope(loop):
                 return template.render(**context)
 
         return await asyncio.to_thread(_render)
@@ -323,8 +293,10 @@ class ResourceManager:
             raise AssertionError
         context = with_locale(text.kwargs, locale)
 
+        loop = asyncio.get_running_loop()
+
         def _parse_and_render() -> str:
-            with self._render_scope():
+            with self._render_scope(loop):
                 return self._render_cache.inline(content).render(**context)
 
         return await asyncio.to_thread(_parse_and_render)

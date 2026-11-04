@@ -23,8 +23,8 @@ def test_seam_re_exports_contract_abc() -> None:
 
 
 def test_incomplete_backend_cannot_instantiate() -> None:
-    # ``launch`` is the sole abstract member of the Backend ABC — a subclass that
-    # omits it cannot instantiate.
+    # ``launch`` and ``drain_timeout`` are the Backend ABC's abstract members — a
+    # subclass that omits them cannot instantiate.
     class Partial(Backend):
         pass
 
@@ -33,9 +33,14 @@ def test_incomplete_backend_cannot_instantiate() -> None:
 
 
 def test_complete_backend_satisfies_contract() -> None:
-    # The task backend carries task execution only — ``launch`` is the whole ABC;
-    # fleet fan-out is the app's worker bus, not a backend surface.
+    # The task backend carries task execution and its own drain bound — ``launch`` and
+    # ``drain_timeout`` are the whole ABC; fleet fan-out is the app's worker bus, not a
+    # backend surface.
     class Dummy(Backend):
+        @property
+        def drain_timeout(self) -> float:
+            return 30.0
+
         async def launch(self, args) -> None:
             return None
 

@@ -30,6 +30,7 @@ from mcp.types import ToolAnnotations
 from tai42_contract.errors import OperationError
 
 from tai42_skeleton.app.reload_gate import REJECT_MESSAGE, reload_gate
+from tai42_skeleton.app.writer_exit import WriterExitScope, writer_exit_scope
 from tai42_skeleton.operations.registry import OperationRegistry, operation_registry
 from tai42_skeleton.routers.paths import AUTH_API_PREFIX
 
@@ -79,6 +80,19 @@ def is_tier2(op: OperationMetadata) -> bool:
     return op.route_template is not None and op.route_template.startswith(f"{AUTH_API_PREFIX}/")
 
 
+async def _settle_writer_exit(exits: WriterExitScope) -> None:
+    """Run the writer's own exit a projected call's change owes, once the call returned or raised.
+
+    A failed exit is logged at ERROR and never raised into the call's answer: the operation's
+    change already landed, and its own answer (the payload, or the error) is the one the caller
+    reads.
+    """
+    try:
+        await exits.settle()
+    except Exception:
+        logger.exception("writer exit: the writer's own restart after a projected call failed")
+
+
 def _make_tool(op: OperationMetadata) -> Callable[..., Awaitable[object]]:
     """A projected-tool wrapper carrying ``op``'s flat typed signature.
 
@@ -94,32 +108,29 @@ def _make_tool(op: OperationMetadata) -> Callable[..., Awaitable[object]]:
 
     func = op.func
 
-    from tai42_skeleton.operations.adapter import OperationResponse
-
     async def projected(**kwargs: Any) -> object:
         if op.reload_gated and reload_gate.locked:
             raise ToolError(REJECT_MESSAGE)
-        try:
-            result = await func(**kwargs)
-        except OperationError as exc:
-            raise ToolError(exc.message) from exc
-        # An operation that returns an ``OperationResponse`` arms a post-reply background task
-        # (the writer's graceful exit after a converged recycle roll). Every tool door flows
-        # through here — MCP, ``tai tools run``, an agent, a preset, a hook, and a schedule or a
-        # submit run inside a backend job — so the task runs here, once the operation returned
-        # and before the call does: no door's loop is relied on to run it later. The exit is the
-        # worker's graceful stop, whose drain lets the in-flight reply ship (HTTP, MCP), the
-        # in-flight call return (an in-process door) or the in-flight job finish (a backend door)
-        # before the process ends. A failing task is logged at ERROR and never raised into the
-        # reply: the operation's change already landed.
-        if isinstance(result, OperationResponse):
-            if result.background is not None:
-                try:
-                    await result.background()
-                except Exception:
-                    logger.exception("a projected operation's post-reply task failed")
-            return result.payload
-        return result
+        # Every tool door flows through here — MCP, ``tai tools run``, an agent, a preset, a hook,
+        # and a schedule or a submit run inside a backend job — so the writer's own exit a change
+        # under this call owes (its recycle roll converged with the writer needing its own restart)
+        # is settled here, once the operation returned or raised and before the call answers: no
+        # door's loop is relied on to run it later. The exit is the worker's graceful stop, whose
+        # drain lets the in-flight reply ship (HTTP, MCP) or the in-flight call return (an
+        # in-process door) before the process ends. A call under a bound (a backend job, an armed
+        # turn budget) owes none: its change handed the whole roll, the writer's exit included, to
+        # its member. A call cancelled before it settled abandons the exit, ERROR-logged.
+        with writer_exit_scope() as exits:
+            try:
+                result = await func(**kwargs)
+            except OperationError as exc:
+                await _settle_writer_exit(exits)
+                raise ToolError(exc.message) from exc
+            except Exception:
+                await _settle_writer_exit(exits)
+                raise
+            await _settle_writer_exit(exits)
+            return result
 
     # ``eval_str=True`` resolves string annotations (every operation module carries
     # ``from __future__ import annotations``, so its annotations are strings) against

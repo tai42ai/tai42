@@ -7,7 +7,6 @@ from typing import Any
 from tai42_contract.manifest import TaiMCPConfig
 
 from tai42_skeleton.app import lifecycle as _lifecycle
-from tai42_skeleton.app.lifecycle.off_loop import run_blocking
 from tai42_skeleton.app.lifecycle.state import LifecycleState
 from tai42_skeleton.connectors.token_injection import evict_pooled_session
 from tai42_skeleton.manifest.transport import detect_transport
@@ -22,14 +21,16 @@ logger = logging.getLogger(__name__)
 class McpReloadMixin(LifecycleState):
     """Targeted single-MCP reload/deregister and the dependent-preset reconcile methods."""
 
-    async def _reload_mcp_async(self, title: str) -> dict[str, Any]:
-        """Re-probe the manifest MCP server ``title`` and rebind its tools.
+    async def _reload_mcp(self, title: str) -> dict[str, Any]:
+        """Re-probe the manifest MCP server ``title`` and, if viable, (re)attach its tools.
 
         Answers ``{"title", "status"}``: ``error`` (with an ``error`` message) for a title the
-        manifest does not carry, ``unavailable`` when the probe fails (recorded as the title's
-        failure), and otherwise :meth:`_apply_reloaded_mcp`'s ``ok`` result. A bind that fails
-        after a good probe is recorded as the title's failure and propagates
-        (:meth:`_bind_probed_mcp`).
+        manifest does not carry, ``unavailable`` when the probe fails, and otherwise
+        :meth:`_apply_reloaded_mcp`'s ``ok`` result. On a probe failure the server is
+        re-recorded in ``list_failed_mcps`` and its existing tools are left intact (transient
+        blips self-heal). A bind that fails after a good probe is recorded there too and
+        propagates (:meth:`_bind_probed_mcp`); it can leave the set partially updated — rerun
+        after fixing the config. Only a successful reload replaces tools.
         """
         self._refresh_manifest_mcp()
         manifest = self._manifest
@@ -137,11 +138,11 @@ class McpReloadMixin(LifecycleState):
         """Bind a freshly-probed MCP server's tools and reconcile dependent presets.
 
         The registry-mutating half of a reload, split from the probe. This half
-        synchronously rewrites the process-wide tool registry and then
-        marshals the preset reconcile onto the serving loop, so two servers applying
-        at once would race each other's registry mutation across the probe and serving
-        threads. ``_reload_failed_mcps_async`` therefore probes servers concurrently
-        but calls this ONE server at a time; the single-server reload calls it once.
+        synchronously rewrites the process-wide tool registry and then awaits the
+        preset reconcile, so two servers applying at once would interleave one server's
+        bind with the other's reconcile. ``_reload_failed_mcps`` therefore probes servers
+        concurrently but calls this ONE server at a time; the single-server reload calls
+        it once.
         """
         # The stored presets' names, read before anything is touched: a store that cannot
         # be read leaves the bound tools as they are, and a failed title's record names
@@ -156,8 +157,10 @@ class McpReloadMixin(LifecycleState):
         # Heal the connection this reload manages: drop the pooled dispatch session
         # for this title so the next dispatch builds a fresh one. The probe passed on
         # a throwaway off-pool client, so a dead pooled session survives it and every
-        # dispatch keeps hitting the corpse until it is evicted here.
-        await self._evict_mcp_session_on_serving_loop(config)
+        # dispatch keeps hitting the corpse until it is evicted here. The pools are per
+        # event loop; this runs on the serving loop, whose pool dispatch uses. A failed
+        # eviction propagates — it must not silently leave a corpse in the pool.
+        await evict_pooled_session(config, detect_transport(config.config), _lifecycle.FastMCPClient())
 
         # Clean reload: drop any tools this MCP previously bound, then rebind.
         old_bound = set(self._mcp_bound_tools.get(title, set()))
@@ -210,64 +213,16 @@ class McpReloadMixin(LifecycleState):
         after the rebind,
         so their union is exactly the set of bases whose bindings changed.
         """
-        await self._reconcile_bases_on_serving_loop(old_bound | new_bound)
+        await self.preset_manager.reconcile_bases(old_bound | new_bound)
 
-    async def _reconcile_bases_on_serving_loop(self, affected_bases: set[str]) -> None:
-        """Reconcile base-dependent presets with the ``PresetManager`` per-name locks taken on the serving loop.
-
-        Those locks are ``asyncio.Lock``s, valid on a single loop only. The preset
-        mutation routes take them on the serving loop, so every reconcile takes them
-        there too: a route mutating a preset and a reconcile touching the same name
-        contend on ONE loop, never two (a cross-loop contended acquire raises, and a
-        lock touched from two threads gives no mutual exclusion). The reprobe pass
-        already runs this ON the serving loop and awaits directly; an admin
-        reload/deregister runs its body on a ``run_blocking`` worker loop and
-        marshals the coroutine back onto the serving loop, awaiting the cross-loop
-        result without blocking the worker loop. With no serving loop bound (a
-        pure-sync boot) nothing else contends, so the reconcile runs on the current
-        loop.
-        """
-        loop = self._serving_loop
-        if loop is None or asyncio.get_running_loop() is loop:
-            await self.preset_manager.reconcile_bases(affected_bases)
-            return
-        future = asyncio.run_coroutine_threadsafe(self.preset_manager.reconcile_bases(affected_bases), loop)
-        await asyncio.wrap_future(future)
-
-    async def _evict_mcp_session_on_serving_loop(self, config: TaiMCPConfig) -> None:
-        """Evict the pooled dispatch session for ``config`` on the serving loop.
-
-        The ``FastMCPClient`` pools are per event loop and dispatch runs on the
-        serving loop, so an eviction on any other loop misses the real pool and
-        leaves the dead session in place. An admin reload runs this body on a
-        ``run_blocking`` worker loop and marshals the eviction back onto the
-        serving loop; the reprobe pass already runs on the serving loop and awaits
-        directly, and a pure-sync boot (no serving loop bound) runs it on the
-        current loop. The transport is detected once here and reused, never
-        re-derived. A failed eviction propagates — it must not silently leave a
-        corpse in the pool.
-        """
-        transport = detect_transport(config.config)
-
-        async def _evict() -> None:
-            await evict_pooled_session(config, transport, _lifecycle.FastMCPClient())
-
-        loop = self._serving_loop
-        if loop is None or asyncio.get_running_loop() is loop:
-            await _evict()
-            return
-        future = asyncio.run_coroutine_threadsafe(_evict(), loop)
-        await asyncio.wrap_future(future)
-
-    async def _reload_failed_mcps_async(self) -> list[dict[str, Any]]:
+    async def _reload_failed_mcps(self) -> list[dict[str, Any]]:
         """Re-probe every currently-failed MCP concurrently, then apply the binds one server at a time.
 
         Probing is network-bound and mutates no shared state, so all servers are
         probed at once — N down servers cost ~one probe timeout, not N. Applying a
-        probe result rewrites the process-wide tool/preset registry and marshals the
-        reconcile onto the serving loop, so applications are serialized: running two
-        at once would let one server's bind race another's reconcile across the probe
-        and serving threads. Titles, and the start each failed record waits on, are
+        probe result rewrites the process-wide tool/preset registry and awaits the
+        reconcile, so applications are serialized: running two at once would interleave
+        one server's bind with another's reconcile. Titles, and the start each failed record waits on, are
         snapshotted before any mutation; each outcome applies through
         :meth:`_apply_probe_outcome`.
         """
@@ -296,54 +251,11 @@ class McpReloadMixin(LifecycleState):
         )
         return out
 
-    def _raise_if_on_serving_loop(self, op: str) -> None:
-        """Refuse a reconcile-driving admin call issued from a coroutine already on the serving loop.
-
-        ``reload_mcp`` / ``reload_failed_mcps`` / ``deregister_mcp`` run their async
-        body through ``run_blocking`` and marshal the preset reconcile back onto the
-        serving loop. Called from the serving loop itself, ``run_blocking`` would
-        freeze that loop on its blocking wait, so the marshaled reconcile could never
-        run — a silent deadlock. Raise loudly instead. The supported callers —
-        ``reload_gate.run``'s worker thread and a loop-less sync caller — have no
-        running loop here (or a different one) and pass through.
-        """
-        try:
-            running = asyncio.get_running_loop()
-        except RuntimeError:
-            return
-        if running is self._serving_loop:
-            raise RuntimeError(
-                f"{op} must not be called from the serving loop; drive it through "
-                "reload_gate.run(...) or an off-loop/sync caller"
-            )
-
-    def _reload_mcp(self, title: str) -> dict[str, Any]:
-        """Re-probe one MCP server by title and, if viable, (re)attach its tools.
-
-        Synchronous and context-agnostic, mirroring ``update``; answers as
-        :meth:`_reload_mcp_async`. On a probe failure (``unavailable``) the server is
-        re-recorded in ``list_failed_mcps`` and its existing tools are left intact
-        (transient blips self-heal). A bind that fails after a good probe is recorded there
-        too and raises; it can leave the set partially updated — rerun after fixing the
-        config. Only a successful reload replaces tools.
-        """
-        self._raise_if_on_serving_loop("reload_mcp")
-        return run_blocking(lambda: self._reload_mcp_async(title))
-
-    def _reload_failed_mcps(self) -> list[dict[str, Any]]:
-        """Re-probe every MCP currently in the failed list and attach the ones now viable.
-
-        Synchronous and context-agnostic.
-        """
-        self._raise_if_on_serving_loop("reload_failed_mcps")
-        return run_blocking(self._reload_failed_mcps_async)
-
-    def _deregister_mcp(self, title: str) -> dict[str, Any]:
+    async def _deregister_mcp(self, title: str) -> dict[str, Any]:
         """Detach one MCP server's tools — the removal counterpart of ``reload_mcp``.
 
         Idempotent: a process that never bound the title reports ``absent``, not an error.
         """
-        self._raise_if_on_serving_loop("deregister_mcp")
         self._refresh_manifest_mcp()
         bound = sorted(self._mcp_bound_tools.pop(title, set()))
         self._mcp_listed_tools.pop(title, None)
@@ -362,9 +274,6 @@ class McpReloadMixin(LifecycleState):
         # Reconcile presets that depended on the just-removed bases: a dependent
         # preset is quarantined (its store row surfaces as ``conflicted``) — no
         # dependent preset is left bound to a base that no longer exists.
-        # This method is synchronous (context-agnostic, mirroring ``update``), so the
-        # async reconciliation runs through the off-loop blocking runner, which
-        # marshals the ``PresetManager`` locks onto the serving loop.
         if bound:
-            run_blocking(lambda: self._reconcile_bases_on_serving_loop(set(bound)))
+            await self.preset_manager.reconcile_bases(set(bound))
         return {"title": title, "status": "ok", "removed": bound}

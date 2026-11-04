@@ -2,10 +2,10 @@
 
 Proves the reload lock's three surfaces: a gated route answers the retriable 503
 while a reload holds the gate; the serving loop is NOT frozen during a reload
-(health + a read-only GET answer concurrently while the reload sleeps on its
-worker thread); the FastMCP session middleware rejects a tool call the same way;
-after release everything answers again; the reload-through-gate path runs its
-reload on a worker thread and returns the reload result under a ``{"data": ...}``
+(health + a read-only GET answer concurrently while the reload's body awaits on
+that loop); the FastMCP session middleware rejects a tool call the same way;
+after release everything answers again; the reload-through-gate path awaits its
+reload on the serving loop and returns the reload result under a ``{"data": ...}``
 envelope; and the body runs under the process fork gate, so a forking backend's
 job child can never be alive while the manifest modules are re-imported.
 
@@ -95,24 +95,25 @@ async def test_reject_response_is_retriable_503() -> None:
     assert _json(resp) == {"error": REJECT_MESSAGE, "reloading": True}
 
 
-# -- run() offloads to a worker thread ---------------------------------------
+# -- run() awaits its body on the running loop --------------------------------
 
 
-async def test_run_offloads_to_worker_thread_and_returns_result() -> None:
-    """The heavy body runs on a worker thread (not the serving loop's thread) and
-    ``run`` returns its result; the lock is held during and released after."""
+async def test_run_awaits_its_body_on_the_running_loop_and_returns_result() -> None:
+    """With no other serving loop bound, the body is a coroutine awaited on the loop that
+    called ``run``, and ``run`` returns its result; the lock is held during and released after."""
     gate = ReloadGate()
-    loop_thread = threading.get_ident()
-    seen: dict[str, int] = {}
+    seen: dict[str, Any] = {}
 
-    def body() -> dict[str, str]:
-        seen["thread"] = threading.get_ident()
+    async def body() -> dict[str, str]:
+        seen["loop"] = asyncio.get_running_loop()
+        seen["locked"] = gate.locked
         return {"status": "ok"}
 
     assert not gate.locked
     result = await gate.run(body, reimports=False)
     assert result == {"status": "ok"}
-    assert seen["thread"] != loop_thread
+    assert seen["loop"] is asyncio.get_running_loop()
+    assert seen["locked"] is True
     assert not gate.locked
 
 
@@ -122,22 +123,26 @@ async def test_run_offloads_to_worker_thread_and_returns_result() -> None:
 async def test_a_reimporting_body_holds_the_fork_gate_for_its_whole_span() -> None:
     """A re-importing body pops and re-imports the manifest modules, so while it runs no
     child may be forked and no in-process job may run: ``run`` holds the process fork
-    gate around it, and holds it OWNED by the thread running the body (not merely
-    pending)."""
+    gate around it (``exclusive_async``), owned by the gate's holder thread, while the
+    body runs on the calling loop in a context the gate counts as the rebuild's own."""
     gate = ReloadGate()
     seen: dict[str, Any] = {}
 
-    def body() -> None:
+    async def body() -> None:
+        seen["loop"] = asyncio.get_running_loop()
         seen["blocked"] = fork_gate.blocked
         seen["owner"] = fork_gate._owner
-        seen["thread"] = threading.get_ident()
+        with fork_gate._cond:
+            seen["own_work"] = fork_gate._runs_own_work()
 
     assert not fork_gate.blocked
     await gate.run(body, reimports=True)
+    assert seen["loop"] is asyncio.get_running_loop()
     assert seen["blocked"] is True
-    # The hold is owned by the very thread running the body — the sync door takes the
-    # gate inline rather than through a holder thread.
-    assert seen["owner"] == seen["thread"]
+    # The hold is owned by the gate's dedicated holder thread, never the loop's thread.
+    assert seen["owner"] is not None
+    assert seen["owner"] != threading.get_ident()
+    assert seen["own_work"] is True
     assert not fork_gate.blocked
     assert fork_gate._owner is None
 
@@ -148,7 +153,7 @@ async def test_a_non_reimporting_body_does_not_hold_the_fork_gate() -> None:
     gate = ReloadGate()
     seen: dict[str, Any] = {}
 
-    def body() -> None:
+    async def body() -> None:
         seen["blocked"] = fork_gate.blocked
         seen["owner"] = fork_gate._owner
 
@@ -163,7 +168,7 @@ async def test_run_releases_the_fork_gate_when_the_body_raises() -> None:
     subsequent job child for the process lifetime."""
     gate = ReloadGate()
 
-    def body() -> None:
+    async def body() -> None:
         raise RuntimeError("reload blew up")
 
     with pytest.raises(RuntimeError, match="reload blew up"):
@@ -179,12 +184,15 @@ async def test_a_reimporting_reload_a_job_runs_does_not_wait_on_that_jobs_span(
     """A job that runs a reload (the reload projected as a tool) holds a job span; the
     reload's fork-gate hold passes that span and runs the body at once."""
     gate = ReloadGate()
-    ran = threading.Event()
+    ran = asyncio.Event()
+
+    async def body() -> None:
+        ran.set()
 
     with caplog.at_level(logging.ERROR, logger="tai42_kit.fork_gate"):
         async with fork_gate.job_span_async(timeout=5.0):
             started = time.monotonic()
-            await gate.run(ran.set, reimports=True)
+            await gate.run(body, reimports=True)
             waited = time.monotonic() - started
 
     assert ran.is_set()
@@ -204,7 +212,7 @@ async def test_two_jobs_running_a_reimporting_reload_at_once_do_not_hold_each_ot
     first_holds_the_lock = asyncio.Event()
     started = time.monotonic()
 
-    def body(name: str) -> None:
+    async def body(name: str) -> None:
         entered[name] = time.monotonic() - started
 
     async def first_job() -> None:
@@ -332,10 +340,10 @@ async def test_a_job_on_its_own_loop_running_a_reimporting_reload_beside_another
     windows: dict[str, tuple[float, float]] = {}
     started = time.monotonic()
 
-    def body(name: str) -> None:
+    async def body(name: str) -> None:
         began = time.monotonic() - started
         if name == "first":
-            time.sleep(0.5)
+            await asyncio.sleep(0.5)
         windows[name] = (began, time.monotonic() - started)
 
     async def second_reload() -> None:
@@ -382,13 +390,16 @@ async def test_a_job_whose_wait_for_the_reload_lock_stops_early_runs_on_only_aft
     waits for the re-import to end: the job counts again before it runs."""
     gate = ReloadGate()
     span_open, lock_held = asyncio.Event(), asyncio.Event()
-    in_body, may_end, body_ended = threading.Event(), threading.Event(), threading.Event()
+    in_body, may_end, body_ended = asyncio.Event(), asyncio.Event(), asyncio.Event()
     seen: list[bool] = []
 
-    def body() -> None:
+    async def body() -> None:
         in_body.set()
-        assert may_end.wait(10.0)
+        await asyncio.wait_for(may_end.wait(), 10.0)
         body_ended.set()
+
+    async def nothing() -> None:
+        return None
 
     async def job() -> None:
         async with fork_gate.job_span_async(timeout=5.0):
@@ -397,9 +408,9 @@ async def test_a_job_whose_wait_for_the_reload_lock_stops_early_runs_on_only_aft
             try:
                 if stop == "timeout":
                     async with asyncio.timeout(0.2):
-                        await gate.run(lambda: None, reimports=True)
+                        await gate.run(nothing, reimports=True)
                 else:
-                    await gate.run(lambda: None, reimports=True)
+                    await gate.run(nothing, reimports=True)
             finally:
                 seen.append(body_ended.is_set())
 
@@ -410,7 +421,7 @@ async def test_a_job_whose_wait_for_the_reload_lock_stops_early_runs_on_only_aft
         while not gate.locked:
             await asyncio.sleep(0.01)
         lock_held.set()
-        assert await asyncio.to_thread(in_body.wait, 3.0)
+        await asyncio.wait_for(in_body.wait(), 3.0)
         if stop == "cancel":
             queued.cancel()
         await asyncio.sleep(0.5)
@@ -471,31 +482,26 @@ async def test_gated_routes_reject_while_reloading(monkeypatch: pytest.MonkeyPat
 
 
 async def test_serving_loop_not_frozen_during_reload(monkeypatch: pytest.MonkeyPatch) -> None:
-    """While a reload holds the gate and sleeps on its worker thread, /health and a
-    read-only GET both answer 200 on the still-running serving loop."""
+    """While a reload holds the gate and its body awaits on the serving loop, /health and a
+    read-only GET both answer 200 on that same, still-running loop."""
     monkeypatch.setattr(tai42_app, "_impl", SimpleNamespace(tools=_FakeTools({"a": object(), "b": object()})))
-    loop_thread = threading.get_ident()
-    entered = threading.Event()
-    release = threading.Event()
-    worker: dict[str, int] = {}
+    serving_loop = asyncio.get_running_loop()
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    body_loop: dict[str, asyncio.AbstractEventLoop] = {}
 
-    def blocking_reload() -> dict[str, Any]:
-        worker["thread"] = threading.get_ident()
+    async def awaiting_reload() -> dict[str, Any]:
+        body_loop["loop"] = asyncio.get_running_loop()
         entered.set()
-        # Sleep on the worker thread until the test lets go, leaving the serving
-        # loop free the whole time.
-        assert release.wait(timeout=5)
-        return {"status": "ok", "env_keys": 3}
+        # Await until the test lets go, leaving the serving loop free the whole time.
+        await asyncio.wait_for(release.wait(), 5.0)
+        return {"status": "ok", "env_keys": 3, "awaiting_respawn": []}
 
-    task = asyncio.create_task(reload_gate.run(blocking_reload, reimports=True))
+    task = asyncio.create_task(reload_gate.run(awaiting_reload, reimports=True))
     try:
-        for _ in range(500):
-            if entered.is_set():
-                break
-            await asyncio.sleep(0.01)
-        assert entered.is_set()
+        await asyncio.wait_for(entered.wait(), 5.0)
         assert reload_gate.locked
-        # The serving loop keeps answering while the reload runs on its thread.
+        # The serving loop keeps answering while the reload's body awaits on it.
         health_resp = await health_router.health_check(cast(Request, object()))
         assert health_resp.status_code == 200
         assert bytes(health_resp.body) == b"OK"
@@ -506,8 +512,8 @@ async def test_serving_loop_not_frozen_during_reload(monkeypatch: pytest.MonkeyP
         release.set()
         result = await task
 
-    assert result == {"status": "ok", "env_keys": 3}
-    assert worker["thread"] != loop_thread  # the reload really ran off the serving thread
+    assert result == {"status": "ok", "env_keys": 3, "awaiting_respawn": []}
+    assert body_loop["loop"] is serving_loop  # the reload's body ran on the serving loop itself
     assert not reload_gate.locked
 
 
@@ -612,18 +618,18 @@ class _FakeAdmin:
     def __init__(self, manager: _FakeConfigManager) -> None:
         self._manager = manager
         self.reloads = 0
-        self.reload_thread: int | None = None
+        self.reload_loop: asyncio.AbstractEventLoop | None = None
 
-    def reload_config(self) -> dict[str, Any]:
+    async def reload_config(self) -> dict[str, Any]:
         self.reloads += 1
-        self.reload_thread = threading.get_ident()
-        return {"status": "ok", "env_keys": len(self._manager._env)}
+        self.reload_loop = asyncio.get_running_loop()
+        return {"status": "ok", "env_keys": len(self._manager._env), "awaiting_respawn": []}
 
     served_mcp_names = staticmethod(no_mcp_listing)
 
 
 async def test_write_env_reloads_through_gate_same_result_shape(monkeypatch: pytest.MonkeyPatch) -> None:
-    """``POST /api/config/env`` runs its reload through the gate on a worker thread
+    """``POST /api/config/env`` awaits its reload through the gate on the serving loop
     and returns the reload result under a ``{"data": <reload result>}`` envelope."""
     manager = _FakeConfigManager()
     admin = _FakeAdmin(manager)
@@ -649,14 +655,15 @@ async def test_write_env_reloads_through_gate_same_result_shape(monkeypatch: pyt
             "fanout": {"mode": "local-only", "note": "no worker bus configured; only this worker reloaded"},
             "recycle": None,
             "awaiting_respawn": [],
+            "roll_deferred": False,
+            "roll_deferred_to": None,
             "span_release_error": None,
         }
     }
     assert manager.written == [{"NEW": "val"}]
     assert admin.reloads == 1
-    # The reload ran on a worker thread, not the serving loop's thread.
-    assert admin.reload_thread is not None
-    assert admin.reload_thread != threading.get_ident()
+    # The reload was awaited on the serving loop itself.
+    assert admin.reload_loop is asyncio.get_running_loop()
     assert not reload_gate.locked  # released after the route returns
 
 
@@ -752,11 +759,11 @@ async def test_a_waiter_cancelled_on_the_gate_leaves_no_record() -> None:
 
 
 async def test_work_outside_any_request_or_run_holds_the_gate_and_records_nothing() -> None:
-    from tai42_skeleton.app.admission import current_request_admission
+    from tai42_skeleton.app.admission import current_admission
     from tai42_skeleton.app.epoch import Epoch
 
     epoch = Epoch(number=0)
-    assert current_request_admission() is None
+    assert current_admission() is None
     async with reload_gate.driving():
         assert reload_gate.locked
     async with reload_gate.synchronized():

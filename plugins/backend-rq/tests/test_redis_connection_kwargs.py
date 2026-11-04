@@ -1,6 +1,6 @@
 """Every kit Redis client the backend leases takes the full ``RQ_*`` connection settings.
 
-The tools, the callback job, the enqueue path and the schedule branch each lease a pooled
+The worker inspection, the callback job, the task door and the schedule store each lease a pooled
 client through ``client_ctx`` with :func:`~tai42_backend_rq.settings.rq_client_kwargs`: the
 URL, the connection cap, the socket timeouts and the kit's connection retry, read as bytes.
 """
@@ -13,12 +13,12 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 import pytest
+from tai42_contract.backend import IntervalCadence, ScheduleRecord
 from tai42_kit.backend import CallbackSchema
 from tai42_kit.clients.impl.redis import RedisClient, SyncRedisClient
-from tai42_kit.utils.schedule_subject import schedule_create_fire
 from tai42_kit.utils.worker_secret_capability import WORKER_SECRET_CAPABILITY_ARG
 
-from tai42_backend_rq import extensions, tasks, tools
+from tai42_backend_rq import inspection, schedule_store, task_door, tasks
 from tai42_backend_rq.settings import rq_client_kwargs, rq_settings
 
 _EXPECTED = {
@@ -65,13 +65,13 @@ def test_the_client_kwargs_are_the_connection_settings_read_as_bytes() -> None:
 
 
 @pytest.mark.parametrize(
-    ("lease", "client_cls"), [(tools._async_redis, RedisClient), (tools._sync_redis, SyncRedisClient)]
+    ("lease", "client_cls"), [(inspection._async_redis, RedisClient), (inspection._sync_redis, SyncRedisClient)]
 )
-async def test_the_tools_lease_with_the_full_settings(
+async def test_the_inspection_leases_with_the_full_settings(
     monkeypatch: pytest.MonkeyPatch, lease: Callable[[], Any], client_cls: type
 ) -> None:
     seen: list[tuple[Any, dict[str, Any]]] = []
-    monkeypatch.setattr(tools, "client_ctx", _recording_lease(seen))
+    monkeypatch.setattr(inspection, "client_ctx", _recording_lease(seen))
 
     with pytest.raises(_LeasedError):
         async with lease():
@@ -92,31 +92,24 @@ async def test_the_callback_job_leases_with_the_full_settings(monkeypatch: pytes
     assert seen == [(SyncRedisClient, _EXPECTED)]
 
 
-async def test_the_enqueue_path_leases_with_the_full_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_the_task_door_leases_with_the_full_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     seen: list[tuple[Any, dict[str, Any]]] = []
-    monkeypatch.setattr(tasks, "client_ctx", _recording_lease(seen))
+    monkeypatch.setattr(task_door, "client_ctx", _recording_lease(seen))
 
     with pytest.raises(_LeasedError):
-        await tasks.enqueue_task()
+        await task_door.RqTaskDoor().submit((), {}, {}, None)
 
     assert seen == [(SyncRedisClient, _EXPECTED)]
 
 
-async def _sample_tool(x: int) -> dict[str, Any]:
-    """Sample tool used as the extension target."""
-    return {"x": x}
-
-
-async def test_the_schedule_branch_leases_with_the_full_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_the_schedule_store_leases_with_the_full_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     seen: list[tuple[Any, dict[str, Any]]] = []
-    monkeypatch.setattr(extensions, "client_ctx", _recording_lease(seen))
-    branch = extensions.schedule_task(_sample_tool, "sample_tool", "doc")
+    monkeypatch.setattr(schedule_store, "client_ctx", _recording_lease(seen))
+    record = ScheduleRecord(
+        name="nightly", tool="sample_tool", args=[], kwargs={"x": 7}, cadence=IntervalCadence(every=3600), enabled=True
+    )
 
-    with pytest.raises(_LeasedError), schedule_create_fire():
-        await branch(
-            x=7,
-            backend_schedule_name="nightly",
-            backend_schedule={"kind": "interval", "every": 3600, "relative": False},
-        )
+    with pytest.raises(_LeasedError):
+        await schedule_store.RqScheduleStore().write(record)
 
     assert seen == [(SyncRedisClient, _EXPECTED)]

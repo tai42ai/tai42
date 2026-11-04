@@ -13,7 +13,6 @@ from mcp.types import ToolAnnotations
 from tai42_contract.manifest import ExtensionElement
 from tai42_contract.tools import TOOL_META_PAUSES
 
-from tai42_skeleton.app.lifecycle.off_loop import run_blocking
 from tai42_skeleton.exceptions.exceptions import TaiValidationError
 from tai42_skeleton.extensions.registry import ExtensionRegistry, extension_config, extension_name
 from tai42_skeleton.tools.binding.errors import ExtensionComboRefusedError
@@ -255,16 +254,16 @@ class _BranchBindingMixin(_ToolBindingBase):
         """Apply one combo's extension chain left-to-right; the ``(name, branch)`` produced at EACH layer."""
         return list(combo_layers(self._extension_registry, prepared, extensions))
 
-    def check_combo(self, tool: str, combo: Sequence[ExtensionElement], *, base: Tool | None = None) -> None:
+    def check_combo(self, tool: str, combo: Sequence[ExtensionElement], *, base: Tool | None) -> None:
         """Dry-run bind ``combo`` on ``tool`` against the live registry; nothing is mounted or stored.
 
-        Checks every registered element's settings against its declared schema first. When every
-        element is registered, it then checks the combo's names and cardinality and, when a base is
-        known (``base``, else the live server's tool named ``tool``), walks the bind's own layers
-        over it, so each factory runs once and its branch is discarded. A combo naming an
-        unregistered extension, or a tool the live server does not serve, leaves the rest to the
-        bind after the reload. Raises :class:`ExtensionComboRefusedError` carrying the refusal as
-        text, with nothing chained.
+        ``base`` is the tool the combo binds over; ``None`` is a tool the live server does not
+        serve. Checks every registered element's settings against its declared schema first. When
+        every element is registered, it then checks the combo's names and cardinality and, over a
+        ``base``, walks the bind's own layers, so each factory runs once and its branch is
+        discarded. A combo naming an unregistered extension, or a ``None`` base, leaves the rest to
+        the bind after the reload. Raises :class:`ExtensionComboRefusedError` carrying the refusal
+        as text, with nothing chained.
         """
         refusal = self._combo_refusal(tool, combo, base)
         if refusal is not None:
@@ -272,8 +271,7 @@ class _BranchBindingMixin(_ToolBindingBase):
 
     def _combo_refusal(self, tool: str, combo: Sequence[ExtensionElement], base: Tool | None) -> str | None:
         """The refusal text of :meth:`check_combo`, or ``None`` when the combo passes."""
-        live = self._app._live_serving_core
-        registry = live._extension_registry
+        registry = self._app._live_serving_core._extension_registry
         registered = {entry["name"] for entry in registry.available_extensions()}
         for element in combo:
             if extension_name(element) not in registered:
@@ -286,10 +284,9 @@ class _BranchBindingMixin(_ToolBindingBase):
             return None
         try:
             registry.validate(combo)
-            served = base if base is not None else run_blocking(lambda: live._fast_mcp.get_tool(tool))
-            if served is None:
+            if base is None:
                 return None
-            prepared = self._prepared_branch(served, {})
+            prepared = self._prepared_branch(base, {})
         except Exception as exc:
             return f"extensions on tool '{tool}' cannot bind: {_reason(exc)}"
         finished = 0

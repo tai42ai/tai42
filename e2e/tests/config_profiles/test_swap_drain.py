@@ -234,8 +234,10 @@ async def test_hot_apply_does_not_lose_in_flight_backend_work(
     replicas_stack: TaiStack, uniq: Callable[[str], str]
 ) -> None:
     """A hot in-process swap does not lose an in-flight backend job: a job started before the
-    apply and still executing when the swap lands runs to completion (its ``done`` marker,
-    from the ORIGINAL backend pid, still arrives)."""
+    apply runs to completion (its ``done`` marker, from the ORIGINAL backend pid, still
+    arrives). An engine that runs the job in the worker process has the swap's rebuild wait
+    the job out before it re-imports; an engine that forks a child per job lands the swap
+    while the child still runs it."""
     api = replicas_stack.api(port=replicas_stack.port_a)
     key = uniq("swapdrain")
     serve_pids = {origin.pid for origin in replicas_stack.census() if origin.kind == "serve"}
@@ -254,7 +256,7 @@ async def test_hot_apply_does_not_lose_in_flight_backend_work(
     assert started_pid not in serve_pids, f"the job ran on a serve worker ({started_pid}), not a backend"
     assert "done" not in _values(), "the backend job completed before the swap could land mid-flight"
 
-    # A hot swap lands while the backend job is in-flight.
+    # The hot apply starts while the backend job is in-flight.
     await _apply_hot_flip(replicas_stack, uniq)
 
     # The in-flight backend work completed across the swap (not lost), from the same pid.

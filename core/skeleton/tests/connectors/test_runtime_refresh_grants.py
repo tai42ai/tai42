@@ -22,7 +22,6 @@ from tai42_contract.connectors.providers import OAuthEndpoints, ProviderDescript
 from tai42_kit.settings import reset_all_settings
 
 import tai42_skeleton.connectors.runtime.resolver as resolver_mod
-from tai42_skeleton.app.lifecycle.off_loop import run_blocking
 from tai42_skeleton.connectors.oauth import crypto, discovery
 from tai42_skeleton.connectors.runtime import refresh_owner
 from tai42_skeleton.connectors.runtime.resolver import (
@@ -33,6 +32,7 @@ from tai42_skeleton.connectors.runtime.resolver import (
 
 from .client_store_fake import FakeClientStore
 from .conftest import CID, make_discovered_descriptor
+from .credential_path import job_loop
 from .oauth_fakes import FakeOAuthServer, Reply, serve
 
 SECRET = "remote-env-secret"
@@ -352,7 +352,7 @@ def _declared_at(fake: FakeOAuthServer) -> ProviderDescriptor:
 async def test_an_env_client_grant_under_a_descriptor_declared_again_refreshes_the_declared_way(
     wiring: _Wiring, fake: FakeOAuthServer
 ):
-    from tai42_kit.clients.base import shutdown_all_clients
+    from tai42_kit.loop_bound import release_loop_bound_resources
 
     store = wiring.use(
         _record(grant=ConnectionGrant(issuer=f"{fake.base}/a", resource="https://r.example.com")), _declared_at(fake)
@@ -361,7 +361,7 @@ async def test_an_env_client_grant_under_a_descriptor_declared_again_refreshes_t
     try:
         await resolve_managed_auth(CID, "remote", "files")
     finally:
-        await shutdown_all_clients()
+        await release_loop_bound_resources()
     (request,) = _token_requests(fake)
     assert request.path == "/d/token"
     assert "resource" not in request.form
@@ -563,15 +563,15 @@ async def test_a_caller_cut_by_wait_for_waits_for_the_write_back(wiring: _Wiring
     _assert_rotated(store)
 
 
-async def test_the_same_through_a_throwaway_loop(wiring: _Wiring, fake: FakeOAuthServer):
+async def test_the_same_from_a_job_loop(wiring: _Wiring, fake: FakeOAuthServer):
     store = _slow_rotation(wiring, fake)
     await _warm(fake)
 
     async def _caller():
         return await asyncio.wait_for(resolve_managed_auth(CID, "remote", "files"), 0.2)
 
-    with pytest.raises(TimeoutError):
-        await asyncio.to_thread(run_blocking, _caller)
+    with job_loop() as job, pytest.raises(TimeoutError):
+        await job.run_awaited(_caller())
     _assert_rotated(store)
 
 

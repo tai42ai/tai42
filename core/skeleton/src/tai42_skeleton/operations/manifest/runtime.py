@@ -142,7 +142,7 @@ async def reload_failed_mcps(targets: list[str] | None = None) -> Any:
     Applied on this worker through the gate and broadcast to the fleet (all workers, or only
     ``targets``); the response embeds the per-worker fleet report.
     """
-    # Run the heavy sync re-probe pass on a worker thread through the gate.
+    # The re-probe pass is awaited on the serving loop through the gate.
     return await broadcast(
         ReloadFailedMcps(op="reload_failed_mcps"),
         targets,
@@ -165,7 +165,7 @@ async def deregister_mcp(title: str, targets: list[str] | None = None) -> Any:
     broadcast to the fleet (all workers, or only ``targets``); the response embeds the per-worker
     fleet report.
     """
-    # Run the heavy sync detach on a worker thread through the gate.
+    # The detach is awaited on the serving loop through the gate.
     return await broadcast(
         DeregisterMcp(op="deregister_mcp", title=title),
         targets,

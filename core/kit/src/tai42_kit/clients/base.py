@@ -13,6 +13,8 @@ from weakref import WeakKeyDictionary
 
 from tai42_contract.errors import ClientDisconnectedError
 
+from tai42_kit.loop_closing import loop_is_closing, refuse_lease_on_closing_loop
+
 logger = logging.getLogger(__name__)
 
 
@@ -49,14 +51,18 @@ _loop_clients: "WeakKeyDictionary[AbstractEventLoop, dict[int, dict[type, dict[s
 )
 _loop_locks: "WeakKeyDictionary[AbstractEventLoop, dict[tuple[int, type, str], asyncio.Lock]]" = WeakKeyDictionary()
 
-# The maps above are module-global and reached from many threads: a template
-# render runs in a worker thread (asyncio.to_thread) whose {% include %} bridge
-# spins its own loop (asyncio.run), so concurrent renders touch these maps at the
-# same time. WeakKeyDictionary is not thread-safe, so every EXPLICIT access to the
-# OUTER maps — and every read/write of the epoch counter below — is serialized
+# The maps above are module-global and reached from many threads: each event loop
+# of the process that leases a pooled client keys its own entry, and those loops
+# can run on different threads at the same time (the process's main loop, a loop
+# a worker thread runs of its own), so their clients touch these maps concurrently. WeakKeyDictionary
+# is not thread-safe, so every EXPLICIT access to the OUTER maps — and every
+# read/write of the epoch counter below — is serialized
 # under this lock. The lock is held only around dict bookkeeping and the counter,
 # never across an await (client creation/closing happens outside it). The lock is
 # non-reentrant: no path holds it while calling a helper that re-acquires it. The
+# lease paths also read the loop's closing mark under it, which takes
+# :mod:`tai42_kit.loop_closing`'s own lock nested inside: the order is always this
+# lock first, and ``loop_closing`` never takes this lock. The
 # weak-ref cleanup of a collected loop's entry still fires off-lock on an
 # arbitrary thread, but that removal is a single C-level op (atomic under the
 # GIL). Inner per-loop dicts stay owned by their single loop.
@@ -197,16 +203,26 @@ class PooledClient[T]:
             )
 
     def _clients_for_loop(self, loop: AbstractEventLoop, epoch: int) -> dict[str, _ClientEntry]:
+        """This class's live pool dict for ``loop`` and ``epoch``, for a lease to look its client up in.
+
+        A closing loop is refused with ``RuntimeError`` instead: its release may already have
+        detached its pools, and a dict built anew here would hold a client nothing releases.
+        """
         with _registry_lock:
-            per_loop = _loop_clients.get(loop)
-            if per_loop is None:
-                per_loop = {}
-                _loop_clients[loop] = per_loop
-            per_epoch = per_loop.get(epoch)
-            if per_epoch is None:
-                per_epoch = {}
-                per_loop[epoch] = per_epoch
-            return per_epoch.setdefault(self.__class__, {})
+            refuse_lease_on_closing_loop(loop, type(self).__name__, "lease a client")
+            return self._class_pools(loop, epoch)
+
+    def _class_pools(self, loop: AbstractEventLoop, epoch: int) -> dict[str, _ClientEntry]:
+        """This class's live pool dict for ``loop`` and ``epoch``, built on first use; the caller holds the lock."""
+        per_loop = _loop_clients.get(loop)
+        if per_loop is None:
+            per_loop = {}
+            _loop_clients[loop] = per_loop
+        per_epoch = per_loop.get(epoch)
+        if per_epoch is None:
+            per_epoch = {}
+            per_loop[epoch] = per_epoch
+        return per_epoch.setdefault(self.__class__, {})
 
     def _create_lock(self, loop: AbstractEventLoop, epoch: int, key: str) -> asyncio.Lock:
         with _registry_lock:
@@ -223,30 +239,20 @@ class PooledClient[T]:
     def _register(
         self, loop: AbstractEventLoop, epoch: int, key: str, created: T, build_options: dict
     ) -> _ClientEntry | None:
-        """Register a freshly created client under ``epoch``, or refuse if retired.
+        """Register a freshly created client under ``epoch``, or refuse it when it cannot be pooled.
 
         Returns the new entry, or ``None`` when the epoch advanced during
         ``_create`` — the client then belongs to a now-retired (possibly already
-        drained) epoch and must never land there, so the caller closes it and
-        retries under the fresh epoch. The epoch check and the write are one
-        atomic step under the lock; the current epoch can never be drained, so a
-        write here is safe from a concurrent ``drain_epoch``.
+        drained) epoch and must never land there — or the loop was marked
+        closing during ``_create``, when no release would close a client pooled
+        now. On ``None`` the caller closes the client. The checks and the write
+        are one atomic step under the lock; the current epoch can never be
+        drained, so a write here is safe from a concurrent ``drain_epoch``.
         """
         with _registry_lock:
-            if epoch != _client_epoch:
+            if epoch != _client_epoch or loop_is_closing(loop):
                 return None
-            per_loop = _loop_clients.get(loop)
-            if per_loop is None:
-                per_loop = {}
-                _loop_clients[loop] = per_loop
-            per_epoch = per_loop.get(epoch)
-            if per_epoch is None:
-                per_epoch = {}
-                per_loop[epoch] = per_epoch
-            clients = per_epoch.get(self.__class__)
-            if clients is None:
-                clients = {}
-                per_epoch[self.__class__] = clients
+            clients = self._class_pools(loop, epoch)
             entry = _ClientEntry(created, build_options)
             clients[key] = entry
             return entry
@@ -276,7 +282,7 @@ class PooledClient[T]:
                 if current_client_epoch() != epoch:
                     continue
                 # Re-fetch the live inner dict now that the lock is held:
-                # shutdown_all_clients()/drain_epoch may have detached this
+                # _shutdown_all_clients()/drain_epoch may have detached this
                 # epoch's pool between the capture above and acquiring the lock.
                 # The re-check and any write below must see the LIVE dict so a
                 # second waiter cannot orphan the first waiter's client.
@@ -298,34 +304,42 @@ class PooledClient[T]:
                     # (``_create``'s own guard tears down what it opened). A caller
                     # cancelled after the creation finished, before it resumed, gets the
                     # cancellation instead of the client: the client is still handed
-                    # over (pooled, or closed when its epoch retired) before the
-                    # cancellation propagates.
+                    # over (pooled, or closed when its epoch retired or its loop is
+                    # closing) before the cancellation propagates.
                     if creation.done() and not creation.cancelled() and creation.exception() is None:
                         await self._register_or_close(loop, epoch, key, creation.result(), build_options)
                     raise
-                # ``_create`` awaited, so the epoch may have advanced and a
-                # shutdown/drain may have detached the pool. ``_register`` re-reads
-                # both atomically: it lands the client in the LIVE current-epoch
-                # dict, or refuses (epoch retired) so we close and retry rather
-                # than orphan it in a dict nothing drains.
-                registered = self._register(loop, epoch, key, created, build_options)
+                # ``_create`` awaited, so the epoch may have advanced, a
+                # shutdown/drain may have detached the pool and the loop may have
+                # been marked closing. ``_register`` re-reads all three atomically:
+                # it lands the client in the LIVE current-epoch dict, or refuses
+                # (epoch retired, loop closing) so it is closed and we retry rather
+                # than orphan it in a dict nothing drains; on a closing loop the
+                # retry's lookup raises the refusal.
+                registered = await self._register_or_close(loop, epoch, key, created, build_options)
                 if registered is not None:
                     return registered, epoch
-            await self._close(created)
 
     async def _register_or_close(
         self, loop: AbstractEventLoop, epoch: int, key: str, created: T, build_options: dict
-    ) -> None:
-        """Pool ``created`` under ``epoch`` or, when that epoch has retired, close it."""
-        if self._register(loop, epoch, key, created, build_options) is None:
+    ) -> _ClientEntry | None:
+        """Pool ``created`` under ``epoch`` and return its entry, or close it.
+
+        ``None`` once ``created`` is closed because its epoch has retired or its loop is closing.
+        """
+        registered = self._register(loop, epoch, key, created, build_options)
+        if registered is None:
             await self._close(created)
+        return registered
 
     @asynccontextmanager
     async def current(self, **kwargs) -> AsyncIterator[T]:
         """Lease the pooled client for ``kwargs``, creating it on first use.
 
         A disconnection inside the body evicts and closes the client and raises
-        :class:`ClientDisconnectedError`; retry to rebuild it.
+        :class:`ClientDisconnectedError`; retry to rebuild it. On a loop its end has
+        marked closing (:mod:`tai42_kit.loop_closing`) a new lease raises
+        ``RuntimeError``; a lease held from before keeps its client.
         """
         loop = asyncio.get_running_loop()
         key = self.pool_key(**kwargs)
@@ -529,13 +543,15 @@ async def drain_epoch(epoch: int, deadline: float) -> None:
         raise ExceptionGroup(f"Errors force-closing client epoch {epoch}", errors)
 
 
-async def shutdown_all_clients() -> None:
+async def _shutdown_all_clients() -> None:
     """Close every live client pool for the running event loop.
 
     Sweeps every epoch of the per-loop class-keyed cache and closes each pooled
     client — process-teardown semantics, independent of leases. Closes are
     best-effort — failures are collected and raised together, never silently
-    dropped.
+    dropped. On a loop its end has marked closing (:mod:`tai42_kit.loop_closing`)
+    no lease builds a pool for it again; on a loop that lives on, the next lease
+    builds a fresh pool and the loop's next release closes it.
     """
     # Always called from within a running loop (it is async); get_running_loop
     # raises loudly if that invariant is ever broken.

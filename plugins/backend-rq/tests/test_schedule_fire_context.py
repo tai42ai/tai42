@@ -21,12 +21,7 @@ from tai42_backend_rq.settings import rq_settings
 _SUBJECT = {"target_kind": "tool", "target_name": "assistant", "kind": "person", "key": "p-1"}
 
 
-async def _noop_shutdown() -> None:
-    pass
-
-
-async def test_scheduled_fire_with_key_and_contract_drives_the_door(app, monkeypatch) -> None:
-    monkeypatch.setattr(tasks, "shutdown_all_clients", _noop_shutdown)
+async def test_scheduled_fire_with_key_and_contract_drives_the_door(app) -> None:
     app.tools.run_result = "ok"
     arg = rq_settings().tool_name_arg
     await tasks.tool_execution(
@@ -49,8 +44,7 @@ async def test_scheduled_fire_with_key_and_contract_drives_the_door(app, monkeyp
     assert app.tools.run_calls == [("greet", {"greeting": "hi"})]
 
 
-async def test_task_job_with_forwarded_subject_drives_the_door(app, monkeypatch) -> None:
-    monkeypatch.setattr(tasks, "shutdown_all_clients", _noop_shutdown)
+async def test_task_job_with_forwarded_subject_drives_the_door(app) -> None:
     app.tools.run_result = "ok"
     arg = rq_settings().tool_name_arg
     await tasks.tool_execution(
@@ -71,8 +65,7 @@ async def test_task_job_with_forwarded_subject_drives_the_door(app, monkeypatch)
     assert app.tools.run_calls == [("greet", {"message": "hi"})]
 
 
-async def test_plain_background_job_runs_the_tool_directly(app, monkeypatch) -> None:
-    monkeypatch.setattr(tasks, "shutdown_all_clients", _noop_shutdown)
+async def test_plain_background_job_runs_the_tool_directly(app) -> None:
     app.tools.run_result = "ok"
     arg = rq_settings().tool_name_arg
     # A top-level ``subject`` argument with NO stamped door signal is an ordinary tool argument: the run

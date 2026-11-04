@@ -22,15 +22,14 @@ cadence and stated deliberately.
 Loop ownership matters. The poll task must live on the REAL serving loop and retire
 with the generation that started it, so :func:`start_poll` is driven by the post-swap
 establisher :func:`start_advisories_poll` — run at boot and after every epoch swap, both ON the serving loop — and
-NOT by the per-epoch handler list, which runs on a throwaway build-thread loop a
-spawned task would not survive. Each (re)start registers the task with the epoch under
-construction, so a retire cancels exactly that generation's own task.
+NOT by the per-epoch handler list, which runs while the generation is still being built,
+before the retire cancels the previous generation's task. Each (re)start registers the task with the current epoch,
+the generation it was started for, so a retire cancels exactly that generation's own task.
 """
 
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 from datetime import UTC, datetime
 from typing import Any
@@ -44,6 +43,7 @@ from tai42_skeleton.marketplace.client import RegistryClient
 from tai42_skeleton.marketplace.errors import ListingNotFoundError, RegistryResponseError
 from tai42_skeleton.marketplace.settings import marketplace_settings
 from tai42_skeleton.marketplace.store import MarketplaceInstallStore
+from tai42_skeleton.utils.tasks import cancel_and_wait
 
 logger = logging.getLogger(__name__)
 
@@ -189,7 +189,8 @@ async def stop_poll() -> None:
     """Cancel and await the poll task — the shutdown-hook body.
 
     Called from the lifespan shutdown ON the serving loop the task lives on, so the
-    await is loop-safe by construction. Only ``CancelledError`` is suppressed.
+    await is loop-safe by construction. The task's own cancellation is not raised; a
+    cancellation of the stop while it waits propagates (:func:`cancel_and_wait`).
     """
     await _cancel_and_await_poll_task()
 
@@ -219,39 +220,33 @@ def _spawn_poll_if_enabled() -> None:
 
 
 def _register_task_with_epoch(task: asyncio.Task[None]) -> None:
-    """Register this poll task's cancel with the epoch under construction.
+    """Register this poll task's cancel with the current epoch.
 
     So the epoch retire cancels exactly the generation's own task and no timer outlives
-    its epoch. A no-op when no epoch is installed (a bare unit context). The cancel awaits
-    the task only when it lives on the loop the retire runs on, so a task left on a
-    torn-down build loop is cancelled without a cross-loop await.
+    its epoch. A no-op when no epoch is installed (a bare unit context). The task was
+    started on the serving loop, the loop the retire runs on, so the cancel awaits its end.
     """
-    from tai42_skeleton.app.epoch import epoch_under_construction_or_none
+    from tai42_skeleton.app.epoch import current_epoch_or_none
 
-    epoch = epoch_under_construction_or_none()
+    epoch = current_epoch_or_none()
     if epoch is None:
         return
 
     async def _cancel() -> None:
         if task.done():
             return
-        task.cancel()
-        if task.get_loop() is asyncio.get_running_loop():
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
+        await cancel_and_wait(task)
 
     epoch.register_periodic_loop(_cancel)
 
 
 async def _cancel_and_await_poll_task() -> None:
-    """Cancel the running poll task and await it, suppressing only its ``CancelledError``."""
+    """Cancel the running poll task and await it (:func:`cancel_and_wait`)."""
     global _poll_task
     task = _poll_task
     _poll_task = None
     if task is not None and not task.done():
-        task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await task
+        await cancel_and_wait(task)
 
 
 def _on_poll_done(task: asyncio.Task[None]) -> None:

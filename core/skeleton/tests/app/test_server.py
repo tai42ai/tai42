@@ -39,6 +39,7 @@ from tai42_skeleton.marketplace.compat import CorePluginBootError
 from tai42_skeleton.middleware.audit_log import AuditLogMiddleware
 from tai42_skeleton.middleware.body_limit import BodyLimitMiddleware
 from tai42_skeleton.middleware.rate_limit import RateLimitMiddleware
+from tai42_skeleton.middleware.writer_exit import WriterExitMiddleware
 from tai42_skeleton.monitoring import registry as monitoring_registry
 from tai42_skeleton.tools.binding import ToolBinding, UnknownToolError
 from tai42_skeleton.tools.binding.surface import remove_surface_tool
@@ -176,6 +177,44 @@ def test_run_backend_requires_configured_backend():
     assert launched == [["arg"]]
 
 
+def test_run_backend_declares_its_backends_drain_as_the_exit_drain():
+    a = _fresh()
+
+    class _Backend:
+        drain_timeout = 630.0
+
+        async def launch(self, args):
+            # The drain is declared before the backend runs: a stop may come at any time.
+            assert a.exit_drain.seconds() == 630.0
+
+    backend = _Backend()
+    a._backend_holder._backend = backend  # pyright: ignore[reportAttributeAccessIssue]
+    asyncio.run(a.run_backend(["arg"]))
+
+    # Read at call time: the drain the backend's live settings size.
+    backend.drain_timeout = 930.0
+    assert a.exit_drain.seconds() == 930.0
+
+
+def test_run_backend_announces_its_backends_drain_plus_the_apps_shutdown_bounds():
+    a = _fresh()
+    a.exit_drain.declare_shutdown("module", lambda: 70.0)
+
+    class _Backend:
+        drain_timeout = 630.0
+
+        async def launch(self, args):
+            # The lifespan shutdown runs after the backend's drain, within its declared bounds.
+            assert a.exit_drain.seconds() == 700.0
+
+    backend = _Backend()
+    a._backend_holder._backend = backend  # pyright: ignore[reportAttributeAccessIssue]
+    asyncio.run(a.run_backend(["arg"]))
+
+    backend.drain_timeout = 930.0
+    assert a.exit_drain.seconds() == 1000.0
+
+
 def _assert_sub_mcp_mounted(base: MagicMock, a: TaiMCP) -> None:
     """The sub-MCP router is the one ``Mount`` in the base app's route list, at its root prefix."""
     router = a.sub_app.mcp_sub_app_router
@@ -229,17 +268,19 @@ def test_sse_app_builds_and_finalizes():
     # access control is on (mirrors http_app); an unauthenticated SSE surface
     # would bypass it.
     assert mk.call_args.kwargs["auth"] is a._fast_mcp.auth
-    # The base app's OWN middleware list (inside its ServerErrorMiddleware) carries
-    # the audit trail then the body-size cap: the cap must be in that list so an
-    # over-cap escape becomes a 413 before any error handler can commit a 500, and
-    # the audit line wraps it so an over-cap 413 is audited like any other outcome.
+    # The base app's OWN middleware list (inside its ServerErrorMiddleware) carries the
+    # writer's exit first, so every reply the stack sends passes through it, then the audit
+    # trail then the body-size cap: the cap must be in that list so an over-cap escape
+    # becomes a 413 before any error handler can commit a 500, and the audit line wraps it
+    # so an over-cap 413 is audited like any other outcome.
     assert [m.cls for m in mk.call_args.kwargs["middleware"]] == [
+        WriterExitMiddleware,
         AuditLogMiddleware,
         BodyLimitMiddleware,
         TransportStreamDrainExemptMiddleware,
     ]
     # The transport's stream (``GET /sse``) is the one exempted from the retire drain.
-    assert mk.call_args.kwargs["middleware"][2].kwargs == {"stream_path": "/sse", "carries_replies": True}
+    assert mk.call_args.kwargs["middleware"][3].kwargs == {"stream_path": "/sse", "carries_replies": True}
     # finalize mounts the sub-app router on the base, then wraps only the always-on
     # outer RateLimitMiddleware around it.
     _assert_sub_mcp_mounted(sentinel, a)
@@ -255,14 +296,15 @@ def test_http_app_builds_and_finalizes():
     mcp.http_app.return_value = sentinel
     result = a.http_app(path="/mcp", transport="http")
     mcp.http_app.assert_called_once()
-    # The audit trail and the body-size cap are injected into the base app's own
-    # middleware list (inside ServerErrorMiddleware), audit outermost.
+    # The writer's exit, the audit trail and the body-size cap are injected into the base
+    # app's own middleware list (inside ServerErrorMiddleware), the writer's exit outermost.
     assert [m.cls for m in mcp.http_app.call_args.kwargs["middleware"]] == [
+        WriterExitMiddleware,
         AuditLogMiddleware,
         BodyLimitMiddleware,
         TransportStreamDrainExemptMiddleware,
     ]
-    assert mcp.http_app.call_args.kwargs["middleware"][2].kwargs == {"stream_path": "/mcp", "carries_replies": False}
+    assert mcp.http_app.call_args.kwargs["middleware"][3].kwargs == {"stream_path": "/mcp", "carries_replies": False}
     _assert_sub_mcp_mounted(sentinel, a)
     # finalize wraps only the always-on outer RateLimitMiddleware around the base.
     assert isinstance(result, RateLimitMiddleware)
@@ -464,6 +506,66 @@ def test_fleet_broadcast_error_masks_a_transport_cause():
     assert resp.status_code == 500
     body = _json.loads(bytes(resp.body))
     assert body["error"] == "Internal Server Error"
+    assert "internal-host" not in bytes(resp.body).decode()
+
+
+def _writer_restarting_roll() -> Any:
+    """A roll that restarted serve-b and arms the writer's own exit: its reload failed, its state unknown."""
+    from tai42_skeleton.app.bus import WorkerIdentity, WorkerKind
+    from tai42_skeleton.app.recycle import RECYCLED, RecycleReport, RecycleRow
+    from tai42_skeleton.config.recycle_policy import RecycleDecision, RecycleReason, ReportedKeys
+    from tai42_skeleton.config.recycle_roll import RollOutcome
+
+    decision = RecycleDecision(
+        writer=WorkerIdentity(name="serve-a", kind=WorkerKind.serve, pid=1, generation=3),
+        reported={"serve-b": ReportedKeys(generation=1, keys=("TAI_BUS_HEARTBEAT_TTL",))},
+        unconfirmed={},
+        clean=frozenset({"serve-c"}),
+        writer_reason=RecycleReason(unknown="its reload reported failed"),
+        withheld={},
+        addressed=None,
+        report_unreachable=False,
+    )
+    recycle = RecycleReport(
+        rows=[
+            RecycleRow(
+                name="serve-b", kind="serve", generation_before=1, status=RECYCLED, keys=["TAI_BUS_HEARTBEAT_TTL"]
+            )
+        ]
+    )
+    return RollOutcome(decision=decision, recycle=recycle, awaiting_respawn=[], self_exit_armed=True)
+
+
+@pytest.mark.parametrize(
+    "cause",
+    [CorePluginBootError("tools plugin 'acme_tools' failed to import: boom"), ConnectionError("internal-host:6379")],
+    ids=["operator-facing", "masked"],
+)
+def test_fleet_broadcast_error_carries_the_roll_it_ran(cause: Exception):
+    # A reload whose own local reload failed still restarted the drifted siblings: the error reply
+    # carries that roll and the verdict.
+    import json as _json
+
+    from starlette.requests import Request
+
+    from tai42_skeleton.app.bus.models import FleetResult
+    from tai42_skeleton.operations._broadcast import FleetBroadcastError
+
+    exc = FleetBroadcastError("reload_config", FleetResult(op="reload_config", reachable=True), cause)
+    exc.__cause__ = cause
+    exc.roll = _writer_restarting_roll()
+
+    scope = {"type": "http", "method": "POST", "path": "/api/config/reload", "query_string": b"", "headers": []}
+    resp = asyncio.run(error_envelope.fleet_broadcast_error_handler(Request(scope), exc))
+
+    assert resp.status_code == 500
+    body = _json.loads(bytes(resp.body))
+    assert [(line["name"], line["status"]) for line in body["recycle"]["recycle"]] == [
+        ("serve-b", "recycled"),
+        ("serve-a", "self-deferred"),
+    ]
+    assert body["recycle"]["skipped"] == ["serve-c"]
+    assert body["awaiting_respawn"] == []
     assert "internal-host" not in bytes(resp.body).decode()
 
 

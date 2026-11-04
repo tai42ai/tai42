@@ -18,8 +18,8 @@ one seam. This package is one such provider (direct/host execution); any package
 can back the same contract, so this repo is this provider's own full doc home, and
 the documentation site covers the platform-level story:
 
-- Sandbox concept: https://tai42.ai/concepts/sandboxes
-- Deployment / operate: https://tai42.ai/operate
+- Sandbox concept: https://docs.tai42.ai/concepts/sandbox
+- Deployment / operate: https://docs.tai42.ai/operate
 
 Its only tai-* dependencies are `tai42-contract` (the `Sandbox` ABC, the session /
 stream models, `SandboxPolicy`, the error family, `PluginItemKind.SANDBOX`, and the

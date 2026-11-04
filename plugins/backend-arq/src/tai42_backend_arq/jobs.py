@@ -35,11 +35,10 @@ async def known_queues(redis: Any) -> list[str]:
     return [settings.queue_name, *sorted(registered - {settings.queue_name})]
 
 
-async def job_handle(redis: Any, job_id: str) -> Job:
-    """A ``Job`` handle for ``job_id`` pinned to the known queue holding it.
+async def holding_queue(redis: Any, job_id: str) -> str:
+    """The known queue holding ``job_id``, or the settings queue for an id on none.
 
-    An id on no known queue (finished, result only, or never sent) gets the settings
-    queue: arq then answers from its per-id result and in-progress keys alone. An id on
+    An id on no known queue is finished, has a result only, or was never sent. An id on
     more than one queue raises ``RuntimeError``.
     """
     queues = await known_queues(redis)
@@ -50,7 +49,17 @@ async def job_handle(redis: Any, job_id: str) -> Job:
     hits = [queue for queue, score in zip(queues, scores, strict=True) if score is not None]
     if len(hits) > 1:
         raise RuntimeError(f"job {job_id} is queued on more than one queue: {hits}")
-    queue = hits[0] if hits else queues[0]
+    return hits[0] if hits else queues[0]
+
+
+async def job_handle(redis: Any, job_id: str, queue: str | None = None) -> Job:
+    """A ``Job`` handle for ``job_id`` pinned to ``queue``, by default the :func:`holding_queue`.
+
+    On the settings queue an id on no known queue is answered from arq's per-id result and
+    in-progress keys alone.
+    """
+    if queue is None:
+        queue = await holding_queue(redis, job_id)
     return Job(job_id, redis, _queue_name=queue, _deserializer=job_deserializer)
 
 

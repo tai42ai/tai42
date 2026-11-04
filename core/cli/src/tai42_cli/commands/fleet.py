@@ -21,6 +21,7 @@ from tai42_cli.commands._common import (
     covers,
     emit_result,
 )
+from tai42_cli.commands._reload_roll_help import RELOAD_ROLL_HELP
 from tai42_cli.render import print_json, print_records
 
 app = typer.Typer(
@@ -106,7 +107,17 @@ def list_workers(ctx: typer.Context) -> None:
     print_records(rows, _WORKER_COLUMNS, json_output=False)
 
 
-@app.command("reload-config")
+_RELOAD_CONFIG_HELP = f"""\
+Soft-restart the worker fleet (all, or only ``--target``), restarting drifted workers whose reload built.
+
+With ``--target`` only the named workers are judged; the others keep running.
+
+{RELOAD_ROLL_HELP}
+
+Example: ``tai fleet reload-config --target serve-1``"""
+
+
+@app.command("reload-config", help=_RELOAD_CONFIG_HELP)
 @covers(("POST", "/api/fleet/reload-config"))
 def reload_config(
     ctx: typer.Context,
@@ -115,18 +126,7 @@ def reload_config(
         typer.Option("--target", help="A worker slot name to restrict the reload to (e.g. serve-1; repeatable)."),
     ] = None,
 ) -> None:
-    """Soft-restart the worker fleet — all of them, or only ``--target`` ones.
-
-    The response is the per-worker fleet report (one row per worker with its
-    reload outcome).
-
-    Each worker's row names the recycle-class keys awaiting a respawn
-    (``awaiting_respawn``): the soft restart carries every hot key in place, and
-    those keys take effect only when that worker is respawned through the
-    deployment's supervisor.
-
-    Example: ``tai fleet reload-config --target serve-1``
-    """
+    """Post the fleet reload and emit its report; the command's help is ``_RELOAD_CONFIG_HELP``."""
     ctx_obj = app_context(ctx)
     targets = list(target) if target else None
     with ctx_obj.client() as client:

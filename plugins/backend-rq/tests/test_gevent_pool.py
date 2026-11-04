@@ -3,8 +3,8 @@
 ``--pool gevent`` monkey-patches the process, which turns ``threading``'s threads and thread
 identities into greenlets: rq's timer penalty cannot target a greenlet, and a refresher greenlet
 would neither report progress nor refresh rq's heartbeats while a job holds the CPU. Each case
-builds a real gevent-pool worker (``_build_worker``) in a fresh subprocess against a real Redis,
-runs one job, and reads what happened.
+patches a fresh subprocess first, as the pool's process prelude does, builds a real gevent-pool
+worker (``_build_worker``) there against a real Redis, runs one job, and reads what happened.
 
 Skipped when no Redis is reachable — set ``TAI_TEST_RQ_REDIS``
 (default ``redis://localhost:6379/15``) to run it.
@@ -38,11 +38,21 @@ def _redis_reachable(url: str) -> bool:
 
 pytestmark = pytest.mark.skipif(not _redis_reachable(_REDIS_URL), reason=f"no Redis reachable at {_REDIS_URL}")
 
-# The worker process: bind the suite's stub app (``conftest``), build the gevent-pool worker the
-# way ``tai backend worker --pool gevent`` does, run one job (``spin`` holds the CPU, ``nap``
-# sleeps cooperatively) while the worker reports into a liveness file, and print what happened.
+# The worker process: patch first, as the gevent pool's process prelude does, and bind asyncio's
+# future chaining after it, as the host's entry does; bind the suite's stub app (``conftest``);
+# build the gevent-pool worker the way ``tai backend worker --pool gevent`` does; run one job
+# (``spin`` holds the CPU, ``nap`` sleeps cooperatively) while the worker reports into a liveness
+# file, and print what happened.
 _WORKER_SCRIPT = textwrap.dedent(
     """
+    from gevent import monkey
+
+    monkey.patch_all()
+
+    from tai42_kit.backend.reshaped_threads import bind_future_chaining
+
+    bind_future_chaining()
+
     import json, logging, sys, time
     from pathlib import Path
 

@@ -20,9 +20,9 @@ WhatsApp provisioning tools. The ecosystem is open-ended, so this repo is these
 tools' own full doc home, and the documentation site covers the platform-level
 story:
 
-- Tools concept: https://tai42.ai/concepts/tools
-- Build a tool (author guide): https://tai42.ai/guides/authors/tool
-- Ecosystem catalog: https://tai42.ai/reference/catalog
+- Tools and extensions concept: https://docs.tai42.ai/concepts/tools-and-extensions
+- Build a tool (guide): https://docs.tai42.ai/guides/build-a-tool
+- Plugin catalog: https://docs.tai42.ai/plugins
 
 ## Install
 

@@ -512,7 +512,6 @@ def test_a_withdraw_that_returns_the_location_to_the_bus_the_process_runs_on_is_
     ("fields", "key"),
     [
         ({"heartbeat_ttl": 21.0}, "TAI_BUS_HEARTBEAT_TTL"),
-        ({"ack_timeout": 3.0}, "TAI_BUS_ACK_TIMEOUT"),
         ({"apply_timeout": 120.0}, "TAI_BUS_APPLY_TIMEOUT"),
     ],
 )
@@ -578,12 +577,12 @@ class _Lifecycle(TaiMCPLifecycleMixin):
     def __init__(self) -> None:
         super().__init__()
         self.started_with: object | None = None
-        self._building = ServingCore(cast("object", self), args=(), auth=None, kwargs={"name": "boot-rules"})  # type: ignore[arg-type]
+        self._scaffold_core = ServingCore(cast("object", self), args=(), auth=None, kwargs={"name": "boot-rules"})  # type: ignore[arg-type]
 
     def _mcp_tools(self, config, tools, preset_names):  # abstract in the mixin
         pass
 
-    def start(self, manifest):
+    async def start(self, manifest):
         self.started_with = manifest
 
 
@@ -597,12 +596,14 @@ async def test_app_context_refuses_a_window_below_the_drain_floor(monkeypatch: p
     assert lifecycle.started_with is None
 
 
-def test_a_reload_refuses_a_window_below_the_drain_floor_before_rebuilding(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_a_reload_refuses_a_window_below_the_drain_floor_before_rebuilding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     _with_bus(monkeypatch)
     _window_and_drain(monkeypatch, window="20", drain="10")
     lifecycle = _Lifecycle()
     with pytest.raises(boot_rules.ApplyWindowBelowDrainError, match="TAI_TOOL_RUNS_SHUTDOWN_DRAIN_SECONDS=10"):
-        lifecycle._reload_registries(ConcreteManifest())
+        await lifecycle._reload_registries(ConcreteManifest())
     # Refused before the registries rebuild, so the build primitive discards it whole.
     assert lifecycle.started_with is None
 
@@ -617,12 +618,14 @@ async def test_app_context_refuses_a_backend_without_hooks_store(monkeypatch: py
     assert lifecycle.started_with is None
 
 
-def test_a_reload_refuses_a_backend_without_hooks_store_before_rebuilding(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_a_reload_refuses_a_backend_without_hooks_store_before_rebuilding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     _with_bus(monkeypatch)
     _no_hooks_store(monkeypatch)
     lifecycle = _Lifecycle()
     with pytest.raises(boot_rules.BackendNeedsHooksStoreError, match="HOOKS_REDIS_URL"):
-        lifecycle._reload_registries(ConcreteManifest(backend_module="myapp.backend"))
+        await lifecycle._reload_registries(ConcreteManifest(backend_module="myapp.backend"))
     assert lifecycle.started_with is None
 
 
@@ -727,7 +730,7 @@ async def test_a_single_worker_boots_over_in_memory_stores(monkeypatch: pytest.M
         (_no_hooks_store, boot_rules.WorkersNeedHooksStoreError, "HOOKS_REDIS_URL"),
     ],
 )
-def test_a_reload_refuses_an_in_memory_store_on_a_multi_worker_server_before_rebuilding(
+async def test_a_reload_refuses_an_in_memory_store_on_a_multi_worker_server_before_rebuilding(
     monkeypatch: pytest.MonkeyPatch,
     no_store: Callable[[pytest.MonkeyPatch], None],
     error: type[Exception],
@@ -740,7 +743,7 @@ def test_a_reload_refuses_an_in_memory_store_on_a_multi_worker_server_before_reb
     no_store(monkeypatch)
     lifecycle = _Lifecycle()
     with pytest.raises(error, match=setting):
-        lifecycle._reload_registries(ConcreteManifest())
+        await lifecycle._reload_registries(ConcreteManifest())
     assert lifecycle.started_with is None
 
 
@@ -778,11 +781,13 @@ async def test_a_worker_keeps_the_container_bus_url_over_a_stored_empty_value(
     assert os.environ["TAI_BUS_REDIS_URL"]
 
 
-def test_a_reload_refuses_a_busless_multi_worker_server_before_rebuilding(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_a_reload_refuses_a_busless_multi_worker_server_before_rebuilding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     _serve_workers(monkeypatch, 2)
     _busless(monkeypatch)
     _shared_stores(monkeypatch)
     lifecycle = _Lifecycle()
     with pytest.raises(RuntimeError, match=r"2 workers with no worker bus.*TAI_BUS_REDIS_URL"):
-        lifecycle._reload_registries(ConcreteManifest())
+        await lifecycle._reload_registries(ConcreteManifest())
     assert lifecycle.started_with is None

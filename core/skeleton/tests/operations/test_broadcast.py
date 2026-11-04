@@ -13,13 +13,14 @@ rows carry a settable PTTL, so an apply that fades a row is exactly what these d
 from __future__ import annotations
 
 import logging
-import signal
+from typing import cast
 
 import pytest
 
 from tai42_skeleton.app import instance
-from tai42_skeleton.app.bus import FleetResult, OpOutcome, WorkerResult
+from tai42_skeleton.app.bus import FleetResult, OpOutcome, WorkerBus, WorkerResult
 from tai42_skeleton.app.bus.ops import ReloadTool
+from tai42_skeleton.config.recycle_roll import RollOutcome
 from tai42_skeleton.operations import _broadcast
 from tai42_skeleton.operations._broadcast import broadcast, fleet_fanout
 
@@ -74,7 +75,8 @@ async def test_untargeted_snapshot_excludes_self_and_gap_rows(monkeypatch: pytes
 
 async def test_targeted_broadcast_takes_no_op_start_census(monkeypatch: pytest.MonkeyPatch) -> None:
     # A targeted op's expected set is the caller's explicit list, not the census, so a
-    # named target that fades mid-apply is already carried into the report as departed.
+    # named target stays expected at a known life whether or not its presence row is
+    # still there when publish reads the census.
     # The snapshot would be pure overhead — and a second census on a path that already
     # ran one for validation.
     bus = _install(monkeypatch, FakeBus(origin="serve-a", remotes=["serve-b"]))
@@ -211,8 +213,10 @@ def test_a_stopped_roll_leaves_its_unreached_and_stopped_targets_and_the_writer_
 
     roll = RecycleReport(
         rows=[
-            RecycleRow(name="backend-1", kind="backend", generation_before=1, status=RECYCLED),
-            RecycleRow(name="backend-2", kind="backend", generation_before=1, status=TIMED_OUT, detail="slow"),
+            RecycleRow(name="backend-1", kind="backend", generation_before=1, status=RECYCLED, keys=[_KEY]),
+            RecycleRow(
+                name="backend-2", kind="backend", generation_before=1, status=TIMED_OUT, keys=[_KEY], detail="slow"
+            ),
         ],
         stopped=RecycleStop(kind="backend", name="backend-2", detail="slow"),
     )
@@ -226,6 +230,101 @@ def test_a_stopped_roll_leaves_its_unreached_and_stopped_targets_and_the_writer_
     assert [w.name for w in verdict] == ["backend-2", "serve-1", "serve-2"]
 
 
+def test_a_target_whose_exit_is_deferred_to_its_own_change_is_not_awaiting_a_respawn() -> None:
+    from tai42_skeleton.app.bus import WorkerIdentity, WorkerKind
+    from tai42_skeleton.app.recycle import RECYCLED, SELF_DEFERRED, RecycleReport, RecycleRow
+    from tai42_skeleton.operations._broadcast import awaiting_respawn_after
+
+    # The joiner's roll reached serve-1 while serve-1's own change was rolling: serve-1's own
+    # operation reports whether serve-1 converged, so the joiner's verdict leaves it out.
+    roll = RecycleReport(
+        rows=[
+            RecycleRow(
+                name="serve-1",
+                kind="serve",
+                generation_before=1,
+                status=SELF_DEFERRED,
+                keys=[_KEY],
+                detail="its exit is deferred to its own in-flight change: the env change",
+            ),
+            RecycleRow(name="serve-2", kind="serve", generation_before=1, status=RECYCLED, keys=[_KEY]),
+        ]
+    )
+    joiner = WorkerIdentity(name="backend-1", kind=WorkerKind.backend, pid=1, generation=2)
+
+    verdict = awaiting_respawn_after(
+        _report(_row("backend-1", []), _row("serve-1", [_KEY]), _row("serve-2", [_KEY])),
+        roll,
+        joiner,
+        self_exit_armed=False,
+    )
+
+    assert verdict == []
+
+
+def _writer_moved_roll(*, armed: bool) -> RollOutcome:
+    """A roll that converged on ``backend-1`` after a reload whose writer ``serve-1`` reports the key moved."""
+    from tai42_skeleton.app.bus import WorkerIdentity, WorkerKind
+    from tai42_skeleton.app.recycle import RECYCLED, RecycleReport, RecycleRow
+    from tai42_skeleton.config.recycle_policy import RecycleDecision, RecycleReason, ReportedKeys
+
+    return RollOutcome(
+        decision=RecycleDecision(
+            writer=WorkerIdentity(name="serve-1", kind=WorkerKind.serve, pid=1, generation=2),
+            reported={"backend-1": ReportedKeys(generation=1, keys=(_KEY,))},
+            unconfirmed={},
+            clean=frozenset(),
+            writer_reason=RecycleReason(keys=(_KEY,)),
+            withheld={},
+            addressed=None,
+            report_unreachable=False,
+        ),
+        recycle=RecycleReport(
+            rows=[RecycleRow(name="backend-1", kind="backend", generation_before=1, status=RECYCLED, keys=[_KEY])]
+        ),
+        awaiting_respawn=[],
+        self_exit_armed=armed,
+    )
+
+
+@pytest.mark.parametrize("armed", [True, False])
+def test_an_applied_result_and_its_reply_state_the_writers_exit_as_its_roll_armed_it(armed: bool) -> None:
+    from tai42_skeleton.config.service import ApplyResult
+    from tai42_skeleton.operations._broadcast import apply_response
+
+    roll = _writer_moved_roll(armed=armed)
+    result = ApplyResult(fleet=_report(), local={"status": "ok", "env_keys": 1, "awaiting_respawn": []}).rolled(roll)
+
+    assert result.self_exit_armed is armed
+    rows = apply_response(result)["recycle"]["recycle"]
+    assert [(row["name"], row["status"]) for row in rows][-1] == (
+        ("serve-1", "self-deferred") if armed else ("backend-1", "recycled")
+    )
+
+
+@pytest.mark.parametrize("armed", [True, False])
+def test_a_profile_apply_outcome_and_its_reply_state_the_writers_exit_as_its_roll_armed_it(
+    armed: bool,
+) -> None:
+    from tai42_skeleton.config.service.results import ProfileApplyOutcome
+    from tai42_skeleton.operations._broadcast import profile_apply_response
+
+    roll = _writer_moved_roll(armed=armed)
+    outcome = ProfileApplyOutcome(
+        hot=[],
+        decision=roll.decision,
+        recycle=roll.recycle,
+        fleet=_report(),
+        awaiting_respawn=roll.awaiting_respawn,
+        self_exit_armed=roll.self_exit_armed,
+    )
+
+    rows = profile_apply_response(outcome)["recycle"]
+    assert [(row["name"], row["status"]) for row in rows][-1] == (
+        ("serve-1", "self-deferred") if armed else ("backend-1", "recycled")
+    )
+
+
 def test_the_awaiting_verdict_is_logged_once_naming_every_worker(caplog: pytest.LogCaptureFixture) -> None:
     import logging
 
@@ -234,9 +333,10 @@ def test_the_awaiting_verdict_is_logged_once_naming_every_worker(caplog: pytest.
     from tai42_skeleton.operations._broadcast import log_awaiting_respawn
 
     with caplog.at_level(logging.ERROR):
-        log_awaiting_respawn([])
+        log_awaiting_respawn([], withheld=set())
         log_awaiting_respawn(
-            [AwaitingWorker(name="backend-2", keys=[_KEY]), AwaitingWorker(name="serve-1", keys=[_KEY])]
+            [AwaitingWorker(name="backend-2", keys=[_KEY]), AwaitingWorker(name="serve-1", keys=[_KEY])],
+            withheld=set(),
         )
 
     errors = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
@@ -244,6 +344,33 @@ def test_the_awaiting_verdict_is_logged_once_naming_every_worker(caplog: pytest.
         "worker(s) awaiting a respawn — recycle-class key(s) changed in the stored env since they were bound and "
         "nothing in this operation respawns them: backend-2 (BACKEND_MANIFEST_KEY), serve-1 (BACKEND_MANIFEST_KEY) — "
         "restart each through the deployment's supervisor (bare: restart the server)"
+    ]
+
+
+def test_a_withheld_worker_is_told_to_fix_the_stored_config_before_any_restart(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import logging
+
+    from tai42_contract.app.responses import AwaitingWorker
+
+    from tai42_skeleton.operations._broadcast import log_awaiting_respawn
+
+    with caplog.at_level(logging.ERROR):
+        log_awaiting_respawn(
+            [AwaitingWorker(name="backend-2", keys=[_KEY]), AwaitingWorker(name="serve-2", keys=[_KEY])],
+            withheld={"serve-2"},
+        )
+
+    errors = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
+    assert errors == [
+        "worker(s) awaiting a respawn — recycle-class key(s) changed in the stored env since they were bound and "
+        "nothing in this operation respawns them: backend-2 (BACKEND_MANIFEST_KEY) — "
+        "restart each through the deployment's supervisor (bare: restart the server)",
+        "worker(s) whose reload was refused at its epoch build — the stored config did not build on them, so each "
+        "keeps serving its current config, its recycle-class key(s) changed in the stored env since they were "
+        "bound: serve-2 (BACKEND_MANIFEST_KEY) — fix the stored config, or the cause the build error names, "
+        "before restarting any of them",
     ]
 
 
@@ -277,36 +404,21 @@ async def test_a_non_member_publisher_applies_nothing_locally_and_its_member_con
     assert [row["name"] for row in body["results"]] == ["backend-1"]
 
 
-async def test_the_writer_exit_of_a_non_member_aims_at_the_member_it_acts_for(
+async def test_the_writer_exit_of_a_member_marks_it_recycling_and_pulls_its_own_latch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from tai42_skeleton.app import graceful_exit
-    from tai42_skeleton.operations._broadcast import writer_exit_response
-
-    _fork_child_bus(monkeypatch)
-    kills: list[tuple[int, int]] = []
-    monkeypatch.setattr(graceful_exit.os, "kill", lambda pid, sig: kills.append((pid, sig)))
-
-    response = writer_exit_response({"status": "ok"}, armed=True)
-    assert response.background is not None
-    await response.background()
-
-    assert kills == [(1, signal.SIGTERM)]
-
-
-async def test_the_writer_exit_of_a_member_aims_at_itself(monkeypatch: pytest.MonkeyPatch) -> None:
-    from tai42_skeleton.app import graceful_exit
-    from tai42_skeleton.operations._broadcast import writer_exit_response
+    from tai42_skeleton.app.writer_exit import WRITER_EXIT_REASON, writer_exit_scope
 
     bus = _install(monkeypatch, FakeBus(origin="serve-a"))
-    kills: list[tuple[int, int]] = []
-    monkeypatch.setattr(graceful_exit.os, "kill", lambda pid, sig: kills.append((pid, sig)))
 
-    response = writer_exit_response({"status": "ok"}, armed=True)
-    assert response.background is not None
-    await response.background()
+    with writer_exit_scope() as exits:
+        exits.hold_exit(cast("WorkerBus", bus), "the env change")
+        exits.owe(cast("WorkerBus", bus))
+        await exits.settle()
 
-    assert kills == [(bus.identity.pid, signal.SIGTERM)]
+    assert bus.recycling_marks == 1
+    assert bus.exit_requests == [WRITER_EXIT_REASON]
+    assert bus.publish_calls == []
 
 
 async def test_a_preset_fan_out_from_a_non_member_carries_no_self_entry(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -335,3 +447,57 @@ async def test_a_preset_fan_out_from_a_member_carries_its_applied_self_entry(mon
     local = bus.publish_calls[0][2]
     assert local is not None
     assert local.outcome == OpOutcome.applied
+
+
+def _handed_off_roll() -> RollOutcome:
+    """A roll ``serve-1`` handed to its member ``backend-1``: decided, not rolled in the change."""
+    roll = _writer_moved_roll(armed=False)
+    return RollOutcome(
+        decision=roll.decision, recycle=None, awaiting_respawn=[], self_exit_armed=False, deferred_to="backend-1"
+    )
+
+
+def test_a_handed_off_roll_reads_deferred_to_its_member_on_every_reply() -> None:
+    from tai42_skeleton.config.service import ApplyResult
+    from tai42_skeleton.config.service.results import ProfileApplyOutcome
+    from tai42_skeleton.operations._broadcast import apply_response, profile_apply_response, roll_outcome_body
+
+    roll = _handed_off_roll()
+    result = ApplyResult(fleet=_report(), local={"status": "ok", "env_keys": 1, "awaiting_respawn": []}).rolled(roll)
+    outcome = ProfileApplyOutcome(
+        hot=[],
+        decision=roll.decision,
+        recycle=None,
+        fleet=_report(),
+        awaiting_respawn=[],
+        self_exit_armed=False,
+        roll_deferred=True,
+        roll_deferred_to="backend-1",
+    )
+
+    applied = apply_response(result)
+    assert (applied["recycle"], applied["awaiting_respawn"]) == (None, [])
+    assert (applied["roll_deferred"], applied["roll_deferred_to"]) == (True, "backend-1")
+    assert roll_outcome_body(roll) == {
+        "recycle": None,
+        "awaiting_respawn": [],
+        "roll_deferred": True,
+        "roll_deferred_to": "backend-1",
+    }
+    profiled = profile_apply_response(outcome)
+    assert (profiled["recycle"], profiled["recycle_stopped"]) == ([], None)
+    assert (profiled["roll_deferred"], profiled["roll_deferred_to"]) == (True, "backend-1")
+
+
+def test_a_roll_run_in_its_change_reads_deferred_to_nobody() -> None:
+    from tai42_skeleton.operations._broadcast import roll_outcome_body
+
+    body = roll_outcome_body(_writer_moved_roll(armed=True))
+
+    assert (body["roll_deferred"], body["roll_deferred_to"]) == (False, None)
+    assert roll_outcome_body(None) == {
+        "recycle": None,
+        "awaiting_respawn": [],
+        "roll_deferred": False,
+        "roll_deferred_to": None,
+    }

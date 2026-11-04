@@ -8,7 +8,6 @@ checkpoint/store connection resources. Importing this package pulls
 ``tai42_kit`` top level stays vendor-free).
 """
 
-from tai42_kit.llm._resource_registry import release_loop_bound_resources
 from tai42_kit.llm.checkpoint.checkpoint_registry import checkpoint_registry
 from tai42_kit.llm.classifier import get_classifier, get_classifier_async
 from tai42_kit.llm.embedding import get_embedding, get_embedding_async
@@ -36,7 +35,6 @@ __all__ = [
     "get_embedding_async",
     "get_llm",
     "get_llm_async",
-    "release_loop_bound_resources",
     "store_registry",
     "system_prompt_cache_mark",
 ]

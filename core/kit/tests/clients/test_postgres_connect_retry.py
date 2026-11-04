@@ -26,8 +26,9 @@ import psycopg
 from pydantic import SecretStr
 from tai42_contract.errors import ClientDisconnectedError
 
-from tai42_kit.clients import PostgresConnectionOptions, PostgresConnectionSettings, client_ctx, shutdown_all_clients
+from tai42_kit.clients import PostgresConnectionOptions, PostgresConnectionSettings, client_ctx
 from tai42_kit.clients.impl import postgres as pg_mod
+from tai42_kit.loop_bound import release_loop_bound_resources
 
 _MARKER_PASSWORD = "m4rker-pw-never-logged"
 _DSN = f"postgresql://u:{_MARKER_PASSWORD}@h:5433/db"
@@ -289,7 +290,7 @@ async def test_the_rebuild_after_an_eviction_retries(
         assert connects.calls == 4
         assert len(pools.built) == 2
     finally:
-        await shutdown_all_clients()
+        await release_loop_bound_resources()
 
 
 def _closed_loopback_port() -> int:

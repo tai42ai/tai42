@@ -3,57 +3,47 @@
 ``prefork`` (:class:`CustomRQWorker`) forks a monitored work-horse per job. ``solo``
 (:class:`CustomRQSimpleWorker`) and ``gevent`` (:class:`CustomRQGeventWorker`) run each job in
 this process, beside a refresher on an OS thread that reports the worker's progress and refreshes
-rq's heartbeats while the job runs; each keeps the job to its budget with its own death penalty.
-Every class reports the work loop's progress, also while a job waits for a config reload's
-re-import, and installs the fork gate's guard over every fork of the process
-(:mod:`tai42_backend_rq.worker` describes the gate's invariant). The ``worker`` runtime builds
-the class its pool selects.
+rq's heartbeats while the job runs; each keeps the job to its budget, and raises a stop into it,
+with its own death penalty (:mod:`tai42_backend_rq.death_penalties`).
+Every class reports the work loop's progress, also while a fork or a job waits on the work
+loop's own thread for a config reload's re-import, and installs the kit's fork safety over every fork of the process
+(:mod:`tai42_backend_rq.worker` describes the gate's invariant). Each class declares the job class
+its jobs are dequeued as, which decides the event loop a job's coroutine runs on
+(:mod:`tai42_backend_rq.job_loop`). The ``worker`` runtime builds the class its pool selects.
 """
 
 from __future__ import annotations
 
-import importlib
 import logging
 import os
 import signal
-import sys
-import threading
 import time
 from _thread import LockType
 from collections.abc import Callable
-from contextlib import AbstractContextManager
 from typing import Any, ClassVar
 
 from rq import SimpleWorker, Worker
+from rq.defaults import DEFAULT_LOGGING_DATE_FORMAT, DEFAULT_LOGGING_FORMAT
 from rq.exceptions import StopRequested
 from rq.timeouts import (
-    BaseDeathPenalty,
     HorseMonitorTimeoutException,
-    JobTimeoutException,
     TimerDeathPenalty,
     UnixSignalDeathPenalty,
 )
 from rq.worker import WorkerStatus
 from tai42_contract.app import tai42_app
 from tai42_contract.backend.runtime import ProgressReporter
+from tai42_kit.backend import fork_safety
 from tai42_kit.backend.job_context import running_job
 from tai42_kit.fork_gate import JOB_SPAN_WAIT_SECONDS, fork_gate
 
+from tai42_backend_rq.death_penalties import WatchedDeathPenalty, WatchedGeventDeathPenalty, WatchedTimerDeathPenalty
+from tai42_backend_rq.job_loop import HostLoopJob, PrivateLoopJob
+from tai42_backend_rq.scheduler_thread import ThreadedScheduler
 from tai42_backend_rq.settings import rq_settings
+from tai42_backend_rq.unpatched import original, os_thread_lock
 
 logger = logging.getLogger(__name__)
-
-
-def _original(module: str, name: str) -> Any:
-    """``module.name`` as it was before ``--pool gevent`` patched the process (unchanged when it has not).
-
-    Only gevent's ``monkey`` module patches, so while it is not loaded nothing is patched and the
-    attribute is read as it stands: the pools that never load gevent do not load it here either.
-    """
-    monkey = sys.modules.get("gevent.monkey")
-    if monkey is None:
-        return getattr(importlib.import_module(module), name)
-    return monkey.get_original(module, name)
 
 
 # Upper bound on one idle dequeue block, kept short so a warm-shutdown request
@@ -68,34 +58,38 @@ _HORSE_POLL_SECONDS = 0.25
 # How often the non-forking pools' refresher thread wakes while a job runs in-process: each wake
 # reports the worker's progress, promising the next wake within this tick, and rq's own
 # heartbeats are refreshed once per ``job_monitoring_interval`` of those wakes. A spawn or job
-# waiting on the fork gate reports on the same tick.
+# waiting on the fork gate on the work loop's thread reports on the same tick.
 _REFRESH_TICK_SECONDS = 1.0
 
 
 class _TaiWorkerMixin:
     """Worker behavior shared by both worker classes.
 
-    * Skips rq's signal-handler install when the work loop runs off the main
-      thread (``signal.signal`` requires the main thread; shutdown then arrives
-      via :meth:`~tai42_backend_rq.worker.RqWorkerRuntime.request_drain`).
+    * Skips rq's signal-handler install on every pool: the host owns the process's signals,
+      and rq's handlers would replace the host's; shutdown arrives via
+      :meth:`~tai42_backend_rq.worker.RqWorkerRuntime.request_drain`.
     * Bounds each idle dequeue poll (``_DEQUEUE_POLL_SECONDS``) AND returns to the
       outer ``work`` loop each poll so an off-thread drain request is honored
       within seconds even while the worker is idle.
     * Runs every job under the worker's current job budget (:meth:`prepare_execution`), marked
       as a backend job (:meth:`perform_job`).
-    * Holds a fork gate job span around each fork this worker makes — the work-horse
-      (:meth:`CustomRQWorker.fork_work_horse`), the ``rq-scheduler`` spawned with the work loop
-      (:meth:`_start_scheduler`) and re-spawned from its maintenance pass
-      (:meth:`run_maintenance_tasks`) — so each waits out a config reload's re-import of the
-      manifest modules where a stop request raised meanwhile reaches the work loop and
-      nothing is forked. A forked child is exposed only at the fork instant: it copies
-      ``importlib``'s module-lock table at ``fork()``. The fork gate's guard
-      (:meth:`guard_forks`) covers every other fork of the process; a fork inside one of
-      these spans nests in it. The non-forking pools also hold a span around each whole
-      in-process job (:meth:`CustomRQSimpleWorker.execute_job`).
+    * Installs the kit's fork safety (:meth:`guard_forks`) over every fork of the process that
+      runs the interpreter's fork hooks: every such child resets its inherited copy of the fork
+      gate and evicts the monitoring writer it inherited. The fork gate's guard holds a job span
+      around each fork, so on ``prefork`` and ``solo`` the ``prefork`` work-horse, the
+      ``rq-scheduler`` the work loop spawns and its maintenance pass re-spawns, and any other fork
+      made off an event loop's thread wait out a config reload's re-import of the manifest
+      modules. A forked child is exposed only at the fork instant: it copies ``importlib``'s
+      module-lock table at ``fork()``. The ``gevent`` pool runs rq's scheduler as a thread of its
+      own process (:class:`CustomRQGeventWorker`), so no fork of its own waits. The non-forking
+      pools also hold a span around each whole in-process job
+      (:meth:`CustomRQSimpleWorker.execute_job`); a fork inside it nests in it.
     * Reports the work loop's progress (``report_progress``) on every rq heartbeat: each
       bounded dequeue poll and each job boundary, and once per ``_REFRESH_TICK_SECONDS`` while a
-      fork or a job waits on the fork gate. A forked work-horse never reports: the liveness
+      fork or a job waits on the fork gate on the work loop's own thread (:meth:`work` runs the
+      loop as the fork gate's engine loop): that wait holds up the loop's next pass. A fork
+      waiting on any other thread reports nothing: the loop passes or stalls without it. A
+      forked work-horse never reports: the liveness
       file is the parent's signal, and the parent reports from its horse monitor
       (:meth:`CustomRQWorker.wait_for_horse`) while the horse runs.
     * A report that raises is kept, and the first one is logged at ERROR: the job in hand (and
@@ -145,45 +139,26 @@ class _TaiWorkerMixin:
             )
 
     def _tick_gate_wait(self) -> None:
-        """Report a pass of the work loop while a fork or a job waits on the fork gate."""
+        """Report a pass of the work loop while a fork or a job on the loop's thread waits on the fork gate."""
         self._report(next_within=_REFRESH_TICK_SECONDS)
 
+    def work(self, *args: Any, **kwargs: Any) -> bool:
+        """Run rq's work loop as the fork gate's engine loop: a wait on the gate on its thread reports its progress.
+
+        Such a wait (the fork of a work-horse or of the ``rq-scheduler``, an in-process job's
+        span) reports a pass each ``_REFRESH_TICK_SECONDS``. The forked work-horse never runs
+        this loop.
+        """
+        with fork_gate.engine_loop(tick=self._tick_gate_wait, tick_every=_REFRESH_TICK_SECONDS):
+            return super().work(*args, **kwargs)  # pyright: ignore[reportAttributeAccessIssue]
+
     def guard_forks(self) -> None:
-        """Guard every fork of this process with the fork gate, reporting this worker's progress while one waits."""
-        fork_gate.guard_forks(
-            timeout=JOB_SPAN_WAIT_SECONDS, tick=self._tick_gate_wait, tick_every=_REFRESH_TICK_SECONDS
-        )
+        """Install the kit's fork safety over every fork of this process (see the class docstring).
 
-    def _fork_span(self) -> AbstractContextManager[None]:
-        """The job span a fork this worker makes holds, reporting the worker's progress while it waits.
-
-        Taken here rather than left to the fork guard's ``before`` hook: CPython reports an
-        exception raised in that hook and forks anyway, while here a stop request raised
-        during the wait propagates to the work loop.
+        A fork that waits on a re-import waits for up to ``JOB_SPAN_WAIT_SECONDS``, reporting this
+        worker's progress only when it waits on the work loop's thread (:meth:`work`).
         """
-        return fork_gate.job_span(
-            timeout=JOB_SPAN_WAIT_SECONDS, tick=self._tick_gate_wait, tick_every=_REFRESH_TICK_SECONDS
-        )
-
-    def run_maintenance_tasks(self) -> None:
-        """Run rq's periodic maintenance inside a fork span.
-
-        It re-spawns the scheduler process when that process has died. The span covers the
-        whole body, which spawns at most once and otherwise does bounded Redis maintenance
-        (registry cleaning).
-        """
-        with self._fork_span():
-            super().run_maintenance_tasks()  # pyright: ignore[reportAttributeAccessIssue]
-
-    def _start_scheduler(self, *args: Any, **kwargs: Any) -> None:
-        """Start the scheduler process ``work()`` spawns before its dequeue loop, inside a fork span.
-
-        The span covers the whole body, which spawns at most once and otherwise does bounded
-        Redis work (scheduler construction plus ``acquire_locks``; in burst mode it enqueues
-        due jobs and forks nothing).
-        """
-        with self._fork_span():
-            super()._start_scheduler(*args, **kwargs)  # pyright: ignore[reportAttributeAccessIssue]
+        fork_safety.guard_forks(fork_gate, timeout=JOB_SPAN_WAIT_SECONDS)
 
     def raise_for_liveness_failure(self) -> None:
         """Raise the first failed progress report, after the work loop has returned."""
@@ -200,11 +175,9 @@ class _TaiWorkerMixin:
     death_penalty_class = TimerDeathPenalty
 
     def _install_signal_handlers(self) -> None:
-        if threading.current_thread() is threading.main_thread():
-            super()._install_signal_handlers()  # pyright: ignore[reportAttributeAccessIssue]
-            return
+        """Install none of rq's signal handlers: the host owns the process's signals (see the class docstring)."""
         logger.info(
-            "worker %r runs off the main thread; shutdown is driven by warm-shutdown requests, not signal handlers",
+            "worker %r: the host owns the process's signals; shutdown is driven by warm-shutdown requests",
             self.name,
         )
 
@@ -237,9 +210,9 @@ class _TaiWorkerMixin:
         """Honor an off-thread drain request even while IDLE.
 
         rq's own idle shutdown relies on ``request_stop`` raising ``StopRequested`` INSIDE the
-        blocked dequeue — a signal delivered on the worker's own (main) thread. Here the work
-        loop runs off the main thread, so :meth:`~tai42_backend_rq.worker.RqWorkerRuntime.request_drain` can only set
-        ``_stop_requested``; it cannot raise into this blocked call. And rq's
+        blocked dequeue — a signal handler rq installed. Here the host owns the signals, and
+        :meth:`~tai42_backend_rq.worker.RqWorkerRuntime.request_drain`, called from the host's
+        loop, can only set ``_stop_requested``; it cannot raise into this blocked call. And rq's
         ``dequeue_job_and_maintain_ttl`` re-loops INTERNALLY on every ``DequeueTimeout`` when
         ``max_idle_time`` is ``None`` (a continuous worker), so control never returns to the
         outer ``work`` loop that checks the flag — an idle worker would then never stop.
@@ -248,7 +221,7 @@ class _TaiWorkerMixin:
         every ``_DEQUEUE_POLL_SECONDS`` with no job, and re-check ``_stop_requested`` between
         polls: when set, raise ``StopRequested`` so the outer ``work`` loop breaks and the
         process exits cleanly (the recycle self-exit + any graceful backend shutdown). A
-        dequeued job returns immediately, exactly as before.
+        dequeued job returns immediately, as rq's own call returns it.
 
         A failed progress report stops the loop the same way, before it takes another job.
         """
@@ -264,13 +237,17 @@ class _TaiWorkerMixin:
 class CustomRQWorker(_TaiWorkerMixin, Worker):
     """The prefork worker: RQ's native forking ``execute_job``, a monitored work-horse child per job.
 
-    The fork gate spans the ``os.fork()`` INSTANT of each horse, not the job: the
+    The fork guard spans the ``os.fork()`` INSTANT of each horse, not the job: the
     horse is a separate process, and what it inherits is a SNAPSHOT of ``importlib``'s
     module locks taken at the fork. A horse forked while no re-import is running therefore
     holds unlocked copies and is immune to every later parent re-import, however long its
     job runs. Holding the gate for the whole fork→reap span would block reloads behind
     arbitrarily long jobs for no added protection.
+
+    The horse runs each job's coroutine on a fresh loop of its own (:class:`PrivateLoopJob`).
     """
+
+    job_class = PrivateLoopJob
 
     def __init__(self, queues: Any, *args: Any, report_progress: ProgressReporter, **kwargs: Any) -> None:
         """Build the prefork worker and clear the killed-horse pid tracker."""
@@ -280,17 +257,15 @@ class CustomRQWorker(_TaiWorkerMixin, Worker):
         self._killed_horse_pid = 0
 
     def fork_work_horse(self, job: Any, queue: Any) -> None:
-        """Fork the work-horse inside a fork span, clearing the killed-horse pid tracker first.
+        """Fork the work-horse, clearing the killed-horse pid tracker first.
 
-        ``super()`` returns in the parent as soon as ``os.fork()`` has returned, so the span
-        closes the moment the child exists; the horse then runs its whole job outside the
-        gate against its own inherited lock table.
+        The fork guard's span closes the moment ``os.fork()`` returns in the parent; the horse
+        then runs its whole job outside the gate against its own inherited lock table.
         """
         # Each new horse starts un-killed, so an OS-reused pid is never mistaken
         # for the killed one.
         self._killed_horse_pid = 0
-        with self._fork_span():
-            super().fork_work_horse(job, queue)
+        super().fork_work_horse(job, queue)
 
     def kill_horse(self, sig: signal.Signals = signal.SIGKILL) -> None:
         """Record the horse pid being killed, then signal it (default SIGKILL)."""
@@ -356,112 +331,40 @@ class CustomRQWorker(_TaiWorkerMixin, Worker):
                 )
 
 
-class _WatchedDeathPenalty(BaseDeathPenalty):
-    """A job-budget penalty that records each section it guards while the section runs.
-
-    rq guards a job's body, and each of its callbacks, with one penalty named by the job's id. The
-    refresher of a non-forking worker reads the record (:meth:`overdue`) to tell a section the
-    penalty has not ended from one it has: the penalty's exception reaches the job within moments
-    wherever it can, so a section still running a tick past its deadline is blocked where the
-    exception cannot reach.
-    """
-
-    # Job id -> (monotonic deadline, timeout) of the section its penalty guards now.
-    _armed: ClassVar[dict[str, tuple[float, float]]] = {}
-
-    def __init__(
-        self, timeout: float, exception: type[JobTimeoutException] = JobTimeoutException, **kwargs: Any
-    ) -> None:
-        super().__init__(timeout, exception, **kwargs)
-        self._job_id: str | None = kwargs.get("job_id")
-
-    def setup_death_penalty(self) -> None:
-        super().setup_death_penalty()
-        if self._job_id is not None and self._timeout > 0:
-            self._armed[self._job_id] = (time.monotonic() + self._timeout, self._timeout)
-
-    def cancel_death_penalty(self) -> None:
-        if self._job_id is not None:
-            self._armed.pop(self._job_id, None)
-        super().cancel_death_penalty()
-
-    @classmethod
-    def overdue(cls, job_id: str, margin: float) -> float | None:
-        """The timeout of ``job_id``'s guarded section when it still runs ``margin`` seconds past its deadline."""
-        armed = cls._armed.get(job_id)
-        if armed is None:
-            return None
-        deadline, timeout = armed
-        return timeout if time.monotonic() > deadline + margin else None
-
-
-class _WatchedTimerDeathPenalty(_WatchedDeathPenalty, TimerDeathPenalty):
-    """The ``solo`` pool's penalty: rq's timer, which raises the job's timeout into the job's OS thread.
-
-    The exception reaches the job at its next Python bytecode, so it cannot end a job blocked in C code.
-    """
-
-
-class _GeventDeathPenalty(BaseDeathPenalty):
-    """A ``gevent.Timeout`` that raises the job's timeout into the job's greenlet.
-
-    It fires when the job yields to the hub, so it cannot end a job that holds the CPU or blocks
-    in C code without yielding.
-    """
-
-    def __init__(
-        self, timeout: float, exception: type[JobTimeoutException] = JobTimeoutException, **kwargs: Any
-    ) -> None:
-        super().__init__(timeout, exception, **kwargs)
-        self._gevent_timeout: Any = None
-
-    def setup_death_penalty(self) -> None:
-        if self._timeout <= 0:
-            return
-        from gevent import Timeout
-
-        self._gevent_timeout = Timeout(
-            self._timeout, self._exception(f"Task exceeded maximum timeout value ({self._timeout} seconds)")
-        )
-        self._gevent_timeout.start()
-
-    def cancel_death_penalty(self) -> None:
-        if self._gevent_timeout is not None:
-            self._gevent_timeout.close()
-            self._gevent_timeout = None
-
-
-class _WatchedGeventDeathPenalty(_WatchedDeathPenalty, _GeventDeathPenalty):
-    """The ``gevent`` pool's penalty.
-
-    rq's timer cannot serve this pool: the patched process gives the timer a greenlet's identity
-    to target, which is no thread, so the timer fails and the job runs on.
-    """
-
-
 class CustomRQSimpleWorker(_TaiWorkerMixin, SimpleWorker):
     """The non-forking worker (``solo`` and ``gevent`` pools): jobs run in the worker process itself.
 
-    Its fork gate spans the WHOLE job (see :meth:`execute_job`), besides the fork guard's
-    span over the fork instant of the ``rq-scheduler`` child it spawns. A job has no child
+    Its fork gate spans the WHOLE job (see :meth:`execute_job`), besides, on ``solo``, the fork
+    guard's span over the fork instant of the ``rq-scheduler`` child it spawns. A job has no child
     and no inherited lock snapshot here: its body executes in this very process and imports
     lazily against the same live ``sys.modules`` a reload is churning, so the exposure lasts
     as long as the job does.
+
+    On ``solo`` each job runs its coroutine on a fresh loop of its own (:class:`PrivateLoopJob`).
+
+    A stop (rq's stop-job command) is raised into the running job's thread of execution the way the
+    pool's task timeout is, by the penalty that guards it, which raises whichever of the two comes
+    first and not the other; a job that ends on the stop is marked ``stopped`` by rq.
     """
 
-    death_penalty_class = _WatchedTimerDeathPenalty
+    job_class: type[PrivateLoopJob | HostLoopJob] = PrivateLoopJob
+    death_penalty_class = WatchedTimerDeathPenalty
 
     # Per OS thread: the worker whose refresher runs on it, and that refresher's own Redis client.
-    _refresher_thread: ClassVar[Any] = _original("_thread", "_local")()
+    _refresher_thread: ClassVar[Any] = original("_thread", "_local")()
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
-        """Build the worker with the guard that rq's end of a job's execution and each refresh of it hold.
+        """Build the worker with its guards: one over rq's end of a job's execution, one over a job's run.
 
-        A refresh then never touches an execution rq has ended. It is a native lock: the
-        refresher is another OS thread.
+        rq's end of a job's execution and each refresh of it hold the first, so a refresh never
+        touches an execution rq has ended. The end of a job's run and each stop of it hold the
+        second, so a stop never acts on a run that has ended (:meth:`kill_horse`). Both are native
+        locks: the refresher and, on ``solo``, rq's stop-job listener are other OS threads.
         """
         super().__init__(*args, **kwargs)
-        self._execution_guard = _os_thread_lock()
+        self._execution_guard = os_thread_lock()
+        self._run_guard = os_thread_lock()
+        self._running_job_id: str | None = None
 
     @property
     def connection(self) -> Any:
@@ -482,6 +385,27 @@ class CustomRQSimpleWorker(_TaiWorkerMixin, SimpleWorker):
     def connection(self, connection: Any) -> None:
         self._work_loop_connection = connection
 
+    def kill_horse(self, sig: signal.Signals = signal.SIGKILL) -> None:
+        """Stop the job rq's stop-job command names (``sig`` is a work-horse's, and this worker has none).
+
+        rq calls this once the command names the job this worker runs, and has marked the job as
+        stopped (``_stopped_job_id``), so that the job's failure is marked ``stopped``. The stop is
+        raised into the job's guarded section, if one runs and its budget has not raised into it,
+        where the job ends on it unless it catches it (:class:`WatchedDeathPenalty`). Otherwise
+        nothing is raised: a job whose section has ended, or whose budget has fired, runs on as it
+        was, and its mark stays, so a job that then ends in rq's failure handling is marked
+        ``stopped``. A job whose run has ended meanwhile is no longer this worker's to stop, so its
+        mark is dropped, as the end of a run drops it (:meth:`_end_run`).
+        """
+        with self._run_guard:
+            stopped = self._stopped_job_id
+            if stopped is None:
+                return
+            if stopped != self._running_job_id:
+                self._stopped_job_id = None
+                return
+            WatchedDeathPenalty.interrupt(stopped)
+
     def cleanup_execution(self, job: Any, pipeline: Any) -> None:
         """End the job's execution, never during a refresh of it (see :meth:`_maintain_heartbeats_until`)."""
         with self._execution_guard:
@@ -493,38 +417,56 @@ class CustomRQSimpleWorker(_TaiWorkerMixin, SimpleWorker):
         The fork gate is held for the whole body: an in-process job's imports race a
         concurrent re-import for its entire duration, so nothing narrower is sound. The
         prefork pool deliberately does NOT route through here — only the fork instant of
-        its horse is gated, by the span :meth:`CustomRQWorker.fork_work_horse` holds.
+        its horse is gated, by the fork guard's span (:meth:`guard_forks`).
 
         A non-forking worker has no horse monitor to refresh heartbeats during a
         job, so a refresher thread ticks them on the same
         ``job_monitoring_interval``, keeping both pools on one liveness contract. It is an OS
         thread even under ``--pool gevent``, so a job that holds the CPU cannot starve it. The
         same thread reports the worker's progress while the job runs: the job occupies
-        the work loop, up to its budget (:meth:`prepare_execution`). The timer penalty
-        cannot interrupt a job blocked in C code, so a job still running past its budget
-        holds the worker's only slot: the thread then stops, and the liveness probe ends
-        the worker. A job that waits on the gate reports the worker's progress each
-        ``_REFRESH_TICK_SECONDS`` meanwhile: the refresher has not started yet.
+        the work loop, up to its budget (:meth:`prepare_execution`). The penalty does not
+        end a job blocked where its exception cannot reach, or one that catches it, so a job
+        still running past its budget holds the worker's only slot: the thread then stops,
+        and the liveness probe ends the worker. A job that waits on the gate runs on the work
+        loop's thread, so it reports the worker's progress each ``_REFRESH_TICK_SECONDS``
+        meanwhile (:meth:`work`): the refresher has not started yet.
         """
-        with fork_gate.job_span(
-            timeout=JOB_SPAN_WAIT_SECONDS, tick=self._tick_gate_wait, tick_every=_REFRESH_TICK_SECONDS
-        ):
+        with fork_gate.job_span(timeout=JOB_SPAN_WAIT_SECONDS):
             self._run_job_inline(job, queue)
 
     def _run_job_inline(self, job: Any, queue: Any) -> None:
         """The in-process job body, run with the fork gate held, beside the refresher's OS thread."""
         self.prepare_execution(job)
-        done = _os_thread_lock()
+        done = os_thread_lock()
         done.acquire()
-        ended = _os_thread_lock()
+        ended = os_thread_lock()
         ended.acquire()
         _start_os_thread(self._refresh_until, (job, done, ended))
+        with self._run_guard:
+            self._running_job_id = job.id
         try:
             self.perform_job(job, queue)
         finally:
-            done.release()
-            ended.acquire(timeout=self.job_monitoring_interval)
+            try:
+                self._end_run(job)
+            finally:
+                done.release()
+                ended.acquire(timeout=self.job_monitoring_interval)
         self.set_state(WorkerStatus.IDLE)
+
+    def _end_run(self, job: Any) -> None:
+        """End ``job``'s run in this worker: no record of its sections and no mark of a stop of it remain.
+
+        A stop that ended the job had its mark taken by rq's failure handling; a mark still left
+        names a stop that did not end the job, and is dropped with the run. A raise that skipped
+        a section's own end leaves that section's records, which end here
+        (:meth:`WatchedDeathPenalty.end_run`).
+        """
+        with self._run_guard:
+            self._running_job_id = None
+            if self._stopped_job_id == job.id:
+                self._stopped_job_id = None
+            WatchedDeathPenalty.end_run(job.id)
 
     def _refresh_until(self, job: Any, done: LockType, ended: LockType) -> None:
         """The refresher's OS thread: run :meth:`_maintain_heartbeats_until`, close its client, release ``ended``."""
@@ -544,9 +486,10 @@ class CustomRQSimpleWorker(_TaiWorkerMixin, SimpleWorker):
     def _maintain_heartbeats_until(self, job: Any, done: LockType) -> None:
         """Report progress every tick and refresh rq's heartbeats every monitoring interval, until ``done`` is released.
 
-        Both stop once a section of the job the timer penalty guards (its body, or a callback) is
-        still running a tick past its timeout, logged once at ERROR: the timer has not ended it, so
-        it holds the worker's only slot and this pool cannot end it. A failed refresh is logged at
+        Both stop once a section of the job the penalty guards (its body, or a callback) is still
+        running a tick past its timeout, logged once at ERROR: the job has not ended on the
+        penalty's exception, so it holds the worker's only slot, and the liveness probe ends the
+        worker. A failed refresh is logged at
         ERROR and retried on the next tick, never swallowed: a stopped heartbeat drops this worker
         from the census. Once rq has ended the job's execution (its result is stored, its callbacks
         may still run), there is no execution left to refresh, so the ticks only report. A failed
@@ -554,10 +497,10 @@ class CustomRQSimpleWorker(_TaiWorkerMixin, SimpleWorker):
         """
         last_refresh = time.monotonic()
         while not done.acquire(timeout=_REFRESH_TICK_SECONDS):
-            timeout = _WatchedDeathPenalty.overdue(job.id, margin=_REFRESH_TICK_SECONDS)
+            timeout = WatchedDeathPenalty.overdue(job.id, margin=_REFRESH_TICK_SECONDS)
             if timeout is not None:
                 logger.error(
-                    "worker %r: job %s is still running past its %gs timeout, which this pool cannot end; "
+                    "worker %r: job %s is still running past its %gs timeout and has not ended; "
                     "it reports no more progress, so the liveness probe ends this worker",
                     self.name,
                     job.id,
@@ -577,9 +520,74 @@ class CustomRQSimpleWorker(_TaiWorkerMixin, SimpleWorker):
 
 
 class CustomRQGeventWorker(CustomRQSimpleWorker):
-    """The ``gevent`` pool's worker: the non-forking worker, with each job's budget kept by a gevent timeout."""
+    """The ``gevent`` pool's worker: the non-forking worker, its jobs run on the host's loop.
 
-    death_penalty_class = _WatchedGeventDeathPenalty
+    Each job hands its coroutine to the host's running loop (:class:`HostLoopJob`), and each job's
+    budget is kept by a timer on the job's hub, which ends the job's wait and cancels its coroutine
+    there.
+    rq's scheduler runs as a thread of this process (:class:`ThreadedScheduler`), a greenlet under
+    the pool's patch, so a job that holds the CPU stalls it together with the host loop. This worker
+    forks no child of its own. A thread ``threading`` starts in the patched process is a greenlet
+    on the OS thread that runs the host's loop, so the fork guard, which never blocks a loop, makes
+    no fork from one wait. A native OS thread runs no loop: the refresher each job starts
+    (:func:`_start_os_thread`), and gevent's own threadpool. A fork from one waits out a running
+    re-import and reports no progress; the refresher itself never forks. For every Python-level
+    fork other code in the process makes, the guard resets the child's copy of the fork gate and
+    evicts the monitoring writer the child inherited.
+    """
+
+    job_class = HostLoopJob
+    death_penalty_class = WatchedGeventDeathPenalty
+
+    def _start_scheduler(
+        self,
+        burst: bool = False,
+        logging_level: str | None = "INFO",
+        date_format: str = DEFAULT_LOGGING_DATE_FORMAT,
+        log_format: str = DEFAULT_LOGGING_FORMAT,
+    ) -> None:
+        """Start rq's scheduler on a thread of this process once it holds a queue's scheduler lock.
+
+        rq's own start forks the scheduler, which in this patched process would copy the host loop
+        into the child (:mod:`tai42_backend_rq.scheduler_thread`). In burst mode it enqueues the
+        jobs already due and starts nothing, as rq's does.
+        """
+        self.scheduler = ThreadedScheduler(
+            self.queues,
+            connection=self.connection,
+            logging_level=logging_level if logging_level is not None else self.log.level,
+            date_format=date_format,
+            log_format=log_format,
+            serializer=self.serializer,
+        )
+        self.scheduler.acquire_locks()
+        if not self.scheduler.acquired_locks:
+            return
+        if burst:
+            try:
+                self.scheduler.register_birth()
+                self.scheduler.enqueue_scheduled_jobs()
+            finally:
+                self.scheduler.release_locks()
+                self.scheduler.register_death()
+        else:
+            self.scheduler.start()
+
+    def stop_scheduler(self) -> None:
+        """Stop the scheduler thread by its flag and wait for it to end.
+
+        A live thread sees the flag within one scheduler interval, then releases its locks and deletes
+        its key. A thread that has already died ends the wait at once and leaves its locks and key in
+        Redis until their TTL (the scheduler interval plus 60 seconds) lets them expire. rq's own stop
+        signals a scheduler process by pid, which a thread has none of. With no scheduler built there
+        is nothing to stop.
+        """
+        scheduler = self.scheduler
+        if scheduler is None:
+            return
+        scheduler.request_stop()
+        if scheduler._process is not None:
+            scheduler._process.join()
 
 
 def _start_os_thread(target: Callable[..., None], args: tuple[Any, ...]) -> None:
@@ -588,12 +596,7 @@ def _start_os_thread(target: Callable[..., None], args: tuple[Any, ...]) -> None
     The patch turns ``threading``'s threads into greenlets, which a job that holds the CPU never
     lets run; gevent keeps the unpatched start function for exactly this.
     """
-    _original("_thread", "start_new_thread")(target, args)
-
-
-def _os_thread_lock() -> LockType:
-    """A lock that blocks only the OS thread that waits on it, even in a process gevent has patched."""
-    return _original("_thread", "allocate_lock")()
+    original("_thread", "start_new_thread")(target, args)
 
 
 def _client_like(connection: Any) -> Any:

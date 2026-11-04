@@ -48,8 +48,9 @@ async def redrive_pending_conversations() -> None:
 
     Intake re-drive must run FIRST: it gives every stranded ``accepted`` record a terminal
     outcome, which is work the delivery re-drive then picks up. No-op with no backend. The
-    periodic sweep is established separately (post-swap), so it survives a reload rather
-    than being spawned on the throwaway build-thread loop this handler runs on at reload.
+    periodic sweep is established separately (post-swap), so it starts once the swap has
+    retired the previous generation's sweep, rather than while this handler runs during the
+    generation's build at reload.
     """
     if not get_conversations_manager().durable:
         return

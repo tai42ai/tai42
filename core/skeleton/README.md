@@ -87,6 +87,14 @@ advisories on a timer — that is its one outbound call, and
 `tai backend` runs the agent/worker backend process and `tai metrics` serves the
 Prometheus endpoint; the full command surface is in the CLI reference below.
 
+A backend runtime may declare a process prelude: a `module:callable` that must run
+before anything else is imported, as a green worker pool's patch must. `tai backend`
+then reads its configuration, restarts itself once, in place, through that prelude
+(same process id, same arguments, one `restarting with process prelude
+<module:callable>` log line), and runs on the standard library's event loop with
+asyncio's future chaining bound to the threads the prelude reshaped, so a future
+another of those threads completes still wakes the loop.
+
 `tai serve`, `tai backend`, and `tai metrics` form one run family over a single
 shared Prometheus multiprocess directory (`PROMETHEUS_MULTIPROC_DIR`, default a
 fixed absolute path under the host temp dir; any override must be absolute).
@@ -146,6 +154,79 @@ backend needs that shared registry too, whatever the worker count: `tai serve`,
 an in-memory hooks registry, naming `HOOKS_REDIS_URL`, because the backend process
 matches the events it raises (an expired ask, for one) against its own registry,
 which holds none of the hooks registered through the server.
+
+### Fleet restarts and the server's graceful-shutdown cap
+
+A settings change that needs a restart (a profile apply, an env write, a config reload)
+rolls a fleet restart inside the request that made the change: each other worker that
+needs it is restarted in turn, and the request answers once the roll ends. A worker whose
+reload was refused at its epoch build (the build discarded before its swap) is not
+restarted: the stored config did not build on it and a restart may fail the same way, so it
+keeps serving its current config and the response names it in `awaiting_respawn`; fix the
+stored config, or the cause the build error names, before restarting it. For each worker the
+roll waits the drain that worker announces as it leaves, plus the start-and-rejoin step (the
+app's declared drain budget, `TAI_TOOL_RUNS_SHUTDOWN_DRAIN_SECONDS`, 10 s by default). The
+drain a worker announces covers its whole stop: its runtime's stop phase, then the app's
+lifespan shutdown, whose steps run one after another within the bounds the app's modules
+declare — the hook-run attempts twice `HOOKS_RUN_SHUTDOWN_GRACE_SECONDS` (their grace to
+finish, then the cancelled ones' grace to settle their jobs), the credential refreshes'
+close wait (30 s, for a refresh to finish its write-back), the states outbox
+`STATES_OUTBOX_SHUTDOWN_GRACE_SECONDS`, and the tool-run supervisors
+`TAI_TOOL_RUNS_SHUTDOWN_DRAIN_SECONDS`: 100 s at the defaults. A `tai serve` worker announces
+its graceful-shutdown cap plus those bounds (110 s at the defaults); a `tai backend` worker
+announces its backend's own drain bound — for the shipped backends, its task timeout (arq:
+its job-completion wait) plus a 30 s grace — plus the same bounds. The leaving worker's
+census row reads `recycling` with that announced drain from its departure decision, or the
+first stop signal, `SIGTERM` or `SIGINT`, of a stop decided outside it, until the stop
+deletes the row once its shutdown handlers are over (before it tears down its resources), so
+the roll sees the drain for the whole stop and a roll reaching a worker already stopping
+waits that drain out with no second signal. A roll over a backend
+therefore takes as long as that backend's in-flight jobs need, which is often far longer
+than a minute.
+
+A change made under a bound fixed before it started cannot wait out such a roll: a change
+run as a backend job (a queued or synchronous tool task, a schedule or hook forwarded to
+the backend, a callback's tool) runs under the job's budget, and a call from a live caller (an
+MCP tool call, a `POST /api/run-tool` call such as `tai tools run`, an agent run, a
+conversation turn; a preset run through any of these) runs under the turn budget when
+`TAI_TURN_TIMEOUT_SECONDS` is set. Such a change hands its roll to the worker it runs for —
+the `tai backend` worker that ran the job, or the worker serving the call — and answers at
+once with `roll_deferred: true`, `roll_deferred_to` naming that worker, and no roll rows.
+It does so even when that worker's own restart is the only one: that restart waits for the
+worker's other changes in flight, which the bound cannot hold either. That worker carries
+the roll out on its own, outside every bound: it waits each worker's drain and step as
+above and, when the roll converged and it needs its own restart, restarts itself last. The roll's outcome is in
+that worker's log. A hand-off that fails fails the change loudly; what the change wrote stays
+written. The hand-off's error names the worker and whether the reload reached the bus. When the
+worker is already leaving, or the worker serving the call could not take the roll, the roll did
+not start; when its answer does not tell (the op failed on the worker over the bus, the bus
+unreachable or failing, no answer came), the roll may have been sent to that worker and whether
+it started is unknown, and that worker's log and the fleet census tell. A backup import's
+config section carries the roll in its report: its `errors` name the change's failure, its
+`fanout` error names the roll's, a roll that did not start lists in `awaiting_respawn` the
+workers whose reload reported a moved key, and one whose answer is unknown is left to that
+worker — `roll_deferred: true`, `roll_deferred_to` naming it, no roll rows and an empty
+`awaiting_respawn`. An env or manifest write, a profile apply and a config soft restart answer
+with the error's text alone and no roll fields: `POST /api/run-tool` as a structured 500
+`{"error": ...}`, an MCP tool call as the tool's error, a backend job as the job's error. That
+text names the hand-off's failure when the change's own reload and broadcast succeeded; when
+one of them failed too, the text names that failure, and the hand-off's failure is in the
+worker's log. A marketplace operation whose hand-off fails answers with no roll fields: its
+error says the config changes landed but the fleet recycle roll they owe did not complete,
+naming only the failure's type, whose text is in the worker's log. A change with no bound (an
+HTTP request outside those doors, a live call with no turn budget) rolls inside the change as
+described above.
+
+`tai serve` caps the server's own stop phase at `APP_ARGS_TIMEOUT_GRACEFUL_SHUTDOWN` seconds
+(10 by default; the `--timeout-graceful-shutdown` extra-arg overrides it): after that cap,
+uvicorn cancels the requests still running. The cap does not bound the app's lifespan shutdown,
+which runs after it within the bounds above. The worker that made the change never cuts its own
+roll this way — its own restart runs only after its reply is sent. But a worker that is stopped
+from outside while its request still rolls (a rolling deploy, a scale-down, the process
+manager's stop) cancels the roll at that cap: the caller gets no reply, and the workers after
+the cut are not restarted by that roll. When settings changes that restart the fleet run during
+such stops, set the cap to at least the longest roll the deployment expects, and give the
+process manager's own stop timeout room above the cap plus the app's shutdown bounds.
 
 ## Conversations and person linking
 
@@ -327,12 +408,14 @@ See `CONTRIBUTING.md` for the rules.
 The whole platform — the quickstart, concepts, guides, and the generated
 reference — lives in the unified documentation site:
 
-- Getting started & install: https://tai42.ai/getting-started/installation
-- Quickstart: https://tai42.ai/getting-started/quickstart
-- Concepts: https://tai42.ai/concepts
-- Guides: https://tai42.ai/guides
-- Built-in tools & extensions: https://tai42.ai/concepts/tools-and-extensions
-- Reference (HTTP API, CLI, Python SDK): https://tai42.ai/reference/cli
+- Getting started & install: https://docs.tai42.ai/getting-started/installation
+- Quickstart: https://docs.tai42.ai/getting-started/quickstart
+- Concepts: https://docs.tai42.ai/concepts
+- Guides: https://docs.tai42.ai/guides
+- Built-in tools & extensions: https://docs.tai42.ai/concepts/tools-and-extensions
+- HTTP API reference: https://docs.tai42.ai/reference/api
+- CLI reference: https://docs.tai42.ai/reference/cli
+- Python SDK reference: https://docs.tai42.ai/reference/python-sdk
 
 ## License
 

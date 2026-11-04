@@ -2,8 +2,8 @@
 
 The surface holds one tool (disabled at the server, so the server ``list_*`` view hides it),
 one prompt, one resource and one resource template; after the reset the provider stores
-none of them. The reset is synchronous and runs both from a loop-less thread (a reload's
-worker thread) and from inside a running loop (cold boot on the serving loop).
+none of them. The reset is a coroutine; it empties the surface on a loop of its own and
+inside the running serving loop alike.
 """
 
 from __future__ import annotations
@@ -52,17 +52,17 @@ async def _stored(instance: TaiMCP) -> list[object]:
     ]
 
 
-def test_the_reset_from_a_loop_less_thread_empties_the_surface() -> None:
+def test_the_reset_run_on_a_loop_of_its_own_empties_the_surface() -> None:
     import asyncio
 
     instance = _populated()
     assert len(asyncio.run(_stored(instance))) == 4
-    instance._reset_component_surface()
+    asyncio.run(instance._reset_component_surface())
     assert asyncio.run(_stored(instance)) == []
 
 
 async def test_the_reset_inside_a_running_loop_empties_the_surface() -> None:
     instance = _populated()
     assert len(await _stored(instance)) == 4
-    instance._reset_component_surface()
+    await instance._reset_component_surface()
     assert await _stored(instance) == []

@@ -4,6 +4,8 @@ in-memory ``Storage`` double."""
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 from jinja2.exceptions import SecurityError
 from tai42_contract.template import TemplatedText
@@ -65,8 +67,14 @@ async def _reference_render(manager: ResourceManager, text: TemplatedText, local
         return await manager.render_by_id(text.id, text.kwargs, locale=locale)
     assert text.content is not None
     context = with_locale(text.kwargs, locale)
-    with manager._render_scope():
-        return manager._render_cache.inline(text.content).render(**context)
+    content = text.content
+    loop = asyncio.get_running_loop()
+
+    def _render() -> str:
+        with manager._render_scope(loop):
+            return manager._render_cache.inline(content).render(**context)
+
+    return await asyncio.to_thread(_render)
 
 
 @pytest.mark.parametrize("text", _REFERENCE_TEXTS)

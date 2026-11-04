@@ -3,20 +3,25 @@
 The dispatcher owns this vocabulary. A publisher builds one of these models and the bus publishes
 its dump; a receiver validates the delivered dict back into the model (an unknown op or a missing
 field is refused before anything applies) and reports the op's declared ``effects`` to the
-post-apply handlers, and whether a resyncing worker owes it a reply. ``prefix`` is the only
-defaulted field, so a dump that excludes defaults is the exact wire dict: the tag is always
-present, ``prefix`` only when set.
+post-apply handlers, and whether a resyncing worker owes it a reply. A dump that excludes
+defaults is the exact wire dict: the tag is always present, a defaulted field only when set.
 """
 
 from __future__ import annotations
 
-from typing import Annotated, Any, ClassVar, Literal
+from dataclasses import dataclass
+from typing import Annotated, Any, ClassVar, Literal, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 from tai42_contract.backend import FleetOpEffect
 
+from tai42_skeleton.app.bus.exit_latch import ExitRefusal, ExitRefusalKind
+from tai42_skeleton.app.bus.models import FleetResult, WorkerIdentity, WorkerKind
+
 __all__ = [
     "FLEET_OP_ADAPTER",
+    "CarryRoll",
+    "CarryRollReply",
     "ClearTemplateCache",
     "DeploymentKeysChanged",
     "DeregisterMcp",
@@ -30,7 +35,10 @@ __all__ = [
     "ReloadTool",
     "RemoveTool",
     "ReprobeFailedMcps",
+    "carry_roll_reply",
     "fleet_op_wire",
+    "recycle_leaving",
+    "recycle_reply",
 ]
 
 _REGISTRY: frozenset[FleetOpEffect] = frozenset({FleetOpEffect.registry})
@@ -132,10 +140,56 @@ class ClearTemplateCache(_FleetOp):
 
 
 class Recycle(_FleetOp):
-    """Gracefully exit this worker after its reply ships; changes nothing it keeps."""
+    """Gracefully exit this worker after its reply ships; changes nothing it keeps.
+
+    The reply is ``{"recycling": kind}`` when the worker armed its exit. A worker that arms
+    nothing names why (:func:`recycle_reply`): one already leaving (``already_leaving``: its
+    reason) leaves once, and one whose exit is deferred to its own in-flight change
+    (``exit_deferred``: that change) leaves when that change's reply is answered.
+    """
 
     op: Literal["recycle"]
     effects: ClassVar[frozenset[FleetOpEffect]] = _NONE
+
+
+def recycle_reply(worker_kind: str, refusal: ExitRefusal | None) -> dict[str, str]:
+    """The ``applied`` payload a worker of ``worker_kind`` answers a :class:`Recycle` op with.
+
+    ``refusal`` is why it armed no exit (:class:`~tai42_skeleton.app.bus.ExitRefusal`): the
+    payload names it under its kind with its reason. ``None``: the exit was armed.
+    """
+    if refusal is None:
+        return {"recycling": worker_kind}
+    return {"recycling": worker_kind, refusal.kind: refusal.reason}
+
+
+def recycle_leaving(payload: object) -> ExitRefusal | None:
+    """The refusal an ``applied`` :class:`Recycle` reply names, else ``None`` (the exit was armed).
+
+    Raises :class:`TypeError` when the reply names a refusal whose reason is not text.
+    """
+    named = _named_reason(payload, get_args(ExitRefusalKind))
+    return None if named is None else ExitRefusal(kind=named[0], reason=named[1])
+
+
+def _named_reason[K: str](payload: object, kinds: tuple[K, ...]) -> tuple[K, str] | None:
+    """The first of ``kinds`` an op's ``applied`` ``payload`` names, with the reason it carries; ``None`` when none.
+
+    A payload that is not an object names none. Raises :class:`TypeError` when the named
+    reason is not text: the payload breaks the reply the op defines.
+    """
+    if not isinstance(payload, dict):
+        return None
+    for kind in kinds:
+        reason = payload.get(kind)
+        if reason is None:
+            continue
+        if not isinstance(reason, str):
+            raise TypeError(
+                f"fleet op reply: {kind!r} names its reason as {type(reason).__name__}, not text: {reason!r}"
+            )
+        return kind, reason
+    return None
 
 
 class DeploymentKeysChanged(_FleetOp):
@@ -144,14 +198,69 @@ class DeploymentKeysChanged(_FleetOp):
     Carries no names: each receiver re-reads the census, so it judges by every row as it stands.
     A receiver that withdrew a key rebuilds its serving generation through the config reload it
     applies (that reload carries the registry effect), and replies with the withdrawn names and
-    the recycle-class ones among them it still runs on. The op itself changes nothing, so it
-    declares no effects; its reload does. A worker still resyncing at publish owes the reply
-    too, since only the joiner can roll it: its own resync does not.
+    every recycle-class key it still runs on off its effective value, as every reload replies.
+    The op itself changes nothing, so it declares no effects; its reload does. A worker still
+    resyncing at publish owes the reply too, since only the joiner can roll it: its own resync
+    does not.
     """
 
     op: Literal["deployment_keys_changed"]
     effects: ClassVar[frozenset[FleetOpEffect]] = _NONE
     awaited_mid_resync: ClassVar[bool] = True
+
+
+class CarryRoll(_FleetOp):
+    """Carry out the fleet recycle roll a change decided, as this worker's own tracked task.
+
+    Sent by a change run under a bound the roll's waits can outlast (a dispatched job's budget, an
+    armed turn budget) to the bus member it acts for, the change's writer. It carries
+    the decision's inputs: the change's reload ``report``, the recycle targets ``pinned`` at the
+    change's start, the ``writer`` and the workers a targeted reload ``addressed`` (``None``: the
+    whole fleet) — names, kinds, generations and key names, never an env value. ``writer_exits``
+    says whether the writer's own restart may follow the roll. ``holds`` names the roll holds
+    (:mod:`~tai42_skeleton.config.roll_holds`) the member keeps from before its answer until the
+    roll ended. The member answers (:class:`CarryRollReply`) as soon as it took those holds, and
+    starts the roll once that answer is given, without waiting for the answer's reply frame to ship.
+    """
+
+    op: Literal["carry_roll"]
+    change: str
+    report: FleetResult
+    pinned: dict[str, tuple[WorkerKind, int]]
+    writer: WorkerIdentity
+    addressed: tuple[str, ...] | None = None
+    writer_exits: bool = True
+    holds: tuple[str, ...] = ()
+    effects: ClassVar[frozenset[FleetOpEffect]] = _NONE
+    awaited_mid_resync: ClassVar[bool] = True
+
+
+CarryRollReplyKind = Literal["carrying", "already_leaving"]
+
+
+@dataclass(frozen=True)
+class CarryRollReply:
+    """How a member answered a :class:`CarryRoll` op, and the reason it names.
+
+    ``carrying``: it took the roll, ``reason`` the change it carries. ``already_leaving``: its
+    exit latch is set, ``reason`` the exit's, and it carries nothing.
+    """
+
+    kind: CarryRollReplyKind
+    reason: str
+
+    def reply(self) -> dict[str, str]:
+        """The ``applied`` payload the member answers with."""
+        return {self.kind: self.reason}
+
+
+def carry_roll_reply(payload: object) -> CarryRollReply | None:
+    """The :class:`CarryRollReply` an ``applied`` :class:`CarryRoll` payload names, else ``None`` (not such a reply).
+
+    Raises :class:`TypeError` when the reply names a kind whose reason is not text.
+    """
+    named = _named_reason(payload, get_args(CarryRollReplyKind))
+    return None if named is None else CarryRollReply(kind=named[0], reason=named[1])
 
 
 FleetOp = Annotated[
@@ -166,6 +275,7 @@ FleetOp = Annotated[
     | EvictTemplate
     | ClearTemplateCache
     | Recycle
+    | CarryRoll
     | DeploymentKeysChanged,
     Field(discriminator="op"),
 ]
@@ -174,5 +284,5 @@ FLEET_OP_ADAPTER: TypeAdapter[FleetOp] = TypeAdapter(FleetOp)
 
 
 def fleet_op_wire(op: FleetOp) -> dict[str, Any]:
-    """The wire dict a fleet op travels as: its fields, defaults omitted."""
-    return op.model_dump(exclude_defaults=True)
+    """The wire dict a fleet op travels as: its fields in JSON form, defaults omitted."""
+    return op.model_dump(mode="json", exclude_defaults=True)

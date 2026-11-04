@@ -3,15 +3,18 @@
 A command that runs on the deployment host with no server (``tai plugins uninstall --offline``)
 writes the manifest through the same :class:`~tai42_skeleton.config.service.ConfigService` write
 stage a server runs, wired by :meth:`~tai42_skeleton.config.service.ConfigService.host_side`. It has
-nothing to reload and no extension registered, so its admin and its combo check say so.
+nothing to reload, no tool served and no extension registered, so its admin and its combo check
+say so.
 """
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from fastmcp.tools.base import Tool
     from tai42_contract.manifest import ExtensionElement, TaiMCPConfig
 
 
@@ -22,7 +25,7 @@ class HostSideAdmin:
     entries; a call is a wiring error and raises.
     """
 
-    def reload_config(self) -> dict[str, Any]:
+    async def reload_config(self) -> dict[str, Any]:
         """Refuse: a host-side process has nothing to reload."""
         raise RuntimeError(
             "a host-side process serves nothing to reload; the deployment loads the written manifest at its next start"
@@ -36,9 +39,20 @@ class HostSideAdmin:
         )
 
 
-def host_side_combo_check(tool: str, combo: Sequence[ExtensionElement]) -> None:
-    """Leave every combo to the bind at the deployment's next start.
+class HostSideComboCheck:
+    """The combo check of a host-side process.
 
-    A host-side process registers no extension, so every combo is the case the live check
-    leaves to the bind after the reload: a combo naming an unregistered extension.
+    It serves no tool and registers no extension, so it has no base to hand a check and every
+    combo is left to the bind at the deployment's next start.
     """
+
+    async def served_bases(self) -> dict[str, Tool]:
+        """No tool: a host-side process serves nothing."""
+        return {}
+
+    def check_combo(self, tool: str, combo: Sequence[ExtensionElement], *, base: Tool | None) -> None:
+        """Leave every combo to the bind at the deployment's next start.
+
+        A host-side process registers no extension, so every combo is the case the live check
+        leaves to the bind after the reload: a combo naming an unregistered extension.
+        """

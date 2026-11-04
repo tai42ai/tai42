@@ -55,11 +55,14 @@ from tai42_skeleton.operations import (
     NotFoundError,
     NotSupportedError,
     OperationFailedError,
-    OperationResponse,
     UpstreamError,
     operation,
 )
-from tai42_skeleton.operations._broadcast import apply_response, translate_orphan_env_write, writer_exit_response
+from tai42_skeleton.operations._broadcast import (
+    apply_response,
+    roll_outcome_body,
+    translate_orphan_env_write,
+)
 from tai42_skeleton.operations._marketplace_errors import to_operation_error
 from tai42_skeleton.operations.response_models.marketplace import (
     AdvisorySnapshot,
@@ -394,17 +397,16 @@ async def marketplace_advisories() -> dict[str, Any]:
     return {"advisories": state.advisories, "fetched_at": state.fetched_at.isoformat()}
 
 
-def render_receipt(receipt: dict[str, Any]) -> OperationResponse:
+def render_receipt(receipt: dict[str, Any]) -> dict[str, Any]:
     """Render an installer receipt: its ``reload`` (the change's ``ApplyResult``) in the shared reply shape.
 
     The installer hands the structured outcome up; the op renders it with :func:`apply_response`
-    (``None`` — an uninstall that ran no apply — stays ``None``) and arms this worker's post-reply
-    self-exit from the change's ``self_exit_armed``, as every env door does.
+    (``None`` — an uninstall that ran no apply — stays ``None``).
     """
     result = receipt["reload"]
     if result is None:
-        return writer_exit_response(receipt, armed=False)
-    return writer_exit_response({**receipt, "reload": apply_response(result)}, armed=result.self_exit_armed)
+        return receipt
+    return {**receipt, "reload": apply_response(result)}
 
 
 @operation(
@@ -432,7 +434,7 @@ async def marketplace_install(
     secret_keys: list[str] | None = None,
     route_mounts: dict[str, str] | None = None,
     accept_public_routes: bool = False,
-) -> OperationResponse:
+) -> Any:
     """Resolve, pip install, patch the manifest, reload, and record attribution.
 
     Nothing is pip-installed for a descriptor-only plugin; aborts and unwinds on any
@@ -441,8 +443,8 @@ async def marketplace_install(
     the same combined transaction. ``route_mounts`` remaps declared route bases;
     ``accept_public_routes`` acknowledges public routes. The result's ``routes`` lists
     every route the install mounted. An install-time env change carrying a recycle-class key
-    rolls a worker recycle (the receipt's ``reload.recycle``); when it converged this worker
-    recycles itself after replying.
+    rolls a worker recycle (the receipt's ``reload.recycle``); when it converged and this worker
+    needs its own restart, it recycles itself after replying.
     """
     # OFF gate — BEFORE the fleet PG advisory lock: with no attribution store the
     # install cannot record, so it refuses with a named, machine-readable reason.
@@ -506,7 +508,7 @@ async def marketplace_install_preview(
     request_model=MarketplaceUninstall,
     response_model=UninstallResult,
 )
-async def marketplace_uninstall(ref: str) -> OperationResponse:
+async def marketplace_uninstall(ref: str) -> Any:
     """Swap in the plugin environment without the plugin, unpatch the manifest and reload, then drop its record.
 
     Convergent and registry-free (see :meth:`Installer.uninstall`).
@@ -548,7 +550,7 @@ async def marketplace_update(
     secret_keys: list[str] | None = None,
     route_mounts: dict[str, str] | None = None,
     accept_public_routes: bool = False,
-) -> OperationResponse:
+) -> Any:
     """Resolve the target, pip upgrade, re-patch the manifest, reload, and upsert attribution.
 
     Nothing is pip-upgraded for a descriptor-only plugin; the same pre-flights apply
@@ -558,7 +560,7 @@ async def marketplace_update(
     ``accept_public_routes`` acknowledges public routes not already approved. The
     result's ``routes`` lists every route the update mounted. An update-time env change
     carrying a recycle-class key rolls a worker recycle (the receipt's ``reload.recycle``);
-    when it converged this worker recycles itself after replying.
+    when it converged and this worker needs its own restart, it recycles itself after replying.
     """
     # OFF gate — BEFORE the fleet PG advisory lock: with no attribution store the
     # update cannot upsert, so it refuses with a named reason.
@@ -585,27 +587,37 @@ async def marketplace_update(
     destructive=True,
     reload_gated=True,
     authority_changing=True,
-    errors=[NotSupportedError, UnavailableError],
+    errors=[NotSupportedError, UnavailableError, OperationFailedError],
     response_model=UpgradeAllResult,
 )
-async def marketplace_upgrade_all() -> dict[str, Any]:
+async def marketplace_upgrade_all() -> Any:
     """Move every installed plugin onto its latest COMPATIBLE version in one lock-held batch.
 
-    Answers ``{"results": [{ref, outcome, detail, span_release_error}, ...]}``; a row's
-    ``span_release_error`` names the failed config-store span releases of the config writes its ref
-    landed — an upgrade's write, or a failed upgrade's forward and restore writes — joined in write
-    order (``null`` when each released or the ref wrote nothing).
+    Answers ``{"results": [{ref, outcome, detail, span_release_error}, ...], "recycle", "awaiting_respawn",
+    "roll_deferred", "roll_deferred_to"}``;
+    a row's ``span_release_error`` names the failed config-store span releases of the config writes
+    its ref landed — an upgrade's write, or a failed upgrade's forward and restore writes — joined in
+    write order (``null`` when each released or the ref wrote nothing). ``recycle`` is the one fleet
+    recycle roll the batch's reloads settled once it ended (``null`` when the roll had no
+    worker to visit — every worker's reload confirmed no recycle-class key, or the only ones naming
+    one were refused at their epoch build or are the writer whose own restart cannot follow as its exit —
+    or the batch reloaded nothing) and ``awaiting_respawn`` the workers still awaiting a
+    respawn after it; when the roll converged, this worker's own restart, when it needs one,
+    follows as its exit once the reply is sent. ``roll_deferred`` is ``true`` when the roll was handed to the worker
+    ``roll_deferred_to`` names, which carries it out after the reply.
 
     Per-ref failures (including a ref with NO compatible version) are report
-    entries, never a batch abort — the ONE operation-level failure is the
-    fleet marketplace lock being held elsewhere (the retriable 503). See
-    :meth:`Installer.upgrade_all` for the outcome vocabulary.
+    entries, never a batch abort. The operation-level failures are the fleet
+    marketplace lock being held elsewhere (the retriable 503) and the batch's
+    landed config changes whose fleet recycle roll did not complete (a 500 saying
+    so). See :meth:`Installer.upgrade_all` for the outcome vocabulary.
     """
     # OFF gate — BEFORE the fleet PG advisory lock: with no attribution store there
     # is no installed inventory to upgrade, so it refuses with a named reason.
     if not component_store_configured(SKELETON_COMPONENT):
         raise NotSupportedError(not_configured_message(_NOT_CONFIGURED_NOUN), extra={"code": _NOT_CONFIGURED_CODE})
     try:
-        return {"results": await Installer().upgrade_all()}
+        report = await Installer().upgrade_all()
     except MarketplaceError as exc:
         raise to_operation_error(exc) from exc
+    return {"results": report.results, **roll_outcome_body(report.roll)}

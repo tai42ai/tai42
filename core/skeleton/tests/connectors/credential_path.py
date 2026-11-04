@@ -12,9 +12,10 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextvars
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -32,6 +33,7 @@ from tai42_contract.manifest import TaiMCPConfig
 from tai42_kit.settings import reset_all_settings
 
 import tai42_skeleton.connectors.runtime.resolver as resolver_mod
+from tai42_skeleton.app.lifecycle.state import LifecycleState
 from tai42_skeleton.connectors.oauth import crypto
 from tai42_skeleton.connectors.providers import registry
 from tai42_skeleton.connectors.runtime import refresh_owner
@@ -198,14 +200,22 @@ class CredentialPath:
 
     # -- the token endpoint ------------------------------------------------------------------------
 
-    def token_endpoint(self, *, delay: float = 0.0, status: int = 200, body: dict | None = None) -> None:
-        """Answer every refresh with a rotated pair (after ``delay`` seconds)."""
+    def token_endpoint(
+        self,
+        *,
+        delay: float = 0.0,
+        status: int = 200,
+        body: dict | None = None,
+        hold: Callable[[], object] | None = None,
+    ) -> None:
+        """Answer every refresh with a rotated pair (after ``delay`` seconds, and once ``hold`` returns)."""
         self.oauth.route(
             "POST",
             "/token",
             Reply(
                 status=status,
                 delay=delay,
+                hold=hold,
                 body=body
                 if body is not None
                 else {"access_token": "at-new", "refresh_token": "rt-rotated", "expires_in": 3600},
@@ -237,37 +247,101 @@ class CredentialPath:
 def owner_loop() -> Iterator[asyncio.AbstractEventLoop]:
     """A long-lived loop in its own thread, bound as the refresh owner (the serving loop's stand-in).
 
-    It closes as ``asyncio.run`` closes its loop: once the refresh owner and the clients are shut
-    down, every task still on the loop (a late start's apply the test did not wait out, say) is
-    cancelled and run to its end, so whatever it holds is released before the loop closes. A
+    It closes as ``asyncio.run`` closes its loop: once the refresh owner is shut down and the kit's
+    resources kept for the loop are released, every task still on the loop (a late start's apply
+    the test did not wait out, say) is cancelled and run to its end, so whatever it holds is
+    released before the loop closes. A
     task that fails instead of ending on its cancellation fails the teardown.
     """
-    loop = asyncio.new_event_loop()
-    thread = threading.Thread(target=loop.run_forever, daemon=True)
-    thread.start()
 
     async def _bind() -> None:
         refresh_owner.bind_to_running_loop()
 
-    asyncio.run_coroutine_threadsafe(_bind(), loop).result(5)
+    async def _close() -> None:
+        await refresh_owner.aclose()
+        await _end_loop_resources()
+
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=loop.run_forever, daemon=True)
+    thread.start()
     try:
+        asyncio.run_coroutine_threadsafe(_bind(), loop).result(5)
         yield loop
     finally:
-        from tai42_kit.clients.base import shutdown_all_clients
-
-        async def _close() -> None:
-            await refresh_owner.aclose()
-            await shutdown_all_clients()
-            await _end_left_tasks()
-            await loop.shutdown_asyncgens()
-            await loop.shutdown_default_executor()
-
         try:
             asyncio.run_coroutine_threadsafe(_close(), loop).result(30)
         finally:
             loop.call_soon_threadsafe(loop.stop)
             thread.join(5)
             loop.close()
+
+
+class JobLoop:
+    """An in-process backend job's own loop, run the way the backends run it: one job at a time.
+
+    Each :meth:`run` is one job: on a thread of its own, in a copy of the caller's context, the
+    loop runs exactly the coroutine it is handed (``run_until_complete``) and then stops. A task
+    the job left on the loop runs again only when a later job runs on the same loop, as on a pool
+    that reuses its job loops; a test that runs one job models a pool that makes a loop per job
+    and never runs it again.
+    """
+
+    def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
+        self.loop = loop
+
+    def run(self, coro: Any, timeout: float = 30.0) -> Any:
+        """Run ``coro`` as one job on this loop from this (non-loop) thread, and return its result."""
+        outcome: list[Any] = []
+        failure: list[BaseException] = []
+
+        def _job() -> None:
+            try:
+                outcome.append(self.loop.run_until_complete(coro))
+            except BaseException as error:
+                failure.append(error)
+
+        thread = threading.Thread(target=contextvars.copy_context().run, args=(_job,), daemon=True)
+        thread.start()
+        thread.join(timeout)
+        if thread.is_alive():
+            raise TimeoutError(f"the job did not end within {timeout}s")
+        if failure:
+            raise failure[0]
+        return outcome[0]
+
+    async def run_awaited(self, coro: Any, timeout: float = 30.0) -> Any:
+        """Run ``coro`` as one job on this loop from a running loop, which it does not block."""
+        return await asyncio.to_thread(self.run, coro, timeout)
+
+
+@contextmanager
+def job_loop() -> Iterator[JobLoop]:
+    """An in-process backend job's own loop (:class:`JobLoop`), apart from the serving loop.
+
+    At exit the kit's resources kept for the loop are released and its left tasks are ended, on
+    one last run of the loop, as at :func:`owner_loop`'s close, and the loop is closed.
+    """
+    loop = asyncio.new_event_loop()
+    job = JobLoop(loop)
+    try:
+        yield job
+    finally:
+        try:
+            job.run(_end_loop_resources())
+        finally:
+            loop.close()
+
+
+async def _end_loop_resources() -> None:
+    """On the running loop, at its close: release the kit's resources kept for the loop, end the left
+    tasks, then the async generators and the executor."""
+    from tai42_kit.loop_bound import release_loop_bound_resources
+
+    await release_loop_bound_resources()
+    await _end_left_tasks()
+    loop = asyncio.get_running_loop()
+    await loop.shutdown_asyncgens()
+    await loop.shutdown_default_executor()
 
 
 async def _end_left_tasks() -> None:
@@ -278,9 +352,18 @@ async def _end_left_tasks() -> None:
     await asyncio.gather(*left, return_exceptions=True)
     failures = [error for task in left if not task.cancelled() and (error := task.exception()) is not None]
     if failures:
-        raise BaseExceptionGroup("tasks left on the owner loop failed when cancelled", failures)
+        raise BaseExceptionGroup("tasks left on the loop failed when cancelled", failures)
 
 
 def on_loop(loop: asyncio.AbstractEventLoop, coro: Any, timeout: float = 30.0) -> Any:
     """Run ``coro`` on ``loop`` from this (non-loop) thread and return its result."""
     return asyncio.run_coroutine_threadsafe(coro, loop).result(timeout)
+
+
+def bind_as_serving(state: LifecycleState, loop: asyncio.AbstractEventLoop) -> None:
+    """Bind ``loop`` (running in its own thread) as ``state``'s serving loop, from inside that loop."""
+
+    async def _bind() -> None:
+        state.bind_serving_loop()
+
+    on_loop(loop, _bind(), timeout=5)

@@ -129,6 +129,7 @@ async def test_probe_http_noauth_header_differing_in_case_collapses_to_one(insta
     assert cfg["config"]["headers"] == {"x-token": "client"}
 
 
+@pytest.mark.usefixtures("serving_here")
 async def test_a_probe_that_stops_waiting_leaves_the_start_running_to_completion(monkeypatch, caplog):
     import asyncio
     import logging

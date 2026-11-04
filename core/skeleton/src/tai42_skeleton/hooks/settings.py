@@ -66,7 +66,9 @@ class HooksSettings(TaiBaseSettings):
     # ``run_retry_cap_seconds`` between them. A running attempt holds a lease of
     # ``run_lease_seconds`` (renewed at a third of it); the sweep claims due and lapsed runs every
     # ``run_sweep_seconds``; shutdown gives the attempts in flight
-    # ``run_shutdown_grace_seconds`` before it cancels them.
+    # ``run_shutdown_grace_seconds`` before it cancels them, and the cancelled ones as much
+    # again to settle their jobs. Twice this grace is part of the drain a leaving worker
+    # announces to a fleet restart.
     run_max_attempts: int = Field(default=5, ge=1)
     run_retry_base_seconds: float = Field(default=10.0, gt=0)
     run_retry_cap_seconds: float = Field(default=600.0, gt=0)

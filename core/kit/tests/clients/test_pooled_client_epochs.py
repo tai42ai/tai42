@@ -17,8 +17,8 @@ from tai42_kit.clients import (
     advance_client_epoch,
     current_client_epoch,
     drain_epoch,
-    shutdown_all_clients,
 )
+from tai42_kit.clients.base import _shutdown_all_clients
 
 
 class _Conn:
@@ -87,7 +87,7 @@ async def test_client_released_while_current_lingers_until_shutdown():
         pass  # released while epoch 0 is current -> stays pooled
     advance_client_epoch()
     assert cls.closed == 0
-    await shutdown_all_clients()
+    await _shutdown_all_clients()
     assert cls.closed == 1
 
 
@@ -99,7 +99,7 @@ async def test_shutdown_closes_every_epoch():
     advance_client_epoch()
     async with inst.current(url="a"):
         pass  # epoch 1
-    await shutdown_all_clients()
+    await _shutdown_all_clients()
     assert cls.closed == 2  # both epochs' pools are closed
 
 
@@ -111,7 +111,7 @@ async def test_close_targets_current_epoch_only():
     advance_client_epoch()
     await inst.close(url="a")  # current epoch (1) has no such client -> no-op
     assert cls.closed == 0
-    await shutdown_all_clients()  # the retired-epoch client is still reclaimable
+    await _shutdown_all_clients()  # the retired-epoch client is still reclaimable
     assert cls.closed == 1
 
 
@@ -209,7 +209,7 @@ async def test_create_during_epoch_bump_is_closed_and_retried():
     # First client closed-and-retried; second (current-epoch) client pooled.
     assert _SlowClient.created == 2
     assert _SlowClient.closed == 1
-    await shutdown_all_clients()
+    await _shutdown_all_clients()
     assert _SlowClient.closed == 2  # the retried current-epoch client closes here
 
 

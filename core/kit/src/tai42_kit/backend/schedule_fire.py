@@ -110,8 +110,8 @@ async def backend_fire(tool_name: str, kwargs: dict[str, Any]) -> Any:
       identity, receiver-less;
     * a plain job with no door signal → ``run_tool`` with no door context, returning its result.
 
-    The worker's detached-run marker and secret-capability bind wrap this call; they are not this
-    seam's concern.
+    The job body (:func:`~tai42_kit.backend.job_run.run_dispatched_tool`) wraps this call in the
+    dispatched-job scope and the job's secret-capability bind; they are not this seam's concern.
     """
     subject = pop_schedule_subject(kwargs)
     state_binding = pop_schedule_state_binding(kwargs)

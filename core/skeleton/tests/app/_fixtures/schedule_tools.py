@@ -16,12 +16,9 @@ whatever a test sets, so a malformed backend answer can be exercised.
 
 from typing import Any
 
-from pydantic import TypeAdapter
 from tai42_contract.app import tai42_app
 from tai42_contract.backend import (
-    CrontabCadence,
-    IntervalCadence,
-    ScheduleCadence,
+    SCHEDULE_CADENCE_ADAPTER,
     ScheduleImportError,
     ScheduleImportMode,
     ScheduleImportReport,
@@ -32,7 +29,6 @@ from tai42_contract.backend import (
 #: The fake backend's own tool-name key inside a stored job's kwargs.
 TOOL_NAME_KEY = "fake_target"
 
-_CADENCE: TypeAdapter[IntervalCadence | CrontabCadence] = TypeAdapter(ScheduleCadence)
 
 demo_calls: list[dict] = []
 #: name -> {"args", "kwargs" (with TOOL_NAME_KEY), "cadence" (dumped), "enabled"}
@@ -62,7 +58,7 @@ def backend_list_schedules() -> list:
         ScheduleListRow(
             name=name,
             tool=entry["kwargs"][TOOL_NAME_KEY],
-            cadence=_CADENCE.validate_python(entry["cadence"]),
+            cadence=SCHEDULE_CADENCE_ADAPTER.validate_python(entry["cadence"]),
             enabled=entry["enabled"],
         ).model_dump(mode="json")
         for name, entry in store.items()
@@ -89,7 +85,7 @@ def backend_export_schedules() -> list:
                 tool=tool,
                 args=entry["args"],
                 kwargs=kwargs,
-                cadence=_CADENCE.validate_python(entry["cadence"]),
+                cadence=SCHEDULE_CADENCE_ADAPTER.validate_python(entry["cadence"]),
                 enabled=entry["enabled"],
             ).model_dump(mode="json")
         )

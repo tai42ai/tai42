@@ -1,14 +1,12 @@
-"""ResourceManager ``{% include %}``: a dependency resolves through the sync-loader bridge, a
-pooled-client cleanup failure is logged without failing the render, and ``ignore missing``
-still works. All storage is an in-memory ``Storage`` double."""
+"""ResourceManager ``{% include %}``: a dependency resolves through the sync-loader bridge, on
+the loop that drives the render, and ``ignore missing`` still works. All storage is an
+in-memory ``Storage`` double."""
 
 from __future__ import annotations
 
-import logging
+import asyncio
 
-import pytest
-
-from tai42_skeleton.template import resource_manager as rm_mod
+from tai42_contract.template import TemplatedText
 
 from ._manager_fixtures import _manager
 
@@ -20,21 +18,25 @@ async def test_include_resolves_via_sync_loader() -> None:
     assert await manager.render_by_id("parent.j2") == "P[CHILD]"
 
 
-async def test_include_client_cleanup_failure_is_logged_not_fatal(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    """A pooled-client cleanup failure after a template load is logged loudly but
-    must not replace the load's result — the include still renders."""
+async def test_an_include_loads_on_the_loop_that_drives_the_render() -> None:
+    """A dependency of a stored or an inline render is read on the loop that awaits the
+    render, the loop whose pooled storage clients the app owns, never on a loop of its own."""
+    manager, store = _manager(
+        {"child.j2": "CHILD", "inline_child.j2": "INLINE", "parent.j2": 'P[{% include "child.j2" %}]'}
+    )
+    loaded_on: dict[str, asyncio.AbstractEventLoop] = {}
+    read = store.load
 
-    async def boom() -> None:
-        raise RuntimeError("cleanup failed")
+    async def recording_load(path: str) -> str:
+        loaded_on[path] = asyncio.get_running_loop()
+        return await read(path)
 
-    monkeypatch.setattr(rm_mod, "shutdown_all_clients", boom)
-    manager, _ = _manager({"child.j2": "CHILD", "parent.j2": 'P[{% include "child.j2" %}]'})
-    with caplog.at_level(logging.ERROR):
-        assert await manager.render_by_id("parent.j2") == "P[CHILD]"
-    # The cleanup failure is logged loudly, not silently swallowed.
-    assert "Error closing pooled clients" in caplog.text
+    store.load = recording_load  # type: ignore[method-assign]
+    assert await manager.render_by_id("parent.j2") == "P[CHILD]"
+    rendered = await manager.render_templated_text(TemplatedText(content='I[{% include "inline_child.j2" %}]'))
+    assert rendered == "I[INLINE]"
+    loop = asyncio.get_running_loop()
+    assert loaded_on == {"parent.j2": loop, "child.j2": loop, "inline_child.j2": loop}
 
 
 async def test_include_missing_with_ignore_missing_renders_blank() -> None:

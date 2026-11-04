@@ -16,7 +16,10 @@ Two layers, each honest about what it covers:
   a reader of the plugins directory (the once-per-process boot verification and
   ``tai doctor``): it waits while an operation changes the directory, so it never reads
   a half-changed one, is granted beside an operation that has downgraded to roll, and
-  holds a writer off only while it reads.
+  holds a writer off only while it reads. It is also the roll hold
+  :data:`MARKETPLACE_ROLL_HOLD` (:mod:`~tai42_skeleton.config.roll_holds`): the bus member
+  carrying a roll an operation handed off holds the key shared until that roll ended, so a
+  second operation is refused until then.
 - The per-worker :data:`operation_lock` is the UX fast path: a second request
   arriving in the SAME worker while an operation runs is refused immediately with
   a retriable :class:`OperationInProgressError` instead of queueing for minutes.
@@ -38,6 +41,7 @@ from typing import Any, Protocol
 from tai42_kit.clients.impl.postgres import pinned_connection
 from tai42_kit.db import component_store_settings
 
+from tai42_skeleton.config.roll_holds import register_roll_hold
 from tai42_skeleton.db import SKELETON_COMPONENT
 from tai42_skeleton.db.lock_keys import MARKETPLACE_LOCK_KEY
 from tai42_skeleton.marketplace.errors import OperationInProgressError
@@ -174,6 +178,12 @@ async def fleet_lock_shared() -> AsyncIterator[None]:
                 )
 
 
+# The roll hold a marketplace operation's handed-off fleet recycle roll names: its carrier holds
+# the key shared until the roll ended.
+MARKETPLACE_ROLL_HOLD = "marketplace-fleet-key"
+register_roll_hold(MARKETPLACE_ROLL_HOLD, fleet_lock_shared)
+
+
 @asynccontextmanager
 async def operation_guard(
     fleet: Callable[[], AbstractAsyncContextManager[FleetHold]],
@@ -182,8 +192,12 @@ async def operation_guard(
 
     Refuses immediately (no store/registry/pip/manifest call) when either lock is
     held elsewhere. Both stay held to the body's end, a downgraded fleet hold included, so
-    a second operation on this worker or any other is refused until then. ``fleet`` is the
-    fleet-lock factory the flow injected, so a test drives the guard against a fake fleet lock.
+    a second operation on this worker or any other is refused until then. Both are released
+    when the body ends: a roll the body handed off and still running then is covered only by
+    its carrier, which keeps the fleet key shared until that roll ended
+    (:data:`MARKETPLACE_ROLL_HOLD`), so a second operation, which takes the key exclusively,
+    is still refused while it runs. ``fleet`` is the fleet-lock factory the caller injected, so
+    a test drives the guard against a fake fleet lock.
     """
     if operation_lock.locked():
         raise OperationInProgressError("another marketplace operation is in progress; retry shortly")

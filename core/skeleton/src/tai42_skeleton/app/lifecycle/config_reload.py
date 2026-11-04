@@ -1,9 +1,8 @@
 """The soft config reload — build and swap a fresh serving epoch under the persisted env."""
 
-import asyncio
 from typing import Any
 
-from tai42_skeleton.app import lifecycle as _lifecycle
+from tai42_skeleton.app.discarded_build import is_discarded_build_failure, state_discarded_build
 from tai42_skeleton.app.lifecycle.state import LifecycleState
 
 
@@ -25,7 +24,7 @@ def awaiting_respawn() -> list[str]:
 class ConfigReloadMixin(LifecycleState):
     """The soft config-reload lifecycle step: build and swap a fresh serving epoch in place."""
 
-    def _reload_config(self) -> dict[str, Any]:
+    async def _reload_config(self) -> dict[str, Any]:
         """Soft restart: build a FRESH serving epoch under the persisted env and swap it in atomically.
 
         Env refresh + settings reset + registry rebuild + fresh serving surface + retire of the
@@ -35,17 +34,24 @@ class ConfigReloadMixin(LifecycleState):
         untouched.
 
         The build's fresh FastMCP lifespan is loop-affine, so the swap runs ON the
-        serving loop even though this body is driven from a reload-gate worker thread,
-        and blocks that loop for the rebuild's length: health and readiness probes, MCP
-        keepalives, in-flight streams and the generation's timers pause until the swap
-        returns. The worker-bus heartbeat runs on its own thread and does not pause.
+        serving loop: the body runs under ``reload_gate.run``, which runs it there from
+        whatever loop its door is driven on. The rebuild's synchronous steps (the module re-imports) hold the
+        serving loop while they run: health and readiness probes, MCP keepalives, in-flight
+        streams and the generation's timers pause until each returns. The worker-bus
+        heartbeat runs on its own thread and does not pause, except under a process prelude,
+        where it is a task of the serving loop and pauses with it.
 
         The result ``{"status", "env_keys", "awaiting_respawn"}`` states, as a fact, the
         recycle-class keys whose value now differs from the one this process bound them under —
         at boot, or when the plugin that declares them was loaded (:func:`awaiting_respawn`): the
         soft restart carries every hot key in place, and a pooled resource of this process still
         runs on the bound value of those keys. The operation that started the reload judges the
-        fact — it alone knows whether a respawn follows.
+        fact — it alone knows whether a respawn follows. A build refused and discarded before its
+        swap (:func:`~tai42_skeleton.app.discarded_build.is_discarded_build_failure`) re-raises its
+        failure carrying the same measurement, taken after the discard
+        (:func:`~tai42_skeleton.app.discarded_build.state_discarded_build`): the previous epoch keeps
+        serving under the env the discard restored, and the drift standing there is what the
+        worker's ``failed`` reply states. Any other failure is re-raised as it is.
 
         The env is applied under the fleet's deployment ownership, read from the bus census on
         the serving loop (a census the bus cannot answer is judged by the fleet's names last read,
@@ -60,25 +66,11 @@ class ConfigReloadMixin(LifecycleState):
         if bus is None:
             raise RuntimeError("reload_config ran before the worker bus was built")
 
-        async def _swap() -> dict[str, Any]:
-            # Release the loop-bound kit resources before the build's settings reset
-            # drops their per-loop registries — it refuses to drop a registry still
-            # holding live resources on a running loop.
-            ownership = await resolve_deployment_ownership(bus, "reload_config")
-            await _lifecycle.release_loop_bound_resources()
+        ownership = await resolve_deployment_ownership(bus, "reload_config")
+        try:
             await build_and_swap_epoch(env, ownership=ownership)
-            return {"status": "ok", "env_keys": len(env), "awaiting_respawn": awaiting_respawn()}
-
-        loop = self._serving_loop
-        if loop is not None and loop.is_running():
-            try:
-                running: asyncio.AbstractEventLoop | None = asyncio.get_running_loop()
-            except RuntimeError:
-                running = None
-            if running is loop:
-                raise RuntimeError("reload_config must be driven off the serving loop (via reload_gate.run)")
-            # Marshal the swap onto the serving loop and block-wait its result.
-            return asyncio.run_coroutine_threadsafe(_swap(), loop).result()
-        # No serving loop bound (a pure-sync context / test): drive the swap on a
-        # throwaway loop of this caller's own.
-        return asyncio.run(_swap())
+        except Exception as failure:
+            if is_discarded_build_failure(failure):
+                state_discarded_build(failure, awaiting_respawn())
+            raise
+        return {"status": "ok", "env_keys": len(env), "awaiting_respawn": awaiting_respawn()}

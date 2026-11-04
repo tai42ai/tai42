@@ -23,7 +23,7 @@ from tai42_contract.presets import PresetBody
 
 from tai42_skeleton.app import admission as admission_mod
 from tai42_skeleton.app import applied_env, instance
-from tai42_skeleton.app.admission import RequestAdmission
+from tai42_skeleton.app.admission import Admission
 from tai42_skeleton.app.bus import FleetResult, LocalApplyResult
 from tai42_skeleton.app.bus.ops import FleetOp
 from tai42_skeleton.app.epoch import Epoch
@@ -140,15 +140,11 @@ class _World:
         async def save_previous(_env: dict[str, str]) -> None:
             return None
 
-        async def release_pools() -> None:
-            return None
-
         return await service.apply_replace_env(
             profile_env,
             save_previous=save_previous,
             build_and_swap=build,
             build_and_discard=build,
-            release_llm_pools=release_pools,
         )
 
 
@@ -208,9 +204,9 @@ async def test_a_profile_apply_waits_for_a_write_inside_its_listing(monkeypatch:
     profiler = world.service()
     validate_replace = profiler._validate_replace
 
-    def logged_validate_replace(env: dict[str, str], ownership: DeploymentOwnership) -> None:
+    def logged_validate_replace(env: dict[str, str], ownership: DeploymentOwnership, inputs: Any) -> None:
         world.log.append("validate_replace")
-        validate_replace(env, ownership)
+        validate_replace(env, ownership, inputs)
 
     monkeypatch.setattr(profiler, "_validate_replace", logged_validate_replace)
     profile: list[asyncio.Task[Any]] = []
@@ -288,13 +284,11 @@ async def test_a_write_waiting_for_the_lock_is_recorded_as_waiting_on_its_genera
 
     serving = Epoch(number=0)
     serving.admit()
-    request = RequestAdmission(epoch=serving)
+    request = Admission(epoch=serving, kind="served_request")
     seen: list[tuple[bool, bool, int]] = []
 
     async def listing() -> None:
-        seen.append(
-            (admission_mod.current_request_admission() is request, request in serving.waiting, serving.in_flight)
-        )
+        seen.append((admission_mod.current_admission() is request, request in serving.waiting, serving.in_flight))
 
     world.during = listing
     token = admission_mod._admission.set(request)
@@ -397,13 +391,11 @@ async def test_a_write_blocked_on_the_store_span_is_recorded_as_waiting_on_its_g
     world.store = store
     serving = Epoch(number=0)
     serving.admit()
-    request = RequestAdmission(epoch=serving)
+    request = Admission(epoch=serving, kind="served_request")
     seen: list[tuple[bool, bool, int]] = []
 
     async def listing() -> None:
-        seen.append(
-            (admission_mod.current_request_admission() is request, request in serving.waiting, serving.in_flight)
-        )
+        seen.append((admission_mod.current_admission() is request, request in serving.waiting, serving.in_flight))
 
     world.during = listing
     token = admission_mod._admission.set(request)

@@ -17,16 +17,19 @@ from typing import ClassVar, Final
 from tai42_contract.app import tai42_app
 from tai42_contract.backend import Backend
 from tai42_contract.backend.runtime import (
+    PROCESS_PRELUDE_ENV,
     BackendRuntime,
     ExecutionMode,
     FleetOpApplied,
+    ProcessPreludeRequired,
     ProgressLiveness,
 )
 
 from tai42_kit.backend.conformance import OVERRIDDEN_LAUNCH_VERDICT, check_runtime_declarations
+from tai42_kit.backend.reshaped_threads import future_chaining_bound
 from tai42_kit.backend.settings import BackendDispatchSettings
 from tai42_kit.liveness import LivenessFile, backend_liveness_settings
-from tai42_kit.signals import SignalSubscription, signal_chain
+from tai42_kit.signals import STOP_SIGNALS, SignalSubscription, signal_chain
 
 logger = logging.getLogger(__name__)
 
@@ -34,19 +37,24 @@ logger = logging.getLogger(__name__)
 # consumes — a loud backstop for a boot that never completes.
 DEFAULT_READY_TIMEOUT_SECONDS: Final[float] = 120.0
 
+#: The margin a drain budget adds on top of the engine's job budget: the warm drain has to
+#: outlast the longest in-flight job AND the engine's own teardown, or the wait is abandoned on
+#: exactly the work it exists to protect. A binding that sizes ``drain_timeout`` from its live
+#: job budget adds this margin to it.
+DRAIN_MARGIN_SECONDS: Final = 30.0
+
 # Upper bound on the wait for a run body to return after a drain was requested.
 #
 # It must sit ABOVE the longest job the engine can be running, because a warm
 # drain waits for in-flight work to finish: a bound below the job budget abandons
 # — and so severs — exactly the work the drain exists to protect. The default is
-# the dispatch surface's own ``task_timeout`` default plus a margin for the
-# engine's own teardown. A binding that knows its live job budget overrides
+# the dispatch surface's own ``task_timeout`` default plus ``DRAIN_MARGIN_SECONDS``.
+# A binding that knows its live job budget overrides
 # ``drain_timeout`` from settings rather than living with this default, and the
 # deployment's termination grace must be at least as long or the supervisor's kill
 # lands first.
-_DRAIN_MARGIN_SECONDS: Final = 30.0
 DEFAULT_DRAIN_TIMEOUT_SECONDS: Final[float] = (
-    float(BackendDispatchSettings.model_fields["task_timeout"].default) + _DRAIN_MARGIN_SECONDS
+    float(BackendDispatchSettings.model_fields["task_timeout"].default) + DRAIN_MARGIN_SECONDS
 )
 
 # The whole-turnover budget is the apply budget the host hands the fleet-op handler,
@@ -76,13 +84,16 @@ class ManagedBackend(Backend):
 
     ready_timeout: ClassVar[float] = DEFAULT_READY_TIMEOUT_SECONDS
 
-    drain_timeout: float = DEFAULT_DRAIN_TIMEOUT_SECONDS
-    """How long a drain may take before the wait is abandoned.
+    @property
+    def drain_timeout(self) -> float:
+        """How long a drain may take before the wait is abandoned: :data:`DEFAULT_DRAIN_TIMEOUT_SECONDS`.
 
-    Declared per class like the rest, but deliberately NOT a ``ClassVar``: the
-    budget has to cover the engine's LIVE job budget, which is a settings read, so
-    a binding overrides this with a property (the same shape as
-    :attr:`dispatch_settings`) rather than freezing a number at import."""
+        The backend's drain bound (:attr:`tai42_contract.backend.Backend.drain_timeout`).
+        A property, not a ``ClassVar``: the budget has to cover the engine's LIVE job
+        budget, which is a settings read, so a binding overrides it with a property
+        that reads its settings rather than freezing a number at import.
+        """
+        return DEFAULT_DRAIN_TIMEOUT_SECONDS
 
     # Whether THIS launch abandoned its drain wait. Set per launch (the process
     # launches once), and read only by :meth:`_release`, which uses it to tell an
@@ -107,9 +118,18 @@ class ManagedBackend(Backend):
 
         NEVER overridden — the template is what makes every backend behave identically around the
         vendor binding.
+
+        The runtime builds before the readiness wait, so its fork guard and signal receivers are in
+        place before the first fork or the first job, and consumes only after it. Config reloads
+        re-import the runtime's package from the build onward: the boot's own resync can do it
+        inside the readiness wait (a first connect that withdraws a stored key reloads before the
+        app reads ready), and later reloads land during the run body. The runtime runs on what its
+        build produced (:class:`~tai42_contract.backend.runtime.BackendRuntime`), so none of them
+        reaches it.
         """
         self._drain_overran = False
         runtime = self._select(args)
+        self._require_prelude(runtime)
         liveness = self._bind_liveness(runtime)
         if not runtime.consumes_work:
             # A runtime that pulls no work has nothing to gate on and nothing to
@@ -157,6 +177,33 @@ class ManagedBackend(Backend):
         self._validate(runtime)
         return runtime
 
+    @staticmethod
+    def _require_prelude(runtime: BackendRuntime) -> None:
+        """Refuse a runtime whose process prelude this process was not started with, before anything starts.
+
+        The prelude must run before any other import, so a process that has already imported the
+        platform cannot run it now: it raises :class:`ProcessPreludeRequired`, which the host's
+        entry answers by starting the process again with the prelude first. A process the entry
+        started with that prelude names it in :data:`PROCESS_PRELUDE_ENV`. A runtime that declares
+        no prelude is not checked against it.
+
+        A process that names a prelude in :data:`PROCESS_PRELUDE_ENV` runs on threads the prelude
+        reshaped, so its host must have bound asyncio's future chaining to them
+        (:func:`~tai42_kit.backend.reshaped_threads.bind_future_chaining`) before running any loop;
+        a process that has not is refused with a :class:`RuntimeError`, whatever its runtime
+        declares. Starting it again would not bind it, so this is not a restart.
+        """
+        prelude = runtime.process_prelude
+        marker = os.environ.get(PROCESS_PRELUDE_ENV)
+        if prelude is not None and marker != prelude:
+            raise ProcessPreludeRequired(prelude)
+        if marker and not future_chaining_bound():
+            raise RuntimeError(
+                f"this process was started through the process prelude {marker!r} ({PROCESS_PRELUDE_ENV}), "
+                "but its host never bound asyncio's future chaining to the threads the prelude reshaped; "
+                "call tai42_kit.backend.reshaped_threads.bind_future_chaining() before running any event loop"
+            )
+
     def _validate(self, runtime: BackendRuntime) -> None:
         """Refuse a runtime whose declarations and bindings disagree, before anything starts.
 
@@ -177,7 +224,9 @@ class ManagedBackend(Backend):
 
         A runtime consuming before that finished would run work against a
         half-built registry and fail it permanently, so a boot that never
-        completes is a refusal rather than a degraded start.
+        completes is a refusal rather than a degraded start. The resync can
+        reload the configuration before it reads ready, re-importing the built
+        runtime's package (see :meth:`launch`).
         """
         try:
             await asyncio.wait_for(tai42_app.lifecycle.wait_until_ready(), timeout=self.ready_timeout)
@@ -207,9 +256,14 @@ class ManagedBackend(Backend):
         cancelled at all: only the bridge is, and the thread runs on. That case is
         reported and the thread is abandoned as a daemon; see
         :meth:`_report_abandoned_body`.
+
+        An ``inline`` body blocks the loop, so no signal-chain subscriber can run until it
+        returns. For its span the stop signals carry the process's default dispositions,
+        which is what the engine installs its own handlers over, or relies on.
         """
         if runtime.mode is ExecutionMode.inline:
-            runtime.run_blocking()
+            with signal_chain.released(*STOP_SIGNALS):
+                runtime.run_blocking()
             return
 
         thread: threading.Thread | None = None
@@ -387,7 +441,7 @@ class ManagedBackend(Backend):
 
     @contextmanager
     def _drain_wiring(self, runtime: BackendRuntime) -> Iterator[None]:
-        """Subscribe warm-then-cold shutdown to SIGTERM and SIGINT for the span of the run body.
+        """Subscribe warm-then-cold shutdown to the stop signals for the span of the run body.
 
         Through the composed chain, so the host's own subscriber — the one whose
         main-task cancellation guarantees teardown — survives this registration
@@ -406,7 +460,7 @@ class ManagedBackend(Backend):
                 runtime.request_terminate()
 
         subscriptions: list[SignalSubscription] = []
-        for sig in (signal.SIGTERM, signal.SIGINT):
+        for sig in STOP_SIGNALS:
             try:
                 subscriptions.append(
                     signal_chain.add(sig, partial(_on_signal, sig), name=f"{self.label}-{runtime.name}-drain")

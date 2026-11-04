@@ -3,7 +3,8 @@
 The prefork parent reports from its own loop (``heartbeat`` on each dequeue poll and job
 boundary, and each ``wait_for_horse`` tick while a horse runs); the forked horse never
 reports, since the liveness file is the parent's signal. The non-forking pools report from
-the refresher thread that runs beside an in-process job.
+the refresher thread that runs beside an in-process job. A worker launched through
+``RqBackend.launch`` writes those reports into the liveness file and removes it when it ends.
 """
 
 from __future__ import annotations
@@ -22,8 +23,13 @@ from rq.timeouts import JobTimeoutException
 from tai42_contract.backend.runtime import ProgressLiveness
 from tai42_kit.fork_gate import fork_gate
 
+from tai42_backend_rq import unpatched, worker_pools
 from tai42_backend_rq import worker as worker_module
-from tai42_backend_rq import worker_pools
+from tai42_backend_rq.backend import RqBackend
+
+# The registration decorator's static type is a union (decorator-or-class);
+# at runtime the stub app returns the class unchanged.
+_RqBackendCls: Any = RqBackend
 
 
 class _Reports:
@@ -47,7 +53,10 @@ def _bare(cls: type[Any], reports: _Reports) -> Any:
     worker._is_work_horse = False
     worker.execution = None
     if issubclass(cls, worker_pools.CustomRQSimpleWorker):
-        worker._execution_guard = worker_pools._os_thread_lock()
+        worker._execution_guard = unpatched.os_thread_lock()
+        worker._run_guard = unpatched.os_thread_lock()
+        worker._running_job_id = None
+        worker._stopped_job_id = None
     return worker
 
 
@@ -165,60 +174,75 @@ def test_the_worker_runtime_declares_progress_liveness() -> None:
     assert worker_module.RqWorkerRuntime.liveness == ProgressLiveness()
 
 
-def test_the_standalone_entry_writes_the_liveness_file_while_it_works_and_removes_it(
+class _OnePassWorker:
+    """A pool worker whose work loop makes one pass, reporting it, then runs ``after_pass``."""
+
+    def __init__(self, after_pass: Any) -> None:
+        self._after_pass = after_pass
+        self.checked = False
+
+    def build(self, queues: Any, *, name: Any, connection: Any, default_result_ttl: int, report_progress: Any) -> Any:
+        self._report = report_progress
+        return self
+
+    def guard_forks(self) -> None:
+        pass
+
+    def work(self, **kwargs: Any) -> None:
+        self._report(next_within=worker_pools._DEQUEUE_POLL_SECONDS)
+        self._after_pass()
+
+    def raise_for_liveness_failure(self) -> None:
+        self.checked = True
+
+
+async def test_launch_writes_the_liveness_file_while_the_worker_works_and_removes_it(
     monkeypatch: pytest.MonkeyPatch, liveness_path: Path
 ) -> None:
-    seen: dict[str, Any] = {}
+    during: list[str] = []
+    worker = _OnePassWorker(lambda: during.append(liveness_path.read_text()))
+    closed: list[bool] = []
+    monkeypatch.setattr(
+        worker_module, "rq_redis_connection", lambda redis_url: SimpleNamespace(close=lambda: closed.append(True))
+    )
+    monkeypatch.setattr(worker_module, "CustomRQSimpleWorker", worker.build)
 
-    class _Worker:
-        def __init__(self, queues: Any, *, name: Any, connection: Any, default_result_ttl: int, report_progress: Any):
-            self._report = report_progress
+    await _RqBackendCls().launch(["worker", "--pool", "solo", "--burst"])
 
-        def guard_forks(self) -> None:
-            pass
-
-        def work(self, **kwargs: Any) -> None:
-            self._report(next_within=worker_pools._DEQUEUE_POLL_SECONDS)
-            seen["during"] = liveness_path.read_text()
-
-        def raise_for_liveness_failure(self) -> None:
-            seen["checked"] = True
-
-    conn = SimpleNamespace(close=lambda: seen.__setitem__("closed", True))
-    monkeypatch.setattr(worker_module, "install_fork_hooks", lambda: None)
-    monkeypatch.setattr(worker_module, "rq_redis_connection", lambda redis_url: conn)
-    monkeypatch.setattr(worker_module, "CustomRQSimpleWorker", _Worker)
-
-    worker_module.start_rq_worker(None, None, "info", False, 500, "solo", None)
-
-    assert seen["during"] == f"{os.getpid()}\n10\n"
-    assert seen["closed"] is True
-    assert seen["checked"] is True
+    assert during == [f"{os.getpid()}\n10\n"]
+    assert worker.checked is True
+    assert closed == [True]
     assert not liveness_path.exists()
 
 
-def test_the_standalone_entry_removes_the_liveness_file_when_the_work_loop_raises(
+async def test_launch_removes_the_liveness_file_when_the_work_loop_raises(
     monkeypatch: pytest.MonkeyPatch, liveness_path: Path
 ) -> None:
-    class _Worker:
-        def __init__(self, queues: Any, *, name: Any, connection: Any, default_result_ttl: int, report_progress: Any):
-            self._report = report_progress
+    def fail() -> None:
+        raise RuntimeError("work loop failed")
 
-        def guard_forks(self) -> None:
-            pass
-
-        def work(self, **kwargs: Any) -> None:
-            self._report(next_within=worker_pools._DEQUEUE_POLL_SECONDS)
-            raise RuntimeError("work loop failed")
-
-    monkeypatch.setattr(worker_module, "install_fork_hooks", lambda: None)
     monkeypatch.setattr(worker_module, "rq_redis_connection", lambda redis_url: SimpleNamespace(close=lambda: None))
-    monkeypatch.setattr(worker_module, "CustomRQSimpleWorker", _Worker)
+    monkeypatch.setattr(worker_module, "CustomRQSimpleWorker", _OnePassWorker(fail).build)
 
     with pytest.raises(RuntimeError, match="work loop failed"):
-        worker_module.start_rq_worker(None, None, "info", False, 500, "solo", None)
+        await _RqBackendCls().launch(["worker", "--pool", "solo", "--burst"])
 
     assert not liveness_path.exists()
+
+
+async def test_launch_fails_the_worker_when_its_liveness_file_is_refused(
+    monkeypatch: pytest.MonkeyPatch, liveness_path: Path
+) -> None:
+    owner = os.getppid()
+    liveness_path.write_text(f"{owner}\n5\n")
+    conn = fakeredis.FakeStrictRedis(server=fakeredis.FakeServer())
+    monkeypatch.setattr(worker_module, "rq_redis_connection", lambda redis_url: conn)
+    monkeypatch.setattr(worker_pools.CustomRQSimpleWorker, "_start_scheduler", lambda self, *args, **kwargs: None)
+
+    with pytest.raises(RuntimeError, match="stopped because reporting its progress failed"):
+        await _RqBackendCls().launch(["worker", "--pool", "solo", "--burst"])
+
+    assert liveness_path.read_text() == f"{owner}\n5\n"
 
 
 def _perform_blocked_in_c(worker: Any, job: Any, queue: Any) -> bool:
@@ -262,7 +286,7 @@ def test_the_refresher_stops_reporting_once_the_job_runs_past_its_budget(
     assert max(stamps) - started < 0.2 + worker_pools._REFRESH_TICK_SECONDS * 5, "reports went on past the budget"
     assert all(stamp - started < 0.3 for stamp in refreshes), "rq's heartbeats went on past the budget"
     assert [record.getMessage() for record in caplog.records] == [
-        "worker 'w1': job job-1 is still running past its 0.2s timeout, which this pool cannot end; "
+        "worker 'w1': job job-1 is still running past its 0.2s timeout and has not ended; "
         "it reports no more progress, so the liveness probe ends this worker"
     ]
 
@@ -385,22 +409,6 @@ def test_a_failed_report_in_the_horse_monitor_keeps_monitoring_the_horse(
         worker.raise_for_liveness_failure()
 
 
-def test_the_standalone_entry_fails_when_its_liveness_file_is_refused(
-    monkeypatch: pytest.MonkeyPatch, liveness_path: Path
-) -> None:
-    owner = os.getppid()
-    liveness_path.write_text(f"{owner}\n5\n")
-    conn = fakeredis.FakeStrictRedis(server=fakeredis.FakeServer())
-    monkeypatch.setattr(worker_module, "install_fork_hooks", lambda: None)
-    monkeypatch.setattr(worker_module, "rq_redis_connection", lambda redis_url: conn)
-    monkeypatch.setattr(worker_pools.CustomRQSimpleWorker, "_start_scheduler", lambda self, *args, **kwargs: None)
-
-    with pytest.raises(RuntimeError, match="stopped because reporting its progress failed"):
-        worker_module.start_rq_worker(None, None, "info", True, 500, "solo", None)
-
-    assert liveness_path.read_text() == f"{owner}\n5\n"
-
-
 def _hold_rebuild_for(seconds: float) -> threading.Thread:
     """Hold the process's fork gate as a config reload's re-import does, for ``seconds``, on a thread."""
     held = threading.Event()
@@ -424,30 +432,68 @@ def _fork_an_exiting_child(self: Any, job: Any, queue: Any) -> None:
     os.waitpid(pid, 0)
 
 
+def _work_loop_running(monkeypatch: pytest.MonkeyPatch, base: type[Any], one_pass: Any) -> None:
+    """Make rq's own ``work`` of ``base`` run ``one_pass`` once, on the calling thread, as its loop would."""
+
+    def work(self: Any, *args: Any, **kwargs: Any) -> bool:
+        one_pass(self)
+        return True
+
+    monkeypatch.setattr(base, "work", work)
+
+
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="os.fork is not available on this platform")
 def test_a_job_waiting_on_the_fork_gate_reports_the_worker_s_progress(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The work-horse fork waits on the work loop's thread, holding up its next pass: the wait reports it."""
     reports = _Reports()
     worker = _bare(worker_pools.CustomRQWorker, reports)
     worker.guard_forks()
     monkeypatch.setattr(Worker, "fork_work_horse", _fork_an_exiting_child)
+    _work_loop_running(monkeypatch, Worker, lambda self: self.fork_work_horse(object(), object()))
     rebuild = _hold_rebuild_for(2.5)
 
-    worker.fork_work_horse(object(), object())
+    assert worker.work() is True
 
     rebuild.join(5.0)
     assert reports.promises.count(worker_pools._REFRESH_TICK_SECONDS) >= 2
 
 
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="os.fork is not available on this platform")
+def test_a_fork_waiting_off_the_work_loop_thread_reports_no_pass_of_the_loop(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The work loop is blocked while a fork on another thread waits on the re-import: nothing reports a pass."""
+    reports = _Reports()
+    worker = _bare(worker_pools.CustomRQWorker, reports)
+    worker.guard_forks()
+    forkers: list[threading.Thread] = []
+
+    def one_pass(self: Any) -> None:
+        forker = threading.Thread(target=_fork_an_exiting_child, args=(self, None, None), daemon=True)
+        forkers.append(forker)
+        forker.start()
+        forker.join(10.0)
+
+    _work_loop_running(monkeypatch, Worker, one_pass)
+    rebuild = _hold_rebuild_for(2.5)
+
+    assert worker.work() is True
+
+    rebuild.join(5.0)
+    assert not forkers[0].is_alive()
+    assert reports.promises == []
+
+
 def test_an_in_process_job_waiting_on_the_fork_gate_reports_the_worker_s_progress(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """An in-process job's span waits on the work loop's thread: the wait reports the loop's progress."""
     reports = _Reports()
     worker = _bare(worker_pools.CustomRQSimpleWorker, reports)
     ran: list[int] = []
     monkeypatch.setattr(worker_pools.CustomRQSimpleWorker, "_run_job_inline", lambda self, job, queue: ran.append(1))
+    _work_loop_running(monkeypatch, SimpleWorker, lambda self: self.execute_job(object(), object()))
     rebuild = _hold_rebuild_for(2.5)
 
-    worker.execute_job(object(), object())
+    assert worker.work() is True
 
     rebuild.join(5.0)
     assert ran == [1]

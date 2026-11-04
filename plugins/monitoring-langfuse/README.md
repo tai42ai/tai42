@@ -20,9 +20,9 @@ This package is one such provider (Langfuse); any package can back the same
 contract, so this repo is this provider's own full doc home, and the
 documentation site covers the platform-level story:
 
-- Observability guide: https://tai42.ai/guides/observe
-- Author a monitoring backend (author guide): https://tai42.ai/guides/authors/monitoring-backend
-- Ecosystem catalog: https://tai42.ai/reference/catalog
+- Observe (operations guide): https://docs.tai42.ai/operate/observe
+- Write a monitoring backend (section of the Observe page): https://docs.tai42.ai/operate/observe#write-a-monitoring-backend
+- Plugin catalog: https://docs.tai42.ai/plugins
 
 Its only tai-* dependencies are `tai42-contract` (the `Monitoring` /
 `MonitoringWriter` / `MonitoringReader` protocols, the neutral data models, and

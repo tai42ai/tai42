@@ -4,7 +4,8 @@ The bar a vendor binding has to clear is "declare a runtime and implement it";
 everything else is the host's. That bar is only real if it is executable, so the
 rules live here as data rather than in a review checklist: a plugin adds a
 five-line test calling :func:`check_backend_declarations` and gets the same
-verdict the launch path enforces.
+verdict the launch path enforces, and one calling :func:`check_tool_surface` over the
+tools it registers.
 
 pytest-free and dependency-free, so it ships in the wheel and any test runner
 can call it.
@@ -14,6 +15,7 @@ from __future__ import annotations
 
 import inspect
 import re
+from collections.abc import Mapping, Set
 from typing import Any
 
 from tai42_contract.backend.runtime import (
@@ -24,10 +26,15 @@ from tai42_contract.backend.runtime import (
     ProgressLiveness,
 )
 
+from tai42_kit.backend.tool_surface import BACKEND_TOOL_TAG, BACKEND_TOOLS
+
 # Signal installs a runtime may never make: the host owns the process's signal
 # disposition, ``add_signal_handler`` is last-writer-wins, and ``signal.signal``
 # is a C-level rebind that removes asyncio's signal machinery outright.
 _FORBIDDEN_SIGNAL_CALLS = re.compile(r"add_signal_handler|signal\s*\.\s*signal\s*\(")
+
+# A process prelude is a dotted module path and a callable's name in it, joined by one colon.
+_PRELUDE_NAME = re.compile(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*:[A-Za-z_]\w*")
 
 # The one wording for the overridden-template verdict, so the launch path and a
 # conformance test cannot report the same defect two different ways.
@@ -132,12 +139,25 @@ def _check_liveness(runtime: BackendRuntime | type[BackendRuntime], name: str) -
     return problems
 
 
+def _check_process_prelude(runtime: BackendRuntime | type[BackendRuntime], name: str) -> list[str]:
+    """A declared ``process_prelude`` that is not a ``module:callable`` name the host's entry can run."""
+    prelude = _declared(runtime, "process_prelude")
+    if prelude is None or prelude is _UNDECLARED:
+        return []
+    if isinstance(prelude, str) and _PRELUDE_NAME.fullmatch(prelude):
+        return []
+    return [
+        f"{name} declares process_prelude={prelude!r}, which is not a 'module:callable' name, so the host's "
+        "entry cannot run it"
+    ]
+
+
 def check_runtime_declarations(runtime: BackendRuntime | type[BackendRuntime]) -> list[str]:
     """Every way ``runtime``'s declarations and its bindings disagree.
 
-    Accepts a class or an instance: ``pool_turnover_required`` may be decided per
-    instance by a launch option, so the launch path checks the live object while
-    a conformance test checks the declared class.
+    Accepts a class or an instance: ``pool_turnover_required`` and ``process_prelude``
+    may be decided per instance by a launch option, so the launch path checks the live
+    object while a conformance test checks the declared class.
 
     A MISSING declaration is a reported problem, never a raise: the whole point
     is to hand a binding the full list of what it still owes, and an
@@ -152,6 +172,7 @@ def check_runtime_declarations(runtime: BackendRuntime | type[BackendRuntime]) -
         *_check_consumes_work(runtime, cls, mode, name),
         *_check_pool_turnover(runtime, cls, name),
         *_check_liveness(runtime, name),
+        *_check_process_prelude(runtime, name),
     ]
 
 
@@ -196,6 +217,27 @@ def check_backend_declarations(backend: object) -> list[str]:
             "exported into this process"
         )
 
+    return problems
+
+
+def check_tool_surface(tools: Mapping[str, Set[str]]) -> list[str]:
+    """Every way a backend's registered tools differ from the ``backend_*`` surface.
+
+    ``tools`` maps each tool the backend registered to its tags. An empty list is the
+    certification: every tool of :data:`~tai42_kit.backend.tool_surface.BACKEND_TOOLS` is
+    registered under the ``backend`` tag, and no other ``backend_*`` tool is.
+    """
+    problems = [f"{tool} is not registered" for tool in BACKEND_TOOLS if tool not in tools]
+    problems.extend(
+        f"{tool} is registered without the {BACKEND_TOOL_TAG!r} tag"
+        for tool in BACKEND_TOOLS
+        if tool in tools and BACKEND_TOOL_TAG not in tools[tool]
+    )
+    problems.extend(
+        f"{tool} is registered outside the backend tool surface"
+        for tool in sorted(tools)
+        if tool.startswith("backend_") and tool not in BACKEND_TOOLS
+    )
     return problems
 
 

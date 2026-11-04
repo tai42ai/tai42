@@ -25,8 +25,8 @@ from tai42_contract.states.models import (
     StateTemplateDocument,
     WriteOrigin,
 )
-from tai42_kit.clients.base import shutdown_all_clients
 from tai42_kit.db import apply_migrations
+from tai42_kit.loop_bound import release_loop_bound_resources
 from tai42_kit.settings import reset_all_settings
 
 from tai42_skeleton.app import instance
@@ -105,7 +105,7 @@ async def states(monkeypatch) -> AsyncIterator[tuple[StatesService, str]]:
             await execute("DELETE FROM state_records WHERE state = %s", (state,))
             await execute("DELETE FROM state_declarations WHERE name = %s", (state,))
             await svc.delete_template(template)
-            await shutdown_all_clients()
+            await release_loop_bound_resources()
 
 
 def _subject() -> StateSubject:

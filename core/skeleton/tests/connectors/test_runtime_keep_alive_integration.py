@@ -17,10 +17,10 @@ import pytest
 from pydantic import SecretStr
 from tai42_contract.connectors.models import AuthHealthState, ConnectionRecord
 from tai42_kit.clients import client_ctx
-from tai42_kit.clients.base import shutdown_all_clients
 from tai42_kit.clients.impl.postgres import PostgresClient
 from tai42_kit.clients.impl.redis import RedisClient
 from tai42_kit.db import apply_migrations, component_store_settings
+from tai42_kit.loop_bound import release_loop_bound_resources
 from tai42_kit.settings import reset_all_settings
 
 import tai42_skeleton.connectors.runtime.resolver as resolver_mod
@@ -62,7 +62,7 @@ async def real_store() -> AsyncIterator[tuple[RedisPgConnectorTokenStore, str, s
         await client.delete(store._rec_key(cid))
         await client.delete(f"{connector_store_settings().key_prefix}keep_alive:{cid}")
     resolver_mod.reset_keep_alive_stamps()
-    await shutdown_all_clients()
+    await release_loop_bound_resources()
 
 
 async def _seed(store: RedisPgConnectorTokenStore, provider: str, cid: str, *, session_expires_at: datetime) -> bytes:

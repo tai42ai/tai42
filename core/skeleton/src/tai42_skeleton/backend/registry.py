@@ -28,8 +28,8 @@ class BackendHolder:
 
         return decorator
 
-    async def launch(self, args) -> None:
-        """Launch the registered backend with ``args``, raising when none is configured."""
+    def registered(self) -> Backend:
+        """The registered backend instance, raising when none is configured."""
         if self._backend is None:
             raise RuntimeError(f"Backend provider {backend_provider()} is not configured")
-        await self._backend.launch(args)
+        return self._backend

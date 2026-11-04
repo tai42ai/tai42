@@ -18,9 +18,9 @@ import pytest
 from tai42_skeleton.app import admission as admission_mod
 from tai42_skeleton.app import transport_stream
 from tai42_skeleton.app.admission import (
-    RequestAdmission,
+    Admission,
     admit_session_call,
-    current_request_admission,
+    current_admission,
     mark_current_request_drain_exempt,
     track_current_stream_replies,
 )
@@ -64,13 +64,36 @@ async def test_a_session_call_is_counted_until_its_task_ended_and_its_reply_is_w
 
     await _served_request(epoch, _stream)
     call = seen["call"]
-    assert isinstance(call, RequestAdmission)
-    assert call.session_call
+    assert isinstance(call, Admission)
+    assert call.kind == "session_call"
     assert call.epoch is epoch
     assert call.finished.is_set()
     assert seen["while running"] == 1, "the session's call is not counted against the drain"
     assert seen["handed, not written"] == 1, "the call stopped counting before its reply was written"
     assert seen["written"] == 0
+
+
+async def test_a_session_call_stays_counted_when_it_asks_for_the_drain_exemption_of_a_served_stream() -> None:
+    epoch = Epoch(number=0)
+    seen: dict[str, Any] = {}
+
+    async def _call() -> None:
+        call = admit_session_call(7)
+        assert call is not None
+        mark_current_request_drain_exempt()
+        seen["long_lived"] = call.long_lived
+        seen["current"] = current_admission() is call
+        seen["while running"] = epoch.in_flight
+
+    async def _stream() -> None:
+        mark_current_request_drain_exempt()
+        replies = track_current_stream_replies()
+        assert replies is not None
+        await asyncio.create_task(_call())
+        replies.wrote(_reply_event(7))
+
+    await _served_request(epoch, _stream)
+    assert seen == {"long_lived": False, "current": True, "while running": 1}
 
 
 async def test_a_reply_written_before_the_task_ended_counts_the_call_until_the_task_ends() -> None:
@@ -159,7 +182,7 @@ async def test_the_call_resolves_its_own_record_even_while_the_post_that_deliver
     """The SSE message POST is answered before the call runs, and it can end a moment after the
     call started; the call acts for its own record, never for that POST."""
     epoch = Epoch(number=0)
-    post = RequestAdmission(epoch=epoch)
+    post = Admission(epoch=epoch, kind="served_request")
 
     @dataclass
     class _Request:
@@ -171,8 +194,8 @@ async def test_the_call_resolves_its_own_record_even_while_the_post_that_deliver
         # Inside the call the MCP SDK's request context names the POST that delivered it.
         monkeypatch.setattr(admission_mod, "get_http_request", _Request)
         seen["call"] = admit_session_call(1)
-        seen["resolved"] = current_request_admission()
-        seen["party"] = gate_party().request
+        seen["resolved"] = current_admission()
+        seen["party"] = gate_party().admission
 
     async def _stream() -> None:
         mark_current_request_drain_exempt()
@@ -182,7 +205,7 @@ async def test_the_call_resolves_its_own_record_even_while_the_post_that_deliver
         replies.end()
 
     await _served_request(epoch, _stream)
-    assert isinstance(seen["call"], RequestAdmission)
+    assert isinstance(seen["call"], Admission)
     assert not post.finished.is_set()
     assert seen["resolved"] is seen["call"]
     assert seen["party"] is seen["call"]
@@ -196,8 +219,8 @@ async def test_code_under_a_stream_outside_any_call_acts_for_no_request() -> Non
 
     async def _stream() -> None:
         mark_current_request_drain_exempt()
-        seen["resolved"] = current_request_admission()
-        seen["party"] = gate_party().request
+        seen["resolved"] = current_admission()
+        seen["party"] = gate_party().admission
 
     await _served_request(epoch, _stream)
     assert seen == {"resolved": None, "party": None}

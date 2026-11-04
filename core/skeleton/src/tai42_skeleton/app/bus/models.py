@@ -67,15 +67,19 @@ class OpOutcome(StrEnum):
     """Per-worker outcome of a fleet op.
 
     ``applied`` / ``failed`` are terminal WIRE replies from a subscriber.
-    ``missing`` / ``departed`` / ``timed_out`` are publisher-COMPUTED from the
-    presence census (a silent worker never sends them). ``resyncing`` /
+    ``missing`` / ``departed`` / ``timed_out`` are publisher-COMPUTED from the bus's
+    record of each life (a silent worker never sends them): ``departed`` once a read of
+    the worker's slot shows the expected life ended (its claim gone, or a newer life in the
+    slot), the other two at the report cut. ``resyncing`` /
     ``recycling`` / ``stale`` are the gap outcomes for a row that fails the ready+
     fresh gate: it is not an expected worker, so instead of being dropped it is
     landed as its own actual condition — ``resyncing`` (the worker wrote that state
     and converges on its resync), ``recycling`` (departing, converging by
     old-life-gone + fresh capacity), or ``stale`` (a quiet row past the freshness
     bound — reconnecting or dead, carrying no convergence promise). A decayed row is
-    ``stale`` regardless of its written state.
+    ``stale`` regardless of its written state. An expected worker that began leaving after
+    publish and sent no terminal reply is ``recycling`` too, computed at the report cut from
+    its row and its still-held slot claim.
     """
 
     applied = "applied"
@@ -99,7 +103,8 @@ class WorkerState(StrEnum):
     """The lifecycle state a worker advertises in its presence value.
 
     ``resyncing`` while its boot/reconnect resync runs, ``ready`` once converged,
-    ``recycling`` once it has begun a graceful self-exit.
+    ``recycling`` while it stops: from its departure decision, or the start of its stop,
+    until its process life ends.
     """
 
     ready = "ready"
@@ -144,6 +149,13 @@ class WorkerRow(BaseModel):
     kept on the bus under that digest (names and shapes only, never values); every worker reads
     both to judge ownership across the fleet
     (:func:`tai42_skeleton.config.deployment_env.fleet_deployment_ownership`).
+
+    ``drain_seconds`` is the bound a worker leaving gracefully announced with its
+    ``state=recycling``, carried on the row through its whole stop: how long it may take to
+    finish its in-flight work and exit — the bound of its whole stop as its process declared it,
+    its runtime's stop phase plus its modules' shutdown bounds
+    (:mod:`tai42_skeleton.app.lifecycle.exit_drain`). ``None`` while it is not leaving, or when
+    its process declared no drain.
     """
 
     name: str
@@ -156,7 +168,13 @@ class WorkerRow(BaseModel):
     deployment_keys: list[str]
     env_readers: str
     last_op: LastOp | None = None
+    drain_seconds: float | None = None
     pttl_ms: int | None = Field(default=None, exclude=True)
+
+
+def heartbeat_interval(heartbeat_ttl: float) -> float:
+    """The presence refresh cadence: a subscriber's heartbeat rewrites its row every third of the TTL."""
+    return heartbeat_ttl / 3
 
 
 def presence_fresh(pttl_ms: int | None, heartbeat_ttl: float) -> bool:
@@ -170,7 +188,7 @@ def presence_fresh(pttl_ms: int | None, heartbeat_ttl: float) -> bool:
     """
     if pttl_ms is None:
         return False
-    interval = heartbeat_ttl / 3
+    interval = heartbeat_interval(heartbeat_ttl)
     bound_ms = (heartbeat_ttl - 2 * interval) * 1000
     return pttl_ms > bound_ms
 
@@ -183,12 +201,17 @@ class _PresenceValue(BaseModel):
     reconstructs the value from a redis read, so independent writers never silently
     drop each other's fields. ``name`` lives in the presence KEY, not this value.
 
-    Two threads share it: the subscription's loop and the heartbeat thread. Every
+    Two threads share it: the subscription's loop and the heartbeat's thread (one thread,
+    under a process prelude, where the heartbeat is a task of that loop). Every
     mutation is ONE attribute assignment of an immutable value, and every write
     serializes the whole object, so neither side ever serializes a partial update; two
     complete writes may land in either order within one beat interval, and the next
-    beat carries every assigned value. The subscription replaces or drops the object
-    only after it has stopped the heartbeat thread.
+    beat carries every assigned value. The subscription replaces the object on a connect and
+    drops it on a transport or lost-slot exit, and the life drops it at its end, each only
+    after the heartbeat is stopped.
+
+    It is also the one parse of a presence value read back from Redis:
+    ``_PresenceValue.model_validate_json(raw)``, which raises on a value that is not one.
     """
 
     kind: WorkerKind
@@ -200,12 +223,22 @@ class _PresenceValue(BaseModel):
     deployment_keys: tuple[str, ...]
     env_readers: str
     last_op: LastOp | None = None
+    drain_seconds: float | None = None
+
+    def row(self, name: str, pttl_ms: int | None) -> WorkerRow:
+        """This value as the census row of the worker ``name``, with the PTTL read alongside it."""
+        return WorkerRow(name=name, pttl_ms=pttl_ms, **self.model_dump())
 
 
 class LocalApplyResult(BaseModel):
-    """The publisher's own already-completed self-apply outcome, handed to :meth:`WorkerBus.publish`.
+    """A worker's own completed apply outcome for a fleet op, read as its row (:meth:`as_row`).
 
-    Lets the bus synthesize a truthful self entry.
+    Two readers take it as that worker's row: its publish (:meth:`WorkerBus.publish`), which puts
+    it in the fleet report as the worker's self entry, and, for a reload, its recycle decision
+    (:func:`~tai42_skeleton.config.recycle_policy.with_own_statement`). A joining worker's decision
+    always takes it as the worker's row, replacing the self entry its publish put in the report; a
+    writer's reload decision keeps it when the bus could not complete the report and it answers
+    for the worker's env.
 
     ``outcome`` is terminal — ``applied`` on success, ``failed`` (with ``error``
     attached) on the publish-anyway path where the broadcast still goes out after a
@@ -225,6 +258,10 @@ class LocalApplyResult(BaseModel):
                 "LocalApplyResult.outcome must be 'applied' or 'failed' — the caller's own terminal result"
             )
         return value
+
+    def as_row(self, name: str) -> WorkerResult:
+        """This entry as the fleet-report row of ``name``, the worker that applied it."""
+        return WorkerResult(name=name, outcome=self.outcome, payload=self.payload, error=self.error)
 
 
 class WorkerResult(BaseModel):

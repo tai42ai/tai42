@@ -1,6 +1,6 @@
 """The :class:`RqBackend` — RQ's binding of the shared launch lifecycle.
 
-Registered on import via ``@tai42_app.backends.register_backend``. It declares
+Registered on import via ``tai42_app.backends.register_backend``. It declares
 three runtimes (``worker`` / ``beat`` / ``dashboard``) and nothing else:
 subcommand dispatch, boot-readiness gating, off-loop running, composed
 warm/cold shutdown wiring and drain-on-cancellation all come from
@@ -16,15 +16,10 @@ from typing import ClassVar, Self
 
 from tai42_contract.app import tai42_app
 from tai42_contract.backend.runtime import BackendRuntime, ExecutionMode, HttpLiveness, ProgressLiveness
-from tai42_kit.backend import ManagedBackend
+from tai42_kit.backend import DRAIN_MARGIN_SECONDS, ManagedBackend
 
 from tai42_backend_rq.settings import rq_settings
 from tai42_backend_rq.worker import RqWorkerRuntime
-
-# Margin the drain budget adds on top of the engine's own job budget: the warm
-# drain has to outlast the longest in-flight job AND the engine's own teardown, or
-# the wait is abandoned on exactly the work it exists to protect.
-_DRAIN_MARGIN_SECONDS = 30.0
 
 
 class _InlineRuntime(BackendRuntime):
@@ -69,13 +64,20 @@ class RqBeatRuntime(_InlineRuntime):
     name = "beat"
     liveness = ProgressLiveness()
 
-    def run_blocking(self) -> None:
-        """Run the rq scheduler in the foreground on a connection built by the kit seam."""
-        # Imported on the path that runs it: only this runtime needs the
-        # scheduler, and only this process ever becomes one.
+    async def build(self) -> None:
+        """Take the scheduler's entry from the beat module.
+
+        The run holds the entry it took here, and so runs the scheduler class, the queue class
+        and the connection factory of the beat module this build saw, whatever a later config
+        reload re-imports.
+        """
         from tai42_backend_rq import beat
 
-        beat.run_beat(self._args, report_progress=self.report_progress)
+        self._run_beat = beat.run_beat
+
+    def run_blocking(self) -> None:
+        """Run the rq scheduler in the foreground on a connection built by the kit seam."""
+        self._run_beat(self._args, report_progress=self.report_progress)
 
 
 class RqDashboardRuntime(_VendorCliRuntime):
@@ -100,7 +102,6 @@ class RqDashboardRuntime(_VendorCliRuntime):
         dashboard_main()
 
 
-@tai42_app.backends.register_backend
 class RqBackend(ManagedBackend):
     """RQ execution backend: ``launch`` runs worker/beat/dashboard."""
 
@@ -119,4 +120,8 @@ class RqBackend(ManagedBackend):
         widens ``RQ_TASK_TIMEOUT`` widens the drain with it instead of leaving a
         warm shutdown abandoning a work-horse it should have waited for.
         """
-        return float(rq_settings().task_timeout) + _DRAIN_MARGIN_SECONDS
+        return float(rq_settings().task_timeout) + DRAIN_MARGIN_SECONDS
+
+
+# Plain call (not decorator) so ``RqBackend`` keeps its concrete class type.
+tai42_app.backends.register_backend(RqBackend)

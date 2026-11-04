@@ -28,9 +28,9 @@ package is the GitHub verifier. The ecosystem is open-ended: any package can
 supply a verifier, so this repo is this verifier's own full doc home, and the
 documentation site covers the platform-level story:
 
-- Triggers & webhooks concept: https://tai42.ai/concepts/triggers-and-webhooks
-- Build a webhook verifier (author guide): https://tai42.ai/guides/authors/webhook-verifier
-- Ecosystem catalog: https://tai42.ai/reference/catalog
+- Triggers & webhooks concept: https://docs.tai42.ai/concepts/triggers-and-webhooks
+- Webhook verifiers (section of the triggers & webhooks concept): https://docs.tai42.ai/concepts/triggers-and-webhooks#webhook-verifiers
+- Plugin catalog: https://docs.tai42.ai/plugins
 
 ## Install
 

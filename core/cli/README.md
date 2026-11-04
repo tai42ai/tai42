@@ -26,6 +26,14 @@ Installing the server package adds its own local and runtime commands (`serve`,
 validation) to the same `tai` command through an entry-point group, so one binary
 covers both remote and local operation when both are installed.
 
+The package also carries the entry a local command restarts itself through when a
+backend runtime declares a process prelude (a `module:callable` that must run
+before anything else is imported):
+`python -P -m tai42_cli.process_prelude <module:callable> <tai arguments...>`
+runs the prelude, records it in `TAI_PROCESS_PRELUDE`, then runs `tai` on the
+rest of the arguments. The `tai42_cli` package root stays import-light for it:
+importing it imports neither the CLI framework nor the contract.
+
 ## Install
 
 Requires **Python 3.13+**. Install from PyPI:
@@ -83,8 +91,8 @@ uv run --no-sync pytest --cov --cov-report=term-missing
 The whole platform — concepts, guides, and the generated reference — lives in
 the unified documentation site:
 
-- Layering & the contract/kit/cli/skeleton split: https://tai42.ai/concepts/layering
-- Python SDK reference: https://tai42.ai/reference/python-sdk
+- Layering & the contract/kit/cli/skeleton split: https://docs.tai42.ai/concepts/layering
+- Python SDK reference: https://docs.tai42.ai/reference/python-sdk
 
 ## License
 

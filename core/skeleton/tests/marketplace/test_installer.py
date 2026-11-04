@@ -13,7 +13,7 @@ import os
 import shutil
 import tempfile
 import weakref
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -341,10 +341,8 @@ class FakeConfigService:
         # The fake tracks no env store, so the process env plus any ``changes`` stands in.
         return {**os.environ, **{key: value for key, value in changes.items() if not ownership.owns(key)}}
 
-    async def reapply_manifest(
-        self, *, continues: ApplyResult | None = None, recycle_keys: Sequence[str] = ()
-    ) -> ApplyResult:
-        self.reapply_calls.append({"continues": continues, "recycle_keys": tuple(recycle_keys)})
+    async def reapply_manifest(self, *, continues: ApplyResult | None = None) -> ApplyResult:
+        self.reapply_calls.append({"continues": continues})
         return self._reload(self._write(copy.deepcopy(self._cm._manifest)))
 
     def _write(self, document: dict[str, Any]) -> PersistedChange:

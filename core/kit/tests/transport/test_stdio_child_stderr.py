@@ -3,9 +3,12 @@
 The child is launched with file descriptor 2 whatever object stands at ``sys.stderr``,
 so a host that replaces ``sys.stderr`` with a stream that has no file descriptor (a task
 worker's logging proxy) still launches the child, and the child's stderr still reaches
-the process's standard error.
+the process's standard error. Closing the stream the child is handed leaves descriptor 2
+open, on the same file, with the same status flags.
 """
 
+import fcntl
+import os
 import sys
 
 import pytest
@@ -13,6 +16,7 @@ from fastmcp import Client
 from tai42_contract.manifest import MCPConfig, TaiMCPConfig
 
 from tai42_kit.transport import get_mcp_transport
+from tai42_kit.transport.stdio_launch import stdio_child_stderr
 
 _SERVER = """
 import sys
@@ -68,3 +72,11 @@ async def test_a_stdio_child_writes_its_stderr_to_the_process_standard_error(cap
         await client.list_tools()
 
     assert "stdio-child-stderr-marker" in capfd.readouterr().err
+
+
+def test_closing_the_stdio_child_stderr_stream_leaves_descriptor_2_open_and_unchanged():
+    before = (os.readlink("/proc/self/fd/2"), fcntl.fcntl(2, fcntl.F_GETFL))
+
+    stdio_child_stderr().close()
+
+    assert (os.readlink("/proc/self/fd/2"), fcntl.fcntl(2, fcntl.F_GETFL)) == before

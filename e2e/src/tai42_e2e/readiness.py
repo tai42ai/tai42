@@ -15,10 +15,11 @@ from tai42_e2e.child_env import needs_bus
 from tai42_e2e.waiting import WaitTimeoutError, wait_for, wait_for_async
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Collection, Coroutine, Mapping
+    from collections.abc import Awaitable, Callable, Collection, Coroutine, Mapping, Sequence
 
     from tai42_e2e.procs import ProcessHandle
     from tai42_e2e.stack import TaiStack
+    from tai42_e2e.variants import BusWorker
 
 
 def wait_ready(stack: TaiStack) -> None:
@@ -112,29 +113,43 @@ def serve_workers_on_port(stack: TaiStack) -> int:
     return stack.config.workers
 
 
+def expected_backend_processes(stack: TaiStack) -> list[str]:
+    """The backend processes the stack runs: the backend worker, one worker per queue label and,
+    on a stack with ``green_pool_workers``, one worker per green pool of the backend variant."""
+    if not stack.config.run_backend:
+        return []
+    green_pools = stack.infra.variants.backend.green_pool_workers() if stack.config.green_pool_workers else {}
+    return [
+        "backend",
+        *(f"backend-queue-{label}" for label in stack.config.queue_workers),
+        *(f"backend-{pool}" for pool in green_pools),
+    ]
+
+
+def expected_fleet_present(stack: TaiStack, workers: Sequence[BusWorker]) -> bool:
+    """Whether the census rows ``workers`` hold the FULL expected fleet.
+
+    Every serve worker the topology spawns, plus every backend process by its own pid, so a
+    fleet with a process still respawning (it has no row) is not present however ready the
+    rows that are.
+    """
+    if sum(1 for w in workers if w.kind == "serve") < expected_serve_workers(stack):
+        return False
+    backend_pids = {w.pid for w in workers if w.kind == "backend"}
+    return all(stack.process(name).pid in backend_pids for name in expected_backend_processes(stack))
+
+
 def wait_full_census(stack: TaiStack, deadline: float) -> None:
-    """Poll the bus census until the FULL expected fleet is present — every
-    serve worker the topology spawns plus, when a backend is registered, the backend
-    worker and every queue-label worker, each by its own pid — so readiness never
-    returns on a half-formed fleet."""
-    expected_serve = expected_serve_workers(stack)
-    backend_procs = (
-        ["backend", *(f"backend-queue-{label}" for label in stack.config.queue_workers)]
-        if stack.config.run_backend
-        else []
-    )
+    """Poll the bus census until the FULL expected fleet is present (:func:`expected_fleet_present`),
+    so readiness never returns on a half-formed fleet."""
 
     def probe() -> bool:
         early = early_exit_detail(stack)
         if early is not None:
             raise RuntimeError(f"fleet census: {early}")
-        workers = stack.census()
-        if sum(1 for w in workers if w.kind == "serve") < expected_serve:
-            return False
-        backend_pids = {w.pid for w in workers if w.kind == "backend"}
-        return all(stack.process(name).pid in backend_pids for name in backend_procs)
+        return expected_fleet_present(stack, stack.census())
 
-    want = " + ".join([f"{expected_serve} serve workers", *backend_procs])
+    want = " + ".join([f"{expected_serve_workers(stack)} serve workers", *expected_backend_processes(stack)])
     wait_for(probe, deadline=deadline, message=f"the worker-bus census never reached the full fleet ({want})")
 
 

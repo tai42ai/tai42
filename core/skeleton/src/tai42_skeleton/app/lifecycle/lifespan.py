@@ -1,9 +1,10 @@
 """The worker lifespan context manager, resource teardown, and the reaper task spawn/cancel."""
 
 import asyncio
+import contextlib
+import inspect
 import logging
-import os
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -17,15 +18,84 @@ from tai42_skeleton.app.boot_rules import (
     require_hooks_store_for_workers,
     require_sub_mcp_store_for_workers,
 )
-from tai42_skeleton.app.graceful_exit import request_graceful_exit
 from tai42_skeleton.app.lifecycle.state import LifecycleState
 from tai42_skeleton.app.readiness_sentinel import remove_ready_sentinel
 from tai42_skeleton.connectors.runtime import refresh_owner
 from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.settings.owned_settings import require_known_owned_settings
 from tai42_skeleton.tools import mcp_start
+from tai42_skeleton.utils.tasks import cancel_and_wait
 
 logger = logging.getLogger(__name__)
+
+
+def _require_deployment_invariants(manifest: Manifest) -> None:
+    """Refuse loudly, before the app starts, a deployment whose shared state the processes cannot agree on.
+
+    Checked at the one seam both `tai serve` and `tai backend` cross.
+    """
+    # A process with a registered backend, or a shared-config deployment, must have the
+    # worker bus configured — otherwise sibling workers or instances serve stale config
+    # after a reload.
+    require_bus_for_shared_config()
+    require_bus_for_backend(manifest)
+    # A registered backend runs in its own process, which matches the events it raises
+    # against its own hooks registry, so that registry must be shared.
+    require_hooks_store_for_backend(manifest)
+    # A server running more than one worker needs the bus, the sub-MCP registration store
+    # and the hooks registry shared, read under the stored env the boot env bridge applied.
+    require_bus_for_workers()
+    require_sub_mcp_store_for_workers()
+    require_hooks_store_for_workers()
+    # A bus-enabled process's fleet apply window must cover the retire's drain floor, so
+    # a worker draining real work answers inside it.
+    require_apply_window_covers_drain()
+
+
+class _StopSteps:
+    """The steps of one stop, run in order, each one whatever an earlier one raised.
+
+    The stop owns what its log says about its end. When every step ran with no failure it
+    logs that at INFO. When steps failed, :meth:`run` raises what they raised once the last
+    step ran: one failure as itself, several together as an ``ExceptionGroup``. A cancellation
+    (or any other ``BaseException``) is no step failure: it propagates at once, after the
+    failures collected before it are logged at ERROR and a WARNING names the step it cut short
+    and every step that never ran, so cutting the stop short loses none of them.
+    """
+
+    def __init__(self, stop: str, steps: Sequence[tuple[str, Callable[[], object]]]) -> None:
+        self._stop = stop
+        self._steps = tuple(steps)
+
+    async def run(self) -> None:
+        """Run every step (sync or async) in order, then raise what the steps raised."""
+        failures: list[Exception] = []
+        for index, (label, step) in enumerate(self._steps):
+            try:
+                result = step()
+                if inspect.isawaitable(result):
+                    await result
+            except Exception as e:
+                failures.append(e)
+            except BaseException as cut:
+                for failure in failures:
+                    logger.exception(
+                        "%s cut short during %s; an earlier step failed", self._stop, label, exc_info=failure
+                    )
+                never_ran = ", ".join(later for later, _ in self._steps[index + 1 :]) or "none"
+                logger.warning(
+                    "%s cut short by %s during %s, which did not finish; never ran: %s",
+                    self._stop,
+                    type(cut).__name__,
+                    label,
+                    never_ran,
+                )
+                raise
+        if len(failures) == 1:
+            raise failures[0]
+        if failures:
+            raise ExceptionGroup(f"{self._stop} failed", failures)
+        logger.info("%s finished: every step ran", self._stop)
 
 
 class LifespanMixin(LifecycleState):
@@ -40,24 +110,8 @@ class LifespanMixin(LifecycleState):
         """
         if self._bus is None:
             raise RuntimeError("read_boot_manifest builds the worker bus; call it first")
-        # Bus/boot invariant at the one seam both `tai serve` and `tai backend`
-        # cross: a process with a registered backend, or a shared-config deployment,
-        # must have the worker bus configured — otherwise sibling workers or instances
-        # serve stale config after a reload. Refuse loudly before the app starts.
-        require_bus_for_shared_config()
-        require_bus_for_backend(manifest)
-        # A registered backend runs in its own process, which matches the events it raises
-        # against its own hooks registry, so that registry must be shared.
-        require_hooks_store_for_backend(manifest)
-        # A server running more than one worker needs the bus, the sub-MCP registration store
-        # and the hooks registry shared, read under the stored env the boot env bridge applied.
-        require_bus_for_workers()
-        require_sub_mcp_store_for_workers()
-        require_hooks_store_for_workers()
-        # A bus-enabled process's fleet apply window must cover the retire's drain floor, so
-        # a worker draining real work answers inside it.
-        require_apply_window_covers_drain()
-        from tai42_skeleton.app.epoch import clear_epoch, install_boot_core
+        _require_deployment_invariants(manifest)
+        from tai42_skeleton.app.epoch import install_boot_core
 
         try:
             # Install boot epoch 0's serving core BEFORE start(), so start() and the
@@ -65,13 +119,12 @@ class LifespanMixin(LifecycleState):
             # process-spine read resolves to it. Built FRESH here (via the builder)
             # under the started env rather than reusing the construction-time scaffold,
             # so a sequential app_context in the same process never inherits a prior
-            # generation's collaborators. Clearing ``_building`` routes reads through the
+            # generation's collaborators. Dropping the scaffold routes reads through the
             # installed epoch; the worker lifespan attaches the dispatch slot + serving
             # app (an embedded / pure-``app_context`` caller needs none).
-            self._building = self._build_serving_core()
-            install_boot_core(self._building)
-            self._building = None
-            self.start(manifest)
+            install_boot_core(self._build_serving_core())
+            self._scaffold_core = None
+            await self.start(manifest)
             # Every plugin is imported now, so every settings group is registered: an env
             # name the process environment or the ``.env`` file sets under an owned prefix
             # that no group accepts refuses the boot (``start()`` audited the applied env).
@@ -79,10 +132,9 @@ class LifespanMixin(LifecycleState):
             # raise_on_error: a failed startup handler must abort the boot
             # loudly, never leave a healthy-looking half-initialized app.
             await self._run_handlers(list(self._startup_handlers.values()), raise_on_error=True)
-            # Remember the serving loop, so a reload running on a worker thread can
-            # marshal loop-affine work (preset reconcile, checkpoint/store close) back
-            # onto the serving loop.
-            self._serving_loop = asyncio.get_running_loop()
+            # Bind this loop as the serving loop: a reload body driven from another loop (an
+            # in-process job's own loop) runs here (``reload_gate.run``).
+            self.bind_serving_loop()
             # The connectors' credential refreshes run as tasks owned by this loop, so a
             # caller that stops waiting (a budget, a cancelled request) never cuts one.
             refresh_owner.bind_to_running_loop()
@@ -123,31 +175,66 @@ class LifespanMixin(LifecycleState):
             # fails immediately and this process leaves the load balancer's endpoints
             # before draining begins.
             remove_ready_sentinel()
-            await self._cancel_bus_subscription()
-            await self._cancel_reprobe_task()
-            # Cancel every MCP server start still running and close the start loop.
-            await mcp_start.aclose()
-            await self._cancel_interactions_reaper()
-            await self._cancel_sandbox_reaper()
-            await self._cancel_media_reaper()
-            await self._cancel_monitoring_health_watch()
-            # Stop the hook-run sweep and give the running hook-run attempts their grace
-            # while credential refreshes and pooled clients are still live, before the
-            # shutdown handlers drain the tool supervisors.
-            await self._stop_hook_runs()
-            # Cancel the owned credential refreshes; a refresh mid write-back finishes first.
-            await refresh_owner.aclose()
-            # Shutdown keeps swallow-and-log so teardown runs every handler.
-            await self._run_handlers(list(self._shutdown_handlers.values()))
-            await self._teardown_resources()
-            # Drop the process serving generation (closing its FastMCP lifespan), then
-            # leave a fresh boot-scaffold core as the read target of the un-booted app, as
-            # construction does: a post-context read sees none of the dropped generation's
-            # state, and a later app_context in this process starts from a clean slate.
+            # Begin this worker's leaving, whatever asked it to stop, and wait for its census
+            # row to read ``recycling`` (with the declared exit drain) before it stops taking
+            # part in ops. A leaving already begun — a departure decision, or the first stop
+            # signal the host observed — keeps its first reason and its first announce. The row
+            # stays, fresh, through every step of the stop until ``leave_census``.
+            self.bus.stop_began("shutdown")
             try:
-                await clear_epoch()
+                await self._stop_serving()
             finally:
-                self._building = self._build_serving_core()
+                # Every step of the stop ran on the serving loop; from here the process serves from none.
+                self.unbind_serving_loop()
+
+    async def _stop_serving(self) -> None:
+        """Run every step of this process's stop, in order, then raise what the steps raised.
+
+        Each step runs whatever an earlier one raised, and the stop logs how it ended: finished,
+        or cut short by a cancellation with the steps that never ran (:class:`_StopSteps`). The
+        wait for the leaving's announce comes first and op participation ends next; the census life
+        (heartbeat, claim, row) outlives every step until ``leave_census``, after the shutdown
+        handlers, and the resources and the serving generation are torn down last.
+        """
+        from tai42_skeleton.app.epoch import clear_epoch
+
+        await _StopSteps(
+            "shutdown stop",
+            (
+                ("leaving announce", self.bus.leaving_announced),
+                # End op participation only: the census life (heartbeat, claim, row) outlives it.
+                ("bus subscription cancel", self._cancel_bus_subscription),
+                ("re-probe task cancel", self._cancel_reprobe_task),
+                # Cancel every MCP server start still running on the serving loop.
+                ("MCP starts cancel", mcp_start.aclose),
+                ("interactions reaper cancel", self._cancel_interactions_reaper),
+                ("sandbox reaper cancel", self._cancel_sandbox_reaper),
+                ("media reaper cancel", self._cancel_media_reaper),
+                ("monitoring health watch cancel", self._cancel_monitoring_health_watch),
+                # Stop the hook-run sweep and give the running hook-run attempts their grace
+                # while credential refreshes and pooled clients are still live, before the
+                # shutdown handlers drain the tool supervisors.
+                ("hook runs stop", self._stop_hook_runs),
+                # Cancel the owned credential refreshes; a refresh mid write-back finishes first.
+                ("credential refreshes close", refresh_owner.aclose),
+                # Shutdown keeps swallow-and-log so teardown runs every handler.
+                ("shutdown handlers", lambda: self._run_handlers(list(self._shutdown_handlers.values()))),
+                # End this process life's census record once the last declared shutdown wait is
+                # over: the announced drain covers exactly the steps the row lived through.
+                ("census leave", self.bus.leave_census),
+                ("resource teardown", self._teardown_resources),
+                # Drop the process serving generation (closing its FastMCP lifespan), then
+                # leave a fresh boot-scaffold core as the read target of the un-booted app, as
+                # construction does: a post-context read sees none of the dropped generation's
+                # state, and a later app_context in this process starts from a clean slate.
+                ("serving generation drop", clear_epoch),
+                ("boot scaffold rebuild", self._rebuild_boot_scaffold),
+            ),
+        ).run()
+
+    def _rebuild_boot_scaffold(self) -> None:
+        """Leave a fresh boot-scaffold core as the un-booted app's read target."""
+        self._scaffold_core = self._build_serving_core()
 
     @staticmethod
     def _log_task_exception(task: asyncio.Task[Any]) -> bool:
@@ -179,8 +266,9 @@ class LifespanMixin(LifecycleState):
         job — a runtime exception OR a NORMAL return, both a death, since these
         tasks are contractually perpetual — so the death is logged at ERROR, the
         marker ``_dead_perpetual_task`` is set (``/ready`` then names the task and
-        503s), and this process requests its own graceful exit so a
-        ``restart: unless-stopped`` supervisor reboots it from a clean baseline.
+        503s), and this process requests its own graceful exit through its bus's exit latch
+        (:meth:`~tai42_skeleton.app.bus.WorkerBus.request_graceful_exit`, one signal per life)
+        so a ``restart: unless-stopped`` supervisor reboots it from a clean baseline.
         """
         if task.cancelled():
             return
@@ -193,41 +281,46 @@ class LifespanMixin(LifecycleState):
         else:
             reason = type(task.exception()).__name__
         self._dead_perpetual_task = (task.get_name(), reason)
-        request_graceful_exit(os.getpid())
+        bus = self._bus
+        if bus is None:
+            raise RuntimeError(f"perpetual task {task.get_name()!r} died with no worker bus built to request the exit")
+        bus.request_graceful_exit(f"perpetual task {task.get_name()} {reason}")
+
+    @staticmethod
+    async def _cancel_perpetual_task(task: asyncio.Task[Any] | None) -> None:
+        """Cancel a run-until-cancelled lifespan task at shutdown and await its end; ``None`` is a no-op.
+
+        The shutdown counterpart of :meth:`_on_perpetual_task_done`, which every such task
+        registers: a non-``CancelledError`` death was already surfaced at ERROR there, which also
+        requested this process's graceful exit, so it is awaited here and not raised a second
+        time. A cancellation of the stop itself while it waits propagates (:func:`cancel_and_wait`).
+        """
+        if task is None:
+            return
+        with contextlib.suppress(Exception):
+            await cancel_and_wait(task)
 
     async def _teardown_resources(self) -> None:
         """Release process-wide resources at shutdown.
 
         Runs on ``app_context`` — the single seam both the served (HTTP / stdio)
-        and backend-worker entrypoints cross — so neither path leaks pooled
-        clients or the langgraph store/checkpoint pools, nor loses buffered
-        monitoring spans. Each step runs independently so one failure cannot skip
-        the rest; collected failures are re-raised together so they surface
-        loudly rather than being swallowed.
+        and backend-worker entrypoints cross — so neither path leaks the kit's
+        loop-bound resources (pooled clients, checkpoint savers, stores), nor loses
+        buffered monitoring spans. Each step runs whatever an earlier one raised
+        (:class:`_StopSteps`), and what the steps raised is raised once the last ran.
         """
-        errors: list[Exception] = []
-
-        async def _guard(label: str, teardown: Callable[[], Any]) -> None:
-            try:
-                await teardown()
-            except Exception as e:
-                logger.error("Error during %s teardown: %s", label, e, exc_info=True)
-                errors.append(e)
-
-        await _guard("pooled clients", self.clients.shutdown_clients)
-        await _guard("loop-bound kit resources", lambda: _lifecycle.release_loop_bound_resources(all_epochs=True))
-
-        # Flush buffered monitoring spans last, so spans emitted during the
-        # teardown above are captured before the process exits rather than lost
-        # to a SIGTERM / container restart ahead of the SDK's periodic flush.
-        try:
-            _lifecycle.get_monitoring().writer.flush()
-        except Exception as e:
-            logger.error("Error during monitoring flush: %s", e, exc_info=True)
-            errors.append(e)
-
-        if errors:
-            raise ExceptionGroup("shutdown teardown failed", errors)
+        await _StopSteps(
+            "shutdown teardown",
+            (
+                # Releases only: ``app_context`` does not own the loop, so it does not mark it
+                # closing; a later ``app_context`` on the same loop leases anew.
+                ("loop-bound kit resources", lambda: _lifecycle.release_loop_bound_resources()),
+                # Flush buffered monitoring spans last, so spans emitted during the
+                # teardown above are captured before the process exits rather than lost
+                # to a SIGTERM / container restart ahead of the SDK's periodic flush.
+                ("monitoring flush", lambda: _lifecycle.get_monitoring().writer.flush()),
+            ),
+        ).run()
 
     def _spawn_interactions_reaper(self) -> None:
         """Start the async-park expiry reaper loop on the serving loop.
@@ -248,23 +341,10 @@ class LifespanMixin(LifecycleState):
     async def _cancel_interactions_reaper(self) -> None:
         """Cancel the expiry reaper and await its termination at shutdown.
 
-        The shutdown counterpart of ``_spawn_interactions_reaper``.
-        A non-``CancelledError`` death was already surfaced at ERROR by the
-        done-callback, so it is awaited-and-swallowed here (this runs inside
-        ``app_context``'s shutdown ``finally``, where re-raising would skip the
-        remaining teardown).
+        The shutdown counterpart of ``_spawn_interactions_reaper`` (:meth:`_cancel_perpetual_task`).
         """
-        task = self._interactions_reaper_task
-        self._interactions_reaper_task = None
-        if task is None:
-            return
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
-        except Exception:  # noqa: S110 task failure already surfaced by the done-callback; swallowed so shutdown completes
-            pass
+        task, self._interactions_reaper_task = self._interactions_reaper_task, None
+        await self._cancel_perpetual_task(task)
 
     def _spawn_sandbox_reaper(self) -> None:
         """Start the sandbox session reap loop on the serving loop, but ONLY when a provider is registered.
@@ -287,23 +367,10 @@ class LifespanMixin(LifecycleState):
     async def _cancel_sandbox_reaper(self) -> None:
         """Cancel the sandbox reap loop and await its termination at shutdown.
 
-        The shutdown counterpart of ``_spawn_sandbox_reaper``.
-        A non-``CancelledError`` death was already surfaced at ERROR by the
-        done-callback, so it is awaited-and-swallowed here (this runs inside
-        ``app_context``'s shutdown ``finally``, where re-raising would skip the
-        remaining teardown).
+        The shutdown counterpart of ``_spawn_sandbox_reaper`` (:meth:`_cancel_perpetual_task`).
         """
-        task = self._sandbox_reaper_task
-        self._sandbox_reaper_task = None
-        if task is None:
-            return
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
-        except Exception:  # noqa: S110 task failure already surfaced by the done-callback; swallowed so shutdown completes
-            pass
+        task, self._sandbox_reaper_task = self._sandbox_reaper_task, None
+        await self._cancel_perpetual_task(task)
 
     def _spawn_media_reaper(self) -> None:
         """Start the inbound-media retention reaper loop on the serving loop.
@@ -324,23 +391,10 @@ class LifespanMixin(LifecycleState):
     async def _cancel_media_reaper(self) -> None:
         """Cancel the media retention reaper and await its termination at shutdown.
 
-        The shutdown counterpart of ``_spawn_media_reaper``.
-        A non-``CancelledError`` death was already surfaced at ERROR by the
-        done-callback, so it is awaited-and-swallowed here (this runs inside
-        ``app_context``'s shutdown ``finally``, where re-raising would skip the
-        remaining teardown).
+        The shutdown counterpart of ``_spawn_media_reaper`` (:meth:`_cancel_perpetual_task`).
         """
-        task = self._media_reaper_task
-        self._media_reaper_task = None
-        if task is None:
-            return
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
-        except Exception:  # noqa: S110 task failure already surfaced by the done-callback; swallowed so shutdown completes
-            pass
+        task, self._media_reaper_task = self._media_reaper_task, None
+        await self._cancel_perpetual_task(task)
 
     def _spawn_monitoring_health_watch(self) -> None:
         """Start the monitoring health watch loop on the serving loop.
@@ -360,9 +414,8 @@ class LifespanMixin(LifecycleState):
     async def _stop_hook_runs() -> None:
         """Stop the hook-run sweep and settle every hook-run attempt of this process at shutdown.
 
-        A failure is logged with its stack trace and not re-raised: this runs inside
-        ``app_context``'s shutdown ``finally``, where re-raising would skip the remaining
-        teardown. An attempt left unsettled is reclaimed once its lease lapses.
+        A failure is logged with its stack trace and does not fail the stop: an attempt left
+        unsettled is reclaimed once its lease lapses.
         """
         from tai42_skeleton.hooks.runs.sweep import stop_hook_runs_sweep
 
@@ -376,19 +429,7 @@ class LifespanMixin(LifecycleState):
     async def _cancel_monitoring_health_watch(self) -> None:
         """Cancel the monitoring health watch and await its termination at shutdown.
 
-        The shutdown counterpart of ``_spawn_monitoring_health_watch``. A
-        non-``CancelledError`` death was already surfaced at ERROR by the done-callback, so
-        it is awaited-and-swallowed here (this runs inside ``app_context``'s shutdown
-        ``finally``, where re-raising would skip the remaining teardown).
+        The shutdown counterpart of ``_spawn_monitoring_health_watch`` (:meth:`_cancel_perpetual_task`).
         """
-        task = self._monitoring_health_watch_task
-        self._monitoring_health_watch_task = None
-        if task is None:
-            return
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
-        except Exception:  # noqa: S110 task failure already surfaced by the done-callback; swallowed so shutdown completes
-            pass
+        task, self._monitoring_health_watch_task = self._monitoring_health_watch_task, None
+        await self._cancel_perpetual_task(task)
