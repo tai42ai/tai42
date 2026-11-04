@@ -18,13 +18,12 @@ from tai42_contract.manifest import MCPConfig, TaiMCPConfig
 from tai42_skeleton.app import lifecycle as lifecycle_module
 from tai42_skeleton.app.instance import app
 from tai42_skeleton.app.lifecycle import mcp_probe as mcp_probe_module
-from tai42_skeleton.app.lifecycle.off_loop import run_blocking
 from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.tools import mcp_health
 from tai42_skeleton.tools.mcp_start import McpStartPending, StartId
 
 from ...connectors import mcp_fakes
-from ...connectors.credential_path import CONNECTION_ID, CredentialPath, on_loop, owner_loop
+from ...connectors.credential_path import CONNECTION_ID, CredentialPath, bind_as_serving, on_loop, owner_loop
 from ._credential_app import BUDGET, roomy_budgets
 from ._doubles import _cfg, _failed_row, _FakeMcpTool, _Mixin, _mixin
 
@@ -194,7 +193,7 @@ def test_load_mcps_waits_the_short_reload_budget_during_a_rebuild(monkeypatch):
     seen = _captured_start(monkeypatch)
     monkeypatch.setattr(lifecycle_module, "is_epoch_rebuild_in_progress", lambda: True)
     with owner_loop() as serving:
-        m._serving_loop = serving
+        bind_as_serving(m, serving)
         asyncio.run(m._load_mcps())
     assert seen == {"title": "svc", "wait": mcp_reload_probe_timeout(), "lifetime": mcp_probe_timeout()}
     assert mcp_reload_probe_timeout() < mcp_probe_timeout()  # short reload wait vs the start budget
@@ -210,7 +209,7 @@ def test_load_mcps_waits_the_whole_start_budget_at_cold_boot(monkeypatch):
     seen = _captured_start(monkeypatch)
     monkeypatch.setattr(lifecycle_module, "is_epoch_rebuild_in_progress", lambda: False)
     with owner_loop() as serving:
-        m._serving_loop = serving
+        bind_as_serving(m, serving)
         asyncio.run(m._load_mcps())
     assert seen == {"title": "svc", "wait": mcp_probe_timeout(), "lifetime": mcp_probe_timeout()}
 
@@ -318,8 +317,8 @@ def test_a_boot_whose_include_names_an_unusable_schema_tool_binds_the_rest(monke
 
 
 def _probe(m: _Mixin, config: TaiMCPConfig) -> Any:
-    """The probe as the boot listing runs it: a throwaway loop, no refresh owner bound."""
-    return run_blocking(lambda: m._probe_mcp(config, wait=BUDGET))
+    """The probe as the boot listing runs it: on a loop that is no refresh owner's, before the serving loop is bound."""
+    return asyncio.run(m._probe_mcp(config, wait=BUDGET))
 
 
 def _record(m: _Mixin, config: TaiMCPConfig) -> dict:
@@ -586,12 +585,12 @@ def _slow_rotation(path: CredentialPath) -> None:
 def _door(m: _Mixin, door: str, config: TaiMCPConfig, loop: asyncio.AbstractEventLoop) -> Any:
     """Drive one listing of ``config`` through ``door``; return the door's outcome."""
     if door == "reload":
-        return run_blocking(m._load_mcps)
+        return on_loop(loop, m._load_mcps())
     if door == "targeted reload":
-        return m._reload_mcp(config.title)
+        return on_loop(loop, m._reload_mcp(config.title))
     if door == "reload-failed":
         m._failed_mcps[config.title] = _failed_row()
-        return m._reload_failed_mcps()
+        return on_loop(loop, m._reload_failed_mcps())
     return on_loop(loop, m._probe_and_apply_failed({config.title: config}))
 
 
@@ -642,7 +641,7 @@ def test_each_caller_binds_a_managed_entry(path, door):
     m = _mixin(path.entry)
     with owner_loop() as loop:
         if door == "boot":
-            successes, failures = run_blocking(m._load_mcps)
+            successes, failures = asyncio.run(m._load_mcps())
             assert failures == []
             assert [cfg.title for cfg, _tools in successes] == [path.entry.title]
         else:

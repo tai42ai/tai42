@@ -11,9 +11,17 @@ process is stopped. A process that exits removes its file.
 
 A ``solo`` worker runs its job in its own process, so the worker's progress is reported
 while the job runs (rq: by a monitor thread; celery: by the job's own loop), up to the job
-budget: past it the pool cannot end a job blocked outside Python, and the worker reads not
-alive until the job ends. A worker's embedded beat reports into ``<path>-beat`` with
+budget. A job blocked outside Python is one the pool cannot end at its budget: past the budget
+the worker reads not alive until the job ends. A worker's embedded beat reports into ``<path>-beat`` with
 its own pid, and the worker reads alive only while its beat does.
+
+A config reload re-imports the backend's package in each of its processes, and every process
+runs on what its launch built across it. A worker whose first connect to the bus withdraws a
+stored key another worker's deployment sets reloads before it reads ready: it reads alive and
+runs jobs, on the plain worker and on each green pool. After a fleet ``reload_config`` every
+live worker reports it applied, every process reads alive, every serving worker runs a job, the
+embedded beat's process is running and every liveness file is in place; the stop then reaps the
+beat and removes every file.
 """
 
 from __future__ import annotations
@@ -29,11 +37,12 @@ from typing import Any
 
 import pytest
 
-from tai42_e2e import Infra, wait_for_async
+from tai42_e2e import Infra, spawning, wait_for_async
 from tai42_e2e.binaries import venv_console_script
 from tai42_e2e.booting import boot_stack
 from tai42_e2e.manifests import build_queue_choice_stack
 from tai42_e2e.stack import TaiStack
+from tai42_e2e.tcprelay import TcpRelay, wait_relay_ready
 from tai42_e2e.topology import StackConfig, StackResources
 from tai42_e2e.variants import Variants
 from tai42_e2e.waiting import wait_absent_async
@@ -54,6 +63,10 @@ _LIVENESS_ENV = {"TAI_BACKEND_LIVENESS_INTERVAL": f"{_INTERVAL:g}", "TAI_BACKEND
 # A job longer than any process's horizon plus the grace, so a file refreshed only between
 # jobs would read not alive while it runs.
 _LONG_JOB_SECONDS = 12
+# The long job awaiting its loop, which a worker reports through, and the long job blocked
+# outside Python, which its pool cannot end at its budget.
+_SLOW_TOOL = "e2e_slow_task"
+_BLOCKING_TOOL = "e2e_blocking_task"
 # One probe run starts an interpreter; a verdict lands this much after the file turned stale.
 _PROBE_RUN_SECONDS = 1.0
 
@@ -165,10 +178,10 @@ async def test_each_loop_process_reads_alive_with_its_own_pid(liveness_stack: Ta
         assert str(stack.liveness_dir / process) in verdict.line, (process, verdict.line)
 
 
-async def _send_long_job(stack: TaiStack, key: str, arguments: Mapping[str, Any]) -> None:
+async def _send_long_job(stack: TaiStack, key: str, arguments: Mapping[str, Any], *, tool: str) -> None:
     async with stack.mcp() as mcp:
         result = await mcp.call_tool(
-            "e2e_slow_task_async_task", {"key": key, "seconds": _LONG_JOB_SECONDS, **arguments}, retry_on_reloading=True
+            f"{tool}_async_task", {"key": key, "seconds": _LONG_JOB_SECONDS, **arguments}, retry_on_reloading=True
         )
     queued = result.data if isinstance(result.data, dict) else result.structured_content
     assert isinstance(queued, dict), queued
@@ -191,13 +204,13 @@ async def test_a_solo_worker_running_a_job_longer_than_its_horizon_reads_alive_t
 
 
 async def _start_long_jobs(
-    stack: TaiStack, workers: Mapping[str, Mapping[str, Any]], uniq: Callable[[str], str]
+    stack: TaiStack, workers: Mapping[str, Mapping[str, Any]], uniq: Callable[[str], str], *, tool: str = _SLOW_TOOL
 ) -> None:
-    """Send each worker a long job on the queue it serves, and wait until every job runs."""
+    """Send each worker a long job of ``tool`` on the queue it serves, and wait until every job runs."""
     keys = {worker: uniq("long-job") for worker in workers}
     for worker, arguments in workers.items():
         await _until_alive(stack, worker)
-        await _send_long_job(stack, keys[worker], arguments)
+        await _send_long_job(stack, keys[worker], arguments, tool=tool)
 
     async def started() -> bool:
         return all(stack.records(key) for key in keys.values())
@@ -231,7 +244,7 @@ async def test_a_solo_worker_whose_job_runs_past_its_budget_reads_not_alive_unti
     stack = fresh_stack(_build_solo_budget)
     solo = _shape(stack, _SOLO)
     started = time.monotonic()
-    await _start_long_jobs(stack, {solo: {"queue": _SOLO}}, uniq)
+    await _start_long_jobs(stack, {solo: {"queue": _SOLO}}, uniq, tool=_BLOCKING_TOOL)
 
     # The job's last report is no later than the moment it passed its budget, so the file is
     # stale by its horizon plus the grace after it.
@@ -320,3 +333,166 @@ async def test_a_process_removes_its_file_when_the_stack_stops(
     stack.teardown()
 
     assert [file for file in files if file.exists()] == []
+
+
+# A key the serve worker's deployment sets and the store holds a copy of. A worker whose boot
+# cannot read the census applies the stored copy, and withdraws it at its first connect.
+_WITHDRAWN_KEY = "TAI_LOG_LEVEL"
+_WITHDRAWN_VALUE = "INFO"
+_BOOT_FALLBACK_LINE = "deployment ownership for 'boot env bridge': the census could not be read"
+_SUBSCRIBE_FAILED_LINE = "worker bus: subscription transport error"
+_WITHDRAW_LINE = f"stored env keys ignored, a worker's deployment sets them and its value wins: {_WITHDRAWN_KEY}"
+_BOOT_READY_LINE = "app boot-ready: first self-resync complete"
+# A worker's restart waits on its boot, its first connect and its reload within this.
+_RESTART_DEADLINE = 120.0
+# A job's result is read within this.
+_RESULT_TIMEOUT = 60
+# The census rows outlive a bus outage that spans a worker's boot: no row lapses while its
+# process is cut off from the bus.
+_OUTAGE_HEARTBEAT_TTL = str(int(2 * _RESTART_DEADLINE))
+
+
+def _withdrawing_workers(variants: Variants) -> dict[str, dict[str, str]]:
+    """The workers whose first connect withdraws the stored key, each with the dispatch arguments of a job it runs.
+
+    The plain worker serves the settings queue; each green-pool worker serves the queue named after its pool."""
+    return {"backend": {}, **{f"backend-{pool}": {"queue": pool} for pool in variants.backend.green_pool_workers()}}
+
+
+def _serving_workers(stack: TaiStack) -> dict[str, dict[str, str]]:
+    """The liveness stack's workers, each with the dispatch arguments of a job it runs on the queue it serves."""
+    shapes = stack.infra.variants.backend.liveness_processes(stack.resources)
+    return {
+        "backend": {},
+        _QUEUE_WORKER: {"queue": _LABEL},
+        **{f"backend-{name}": {"queue": shape.args[shape.args.index("--queue") + 1]} for name, shape in shapes.items()},
+    }
+
+
+def _build_first_connect_withdraw(res: StackResources, variants: Variants) -> StackConfig:
+    """The queue-choice stack with its green-pool workers, whose store holds a copy of ``_WITHDRAWN_KEY``.
+
+    The serve worker's deployment sets the key. Each worker of :func:`_withdrawing_workers`
+    reports its liveness at the short interval."""
+    config = replace(build_queue_choice_stack(res, variants), green_pool_workers=True)
+    process_env = {
+        **config.process_env,
+        "serve": {**config.process_env.get("serve", {}), _WITHDRAWN_KEY: _WITHDRAWN_VALUE},
+    }
+    for worker in _withdrawing_workers(variants):
+        process_env[worker] = {**process_env.get(worker, {}), **_LIVENESS_ENV}
+    return replace(config, stored_env={**config.stored_env, _WITHDRAWN_KEY: _WITHDRAWN_VALUE}, process_env=process_env)
+
+
+def _log_since(stack: TaiStack, process: str, offset: int) -> str:
+    return stack.process(process).log_path.read_text(encoding="utf-8", errors="replace")[offset:]
+
+
+async def _until_logged(stack: TaiStack, process: str, offset: int, line: str) -> None:
+    async def logged() -> bool:
+        assert stack.process(process).is_running(), stack.process(process).log_tail()
+        return line in _log_since(stack, process, offset)
+
+    await wait_for_async(logged, deadline=_RESTART_DEADLINE, interval=0.2, message=f"{process} never logged {line!r}")
+
+
+async def _restart_withdrawing_at_first_connect(stack: TaiStack, relay: TcpRelay, worker: str) -> str:
+    """Restart ``worker`` so that its first connect withdraws the stored key; returns its new life's log.
+
+    The worker stops while it is on the bus, so its census row goes with it. Its new life boots
+    with the stack's bus severed: its boot judges ownership by its own deployment env, which does
+    not set the key, and applies the stored copy. The other processes' rows stay in the census
+    through the outage. Once the worker has tried to subscribe the bus is restored, and its first
+    connect reads the census, where the serve worker's row sets the key."""
+    offset = len(_log_since(stack, worker, 0))
+    stack.process(worker).terminate()
+    relay.sever()
+    try:
+        spawning.spawn(stack, stack.specs[worker])
+        await _until_logged(stack, worker, offset, _BOOT_FALLBACK_LINE)
+        await _until_logged(stack, worker, offset, _SUBSCRIBE_FAILED_LINE)
+    finally:
+        relay.restore()
+    wait_relay_ready(relay)
+    await _until_logged(stack, worker, offset, _BOOT_READY_LINE)
+    return _log_since(stack, worker, offset)
+
+
+async def _run_job(stack: TaiStack, worker: str, dispatch: Mapping[str, str]) -> None:
+    """Run an ``e2e_worker_info`` job sent with ``dispatch``; asserts ``worker`` or a child it forked ran it."""
+    async with stack.mcp() as mcp:
+        queued = await mcp.call_tool("e2e_worker_info_async_task", dict(dispatch), retry_on_reloading=True)
+        submitted = queued.data if isinstance(queued.data, dict) else queued.structured_content
+        assert isinstance(submitted, dict), submitted
+        assert submitted.get("status") == "submitted", submitted
+        result = await mcp.call_tool(
+            "backend_task_result",
+            {"task_id": submitted["task_id"], "timeout": _RESULT_TIMEOUT},
+            retry_on_reloading=True,
+        )
+    info = result.data if isinstance(result.data, dict) else result.structured_content
+    assert isinstance(info, dict), info
+    info = info.get("result", info)
+    assert stack.process(worker).pid in (info["pid"], info["ppid"]), (worker, info, stack.process(worker).log_tail())
+
+
+# Each worker's restart (the stop's drain, the boot, the first connect's reload) + its job.
+@pytest.mark.timeout(900)
+async def test_a_worker_whose_first_connect_reloads_before_it_reads_ready_reads_alive_and_runs_jobs(
+    infra: Infra, fresh_stack: Callable[..., TaiStack]
+) -> None:
+    redis_host, redis_port = infra.settings.redis_host_port
+    relay = TcpRelay(redis_host, redis_port)
+    try:
+        relay.start()
+        wait_relay_ready(relay)
+    except BaseException:
+        relay.stop()
+        raise
+    stack = fresh_stack(
+        _build_first_connect_withdraw,
+        env_overrides={"TAI_BUS_HEARTBEAT_TTL": _OUTAGE_HEARTBEAT_TTL},
+        resource_kwargs={"bus_redis_host": relay.listen_host, "bus_redis_port": relay.port},
+        relays=[relay],
+    )
+
+    for worker, dispatch in _withdrawing_workers(stack.infra.variants).items():
+        life = await _restart_withdrawing_at_first_connect(stack, relay, worker)
+        assert life.index(_WITHDRAW_LINE) < life.index(_BOOT_READY_LINE), life[-4000:]
+        await _until_alive(stack, worker)
+        await _run_job(stack, worker, dispatch)
+        await _until_alive(stack, worker)
+
+
+@pytest.mark.timeout(400)
+async def test_after_a_fleet_reload_every_process_runs_whole_and_the_stop_reaps_the_embedded_beat(
+    fresh_stack: Callable[..., TaiStack],
+) -> None:
+    stack = fresh_stack(_build)
+    for process in _processes(stack):
+        await _until_alive(stack, process)
+
+    report = await stack.api().post("/api/fleet/reload-config", json={"targets": None}, retry_on_reloading=True)
+    assert report["ok"] is True, report
+    assert {row["outcome"] for row in report["results"]} == {"applied"}, report
+    lives = {worker.name for worker in stack.census()}
+    assert {row["name"] for row in report["results"]} == lives, (report, lives)
+
+    for worker, dispatch in _serving_workers(stack).items():
+        await _run_job(stack, worker, dispatch)
+    for process in _processes(stack):
+        await _until_alive(stack, process, deadline=30.0)
+    beat_pid: int | None = None
+    if _EMBEDDED_BEAT in stack.infra.variants.backend.liveness_processes(stack.resources):
+        worker = f"backend-{_EMBEDDED_BEAT}"
+        beat_pid = int(_beat_file(stack, worker).read_text().splitlines()[0])
+        os.kill(beat_pid, 0)
+    files = _files(stack)
+    assert all(file.exists() for file in files), [file for file in files if not file.exists()]
+
+    stack.teardown()
+
+    assert [file for file in files if file.exists()] == []
+    if beat_pid is not None:
+        with pytest.raises(ProcessLookupError):
+            os.kill(beat_pid, 0)

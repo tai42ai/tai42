@@ -20,8 +20,11 @@ redis or a silent worker) is surfaced honestly and healed.
   re-mints each worker's life (SAME names, ADVANCED generations) and reconverges the
   fleet without a restart.
 * A SILENT worker (one REPLICAS master SIGSTOPped, its presence key kept alive by
-  a long TTL): a mutation's report NAMES that worker ``missing`` (not ``departed``);
-  after SIGCONT the fleet converges to the final persisted state.
+  a long TTL): a mutation's report NAMES that worker ``missing`` (not ``departed``),
+  and, its state unknown, its recycle roll asks it once ready and, still silent, restarts
+  it and stops at it while it stays silent; after SIGCONT the resumed worker runs the
+  queued recycle, the supervisor brings it back, and the fleet converges to the final
+  persisted state.
 * A STALE worker (one REPLICAS master SIGSTOPped under a 30s TTL): its presence row
   decays past the server-computed freshness bound while still present, so the fleet
   listing flags it ``stale`` and a broadcast reports it ``outcome=stale``.
@@ -371,14 +374,13 @@ async def test_mutation_during_outage_reports_and_fleet_recovers(
 
 # ---- silent worker (SIGSTOP) ---------------------------------------------
 
-# The two-sided silent-worker envelope: ack+apply deadlines SHORT (the report cuts to the
+# The two-sided silent-worker envelope: the apply deadline SHORT (the report cuts to the
 # ``missing`` verdict quickly and the mutation is bounded), heartbeat TTL well ABOVE the
-# scenario window (the stopped worker's presence key survives, so the verdict is ``missing``
-# — alive but silent — never ``departed``). A ``missing`` verdict needs the stopped worker's
+# scenario window (the stopped worker's slot claim and presence key survive, so the verdict is
+# ``missing`` — alive but silent — never ``departed``). A ``missing`` verdict needs the stopped worker's
 # row still FRESH (beat age under 2/3 of the TTL) at the mutation's publish census, which
 # comes after the mutation's own local reload: the slowest measured under host load on 20
 # cores took 50.1s, so 2/3 of the TTL is twice that.
-_SHORT_ACK_TIMEOUT = "2"
 _SHORT_APPLY_TIMEOUT = "3"
 # The apply window covers the retire's drain floor (three drain budgets), so the short window
 # runs with a one-second drain budget; nothing drains on these backendless replicas.
@@ -389,20 +391,27 @@ _SILENT_WORKER_TTL = "155"
 def build_silent_worker_stack(res: StackResources, variants: Variants) -> StackConfig:
     """A REPLICAS(2) no-backend fleet — two ``--workers 1`` masters, so a SIGSTOPped
     replica has NO uvicorn multiprocess supervisor to SIGKILL it (a ``-w N`` child
-    would be reaped in ~5s). ``PYTHONHASHSEED`` pinned so the two replicas' probe
-    digests are comparable; the ack/apply deadlines and TTL pin the silent-worker
-    envelope."""
+    would be reaped in ~5s). ``supervised=True`` runs the harness respawn-on-exit
+    supervisor: the mutation restarts the silent replica, whose state is unknown, and the
+    resumed replica's recycle exit is brought back like a deployment's process manager
+    would. ``PYTHONHASHSEED`` pinned so the two replicas' probe digests are comparable;
+    the apply deadline and TTL pin the silent-worker envelope."""
     cfg = build_bare_stack(res, variants)
     env = {
         **cfg.env,
         "PYTHONHASHSEED": "0",
-        "TAI_BUS_ACK_TIMEOUT": _SHORT_ACK_TIMEOUT,
         "TAI_BUS_APPLY_TIMEOUT": _SHORT_APPLY_TIMEOUT,
         "TAI_TOOL_RUNS_SHUTDOWN_DRAIN_SECONDS": _SHORT_DRAIN_BUDGET,
         "TAI_BUS_HEARTBEAT_TTL": _SILENT_WORKER_TTL,
     }
     return replace(
-        cfg, name="silent-replicas", topology=Topology.REPLICAS, run_backend=False, run_metrics=False, env=env
+        cfg,
+        name="silent-replicas",
+        topology=Topology.REPLICAS,
+        run_backend=False,
+        run_metrics=False,
+        env=env,
+        supervised=True,
     )
 
 
@@ -447,8 +456,8 @@ async def _replicas_converged(stack: TaiStack, *, deadline: float = 60.0, differ
     "files",
     "store:redis",
     "topology:replicas",
+    "topology:supervised",
     "setting:PYTHONHASHSEED=0",
-    "setting:TAI_BUS_ACK_TIMEOUT=2",
     "setting:TAI_BUS_APPLY_TIMEOUT=3",
     "setting:TAI_TOOL_RUNS_SHUTDOWN_DRAIN_SECONDS=1",
     "setting:TAI_BUS_HEARTBEAT_TTL=155",
@@ -456,11 +465,13 @@ async def _replicas_converged(stack: TaiStack, *, deadline: float = 60.0, differ
 async def test_silent_worker_reports_missing_then_converges(
     fresh_stack: Callable[..., TaiStack], uniq: Callable[[str], str]
 ) -> None:
-    """One REPLICAS master SIGSTOPped goes silent while its presence key survives
-    (long TTL). A mutation on the LIVE replica names the silent worker ``missing`` in
-    its publish-time report — alive but silent, not ``departed``. After SIGCONT the
-    fleet converges to the final persisted state (a fleet reload converges it; the
-    buffered broadcast may also apply on resume — the assertion is the final digest)."""
+    """One REPLICAS master SIGSTOPped goes silent while its presence key survives (long
+    TTL). A mutation on the LIVE replica names the silent worker ``missing`` in its
+    publish-time report — alive but silent, not ``departed`` — and, its state unknown,
+    the mutation's recycle roll asks it once ready and, still silent, restarts it and
+    stops at it while it stays silent. After SIGCONT the resumed replica runs the queued
+    recycle and the supervisor brings it back at a new generation; a fleet reload then
+    finds every worker clean and both replicas land on the final persisted state."""
     stack = fresh_stack(build_silent_worker_stack)
     api_a = stack.api(port=stack.port_a)
 
@@ -479,15 +490,18 @@ async def test_silent_worker_reports_missing_then_converges(
     workers = await wait_for_async(
         both_serve_workers, deadline=20.0, message="the two serve replicas never both registered"
     )
-    b_name = next((worker.name for worker in workers if worker.pid == b_pid), None)
-    assert b_name is not None, f"no bus slot name matched replica B pid {b_pid}: {workers}"
+    b_worker = next((worker for worker in workers if worker.pid == b_pid), None)
+    assert b_worker is not None, f"no bus slot name matched replica B pid {b_pid}: {workers}"
+    b_name = b_worker.name
 
     b_pgid = os.getpgid(stack.process("serve-b").pid)
     os.killpg(b_pgid, signal.SIGSTOP)
     try:
         # A mutation on the live replica: replica B is in the census (its key survives),
         # so it is an expected worker — silent, it is cut to ``missing`` at the apply
-        # deadline (not ``departed``, which would need an expired key).
+        # deadline (not ``departed``, which would need its slot claim gone). A missing worker's
+        # state is unknown, so the roll asks it once ready and, still silent, restarts it;
+        # silent, it never comes back ready and the roll stops at it.
         title = uniq("silent_mcp")
         result = await api_a.post(
             "/api/mcp-config", json={"mcp": [{"title": title, "config": _UNREACHABLE}]}, retry_on_reloading=True
@@ -495,13 +509,24 @@ async def test_silent_worker_reports_missing_then_converges(
         fanout = assert_fleet_fanout(result)
         outcomes = {entry["name"]: entry["outcome"] for entry in fanout["results"]}
         assert outcomes.get(b_name) == "missing", f"the SIGSTOPped replica was not reported missing: {fanout}"
+        roll = result["recycle"]
+        assert roll is not None, f"the mutation did not restart the replica whose state is unknown: {result}"
+        assert [(entry["name"], entry["keys"]) for entry in roll["recycle"]] == [(b_name, [])], roll
+        stop = roll["recycle_stopped"]
+        assert stop is not None, f"the roll ran to its end past the silent replica: {roll}"
+        assert stop["name"] == b_name, f"the roll did not stop at the silent replica: {roll}"
     finally:
         # Always resume replica B — a stopped process left behind would fail teardown.
         os.killpg(b_pgid, signal.SIGCONT)
 
-    # Final convergence: a fleet reload converges the resumed replica onto the persisted
-    # state, so both replicas land on ONE new digest carrying the mutation.
-    await api_a.post("/api/fleet/reload-config", json={"targets": None}, retry_on_reloading=True)
+    # The resumed replica runs the recycle queued while it was stopped; the supervisor brings
+    # it back at a new generation, booted on the persisted state.
+    stack.wait_generation_bump(b_name, b_worker.generation)
+
+    # Final convergence: a fleet reload finds every worker clean and restarts nobody, and
+    # both replicas land on ONE new digest carrying the mutation.
+    report = await api_a.post("/api/fleet/reload-config", json={"targets": None}, retry_on_reloading=True)
+    assert report["recycle"] is None, f"the reload after the resume restarted a worker: {report}"
     await _replicas_converged(stack, differ_from=baseline)
     document = yaml.safe_load(manifest_file(stack).read_text()) or {}
     assert title in [entry["title"] for entry in document.get("mcp", [])], "the mutation did not persist"
@@ -523,12 +548,11 @@ def build_stale_stack(res: StackResources, variants: Variants) -> StackConfig:
     """A REPLICAS(2) no-backend fleet like the silent-worker stack but on a 30s heartbeat
     TTL, so a SIGSTOPped replica's presence row decays past the freshness bound while still
     present — the server-computed ``stale`` flag flips true and a broadcast reports it
-    ``stale``. The short ack/apply deadlines keep the broadcast bounded."""
+    ``stale``. The short apply deadline keeps the broadcast bounded."""
     cfg = build_bare_stack(res, variants)
     env = {
         **cfg.env,
         "PYTHONHASHSEED": "0",
-        "TAI_BUS_ACK_TIMEOUT": _SHORT_ACK_TIMEOUT,
         "TAI_BUS_APPLY_TIMEOUT": _SHORT_APPLY_TIMEOUT,
         "TAI_TOOL_RUNS_SHUTDOWN_DRAIN_SECONDS": _SHORT_DRAIN_BUDGET,
         "TAI_BUS_HEARTBEAT_TTL": _STALE_TTL,
@@ -550,7 +574,6 @@ def build_stale_stack(res: StackResources, variants: Variants) -> StackConfig:
     "store:redis",
     "topology:replicas",
     "setting:PYTHONHASHSEED=0",
-    "setting:TAI_BUS_ACK_TIMEOUT=2",
     "setting:TAI_BUS_APPLY_TIMEOUT=3",
     "setting:TAI_TOOL_RUNS_SHUTDOWN_DRAIN_SECONDS=1",
     "setting:TAI_BUS_HEARTBEAT_TTL=30",

@@ -15,8 +15,8 @@ from collections.abc import AsyncIterator
 
 import pytest
 from tai42_kit.clients import client_ctx
-from tai42_kit.clients.base import shutdown_all_clients
 from tai42_kit.db import apply_migrations
+from tai42_kit.loop_bound import release_loop_bound_resources
 from tai42_kit.settings import reset_all_settings
 
 import tai42_skeleton.connectors.store.catalog_store as catalog_store
@@ -42,7 +42,7 @@ async def real_catalog(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[None]:
     reset_all_settings()
     await apply_migrations([skeleton_entry()])
     yield
-    await shutdown_all_clients()
+    await release_loop_bound_resources()
 
 
 async def test_fetch_categories_returns_seeded_rows_in_display_order(real_catalog: None) -> None:

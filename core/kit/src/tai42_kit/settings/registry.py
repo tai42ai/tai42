@@ -6,10 +6,15 @@ A subclass self-registers through ``TaiBaseSettings.__pydantic_init_subclass__``
 (base.py). This module holds the storage and the extraction that turns a model's
 ``model_fields`` into JSON-safe field metadata.
 
-It also keeps the env a respawn-class field (``recycle`` / ``excluded``) is bound under: while
-a lifespan has bound it (:func:`bind_respawn_class_env`), each such field is bound under the
-process env as it was when its group first registered in this lifespan, or at the bind for a
-group registered before it; nothing but a bind or the process end re-binds it.
+It also keeps the env a respawn-class field (``recycle`` / ``excluded``) is bound under, once a
+lifespan has bound them. :func:`bind_respawn_class_env` binds every registered field under the
+process env as it is then; after it, a field whose env var holds no binding when its group
+registers is bound at that registration, under the env then. :func:`respawn_class_bindings`
+takes the bindings held at one moment and :func:`restore_respawn_class_bindings` puts them back,
+dropping every binding made since; :func:`bind_unbound_respawn_class_env` binds every registered
+field whose env var holds no binding, under the env as it is then. Nothing else re-binds a
+field: a bound field keeps its binding until one of these calls, the lifespan end
+(:func:`unbind_respawn_class_env` drops every binding) or the process end.
 """
 
 import enum
@@ -483,10 +488,7 @@ def _register(cls: type[BaseSettings]) -> None:
 
     _notify(_env_reader_of(info))
     if _BOUND_ENV is not None:
-        env = dict(os.environ)
-        for field in _respawn_fields(info):
-            if field.env_var not in _BOUND_ENV:
-                _BOUND_ENV[field.env_var] = _BoundField(info.qualname, field, env)
+        _bind_unbound_fields(_BOUND_ENV, info, dict(os.environ))
 
 
 def on_settings_registered(listener: Callable[[SettingsClassInfo], None]) -> Callable[[SettingsClassInfo], None]:
@@ -568,6 +570,13 @@ def _respawn_fields(info: SettingsClassInfo) -> list[SettingsFieldInfo]:
     ]
 
 
+def _bind_unbound_fields(bound: dict[str, _BoundField], info: SettingsClassInfo, env: Mapping[str, str]) -> None:
+    """Bind each respawn-class field of ``info`` whose env var ``bound`` holds no binding for under ``env``."""
+    for field in _respawn_fields(info):
+        if field.env_var not in bound:
+            bound[field.env_var] = _BoundField(info.qualname, field, env)
+
+
 def bind_respawn_class_env() -> None:
     """Bind every registered respawn-class field under the process env as it is now.
 
@@ -588,6 +597,55 @@ def unbind_respawn_class_env() -> None:
     """Drop the bound respawn-class env (a lifespan's end); nothing is bound until the next bind."""
     global _BOUND_ENV
     _BOUND_ENV = None
+
+
+class RespawnClassBindings:
+    """An opaque token for the respawn-class bindings held at one moment.
+
+    Made by :func:`respawn_class_bindings` and read only by :func:`restore_respawn_class_bindings`.
+    """
+
+    __slots__ = ("_bound",)
+
+    _bound: Mapping[str, _BoundField] | None
+
+    @classmethod
+    def _holding(cls, bound: Mapping[str, _BoundField] | None) -> "RespawnClassBindings":
+        """A token holding ``bound``: the respawn-class bindings, ``None`` while no lifespan has bound them."""
+        token = cls.__new__(cls)
+        token._bound = bound
+        return token
+
+
+def respawn_class_bindings() -> RespawnClassBindings:
+    """The respawn-class bindings held now, for :func:`restore_respawn_class_bindings` to put back."""
+    return RespawnClassBindings._holding(None if _BOUND_ENV is None else dict(_BOUND_ENV))
+
+
+def restore_respawn_class_bindings(bindings: RespawnClassBindings) -> None:
+    """Put back the respawn-class bindings ``bindings`` holds, dropping every binding made since.
+
+    A group registered since keeps its registration and holds no binding until it registers
+    again (a module re-import) or :func:`bind_unbound_respawn_class_env` binds it, under the env
+    then. A module that stays imported never registers again, so its fields stay unbound until
+    that call.
+    """
+    global _BOUND_ENV
+    _BOUND_ENV = None if bindings._bound is None else dict(bindings._bound)
+
+
+def bind_unbound_respawn_class_env() -> None:
+    """Bind every registered respawn-class field that holds no binding under the process env as it is now.
+
+    Called once the resources behind the current env are committed: a group whose binding a
+    restore dropped is bound under the env those resources were built under. A field already
+    bound keeps its binding. Nothing is bound while no lifespan has bound the respawn-class env.
+    """
+    if _BOUND_ENV is None:
+        return
+    env = dict(os.environ)
+    for info in _REGISTRY.values():
+        _bind_unbound_fields(_BOUND_ENV, info, env)
 
 
 def respawn_class_env_drift() -> frozenset[str]:

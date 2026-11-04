@@ -104,9 +104,13 @@ class AppArgsSettings(TaiBaseSettings):
     # completes in-flight requests within this window instead of waiting
     # indefinitely, so the lifespan teardown always runs. A served worker ends its
     # event streams itself once its in-flight replies are written
-    # (``app/serve_exit.py``); this window is the cap on that wait too. A shipped
-    # ``--timeout-graceful-shutdown`` CLI extra-arg overrides this default. Must
-    # be positive. The ``tai serve`` launcher reads it once to build the uvicorn
+    # (``app/serve_exit.py``); this window is the cap on that wait too. It caps
+    # the server's own stop phase only: the app's lifespan shutdown runs after it,
+    # within the bounds its modules declare, so the window is one part of the drain
+    # a leaving serve worker announces to a fleet restart. A request still
+    # running a fleet restart when the cap ends is cancelled, the restart with
+    # it. A shipped ``--timeout-graceful-shutdown`` CLI extra-arg overrides this
+    # default. Must be positive. The ``tai serve`` launcher reads it once to build the uvicorn
     # config it hands to every worker it spawns or respawns, so only a launcher
     # restart changes it — excluded, like the bind fields.
     timeout_graceful_shutdown: int = Field(default=10, gt=0, json_schema_extra={"reload": "excluded"})

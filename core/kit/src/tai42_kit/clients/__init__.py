@@ -13,7 +13,6 @@ from tai42_kit.clients.base import (
     advance_client_epoch,
     current_client_epoch,
     drain_epoch,
-    shutdown_all_clients,
 )
 from tai42_kit.clients.facade import client_ctx
 from tai42_kit.clients.settings import (
@@ -38,5 +37,4 @@ __all__ = [
     "client_ctx",
     "current_client_epoch",
     "drain_epoch",
-    "shutdown_all_clients",
 ]

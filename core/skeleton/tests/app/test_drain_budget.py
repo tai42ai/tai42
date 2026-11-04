@@ -47,7 +47,7 @@ def test_the_platform_declares_the_tool_runs_shutdown_drain(monkeypatch: pytest.
         assert instance.build_app().drain_budgets.budget() == 17.0
         # Both readers — the epoch retire and the recycle step — read the app's declared budget.
         assert epoch_retire._drain_budget(None) == 17.0
-        assert recycle_policy._recycle_step_timeout() == 17.0
+        assert recycle_policy.recycle_step_timeout() == 17.0
     finally:
         monkeypatch.delenv("TAI_TOOL_RUNS_SHUTDOWN_DRAIN_SECONDS")
         reset_all_settings()

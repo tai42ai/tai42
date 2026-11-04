@@ -1,4 +1,9 @@
-"""The dry-run combo check: ``check_combo`` binds a combo once against the live registry, mounts nothing."""
+"""The dry-run combo check: ``check_combo`` binds a combo once against the live registry, mounts nothing.
+
+It binds over the base the caller hands it.
+
+``served_bases`` lists the bases the live serving generation serves.
+"""
 
 from __future__ import annotations
 
@@ -7,9 +12,11 @@ from collections.abc import Callable, Coroutine
 from typing import Any
 
 import pytest
+from fastmcp.tools.base import Tool
 
 from tai42_skeleton.app.instance import app
 from tai42_skeleton.tools.binding.errors import ExtensionComboRefusedError
+from tai42_skeleton.tools.binding.surface import remove_surface_tool
 
 from .._fakes.combo_check_app import booted_check_app, clean_server, factory_calls
 
@@ -35,9 +42,13 @@ async def _surface() -> tuple[set[str], dict[str, str], list[list[Any]]]:
     return tools, links, combos
 
 
-def _refusal(tool: str, combo: list[Any]) -> ExtensionComboRefusedError:
+async def _echo() -> Tool:
+    return await app.tools.get_tool("echo")
+
+
+def _refusal(tool: str, combo: list[Any], base: Tool | None) -> ExtensionComboRefusedError:
     with pytest.raises(ExtensionComboRefusedError) as caught:
-        app.extensions.check_combo(tool, combo)
+        app.extensions.check_combo(tool, combo, base=base)
     assert caught.value.__cause__ is None
     assert caught.value.__context__ is None
     return caught.value
@@ -52,7 +63,7 @@ _LABELLED_REQUIRED = (
 def test_a_factory_refusal_names_the_extension():
     async def body() -> None:
         before = await _surface()
-        exc = _refusal("echo", [{"name": "refusing", "config": {"label": "x"}}])
+        exc = _refusal("echo", [{"name": "refusing", "config": {"label": "x"}}], await _echo())
         assert str(exc) == "extension 'refusing' on tool 'echo' cannot bind: bad label"
         assert await _surface() == before
 
@@ -62,7 +73,9 @@ def test_a_factory_refusal_names_the_extension():
 def test_the_refusing_element_of_a_stack_is_named():
     async def body() -> None:
         exc = _refusal(
-            "echo", [{"name": "labelled", "config": {"label": "ok"}}, {"name": "refusing", "config": {"label": "x"}}]
+            "echo",
+            [{"name": "labelled", "config": {"label": "ok"}}, {"name": "refusing", "config": {"label": "x"}}],
+            await _echo(),
         )
         assert str(exc) == "extension 'refusing' on tool 'echo' cannot bind: bad label"
 
@@ -71,7 +84,7 @@ def test_the_refusing_element_of_a_stack_is_named():
 
 def test_an_empty_factory_message_reads_as_its_type_name():
     async def body() -> None:
-        exc = _refusal("echo", [{"name": "refusing", "config": {"label": "blank"}}])
+        exc = _refusal("echo", [{"name": "refusing", "config": {"label": "blank"}}], await _echo())
         assert str(exc) == "extension 'refusing' on tool 'echo' cannot bind: ValueError"
 
     _booted(body)
@@ -80,11 +93,11 @@ def test_an_empty_factory_message_reads_as_its_type_name():
 def test_locality_order_and_same_name_return_are_refused_in_the_binds_words():
     async def body() -> None:
         before = await _surface()
-        exc = _refusal("echo", ["relocx", "localw"])
+        exc = _refusal("echo", ["relocx", "localw"], await _echo())
         assert str(exc).startswith(
             "extension 'localw' on tool 'echo' cannot bind: tool 'echo': extension 'localw' requires body locality"
         )
-        exc = _refusal("echo", ["sameret"])
+        exc = _refusal("echo", ["sameret"], await _echo())
         assert str(exc) == (
             "extension 'sameret' on tool 'echo' cannot bind: Extension 'sameret' returned the same name 'echo' "
             "as the original tool. Extensions must return a new name to create a branch."
@@ -97,8 +110,9 @@ def test_locality_order_and_same_name_return_are_refused_in_the_binds_words():
 def test_a_passing_combo_runs_each_factory_once_and_mounts_nothing():
     async def body() -> None:
         before = await _surface()
+        base = await _echo()
         _calls().clear()
-        app.extensions.check_combo("echo", [{"name": "labelled", "config": {"label": "ok"}}, "localw"])
+        app.extensions.check_combo("echo", [{"name": "labelled", "config": {"label": "ok"}}, "localw"], base=base)
         assert _calls() == ["labelled", "localw"]
         assert await _surface() == before
 
@@ -107,13 +121,14 @@ def test_a_passing_combo_runs_each_factory_once_and_mounts_nothing():
 
 def test_settings_are_checked_without_a_bound_base_and_beside_an_unregistered_extension():
     async def body() -> None:
+        echo = await _echo()
         _calls().clear()
-        exc = _refusal("fresh", [{"name": "labelled", "config": {}}])
+        exc = _refusal("fresh", [{"name": "labelled", "config": {}}], None)
         assert str(exc) == f"extension 'labelled' on tool 'fresh' cannot bind: {_LABELLED_REQUIRED}"
-        exc = _refusal("echo", [{"name": "labelled", "config": {}}, "not_loaded"])
+        exc = _refusal("echo", [{"name": "labelled", "config": {}}, "not_loaded"], echo)
         assert str(exc) == f"extension 'labelled' on tool 'echo' cannot bind: {_LABELLED_REQUIRED}"
-        app.extensions.check_combo("fresh", [{"name": "refusing", "config": {"label": "x"}}])
-        app.extensions.check_combo("echo", [{"name": "refusing", "config": {"label": "x"}}, "not_loaded"])
+        app.extensions.check_combo("fresh", [{"name": "refusing", "config": {"label": "x"}}], base=None)
+        app.extensions.check_combo("echo", [{"name": "refusing", "config": {"label": "x"}}, "not_loaded"], base=echo)
         assert _calls() == []
 
     _booted(body)
@@ -122,7 +137,7 @@ def test_settings_are_checked_without_a_bound_base_and_beside_an_unregistered_ex
 def test_cardinality_is_refused_without_a_bound_base():
     async def body() -> None:
         _calls().clear()
-        exc = _refusal("fresh", ["relocx", "relocy"])
+        exc = _refusal("fresh", ["relocx", "relocy"], None)
         assert str(exc).startswith("extensions on tool 'fresh' cannot bind: Only one ")
         assert _calls() == []
 
@@ -137,5 +152,25 @@ def test_a_given_base_is_used_in_place_of_the_served_tool():
             app.extensions.check_combo("p", [{"name": "refusing", "config": {"label": "x"}}], base=served)
         assert str(caught.value) == "extension 'refusing' on tool 'p' cannot bind: bad label"
         assert _calls() == ["refusing"]
+
+    _booted(body)
+
+
+def test_the_callers_base_is_the_only_base():
+    async def body() -> None:
+        _calls().clear()
+        app.extensions.check_combo("echo", [{"name": "labelled", "config": {"label": "ok"}}], base=None)
+        assert _calls() == []
+
+    _booted(body)
+
+
+def test_served_bases_maps_every_served_name_to_the_tool_get_tool_returns():
+    async def body() -> None:
+        bases = await app.extensions.served_bases()
+        assert bases["echo"] is await app.tools.get_tool("echo")
+        assert set(bases) == set(await app.tools.get_tools())
+        remove_surface_tool(app._fast_mcp, "echo")
+        assert "echo" not in await app.extensions.served_bases()
 
     _booted(body)

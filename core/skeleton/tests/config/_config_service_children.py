@@ -93,16 +93,12 @@ def profile_dropping_a_key(
     async def save_previous(_env: dict[str, str]) -> None:
         return None
 
-    async def release_pools() -> None:
-        return None
-
     async def main() -> str:
         await service.apply_replace_env(
             {"M_PICK": "m_b"},
             save_previous=save_previous,
             build_and_swap=build,
             build_and_discard=build,
-            release_llm_pools=release_pools,
         )
         return "persisted"
 

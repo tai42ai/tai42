@@ -18,9 +18,9 @@ from typing import LiteralString
 import pytest
 from psycopg.errors import CheckViolation
 from tai42_kit.clients import client_ctx
-from tai42_kit.clients.base import shutdown_all_clients
 from tai42_kit.clients.impl.postgres import PostgresClient
 from tai42_kit.db import apply_migrations, component_store_settings
+from tai42_kit.loop_bound import release_loop_bound_resources
 from tai42_kit.settings import reset_all_settings
 
 from tai42_skeleton.db import SKELETON_COMPONENT, skeleton_entry
@@ -52,7 +52,7 @@ async def store() -> AsyncIterator[tuple[MarketplaceInstallStore, str]]:
     await _exec("DELETE FROM marketplace_installs WHERE ref LIKE %s", (f"%{token}%",))
     yield MarketplaceInstallStore(), token
     await _exec("DELETE FROM marketplace_installs WHERE ref LIKE %s", (f"%{token}%",))
-    await shutdown_all_clients()
+    await release_loop_bound_resources()
 
 
 async def test_record_and_get_round_trip_jsonb(store: tuple[MarketplaceInstallStore, str]) -> None:

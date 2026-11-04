@@ -13,7 +13,7 @@ import signal
 import threading
 from typing import TYPE_CHECKING
 
-from tai42_e2e import ports, spawning
+from tai42_e2e import ports, readiness, spawning
 from tai42_e2e.waiting import wait_for
 
 if TYPE_CHECKING:
@@ -39,13 +39,16 @@ class RespawnSupervisor:
 
     def start(self) -> None:
         """Start watching once every process is spawned, on a supervised stack. Only the
-        recyclable kinds (serve + backend) are watched — metrics is not a recycle
-        target and joins no bus census."""
+        recyclable kinds are watched: the serve workers, the backend worker, every
+        queue-label worker (``backend-queue-<label>``) and every green-pool worker
+        (``backend-<pool>``) — metrics and the backend variant's extra processes are no
+        recycle target and join no bus census."""
         stack = self._stack
         if not stack.config.supervised:
             return
+        backend_workers = set(readiness.expected_backend_processes(stack))
         with self.lock:
-            self._watched = {name for name in stack.procs if name.startswith("serve") or name == "backend"}
+            self._watched = {name for name in stack.procs if name.startswith("serve") or name in backend_workers}
         self._thread = threading.Thread(target=self._loop, name=f"tai-e2e-supervisor-{stack.config.name}", daemon=True)
         self._thread.start()
 

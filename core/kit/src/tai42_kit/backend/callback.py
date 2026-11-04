@@ -18,9 +18,9 @@ from tai42_contract.app import tai42_app
 from tai42_contract.backend import CallbackSchema as CallbackFields
 from tai42_contract.states import StateSubject
 
+from tai42_kit.backend.job_run import dispatched_job
 from tai42_kit.backend.schedule_fire import visit_return
 from tai42_kit.utils.data import run_jq_first
-from tai42_kit.utils.detached_util import mark_detached_run, reset_detached_run
 from tai42_kit.utils.lc.signature_util import exclude_fastmcp_ctx_from_kwargs
 from tai42_kit.utils.render import render_templated_text
 from tai42_kit.utils.schedule_subject import (
@@ -201,16 +201,12 @@ async def callback_execution(result: Any, callback: CallbackSchema) -> Any:
     expr_output = (await run_jq_first(expr, result, default={})) if expr else {}
 
     if callback.tool:
-        # A worker executes a dequeued callback with no live caller holding a
-        # connection, so the turn budget does not apply, and no HTTP request bound
-        # the secret-read capability — the worker binds the one the callback carried.
+        # A worker executes a dequeued callback as a dispatched job: no live caller holds a
+        # connection and the job budget bounds it, and no HTTP request bound the secret-read
+        # capability — the worker binds the one the callback carried.
         capability = _carried_capability(callback)
-        detached_token = mark_detached_run()
-        try:
-            with bind_worker_secret_capability(capability):
-                return await _run_callback_tool(callback, expr_output)
-        finally:
-            reset_detached_run(detached_token)
+        with dispatched_job(), bind_worker_secret_capability(capability):
+            return await _run_callback_tool(callback, expr_output)
     return expr_output
 
 

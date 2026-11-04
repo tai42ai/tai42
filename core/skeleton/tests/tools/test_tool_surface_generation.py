@@ -99,7 +99,7 @@ def test_resetting_the_component_surface_moves_the_generation() -> None:
             cache = _app_cache()
             assert "first_probe" in await cache.listing()
 
-            app._reset_component_surface()
+            await app._reset_component_surface()
 
             assert "first_probe" not in await cache.listing()
             assert cache.loads == 2
@@ -124,7 +124,7 @@ def test_an_mcp_reload_rebinding_a_server_moves_the_generation() -> None:
     cache = _ListingCache(names, tool_surface_generation)
     assert asyncio.run(cache.listing()) == ["svc_t"]
 
-    assert mixin._reload_mcp("svc")["status"] == "ok"
+    assert asyncio.run(mixin._reload_mcp("svc"))["status"] == "ok"
 
     assert asyncio.run(cache.listing()) == []
     assert cache.loads == 2
@@ -142,13 +142,12 @@ def test_a_failed_profile_apply_build_moves_the_generation() -> None:
         async with app.app_context(Manifest.model_validate({})):
             built_under: list[int] = []
 
-            def rebuild() -> None:
+            async def rebuild(epoch: Epoch) -> None:
                 # The building core gets a tool and a reader caches its listing under the
                 # generation it reads now; then the build fails and the core is discarded.
-                app._building = app._build_serving_core()
+                epoch.core = app._build_serving_core()
                 add_surface_tool(app._fast_mcp, _tool_object())
                 built_under.append(app.tools.surface_generation())
-                app._building = None
                 raise RuntimeError("deliberate build failure")
 
             async def build_serving_app(epoch: Epoch) -> Any:

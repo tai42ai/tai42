@@ -108,7 +108,7 @@ class DoorTable[T]:
         if self._memo is None or self._memo[0] != self._version_of():
             # Read the version BEFORE the build, so the memo can only ever UNDER-claim: a
             # route recorded while the table compiles (``load_routes`` may import router
-            # modules; an epoch build records on its own thread) leaves the stored version
+            # modules, and a module records its routes as it imports) leaves the stored version
             # behind the registry's and the next request rebuilds. Reading it after would
             # stamp the table with a version whose doors it does not hold.
             version = self._version_of()

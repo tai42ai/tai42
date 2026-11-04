@@ -4,7 +4,8 @@ import asyncio
 
 import pytest
 
-from tai42_kit.clients import ClientSettings, PooledClient, client_ctx, shutdown_all_clients
+from tai42_kit.clients import ClientSettings, PooledClient, client_ctx
+from tai42_kit.clients.base import _shutdown_all_clients
 
 
 def _make_client_cls():
@@ -100,7 +101,7 @@ async def test_shutdown_all_clients_closes_live_pools():
         pass
     async with cls().current(url="b"):
         pass
-    await shutdown_all_clients()
+    await _shutdown_all_clients()
     assert cls.closed == 2
 
 

@@ -58,7 +58,7 @@ def test_start_is_idempotent_for_the_component_surface():
 
             # Re-fire every module-level decorator with all four still present,
             # WITHOUT any caller-side removal — start() itself clears first.
-            app.start(_MANIFEST)
+            await app.start(_MANIFEST)
 
             after_tools = [t.name for t in await app._fast_mcp.list_tools()]
             after_prompts = [p.name for p in await app._fast_mcp.list_prompts()]

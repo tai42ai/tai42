@@ -21,9 +21,9 @@ from typing import LiteralString
 import pytest
 from psycopg.errors import CheckViolation, UniqueViolation
 from tai42_kit.clients import client_ctx
-from tai42_kit.clients.base import shutdown_all_clients
 from tai42_kit.clients.impl.postgres import PostgresClient
 from tai42_kit.db import apply_migrations, component_store_settings
+from tai42_kit.loop_bound import release_loop_bound_resources
 from tai42_kit.settings import reset_all_settings
 
 from tai42_skeleton.db import SKELETON_COMPONENT, skeleton_entry
@@ -62,7 +62,7 @@ async def store() -> AsyncIterator[tuple[PostgresRunIndexStore, str]]:
     await _exec("DELETE FROM run_index WHERE preset_name = %s", (token,))
     yield PostgresRunIndexStore(), token
     await _exec("DELETE FROM run_index WHERE preset_name = %s", (token,))
-    await shutdown_all_clients()
+    await release_loop_bound_resources()
 
 
 async def _start(store: PostgresRunIndexStore, token: str, run_id: str, **kw) -> None:

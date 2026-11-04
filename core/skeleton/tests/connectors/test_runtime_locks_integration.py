@@ -21,8 +21,8 @@ import pytest
 from pydantic import SecretStr
 from tai42_contract.connectors.models import AuthHealthState, ConnectionGrant, ConnectionRecord
 from tai42_kit.clients import client_ctx
-from tai42_kit.clients.base import shutdown_all_clients
 from tai42_kit.clients.impl.redis import RedisClient
+from tai42_kit.loop_bound import release_loop_bound_resources
 from tai42_kit.settings import reset_all_settings
 
 import tai42_skeleton.connectors.runtime.resolver as resolver_mod
@@ -52,7 +52,7 @@ async def real_redis() -> AsyncIterator[list[str]]:
     async with client_ctx(RedisClient, connector_store_settings().redis) as client:
         for cid in touched:
             await client.delete(_lock_key(cid))
-    await shutdown_all_clients()
+    await release_loop_bound_resources()
 
 
 async def _key(cid: str) -> bytes | None:

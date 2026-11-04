@@ -12,14 +12,12 @@ from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping, Sequence
+    from collections.abc import Mapping
     from contextlib import AbstractAsyncContextManager
-
-    from tai42_contract.manifest import ExtensionElement
 
     from tai42_skeleton.config.deployment_env import DeploymentOwnership
     from tai42_skeleton.config.service.exclusion import WriteSpan
-    from tai42_skeleton.config.service.results import _FleetPublisher, _ManifestStore, _ReloadAdmin
+    from tai42_skeleton.config.service.results import _ComboCheck, _FleetPublisher, _ManifestStore, _ReloadAdmin
 
 
 class _ConfigServiceBase(ABC):
@@ -33,7 +31,7 @@ class _ConfigServiceBase(ABC):
     _config_manager: _ManifestStore
     _admin: _ReloadAdmin
     _bus: _FleetPublisher
-    _combo_check: Callable[[str, Sequence[ExtensionElement]], None]
+    _combo_check: _ComboCheck
 
     @abstractmethod
     def _resolve(self, document: Mapping[str, Any]) -> dict[str, Any]:

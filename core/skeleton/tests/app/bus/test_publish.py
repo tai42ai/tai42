@@ -4,6 +4,7 @@ census, ``expected_at_start`` re-admission, and target/self validation."""
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 from typing import Any
@@ -11,6 +12,7 @@ from typing import Any
 import fakeredis
 import pytest
 from fakeredis import aioredis
+from pydantic import ValidationError
 from redis.exceptions import ConnectionError as RedisConnectionError
 from tai42_kit.clients.impl.redis import KitAsyncRedis, RedisClient
 
@@ -26,16 +28,18 @@ from tai42_skeleton.app.bus import (
     WorkerState,
 )
 from tai42_skeleton.app.bus.ops import DeploymentKeysChanged, ReloadConfig
-from tai42_skeleton.app.bus.publish import _ReplyLink
+from tai42_skeleton.app.bus.replies import _ReplyLink
 from tai42_skeleton.config.deployment_env import published_deployment_keys, published_env_readers
 
 from ..._fakes.kit_redis import KitFakeRedis
 from ..._helpers import another_skeleton_major, recapture_deployment_env
 from .conftest import (
     _drop_presence,
+    _end_life,
     _FramePubsub,
     _make_nonmember_bus,
     _RaisingPubsub,
+    _RecordingRedis,
     _register_bare_presence,
     _spawn_subscriber,
     _stop,
@@ -228,8 +232,8 @@ async def test_two_phase_ack_then_slow_apply_reports_applied(wire_bus_client: No
 
     async def slow_apply(op: dict, *, deadline: float) -> dict:
         seen.append(op)
-        # Longer than the ack timeout, shorter than the apply timeout: the fast
-        # received-ack must keep this worker from being judged missing.
+        # A slow apply inside the apply timeout: the worker acks at once, is awaited to its
+        # terminal reply, and lands applied.
         await asyncio.sleep(0.12)
         return {"reloaded": True}
 
@@ -245,6 +249,33 @@ async def test_two_phase_ack_then_slow_apply_reports_applied(wire_bus_client: No
         assert seen == [_RELOAD_WIRE]
     finally:
         await _stop(task)
+
+
+async def test_the_reply_collection_holds_a_dedicated_connection_outside_the_epoch_pool(
+    monkeypatch: pytest.MonkeyPatch, server: fakeredis.FakeServer
+) -> None:
+    # The publish holds its connection across the reply collection: a pooled, epoch-stamped
+    # lease would hold a reload's retire for the drain budget, so it is a fresh connection.
+    opened: list[tuple[bool, _RecordingRedis]] = []
+
+    @contextlib.asynccontextmanager
+    async def fake_ctx(client_cls, settings=None, *, fresh=False, **kwargs):
+        inner = KitFakeRedis(server=server, decode_responses=True)
+        rec = _RecordingRedis(inner)
+        opened.append((fresh, rec))
+        try:
+            yield rec
+        finally:
+            await inner.aclose()
+
+    monkeypatch.setattr(bus_module, "client_ctx", fake_ctx)
+    publisher = make_bus()
+    await publisher._establish_identity(KitFakeRedis(server=server, decode_responses=True))
+
+    await publisher.publish(_RELOAD, targets=None, local=LocalApplyResult(outcome=OpOutcome.applied))
+
+    collecting = [fresh for fresh, rec in opened if "pubsub" in rec.touched]
+    assert collecting == [True]
 
 
 async def test_all_terminal_early_exit_returns_before_apply_deadline(wire_bus_client: None) -> None:
@@ -277,7 +308,7 @@ async def test_collect_discards_stale_generation_and_opid(
     bus._identity = WorkerIdentity(name="serve-9", kind=WorkerKind.serve, pid=1, generation=1)
     client = aioredis.FakeRedis(server=server, decode_responses=True)
     try:
-        expected: dict[str, int | None] = {"serve-1": 5}
+        expected: dict[str, int] = {"serve-1": 5}
         frames = [
             # A malformed (non-object) frame is discarded.
             ["not", "an", "object"],
@@ -312,9 +343,9 @@ async def test_collect_transport_error_is_reported_on_the_affected_worker(
 ) -> None:
     # A transport blip mid-collection is reported loudly on the affected worker (its
     # verdict carries the transport-error detail), never silently dropped.
-    bus = make_bus(ack_timeout=0.03, apply_timeout=0.2)
+    bus = make_bus(apply_timeout=0.2)
     bus._identity = WorkerIdentity(name="serve-9", kind=WorkerKind.serve, pid=1, generation=1)
-    # A live presence key so the finalize presence re-check finds it alive → missing.
+    # A held slot claim so the report-cut re-read finds the life alive → missing.
     await _register_bare_presence(server, bus._settings, "serve-1", WorkerKind.serve, ttl_ms=None)
     client = aioredis.FakeRedis(server=server, decode_responses=True)
     try:
@@ -343,7 +374,7 @@ async def test_a_reply_lost_to_a_reconnect_the_retry_hides_names_the_reconnect(
         return pubsub
 
     monkeypatch.setattr(KitFakeRedis, "pubsub", recording_pubsub)
-    publisher = make_bus(ack_timeout=0.5, apply_timeout=0.5)
+    publisher = make_bus(apply_timeout=0.5)
 
     async def apply(op: dict, *, deadline: float) -> None:
         return None
@@ -374,7 +405,7 @@ async def test_a_reply_lost_to_a_reconnect_the_retry_hides_names_the_reconnect(
     monkeypatch.setattr(worker, "_reply", reply_while_the_publisher_is_down)
     task, worker_id = await _spawn_subscriber(worker, apply)
     try:
-        caplog.set_level(logging.WARNING, logger="tai42_skeleton.app.bus.publish")
+        caplog.set_level(logging.WARNING, logger="tai42_skeleton.app.bus.replies")
         result = await publisher.publish(_RELOAD, targets=None, local=LocalApplyResult(outcome=OpOutcome.applied))
         verdict = {r.name: r for r in result.results}[worker_id.name]
         # The received ack may also have been queued on the dropped connection, so the
@@ -404,29 +435,30 @@ async def test_silent_but_present_worker_is_missing(wire_bus_client: None, serve
 async def test_targeted_name_absent_from_census_is_departed(
     wire_bus_client: None, server: fakeredis.FakeServer
 ) -> None:
-    # A targeted name with NO presence key at all stays in the expected set (generation
-    # unknown) and is reported ``departed`` at the cut — never silently dropped.
-    publisher = make_bus(ack_timeout=0.03, apply_timeout=0.1)
+    # A targeted name with NO presence key at all stays in the expected set (at the last
+    # generation its slot minted) and is reported ``departed`` — never silently dropped.
+    publisher = make_bus(apply_timeout=0.1)
     result = await publisher.publish(_RELOAD, targets=["backend-9"], local=None)
     by_name = {r.name: r for r in result.results}
     assert by_name["backend-9"].outcome == OpOutcome.departed
 
 
-async def test_expired_presence_worker_is_departed(
+async def test_a_worker_whose_claim_lapsed_is_departed(
     wire_bus_client: None, server: fakeredis.FakeServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # The target's presence is FRESH at the census (so it is expected), and its TTL runs out
-    # right after the census, well before the apply cut (600ms) — a genuine TTL expiry
-    # mid-apply, reported departed.
-    publisher = make_bus(heartbeat_ttl=5.0, ack_timeout=0.03, apply_timeout=0.6)
+    # The target's presence is FRESH at the census (so it is expected), and its claim and row
+    # TTLs run out right after the census, well before the apply cut (600ms) — a genuine TTL
+    # expiry mid-apply, reported departed.
+    publisher = make_bus(heartbeat_ttl=5.0, apply_timeout=0.6)
     await _register_bare_presence(server, publisher._settings, "backend-1", WorkerKind.backend, ttl_ms=5000)
     classify = publisher._classify_workers
-    censuses: list[dict[str, int | None]] = []
+    censuses: list[dict[str, int]] = []
 
     async def _census_then_expire(*args: Any, **kwargs: Any) -> Any:
         censused = await classify(*args, **kwargs)
         censuses.append(censused[0])
         client: Any = aioredis.FakeRedis(server=server, decode_responses=True)
+        await client.pexpire(publisher._settings.slot_key("backend-1"), 1)
         await client.pexpire(publisher._settings.presence_key("backend-1"), 1)
         await client.aclose()
         return censused
@@ -440,6 +472,345 @@ async def test_expired_presence_worker_is_departed(
     assert by_name["backend-1"].detail is not None
 
 
+# -- a life that ends mid-collection is departed at once ------------------------
+#
+# The publisher re-reads each outstanding worker's slot claim and generation once per heartbeat
+# interval while it collects. A life whose claim is gone, or whose slot a newer life holds, can
+# never reply, so it is reported ``departed`` then instead of being waited on to the apply deadline.
+
+_LONG_APPLY = 10.0
+
+
+def _presence_value(generation: int) -> str:
+    now = "2026-01-01T00:00:00+00:00"
+    return json.dumps(
+        {
+            "kind": "backend",
+            "pid": 9,
+            "generation": generation,
+            "joined_at": now,
+            "beat_at": now,
+            "state": "ready",
+            "deployment_keys": [],
+            "env_readers": published_env_readers().digest,
+            "drain_seconds": None,
+        }
+    )
+
+
+async def _take_the_slot(server: fakeredis.FakeServer, settings: Any, name: str) -> None:
+    """A newer life takes the slot ``name``, as a claim does: its own claim, the next generation, its row."""
+    client: Any = aioredis.FakeRedis(server=server, decode_responses=True)
+    await client.set(settings.slot_key(name), f"claim-of-a-newer-{name}", px=5000)
+    generation = int(await client.incr(settings.gen_key(name)))
+    await client.set(settings.presence_key(name), _presence_value(generation), px=5000)
+    await client.aclose()
+
+
+async def _publish_timed(publisher: WorkerBus, targets: list[str] | None) -> tuple[FleetResult, float]:
+    loop = asyncio.get_running_loop()
+    start = loop.time()
+    result = await publisher.publish(_RELOAD, targets=targets, local=None)
+    return result, loop.time() - start
+
+
+async def test_a_life_that_ends_mid_collection_is_departed_at_once(
+    wire_bus_client: None, server: fakeredis.FakeServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Ready and fresh at the census, then the life ends (its stop releases the claim and deletes
+    # the row) while the publisher collects: the life is over, so the publisher stops waiting on it.
+    publisher = make_bus(heartbeat_ttl=0.3, apply_timeout=_LONG_APPLY)
+    await _register_bare_presence(server, publisher._settings, "backend-1", WorkerKind.backend, ttl_ms=5000)
+    classify = publisher._classify_workers
+
+    async def census_then_the_life_ends(*args: Any, **kwargs: Any) -> Any:
+        censused = await classify(*args, **kwargs)
+        await _end_life(server, publisher._settings, "backend-1")
+        return censused
+
+    monkeypatch.setattr(publisher, "_classify_workers", census_then_the_life_ends)
+    result, elapsed = await _publish_timed(publisher, ["backend-1"])
+    row = {r.name: r for r in result.results}["backend-1"]
+    assert row.outcome == OpOutcome.departed, row
+    assert "holds no claim" in (row.detail or "")
+    assert elapsed < 3.0, f"waited {elapsed:.1f}s on a life that ended"
+
+
+async def test_a_life_that_acked_and_then_ended_is_departed_mid_apply_at_once(
+    wire_bus_client: None, server: fakeredis.FakeServer
+) -> None:
+    # The worker acks the op, then its life ends (its stop releases the claim and deletes the
+    # row) before it applies: the life read reports it departed mid-apply, not timed_out at the cut.
+    publisher = make_bus(heartbeat_ttl=0.3, apply_timeout=_LONG_APPLY)
+    publisher._identity = WorkerIdentity(name="serve-9", kind=WorkerKind.serve, pid=1, generation=1)
+    await _register_bare_presence(server, publisher._settings, "backend-1", WorkerKind.backend, ttl_ms=5000)
+    ack = {"name": "backend-1", "generation": 1, "op_id": "op-A", "phase": "received"}
+
+    class _AckThenTheLifeEnds:
+        """A reply subscription that delivers the worker's ack, then ends its life on the next poll."""
+
+        def __init__(self) -> None:
+            self.acked = False
+            self.ended = False
+
+        async def get_message(self, ignore_subscribe_messages: bool = True, timeout: float = 0.0) -> dict | None:
+            if not self.acked:
+                self.acked = True
+                return {"data": json.dumps(ack)}
+            if not self.ended:
+                self.ended = True
+                await _end_life(server, publisher._settings, "backend-1")
+            await asyncio.sleep(timeout)
+            return None
+
+    client = aioredis.FakeRedis(server=server, decode_responses=True)
+    loop = asyncio.get_running_loop()
+    start = loop.time()
+    try:
+        results = await publisher._collect(
+            client, _AckThenTheLifeEnds(), _ReplyLink(), {"backend-1": 1}, {}, set(), "op-A", "reload_config"
+        )
+    finally:
+        await client.aclose()
+    elapsed = loop.time() - start
+    row = results["backend-1"]
+    assert row.outcome == OpOutcome.departed, row
+    assert "acked, then its slot claim ended before it applied" in (row.detail or "")
+    assert elapsed < 3.0, f"waited {elapsed:.1f}s on an acked life that ended"
+
+
+async def test_a_life_whose_slot_a_newer_life_holds_is_departed_at_once(
+    wire_bus_client: None, server: fakeredis.FakeServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Expected at generation 1; a new life takes the slot at generation 2 while the publisher
+    # collects. The old life's replies can never come under the new slot holder, so it is departed.
+    publisher = make_bus(heartbeat_ttl=0.3, apply_timeout=_LONG_APPLY)
+    settings = publisher._settings
+    await _register_bare_presence(server, settings, "backend-1", WorkerKind.backend, ttl_ms=5000)
+    classify = publisher._classify_workers
+
+    async def census_then_a_newer_life_takes_the_slot(*args: Any, **kwargs: Any) -> Any:
+        censused = await classify(*args, **kwargs)
+        await _take_the_slot(server, settings, "backend-1")
+        return censused
+
+    monkeypatch.setattr(publisher, "_classify_workers", census_then_a_newer_life_takes_the_slot)
+    result, elapsed = await _publish_timed(publisher, ["backend-1"])
+    row = {r.name: r for r in result.results}["backend-1"]
+    assert row.outcome == OpOutcome.departed, row
+    assert "generation 2" in (row.detail or "")
+    assert elapsed < 3.0, f"waited {elapsed:.1f}s on a life a newer life replaced"
+
+
+async def test_a_life_whose_row_lapsed_while_its_slot_claim_holds_is_awaited(
+    wire_bus_client: None, server: fakeredis.FakeServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The heartbeat renews the claim before it writes the row, so a beat whose row write failed
+    # leaves the claim held after the row expired, and the life re-establishes itself on its next
+    # connect and still applies. A missing row does not end the life: it stays awaited.
+    publisher = make_bus(heartbeat_ttl=0.3, apply_timeout=0.4)
+    settings = publisher._settings
+    # The row's life holds its slot claim at generation 1 (see the helper).
+    await _register_bare_presence(server, settings, "backend-1", WorkerKind.backend, ttl_ms=5000)
+    classify = publisher._classify_workers
+
+    async def census_then_the_row_lapses(*args: Any, **kwargs: Any) -> Any:
+        censused = await classify(*args, **kwargs)
+        await _drop_presence(server, settings, "backend-1")
+        return censused
+
+    monkeypatch.setattr(publisher, "_classify_workers", census_then_the_row_lapses)
+    result = await publisher.publish(_RELOAD, targets=["backend-1"], local=None)
+    row = {r.name: r for r in result.results}["backend-1"]
+    assert row.outcome == OpOutcome.missing, row
+    assert "slot claim stayed held" in (row.detail or "")
+
+
+# -- a life that begins leaving after publish -----------------------------------
+#
+# A worker expected ``ready`` whose stop begins while the op is out keeps its slot claim and its
+# row, now reading ``recycling``, through its whole stop. The stop cancels the op it was applying,
+# so no terminal reply comes; at the report cut it is reported as leaving, never as a stuck or
+# silent worker.
+
+
+async def test_an_acked_worker_that_begins_leaving_mid_apply_is_recycling_at_the_cut(
+    wire_bus_client: None,
+) -> None:
+    publisher = make_bus(apply_timeout=0.5, heartbeat_ttl=5.0)
+    worker = make_bus(apply_timeout=0.5, heartbeat_ttl=5.0)
+
+    async def stop_begins_mid_apply(_op: dict, *, deadline: float) -> None:
+        await worker.mark_recycling()
+        await asyncio.Event().wait()
+
+    task, identity = await _spawn_subscriber(worker, stop_begins_mid_apply)
+    try:
+        result = await publisher.publish(_RELOAD, targets=[identity.name], local=None)
+        row = {r.name: r for r in result.results}[identity.name]
+        assert row.outcome == OpOutcome.recycling, row
+        assert row.detail == (
+            "acked, then began leaving before it replied — it converges by ending this life, not by applying this op"
+        )
+    finally:
+        await _stop(task)
+
+
+async def test_a_silent_worker_that_begins_leaving_after_publish_is_recycling_at_the_cut(
+    wire_bus_client: None, server: fakeredis.FakeServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    publisher = make_bus(heartbeat_ttl=5.0, apply_timeout=0.4)
+    settings = publisher._settings
+    await _register_bare_presence(server, settings, "backend-1", WorkerKind.backend, ttl_ms=5000)
+    classify = publisher._classify_workers
+
+    async def census_then_the_stop_begins(*args: Any, **kwargs: Any) -> Any:
+        censused = await classify(*args, **kwargs)
+        await _register_bare_presence(
+            server, settings, "backend-1", WorkerKind.backend, ttl_ms=5000, state=WorkerState.recycling
+        )
+        return censused
+
+    monkeypatch.setattr(publisher, "_classify_workers", census_then_the_stop_begins)
+    result = await publisher.publish(_RELOAD, targets=["backend-1"], local=None)
+    row = {r.name: r for r in result.results}["backend-1"]
+    assert row.outcome == OpOutcome.recycling, row
+    assert row.detail == ("began leaving before it replied — it converges by ending this life, not by applying this op")
+
+
+async def test_a_target_absent_at_publish_whose_slot_a_new_life_takes_is_departed_at_once(
+    wire_bus_client: None, server: fakeredis.FakeServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The target's life 1 left before the publish (no presence key), and life 2 takes the slot
+    # right after the publish-time census. Life 2 claimed after the census, so the op is not
+    # addressed to it: the life the publish addressed is gone, and it is departed at once.
+    publisher = make_bus(heartbeat_ttl=0.3, apply_timeout=_LONG_APPLY)
+    settings = publisher._settings
+    client: Any = aioredis.FakeRedis(server=server, decode_responses=True)
+    await client.set(settings.gen_key("backend-1"), 1)
+    classify = publisher._classify_workers
+
+    async def census_then_a_new_life_takes_the_slot(*args: Any, **kwargs: Any) -> Any:
+        censused = await classify(*args, **kwargs)
+        await client.incr(settings.gen_key("backend-1"))
+        await client.set(settings.presence_key("backend-1"), _presence_value(2))
+        await client.sadd(settings.presence_index, "backend-1")
+        return censused
+
+    monkeypatch.setattr(publisher, "_classify_workers", census_then_a_new_life_takes_the_slot)
+    try:
+        result, elapsed = await _publish_timed(publisher, ["backend-1"])
+    finally:
+        await client.aclose()
+    row = {r.name: r for r in result.results}["backend-1"]
+    assert row.outcome == OpOutcome.departed, row
+    assert "generation 2" in (row.detail or "")
+    assert elapsed < 3.0, f"waited {elapsed:.1f}s on a target a life that never got the op replaced"
+
+
+async def test_a_target_absent_at_publish_is_expected_at_the_last_life_its_slot_minted(
+    wire_bus_client: None, server: fakeredis.FakeServer
+) -> None:
+    # A life claims its slot after it subscribes and before it writes presence, so the last life
+    # the slot minted is the newest one subscribed when the op goes out; a slot never minted
+    # holds no life (generation 0), and any life that takes it later is a newer one.
+    publisher = make_bus()
+    async with bus_module.client_ctx(RedisClient, publisher._settings.redis) as r:
+        await r.set(publisher._settings.gen_key("backend-1"), 3)
+        assert await publisher._classify_workers(r, ["backend-1", "backend-2"]) == (
+            {"backend-1": 3, "backend-2": 0},
+            {},
+            set(),
+        )
+
+
+async def test_a_live_worker_slower_than_many_life_reads_is_waited_on(wire_bus_client: None) -> None:
+    # A live worker renews its slot claim on its own thread while it applies, so every life
+    # read during the collection sees its claim held: it is waited on and answers applied.
+    publisher = make_bus(heartbeat_ttl=0.3, apply_timeout=_LONG_APPLY)
+    worker = make_bus(heartbeat_ttl=0.3, apply_timeout=_LONG_APPLY)
+
+    async def slow(_op: dict, *, deadline: float) -> dict:
+        # Ten life-read intervals of the publisher (heartbeat_ttl / 3 = 0.1 s).
+        await asyncio.sleep(1.0)
+        return {"reloaded": True}
+
+    task, worker_id = await _spawn_subscriber(worker, slow)
+    try:
+        result, _elapsed = await _publish_timed(publisher, [worker_id.name])
+        row = {r.name: r for r in result.results}[worker_id.name]
+        assert row.outcome == OpOutcome.applied, row
+        assert row.payload == {"reloaded": True}
+    finally:
+        await _stop(task)
+
+
+async def test_a_reply_delivered_before_the_life_is_seen_gone_is_kept(
+    wire_bus_client: None, server: fakeredis.FakeServer
+) -> None:
+    # The worker replied and then left: its reply sits delivered on the reply subscription when
+    # the life read finds its slot claim gone. The delivered reply is the answer, not ``departed``.
+    publisher = make_bus(heartbeat_ttl=0.3, apply_timeout=_LONG_APPLY)
+    publisher._identity = WorkerIdentity(name="serve-9", kind=WorkerKind.serve, pid=1, generation=1)
+    reply = {"name": "backend-1", "generation": 1, "op_id": "op-A", "phase": "terminal", "outcome": "applied"}
+
+    class _DeliveredOnlyOnAReadThatDoesNotWait:
+        """A reply subscription whose one reply is only read by a read that does not wait."""
+
+        def __init__(self) -> None:
+            self.frames = [reply]
+
+        async def get_message(self, ignore_subscribe_messages: bool = True, timeout: float = 0.0) -> dict | None:
+            if timeout == 0 and self.frames:
+                return {"data": json.dumps(self.frames.pop(0))}
+            await asyncio.sleep(timeout)
+            return None
+
+    client = aioredis.FakeRedis(server=server, decode_responses=True)
+    try:
+        results = await publisher._collect(
+            client,
+            _DeliveredOnlyOnAReadThatDoesNotWait(),
+            _ReplyLink(),
+            {"backend-1": 1},
+            {},
+            set(),
+            "op-A",
+            "reload_config",
+        )
+    finally:
+        await client.aclose()
+    assert results["backend-1"].outcome == OpOutcome.applied
+
+
+async def test_a_life_read_that_fails_mid_collection_keeps_waiting_and_logs(
+    wire_bus_client: None, server: fakeredis.FakeServer, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A life read that cannot reach the bus proves nothing about the life: it is logged and
+    # the worker stays awaited to the apply deadline, where the cut decides its verdict.
+    publisher = make_bus(heartbeat_ttl=0.3, apply_timeout=0.5)
+    publisher._identity = WorkerIdentity(name="serve-9", kind=WorkerKind.serve, pid=1, generation=1)
+    await _register_bare_presence(server, publisher._settings, "backend-1", WorkerKind.backend, ttl_ms=None)
+    client = aioredis.FakeRedis(server=server, decode_responses=True)
+
+    class _PipelineDown:
+        def __init__(self, inner: Any) -> None:
+            self._inner = inner
+
+        def pipeline(self, transaction: bool = True) -> Any:
+            raise RedisConnectionError("bus down")
+
+    try:
+        with caplog.at_level(logging.ERROR):
+            results = await publisher._collect(
+                _PipelineDown(client), _FramePubsub([]), _ReplyLink(), {"backend-1": 1}, {}, set(), "op-A", "reload"
+            )
+    finally:
+        await client.aclose()
+    assert results["backend-1"].outcome == OpOutcome.missing
+    assert any(r.levelno == logging.ERROR and "life read" in r.getMessage() for r in caplog.records)
+
+
 # -- whole-fleet gap outcomes (a row failing the ready+fresh gate is CLASSIFIED) ----
 
 
@@ -447,7 +818,7 @@ async def test_whole_fleet_publish_reports_a_resyncing_row(wire_bus_client: None
     # A resyncing row is on the census but NOT ready, so it is not an expected worker; it
     # is landed as its ACTUAL condition (``resyncing``), never silently dropped and never
     # reported missing/timed_out. Its PTTL is fresh, so the written state drives it.
-    publisher = make_bus(heartbeat_ttl=5.0, ack_timeout=0.03, apply_timeout=0.1)
+    publisher = make_bus(heartbeat_ttl=5.0, apply_timeout=0.1)
     await _register_bare_presence(
         server, publisher._settings, "backend-1", WorkerKind.backend, ttl_ms=5000, state=WorkerState.resyncing
     )
@@ -466,7 +837,7 @@ async def test_an_op_awaited_mid_resync_expects_a_fresh_resyncing_row(
     # A fresh resyncing worker is subscribed and applies a delivered op after its resync, so
     # an op that declares it owes a reply awaits it: never reported as the resyncing gap.
     # Nobody replies here, so the cut finds it alive, still resyncing, and says so.
-    publisher = make_bus(heartbeat_ttl=5.0, ack_timeout=0.03, apply_timeout=0.1)
+    publisher = make_bus(heartbeat_ttl=5.0, apply_timeout=0.1)
     await _register_bare_presence(
         server, publisher._settings, "backend-1", WorkerKind.backend, ttl_ms=5000, state=WorkerState.resyncing
     )
@@ -489,7 +860,7 @@ async def test_an_op_awaited_mid_resync_expects_a_fresh_resyncing_row(
 async def test_whole_fleet_publish_reports_a_recycling_row(wire_bus_client: None, server: fakeredis.FakeServer) -> None:
     # A fresh recycling row is landed as ``recycling`` — it is departing and converges by
     # old-life-gone + fresh capacity, not by a reply.
-    publisher = make_bus(heartbeat_ttl=5.0, ack_timeout=0.03, apply_timeout=0.1)
+    publisher = make_bus(heartbeat_ttl=5.0, apply_timeout=0.1)
     await _register_bare_presence(
         server, publisher._settings, "backend-1", WorkerKind.backend, ttl_ms=5000, state=WorkerState.recycling
     )
@@ -508,7 +879,7 @@ async def test_whole_fleet_publish_reports_a_ready_but_decayed_row_as_stale(
     # alone is not enough, the presence must also be fresh. It is landed as ``stale`` (a
     # quiet row, reconnecting or dead), carrying no convergence promise. With
     # heartbeat_ttl=5.0 the bound is ttl/3 ≈ 1666ms, so a 1000ms PTTL fails it.
-    publisher = make_bus(heartbeat_ttl=5.0, ack_timeout=0.03, apply_timeout=0.1)
+    publisher = make_bus(heartbeat_ttl=5.0, apply_timeout=0.1)
     await _register_bare_presence(
         server, publisher._settings, "backend-1", WorkerKind.backend, ttl_ms=1000, state=WorkerState.ready
     )
@@ -525,7 +896,7 @@ async def test_whole_fleet_publish_reports_a_decayed_resyncing_row_as_stale(
 ) -> None:
     # A resyncing row whose PTTL has decayed maps to ``stale`` regardless of its written
     # state — a worker that died mid-resync must not carry a convergence promise.
-    publisher = make_bus(heartbeat_ttl=5.0, ack_timeout=0.03, apply_timeout=0.1)
+    publisher = make_bus(heartbeat_ttl=5.0, apply_timeout=0.1)
     await _register_bare_presence(
         server, publisher._settings, "backend-1", WorkerKind.backend, ttl_ms=1000, state=WorkerState.resyncing
     )
@@ -540,7 +911,7 @@ async def test_whole_fleet_publish_reports_a_decayed_resyncing_row_as_stale(
 async def test_targeted_gap_row_carries_its_gap_outcome(wire_bus_client: None, server: fakeredis.FakeServer) -> None:
     # A named target that is present-but-gap carries its gap outcome (not departed, not
     # awaited): a resyncing target is reported ``resyncing``.
-    publisher = make_bus(heartbeat_ttl=5.0, ack_timeout=0.03, apply_timeout=0.1)
+    publisher = make_bus(heartbeat_ttl=5.0, apply_timeout=0.1)
     await _register_bare_presence(
         server, publisher._settings, "backend-1", WorkerKind.backend, ttl_ms=5000, state=WorkerState.resyncing
     )
@@ -551,42 +922,24 @@ async def test_targeted_gap_row_carries_its_gap_outcome(wire_bus_client: None, s
 
 
 async def test_targeted_worker_replaced_mid_apply_is_departed(
-    wire_bus_client: None, server: fakeredis.FakeServer
+    wire_bus_client: None, server: fakeredis.FakeServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # The target is ready+fresh at publish (expected at generation 1) but nobody replies,
-    # and by the report cut its presence key holds a HIGHER generation — a replacement took
-    # the slot mid-apply. The generation-aware verdict is ``departed``, naming the
-    # superseding generation, never timed_out/missing.
-    publisher = make_bus(heartbeat_ttl=5.0, ack_timeout=0.03, apply_timeout=0.2)
+    # and right after the census a replacement takes the slot at a HIGHER generation. The
+    # generation-aware verdict is ``departed``, naming the superseding generation, never
+    # timed_out/missing.
+    publisher = make_bus(heartbeat_ttl=5.0, apply_timeout=0.2)
     settings = publisher._settings
     await _register_bare_presence(server, settings, "backend-1", WorkerKind.backend, ttl_ms=5000)
+    classify = publisher._classify_workers
 
-    async def bump_generation() -> None:
-        # After the expected set is captured, rewrite the presence value at generation 2
-        # (the freed slot reclaimed by a new life) with the key still live.
-        await asyncio.sleep(0.06)
-        client = aioredis.FakeRedis(server=server, decode_responses=True)
-        now = "2026-01-01T00:00:00+00:00"
-        value = json.dumps(
-            {
-                "kind": "backend",
-                "pid": 9,
-                "generation": 2,
-                "joined_at": now,
-                "beat_at": now,
-                "state": "ready",
-                "deployment_keys": [],
-                "env_readers": published_env_readers().digest,
-            }
-        )
-        await client.set(settings.presence_key("backend-1"), value, px=5000)
-        await client.aclose()
+    async def census_then_a_replacement_takes_the_slot(*args: Any, **kwargs: Any) -> Any:
+        censused = await classify(*args, **kwargs)
+        await _take_the_slot(server, settings, "backend-1")
+        return censused
 
-    bumper = asyncio.create_task(bump_generation())
-    try:
-        result = await publisher.publish(_RELOAD, targets=["backend-1"], local=None)
-    finally:
-        await bumper
+    monkeypatch.setattr(publisher, "_classify_workers", census_then_a_replacement_takes_the_slot)
+    result = await publisher.publish(_RELOAD, targets=["backend-1"], local=None)
     by_name = {r.name: r for r in result.results}
     assert by_name["backend-1"].outcome == OpOutcome.departed
     assert "generation 2" in (by_name["backend-1"].detail or "")
@@ -604,8 +957,8 @@ async def test_a_worker_that_fades_before_publish_is_off_the_census_entirely(wir
     # WHY the snapshot is load-bearing: with no ``expected_at_start``, a live worker whose
     # presence key is gone at publish time is not expected, not a gap row, and not in the
     # report — the op reads as fully converged while a worker never confirmed.
-    publisher = make_bus(heartbeat_ttl=30.0, ack_timeout=0.05, apply_timeout=0.4)
-    worker = make_bus(heartbeat_ttl=30.0, ack_timeout=0.05, apply_timeout=0.4)
+    publisher = make_bus(heartbeat_ttl=30.0, apply_timeout=0.4)
+    worker = make_bus(heartbeat_ttl=30.0, apply_timeout=0.4)
 
     async def apply(_op: dict, *, deadline: float) -> None:
         return None
@@ -626,8 +979,8 @@ async def test_expected_at_start_still_collects_a_faded_workers_confirmation(wir
     # alive and replying. Carried in at its snapshot generation, so its terminal reply
     # passes the generation gate and lands as ``applied`` — the confirmation is collected,
     # not guessed at.
-    publisher = make_bus(heartbeat_ttl=30.0, ack_timeout=0.05, apply_timeout=0.4)
-    worker = make_bus(heartbeat_ttl=30.0, ack_timeout=0.05, apply_timeout=0.4)
+    publisher = make_bus(heartbeat_ttl=30.0, apply_timeout=0.4)
+    worker = make_bus(heartbeat_ttl=30.0, apply_timeout=0.4)
 
     async def apply(_op: dict, *, deadline: float) -> dict:
         return {"reloaded": True}
@@ -655,12 +1008,12 @@ async def test_expected_at_start_worker_that_never_returns_is_departed_at_the_cu
 ) -> None:
     # The edge the late census was incidentally hiding: a worker that legitimately went
     # away between op start and publish. Carrying it in cannot hang the collection — the
-    # apply deadline bounds it — and the re-checked presence makes the verdict honest:
+    # apply deadline bounds it — and the re-read slot claim makes the verdict honest:
     # ``departed``, which drops the report off ``ok`` so the publisher logs it loudly.
-    publisher = make_bus(heartbeat_ttl=5.0, ack_timeout=0.03, apply_timeout=0.2)
+    publisher = make_bus(heartbeat_ttl=5.0, apply_timeout=0.2)
     await _register_bare_presence(server, publisher._settings, "backend-1", WorkerKind.backend, ttl_ms=5000)
     at_start = {"backend-1": 1}
-    await _drop_presence(server, publisher._settings, "backend-1")
+    await _end_life(server, publisher._settings, "backend-1")
 
     loop = asyncio.get_running_loop()
     start = loop.time()
@@ -670,7 +1023,7 @@ async def test_expected_at_start_worker_that_never_returns_is_departed_at_the_cu
 
     by_name = {r.name: r for r in result.results}
     assert by_name["backend-1"].outcome == OpOutcome.departed
-    assert "presence key expired" in (by_name["backend-1"].detail or "")
+    assert "holds no claim" in (by_name["backend-1"].detail or "")
     assert not result.ok
     # Bounded by the apply deadline, never an open-ended wait on a worker that is gone.
     assert elapsed < 2.0
@@ -683,7 +1036,7 @@ async def test_expected_at_start_never_overrides_a_live_gap_row(
     # A worker that has announced ``recycling`` is departing on purpose and converges by
     # old-life-gone plus fresh capacity — re-admitting it would await a reply it never
     # owed and burn the apply timeout on a planned exit.
-    publisher = make_bus(heartbeat_ttl=5.0, ack_timeout=0.03, apply_timeout=5.0)
+    publisher = make_bus(heartbeat_ttl=5.0, apply_timeout=5.0)
     await _register_bare_presence(
         server, publisher._settings, "backend-1", WorkerKind.backend, ttl_ms=5000, state=WorkerState.recycling
     )
@@ -705,7 +1058,7 @@ async def test_expected_at_start_never_widens_targets_nor_re_admits_self(
     # Two names the snapshot must not smuggle into a targeted op's expected set: a worker
     # outside ``targets`` (the op does not concern it) and the publisher's own name (it is
     # reported from its own local result and could never reply to itself).
-    publisher = make_bus(heartbeat_ttl=5.0, ack_timeout=0.03, apply_timeout=0.2)
+    publisher = make_bus(heartbeat_ttl=5.0, apply_timeout=0.2)
     at_start = {"backend-2": 1, publisher.identity.name: 1}
 
     result = await publisher.publish(_RELOAD, targets=["backend-1"], local=None, expected_at_start=at_start)
@@ -885,7 +1238,7 @@ async def test_validate_targets_raises_on_unknown(wire_bus_client: None) -> None
     async def noop(_op: dict, *, deadline: float) -> None:
         return None
 
-    _, self_id = await _spawn_subscriber(bus, noop)
+    self_task, self_id = await _spawn_subscriber(bus, noop)
     task, worker_id = await _spawn_subscriber(worker, noop)
     try:
         await bus.validate_targets(None)  # whole-fleet is always valid
@@ -894,7 +1247,7 @@ async def test_validate_targets_raises_on_unknown(wire_bus_client: None) -> None
         with pytest.raises(UnknownFleetTargetsError, match="unknown fleet targets"):
             await bus.validate_targets(["backend-does-not-exist"])
     finally:
-        await _stop(task)
+        await _stop(self_task, task)
 
 
 # -- no-op local() variant ----------------------------------------------------
@@ -948,8 +1301,8 @@ async def test_local_variant(wire_bus_client: None) -> None:
 
 
 async def test_live_but_slow_apply_is_timed_out(wire_bus_client: None) -> None:
-    publisher = make_bus(ack_timeout=0.05, apply_timeout=0.5, heartbeat_ttl=0.5)
-    worker = make_bus(ack_timeout=0.05, apply_timeout=0.5, heartbeat_ttl=0.5)
+    publisher = make_bus(apply_timeout=0.5, heartbeat_ttl=0.5)
+    worker = make_bus(apply_timeout=0.5, heartbeat_ttl=0.5)
 
     async def slow(_op: dict, *, deadline: float) -> None:
         await asyncio.sleep(0.9)
@@ -972,8 +1325,8 @@ async def test_a_worker_draining_inside_the_drain_floor_answers_applied(wire_bus
 
     budget = 1.0
     window = retire_drain_floor_seconds(budget)
-    publisher = make_bus(ack_timeout=0.05, apply_timeout=window, heartbeat_ttl=5.0)
-    worker = make_bus(ack_timeout=0.05, apply_timeout=window, heartbeat_ttl=5.0)
+    publisher = make_bus(apply_timeout=window, heartbeat_ttl=5.0)
+    worker = make_bus(apply_timeout=window, heartbeat_ttl=5.0)
 
     async def draining(_op: dict, *, deadline: float) -> None:
         await asyncio.sleep(2.5 * budget)
@@ -989,50 +1342,48 @@ async def test_a_worker_draining_inside_the_drain_floor_answers_applied(wire_bus
         await _stop(task)
 
 
-# -- presence re-check degrade branches --------------------------------------
+# -- report-cut life re-read branches ----------------------------------------
 
 
-async def test_recheck_transport_error_degrades_to_loud_missing(caplog: pytest.LogCaptureFixture) -> None:
-    # A transport error raised by the presence re-check (r.get) must not be swallowed
-    # into a silent verdict: it logs an ERROR and degrades to the loud missing/timed_out
-    # classification (a present-but-silent worker), never departed or dropped.
+async def test_a_life_re_read_that_fails_at_the_cut_degrades_to_loud_missing(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A transport error raised by the report-cut re-read must not be swallowed into a silent
+    # verdict: it logs an ERROR and degrades to the loud missing/timed_out classification,
+    # never departed or dropped, and the row says the life could not be re-read.
     bus = make_bus()
 
-    class _BoomGet:
-        async def get(self, key: str) -> str:
-            raise RedisConnectionError("presence store down")
+    class _BoomPipeline:
+        def pipeline(self, transaction: bool = True) -> Any:
+            raise RedisConnectionError("bus down")
 
     with caplog.at_level(logging.ERROR):
-        status, gen, state = await bus._recheck_presence(_BoomGet(), "serve-2")
-        never_acked = await bus._computed_verdict(_BoomGet(), "serve-2", 1, acked=False, transport_error=None)
-        acked = await bus._computed_verdict(_BoomGet(), "serve-2", 1, acked=True, transport_error=None)
+        life = await bus._reread_life(_BoomPipeline(), "serve-2")
+        never_acked = await bus._computed_verdict(_BoomPipeline(), "serve-2", 1, acked=False, transport_error=None)
+        acked = await bus._computed_verdict(_BoomPipeline(), "serve-2", 1, acked=True, transport_error=None)
 
-    assert (status, gen, state) == ("unreachable", None, None)
-    # Unreachable re-check is treated as still-present (not departed): missing when never
-    # acked, timed_out when acked — the loud verdicts, not a silent drop.
+    assert life is None
     assert never_acked.outcome is OpOutcome.missing
     assert acked.outcome is OpOutcome.timed_out
-    assert any(r.levelno == logging.ERROR and "presence re-check" in r.getMessage() for r in caplog.records), (
+    for row in (never_acked, acked):
+        assert "could not be re-read" in (row.detail or ""), row
+        assert "stayed held" not in (row.detail or ""), row
+    assert any(r.levelno == logging.ERROR and "life re-read" in r.getMessage() for r in caplog.records), (
         "the transport-error degrade did not log loudly"
     )
 
 
-async def test_recheck_unparseable_presence_logs_and_treats_alive(caplog: pytest.LogCaptureFixture) -> None:
-    # An unparseable presence value at the report cut logs a WARNING and is treated as
-    # ALIVE with an unknown generation — so the verdict is a present-but-silent one
-    # (missing/timed_out), never departed (which would falsely claim the worker gone).
+async def test_a_row_that_is_not_a_presence_value_raises_at_the_cut(
+    wire_bus_client: None, server: fakeredis.FakeServer
+) -> None:
+    # The report cut parses the row with the census's one parse: a value that is not a
+    # presence value raises, never read as some guessed life.
     bus = make_bus()
-
-    class _Garbled:
-        async def get(self, key: str) -> str:
-            return "not-json"
-
-    with caplog.at_level(logging.WARNING):
-        status, gen, state = await bus._recheck_presence(_Garbled(), "serve-2")
-        verdict = await bus._computed_verdict(_Garbled(), "serve-2", 1, acked=True, transport_error=None)
-
-    assert (status, gen, state) == ("alive", None, None)
-    assert verdict.outcome is OpOutcome.timed_out
-    assert any(r.levelno == logging.WARNING and "unparseable" in r.getMessage() for r in caplog.records), (
-        "the unparseable-value branch did not log a warning"
-    )
+    await _register_bare_presence(server, bus._settings, "serve-2", WorkerKind.serve, ttl_ms=5000)
+    client: Any = aioredis.FakeRedis(server=server, decode_responses=True)
+    try:
+        await client.set(bus._settings.presence_key("serve-2"), "not-json", px=5000)
+        with pytest.raises(ValidationError):
+            await bus._reread_life(client, "serve-2")
+    finally:
+        await client.aclose()

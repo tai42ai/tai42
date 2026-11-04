@@ -24,7 +24,7 @@ _ROW = {
     "tool": "report",
     "cadence": {"kind": "interval", "every": 60.0, "relative": False},
     "enabled": True,
-    "next_run_at_ts": None,
+    "next_run_at_ts": 1783501200.0,
     "next_run_at_iso": "2026-07-08T09:00:00+00:00",
     "error": None,
 }

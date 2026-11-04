@@ -1,75 +1,93 @@
-"""The Celery application and the pool-child fork-safety hooks.
+"""The Celery application, carrying the state of the worker or beat process that runs it.
 
 ``celery_app`` is built at import time from :class:`CelerySettings` (the RedBeat beat
-scheduler that reports the beat's progress; pool restarts and task events enabled). Every
+scheduler that reports the beat's progress; pool restarts and task events enabled). Its worker
+application is :class:`HostedWorker`, which leaves the process's signals to the host. Every
 Redis connection it makes — the broker, the result backend and the RedBeat store — carries the kit's connection
-behaviour (retry, socket timeouts); see :mod:`tai42_backend_celery.core.redis_seam`. ``worker_process_init`` evicts
-the monitoring vendor client in each forked child (its parent-owned
-threads/sockets are dead there; the child rebuilds it on first use).
-``worker_process_shutdown`` flushes buffered monitoring spans and closes each
-task loop's pooled clients before the child exits.
+behaviour (retry, socket timeouts); see :mod:`tai42_backend_celery.core.redis_seam`.
+The worker's fork guard (:mod:`tai42_kit.backend.fork_safety`) evicts the inherited monitoring client
+in every child.
+
+The state the runtime's build sets for the process that runs the app lives on the app itself
+(:class:`HostedCelery`), and the runtime hands celery that object: a config reload re-imports this
+package while the process runs, and every step, signal receiver, task and beat celery runs still
+reads the state the build set. The worker's celery signal receivers are connected by the runtime's
+build too (:mod:`~tai42_backend_celery.core.worker_signals`).
 """
 
 from __future__ import annotations
 
-import logging
-import sys
-from typing import Any
+from functools import cached_property
+from typing import TYPE_CHECKING, Any
 
-from celery import Celery, signals
+from celery import Celery
+from celery.apps.worker import Worker
+from celery.platforms import IS_macOS
 from celery_pydantic import pydantic_celery
-from tai42_contract.app import tai42_app
 from tai42_kit.clients.impl.redis import redis_from_url_kwargs
 
 from tai42_backend_celery.core.redis_seam import KitAMQP, KitLoader, configure_redis_seam
 from tai42_backend_celery.core.settings import celery_settings
 
-logger = logging.getLogger(__name__)
+if TYPE_CHECKING:
+    from tai42_contract.backend.runtime import ProgressReporter
+    from tai42_kit.backend import SharedLoop
 
-
-# --- fork-safety signal hooks ------------------------------------------------
-
-
-@signals.worker_process_init.connect
-def on_worker_process_init(sender: Any = None, **kwargs: Any) -> None:
-    """Runs in each freshly forked pool child before it takes work.
-
-    Evicts the monitoring vendor client (its parent-owned exporter
-    threads/sockets are dead here); the child rebuilds it on first use. On macOS
-    a warning names the platform hazard: the system resolver is not fork-safe, so
-    a child's first telemetry export may crash it — prefer the ``solo`` or
-    ``threads`` pool there.
-    """
-    tai42_app.monitoring.active.writer.shutdown()
-    logger.info("worker child %s: evicted the pre-fork monitoring client (fork-safe shutdown)", sender)
-    if sys.platform == "darwin":
-        logger.warning(
-            "macOS prefork child: the system DNS resolver is not fork-safe, so telemetry export from this "
-            "child may crash it; use the 'solo' or 'threads' worker pool on macOS if that happens"
-        )
-
-
-@signals.worker_process_shutdown.connect
-def on_worker_process_shutdown(sender: Any = None, **kwargs: Any) -> None:
-    """Flush buffered monitoring spans then close each task loop's pooled clients, in each pool child at exit."""
-    try:
-        tai42_app.monitoring.active.writer.flush()
-    except Exception as e:
-        logger.warning("Error flushing monitoring on worker child shutdown: %s", e)
-
-    from tai42_backend_celery.core.tasks import callback_task, tool_execution
-
-    for task in (tool_execution, callback_task):
-        try:
-            task.close_loop()
-        except Exception as e:
-            logger.warning("Error closing task loop clients on worker child shutdown: %s", e)
+    from tai42_backend_celery.core.embedded_beat import EmbeddedBeat
+    from tai42_backend_celery.core.job_slots import JobWatch
+    from tai42_backend_celery.core.liveness_step import WorkerProgress
 
 
 # --- app factory ---------------------------------------------------------------
 
 
-def create_celery_app() -> Celery:
+class HostedWorker(Worker):
+    """Celery's worker application, run by a host that owns the process's signals.
+
+    The host routes its stop signals to the worker's warm and cold stop through its own composed
+    chain (:class:`~tai42_backend_celery.core.backend.CeleryWorkerRuntime`), on every pool. So the
+    worker installs no signal handler of its own: neither its stop handlers nor its ``SIGHUP``
+    restart, its ``SIGUSR1`` stack dump or its ``SIGUSR2`` remote debugger.
+    """
+
+    def install_platform_tweaks(self, worker: Any) -> None:
+        """Apply Celery's macOS proxy-detection workaround, and install no signal handler."""
+        if IS_macOS:
+            self.macOS_proxy_detection_workaround()
+
+
+class HostedCelery(Celery):
+    """A Celery application whose worker application is :class:`HostedWorker`, carrying its process's state.
+
+    The runtime that runs the app sets each piece in its build, and celery hands the app to every
+    reader (a step as its parent's ``app``, a task as its ``app``, the beat's scheduler as its
+    ``app``); each is ``None`` until set:
+
+    - ``beat_reporter``: the progress reporter of the beat this app runs, the standalone beat's or
+      the one a worker embeds (:func:`~tai42_backend_celery.core.beat_scheduler.register`).
+    - ``worker_progress``: the worker's progress reporter and job budget, which its progress step
+      reads (:func:`~tai42_backend_celery.core.liveness_step.register`).
+    - ``embedded_beat``: the liveness file, grace and service of the worker's embedded beat
+      (:func:`~tai42_backend_celery.core.embedded_beat.register`).
+    - ``job_watch``: the worker process's watch over its in-process jobs, set as its consumer
+      starts (:func:`~tai42_backend_celery.core.job_slots.watch`).
+    - ``shared_loop``: the host's loop a green pool's jobs run on
+      (:meth:`~tai42_backend_celery.core.tasks.AsyncTask.share_loop`).
+    """
+
+    beat_reporter: ProgressReporter | None = None
+    worker_progress: WorkerProgress | None = None
+    embedded_beat: EmbeddedBeat | None = None
+    job_watch: JobWatch | None = None
+    shared_loop: SharedLoop | None = None
+
+    @cached_property
+    def Worker(self) -> type[HostedWorker]:  # noqa: N802 - Celery's own attribute name
+        """The worker application, bound to this app as Celery binds its own."""
+        return self.subclass_with_self(HostedWorker)
+
+
+def create_celery_app() -> HostedCelery:
     """Build and configure the Celery app from the ``CELERY_*`` settings.
 
     The loader and the AMQP facet select the kit's Redis result backend and broker
@@ -79,7 +97,7 @@ def create_celery_app() -> Celery:
     URL form the kit's connection cannot carry.
     """
     settings = celery_settings()
-    app = Celery(
+    app = HostedCelery(
         "TaiMCPCelery",
         broker=settings.broker_url,
         backend=settings.result_backend,
@@ -95,6 +113,9 @@ def create_celery_app() -> Celery:
         redbeat_key_prefix=settings.redbeat_key_prefix,
         beat_max_loop_interval=settings.beat_max_loop_interval,
         timezone="UTC",
+        # A task sent with no queue (a beat-fired schedule, an unlabelled dispatch) goes to the
+        # settings queue, which a worker started without a label consumes.
+        task_default_queue=settings.queue_name,
         worker_pool_restarts=True,
         worker_concurrency=settings.worker_concurrency,
         worker_send_task_events=True,  # worker emits task-* events

@@ -121,6 +121,31 @@ def test_declared_error_maps_to_status():
     assert resp.status_code == 409
 
 
+def test_a_declared_error_reply_carries_the_errors_extra_body_fields():
+    from tai42_skeleton.operations.errors import OperationFailedError
+
+    reg = OperationRegistry()
+
+    @operation(
+        summary="Fail",
+        tags=["sample"],
+        request_model=GreetRequest,
+        registry=reg,
+        no_body_reason="test fixture: response body not under test",
+        errors=[OperationFailedError],
+    )
+    async def fail(name: str) -> dict:
+        raise OperationFailedError("the change landed but the roll ran", extra={"recycle": None})
+
+    handler = register_operation_route(
+        SpecApp(), operation_metadata_of(fail), path="/api/sample/fail", method="POST", action="write"
+    )
+    resp = _run(handler(_request("POST", "/api/sample/fail", body={"name": "ann"})))
+
+    assert resp.status_code == 500
+    assert json.loads(bytes(resp.body)) == {"error": "the change landed but the roll ran", "recycle": None}
+
+
 def test_validation_error_is_422():
     reg = OperationRegistry()
     _, handler = _register(reg)

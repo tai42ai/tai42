@@ -15,6 +15,7 @@ import asyncio
 import logging
 
 import pytest
+from tests._fakes.rebuild import no_rebuild
 
 from tai42_skeleton.app import epoch_retire as epoch_retire_mod
 from tai42_skeleton.app.admission import (
@@ -26,6 +27,7 @@ from tai42_skeleton.app.epoch import build_and_swap_epoch, current_epoch
 from tai42_skeleton.app.reload_gate import reload_gate
 from tai42_skeleton.config.deployment_env import DeploymentOwnership
 
+from ._deferred_retire_tail import DEFERRED_TAIL_BOUND_S
 from .test_epoch import (  # noqa: F401 - _reset_epoch_state is the autouse fixture these cases need
     _ClosingSupervisor,
     _install_boot,
@@ -45,7 +47,7 @@ DRAIN_BUDGET_S = 10.0
 
 
 async def _deferred_tails_finished() -> None:
-    async with asyncio.timeout(2.0):
+    async with asyncio.timeout(DEFERRED_TAIL_BOUND_S):
         await asyncio.gather(*epoch_retire_mod._deferred_retire_tasks)
 
 
@@ -63,7 +65,7 @@ async def test_a_supervised_run_whose_tool_call_runs_in_a_child_task_survives_it
         async with reload_gate.driving():
             await build_and_swap_epoch(
                 {},
-                rebuild=lambda: None,
+                rebuild=no_rebuild,
                 build_serving_app=_serve("new-app"),
                 drain_deadline=0.5,
                 ownership=DeploymentOwnership(),
@@ -168,7 +170,7 @@ async def test_a_request_reaching_the_gate_during_a_synchronous_drain_is_not_cou
             start = loop.time()
             await build_and_swap_epoch(
                 {},
-                rebuild=lambda: None,
+                rebuild=no_rebuild,
                 build_serving_app=_serve("new-app"),
                 drain_deadline=DRAIN_BUDGET_S,
                 ownership=DeploymentOwnership(),
@@ -233,7 +235,7 @@ async def test_a_gate_waiter_giving_up_after_the_synchronous_drain_ended_leaves_
             loop.call_later(0.02, _waiter_arrives_then_leaves)
             await build_and_swap_epoch(
                 {},
-                rebuild=lambda: None,
+                rebuild=no_rebuild,
                 build_serving_app=_serve("new-app"),
                 drain_deadline=budget,
                 ownership=DeploymentOwnership(),
@@ -261,7 +263,7 @@ async def test_a_request_waiting_on_the_gate_after_the_tail_turned_over_is_never
         async with reload_gate.driving():
             await build_and_swap_epoch(
                 {},
-                rebuild=lambda: None,
+                rebuild=no_rebuild,
                 build_serving_app=_serve("new-app"),
                 drain_deadline=0.05,
                 ownership=DeploymentOwnership(),
@@ -351,7 +353,7 @@ async def test_a_session_call_driving_a_reload_answers_before_the_close(
             start = loop.time()
             await build_and_swap_epoch(
                 {},
-                rebuild=lambda: None,
+                rebuild=no_rebuild,
                 build_serving_app=_serve("new-app"),
                 drain_deadline=DRAIN_BUDGET_S,
                 ownership=DeploymentOwnership(),

@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING
 from tai42_contract.app import tai42_app
 
 from tai42_skeleton.app import lifecycle as _lifecycle
-from tai42_skeleton.app.lifecycle.off_loop import run_blocking
 from tai42_skeleton.app.lifecycle.state import LifecycleState
 from tai42_skeleton.app.mount_map import bind_module
 from tai42_skeleton.operations import reregister_operations
@@ -22,13 +21,13 @@ logger = logging.getLogger(__name__)
 class ComponentImportMixin(LifecycleState):
     """Lifecycle mixin that imports the manifest's plugin modules and runs their registration side-effects."""
 
-    def _initialize_components(self, installed: "InstalledPackages"):
-        """Import the live manifest's modules; ``installed`` is the build's package→dist snapshot.
+    async def _initialize_components(self, installed: "InstalledPackages"):
+        """Import the started manifest's modules; ``installed`` is the build's package→dist snapshot.
 
         ``start()`` takes the snapshot once, after the plugin layer is on ``sys.path``,
         and the same snapshot serves the schema gate and every compat verdict of the pass.
         """
-        manifest = self._require_live_manifest()
+        manifest = self._require_manifest()
 
         # Repopulate the operation registry that start() cleared at its top. A leaf
         # module declares its operations with @operation at IMPORT, and that
@@ -50,7 +49,7 @@ class ComponentImportMixin(LifecycleState):
         # each declared plugin route resolves its absolute path + public flag from the
         # declaration while its module imports below (bound through
         # ``_import_manifest_module``). Reserved-prefix violations fail the build here.
-        self._mount_map = self._build_mount_map(installed)
+        self._mount_map = await self._build_mount_map(installed)
 
         # Register the manifest's declarative connector providers before importing
         # any manifest module. A connector is pure data (no import path), so it is
@@ -105,7 +104,7 @@ class ComponentImportMixin(LifecycleState):
         # an agent tool can reference a base tool already loaded above.
         self._import_additive_role([cfg.module for cfg in manifest.agents], "agents", installed, executed_modules)
 
-        self._load_manifest_mcps()
+        await self._load_manifest_mcps()
 
         # Project the operation surface into MCP tools. Runs AFTER the router
         # modules registered their operations and AFTER base tools/MCPs bound (so
@@ -135,7 +134,7 @@ class ComponentImportMixin(LifecycleState):
         Each aborts boot on incompat or import failure through the shared abort seam — the server cannot
         run without its scalar slots.
         """
-        manifest = self._require_live_manifest()
+        manifest = self._require_manifest()
         self._import_manifest_module(manifest.backend_module, "backend", installed, executed)
         self._import_manifest_module(manifest.sandbox_module, "sandbox", installed, executed)
         self._import_manifest_module(manifest.storage_module, "storage", installed, executed)
@@ -148,18 +147,18 @@ class ComponentImportMixin(LifecycleState):
         declared extensions module imported, a validation failure is genuine manifest
         misconfiguration and stays a loud abort.
         """
-        manifest = self._require_live_manifest()
+        manifest = self._require_manifest()
         for extension in manifest.extensions_modules or []:
             self._import_manifest_module(extension, "extensions", installed, executed)
         self._extension_registry.validation()
 
     def _import_tool_modules(self, installed: "InstalledPackages", executed: set[str]) -> None:
         """Import the tools modules, aborting boot on the first module that cannot load."""
-        manifest = self._require_live_manifest()
+        manifest = self._require_manifest()
         for cfg in manifest.tools:
             self._import_manifest_module(cfg.module, "tools", installed, executed)
 
-    def _load_manifest_mcps(self) -> None:
+    async def _load_manifest_mcps(self) -> None:
         """Probe and bind the manifest's MCP servers, recording the failed ones.
 
         Then prune the passive health store to the CONFIGURED titles.
@@ -169,14 +168,14 @@ class ComponentImportMixin(LifecycleState):
         epoch build against the CONFIGURED titles (a failed/unavailable title keeps
         its history), so an empty manifest clears the store.
         """
-        manifest = self._require_live_manifest()
+        manifest = self._require_manifest()
         if manifest.mcp:
 
             async def probe_and_read_preset_names():
                 probed = await self._load_mcps()
                 return probed, await self.preset_manager.stored_preset_names()
 
-            (successes, failures), preset_names = run_blocking(probe_and_read_preset_names)
+            (successes, failures), preset_names = await probe_and_read_preset_names()
 
             for cfg, tools in successes:
                 self._mcp_tools(cfg, tools, preset_names)

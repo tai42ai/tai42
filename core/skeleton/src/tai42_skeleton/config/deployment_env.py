@@ -45,12 +45,12 @@ last read them (at boot, its own deployment env) and logs a WARNING. A worker jo
 bus, receiving a join announcement or reconnecting reads the census strictly and fails that step
 when it cannot. It withdraws the applied stored keys the fleet owns and, when it withdrew any,
 rebuilds its serving generation through a config reload; a withdraw that takes away a value
-locating the bus it is a member of ends the process with an ERROR instead. On joining the bus a worker publishes a
-``deployment_keys_changed`` fleet op, on which every other worker does the same and reports the
-recycle-class keys it withdrew but still runs on; the joining worker rolls a recycle over exactly
-those workers, one at a time, and recycles itself last when its own withdraw left a recycle-class
-key. With no bus the fleet is this process. A worker the deployment did not give a value runs that
-setting's default.
+locating the bus it is a member of ends the process with an ERROR instead. On joining the bus a
+worker publishes a ``deployment_keys_changed`` fleet op, on which every other worker does the same
+and reports every recycle-class key it still runs on off its effective value, as every reload
+reports; the joining worker decides from those replies and its own resync reload which workers need
+a restart and rolls a recycle over them, one at a time, itself last. With no bus the fleet is this
+process. A worker the deployment did not give a value runs that setting's default.
 """
 
 from __future__ import annotations
@@ -75,8 +75,6 @@ from tai42_skeleton.app.boot_rules import ConfigInvariantError
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping, Sequence
-
-    from tai42_kit.settings import SettingsFieldRef
 
     from tai42_skeleton.app.bus import WorkerRow
 
@@ -105,11 +103,12 @@ _captured: dict[str, str] | None = None
 
 # The names this process's deployment env sets, sorted, as its presence row publishes them;
 # ``None`` until the capture. One immutable value, replaced whole, because the bus heartbeat
-# thread reads it.
+# reads it, from a thread of its own where the process's threads are OS threads.
 _published: tuple[str, ...] | None = None
 
 # This process's env readers as its presence row publishes them; ``None`` until the capture.
-# One immutable value, replaced whole, because the bus heartbeat thread reads it.
+# One immutable value, replaced whole, because the bus heartbeat reads it, from a thread of its
+# own where the process's threads are OS threads.
 _published_readers: PublishedEnvReaders | None = None
 
 # Reader descriptions by digest: this process's own and those of the rows the last census read found.
@@ -187,6 +186,11 @@ def _require_captured() -> dict[str, str]:
     return _captured
 
 
+def captured_deployment_env() -> dict[str, str]:
+    """A copy of the captured deployment env; raises when the cold-boot env bridge has not captured it yet."""
+    return dict(_require_captured())
+
+
 def deployment_env_value(key: str) -> str | None:
     """The value ``key`` had in the deployment env, empty included; ``None`` when the deployment did not carry it."""
     return _require_captured().get(key)
@@ -238,10 +242,6 @@ class DeploymentOwnership:
         self._folded = frozenset(fold_env_name(key) for key in self._keys)
         self._index = _ownership_index(fleet_readers or {})
         self._fields = frozenset(field for key in self._keys for field in self._index.fields_set_by(key))
-
-    def fields_set_by(self, key: str) -> frozenset[SettingsFieldRef]:
-        """Every field of the ownership's env readers the env name ``key`` sets; empty when it sets none."""
-        return self._index.fields_set_by(key)
 
     def owns(self, key: str) -> bool:
         """Whether ``key`` is set by the deployment."""

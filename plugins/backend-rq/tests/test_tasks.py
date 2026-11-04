@@ -2,17 +2,12 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from rq.exceptions import NoSuchJobError
-from tai42_contract.access_control import caller_may_read_secrets
 from tai42_contract.interactions import SuspendedInteraction
 from tai42_kit.backend import CallbackSchema
-from tai42_kit.settings import reset_all_settings
-from tai42_kit.utils.detached_util import in_detached_run
 from tai42_kit.utils.schedule_subject import (
     SCHEDULE_EXECUTION_FINGERPRINT_ARG,
     SCHEDULE_EXECUTION_KEY_ARG,
@@ -36,37 +31,10 @@ _FORWARDED = {
 _CARRIED = {WORKER_SECRET_CAPABILITY_ARG: False}
 
 
-async def _noop_shutdown() -> None:
-    pass
-
-
-class _FakeQueue:
-    """Records the jobs the enqueue path submits, without touching Redis."""
-
-    def __init__(self, name: str, connection: Any = None) -> None:
-        self.calls: list[SimpleNamespace] = []
-
-    def enqueue(self, func: Any, args: Any = None, kwargs: Any = None, ttl: Any = None, depends_on: Any = None) -> Any:
-        self.calls.append(SimpleNamespace(func=func, args=args, kwargs=kwargs, depends_on=depends_on))
-        return SimpleNamespace(id="job-1")
-
-    def enqueue_at(self, when: Any, func: Any, args: Any = None, kwargs: Any = None, ttl: Any = None) -> Any:
-        return self.enqueue(func, args=args, kwargs=kwargs, ttl=ttl)
-
-    def enqueue_in(self, delta: Any, func: Any, args: Any = None, kwargs: Any = None, ttl: Any = None) -> Any:
-        return self.enqueue(func, args=args, kwargs=kwargs, ttl=ttl)
-
-
 # --- tool_execution ----------------------------------------------------------
 
 
-async def test_tool_execution_dispatches_and_closes_clients(app, monkeypatch):
-    closed: list[bool] = []
-
-    async def fake_shutdown() -> None:
-        closed.append(True)
-
-    monkeypatch.setattr(tasks, "shutdown_all_clients", fake_shutdown)
+async def test_tool_execution_dispatches_the_tool(app):
     app.tools.run_result = {"out": 1}
 
     arg_name = rq_settings().tool_name_arg
@@ -74,7 +42,6 @@ async def test_tool_execution_dispatches_and_closes_clients(app, monkeypatch):
 
     assert result == {"out": 1}
     assert app.tools.run_calls == [("my_tool", {"x": 5})]
-    assert closed == [True]
 
 
 def test_enqueue_serializer_refuses_secret_value_payload():
@@ -90,79 +57,12 @@ def test_enqueue_serializer_refuses_secret_value_payload():
     assert "tok-4242-xyzzy" not in str(excinfo.value)
 
 
-async def test_tool_execution_runs_the_tool_detached(app, monkeypatch):
-    # A worker execution has no live caller, so the tool observes the detached
-    # flag set; the flag never leaks past the job.
-    async def fake_shutdown() -> None:
-        pass
-
-    monkeypatch.setattr(tasks, "shutdown_all_clients", fake_shutdown)
-
-    arg_name = rq_settings().tool_name_arg
-    await tasks.tool_execution(**{arg_name: "my_tool", WORKER_SECRET_CAPABILITY_ARG: False, "x": 5})
-
-    assert app.tools.detached_seen == [True]
-    assert app.tools.offloads == [True]
-    assert in_detached_run() is False
-
-
-@pytest.mark.parametrize("capability", [True, False])
-async def test_tool_execution_binds_the_carried_capability(app, monkeypatch, capability: bool):
-    # The worker binds the capability the job carried verbatim, never passes the reserved
-    # kwarg to the tool, and the bind never leaks past the job.
-    async def fake_shutdown() -> None:
-        pass
-
-    monkeypatch.setattr(tasks, "shutdown_all_clients", fake_shutdown)
-
-    arg_name = rq_settings().tool_name_arg
-    await tasks.tool_execution(**{arg_name: "my_tool", WORKER_SECRET_CAPABILITY_ARG: capability, "x": 5})
-
-    assert app.tools.secret_capability_seen == [capability]
-    assert app.tools.run_calls == [("my_tool", {"x": 5})]
-    assert caller_may_read_secrets() is False
-
-
-async def test_tool_execution_without_a_carried_capability_raises(app, monkeypatch):
-    async def fake_shutdown() -> None:
-        pass
-
-    monkeypatch.setattr(tasks, "shutdown_all_clients", fake_shutdown)
-
-    arg_name = rq_settings().tool_name_arg
-    with pytest.raises(KeyError, match=WORKER_SECRET_CAPABILITY_ARG):
-        await tasks.tool_execution(**{arg_name: "my_tool", "x": 5})
-    assert app.tools.run_calls == []
-
-
-async def test_tool_execution_missing_tool_name_raises_but_still_cleans_up(app, monkeypatch):
-    closed: list[bool] = []
-
-    async def fake_shutdown() -> None:
-        closed.append(True)
-
-    monkeypatch.setattr(tasks, "shutdown_all_clients", fake_shutdown)
-
-    with pytest.raises(KeyError):
-        await tasks.tool_execution(x=5)
-    # The kwargs were malformed before dispatch; no cleanup ran because no
-    # clients could have been opened yet — the pop happens outside the try.
-    assert closed == []
-
-
-async def test_tool_execution_closes_clients_on_tool_failure(app, monkeypatch):
-    closed: list[bool] = []
-
-    async def fake_shutdown() -> None:
-        closed.append(True)
-
-    monkeypatch.setattr(tasks, "shutdown_all_clients", fake_shutdown)
+async def test_tool_execution_raises_the_tool_s_error(app):
     app.tools.run_error = RuntimeError("tool blew up")
 
     arg_name = rq_settings().tool_name_arg
     with pytest.raises(RuntimeError, match="tool blew up"):
         await tasks.tool_execution(**{arg_name: "my_tool", WORKER_SECRET_CAPABILITY_ARG: False})
-    assert closed == [True]
 
 
 # --- callback_job ------------------------------------------------------------
@@ -199,6 +99,9 @@ class FakeFetchedJob:
     def return_value(self) -> Any:
         return self._value
 
+    def get_status(self) -> str:
+        return "started"
+
 
 def _patch_job_fetch(monkeypatch, job: FakeFetchedJob | Exception) -> None:
     class FakeJobClass:
@@ -227,24 +130,24 @@ async def test_callback_job_runs_callback_on_success(monkeypatch):
     assert seen == [({"n": 3}, callback)]
 
 
-async def test_callback_job_reports_failed_primary_with_exc_string(monkeypatch):
-    """The reported error is the Result's persisted traceback text, not the
+async def test_callback_job_raises_on_a_failed_primary_with_exc_string(monkeypatch):
+    """The raised error carries the Result's persisted traceback text, not the
     Result object's repr."""
     _patch_job_fetch(monkeypatch, FakeFetchedJob(failed=True))
-    result = await tasks.callback_job("job-1", CallbackSchema(tool="t", carried_kwargs=_CARRIED))
-    assert result == {"status": "failure", "job_id": "job-1", "error": "job failed hard"}
+    with pytest.raises(RuntimeError, match=r"^callback predecessor job job-1 failed: job failed hard$"):
+        await tasks.callback_job("job-1", CallbackSchema(tool="t", carried_kwargs=_CARRIED))
 
 
-async def test_callback_job_failed_primary_without_exc_string_falls_back(monkeypatch):
+async def test_callback_job_failed_primary_without_exc_string_names_the_result(monkeypatch):
     _patch_job_fetch(monkeypatch, FakeFetchedJob(failed=True, exc_string=None))
-    result = await tasks.callback_job("job-1", CallbackSchema(tool="t", carried_kwargs=_CARRIED))
-    assert result == {"status": "failure", "job_id": "job-1", "error": "Result(id=r-1, type=FAILED)"}
+    with pytest.raises(RuntimeError, match=r"failed: Result\(id=r-1, type=FAILED\)$"):
+        await tasks.callback_job("job-1", CallbackSchema(tool="t", carried_kwargs=_CARRIED))
 
 
-async def test_callback_job_reports_unfinished_primary(monkeypatch):
+async def test_callback_job_raises_on_an_unfinished_primary(monkeypatch):
     _patch_job_fetch(monkeypatch, FakeFetchedJob(finished=False))
-    result = await tasks.callback_job("job-1", CallbackSchema(tool="t", carried_kwargs=_CARRIED))
-    assert result == {"status": "not_finished", "job_id": "job-1", "error": "Job not completed"}
+    with pytest.raises(RuntimeError, match=r"^callback predecessor job job-1 is still started$"):
+        await tasks.callback_job("job-1", CallbackSchema(tool="t", carried_kwargs=_CARRIED))
 
 
 async def test_callback_job_missing_primary_raises(monkeypatch):
@@ -253,182 +156,12 @@ async def test_callback_job_missing_primary_raises(monkeypatch):
         await tasks.callback_job("job-1", CallbackSchema(tool="t", carried_kwargs=_CARRIED))
 
 
-async def test_callback_job_closes_clients_on_success(monkeypatch):
-    """Like ``tool_execution``, the job runs on its own fresh event loop, so
-    the pooled clients bound to that loop must be closed before it ends."""
-    closed: list[bool] = []
-
-    async def fake_shutdown() -> None:
-        closed.append(True)
-
-    monkeypatch.setattr(tasks, "shutdown_all_clients", fake_shutdown)
-    _patch_job_fetch(monkeypatch, FakeFetchedJob(value={"n": 1}))
-
-    async def fake_callback_execution(result: Any, callback: Any) -> str:
-        return "chained"
-
-    monkeypatch.setattr(tasks, "callback_execution", fake_callback_execution)
-
-    assert await tasks.callback_job("job-1", CallbackSchema(tool="t", carried_kwargs=_CARRIED)) == "chained"
-    assert closed == [True]
-
-
-async def test_callback_job_closes_clients_when_it_raises(monkeypatch):
-    closed: list[bool] = []
-
-    async def fake_shutdown() -> None:
-        closed.append(True)
-
-    monkeypatch.setattr(tasks, "shutdown_all_clients", fake_shutdown)
-    _patch_job_fetch(monkeypatch, NoSuchJobError("gone"))
-
-    with pytest.raises(NoSuchJobError):
-        await tasks.callback_job("job-1", CallbackSchema(tool="t", carried_kwargs=_CARRIED))
-    assert closed == [True]
-
-
-# --- enqueue_task ------------------------------------------------------------
-
-
-class FakeEnqueuedJob:
-    def __init__(self, job_id: str = "job-1") -> None:
-        self.id = job_id
-
-
-class FakeQueue:
-    def __init__(self, name: Any = None, connection: Any = None) -> None:
-        self.name = name
-        self.calls: list[tuple[str, Any]] = []
-
-    def enqueue(self, func: Any, *args: Any, **kwargs: Any) -> FakeEnqueuedJob:
-        self.calls.append(("enqueue", (func, args, kwargs)))
-        return FakeEnqueuedJob(f"job-{len(self.calls)}")
-
-    def enqueue_at(self, when: datetime, func: Any, *args: Any, **kwargs: Any) -> FakeEnqueuedJob:
-        self.calls.append(("enqueue_at", (when, func, args, kwargs)))
-        return FakeEnqueuedJob()
-
-    def enqueue_in(self, delta: timedelta, func: Any, *args: Any, **kwargs: Any) -> FakeEnqueuedJob:
-        self.calls.append(("enqueue_in", (delta, func, args, kwargs)))
-        return FakeEnqueuedJob()
-
-
-@pytest.fixture
-def queue(monkeypatch) -> FakeQueue:
-    fake_queue = FakeQueue()
-
-    def make_queue(name: Any = None, connection: Any = None) -> FakeQueue:
-        fake_queue.name = name
-        return fake_queue
-
-    monkeypatch.setattr(tasks, "TaskBudgetQueue", make_queue)
-    monkeypatch.setattr(tasks, "client_ctx", make_client_ctx(object()))
-    return fake_queue
-
-
-async def test_enqueue_task_binds_the_settings_queue_name(queue, monkeypatch):
-    """The enqueue queue name is the ``queue_name`` setting, so the enqueue side
-    and the worker's consume side name the SAME per-stack queue."""
-    monkeypatch.setenv("RQ_QUEUE_NAME", "tai42_e2e_abc123:default")
-    reset_all_settings()
-    try:
-        await tasks.enqueue_task(a=1)
-    finally:
-        reset_all_settings()
-    assert queue.name == "tai42_e2e_abc123:default"
-
-
-async def test_enqueue_task_plain(queue):
-    job = await tasks.enqueue_task(a=1)
-    assert job.id == "job-1"
-    [(kind, (func, _args, opts))] = queue.calls
-    assert kind == "enqueue"
-    assert func is tasks.tool_execution
-    assert opts == {"args": (), "kwargs": {"a": 1}, "ttl": None}
-
-
-async def test_enqueue_task_passes_tool_kwargs_explicitly(queue):
-    """Tool kwargs travel in the explicit ``kwargs=`` slot: a name colliding
-    with an rq job option (``description``/``meta``/...) must reach the tool,
-    not be consumed as a job option."""
-    await tasks.enqueue_task(description="user text", meta={"m": 1})
-    [(_kind, (_func, _args, opts))] = queue.calls
-    assert opts["kwargs"] == {"description": "user text", "meta": {"m": 1}}
-
-
-async def test_enqueue_task_eta_maps_to_enqueue_at(queue):
-    eta = datetime(2030, 1, 1, tzinfo=UTC)
-    await tasks.enqueue_task(a=1, eta=eta.isoformat(), expires=90.5)
-    [(kind, (when, _func, _args, opts))] = queue.calls
-    assert kind == "enqueue_at"
-    assert when == eta
-    assert opts == {"args": (), "kwargs": {"a": 1}, "ttl": 90}
-
-
-async def test_enqueue_task_countdown_maps_to_enqueue_in(queue):
-    await tasks.enqueue_task(a=1, countdown=30)
-    [(kind, (delta, _func, _args, _opts))] = queue.calls
-    assert kind == "enqueue_in"
-    assert delta == timedelta(seconds=30)
-
-
-async def test_enqueue_task_chains_callback_job(queue):
-    callback = CallbackSchema(tool="next", carried_kwargs=_CARRIED)
-    job = await tasks.enqueue_task(a=1, callback_kwargs=callback)
-
-    assert [kind for kind, _ in queue.calls] == ["enqueue", "enqueue"]
-    _, (func, args, opts) = queue.calls[1]
-    assert func is tasks.callback_job
-    assert args == ()
-    assert opts == {"args": (job.id, callback), "depends_on": job}
-
-
-async def test_enqueue_task_none_options_are_dropped(queue):
-    await tasks.enqueue_task(a=1, countdown=None, eta=None, expires=None, callback_kwargs=None)
-    [(kind, _)] = queue.calls
-    assert kind == "enqueue"
-
-
-# --- the callback carries the followed run's door context --------------------
-
-
-async def test_enqueue_carries_the_forwarded_pair_onto_the_callback(app, monkeypatch):
-    # A task fired from within a door forwards its subject/identity onto the job; the callback runs as a
-    # SEPARATE dependent job, so the same pair is carried on its spec or the follow-up loses the door.
-    queue = _FakeQueue("q")
-    monkeypatch.setattr(tasks, "TaskBudgetQueue", lambda name, connection=None: queue)
-    monkeypatch.setattr(tasks, "client_ctx", make_client_ctx(object()))
-    await tasks.enqueue_task(backend_tool_name="greet", callback_kwargs=CallbackSchema(tool="next"), **_FORWARDED)
-    callback_call = queue.calls[1]
-    assert callback_call.func is tasks.callback_job
-    (_, enqueued_callback) = callback_call.args
-    assert enqueued_callback.carried_kwargs == {**_FORWARDED, **_CARRIED}
-
-
-@pytest.mark.parametrize(("gate_enabled", "capability"), [(True, False), (False, True)])
-async def test_enqueue_carries_the_gate_state_onto_a_plain_callback(
-    app, monkeypatch, access_control, gate_enabled: bool, capability: bool
-):
-    # A plain background task forwards no door context; its callback still carries the gate state
-    # decided in this, the submitting process: ON fail-closes, OFF is the synthetic admin.
-    access_control(gate_enabled)
-    queue = _FakeQueue("q")
-    monkeypatch.setattr(tasks, "TaskBudgetQueue", lambda name, connection=None: queue)
-    monkeypatch.setattr(tasks, "client_ctx", make_client_ctx(object()))
-    await tasks.enqueue_task(
-        backend_tool_name="greet",
-        backend_secret_capability=True,
-        callback_kwargs=CallbackSchema(tool="next"),
-        text="hi",
-    )
-    (_, enqueued_callback) = queue.calls[1].args
-    assert enqueued_callback.carried_kwargs == {WORKER_SECRET_CAPABILITY_ARG: capability}
+# --- the callback runs under the followed run's door context ---------------
 
 
 async def test_callback_job_that_asks_parks_under_the_forwarded_identity(app, monkeypatch):
     # A dequeued callback whose tool asks parks under the carried identity + subject and hands back the
     # re-park sentinel — the ask is never returned as the callback's value.
-    monkeypatch.setattr(tasks, "shutdown_all_clients", _noop_shutdown)
     _patch_job_fetch(monkeypatch, FakeFetchedJob(value={"value": 3}))
     sentinel = SuspendedInteraction(interaction_id="i-1", caller_interaction_ids=["i-1"])
     app.interactions.park_sentinel = sentinel

@@ -1704,8 +1704,17 @@ class _RecordingBus:
             raise self.census_error
         return dict.fromkeys(sorted(self.live), 1)
 
-    async def subscribe(self, callback: Any, on_ready: Any = None) -> None:
+    async def subscribe(self, callback: Any, on_ready: Any = None, failure_payload: Any = None) -> None:
         await asyncio.Event().wait()
+
+    def stop_began(self, reason: str) -> bool:
+        return True
+
+    async def leaving_announced(self) -> None:
+        return None
+
+    async def leave_census(self) -> None:
+        return None
 
     async def census(self) -> list[WorkerRow]:
         return [self._row]

@@ -2,7 +2,7 @@
 
 A Celery prefork worker forks children that inherit the tool registry at fork
 time, so a bus op that mutates this process's registry has not truly applied
-until the pool re-forks. :func:`turnover_local_pool` re-forks the local pool and
+until the pool re-forks. :meth:`PoolTurnover.turnover_local_pool` re-forks the local pool and
 confirms it: it polls ``stats`` and ``active`` until every idle pre-restart child
 is gone and the pool is back to full size, and raises otherwise (a bare
 ``pool_restart`` returns once the restart is only armed). A pre-restart child busy
@@ -18,12 +18,23 @@ its share of the budget, the pre-restart children are killed outright so the poo
 re-forks them. The re-fork is always the mechanism — the children are never
 reloaded in place — and the same confirmation decides the verdict either way.
 
+A worker that leaves (:meth:`PoolTurnover.mark_worker_leaving`, called when its drain is
+requested and when its run body ends) abandons every turnover in flight and every
+one that starts after: its consumer stops, so no control command is answered any
+more, and its pool takes no new work, so no pre-op child serves another job. The
+abandoned turnover is logged at WARNING and returns within one poll, rather than
+polling a consumer that is gone for the rest of its budget and holding the process
+exit on its thread. A control call the leave left unanswered is reported the same
+way, with its error, rather than failing the op for a pool the leave is draining.
+
 Only the Celery-shaped half lives here. WHICH bus ops warrant a turnover, the
 ``budget`` the whole turnover must land inside (sized under the bus apply window),
 and the manifest env the re-forked children inherit are all host-shaped, so the
 shared backend base owns them and hands the budget in.
-:func:`register` is worker-scoped — called from the worker runtime's ``build``,
-never at import — and the turnover no-ops on a non-prefork pool.
+The worker runtime makes one :class:`PoolTurnover` for the app it runs and registers it from its
+``build``, never at import; the turnover's state lives on that object, so a config reload that
+re-imports this module leaves the runtime's turnover whole. The turnover no-ops on a non-prefork
+pool.
 """
 
 from __future__ import annotations
@@ -35,11 +46,12 @@ import threading
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from celery import signals
 
-from tai42_backend_celery.core.app import celery_app
+if TYPE_CHECKING:
+    from celery import Celery
 
 logger = logging.getLogger(__name__)
 
@@ -56,170 +68,329 @@ _POOL_RECYCLE_POLL_INTERVAL = 0.5
 # letting the bus ack time out.
 _RESTART_PROPAGATION_SHARE = 0.5
 
-# This worker's own node name (captured at setup) and a flag set once the worker
-# is consuming control commands. The handler addresses ``pool_restart`` / ``stats``
-# to this name.
-_local_nodename: str | None = None
-_worker_ready = threading.Event()
+# The longest a turnover waiting on its own (for the worker to start consuming, for
+# the restart to propagate) goes before it looks again at whether the worker left.
+_LEAVE_CHECK_INTERVAL = 0.2
 
 
-def register() -> None:
-    """Prepare this worker process for pool turnover.
+class _WorkerLeavingError(Exception):
+    """Raised inside a turnover once this worker leaves; :meth:`PoolTurnover.turnover_local_pool` reports it."""
 
-    Worker-scoped, called from the worker runtime's ``build``, never at import:
-    connects the setup/ready signals that tell :func:`turnover_local_pool` who to
-    address and when. The post-apply hook itself is not wired here — the shared backend base owns
-    which ops warrant a turnover and drives this module through the runtime.
+
+class PoolTurnover:
+    """The prefork-pool turnover of the worker process that runs ``app``.
+
+    It holds this worker's own node name (captured at setup), a flag set once the worker is
+    consuming control commands, and a flag set once the worker leaves, which never unsets, as the
+    process launches once. The turnover addresses ``pool_restart`` / ``stats`` to the node name,
+    over ``app``'s broker.
     """
-    signals.celeryd_after_setup.connect(_record_local_nodename)
-    signals.worker_ready.connect(_mark_worker_ready)
 
+    def __init__(self, app: Celery) -> None:
+        """Start with no node name, and with the worker neither ready nor leaving."""
+        self._app = app
+        self._local_nodename: str | None = None
+        self._worker_ready = threading.Event()
+        self._worker_leaving = threading.Event()
 
-def _record_local_nodename(sender: Any = None, instance: Any = None, **kwargs: Any) -> None:
-    """Capture this worker's node name from the ``celeryd_after_setup`` signal."""
-    global _local_nodename
-    name = getattr(instance, "hostname", None) or sender
-    if name:
-        _local_nodename = str(name)
+    def register(self) -> None:
+        """Prepare this worker process for pool turnover.
 
-
-def _mark_worker_ready(sender: Any = None, **kwargs: Any) -> None:
-    """Mark the worker ready to answer control commands.
-
-    So the turnover only runs once the local pidbox is consuming.
-    """
-    _worker_ready.set()
-
-
-def turnover_local_pool(reason: str, budget: float) -> None:
-    """Restart the local prefork pool within ``budget`` seconds and confirm the whole pool re-forked.
-
-    Blocking (control I/O), so the caller runs it off the serving loop; a raise
-    propagates, failing the op named by ``reason``. ``budget`` is the caller's:
-    the whole turnover — the wait for a consuming
-    worker, the restart, the kill guard and the confirmation — is spent inside it,
-    so a stall reports a truthful ``failed`` before the caller's own window closes.
-
-    No-op for a non-prefork pool and before the worker reaches setup
-    (``_local_nodename`` is ``None`` — its next-forked children inherit the post-op
-    registry). A worker that reached setup but is not yet consuming control
-    commands may have a bootstrap child forked from the pre-op registry it cannot
-    yet recycle, so the turnover WAITS (bounded by the budget) for it to start
-    consuming, then recycles; a worker that never starts consuming raises loudly.
-    """
-    if _local_nodename is None:
-        logger.debug("prefork turnover skipped for %s: worker has not reached setup (no forked pool yet)", reason)
-        return
-    deadline = time.monotonic() + budget
-    if not _worker_ready.is_set() and not _worker_ready.wait(timeout=budget):
-        raise RuntimeError(
-            f"[{_local_nodename}] worker did not start consuming control commands within {budget}s; "
-            "cannot recycle a possibly-stale prefork pool after a mutating bus op"
+        Worker-scoped, called from the worker runtime's ``build``, never at import:
+        connects the setup/ready signals that tell :meth:`turnover_local_pool` who to
+        address and when, held strongly under a ``dispatch_uid`` naming this turnover, so a
+        second call adds nothing. The post-apply hook itself is not wired here — the shared
+        backend base owns which ops warrant a turnover and drives this object through the runtime.
+        """
+        signals.celeryd_after_setup.connect(
+            self._record_local_nodename, weak=False, dispatch_uid=f"tai42-celery-turnover-setup-{id(self)}"
         )
-    hostname = _local_nodename
-    before = _prefork_pool_state(hostname)
-    if before is None:
-        return
-    _restart_pool_and_confirm(hostname, before, max(0.0, deadline - time.monotonic()))
+        signals.worker_ready.connect(
+            self._mark_worker_ready, weak=False, dispatch_uid=f"tai42-celery-turnover-ready-{id(self)}"
+        )
+
+    def _record_local_nodename(self, sender: Any = None, instance: Any = None, **kwargs: Any) -> None:
+        """Capture this worker's node name from the ``celeryd_after_setup`` signal."""
+        name = getattr(instance, "hostname", None) or sender
+        if name:
+            self._local_nodename = str(name)
+
+    def _mark_worker_ready(self, sender: Any = None, **kwargs: Any) -> None:
+        """Mark the worker ready to answer control commands.
+
+        So the turnover only runs once the local pidbox is consuming.
+        """
+        self._worker_ready.set()
+
+    def mark_worker_leaving(self) -> None:
+        """Mark this worker as leaving: every turnover in flight, and every later one, is abandoned.
+
+        Called from the worker's drain request and from the end of its run body. Never
+        blocks and is idempotent, so the drain request may call it from the serving loop.
+        """
+        self._worker_leaving.set()
+
+    def _raise_if_leaving(self) -> None:
+        if self._worker_leaving.is_set():
+            raise _WorkerLeavingError
+
+    def _wait_unless_leaving(self, event: threading.Event, timeout: float) -> bool:
+        """Wait at most ``timeout`` for ``event``; raise :class:`_WorkerLeavingError` once this worker leaves."""
+        deadline = time.monotonic() + timeout
+        while True:
+            self._raise_if_leaving()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return event.is_set()
+            if event.wait(min(_LEAVE_CHECK_INTERVAL, remaining)):
+                return True
+
+    def turnover_local_pool(self, reason: str, budget: float) -> None:
+        """Restart the local prefork pool within ``budget`` seconds and confirm the whole pool re-forked.
+
+        Blocking (control I/O), so the caller runs it off the serving loop; a raise
+        propagates, failing the op named by ``reason``. ``budget`` is the caller's:
+        the whole turnover — the wait for a consuming
+        worker, the restart, the kill guard and the confirmation — is spent inside it,
+        so a stall reports a truthful ``failed`` before the caller's own window closes.
+
+        No-op for a non-prefork pool and before the worker reaches setup
+        (no node name captured yet — its next-forked children inherit the post-op
+        registry). A worker that reached setup but is not yet consuming control
+        commands may have a bootstrap child forked from the pre-op registry it cannot
+        yet recycle, so the turnover WAITS (bounded by the budget) for it to start
+        consuming, then recycles; a worker that never starts consuming raises loudly.
+
+        A worker that leaves abandons the turnover (see the module docstring): it is
+        logged at WARNING and returns, since a leaving worker's pool takes no new work.
+        A leave stops this worker's consumer and leaves the turnover's own short-lived
+        control connection open, so what it causes is a control call left unanswered,
+        which the turnover raises as a ``RuntimeError``. A ``RuntimeError`` raised once
+        the worker has left is that leave's, so it is logged with the abandonment
+        instead of failing the op; any other failure, a broker transport error among
+        them, propagates.
+        """
+        hostname = self._local_nodename
+        if hostname is None:
+            logger.debug("prefork turnover skipped for %s: worker has not reached setup (no forked pool yet)", reason)
+            return
+        try:
+            self._turn_over(hostname, budget)
+        except _WorkerLeavingError:
+            _report_abandoned(hostname, reason, None)
+        except RuntimeError as exc:
+            if not self._worker_leaving.is_set():
+                raise
+            _report_abandoned(hostname, reason, exc)
+
+    def _turn_over(self, hostname: str, budget: float) -> None:
+        """Wait for a consuming worker, then restart its prefork pool and confirm it, all inside ``budget``."""
+        deadline = time.monotonic() + budget
+        if not self._wait_unless_leaving(self._worker_ready, budget):
+            raise RuntimeError(
+                f"[{hostname}] worker did not start consuming control commands within {budget}s; "
+                "cannot recycle a possibly-stale prefork pool after a mutating bus op"
+            )
+        before = self._prefork_pool_state(hostname)
+        if before is None:
+            return
+        self._restart_pool_and_confirm(hostname, before, max(0.0, deadline - time.monotonic()))
+
+    @contextmanager
+    def _control_connection(self) -> Iterator[Any]:
+        """A fresh, short-lived broker connection for one turnover control call, never the app's shared pool.
+
+        The pooled connection is inherited by the prefork children, and
+        ``pool_restart`` terminating them would break the parent's next write over it.
+        """
+        with self._app.connection_for_write() as conn:
+            yield conn
+
+    def _prefork_pool_state(self, hostname: str) -> tuple[set[int], int] | None:
+        """This worker's prefork pool state ``(child_pids, max_concurrency)`` from a single ``stats`` call.
+
+        ``None`` when the pool is not prefork (no forked children to recycle). A
+        worker that does not answer ``stats``, or answers without a pool section,
+        raises: its turnover cannot be verified.
+        """
+        self._raise_if_leaving()
+        with self._control_connection() as conn:
+            stats = (
+                self._app.control.inspect(
+                    destination=[hostname], timeout=_POOL_CONTROL_TIMEOUT, limit=1, connection=conn
+                ).stats()
+                or {}
+            )
+        cfg = stats.get(hostname)
+        if not isinstance(cfg, dict):
+            raise RuntimeError(f"worker {hostname} did not answer stats; cannot verify its pool for turnover")  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
+        pool = cfg.get("pool")
+        if not isinstance(pool, dict):
+            raise RuntimeError(f"worker {hostname} stats carried no pool section; cannot verify turnover")  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
+        if "prefork" not in str(pool.get("implementation", "")).lower():
+            return None
+        pids = _pool_pids(pool)
+        max_conc = pool.get("max-concurrency")
+        return pids, max_conc if isinstance(max_conc, int) and max_conc > 0 else len(pids)
+
+    def _restart_pool(self, hostname: str) -> None:
+        """Arm this worker's pool restart.
+
+        The turnover itself is confirmed by :meth:`_confirm_turnover`.
+        """
+        with self._control_connection() as conn:
+            replies = self._app.control.broadcast(
+                "pool_restart",
+                arguments={"reload": False},
+                reply=True,
+                destination=[hostname],
+                timeout=_POOL_RESTART_TIMEOUT,
+                # One addressed worker, one reply: return on it, not the full timeout.
+                limit=1,
+                connection=conn,
+            )
+        reply = next(iter(replies or []), {}).get(hostname, {})
+        if not (isinstance(reply, dict) and "ok" in reply):
+            raise RuntimeError(f"pool restart request failed for {hostname}: {reply!r}")
+
+    def _restart_pool_and_confirm(self, hostname: str, before: tuple[set[int], int], budget: float) -> None:
+        """Re-fork the pool within ``budget``, confirming the turnover either way.
+
+        Arms the restart under a bound, kills the pre-restart children if that wedges,
+        and confirms the turnover either way. The restart carries no hard bound of its
+        own — the control call bounds only the
+        reply drain, not the publish nor the pool-side apply, and the apply can wedge
+        indefinitely inside billiard on the pool parent's ``_putlock``. So the arm gets
+        a share of the budget and the rest pays for the hard path, which is the same
+        re-fork by a harsher route. :meth:`_confirm_turnover` is the verdict in both
+        cases, and it raises when the pool did not turn over.
+        """
+        deadline = time.monotonic() + budget
+        propagation_timeout = _restart_propagation_timeout(budget)
+        wedged = not self._await_restart(hostname, propagation_timeout)
+        # A leaving worker's drain takes its children down: the kill guard and the
+        # confirmation are for a pool that stays.
+        self._raise_if_leaving()
+        if wedged:
+            logger.error(
+                "[%s] pool_restart did not return within %.2fs — wedged inside billiard (pool parent's _putlock); "
+                "killing pre-restart pool children %s so the pool re-forks",
+                hostname,
+                propagation_timeout,
+                sorted(before[0]),
+            )
+            _kill_pool_children(hostname, before[0])
+        try:
+            self._confirm_turnover(hostname, before, max(0.0, deadline - time.monotonic()))
+        except RuntimeError as exc:
+            if wedged:
+                raise RuntimeError(
+                    f"[{hostname}] pool_restart wedged inside billiard (_putlock) and killing its children did not "
+                    f"bring the pool back either: {exc}"
+                ) from exc
+            raise
+
+    def _await_restart(self, hostname: str, timeout: float) -> bool:
+        """Run :meth:`_restart_pool` on a watchdog thread, waiting at most ``timeout``.
+
+        Returns ``False`` when the call has not returned by the bound. It then stays
+        wedged on its own daemon thread — a Python thread cannot be cancelled — and a
+        reply landing later only re-arms an already-completed turnover. A failure
+        raised by the restart itself surfaces here, in the caller's thread. The wait
+        ends early, raising :class:`_WorkerLeavingError`, once this worker leaves.
+        """
+        failures: list[Exception] = []
+        done = threading.Event()
+
+        def _arm() -> None:
+            # Captured, never raised out of the thread: the caller re-raises it, so the
+            # op fails on the calling stack instead of dying in a thread hook.
+            try:
+                self._restart_pool(hostname)
+            except Exception as exc:
+                failures.append(exc)
+            finally:
+                done.set()
+
+        self._raise_if_leaving()
+        threading.Thread(target=_arm, name=f"tai42-pool-restart[{hostname}]", daemon=True).start()
+        if not self._wait_unless_leaving(done, timeout):
+            return False
+        if failures:
+            raise failures[0]
+        return True
+
+    def _confirm_turnover(self, hostname: str, before: tuple[set[int], int], timeout: float) -> None:
+        """Poll ``stats`` and ``active`` until the pool has turned over, or raise loudly at the deadline.
+
+        Turned over means every IDLE pre-restart child gone AND the pool back to full size.
+        A pre-restart child running a job checks the armed restart before taking its next
+        one, so it finishes the job it holds and exits after it without taking new work on
+        the pre-op registry; it is not waited for (logged at INFO with its pid). This holds
+        the bus reply until no pre-restart child can take a new job, since ``pool_restart``
+        returns once merely armed — a fast follow-up dispatch could still reach an idle
+        pre-restart child. Each poll first checks whether this worker left, and the pause
+        between polls ends at the leave, so a leave ends the confirmation within one poll.
+        """
+        old_pids, max_conc = before
+        idle_survivors = old_pids
+        size = 0
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            self._raise_if_leaving()
+            with self._control_connection() as conn:
+                inspect = self._app.control.inspect(
+                    destination=[hostname], timeout=min(_POOL_CONTROL_TIMEOUT, remaining), limit=1, connection=conn
+                )
+                stats = inspect.stats() or {}
+                cfg = stats.get(hostname)
+                active = inspect.active() if isinstance(cfg, dict) else None
+            if isinstance(cfg, dict) and isinstance(cfg.get("pool"), dict):
+                new_pids = _pool_pids(cfg["pool"])
+                surviving = old_pids & new_pids
+                idle_survivors = surviving - _busy_pids(active or {}, hostname)
+                size = len(new_pids)
+                if not idle_survivors and size >= max_conc:
+                    if surviving:
+                        logger.info(
+                            "[%s] prefork turnover: pre-restart child(ren) %s finish the job they hold and exit "
+                            "after it; no child takes new work on the pre-op registry",
+                            hostname,
+                            sorted(surviving),
+                        )
+                    return
+            nap = min(_POOL_RECYCLE_POLL_INTERVAL, max(0.0, deadline - time.monotonic()))
+            if nap == 0.0:
+                break
+            if self._worker_leaving.wait(nap):
+                raise _WorkerLeavingError
+        if idle_survivors:
+            detail = (
+                f"idle pre-restart children still present: {sorted(idle_survivors)}; they would serve the pre-op "
+                "registry"
+            )
+        else:
+            detail = f"pool came back short: {size}/{max_conc} children"
+        raise RuntimeError(f"[{hostname}] prefork pool did not fully recycle within {timeout}s ({detail})")
 
 
-@contextmanager
-def _control_connection() -> Iterator[Any]:
-    """A fresh, short-lived broker connection for one turnover control call, never the app's shared pool.
-
-    The pooled connection is inherited by the prefork children, and
-    ``pool_restart`` terminating them would break the parent's next write over it.
-    """
-    with celery_app.connection_for_write() as conn:
-        yield conn
+def _report_abandoned(hostname: str, reason: str, failure: RuntimeError | None) -> None:
+    """Log at WARNING a turnover this worker's leave abandoned, with the control failure the leave caused."""
+    logger.warning(
+        "[%s] prefork turnover for %s abandoned: this worker is leaving, so its consumer no longer answers "
+        "control commands and its pool takes no new work%s",
+        hostname,
+        reason,
+        f" ({failure})" if failure is not None else "",
+    )
 
 
 def _pool_pids(pool: dict[str, Any]) -> set[int]:
     """The child PIDs a prefork worker reports in its ``stats`` pool section."""
     return {p for p in pool.get("processes", []) if isinstance(p, int)}
-
-
-def _prefork_pool_state(hostname: str) -> tuple[set[int], int] | None:
-    """This worker's prefork pool state ``(child_pids, max_concurrency)`` from a single ``stats`` call.
-
-    ``None`` when the pool is not prefork (no forked children to recycle). A
-    worker that does not answer ``stats``, or answers without a pool section,
-    raises: its turnover cannot be verified.
-    """
-    with _control_connection() as conn:
-        stats = (
-            celery_app.control.inspect(
-                destination=[hostname], timeout=_POOL_CONTROL_TIMEOUT, limit=1, connection=conn
-            ).stats()
-            or {}
-        )
-    cfg = stats.get(hostname)
-    if not isinstance(cfg, dict):
-        raise RuntimeError(f"worker {hostname} did not answer stats; cannot verify its pool for turnover")  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
-    pool = cfg.get("pool")
-    if not isinstance(pool, dict):
-        raise RuntimeError(f"worker {hostname} stats carried no pool section; cannot verify turnover")  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
-    if "prefork" not in str(pool.get("implementation", "")).lower():
-        return None
-    pids = _pool_pids(pool)
-    max_conc = pool.get("max-concurrency")
-    return pids, max_conc if isinstance(max_conc, int) and max_conc > 0 else len(pids)
-
-
-def _restart_pool(hostname: str) -> None:
-    """Arm this worker's pool restart.
-
-    The turnover itself is confirmed by :func:`_confirm_turnover`.
-    """
-    with _control_connection() as conn:
-        replies = celery_app.control.broadcast(
-            "pool_restart",
-            arguments={"reload": False},
-            reply=True,
-            destination=[hostname],
-            timeout=_POOL_RESTART_TIMEOUT,
-            # One addressed worker, one reply: return on it, not the full timeout.
-            limit=1,
-            connection=conn,
-        )
-    reply = next(iter(replies or []), {}).get(hostname, {})
-    if not (isinstance(reply, dict) and "ok" in reply):
-        raise RuntimeError(f"pool restart request failed for {hostname}: {reply!r}")
-
-
-def _restart_pool_and_confirm(hostname: str, before: tuple[set[int], int], budget: float) -> None:
-    """Re-fork the pool within ``budget``, confirming the turnover either way.
-
-    Arms the restart under a bound, kills the pre-restart children if that wedges,
-    and confirms the turnover either way. The restart carries no hard bound of its
-    own — the control call bounds only the
-    reply drain, not the publish nor the pool-side apply, and the apply can wedge
-    indefinitely inside billiard on the pool parent's ``_putlock``. So the arm gets
-    a share of the budget and the rest pays for the hard path, which is the same
-    re-fork by a harsher route. :func:`_confirm_turnover` is the verdict in both
-    cases, and it raises when the pool did not turn over.
-    """
-    deadline = time.monotonic() + budget
-    propagation_timeout = _restart_propagation_timeout(budget)
-    wedged = not _await_restart(hostname, propagation_timeout)
-    if wedged:
-        logger.error(
-            "[%s] pool_restart did not return within %.2fs — wedged inside billiard (pool parent's _putlock); "
-            "killing pre-restart pool children %s so the pool re-forks",
-            hostname,
-            propagation_timeout,
-            sorted(before[0]),
-        )
-        _kill_pool_children(hostname, before[0])
-    try:
-        _confirm_turnover(hostname, before, max(0.0, deadline - time.monotonic()))
-    except RuntimeError as exc:
-        if wedged:
-            raise RuntimeError(
-                f"[{hostname}] pool_restart wedged inside billiard (_putlock) and killing its children did not "
-                f"bring the pool back either: {exc}"
-            ) from exc
-        raise
 
 
 def _restart_propagation_timeout(budget: float) -> float:
@@ -230,35 +401,6 @@ def _restart_propagation_timeout(budget: float) -> float:
     confirmation.
     """
     return max(0.0, budget) * _RESTART_PROPAGATION_SHARE
-
-
-def _await_restart(hostname: str, timeout: float) -> bool:
-    """Run :func:`_restart_pool` on a watchdog thread, waiting at most ``timeout``.
-
-    Returns ``False`` when the call has not returned by the bound. It then stays
-    wedged on its own daemon thread — a Python thread cannot be cancelled — and a
-    reply landing later only re-arms an already-completed turnover. A failure
-    raised by the restart itself surfaces here, in the caller's thread.
-    """
-    failures: list[Exception] = []
-    done = threading.Event()
-
-    def _arm() -> None:
-        # Captured, never raised out of the thread: the caller re-raises it, so the
-        # op fails on the calling stack instead of dying in a thread hook.
-        try:
-            _restart_pool(hostname)
-        except Exception as exc:
-            failures.append(exc)
-        finally:
-            done.set()
-
-    threading.Thread(target=_arm, name=f"tai42-pool-restart[{hostname}]", daemon=True).start()
-    if not done.wait(timeout):
-        return False
-    if failures:
-        raise failures[0]
-    return True
 
 
 def _kill_pool_children(hostname: str, pids: set[int]) -> None:
@@ -297,56 +439,3 @@ def _busy_pids(active: Any, hostname: str) -> set[int]:
     if not isinstance(tasks, list):
         return set()
     return {task["worker_pid"] for task in tasks if isinstance(task, dict) and isinstance(task.get("worker_pid"), int)}
-
-
-def _confirm_turnover(hostname: str, before: tuple[set[int], int], timeout: float) -> None:
-    """Poll ``stats`` and ``active`` until the pool has turned over, or raise loudly at the deadline.
-
-    Turned over means every IDLE pre-restart child gone AND the pool back to full size.
-    A pre-restart child running a job checks the armed restart before taking its next
-    one, so it finishes the job it holds and exits after it without taking new work on
-    the pre-op registry; it is not waited for (logged at INFO with its pid). This holds
-    the bus reply until no pre-restart child can take a new job, since ``pool_restart``
-    returns once merely armed — a fast follow-up dispatch could still reach an idle
-    pre-restart child.
-    """
-    old_pids, max_conc = before
-    idle_survivors = old_pids
-    size = 0
-    deadline = time.monotonic() + timeout
-    while True:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            break
-        with _control_connection() as conn:
-            inspect = celery_app.control.inspect(
-                destination=[hostname], timeout=min(_POOL_CONTROL_TIMEOUT, remaining), limit=1, connection=conn
-            )
-            stats = inspect.stats() or {}
-            cfg = stats.get(hostname)
-            active = inspect.active() if isinstance(cfg, dict) else None
-        if isinstance(cfg, dict) and isinstance(cfg.get("pool"), dict):
-            new_pids = _pool_pids(cfg["pool"])
-            surviving = old_pids & new_pids
-            idle_survivors = surviving - _busy_pids(active or {}, hostname)
-            size = len(new_pids)
-            if not idle_survivors and size >= max_conc:
-                if surviving:
-                    logger.info(
-                        "[%s] prefork turnover: pre-restart child(ren) %s finish the job they hold and exit after it; "
-                        "no child takes new work on the pre-op registry",
-                        hostname,
-                        sorted(surviving),
-                    )
-                return
-        nap = min(_POOL_RECYCLE_POLL_INTERVAL, max(0.0, deadline - time.monotonic()))
-        if nap == 0.0:
-            break
-        time.sleep(nap)
-    if idle_survivors:
-        detail = (
-            f"idle pre-restart children still present: {sorted(idle_survivors)}; they would serve the pre-op registry"
-        )
-    else:
-        detail = f"pool came back short: {size}/{max_conc} children"
-    raise RuntimeError(f"[{hostname}] prefork pool did not fully recycle within {timeout}s ({detail})")

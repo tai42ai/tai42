@@ -3,8 +3,7 @@
 from collections.abc import Mapping
 from typing import Any
 
-from pydantic import TypeAdapter
-from tai42_contract.backend import CrontabCadence, IntervalCadence, ScheduleCadence
+from tai42_contract.backend import CRONTAB_FIELDS, SCHEDULE_CADENCE_ADAPTER, CrontabCadence, IntervalCadence
 
 _PERIODS = {
     "s": 1,
@@ -27,10 +26,6 @@ _PERIODS = {
     "days": 86400,
 }
 
-_CRONTAB_FIELDS = ("minute", "hour", "day_of_month", "month_of_year", "day_of_week")
-
-_CADENCE: TypeAdapter[IntervalCadence | CrontabCadence] = TypeAdapter(ScheduleCadence)
-
 
 def parse_crontab_expr(expr: str) -> CrontabCadence:
     """A standard 5-field cron expression (M H DOM MON DOW) as a :class:`CrontabCadence`.
@@ -49,7 +44,7 @@ def _interval_from_seconds(value: float) -> IntervalCadence:
 
 def _canonical_schedule(spec: Mapping[str, Any]) -> IntervalCadence | CrontabCadence:
     """A ``kind``-tagged mapping validated as a :data:`ScheduleCadence`."""
-    return _CADENCE.validate_python(dict(spec))
+    return SCHEDULE_CADENCE_ADAPTER.validate_python(dict(spec))
 
 
 def _interval_from_friendly(spec: Mapping[str, Any]) -> IntervalCadence:
@@ -73,7 +68,7 @@ def _interval_from_friendly(spec: Mapping[str, Any]) -> IntervalCadence:
 def _crontab_from_friendly(spec: Mapping[str, Any]) -> CrontabCadence:
     """A friendly crontab: an ``expression`` with per-field overrides, else the fields (each ``*`` by default)."""
     base = parse_crontab_expr(spec["expression"]).model_dump() if "expression" in spec else {}
-    fields = {field: spec.get(field, base.get(field, "*")) for field in _CRONTAB_FIELDS}
+    fields = {field: spec.get(field, base.get(field, "*")) for field in CRONTAB_FIELDS}
     return CrontabCadence(**fields)
 
 

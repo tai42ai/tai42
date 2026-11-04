@@ -1,6 +1,6 @@
 """The loop-affine background loops survive a reload: the marketplace advisories poll and
 the conversations delivery sweep must still be running on the LIVE serving loop after an
-epoch swap, not left dead on the throwaway build-thread loop the per-epoch handlers run on.
+epoch swap.
 
 These drive ``reload_config`` (which collapses onto ``build_and_swap_epoch``) through the
 reload gate exactly as production does. The two loops are (re)established by the post-swap
@@ -91,7 +91,7 @@ def test_advisories_poll_and_delivery_sweep_survive_a_reload(monkeypatch: pytest
             await reload_gate.run(app.admin.reload_config, reimports=True)
 
             # Both loops are STILL running after the reload — re-established as fresh tasks
-            # on the SAME live (not-closed) serving loop, not left dead on the build loop.
+            # on the SAME live (not-closed) serving loop the reload built and swapped on.
             poll_after = advisories_module._poll_task
             sweep_after = delivery_sweep_module._sweep_task
             assert poll_after is not None

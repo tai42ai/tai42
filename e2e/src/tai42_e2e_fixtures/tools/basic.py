@@ -210,11 +210,9 @@ async def e2e_settings_snapshot() -> dict:
     }
 
 
-@tai42_app.tools.tool(tags={"e2e"})
-async def e2e_record(key: str, value: str) -> str:
-    """RPUSH ``{"value", "pid"}`` onto the Redis list ``e2e:rec:{key}`` so the
-    harness (which reads that list) sees a side effect from whichever process
-    executed the call — webhook/hook/backend-execution observation."""
+async def _push_marker(key: str, value: str) -> None:
+    """RPUSH ``{"value", "pid"}`` (this process's pid) onto ``e2e:rec:{key}``, the list the
+    harness reads, under a ``RedisClient`` lease taken for this write alone."""
     from collections.abc import Awaitable
     from typing import cast
 
@@ -225,6 +223,24 @@ async def e2e_record(key: str, value: str) -> str:
     async with client_ctx(RedisClient, _E2eProbeRedisSettings()) as client:
         # The pooled client yields an async Redis; rpush returns an awaitable.
         await cast(Awaitable[int], client.rpush(f"e2e:rec:{key}", record))
+
+
+_HOLD_BOUND_SECONDS = 300
+
+
+def _require_hold_bound(tool: str, seconds: float) -> None:
+    """Refuse a hold outside ``0 < seconds <= 300``: a broken sequence fails loudly rather than
+    hangs, and a zero (which Redis reads as "block forever") never reaches a wait."""
+    if not 0 < seconds <= _HOLD_BOUND_SECONDS:
+        raise ValueError(f"{tool} needs 0 < seconds <= {_HOLD_BOUND_SECONDS}, got {seconds}")
+
+
+@tai42_app.tools.tool(tags={"e2e"})
+async def e2e_record(key: str, value: str) -> str:
+    """RPUSH ``{"value", "pid"}`` onto the Redis list ``e2e:rec:{key}`` so the
+    harness (which reads that list) sees a side effect from whichever process
+    executed the call — webhook/hook/backend-execution observation."""
+    await _push_marker(key, value)
     return "recorded"
 
 
@@ -295,18 +311,26 @@ async def e2e_slow_task(key: str, seconds: float) -> str:
     IN the backend worker, then SIGKILLs the worker — so the terminal it reads
     back is caused by the crash, not by a self-completing sleep."""
     import asyncio
-    from collections.abc import Awaitable
-    from typing import cast
-
-    from tai42_kit.clients import client_ctx
-    from tai42_kit.clients.impl.redis import RedisClient
 
     if seconds > 30:
         raise ValueError(f"e2e_slow_task bound exceeded: {seconds} > 30 seconds")
-    record = json.dumps({"value": "started", "pid": os.getpid()})
-    async with client_ctx(RedisClient, _E2eProbeRedisSettings()) as client:
-        await cast(Awaitable[int], client.rpush(f"e2e:rec:{key}", record))
+    await _push_marker(key, "started")
     await asyncio.sleep(seconds)  # noqa: TID251 — the observed in-flight work, bounded above
+    return "done"
+
+
+@tai42_app.tools.tool(tags={"e2e"})
+async def e2e_blocking_task(key: str, seconds: float) -> str:
+    """RPUSH a ``started`` marker onto ``e2e:rec:{key}`` then sleep in a blocking ``time.sleep`` for
+    ``seconds`` (bounded at 30). On a worker whose interpreter is not monkey-patched the sleep holds
+    the job's OS thread and yields to no event loop, so the job's loop runs nothing until it ends;
+    under a green pool's patching the sleep is cooperative instead."""
+    import time
+
+    if seconds > 30:
+        raise ValueError(f"e2e_blocking_task bound exceeded: {seconds} > 30 seconds")
+    await _push_marker(key, "started")
+    time.sleep(seconds)  # noqa: TID251 — the observed blocked work, bounded above
     return "done"
 
 
@@ -323,12 +347,9 @@ async def e2e_hold_until_released(key: str, seconds: int = 300) -> str:
     from tai42_kit.clients import client_ctx
     from tai42_kit.clients.impl.redis import RedisClient
 
-    if not 0 < seconds <= 300:
-        # Redis reads a BLPOP timeout of 0 as "block forever"; the hold is bounded on both sides.
-        raise ValueError(f"e2e_hold_until_released needs 0 < seconds <= 300, got {seconds}")
-    record = json.dumps({"value": "started", "pid": os.getpid()})
+    _require_hold_bound("e2e_hold_until_released", seconds)
+    await _push_marker(key, "started")
     async with client_ctx(RedisClient, _E2eProbeRedisSettings()) as client:
-        await cast(Awaitable[int], client.rpush(f"e2e:rec:{key}", record))
         released = await cast(Awaitable[Any], client.blpop([f"e2e:rel:{key}"], timeout=seconds))
     if released is None:
         raise TimeoutError(f"e2e_hold_until_released({key!r}) was never released within {seconds} seconds")
@@ -336,29 +357,66 @@ async def e2e_hold_until_released(key: str, seconds: int = 300) -> str:
 
 
 @tai42_app.tools.tool(tags={"e2e"})
-async def e2e_drain_probe(key: str, seconds: float) -> str:
-    """RPUSH a ``started`` marker, sleep ``seconds`` (bounded at 30), then RPUSH a ``done``
-    marker — both onto ``e2e:rec:{key}`` with this process's pid.
+async def e2e_drain_hold(key: str, seconds: int = 300) -> str:
+    """RPUSH a ``started`` marker, hold until ``e2e:rel:{key}`` holds a record, then RPUSH a
+    ``done`` marker — both onto ``e2e:rec:{key}`` with this process's pid.
 
-    The recycle-drain spec attaches ``sync_task`` and runs it INTO the backend: after the
-    ``started`` marker proves it is in-flight, the backend is recycled. Whether ``done`` also
-    lands tells the test if the in-flight backend job DRAINED to completion during the
-    graceful recycle shutdown (both markers) or was lost (only ``started``) — the direct
-    observable of the arq job-completion-wait behavior, independent of the serve-side
-    tool-run record (which a serve recycle legitimately cancels)."""
-    import asyncio
+    The in-flight backend job a stop drains, ended by the test once it has seen the stop wait on
+    it (``RedisAdmin.release``) rather than by a clock, and bounded at 300 s so a broken sequence
+    fails loudly. Both markers follow :func:`e2e_drain_probe`: ``done`` from the ``started`` pid
+    is the job running to completion on the life that started it.
+
+    The release is polled, each poll taking its own ``RedisClient`` lease for one ``LPOP``, so the
+    probe holds no client lease across its wait: a config reload's epoch retire, which waits on
+    the retired epoch's leases, does not wait on the probe."""
     from collections.abc import Awaitable
-    from typing import cast
+    from typing import Any, cast
 
     from tai42_kit.clients import client_ctx
     from tai42_kit.clients.impl.redis import RedisClient
 
+    from tai42_e2e.waiting import wait_for_async
+
+    _require_hold_bound("e2e_drain_hold", seconds)
+
+    async def released() -> bool:
+        async with client_ctx(RedisClient, _E2eProbeRedisSettings()) as client:
+            return await cast(Awaitable[Any], client.lpop(f"e2e:rel:{key}")) is not None
+
+    await _push_marker(key, "started")
+    await wait_for_async(
+        released, deadline=seconds, interval=0.2, message=f"e2e_drain_hold({key!r}) was never released"
+    )
+    await _push_marker(key, "done")
+    return "done"
+
+
+@tai42_app.tools.tool(tags={"e2e"})
+async def e2e_drain_probe(key: str, seconds: float) -> str:
+    """RPUSH a ``started`` marker, sleep ``seconds`` (bounded at 30), then RPUSH a ``done``
+    marker — both onto ``e2e:rec:{key}`` with this process's pid.
+
+    The drain specs attach ``sync_task`` and run it INTO the backend: after the ``started``
+    marker proves it is in-flight, a reload rolls the backend (or a hot apply swaps its epoch).
+    Whether ``done`` also lands, from the ``started`` pid, tells the test if the in-flight
+    backend job ran to completion on the life that started it (both markers) or was lost (only
+    ``started``) — the observable of the job surviving the roll, whichever backend the stack
+    runs: an engine that runs the job in the worker process has the reload wait the job out
+    before it re-imports, and an engine that forks a child per job has the worker's graceful
+    stop wait the child out. It is independent of the serve-side tool-run record (which a serve
+    recycle legitimately cancels).
+
+    Each marker write takes its own ``RedisClient`` lease and releases it once written, so the
+    probe holds no client lease across its sleep: a config reload's epoch retire, which waits on
+    the retired epoch's leases, does not wait on the probe, and the ``done`` write leases a
+    client on the epoch current when it runs."""
+    import asyncio
+
     if seconds > 30:
         raise ValueError(f"e2e_drain_probe bound exceeded: {seconds} > 30 seconds")
-    async with client_ctx(RedisClient, _E2eProbeRedisSettings()) as client:
-        await cast(Awaitable[int], client.rpush(f"e2e:rec:{key}", json.dumps({"value": "started", "pid": os.getpid()})))
-        await asyncio.sleep(seconds)  # noqa: TID251 — the observed in-flight work, bounded above
-        await cast(Awaitable[int], client.rpush(f"e2e:rec:{key}", json.dumps({"value": "done", "pid": os.getpid()})))
+    await _push_marker(key, "started")
+    await asyncio.sleep(seconds)  # noqa: TID251 — the observed in-flight work, bounded above
+    await _push_marker(key, "done")
     return "done"
 
 

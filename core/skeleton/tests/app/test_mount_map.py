@@ -26,6 +26,20 @@ from tai42_skeleton.app.mount_map import (
 _RESERVED = ("/api/auth",)
 
 
+async def _no_overrides() -> dict[str, dict[str, str]]:
+    """An override loader with no persisted route mounts."""
+    return {}
+
+
+def _overrides(mounts: dict[str, dict[str, str]]):
+    """An override loader yielding ``mounts``."""
+
+    async def load() -> dict[str, dict[str, str]]:
+        return mounts
+
+    return load
+
+
 def _router_spec(
     *,
     namespace: str = "acme",
@@ -88,10 +102,10 @@ def _packaged(specs: dict[str, PluginSpec], monkeypatch: pytest.MonkeyPatch) -> 
     )
 
 
-def test_packaged_binding_uses_declaration_base_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_packaged_binding_uses_declaration_base_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
     spec = _router_spec()
     _packaged({"acme_one.router": spec}, monkeypatch)
-    mapping = build_mount_map(["acme_one.router"], _RESERVED, dict)
+    mapping = await build_mount_map(["acme_one.router"], _RESERVED, _no_overrides)
     binding = mapping["acme_one.router"]
     assert binding.owner_ref == "acme/one"
     assert binding.item_name == "web"
@@ -100,48 +114,48 @@ def test_packaged_binding_uses_declaration_base_by_default(monkeypatch: pytest.M
     assert binding.forbidden is False
 
 
-def test_route_mounts_override_the_base(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_route_mounts_override_the_base(monkeypatch: pytest.MonkeyPatch) -> None:
     spec = _router_spec()
     _packaged({"acme_one.router": spec}, monkeypatch)
-    mapping = build_mount_map(["acme_one.router"], _RESERVED, lambda: {"acme/one": {"web": "relays/web"}})
+    mapping = await build_mount_map(["acme_one.router"], _RESERVED, _overrides({"acme/one": {"web": "relays/web"}}))
     binding = mapping["acme_one.router"]
     assert binding.base == "relays/web"
     assert binding.resolved_path("/ping") == "/api/relays/web/ping"
 
 
-def test_route_less_item_binds_a_forbidden_marker(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_route_less_item_binds_a_forbidden_marker(monkeypatch: pytest.MonkeyPatch) -> None:
     spec = _channel_no_routes_spec()
     _packaged({"acme_chan.channel": spec}, monkeypatch)
-    mapping = build_mount_map(["acme_chan.channel"], _RESERVED, dict)
+    mapping = await build_mount_map(["acme_chan.channel"], _RESERVED, _no_overrides)
     binding = mapping["acme_chan.channel"]
     assert binding.forbidden is True
     assert binding.declared_routes == ()
 
 
-def test_operator_module_with_no_packaged_spec_gets_no_binding(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_operator_module_with_no_packaged_spec_gets_no_binding(monkeypatch: pytest.MonkeyPatch) -> None:
     # A manifest module whose top-level package ships no tai-plugin.yml (an
     # operator-authored deployment module) keeps core semantics: no binding.
     _packaged({}, monkeypatch)
-    mapping = build_mount_map(["some.operator.module"], _RESERVED, dict)
+    mapping = await build_mount_map(["some.operator.module"], _RESERVED, _no_overrides)
     assert mapping == {}
 
 
-def test_overrides_are_not_read_when_no_plugin_route_module_is_present(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_overrides_are_not_read_when_no_plugin_route_module_is_present(monkeypatch: pytest.MonkeyPatch) -> None:
     # No packaged plugin route module → the override loader is never invoked (no
     # install-store round-trip on a deployment with none).
     _packaged({}, monkeypatch)
 
-    def _fail() -> dict:
+    async def _fail() -> dict:
         raise AssertionError("the override loader must not be called with no plugin route module")
 
-    assert build_mount_map(["some.operator.module"], _RESERVED, _fail) == {}
+    assert await build_mount_map(["some.operator.module"], _RESERVED, _fail) == {}
 
 
-def test_public_route_under_reserved_prefix_fails_the_build(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_public_route_under_reserved_prefix_fails_the_build(monkeypatch: pytest.MonkeyPatch) -> None:
     spec = _router_spec(base="auth", path="/keys", public=True)
     _packaged({"acme_one.router": spec}, monkeypatch)
     with pytest.raises(MountMapError):
-        build_mount_map(["acme_one.router"], _RESERVED, dict)
+        await build_mount_map(["acme_one.router"], _RESERVED, _no_overrides)
 
 
 def test_reserved_prefix_audit_canonicalizes_the_resolved_path() -> None:
@@ -173,11 +187,11 @@ def test_reserved_prefix_audit_leaves_a_canonical_offside_route_alone() -> None:
     _reject_reserved_public_routes({"acme_one.router": binding}, _RESERVED)
 
 
-def test_authed_route_under_reserved_prefix_is_allowed(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_authed_route_under_reserved_prefix_is_allowed(monkeypatch: pytest.MonkeyPatch) -> None:
     # A NON-public route under the reserved prefix is legitimate (the auth surface).
     spec = _router_spec(base="auth", path="/users", public=False)
     _packaged({"acme_one.router": spec}, monkeypatch)
-    mapping = build_mount_map(["acme_one.router"], _RESERVED, dict)
+    mapping = await build_mount_map(["acme_one.router"], _RESERVED, _no_overrides)
     assert mapping["acme_one.router"].base == "auth"
 
 

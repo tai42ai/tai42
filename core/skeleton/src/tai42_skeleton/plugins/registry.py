@@ -6,8 +6,9 @@ integrity map the import map injects.
 The registry is rebuilt by a pass registered on BOTH ``lifecycle.on_startup`` and
 ``lifecycle.on_reload`` (wired in ``app/instance.py`` alongside the connector
 catalog refresh), so a reload that changes ``manifest.studio_plugins`` reflects
-without a process restart. Data is read at call time from the live manifest and
-the ``plugins_settings`` dist path — never captured at import time.
+without a process restart. Data is read at call time from the manifest of the
+generation being started and the ``plugins_settings`` dist path — never captured at
+import time.
 
 A manifest-declared studio plugin the operator chose to load that cannot load —
 the package is contract-incompatible with the running ``tai42-contract``, missing
@@ -488,19 +489,19 @@ def abort_staging() -> None:
 
 
 async def rebuild_studio_plugin_registry() -> None:
-    """Startup/reload handler: rebuild the registry from the live manifest and SPA dist path.
+    """Startup/reload handler: rebuild the registry from the started manifest and SPA dist path.
 
-    Rebuilds from the LIVE manifest's ``studio_plugins`` and the configured SPA dist path.
-    Registered on both ``lifecycle.on_startup`` and ``lifecycle.on_reload`` so a reload that
-    changes ``studio_plugins`` reflects without a process restart. Reads at call time via the
-    live-manifest seam — never captured at import.
+    Rebuilds from the ``studio_plugins`` of the manifest the generation being started
+    recorded, and the configured SPA dist path. Registered on both ``lifecycle.on_startup``
+    and ``lifecycle.on_reload`` so a reload that changes ``studio_plugins`` reflects without a
+    process restart: the handler runs inside the rebuild, before the swap, so it reads the
+    generation under construction, never the one still serving. Read at call time — never
+    captured at import.
     """
-    from tai42_contract.app import tai42_app
-
+    from tai42_skeleton.app import instance
     from tai42_skeleton.plugins.settings import plugins_settings
 
-    live_manifest = tai42_app.admin.live_manifest
-    studio_plugins = live_manifest.get("studio_plugins", [])
+    studio_plugins = instance.app._require_manifest().studio_plugins
     dist_path = plugins_settings().studio_dist_path
     registry = build_registry(studio_plugins, dist_path)
     set_current_registry(registry)

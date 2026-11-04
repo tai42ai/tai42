@@ -43,13 +43,13 @@ class _Admin:
     def list_failed_mcps(self) -> object:
         return self._dispatch("list_failed_mcps")
 
-    def reload_mcp(self, title: str) -> object:
+    async def reload_mcp(self, title: str) -> object:
         return self._dispatch("reload_mcp", title)
 
-    def reload_failed_mcps(self) -> object:
+    async def reload_failed_mcps(self) -> object:
         return self._dispatch("reload_failed_mcps")
 
-    def deregister_mcp(self, title: str) -> object:
+    async def deregister_mcp(self, title: str) -> object:
         return self._dispatch("deregister_mcp", title)
 
 
@@ -113,12 +113,12 @@ class _MutateStore(ExclusiveWriteStore):
 
 class _ReloadAdmin:
     def __init__(self, result: dict | None = None, served: dict[str, list[str]] | None = None) -> None:
-        self.result = result if result is not None else {"status": "ok", "env_keys": 0}
+        self.result = result if result is not None else {"status": "ok", "env_keys": 0, "awaiting_respawn": []}
         self.served = served if served is not None else {}
         self.calls = 0
         self.listed: list[str] = []
 
-    def reload_config(self) -> dict:
+    async def reload_config(self) -> dict:
         self.calls += 1
         return self.result
 

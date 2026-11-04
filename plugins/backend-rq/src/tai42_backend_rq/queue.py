@@ -8,9 +8,6 @@ from rq import Queue
 
 from tai42_backend_rq.settings import rq_settings
 
-#: The import path ``rq-scheduler`` resolves its ``--queue-class`` from.
-TASK_BUDGET_QUEUE_PATH = "tai42_backend_rq.queue.TaskBudgetQueue"
-
 
 class TaskBudgetQueue(Queue):
     """An rq queue whose default job timeout is the dispatch's ``task_timeout``.

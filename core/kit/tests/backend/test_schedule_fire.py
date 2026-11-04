@@ -8,7 +8,7 @@ run and the door-layer binding is handed to ``visit`` (never an ambient deposit)
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Iterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from types import SimpleNamespace
 from typing import Any
 
@@ -113,6 +113,8 @@ class _FakeApp:
         self.storage = SimpleNamespace(resource_manager=_FakeResourceManager())
         self.tools = _FakeTools()
         self.interactions = _FakeInteractions()
+        # The app's job-admission door, entered by the run's ``dispatched_job``: admits nothing here.
+        self.lifecycle = SimpleNamespace(admitted_job=nullcontext)
 
 
 @pytest.fixture

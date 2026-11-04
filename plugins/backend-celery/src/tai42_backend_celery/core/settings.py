@@ -91,6 +91,12 @@ class CelerySettings(BackendDispatchSettings, DefaultNamespaceMixin, TaiBaseSett
     redbeat: CeleryRedbeatRedisSettings = Field(default_factory=CeleryRedbeatRedisSettings)
     redbeat_key_prefix: str = "redbeat:"
     beat_max_loop_interval: int = 60
+    # The Celery queue the host sends to, beat schedules fire on, and a worker
+    # started without a label consumes; a labelled queue is ``<queue_name>.<label>``.
+    # Celery's own default is ``celery``; co-tenant deployments on one broker set
+    # distinct values, none another's value followed by ``.<label>``, so each
+    # worker consumes only its own tasks.
+    queue_name: str = "celery"
 
     # Prefork pool size, capped at ONE child so a bus op can re-fork the WHOLE
     # pool within the turnover's confirmation budget: Celery's ``pool_restart`` is

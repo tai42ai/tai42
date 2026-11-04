@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 import time
 
 import pytest
@@ -30,8 +31,8 @@ def test_reload_config_refreshes_env_and_reinitializes(monkeypatch):
             monkeypatch.setattr(app.config.config_manager, "read_manifest", dict)
 
             before = current_client_epoch()
-            # Driven off the serving loop, as production does (the reload-gate worker
-            # thread): a fresh epoch is built under the refreshed env and swapped in.
+            # Driven through the reload gate, as production does (the body awaited on the
+            # serving loop): a fresh epoch is built under the refreshed env and swapped in.
             out = await reload_gate.run(app.admin.reload_config, reimports=True)
             assert out == {"status": "ok", "env_keys": 2, "awaiting_respawn": []}
             # Env refreshed into the process environment.
@@ -118,7 +119,18 @@ def test_a_token_endpoint_slower_than_the_budget_holds_the_reload_one_budget(mon
     harness = AppHarness(monkeypatch, path)
     path.connect()
     path.mcp.reset(mcp_fakes.bearer_only("at-old", "at-new"))
-    path.token_endpoint(delay=BUDGET * 3)
+    # The token endpoint answers only once the build's listing has given the entry up, so the refresh
+    # outlasts the credential pass's budget and the listing whatever the host's speed.
+    answer = threading.Event()
+    path.token_endpoint(hold=lambda: answer.wait(60))
+    record_failed = app._record_failed_mcp
+
+    def recorded_then_answer(config, exc) -> None:
+        record_failed(config, exc)
+        if config.title == path.entry.title:
+            answer.set()
+
+    monkeypatch.setattr(app, "_record_failed_mcp", recorded_then_answer)
     original = epoch_defaults.default_bring_credentials_up_to_date
     spent: list[float] = []
 
@@ -132,7 +144,10 @@ def test_a_token_endpoint_slower_than_the_budget_holds_the_reload_one_budget(mon
     async def run():
         async with app.app_context(harness.manifest()):
             path.connect(expires_in=-5)
-            await harness.reload(door)
+            try:
+                await harness.reload(door)
+            finally:
+                answer.set()
             assert not bound(path.entry.title)
             await _until_rotated(path)
             roomy_budgets(monkeypatch)

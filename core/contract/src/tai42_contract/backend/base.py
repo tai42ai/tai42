@@ -18,7 +18,20 @@ class Backend(ABC):
     app's own worker bus, internal to the app. A backend-runtime process
     receives fleet ops through the app's bus subscription exactly like a serving
     HTTP worker — the backend carries no control-plane surface of its own.
+
+    Each backend declares its own drain bound (:attr:`drain_timeout`); the app
+    announces it, together with its own shutdown bounds, when the process leaves,
+    so a fleet restart waits for the worker to finish its in-flight work rather
+    than reporting it timed out.
     """
+
+    @property
+    @abstractmethod
+    def drain_timeout(self) -> float:
+        """How long, in seconds, this backend's worker may take to finish its in-flight work and exit when stopped.
+
+        Read at call time, so a settings change applies to the next stop.
+        """
 
     @abstractmethod
     async def launch(self, args: Sequence[str]) -> None:

@@ -92,11 +92,13 @@ xfail_strict = true
 # (e.g. a missing await -> "coroutine was never awaited") fails the suite loudly
 # instead of passing green.
 filterwarnings = ["error"]
-# The live-engine conformance leg is gated behind this marker: it needs a real
-# Docker engine and is never collected in a bare venv.
+# Each marker gates tests that need more than a bare venv on the host: the
+# member's own scoped install, a real Docker engine, or a process namespace of
+# their own.
 markers = [
     "scoped_install: needs this member's own package-scoped install (uv sync --package <member>); a whole-repo session, whose venv holds every member, skips it",
     "docker: requires a live Docker engine (SANDBOX_DOCKER_TEST_HOST); not run in the unit gate",
+    "process_namespace: runs the sandbox exec scripts under a real shell, whose /proc scan must see only the test's own processes, so the tests run in a process namespace of their own (a container); skips VISIBLY with the reason when SANDBOX_DOCKER_PROCESS_NAMESPACE is not set; not run in the unit gate",
 ]
 
 [tool.coverage.run]

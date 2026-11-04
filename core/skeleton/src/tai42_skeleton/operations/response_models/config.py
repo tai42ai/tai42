@@ -4,9 +4,12 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, JsonValue, RootModel
+from pydantic import BaseModel, Field, JsonValue, RootModel
+from tai42_contract.app.responses import AwaitingWorker, RecycleRoll
 from tai42_contract.settings_profiles import SettingsProfileBody
 from tai42_kit.settings import SettingsFieldInfo
+
+from tai42_skeleton.app.bus import FleetResult
 
 
 class EnvView(BaseModel):
@@ -75,6 +78,35 @@ class ProfileWriteResult(BaseModel):
 
     ok: bool
     version: int
+
+
+class FleetReloadResponse(FleetResult):
+    """A fleet soft restart's per-worker reload report, the recycle roll it ran, and its verdict.
+
+    An applied worker's ``payload`` is ``{status: "ok", env_keys, awaiting_respawn}``; a worker
+    whose reload was refused at its epoch build (the build discarded before its swap) replies
+    ``failed`` with ``{status: "discarded", awaiting_respawn}``, serving its previous epoch with
+    that drift standing; any other failed reload, a failed discard among them, carries no payload.
+    ``recycle`` is the roll that restarted the workers the reload addressed whose reload built and
+    whose ``awaiting_respawn`` named a recycle-class key, or whose state was unknown: a worker other
+    than the answering one is asked once ready and restarted when its reply neither confirms it
+    clean nor states a refused build; the answering worker is never asked, and when its own state is
+    unknown its restart is its ``self-deferred`` line, present when the roll converged. A worker
+    whose reload was refused at its epoch build is never restarted: the stored config did not build
+    on it and a restart may fail the same way, so the roll leaves it running and lists it.
+    ``recycle`` is ``null`` when the roll had no worker to visit: every addressed worker confirmed
+    no recycle-class key, or the only ones naming one were refused at their epoch build.
+    ``awaiting_respawn`` the workers still awaiting a respawn after the roll (name + keys), those
+    left running after a refused epoch build among them. ``roll_deferred`` is ``true`` when the roll
+    was handed to the worker ``roll_deferred_to`` names, which carries it out after the reply
+    (``recycle`` is ``null`` and ``awaiting_respawn`` empty); ``roll_deferred_to`` is ``null``
+    otherwise.
+    """
+
+    recycle: RecycleRoll | None = None
+    awaiting_respawn: list[AwaitingWorker] = Field(default_factory=list[AwaitingWorker])
+    roll_deferred: bool = False
+    roll_deferred_to: str | None = None
 
 
 class OkResult(BaseModel):

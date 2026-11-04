@@ -669,7 +669,7 @@ async def test_a_template_in_the_same_archive_restores_before_the_rows_naming_it
             "storage": {"jq/acl": {"content_text": ".context.ok", "content_type": "text/plain"}},
         },
     }
-    result = (await import_backup(document, ["access_control", "storage"])).payload
+    result = await import_backup(document, ["access_control", "storage"])
     assert result.sections["storage"].errors == []
     assert result.sections["access_control"].errors == []
     assert pg.principal("owner-2") is not None

@@ -403,7 +403,9 @@ def test_upgrade_all_posts_and_renders_the_report(monkeypatch) -> None:
         "results": [
             {"ref": "tai42/a", "outcome": "upgraded", "detail": "1.0.0 -> 1.2.0"},
             {"ref": "tai42/b", "outcome": "no-compatible-version", "detail": "no published version supports 0.3.0"},
-        ]
+        ],
+        "recycle": None,
+        "awaiting_respawn": [{"name": "backend-1", "keys": ["TAI_BUS_HEARTBEAT_TTL"]}],
     }
     result = run_cli(monkeypatch, handler, ["plugins", "upgrade", "--all"])
     assert result.exit_code == 0, result.output
@@ -411,6 +413,7 @@ def test_upgrade_all_posts_and_renders_the_report(monkeypatch) -> None:
     assert captured["path"] == "/api/marketplace/upgrade-all"
     assert "upgraded" in result.output
     assert "no-compatible-version" in result.output
+    assert "backend-1" in result.output
 
 
 def test_upgrade_without_all_is_a_usage_error(monkeypatch) -> None:

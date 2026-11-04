@@ -1,6 +1,6 @@
 """The manifest-write pipeline of a host-side process: a process with no serving surface.
 
-``HostSideAdmin`` and ``host_side_combo_check`` are its collaborators; ``ConfigService.host_side()``
+``HostSideAdmin`` and ``HostSideComboCheck`` are its collaborators; ``ConfigService.host_side()``
 wires them, after the boot read, with the deployment's config manager and the bus the read built.
 Its write stage persists a manifest change under the config store's exclusive write span; nothing
 in the process reloads it.
@@ -22,7 +22,7 @@ from tai42_kit.utils.data import load_manifest
 from tai42_skeleton.app.instance import app
 from tai42_skeleton.config.file_manager import FileConfigManager
 from tai42_skeleton.config.service import ConfigService
-from tai42_skeleton.config.service.host_side import HostSideAdmin, host_side_combo_check
+from tai42_skeleton.config.service.host_side import HostSideAdmin, HostSideComboCheck
 
 
 @pytest.fixture(autouse=True)
@@ -39,9 +39,9 @@ def _restore_process_env() -> Iterator[None]:
     reset_all_settings()
 
 
-def test_the_host_side_admin_refuses_a_reload() -> None:
+async def test_the_host_side_admin_refuses_a_reload() -> None:
     with pytest.raises(RuntimeError, match="serves nothing to reload"):
-        HostSideAdmin().reload_config()
+        await HostSideAdmin().reload_config()
 
 
 async def test_the_host_side_admin_refuses_to_list_served_mcp_servers() -> None:
@@ -50,7 +50,11 @@ async def test_the_host_side_admin_refuses_to_list_served_mcp_servers() -> None:
 
 
 def test_the_host_side_combo_check_leaves_every_combo_to_the_next_start_bind() -> None:
-    assert host_side_combo_check("t", [{"extension": "no.registry.knows.this"}]) is None
+    assert HostSideComboCheck().check_combo("t", [{"extension": "no.registry.knows.this"}], base=None) is None
+
+
+async def test_the_host_side_combo_check_serves_no_tool() -> None:
+    assert await HostSideComboCheck().served_bases() == {}
 
 
 class _SpanRecordingManager(FileConfigManager):

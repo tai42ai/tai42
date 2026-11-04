@@ -20,6 +20,7 @@ import pytest
 from starlette.requests import Request
 from tai42_kit.clients.base import advance_client_epoch
 from tai42_kit.settings import reset_all_settings, sweep_stale_settings
+from tests._fakes.rebuild import no_rebuild
 
 from tai42_skeleton.config.deployment_env import DeploymentOwnership
 from tai42_skeleton.interactions.settings import interactions_settings
@@ -108,13 +109,14 @@ class _OpenRequestOn(_OpenRequest):
 
 @pytest.fixture
 def _serving_generation() -> Iterator[None]:
-    """A boot generation installed with no dispatch slot; the process serving state dropped after."""
+    """A boot generation with a fresh serving core and no dispatch slot; the process serving state dropped after."""
     from tai42_kit.clients.base import current_client_epoch
 
     from tai42_skeleton.app import epoch as epoch_mod
+    from tai42_skeleton.app import instance
     from tai42_skeleton.app.retired_generations import detach_retired_generations
 
-    epoch_mod._current = epoch_mod.Epoch(number=current_client_epoch())
+    epoch_mod._current = epoch_mod.Epoch(number=current_client_epoch(), core=instance.app._build_serving_core())
     try:
         yield
     finally:
@@ -138,7 +140,7 @@ async def test_an_inbox_stream_open_across_a_reload_leaves_nothing_reported_whil
 
     async def _reload() -> None:
         await build_and_swap_epoch(
-            env, rebuild=lambda: None, build_serving_app=_build, drain_deadline=0.1, ownership=DeploymentOwnership()
+            env, rebuild=no_rebuild, build_serving_app=_build, drain_deadline=0.1, ownership=DeploymentOwnership()
         )
 
     gate: asyncio.Future[None] = asyncio.get_running_loop().create_future()

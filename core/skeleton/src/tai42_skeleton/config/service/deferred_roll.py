@@ -1,14 +1,16 @@
-"""Deferring the fleet recycle rolls of a caller's changes until the caller has finished its own work.
+"""Deferring the fleet recycle decision of a caller's changes until the caller has finished its own work.
 
 A caller whose own work must be finished before any worker restarts opens a
-:func:`deferring_rolls` scope around its changes. Inside it, every pipeline run that owes a roll
-persists, reloads locally, broadcasts and pins its recycle targets as always, then records the
-roll in the scope's :class:`DeferredRolls` instead of running it; its
-:class:`~tai42_skeleton.config.service.ApplyResult` reads ``roll_deferred`` and carries no
-verdict yet. Once the caller's work is done it runs them as ONE roll
+:func:`deferring_rolls` scope around its changes. Inside it, every pipeline run persists, reloads
+locally, broadcasts and pins the census as always, then records its reload in the scope's
+:class:`DeferredRolls` (:class:`DeferredReload`: the writer, the pin, the reload report) instead
+of deciding and rolling; its :class:`~tai42_skeleton.config.service.ApplyResult` reads
+``roll_deferred`` and carries no verdict yet. A run whose propagation raised records its reload
+too, so the scope's decision reads the latest statement of the fleet. Once the caller's work is
+done it decides and rolls ONCE over the scope
 (:meth:`~tai42_skeleton.config.service.ConfigService.run_deferred_rolls`) and folds the
-:class:`RollOutcome` into its result (:meth:`ApplyResult.rolled
-<tai42_skeleton.config.service.ApplyResult.rolled>`). Outside a scope every run rolls inline.
+:class:`~tai42_skeleton.config.recycle_roll.RollOutcome` into its result (:meth:`ApplyResult.rolled
+<tai42_skeleton.config.service.ApplyResult.rolled>`). Outside a scope every run decides inline.
 """
 
 from __future__ import annotations
@@ -20,53 +22,45 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from tai42_contract.app.responses import AwaitingWorker
-
     from tai42_skeleton.app.bus import FleetResult, WorkerIdentity, WorkerKind
-    from tai42_skeleton.app.recycle import RecycleReport
 
 
 @dataclass(frozen=True)
-class PendingRoll:
-    """One run's roll, not yet run: the writer it excludes and the recycle targets pinned before its reload."""
+class DeferredReload:
+    """One run's reload awaiting its recycle decision.
 
-    identity: WorkerIdentity
+    The writer it was written for, the recycle targets pinned from the census before its local
+    reload, and the report its recycle decision reads: its reload report, with the writer's own
+    row kept when the broadcast could not reach the bus and the writer's entry answers for its env
+    (:func:`~tai42_skeleton.config.service.broadcast._decision_report`).
+    """
+
+    writer: WorkerIdentity
     pinned: Mapping[str, tuple[WorkerKind, int]]
+    report: FleetResult
 
 
 @dataclass
 class DeferredRolls:
-    """The rolls one scope's runs deferred, and the last reload report any run in the scope published.
+    """The reloads one scope's runs recorded, in the order they ran."""
 
-    The verdict of the deferred roll judges ``last_fleet``: the scope's latest reload is the
-    fleet's latest statement of the recycle-class keys each worker still has to respawn for.
-    """
+    reloads: list[DeferredReload] = field(default_factory=list)
 
-    rolls: list[PendingRoll] = field(default_factory=list)
-    last_fleet: FleetResult | None = None
+    def merged(self) -> DeferredReload | None:
+        """The scope's reloads as the one the decision reads, ``None`` when no run recorded one.
 
-    def merged(self) -> PendingRoll | None:
-        """The deferred rolls as one roll, ``None`` when no run deferred one.
-
-        Its targets are every target any run pinned, with the most recent pin of each (the
-        latest life the census showed); the writer is the one the latest run recorded — every
-        run in a scope is written by the same process.
+        Its pin is every target any run pinned, with the most recent pin of each (the latest
+        life the census showed); its report and writer are the latest run's: the scope's latest
+        reload is the fleet's latest statement of the recycle-class keys each worker still has
+        to respawn for, and every run in a scope is written by the same process.
         """
-        if not self.rolls:
+        if not self.reloads:
             return None
         pinned: dict[str, tuple[WorkerKind, int]] = {}
-        for roll in self.rolls:
-            pinned.update(roll.pinned)
-        return PendingRoll(identity=self.rolls[-1].identity, pinned=pinned)
-
-
-@dataclass(frozen=True)
-class RollOutcome:
-    """What a scope's deferred roll did: its report, the writer it excluded, and the operation's verdict."""
-
-    recycle: RecycleReport
-    self_identity: WorkerIdentity
-    awaiting_respawn: list[AwaitingWorker]
+        for reload in self.reloads:
+            pinned.update(reload.pinned)
+        latest = self.reloads[-1]
+        return DeferredReload(writer=latest.writer, pinned=pinned, report=latest.report)
 
 
 _ACTIVE: ContextVar[DeferredRolls | None] = ContextVar("deferred_rolls", default=None)
@@ -74,7 +68,7 @@ _ACTIVE: ContextVar[DeferredRolls | None] = ContextVar("deferred_rolls", default
 
 @contextmanager
 def deferring_rolls() -> Iterator[DeferredRolls]:
-    """Defer the rolls of every pipeline run inside the block, recording them in the returned scope."""
+    """Defer the recycle decision of every pipeline run inside the block, recording its reload in the returned scope."""
     deferral = DeferredRolls()
     token = _ACTIVE.set(deferral)
     try:
@@ -84,5 +78,5 @@ def deferring_rolls() -> Iterator[DeferredRolls]:
 
 
 def active_deferral() -> DeferredRolls | None:
-    """The scope the current task's pipeline runs defer their rolls to, ``None`` outside one."""
+    """The scope the current task's pipeline runs record their reloads in, ``None`` outside one."""
     return _ACTIVE.get()

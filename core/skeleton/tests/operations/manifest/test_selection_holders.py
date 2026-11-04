@@ -30,6 +30,7 @@ from tai42_skeleton.config.service import ConfigService
 from tai42_skeleton.operations import BadRequestError, ConflictError, UpstreamError
 from tai42_skeleton.operations import config as config_ops
 from tai42_skeleton.operations import manifest as manifest_ops
+from tai42_skeleton.operations import settings_profiles as profile_ops
 from tai42_skeleton.operations.manifest.selection_holders import refuse_held_unpicks, unpick_holders
 from tai42_skeleton.operations.reference_graph import StoredPresets
 from tai42_skeleton.tools.mcp_start import StartId
@@ -444,9 +445,7 @@ async def test_a_backup_restore_reports_the_refused_manifest_section_and_applies
         "sections": {"manifest": {"mcp": [_entry(include=["acme_read"])]}, "env": {"OTHER_KEY": "1"}},
     }
 
-    response = await backup_ops.import_backup(document, ["manifest", "env"])
-
-    result = response.payload
+    result = await backup_ops.import_backup(document, ["manifest", "env"])
     assert result.ok is False
     assert any("cannot unpick 'acme_send'" in str(error) for error in result.sections["manifest"].errors)
     assert result.sections["env"].errors == []
@@ -675,7 +674,7 @@ async def test_an_env_write_that_keeps_the_selection_passes_without_a_listing(ma
         manifest_ops.update_manifest,
         manifest_ops.set_mcp_secret_env,
         config_ops.write_env,
-        config_ops.apply_profile,
+        profile_ops.apply_profile,
     ],
 )
 def test_each_selection_write_door_declares_409_502_and_503(op: Any) -> None:

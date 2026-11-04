@@ -21,16 +21,18 @@ in-process config reload share no surface.
 
 from __future__ import annotations
 
+from typing import Any
+
 from pydantic import BaseModel
 from tai42_contract.app import tai42_app
 
 from tai42_skeleton.app import instance
-from tai42_skeleton.app.bus import FleetResult, LastOp, WorkerKind, WorkerState, presence_fresh
-from tai42_skeleton.app.bus import ops as fleet_ops
-from tai42_skeleton.app.reload_gate import reload_gate
+from tai42_skeleton.app.bus import LastOp, WorkerKind, WorkerState, presence_fresh
+from tai42_skeleton.config.service import ConfigService
 from tai42_skeleton.operations import BadRequestError, operation
-from tai42_skeleton.operations._broadcast import awaiting_respawn_after, broadcast, log_awaiting_respawn
+from tai42_skeleton.operations._broadcast import fleet_reload_response
 from tai42_skeleton.operations.response_models.backend import BackendInfo
+from tai42_skeleton.operations.response_models.config import FleetReloadResponse
 
 
 class ReloadConfig(BaseModel):
@@ -109,15 +111,15 @@ async def list_workers() -> WorkerListing:
 
 @operation(
     name="fleet_reload_config",
-    summary="Soft-restart the worker fleet",
+    summary="Soft-restart the worker fleet, restarting the drifted workers whose reload built",
     tags=["backend"],
     destructive=True,
     errors=[BadRequestError],
     request_model=ReloadConfig,
-    response_model=FleetResult,
+    response_model=FleetReloadResponse,
 )
-async def fleet_reload_config(targets: list[str] | None) -> FleetResult:
-    """Soft-restart the worker fleet, optionally restricted to the named ``targets``.
+async def fleet_reload_config(targets: list[str] | None) -> Any:
+    """Soft-restart the worker fleet, optionally restricted to the named ``targets``, then restart the drifted.
 
     Called over MCP on a worker the reload applies to (no ``targets``, or ``targets`` naming that
     worker), the reload answers on the session that called it and then retires that session with the
@@ -125,12 +127,32 @@ async def fleet_reload_config(targets: list[str] | None) -> FleetResult:
     SSE session's stream closes), so the client starts a new session to go on. When ``targets`` leave
     that worker out, nothing reloads there and the session keeps working.
 
-    Each worker's payload is ``{status, env_keys, awaiting_respawn}``: ``awaiting_respawn`` names the
-    recycle-class keys whose value now differs from the one that worker bound (at boot, or when the
-    plugin that declares them was loaded) — the soft
-    restart carries every hot key in place, and those keys take effect only when the worker is
-    respawned through the deployment's supervisor. This
-    operation ERROR-logs one line naming every such worker and its keys.
+    An applied worker's payload is ``{status: "ok", env_keys, awaiting_respawn}``; a worker whose
+    reload was refused at its epoch build (the build discarded before its swap) replies ``failed``
+    with ``{status: "discarded", awaiting_respawn}``, serving its previous epoch with that drift
+    standing; any other failed reload, a failed discard among them, carries no payload.
+    ``awaiting_respawn`` names the recycle-class keys whose value now differs from the one that
+    worker bound (at boot, or when the plugin that declares them was loaded) — the soft restart
+    carries every hot key in place, and those keys take effect only on a restart. Once the reports
+    are in, every worker the reload addressed that names such a key is restarted one at a time
+    through the deployment's supervisor, except a worker whose reload was refused at its epoch
+    build: the stored config did not build on it and a restart may fail the same way, so it keeps
+    serving its current config and is named in ``awaiting_respawn``. Any worker other than this one
+    whose state is unknown (its reload failed otherwise or did not finish, it has no row, its reply
+    carries no ``awaiting_respawn`` list, or the bus was unreachable) is asked once it is ready and
+    restarted unless its reply confirms it clean or states a refused build (its restart then
+    withheld); the workers that confirmed none are left running. This worker is never asked: when
+    its own state is unknown, it needs its own restart. ``recycle`` reports that roll (``null`` when
+    the roll had no worker to visit: every addressed worker confirmed no recycle-class key, or the
+    only ones naming one were refused at their epoch build) and ``awaiting_respawn`` the workers
+    still awaiting a respawn after it. When this worker needs its own restart and the roll
+    converged, it exits gracefully once the reply is answered and its supervisor starts it again. A
+    soft restart run under a bound the roll's waits can outlast (a dispatched job's budget, an armed
+    turn budget) runs no roll itself: it hands the roll to the bus member it acts for, which carries
+    it out after the reply and departs itself last, once the roll converged, when it needs its own
+    restart; ``roll_deferred`` is then ``true``, ``roll_deferred_to`` names that member, ``recycle`` is ``null`` and
+    ``awaiting_respawn`` empty, the roll not judged in this reply. Otherwise ``roll_deferred`` is
+    ``false`` and ``roll_deferred_to`` ``null``.
     """
     # ``targets`` is validated at the HTTP edge (the route's ``_reload_targets``
     # extractor raises ``BadRequestError`` for a malformed body / non-string-list
@@ -142,15 +164,5 @@ async def fleet_reload_config(targets: list[str] | None) -> FleetResult:
     # but a failed local apply must not abort the broadcast — the recovery door
     # exists to heal the exact stale siblings a failed local reload would strand —
     # so it publishes anyway and re-raises with the fleet report attached.
-    report = FleetResult.model_validate(
-        await broadcast(
-            fleet_ops.ReloadConfig(op="reload_config"),
-            targets,
-            lambda: reload_gate.run(tai42_app.admin.reload_config, reimports=True),
-            publish_on_local_failure=True,
-        )
-    )
-    # This operation starts the reload and rolls nothing, so every row stating a moved
-    # recycle-class env is a worker awaiting a respawn: one loud line naming them.
-    log_awaiting_respawn(awaiting_respawn_after(report, None, None, self_exit_armed=False))
-    return report
+    outcome = await ConfigService.from_app().reload_fleet(targets, change="the fleet soft restart")
+    return fleet_reload_response(outcome)

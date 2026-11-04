@@ -1,6 +1,6 @@
-"""Subscriber-side behaviour: slot claim/renew/release, identity re-establish, the
-op-handling echo-skip/target filter, heartbeat supervision, reconnect + re-mint,
-teardown, presence + last-op writes, and fork non-member derivation."""
+"""Subscriber-side behaviour: the op-handling echo-skip/target filter, heartbeat supervision,
+reconnect + re-mint, the boot resync's presence states, the last-op write, and fork
+non-member derivation."""
 
 from __future__ import annotations
 
@@ -28,16 +28,14 @@ from tai42_skeleton.app.bus import (
     WorkerIdentity,
     WorkerKind,
     WorkerState,
-    _PresenceValue,
 )
+from tai42_skeleton.app.bus.life import _Heartbeat
 from tai42_skeleton.app.bus.models import _OP_PAYLOAD_KEY
 from tai42_skeleton.app.bus.ops import ReloadConfig, ReloadMcp
-from tai42_skeleton.app.bus.subscribe import _HeartbeatThread
-from tai42_skeleton.config.deployment_env import published_env_readers
 
 from ..._fakes.kit_redis import KitFakeRedis
 from ..._helpers import another_skeleton_major
-from .conftest import _noop_op, _RecordingRedis, _spawn_subscriber, _stop, _until, make_bus
+from .conftest import _noop_op, _spawn_subscriber, _start, _stop, _until, make_bus
 
 _RELOAD = ReloadConfig(op="reload_config")
 _RELOAD_WIRE = {"op": "reload_config"}
@@ -45,91 +43,6 @@ _RELOAD_WIRE = {"op": "reload_config"}
 
 def _live_heartbeat_threads() -> list[threading.Thread]:
     return [t for t in threading.enumerate() if t.name.startswith("tai-worker-bus-heartbeat-")]
-
-
-# -- slot claim / generation / ownership (compare-token) ----------------------
-
-
-async def test_two_serve_workers_claim_distinct_ordinals(wire_bus_client: None) -> None:
-    bus_a = make_bus(kind=WorkerKind.serve)
-    bus_b = make_bus(kind=WorkerKind.serve)
-
-    async def noop(_op: dict, *, deadline: float) -> None:
-        return None
-
-    t1, id_a = await _spawn_subscriber(bus_a, noop)
-    t2, id_b = await _spawn_subscriber(bus_b, noop)
-    try:
-        assert {id_a.name, id_b.name} == {"serve-1", "serve-2"}
-    finally:
-        await _stop(t1, t2)
-
-
-async def test_reclaim_after_release_reuses_name_at_next_generation(
-    wire_bus_client: None, server: fakeredis.FakeServer
-) -> None:
-    bus = make_bus()
-    client = aioredis.FakeRedis(server=server, decode_responses=True)
-    try:
-        first = await bus._claim_slot(client)
-        assert first.name == "serve-1"
-        assert first.generation == 1
-        assert await bus._release_claim(client, "serve-1") is True
-
-        second = await bus._claim_slot(client)
-        # Same name reused (now free), monotonic generation per name.
-        assert second.name == "serve-1"
-        assert second.generation == 2
-
-        assert await bus._release_claim(client, "serve-1") is True
-        third = await bus._claim_slot(client)
-        assert third.name == "serve-1"
-        assert third.generation == 3
-    finally:
-        await client.aclose()
-
-
-async def test_renew_and_release_are_ownership_checked(wire_bus_client: None, server: fakeredis.FakeServer) -> None:
-    bus = make_bus()
-    client = aioredis.FakeRedis(server=server, decode_responses=True)
-    try:
-        await bus._claim_slot(client)
-        # A held claim renews.
-        assert await bus._renew_claim(client, "serve-1") is True
-        # A foreign token now owns the slot: renew MISSES atomically (never clobbers),
-        # and release no-ops (no DEL of another holder's claim).
-        await client.set(bus._settings.slot_key("serve-1"), "foreign-token", px=15000)
-        assert await bus._renew_claim(client, "serve-1") is False
-        assert await bus._release_claim(client, "serve-1") is False
-        # The foreign token is intact — renew never overwrote it.
-        assert await client.get(bus._settings.slot_key("serve-1")) == "foreign-token"
-    finally:
-        await client.aclose()
-
-
-async def test_establish_identity_keeps_held_claim_but_remints_a_lost_one(
-    wire_bus_client: None, server: fakeredis.FakeServer
-) -> None:
-    bus = make_bus()
-    client = aioredis.FakeRedis(server=server, decode_responses=True)
-    try:
-        await bus._establish_identity(client)
-        first = bus.identity
-        assert first.name == "serve-1"
-
-        # A reconnect that still holds its claim keeps the SAME name+generation.
-        await bus._establish_identity(client)
-        assert bus.identity.name == first.name
-        assert bus.identity.generation == first.generation
-
-        # The slot is stolen: the next (re)establish renews-misses and re-mints a NEW
-        # life — the lowest free ordinal (serve-1 is taken by the thief), fresh gen.
-        await client.set(bus._settings.slot_key("serve-1"), "foreign-token", px=15000)
-        await bus._establish_identity(client)
-        assert bus.identity.name == "serve-2"
-        assert bus.identity.generation == 1
-    finally:
-        await client.aclose()
 
 
 # -- workers of two skeleton majors on one namespace ---------------------------
@@ -186,19 +99,19 @@ async def test_echo_skip_is_keyed_on_name_and_generation() -> None:
         return {"data": json.dumps({"payload": _RELOAD_WIRE, "name": name, "generation": generation})}
 
     # Own (name, generation): echo-skipped.
-    await bus._handle_op(None, record, frame("serve-1", 3))
+    await bus._handle_op(None, record, frame("serve-1", 3), failure_payload=lambda _op, _failure: None)
     assert applied == []
 
     # SAME name, EARLIER generation: a prior life's frame is foreign and applied.
-    await bus._handle_op(None, record, frame("serve-1", 2))
+    await bus._handle_op(None, record, frame("serve-1", 2), failure_payload=lambda _op, _failure: None)
     assert applied == [_RELOAD_WIRE]
 
     # A different name is foreign and applied.
-    await bus._handle_op(None, record, frame("serve-2", 3))
+    await bus._handle_op(None, record, frame("serve-2", 3), failure_payload=lambda _op, _failure: None)
     assert applied == [_RELOAD_WIRE, _RELOAD_WIRE]
 
     # A malformed frame is discarded without applying.
-    await bus._handle_op(None, record, {"data": "not valid json"})
+    await bus._handle_op(None, record, {"data": "not valid json"}, failure_payload=lambda _op, _failure: None)
     assert applied == [_RELOAD_WIRE, _RELOAD_WIRE]
 
 
@@ -216,6 +129,21 @@ def test_fork_child_derives_a_nonmember_identity() -> None:
     assert child.generation == 0
     assert child.member is False
     assert child.kind == WorkerKind.backend
+
+
+async def test_fork_child_does_not_inherit_its_parents_departure(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The exit latch is one per process life: a child forked from a parent already leaving
+    # starts with none of the parent's departure, nor its announce.
+    import tai42_skeleton.app.bus.worker_bus as worker_bus_module
+
+    monkeypatch.setattr(worker_bus_module.os, "kill", lambda pid, sig: None)
+    bus = make_bus(kind=WorkerKind.backend)
+    bus._identity = WorkerIdentity(name="backend-2", kind=WorkerKind.backend, pid=1, generation=7)
+    bus.request_graceful_exit("the parent leaves")
+    assert bus.departing == "the parent leaves"
+    bus._fork_child_nonmember()
+    assert bus.departing is None
+    assert bus._leaving_announce is None
 
 
 def test_a_member_acts_for_itself() -> None:
@@ -253,9 +181,9 @@ def test_fork_child_drops_the_inherited_heartbeat_thread() -> None:
     bus = make_bus()
     bus._identity = WorkerIdentity(name="serve-1", kind=WorkerKind.serve, pid=1, generation=1)
     key = bus._settings.presence_key("serve-1")
-    bus._heartbeat_thread = _HeartbeatThread("tai-worker-bus-heartbeat-serve-1", lambda: bus._heartbeat_main(key))
+    bus._heartbeat = _Heartbeat("tai-worker-bus-heartbeat-serve-1", lambda: bus._heartbeat_main(key))
     bus._fork_child_nonmember()
-    assert bus._heartbeat_thread is None
+    assert bus._heartbeat is None
 
 
 def test_fork_derive_from_a_local_bus_succeeds() -> None:
@@ -297,7 +225,7 @@ async def test_reconnect_after_transport_drop(wire_bus_client: None, server: fak
     async def on_ready() -> None:
         reconnects.append("ready")
 
-    task = asyncio.create_task(worker.subscribe(apply, on_ready))
+    task = _start(worker, apply, on_ready)
     try:
         await asyncio.wait_for(_until(lambda: len(reconnects) >= 1), timeout=2.0)
         name = worker.identity.name
@@ -320,6 +248,49 @@ async def test_reconnect_after_transport_drop(wire_bus_client: None, server: fak
         await _stop(task)
 
 
+async def _row_of(publisher: WorkerBus, name: str) -> Any:
+    return {r.name: r for r in await publisher.census()}.get(name)
+
+
+@pytest.mark.parametrize("begun_while", ["connected", "disconnected"])
+async def test_a_life_that_began_leaving_still_reads_recycling_after_a_reconnect(
+    wire_bus_client: None, server: fakeredis.FakeServer, begun_while: str
+) -> None:
+    # The row is the published form of the life's leaving: a reconnect's fresh presence and its
+    # resync keep it ``recycling``, with the declared drain, whether the leaving began while the
+    # row was written or while the transport was down and nothing could be written.
+    publisher = make_bus()
+    worker = make_bus(heartbeat_ttl=5.0, drain=630.0)
+    readies: list[str] = []
+
+    async def on_ready() -> None:
+        readies.append("ready")
+
+    task = _start(worker, _noop_op, on_ready)
+    try:
+        await asyncio.wait_for(_until(lambda: len(readies) >= 1), timeout=2.0)
+        name = worker.identity.name
+        if begun_while == "connected":
+            assert worker.stop_began("SIGTERM received") is True
+            await worker.leaving_announced()
+            assert (await _row_of(publisher, name)).state == WorkerState.recycling
+        server.connected = False
+        await asyncio.sleep(0.15)
+        if begun_while == "disconnected":
+            assert worker.stop_began("SIGTERM received") is True
+            await worker.leaving_announced()
+        server.connected = True
+        await asyncio.wait_for(_until(lambda: len(readies) >= 2), timeout=3.0)
+        # The reconnect's resync has written its last state.
+        await asyncio.sleep(0.1)
+
+        row = await _row_of(publisher, name)
+        assert (row.state, row.drain_seconds) == (WorkerState.recycling, 630.0)
+        assert worker.departing == "SIGTERM received"
+    finally:
+        await _stop(task)
+
+
 async def test_a_reconnect_the_retry_hides_is_followed_by_the_resync(
     wire_bus_client: None,
     server: fakeredis.FakeServer,
@@ -338,7 +309,7 @@ async def test_a_reconnect_the_retry_hides_is_followed_by_the_resync(
         return pubsub
 
     monkeypatch.setattr(KitFakeRedis, "pubsub", recording_pubsub)
-    publisher = make_bus(ack_timeout=_REPLY_WINDOW, apply_timeout=_REPLY_WINDOW)
+    publisher = make_bus(apply_timeout=_REPLY_WINDOW)
     worker = make_bus(heartbeat_ttl=5.0)
     readies: list[str] = []
     applied: list[dict] = []
@@ -366,7 +337,7 @@ async def test_a_reconnect_the_retry_hides_is_followed_by_the_resync(
         readies.append(worker.identity.name)
 
     caplog.set_level(logging.WARNING, logger="tai42_skeleton.app.bus.subscribe")
-    task = asyncio.create_task(worker.subscribe(apply, on_ready))
+    task = _start(worker, apply, on_ready)
     try:
         await asyncio.wait_for(_until(lambda: len(readies) == 1), timeout=2.0)
         name = worker.identity.name
@@ -406,7 +377,7 @@ async def test_reconnect_after_wrapped_disconnect(wire_pooled_bus_client: None, 
     async def on_ready() -> None:
         reconnects.append("ready")
 
-    task = asyncio.create_task(worker.subscribe(apply, on_ready))
+    task = _start(worker, apply, on_ready)
     try:
         await asyncio.wait_for(_until(lambda: len(reconnects) >= 1), timeout=2.0)
         server.connected = False
@@ -457,7 +428,7 @@ async def test_heartbeat_death_forces_reconnect(
     async def on_ready() -> None:
         readies.append("ready")
 
-    task = asyncio.create_task(worker.subscribe(apply, on_ready))
+    task = _start(worker, apply, on_ready)
     try:
         await asyncio.wait_for(_until(lambda: len(readies) >= 1), timeout=10.0)
         await asyncio.wait_for(_until(lambda: len(readies) >= 2), timeout=10.0)
@@ -478,168 +449,6 @@ async def test_heartbeat_death_forces_reconnect(
     assert _live_heartbeat_threads() == []
 
 
-# -- the heartbeat lives off the subscription loop ------------------------------
-
-
-async def test_claim_survives_a_subscription_loop_stall(
-    wire_bus_client: None, server: fakeredis.FakeServer, caplog: pytest.LogCaptureFixture
-) -> None:
-    # An op callback that blocks the subscription loop's thread synchronously for longer
-    # than the claim TTL (a config reload's rebuild) keeps the claim and the presence row:
-    # the heartbeat renews from its own thread, so the worker keeps its life and resyncs once.
-    ttl = 0.6
-    worker = make_bus(heartbeat_ttl=ttl)
-    publisher = make_bus(heartbeat_ttl=ttl, apply_timeout=5.0)
-    readies: list[str] = []
-
-    async def stall(_op: dict, *, deadline: float) -> None:
-        time.sleep(ttl * 2.5)
-
-    async def on_ready() -> None:
-        readies.append("ready")
-
-    task = asyncio.create_task(worker.subscribe(stall, on_ready))
-    probe: Any = aioredis.FakeRedis(server=server, decode_responses=True)
-    try:
-        with caplog.at_level(logging.WARNING):
-            await asyncio.wait_for(_until(lambda: len(readies) >= 1), timeout=3.0)
-            first = worker.identity
-            assert (first.name, first.generation) == ("serve-1", 1)
-            result = await publisher.publish(_RELOAD, targets=[first.name], local=None)
-            # The next beat after the stall must still find the claim held.
-            await asyncio.sleep(ttl)
-
-        assert [(r.name, r.outcome) for r in result.results] == [(first.name, OpOutcome.applied)]
-        assert (worker.identity.name, worker.identity.generation) == ("serve-1", 1)
-        assert readies == ["ready"]
-        messages = [r.getMessage() for r in caplog.records]
-        assert not any("presence heartbeat for" in m or "re-minting" in m for m in messages), messages
-        assert not any(r.exc_info and isinstance(r.exc_info[1], bus_module.SlotLostError) for r in caplog.records)
-        assert await probe.get(worker._settings.slot_key("serve-1")) == worker._claim_token
-        assert await probe.pttl(worker._settings.slot_key("serve-1")) > 0
-        presence_pttl = await probe.pttl(worker._settings.presence_key("serve-1"))
-        assert bus_module.presence_fresh(presence_pttl, ttl), presence_pttl
-    finally:
-        await probe.aclose()
-        await _stop(task)
-
-
-async def test_heartbeat_beats_off_the_subscription_loop(
-    server: fakeredis.FakeServer, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # The heartbeat runs on a dedicated named thread with its own event loop and its own
-    # fresh (non-pooled) connection, never on the loop the subscription serves from.
-    opened: list[tuple[str, bool]] = []
-
-    @asynccontextmanager
-    async def spy(client_cls, settings=None, *, fresh: bool = False, **kw) -> AsyncIterator[KitFakeRedis]:
-        opened.append((threading.current_thread().name, fresh))
-        client = KitFakeRedis(server=server, decode_responses=True)
-        try:
-            yield client
-        finally:
-            await client.aclose()
-
-    monkeypatch.setattr(bus_module, "client_ctx", spy)
-    worker = make_bus(heartbeat_ttl=0.3)
-    beats: list[tuple[asyncio.AbstractEventLoop, str]] = []
-    real_heartbeat = worker._heartbeat_loop
-
-    async def recording_heartbeat(r: object, presence_key: str) -> None:
-        beats.append((asyncio.get_running_loop(), threading.current_thread().name))
-        await real_heartbeat(r, presence_key)
-
-    monkeypatch.setattr(worker, "_heartbeat_loop", recording_heartbeat)
-    task = asyncio.create_task(worker.subscribe(_noop_op))
-    try:
-        await asyncio.wait_for(_until(lambda: bool(beats)), timeout=3.0)
-        loop, thread_name = beats[0]
-        assert loop is not asyncio.get_running_loop()
-        assert thread_name == "tai-worker-bus-heartbeat-serve-1"
-        assert (thread_name, True) in opened, opened
-    finally:
-        await _stop(task)
-
-
-async def test_a_heartbeat_stopped_before_its_body_starts_never_runs_it() -> None:
-    ran: list[str] = []
-
-    async def main() -> None:
-        ran.append("body")
-
-    heartbeat = _HeartbeatThread("tai-worker-bus-heartbeat-test", main)
-    heartbeat.request_stop()
-    heartbeat.start()
-    await asyncio.wait_for(asyncio.wrap_future(heartbeat.done), timeout=2.0)
-    heartbeat.thread.join(2.0)
-    assert ran == []
-    assert heartbeat.done.exception() is None
-
-
-async def test_a_heartbeat_that_returns_cleanly_is_a_loud_failure(caplog: pytest.LogCaptureFixture) -> None:
-    # The beat loop is unbounded, so a clean return is never an expected end: the
-    # supervision turns it into a RuntimeError logged at ERROR.
-    bus = make_bus()
-
-    async def main() -> None:
-        return None
-
-    heartbeat = _HeartbeatThread("tai-worker-bus-heartbeat-test", main)
-    heartbeat.start()
-    await asyncio.wait_for(asyncio.wrap_future(heartbeat.done), timeout=2.0)
-    with caplog.at_level(logging.ERROR):
-        failure = bus._heartbeat_failure(heartbeat, "serve-1")
-    assert isinstance(failure, RuntimeError)
-    assert "returned without an error" in str(failure)
-    assert any("presence heartbeat for serve-1 stopped" in r.getMessage() for r in caplog.records)
-    heartbeat.thread.join(2.0)
-
-
-async def test_a_heartbeat_failing_while_its_stop_is_pending_is_logged(caplog: pytest.LogCaptureFixture) -> None:
-    # A heartbeat that dies on its own after the supervision last looked is not lost:
-    # the teardown's join logs its exception at ERROR.
-    bus = make_bus()
-
-    async def main() -> None:
-        raise RedisConnectionError("heartbeat connection dropped")
-
-    heartbeat = _HeartbeatThread("tai-worker-bus-heartbeat-test", main)
-    bus._heartbeat_thread = heartbeat
-    heartbeat.start()
-    await asyncio.wait_for(_until(heartbeat.done.done), timeout=2.0)
-    with caplog.at_level(logging.ERROR):
-        await bus._stop_heartbeat()
-    assert not heartbeat.thread.is_alive()
-    errors = [r for r in caplog.records if r.levelno == logging.ERROR]
-    assert len(errors) == 1
-    assert "terminated abnormally" in errors[0].getMessage()
-    assert isinstance(errors[0].exc_info and errors[0].exc_info[1], RedisConnectionError)
-
-
-async def test_a_heartbeat_thread_that_overruns_its_stop_is_logged_and_left(caplog: pytest.LogCaptureFixture) -> None:
-    # The join is bounded by one claim TTL: a body that cannot be cancelled (it blocks its
-    # own thread) is reported at ERROR and left to its daemon status so teardown runs.
-    bus = make_bus(heartbeat_ttl=0.1)
-    release = threading.Event()
-
-    async def main() -> None:
-        release.wait(5.0)
-
-    heartbeat = _HeartbeatThread("tai-worker-bus-heartbeat-test", main)
-    bus._heartbeat_thread = heartbeat
-    heartbeat.start()
-    await asyncio.wait_for(_until(lambda: heartbeat._task is not None), timeout=2.0)
-    try:
-        with caplog.at_level(logging.ERROR):
-            await bus._stop_heartbeat()
-        assert any("did not stop within 0.10s" in r.getMessage() for r in caplog.records)
-        assert bus._heartbeat_thread is None
-        assert heartbeat.thread.is_alive()
-    finally:
-        release.set()
-        heartbeat.thread.join(5.0)
-
-
 # -- lost slot: SlotLostError re-mints a new life -----------------------------
 
 
@@ -658,7 +467,7 @@ async def test_lost_slot_remints_a_new_life(
     async def on_ready() -> None:
         readies.append("ready")
 
-    task = asyncio.create_task(worker.subscribe(apply, on_ready))
+    task = _start(worker, apply, on_ready)
     try:
         await asyncio.wait_for(_until(lambda: len(readies) >= 1), timeout=3.0)
         first = worker.identity.name
@@ -678,242 +487,6 @@ async def test_lost_slot_remints_a_new_life(
     finally:
         await _stop(task)
     assert _live_heartbeat_threads() == []
-
-
-# -- teardown split: deliberate releases the claim, transport/lost leave keys to TTL --
-
-
-async def test_teardown_deliberate_releases_claim_and_deletes_presence(
-    wire_bus_client: None, server: fakeredis.FakeServer
-) -> None:
-    # A long claim TTL so the slot survives to the deliberate release: this test runs no
-    # heartbeat, and the presence delete is gated on the claim release succeeding — under
-    # the default sub-second TTL the unrenewed claim can lapse before teardown, miss the
-    # release, and leave the presence row. In a live worker the heartbeat holds the claim.
-    bus = make_bus(heartbeat_ttl=5.0)
-    client = aioredis.FakeRedis(server=server, decode_responses=True)
-    try:
-        await bus._establish_identity(client)
-        name = bus.identity.name
-        pkey = bus._settings.presence_key(name)
-        await client.set(pkey, "{}", px=15000)
-        pubsub = client.pubsub()
-        await pubsub.subscribe(bus._settings.channel)
-
-        await bus._teardown(client, pubsub, pkey, "deliberate")
-
-        # A deliberate stop releases the claim then deletes its own presence row.
-        assert await client.exists(pkey) == 0
-        assert await client.exists(bus._settings.slot_key(name)) == 0
-    finally:
-        await client.aclose()
-
-
-async def test_teardown_transport_leaves_both_keys_on_ttl(wire_bus_client: None, server: fakeredis.FakeServer) -> None:
-    bus = make_bus()
-    client = aioredis.FakeRedis(server=server, decode_responses=True)
-    try:
-        await bus._establish_identity(client)
-        name = bus.identity.name
-        pkey = bus._settings.presence_key(name)
-        await client.set(pkey, "{}", px=15000)
-        pubsub = client.pubsub()
-        await pubsub.subscribe(bus._settings.channel)
-
-        await bus._teardown(client, pubsub, pkey, "transport")
-
-        # A transport-error exit carries BOTH keys on their TTL across the reconnect.
-        assert await client.exists(pkey) == 1
-        assert await client.exists(bus._settings.slot_key(name)) == 1
-    finally:
-        await client.aclose()
-
-
-async def test_teardown_deliberate_leaves_a_reclaimed_row_untouched(
-    wire_bus_client: None, server: fakeredis.FakeServer
-) -> None:
-    bus = make_bus()
-    client = aioredis.FakeRedis(server=server, decode_responses=True)
-    try:
-        await bus._establish_identity(client)
-        name = bus.identity.name
-        pkey = bus._settings.presence_key(name)
-        # A NEW holder already owns the slot + row (foreign claim token).
-        await client.set(bus._settings.slot_key(name), "foreign-token", px=15000)
-        await client.set(pkey, '{"new":"holder"}', px=15000)
-        pubsub = client.pubsub()
-        await pubsub.subscribe(bus._settings.channel)
-
-        await bus._teardown(client, pubsub, pkey, "deliberate")
-
-        # The release misses (foreign token), so the new holder's row is NOT deleted.
-        assert await client.exists(pkey) == 1
-        assert await client.get(bus._settings.slot_key(name)) == "foreign-token"
-    finally:
-        await client.aclose()
-
-
-async def test_teardown_deliberate_releases_claim_before_presence_is_registered(
-    wire_bus_client: None, server: fakeredis.FakeServer, caplog: pytest.LogCaptureFixture
-) -> None:
-    # A deliberate stop that cancels in the claim window — the slot is won but the
-    # presence row is not yet written (presence_key None) — must STILL release the
-    # claim, so the slot never lingers to its TTL.
-    bus = make_bus()
-    client = aioredis.FakeRedis(server=server, decode_responses=True)
-    try:
-        await bus._establish_identity(client)
-        name = bus.identity.name
-        assert await client.exists(bus._settings.slot_key(name)) == 1
-        pubsub = client.pubsub()
-        await pubsub.subscribe(bus._settings.channel)
-
-        with caplog.at_level(logging.WARNING):
-            await bus._teardown(client, pubsub, None, "deliberate")
-
-        # The compare-token release ran: the slot is free (a fresh SET NX now wins), and
-        # no spurious "already reclaimed" warning fires with no presence row to leave.
-        assert await client.set(bus._settings.slot_key(name), "next-token", nx=True) is True
-        assert not any("already reclaimed" in r.getMessage() for r in caplog.records)
-    finally:
-        await client.aclose()
-
-
-async def test_teardown_deliberate_swallows_a_release_transport_blip(
-    wire_bus_client: None,
-    server: fakeredis.FakeServer,
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    # A deliberate stop is a CancelledError propagating through the subscription's
-    # finally → _teardown; a transport error on the claim release must be logged and the
-    # claim left to its TTL, NEVER propagated — else it replaces the CancelledError and
-    # the stop reconnect-loops instead of terminating. The pub/sub close and the
-    # _presence reset still run.
-    bus = make_bus()
-    client = aioredis.FakeRedis(server=server, decode_responses=True)
-    try:
-        await bus._establish_identity(client)
-        name = bus.identity.name
-        pkey = bus._settings.presence_key(name)
-        bus._presence = _PresenceValue(
-            kind=WorkerKind.serve,
-            pid=1,
-            generation=1,
-            joined_at="2026-01-01T00:00:00+00:00",
-            beat_at="2026-01-01T00:00:00+00:00",
-            state=WorkerState.ready,
-            deployment_keys=(),
-            env_readers="",
-        )
-        pubsub = client.pubsub()
-        await pubsub.subscribe(bus._settings.channel)
-
-        async def blip(*_a: object, **_k: object) -> bool:
-            raise RedisConnectionError("claim release lost its connection")
-
-        monkeypatch.setattr(bus, "_release_claim", blip)
-        with caplog.at_level(logging.WARNING):
-            await bus._teardown(client, pubsub, pkey, "deliberate")  # must NOT raise
-
-        assert any(
-            "claim release for" in r.getMessage() and "transport" in r.getMessage()
-            for r in caplog.records
-            if r.levelno == logging.WARNING
-        )
-        # The transport path does not emit the misleading "already reclaimed" warning.
-        assert not any("already reclaimed" in r.getMessage() for r in caplog.records)
-        # Teardown still completed: the in-memory presence is reset and the pub/sub is
-        # unsubscribed/closed, and the claim key is left to its TTL.
-        assert bus._presence is None
-        assert pubsub.subscribed is False
-        assert await client.exists(bus._settings.slot_key(name)) == 1
-    finally:
-        await client.aclose()
-
-
-# -- recycling state written before graceful self-exit ------------------------
-
-
-async def test_mark_recycling_writes_the_recycling_state(wire_bus_client: None) -> None:
-    bus = make_bus(heartbeat_ttl=5.0)
-
-    async def noop(_op: dict, *, deadline: float) -> None:
-        return None
-
-    task, identity = await _spawn_subscriber(bus, noop)
-    try:
-        await bus.mark_recycling()
-        rows = {r.name: r for r in await bus.census()}
-        assert rows[identity.name].state == WorkerState.recycling
-    finally:
-        await _stop(task)
-
-
-async def test_mark_recycling_is_a_noop_without_presence() -> None:
-    # An unsubscribed bus holds no presence state, so marking recycling is a no-op
-    # (nothing to write) and never touches redis.
-    bus = make_bus()
-    await bus.mark_recycling()  # must not raise
-
-
-async def test_mark_recycling_swallows_a_transport_blip(
-    wire_bus_client: None, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    # The recycling-state write is cosmetic (it only tells the census WHY a worker is
-    # departing), so a transport blip on it must be logged and swallowed, never
-    # propagated — an unguarded raise here would abort the recycle op over a census
-    # write. The renew succeeds; the presence SET raises a transport error.
-    bus = make_bus(heartbeat_ttl=5.0)
-
-    async def noop(_op: dict, *, deadline: float) -> None:
-        return None
-
-    task, _ = await _spawn_subscriber(bus, noop)
-    try:
-
-        async def blip(*_a: object, **_k: object) -> None:
-            raise RedisConnectionError("recycling-state write lost its connection")
-
-        monkeypatch.setattr(bus, "_set_presence", blip)
-        with caplog.at_level(logging.WARNING):
-            await bus.mark_recycling()  # must NOT raise
-
-        assert any("recycling-state write" in r.getMessage() for r in caplog.records if r.levelno == logging.WARNING)
-    finally:
-        await _stop(task)
-
-
-async def test_presence_writes_are_skipped_on_a_lost_claim(wire_bus_client: None, server: fakeredis.FakeServer) -> None:
-    # A renew-gated presence write (mark_recycling, the last_op stamp) skips silently
-    # when the claim is lost — an ex-owner in the loss-lag never regresses the census
-    # under its stale name; the re-mint rides the heartbeat's SlotLostError instead.
-    bus = make_bus()
-    client = aioredis.FakeRedis(server=server, decode_responses=True)
-    try:
-        await bus._establish_identity(client)
-        name = bus.identity.name
-        now = "2026-01-01T00:00:00+00:00"
-        bus._presence = _PresenceValue(
-            kind=WorkerKind.serve,
-            pid=1,
-            generation=bus.identity.generation,
-            joined_at=now,
-            beat_at=now,
-            state=WorkerState.ready,
-            deployment_keys=(),
-            env_readers="",
-        )
-        # Steal the claim so every renew misses.
-        await client.set(bus._settings.slot_key(name), "foreign-token", px=30000)
-
-        await bus.mark_recycling()
-        assert bus._presence.state == WorkerState.ready  # not flipped — the write was skipped
-
-        await bus._stamp_last_op(client, "reload_config", "applied")
-        assert bus._presence.last_op is None  # not stamped — the write was skipped
-    finally:
-        await client.aclose()
 
 
 # -- presence value round-trip + last_op stamp --------------------------------
@@ -1001,7 +574,7 @@ async def test_presence_state_is_resyncing_before_on_ready_and_ready_after(wire_
         rows = {r.name: r for r in await bus.census()}
         state_during_ready.append(rows[bus.identity.name].state)
 
-    task = asyncio.create_task(bus.subscribe(_noop_op, on_ready))
+    task = _start(bus, _noop_op, on_ready)
     try:
         async with asyncio.timeout(2.0):
             while not state_during_ready:
@@ -1036,7 +609,52 @@ async def test_failing_callback_reports_failed(wire_bus_client: None) -> None:
         by_name = {r.name: r for r in result.results}
         assert by_name[worker_id.name].outcome == OpOutcome.failed
         assert "nope" in (by_name[worker_id.name].error or "")
+        assert by_name[worker_id.name].payload is None
         assert not result.ok
+    finally:
+        await _stop(task)
+
+
+async def test_a_failed_reply_carries_the_payload_the_subscriber_states_for_its_failure(
+    wire_bus_client: None,
+) -> None:
+    publisher = make_bus()
+    worker = make_bus()
+    refusal = RuntimeError("refused at the build")
+    stated: list[tuple[dict, Exception]] = []
+
+    async def refuse(_op: dict, *, deadline: float) -> None:
+        raise refusal
+
+    def statement(op: dict, failure: Exception) -> dict[str, Any]:
+        stated.append((op, failure))
+        return {"status": "discarded", "awaiting_respawn": ["TAI_X"]}
+
+    task, worker_id = await _spawn_subscriber(worker, refuse, failure_payload=statement)
+    try:
+        result = await publisher.publish(_RELOAD, targets=None, local=LocalApplyResult(outcome=OpOutcome.applied))
+        row = {r.name: r for r in result.results}[worker_id.name]
+        assert row.outcome == OpOutcome.failed
+        assert row.payload == {"status": "discarded", "awaiting_respawn": ["TAI_X"]}
+        assert row.error == "RuntimeError: refused at the build"
+        assert stated == [(_RELOAD_WIRE, refusal)]
+    finally:
+        await _stop(task)
+
+
+async def test_a_failed_reply_the_subscriber_states_nothing_for_carries_no_payload(wire_bus_client: None) -> None:
+    publisher = make_bus()
+    worker = make_bus()
+
+    async def boom(_op: dict, *, deadline: float) -> None:
+        raise RuntimeError("nope")
+
+    task, worker_id = await _spawn_subscriber(worker, boom, failure_payload=lambda _op, _failure: None)
+    try:
+        result = await publisher.publish(_RELOAD, targets=None, local=LocalApplyResult(outcome=OpOutcome.applied))
+        row = {r.name: r for r in result.results}[worker_id.name]
+        assert row.outcome == OpOutcome.failed
+        assert row.payload is None
     finally:
         await _stop(task)
 
@@ -1047,7 +665,7 @@ async def test_failing_callback_reports_failed(wire_bus_client: None) -> None:
 async def test_subscriber_skips_op_outside_targets(wire_bus_client: None) -> None:
     # The publisher returns on the targeted worker's terminal reply, so its reply windows only
     # bound a hang; they are generous so a slow host still collects the ``applied`` reply.
-    publisher = make_bus(ack_timeout=_REPLY_WINDOW, apply_timeout=_REPLY_WINDOW)
+    publisher = make_bus(apply_timeout=_REPLY_WINDOW)
     worker_a = make_bus()
     worker_b = make_bus()
     a_seen: list[dict] = []
@@ -1133,7 +751,7 @@ async def test_subscription_uses_a_fresh_epoch_immune_connection(
     async def apply(_op: dict, *, deadline: float) -> object:
         return None
 
-    task = asyncio.create_task(bus.subscribe(apply, on_ready))
+    task = _start(bus, apply, on_ready)
     try:
         await asyncio.wait_for(ready.wait(), timeout=2.0)
         await asyncio.sleep(0.05)
@@ -1142,101 +760,6 @@ async def test_subscription_uses_a_fresh_epoch_immune_connection(
         assert fresh_flags == [True, True], f"a bus connection was not fresh=True: {fresh_flags}"
     finally:
         await _stop(task)
-
-
-# -- presence index: atomic write, self-stop removal ---------------------------
-
-
-async def test_set_presence_writes_key_and_index_member_in_one_pipeline(server) -> None:
-    bus = make_bus(kind=WorkerKind.serve)
-    inner: Any = aioredis.FakeRedis(server=server, decode_responses=True)
-    recording = _RecordingRedis(inner)
-    presence = _PresenceValue(
-        kind=WorkerKind.serve,
-        pid=1,
-        generation=1,
-        joined_at="2026-01-01T00:00:00+00:00",
-        beat_at="2026-01-01T00:00:00+00:00",
-        state=WorkerState.ready,
-        deployment_keys=(),
-        env_readers="",
-    )
-    key = bus._settings.presence_key(bus.identity.name)
-
-    await bus._set_presence(recording, key, presence)
-
-    # The reader body and its life, the row and the index SADD ride ONE pipeline, in that order —
-    # a presence key never exists without its index member or without the body its digest names.
-    assert len(recording.pipelines) == 1
-    assert recording.pipelines[0].commands == ["set", "pexpire", "set", "sadd"]
-    assert bus.identity.name in await inner.smembers(bus._settings.presence_index)
-    row = json.loads(await inner.get(key))
-    readers = published_env_readers()
-    assert row["env_readers"] == readers.digest
-    body_key = bus._settings.env_readers_key(readers.digest)
-    assert await inner.get(body_key) == readers.body
-    row_ttl_ms = int(bus._settings.heartbeat_ttl * 1000)
-    # A lone write leaves the body twice the row's TTL to live.
-    assert row_ttl_ms < await inner.pttl(body_key) <= 2 * row_ttl_ms
-    assert 0 < await inner.pttl(key) <= row_ttl_ms
-    await inner.aclose()
-
-
-async def test_a_beat_with_a_short_ttl_never_cuts_a_shared_reader_body_below_a_longer_row(server) -> None:
-    # Two workers with one reader set and different heartbeat TTLs share one body key: the
-    # short-TTL worker's beat after the long-TTL worker's leaves the body outliving the long row.
-    long_bus = make_bus(kind=WorkerKind.serve, heartbeat_ttl=45.0)
-    short_bus = make_bus(kind=WorkerKind.serve, heartbeat_ttl=1.0)
-    inner: Any = aioredis.FakeRedis(server=server, decode_responses=True)
-
-    def presence() -> _PresenceValue:
-        return _PresenceValue(
-            kind=WorkerKind.serve,
-            pid=1,
-            generation=1,
-            joined_at="2026-01-01T00:00:00+00:00",
-            beat_at="2026-01-01T00:00:00+00:00",
-            state=WorkerState.ready,
-            deployment_keys=(),
-            env_readers="",
-        )
-
-    long_key = long_bus._settings.presence_key(long_bus.identity.name)
-    await long_bus._set_presence(inner, long_key, presence())
-    await short_bus._set_presence(inner, short_bus._settings.presence_key(short_bus.identity.name), presence())
-
-    body_key = long_bus._settings.env_readers_key(published_env_readers().digest)
-    assert await inner.pttl(body_key) > 45_000 >= await inner.pttl(long_key)
-    await inner.aclose()
-
-
-async def test_deliberate_stop_removes_the_index_member_and_presence_key(
-    wire_bus_client: None, server, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    bus = make_bus(kind=WorkerKind.serve)
-    task, ident = await _spawn_subscriber(bus, _noop_op)
-    heartbeat_alive_at_release: list[bool] = []
-    real_release = bus._release_claim
-
-    async def recording_release(r: Any, name: str) -> bool:
-        heartbeat_alive_at_release.append(bool(_live_heartbeat_threads()))
-        return await real_release(r, name)
-
-    monkeypatch.setattr(bus, "_release_claim", recording_release)
-    client: Any = aioredis.FakeRedis(server=server, decode_responses=True)
-    assert ident.name in await client.smembers(bus._settings.presence_index)
-    assert len(_live_heartbeat_threads()) == 1
-
-    await _stop(task)
-
-    # A deliberate stop joins the heartbeat thread, then releases the claim, then removes
-    # BOTH the presence key and its index member (the teardown mirror of the atomic write).
-    assert heartbeat_alive_at_release == [False]
-    assert _live_heartbeat_threads() == []
-    assert bus._heartbeat_thread is None
-    assert ident.name not in await client.smembers(bus._settings.presence_index)
-    assert await client.get(bus._settings.presence_key(ident.name)) is None
-    await client.aclose()
 
 
 # The publisher's ack and apply windows in a test that waits on a terminal reply: a hang bound.

@@ -1,6 +1,7 @@
 """HTTP routes for the deployment config surface — ``/api/config/*``.
 
-AUTHED thin adapters over operations in ``tai42_skeleton.operations.config``:
+AUTHED thin adapters over operations in ``tai42_skeleton.operations.config`` and, for the
+settings-profile routes, ``tai42_skeleton.operations.settings_profiles``:
 
 * ``GET /api/config/env`` — the stored env config plus the operator's secret-key
   marks; admin-only (``action=secret``), the whole store being one admin-owned
@@ -15,6 +16,8 @@ AUTHED thin adapters over operations in ``tai42_skeleton.operations.config``:
 * ``POST /api/config/reload`` — a local soft-restart (refresh env, reset settings
   caches, re-initialize from the manifest), fanned out to every worker when a
   backend is configured.
+* ``/api/config/profiles`` and ``/api/config/profiles/{name}[/diff|/versions[/{version}]|/rollback|/apply]``
+  — the settings-profile CRUD, diff, version history, rollback and apply.
 
 Success bodies are ``{"data": ...}``; failures are ``{"error": "<message>"}``.
 """
@@ -28,20 +31,20 @@ from tai42_contract.app import tai42_app
 
 from tai42_skeleton.operations import BadRequestError, operation_metadata_of, register_operation_route
 from tai42_skeleton.operations.adapter import read_json_object
-from tai42_skeleton.operations.config import apply_profile as _apply_profile_op
-from tai42_skeleton.operations.config import delete_profile as _delete_profile_op
-from tai42_skeleton.operations.config import diff_profile as _diff_profile_op
-from tai42_skeleton.operations.config import get_profile as _get_profile_op
-from tai42_skeleton.operations.config import get_profile_version as _get_profile_version_op
-from tai42_skeleton.operations.config import list_profile_versions as _list_profile_versions_op
-from tai42_skeleton.operations.config import list_profiles as _list_profiles_op
-from tai42_skeleton.operations.config import put_profile as _put_profile_op
 from tai42_skeleton.operations.config import read_env as _read_env_op
 from tai42_skeleton.operations.config import read_mode as _read_mode_op
 from tai42_skeleton.operations.config import read_settings_schema as _read_settings_schema_op
 from tai42_skeleton.operations.config import reload_config as _reload_config_op
-from tai42_skeleton.operations.config import rollback_profile as _rollback_profile_op
 from tai42_skeleton.operations.config import write_env as _write_env_op
+from tai42_skeleton.operations.settings_profiles import apply_profile as _apply_profile_op
+from tai42_skeleton.operations.settings_profiles import delete_profile as _delete_profile_op
+from tai42_skeleton.operations.settings_profiles import diff_profile as _diff_profile_op
+from tai42_skeleton.operations.settings_profiles import get_profile as _get_profile_op
+from tai42_skeleton.operations.settings_profiles import get_profile_version as _get_profile_version_op
+from tai42_skeleton.operations.settings_profiles import list_profile_versions as _list_profile_versions_op
+from tai42_skeleton.operations.settings_profiles import list_profiles as _list_profiles_op
+from tai42_skeleton.operations.settings_profiles import put_profile as _put_profile_op
+from tai42_skeleton.operations.settings_profiles import rollback_profile as _rollback_profile_op
 
 _ENV_BODY_SHAPE = 'the env write body is {"env": {name: value}, "secret_keys": [name] | null}'
 

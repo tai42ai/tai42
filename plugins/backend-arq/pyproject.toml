@@ -39,11 +39,6 @@ dependencies = [
     "croniter~=6.2.2",
     # Job/schedule payload (de)serialization.
     "orjson~=3.11.8",
-    # Presents the extension branch tools with real composed signatures.
-    "makefun~=1.16.0",
-    # Detecting/stripping the FastMCP request-context parameter in the
-    # signature helpers (fastmcp is the platform's tool substrate).
-    "fastmcp>=3.4.7",
     # CLI arg parsing for the worker launch (same option surface as `arq worker`).
     "click>=8",
     # SettingsConfigDict / to_jsonable_python used directly by settings + tasks.

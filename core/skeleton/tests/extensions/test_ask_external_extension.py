@@ -562,7 +562,7 @@ def test_a_manifest_write_attaching_it_to_a_tool_without_callback_url_is_refused
     async def run() -> None:
         async with app.app_context(Manifest.model_validate(document)):
             store = FakeConfigStore(manifest=dict(document))
-            service, admin, _bus = _service(store, combo_check=app.extensions.check_combo)
+            service, admin, _bus = _service(store, combo_check=app.extensions)
             with pytest.raises(ValueError, match="must accept callback_url") as caught:
                 await service.apply_change(attach)
             assert str(caught.value) == (

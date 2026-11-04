@@ -1,15 +1,14 @@
 """The recycle bus op + the single-shot post-terminal-reply slot.
 
 The recycle handler ARMS the bus's post-reply slot and returns its applied payload;
-the subscription loop fires the slot AFTER the terminal reply ships and only on a
-clean apply. Scheduling the exit inside the handler would race the reply, so the
-handler never schedules — it only arms.
+the subscription loop fires the slot once the terminal reply was sent (shipped or
+failed to ship), whether the op applied or failed; a cancelled op fires nothing. Scheduling the exit inside the handler
+would race the reply, so the handler never schedules — it only arms.
 """
 
 from __future__ import annotations
 
 import asyncio
-import functools
 import json
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
@@ -25,7 +24,6 @@ import tai42_skeleton.app.bus as bus_module
 from tai42_skeleton.app.bus import WorkerBus, WorkerIdentity, WorkerKind, WorkerState, _PresenceValue
 from tai42_skeleton.app.bus.ops import Recycle
 from tai42_skeleton.app.bus_settings import BusRedisSettings, BusSettings
-from tai42_skeleton.app.graceful_exit import request_graceful_exit
 from tai42_skeleton.app.instance import app
 from tai42_skeleton.app.lifecycle import TaiMCPLifecycleMixin
 
@@ -34,7 +32,7 @@ tai42_app.bind(app)
 
 def _make_bus(kind: WorkerKind = WorkerKind.serve) -> WorkerBus:
     settings = BusSettings(redis=BusRedisSettings(redis_url="redis://fake"))
-    bus = WorkerBus(settings, kind=kind)
+    bus = WorkerBus(settings, kind=kind, exit_drain=lambda: None)
     # Simulate a claimed slot: these tests drive ``_handle_op`` directly, without a
     # subscription, so mint the identity the handler reads. No presence state is set,
     # so the renew-gated last_op stamp is a no-op (nothing to write).
@@ -56,6 +54,14 @@ class _RecordingRedis:
         return 1
 
 
+class _RecordingOutcomes(_RecordingRedis):
+    """Records each reply by its terminal outcome (``applied`` / ``failed``), the ack by its phase."""
+
+    async def publish(self, channel: str, data: str) -> None:
+        frame = json.loads(data)
+        self.events.append(("reply", frame.get("outcome", frame["phase"])))
+
+
 def _frame(reply_to: str | None) -> dict[str, Any]:
     # A foreign publisher (different name+generation than the handling bus), so the
     # op is applied rather than echo-skipped.
@@ -70,7 +76,7 @@ def _frame(reply_to: str | None) -> dict[str, Any]:
     return {"data": json.dumps(frame)}
 
 
-# -- slot fires AFTER the terminal reply, only on a clean apply ----------------
+# -- slot fires AFTER the terminal reply, never on a cancellation --------------
 
 
 async def test_slot_fires_after_the_terminal_reply() -> None:
@@ -82,14 +88,14 @@ async def test_slot_fires_after_the_terminal_reply() -> None:
         bus.arm_post_reply(lambda: events.append(("slot", None)))
         return {"recycling": "serve"}
 
-    await bus._handle_op(cast("Any", r), handler, _frame("reply-chan"))
+    await bus._handle_op(cast("Any", r), handler, _frame("reply-chan"), failure_payload=lambda _op, _failure: None)
 
     # received ack, THEN the terminal reply, THEN the armed self-exit — never before.
     assert events == [("reply", "received"), ("reply", "terminal"), ("slot", None)]
 
 
 async def test_slot_fires_even_without_a_reply_channel() -> None:
-    # Exit is conditional on apply-success, not on a reply being requested.
+    # The armed action does not depend on a reply being requested.
     bus = _make_bus()
     events: list[tuple[str, Any]] = []
     r = _RecordingRedis(events)
@@ -98,23 +104,25 @@ async def test_slot_fires_even_without_a_reply_channel() -> None:
         bus.arm_post_reply(lambda: events.append(("slot", None)))
         return None
 
-    await bus._handle_op(cast("Any", r), handler, _frame(None))
+    await bus._handle_op(cast("Any", r), handler, _frame(None), failure_payload=lambda _op, _failure: None)
     assert events == [("slot", None)]
 
 
-async def test_a_failed_apply_disarms_without_firing() -> None:
+async def test_a_failed_apply_fires_the_armed_action_after_its_failed_terminal_reply() -> None:
+    # An armed action is a decision already taken, so a step of the apply that fails after
+    # arming it still has it carried out, once the failed reply was sent.
     bus = _make_bus()
     events: list[tuple[str, Any]] = []
-    r = _RecordingRedis(events)
+
+    r = _RecordingOutcomes(events)
 
     async def handler(_op: dict[str, Any], *, deadline: float) -> None:
         bus.arm_post_reply(lambda: events.append(("slot", None)))
         raise RuntimeError("apply blew up")
 
-    await bus._handle_op(cast("Any", r), handler, _frame("reply-chan"))
+    await bus._handle_op(cast("Any", r), handler, _frame("reply-chan"), failure_payload=lambda _op, _failure: None)
 
-    # The terminal reply is `failed`, and the slot is consumed WITHOUT firing.
-    assert events == [("reply", "received"), ("reply", "terminal")]
+    assert events == [("reply", "received"), ("reply", "failed"), ("slot", None)]
     assert bus._post_reply_slot is None
 
 
@@ -130,14 +138,15 @@ async def test_arming_then_a_clean_op_that_does_not_rearm_does_not_refire() -> N
     async def plain(_op: dict[str, Any], *, deadline: float) -> None:
         return None
 
-    await bus._handle_op(cast("Any", r), arming, _frame("reply-chan"))
-    await bus._handle_op(cast("Any", r), plain, _frame("reply-chan"))
+    await bus._handle_op(cast("Any", r), arming, _frame("reply-chan"), failure_payload=lambda _op, _failure: None)
+    await bus._handle_op(cast("Any", r), plain, _frame("reply-chan"), failure_payload=lambda _op, _failure: None)
     assert events.count(("slot", None)) == 1
 
 
-async def test_terminal_reply_publish_error_disarms_without_firing() -> None:
-    # A transport error shipping the terminal reply propagates AND leaves the slot
-    # disarmed, so a later clean op never fires the stale self-exit.
+async def test_terminal_reply_publish_error_fires_the_slot_once_and_disarms_it() -> None:
+    # A transport error shipping the terminal reply of an op that applied propagates AFTER the
+    # armed action ran: the handler decided it, so it is carried out. The slot is then disarmed,
+    # so a later clean op never fires it again.
     bus = _make_bus()
     events: list[tuple[str, Any]] = []
     fired: list[str] = []
@@ -154,20 +163,18 @@ async def test_terminal_reply_publish_error_disarms_without_firing() -> None:
 
     r = _RaisingOnTerminal()
     with pytest.raises(ConnectionError):
-        await bus._handle_op(cast("Any", r), arming, _frame("reply-chan"))
+        await bus._handle_op(cast("Any", r), arming, _frame("reply-chan"), failure_payload=lambda _op, _failure: None)
 
-    # The received ack shipped, the terminal publish raised, and the slot is disarmed
-    # WITHOUT firing.
     assert events == [("reply", "received"), ("reply", "terminal")]
-    assert fired == []
+    assert fired == ["slot"]
     assert bus._post_reply_slot is None
 
     # A subsequent clean op that never rearms must not misfire the stale self-exit.
     async def plain(_op: dict[str, Any], *, deadline: float) -> None:
         return None
 
-    await bus._handle_op(cast("Any", r), plain, _frame(None))
-    assert fired == []
+    await bus._handle_op(cast("Any", r), plain, _frame(None), failure_payload=lambda _op, _failure: None)
+    assert fired == ["slot"]
 
 
 async def test_cancellation_after_arming_disarms_the_slot() -> None:
@@ -181,13 +188,15 @@ async def test_cancellation_after_arming_disarms_the_slot() -> None:
         raise asyncio.CancelledError
 
     with pytest.raises(asyncio.CancelledError):
-        await bus._handle_op(cast("Any", r), arming_then_cancelled, _frame("reply-chan"))
+        await bus._handle_op(
+            cast("Any", r), arming_then_cancelled, _frame("reply-chan"), failure_payload=lambda _op, _failure: None
+        )
 
     assert fired == []
     assert bus._post_reply_slot is None
 
 
-# -- the recycle op dispatches to the worker's graceful-exit primitive ---------
+# -- the recycle op arms the worker's own exit latch ---------------------------
 
 
 class _Mixin(TaiMCPLifecycleMixin):
@@ -212,12 +221,10 @@ async def test_recycle_dispatch_arms_the_graceful_exit_of_this_worker(kind: Work
 
     # The applied payload names the graceful-exit kind only — never an env value.
     assert result == {"recycling": kind.value}
-    # The slot is armed with this worker's graceful exit, aimed at its own bus pid; it fires
-    # only later, after the terminal reply ships (proven by the bus tests above).
-    slot = m._bus._post_reply_slot
-    assert isinstance(slot, functools.partial)
-    assert slot.func is request_graceful_exit
-    assert slot.args == (m._bus.identity.pid,)
+    # The worker decided to leave for the recycle op, and the slot is armed with that departure's
+    # signal; it fires only later, once the terminal reply was sent (proven by the bus tests above).
+    assert m._bus.departing == "a fleet recycle op"
+    assert m._bus._post_reply_slot == m._bus.signal_departure
 
 
 async def test_apply_bus_op_recycle_returns_payload_and_fires_hook() -> None:
@@ -233,6 +240,32 @@ async def test_apply_bus_op_recycle_returns_payload_and_fires_hook() -> None:
     assert fired == ["recycle"]
     # A recycle ends the process: it declares no effect a post-apply handler acts on.
     assert fired_effects == [frozenset()]
+
+
+async def test_a_recycle_op_whose_applied_handler_fails_still_sends_the_decided_departure_signal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The departure was decided before the post-apply handler failed, and the decision is final:
+    # the publisher reads the failure, and the worker still leaves.
+    m = _Mixin()
+    bus = _make_bus(WorkerKind.backend)
+    m._bus = bus
+    events: list[tuple[str, Any]] = []
+    monkeypatch.setattr(bus, "signal_departure", lambda: events.append(("signal", bus.departing)))
+
+    def a_handler_that_fails(_applied: Any) -> None:
+        raise RuntimeError("a post-apply handler failed")
+
+    m._on_fleet_op_applied(a_handler_that_fails)
+
+    await bus._handle_op(
+        cast("Any", _RecordingOutcomes(events)),
+        m._apply_bus_op,
+        _frame("reply-chan"),
+        failure_payload=lambda _op, _failure: None,
+    )
+
+    assert events == [("reply", "received"), ("reply", "failed"), ("signal", "a fleet recycle op")]
 
 
 async def test_recycle_dispatch_writes_recycling_state_before_arming(monkeypatch: pytest.MonkeyPatch) -> None:

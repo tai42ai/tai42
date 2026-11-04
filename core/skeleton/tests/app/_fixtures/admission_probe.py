@@ -1,7 +1,7 @@
 """Fixture tool module: a tool that records which request admission it runs on behalf of.
 
 Each call appends, at the moment the tool body runs, the record
-``current_request_admission`` resolves, whether that record's request had already ended,
+``current_admission`` resolves, whether that record's request had already ended,
 and the record the admission ContextVar holds in the tool body's own context.
 """
 
@@ -10,16 +10,16 @@ from dataclasses import dataclass
 from tai42_contract.app import tai42_app
 
 from tai42_skeleton.app import admission as admission_mod
-from tai42_skeleton.app.admission import RequestAdmission, current_request_admission
+from tai42_skeleton.app.admission import Admission, current_admission
 
 
 @dataclass(frozen=True)
 class Observation:
     """What one call of :func:`admission_probe` saw while it ran."""
 
-    resolved: RequestAdmission | None
+    resolved: Admission | None
     resolved_finished: bool
-    context_record: RequestAdmission | None
+    context_record: Admission | None
     context_record_finished: bool
 
 
@@ -29,7 +29,7 @@ OBSERVED: list[Observation] = []
 @tai42_app.tools.tool
 async def admission_probe() -> int:
     """Record the request admission this call resolves and return the call's ordinal."""
-    resolved = current_request_admission()
+    resolved = current_admission()
     context_record = admission_mod._admission.get()
     OBSERVED.append(
         Observation(

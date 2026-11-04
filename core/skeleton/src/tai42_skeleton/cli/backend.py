@@ -1,16 +1,18 @@
 """The ``backend`` CLI command — runs an execution-backend runtime (worker / beat / dashboard)."""
 
 import asyncio
+import functools
 import logging
 import os
-import signal
 
 import click
 from dotenv import find_dotenv
+from tai42_cli import process_prelude
 from tai42_cli.boot_env import load_boot_dotenv
-from tai42_contract.backend import CONSUMING_RUNTIME
+from tai42_contract.backend import CONSUMING_RUNTIME, PROCESS_PRELUDE_ENV, ProcessPreludeRequired
+from tai42_kit.backend.reshaped_threads import bind_future_chaining
 from tai42_kit.logging import install_record_redaction, logging_settings, setup_logging
-from tai42_kit.signals import signal_chain
+from tai42_kit.signals import STOP_SIGNALS, signal_chain
 
 from tai42_skeleton.app import instance
 from tai42_skeleton.app.boot_rules import (
@@ -21,28 +23,30 @@ from tai42_skeleton.app.boot_rules import (
 from tai42_skeleton.app.bus import WorkerKind
 from tai42_skeleton.backend.settings import base_backend_settings
 from tai42_skeleton.config.config_mode import ConfigMode, config_mode
+from tai42_skeleton.config.deployment_env import captured_deployment_env
 from tai42_skeleton.connectors.meta_log_redactor import register_connector_log_redaction
 
 logger = logging.getLogger(__name__)
 
 
 async def run_backend(extra_args):
-    """Boot the app and launch the execution-backend runtime, tearing down cleanly on SIGTERM."""
-    # Handle SIGTERM (the deployment-standard stop signal) by cancelling this main
-    # task: the cancellation unwinds through ``app_context``'s ``finally`` (shutdown
-    # handlers + ``_teardown_resources``) so teardown is guaranteed, where an
-    # unhandled SIGTERM would kill the process outright and skip it. SIGINT is
-    # already safe (KeyboardInterrupt → the runner cancels the task). Unix/uvloop
-    # only, matching the CLI's target.
+    """Boot the app and launch the execution-backend runtime, tearing down cleanly on a stop signal."""
+    # Handle each stop signal — the orchestrator's SIGTERM and the terminal's SIGINT —
+    # by cancelling this main task: the cancellation unwinds through ``app_context``'s
+    # ``finally``, which runs the stop (shutdown handlers + ``_teardown_resources``),
+    # where an unhandled SIGTERM would kill the process outright and skip it. A later
+    # stop signal while that stop runs cancels it in turn and cuts it short; the stop
+    # logs how it ended either way. Unix/uvloop only, matching the CLI's target.
     #
     # It goes through the composed chain because a backend runtime installs its own
-    # drain handler on the same signal; asyncio's ``add_signal_handler`` is
+    # drain handler on the same signals; asyncio's ``add_signal_handler`` is
     # last-writer-wins, so a direct install here would be destroyed by it — taking
-    # the only guarantee of teardown with it.
+    # the signal-driven stop with it.
     main_task = asyncio.current_task()
     if main_task is None:
         raise AssertionError
-    signal_chain.add(signal.SIGTERM, main_task.cancel, name="backend-main-task-cancel")
+    for sig in STOP_SIGNALS:
+        signal_chain.add(sig, main_task.cancel, name="backend-main-task-cancel")
 
     # Worker-bus boot rule (fail loud, naming TAI_BUS_REDIS_URL). Run BEFORE the app
     # (and its config manager) is built, so a shared-config busless backend refuses on
@@ -50,6 +54,11 @@ async def run_backend(extra_args):
     require_bus_for_shared_config()
 
     app = instance.build_app()
+    # The host observes the stop's start: the first stop signal begins this worker's leaving, so
+    # its census row reads ``recycling`` for the whole drain and a roll that reaches it meanwhile
+    # finds it already leaving. A later one begins nothing again.
+    for sig in STOP_SIGNALS:
+        signal_chain.add(sig, functools.partial(app.stop_began, f"{sig.name} received"), name="backend-stop-began")
     # This CLI-configured backend process keeps its root logger on the applied env:
     # once the boot env bridge has applied the stored env, and across config reloads;
     # fastmcp's settings are read again once the bridge has applied it. The public
@@ -128,6 +137,12 @@ def main(ctx, manifest_path, extra_args):
     TAI_DEFAULT_REDIS_URL). The events this process raises are matched against
     its own registry, and an in-memory one holds none of the hooks registered
     through the server, so a backend over it is refused at boot and on reload.
+
+    \b
+    A runtime whose engine must patch the interpreter before anything else is
+    imported (a green worker pool) starts once, reads its configuration, and then
+    restarts itself in place with that patch applied first: same process id, same
+    arguments, one "restarting with process prelude" log line.
     """  # noqa: D301 - a plain backslash-b is Click's no-rewrap marker
     if config_mode() == ConfigMode.file:
         load_boot_dotenv(find_dotenv())
@@ -166,22 +181,37 @@ def main(ctx, manifest_path, extra_args):
     init_prometheus_multiproc_dir()
     assert_multiproc_value_class()
 
-    try:
-        import uvloop
-
-        loop = uvloop
-    except ImportError:
+    # A process started through a process prelude runs on the standard library's loop: the
+    # prelude replaced the interpreter's blocking primitives, and a native loop bypasses them.
+    # The prelude may also run the process's threads on one OS thread, so asyncio's future
+    # chaining is bound to tell those threads apart before any loop of the process runs.
+    if os.environ.get(PROCESS_PRELUDE_ENV):
+        bind_future_chaining()
         loop = asyncio
+    else:
+        try:
+            import uvloop
+
+            loop = uvloop
+        except ImportError:
+            loop = asyncio
 
     all_args = list(ctx.args) + list(extra_args)
     try:
         loop.run(run_backend(all_args))
     except asyncio.CancelledError:
-        # Only the SIGTERM handler cancels the main task, so this is the deliberate
-        # signal-driven stop — teardown already ran through ``app_context``'s
-        # ``finally`` during the unwind. Convert it into a clean exit.
-        logger.info("SIGTERM received — backend worker shut down after teardown")
-
-
-if __name__ == "__main__":
-    main()
+        # Only the stop-signal handler cancels the main task, so this is the deliberate
+        # signal-driven stop. Whether that stop finished or a later signal cut it short is
+        # the stop's own line to say (``app_context``'s ``finally``), and a signal landing
+        # before ``app_context`` was entered had no stop to run. Convert it into a clean exit.
+        logger.info("stop signal received — backend worker exiting")
+    except ProcessPreludeRequired as exc:
+        # The launch refused the runtime before starting any of it, and the app context has
+        # unwound. Start this process again, in place, through the prelude the runtime declares;
+        # the new image runs the prelude first, so its launch proceeds. It starts with the
+        # deployment env, the one this process was started with: its own boot applies the stored
+        # env again, and no stored key this boot applied passes for one the deployment sets.
+        # Exec runs no exit hook, so the logging is flushed and closed here.
+        logger.info("restarting with process prelude %s", exc.prelude)
+        logging.shutdown()
+        process_prelude.relaunch(exc.prelude, captured_deployment_env())

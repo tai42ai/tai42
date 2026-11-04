@@ -27,9 +27,9 @@ that identity may do. This package is one such provider (api keys over Redis);
 any package can back the same contract, so this repo is this provider's own full
 doc home, and the documentation site covers the platform-level story:
 
-- Access-control concept: https://tai42.ai/concepts/access-control
-- Build an identity provider (author guide): https://tai42.ai/guides/authors/identity-provider
-- Ecosystem catalog: https://tai42.ai/reference/catalog
+- Access-control concept: https://docs.tai42.ai/concepts/access-control
+- Resolving a credential across identity providers (section of the access-control concept): https://docs.tai42.ai/concepts/access-control#resolving-a-credential-across-providers
+- Plugin catalog: https://docs.tai42.ai/plugins
 
 ## What it stores
 

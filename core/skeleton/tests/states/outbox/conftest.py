@@ -17,9 +17,9 @@ import pytest
 from tai42_contract.app import tai42_app
 from tai42_contract.states.models import StateBatchWrite, StateDeclaration, StateSubject, WriteOrigin
 from tai42_kit.clients import client_ctx
-from tai42_kit.clients.base import shutdown_all_clients
 from tai42_kit.clients.impl.postgres import PostgresClient
 from tai42_kit.db import apply_migrations, component_store_settings
+from tai42_kit.loop_bound import release_loop_bound_resources
 from tai42_kit.settings import reset_all_settings
 
 from tai42_skeleton.states import db as states_db
@@ -168,7 +168,7 @@ def _bound_app() -> Iterator[None]:
 @pytest.fixture(autouse=True)
 async def _release_pools() -> AsyncIterator[None]:
     yield
-    await shutdown_all_clients()
+    await release_loop_bound_resources()
 
 
 @pytest.fixture

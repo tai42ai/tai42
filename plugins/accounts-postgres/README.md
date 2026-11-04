@@ -32,9 +32,9 @@ login, sessions, and invites); any package can back the same contract, so this
 repo is this provider's own full doc home, and the documentation site covers the
 platform-level story:
 
-- Accounts concept: https://tai42.ai/concepts/accounts
-- Build an accounts provider (author guide): https://tai42.ai/guides/authors/accounts-provider
-- Ecosystem catalog: https://tai42.ai/reference/catalog
+- Accounts concept: https://docs.tai42.ai/concepts/accounts
+- Accounts and identity providers, one seam (section of the accounts concept): https://docs.tai42.ai/concepts/accounts#accounts-and-identity-are-two-kinds-one-seam
+- Plugin catalog: https://docs.tai42.ai/plugins
 
 ## What it stores
 

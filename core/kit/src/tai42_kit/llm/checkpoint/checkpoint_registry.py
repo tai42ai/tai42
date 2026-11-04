@@ -2,7 +2,6 @@
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
 
-from tai42_kit.llm._resource_registry import LoopRegistryMap, ResourceRegistry
 from tai42_kit.llm.checkpoint.checkpoint import (
     CheckpointResource,
     create_checkpoint_resource,
@@ -12,7 +11,7 @@ from tai42_kit.llm.checkpoint.checkpoint import (
 )
 from tai42_kit.llm.checkpoint.ledger import FinishedThreadLedger
 from tai42_kit.llm.checkpoint.retention import ThreadRetention
-from tai42_kit.settings.cache_registry import register_settings_reset
+from tai42_kit.loop_bound import LoopRegistryMap, ResourceRegistry
 
 
 class CheckpointRegistry(ResourceRegistry):
@@ -55,21 +54,13 @@ class CheckpointRegistry(ResourceRegistry):
         return (await self.resource(provider, conn_string)).ledger
 
 
-_registries: LoopRegistryMap[CheckpointRegistry] = LoopRegistryMap(CheckpointRegistry, "CheckpointRegistry")
+_registries: LoopRegistryMap[CheckpointRegistry] = LoopRegistryMap(CheckpointRegistry)
 
 
 def checkpoint_registry() -> CheckpointRegistry:
     """Return the CheckpointRegistry for the running event loop.
 
-    One registry per loop; after ``close_all()`` the next call builds a fresh
-    registry instead of returning the closed one.
+    One registry per loop and client epoch: the next call after the epoch
+    advances, or after ``close_all()``, builds a fresh registry.
     """
     return _registries.current()
-
-
-@register_settings_reset
-def _reset_checkpoint_registries() -> None:
-    # Drop the per-loop registries so a settings reload rebuilds them with the
-    # fresh configuration on next use. Raises if a running loop's registry still
-    # holds live resources (call close_all() first) rather than leaking them.
-    _registries.reset()

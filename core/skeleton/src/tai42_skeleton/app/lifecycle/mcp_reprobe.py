@@ -33,26 +33,10 @@ class McpReprobeMixin(LifecycleState):
     async def _cancel_reprobe_task(self) -> None:
         """Cancel the re-probe task and await its termination.
 
-        The shutdown counterpart of ``_spawn_reprobe_task``.
-
-        A task that died with a non-``CancelledError`` exception was already
-        surfaced at ERROR by its done-callback, so it is awaited-and-swallowed
-        here rather than re-raised — this runs inside ``app_context``'s shutdown
-        ``finally``, and re-raising would skip the remaining teardown.
+        The shutdown counterpart of ``_spawn_reprobe_task`` (:meth:`_cancel_perpetual_task`).
         """
-        task = self._reprobe_task
-        self._reprobe_task = None
-        if task is None:
-            return
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
-        except Exception:  # noqa: S110 task failure already surfaced by the done-callback; swallowed so shutdown completes
-            # Already logged at ERROR by the done-callback; swallowed so a dead
-            # re-probe task cannot abort the remaining shutdown steps.
-            pass
+        task, self._reprobe_task = self._reprobe_task, None
+        await self._cancel_perpetual_task(task)
 
     async def _reprobe_sleep(self, seconds: float) -> None:
         """The re-probe loop's inter-pass sleep.
@@ -93,8 +77,8 @@ class McpReprobeMixin(LifecycleState):
         probes = await asyncio.gather(*(self._probe_mcp(snapshot[t]) for t in titles), return_exceptions=True)
         out: list[dict[str, Any]] = []
         # Every read/write of ``_failed_mcps`` (and the bind it drives) happens under
-        # the reload gate; a worker-thread reload holds the same lock, so the
-        # re-verify and apply below cannot race a concurrent mutation.
+        # the reload gate; every reload body holds the same lock (``reload_gate.run``),
+        # so the re-verify and apply below cannot race a concurrent mutation.
         async with reload_gate.synchronized():
             for title, probe in zip(titles, probes, strict=True):
                 result = await self._apply_probe_outcome(title, snapshot[title], probe, awaited=None)
@@ -173,7 +157,7 @@ class McpReprobeMixin(LifecycleState):
         # Titles known-failed as of the previous pass; a title present now but
         # absent here is a fresh failure and resets the backoff to probe promptly.
         # Seeded under the reload-gate lock on the first pass (below) so the
-        # snapshot never races a worker-thread reload mutating the failed set.
+        # snapshot never races a reload body mutating the failed set.
         known_failed: set[str] | None = None
         while True:
             await self._reprobe_sleep(interval)
@@ -181,7 +165,7 @@ class McpReprobeMixin(LifecycleState):
                 settings = _lifecycle.CoreSettings()
                 initial = settings.mcp_reprobe_initial_seconds
                 # SNAPSHOT the failed set + each title's probe config under the
-                # reload-gate lock: a worker-thread reload holds the same lock, so
+                # reload-gate lock: every reload body holds the same lock, so
                 # this is the only place the failed set is read concurrency-safely (a
                 # bare snapshot would race a concurrent mutation → dict-changed-size).
                 # The probe that follows runs OFF the gate.

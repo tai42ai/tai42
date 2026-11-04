@@ -53,7 +53,64 @@ event loop stays free for worker-bus ops. Its lifecycle is the shared one every
 backend gets: it waits for the app to finish booting before it consumes, then
 SIGTERM (or SIGINT) drains it warm — no new jobs, the current one finishes, the
 process exits after teardown — and a second signal kills the running work-horse.
-An idle worker stops within one dequeue poll (5s).
+An idle worker stops within one dequeue poll (5s). The drain is awaited for at
+most the backend's drain bound, `RQ_TASK_TIMEOUT` plus a 30 s grace; a drain that
+overruns it is logged at ERROR and the wait abandoned, so teardown still runs. A
+worker leaving gracefully announces that bound plus the app's own shutdown
+bounds, which run after the drain, on its census row (`drain_seconds`, with
+`state: recycling`), and a fleet restart waits that long, plus the
+start-and-rejoin step, for the worker to go and its replacement to join. The
+deployment's termination grace must be at least that sum, or the supervisor's
+kill lands first.
+
+```bash
+tai backend worker --pool gevent
+```
+
+On `--pool gevent` the worker must be patched by gevent's own patch
+(`gevent.monkey.patch_all`) before anything else is imported. The worker
+declares that patch as its process prelude, so `tai backend worker` reads its
+configuration, then restarts itself once, in place, with the patch applied
+first: the same process id and the same arguments, and one
+`restarting with process prelude gevent.monkey:patch_all` log line. Every job's
+coroutine then runs on the host's event loop, the one loop the process's OS
+thread runs, beside the process's own work on it (the worker-bus subscription);
+the kit resources bound to that loop (pooled clients, checkpoint savers, stores)
+are the host's, released at its stop. rq's own scheduler, which moves delayed
+(`eta` / `countdown`) jobs onto the queue, runs as a thread of this worker
+process on this pool rather than as the forked child the other pools use; a job
+that holds the CPU stalls the host loop and that thread alike until it yields.
+A job past `RQ_TASK_TIMEOUT` has its
+coroutine cancelled on that loop at the budget, its cleanup run there, and fails
+with rq's `JobTimeoutException`. On `prefork` and `solo` each job runs its
+coroutine on a fresh loop of its own. A job past `RQ_TASK_TIMEOUT` there has its
+coroutine cancelled and its cleanup run on that loop, then fails with
+`JobTimeoutException`; on `prefork` a thread the job awaits (a sync tool's) is
+not waited for and ends on its own. A coroutine that catches the cancel and runs
+on is not ended by the budget: on `solo` and `gevent` it runs on until the
+worker stops reporting its liveness a second past the budget and the probe ends
+the worker (see Liveness), and a stop sent once the budget has fired raises
+nothing into it (see the stop-job command below); on `prefork` rq kills the
+work-horse once the job runs 60 seconds past the budget. As the job ends, the
+kit resources bound to its loop are released, then the tasks left on that loop
+are cancelled and run to their end, and the loop closes.
+
+A settings change that restarts the fleet (a profile apply, an env write, a
+config reload) run as a job on this backend — a `sync_task` or `async_task`
+branch, a schedule, a callback — runs under the job's budget, which cannot wait
+out the restart's drains, nor the wait the restart of the `tai backend worker`
+that ran the job takes for that worker's other changes in flight. So the change
+hands the restart to that worker, even when it is the only one to restart, and
+answers at once with `roll_deferred: true`, `roll_deferred_to` naming that
+worker, and no restart rows. The worker carries the restart out on its own, outside the job's budget,
+and, when it needs its own restart, restarts itself last; the outcome is in its
+log. A hand-off that fails fails the change loudly, naming the worker; the change
+is saved and reloaded. When the worker refused the restart (it failed to take it,
+or it is already leaving), the restart did not start; when its answer is not
+known (the bus unreachable, no answer came), whether it started is unknown, and
+the worker's log and the fleet census tell. A `sync_task` caller's wait on
+the job's result is recorded as fleet work, so a reload of the `tai serve`
+worker it waits in does not cut it.
 
 `beat` and `dashboard` pull no queued work, so they run on the event loop and
 keep whatever signal handling their own CLI installs. Nothing else runs in those
@@ -91,9 +148,9 @@ own `TAI_BACKEND_LIVENESS_PATH`, and removes its file when it exits.
   the `solo` and `gevent` pools, where the job runs in the worker process, a
   monitor thread reports once a second until the job ends. It is an OS thread
   under `gevent` too, so a job that holds the CPU does not starve it. Those
-  pools cannot end every job at `RQ_TASK_TIMEOUT` (one blocked in a C call, or
-  under `gevent` one that never yields), so the monitor stops reporting once a
-  job runs past it, and the probe ends the worker.
+  pools cannot end every job at `RQ_TASK_TIMEOUT` (one blocked in a C call,
+  under `gevent` one that never yields, or one that catches the timeout), so the
+  monitor stops reporting once a job runs past it, and the probe ends the worker.
   A report that fails (the file is owned by another live process, or cannot be
   written) stops the worker before its next job, and the launch exits non-zero.
 - `beat` reports each pass of the scheduler loop, promising the next within its
@@ -136,11 +193,35 @@ need a worker without a label.
 - A tool with its own `queue` parameter cannot take a `sync_task` or
   `async_task` branch.
 - A job does not wait for another job: it chains the next one with
-  `callback_kwargs`. `sync_task` and `backend_task_result` (given a `timeout`)
+  `callback_kwargs`, which runs only when the job succeeds (a callback job that
+  finds its predecessor failed or unfinished raises). `sync_task` and
+  `backend_task_result` (given a `timeout`)
   are for callers outside a job and raise `RuntimeError` inside one.
 - RQ has no disabled-schedule state, so `backend_list_schedules` always reports a
-  schedule as enabled, and disabling one deletes it.
-- `backend_registered_tasks` and `backend_list_failed_tasks` are not implemented.
+  schedule as enabled, `backend_enable_schedule` writes nothing, and
+  `backend_disable_schedule` raises `UnsupportedBackendTool`, leaving the
+  schedule as it is.
+- `backend_registered_tasks` and `backend_list_failed_tasks` raise
+  `UnsupportedBackendTool`.
+- RQ's stop-job command stops a running job: `backend_cancel_task(terminate=True)` does
+  so; `backend_cancel_task` without `terminate` keeps a job that has not started from
+  running and leaves a job a worker has claimed or is running to finish, its record
+  untouched. A job that ends on the stop is marked `stopped`. On the `prefork` pool the
+  stop kills the work-horse with `SIGKILL`, so the job's cleanup does not run. On the
+  `solo` and `gevent` pools, which run the job in the worker process, it is raised into
+  the job the way the pool's task timeout is — into the job's OS thread on `solo`, into
+  its greenlet on `gevent` — and the job's async work is cancelled and run to its end,
+  its cleanup included; a job blocked in C code, or holding the CPU on `gevent`, is ended
+  when that returns. Async work that catches the cancel and runs on keeps the job
+  running: the job still ends on the stop, marked `stopped`, if that work returns within
+  `RQ_TASK_TIMEOUT`; once it runs a second past it, the worker stops reporting its
+  liveness and the probe ends the worker. The task timeout and the stop are raised into
+  a job once between them, whichever comes first, and the other is not raised: a stop
+  sent once the task timeout has fired raises nothing into the job, which runs on until
+  the probe ends the worker a second past that timeout, and is still marked `stopped`
+  if it ends in rq's failure handling before then. A job that ends before the stop lands is
+  reported with the status it reached, and a stop not confirmed within the task timeout
+  says so.
 - The rq scheduler cannot honour a relative interval: a schedule with `relative: true`
   is refused on create, update and import.
 - The worker runs every job — enqueued, or fired by the scheduler — under its own

@@ -46,9 +46,10 @@ barrier failing to hold — the outcome is exactly the unguarded behavior, now
 reported instead of silent. Proceeding after a timeout is a DEGRADED mode, not a
 weaker hold: see :class:`ForkGate` for what stops being guaranteed.
 
-A job span waiting on a rebuild can report progress: given a ``tick``, it calls it once
-per ``tick_every`` seconds of waiting, so a work loop whose next pass is held up by a
-re-import keeps telling its liveness probe it is alive.
+A wait on the thread of the process's engine loop (:meth:`ForkGate.engine_loop`) reports the
+loop's progress: it calls the loop's ``tick`` once per ``tick_every`` seconds of waiting, so a
+loop whose next pass is held up by a re-import keeps telling its liveness probe it is alive. A
+wait on any other thread reports nothing (:mod:`tai42_kit.engine_loop_progress`).
 
 Import-safe: ``threading`` and ``asyncio`` only, no dependencies. A process that runs
 no backend jobs (no fork and no in-process job takes a span) pays one uncontended acquire
@@ -70,8 +71,9 @@ import math
 import threading
 import time
 from collections.abc import AsyncIterator, Callable, Iterator
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import AbstractContextManager, asynccontextmanager, contextmanager
 
+from tai42_kit.engine_loop_progress import EngineLoop
 from tai42_kit.fork_guard import ForkGuard, ForkHooks
 from tai42_kit.thread_wait import hold_on_thread, wait_on_thread
 
@@ -136,7 +138,8 @@ class ForkGate:
     (:meth:`exclusive_async` does NOT nest with another ``exclusive_async`` or with
     a thread-held ``exclusive``: each takes its own holder thread, so a second one
     is a different owner and waits. Nothing nests them: the reload doors are
-    serialized externally by the serving loop's reload gate.)
+    serialized externally by the reload gate, one lock per process that excludes
+    every other holder on any loop and any thread.)
 
     Degraded mode after a timeout
     -----------------------------
@@ -187,6 +190,8 @@ class ForkGate:
         self._generation = 0
         # The fork hooks ``guard_forks`` installs, and what they hold for the forks in progress.
         self._fork_hooks = ForkHooks(self)
+        # The process's engine loop while one runs (``engine_loop``): the thread whose waits report its progress.
+        self._engine_loop = EngineLoop()
 
     def reset_after_fork(self) -> None:
         """Drop every inherited hold — FORK-CHILD ONLY, never call in a live parent.
@@ -201,9 +206,9 @@ class ForkGate:
         is, the first gate call in the child either deadlocks on that lock or waits on a
         span nothing here will release. The child is a fresh single-threaded process, so
         the correct state is simply empty: a brand-new condition, zeroed counters, no open
-        span on any thread. A span the child inherited open and later leaves changes
-        nothing in the reset gate. The fork guard stays installed: the child's own forks
-        are guarded too.
+        span on any thread, and no engine loop: the child runs none of its parent's. A span
+        the child inherited open and later leaves changes nothing in the reset gate. The
+        fork guard stays installed: the child's own forks are guarded too.
 
         The parent's own gate is untouched — this mutates only the child's copy.
         """
@@ -215,6 +220,7 @@ class ForkGate:
         self._open_spans = set()
         self._parked = set()
         self._fork_hooks.forget_forks()
+        self._engine_loop.forget()
 
     def fresh_context(self) -> contextvars.Context:
         """An empty :class:`contextvars.Context` that still belongs to the rebuild and the job span running here.
@@ -273,10 +279,23 @@ class ForkGate:
         with self._cond:
             return len(self._open_spans)
 
+    def engine_loop(self, *, tick: Callable[[], None], tick_every: float) -> AbstractContextManager[None]:
+        """Run the calling thread as this process's engine loop for the block: its waits on the gate report ``tick``.
+
+        A job span or a guarded fork that waits on this thread calls ``tick`` once per
+        ``tick_every`` seconds of waiting, outside the gate's lock: the wait holds up the
+        loop's next pass. A wait on any other thread calls nothing (see
+        :mod:`tai42_kit.engine_loop_progress`). A tick that raises is logged at ERROR once
+        and that wait ticks no more, so a tick that refuses to report keeps refusing.
+
+        One engine loop at a time: a block entered while another is open raises
+        ``RuntimeError``. ``tick_every`` must be positive seconds (``ValueError`` otherwise).
+        """
+        _require_positive_seconds("tick_every", tick_every)
+        return self._engine_loop.running(tick=tick, tick_every=tick_every)
+
     @contextmanager
-    def job_span(
-        self, *, timeout: float, tick: Callable[[], None] | None = None, tick_every: float = 1.0
-    ) -> Iterator[None]:
+    def job_span(self, *, timeout: float) -> Iterator[None]:
         """Hold the work-loop side for as long as this pool's exposure lasts.
 
         WHAT the caller wraps is the caller's choice, and differs by pool (see the
@@ -292,18 +311,14 @@ class ForkGate:
         that overran. The span is registered on BOTH paths, so a rebuild waiting behind
         it still waits out the span the caller declared.
 
-        ``tick`` is the waiting loop's progress report: while the span waits it is called
-        once per ``tick_every`` seconds, outside the gate's lock; an entry that does not
-        wait never calls it. A tick that raises is logged at ERROR once and that wait
-        ticks no more, so a tick that refuses to report keeps refusing. ``tick_every``
-        must be positive seconds (``ValueError`` otherwise).
+        A span that waits on the engine loop's thread reports the loop's progress meanwhile
+        (:meth:`engine_loop`); an entry that does not wait reports nothing.
 
         Re-entrant per context: a span entered in a context that carries an open span of
         this gate enters at once and registers nothing, because the outer span already
         covers the window. A fork from inside an in-process job is the case, on the job's
         own thread or on a worker the job hands a sync step to with ``asyncio.to_thread``.
         """
-        _require_positive_seconds("tick_every", tick_every)
         with self._cond:
             nested = _job_span_mark.get() in self._open_spans
         if nested:
@@ -315,7 +330,7 @@ class ForkGate:
         # the registration and the try cannot leak a span that nothing ever releases.
         entered: list[int] = []
         try:
-            self._enter_reported_span(span, timeout, tick, tick_every, entered.append)
+            self._enter_reported_span(span, timeout, entered.append)
             mark = _job_span_mark.set(span)
             try:
                 yield
@@ -335,8 +350,8 @@ class ForkGate:
         pending the span registers at once on the loop, and while one is, the wait runs
         on a thread of its own that does nothing else, awaited through a future the loop
         keeps turning around. The span is always registered on the loop, so a job
-        cancelled while it waits ends the wait and registers nothing. No ``tick``: the
-        loop's own passes go on while the job waits.
+        cancelled while it waits ends the wait and registers nothing. It reports no
+        progress: the loop's own passes go on while the job waits.
         """
         with self._cond:
             nested = _job_span_mark.get() in self._open_spans
@@ -467,43 +482,38 @@ class ForkGate:
         if cancelled is not None:
             raise cancelled
 
-    def _enter_span(
-        self,
-        span: object,
-        timeout: float,
-        tick: Callable[[], None] | None,
-        tick_every: float,
-        record: Callable[[int], None],
-    ) -> bool:
+    def _enter_span(self, span: object, timeout: float, record: Callable[[int], None]) -> bool:
         """Register the job span ``span``, handing the gate generation to ``record``; return whether it overran.
 
         ``record`` runs under the gate's lock just before the span is registered, so a
         caller that is interrupted after the registration has always recorded what to close.
 
-        The wait runs in slices of ``tick_every`` when there is a ``tick``, calling it
-        between slices. The report is BUILT under the lock but every tick and log is
-        EMITTED outside it: either can block on I/O, and under a green pool it can yield,
-        which would hold the gate's lock across an unbounded operation.
+        On the engine loop's thread (:meth:`engine_loop`) the wait runs in slices of the
+        loop's ``tick_every``, calling its ``tick`` between slices. The report is BUILT under
+        the lock but every tick and log is EMITTED outside it: either can block on I/O, and
+        under a green pool it can yield, which would hold the gate's lock across an
+        unbounded operation.
         """
         deadline = time.monotonic() + timeout
+        loop = self._engine_loop.tick_here()
         while True:
             with self._cond:
                 remaining = deadline - time.monotonic()
-                wait = remaining if tick is None else min(tick_every, remaining)
+                wait = remaining if loop is None else min(loop.tick_every, remaining)
                 admitted = self._cond.wait_for(lambda: self._pending_rebuilds == 0, timeout=max(wait, 0.0))
                 if admitted or time.monotonic() >= deadline:
                     record(self._generation)
                     self._open_spans.add(span)
                     return not admitted
-            if tick is not None:
+            if loop is not None:
                 try:
-                    tick()
+                    loop.tick()
                 except Exception:
                     logger.exception(
                         "fork gate: the progress tick during a job span's wait failed; "
                         "this wait reports no more progress"
                     )
-                    tick = None
+                    loop = None
 
     def _leave_span(self, span: object, generation: int) -> None:
         """Close the job span ``span``, recorded under ``generation``.
@@ -536,36 +546,28 @@ class ForkGate:
             self._open_spans.add(span)
             return bool(self._held_rebuilds)
 
-    def _enter_reported_span(
-        self,
-        span: object,
-        timeout: float,
-        tick: Callable[[], None] | None,
-        tick_every: float,
-        record: Callable[[int], None],
-    ) -> None:
+    def _enter_reported_span(self, span: object, timeout: float, record: Callable[[int], None]) -> None:
         """:meth:`_enter_span`, reporting at ERROR a span that entered only because its wait ran out."""
-        if self._enter_span(span, timeout, tick, tick_every, record):
+        if self._enter_span(span, timeout, record):
             _report_span_overrun(timeout)
 
     def _runs_own_work(self) -> bool:
         """Whether this context runs a held rebuild's body or an open job span. Called under ``_cond``."""
         return _rebuild_hold.get() in self._held_rebuilds or _job_span_mark.get() in self._open_spans
 
-    def guard_forks(self, *, timeout: float, tick: Callable[[], None], tick_every: float = 1.0) -> None:
+    def guard_forks(self, *, timeout: float, after_in_child: Callable[[], None] | None = None) -> None:
         """Hold a job span around every fork of this process but a rebuild's own (see :mod:`tai42_kit.fork_guard`).
 
-        Each fork waits as :meth:`job_span` waits with ``timeout``, ``tick`` and
-        ``tick_every``, but a fork on a thread that runs an event loop, which never waits.
-        One guard per gate: a second call with the same arguments changes
-        nothing, one with other arguments raises ``RuntimeError`` (a process has one work loop
-        to report for). ``timeout`` and ``tick_every`` must be positive seconds
-        (``ValueError`` otherwise); they are checked here because a fork hook cannot raise to
-        its caller.
+        Each fork waits as :meth:`job_span` waits with ``timeout``, reporting the engine
+        loop's progress only on the loop's own thread (:meth:`engine_loop`), but a fork on a
+        thread that runs an event loop, which never waits. ``after_in_child``, when given,
+        runs in every child once the child's copy of the gate is reset. One guard per gate: a
+        second call with the same arguments changes nothing, one with other arguments raises
+        ``RuntimeError``. ``timeout`` must be positive seconds (``ValueError`` otherwise); it
+        is checked here because a fork hook cannot raise to its caller.
         """
         _require_positive_seconds("timeout", timeout)
-        _require_positive_seconds("tick_every", tick_every)
-        self._fork_hooks.install(ForkGuard(timeout=timeout, tick=tick, tick_every=tick_every))
+        self._fork_hooks.install(ForkGuard(timeout=timeout, after_in_child=after_in_child))
 
     def _other_spans(self, own_span: object | None) -> set[object]:
         """The open job spans a rebuild started in ``own_span`` waits for. Called under ``_cond``.

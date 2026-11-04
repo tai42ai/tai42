@@ -104,7 +104,7 @@ def test_every_surface_door_makes_the_next_lookup_ask_again(asked: list[str]) ->
 
         app.tools.tool(force=True)(first_probe)
         assert (await asks("first_probe"), await asks("first_probe")) == (1, 0)
-        app._reset_component_surface()  # the component surface reset
+        await app._reset_component_surface()  # the component surface reset
         with pytest.raises(UnknownToolError):
             await app.tools.get_tool("first_probe")
 
@@ -167,7 +167,6 @@ def _epoch_state() -> Iterator[None]:
     finally:
         for name, value in saved.items():
             setattr(epoch_mod, name, value)
-        epoch_mod._building_epoch = None
         retired_mod.detach_retired_generations()
 
 
@@ -179,21 +178,16 @@ def test_two_coexisting_cores_each_answer_with_their_own_tool(asked: list[str]) 
         live_tool = await app.tools.get_tool("probe")
         seen: dict[str, Any] = {}
 
-        def rebuild() -> None:
-            app._building = app._build_serving_core()
+        async def rebuild(epoch: Epoch) -> None:
+            epoch.core = app._build_serving_core()
             add_surface_tool(app._fast_mcp, _tool(second_probe))  # the building core's own "probe"
 
         async def build_serving_app(epoch: Epoch) -> Any:
-            core = app._building
-            try:
-                # During the build ``get_tool`` reads the building core; the live core still
-                # answers with its own tool when asked directly.
-                seen["building"] = await app.tools.get_tool("probe")
-                seen["live"] = await live_core._fast_mcp.get_tool("probe")
-                await asyncio.sleep(0)
-                epoch.core = core
-            finally:
-                app._building = None
+            # In the build's work ``get_tool`` reads the building core; the live core still
+            # answers with its own tool when asked directly.
+            seen["building"] = await app.tools.get_tool("probe")
+            seen["live"] = await live_core._fast_mcp.get_tool("probe")
+            await asyncio.sleep(0)
             return _serving_handle
 
         async def no_loops() -> None:
@@ -222,16 +216,13 @@ def test_a_discarded_build_never_answers_for_the_live_core(asked: list[str]) -> 
         add_surface_tool(app._fast_mcp, _tool(first_probe))
         live_tool = await app.tools.get_tool("probe")
 
-        def rebuild() -> None:
-            app._building = app._build_serving_core()
+        async def rebuild(epoch: Epoch) -> None:
+            epoch.core = app._build_serving_core()
             add_surface_tool(app._fast_mcp, _tool(second_probe))
 
         async def build_serving_app(epoch: Epoch) -> Any:
-            try:
-                await app.tools.get_tool("probe")  # indexed on the building core
-                raise RuntimeError("deliberate build failure")
-            finally:
-                app._building = None
+            await app.tools.get_tool("probe")  # indexed on the building core
+            raise RuntimeError("deliberate build failure")
 
         with pytest.raises(RuntimeError, match="deliberate build failure"):
             await build_and_swap_epoch(

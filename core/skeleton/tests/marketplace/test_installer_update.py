@@ -364,7 +364,7 @@ async def test_upgrade_all_reports_every_outcome(monkeypatch: pytest.MonkeyPatch
     # re-resolves its picked pin.
     h.registry.resolved = make_resolved(make_spec(name="up", package="pkg-up"), version="1.2.0")
 
-    report = await h.installer().upgrade_all()
+    report = (await h.installer().upgrade_all()).results
 
     by_ref = {entry["ref"]: entry for entry in report}
     assert [e["ref"] for e in report] == ["tai42/up", "tai42/current", "tai42/stuck", "tai42/broken"]
@@ -396,7 +396,7 @@ async def test_upgrade_all_holds_one_lock_across_the_batch(monkeypatch: pytest.M
         "tai42/b": [_published_row("1.0.0")],
     }
 
-    report = await h.installer().upgrade_all()
+    report = (await h.installer().upgrade_all()).results
 
     assert [entry["outcome"] for entry in report] == ["up-to-date", "up-to-date"]
     # ONE acquire/release pair wraps the whole batch — never per ref.
@@ -416,7 +416,10 @@ async def test_upgrade_all_lock_held_elsewhere_refuses_before_any_read() -> None
 
 async def test_upgrade_all_empty_store_is_an_empty_report() -> None:
     h = Harness()
-    assert await h.installer().upgrade_all() == []
+    report = await h.installer().upgrade_all()
+    assert report.results == []
+    # No ref changed the config, so no reload ran and no decision is owed.
+    assert report.roll is None
 
 
 async def test_upgrade_all_row_carries_its_write_s_span_release_error(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -443,7 +446,7 @@ async def test_upgrade_all_row_carries_its_write_s_span_release_error(monkeypatc
 
     monkeypatch.setattr(h.svc, "converge", _converge)
 
-    report = await h.installer().upgrade_all()
+    report = (await h.installer().upgrade_all()).results
 
     by_ref = {entry["ref"]: entry for entry in report}
     assert by_ref["tai42/up"]["outcome"] == "upgraded"
@@ -478,7 +481,7 @@ async def test_an_update_unwind_keeps_a_manifest_edit_another_door_landed(monkey
 
     h.store.record = _record  # type: ignore[method-assign]
 
-    report = await h.installer().upgrade_all()
+    report = (await h.installer().upgrade_all()).results
 
     assert report[0]["outcome"] == "failed"
     assert h.cm._manifest == {"tools": [{"title": "pkg.up", "module": "pkg.up"}, kept]}
@@ -527,7 +530,7 @@ async def test_upgrade_all_failed_row_joins_forward_and_restore_release_errors(
         _released_with("OSError: restore release failed"),
     )
 
-    report = await h.installer().upgrade_all()
+    report = (await h.installer().upgrade_all()).results
 
     assert len(h.svc.writes) == 2
     assert report == [
@@ -545,7 +548,7 @@ async def test_upgrade_all_failed_row_carries_the_restore_release_error(monkeypa
     h = _failed_upgrade_harness(monkeypatch)
     _on_each_landed_change(monkeypatch, h, _lands, _released_with("OSError: restore release failed"))
 
-    report = await h.installer().upgrade_all()
+    report = (await h.installer().upgrade_all()).results
 
     assert len(h.svc.writes) == 2
     assert report[0]["outcome"] == "failed"
@@ -566,7 +569,7 @@ async def test_upgrade_all_failed_row_carries_a_forward_fleet_broadcast_error_s_
         _released_with("OSError: restore release failed"),
     )
 
-    report = await h.installer().upgrade_all()
+    report = (await h.installer().upgrade_all()).results
 
     assert len(h.svc.writes) == 2
     assert report[0]["outcome"] == "failed"
@@ -587,7 +590,7 @@ async def test_upgrade_all_failed_unwind_row_carries_both_writes_release_errors(
         _propagation_fails("restore reload failed", "OSError: restore"),
     )
 
-    report = await h.installer().upgrade_all()
+    report = (await h.installer().upgrade_all()).results
 
     assert len(h.svc.writes) == 2
     assert report[0]["outcome"] == "failed"

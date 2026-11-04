@@ -46,7 +46,7 @@ _STAYS_CLEAR = 0.2
 
 
 def _nobody() -> GateParty:
-    return GateParty(request=None, task=None, task_epoch=None)
+    return GateParty(admission=None, task=None, task_epoch=None)
 
 
 class _HeldElsewhere:

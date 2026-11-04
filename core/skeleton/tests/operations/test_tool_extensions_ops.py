@@ -100,8 +100,8 @@ class _MutateStore(ExclusiveWriteStore):
 
 
 class _ReloadAdmin:
-    def reload_config(self) -> dict:
-        return {"status": "ok", "env_keys": 0}
+    async def reload_config(self) -> dict:
+        return {"status": "ok", "env_keys": 0, "awaiting_respawn": []}
 
     async def served_mcp_names(self, config: Any) -> list[str]:
         return []

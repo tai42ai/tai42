@@ -580,7 +580,6 @@ def _collision_forward(monkeypatch: pytest.MonkeyPatch, *, span_release_error: s
             "reload_config",
             FleetResult(op="reload_config", reachable=True),
             collision,
-            unrolled_recycle_keys=("BACKEND_MANIFEST_KEY",),
             span_release_error=span_release_error,
         ) from collision
 
@@ -612,17 +611,18 @@ async def test_commit_install_recovers_a_remapped_route_collision(monkeypatch: p
     resolved = make_resolved(spec, version="1.0.0")
     _collision_forward(monkeypatch)
 
-    result = await inst._commit_install(
+    result, environment_notes = await inst._commit_install(
         "tai42/toolbox", "1.0.0", spec, "pypi", resolved, {"r": "remap"}, [_route("remap")], None, None, None
     )
 
+    assert environment_notes == []
     # The row was recorded with the resolved mounts, and the result is the remount's apply.
     assert h.store.record_calls[-1][0] == "tai42/toolbox"
     assert h.store.record_calls[-1][10] == {"r": "remap"}
     assert result.local == {"reloaded": True}
     assert "store:delete" not in h.events
-    # The failed forward reload rolled nothing, so the recovery reload rolls the change's keys.
-    assert h.svc.reapply_calls[-1] == {"continues": None, "recycle_keys": ("BACKEND_MANIFEST_KEY",)}
+    # The failed forward reload ran no roll, so the recovery reload decides one from its own report.
+    assert h.svc.reapply_calls[-1] == {"continues": None}
 
 
 @pytest.mark.parametrize(
@@ -654,7 +654,7 @@ async def test_a_recovered_collision_keeps_the_forward_write_s_span_release_erro
 
     monkeypatch.setattr(h.svc, "reapply_manifest", _reapply)
 
-    result = await inst._commit_install(
+    result, _environment_notes = await inst._commit_install(
         "tai42/toolbox", "1.0.0", spec, "pypi", resolved, {"r": "remap"}, [_route("remap")], None, None, None
     )
 

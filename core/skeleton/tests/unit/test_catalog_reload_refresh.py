@@ -29,16 +29,21 @@ class _Mixin(TaiMCPLifecycleMixin):
     def __init__(self):
         super().__init__()
         self.started_with = None
-        self._building = ServingCore(cast("object", self), args=(), auth=None, kwargs={"name": "reload-under-test"})  # type: ignore[arg-type]
+        self._scaffold_core = ServingCore(
+            cast("object", self),  # type: ignore[arg-type]
+            args=(),
+            auth=None,
+            kwargs={"name": "reload-under-test"},
+        )
 
     def _mcp_tools(self, config, tools, preset_names):  # abstract in the mixin
         pass
 
-    def start(self, manifest):
+    async def start(self, manifest):
         self.started_with = manifest
 
 
-def test_reload_registries_reruns_handlers() -> None:
+async def test_reload_registries_reruns_handlers() -> None:
     mixin = _Mixin()
     ran = []
 
@@ -47,13 +52,13 @@ def test_reload_registries_reruns_handlers() -> None:
         ran.append("reload")
 
     manifest = Manifest()
-    mixin._reload_registries(manifest)
+    await mixin._reload_registries(manifest)
 
     assert mixin.started_with is manifest
     assert ran == ["reload"]
 
 
-def test_reload_registries_raises_when_handler_fails() -> None:
+async def test_reload_registries_raises_when_handler_fails() -> None:
     # raise_on_error on the per-epoch rebuild: a failed reload handler must fail the
     # build loudly (so the primitive discards the half-built epoch), never leave the
     # worker silently behind.
@@ -64,7 +69,7 @@ def test_reload_registries_raises_when_handler_fails() -> None:
         raise RuntimeError("reload blew up")
 
     with pytest.raises(RuntimeError, match="lifecycle handlers failed"):
-        mixin._reload_registries(Manifest())
+        await mixin._reload_registries(Manifest())
 
 
 def _forget(prefixes: tuple[str, ...]) -> None:
@@ -72,7 +77,7 @@ def _forget(prefixes: tuple[str, ...]) -> None:
         del sys.modules[name]
 
 
-def test_reload_registries_audits_dropped_plugin_routes(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_reload_registries_audits_dropped_plugin_routes(monkeypatch: pytest.MonkeyPatch) -> None:
     # The route-preservation audit is WIRED through the real _reload_registries seam:
     # when a still-declared route plugin loses every route in the staged generation, the
     # rebuild raises EpochRouteAuditError before the swap so the old epoch keeps serving.
@@ -116,7 +121,7 @@ def test_reload_registries_audits_dropped_plugin_routes(monkeypatch: pytest.Monk
         # the cached sibling never re-fires. The bind-time completeness check then raises;
         # this buggy_start simulates the rollback that drops the plugin's rows out of the
         # STAGED generation, exactly the drop the audit must catch.
-        def buggy_start(manifest: Manifest) -> None:
+        async def buggy_start(manifest: Manifest) -> None:
             registry.reset_shape_index()  # clears the STAGED target, as the real start() does
             try:
                 with bind_module(binding):
@@ -128,7 +133,7 @@ def test_reload_registries_audits_dropped_plugin_routes(monkeypatch: pytest.Monk
 
         assert registry.match(served_path, "POST") is not None  # committed still live pre-audit
         with pytest.raises(EpochRouteAuditError, match="fixture/web:web"):
-            mixin._reload_registries(Manifest())
+            await mixin._reload_registries(Manifest())
     finally:
         _forget(prefixes)
 

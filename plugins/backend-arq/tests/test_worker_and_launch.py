@@ -16,12 +16,10 @@ import signal
 import time
 from pathlib import Path
 from typing import Any, ClassVar, cast
-from unittest.mock import AsyncMock
 
 import click
 import pytest
 from arq import Worker
-from click.testing import CliRunner
 from tai42_contract.backend.runtime import CONSUMING_RUNTIME, ExecutionMode, ProgressLiveness
 from tai42_kit.liveness import LivenessFile, backend_liveness_settings
 
@@ -402,56 +400,6 @@ async def test_aclose_severs_work_that_outlived_the_drain() -> None:
         await runtime.aclose()
 
     assert in_flight.cancelled()
-
-
-# -- the standalone entry point -------------------------------------------------------
-
-
-def test_main_runs_a_standalone_worker_with_arq_owning_the_signals(worker_env) -> None:
-    """The direct CLI has no host chain to compose with and no app booting
-    alongside it, so arq keeps its own handlers -- the only thing that would
-    drain a SIGTERM there."""
-    result = CliRunner().invoke(worker.main, ["--max-jobs", "3"], catch_exceptions=False)
-
-    assert result.exit_code == 0
-    built = worker_env.latest()
-    assert built.kwargs["max_jobs"] == 3
-    assert built.kwargs["handle_signals"] is True
-    assert built.ran is True
-    assert built.closed is True
-
-
-def test_main_reports_into_the_liveness_file_and_removes_it(worker_env, liveness_path: Path) -> None:
-    result = CliRunner().invoke(worker.main, [], catch_exceptions=False)
-
-    assert result.exit_code == 0
-    assert worker_env.latest().reported == f"{os.getpid()}\n5.5\n"
-    assert not liveness_path.exists()
-
-
-def test_main_removes_the_liveness_file_when_the_worker_raises(
-    worker_env, monkeypatch: pytest.MonkeyPatch, liveness_path: Path
-) -> None:
-    class _FailingWorker(_FakeWorker):
-        async def async_run(self) -> None:
-            self.kwargs["report_progress"](next_within=0.5)
-            assert liveness_path.exists()
-            raise RuntimeError("arq loop failed")
-
-    monkeypatch.setattr(worker, "_ProgressReportingWorker", _FailingWorker)
-
-    with pytest.raises(RuntimeError, match="arq loop failed"):
-        CliRunner().invoke(worker.main, [], catch_exceptions=False)
-
-    assert not liveness_path.exists()
-
-
-def test_main_keyboard_interrupt_exits_130(monkeypatch) -> None:
-    monkeypatch.setattr(worker, "_run_standalone", AsyncMock(side_effect=KeyboardInterrupt))
-
-    result = CliRunner().invoke(worker.main, [])
-
-    assert result.exit_code == 130
 
 
 # -- ArqBackend.launch -----------------------------------------------------------------

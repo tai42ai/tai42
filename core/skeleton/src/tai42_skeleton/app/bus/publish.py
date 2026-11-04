@@ -1,8 +1,7 @@
-"""Publish an op to the fleet and collect + compute each worker's verdict."""
+"""Publish an op to the fleet: census the expected workers, broadcast, and report each worker's outcome."""
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import sys
@@ -10,33 +9,27 @@ import uuid
 from typing import TYPE_CHECKING, Any
 
 from tai42_kit.clients.impl.redis import RedisClient
-from tai42_kit.settings import decode_env_readers
 
 from tai42_skeleton.app.bus.models import (
     _OP_PAYLOAD_KEY,
     TRANSPORT_ERRORS,
     FleetResult,
-    LastOp,
     LocalApplyResult,
     OpOutcome,
     UnknownFleetTargetsError,
-    WorkerKind,
     WorkerResult,
     WorkerRow,
     WorkerState,
     _beat_age_seconds,
-    _decode,
-    _merge_terminal,
+    _PresenceValue,
     presence_fresh,
 )
 from tai42_skeleton.app.bus.ops import FleetOp, fleet_op_wire
-from tai42_skeleton.config.deployment_env import published_env_readers
+from tai42_skeleton.app.bus.replies import WorkerBusRepliesMixin, _ReplyLink
 from tai42_skeleton.utils.redis_typing import eval_script
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
-
-    from tai42_kit.settings import EnvReader
 
     from tai42_skeleton.app.bus.models import WorkerIdentity
     from tai42_skeleton.app.bus_settings import BusSettings
@@ -61,27 +54,11 @@ return 0
 """
 
 
-_RECONNECTED_CAUSE = (
-    "the reply subscription reconnected during reply collection; a reply sent while it was disconnected is lost"
-)
-
-
-class _ReplyLink:
-    """Whether the reply pub/sub reconnected; its reconnect hook sets ``reconnected``."""
-
-    def __init__(self) -> None:
-        """Start with no reconnect seen."""
-        self.reconnected = False
-
-    def mark_reconnected(self) -> None:
-        """Record a reconnect of the reply pub/sub."""
-        self.reconnected = True
-
-
-class WorkerBusPublishMixin:
+class WorkerBusPublishMixin(WorkerBusRepliesMixin):
     """The publisher surface of :class:`WorkerBus`: broadcast an op and collect a per-worker outcome.
 
-    Computes verdicts for workers that never reply.
+    The replies and the verdicts of workers that never reply are collected by
+    :class:`~tai42_skeleton.app.bus.replies.WorkerBusRepliesMixin`.
     """
 
     if TYPE_CHECKING:
@@ -151,7 +128,7 @@ class WorkerBusPublishMixin:
             return FleetResult(op=op_name, reachable=False, error=f"{type(exc).__name__}: {exc}")
 
         if local is not None:
-            fleet.append(self._self_result(local))
+            fleet.append(local.as_row(self.identity.name))
         fleet.sort(key=lambda r: r.name)
         return FleetResult(op=op_name, results=fleet)
 
@@ -167,7 +144,12 @@ class WorkerBusPublishMixin:
         op_id = uuid.uuid4().hex
         reply_channel = f"{self._settings.reply_prefix}{op_id}"
         identity = self.identity
-        async with _pkg.client_ctx(RedisClient, self._settings.redis) as conn:
+        # ``fresh=True``: a dedicated, non-pooled connection, for the reason the subscription
+        # states (``_run_subscription`` in ``subscribe.py``): this lease is held across the whole
+        # reply collection, up to the apply timeout, and a pooled lease is epoch-stamped, so a
+        # reload's retire would wait its drain budget on it and then force-close it, failing the
+        # collection and holding the retire. The bus URL never changes across a profile apply.
+        async with _pkg.client_ctx(RedisClient, self._settings.redis, fresh=True) as conn:
             r: Any = conn
             expected, gaps, mid_resync = await self._classify_workers(
                 r, targets, expected_at_start, await_resyncing=await_resyncing
@@ -210,7 +192,7 @@ class WorkerBusPublishMixin:
         expected_at_start: dict[str, int] | None = None,
         *,
         await_resyncing: bool = False,
-    ) -> tuple[dict[str, int | None], dict[str, WorkerResult], set[str]]:
+    ) -> tuple[dict[str, int], dict[str, WorkerResult], set[str]]:
         """Split the live fleet into the EXPECTED set and the GAP set.
 
         EXPECTED is keyed name → generation, awaited for a reply; GAP is keyed name → its
@@ -221,9 +203,11 @@ class WorkerBusPublishMixin:
         a gap; rather than being dropped it is landed as its own condition (``resyncing`` /
         ``recycling`` / ``stale``). Whole-fleet: every row minus self is classified so.
         Targeted: each named target minus self — a present target is classified so, and a
-        target absent from the census stays expected with generation ``None`` so it is
-        reported ``departed`` at the cut. The third set names the expected workers admitted
-        while resyncing.
+        target absent from the census stays expected: at the generation the caller's op-start
+        census saw (:meth:`_carry_expected`), else at the last generation its slot minted
+        (:meth:`_last_minted`). Either way it is expected at a known life, so a life read
+        during the collection reports it ``departed`` once its slot claim is gone or a newer
+        life holds its slot. The third set names the expected workers admitted while resyncing.
 
         This census runs at publish time; ``expected_at_start`` re-admits what the
         caller's earlier op-start census saw — see :meth:`_carry_expected`.
@@ -231,32 +215,47 @@ class WorkerBusPublishMixin:
         rows = await self._indexed_workers(r)
         by_name = {row.name: row for row in rows}
         self_name = self.identity.name
-        expected: dict[str, int | None] = {}
+        expected: dict[str, int] = {}
         gaps: dict[str, WorkerResult] = {}
         mid_resync: set[str] = set()
+        absent: list[str] = []
         if targets is None:
             for name, row in by_name.items():
                 if name != self_name:
                     self._place_row(row, expected, gaps, mid_resync, await_resyncing=await_resyncing)
         else:
             # Targets are NOT re-validated here (the caller validated); an absent target
-            # is reported as departed at the cut, a present-but-gap target as its gap
-            # outcome.
+            # stays expected at a known life, a present-but-gap target lands as its gap outcome.
             for name in targets:
                 if name == self_name:
                     continue
                 row = by_name.get(name)
                 if row is None:
-                    expected[name] = None
+                    absent.append(name)
                 else:
                     self._place_row(row, expected, gaps, mid_resync, await_resyncing=await_resyncing)
         self._carry_expected(expected, gaps, targets, expected_at_start)
+        expected.update(await self._last_minted(r, [name for name in absent if name not in expected]))
         return expected, gaps, mid_resync
+
+    async def _last_minted(self, r: Any, names: list[str]) -> dict[str, int]:
+        """The last generation each slot in ``names`` minted, read in one round trip; ``0`` for a slot never minted.
+
+        A life subscribes to the op channel before it claims its slot and mints its
+        generation, so read before the publish, the last minted life is the newest one the
+        op can reach: a life that claims the slot later is a newer life, and the collection
+        reports the target ``departed`` once it holds the slot. Generations start at 1, so a
+        slot never minted is expected at 0 and every life that takes it is a newer one.
+        """
+        if not names:
+            return {}
+        raws = await r.mget([self._settings.gen_key(name) for name in names])
+        return {name: int(raw) if raw is not None else 0 for name, raw in zip(names, raws, strict=True)}
 
     def _place_row(
         self,
         row: WorkerRow,
-        expected: dict[str, int | None],
+        expected: dict[str, int],
         gaps: dict[str, WorkerResult],
         mid_resync: set[str],
         *,
@@ -272,7 +271,7 @@ class WorkerBusPublishMixin:
 
     def _carry_expected(
         self,
-        expected: dict[str, int | None],
+        expected: dict[str, int],
         gaps: dict[str, WorkerResult],
         targets: list[str] | None,
         expected_at_start: dict[str, int] | None,
@@ -283,7 +282,7 @@ class WorkerBusPublishMixin:
         a worker whose presence TTL faded across it would land in neither set here, and
         an op that never expected it would report converged without it. Re-admitted at
         its SNAPSHOT generation, so the reply gate still discards a replacement life's
-        reply and :meth:`_computed_verdict` names the successor when the slot was retaken.
+        reply and the ``departed`` verdict names the successor when the slot was retaken.
 
         Deliberately narrow. It never overrides a live classification — a carried name
         the census still sees keeps whatever this census decided, including a gap outcome
@@ -346,264 +345,6 @@ class WorkerBusPublishMixin:
         detail = f"state={row.state.value}" + (f", last beat {age:.0f}s ago" if age is not None else "")
         return WorkerResult(name=row.name, outcome=outcome, detail=detail)
 
-    async def _collect(
-        self,
-        r: Any,
-        pubsub: Any,
-        link: _ReplyLink,
-        expected: dict[str, int | None],
-        gaps: dict[str, WorkerResult],
-        mid_resync: set[str],
-        op_id: str,
-        op_name: str,
-    ) -> dict[str, WorkerResult]:
-        loop = asyncio.get_running_loop()
-        start = loop.time()
-        ack_deadline = start + self._settings.ack_timeout
-        apply_deadline = start + self._settings.apply_timeout
-        terminal, acked, transport_error = await self._collect_replies(
-            pubsub, link, expected, op_id, op_name, ack_deadline, apply_deadline
-        )
-        return await self._finalize_verdicts(r, expected, gaps, mid_resync, terminal, acked, transport_error)
-
-    async def _collect_replies(
-        self,
-        pubsub: Any,
-        link: _ReplyLink,
-        expected: dict[str, int | None],
-        op_id: str,
-        op_name: str,
-        ack_deadline: float,
-        apply_deadline: float,
-    ) -> tuple[dict[str, WorkerResult], set[str], str | None]:
-        """Gather terminal/ack replies until the deadline.
-
-        Returns the terminal map, the ack set, and a transport error string if the poll
-        hit a blip. A reconnect of the reply subscription that the retry hid inside a
-        read is a blip too: a reply sent while it was disconnected is never delivered, so
-        it is logged and named on every worker left without a terminal reply. Collection
-        goes on after it, as the replies sent after the reconnect still arrive.
-        """
-        terminal: dict[str, WorkerResult] = {}
-        acked: set[str] = set()
-        loop = asyncio.get_running_loop()
-        ack_checked = False
-        transport_error: str | None = None
-
-        # Early exit counts TERMINAL wire replies only; a provisional missing/departed
-        # never enables it, so an in-flight ``applied`` can never be cut off early.
-        while expected.keys() - terminal.keys():
-            now = loop.time()
-            if now >= apply_deadline:
-                break
-            if not ack_checked and now >= ack_deadline:
-                # Provisional verdicts at the ack deadline are diagnostic only; the
-                # finalize pass below re-checks presence, so they never block a
-                # later terminal reply. Marking the pass done is what matters here.
-                ack_checked = True
-            next_deadline = apply_deadline if ack_checked else ack_deadline
-            timeout = max(0.01, next_deadline - now)
-            try:
-                msg = await pubsub.get_message(ignore_subscribe_messages=True, timeout=timeout)
-            except TRANSPORT_ERRORS as exc:
-                # A blip mid-collection is reported loudly on the affected workers
-                # (below), never silently dropped.
-                transport_error = f"{type(exc).__name__}: {exc}"
-                logger.error("worker bus: reply collection for %r hit a transport error", op_name, exc_info=True)
-                break
-            if link.reconnected and transport_error is None:
-                transport_error = _RECONNECTED_CAUSE
-                logger.warning("worker bus: reply collection for %r: %s", op_name, _RECONNECTED_CAUSE)
-            if msg is not None:
-                self._fold_reply(msg, expected, op_id, terminal, acked)
-        return terminal, acked, transport_error
-
-    def _fold_reply(
-        self,
-        msg: dict[str, Any],
-        expected: dict[str, int | None],
-        op_id: str,
-        terminal: dict[str, WorkerResult],
-        acked: set[str],
-    ) -> None:
-        """Fold one reply message into ``terminal`` / ``acked``; an undecodable or discarded frame is skipped."""
-        frame = _decode(msg["data"])
-        if frame is None:
-            return
-        phase, name = self._classify_reply_frame(frame, expected, op_id)
-        if name is None:
-            return
-        if phase == "received":
-            acked.add(name)
-        elif phase == "terminal":
-            _merge_terminal(terminal, name, self._terminal_result(name, frame))
-
-    def _classify_reply_frame(
-        self, frame: dict[str, Any], expected: dict[str, int | None], op_id: str
-    ) -> tuple[str | None, str | None]:
-        """Admit/classify a reply frame.
-
-        Returns ``(phase, name)`` for an in-expected frame whose generation and op_id
-        match, or ``(None, None)`` when it is discarded (the generation/op_id mismatches
-        are logged).
-        """
-        name = frame.get("name")
-        if name not in expected:
-            return None, None
-        expected_gen = expected[name]
-        got_gen = frame.get("generation")
-        # generation is the life-binding, op_id the op-binding: a worker that lost
-        # its slot but has not yet discovered it (up to one heartbeat of detection
-        # lag) can reply under a stale life — discard those loudly, never fold.
-        if expected_gen is not None and got_gen != expected_gen:
-            logger.warning(
-                "worker bus: discarding reply from %s — expected generation %s, got %s (op_id %s)",
-                name,
-                expected_gen,
-                got_gen,
-                frame.get("op_id"),
-            )
-            return None, None
-        if frame.get("op_id") != op_id:
-            logger.warning(
-                "worker bus: discarding reply from %s — op_id mismatch (expected %s, got %s)",
-                name,
-                op_id,
-                frame.get("op_id"),
-            )
-            return None, None
-        return frame.get("phase"), name
-
-    async def _finalize_verdicts(
-        self,
-        r: Any,
-        expected: dict[str, int | None],
-        gaps: dict[str, WorkerResult],
-        mid_resync: set[str],
-        terminal: dict[str, WorkerResult],
-        acked: set[str],
-        transport_error: str | None,
-    ) -> dict[str, WorkerResult]:
-        """Compute the final per-worker verdicts.
-
-        A collected terminal, else a presence-rechecked computed verdict, then the gap
-        rows folded in.
-        """
-        results: dict[str, WorkerResult] = {}
-        for name in expected:
-            verdict = terminal.get(name)
-            if verdict is None:
-                verdict = await self._computed_verdict(
-                    r, name, expected[name], name in acked, transport_error, admitted_mid_resync=name in mid_resync
-                )
-            results[name] = verdict
-        # Gap rows were never expected to reply; land
-        # each as its own actual condition (resyncing/recycling/stale) rather than
-        # dropping it. Disjoint from ``expected`` by construction.
-        results.update(gaps)
-        return results
-
-    def _terminal_result(self, name: str, frame: dict[str, Any]) -> WorkerResult:
-        raw = frame.get("outcome")
-        outcome = OpOutcome.failed if raw == OpOutcome.failed.value else OpOutcome.applied
-        return WorkerResult(name=name, outcome=outcome, payload=frame.get("payload"), error=frame.get("error"))
-
-    async def _computed_verdict(
-        self,
-        r: Any,
-        name: str,
-        expected_gen: int | None,
-        acked: bool,
-        transport_error: str | None,
-        *,
-        admitted_mid_resync: bool = False,
-    ) -> WorkerResult:
-        """Classify a worker that holds no terminal reply, re-checking presence.
-
-        Generation-aware: when the presence key now shows a generation GREATER than the
-        one expected at publish, the target's life ended and a replacement took its slot
-        mid-apply — ``departed`` (the reply gate already discarded the stale life's
-        replies). An absent key is ``departed``; a still-live same-life key is
-        ``timed_out`` (acked) or ``missing`` (never acked). A never-acked worker admitted
-        mid-resync whose presence still reads ``resyncing`` has not read the op yet, and
-        its ``missing`` detail says so.
-        """
-        status, current_gen, current_state = await self._recheck_presence(r, name)
-        if status == "alive" and expected_gen is not None and current_gen is not None and current_gen > expected_gen:
-            return WorkerResult(
-                name=name,
-                outcome=OpOutcome.departed,
-                detail=f"replaced by generation {current_gen} mid-apply",
-            )
-        absent = status == "absent"
-        if acked:
-            if absent:
-                return WorkerResult(
-                    name=name,
-                    outcome=OpOutcome.departed,
-                    detail="acked then its presence key expired before applying — worker departed mid-apply",
-                )
-            detail = (
-                "acked but did not apply within the apply timeout, which covers the worker's full drain budget — "
-                "its reload is stuck past it; read the worker's log, verify via fleet census/reload"
-            )
-            if transport_error is not None:
-                detail = f"{detail} (reply collection transport error: {transport_error})"
-            return WorkerResult(name=name, outcome=OpOutcome.timed_out, detail=detail)
-        if absent:
-            return WorkerResult(
-                name=name,
-                outcome=OpOutcome.departed,
-                detail="no reply and presence key expired — worker departed",
-            )
-        if admitted_mid_resync and current_state == WorkerState.resyncing:
-            detail = (
-                "no received-ack: the worker was resyncing at publish and applies this op after its resync, "
-                "which outlasted the apply timeout"
-            )
-        else:
-            detail = (
-                "no received-ack within the ack timeout while presence stayed live — worker missing (alive but silent)"
-            )
-        if transport_error is not None:
-            detail = f"{detail} (reply collection transport error: {transport_error})"
-        return WorkerResult(name=name, outcome=OpOutcome.missing, detail=detail)
-
-    async def _recheck_presence(self, r: Any, name: str) -> tuple[str, int | None, WorkerState | None]:
-        """Re-read a worker's presence key at the report cut.
-
-        Returns ``("absent", None, None)`` when the key is gone, ``("alive", generation,
-        state)`` when it is present (the generation and state parsed from the value, both
-        ``None`` if the value does not parse), or ``("unreachable", None, None)`` when the
-        check itself could not reach Redis (the caller degrades to a loud
-        missing/timed_out). The generation lets the verdict see a replacement that took the
-        slot mid-apply; the state, a worker that is still resyncing.
-        """
-        try:
-            raw = await r.get(self._settings.presence_key(name))
-        except TRANSPORT_ERRORS:
-            logger.error("worker bus: presence re-check for %s failed", name, exc_info=True)
-            return ("unreachable", None, None)
-        if raw is None:
-            return ("absent", None, None)
-        try:
-            text = raw.decode() if isinstance(raw, bytes) else raw
-            meta = json.loads(text)
-            generation = int(meta["generation"])
-            state = WorkerState(meta["state"])
-        except (ValueError, TypeError, KeyError):
-            logger.warning("worker bus: presence value for %s is unparseable at the report cut", name, exc_info=True)
-            return ("alive", None, None)
-        return ("alive", generation, state)
-
-    def _self_result(self, local: LocalApplyResult) -> WorkerResult:
-        return WorkerResult(
-            name=self.identity.name,
-            outcome=local.outcome,
-            payload=local.payload,
-            error=local.error,
-        )
-
     def _local_publish(self, op_name: str, targets: list[str] | None, local: LocalApplyResult | None) -> FleetResult:
         if targets is not None:
             unknown = sorted(set(targets) - {self.identity.name})
@@ -611,7 +352,7 @@ class WorkerBusPublishMixin:
                 raise UnknownFleetTargetsError(
                     f"worker bus (local): cannot reach targets not on this process: {unknown}"
                 )
-        results = [self._self_result(local)] if local is not None else []
+        results = [local.as_row(self.identity.name)] if local is not None else []
         return FleetResult(op=op_name, local_only=True, results=results)
 
     def _validate_local_targets(self, local: LocalApplyResult | None, targets: list[str] | None) -> None:
@@ -645,24 +386,6 @@ class WorkerBusPublishMixin:
         async with _pkg.client_ctx(RedisClient, self._settings.redis) as conn:
             return await self._indexed_workers(conn)
 
-    async def env_readers(self, digests: Sequence[str]) -> dict[str, tuple[EnvReader, ...]]:
-        """The env-reader descriptions the bus holds under ``digests``, by digest, read in one round trip.
-
-        A digest the bus holds no description under is left out. The busless variant holds this
-        process's own description only. On an outage it raises one of :data:`TRANSPORT_ERRORS`;
-        a value that is not a description raises.
-        """
-        if not digests:
-            return {}
-        if self._local:
-            own = published_env_readers()
-            return {own.digest: own.readers} if own.digest in digests else {}
-        async with _pkg.client_ctx(RedisClient, self._settings.redis) as conn:
-            bodies = await conn.mget([self._settings.env_readers_key(digest) for digest in digests])
-        return {
-            digest: decode_env_readers(body) for digest, body in zip(digests, bodies, strict=True) if body is not None
-        }
-
     async def expected_at_start(self) -> dict[str, int]:
         """The siblings owed a confirmation right now, as ``{name: generation}``.
 
@@ -681,12 +404,16 @@ class WorkerBusPublishMixin:
         carrying one back in would turn a worker that announced its own departure into a
         wait. A busless bus sees only its own row and so snapshots nothing.
         """
+        return self.expected_from_census(await self.census())
+
+    def expected_from_census(self, rows: Sequence[WorkerRow]) -> dict[str, int]:
+        """The siblings owed a confirmation by census ``rows`` the caller already read, as ``{name: generation}``.
+
+        The snapshot :meth:`expected_at_start` takes, for a publisher that reads the census once
+        before its local side effect and derives more than the snapshot from it.
+        """
         self_name = self.identity.name
-        return {
-            row.name: row.generation
-            for row in await self.census()
-            if row.name != self_name and self._is_ready_fresh(row)
-        }
+        return {row.name: row.generation for row in rows if row.name != self_name and self._is_ready_fresh(row)}
 
     async def validate_targets(self, targets: list[str] | None) -> None:
         """Raise naming any target absent from the census.
@@ -735,28 +462,12 @@ class WorkerBusPublishMixin:
                 # between the GET and here is not removed.
                 stale.append(name)
                 continue
-            rows.append(self._row_from_presence(name, raw, outcomes[2 * i + 1]))
+            pttl_ms = outcomes[2 * i + 1]
+            rows.append(
+                _PresenceValue.model_validate_json(raw).row(name, int(pttl_ms) if pttl_ms is not None else None)
+            )
         if stale:
             logger.debug("worker bus: pruning stale presence-index members %s", stale)
             for name in stale:
                 await eval_script(r, _PRUNE_STALE_LUA, 2, self._settings.presence_key(name), index, name)
         return rows
-
-    @staticmethod
-    def _row_from_presence(name: str, raw: Any, pttl_ms: Any) -> WorkerRow:
-        text = raw.decode() if isinstance(raw, bytes) else raw
-        meta = json.loads(text)
-        last_op_raw = meta.get("last_op")
-        return WorkerRow(
-            name=name,
-            kind=WorkerKind(meta["kind"]),
-            pid=int(meta["pid"]),
-            generation=int(meta["generation"]),
-            joined_at=meta["joined_at"],
-            beat_at=meta["beat_at"],
-            state=WorkerState(meta["state"]),
-            deployment_keys=list(meta["deployment_keys"]),
-            env_readers=meta["env_readers"],
-            last_op=LastOp(**last_op_raw) if last_op_raw is not None else None,
-            pttl_ms=int(pttl_ms) if pttl_ms is not None else None,
-        )

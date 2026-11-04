@@ -43,10 +43,12 @@ from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.settings.owned_settings import refuse_unknown_owned_env_write
 from tai42_skeleton.sub_mcp.settings import SubMcpSettings
 from tai42_skeleton.tools.binding.errors import ExtensionComboRefusedError
+from tai42_skeleton.tools.binding.surface import tool_surface_generation
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Mapping
+    from collections.abc import Callable, Iterator, Mapping
 
+    from fastmcp.tools.base import Tool
     from tai42_contract.manifest import ExtensionElement
 
     from tai42_skeleton.config.deployment_env import DeploymentOwnership
@@ -62,15 +64,9 @@ def _stored_after(stored: Mapping[str, str], changes: Mapping[str, str]) -> dict
 
 def _refuse_unrecyclable_merge(
     stored: Mapping[str, str], changes: Mapping[str, str], ownership: DeploymentOwnership
-) -> list[str]:
-    """Refuse an env merge no recycle can carry; return its recycle-class keys.
-
-    The env the merge would store is :func:`_stored_after`. The returned keys are the ones the
-    merge changes that only a worker recycle carries, sorted.
-    """
-    proposed = _stored_after(stored, changes)
-    _hot, recycle = refuse_unrecyclable_env_change(stored, proposed, ownership, change="this env change")
-    return recycle
+) -> None:
+    """Refuse an env merge no recycle can carry; the env the merge would store is :func:`_stored_after`."""
+    refuse_unrecyclable_env_change(stored, _stored_after(stored, changes), ownership, change="this env change")
 
 
 def _check_apply_window(effective: dict[str, str], *, stored_env_file: str | None) -> None:
@@ -134,22 +130,30 @@ class _ManifestValidationInputs:
 
     The process env (the env ``!ENV`` markers and combo settings resolve against is derived from it
     and the stored env, which the write exclusion holds still), whether the bus is
-    configured (the backend-needs-bus rule), and the live serving generation (the combo check
-    dry-runs against its extension registry; a reload or a settings-profile apply installs a new one).
+    configured (the backend-needs-bus rule), the live serving generation (the combo check
+    dry-runs against its extension registry; a reload or a settings-profile apply installs a new
+    one), the tool-surface generation (bumped on every tool bound or removed) and the tools the
+    live generation serves, by name (the bases the combo check binds over).
     """
 
     env: dict[str, str]
     bus_enabled: bool
     epoch: Epoch | None
-
-    @classmethod
-    def now(cls) -> _ManifestValidationInputs:
-        return cls(env=dict(os.environ), bus_enabled=bus_settings().enabled, epoch=current_epoch_or_none())
+    surface: int
+    served: Mapping[str, Tool]
 
     def unchanged(self) -> bool:
-        """Whether the process env, the bus setting and the live serving generation are still these."""
-        current = _ManifestValidationInputs.now()
-        return current.env == self.env and current.bus_enabled == self.bus_enabled and current.epoch is self.epoch
+        """Whether the process env, the bus setting, the live serving generation and its tool surface are still these.
+
+        The served tools are compared through the tool-surface generation, which moves with every
+        tool bound or removed.
+        """
+        return (
+            dict(os.environ) == self.env
+            and bus_settings().enabled == self.bus_enabled
+            and current_epoch_or_none() is self.epoch
+            and tool_surface_generation() == self.surface
+        )
 
 
 @dataclass(frozen=True, eq=False)
@@ -171,8 +175,23 @@ class _ValidationMixin(_ConfigServiceBase):
     The resolved projection of a change is validated here before it is persisted.
     """
 
-    def _validate_manifest(self, document: Mapping[str, Any], ownership: DeploymentOwnership) -> None:
-        """Validate the resolved projection of a manifest change.
+    async def _manifest_validation_inputs(self) -> _ManifestValidationInputs:
+        """The inputs a manifest validation is about to read; taken before it reads them.
+
+        The sync reads are taken first, so a surface that moves while the served tools are listed
+        reads as changed.
+        """
+        env = dict(os.environ)
+        bus_enabled = bus_settings().enabled
+        epoch = current_epoch_or_none()
+        surface = tool_surface_generation()
+        served = await self._combo_check.served_bases()
+        return _ManifestValidationInputs(env=env, bus_enabled=bus_enabled, epoch=epoch, surface=surface, served=served)
+
+    def _validate_manifest(
+        self, document: Mapping[str, Any], ownership: DeploymentOwnership, inputs: _ManifestValidationInputs
+    ) -> None:
+        """Validate the resolved projection of a manifest change against ``inputs``.
 
         Refuses any ``!ENV`` marker left dangling first, so it is named as dangling before the
         resolved projection, where it would read as ``"N/A"``, is validated; then checks the
@@ -183,19 +202,19 @@ class _ValidationMixin(_ConfigServiceBase):
         ownership), not this process's env alone: the write holds the store's exclusive span, so
         that env is the one every worker converges to. A manifest mutation leaves the env
         unchanged, so the invariants read the current bus and store configuration, after the
-        projection.
+        projection. The combos bind over the served tools of ``inputs``.
         """
         env = self._converged_env(self._read_stored_env(), ownership)
         refuse_unresolved_env(document, env)
         with _environ(env, stored_env_file=self._stored_env_file()):
-            manifest = self._validated_projection(document)
+            manifest = self._validated_projection(document, inputs.served)
         workers = serve_workers()
         _check_bus_invariants(
             backend_module=manifest.backend_module, workers=workers, bus_configured=bus_settings().enabled
         )
         _check_store_invariants(backend_module=manifest.backend_module, workers=workers)
 
-    def _validate_manifest_noting_inputs(
+    async def _validate_manifest_noting_inputs(
         self, document: Mapping[str, Any], ownership: DeploymentOwnership
     ) -> _ManifestValidationInputs:
         """Validate ``document`` as :meth:`_validate_manifest` does; return the inputs it was validated against.
@@ -204,14 +223,14 @@ class _ValidationMixin(_ConfigServiceBase):
         reads as changed. A caller that awaits before it persists validates again unless the
         document and :meth:`_ManifestValidationInputs.unchanged` both still hold.
         """
-        inputs = _ManifestValidationInputs.now()
-        self._validate_manifest(document, ownership)
+        inputs = await self._manifest_validation_inputs()
+        self._validate_manifest(document, ownership, inputs)
         return inputs
 
-    def _env_validation_inputs(self) -> _EnvValidationInputs:
+    async def _env_validation_inputs(self) -> _EnvValidationInputs:
         """The inputs an env-write validation is about to read; taken before it reads them."""
         return _EnvValidationInputs(
-            process=_ManifestValidationInputs.now(),
+            process=await self._manifest_validation_inputs(),
             stored_env=self._read_stored_env(),
             manifest=self._read_preserved_manifest(),
         )
@@ -224,8 +243,25 @@ class _ValidationMixin(_ConfigServiceBase):
             and self._read_preserved_manifest() == inputs.manifest
         )
 
-    def _validate_env(self, changes: dict[str, str], ownership: DeploymentOwnership) -> list[str]:
-        """Validate the effective config an env change produces; return the recycle-class keys it changes.
+    async def _validate_again_if_moved(
+        self, validated: _EnvValidationInputs, validate: Callable[[_ManifestValidationInputs], None]
+    ) -> _EnvValidationInputs:
+        """Run ``validate`` again, against inputs taken now, when any of ``validated`` changed since it was taken.
+
+        An env write validates against its inputs, then awaits; this step runs after that await
+        and before the caller relies on the inputs. Returns the inputs the write stands validated against: ``validated``
+        when nothing changed, else the ones taken here. A refusal raises before the caller's env write.
+        """
+        if self._env_validation_inputs_unchanged(validated):
+            return validated
+        inputs = await self._env_validation_inputs()
+        validate(inputs.process)
+        return inputs
+
+    def _validate_env(
+        self, changes: dict[str, str], ownership: DeploymentOwnership, inputs: _ManifestValidationInputs
+    ) -> None:
+        """Validate the effective config an env change produces against ``inputs``.
 
         Refuses an X-band key in the change PAYLOAD, a stored env that would set one name under two
         spellings, a change that sets a key the deployment sets, and a change no recycle can
@@ -236,6 +272,7 @@ class _ValidationMixin(_ConfigServiceBase):
         configuration (so removing either while a backend remains is rejected too), the
         workers-need-bus and workers-need-shared-stores invariants (so emptying the bus or a store
         a multi-worker server shares is rejected) and the apply-window invariant against the post-change env.
+        The persisted manifest's combos bind over the served tools of ``inputs``.
         """
         refuse_x_band(changes.keys())
         refuse_unknown_owned_env_write([key for key, value in changes.items() if value != ""])
@@ -254,7 +291,7 @@ class _ValidationMixin(_ConfigServiceBase):
         with _environ(effective, stored_env_file=self._stored_env_file()):
             preserved = self._read_preserved_manifest()
             refuse_unresolved_env(preserved, effective)
-            manifest = self._validated_projection(preserved)
+            manifest = self._validated_projection(preserved, inputs.served)
             # Resolve the bus through its settings against the effective env (a fresh
             # read, NOT the cached singleton) so a bus configured only via
             # ``TAI_DEFAULT_REDIS_URL`` — not ``TAI_BUS_REDIS_URL`` — is still seen as
@@ -267,12 +304,16 @@ class _ValidationMixin(_ConfigServiceBase):
             _check_store_invariants(backend_module=manifest.backend_module, workers=workers)
         _check_apply_window(effective, stored_env_file=self._stored_env_file())
         # Last, so a change the bus invariants refuse is named by their rule.
-        return _refuse_unrecyclable_merge(stored, changes, ownership)
+        _refuse_unrecyclable_merge(stored, changes, ownership)
 
     def _validate_env_and_manifest(
-        self, changes: dict[str, str], document: Mapping[str, Any], ownership: DeploymentOwnership
-    ) -> list[str]:
-        """Validate a combined env-write + manifest-mutate before it persists; return the recycle-class keys it changes.
+        self,
+        changes: dict[str, str],
+        document: Mapping[str, Any],
+        ownership: DeploymentOwnership,
+        inputs: _ManifestValidationInputs,
+    ) -> None:
+        """Validate a combined env-write + manifest-mutate before it persists, against ``inputs``.
 
         Refuses an X-band key in the env change PAYLOAD, a stored env that would set one name under
         two spellings, a change that sets a key the deployment sets, and a change no recycle can
@@ -282,6 +323,7 @@ class _ValidationMixin(_ConfigServiceBase):
         reference is caught as dangling), validates the resolved projection, and
         evaluates backend-needs-bus, backend-needs-hooks-store, workers-need-bus,
         workers-need-shared-stores and the apply-window invariant against the post-change env.
+        The combos bind over the served tools of ``inputs``.
         """
         refuse_x_band(changes.keys())
         refuse_unknown_owned_env_write([key for key, value in changes.items() if value != ""])
@@ -297,16 +339,27 @@ class _ValidationMixin(_ConfigServiceBase):
         workers = serve_workers()
         with _environ(effective, stored_env_file=self._stored_env_file()):
             refuse_unresolved_env(document, effective)
-            manifest = self._validated_projection(document)
+            manifest = self._validated_projection(document, inputs.served)
             _check_bus_invariants(
                 backend_module=manifest.backend_module, workers=workers, bus_configured=BusSettings().enabled
             )
             _check_store_invariants(backend_module=manifest.backend_module, workers=workers)
         _check_apply_window(effective, stored_env_file=self._stored_env_file())
-        return _refuse_unrecyclable_merge(stored, changes, ownership)
+        _refuse_unrecyclable_merge(stored, changes, ownership)
 
-    def _validate_replace(self, profile_env: dict[str, str], ownership: DeploymentOwnership) -> None:
-        """Validate a whole-env REPLACE (a settings-profile apply) before it persists.
+    async def validate_profile_env(self, profile_env: dict[str, str], ownership: DeploymentOwnership) -> None:
+        """Validate a settings profile's env as a whole-env replace, against the inputs taken now.
+
+        The check a profile passes before it is stored: the same validation the apply runs
+        (:meth:`_validate_replace`), judged by ``ownership``. A refusal raises ``ValueError``.
+        """
+        inputs = await self._manifest_validation_inputs()
+        self._validate_replace(profile_env, ownership, inputs)
+
+    def _validate_replace(
+        self, profile_env: dict[str, str], ownership: DeploymentOwnership, inputs: _ManifestValidationInputs
+    ) -> None:
+        """Validate a whole-env REPLACE (a settings-profile apply) before it persists, against ``inputs``.
 
         The apply's validate-before-persist entry, mirroring :meth:`ConfigService.apply_replace`.
 
@@ -317,7 +370,8 @@ class _ValidationMixin(_ConfigServiceBase):
         than its stored one, refuses a change that leaves a manifest ``!ENV`` marker
         dangling against the replace-effective env, and evaluates the backend-needs-bus,
         backend-needs-hooks-store, workers-need-bus, workers-need-shared-stores and apply-window
-        invariants against that same env.
+        invariants against that same env. The persisted manifest's combos bind over the served
+        tools of ``inputs``.
         """
         refuse_x_band(profile_env.keys())
         refuse_colliding_spellings(profile_env, source="a profile")
@@ -343,25 +397,26 @@ class _ValidationMixin(_ConfigServiceBase):
         with _environ(effective, stored_env_file=self._stored_env_file()):
             preserved = self._read_preserved_manifest()
             refuse_unresolved_env(preserved, effective, connector_env=connector_env)
-            manifest = self._validated_projection(preserved)
+            manifest = self._validated_projection(preserved, inputs.served)
             _check_bus_invariants(
                 backend_module=manifest.backend_module, workers=workers, bus_configured=BusSettings().enabled
             )
             _check_store_invariants(backend_module=manifest.backend_module, workers=workers)
         _check_apply_window(effective, stored_env_file=self._stored_env_file())
 
-    def _validated_projection(self, document: Mapping[str, Any]) -> Manifest:
+    def _validated_projection(self, document: Mapping[str, Any], served: Mapping[str, Tool]) -> Manifest:
         """Build and validate the RESOLVED in-memory projection of a PRESERVED document.
 
         The ``!ENV`` markers are materialized for validation only, then the projection is validated
         against the ``Manifest`` schema and every extension combo of ``tools``, ``mcp`` and
-        ``api_tools`` is dry-run bound, in document order, with its settings resolved. Raises on an
-        invalid document; a refused combo raises ``ValueError`` naming its path.
+        ``api_tools`` is dry-run bound, in document order, with its settings resolved, over the
+        tool ``served`` holds under the combo's tool name (none when it holds no such tool).
+        Raises on an invalid document; a refused combo raises ``ValueError`` naming its path.
         """
         manifest = Manifest.model_validate(self._resolve(document))
         for path, tool, combo in _extension_combos(manifest):
             try:
-                self._combo_check(tool, combo)
+                self._combo_check.check_combo(tool, combo, base=served.get(tool))
             except ExtensionComboRefusedError as exc:
                 raise ValueError(f"{path}: {exc}") from exc
         return manifest

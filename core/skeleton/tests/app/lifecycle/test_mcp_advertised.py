@@ -20,9 +20,9 @@ from tai42_contract.presets import PresetBody
 from tai42_kit.clients.impl.postgres import PostgresClient
 
 import tai42_skeleton.settings.mcp_settings as mcp_settings_module
-import tai42_skeleton.tools.binding.registration as registration_module
 import tai42_skeleton.versioning.store as store_module
 from tai42_skeleton.app import instance
+from tai42_skeleton.app.epoch import Epoch, building
 from tai42_skeleton.app.reload_gate import reload_gate
 from tai42_skeleton.exceptions.exceptions import TaiValidationError
 from tai42_skeleton.manifest import Manifest
@@ -148,13 +148,11 @@ def test_a_read_during_a_rebuild_answers_the_live_generations_rows(monkeypatch):
     async def run():
         _listing(monkeypatch, _tools("send", "read"))
         async with instance.app.app_context(_manifest(_cfg(include=["acme_send"]))):
-            # A rebuild's generation under construction: its own build has not listed yet.
-            instance.app._building = instance.app._build_serving_core()
-            try:
+            # A rebuild's generation under construction: its own build has not listed yet. Even the
+            # build's own work reads the live generation's advertised rows.
+            with building(Epoch(number=0, core=instance.app._build_serving_core())):
                 rows = await instance.app.admin.advertised_mcp_tools("acme")
                 served = await instance.app.admin.served_mcp_names(_cfg(include=["acme_send"]))
-            finally:
-                instance.app._building = None
 
             assert [row["name"] for row in rows] == ["acme_read", "acme_send"]
             assert served == ["acme_send", "acme_read"]
@@ -398,37 +396,6 @@ def test_a_selection_grafted_after_the_bind_reads_pending_bind_until_a_reload_bi
     asyncio.run(run())
 
 
-def test_a_read_while_a_rebind_is_binding_reads_its_unbound_rows_pending_bind(monkeypatch):
-    async def run():
-        _listing(monkeypatch, _tools("send", "read"))
-        serving = asyncio.get_running_loop()
-        seen: list[list[dict[str, Any]]] = []
-        adapt = registration_module.adapt_mcp_tool
-
-        def adapt_and_read_once(*args: Any, **kwargs: Any) -> Any:
-            # The rebind runs off the serving loop; the read is answered on it meanwhile.
-            if armed and not seen:
-                read = instance.app.admin.advertised_mcp_tools("acme")
-                seen.append(asyncio.run_coroutine_threadsafe(read, serving).result(timeout=10))
-            return adapt(*args, **kwargs)
-
-        armed = False
-        monkeypatch.setattr(registration_module, "adapt_mcp_tool", adapt_and_read_once)
-        async with instance.app.app_context(_manifest(_cfg())):
-            armed = True
-            await _reload("acme")
-
-            [rows] = seen
-            assert {row["name"]: row["bound"] for row in rows} == {"acme_read": False, "acme_send": False}
-            assert _reasons(rows) == {"acme_read": "pending_bind", "acme_send": "pending_bind"}
-            assert _reasons(await instance.app.admin.advertised_mcp_tools("acme")) == {
-                "acme_read": None,
-                "acme_send": None,
-            }
-
-    asyncio.run(run())
-
-
 def test_a_re_fired_start_whose_probe_fails_drops_every_bind_record_of_the_last_start(pg, monkeypatch):
     async def run():
         tools = [_tool("send"), _tool("read", {"type": "object", "properties": {"q": {"anyOf": []}}}), _tool("delete")]
@@ -443,7 +410,7 @@ def test_a_re_fired_start_whose_probe_fails_drops_every_bind_record_of_the_last_
             }
 
             probe.side_effect = TimeoutError("no answer")
-            instance.app.start(manifest)
+            await instance.app.start(manifest)
 
             core = instance.app._live_serving_core
             assert "acme" not in core._mcp_listed_tools

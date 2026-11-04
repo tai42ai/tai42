@@ -38,6 +38,8 @@ from tai42_skeleton.app.sub_mcp_app import (
 )
 from tai42_skeleton.config.deployment_env import DeploymentOwnership
 
+from ._deferred_retire_tail import DEFERRED_TAIL_BOUND_S
+
 
 class _FakeLifespan(SubAppLifespan):
     """A ``SubAppLifespan`` stand-in for the teardown tests.
@@ -273,9 +275,10 @@ async def test_a_mount_session_driving_a_reload_keeps_its_lifespan_until_it_answ
     after the call has answered, with the retired generation's other transports."""
     from tai42_skeleton.app import epoch as epoch_mod
     from tai42_skeleton.app import epoch_retire as epoch_retire_mod
+    from tai42_skeleton.app.instance import app
     from tai42_skeleton.app.reload_gate import reload_gate
 
-    boot = epoch_mod.Epoch(number=0)
+    boot = epoch_mod.Epoch(number=0, core=app._build_serving_core())
     monkeypatch.setattr(epoch_mod, "_current", boot)
     monkeypatch.setattr(epoch_mod, "_serving_slot", {})
     r = _router()
@@ -290,11 +293,19 @@ async def test_a_mount_session_driving_a_reload_keeps_its_lifespan_until_it_answ
     async def _build(_epoch: Any) -> Any:
         return _FakeSub()
 
+    async def _reset_router(epoch: epoch_mod.Epoch) -> None:
+        epoch.core = app._build_serving_core()
+        r.reset()
+
     async def _driver() -> None:
         async with reload_gate.driving():
-            # The rebuild resets the sub-MCP router, as ``start()`` does.
+            # The rebuild installs a fresh serving core and resets the sub-MCP router, as ``start()`` does.
             await epoch_mod.build_and_swap_epoch(
-                {}, rebuild=r.reset, build_serving_app=_build, drain_deadline=0.05, ownership=DeploymentOwnership()
+                {},
+                rebuild=_reset_router,
+                build_serving_app=_build,
+                drain_deadline=0.05,
+                ownership=DeploymentOwnership(),
             )
         await asyncio.sleep(0.2)  # the reload's fleet wait, past the drain budget
         order.append("driver answered")
@@ -303,7 +314,7 @@ async def test_a_mount_session_driving_a_reload_keeps_its_lifespan_until_it_answ
         await _driver()
 
     await admission_mod.EpochAdmissionApp(_app, boot)({"type": "http"}, None, None)  # type: ignore[arg-type]
-    async with asyncio.timeout(5.0):
+    async with asyncio.timeout(DEFERRED_TAIL_BOUND_S):
         await asyncio.gather(*epoch_retire_mod._deferred_retire_tasks)
     assert order == ["driver answered", "mount closed"]
 
@@ -329,10 +340,10 @@ async def test_start_resets_stale_sub_app_routes():
     await run()
 
 
-async def test_route_mutation_runs_off_the_build_loop():
+async def test_route_mutation_runs_on_a_backend_job_loop():
     # register/unregister mutate state under a loop-agnostic threading.Lock, not
-    # the loop-bound _build_lock, so a reload driven from a throwaway loop can't
-    # raise "asyncio.Lock ... is bound to a different event loop".
+    # the loop-bound _build_lock, so a register or unregister an in-process backend job
+    # drives on its own loop can't raise "asyncio.Lock ... is bound to a different event loop".
     r = _router()
     await r.register_sub_mcp_app("a", [], transport="stdio")
     # Build "a" on THIS loop so _build_lock binds to it.
@@ -340,7 +351,7 @@ async def test_route_mutation_runs_off_the_build_loop():
 
     captured: list[BaseException] = []
 
-    def off_loop():
+    def on_job_loop():
         async def ops():
             await r.register_sub_mcp_app("b", [], transport="stdio")
             await r.unregister_sub_mcp_app("a")
@@ -350,11 +361,11 @@ async def test_route_mutation_runs_off_the_build_loop():
         except BaseException as exc:  # a cross-loop _build_lock acquire would land here
             captured.append(exc)
 
-    thread = threading.Thread(target=off_loop)
+    thread = threading.Thread(target=on_job_loop)
     thread.start()
     thread.join()
 
-    assert not captured, f"route mutation raised off the build loop: {captured}"
+    assert not captured, f"route mutation raised on a backend job loop: {captured}"
     assert "b" in r.routes
     assert "a" not in r.routes
 
@@ -964,91 +975,40 @@ async def test_log_teardown_result_ignores_a_cancelled_task(caplog):
     assert caplog.text == ""  # a cancelled teardown returns quietly, no ERROR
 
 
-# -- cross-loop teardown never block-waits on a parked owner loop -------------
+# -- a cross-loop teardown runs on the owner loop ------------------------------
 
 
-def test_cross_loop_close_does_not_deadlock_on_a_parked_owner_loop(caplog):
-    # A teardown scheduled onto the owner loop while that loop's
-    # thread is PARKED in _run_blocking must not block-wait on it (a cross-loop
-    # block-wait would deadlock the reload forever). The register call completes
-    # despite the parked owner; the stale stack's close lands on the owner loop once
-    # it is unparked, and a close failure is surfaced via the logged done-callback.
+def test_a_replace_register_from_another_loop_awaits_the_close_on_the_owner_loop_and_raises_its_failure(caplog):
+    # A replace-register driven from another loop (an in-process backend job's own loop)
+    # closes the stale stack on the owner loop that entered it and waits for that close:
+    # its failure raises in the caller, so the replace is never reported as clean.
     r = SubMcpAppRouter(app=_FakeApp())
 
     owner_loop = asyncio.new_event_loop()
-    owner_ready = threading.Event()
-
-    def _run_owner():
-        asyncio.set_event_loop(owner_loop)
-        owner_loop.call_soon(owner_ready.set)
-        owner_loop.run_forever()
-
-    owner_thread = threading.Thread(target=_run_owner, daemon=True)
+    owner_thread = threading.Thread(target=owner_loop.run_forever, daemon=True)
     owner_thread.start()
-    owner_ready.wait()
     r._owner_loop = owner_loop
 
-    # Register the slug on the owner loop, then record a stale stack whose close
-    # RAISES — so the done-callback's error path is exercised — and which records the
-    # loop it ran on.
-    asyncio.run_coroutine_threadsafe(r.register_sub_mcp_app("svc", [], transport="stdio"), owner_loop).result()
+    asyncio.run_coroutine_threadsafe(r.register_sub_mcp_app("svc", [], transport="stdio"), owner_loop).result(5)
     closed_on: dict[str, Any] = {}
-    close_ran = threading.Event()
 
-    async def _record_and_raise() -> None:
+    async def _record() -> None:
         closed_on["loop"] = asyncio.get_running_loop()
-        close_ran.set()
 
-    r._app_exit_stacks["svc"] = _FakeLifespan(on_close=_record_and_raise, error=RuntimeError("teardown boom"))
+    r._app_exit_stacks["svc"] = _FakeLifespan(on_close=_record, error=RuntimeError("teardown boom"))
 
-    # Park the owner loop's thread inside a call_soon callback blocked on a
-    # concurrent.futures result — the shape _run_blocking's executor.submit().result()
-    # imposes on the owner thread.
-    unpark = concurrent.futures.Future()
-    parked = threading.Event()
-
-    def _park() -> None:
-        parked.set()
-        unpark.result()
-
-    owner_loop.call_soon_threadsafe(_park)
-    parked.wait()
-
-    # From a throwaway loop on another thread, drive a REPLACE-register: the stale
-    # stack's close must be SCHEDULED onto the owner loop, not block-waited.
-    register_done = threading.Event()
-    register_err: dict[str, BaseException] = {}
-
-    def _foreign() -> None:
-        try:
+    try:
+        with (
+            caplog.at_level(logging.ERROR, logger="tai42_skeleton.app.sub_mcp_app"),
+            pytest.raises(RuntimeError, match=r"^teardown boom$"),
+        ):
             asyncio.run(r.register_sub_mcp_app("svc", [], transport="stdio"))
-        except BaseException as exc:  # a cross-loop block-wait would hang, not raise
-            register_err["exc"] = exc
-        finally:
-            register_done.set()
-
-    foreign_thread = threading.Thread(target=_foreign, daemon=True)
-    foreign_thread.start()
-
-    assert register_done.wait(timeout=5.0), "register block-waited on the parked owner loop (deadlock)"
-    assert "exc" not in register_err
-    # The close cannot have run yet — the owner loop is still parked.
-    assert not close_ran.is_set()
-
-    with caplog.at_level(logging.ERROR, logger="tai42_skeleton.app.sub_mcp_app"):
-        unpark.set_result(None)  # release the owner loop
-        assert close_ran.wait(timeout=5.0)
-        # Let the done-callback fire on the owner loop.
-        drained = threading.Event()
-        owner_loop.call_soon_threadsafe(drained.set)
-        drained.wait(timeout=5.0)
-
-    assert closed_on["loop"] is owner_loop  # closed on the loop that entered it
-    assert "teardown boom" in caplog.text  # the failure was surfaced, not lost
-
-    owner_loop.call_soon_threadsafe(owner_loop.stop)
-    owner_thread.join(timeout=5.0)
-    owner_loop.close()
+        assert closed_on["loop"] is owner_loop  # closed on the loop that entered it
+        assert "Error shutting down MCP app svc" in caplog.text
+    finally:
+        owner_loop.call_soon_threadsafe(owner_loop.stop)
+        owner_thread.join(timeout=5.0)
+        owner_loop.close()
 
 
 def test_reset_does_not_deadlock_on_a_parked_owner_loop(caplog):
@@ -1087,7 +1047,7 @@ def test_reset_does_not_deadlock_on_a_parked_owner_loop(caplog):
     r._app_exit_stacks["svc"] = _FakeLifespan(on_close=_record_and_raise, error=RuntimeError("teardown boom"))
 
     # Park the owner loop's thread inside a call_soon callback blocked on a
-    # concurrent.futures result — the shape _run_blocking imposes on the owner thread.
+    # concurrent.futures result.
     unpark = concurrent.futures.Future()
     parked = threading.Event()
 

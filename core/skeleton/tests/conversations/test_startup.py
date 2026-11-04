@@ -6,8 +6,8 @@ constructed, whatever routers it mounts.
 The recovery passes themselves are tested in ``test_turn`` and ``test_delivery_sweep``;
 here only the wiring is asserted — that each hook runs its passes, in the order the
 durability story depends on, and no-ops without a backend. The sweep lives on the
-``on_post_swap`` hook (not ``on_startup``) so it is re-established on the real serving
-loop after a reload rather than spawned on the throwaway build-thread loop.
+``on_post_swap`` hook (not ``on_startup``) so it is re-established on the serving loop
+after every epoch swap and retires with its generation.
 """
 
 from __future__ import annotations
@@ -132,9 +132,8 @@ async def test_startup_is_a_no_op_without_a_backend(monkeypatch, order):
 
 
 async def test_post_swap_starts_the_sweep_with_a_backend(monkeypatch, order):
-    # The sweep is (re)established on the serving loop at boot and after every epoch swap —
-    # not by the on_startup re-drive, so it survives a reload rather than dying on the
-    # throwaway build-thread loop.
+    # The sweep is (re)established on the serving loop at boot and after every epoch swap,
+    # not by the on_startup re-drive.
     monkeypatch.setenv("CONVERSATIONS_REDIS_URL", "redis://localhost:1/0")
     lifecycle.start_conversations_delivery_sweep()
     assert order == ["start_delivery_sweep"]

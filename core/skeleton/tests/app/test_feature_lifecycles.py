@@ -150,9 +150,9 @@ def test_a_reload_that_finds_the_store_unconfigured_cancels_the_poll(
 
     real_reload = app.admin.reload_config
 
-    def _reload_with_the_store_dropped(*args: Any, **kwargs: Any) -> Any:
+    async def _reload_with_the_store_dropped(*args: Any, **kwargs: Any) -> Any:
         configured["value"] = False
-        return real_reload(*args, **kwargs)
+        return await real_reload(*args, **kwargs)
 
     monkeypatch.setattr(app.admin, "reload_config", _reload_with_the_store_dropped)
     monkeypatch.setenv("MARKETPLACE_ADVISORIES_POLL", "true")

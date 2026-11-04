@@ -95,7 +95,7 @@ def test_a_billiard_child_forked_during_a_module_reimport_wedges_unless_guarded(
     gate = ForkGate()
     guarded = mode == "guard"
     if guarded:
-        gate.guard_forks(timeout=_ARRIVES, tick=lambda: None)
+        gate.guard_forks(timeout=_ARRIVES)
     forked = threading.Event()
     child = ForkProcess(target=importlib.import_module, args=(name,), daemon=True)
 

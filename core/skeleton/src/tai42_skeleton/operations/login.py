@@ -42,8 +42,8 @@ def _active_accounts_providers() -> list[AccountsProvider]:
     """The CURRENT epoch's live accounts-provider instances, name-sorted for a deterministic aggregate.
 
     Filters the epoch's recorded identity providers to the accounts ones (an accounts
-    provider IS an identity provider); reads the app's recorded providers, so a build in flight
-    resolves the epoch being built, else the live one.
+    provider IS an identity provider); reads the app's recorded providers, which a request resolves
+    on the live generation.
     """
     from tai42_skeleton.app.instance import app
 

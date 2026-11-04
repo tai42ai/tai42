@@ -8,9 +8,7 @@ filtering, manifest refresh and the Celery turnover, end to end), and asserts
 through a pool child (``probe_registry`` returns the child pid + the registry it
 was forked with).
 
-Point ``TAI_TEST_CELERY_BROKER`` at a Redis broker to run it; once set, an
-unreachable broker fails the module instead of skipping it. Unset, it probes
-``redis://localhost:6399/0`` and skips when nothing answers there.
+Point ``TAI_TEST_CELERY_BROKER`` at a Redis broker to run it (see the live worker harness module).
 """
 
 from __future__ import annotations
@@ -26,33 +24,13 @@ from typing import Any
 import pytest
 from tai42_contract.backend import FleetOpApplied, FleetOpEffect
 
+from . import _live_probe as probe  # registers the probe task on celery_app
+from ._live_redis_worker import _BROKER, _live_marks
+
 _REGISTRY = frozenset({FleetOpEffect.registry})
 _NONE: frozenset[FleetOpEffect] = frozenset()
 
-_BROKER_ENV = "TAI_TEST_CELERY_BROKER"
-_BROKER_REQUIRED = _BROKER_ENV in os.environ
-_BROKER = os.environ.get(_BROKER_ENV, "redis://localhost:6399/0")
-
-
-def _redis_reachable(url: str) -> bool:
-    """Whether a Redis broker answers at ``url``; a configured broker that does not answer raises."""
-    import redis
-
-    try:
-        redis.Redis.from_url(url).ping()
-    except redis.ConnectionError:
-        if _BROKER_REQUIRED:
-            raise
-        return False
-    return True
-
-
-pytestmark = [
-    pytest.mark.skipif(not _redis_reachable(_BROKER), reason=f"no Redis broker reachable at {_BROKER}"),
-    # A live worker boot legitimately emits framework warnings; do not treat them
-    # as errors for this one integration test.
-    pytest.mark.filterwarnings("ignore"),
-]
+pytestmark = _live_marks()
 
 
 def _submit(celery_app: Any) -> list[Any]:
@@ -62,13 +40,13 @@ def _submit(celery_app: Any) -> list[Any]:
     return celery_app.send_task("tests.probe_registry").get(timeout=30, disable_sync_subtasks=False)
 
 
-def _bus_op_applied(stub_app: Any) -> Any:
-    """The post-apply handler the shared base wires for this backend — the real
+def _bus_op_applied(stub_app: Any, runtime: Any) -> Any:
+    """The post-apply handler the shared base wires for this backend's ``runtime`` — the real
     seam a bus op reaches, so the live path exercised here is the shipped one."""
-    from tai42_backend_celery.core.backend import CeleryBackend, CeleryWorkerRuntime
+    from tai42_backend_celery.core.backend import CeleryBackend
 
     stub_app.lifecycle.fleet_op_applied.clear()
-    CeleryBackend()._install_turnover(CeleryWorkerRuntime.from_args([]))
+    CeleryBackend()._install_turnover(runtime)
     return stub_app.lifecycle.fleet_op_applied[-1]
 
 
@@ -87,10 +65,10 @@ def _fresh_connection(celery_app: Any) -> Iterator[Any]:
         yield conn
 
 
-def _wait_worker_ready(prefork: Any, celery_app: Any, timeout: float = 40.0) -> None:
+def _wait_worker_ready(turnover: Any, celery_app: Any, timeout: float = 40.0) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        if prefork._worker_ready.is_set() and prefork._local_nodename is not None:
+        if turnover._worker_ready.is_set() and turnover._local_nodename is not None:
             with _fresh_connection(celery_app) as conn:
                 pong = celery_app.control.ping(timeout=1.0, connection=conn)
             if pong:
@@ -102,20 +80,17 @@ def _wait_worker_ready(prefork: Any, celery_app: Any, timeout: float = 40.0) -> 
 @pytest.fixture
 def live_worker() -> Iterator[Any]:
     """Boot a real prefork worker (concurrency 1) in a background thread, wired to
-    the Redis broker, with the prefork-turnover signals connected. Torn down by
-    requesting worker shutdown and reaping any surviving pool child."""
-    from tai42_backend_celery.core import prefork
+    the Redis broker, with the turnover's signals of a worker runtime connected; yields
+    that runtime. Torn down by requesting worker shutdown and reaping any surviving pool child."""
     from tai42_backend_celery.core.app import celery_app
-
-    from . import _live_probe as probe  # registers the probe task on celery_app
+    from tai42_backend_celery.core.backend import CeleryWorkerRuntime
 
     celery_app.conf.update(broker_url=_BROKER, result_backend=_BROKER)
 
     # Wire the turnover's Celery signals (node-name capture + readiness), exactly
     # as the worker runtime's ``build`` does.
-    prefork._local_nodename = None
-    prefork._worker_ready.clear()
-    prefork.register()
+    runtime = CeleryWorkerRuntime.from_args([])
+    runtime._turnover.register()
 
     worker = celery_app.Worker(
         pool="prefork",
@@ -129,8 +104,8 @@ def live_worker() -> Iterator[Any]:
     thread = threading.Thread(target=worker.start, name="live-celery-worker", daemon=True)
     thread.start()
     try:
-        _wait_worker_ready(prefork, celery_app)
-        yield probe
+        _wait_worker_ready(runtime._turnover, celery_app)
+        yield runtime
     finally:
         from celery import _state
         from celery.worker import state
@@ -155,8 +130,7 @@ def live_worker() -> Iterator[Any]:
 def test_pool_child_sees_ops_only_after_turnover_confirms(live_worker: Any, stub_app: Any) -> None:
     from tai42_backend_celery.core.app import celery_app
 
-    probe = live_worker
-    bus_op_applied = _bus_op_applied(stub_app)
+    bus_op_applied = _bus_op_applied(stub_app, live_worker)
 
     # Seed the parent registry and re-fork so the live child is forked with it
     # (the boot child was forked before the registry was populated).
@@ -194,3 +168,42 @@ def test_pool_child_sees_ops_only_after_turnover_confirms(live_worker: Any, stub
     reload_pid, reload_tools = _submit(celery_app)
     assert reload_pid != dereg_pid
     assert reload_tools == ["alpha", "gamma"]
+
+
+def _wait_consumer_stopped(celery_app: Any, timeout: float = 15.0) -> None:
+    """Block until the worker no longer answers ``ping``: its consumer has stopped."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        with _fresh_connection(celery_app) as conn:
+            if not celery_app.control.ping(timeout=0.5, connection=conn):
+                return
+    raise RuntimeError("live celery worker still answered control commands after its leave")
+
+
+def test_a_worker_that_leaves_mid_turnover_ends_the_turnover_at_once(
+    live_worker: Any, stub_app: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A real worker leaves between arming the pool restart and confirming it.
+
+    The leave is the runtime's warm drain, the one a SIGTERM drives; once the
+    consumer has stopped no control command is answered. The whole apply, and the
+    event loop's close that joins the turnover's thread, end at once rather than
+    after the turnover budget.
+    """
+    from tai42_backend_celery.core.app import celery_app
+
+    runtime = live_worker
+    bus_op_applied = _bus_op_applied(stub_app, runtime)
+    arm = runtime._turnover._restart_pool
+
+    def _arm_then_leave(hostname: str) -> None:
+        arm(hostname)
+        runtime.request_drain()
+        _wait_consumer_stopped(celery_app)
+
+    monkeypatch.setattr(runtime._turnover, "_restart_pool", _arm_then_leave)
+    budget = 30.0
+    started = time.monotonic()
+    asyncio.run(bus_op_applied(FleetOpApplied(op="reload_config", effects=_REGISTRY, budget=budget)))
+    # The leave itself waits out the consumer's stop; the turnover adds no wait of its own.
+    assert time.monotonic() - started < 10.0

@@ -4,7 +4,9 @@ The assembled app (``create_app``) runs under uvicorn on a loopback port with th
 access-control stack, the config router and ``apply_profile`` projected as an MCP tool.
 The REAL apply pipeline runs over in-memory fakes (store, bus); only its build and its
 recycle orchestration are injected, the orchestration stopping on a target that never
-converged as the live roll does. The env is persisted by then, so the HTTP route, the
+converged as the live roll does. Every worker's reload reports the profile's recycle-class
+key off its bound value, so the decision restarts both backends and the applier needs its own
+restart. The env is persisted by then, so the HTTP route, the
 MCP ``tools/call`` and the in-process ``run_tool`` all read the report, with the row the
 roll stopped at, and no door arms the applier's own self-exit.
 """
@@ -27,9 +29,10 @@ from tai42_contract.settings_profiles import SettingsProfileBody
 # classification reflects only IMPORTED settings classes, and TAI_BUS_* are recycle-class.
 import tai42_skeleton.app.bus_settings  # noqa: F401
 from tai42_skeleton.app import applied_env
-from tai42_skeleton.app.bus import WorkerRow
+from tai42_skeleton.app.bus import WorkerKind, WorkerRow
 from tai42_skeleton.app.epoch import Epoch
 from tai42_skeleton.app.instance import app
+from tai42_skeleton.app.lifecycle import config_reload
 from tai42_skeleton.app.recycle import (
     RECYCLED,
     TIMED_OUT,
@@ -41,7 +44,7 @@ from tai42_skeleton.app.recycle import (
 )
 from tai42_skeleton.config.deployment_env import DeploymentOwnership
 from tai42_skeleton.config.service import ConfigService, ProfileApplyOutcome
-from tai42_skeleton.operations import config as config_ops
+from tai42_skeleton.operations import settings_profiles as profile_ops
 
 from .._fakes.bus import FakeBus
 from ..config.fake_pipeline import ComboChecks, FakeConfigStore, FakeReloadAdmin
@@ -64,8 +67,8 @@ pytestmark = [
 
 PROFILE = "next"
 STOP_DETAIL = (
-    "old life still present; the recycle op was not confirmed by the target (no received-ack within the ack "
-    "timeout while presence stayed live — worker missing (alive but silent))"
+    "old life still present; the recycle op was not confirmed by the target (no received-ack within the apply "
+    "timeout while its slot claim stayed held — worker missing (alive but silent))"
 )
 SERVED_MANIFEST: dict[str, Any] = {
     "default_routers": "none",
@@ -98,7 +101,21 @@ def _process_state_restored(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 class _ProfileStore:
     async def get_active_body(self, name: str) -> SettingsProfileBody:
         assert name == PROFILE
-        return SettingsProfileBody(env={"TAI_BUS_ACK_TIMEOUT": "7"}, secret_keys=[])
+        return SettingsProfileBody(env={"TAI_BUS_HEARTBEAT_TTL": "7"}, secret_keys=[])
+
+
+_MOVED_KEY = "TAI_BUS_HEARTBEAT_TTL"
+_BACKENDS = ("backend-0", "backend-1")
+
+
+def _reporting_drift(bus: FakeBus) -> FakeBus:
+    """``bus`` with two backend siblings whose reloads report the recycle-class key off its bound value."""
+    for row in bus.rows:
+        if row.name in _BACKENDS:
+            row.kind = WorkerKind.backend
+    for name in _BACKENDS:
+        bus.remote_payloads[name] = {"status": "ok", "env_keys": 1, "awaiting_respawn": [_MOVED_KEY]}
+    return bus
 
 
 class _DroppingBus(FakeBus):
@@ -107,7 +124,7 @@ class _DroppingBus(FakeBus):
     the transport error a refused connection gives."""
 
     def __init__(self) -> None:
-        super().__init__(origin="serve-applier")
+        super().__init__(origin="serve-applier", remotes=list(_BACKENDS))
         self._reads = 0
 
     async def census(self) -> list[WorkerRow]:
@@ -118,11 +135,21 @@ class _DroppingBus(FakeBus):
 
 
 async def _stopping_roll(*_args: Any, **_kwargs: Any) -> RecycleReport:
-    """A roll that stops at ``backend-1`` after recycling ``backend-0``, exactly as the orchestration raises."""
+    """A roll that stops at ``backend-1`` after recycling ``backend-0``, exactly as the orchestration raises.
+
+    Each row carries the key its worker reported, as the real orchestrator's rows do.
+    """
     partial = RecycleReport(
         rows=[
-            RecycleRow(name="backend-0", kind="backend", generation_before=1, status=RECYCLED),
-            RecycleRow(name="backend-1", kind="backend", generation_before=1, status=TIMED_OUT, detail=STOP_DETAIL),
+            RecycleRow(name="backend-0", kind="backend", generation_before=1, status=RECYCLED, keys=[_MOVED_KEY]),
+            RecycleRow(
+                name="backend-1",
+                kind="backend",
+                generation_before=1,
+                status=TIMED_OUT,
+                detail=STOP_DETAIL,
+                keys=[_MOVED_KEY],
+            ),
         ],
         stopped=RecycleStop(kind="backend", name="backend-1", detail=STOP_DETAIL),
     )
@@ -161,9 +188,9 @@ def _install_pipeline(
     applied: list[ProfileApplyOutcome] = []
 
     def from_app(_cls: type[ConfigService]) -> ConfigService:
-        store = FakeConfigStore(env={"TAI_BUS_ACK_TIMEOUT": "5"})
+        store = FakeConfigStore(env={"TAI_BUS_HEARTBEAT_TTL": "5"})
         stores.append(store)
-        bus = _DroppingBus() if outage else FakeBus(origin="serve-applier")
+        bus = _reporting_drift(_DroppingBus() if outage else FakeBus(origin="serve-applier", remotes=list(_BACKENDS)))
         pipeline = _Pipeline(
             config_manager=store,
             admin=FakeReloadAdmin(),
@@ -174,18 +201,35 @@ def _install_pipeline(
         pipeline.applied = applied
         return pipeline
 
-    monkeypatch.setattr(config_ops, "_require_profile_store", lambda: None)
-    monkeypatch.setattr(config_ops, "_profile_store", lambda: _ProfileStore())
-    monkeypatch.setattr(config_ops.ConfigService, "from_app", classmethod(from_app))
+    # The applier's own reload reports the key too.
+    monkeypatch.setattr(config_reload, "awaiting_respawn", lambda: [_MOVED_KEY])
+    monkeypatch.setattr(profile_ops, "_require_profile_store", lambda: None)
+    monkeypatch.setattr(profile_ops, "_profile_store", lambda: _ProfileStore())
+    monkeypatch.setattr(profile_ops.ConfigService, "from_app", classmethod(from_app))
     return stores, applied
 
 
 def _assert_report(report: dict[str, Any]) -> None:
+    keys = [_MOVED_KEY]
     assert report["recycle"] == [
-        {"name": "backend-0", "kind": "backend", "status": "recycled", "generation_before": 1, "detail": None},
-        {"name": "backend-1", "kind": "backend", "status": "timed-out", "generation_before": 1, "detail": STOP_DETAIL},
+        {
+            "name": "backend-0",
+            "kind": "backend",
+            "status": "recycled",
+            "generation_before": 1,
+            "keys": keys,
+            "detail": None,
+        },
+        {
+            "name": "backend-1",
+            "kind": "backend",
+            "status": "timed-out",
+            "generation_before": 1,
+            "keys": keys,
+            "detail": STOP_DETAIL,
+        },
     ]
-    # The roll stopped: no self-deferred line although the diff is serve-affecting.
+    # The roll stopped: no self-deferred line although the applier needs its own restart.
     assert all(entry["status"] != "self-deferred" for entry in report["recycle"])
     assert report["refused"] == []
     assert report["recycle_stopped"] == {"kind": "backend", "name": "backend-1", "detail": STOP_DETAIL}
@@ -226,7 +270,7 @@ async def test_a_stopped_roll_answers_200_with_its_report_on_every_door(monkeypa
     assert len(applied) == 3
     assert all(outcome.self_exit_armed is False for outcome in applied)
     # Every door's env persisted before its roll ran.
-    assert [store.env for store in stores] == [{"TAI_BUS_ACK_TIMEOUT": "7"}] * 3
+    assert [store.env for store in stores] == [{"TAI_BUS_HEARTBEAT_TTL": "7"}] * 3
 
 
 def _assert_outage_report(report: dict[str, Any]) -> None:
@@ -262,4 +306,4 @@ async def test_a_bus_outage_during_the_roll_answers_200_with_the_stop_on_every_d
 
     assert len(applied) == 3
     assert all(outcome.self_exit_armed is False for outcome in applied)
-    assert [store.env for store in stores] == [{"TAI_BUS_ACK_TIMEOUT": "7"}] * 3
+    assert [store.env for store in stores] == [{"TAI_BUS_HEARTBEAT_TTL": "7"}] * 3

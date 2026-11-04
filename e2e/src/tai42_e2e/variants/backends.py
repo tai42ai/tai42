@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import abc
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
+
+from tai42_kit.backend import DRAIN_MARGIN_SECONDS, BackendDispatchSettings
 
 from tai42_e2e.rabbitx import RabbitAdmin, broker_url_for
 from tai42_e2e.topology import Infra, InfraUnavailableError, StackResources
@@ -12,6 +15,13 @@ from tai42_e2e.variants.census import BrokerLease
 
 if TYPE_CHECKING:
     from tai42_e2e.settings import HarnessSettings
+
+# The default of the dispatch job budget (``task_timeout``), the wait rq and celery size
+# their drain bound to.
+_DEFAULT_TASK_TIMEOUT_SECONDS = BackendDispatchSettings.model_fields["task_timeout"].default
+# The default of arq's ``job_completion_wait``, the warm-drain window arq sizes its drain
+# bound to.
+_DEFAULT_ARQ_JOB_COMPLETION_WAIT_SECONDS = 300
 
 
 @dataclass(frozen=True)
@@ -22,6 +32,17 @@ class LivenessProcess:
 
     args: list[str]
     env: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class GreenPoolWorker:
+    """One worker that runs its jobs on a green pool: its ``tai backend <args>``, serving only the
+    queue named after its pool, how many jobs it runs at once, and the text the failure of a job
+    that runs past the job budget carries, ``None`` for a pool that cannot end a job at the budget."""
+
+    args: list[str]
+    jobs_at_once: int
+    past_budget_error: str | None
 
 
 class BackendVariant(abc.ABC):
@@ -71,6 +92,11 @@ class BackendVariant(abc.ABC):
         default is none: the plain worker and the extras cover every shape of this backend."""
         return {}
 
+    def green_pool_workers(self) -> dict[str, GreenPoolWorker]:
+        """Each worker that runs its jobs on a green pool, by pool, each serving only the queue
+        named after its pool. The default is none: the backend's workers run no green pool."""
+        return {}
+
     @abc.abstractmethod
     def queue_worker_args(self, label: str) -> list[str]:
         """The ``tai backend <args>`` of a worker serving only the queue a task sent with
@@ -85,11 +111,24 @@ class BackendVariant(abc.ABC):
         low so a job orphaned by a SIGKILLed worker surfaces a bounded, observable
         terminal instead of blocking on the multi-minute production default."""
 
+    @abc.abstractmethod
+    def drain_seconds(self, env: Mapping[str, str]) -> float:
+        """The drain bound the backend declares for a worker run with ``env``: the wait it
+        lets in-flight work finish within, plus the engine's teardown margin."""
+
     # The tool-run status an in-flight job reaches when the ``tai backend worker`` process
     # group is SIGKILLed under it. The invariant is always a bounded, loud terminal, never
     # an eternal ``running``, but the concrete outcome is a property of each backend's
     # process model, so each variant declares its own and the spec asserts exactly that.
     crashed_run_terminal: str
+
+    # The process that executes a dispatched job on this stack's plain worker: the worker
+    # process itself, or a child the worker forks per job. A config reload that re-imports
+    # the manifest modules waits out a job running in the reloading process (its fork-gate
+    # job span), so on a ``"worker"`` engine the recycle that reload owes finds no job in
+    # flight; on a ``"child"`` engine the reload goes ahead while the child runs, and the
+    # leaving worker's graceful stop waits the child out.
+    job_process: Literal["worker", "child"]
 
 
 class ArqVariant(BackendVariant):
@@ -101,6 +140,7 @@ class ArqVariant(BackendVariant):
     # orphans the job: no in-worker monitor survives to fail it, the sync_task result
     # wait times out at ``task_timeout``, and the run is recorded failed.
     crashed_run_terminal = "failed"
+    job_process = "worker"
 
     def feature_env(self, res: StackResources) -> dict[str, str]:
         # The logical DB isolates co-tenant stacks, but a DB index re-leased while a
@@ -126,6 +166,11 @@ class ArqVariant(BackendVariant):
     def task_timeout_env(self, seconds: int) -> dict[str, str]:
         return {"ARQ_TASK_TIMEOUT": str(seconds)}
 
+    def drain_seconds(self, env: Mapping[str, str]) -> float:
+        # arq lets in-flight jobs finish within its ``job_completion_wait``, not its job budget.
+        wait = env.get("ARQ_JOB_COMPLETION_WAIT", _DEFAULT_ARQ_JOB_COMPLETION_WAIT_SECONDS)
+        return float(wait) + DRAIN_MARGIN_SECONDS
+
 
 class RqVariant(BackendVariant):
     name = "rq"
@@ -136,6 +181,8 @@ class RqVariant(BackendVariant):
     # outside the worker master's group: killing the master leaves the horse running, it
     # finishes the job and writes the result, and the run is recorded succeeded.
     crashed_run_terminal = "succeeded"
+    # The plain worker's default prefork pool runs each job in that work-horse child.
+    job_process = "child"
 
     def feature_env(self, res: StackResources) -> dict[str, str]:
         # Same reasoning as arq: namespace the RQ queue by the per-stack token so a
@@ -159,11 +206,27 @@ class RqVariant(BackendVariant):
         # worker's progress while the job runs, up to the job budget. It serves its own queue.
         return {"solo": LivenessProcess(["worker", "--pool", "solo", "--queue", "solo"])}
 
+    def green_pool_workers(self) -> dict[str, GreenPoolWorker]:
+        # The gevent pool's worker is patched before anything else is imported, so ``tai backend
+        # worker`` restarts itself once, in place, through that patch. It runs one job at a time
+        # on its own queue, its jobs' coroutines on the process's event loop, and fails a job past
+        # its budget with rq's timeout.
+        return {
+            "gevent": GreenPoolWorker(
+                ["worker", "--pool", "gevent", "--queue", "gevent"],
+                jobs_at_once=1,
+                past_budget_error="Task exceeded maximum timeout value",
+            )
+        }
+
     def queue_worker_args(self, label: str) -> list[str]:
         return ["worker", "--queue", label]
 
     def task_timeout_env(self, seconds: int) -> dict[str, str]:
         return {"RQ_TASK_TIMEOUT": str(seconds)}
+
+    def drain_seconds(self, env: Mapping[str, str]) -> float:
+        return float(env.get("RQ_TASK_TIMEOUT", _DEFAULT_TASK_TIMEOUT_SECONDS)) + DRAIN_MARGIN_SECONDS
 
 
 class CeleryVariant(BackendVariant):
@@ -175,6 +238,8 @@ class CeleryVariant(BackendVariant):
     # killing the group takes the job with it: the sync_task result wait times out at
     # ``task_timeout`` and the run is recorded failed.
     crashed_run_terminal = "failed"
+    # The plain worker's prefork pool runs each job in a pool child.
+    job_process = "child"
 
     def feature_env(self, res: StackResources) -> dict[str, str]:
         broker_url = self._require_broker(res)
@@ -226,9 +291,9 @@ class CeleryVariant(BackendVariant):
         # beat, so the two never contend for the one RedBeat lock, and its loop interval
         # short, so the promise each tick makes is short.
         return {
-            "solo": LivenessProcess(["worker", "-P", "solo", "-Q", "solo", "-n", "solo@%h"]),
+            "solo": LivenessProcess(["worker", "-P", "solo", "--queue", "solo", "-n", "solo@%h"]),
             "embedded-beat": LivenessProcess(
-                ["worker", "-B", "-Q", "embedded", "-n", "embedded@%h"],
+                ["worker", "-B", "--queue", "embedded", "-n", "embedded@%h"],
                 env={
                     "CELERY_REDBEAT_KEY_PREFIX": f"{res.bus_namespace}:redbeat-embedded:",
                     "CELERY_BEAT_MAX_LOOP_INTERVAL": "2",
@@ -236,12 +301,29 @@ class CeleryVariant(BackendVariant):
             ),
         }
 
+    def green_pool_workers(self) -> dict[str, GreenPoolWorker]:
+        # A green pool's worker is patched before anything else is imported, so ``tai backend
+        # worker`` restarts itself once, in place, through that patch. Each runs two jobs at a
+        # time on its own queue under its own node name. The gevent pool fails a job past the
+        # budget with Celery's time limit; the eventlet pool cannot end a job.
+        return {
+            pool: GreenPoolWorker(
+                ["worker", "-P", pool, "-c", "2", "--queue", pool, "-n", f"{pool}@%h"],
+                jobs_at_once=2,
+                past_budget_error=past_budget_error,
+            )
+            for pool, past_budget_error in (("gevent", "TimeLimitExceeded"), ("eventlet", None))
+        }
+
     def queue_worker_args(self, label: str) -> list[str]:
         # A second Celery worker on one host needs its own node name beside the default one.
-        return ["worker", "-Q", label, "-n", f"{label}@%h"]
+        return ["worker", "--queue", label, "-n", f"{label}@%h"]
 
     def task_timeout_env(self, seconds: int) -> dict[str, str]:
         return {"CELERY_TASK_TIMEOUT": str(seconds)}
+
+    def drain_seconds(self, env: Mapping[str, str]) -> float:
+        return float(env.get("CELERY_TASK_TIMEOUT", _DEFAULT_TASK_TIMEOUT_SECONDS)) + DRAIN_MARGIN_SECONDS
 
     @staticmethod
     def _require_broker(res: StackResources) -> str:

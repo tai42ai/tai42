@@ -1,21 +1,24 @@
-"""The per-request admission record a serving generation counts, and the ASGI wrapper that keeps it.
+"""The admission record of each unit of work a serving generation counts, and the doors that keep it.
 
 Every HTTP request a generation serves is admitted on it by :class:`EpochAdmissionApp` and
 counted until it ends, so a retire drains exactly that generation's live work. The record
 travels with the request (on its ASGI scope and in the context), so a long-lived stream can
-exempt itself from the retire drain and the reload gate can record the request that drives
-or waits on it (:func:`current_request_admission`). A call of an MCP session served on a
-long-lived stream (the SSE transport, where every call answers on the session's stream) is
-admitted as a request of its own (:func:`admit_session_call`), counted until its task has
-ended and the stream has written its reply or ended (:func:`track_current_stream_replies`).
+exempt itself from the retire drain and the reload gate can record the work that drives or
+waits on it (:func:`current_admission`). A call of an MCP session served on a long-lived
+stream (the SSE transport, where every call answers on the session's stream) is admitted as
+work of its own (:func:`admit_session_call`), counted until its task has ended and the stream
+has written its reply or ended (:func:`track_current_stream_replies`). A backend job running
+on the serving loop is admitted as work of its own for its run (:func:`admitted_job`).
 """
 
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Iterator
+from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from fastmcp.server.dependencies import get_http_request
 
@@ -26,50 +29,57 @@ if TYPE_CHECKING:
 
     from tai42_skeleton.app.epoch import Epoch
 
+# The unit of the generation's work an admission record counts: a served HTTP request, a call
+# of a session served on a long-lived stream, or a backend job running on the serving loop.
+AdmissionKind = Literal["served_request", "session_call", "job"]
+
 
 @dataclass(eq=False)
-class RequestAdmission:
-    """The per-request admission record the serving epoch counts.
+class Admission:
+    """The admission record of one unit of the generation's work the serving epoch counts.
 
-    A MUTABLE object shared between the admission wrapper and the request's own
-    coroutine tree (mutation is visible even when the request's work runs in a child
-    task, unlike a ``ContextVar`` set that would not propagate back to the wrapper).
-    The request's in-flight slot is released for good exactly once: early by a long-lived
-    stream that exempts itself from the retire drain (``long_lived``) or by a request that
-    drives a gated body, else by the wrapper when the request ends. While the request
-    waits on a lock whose holder may drive its generation's retire (the reload gate, or a
-    lock acquired through :func:`~tai42_skeleton.app.reload_gate.hold_recorded`) its slot is
-    not counted (it cannot move until the lock is released); it is counted again when the
-    wait ends. ``finished`` is set when the
-    request ends. ``session_call`` marks the record of one call of a session served on a
-    long-lived stream (:func:`admit_session_call`). ``replies`` is set on the record of a
+    ``kind`` names the unit: a served request, a call of a session on a long-lived stream, or a
+    backend job running on the serving loop.
+
+    A MUTABLE object shared between the door that admitted the work and the work's own
+    coroutine tree (mutation is visible even when the work runs in a child task, unlike a
+    ``ContextVar`` set that would not propagate back to the door). The work's in-flight slot is
+    released for good exactly once: early by a long-lived stream that exempts itself from the
+    retire drain (``long_lived``) or by work that drives a gated body, else by the door when the
+    work ends. While the work waits on work that may drive its generation's retire (the reload
+    gate, a lock acquired through :func:`~tai42_skeleton.app.reload_gate.hold_recorded`, or any
+    other :func:`~tai42_skeleton.app.reload_gate.recorded_wait`) its slot is not counted (it
+    cannot move until that work ends); it is counted again when the wait ends. ``finished`` is
+    set when the work ends. Only a served request's record carries the stream fields:
+    ``long_lived`` marks a served request whose long-lived stream is exempt from the drain
+    (:func:`mark_current_request_drain_exempt`), and ``replies`` is set on the record of a
     long-lived stream that carries its session's replies (:func:`track_current_stream_replies`).
     """
 
     epoch: Epoch
+    kind: AdmissionKind
     slot_released: bool = False
     long_lived: bool = False
     finished: asyncio.Event = field(default_factory=asyncio.Event)
     _counted: bool = True
     _waits: int = 0
-    session_call: bool = False
     replies: StreamReplies | None = None
 
     def finish(self) -> None:
-        """Record that the request ended: it drives nothing any more and its slot is released."""
+        """Record that the work ended: it drives nothing any more and its slot is released."""
         self.epoch.driving.discard(self)
         self.release_slot()
         self.finished.set()
 
     def release_slot(self) -> None:
-        """Release this request's in-flight slot on its generation for good; a second call is a no-op."""
+        """Release this work's in-flight slot on its generation for good; a second call is a no-op."""
         if self.slot_released:
             return
         self.slot_released = True
         self._uncount()
 
     def begin_wait(self) -> None:
-        """Record one wait of this request on a recorded lock; the first leaves the in-flight count."""
+        """Record one wait of this work on a recorded lock; the first leaves the in-flight count."""
         self._waits += 1
         if self._waits == 1:
             self.epoch.waiting.add(self)
@@ -77,7 +87,7 @@ class RequestAdmission:
         self.epoch.note_gate_wait()
 
     def end_wait(self) -> None:
-        """Record that one wait on a recorded lock ended; the last returns a live request to the in-flight count."""
+        """Record that one wait on a recorded lock ended; the last returns live work to the in-flight count."""
         self._waits -= 1
         if self._waits > 0:
             return
@@ -98,15 +108,15 @@ class RequestAdmission:
 # scope, the request an MCP SDK attaches to every message it routes).
 _ADMISSION_SCOPE_KEY = "tai42.admission"
 
-# The admission record of the request in flight on THIS coroutine tree (``None`` off a served
-# request). Read through :func:`current_request_admission`, never directly: a task that
-# copied a request's context (an MCP session's server task copies its ``initialize``
-# request's) carries a record that does not name the request it is serving now.
-_admission: ContextVar[RequestAdmission | None] = ContextVar("admission", default=None)
+# The admission record of the work in flight on THIS coroutine tree (``None`` off admitted
+# work). Read through :func:`current_admission`, never directly: a task that copied a
+# request's context (an MCP session's server task copies its ``initialize`` request's)
+# carries a record that does not name the request it is serving now.
+_admission: ContextVar[Admission | None] = ContextVar("admission", default=None)
 
 
-def current_request_admission() -> RequestAdmission | None:
-    """The admission record of the request this code runs on behalf of, or ``None``.
+def current_admission() -> Admission | None:
+    """The admission record of the work this code runs on behalf of, or ``None``.
 
     A call of a session served on a long-lived stream runs under its own record
     (:func:`admit_session_call`), which comes first: on the SSE transport the message POST
@@ -115,13 +125,13 @@ def current_request_admission() -> RequestAdmission | None:
     (fastmcp's ``get_http_request``): inside a streamable-HTTP tool body that is the POST
     carrying the ``tools/call``, while the ``_admission`` ContextVar there still holds the
     record of the request that created the session. When that request has already ended, or
-    when there is none (a plain route handler), the ContextVar's record. A record whose
-    request already ended resolves to ``None`` (a task that inherited a finished request's
-    context acts for no request), and so does a long-lived stream's: it never finishes on its
-    own, so nothing can wait for it.
+    when there is none (a plain route handler, an admitted backend job), the ContextVar's
+    record. A record whose work already ended resolves to ``None`` (a task that inherited a
+    finished request's context acts for no work), and so does a long-lived stream's: it never
+    finishes on its own, so nothing can wait for it.
     """
     state = _admission.get()
-    if state is not None and state.session_call and not state.finished.is_set():
+    if state is not None and state.kind == "session_call" and not state.finished.is_set():
         return state
     state = None
     try:
@@ -137,8 +147,8 @@ def current_request_admission() -> RequestAdmission | None:
     return state
 
 
-def admit_session_call(request_id: object | None) -> RequestAdmission | None:
-    """Admit the MCP call running in the current task as a request of its own when its session runs on a stream.
+def admit_session_call(request_id: object | None) -> Admission | None:
+    """Admit the MCP call running in the current task as work of its own when its session runs on a stream.
 
     On the SSE transport a session runs inside its ``GET`` stream, which is exempt from the
     retire drain, and every call of the session runs in its own task under that stream's
@@ -164,7 +174,7 @@ def admit_session_call(request_id: object | None) -> RequestAdmission | None:
     if task is None:
         raise RuntimeError("an MCP session call is admitted from inside its own task")
     stream.epoch.admit()
-    call = RequestAdmission(epoch=stream.epoch, session_call=True)
+    call = Admission(epoch=stream.epoch, kind="session_call")
     _admission.set(call)
     # The call ends once its task has ended and its reply is written (or its stream ended).
     outstanding = 2
@@ -197,6 +207,35 @@ def track_current_stream_replies() -> StreamReplies | None:
     return state.replies
 
 
+@contextmanager
+def admitted_job() -> Iterator[None]:
+    """Admit the enclosed backend job's run on the live serving generation while it runs on the serving loop.
+
+    The job is counted in flight until the scope ends, so a reload's retire drains it within the
+    drain budget before it closes the generation's loop-bound resources; its record is the
+    current admission, so a recorded wait or a reload the job drives is recorded as the job's.
+    A job on any other event loop, or with no serving loop bound, records nothing: it is not
+    the serving generation's work, and its own loop's end releases what it kept.
+    """
+    # The epoch and the app instance import this module as they load, so both are imported at call time.
+    from tai42_skeleton.app.epoch import current_epoch
+    from tai42_skeleton.app.instance import bound_serving_loop
+
+    serving = bound_serving_loop()
+    if serving is None or serving is not asyncio.get_running_loop():
+        yield
+        return
+    epoch = current_epoch()
+    epoch.admit()
+    record = Admission(epoch=epoch, kind="job")
+    token = _admission.set(record)
+    try:
+        yield
+    finally:
+        _admission.reset(token)
+        record.finish()
+
+
 class EpochAdmissionApp:
     """ASGI wrapper that counts every request against the epoch that served it.
 
@@ -219,9 +258,9 @@ class EpochAdmissionApp:
         self._epoch.admit()
         # Publish this request's admission record, on the scope and in the context, so a
         # long-lived stream can exempt itself from the retire drain and the reload gate can
-        # record the request that drives or waits on it (``current_request_admission``). The
-        # record is a shared object, so a slot released by the request's own work is seen here.
-        state = RequestAdmission(epoch=self._epoch)
+        # record the request that drives or waits on it (``current_admission``). The record is
+        # a shared object, so a slot released by the request's own work is seen here.
+        state = Admission(epoch=self._epoch, kind="served_request")
         scope[_ADMISSION_SCOPE_KEY] = state
         admission_token = _admission.set(state)
         try:
@@ -256,12 +295,13 @@ def mark_current_request_drain_exempt() -> None:
 
     Releases this request's in-flight slot NOW so ``_drain_in_flight`` no longer waits on it,
     and marks the record ``long_lived``; the record releases the slot exactly once, so the
-    admission wrapper does not release it a SECOND time at request end. A no-op off a served
-    request. Only a genuinely long-lived stream calls this; every real / short request stays
+    admission wrapper does not release it a SECOND time at request end. A no-op when the current
+    work is not a served request (none, a session call or a backend job): only a request's own
+    stream is exempted. Only a genuinely long-lived stream calls this; every real / short request stays
     counted, so a retire STILL drains in-flight work (an MCP tool call, a sync REST tool run)
     BEFORE the transports close.
     """
-    state = current_request_admission()
-    if state is not None:
+    state = current_admission()
+    if state is not None and state.kind == "served_request":
         state.long_lived = True
         state.release_slot()

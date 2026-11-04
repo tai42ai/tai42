@@ -6,11 +6,13 @@ swaps the serving epoch, which by design retires every live MCP session (the
 swapped-in epoch serves a NEW session-id space; the old session manager is closed
 on a deferred task once the driving call's result is delivered). A tool call or a
 listing that lands on such a retired session gets a ``404`` the SDK surfaces as
-``McpError`` "Session terminated" — either on the request send, or on the SDK's
-post-call output-schema validation issuing a follow-up ``tools/list``. A real MCP
-client handles this by RE-INITIALISING; :class:`McpClient` does the same
-internally, so a test calls it plainly and still gets the call's REAL result
-(``True``/``False``/error/dict) — no per-site retry wrap, and no assertion masked.
+``McpError`` "Session terminated". A real MCP client handles this by RE-INITIALISING;
+:class:`McpClient` does the same internally, so a test calls it plainly and still gets
+the call's REAL result (``True``/``False``/error/dict) — no per-site retry wrap, and no
+assertion masked. The SDK validates a call's result against the tool's listed output
+schema, listing the tools first when the session has not; :class:`McpClient` lists them
+on each session before its first call, so the only request a retired session can reject
+is the call itself and a re-issued call is one the server never ran.
 
 Every request waits for its reply at most ``read_timeout`` seconds, a bound the stack
 derives from its own settings (:func:`mcp_read_timeout`): the longest legitimate call — a
@@ -114,6 +116,9 @@ class McpClient:
         # swap re-opens with the same credentials.
         self._auth = auth
         self._client = self._new_client()
+        # Whether the current session has listed the tools, so the SDK's output-schema
+        # validation of a call's result sends no request after the call.
+        self._tools_listed = False
 
     def _new_client(self) -> Client:
         if self._auth is not None:
@@ -148,17 +153,15 @@ class McpClient:
         Polls past a reload-gate rejection of the fresh ``initialize`` handshake (the
         swapped-in worker may still briefly hold its reload gate — the client raises
         ``HTTPStatusError`` before a session exists, so a tool call's own
-        ``retry_on_reloading`` cannot cover it), bounded by the reinit deadline. Then
-        warms the SDK's per-session output-schema cache with a ``list_tools`` so a
-        re-run of a SELF-terminating reload op (whose own swap retires this fresh
-        session too) issues no post-call follow-up ``tools/list`` on it — best-effort
-        cache warming only, so a failure here never surfaces."""
+        ``retry_on_reloading`` cannot cover it), bounded by the reinit deadline. The fresh
+        session lists the tools before its first call (:meth:`_list_on_session`)."""
 
         async def _reopened() -> bool | None:
             # A fresh Client per attempt so a half-open one never lingers; ``None`` on a
             # reload-gate handshake rejection tells the sanctioned poller to retry.
             await self._close()
             self._client = self._new_client()
+            self._tools_listed = False
             try:
                 await self._client.__aenter__()
             except httpx.HTTPStatusError as exc:
@@ -170,8 +173,12 @@ class McpClient:
         await wait_for_async(
             _reopened, deadline=_SESSION_REINIT_DEADLINE, message="the MCP session re-init never left the reload gate"
         )
-        with contextlib.suppress(Exception):
-            await self._client.list_tools()
+
+    async def _list_on_session(self) -> list[Tool]:
+        """List the tools on the current session, which fills the SDK's output-schema cache for it."""
+        tools = await self._client.list_tools()
+        self._tools_listed = True
+        return tools
 
     async def _with_session_reinit[T](self, op: Callable[[], Awaitable[T]]) -> T:
         """Run ``op`` on the current session; if the server retired it mid-call,
@@ -188,9 +195,9 @@ class McpClient:
                 await self._reinit()
 
     async def list_tools(self) -> list[Tool]:
-        # A lambda (not the bound ``self._client.list_tools``) so a retry after a
-        # re-init re-reads the FRESH ``self._client``, never the retired one.
-        return await self._with_session_reinit(lambda: self._client.list_tools())
+        # ``_list_on_session`` reads ``self._client`` on each attempt, so a retry after a
+        # re-init lists on the FRESH session, never the retired one.
+        return await self._with_session_reinit(self._list_on_session)
 
     async def tool_names(self) -> list[str]:
         return [t.name for t in await self.list_tools()]
@@ -218,16 +225,20 @@ class McpClient:
         retry every real client applies to the retriable ``reloading`` rejection. A
         non-reload error is returned/raised at once (never retried).
 
-        A session termination (the call's own reload, or a prior reload's
-        deferred close, retiring this session) is handled underneath both paths: the
-        session re-initialises and the call re-issues, so the caller sees the real
-        result — the ``reloading`` retry and ``raise_on_error`` semantics are
-        unchanged."""
+        A session termination (a prior reload's deferred close retiring this session) is
+        handled underneath both paths: the session re-initialises and the call re-issues, so
+        the caller sees the real result — the ``reloading`` retry and ``raise_on_error``
+        semantics are unchanged. The tools are listed on the session before its first call,
+        so a call whose reply was delivered sends nothing more and is never re-issued, even
+        when its own reload then retires the session."""
+
+        async def _call(raise_err: bool) -> CallToolResult:
+            if not self._tools_listed:
+                await self._list_on_session()
+            return await self._client.call_tool(name, arguments or {}, raise_on_error=raise_err, meta=meta)
 
         def _invoke(raise_err: bool) -> Awaitable[CallToolResult]:
-            return self._with_session_reinit(
-                lambda: self._client.call_tool(name, arguments or {}, raise_on_error=raise_err, meta=meta)
-            )
+            return self._with_session_reinit(lambda: _call(raise_err))
 
         if not retry_on_reloading:
             return await _invoke(raise_on_error)

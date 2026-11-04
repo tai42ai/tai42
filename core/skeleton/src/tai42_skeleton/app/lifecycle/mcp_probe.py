@@ -104,15 +104,15 @@ class McpProbeMixin(LifecycleState):
     async def _probe_mcp(self, config: TaiMCPConfig, *, wait: float | None = None) -> list["mcp.types.Tool"]:
         """Connect to one MCP server and list its tools, waiting ``wait`` for the start.
 
-        The start runs on the MCP start loop (:func:`start_listing`), bounded by the start
+        The start runs as a task of the serving loop (:func:`start_listing`), bounded by the start
         budget ``mcp_probe_timeout``; ``wait`` bounds only this caller and defaults to the
         whole start budget. A start that ends within the wait returns its tools or raises its
         error, and callers decide whether to skip-and-record or surface it. A start still in
         progress when the wait ends raises :class:`McpStartPending`; the caller stopping its
         wait does not tear the start down — only the start budget does — and its outcome is
         applied on the serving loop when it arrives (:meth:`_apply_late_probe`). With no
-        serving loop running there is nowhere to apply a late outcome, so the probe waits the
-        whole start budget instead and never answers with a pending start. The listing goes
+        serving loop bound, :func:`start_listing` waits the start out whatever the wait, so
+        the probe never answers with a pending start there. The listing goes
         through the managed-credential seam (:func:`list_with_managed_auth`): the request
         without a credential first, a credential only when the server answers it 401; the
         start budget bounds the whole seam. Each attempt is a one-shot, off-pool
@@ -146,9 +146,6 @@ class McpProbeMixin(LifecycleState):
             finally:
                 _note_credential_demand(demanded_titles, config.title, demanded=listing.credential_demanded)
 
-        serving = self._serving_loop
-        if serving is None or not serving.is_running():
-            wait = None
         return await start_listing(
             _do,
             title=config.title,
@@ -161,19 +158,19 @@ class McpProbeMixin(LifecycleState):
     def _apply_late_probe(self, config: TaiMCPConfig) -> Callable[[StartId, Any], None]:
         """The hook that applies the outcome of a start ``_probe_mcp`` stopped waiting for.
 
-        Called on the MCP start loop's thread when the start ends; it marshals the outcome
-        onto the serving loop, where, under the reload gate, :meth:`_apply_late_outcome`
+        Called on the start's loop when the start ends; it schedules the outcome onto the
+        serving loop, where, under the reload gate, :meth:`_apply_late_outcome`
         applies it only when the title's ``starting`` record waits on that very start.
         Two starts of one title overlap only across serving generations or configs (a
         rebuild, or an edit, while a late start is pending); the record waits on the one
         recorded last, so an older start's outcome never replaces it
-        (:meth:`_apply_probe_outcome`). A serving loop that stopped running before the start
-        ended leaves nothing to apply on: logged at ERROR.
+        (:meth:`_apply_probe_outcome`). A start that ends once no serving loop is bound or
+        running (``app_context`` has unbound it) leaves nothing to apply on: logged at ERROR.
         """
         title = config.title
 
         def apply(start: StartId, outcome: Any) -> None:
-            loop = self._serving_loop
+            loop = self.serving_loop()
             if loop is None or not loop.is_running():
                 logger.error(
                     "MCP server '%s' finished starting after its caller stopped waiting, but no serving loop "
@@ -251,7 +248,8 @@ class McpProbeMixin(LifecycleState):
         if config is None:
             raise LookupError(f"unknown mcp title {title!r}")
         pairs = self._listed_mcp_tools(config)
-        # Snapshot-copied: a bind on a reload worker thread may be adding to the set.
+        # Snapshot-copied: this read may run on a backend job's thread while a bind on the
+        # serving loop adds to the set.
         bound_names = set(core._mcp_bound_tools.get(title, ()))
         rows: list[dict[str, Any]] = []
         for name, tool in pairs:
@@ -293,9 +291,7 @@ class McpProbeMixin(LifecycleState):
         """Probe every manifest MCP server concurrently, each isolated.
 
         Returns ``(successes, failures)`` and never raises for one server, so a
-        dead/slow MCP can't abort startup. Driven off-loop through
-        ``run_blocking`` so a sync (Celery/RQ) caller and the serving loop both
-        reach it safely.
+        dead/slow MCP can't abort startup.
         """
         manifest = self._manifest
         if manifest is None or not manifest.mcp:
@@ -304,11 +300,10 @@ class McpProbeMixin(LifecycleState):
         # A RELOAD holds the reload gate while the fleet is live, so a slow or unreachable
         # server must not hold the rebuild for the whole start budget — it would stall every
         # reload-gated write and fleet-reload convergence. A rebuild waits only the short reload
-        # budget; a start still in progress then is recorded ``starting`` and goes on, on the MCP
-        # start loop, up to the start budget, binding through the late-outcome apply when it
-        # completes; with no serving loop running to apply that outcome on, the probe waits
-        # the whole start budget instead (:meth:`_probe_mcp`). The one-time cold boot waits
-        # the whole start budget.
+        # budget; a start still in progress then is recorded ``starting`` and goes on, as a task
+        # of the serving loop, up to the start budget, binding through the late-outcome apply when
+        # it completes; with no serving loop bound, the start is waited out instead
+        # (:func:`start_listing`). The one-time cold boot waits the whole start budget.
         wait = mcp_reload_probe_timeout() if _lifecycle.is_epoch_rebuild_in_progress() else mcp_probe_timeout()
 
         async def run_one(config: TaiMCPConfig):
@@ -416,7 +411,7 @@ class McpProbeMixin(LifecycleState):
         config carries credentials. Per-process: in a
         multi-worker backend this reflects only the current process.
 
-        Reads race a reload worker thread mutating ``_failed_mcps`` (this read is
+        Reads race a reload a backend job drives on its own thread, mutating ``_failed_mcps`` (this read is
         deliberately not reload-gated, so status keeps answering mid-reload), so
         the dict is snapshot-copied — a single C-level op, atomic under the GIL —
         before iterating.
@@ -436,7 +431,7 @@ class McpProbeMixin(LifecycleState):
         empty values. The four fields are this worker's passive dispatch health —
         per-process, so a fleet report reads each worker's own.
 
-        Reads race a reload worker thread mutating ``_mcp_bound_tools`` (this
+        Reads race a reload a backend job drives on its own thread, mutating ``_mcp_bound_tools`` (this
         read is deliberately not reload-gated, so status keeps answering
         mid-reload), so the dict and each per-title tool set are snapshot-copied
         — single C-level ops, atomic under the GIL — before iterating.

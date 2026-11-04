@@ -7,11 +7,11 @@ deliveries, adopts lapsed intakes, and prunes the terminal-status and route-thre
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 
 from tai42_skeleton.conversations.records import PRUNE_START, PruneCursor
 from tai42_skeleton.conversations.settings import conversations_settings
+from tai42_skeleton.utils.tasks import cancel_and_wait
 
 logger = logging.getLogger(__name__)
 
@@ -42,25 +42,22 @@ def start_delivery_sweep() -> None:
 
 
 def _register_sweep_with_epoch(task: asyncio.Task[None]) -> None:
-    """Register this sweep task's cancel with the epoch under construction.
+    """Register this sweep task's cancel with the current epoch.
 
     The epoch retire cancels exactly the generation's own sweep and no timer outlives its epoch. A
-    no-op when no epoch is installed. The cancel awaits only a task on the retire's own loop, so a
-    task left on a torn-down build loop is cancelled without a cross-loop await.
+    no-op when no epoch is installed. The task was started on the serving loop, the loop the retire
+    runs on, so the cancel awaits its end.
     """
-    from tai42_skeleton.app.epoch import epoch_under_construction_or_none
+    from tai42_skeleton.app.epoch import current_epoch_or_none
 
-    epoch = epoch_under_construction_or_none()
+    epoch = current_epoch_or_none()
     if epoch is None:
         return
 
     async def _cancel() -> None:
         if task.done():
             return
-        task.cancel()
-        if task.get_loop() is asyncio.get_running_loop():
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
+        await cancel_and_wait(task)
 
     epoch.register_periodic_loop(_cancel)
 
@@ -68,16 +65,15 @@ def _register_sweep_with_epoch(task: asyncio.Task[None]) -> None:
 async def stop_delivery_sweep() -> None:
     """Cancel and await the sweep task.
 
-    Must be called ON the serving loop the task lives on, so the await is loop-safe. Only
-    ``CancelledError`` is suppressed.
+    Must be called ON the serving loop the task lives on, so the await is loop-safe. The task's own
+    cancellation is not raised; a cancellation of the stop while it waits propagates
+    (:func:`cancel_and_wait`).
     """
     global _sweep_task
     task = _sweep_task
     _sweep_task = None
     if task is not None and not task.done():
-        task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await task
+        await cancel_and_wait(task)
 
 
 async def _redrive_lapsed_intakes() -> None:

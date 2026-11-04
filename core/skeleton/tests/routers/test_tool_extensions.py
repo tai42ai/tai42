@@ -654,7 +654,7 @@ def test_post_apply_local_reload_failure_after_manifest_write_propagates(cfg, mo
             # fails. Per the pipeline's failure discipline the reload is still
             # broadcast (siblings converge on the persisted state) and the call
             # re-raises with the fleet report attached.
-            def _boom() -> dict[str, Any]:
+            async def _boom() -> dict[str, Any]:
                 raise RuntimeError("local reload boom")
 
             monkeypatch.setattr(instance.app, "_reload_config", _boom)

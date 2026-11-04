@@ -578,12 +578,6 @@ ROUTE_TABLE_SHAPES: dict[tuple[str, str], RouteShape] = {
         items_key=None, columns=("condition", "name", "description", "scopes", "base_tier", "allow_all", "grants")
     ),
     ("POST", "/api/config/env"): RouteShape(items_key="awaiting_respawn", columns=("name", "keys")),
-    ("POST", "/api/config/reload"): RouteShape(
-        items_key="results", columns=("name", "outcome", "payload", "error", "detail")
-    ),
-    ("POST", "/api/fleet/reload-config"): RouteShape(
-        items_key="results", columns=("name", "outcome", "payload", "error", "detail")
-    ),
     ("POST", "/api/hook-runs/{id}/retry"): RouteShape(
         items_key=None,
         columns=(
@@ -605,9 +599,6 @@ ROUTE_TABLE_SHAPES: dict[tuple[str, str], RouteShape] = {
     ("POST", "/api/manifest/replace"): RouteShape(items_key="awaiting_respawn", columns=("name", "keys")),
     ("POST", "/api/marketplace/uninstall"): RouteShape(
         items_key=None, columns=("ref", "uninstalled", "manifest_written", "reload", "notes")
-    ),
-    ("POST", "/api/marketplace/upgrade-all"): RouteShape(
-        items_key="results", columns=("ref", "outcome", "detail", "span_release_error")
     ),
     ("POST", "/api/mcp-config"): RouteShape(items_key="awaiting_respawn", columns=("name", "keys")),
     ("POST", "/api/mcp-config/entries"): RouteShape(items_key="awaiting_respawn", columns=("name", "keys")),

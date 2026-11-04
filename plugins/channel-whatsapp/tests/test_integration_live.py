@@ -23,9 +23,9 @@ import httpx
 import pytest
 from tai42_contract.channels import ChannelDeliveryError
 from tai42_kit.clients import client_ctx as kit_client_ctx
-from tai42_kit.clients import shutdown_all_clients
 from tai42_kit.clients.impl.http import HttpxClient
 from tai42_kit.clients.impl.redis import RedisClient
+from tai42_kit.loop_bound import release_loop_bound_resources
 from tai42_kit.settings import reset_all_settings
 
 from tai42_channel_whatsapp import WhatsAppChannel
@@ -447,7 +447,7 @@ async def host_store(stub_app, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator
 
     monkeypatch.setattr(stub_app.clients, "client_ctx", client_ctx)
     yield
-    await shutdown_all_clients()
+    await release_loop_bound_resources()
 
 
 @_needs_flow_endpoint

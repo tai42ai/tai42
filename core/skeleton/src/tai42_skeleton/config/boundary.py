@@ -177,8 +177,8 @@ def counting_diff_keys(
 
 def refuse_unrecyclable_env_change(
     stored: Mapping[str, str], proposed: Mapping[str, str], ownership: DeploymentOwnership, *, change: str
-) -> tuple[list[str], list[str]]:
-    """Refuse an env change no recycle can carry; return its ``(hot, recycle)`` keys.
+) -> list[str]:
+    """Refuse an env change no recycle can carry; return its ``hot`` keys.
 
     ``proposed`` is the WHOLE env the write would store. The diff is the change the reload
     really produces (:func:`counting_diff_keys`): a key the deployment sets is never part of
@@ -186,14 +186,13 @@ def refuse_unrecyclable_env_change(
     classified by the fields each sets in the live registry (:class:`EnvKeyClasses`): a
     bus-reaching key is refused, a :class:`ValueError` naming ``change`` and the keys.
     Otherwise the changed ``hot``-class keys (a key that sets no registered field counts as
-    ``hot``) and the changed ``recycle``-class keys are returned, sorted. Names only.
+    ``hot``) are returned, sorted. Names only.
     """
     diff_keys = counting_diff_keys(stored, proposed, ownership)
     classes = EnvKeyClasses()
     hot = sorted(key for key in diff_keys if classes.reload_class(key) == "hot")
-    recycle = sorted(key for key in diff_keys if classes.reload_class(key) == "recycle")
     _refuse_unrecyclable(diff_keys, change=change)
-    return hot, recycle
+    return hot
 
 
 def refuse_x_band(written_keys: Iterable[str]) -> None:

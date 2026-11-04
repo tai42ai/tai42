@@ -1,4 +1,4 @@
-"""The profile-apply response models: a recycle line carries an optional ``detail``."""
+"""The config-write response models: a recycle line, the roll report and the verdict after it."""
 
 from __future__ import annotations
 
@@ -6,27 +6,59 @@ from tai42_contract.app.responses import ProfileApplyResponse, RecycleEntry, Rec
 
 
 def test_a_recycle_line_round_trips_with_and_without_a_detail() -> None:
-    recycled = RecycleEntry(name="backend-1", kind="backend", status="recycled", generation_before=1)
+    recycled = RecycleEntry(
+        name="backend-1", kind="backend", status="recycled", generation_before=1, keys=["BACKEND_MANIFEST_KEY"]
+    )
     assert recycled.detail is None
     assert RecycleEntry.model_validate(recycled.model_dump()) == recycled
 
     stopped = RecycleEntry(
-        name="backend-2", kind="backend", status="timed-out", generation_before=3, detail="old life still present"
+        name="backend-2",
+        kind="backend",
+        status="timed-out",
+        generation_before=3,
+        keys=[],
+        detail="no reload report row; old life still present",
     )
     assert RecycleEntry.model_validate_json(stopped.model_dump_json()) == stopped
 
 
 def test_a_recycle_line_without_a_detail_key_validates() -> None:
     entry = RecycleEntry.model_validate(
-        {"name": "serve-1", "kind": "serve", "status": "self-deferred", "generation_before": 7}
+        {"name": "serve-1", "kind": "serve", "status": "self-deferred", "generation_before": 7, "keys": ["TAI_X"]}
     )
     assert entry.detail is None
 
 
-def test_the_detail_is_optional_in_the_schema() -> None:
+def test_the_detail_is_optional_and_the_keys_required_in_the_schema() -> None:
     schema = ProfileApplyResponse.model_json_schema()["$defs"]["RecycleEntry"]
     assert "detail" in schema["properties"]
     assert "detail" not in schema["required"]
+    assert schema["properties"]["keys"] == {"items": {"type": "string"}, "title": "Keys", "type": "array"}
+    assert "keys" in schema["required"]
+
+
+def test_the_roll_report_names_the_workers_it_left_running() -> None:
+    from tai42_contract.app.responses import RecycleRoll
+
+    roll = RecycleRoll.model_validate(
+        {
+            "recycle": [
+                {
+                    "name": "backend-1",
+                    "kind": "backend",
+                    "status": "recycled",
+                    "generation_before": 1,
+                    "keys": ["BACKEND_MANIFEST_KEY"],
+                }
+            ],
+            "skipped": ["serve-2"],
+            "fresh": [],
+        }
+    )
+    assert roll.skipped == ["serve-2"]
+    assert RecycleRoll.model_validate_json(roll.model_dump_json()) == roll
+    assert "skipped" in RecycleRoll.model_json_schema()["required"]
 
 
 def test_a_recycle_stop_round_trips_with_and_without_a_target() -> None:
@@ -38,7 +70,7 @@ def test_a_recycle_stop_round_trips_with_and_without_a_target() -> None:
 
 def test_the_profile_apply_response_defaults_recycle_stopped_to_none() -> None:
     body = ProfileApplyResponse.model_validate(
-        {"hot": [], "recycle": [], "fresh": [], "refused": [], "fanout": {"mode": "fleet"}}
+        {"hot": [], "recycle": [], "skipped": [], "fresh": [], "refused": [], "fanout": {"mode": "fleet"}}
     )
     assert body.recycle_stopped is None
     schema = ProfileApplyResponse.model_json_schema()
@@ -56,7 +88,16 @@ def test_an_apply_response_carries_the_recycle_roll_and_the_keys_awaiting_a_resp
             "awaiting_respawn": [{"name": "backend-2", "keys": ["BACKEND_MANIFEST_KEY"]}],
             "fanout": {"mode": "fleet"},
             "recycle": {
-                "recycle": [{"name": "backend-1", "kind": "backend", "status": "recycled", "generation_before": 1}],
+                "recycle": [
+                    {
+                        "name": "backend-1",
+                        "kind": "backend",
+                        "status": "recycled",
+                        "generation_before": 1,
+                        "keys": ["BACKEND_MANIFEST_KEY"],
+                    }
+                ],
+                "skipped": ["serve-1"],
                 "fresh": [{"name": "backend-1", "kind": "backend", "generation": 2}],
                 "recycle_stopped": None,
             },
@@ -64,10 +105,12 @@ def test_an_apply_response_carries_the_recycle_roll_and_the_keys_awaiting_a_resp
     )
     assert isinstance(body.recycle, RecycleRoll)
     assert body.recycle.recycle[0].status == "recycled"
+    assert body.recycle.recycle[0].keys == ["BACKEND_MANIFEST_KEY"]
+    assert body.recycle.skipped == ["serve-1"]
     assert body.awaiting_respawn[0].name == "backend-2"
 
 
-def test_an_apply_response_with_no_recycle_class_change_has_no_roll() -> None:
+def test_an_apply_response_whose_fleet_confirmed_clean_has_no_roll() -> None:
     from tai42_contract.app.responses import ApplyResponse
 
     body = ApplyResponse.model_validate({"status": "ok", "env_keys": 0, "fanout": {"mode": "local-only"}})
@@ -82,7 +125,9 @@ def test_a_backup_section_report_carries_the_recycle_roll() -> None:
     from tai42_contract.app.responses import RecycleRoll
     from tai42_contract.backup.models import BackupSectionReport
 
-    report = BackupSectionReport.model_validate({"recycle": {"recycle": [], "fresh": [], "recycle_stopped": None}})
+    report = BackupSectionReport.model_validate(
+        {"recycle": {"recycle": [], "skipped": [], "fresh": [], "recycle_stopped": None}}
+    )
     assert isinstance(report.recycle, RecycleRoll)
     assert report.recycle is not None
     assert BackupSectionReport().recycle is None
@@ -101,7 +146,7 @@ def test_the_awaiting_respawn_verdict_names_workers_and_keys() -> None:
     )
     assert body.awaiting_respawn == [AwaitingWorker(name="serve-2", keys=["BACKEND_MANIFEST_KEY"])]
     profile = ProfileApplyResponse.model_validate(
-        {"hot": [], "recycle": [], "fresh": [], "refused": [], "fanout": {"mode": "fleet"}}
+        {"hot": [], "recycle": [], "skipped": [], "fresh": [], "refused": [], "fanout": {"mode": "fleet"}}
     )
     assert profile.awaiting_respawn == []
     assert "awaiting_respawn" not in ProfileApplyResponse.model_json_schema()["required"]
@@ -141,6 +186,7 @@ def test_a_profile_apply_response_carries_the_store_span_release_error() -> None
         {
             "hot": [],
             "recycle": [],
+            "skipped": [],
             "fresh": [],
             "refused": [],
             "fanout": {"mode": "fleet"},

@@ -51,7 +51,7 @@ async def test_a_failing_pass_is_logged_and_counted_and_the_loop_goes_on(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     _settings(monkeypatch)
-    monkeypatch.setattr(epoch_mod, "epoch_under_construction_or_none", lambda: None)
+    monkeypatch.setattr(epoch_mod, "current_epoch_or_none", lambda: None)
     passes: list[int] = []
 
     async def _pass() -> None:
@@ -73,7 +73,7 @@ async def test_a_failing_pass_is_logged_and_counted_and_the_loop_goes_on(
 
 async def test_a_restart_cancels_the_previous_sweep(monkeypatch: pytest.MonkeyPatch) -> None:
     _settings(monkeypatch, interval=60)
-    monkeypatch.setattr(epoch_mod, "epoch_under_construction_or_none", lambda: None)
+    monkeypatch.setattr(epoch_mod, "current_epoch_or_none", lambda: None)
     sweep_mod.start_state_outbox_sweep()
     first = sweep_mod._sweep_task
     assert first is not None
@@ -83,11 +83,11 @@ async def test_a_restart_cancels_the_previous_sweep(monkeypatch: pytest.MonkeyPa
     assert sweep_mod._sweep_task is not first
 
 
-async def test_the_epoch_under_construction_cancels_its_own_sweep(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_the_current_epoch_cancels_the_sweep_it_registered(monkeypatch: pytest.MonkeyPatch) -> None:
     _settings(monkeypatch, interval=60)
     cancels: list[Callable[[], Awaitable[None]]] = []
     monkeypatch.setattr(
-        epoch_mod, "epoch_under_construction_or_none", lambda: SimpleNamespace(register_periodic_loop=cancels.append)
+        epoch_mod, "current_epoch_or_none", lambda: SimpleNamespace(register_periodic_loop=cancels.append)
     )
     sweep_mod.start_state_outbox_sweep()
     task = sweep_mod._sweep_task

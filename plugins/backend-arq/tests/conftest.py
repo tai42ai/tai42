@@ -14,7 +14,7 @@ import fnmatch
 import itertools
 import threading
 from collections.abc import AsyncIterator, Callable, Iterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -28,6 +28,7 @@ from tai42_contract.extensions import ExtensionKind
 from tai42_contract.interactions import VisitOutcome
 from tai42_contract.template import TemplatedText
 from tai42_kit.utils.detached_util import in_detached_run
+from tai42_kit.utils.run_bound import in_bounded_run
 from tai42_kit.utils.state_context import current_state_context
 
 # -- The recording stub app ------------------------------------------------------
@@ -41,6 +42,8 @@ class StubTools:
         # The detached flag observed inside each call — a worker execution has no
         # live caller, so the tool must run detached and the turn budget be skipped.
         self.detached_seen: list[bool] = []
+        # The bounded flag observed inside each call — a worker execution runs under its job budget.
+        self.bounded_seen: list[bool] = []
         # The ``offload_sync`` value each call received — a worker execution runs a
         # blocking sync tool off the shared event loop.
         self.offloads: list[bool] = []
@@ -64,6 +67,7 @@ class StubTools:
         self, key: str, arguments: dict[str, Any], *, offload_sync: bool = False, extras: dict[str, Any] | None = None
     ) -> Any:
         self.detached_seen.append(in_detached_run())
+        self.bounded_seen.append(in_bounded_run())
         self.offloads.append(offload_sync)
         self.secret_capability_seen.append(caller_may_read_secrets())
         return await self.run_tool_mock(key, arguments)
@@ -100,12 +104,16 @@ class StubBackends:
 class StubLifecycle:
     """Records shutdown handlers and drives the boot-ready latch the worker gate
     awaits. ``ready`` is pre-set, so ``wait_until_ready`` resolves at once unless a
-    test clears it to exercise the gate."""
+    test clears it to exercise the gate. ``waiting_on_fleet`` is set inside a
+    ``waiting_on_fleet_work`` span and ``fleet_waits`` counts the spans. ``admitted_job``
+    admits nothing: no serving generation counts the stub's jobs."""
 
     def __init__(self) -> None:
         self.shutdown_handlers: list[Callable[..., Any]] = []
         self.ready = asyncio.Event()
         self.ready.set()
+        self.fleet_waits = 0
+        self.waiting_on_fleet = False
 
     def on_shutdown(self, func: Callable[..., Any]) -> Callable[..., Any]:
         self.shutdown_handlers.append(func)
@@ -113,6 +121,19 @@ class StubLifecycle:
 
     async def wait_until_ready(self) -> None:
         await self.ready.wait()
+
+    @asynccontextmanager
+    async def waiting_on_fleet_work(self) -> AsyncIterator[None]:
+        self.fleet_waits += 1
+        self.waiting_on_fleet = True
+        try:
+            yield
+        finally:
+            self.waiting_on_fleet = False
+
+    @contextmanager
+    def admitted_job(self) -> Iterator[None]:
+        yield
 
 
 class StubAdmin:
@@ -124,11 +145,11 @@ class StubAdmin:
     def update(self, manifest: Any) -> None:
         self.calls.append(("update", (manifest,)))
 
-    def reload_mcp(self, title: str) -> dict[str, Any]:
+    async def reload_mcp(self, title: str) -> dict[str, Any]:
         self.calls.append(("reload_mcp", (title,)))
         return {"title": title, "status": "ok"}
 
-    def deregister_mcp(self, title: str) -> dict[str, Any]:
+    async def deregister_mcp(self, title: str) -> dict[str, Any]:
         self.calls.append(("deregister_mcp", (title,)))
         return {"title": title, "status": "absent"}
 
@@ -136,11 +157,11 @@ class StubAdmin:
         self.calls.append(("run_tool_reload", (kind, action, name)))
         return {"kind": kind, "action": action, "name": name, "status": "ok"}
 
-    def reload_config(self) -> dict[str, Any]:
+    async def reload_config(self) -> dict[str, Any]:
         self.calls.append(("reload_config", ()))
         return {"status": "ok", "env_keys": 3}
 
-    def reload_failed_mcps(self) -> list[dict[str, Any]]:
+    async def reload_failed_mcps(self) -> list[dict[str, Any]]:
         self.calls.append(("reload_failed_mcps", ()))
         return [{"title": "srv", "status": "ok"}]
 
@@ -237,6 +258,26 @@ class StubInteractions:
         return _cm()
 
 
+class StubWriter:
+    """The monitoring writer: counts the shutdowns a forked child's eviction makes."""
+
+    def __init__(self) -> None:
+        self.shutdown_calls = 0
+
+    def shutdown(self) -> None:
+        self.shutdown_calls += 1
+
+
+class StubMonitoringBackend:
+    def __init__(self) -> None:
+        self.writer = StubWriter()
+
+
+class StubMonitoring:
+    def __init__(self) -> None:
+        self.active = StubMonitoringBackend()
+
+
 class StubApp:
     def __init__(self) -> None:
         self.tools = StubTools()
@@ -246,6 +287,7 @@ class StubApp:
         self.admin = StubAdmin()
         self.interactions = StubInteractions()
         self.storage = StubStorage()
+        self.monitoring = StubMonitoring()
 
 
 _stub_app = StubApp()
@@ -272,6 +314,23 @@ def stub_app() -> StubApp:
     return _stub_app
 
 
+def backend_tools() -> SimpleNamespace:
+    """The registered ``backend_*`` tools, each an attribute by its name."""
+    return SimpleNamespace(**_stub_app.tools.registered)
+
+
+@pytest.fixture(autouse=True)
+def _unguarded_fork_gate(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Start each test with no fork guard installed, and drop the one a built worker installs when it ends.
+
+    The guard is process-wide and each test stands for its own process, so a test's forks are
+    guarded only by the guard that test installs.
+    """
+    from tai42_kit.fork_gate import fork_gate
+
+    monkeypatch.setattr(fork_gate._fork_hooks, "guard", None)
+
+
 @pytest.fixture(autouse=True)
 def _gate_state_declared(monkeypatch: pytest.MonkeyPatch) -> None:
     """A fresh kit gate state per test, declared enabled — what the skeleton hands the kit at boot."""
@@ -294,6 +353,7 @@ def access_control() -> Callable[[bool], None]:
 def _reset_stub_run_tool() -> None:
     _stub_app.tools.run_tool_mock = AsyncMock(return_value=None)
     _stub_app.tools.detached_seen.clear()
+    _stub_app.tools.bounded_seen.clear()
     _stub_app.tools.offloads.clear()
     _stub_app.tools.secret_capability_seen.clear()
     _stub_app.interactions.visit_calls.clear()
@@ -523,10 +583,10 @@ def redis_url(monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
         settings_module.arq_settings.cache_clear()
 
 
-def handle_of(job_factory: Callable[..., Any]) -> Callable[[Any, str], Any]:
+def handle_of(job_factory: Callable[..., Any]) -> Callable[..., Any]:
     """A stand-in for a module's ``job_handle`` building each handle with ``job_factory(job_id, redis)``."""
 
-    async def _handle(redis: Any, job_id: str) -> Any:
+    async def _handle(redis: Any, job_id: str, queue: str | None = None) -> Any:
         return job_factory(job_id, redis)
 
     return _handle
@@ -568,3 +628,10 @@ def arq_redis(settings_queue: str, bind_pool: Callable[[Any], None]) -> Any:
     )
     bind_pool(redis)
     return redis
+
+
+async def submit_job(**options: Any) -> Any:
+    """Queue a ``tool_execution`` job for tool ``t`` through the task door with the given task options."""
+    from tai42_backend_arq.task_door import ArqTaskDoor
+
+    return await ArqTaskDoor().submit((), {"backend_tool_name": "t"}, options, None)

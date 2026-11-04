@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from copy import deepcopy
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 
 import pytest
 from starlette.requests import Request
@@ -92,12 +92,19 @@ class _FakeConfigManager(ExclusiveWriteStore):
 def fake(monkeypatch):
     live = {"mcp": [{"title": "gh", "config": {"url": "https://x"}}], "user_tools": ["b", "a"]}
     cm = _FakeConfigManager({"mcp": [], "tools": []})
+
+    async def reload_config() -> dict[str, Any]:
+        return {"status": "ok", "env_keys": 3, "awaiting_respawn": []}
+
+    async def reload_mcp(title: str) -> dict[str, Any]:
+        return {"title": title, "status": "ok", "tools": ["t1"]}
+
     admin = SimpleNamespace(
         live_manifest=live,
         live_mcp_status=lambda: {"bound": {"gh": ["t1"]}, "failed": []},
-        reload_config=lambda: {"status": "ok", "env_keys": 3},
+        reload_config=reload_config,
         served_mcp_names=no_mcp_listing,
-        reload_mcp=lambda title: {"title": title, "status": "ok", "tools": ["t1"]},
+        reload_mcp=reload_mcp,
     )
     # No worker bus: reloads stay local-only (fan-out has its own test). Patch the
     # contract handle's impl so the router body and the fanout helper both resolve
@@ -546,6 +553,8 @@ async def test_mcp_config_valid_persists_and_reloads(fake):
         "fanout": {"mode": "local-only", "note": "no worker bus configured; only this worker reloaded"},
         "recycle": None,
         "awaiting_respawn": [],
+        "roll_deferred": False,
+        "roll_deferred_to": None,
         "span_release_error": None,
     }
     assert fake.cm.written is not None
@@ -666,13 +675,25 @@ def fake_full(monkeypatch):
     live = {"mcp": [{"title": "gh"}], "user_tools": []}
     cm = _FakeConfigManager({"mcp": [], "tools": []})
 
+    async def reload_failed_mcps() -> list[dict[str, Any]]:
+        return [{"title": "gh", "status": "ok"}]
+
+    async def deregister_mcp(title: str) -> dict[str, Any]:
+        return {"title": title, "status": "ok", "removed": [f"{title}_t"]}
+
+    async def reload_mcp(title: str) -> dict[str, Any]:
+        return {"title": title, "status": "ok"}
+
+    async def reload_config() -> dict[str, Any]:
+        return {"status": "ok", "env_keys": 0, "awaiting_respawn": []}
+
     admin = SimpleNamespace(
         live_manifest=live,
         list_failed_mcps=lambda: [{"title": "gh", "status": "unavailable"}],
-        reload_failed_mcps=lambda: [{"title": "gh", "status": "ok"}],
-        deregister_mcp=lambda title: {"title": title, "status": "ok", "removed": [f"{title}_t"]},
-        reload_mcp=lambda title: {"title": title, "status": "ok"},
-        reload_config=lambda: {"status": "ok", "env_keys": 0},
+        reload_failed_mcps=reload_failed_mcps,
+        deregister_mcp=deregister_mcp,
+        reload_mcp=reload_mcp,
+        reload_config=reload_config,
         served_mcp_names=no_mcp_listing,
     )
     fake_app = SimpleNamespace(

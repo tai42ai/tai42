@@ -78,9 +78,13 @@ def registry(monkeypatch: pytest.MonkeyPatch) -> RouteRegistry:
     return fresh
 
 
-def _register_pass(overrides: dict[str, dict[str, str]]) -> None:
+async def _register_pass(overrides: dict[str, dict[str, str]]) -> None:
     """One registration pass of the synthetic module under the mount map ``overrides`` resolve to."""
-    binding = build_mount_map([_MODULE], ("/api/auth",), lambda: overrides)[_MODULE]
+
+    async def load_overrides() -> dict[str, dict[str, str]]:
+        return overrides
+
+    binding = (await build_mount_map([_MODULE], ("/api/auth",), load_overrides))[_MODULE]
     surface = HttpSurface(_FakeApp())  # type: ignore[arg-type]
     with bind_module(binding):
         surface.custom_route(
@@ -98,45 +102,45 @@ def _bases_in_routes(registry: RouteRegistry) -> set[str]:
     return {meta.path for meta in registry.routes() if meta.path.endswith("/ping")}
 
 
-def test_boot_serves_the_declared_base(registry: RouteRegistry) -> None:
-    _register_pass({})
+async def test_boot_serves_the_declared_base(registry: RouteRegistry) -> None:
+    await _register_pass({})
     assert package_mounts(_PACKAGE, registry.live_routes()) == {"synthetic": "/api/synthetic"}
 
 
-def test_a_remap_reads_the_new_base_while_the_dedup_map_holds_both(registry: RouteRegistry) -> None:
-    _register_pass({})
+async def test_a_remap_reads_the_new_base_while_the_dedup_map_holds_both(registry: RouteRegistry) -> None:
+    await _register_pass({})
     registry.begin_shape_staging()
-    _register_pass({"acme/synthetic": {"synthetic": "synthetic-alt"}})
+    await _register_pass({"acme/synthetic": {"synthetic": "synthetic-alt"}})
     registry.commit_shape_staging()
     assert package_mounts(_PACKAGE, registry.live_routes()) == {"synthetic": "/api/synthetic-alt"}
     assert _bases_in_routes(registry) == {"/api/synthetic/ping", "/api/synthetic-alt/ping"}
 
 
-def test_a_dropped_router_has_no_mount_while_the_dedup_map_keeps_its_rows(registry: RouteRegistry) -> None:
-    _register_pass({})
+async def test_a_dropped_router_has_no_mount_while_the_dedup_map_keeps_its_rows(registry: RouteRegistry) -> None:
+    await _register_pass({})
     registry.begin_shape_staging()
     registry.commit_shape_staging()
     assert package_mounts(_PACKAGE, registry.live_routes()) == {}
     assert _bases_in_routes(registry) == {"/api/synthetic/ping"}
 
 
-def test_a_failed_build_keeps_the_previous_generation(registry: RouteRegistry) -> None:
-    _register_pass({})
+async def test_a_failed_build_keeps_the_previous_generation(registry: RouteRegistry) -> None:
+    await _register_pass({})
     registry.begin_shape_staging()
-    _register_pass({"acme/synthetic": {"synthetic": "synthetic-alt"}})
+    await _register_pass({"acme/synthetic": {"synthetic": "synthetic-alt"}})
     registry.abort_shape_staging()
     assert package_mounts(_PACKAGE, registry.live_routes()) == {"synthetic": "/api/synthetic"}
 
 
-def test_two_bases_for_one_item_in_one_generation_raise(registry: RouteRegistry) -> None:
-    _register_pass({})
-    _register_pass({"acme/synthetic": {"synthetic": "synthetic-alt"}})
+async def test_two_bases_for_one_item_in_one_generation_raise(registry: RouteRegistry) -> None:
+    await _register_pass({})
+    await _register_pass({"acme/synthetic": {"synthetic": "synthetic-alt"}})
     with pytest.raises(RuntimeError, match=r"route item 'synthetic' of acme/synthetic is served under two bases"):
         package_mounts(_PACKAGE, registry.live_routes())
 
 
-def test_a_package_shipping_no_plugin_spec_has_no_mounts(registry: RouteRegistry) -> None:
-    _register_pass({})
+async def test_a_package_shipping_no_plugin_spec_has_no_mounts(registry: RouteRegistry) -> None:
+    await _register_pass({})
     assert package_mounts("operator_pkg", registry.live_routes()) == {}
 
 

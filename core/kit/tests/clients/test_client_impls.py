@@ -274,7 +274,7 @@ async def test_redis_async_distinct_configurations_get_distinct_pooled_clients(m
     # (or socket timeouts) each get their own pooled client; an identical configuration
     # shares one; env_prefix alone never splits a pool.
     redis_mod = _redis_mod()
-    from tai42_kit.clients import shutdown_all_clients
+    from tai42_kit.loop_bound import release_loop_bound_resources
 
     class _FakeAsyncRedis:
         def __init__(self, kwargs):
@@ -302,13 +302,13 @@ async def test_redis_async_distinct_configurations_get_distinct_pooled_clients(m
             assert prefixed_a is prefixed_b  # env_prefix alone shares one pool
             assert small is prefixed_a  # the identical configuration is the same pooled client
     finally:
-        await shutdown_all_clients()
+        await release_loop_bound_resources()
 
 
 async def test_redis_sync_distinct_configurations_get_distinct_pooled_clients(monkeypatch):
     # The sync client pools by the same full-configuration identity as its async peer.
     redis_mod = _redis_mod()
-    from tai42_kit.clients import shutdown_all_clients
+    from tai42_kit.loop_bound import release_loop_bound_resources
 
     class _FakeSyncRedis:
         def __init__(self, kwargs):
@@ -333,7 +333,7 @@ async def test_redis_sync_distinct_configurations_get_distinct_pooled_clients(mo
             assert prefixed_a is prefixed_b  # env_prefix alone shares one pool
             assert small is prefixed_a  # the identical configuration is the same pooled client
     finally:
-        await shutdown_all_clients()
+        await release_loop_bound_resources()
 
 
 # ---------------------------------------------------------------------------

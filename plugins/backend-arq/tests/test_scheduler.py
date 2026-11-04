@@ -11,10 +11,10 @@ import orjson
 import pytest
 from arq.jobs import JobStatus
 
-from tai42_backend_arq import scheduler, tools
+from tai42_backend_arq import scheduler
 from tai42_backend_arq.settings import TaskFailedError
 
-from .conftest import SETTINGS_QUEUE, DeleteOnLockRedis, handle_of
+from .conftest import SETTINGS_QUEUE, DeleteOnLockRedis, backend_tools, handle_of
 
 
 def _job_type(**results: Any) -> type:
@@ -587,7 +587,7 @@ async def test_watchdog_records_unrecoverable_schedule(fake_redis, monkeypatch, 
 
     await scheduler.recover_stalled_schedules({"redis": fake_redis})
 
-    rows = {row["name"]: row for row in await tools.backend_list_schedules()}
+    rows = {row["name"]: row for row in await backend_tools().backend_list_schedules()}
     error = rows["a_broken"]["error"]
     assert error is not None
     assert "probe failed" in error["message"]
@@ -610,7 +610,7 @@ async def test_watchdog_clears_error_on_recovery(fake_redis, monkeypatch, bind_p
 
     await scheduler.recover_stalled_schedules({"redis": fake_redis})
 
-    (row,) = await tools.backend_list_schedules()
+    (row,) = await backend_tools().backend_list_schedules()
     assert row["error"] is None
     assert b"recovery_error" not in fake_redis._store[key]
     assert b"recovery_failed_at" not in fake_redis._store[key]
@@ -649,16 +649,15 @@ async def test_backend_get_schedule_surfaces_recovery_error(fake_redis, monkeypa
 
     # Error tick: the per-schedule probe raises; the fault surfaces on the read door.
     await scheduler.recover_stalled_schedules({"redis": fake_redis})
-    errored = await tools.backend_get_schedule("s1")
-    assert errored["recovery_error"] is not None
-    assert "probe failed" in errored["recovery_error"]
-    assert errored["recovery_failed_at"] is not None
+    errored = await backend_tools().backend_get_schedule("s1")
+    assert errored["error"] is not None
+    assert "probe failed" in errored["error"]["message"]
+    assert errored["error"]["at_iso"] is not None
 
     # Recovery tick: the schedule recovers and the read door reports it cleared.
     await scheduler.recover_stalled_schedules({"redis": fake_redis})
-    recovered = await tools.backend_get_schedule("s1")
-    assert recovered["recovery_error"] is None
-    assert recovered["recovery_failed_at"] is None
+    recovered = await backend_tools().backend_get_schedule("s1")
+    assert recovered["error"] is None
 
 
 # -- every scheduler enqueue names the settings queue ----------------------------------

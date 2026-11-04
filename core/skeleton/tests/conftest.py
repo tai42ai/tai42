@@ -54,9 +54,11 @@ if not os.path.basename(os.environ.get("PROMETHEUS_MULTIPROC_DIR", "")).startswi
 if str(Path(__file__).resolve().parent.parent) not in sys.path:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import asyncio
 import logging
 from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -75,6 +77,7 @@ import tai42_skeleton.versioning.store as versioning_store
 from tai42_skeleton.access_control.request_scopes import reset_request_is_admin, set_request_is_admin
 from tai42_skeleton.app.bus import WorkerKind
 from tai42_skeleton.app.lifecycle.lifespan import LifespanMixin
+from tai42_skeleton.app.writer_exit import WriterExitScope, writer_exit_scope
 from tai42_skeleton.config.deployment_env import capture_deployment_env, reset_deployment_env
 
 from ._fakes.advisory_locks import FakeAdvisoryLocks
@@ -84,9 +87,44 @@ from ._module_identity import restore_states_module_identity
 from ._staged_generations import preserved_staged_generations
 from .access_control.conftest import FakeAccessControlPg
 from .access_control.conftest import make_pg_ctx as make_access_control_pg_ctx
+from .connectors.credential_path import owner_loop
 from .runs.conftest import FakeRunIndexPg
 from .tool_meta.conftest import FakeToolMetaPg, make_pg_ctx
 from .versioning.conftest import FakeVersioningPg
+
+
+@pytest.fixture
+async def writer_exit_edge() -> AsyncIterator[WriterExitScope]:
+    """The edge a door's change answers on, for a test driving the door below its edge.
+
+    In production every request, tool call and join runs under a writer-exit scope its edge
+    opens and settles (:mod:`tai42_skeleton.app.writer_exit`); a test calling a service or an
+    operation directly stands in for that edge here. The exit its change owes is settled when
+    the test ends, so the hold it took is released and the exit runs on the test's bus.
+    """
+    with writer_exit_scope() as exits:
+        yield exits
+        await exits.settle()
+
+
+@pytest.fixture
+def serving(monkeypatch: pytest.MonkeyPatch) -> Iterator[asyncio.AbstractEventLoop]:
+    """A running serving loop in its own thread, bound by the built app."""
+    from tai42_skeleton.app import instance
+
+    with owner_loop() as loop:
+        monkeypatch.setattr(instance, "_app", SimpleNamespace(serving_loop=lambda: loop))
+        yield loop
+
+
+@pytest.fixture
+async def serving_here(monkeypatch: pytest.MonkeyPatch) -> asyncio.AbstractEventLoop:
+    """The test's own loop, bound as the serving loop by the built app."""
+    from tai42_skeleton.app import instance
+
+    loop = asyncio.get_running_loop()
+    monkeypatch.setattr(instance, "_app", SimpleNamespace(serving_loop=lambda: loop))
+    return loop
 
 
 @pytest.fixture

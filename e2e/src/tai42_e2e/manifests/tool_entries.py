@@ -60,8 +60,9 @@ def _probe_tools_entry(
     tool riding reload churn can leave the prefork pool unable to dispatch).
     ``with_async_branch`` attaches ``async_task`` to ``run_tool``: any tool by name queued
     as a backend job, its result read back with ``backend_task_result``.
-    ``with_async_worker_branches`` attaches ``async_task`` beside ``sync_task`` to the
-    worker-info and slow probes, so a spec queues them by id (on a chosen queue)."""
+    ``with_async_worker_branches`` attaches ``async_task`` to the worker-info, slow and
+    blocking probes (beside ``sync_task`` on the first two), so a spec queues them by id (on a
+    chosen queue)."""
     extensions: dict[str, list[list[str]]] = {
         "e2e_echo": [["prometheus_metrics"]],
         "e2e_fail": [["prometheus_metrics"]],
@@ -78,6 +79,9 @@ def _probe_tools_entry(
         # Branch the drain probe (started → sleep → done) so the recycle-drain spec can read
         # whether an in-flight backend job DRAINED to completion across a recycle.
         extensions["e2e_drain_probe"] = [["sync_task"]]
+        # Branch the drain hold (started → held until the test releases it → done) so the
+        # recycle-drain spec ends the in-flight job only once it has seen the stop wait on it.
+        extensions["e2e_drain_hold"] = [["sync_task"]]
         # Universal backend-execution door: run_tool_sync_task runs any registered tool
         # by name inside the backend worker. Its base is the FIXTURE ``run_tool`` dispatch
         # tool (the skeleton ``run_tool`` op is a tier-1 meta-executor blocked from the MCP
@@ -104,9 +108,10 @@ def _probe_tools_entry(
         # from inside a branch an agent calls.
         extensions["e2e_undeclared_park"] = [["chain"]]
     if with_async_worker_branches:
-        # Queue the worker-info and slow probes as by-id jobs: which worker ran a job,
-        # and a job held deferred long enough to be listed and cancelled.
-        for name in ("e2e_worker_info", "e2e_slow_task"):
+        # Queue the worker-info, slow and blocking probes as by-id jobs: which worker ran a
+        # job, a job held deferred long enough to be listed and cancelled, and a job blocked
+        # where its pool cannot end it at its budget.
+        for name in ("e2e_worker_info", "e2e_slow_task", "e2e_blocking_task"):
             extensions[name] = [*extensions.get(name, []), ["async_task"]]
     return {"title": PROBE_TOOLS_TITLE, "module": "tai42_e2e_fixtures.tools", "extensions": extensions}
 

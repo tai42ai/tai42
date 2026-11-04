@@ -25,6 +25,7 @@ def test_defaults() -> None:
     assert settings.redbeat.redis_url == "redis://localhost:6379/0"
     assert settings.redbeat_key_prefix == "redbeat:"
     assert settings.beat_max_loop_interval == 60
+    assert settings.queue_name == "celery"
 
 
 def test_base_backend_fields_agree_with_host_defaults() -> None:
@@ -72,9 +73,11 @@ def test_redbeat_task_key_prefixes_once() -> None:
 def test_env_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("CELERY_BROKER_URL", "amqp://broker.example:5672//")
     monkeypatch.setenv("CELERY_TASK_TIMEOUT", "17")
+    monkeypatch.setenv("CELERY_QUEUE_NAME", "stack-1")
     settings = CelerySettings()
     assert settings.broker_url == "amqp://broker.example:5672//"
     assert settings.task_timeout == 17
+    assert settings.queue_name == "stack-1"
 
 
 def test_accessor_is_cached() -> None:

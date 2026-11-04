@@ -10,7 +10,9 @@ Re-entrancy: only the OUTERMOST tool call of a turn opens a window. A ContextVar
 is set while a window is held; a nested call (a nested tool dispatch mid-turn) sees the
 guard armed and runs unwrapped, so the outer window bounds the whole turn rather than
 each nested call resetting the clock. A detached run (no live caller) and an unset
-budget both run unbounded.
+budget both run unbounded. An armed window marks the turn a bounded run
+(:mod:`tai42_kit.utils.run_bound`), so work the window cannot hold — a fleet recycle
+roll — is carried outside it.
 """
 
 import asyncio
@@ -19,6 +21,7 @@ from contextlib import asynccontextmanager
 from contextvars import ContextVar
 
 from tai42_kit.utils.detached_util import in_detached_run
+from tai42_kit.utils.run_bound import bounded_run
 
 from tai42_skeleton.exceptions.exceptions import TurnTimeoutError
 from tai42_skeleton.settings.turn import turn_settings
@@ -49,7 +52,7 @@ async def turn_budget() -> AsyncIterator[None]:
 
     Reads ``TAI_TURN_TIMEOUT_SECONDS`` at call time. Runs the body unwrapped when the
     budget is unset, the run is detached (no live caller), or an outer call already
-    armed the window. Otherwise expiry cancels the awaiting turn and raises a loud,
+    armed the window. Otherwise the body runs as a bounded run and expiry cancels the awaiting turn and raises a loud,
     typed ``TurnTimeoutError``; a builtin ``TimeoutError`` the turn's own work raised
     (which the cancellation did not cause) passes through unchanged. The cancel reaches
     only the awaited coroutine: a synchronous tool body offloaded to a worker thread
@@ -64,8 +67,9 @@ async def turn_budget() -> AsyncIterator[None]:
     try:
         cm = asyncio.timeout(timeout)
         try:
-            async with cm:
-                yield
+            with bounded_run():
+                async with cm:
+                    yield
         except TimeoutError as exc:
             if cm.expired():
                 parked = getattr(exc.__cause__, _PARKED_QUESTION_ATTR, None)

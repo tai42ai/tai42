@@ -1,26 +1,28 @@
 """The process-wide reload gate — the mutual-exclusion seam between an admin config reload and the live serving surface.
 
 A reload (`admin.reload_config` / `admin.reload_mcp` / the failed-MCP re-probe)
-is heavy and synchronous: it re-reads env, resets settings caches, re-imports
-the manifest modules and re-probes every MCP server. Run inline on the serving
-loop, an MCP re-probe would freeze health checks, MCP keepalives and in-flight SSE
-streams for its whole duration. The gate keeps the bodies off the loop:
+re-reads env, resets settings caches, re-imports the manifest modules and re-probes
+every MCP server. Its body is a coroutine awaited on the loop the process serves from,
+whatever loop its door is driven from (an in-process backend job's own loop included): the
+generation it builds, its FastMCP lifespan and background loops, the ``PresetManager``'s
+``asyncio.Lock``s, the per-loop MCP client pools and the MCP server starts all belong to
+that one loop, so every step of the body runs there:
 
-* :meth:`ReloadGate.run` holds the gate's process lock and awaits the heavy sync
-  body on a worker thread (`asyncio.to_thread`). An MCP re-probe body runs there,
-  marshalling only short reconciles onto the serving loop, so the loop keeps
-  running while it executes. A config reload
-  marshals its rebuild back onto the serving loop (`config_reload`): the proposed
-  env and the cleared settings caches are process-wide, so the swap is atomic for
-  live requests only while nothing is served, and health/readiness probes, MCP
-  keepalives, in-flight streams and the generation's timers pause until the swap
-  returns. The worker-bus heartbeat runs on its own thread and does not pause;
+* :meth:`ReloadGate.run` holds the gate's process lock and awaits the body on the serving
+  loop. An MCP re-probe body awaits its probes, so the loop keeps serving between its
+  steps. A config reload rebuilds the generation on the serving loop: the
+  proposed env and the cleared settings caches are process-wide, so the swap is atomic
+  for live requests only while nothing is served, and health/readiness probes, MCP
+  keepalives, in-flight streams and the generation's timers pause while a synchronous
+  step of the rebuild (a module import) holds the loop. The worker-bus heartbeat runs on
+  its own thread and does not pause, except in a process run under a process prelude,
+  where it is a task of the loop (:mod:`tai42_skeleton.app.bus.life`);
 * while the lock is held, routes that dispatch a run or mutate the live
   tool/agent registries answer :meth:`reject_response` (HTTP 503, retriable), and
   the FastMCP session surface rejects tool calls the same way. Health, liveness
   and read-only GETs keep answering;
-* a body declared ``reimports=True`` ALSO holds ``fork_gate.exclusive`` on that
-  worker thread, which excludes the OTHER live consumers of this process's modules:
+* a body declared ``reimports=True`` ALSO holds ``fork_gate.exclusive_async`` around the
+  body, which excludes the OTHER live consumers of this process's modules:
   a backend work loop that forks a job child, and a backend job that runs in this
   process. A re-importing body pops the manifest modules out of ``sys.modules`` and
   re-imports them (``import_or_reload_package``); a child forked during that window
@@ -57,13 +59,13 @@ them), so nothing in it is ever reloading.
 
 The lock is never taken bare. Every holder enters through one of two context managers,
 which record on the serving generation the work engaged with the gate
-(:class:`GateParty`), so a retire of that generation never severs it. A request waiting for
-the lock cannot move, so it leaves the in-flight count while it waits:
+(:class:`GateParty`), so a retire of that generation never severs it. Admitted work waiting
+for the lock cannot move, so it leaves the in-flight count while it waits:
 
-* :meth:`ReloadGate.driving` — the holder runs a gated body (a reload, a profile apply).
-  While it waits for the lock its request or tool-run supervisor is recorded as
+* :meth:`ReloadGate.driving` — the holder runs a gated body (:meth:`ReloadGate.run`).
+  While it waits for the lock its admitted work or tool-run supervisor is recorded as
   waiting; once it holds the lock it is recorded as driving until it finishes, and its
-  request leaves the in-flight count: it cannot finish before the gate is released,
+  admitted work leaves the in-flight count: it cannot finish before the gate is released,
   which happens only after the retire it drives has returned.
 * :meth:`ReloadGate.synchronized` — the holder only waits a reload out or reads under
   the lock (a tool lookup that missed mid-rebuild, a re-probe pass). It is recorded as
@@ -73,13 +75,17 @@ Both acquire through :func:`hold_recorded`, as does any other lock whose holder 
 retire (the config-write lock a settings-profile apply holds across its build), so every such
 waiter is recorded the same way. A blocking span taken off the loop (the config store's
 exclusive write span) is entered through :func:`hold_recorded_blocking`, which records its
-waiter the same way. Both helpers park the caller's fork-gate job span while they wait
-(``ForkGate.parked_span``), so a job queued behind a reload's holder never holds that reload
-up, and counts again before it runs.
+waiter the same way. Both record through :func:`recorded_wait`, which also records a wait with
+no lock: admitted work waiting on work outside this process that may drive its reload (a queued
+job's result, through ``app.lifecycle.waiting_on_fleet_work``). Both helpers park the caller's
+fork-gate job span while they wait (``ForkGate.parked_span``), so a job queued behind a
+reload's holder never holds that reload up, and counts again before it runs.
 
 A call of an SSE session acts for its own admission record, not the session stream's
 (:func:`~tai42_skeleton.app.admission.admit_session_call`), so it is recorded exactly as a
-request is and its record finishes once its session stream has written its reply.
+request is and its record finishes once its session stream has written its reply. A backend
+job running on the serving loop acts for its own admission record too
+(:func:`~tai42_skeleton.app.admission.admitted_job`).
 """
 
 from __future__ import annotations
@@ -90,7 +96,7 @@ import logging
 import os
 import sys
 import threading
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AbstractContextManager, AsyncExitStack, ExitStack, asynccontextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, TypeVar
@@ -100,7 +106,7 @@ from tai42_kit.fork_gate import JOB_SPAN_WAIT_SECONDS, fork_gate
 from tai42_kit.process_lock import ProcessLock
 
 if TYPE_CHECKING:
-    from tai42_skeleton.app.admission import RequestAdmission
+    from tai42_skeleton.app.admission import Admission
     from tai42_skeleton.app.epoch import Epoch
 
 T = TypeVar("T")
@@ -112,10 +118,10 @@ logger = logging.getLogger(__name__)
 REJECT_MESSAGE = "reloading — the server is applying a config reload; retry shortly"
 
 # How long a re-importing rebuild waits for the open job spans (a fork instant, or a
-# whole in-process job) to close before it starts — the one budget for every door,
-# shared with the profile-apply path that drives ``build_and_swap_epoch`` directly.
+# whole in-process job) to close before it starts — the one budget for every door
+# (:meth:`ReloadGate.run`, with ``reimports=True``).
 #
-# This is a DELIBERATE bound against the fleet-ack deadline, not a wait sized to the
+# This is a DELIBERATE bound against the fleet apply deadline, not a wait sized to the
 # work. How long a job span actually lasts depends on the pool:
 #
 # * PREFORK (the default): a span is ~the ``os.fork()`` instant — the child inherits a
@@ -128,60 +134,67 @@ REJECT_MESSAGE = "reloading — the server is applying a config reload; retry sh
 #   reliably enforceable: a job wedged in a C-blocked call runs past it. The degraded
 #   proceed below is what actually bounds this side.
 #
-# A reload therefore proceeds UNGUARDED — logging the fork gate's ERROR where it overruns —
-# in exactly four residual cases: an in-process job that has already been running longer
-# than 30s; an in-process job whose own ``threading`` thread (one that does not carry the
+# A reload therefore proceeds UNGUARDED in these cases of this gate's own, logging the fork
+# gate's ERROR in the first three, where its wait overruns: an in-process job that has already been running
+# longer than 30s; an in-process job whose own ``threading`` thread (one that does not carry the
 # job's context) forks or enters a span while the reload is pending, so that thread waits
 # behind the reload and the job's span stays open until the budget runs out; a fork
-# instant that happens to collide with the tail of an exhausted quiesce; or an in-process
-# job whose own sibling task (one that shares the job's context) imports while the job's
-# wait on a recorded lock is parked. In each, the job or the child is exposed to the
-# re-import race the gate otherwise closes. That
-# is the accepted tradeoff: the alternative is a reload that misses its fleet ack (and, on
-# a sibling, blocks fleet convergence) behind a long-running job.
+# instant that happens to collide with the tail of an exhausted quiesce. Two run with no log
+# line: an in-process job whose own sibling task (one that shares the job's context) imports
+# while the job's wait on a recorded lock is parked; and an in-process job that starts a
+# re-importing reload itself, whose sibling task imports or forks while that reload re-imports —
+# the reload never waits for the span of the job that started it, so the sibling runs beside the
+# re-import. The fork gate and the fork guard keep residual cases of their own (a span whose
+# wait outlasts its bound, a fork on an event loop's thread or from the rebuild's own body while
+# a rebuild holds the gate), listed in :mod:`tai42_kit.fork_gate` and :mod:`tai42_kit.fork_guard`.
+# In each, the job or the child is exposed to the re-import race the gate otherwise
+# closes. That is the accepted tradeoff: the alternative is a reload that misses the apply
+# deadline (and, on a sibling, blocks fleet convergence) behind a long-running job, or a job's
+# own reload that spends its whole budget waiting on the job that is waiting on it.
 FORK_QUIESCE_SECONDS = 30.0
 
 
 @dataclass(eq=False)
 class GateParty:
-    """The work that is about to wait on, then hold, a lock whose holder may drive its generation's retire.
+    """Admitted work or a background run that is about to wait, recorded on its generation while it waits.
 
-    The generation records it: the reload gate's parties, and those of every lock acquired
-    through :func:`hold_recorded`. ``request`` is the admission record of the request it acts for (``None`` off a served
-    request); ``task`` is the tool-run supervisor whose run it belongs to (its own task, or
-    a child task of it such as an agent's tool call) and ``task_epoch`` the generation that
-    admitted that run (both ``None`` outside a run of the live generation). A party with
+    It waits on something that may itself drive the generation's retire: the holder of a lock,
+    or work outside the process. The generation records the parties of the reload gate and those
+    of every :func:`recorded_wait`. ``admission`` is the admission record of the request, session
+    call or job it acts for (``None`` off admitted work); ``task`` is the tool-run supervisor whose run it belongs to
+    (its own task, or a child task of it such as an agent's tool call) and ``task_epoch`` the
+    generation that admitted that run (both ``None`` outside a run of the live generation). A party with
     neither records nothing (the bus subscription, a periodic loop, the retire's own tail).
     """
 
-    request: RequestAdmission | None
+    admission: Admission | None
     task: asyncio.Task[Any] | None
     task_epoch: Epoch | None
 
     def wait(self) -> None:
-        """Record the party as waiting on the lock; its request leaves the in-flight count while it waits."""
-        if self.request is not None:
-            self.request.begin_wait()
+        """Record the party as waiting on the lock; its admitted work leaves the in-flight count while it waits."""
+        if self.admission is not None:
+            self.admission.begin_wait()
         if self.task is not None and self.task_epoch is not None:
             self.task_epoch.begin_task_wait(self.task)
 
     def stop_waiting(self) -> None:
         """Record that the party no longer waits (it acquired the lock, or gave up)."""
-        if self.request is not None:
-            self.request.end_wait()
+        if self.admission is not None:
+            self.admission.end_wait()
         if self.task is not None and self.task_epoch is not None:
             self.task_epoch.end_task_wait(self.task)
 
     def drive(self) -> None:
-        """Record the party as driving a gated body until its request or supervisor finishes.
+        """Record the party as driving a gated body until its admitted work or supervisor finishes.
 
-        A driving request leaves the in-flight count (its slot is released once): it cannot
+        Driving admitted work leaves the in-flight count (its slot is released once): it cannot
         finish before the gate is released, which happens only after a retire it drives has
         returned, so the retire waits for it apart from the drain budget.
         """
-        if self.request is not None:
-            self.request.epoch.driving.add(self.request)
-            self.request.release_slot()
+        if self.admission is not None:
+            self.admission.epoch.driving.add(self.admission)
+            self.admission.release_slot()
         if self.task is not None and self.task_epoch is not None and not self.task.done():
             epoch = self.task_epoch
             epoch.driving_tasks.add(self.task)
@@ -189,8 +202,8 @@ class GateParty:
 
 
 def gate_party() -> GateParty:
-    """The current request and tool-run supervisor, for a recorded lock wait to record on their generation."""
-    from tai42_skeleton.app.admission import current_request_admission
+    """The current admitted work and tool-run supervisor, for a recorded lock wait to record on their generation."""
+    from tai42_skeleton.app.admission import current_admission
     from tai42_skeleton.app.epoch import current_epoch_or_none
     from tai42_skeleton.operations.tool_runs.supervisor import running_supervisor
 
@@ -201,28 +214,39 @@ def gate_party() -> GateParty:
         live = current_epoch_or_none()
         if live is not None and live.number == supervisor[1]:
             task, task_epoch = supervisor[0], live
-    return GateParty(request=current_request_admission(), task=task, task_epoch=task_epoch)
+    return GateParty(admission=current_admission(), task=task, task_epoch=task_epoch)
+
+
+@asynccontextmanager
+async def recorded_wait(party: GateParty | None = None) -> AsyncIterator[GateParty]:
+    """Record ``party`` (the current one by default) as waiting for the span; yields the party.
+
+    For a wait on work that may drive a retire of the waiter's generation (a lock's holder, work
+    outside this process whose change reloads it): the waiter cannot move before that work ends,
+    so the retire never counts it against the drain budget and never severs it. Once the span
+    ends the party is ordinary work again, drained like any other.
+    """
+    party = gate_party() if party is None else party
+    party.wait()
+    try:
+        yield party
+    finally:
+        party.stop_waiting()
 
 
 @asynccontextmanager
 async def hold_recorded(lock: ProcessLock, party: GateParty | None = None) -> AsyncIterator[GateParty]:
-    """Hold ``lock``, with ``party`` (the current one by default) recorded as waiting while it waits.
+    """Hold ``lock``, with ``party`` (the current one by default) in a :func:`recorded_wait` while it waits.
 
-    For a lock whose holder may drive a retire of the waiter's generation: a waiter cannot move
-    before the holder releases, so the retire never counts it against the drain budget and never
-    severs it. Its fork-gate job span is parked while it waits
-    (:meth:`~tai42_kit.fork_gate.ForkGate.parked_span`), as the holder may be starting a
-    re-import, and counts again before it holds the lock. A waiter stopped (cancelled, timed out)
-    while its span counts again does not keep the lock. Yields the party, released on exit.
+    For a lock whose holder may drive a retire of the waiter's generation. Its fork-gate job span
+    is parked while it waits (:meth:`~tai42_kit.fork_gate.ForkGate.parked_span`), as the holder
+    may be starting a re-import, and counts again before it holds the lock. A waiter stopped
+    (cancelled, timed out) while its span counts again does not keep the lock. Yields the party,
+    released on exit.
     """
-    party = gate_party() if party is None else party
-    party.wait()
     async with AsyncExitStack() as holding:
-        try:
-            async with fork_gate.parked_span(timeout=JOB_SPAN_WAIT_SECONDS):
-                await holding.enter_async_context(lock.held())
-        finally:
-            party.stop_waiting()
+        async with recorded_wait(party) as party, fork_gate.parked_span(timeout=JOB_SPAN_WAIT_SECONDS):
+            await holding.enter_async_context(lock.held())
         yield party
 
 
@@ -312,31 +336,28 @@ async def hold_recorded_blocking(span: AbstractContextManager[None], party: Gate
 
     The off-loop counterpart of :func:`hold_recorded`, for a span whose entry blocks the thread
     until another holder, possibly in another process, leaves it. The serving loop keeps running
-    while it blocks, and the party is recorded as waiting exactly as a :func:`hold_recorded`
-    waiter is. A waiter abandoned before its entry completed returns at once and leaves the entry
-    to its thread, which exits the span as soon as entry completes; a waiter whose cancellation
-    lands as its entry completes exits the span itself before it returns. The caller's fork-gate
-    job span is parked while the entry blocks, as :func:`hold_recorded` parks it, and counts again
-    before the holder runs on. The span must therefore
+    while it blocks, in a :func:`recorded_wait` of the party. A waiter abandoned before its entry
+    completed returns at once and leaves the entry to its thread, which exits the span as soon as
+    entry completes; a waiter whose cancellation lands as its entry completes exits the span
+    itself before it returns. The caller's fork-gate job span is parked while the entry blocks,
+    as :func:`hold_recorded` parks it, and counts again before the holder runs on. The span must therefore
     exclude on its own and tolerate being entered and exited on different threads. The exit always
     completes before the holder returns: a cancellation during it is re-raised afterwards, and an
     error entering or exiting the span propagates; an entry that fails after its waiter returned
     is logged, as no one is left to receive it.
     """
     entry = _ThreadEntry(span)
-    party.wait()
-    try:
-        async with fork_gate.parked_span(timeout=JOB_SPAN_WAIT_SECONDS):
-            await asyncio.to_thread(entry.enter)
-    except BaseException as stopped:
-        if entry.abandon():
-            await _exit_on_thread(entry)
-        elif entry.error is not None and entry.error is not stopped:
-            # The entry failed, but the cancellation reached the waiter instead of the error.
-            raise entry.error from stopped
-        raise
-    finally:
-        party.stop_waiting()
+    async with recorded_wait(party):
+        try:
+            async with fork_gate.parked_span(timeout=JOB_SPAN_WAIT_SECONDS):
+                await asyncio.to_thread(entry.enter)
+        except BaseException as stopped:
+            if entry.abandon():
+                await _exit_on_thread(entry)
+            elif entry.error is not None and entry.error is not stopped:
+                # The entry failed, but the cancellation reached the waiter instead of the error.
+                raise entry.error from stopped
+            raise
     try:
         yield
     finally:
@@ -356,10 +377,10 @@ class ReloadGate:
 
     @asynccontextmanager
     async def driving(self) -> AsyncIterator[None]:
-        """Hold the gate to run a gated body, the current request or supervisor recorded as its driver.
+        """Hold the gate to run a gated body, the current admitted work or supervisor recorded as its driver.
 
-        Use ``async with reload_gate.driving(): ...`` around a body that rebuilds or swaps the
-        serving generation outside :meth:`run` (the profile apply).
+        :meth:`run` holds it around every reload body; a body is never run under it directly,
+        so every body runs on the serving loop.
         """
         async with hold_recorded(self._lock) as party:
             party.drive()
@@ -383,37 +404,35 @@ class ReloadGate:
         """
         return self._lock.locked
 
-    async def run(self, fn: Callable[[], T], *, reimports: bool) -> T:
-        """Hold the reload lock and await ``fn`` on a worker thread.
+    async def run(self, fn: Callable[[], Awaitable[T]], *, reimports: bool) -> T:
+        """Hold the reload lock and await the reload body ``fn`` on the serving loop.
 
-        The lock is held through :meth:`driving`.
-
-        The heavy reload bodies stay synchronous and unchanged; only the acquire
-        and the thread offload live here, so the serving loop keeps running while
-        the reload executes.
+        The lock is held through :meth:`driving`, on the calling loop and in the caller's
+        context. The body runs on the serving loop
+        (:func:`~tai42_skeleton.app.lifecycle.state.run_on_serving_loop`), whatever loop
+        the door is driven from, in the caller's context; its result and its exception reach
+        the caller, and a cancelled caller cancels it. The lock and the fork gate are released
+        only after the body has ended on the serving loop, a cancelled body's cleanup included,
+        so one reload body runs at a time and a re-importing body stays inside the fork gate
+        until it is done.
 
         ``reimports`` declares whether ``fn`` pops and re-imports the manifest modules.
-        Only then is the fork gate taken — on the worker thread, around ``fn`` itself,
-        so it spans the whole body including the loop-affine build a body marshals back
-        onto the serving loop, which is where the re-import runs. A non-re-importing
-        body (an MCP re-probe/rebind) must NOT hold it: it would stall a forking
-        backend's jobs for the probe's duration to guard against a race it cannot cause.
-        Required, never defaulted — adding a door is a decision about the fork gate.
+        Only then is the fork gate taken (``fork_gate.exclusive_async``) around ``fn``
+        itself, so it spans the whole body; the gate's hold is kept by a holder thread of
+        its own, so the loop keeps running while the gate waits for job spans to drain, and
+        the body runs marked as the hold's own work. A non-re-importing body (an MCP
+        re-probe/rebind) must NOT hold it: it would stall a forking backend's jobs for the
+        probe's duration to guard against a race it cannot cause. Required, never
+        defaulted — adding a door is a decision about the fork gate.
         """
+        from tai42_skeleton.app.instance import bound_serving_loop
+        from tai42_skeleton.app.lifecycle.state import run_on_serving_loop
+
         async with self.driving():
             if reimports:
-                return await asyncio.to_thread(self._run_fork_exclusive, fn)
-            return await asyncio.to_thread(fn)
-
-    @staticmethod
-    def _run_fork_exclusive(fn: Callable[[], T]) -> T:
-        """Run one re-importing reload body with no backend child forked and no in-process job running.
-
-        This is the invariant :data:`tai42_kit.fork_gate.fork_gate` exists to
-        hold (stated canonically there).
-        """
-        with fork_gate.exclusive(timeout=FORK_QUIESCE_SECONDS):
-            return fn()
+                async with fork_gate.exclusive_async(timeout=FORK_QUIESCE_SECONDS):
+                    return await run_on_serving_loop(bound_serving_loop(), fn)
+            return await run_on_serving_loop(bound_serving_loop(), fn)
 
     def reset_after_fork(self) -> None:
         """Start a forked child with the gate free: it inherits no hold of the parent's."""

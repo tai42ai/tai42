@@ -128,6 +128,8 @@ async def test_schedules_round_trip_through_bound_backend(monkeypatch):
         "fanout": None,
         "recycle": None,
         "awaiting_respawn": [],
+        "roll_deferred": False,
+        "roll_deferred_to": None,
         "span_release_error": None,
     }
     assert ("backend_import_schedules", {"schedules": backend_doc, "mode": "skip"}) in tools.run_calls

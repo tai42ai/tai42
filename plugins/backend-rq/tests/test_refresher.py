@@ -16,7 +16,7 @@ import pytest
 from redis import Redis
 from rq.timeouts import JobTimeoutException
 
-from tai42_backend_rq import worker_pools
+from tai42_backend_rq import death_penalties, unpatched, worker_pools
 
 
 class _ClosingRedis(Redis):
@@ -44,7 +44,7 @@ class _Reports:
 
 
 def _held_lock() -> Any:
-    lock = worker_pools._os_thread_lock()
+    lock = unpatched.os_thread_lock()
     lock.acquire()
     return lock
 
@@ -55,7 +55,7 @@ def _refresher_worker(reports: Any, *, interval: float, running: bool = True) ->
     worker.name = "w1"
     worker.job_monitoring_interval = interval
     worker._report_progress = reports
-    worker._execution_guard = worker_pools._os_thread_lock()
+    worker._execution_guard = unpatched.os_thread_lock()
     worker.execution = SimpleNamespace(job_id="job-1") if running else None
     worker.connection = _ClosingRedis(host="127.0.0.1", port=6390, db=3, socket_timeout=2.0)
     return worker
@@ -215,7 +215,7 @@ def test_a_section_running_past_its_timeout_stops_the_refresher_without_reportin
     reports = _Reports()
     worker = _refresher_worker(reports, interval=0)
     refreshes = _record_refreshes(monkeypatch)
-    monkeypatch.setitem(worker_pools._WatchedDeathPenalty._armed, "job-1", (time.monotonic() - 1.0, 0.2))
+    monkeypatch.setitem(death_penalties.WatchedDeathPenalty._armed, "job-1", (time.monotonic() - 1.0, 0.2))
 
     with caplog.at_level("ERROR", logger="tai42_backend_rq.worker_pools"):
         worker._maintain_heartbeats_until(_JOB, done)  # returns on its own: ``done`` is still held
@@ -223,7 +223,7 @@ def test_a_section_running_past_its_timeout_stops_the_refresher_without_reportin
     assert reports.promises == []
     assert refreshes == []
     assert [r.getMessage() for r in caplog.records] == [
-        "worker 'w1': job job-1 is still running past its 0.2s timeout, which this pool cannot end; "
+        "worker 'w1': job job-1 is still running past its 0.2s timeout and has not ended; "
         "it reports no more progress, so the liveness probe ends this worker"
     ]
 
@@ -232,25 +232,25 @@ def test_a_section_running_past_its_timeout_stops_the_refresher_without_reportin
 
 
 def test_a_job_with_no_guarded_section_is_never_overdue() -> None:
-    assert worker_pools._WatchedDeathPenalty.overdue("no-such-job", margin=0) is None
+    assert death_penalties.WatchedDeathPenalty.overdue("no-such-job", margin=0) is None
 
 
 def test_a_guarded_section_inside_its_deadline_and_margin_is_not_overdue() -> None:
-    with worker_pools._WatchedTimerDeathPenalty(30, JobTimeoutException, job_id="job-1"):
-        assert worker_pools._WatchedDeathPenalty.overdue("job-1", margin=1.0) is None
+    with death_penalties.WatchedTimerDeathPenalty(30, JobTimeoutException, job_id="job-1"):
+        assert death_penalties.WatchedDeathPenalty.overdue("job-1", margin=1.0) is None
 
 
 def test_a_guarded_section_past_its_deadline_but_inside_the_margin_is_not_overdue(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setitem(worker_pools._WatchedDeathPenalty._armed, "job-1", (time.monotonic() - 0.5, 2.0))
+    monkeypatch.setitem(death_penalties.WatchedDeathPenalty._armed, "job-1", (time.monotonic() - 0.5, 2.0))
 
-    assert worker_pools._WatchedDeathPenalty.overdue("job-1", margin=60.0) is None
+    assert death_penalties.WatchedDeathPenalty.overdue("job-1", margin=60.0) is None
 
 
 def test_a_guarded_section_past_its_deadline_and_margin_is_overdue_by_its_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setitem(worker_pools._WatchedDeathPenalty._armed, "job-1", (time.monotonic() - 5.0, 2.0))
+    monkeypatch.setitem(death_penalties.WatchedDeathPenalty._armed, "job-1", (time.monotonic() - 5.0, 2.0))
 
-    assert worker_pools._WatchedDeathPenalty.overdue("job-1", margin=1.0) == 2.0
+    assert death_penalties.WatchedDeathPenalty.overdue("job-1", margin=1.0) == 2.0

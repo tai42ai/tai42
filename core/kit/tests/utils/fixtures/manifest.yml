@@ -86,7 +86,7 @@ extensions_modules: []      # modules registering tool extensions
 #
 # The skeleton also ships runtime-native built-in tools; opt each module in
 # the same way (see the built-in tools & extensions docs at
-# https://tai42.ai/concepts/tools-and-extensions):
+# https://docs.tai42.ai/concepts/tools-and-extensions):
 #   - title: file-loader
 #     module: tai42_skeleton.tools.builtin.file_loader  # file_loader (url or resource id -> text/media)
 #   - title: ask

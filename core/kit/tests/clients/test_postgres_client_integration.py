@@ -24,6 +24,7 @@ pytest.importorskip("psycopg_pool")
 import psycopg
 from psycopg import pq, sql
 
+from tai42_kit.backend import PrivateLoop
 from tai42_kit.clients import advance_client_epoch, client_ctx, drain_epoch
 from tai42_kit.clients.impl import postgres as pg
 from tai42_kit.clients.impl.postgres import Json, PostgresClient, pinned_connection, read_connection
@@ -283,3 +284,26 @@ async def test_a_pool_with_a_retry_budget_connects_to_a_live_server_with_no_retr
         async with client_ctx(PostgresClient, fresh=True, **kwargs) as pool:
             assert await _scalar(pool, "SELECT 1") == 1
     assert [r for r in caplog.records if r.name == pg.__name__] == []
+
+
+def test_a_private_loop_s_end_closes_the_real_pool_a_job_on_it_used(
+    real_pg_settings: PostgresConnectionSettings,
+) -> None:
+    """The pool runs worker tasks of its own, which its close awaits: the loop's end releases it while they run."""
+    kwargs = real_pg_settings.client_kwargs()
+    used: list[Any] = []
+
+    async def _job() -> int:
+        async with PostgresClient().current(**kwargs) as pool:
+            used.append(pool)
+            return await _scalar(pool, "SELECT 1")
+
+    private = PrivateLoop()
+    try:
+        assert private.run(_job()) == 1
+    finally:
+        private.close()
+
+    [pool] = used
+    assert pool.closed
+    assert private.closed

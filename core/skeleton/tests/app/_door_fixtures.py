@@ -71,7 +71,7 @@ def fresh_serving_core(monkeypatch: pytest.MonkeyPatch) -> None:
     """
     from tai42_skeleton.app.instance import app
 
-    monkeypatch.setattr(app, "_building", app._build_serving_core())
+    monkeypatch.setattr(app, "_scaffold_core", app._build_serving_core())
 
 
 def install_declaring_provider(monkeypatch: pytest.MonkeyPatch, provider: DeclaringTokenProvider) -> None:

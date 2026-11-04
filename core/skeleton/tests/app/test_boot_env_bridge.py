@@ -18,6 +18,7 @@ import pytest
 from pyaml_env import parse_config
 from tai42_kit.settings import reset_all_settings
 from tai42_kit.utils.data import load_manifest
+from tests._fakes.rebuild import no_rebuild
 
 from tai42_skeleton.app.bus import WorkerKind
 from tai42_skeleton.app.instance import app, register_cli_process_state
@@ -317,13 +318,16 @@ def test_a_group_registered_by_a_discarded_build_keeps_the_deployment_value(monk
     async def build(_epoch) -> _Serving:
         return _Serving()
 
+    async def import_late_settings(_epoch: epoch_mod.Epoch) -> None:
+        importlib.import_module(_LATE_SETTINGS_MODULE)
+
     async def run() -> str | None:
         manifest = await app.lifecycle.read_boot_manifest()
         async with app.app_context(manifest):
             assert os.environ["LATE_ALIASED_ENDPOINT"] == "from-store"
             await epoch_mod.build_and_discard_epoch(
                 dict(stored),
-                rebuild=lambda: importlib.import_module(_LATE_SETTINGS_MODULE),
+                rebuild=import_late_settings,
                 build_serving_app=build,
                 ownership=DeploymentOwnership(),
             )
@@ -526,7 +530,7 @@ def test_a_discarded_reload_leaves_the_log_redactor_on_the_live_connector_meta_t
     asyncio.run(
         epoch_mod.build_and_discard_epoch(
             {"CONNECTORS_META_TOKEN_KEY": "reloaded_hub.token"},
-            rebuild=lambda: None,
+            rebuild=no_rebuild,
             build_serving_app=build,
             ownership=DeploymentOwnership(),
         )

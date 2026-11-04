@@ -6,9 +6,10 @@ from ``tai42_skeleton.config.service`` unchanged.
 
 from __future__ import annotations
 
-from tai42_skeleton.config.service.deferred_roll import DeferredRolls, RollOutcome, deferring_rolls
+from tai42_skeleton.config.service.deferred_roll import DeferredRolls, deferring_rolls
 from tai42_skeleton.config.service.results import (
     ApplyResult,
+    FleetReloadOutcome,
     OrphanEnvWriteError,
     PersistedChange,
     ProfileApplyOutcome,
@@ -20,10 +21,10 @@ __all__ = [
     "ApplyResult",
     "ConfigService",
     "DeferredRolls",
+    "FleetReloadOutcome",
     "OrphanEnvWriteError",
     "PersistedChange",
     "ProfileApplyOutcome",
-    "RollOutcome",
     "deferring_rolls",
     "joined_span_release_errors",
 ]

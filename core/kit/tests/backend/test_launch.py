@@ -8,6 +8,7 @@ behavior does not depend on which engine is underneath.
 from __future__ import annotations
 
 import asyncio
+import os
 import signal
 import threading
 from collections.abc import Mapping, Sequence
@@ -17,7 +18,7 @@ import pytest
 from tai42_contract.backend.runtime import BackendRuntime, ExecutionMode, ProgressLiveness
 
 from tai42_kit.backend import DEFAULT_DRAIN_TIMEOUT_SECONDS, BackendDispatchSettings, ManagedBackend
-from tai42_kit.signals import signal_chain
+from tai42_kit.signals import STOP_SIGNALS, signal_chain
 
 from .fakes import (
     FakeApp,
@@ -272,6 +273,70 @@ async def test_an_inline_body_blocks_the_loop_and_is_wired_to_nothing() -> None:
     assert runtime.calls == ["build", "run", "drained", "aclose"]
 
 
+# How long the interruptible inline body waits for its interrupt before returning on its own.
+_INLINE_BODY_BOUND_SECONDS = 5.0
+
+
+async def test_an_inline_body_runs_under_the_default_dispositions_of_the_stop_signals() -> None:
+    # A host subscribes the stop signals on the chain before it launches. An inline body blocks
+    # the loop, so no chain subscriber could run until it returned; for its span the stop signals
+    # carry the process's default dispositions, and a Ctrl-C reaches the engine as the
+    # ``KeyboardInterrupt`` it ends on.
+    body_started = threading.Event()
+
+    class _InterruptibleScheduler(FakeSchedulerRuntime):
+        interrupted = False
+        dispositions: tuple[object, object] = (None, None)
+
+        def run_blocking(self) -> None:
+            cls = type(self)
+            cls.dispositions = (signal.getsignal(signal.SIGINT), signal.getsignal(signal.SIGTERM))
+            try:
+                self._enter_body()
+                body_started.set()
+                threading.Event().wait(timeout=_INLINE_BODY_BOUND_SECONDS)
+            except KeyboardInterrupt:
+                cls.interrupted = True
+            self._leave_body()
+
+    class _SchedulerBackend(FakeOnLoopBackend):
+        runtimes: ClassVar[_Runtimes] = {"scheduler": _InterruptibleScheduler}
+
+    def _interrupt_once_the_body_runs() -> None:
+        if body_started.wait(timeout=_INLINE_BODY_BOUND_SECONDS):
+            os.kill(os.getpid(), signal.SIGINT)
+
+    host_fired = asyncio.Event()
+    host = [signal_chain.add(sig, host_fired.set, name="host-stop") for sig in STOP_SIGNALS]
+    try:
+        sender = threading.Thread(target=_interrupt_once_the_body_runs, name="interrupt-sender")
+        sender.start()
+        await _SchedulerBackend().launch(["scheduler"])
+        sender.join()
+
+        runtime = _InterruptibleScheduler.latest
+        assert runtime is not None
+        assert _InterruptibleScheduler.interrupted is True
+        assert _InterruptibleScheduler.dispositions == (signal.default_int_handler, signal.SIG_DFL)
+        assert runtime.calls == ["build", "run", "drained", "aclose"]
+        # The interrupt went to the engine, not to the host's subscriber.
+        assert not host_fired.is_set()
+
+        # The chain took the stop signals back once the body returned: a real delivery reaches
+        # the host's subscriber again.
+        assert _chain_signals_installed()
+        os.kill(os.getpid(), signal.SIGINT)
+        await asyncio.wait_for(host_fired.wait(), timeout=5)
+    finally:
+        for subscription in host:
+            subscription.cancel()
+
+
+def _chain_signals_installed() -> bool:
+    """Whether every stop signal carries the chain's handler rather than a default disposition."""
+    return all(signal.getsignal(sig) not in (signal.SIG_DFL, signal.default_int_handler) for sig in STOP_SIGNALS)
+
+
 async def test_a_non_consuming_runtime_skips_the_readiness_gate_but_still_builds() -> None:
     # No app is bound at all here: a runtime that pulls no work never touches the
     # readiness latch, so it must not reach for the app handle. Building is not
@@ -348,14 +413,14 @@ def test_the_default_drain_budget_covers_the_default_job_budget() -> None:
     # A warm drain waits for in-flight work to finish, so a bound below the job
     # budget abandons — and severs — exactly the work it exists to protect.
     assert BackendDispatchSettings().task_timeout < DEFAULT_DRAIN_TIMEOUT_SECONDS
-    assert ManagedBackend.drain_timeout == DEFAULT_DRAIN_TIMEOUT_SECONDS
+    assert FakeOnLoopBackend().drain_timeout == DEFAULT_DRAIN_TIMEOUT_SECONDS
 
 
 def test_the_default_drain_budget_is_the_dispatch_job_budget_default_plus_a_margin() -> None:
-    from tai42_kit.backend.base import _DRAIN_MARGIN_SECONDS
+    from tai42_kit.backend import DRAIN_MARGIN_SECONDS
 
     job_budget_default = BackendDispatchSettings.model_fields["task_timeout"].default
-    assert float(job_budget_default) + _DRAIN_MARGIN_SECONDS == DEFAULT_DRAIN_TIMEOUT_SECONDS
+    assert float(job_budget_default) + DRAIN_MARGIN_SECONDS == DEFAULT_DRAIN_TIMEOUT_SECONDS
 
 
 def test_a_binding_can_read_its_drain_budget_from_live_settings() -> None:

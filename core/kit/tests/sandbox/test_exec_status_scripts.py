@@ -1,4 +1,8 @@
-"""The killed exec's status scripts, run by a host shell with their files in a temporary directory."""
+"""The killed exec's status scripts, run by a shell in a process namespace of their own.
+
+Their files sit in a temporary directory. The kill's ``/proc`` scan must see only the test's own processes,
+as inside the exec's container it sees only that container's.
+"""
 
 from __future__ import annotations
 
@@ -31,6 +35,10 @@ from tai42_kit.sandbox.exec_status_scripts import (
     record_argv_status,
     report_argv_status,
 )
+
+from .process_namespace import PROCESS_NAMESPACE_MARKS
+
+pytestmark = PROCESS_NAMESPACE_MARKS
 
 _SCRIPT_TIMEOUT = 10
 

@@ -237,7 +237,7 @@ async def test_a_session_call_outliving_the_budget_is_reported_and_its_client_re
             await state.held_started.wait()
             await _reload_from_outside_any_session()
             assert _drain_errors(caplog) == [
-                f"epoch {boot.number} retire: 1 request(s) still in flight after the drain budget"
+                f"epoch {boot.number} retire: 1 unit(s) of work still in flight after the drain budget"
             ]
             with pytest.raises(McpError, match="Connection closed"):
                 async with asyncio.timeout(ANSWER_BOUND_S):

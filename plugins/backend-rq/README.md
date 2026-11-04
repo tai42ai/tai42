@@ -24,9 +24,9 @@ just joins that bus like any other worker. This package is one such backend
 provider's own full doc home, and the documentation site covers the
 platform-level story:
 
-- Backend concept: https://tai42.ai/concepts/backends
-- Build a backend (author guide): https://tai42.ai/guides/authors/backend
-- Ecosystem catalog: https://tai42.ai/reference/catalog
+- Backend concept: https://docs.tai42.ai/concepts/backends
+- Writing a backend (section of the backend concept): https://docs.tai42.ai/concepts/backends#writing-a-backend
+- Plugin catalog: https://docs.tai42.ai/plugins
 
 ## Install
 
@@ -66,7 +66,8 @@ Importing the package registers, as an import side-effect on the global
 
 - **`RqBackend`** via `@tai42_app.backends.register_backend` — the `launch`
   entrypoint (`worker` / `beat` / `dashboard`).
-- **The `backend_*` tool surface** via `@tai42_app.tools.tool` (see below).
+- **The `backend_*` tool surface**, registered by the kit over this backend's
+  worker inspection and schedule store as tools of `tai42_backend_rq` (see below).
   `backend_list_schedules`, `backend_delete_schedule`,
   `backend_export_schedules`, and `backend_import_schedules` are the marker
   tools the host probes for scheduling availability and uses for the backup
@@ -88,6 +89,10 @@ value raises `ValueError` before anything is written. Unset, the job goes to
 tool with its own `queue` parameter cannot take a `sync_task` or `async_task`
 branch. Recurring schedules carry no queue: `beat` puts them on
 `RQ_QUEUE_NAME`, so they need a worker without a label.
+
+A callback runs only when its job succeeds: the callback job is queued on the
+job's success, and a callback job that finds its predecessor failed or still
+unfinished raises.
 
 A job does not wait for another job: it chains the next one with
 `callback_kwargs`. `sync_task` and `backend_task_result` (given a `timeout`) are
@@ -115,6 +120,34 @@ works anywhere.
   A waiting worker that loses Redis keeps reconnecting through RQ's own loop,
   logged at ERROR, outside `RQ_RETRY_ATTEMPTS`; `--redis-url` replaces only the
   URL, the other `RQ_` connection settings still apply.
+
+  On `--pool gevent` the worker must be patched by gevent's own patch
+  (`gevent.monkey.patch_all`) before anything else is imported. The worker
+  declares that patch as its process prelude, so `tai backend worker` reads its
+  configuration, then restarts itself once, in place, with the patch applied
+  first: the same process id and the same arguments, and one
+  `restarting with process prelude gevent.monkey:patch_all` log line. Every job's
+  coroutine then runs on the host's event loop, the one loop the process's OS
+  thread runs, beside the process's own work on it (the worker-bus subscription);
+  the kit resources bound to that loop (pooled clients, checkpoint savers, stores)
+  are the host's, released at its stop. rq's own scheduler, which moves delayed
+  (`eta` / `countdown`) jobs onto the queue, runs as a thread of this worker
+  process on this pool rather than as the forked child the other pools use; a
+  job that holds the CPU stalls the host loop and that thread alike until it
+  yields. A job past `RQ_TASK_TIMEOUT` has its
+  coroutine cancelled on that loop at the budget, its cleanup run there, and fails
+  with rq's `JobTimeoutException`. On `prefork` and `solo` each job runs its
+  coroutine on a fresh loop of its own. A job past `RQ_TASK_TIMEOUT` there has
+  its coroutine cancelled and its cleanup run on that loop, then fails with
+  `JobTimeoutException`; on `prefork` a thread the job awaits (a sync tool's) is
+  not waited for and ends on its own. A coroutine that catches the cancel and
+  runs on is not ended by the budget: on `solo` and `gevent` it runs on until the
+  worker stops reporting its liveness a second past the budget and the probe ends
+  the worker (see Liveness), and a stop sent once the budget has fired raises
+  nothing into it (see `backend_cancel_task`); on `prefork` rq kills the
+  work-horse once the job runs 60 seconds past the budget. As the job ends, the
+  kit resources bound to its loop are released, then the tasks left on that loop
+  are cancelled and run to their end, and the loop closes.
 - `beat [-b/--burst] [-i/--interval SECONDS] [-v/--verbose] [--quiet] [--path PATH] [--pid FILE] [-j/--job-class CLASS] [-u/--url URL]`
   — runs the recurring-job scheduler (`rq-scheduler`'s `Scheduler`, with its
   option names, defaults and meanings), on the same connection settings as the
@@ -150,9 +183,9 @@ own `TAI_BACKEND_LIVENESS_PATH`, and removes its file when it exits.
   under `gevent` too, so a job that holds the CPU does not starve it.
   `solo` ends a job at `RQ_TASK_TIMEOUT` only while it runs Python code, not
   while it blocks in a C call; `gevent` ends it only when it yields to gevent,
-  not while it holds the CPU or blocks without yielding. So the monitor stops
-  reporting once a job is still running a second past its timeout, and the probe
-  ends the worker.
+  not while it holds the CPU or blocks without yielding; and on either pool a
+  job that catches the timeout runs on. So the monitor stops reporting once a
+  job is still running a second past its timeout, and the probe ends the worker.
   A report that fails (the file is owned by another live process, or cannot be
   written) stops the worker before its next job, and the launch exits non-zero.
 - `beat` reports each pass of the scheduler loop, promising the next within its
@@ -172,29 +205,42 @@ bus subscription; this backend ships no control plane of its own.
 
 ## Fork safety
 
-On the prefork pool the worker shuts down the monitoring writer before the
-first fork (the contract's fork-safe evict — the vendor client's background
-threads do not survive `fork()`), and on macOS it disables `urllib` system
-proxy detection, which deadlocks in forked children during SSL setup. An
-`os.register_at_fork` hook — installed on *every* pool, since `solo` and
-`gevent` still spawn the `rq-scheduler` child — repeats the evict in each
-forked child, which then rebuilds a clean client lazily. Every step logs
-loudly; telemetry is never silently disabled.
+The worker installs the kit's fork guard (an `os.register_at_fork` hook) on
+*every* pool. It covers every fork that runs the interpreter's fork hooks:
+`os.fork`, `multiprocessing`'s fork context, and a `subprocess` started with a
+`preexec_fn`. A `subprocess` started without one runs no fork hooks and no
+Python before it execs, so nothing applies to it. Every child the guard covers —
+the work-horses, the `rq-scheduler` child that `prefork` and `solo` spawn, and
+any such child other code in the process forks — resets the fork-gate state it
+inherited and shuts down the monitoring writer it inherited (the vendor
+client's background threads do not survive `fork()`), then rebuilds a clean
+client lazily. On the prefork pool on macOS the worker also disables `urllib`
+system proxy detection, which deadlocks in forked work-horses during SSL setup.
+Every step logs loudly; telemetry is never silently disabled.
 
 The fork gate is the mutual exclusion between this worker and a config
 reload. A reload pops the manifest modules out of `sys.modules` and re-imports
 them; a child forked during that window inherits a held `importlib` lock whose
 owner thread no longer exists and hangs forever on its first import. So:
 
-- **every pool** holds the gate across the `fork()` instant of every child it
-  forks — each work-horse and every `rq-scheduler` spawn — with a job span the
-  worker takes around the fork itself. The kit's fork guard (an
-  `os.register_at_fork` hook, which also resets the gate state the child
-  inherits) holds a span around every other fork of the process, and a fork
-  inside the worker's own span nests in it. A child forked outside the window
-  is immune however long its job runs. A job that arrives mid-reload waits for
-  the re-import to finish, up to 120s, before forking, and reports the worker's
-  progress each second while it waits, so the probe reads it alive.
+- **prefork / solo** hold the gate across the `fork()` instant of every child
+  the process forks off an event loop's thread, through the kit's fork guard:
+  each prefork work-horse and every `rq-scheduler` spawn. A child forked
+  outside the window is immune however long its job runs. A job that arrives
+  mid-reload waits for the re-import to finish, up to 120s, before forking, and
+  reports the worker's progress each second while it waits, so the probe reads
+  it alive: that wait is on the work loop's own thread and holds up its next
+  pass. A fork from any other thread waits the same way and reports nothing,
+  since the work loop passes or stalls without it. The gevent worker forks no
+  child of its own (it runs rq's scheduler as a thread). Under its patch a
+  thread started with `threading` is a green thread on the OS thread that runs
+  the host's loop, and the kit's guard never makes a fork on a loop's thread
+  wait, since that would block the loop. A native OS thread runs no loop (the
+  monitor thread each in-process job starts, gevent's own threadpool), so a
+  Python-level fork from one waits out a running re-import, reporting nothing;
+  the monitor thread itself never forks. On that pool the guard otherwise
+  resets the gate state and evicts the monitoring writer in the children that
+  other code forks with a Python-level fork.
 - **solo / gevent** run jobs in-process, with no inherited snapshot to protect
   them, so the gate is held for the whole job. A job that arrives mid-reload
   waits for the re-import the same way, reporting each second; a config reload
@@ -213,29 +259,65 @@ the budget is exhausted.
 
 ## Tools
 
+The kit registers the `backend_*` tool surface over this backend's worker
+inspection and schedule store (`tai42_kit.backend.register_inspection_tools`
+and `register_schedule_tools`): each tool takes the same arguments and gives
+the same reply shape on every backend, and a tool or form of it the backend
+cannot serve raises `tai42_kit.backend.UnsupportedBackendTool` (a
+`NotImplementedError`).
+
 Task/worker tools: `backend_task_status`, `backend_task_result` (raises the
-task's stored failure — the persisted traceback text — when the task FAILED),
-`backend_cancel_task`, `backend_active_tasks` (keyed by worker name),
+task's stored failure — the persisted traceback text — when the task FAILED; an
+unfinished task replies `Task <id> is not ready (status: <status>)`),
+`backend_cancel_task` (RQ's own `Job.cancel` for a job no worker has claimed; a
+recurring job is first taken off the scheduler. `terminate=True` also stops a
+running job with RQ's stop-job command; without `terminate` a job that has not
+started is kept from running, and a job a worker has claimed or is running is
+left to finish, its record untouched. A job that ends on the stop is marked
+`stopped`. On the `prefork` pool the stop kills the work-horse with `SIGKILL`,
+so the job's cleanup does not run. On the `solo` and `gevent` pools, which run
+the job in the worker process, it is raised into the job the way the pool's
+task timeout is — into the job's OS thread on `solo`, into its greenlet on
+`gevent` — and the job's async work is cancelled and run to its end, its
+cleanup included; a job blocked in C code, or holding the CPU on `gevent`, is
+ended when that returns. Async work that catches the cancel and runs on keeps
+the job running: the job still ends on the stop, marked `stopped`, if that work
+returns within `RQ_TASK_TIMEOUT`; once it runs a second past it, the worker
+stops reporting its liveness and the probe ends the worker. The task timeout and
+the stop are raised into a job once between them, whichever comes first, and the
+other is not raised: a stop sent once the task timeout has fired raises nothing
+into the job, which runs on until the probe ends the worker a second past that
+timeout, and is still marked `stopped` if it ends in rq's failure handling
+before then. A job that ends before the stop lands is reported with the status
+it reached, and a stop not confirmed within the task timeout says so),
+`backend_active_tasks` (keyed by worker name; each running job carries its `id`,
+`description`, `origin` queue, `status`, `enqueued_at` and `started_at` from
+RQ's job record),
 `backend_reserved_tasks` (keyed by queue name — RQ reserves work per queue),
 `backend_scheduled_tasks` (keyed by job id, value carries `next_run_at_ts`),
 `backend_worker_stats` (keyed by worker name), `backend_worker_queues`,
-`backend_ping_worker`, `backend_list_active_workers`.
+`backend_ping_worker`, `backend_list_active_workers`. `backend_ping_worker`,
+`backend_active_tasks`, `backend_worker_stats` and `backend_worker_queues`
+take a `worker_name` that narrows the call to one worker.
 
-Schedule tools: `backend_schedule_exists`, `backend_get_schedule`,
+Schedule tools: `backend_schedule_exists`, `backend_get_schedule` (the
+contract's `ScheduleDetail`: the listing row plus `args` and `kwargs`),
 `backend_list_schedules` (the contract's `ScheduleListRow`: `name` / `tool` /
-`cadence` / `enabled` / `next_run_at_ts` / `next_run_at_iso`; `enabled` is
-always true because RQ has no disabled-schedule state),
-`backend_delete_schedule`, `backend_enable_schedule` (delegates to run-now and
-returns that op's `queued` / `not_found` statuses),
-`backend_disable_schedule` (delegates to delete and returns that op's
-`deleted` / `not_found` statuses — RQ has no disabled-schedule state),
+`cadence` / `enabled` / `next_run_at_ts` / `next_run_at_iso` / `error`;
+`enabled` is always true because RQ has no disabled-schedule state),
+`backend_delete_schedule`, `backend_enable_schedule` (writes nothing: every
+stored schedule is enabled; replies `enabled` or `not_found`),
+`backend_disable_schedule` (raises `UnsupportedBackendTool` and leaves the
+schedule as it is — RQ has no disabled-schedule state),
 `backend_run_schedule_now`, `backend_update_schedule`,
 `backend_export_schedules`, `backend_import_schedules` (the contract's
 `ScheduleRecord` rows and `ScheduleImportReport`; per-row errors surfaced as
 `{"index", "name", "error"}`, never swallowed; a relative interval or a
-disabled row is a per-row error).
+disabled row is a per-row error). A status reply is `{"status", "name"}`; an
+update given no change replies `skipped` with `No changes provided; nothing
+updated.`
 
-Not supported on RQ (raise `NotImplementedError`): `backend_registered_tasks`,
+Not supported on RQ (raise `UnsupportedBackendTool`): `backend_registered_tasks`,
 `backend_list_failed_tasks`.
 
 ## Configuration

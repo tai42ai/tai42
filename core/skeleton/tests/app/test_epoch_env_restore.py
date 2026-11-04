@@ -15,8 +15,9 @@ from tai42_kit.clients.base import current_client_epoch
 from tai42_kit.settings import cache_registry
 from tai42_kit.settings.cache_registry import register_settings_reset
 from tai42_kit.utils import worker_secret_capability as gate_state
+from tests._fakes.rebuild import no_rebuild
 
-from tai42_skeleton.app import applied_env, registry_staging
+from tai42_skeleton.app import applied_env, instance, registry_staging
 from tai42_skeleton.app import epoch as epoch_mod
 from tai42_skeleton.app.epoch import Epoch, build_and_swap_epoch, current_epoch
 from tai42_skeleton.app.instance import build_app
@@ -43,10 +44,10 @@ class _StagingRefusedError(RuntimeError):
 
 @pytest.fixture(autouse=True)
 def _isolated_epoch() -> Iterator[None]:
-    """A boot epoch to keep serving, and the spine globals restored after."""
+    """A boot epoch with a fresh serving core to keep serving, and the spine globals restored after."""
     saved = {name: getattr(epoch_mod, name) for name in ("_current", "_serving_slot")}
     loaded_before = set(applied_env._loaded_env_keys)
-    epoch_mod._current = Epoch(number=current_client_epoch(), serving_app=None)
+    epoch_mod._current = Epoch(number=current_client_epoch(), serving_app=None, core=instance.app._build_serving_core())
     epoch_mod._serving_slot = {}
     applied_env._loaded_env_keys = {"TAI_EPOCH_ENV_RESTORE_LOADED"}
     try:
@@ -83,7 +84,7 @@ async def _assert_restored_after(proposed: dict[str, str], error: type[Exception
 
     with pytest.raises(error):
         await build_and_swap_epoch(
-            proposed, rebuild=lambda: None, build_serving_app=_never_built, ownership=DeploymentOwnership()
+            proposed, rebuild=no_rebuild, build_serving_app=_never_built, ownership=DeploymentOwnership()
         )
 
     assert dict(os.environ) == env_before

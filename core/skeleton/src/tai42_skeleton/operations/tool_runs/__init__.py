@@ -74,6 +74,7 @@ from .supervisor import (  # noqa: E402
     _refresh_liveness_loop,
     drain_supervisors,
     run_recorded,
+    wait_supervisors,
 )
 
 # A reload can rebuild THIS package around a still-cached door submodule whose module-top
@@ -100,4 +101,5 @@ __all__ = [
     "run_recorded",
     "submit_run",
     "tool_runs_settings",
+    "wait_supervisors",
 ]

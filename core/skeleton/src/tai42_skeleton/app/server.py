@@ -51,6 +51,7 @@ from tai42_skeleton.app.transport_stream import TransportStreamDrainExemptMiddle
 from tai42_skeleton.config import ConfigManagerFactory
 from tai42_skeleton.middleware.audit_log import AuditLogMiddleware
 from tai42_skeleton.middleware.body_limit import BodyLimitMiddleware
+from tai42_skeleton.middleware.writer_exit import WriterExitMiddleware
 from tai42_skeleton.presets.manager import PresetManager
 from tai42_skeleton.settings.audit_log import audit_log_settings
 from tai42_skeleton.storage import StorageRegistry
@@ -103,10 +104,10 @@ class TaiMCP(TaiMCPLifecycleMixin):
         self._auth_override: TokenVerifier | None = kwargs.pop("auth", None)
         self._server_kwargs: dict[str, Any] = kwargs
 
-        # The half-built core during a build, and otherwise ``None`` so reads resolve
-        # to the live epoch's core. Set to the eager boot-scaffold core at the end of
-        # construction so a freshly-built (un-booted) app still has a serving surface.
-        self._building: ServingCore | None = None
+        # The un-booted app's read target: the serving core every read resolves while no
+        # epoch is installed (before ``app_context`` and after it ends), ``None`` while an
+        # epoch serves. Set to the eager boot-scaffold core at the end of construction.
+        self._scaffold_core: ServingCore | None = None
 
         self._storage_registry: StorageRegistry = StorageRegistry()
         self._config_manager = ConfigManagerFactory.create()
@@ -139,11 +140,11 @@ class TaiMCP(TaiMCPLifecycleMixin):
         self._tool_meta_facet = ToolMetaFacet(self)
         self._states_facet = StatesFacet(self)
 
-        # The eager boot-scaffold core: an un-booted app (bare construction, an
-        # embedded read, the boot-time ``http_app`` build) needs a live serving
-        # surface before an epoch is installed. ``app_context`` promotes it to
-        # epoch 0; a reload replaces it with a freshly-built one.
-        self._building = self._build_serving_core()
+        # The eager boot-scaffold core, the un-booted app's read target: an un-booted app
+        # (bare construction, an embedded read, the boot-time ``http_app`` build) needs a
+        # serving surface before an epoch is installed. ``app_context`` installs a fresh
+        # core as epoch 0 and drops the scaffold; its end leaves a fresh scaffold again.
+        self._scaffold_core = self._build_serving_core()
 
     # -- Per-epoch serving core (fresh FastMCP + collaborators) ----------------
 
@@ -325,9 +326,8 @@ class TaiMCP(TaiMCPLifecycleMixin):
 
     @property
     def _live_manifest(self) -> dict[str, Any]:
-        if self._manifest is None:
-            raise RuntimeError("TaiMCP is not started — call start()/app_context first.")
-        return self._manifest.live_manifest.model_dump(mode="json", exclude_none=True)
+        """The LIVE serving generation's manifest, emitted (see :meth:`_require_live_manifest`)."""
+        return self._require_live_manifest().live_manifest.model_dump(mode="json", exclude_none=True)
 
     def _base_middleware(
         self, middleware: list[Middleware] | None, *, stream_path: str, carries_replies: bool
@@ -351,9 +351,13 @@ class TaiMCP(TaiMCPLifecycleMixin):
         RateLimitMiddleware, by contrast, rejects before the app is entered, so it
         stays an outer finalize wrapper.
 
+        The first entry runs the writer's own exit a request's change owes once its reply is sent
+        (:class:`~tai42_skeleton.middleware.writer_exit.WriterExitMiddleware`), outside every other
+        entry so every reply the stack sends passes through it.
+
         With access control DISABLED no ResourceGuard runs to bind the secret-read
-        capability, yet gate-off makes every caller the synthetic admin; the outermost
-        entry here binds that capability TRUE for the request so a gate-off caller reaches
+        capability, yet gate-off makes every caller the synthetic admin; the entry after the
+        writer's exit binds that capability TRUE for the request so a gate-off caller reaches
         an admin-fenced primitive exactly as ``resolve_caller`` admits it. Gate ON, the
         adapter's ResourceGuard owns the bind and this entry is absent.
 
@@ -368,6 +372,7 @@ class TaiMCP(TaiMCPLifecycleMixin):
         )
         audit = [Middleware(AuditLogMiddleware)] if audit_log_settings().enable else []
         return [
+            Middleware(WriterExitMiddleware),
             *gate_off_secret_capability,
             *audit,
             Middleware(BodyLimitMiddleware),
@@ -462,8 +467,16 @@ class TaiMCP(TaiMCPLifecycleMixin):
         self._fast_mcp.run(transport, show_banner, **transport_kwargs)
 
     async def run_backend(self, args) -> None:
-        """Launch the background-execution backend with ``args``."""
-        await self._backend_holder.launch(args)
+        """Launch the background-execution backend with ``args``, its drain bound declared as this process's exit drain.
+
+        The backend owns this process's stop phase: it may take its declared drain
+        (:attr:`~tai42_contract.backend.Backend.drain_timeout`) to finish its in-flight work. The
+        app's lifespan shutdown runs after it, and the bounds its modules declare for that shutdown
+        add to the backend's drain in the bound the bus announces when the worker leaves.
+        """
+        backend = self._backend_holder.registered()
+        self.exit_drain.declare(lambda: backend.drain_timeout)
+        await backend.launch(args)
 
     # -- Storage / resources -------------------------------------------------
 

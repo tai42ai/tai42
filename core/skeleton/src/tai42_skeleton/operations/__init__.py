@@ -12,7 +12,7 @@ import pkgutil
 import sys
 from collections.abc import Iterator
 
-from tai42_skeleton.operations.adapter import OperationResponse, register_operation_route
+from tai42_skeleton.operations.adapter import register_operation_route
 from tai42_skeleton.operations.decorator import OPERATION_ATTR, operation, operation_metadata_of
 from tai42_skeleton.operations.errors import (
     BadRequestError,
@@ -162,7 +162,6 @@ __all__ = [
     "OperationFailedError",
     "OperationMetadata",
     "OperationRegistry",
-    "OperationResponse",
     "PayloadTooLargeError",
     "PermissionDeniedError",
     "PreconditionFailedError",

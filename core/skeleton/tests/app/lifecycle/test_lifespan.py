@@ -20,40 +20,69 @@ from ._doubles import _Mixin
 
 
 def _teardown_mixin(monkeypatch):
-    """A mixin with a fake clients facet plus the kit release and monitoring stubbed in the
-    lifecycle module namespace, so ``_teardown_resources`` is observable without real pools."""
+    """A mixin with the kit's loop-bound release and the monitoring stubbed in the lifecycle
+    module namespace, so ``_teardown_resources`` is observable without real resources.
+
+    ``steps`` notes each step as it runs, in order."""
     m = _Mixin()
-    clients = MagicMock(shutdown_clients=AsyncMock())
-    m.clients = clients
-    release = AsyncMock()
+    steps: list[str] = []
+    release = AsyncMock(side_effect=lambda: steps.append("loop-bound kit resources"))
     writer = MagicMock()
+    writer.flush.side_effect = lambda: steps.append("monitoring flush")
     monkeypatch.setattr("tai42_skeleton.app.lifecycle.release_loop_bound_resources", release)
     monkeypatch.setattr("tai42_skeleton.app.lifecycle.get_monitoring", lambda: MagicMock(writer=writer))
-    return m, clients, release, writer
+    return m, steps, release, writer
 
 
-def test_teardown_resources_releases_every_epoch_and_flushes(monkeypatch):
-    m, clients, release, writer = _teardown_mixin(monkeypatch)
-    asyncio.run(m._teardown_resources())
-    clients.shutdown_clients.assert_awaited_once()
-    release.assert_awaited_once_with(all_epochs=True)
+def test_teardown_resources_releases_the_kits_loop_bound_resources_then_flushes(monkeypatch, caplog):
+    m, steps, release, writer = _teardown_mixin(monkeypatch)
+    with caplog.at_level(logging.INFO, logger="tai42_skeleton.app.lifecycle.lifespan"):
+        asyncio.run(m._teardown_resources())
+    release.assert_awaited_once_with()
     writer.flush.assert_called_once_with()
+    assert steps == ["loop-bound kit resources", "monitoring flush"]
+    assert [r.getMessage() for r in caplog.records] == ["shutdown teardown finished: every step ran"]
 
 
-def test_teardown_resources_runs_every_step_then_raises_group(monkeypatch):
-    # One failing step must not skip the rest; collected failures surface as an
-    # ExceptionGroup rather than being swallowed.
-    m, clients, release, writer = _teardown_mixin(monkeypatch)
+def test_teardown_resources_flushes_when_the_kit_release_raises_then_raises_the_one_failure(monkeypatch):
+    # A failing kit release must not skip the flush; the failure is raised once the last step ran.
+    m, _steps, release, writer = _teardown_mixin(monkeypatch)
     release.side_effect = RuntimeError("checkpoint boom")
 
-    with pytest.raises(ExceptionGroup) as ei:
+    with pytest.raises(RuntimeError, match="checkpoint boom"):
         asyncio.run(m._teardown_resources())
 
-    # Every other step still ran despite the release failure.
-    clients.shutdown_clients.assert_awaited_once()
     writer.flush.assert_called_once_with()
-    assert "shutdown teardown failed" in str(ei.value)
-    assert any(isinstance(e, RuntimeError) for e in ei.value.exceptions)
+
+
+def test_teardown_resources_raises_several_failures_together(monkeypatch):
+    m, _steps, release, writer = _teardown_mixin(monkeypatch)
+    release.side_effect = RuntimeError("checkpoint boom")
+    writer.flush.side_effect = OSError("flush boom")
+
+    with pytest.raises(ExceptionGroup, match="shutdown teardown failed") as ei:
+        asyncio.run(m._teardown_resources())
+
+    assert [type(e) for e in ei.value.exceptions] == [RuntimeError, OSError]
+
+
+def test_teardown_resources_lets_a_cancellation_through_and_logs_the_failures_before_it(monkeypatch, caplog):
+    # A cancellation is no step failure: it propagates as itself, a failure collected before it
+    # is logged rather than lost, and a WARNING names the step it cut short and the steps that
+    # never ran.
+    m, _steps, release, writer = _teardown_mixin(monkeypatch)
+    release.side_effect = RuntimeError("pool boom")
+    writer.flush.side_effect = asyncio.CancelledError
+
+    with caplog.at_level(logging.INFO), pytest.raises(asyncio.CancelledError):
+        asyncio.run(m._teardown_resources())
+
+    logged = [r.exc_info[1] for r in caplog.records if r.levelno == logging.ERROR and r.exc_info]
+    assert [str(e) for e in logged] == ["pool boom"]
+    warned = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert warned == [
+        "shutdown teardown cut short by CancelledError during monitoring flush, which did not finish; never ran: none"
+    ]
 
 
 def test_app_context_startup_handler_failure_raises(monkeypatch):
@@ -61,7 +90,11 @@ def test_app_context_startup_handler_failure_raises(monkeypatch):
     # handler must abort the boot loudly, never yield a healthy-looking
     # half-initialized app.
     m, *_ = _teardown_mixin(monkeypatch)
-    monkeypatch.setattr(m, "start", lambda manifest: None)
+
+    async def start(manifest):
+        return None
+
+    monkeypatch.setattr(m, "start", start)
 
     @m._on_startup
     async def boom():
@@ -96,6 +129,41 @@ def test_the_lifespan_exit_leaves_no_state_of_the_generation_it_served(monkeypat
     assert instance.app._mcp_bound_tools == {}
     assert instance.app._mcp_listed_tools == {}
     assert instance.app._failed_mcps == {}
+
+
+def test_a_later_app_context_on_the_same_loop_leases_a_pooled_client_anew_and_its_exit_releases_it():
+    from tai42_kit.clients import PooledClient
+
+    from tai42_skeleton.app import instance
+
+    events: list[str] = []
+
+    class _ProbeClient(PooledClient[str]):
+        async def _create(self, **kwargs: object) -> str:
+            return str(kwargs["context"])
+
+        async def _close(self, client: str) -> None:
+            events.append(f"closed {client}")
+
+    async def run():
+        for context in ("first", "second"):
+            async with (
+                instance.app.app_context(Manifest.model_validate({})),
+                _ProbeClient().current(context=context) as client,
+            ):
+                events.append(f"leased {client}")
+            events.append(f"exited {context}")
+
+    asyncio.run(run())
+
+    assert events == [
+        "leased first",
+        "closed first",
+        "exited first",
+        "leased second",
+        "closed second",
+        "exited second",
+    ]
 
 
 def test_the_lifespan_binds_the_refresh_owner_to_its_serving_loop_and_closes_it_at_shutdown():

@@ -91,10 +91,13 @@ def create_app():
     stateless_http = os.getenv("TAI_STATELESS_HTTP") == "1"
     served = asgi.create_app(transport=cast("asgi.Transport", transport), stateless_http=stateless_http)
 
-    # This CLI-owned worker owns its process's signal handling, so it ends its event streams
-    # only once its in-flight replies are written. uvicorn runs this factory inside its signal
-    # capture; the public factory arms nothing, so an embedded host keeps its own.
-    arm_serve_exit()
+    # This CLI-owned worker owns its process's signal handling, so it begins its leaving at the
+    # first stop signal, ends its event streams only once its in-flight replies are written, and
+    # its server's stop phase is bounded by uvicorn's graceful-shutdown cap, declared as the
+    # runtime phase of its exit drain. uvicorn runs this factory inside its signal capture; the
+    # public factory arms nothing, so an embedded host keeps its own.
+    app = instance.build_app()
+    arm_serve_exit(app.exit_drain, app.stop_began)
     return served
 
 

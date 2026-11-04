@@ -18,6 +18,7 @@ from typing import Any
 
 import pytest
 from tai42_kit.settings import reset_all_settings
+from tai42_kit.utils.run_bound import bounded_run
 
 from tai42_skeleton.app import instance
 from tai42_skeleton.app.boot_rules import (
@@ -27,22 +28,31 @@ from tai42_skeleton.app.boot_rules import (
     WorkersNeedHooksStoreError,
     WorkersNeedSubMcpStoreError,
 )
-from tai42_skeleton.app.bus import OpOutcome
+from tai42_skeleton.app.bus import FleetResult, OpOutcome, WorkerIdentity, WorkerKind, WorkerResult
+from tai42_skeleton.app.discarded_build import DISCARDED_BUILD_STATUS
 from tai42_skeleton.app.epoch import Epoch
+from tai42_skeleton.app.recycle import RECYCLED, RecycleReport, RecycleRow
 from tai42_skeleton.config.deployment_env import DeploymentOwnership
 from tai42_skeleton.config.file_manager import FileConfigManager
+from tai42_skeleton.config.recycle_policy import RecycleReason
 from tai42_skeleton.operations._broadcast import FleetBroadcastError
 
+from .._fakes.bus import FakeBus
 from .._fakes.combo_check_app import CHECK_DOCUMENT, booted_check_app, clean_server, factory_calls
 from .fake_pipeline import (
     FakeConfigStore,
     FakeReloadAdmin,
     RecordingBus,
     _no_bus,
+    _orchestrate_spy,
     _reset_settings_after,  # noqa: F401  — autouse fixture, active on import
     _service,
     _with_bus,
+    discarded_build_failure,
 )
+
+# The door's edge settles the writer's exit its change owes; these tests drive the door below it.
+pytestmark = pytest.mark.usefixtures("writer_exit_edge")
 
 # ---------------------------------------------------------------------------
 # Failure discipline
@@ -57,7 +67,7 @@ async def test_a_combo_on_a_base_not_bound_passes_the_gate_and_the_reload_refusa
     async with booted_check_app():
         store = FakeConfigStore(manifest=dict(CHECK_DOCUMENT))
         admin = FakeReloadAdmin(raise_reload=RuntimeError("Tools 'fresh' not found in server."))
-        service, _admin, _bus = _service(store, admin=admin, combo_check=instance.app.extensions.check_combo)
+        service, _admin, _bus = _service(store, admin=admin, combo_check=instance.app.extensions)
         factory_calls().clear()
         combo = [{"name": "labelled", "config": {"label": "ok"}}]
 
@@ -94,6 +104,114 @@ async def test_local_reload_failure_after_persist_still_broadcasts_then_raises(m
     assert exc.value.report.op == "reload_config"
 
 
+async def test_a_local_reload_failure_still_restarts_the_drifted_siblings_and_raises_with_the_roll(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The writer's own reload failed after the persist: the siblings' reports still decide the
+    # roll — serve-b reports a key and is restarted, serve-c confirmed clean and is left running —
+    # and the writer, its state unknown, has its own restart follow the roll.
+    _with_bus(monkeypatch)
+    orch, seen = _orchestrate_spy(
+        RecycleReport(rows=[RecycleRow(name="serve-b", kind="serve", generation_before=1, status=RECYCLED)])
+    )
+    bus = FakeBus(origin="serve-writer", remotes=["serve-b", "serve-c"])
+    bus.remote_payloads.update(
+        {"serve-b": {"status": "ok", "awaiting_respawn": ["BACKEND_MANIFEST_KEY"]}, "serve-c": {"awaiting_respawn": []}}
+    )
+    store = FakeConfigStore(manifest={"mcp": []})
+    admin = FakeReloadAdmin(raise_reload=RuntimeError("reload boom"))
+    service, _admin, _bus = _service(store, admin=admin, bus=bus, orchestrate=orch)
+
+    def add_server(document: dict[str, Any]) -> None:
+        document["mcp"] = [{"title": "srv", "config": {"url": "http://x"}}]
+
+    with pytest.raises(FleetBroadcastError, match="reload boom") as exc:
+        await service.apply_change(add_server)
+
+    roll = exc.value.roll
+    assert roll is not None
+    assert roll.decision.reported.keys() == {"serve-b"}
+    assert roll.decision.clean == {"serve-c"}
+    assert roll.decision.writer_reason == RecycleReason(unknown="its reload reported failed")
+    assert seen["applier_self_deferred"] is True
+    assert roll.self_exit_armed is True
+    assert roll.awaiting_respawn == []
+
+
+async def test_a_local_reload_refused_at_its_epoch_build_raises_and_leaves_the_writer_serving(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The writer's build was discarded before its swap and measured no drift after the discard: no
+    # restart of its own follows; the siblings' reports still decide the roll, and the refusal still
+    # raises.
+    _with_bus(monkeypatch)
+    orch, _seen = _orchestrate_spy(
+        RecycleReport(rows=[RecycleRow(name="serve-b", kind="serve", generation_before=1, status=RECYCLED)])
+    )
+    bus = FakeBus(origin="serve-writer", remotes=["serve-b", "serve-c"])
+    bus.remote_payloads.update(
+        {"serve-b": {"status": "ok", "awaiting_respawn": ["BACKEND_MANIFEST_KEY"]}, "serve-c": {"awaiting_respawn": []}}
+    )
+    refusal = await discarded_build_failure(RuntimeError("chain pending: run tai db migrate"))
+    store = FakeConfigStore(manifest={"mcp": []})
+    service, _admin, _bus = _service(store, admin=FakeReloadAdmin(raise_reload=refusal), bus=bus, orchestrate=orch)
+
+    def add_server(document: dict[str, Any]) -> None:
+        document["mcp"] = [{"title": "srv", "config": {"url": "http://x"}}]
+
+    with pytest.raises(FleetBroadcastError, match="chain pending") as exc:
+        await service.apply_change(add_server)
+
+    assert exc.value.__cause__ is refusal
+    _op, _targets, local = bus.publish_calls[0]
+    assert local is not None
+    assert local.outcome == OpOutcome.failed
+    assert local.payload == {"status": DISCARDED_BUILD_STATUS, "awaiting_respawn": []}
+    roll = exc.value.roll
+    assert roll is not None
+    assert roll.decision.writer_reason is None
+    assert roll.decision.reported.keys() == {"serve-b"}
+    assert roll.decision.clean == {"serve-c"}
+    assert roll.self_exit_armed is False
+
+
+@pytest.mark.parametrize(
+    "bus_fault",
+    [
+        pytest.param({"reachable": False, "error": "ConnectionError: bus down"}, id="a-returned-unreachable-report"),
+        pytest.param({"publish_error": RuntimeError("ResponseError: WRONGTYPE")}, id="a-raised-broadcast"),
+    ],
+)
+async def test_a_local_reload_refused_at_its_epoch_build_is_never_restarted_when_its_broadcast_misses_the_bus(
+    monkeypatch: pytest.MonkeyPatch, bus_fault: dict[str, Any]
+) -> None:
+    # The report the broadcast left holds no row for the writer, yet the writer's own reload stated
+    # its refused build: the roll that follows in the request (its orchestration a spy here) judges
+    # it from that statement, clean, and arms no exit. The raised report stays the bus-unreachable
+    # shape.
+    _with_bus(monkeypatch)
+    orch, seen = _orchestrate_spy(RecycleReport())
+    refusal = await discarded_build_failure(RuntimeError("chain pending: run tai db migrate"))
+    store = FakeConfigStore(manifest={"mcp": []})
+    service, _admin, _bus = _service(
+        store, admin=FakeReloadAdmin(raise_reload=refusal), bus=RecordingBus(**bus_fault), orchestrate=orch
+    )
+
+    def add_server(document: dict[str, Any]) -> None:
+        document["mcp"] = [{"title": "srv", "config": {"url": "http://x"}}]
+
+    with pytest.raises(FleetBroadcastError) as exc:
+        await service.apply_change(add_server)
+
+    assert exc.value.report.reachable is False
+    assert exc.value.report.results == []
+    roll = exc.value.roll
+    assert roll is not None
+    assert roll.decision.writer_reason is None
+    assert seen["applier_self_deferred"] is False
+    assert roll.self_exit_armed is False
+
+
 async def test_broadcast_raise_after_persist_becomes_fleet_broadcast_error(monkeypatch: pytest.MonkeyPatch) -> None:
     _with_bus(monkeypatch)
     store = FakeConfigStore(manifest={"mcp": []})
@@ -121,6 +239,285 @@ async def test_broadcast_raise_after_persist_becomes_fleet_broadcast_error(monke
     assert exc.value.report.reachable is False
     assert exc.value.report.results == []
     assert "ResponseError" in (exc.value.report.error or "")
+
+
+@pytest.mark.usefixtures(clean_server.__name__)
+async def test_a_roll_that_raises_after_a_failed_broadcast_still_raises_the_broadcast_failure_naming_both(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The broadcast fault raises again at the roll's own ask of serve-b: the change landed, so the
+    # raised error stays the broadcast failure, and its report names the roll's failure too.
+    _with_bus(monkeypatch)
+    store = FakeConfigStore(manifest={"mcp": []})
+    bus = RecordingBus(remotes=["serve-b"], publish_error=RuntimeError("ResponseError: WRONGTYPE"))
+    service, _admin, _bus = _service(store, bus=bus)
+
+    def add_server(document: dict[str, Any]) -> None:
+        document["mcp"] = [{"title": "srv", "config": {"url": "http://x"}}]
+
+    with caplog.at_level(logging.ERROR), pytest.raises(FleetBroadcastError) as exc:
+        await service.apply_change(add_server)
+
+    assert store.persisted == [{"mcp": [{"title": "srv", "config": {"url": "http://x"}}]}]
+    # The failed roll's outcome rides the error: no roll report, no exit armed, and the
+    # unreachable report states no worker as awaiting a respawn.
+    roll = exc.value.roll
+    assert roll is not None
+    assert (roll.recycle, roll.self_exit_armed, roll.awaiting_respawn) == (None, False, [])
+    assert exc.value.report.error == (
+        "RuntimeError: ResponseError: WRONGTYPE (the recycle roll the change owes also failed: "
+        "RuntimeError: ResponseError: WRONGTYPE)"
+    )
+    assert "the recycle roll the change owes also failed" in caplog.text
+
+
+@pytest.mark.usefixtures(clean_server.__name__)
+async def test_a_roll_hand_off_that_fails_after_the_persist_raises_the_landed_change_as_a_fleet_broadcast_error(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Under a bound the change hands its roll to its member, whose app is not built here, so the
+    # hand-off fails after the persist landed: the door raises the landed change's error, never a
+    # bare one, and its report names the roll's failure.
+    _with_bus(monkeypatch)
+    store = FakeConfigStore(manifest={"mcp": []})
+    bus = RecordingBus(remotes=["serve-b"], remote_payload={"awaiting_respawn": ["TAI_BUS_HEARTBEAT_TTL"]})
+    service, _admin, _bus = _service(store, bus=bus)
+    monkeypatch.setattr(instance, "_app", None)
+
+    def add_server(document: dict[str, Any]) -> None:
+        document["mcp"] = [{"title": "srv", "config": {"url": "http://x"}}]
+
+    with caplog.at_level(logging.ERROR), bounded_run(), pytest.raises(FleetBroadcastError) as exc:
+        await service.apply_change(add_server)
+
+    assert store.persisted == [{"mcp": [{"title": "srv", "config": {"url": "http://x"}}]}]
+    assert isinstance(exc.value.__cause__, RuntimeError)
+    assert exc.value.roll is not None
+    assert exc.value.report.reachable is True
+    assert exc.value.report.error == (
+        "the recycle roll the change owes failed: RuntimeError: fleet recycle: the roll for this config change "
+        "could not be handed to 'serve-test', the bus member the change acts for — its app is not built. The roll did "
+        "not start; the reload broadcast reached the bus"
+    )
+    assert "the recycle roll the change owes failed" in caplog.text
+
+
+@pytest.mark.usefixtures(clean_server.__name__)
+async def test_a_failed_roll_hand_off_states_the_workers_still_awaiting_a_respawn_on_every_reader_of_its_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The hand-off is refused, so the roll did not start: serve-b, which reported a moved key,
+    # still awaits its respawn, and the error's roll says so — in the error reply's roll fields
+    # and in the backup import's section report alike.
+    from tai42_skeleton.backup.sections import _landed_change_report
+    from tai42_skeleton.operations._broadcast import roll_outcome_body
+
+    _with_bus(monkeypatch)
+    store = FakeConfigStore(manifest={"mcp": []})
+    bus = RecordingBus(remotes=["serve-b"], remote_payload={"awaiting_respawn": ["TAI_BUS_HEARTBEAT_TTL"]})
+    service, _admin, _bus = _service(store, bus=bus)
+    app = instance._app
+    monkeypatch.setattr(instance, "_app", None)
+
+    def add_server(document: dict[str, Any]) -> None:
+        document["mcp"] = [{"title": "srv", "config": {"url": "http://x"}}]
+
+    with bounded_run(), pytest.raises(FleetBroadcastError) as exc:
+        await service.apply_change(add_server)
+
+    awaiting = [{"name": "serve-b", "keys": ["TAI_BUS_HEARTBEAT_TTL"]}]
+    assert roll_outcome_body(exc.value.roll) == {
+        "recycle": None,
+        "awaiting_respawn": awaiting,
+        "roll_deferred": False,
+        "roll_deferred_to": None,
+    }
+    # The backup import reports the section from the same error.
+    monkeypatch.setattr(instance, "_app", app)
+    monkeypatch.setattr(instance.app, "_bus", bus)
+    section = _landed_change_report("manifest", exc.value, updated=1)
+    assert [worker.model_dump() for worker in section.awaiting_respawn] == awaiting
+    assert section.recycle is None
+    assert section.roll_deferred is False
+
+
+class _ForkedChildBus(RecordingBus):
+    """A forked job child's bus, acting for its member ``serve-test``; the carry-roll op gets ``carry_answer``."""
+
+    def __init__(self, carry_answer: FleetResult, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.member_identity = self.identity
+        self.identity = WorkerIdentity(
+            name="serve-test/fork-9", kind=WorkerKind.backend, pid=9, generation=0, member=False
+        )
+        self._carry_answer = carry_answer
+
+    async def publish(self, op: Any, targets: Any, local: Any, *, expected_at_start: Any = None) -> FleetResult:
+        if op.op == "carry_roll":
+            return self._carry_answer
+        return await super().publish(op, targets, local, expected_at_start=expected_at_start)
+
+
+@pytest.mark.parametrize(
+    ("carry_answer", "why"),
+    [
+        (
+            FleetResult(
+                op="carry_roll",
+                results=[
+                    WorkerResult(
+                        name="serve-test", outcome=OpOutcome.failed, error="RuntimeError: post-apply handler failed"
+                    )
+                ],
+            ),
+            "the op failed there: RuntimeError: post-apply handler failed",
+        ),
+        (
+            FleetResult(op="carry_roll", reachable=False, error="ConnectionError: bus down"),
+            "the bus is unreachable: ConnectionError: bus down",
+        ),
+        (
+            FleetResult(op="carry_roll", results=[WorkerResult(name="serve-test", outcome=OpOutcome.timed_out)]),
+            "no answer came: timed_out",
+        ),
+        (FleetResult(op="carry_roll"), "it did not answer"),
+    ],
+    ids=["failed", "unreachable", "timed-out", "no-row"],
+)
+@pytest.mark.usefixtures(clean_server.__name__)
+async def test_a_roll_whose_hand_off_answer_is_unknown_is_stated_deferred_to_its_member(
+    monkeypatch: pytest.MonkeyPatch, carry_answer: FleetResult, why: str
+) -> None:
+    # The roll may have gone out to serve-test, which may have started it: the reply does not judge it,
+    # so the error's roll names serve-test as the member it is deferred to and lists no worker
+    # awaiting a respawn — in the error reply's roll fields and in the backup import's section
+    # report alike — while the error text and the report's error say whether serve-test started
+    # it is unknown, never that it failed.
+    from tai42_skeleton.backup.sections import _landed_change_report
+    from tai42_skeleton.operations._broadcast import roll_outcome_body
+
+    _with_bus(monkeypatch)
+    store = FakeConfigStore(manifest={"mcp": []})
+    bus = _ForkedChildBus(
+        carry_answer, remotes=["serve-b"], remote_payload={"awaiting_respawn": ["TAI_BUS_HEARTBEAT_TTL"]}
+    )
+    service, _admin, _bus = _service(store, bus=bus)
+
+    def add_server(document: dict[str, Any]) -> None:
+        document["mcp"] = [{"title": "srv", "config": {"url": "http://x"}}]
+
+    with bounded_run(), pytest.raises(FleetBroadcastError) as exc:
+        await service.apply_change(add_server)
+
+    unknown = (
+        "fleet recycle: the roll for this config change may have been sent to 'serve-test', the bus member the "
+        f"change acts for, but its answer is not known — {why}. Whether 'serve-test' started the roll is unknown; the "
+        "reload broadcast reached the bus. Read its log and the fleet census"
+    )
+    assert str(exc.value) == f"reload_config: change persisted but fleet propagation failed — {unknown}"
+    assert exc.value.report.error == (
+        f"the recycle roll the change owes may have been sent to its member, and its answer is not known: "
+        f"RollHandOffUnknownError: {unknown}"
+    )
+    assert roll_outcome_body(exc.value.roll) == {
+        "recycle": None,
+        "awaiting_respawn": [],
+        "roll_deferred": True,
+        "roll_deferred_to": "serve-test",
+    }
+    assert exc.value.roll is not None
+    assert exc.value.roll.self_exit_armed is False
+    monkeypatch.setattr(instance.app, "_bus", bus)
+    section = _landed_change_report("manifest", exc.value, updated=1)
+    assert section.fanout is not None
+    assert section.fanout.error == exc.value.report.error
+    assert section.awaiting_respawn == []
+    assert section.recycle is None
+    assert section.roll_deferred is True
+    assert section.roll_deferred_to == "serve-test"
+
+
+@pytest.mark.usefixtures(clean_server.__name__)
+async def test_a_failed_reload_whose_roll_answer_is_unknown_says_so_on_the_backup_section_report(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A bounded backup import restores the manifest section. The member's local reload fails on
+    # a plugin that cannot load, and the roll that reload still owes goes to the member's own
+    # app, whose answer names no carried roll. The section report is the door that carries the
+    # report's error: its errors keep the reload's failure, its fan-out error says the roll may
+    # have been sent and its answer is not known, next to the roll fields deferring it to the member.
+    from tai42_skeleton.backup.sections import _import_manifest
+    from tai42_skeleton.config.service import ConfigService
+    from tai42_skeleton.marketplace.compat import CorePluginBootError
+
+    _with_bus(monkeypatch)
+    store = FakeConfigStore(manifest={"mcp": []})
+    bus = RecordingBus(remotes=["serve-b"], remote_payload={"awaiting_respawn": ["TAI_BUS_HEARTBEAT_TTL"]})
+    admin = FakeReloadAdmin(raise_reload=CorePluginBootError("plugin 'acme-tools' cannot load"))
+    service, _admin, _bus = _service(store, admin=admin, bus=bus)
+
+    async def answerless_carry_roll(op: Any) -> object:
+        return {"status": "ok"}
+
+    def from_app(cls: type[ConfigService]) -> ConfigService:
+        return service
+
+    # One app serves both reads: the hand-off's (``built_app``) and the fan-out's (``instance.app``).
+    app = instance.app
+    monkeypatch.setattr(instance, "_app", app)
+    monkeypatch.setattr(app, "_bus", bus)
+    monkeypatch.setattr(app, "carry_roll", answerless_carry_roll)
+    monkeypatch.setattr(ConfigService, "from_app", classmethod(from_app))
+
+    with bounded_run():
+        section = await _import_manifest({"mcp": [{"title": "srv", "config": {"url": "http://x"}}]})
+
+    assert section.errors == [
+        "reload_config: change persisted but fleet propagation failed — plugin 'acme-tools' cannot load"
+    ]
+    assert section.fanout is not None
+    assert section.fanout.error == (
+        "the recycle roll the change owes may have been sent to its member, and its answer is not known: "
+        "RollHandOffUnknownError: fleet recycle: the roll for this config change may have been sent to "
+        "'serve-test', the bus member the change acts for, but its answer is not known — its answer names no carried "
+        "roll: {'status': 'ok'}. Whether 'serve-test' started the roll is unknown; the reload broadcast reached "
+        "the bus. Read its log and the fleet census"
+    )
+    assert (section.awaiting_respawn, section.recycle) == ([], None)
+    assert (section.roll_deferred, section.roll_deferred_to) == (True, "serve-test")
+
+
+@pytest.mark.usefixtures(clean_server.__name__)
+async def test_a_failed_broadcast_whose_roll_answer_is_unknown_names_both_on_its_report(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The broadcast fault raises, and the roll the unreachable report still owes goes out to
+    # serve-test, which never answers: the report keeps the broadcast failure and adds that the
+    # roll may have been sent with its answer not known, never that it failed.
+    _with_bus(monkeypatch)
+    store = FakeConfigStore(manifest={"mcp": []})
+    bus = _ForkedChildBus(
+        FleetResult(op="carry_roll"), remotes=["serve-b"], publish_error=RuntimeError("ResponseError: WRONGTYPE")
+    )
+    service, _admin, _bus = _service(store, bus=bus)
+
+    def add_server(document: dict[str, Any]) -> None:
+        document["mcp"] = [{"title": "srv", "config": {"url": "http://x"}}]
+
+    with bounded_run(), pytest.raises(FleetBroadcastError) as exc:
+        await service.apply_change(add_server)
+
+    assert exc.value.report.error == (
+        "RuntimeError: ResponseError: WRONGTYPE (the recycle roll the change owes may have been sent to its "
+        "member, and its answer is not known: RollHandOffUnknownError: fleet recycle: the roll for this config "
+        "change may have been sent to 'serve-test', the bus member the change acts for, but its answer is not "
+        "known — it "
+        "did not answer. "
+        "Whether 'serve-test' started the roll is unknown; the reload broadcast did not reach the bus. Read its "
+        "log and the fleet census)"
+    )
+    assert exc.value.roll is not None
+    assert exc.value.roll.deferred_to == "serve-test"
 
 
 async def test_apply_replace_broadcast_raise_after_persist_becomes_fleet_broadcast_error(
@@ -177,8 +574,16 @@ async def test_op_start_census_failure_is_loud_but_never_aborts_the_reload(
     # exists to correct.
     _with_bus(monkeypatch)
     store = FakeConfigStore(manifest={"mcp": []})
-    bus = RecordingBus(remotes=["serve-w1"], census_error=ConnectionError("bus census unreachable"))
+    bus = RecordingBus(remotes=["serve-w1"])
     service, admin, _bus = _service(store, bus=bus)
+    resolve_ownership = service.deployment_ownership
+
+    async def ownership_then_census_blip(op_name: str) -> Any:
+        ownership = await resolve_ownership(op_name)
+        bus.census_error = ConnectionError("bus census unreachable")
+        return ownership
+
+    monkeypatch.setattr(service, "deployment_ownership", ownership_then_census_blip)
 
     with caplog.at_level(logging.WARNING, logger="tai42_skeleton.operations._broadcast"):
         result = await service.apply_replace({"mcp": [{"title": "new", "config": {"url": "http://new"}}]})
@@ -225,7 +630,8 @@ async def test_unconfirmed_origin_logs_error_but_returns_success(
     _with_bus(monkeypatch)
     store = FakeConfigStore(manifest={"mcp": []})
     bus = RecordingBus(remotes=["serve-w1"], remote_outcome=OpOutcome.missing)
-    service, _admin, _bus = _service(store, bus=bus)
+    orch, seen = _orchestrate_spy()
+    service, _admin, _bus = _service(store, bus=bus, orchestrate=orch)
 
     with caplog.at_level(logging.ERROR, logger="tai42_skeleton.operations._broadcast"):
         result = await service.apply_replace({"mcp": []})
@@ -236,13 +642,18 @@ async def test_unconfirmed_origin_logs_error_but_returns_success(
     assert {r.name: r.outcome for r in result.fleet.results}["serve-w1"] == OpOutcome.missing
     assert any(record.levelno == logging.ERROR for record in caplog.records)
     assert any("did not fully converge" in record.message for record in caplog.records)
+    # Its state is unknown, so the roll asks it once it is ready.
+    assert result.decision is not None
+    assert set(result.decision.unconfirmed) == {"serve-w1"}
+    assert seen["decision"].clean == set()
 
 
 async def test_bus_unreachable_returns_success_with_unreachable_shape(monkeypatch: pytest.MonkeyPatch) -> None:
     _with_bus(monkeypatch)
     store = FakeConfigStore(manifest={"mcp": []})
-    bus = RecordingBus(reachable=False, error="ConnectionError: bus down")
-    service, admin, _bus = _service(store, bus=bus)
+    bus = RecordingBus(remotes=["serve-w1"], reachable=False, error="ConnectionError: bus down")
+    orch, seen = _orchestrate_spy()
+    service, admin, _bus = _service(store, bus=bus, orchestrate=orch)
 
     result = await service.apply_replace({"mcp": []})
 
@@ -252,6 +663,13 @@ async def test_bus_unreachable_returns_success_with_unreachable_shape(monkeypatc
     assert result.fleet.reachable is False
     assert result.fleet.error == "ConnectionError: bus down"
     assert result.fleet.results == []
+    # No sibling stated its env: every pinned worker is asked once ready. The writer's own applied
+    # reload stated no drift, so it is judged clean and keeps running.
+    assert result.decision is not None
+    assert set(result.decision.unconfirmed) == {"serve-w1"}
+    assert result.decision.writer_reason is None
+    assert seen["applier_self_deferred"] is False
+    assert result.self_exit_armed is False
 
 
 # ---------------------------------------------------------------------------

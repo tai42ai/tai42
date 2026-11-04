@@ -79,7 +79,12 @@ def build_marketplace_supervised_stack(res: StackResources, variants: Variants) 
     recycle-class key an install loaded rolls a real recycle (the backend sibling recycled,
     the serve writer's own exit respawned). The recycle step budget is widened so a respawned worker's boot fits the
     per-step census wait, as on the recycle stack, and the fleet apply window covers the
-    retire's drain floor at that budget (3 x 90 s) plus the reload's own 60 s, as there."""
+    retire's drain floor at that budget (3 x 90 s) plus the reload's own 60 s, as there. A leaving
+    worker announces its runtime's stop phase plus the app's shutdown bounds (2 x 20 s + 20 s +
+    90 s = 170 s at this env), and the step stays the replacement's boot-and-rejoin window, as
+    there. The serve workers' 10 s graceful-shutdown cap stays at its default, as there: a roll
+    outlasts it, but the writer restarts only after its reply and no leg stops a serve worker
+    while its request rolls."""
     from dataclasses import replace
 
     base = build_marketplace_stack(res, variants)

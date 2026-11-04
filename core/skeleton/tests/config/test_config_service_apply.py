@@ -28,6 +28,7 @@ from tai42_skeleton.app.bus import OpOutcome
 from tai42_skeleton.config.secret_seal import ResolvedSecretError
 from tai42_skeleton.operations._broadcast import apply_response
 from tai42_skeleton.tools.binding.errors import ExtensionComboRefusedError
+from tai42_skeleton.tools.binding.surface import bump_tool_surface_generation
 
 from .._fakes.bus import FakeBus
 from .._fakes.combo_check_app import booted_check_app, clean_server, factory_calls
@@ -70,7 +71,7 @@ async def test_apply_change_mutates_validates_persists_reloads_broadcasts(monkey
     assert local.outcome == OpOutcome.applied
     # ApplyResult carries the persisted document, the local reload result, and the report.
     assert result.document == {"mcp": [{"title": "srv", "config": {"url": "http://x"}}]}
-    assert result.local == {"status": "ok", "env_keys": 0}
+    assert result.local == {"status": "ok", "env_keys": 0, "awaiting_respawn": []}
     assert result.fleet.op == "reload_config"
     assert result.fleet.ok is True
 
@@ -409,7 +410,7 @@ async def test_a_manifest_write_resolves_a_marker_on_a_key_the_deployment_sets_t
         attach(document)
         await service.apply_replace(document)
 
-    assert checks.calls == [("echo", [{"name": "labelled", "config": {"label": "ok"}}])]
+    assert checks.calls == [("echo", [{"name": "labelled", "config": {"label": "ok"}}], None)]
     assert store.manifest["tools"][0]["extensions"] == {
         "echo": [[{"name": "labelled", "config": {"label": "!ENV ${EXT_L}"}}]]
     }
@@ -530,17 +531,18 @@ async def test_a_serving_generation_swapped_during_the_listing_rechecks_the_comb
     # The combo check dry-runs against the live generation's registry; one installed during
     # the listing refuses the combo the outgoing one accepted.
     _with_bus(monkeypatch)
-    swapped = object()
+    swapped = epoch_module.Epoch(number=0, core=instance.app._build_serving_core())
     admin = _ListingAdmin(lambda: monkeypatch.setattr(epoch_module, "_current", swapped))
     store = FakeConfigStore(manifest=copy.deepcopy(_CHECK_DOCUMENT))
     checks: list[bool] = []
 
-    def combo_check(tool: str, combo: Any) -> None:
-        checks.append(epoch_module.current_epoch_or_none() is swapped)
-        if checks[-1]:
-            raise ExtensionComboRefusedError(f"extension 'labelled' on tool '{tool}' cannot bind: refused")
+    class _SwapRefusingChecks(ComboChecks):
+        def check_combo(self, tool: str, combo: Any, *, base: Any) -> None:
+            checks.append(epoch_module.current_epoch_or_none() is swapped)
+            if checks[-1]:
+                raise ExtensionComboRefusedError(f"extension 'labelled' on tool '{tool}' cannot bind: refused")
 
-    service, _admin, bus = _service(store, admin=admin, combo_check=combo_check)
+    service, _admin, bus = _service(store, admin=admin, combo_check=_SwapRefusingChecks())
     attach = _attach("tools", 0, "echo", [[{"name": "labelled", "config": {"label": "y"}}]])
 
     with pytest.raises(ValueError, match=r"^tools\[a\]\.extensions\[echo\]\[0\]: .* cannot bind: refused$"):
@@ -568,12 +570,57 @@ async def test_the_check_receives_every_combo_once_with_settings_resolved(monkey
 
     resolved = {"name": "labelled", "config": {"label": "resolved-label"}}
     assert checks.calls == [
-        ("echo", [resolved]),
-        ("echo", ["cache"]),
-        ("fetch", ["cache", resolved]),
-        ("op", [resolved]),
+        ("echo", [resolved], None),
+        ("echo", ["cache"], None),
+        ("fetch", ["cache", resolved], None),
+        ("op", [resolved], None),
     ]
     assert store.manifest["tools"][0]["extensions"]["echo"][0][0]["config"]["label"] == "!ENV ${EXT_LABEL}"
+
+
+@pytest.mark.parametrize("door", _DOORS)
+async def test_each_check_receives_the_base_served_under_the_combos_tool_name(
+    monkeypatch: pytest.MonkeyPatch, door: str
+) -> None:
+    # ``echo`` is served, ``fetch`` is not: its combo is checked with no base.
+    _with_bus(monkeypatch)
+    served = object()
+    store = FakeConfigStore(manifest=copy.deepcopy(_CHECK_DOCUMENT))
+    checks = ComboChecks(served={"echo": served})
+    service, _admin, _bus = _service(store, combo_check=checks)
+    labelled = {"name": "labelled", "config": {"label": "y"}}
+
+    def attach(document: dict[str, Any]) -> None:
+        document["tools"][0]["extensions"] = {"echo": [[labelled]]}
+        document["mcp"][0]["extensions"] = {"fetch": [["cache"]]}
+
+    await _write(service, store, door, attach)
+
+    assert checks.calls == [("echo", [labelled], served), ("fetch", ["cache"], None)]
+
+
+@pytest.mark.parametrize("door", _DOORS)
+async def test_a_tool_surface_change_during_the_listing_retakes_the_bases_and_validates_against_them(
+    monkeypatch: pytest.MonkeyPatch, door: str
+) -> None:
+    _with_bus(monkeypatch)
+    before, after = object(), object()
+    checks = ComboChecks(served={"echo": before})
+
+    def rebind() -> None:
+        bump_tool_surface_generation()
+        checks.served = {"echo": after}
+
+    admin = _ListingAdmin(rebind)
+    store = FakeConfigStore(manifest=copy.deepcopy(_CHECK_DOCUMENT))
+    service, _admin, _bus = _service(store, admin=admin, combo_check=checks)
+    labelled = {"name": "labelled", "config": {"label": "y"}}
+    attach = _attach("tools", 0, "echo", [[labelled]])
+
+    await _write(service, store, door, _pick(["m_a"], then=attach))
+
+    assert checks.calls == [("echo", [labelled], before), ("echo", [labelled], after)]
+    assert store.manifest["tools"][0]["extensions"] == {"echo": [[labelled]]}
 
 
 async def test_a_dangling_marker_in_a_setting_is_refused_before_the_check_runs(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -610,7 +657,7 @@ async def test_the_live_check_refuses_settings_breaking_a_declared_schema(monkey
     monkeypatch.setenv("EXT_LABEL", "hello")
     async with booted_check_app():
         store = FakeConfigStore(manifest=copy.deepcopy(_CHECK_DOCUMENT))
-        service, admin, _bus = _service(store, combo_check=instance.app.extensions.check_combo)
+        service, admin, _bus = _service(store, combo_check=instance.app.extensions)
         factory_calls().clear()
 
         with pytest.raises(ValueError, match="'required' rule") as missing:

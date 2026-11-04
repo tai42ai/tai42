@@ -5,13 +5,13 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from pydantic import TypeAdapter, ValidationError
+from pydantic import ValidationError
 
 from tai42_contract.backend import (
     SCHEDULE_BRANCH_SUFFIX,
+    SCHEDULE_CADENCE_ADAPTER,
     CrontabCadence,
     IntervalCadence,
-    ScheduleCadence,
     ScheduleCreate,
     ScheduleImportReport,
     ScheduleListRow,
@@ -19,12 +19,10 @@ from tai42_contract.backend import (
 )
 from tai42_contract.schema_export import build_document_schemas
 
-_CADENCE: TypeAdapter[IntervalCadence | CrontabCadence] = TypeAdapter(ScheduleCadence)
-
 
 def test_both_cadences_parse_through_the_discriminator() -> None:
-    interval = _CADENCE.validate_python({"kind": "interval", "every": 30})
-    crontab = _CADENCE.validate_python({"kind": "crontab", "minute": "0", "hour": "9"})
+    interval = SCHEDULE_CADENCE_ADAPTER.validate_python({"kind": "interval", "every": 30})
+    crontab = SCHEDULE_CADENCE_ADAPTER.validate_python({"kind": "crontab", "minute": "0", "hour": "9"})
     assert isinstance(interval, IntervalCadence)
     assert interval == IntervalCadence(every=30.0)
     assert interval.relative is False
@@ -33,14 +31,19 @@ def test_both_cadences_parse_through_the_discriminator() -> None:
     assert crontab.day_of_week == "*"
 
 
+def test_the_adapter_reads_a_cadence_from_its_json() -> None:
+    cadence = SCHEDULE_CADENCE_ADAPTER.validate_json('{"kind": "crontab", "expression": "0 9 * * 1"}')
+    assert cadence == CrontabCadence(minute="0", hour="9", day_of_week="1")
+
+
 def test_the_discriminator_refuses_an_unknown_kind() -> None:
     with pytest.raises(ValidationError):
-        _CADENCE.validate_python({"kind": "solar", "every": 1})
+        SCHEDULE_CADENCE_ADAPTER.validate_python({"kind": "solar", "every": 1})
 
 
 def test_a_redbeat_tagged_definition_is_not_a_cadence() -> None:
     with pytest.raises(ValidationError):
-        _CADENCE.validate_python({"__type__": "interval", "every": 30, "relative": False})
+        SCHEDULE_CADENCE_ADAPTER.validate_python({"__type__": "interval", "every": 30, "relative": False})
 
 
 @pytest.mark.parametrize("every", [0, -1, -0.5])
@@ -62,7 +65,7 @@ def test_a_five_field_expression_maps_in_order() -> None:
 
 
 def test_a_six_field_expression_drops_the_leading_seconds() -> None:
-    cadence = _CADENCE.validate_python({"kind": "crontab", "expression": "30 0 9 * * 1"})
+    cadence = SCHEDULE_CADENCE_ADAPTER.validate_python({"kind": "crontab", "expression": "30 0 9 * * 1"})
     assert cadence == CrontabCadence(minute="0", hour="9", day_of_week="1")
 
 
@@ -75,6 +78,24 @@ def test_an_expression_of_another_length_is_refused(expression: str, count: int)
 def test_an_expression_beside_a_field_is_refused() -> None:
     with pytest.raises(ValidationError):
         CrontabCadence.model_validate({"expression": "* * * * *", "minute": "0"})
+
+
+@pytest.mark.parametrize(
+    "cadence",
+    [
+        CrontabCadence(),
+        CrontabCadence(minute="0", hour="9"),
+        CrontabCadence(minute="*/5", hour="1-3", day_of_month="2,4", month_of_year="3", day_of_week="mon"),
+    ],
+)
+def test_the_expression_validates_back_to_its_cadence(cadence: CrontabCadence) -> None:
+    assert CrontabCadence.model_validate({"expression": cadence.expression}) == cadence
+
+
+def test_the_expression_lists_the_five_fields_in_order() -> None:
+    cadence = CrontabCadence(minute="*/5", hour="1", day_of_month="2", month_of_year="3", day_of_week="4")
+    assert cadence.expression == "*/5 1 2 3 4"
+    assert CrontabCadence().expression == "* * * * *"
 
 
 def test_a_crontab_dumps_its_fields_only() -> None:
@@ -119,6 +140,41 @@ def test_a_list_row_carries_no_kwargs() -> None:
     with_error = ScheduleListRow.model_validate({**row, "error": {"message": "lost", "at_iso": "2026-01-01T00:00:00"}})
     assert with_error.error is not None
     assert with_error.error.message == "lost"
+
+
+_ROW: dict[str, Any] = {"name": "n", "tool": "echo", "cadence": {"kind": "interval", "every": 5}, "enabled": True}
+
+
+def test_a_list_row_without_a_next_run_has_no_iso() -> None:
+    row = ScheduleListRow.model_validate(_ROW)
+    assert row.next_run_at_ts is None
+    assert row.next_run_at_iso is None
+
+
+@pytest.mark.parametrize(
+    ("ts", "iso"),
+    [(0.0, "1970-01-01T00:00:00+00:00"), (1767225600.5, "2026-01-01T00:00:00.500000+00:00")],
+)
+def test_a_list_row_derives_the_iso_from_the_timestamp(ts: float, iso: str) -> None:
+    assert ScheduleListRow.model_validate({**_ROW, "next_run_at_ts": ts}).next_run_at_iso == iso
+
+
+def test_a_list_row_accepts_the_iso_it_derives() -> None:
+    row = ScheduleListRow.model_validate({**_ROW, "next_run_at_ts": 0.0})
+    assert ScheduleListRow.model_validate(row.model_dump(mode="json")) == row
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"next_run_at_ts": 0.0, "next_run_at_iso": "2026-01-01T00:00:00+00:00"},
+        {"next_run_at_ts": 0.0, "next_run_at_iso": None},
+        {"next_run_at_iso": "1970-01-01T00:00:00+00:00"},
+    ],
+)
+def test_a_list_row_refuses_an_iso_that_disagrees_with_the_timestamp(fields: dict[str, Any]) -> None:
+    with pytest.raises(ValidationError, match="disagrees with next_run_at_ts"):
+        ScheduleListRow.model_validate({**_ROW, **fields})
 
 
 def test_an_import_report_refuses_an_unknown_key() -> None:

@@ -115,7 +115,7 @@ class _InstallerBase:
 
     async def _unwind(
         self,
-        step_error: Exception,
+        step_error: BaseException,
         *,
         change: OperationChange | None,
         provides_undo: ProvidesUndo | None,

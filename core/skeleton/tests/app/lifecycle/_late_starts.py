@@ -12,7 +12,7 @@ from typing import Any
 import pytest
 from tai42_contract.manifest import TaiMCPConfig
 
-from tai42_skeleton.app.lifecycle.off_loop import run_blocking
+from tai42_skeleton.app import instance
 
 from ...connectors.credential_path import on_loop
 from ._doubles import _cfg, _FakeMcpTool, _Mixin, _mixin
@@ -87,27 +87,30 @@ class _CountingListing(_SlowListing):
 
 
 def _slow_mixin(monkeypatch: pytest.MonkeyPatch, server: _SlowListing, config: TaiMCPConfig | None = None) -> _Mixin:
+    """A mixin whose MCP servers are ``server``, served as the process's built app, which owns the serving loop."""
     m = _mixin(config or _cfg("svc"))
     monkeypatch.setattr(m.clients, "client_ctx", server.client_ctx)
+    monkeypatch.setattr(instance, "_app", m)
     return m
 
 
+async def _listing_of_rebuild(m: _Mixin) -> list[tuple[TaiMCPConfig, Any]]:
+    """The rebuild's listing as the epoch build runs it, each failure recorded; answers the successes."""
+    successes, failures = await m._load_mcps()
+    for config, exc in failures:
+        m._record_failed_mcp(config, exc)
+    return successes
+
+
 def _rebuild_listing(m: _Mixin, loop: asyncio.AbstractEventLoop) -> list[tuple[TaiMCPConfig, Any]]:
-    """The rebuild's listing as the epoch build runs it: on the serving loop, blocking it, each failure recorded."""
-
-    async def build() -> list[tuple[TaiMCPConfig, Any]]:
-        successes, failures = run_blocking(m._load_mcps)
-        for config, exc in failures:
-            m._record_failed_mcp(config, exc)
-        return successes
-
-    return on_loop(loop, build())
+    """The rebuild's listing (:func:`_listing_of_rebuild`), awaited on ``loop``."""
+    return on_loop(loop, _listing_of_rebuild(m))
 
 
 def _next_generation(m: _Mixin) -> None:
-    """Build the next serving generation over the same manifest, as an epoch rebuild does."""
+    """Make a fresh serving core over the same manifest the read target, as an epoch swap does."""
     manifest = m._manifest
-    m._building = m._build_serving_core()
+    m._scaffold_core = m._build_serving_core()
     m._manifest = manifest
 
 

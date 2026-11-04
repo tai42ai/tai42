@@ -12,7 +12,7 @@ import os
 import shutil
 import socket
 import tempfile
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -22,6 +22,7 @@ from pydantic import BaseModel
 from pydantic.json_schema import JsonSchemaMode
 
 import tai42_skeleton.cli.mcp_app as mcp_app
+from tai42_skeleton.app.lifecycle.exit_drain import ExitDrain
 from tai42_skeleton.app.route_registry import RouteMetadata, load_api_routes
 from tai42_skeleton.cli.openapi import (
     _component_schemas,
@@ -138,12 +139,20 @@ class _FakeApp:
         # The CLI seams register the root-logger reload handler through the app's
         # lifecycle; the recorder captures it without a real lifecycle.
         self.lifecycle = _FakeLifecycle(self.config.config_manager)
+        # The exit drain the serve exit declares the server's graceful-shutdown cap on.
+        self.exit_drain = ExitDrain()
+        # The reasons the host reported a stop's start for, in order.
+        self.stops_began: list[str] = []
         # The boot env handlers, recorded by their ``module.qualname`` key like the reload ones.
         self.boot_env_handlers: dict[str, object] = {}
         self.http_called = False
         self.http_stateless: bool | None = None
         self.sse_called = False
         self.run_async_transport: str | None = None
+
+    def stop_began(self, reason: str) -> bool:
+        self.stops_began.append(reason)
+        return True
 
     def _on_boot_env_applied(self, func):
         self.boot_env_handlers[f"{func.__module__}.{func.__qualname__}"] = func
@@ -188,13 +197,17 @@ def patch_app_seam(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.fixture(autouse=True)
-def serve_exit_arms(monkeypatch: pytest.MonkeyPatch) -> list[bool]:
-    """Record each arming of the serve exit instead of running it.
+def serve_exit_arms(monkeypatch: pytest.MonkeyPatch) -> list[tuple[ExitDrain, Callable[[str], object]]]:
+    """Record each arming of the serve exit, by the exit drain and the stop-began callback it was armed with.
 
     These launch paths run outside a uvicorn server's signal capture, which the arming needs.
     """
-    arms: list[bool] = []
-    monkeypatch.setattr(mcp_app, "arm_serve_exit", lambda: arms.append(True))
+    arms: list[tuple[ExitDrain, Callable[[str], object]]] = []
+
+    def _arm(exit_drain: ExitDrain, stop_began: Callable[[str], object]) -> None:
+        arms.append((exit_drain, stop_began))
+
+    monkeypatch.setattr(mcp_app, "arm_serve_exit", _arm)
     return arms
 
 

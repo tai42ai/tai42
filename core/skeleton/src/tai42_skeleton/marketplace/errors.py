@@ -16,11 +16,19 @@ from typing import TYPE_CHECKING, Any
 from tai42_skeleton.exceptions.exceptions import TaiMCPServerError
 
 if TYPE_CHECKING:
+    from tai42_skeleton.config.recycle_roll import RollOutcome
     from tai42_skeleton.marketplace.environments.findings import Finding
 
 
 class MarketplaceError(TaiMCPServerError):
-    """Base for every marketplace-client failure."""
+    """Base for every marketplace-client failure.
+
+    ``roll`` is the fleet recycle roll a failed operation still ran for the config changes it
+    landed before failing (its forward change, its unwind's revert, or both), ``None`` when none
+    ran; the operation boundary renders it into the error reply.
+    """
+
+    roll: RollOutcome | None = None
 
 
 class RegistryUnreachableError(MarketplaceError):
@@ -187,16 +195,29 @@ class InstallUnwindError(MarketplaceError):
     """
 
     def __init__(
-        self, step_error: Exception, unwind_error: Exception, *, span_release_error: str | None = None
+        self, step_error: BaseException, unwind_error: Exception, *, span_release_error: str | None = None
     ) -> None:
-        """Build the error from the original ``step_error`` and the ``unwind_error`` raised while rolling back."""
+        """Build the error from the original ``step_error`` and the ``unwind_error`` raised while rolling back.
+
+        A step error with no text (a cancellation) is named by its type.
+        """
         super().__init__(
-            f"install step failed ({step_error}); the unwind then also failed "
+            f"install step failed ({str(step_error) or type(step_error).__name__}); the unwind then also failed "
             f"({unwind_error}) — the environment was left partially changed"
         )
         self.step_error = step_error
         self.unwind_error = unwind_error
         self.span_release_error = span_release_error
+
+
+class UnrunRollError(MarketplaceError):
+    """An operation's config changes landed and the fleet recycle roll they owe did not complete.
+
+    Raised from the error that stopped the roll (a dropped database session, a broken bus),
+    which is logged whole where the roll stopped. The message names only that error's type, so
+    its text — hosts, driver detail — stays out of the reply; the boundary maps it to a 500
+    carrying the message.
+    """
 
 
 class LocalStateError(MarketplaceError):

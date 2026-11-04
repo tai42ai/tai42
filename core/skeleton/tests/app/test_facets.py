@@ -617,6 +617,26 @@ def test_lifecycle_facet_forwarding():
     app._on_reload.assert_called_once_with(_noop)
 
 
+async def test_lifecycle_facet_waiting_on_fleet_work_is_the_current_partys_recorded_wait(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from tai42_skeleton.app import reload_gate
+
+    events: list[str] = []
+
+    class _Party:
+        def wait(self) -> None:
+            events.append("wait")
+
+        def stop_waiting(self) -> None:
+            events.append("stop_waiting")
+
+    monkeypatch.setattr(reload_gate, "gate_party", _Party)
+    async with LifecycleFacet(_app()).waiting_on_fleet_work():
+        events.append("body")
+    assert events == ["wait", "body", "stop_waiting"]
+
+
 # -- AdminFacet ---------------------------------------------------------------
 
 
@@ -624,21 +644,28 @@ def test_admin_facet_sync_forwarding():
     app = _app()
     app._live_manifest = {"live": True}
     f = AdminFacet(app)
-    assert f.reload_mcp("t") is app._reload_mcp.return_value
-    app._reload_mcp.assert_called_once_with("t")
-    assert f.deregister_mcp("t") is app._deregister_mcp.return_value
-    app._deregister_mcp.assert_called_once_with("t")
-    assert f.reload_config() is app._reload_config.return_value
-    app._reload_config.assert_called_once_with()
     assert f.tool_reloader("kind") is app._tool_reloader.return_value
     app._tool_reloader.assert_called_once_with("kind")
-    assert f.reload_failed_mcps() is app._reload_failed_mcps.return_value
-    app._reload_failed_mcps.assert_called_once_with()
     assert f.list_failed_mcps() is app._list_failed_mcps.return_value
     app._list_failed_mcps.assert_called_once_with()
     assert f.live_mcp_status() is app._live_mcp_status.return_value
     app._live_mcp_status.assert_called_once_with()
     assert f.live_manifest == {"live": True}
+
+
+async def test_admin_facet_reload_door_forwarding():
+    app = _app()
+    for name in ("_reload_mcp", "_deregister_mcp", "_reload_config", "_reload_failed_mcps"):
+        setattr(app, name, AsyncMock(return_value=f"{name}-result"))
+    f = AdminFacet(app)
+    assert await f.reload_mcp("t") == "_reload_mcp-result"
+    app._reload_mcp.assert_awaited_once_with("t")
+    assert await f.deregister_mcp("t") == "_deregister_mcp-result"
+    app._deregister_mcp.assert_awaited_once_with("t")
+    assert await f.reload_config() == "_reload_config-result"
+    app._reload_config.assert_awaited_once_with()
+    assert await f.reload_failed_mcps() == "_reload_failed_mcps-result"
+    app._reload_failed_mcps.assert_awaited_once_with()
 
 
 async def test_admin_facet_run_tool_reload_forwarding():

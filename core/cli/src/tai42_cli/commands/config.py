@@ -24,6 +24,7 @@ from tai42_cli.commands._common import (
     parse_env_lines,
     seg,
 )
+from tai42_cli.commands._reload_roll_help import RELOAD_ROLL_HELP
 
 app = typer.Typer(
     name="config",
@@ -90,11 +91,11 @@ def set_env(
     """Merge KEY=VALUE pairs into the stored env and reload the fleet.
 
     A hot-class key is re-read in place. A recycle-class key rolls a worker
-    recycle across the fleet (the response carries the recycle rows; the worker
-    that took the write recycles itself after replying, and its supervisor starts
-    it again). A key that locates the worker bus (a bus URL or the bus
-    namespace), a deployment / boot-identity (X-band) key and a key the
-    deployment sets are refused under any spelling of their names, naming the
+    recycle across the fleet (the response carries the recycle rows; when the
+    roll converged and the worker that took the write needs its own restart, it
+    recycles itself after replying, and its supervisor starts it again). A key
+    that locates the worker bus (a bus URL or the bus namespace), a deployment /
+    boot-identity (X-band) key and a key the deployment sets are refused under any spelling of their names, naming the
     key: a bus key or a key the deployment sets changes in the deployment's
     environment. A write whose resulting stored env would set one name under two
     spellings is refused, naming both: to rename a spelling, remove the old one in
@@ -132,7 +133,19 @@ def set_env(
     emit_result(ctx_obj, data)
 
 
-@app.command("reload")
+_RELOAD_HELP = f"""\
+Soft-restart this process from its manifest, fanning out to every worker.
+
+Refreshes env, resets settings caches, and re-initializes from the manifest
+in-process (no pod restart), then propagates to the fleet; ``--target`` restricts
+the fan-out to named workers, and only they are judged for a restart.
+
+{RELOAD_ROLL_HELP}
+
+Example: ``tai config reload``"""
+
+
+@app.command("reload", help=_RELOAD_HELP)
 @covers(("POST", "/api/config/reload"))
 def reload_config(
     ctx: typer.Context,
@@ -141,19 +154,7 @@ def reload_config(
         typer.Option("--target", help="A worker slot name to restrict the reload to (e.g. serve-1; repeatable)."),
     ] = None,
 ) -> None:
-    """Soft-restart this process from its manifest, fanning out to every worker.
-
-    Refreshes env, resets settings caches, and re-initializes from the manifest
-    in-process (no pod restart), then propagates to the fleet; ``--target`` restricts
-    the fan-out to named workers.
-
-    Each worker's row names the recycle-class keys awaiting a respawn
-    (``awaiting_respawn``): the soft restart carries every hot key in place, and
-    those keys take effect only when that worker is respawned through the
-    deployment's supervisor.
-
-    Example: ``tai config reload``
-    """
+    """Post the fleet reload and emit its report; the command's help is ``_RELOAD_HELP``."""
     ctx_obj = app_context(ctx)
     targets = list(target) if target else None
     with ctx_obj.client() as client:

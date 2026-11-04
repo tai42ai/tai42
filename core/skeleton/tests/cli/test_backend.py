@@ -5,19 +5,22 @@ the ``tai42_app`` handle and imports the manifest's backend module, so a plugin
 registering its Backend at import lands in the bound holder. It joins the worker
 bus under the ``backend`` origin kind, and publishes the resolved manifest into the
 env for the WORKER runtime only — the one whose forked children need it. The
-``main`` Click entry just selects an event loop (uvloop, else asyncio) and hands
-the coroutine to its blocking ``run`` — that blocking run is mocked so the
-launcher wiring (env publish, arg merge) is exercised without a real loop.
+``main`` Click entry just selects an event loop (uvloop, else asyncio; asyncio in a
+process started through a process prelude), hands the coroutine to its blocking
+``run`` and restarts the process through the prelude a launch refused it for — that
+blocking run is mocked so the launcher wiring (env publish, arg merge) is exercised
+without a real loop.
 """
 
 from __future__ import annotations
 
 import asyncio
+import asyncio.futures
 import logging
 import os
 import signal
 import sys
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -27,11 +30,13 @@ import pytest
 from click.testing import CliRunner
 from tai42_contract.app import tai42_app
 from tai42_contract.backend.runtime import BackendRuntime, ExecutionMode, ProgressLiveness
-from tai42_kit.backend import ManagedBackend
+from tai42_kit.backend import ManagedBackend, future_chaining_bound
 from tai42_kit.logging import redaction as kit_redaction
-from tai42_kit.signals import signal_chain
+from tai42_kit.signals import STOP_SIGNALS, signal_chain
 
 import tai42_skeleton.cli.backend as backend
+from tai42_skeleton.app.bus import WorkerBus, WorkerKind
+from tai42_skeleton.app.lifecycle.exit_drain import ExitDrain
 
 _LOGGING_KEY = "tai42_skeleton.app.instance.apply_logging_settings"
 
@@ -82,8 +87,25 @@ class _FakeLifecycle:
         return _FakeManifest()
 
 
-class _FakeApp:
+class _StopObservingApp:
+    """The app's observation of the stop's start, on a real local backend bus.
+
+    Records each reason the host passed and whether that call began the leaving.
+    """
+
     def __init__(self) -> None:
+        self.bus = WorkerBus.local(WorkerKind.backend)
+        self.stops_began: list[tuple[str, bool]] = []
+
+    def stop_began(self, reason: str) -> bool:
+        began = self.bus.stop_began(reason)
+        self.stops_began.append((reason, began))
+        return began
+
+
+class _FakeApp(_StopObservingApp):
+    def __init__(self) -> None:
+        super().__init__()
         # The config manager is reached through the ``config`` facet namespace.
         self.config = SimpleNamespace(config_manager=_FakeConfigManager())
         # ``run_backend`` registers the root-logger reload handler through the app's
@@ -265,7 +287,7 @@ def _cli_process_state_of_its_own(monkeypatch: pytest.MonkeyPatch):
     for name, value in list(vars(real_app).items()):
         if name.endswith("_handlers") and isinstance(value, dict):
             monkeypatch.setattr(real_app, name, dict(value))
-    monkeypatch.setattr(real_app, "_building", real_app._building)
+    monkeypatch.setattr(real_app, "_scaffold_core", real_app._scaffold_core)
     loggers = [logging.getLogger(), logging.getLogger("fastmcp")]
     saved_loggers = [(logger, logger.handlers[:], logger.level, logger.propagate) for logger in loggers]
     saved_settings = {name: getattr(fastmcp.settings, name) for name in Settings.model_fields}
@@ -294,6 +316,8 @@ async def test_run_backend_beat_reaches_import_registered_backend(monkeypatch: p
     real_app = instance.build_app()
     # The boot manifest read builds the process's bus on the app; the test's own ends with it.
     monkeypatch.setattr(real_app, "_bus", None)
+    # The launch declares the backend's drain as the process's exit drain; the test's own ends with it.
+    monkeypatch.setattr(real_app, "_exit_drain", ExitDrain())
     saved_backend = real_app._backend_holder._backend
     real_app._backend_holder._backend = None
     # Model a fresh process: the handle is unbound until start() binds it, so an
@@ -392,6 +416,147 @@ def test_main_falls_back_to_asyncio_when_uvloop_missing(monkeypatch: pytest.Monk
 
     assert result.exit_code == 0, result.output
     assert len(runs) == 1
+
+
+@pytest.mark.parametrize(
+    ("marker", "expected"),
+    [("engine.patch:apply", [("asyncio", True)]), (None, [("uvloop", False)])],
+)
+def test_main_runs_on_the_standard_loop_with_future_chaining_bound_only_when_started_through_a_prelude(
+    monkeypatch: pytest.MonkeyPatch, marker: str | None, expected: list[tuple[str, bool]]
+) -> None:
+    import uvloop
+
+    ran_on: list[tuple[str, bool]] = []
+
+    def on_asyncio(coro):
+        coro.close()
+        ran_on.append(("asyncio", future_chaining_bound()))
+
+    def on_uvloop(coro):
+        coro.close()
+        ran_on.append(("uvloop", future_chaining_bound()))
+
+    if marker is None:
+        monkeypatch.delenv(backend.PROCESS_PRELUDE_ENV, raising=False)
+    else:
+        monkeypatch.setenv(backend.PROCESS_PRELUDE_ENV, marker)
+    # Recorded so teardown undoes the binding ``main`` installs.
+    monkeypatch.setattr(asyncio.futures, "_chain_future", asyncio.futures._chain_future)  # type: ignore[attr-defined]
+    monkeypatch.setattr(backend.asyncio, "run", on_asyncio)
+    monkeypatch.setattr(uvloop, "run", on_uvloop)
+    monkeypatch.setattr(backend, "run_backend", lambda args: _noop_coro())
+    assert not future_chaining_bound()
+
+    result = CliRunner().invoke(backend.main, ["worker"])
+
+    assert result.exit_code == 0, result.output
+    assert ran_on == expected
+
+
+def test_main_restarts_through_the_prelude_the_launch_requires_once_the_run_has_returned(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    import uvloop
+
+    events: list[str] = []
+
+    def refused_run(coro):
+        coro.close()
+        events.append("run returned")
+        raise backend.ProcessPreludeRequired("engine.patch:apply")
+
+    def fake_relaunch(name: str, env: Mapping[str, str]):
+        events.append(f"relaunch {name}")
+        raise SystemExit(0)
+
+    monkeypatch.delenv(backend.PROCESS_PRELUDE_ENV, raising=False)
+    monkeypatch.setattr(uvloop, "run", refused_run)
+    monkeypatch.setattr(backend, "run_backend", lambda args: _noop_coro())
+    monkeypatch.setattr(backend, "setup_logging", lambda settings: None)
+    monkeypatch.setattr(backend.logging, "shutdown", lambda: events.append("logging shut down"))
+    monkeypatch.setattr(backend.process_prelude, "relaunch", fake_relaunch)
+
+    with caplog.at_level(logging.INFO, logger=backend.logger.name):
+        result = CliRunner().invoke(backend.main, ["worker", "-P", "gevent"])
+
+    assert result.exit_code == 0, result.output
+    assert events == ["run returned", "logging shut down", "relaunch engine.patch:apply"]
+    assert [r.getMessage() for r in caplog.records if "restarting" in r.getMessage()] == [
+        "restarting with process prelude engine.patch:apply"
+    ]
+
+
+@pytest.fixture
+def _process_env_restored() -> Iterator[None]:
+    """Restore ``os.environ``, the applied-key tracker and the settings caches after a run of the boot bridge."""
+    from tai42_kit.settings import reset_all_settings
+
+    from tai42_skeleton.app import applied_env
+
+    snapshot = dict(os.environ)
+    loaded_before = set(applied_env._loaded_env_keys)
+    yield
+    os.environ.clear()
+    os.environ.update(snapshot)
+    applied_env._loaded_env_keys = loaded_before
+    reset_all_settings()
+
+
+@pytest.mark.usefixtures("_process_env_restored")
+def test_main_restarts_with_the_deployment_env_not_the_env_the_boot_built(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The restarted image starts with the env the deployment started the process with, no key the boot applied."""
+    from tai42_skeleton.app.instance import app
+    from tai42_skeleton.config import deployment_env
+
+    handed: list[dict[str, str]] = []
+
+    def fake_execv(path: str, argv: list[str]) -> None:
+        handed.append(dict(os.environ))
+        raise SystemExit(0)
+
+    def fake_execve(path: str, argv: list[str], env: Mapping[str, str]) -> None:
+        handed.append(dict(env))
+        raise SystemExit(0)
+
+    async def booting_then_refused(args: list[str]) -> None:
+        await app._apply_stored_env_at_boot(kind=WorkerKind.backend)
+        raise backend.ProcessPreludeRequired("engine.patch:apply")
+
+    monkeypatch.delenv(backend.PROCESS_PRELUDE_ENV, raising=False)
+    monkeypatch.delenv("STORE_ONLY", raising=False)
+    monkeypatch.setattr(app, "_bus", None)
+    monkeypatch.setattr(app.config.config_manager, "read_env", lambda: {"STORE_ONLY": "from-store"})
+    monkeypatch.setattr(backend, "run_backend", booting_then_refused)
+    monkeypatch.setattr(backend, "setup_logging", lambda settings: None)
+    monkeypatch.setattr(backend.logging, "shutdown", lambda: None)
+    monkeypatch.setattr(os, "execv", fake_execv)
+    monkeypatch.setattr(os, "execve", fake_execve)
+    # The boot env bridge of this run captures the env ``main`` started it with.
+    deployment_env.reset_deployment_env()
+
+    result = CliRunner().invoke(backend.main, ["worker", "-P", "gevent"])
+
+    assert result.exit_code == 0, result.output
+    assert os.environ["STORE_ONLY"] == "from-store"
+    assert len(handed) == 1
+    assert "STORE_ONLY" not in handed[0]
+    assert handed[0] == deployment_env.captured_deployment_env()
+
+
+def test_main_does_not_restart_a_run_that_requires_no_prelude(monkeypatch: pytest.MonkeyPatch) -> None:
+    import uvloop
+
+    relaunched: list[str] = []
+    monkeypatch.delenv(backend.PROCESS_PRELUDE_ENV, raising=False)
+    monkeypatch.setattr(uvloop, "run", lambda coro: coro.close())
+    monkeypatch.setattr(backend, "run_backend", lambda args: _noop_coro())
+    monkeypatch.setattr(backend.process_prelude, "relaunch", lambda name, env: relaunched.append(name))
+
+    result = CliRunner().invoke(backend.main, ["worker"])
+
+    assert result.exit_code == 0, result.output
+    assert relaunched == []
 
 
 def test_main_bootstraps_env_in_file_mode(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -494,17 +659,21 @@ def test_main_publishes_absolute_multiproc_dir(monkeypatch: pytest.MonkeyPatch) 
         reset_all_settings()
 
 
-# -- SIGTERM handling --------------------------------------------------------
+# -- stop-signal handling ----------------------------------------------------
 
 
-async def test_run_backend_sigterm_cancels_main_and_runs_teardown(monkeypatch: pytest.MonkeyPatch) -> None:
-    # ``run_backend`` subscribes a SIGTERM handler that cancels the main task; the
-    # cancellation must unwind through ``app_context``'s teardown before surfacing.
+@pytest.mark.parametrize("sig", STOP_SIGNALS, ids=lambda sig: sig.name)
+async def test_run_backend_stop_signal_cancels_main_and_runs_teardown(
+    monkeypatch: pytest.MonkeyPatch, sig: signal.Signals
+) -> None:
+    # ``run_backend`` subscribes, on each stop signal, a handler that cancels the main task;
+    # the cancellation must unwind through ``app_context``'s teardown before surfacing.
     exited = {"value": False}
     entered = asyncio.Event()
 
-    class _SigApp:
+    class _SigApp(_StopObservingApp):
         def __init__(self) -> None:
+            super().__init__()
             self.config = SimpleNamespace(config_manager=_FakeConfigManager())
             self.lifecycle = _FakeLifecycle()
 
@@ -516,7 +685,7 @@ async def test_run_backend_sigterm_cancels_main_and_runs_teardown(monkeypatch: p
             try:
                 yield
             finally:
-                # Guaranteed teardown the SIGTERM handler must let run.
+                # Guaranteed teardown the stop-signal handler must let run.
                 exited["value"] = True
 
         async def run_backend(self, args) -> None:
@@ -529,9 +698,9 @@ async def test_run_backend_sigterm_cancels_main_and_runs_teardown(monkeypatch: p
     task = asyncio.create_task(backend.run_backend(["worker"]))
     await entered.wait()
 
-    # Deliver SIGTERM through the chain the launcher subscribed to.
-    assert "backend-main-task-cancel" in signal_chain.subscribers(signal.SIGTERM)
-    signal_chain._dispatch(signal.SIGTERM)
+    # Deliver the signal through the chain the launcher subscribed to.
+    assert "backend-main-task-cancel" in signal_chain.subscribers(sig)
+    signal_chain._dispatch(sig)
 
     with pytest.raises(asyncio.CancelledError):
         await task
@@ -539,9 +708,34 @@ async def test_run_backend_sigterm_cancels_main_and_runs_teardown(monkeypatch: p
     assert exited["value"] is True
 
 
-def test_main_catches_sigterm_cancellation_as_clean_exit(monkeypatch: pytest.MonkeyPatch) -> None:
-    # ``main`` converts the deliberate SIGTERM-driven cancellation into a clean exit
-    # (exit code 0), not a crash.
+@pytest.mark.parametrize(
+    ("first", "then"),
+    [(signal.SIGTERM, signal.SIGTERM), (signal.SIGINT, signal.SIGTERM), (signal.SIGTERM, signal.SIGINT)],
+    ids=["SIGTERM-SIGTERM", "SIGINT-SIGTERM", "SIGTERM-SIGINT"],
+)
+async def test_the_first_stop_signal_begins_the_workers_leaving_and_a_later_one_begins_nothing(
+    fake_app: _FakeApp, first: signal.Signals, then: signal.Signals
+) -> None:
+    # Run as its own task, as ``main`` runs it: the launcher's main-task cancel then lands on a
+    # finished launch, not on this test.
+    await asyncio.create_task(backend.run_backend(["worker"]))
+
+    for sig in STOP_SIGNALS:
+        assert signal_chain.subscribers(sig) == ("backend-main-task-cancel", "backend-stop-began")
+    signal_chain._dispatch(first)
+    signal_chain._dispatch(then)
+
+    assert fake_app.stops_began == [(f"{first.name} received", True), (f"{then.name} received", False)]
+    assert fake_app.bus.departing == f"{first.name} received"
+    await fake_app.bus.leaving_announced()
+
+
+def test_main_catches_the_stop_signal_cancellation_as_clean_exit(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # ``main`` converts the deliberate stop-signal cancellation into a clean exit (exit code 0),
+    # not a crash, and its line names no one signal: either stop signal cancels the main task.
+    # Whether the stop finished is the stop's own line to say, so this one claims no teardown.
     monkeypatch.delenv("TAI_MANIFEST_PATH", raising=False)
 
     def fake_loop_run(coro):
@@ -549,14 +743,19 @@ def test_main_catches_sigterm_cancellation_as_clean_exit(monkeypatch: pytest.Mon
         raise asyncio.CancelledError
 
     monkeypatch.setattr(backend, "run_backend", lambda args: _noop_coro())
+    # The process logging setup would replace the root handlers the capture rides on.
+    monkeypatch.setattr(backend, "setup_logging", lambda settings: None)
 
     import uvloop
 
     monkeypatch.setattr(uvloop, "run", fake_loop_run)
 
-    result = CliRunner().invoke(backend.main, ["worker"])
+    with caplog.at_level(logging.INFO, logger=backend.logger.name):
+        result = CliRunner().invoke(backend.main, ["worker"])
 
     assert result.exit_code == 0, result.output
+    exits = [record.getMessage() for record in caplog.records if record.name == backend.logger.name]
+    assert exits[-1] == "stop signal received — backend worker exiting"
 
 
 async def _noop_coro() -> None:
@@ -608,12 +807,13 @@ class _DrainingBackend(ManagedBackend):
     runtimes: ClassVar[Mapping[str, type[BackendRuntime]]] = {"worker": _DrainingWorker}
 
 
-async def test_run_backend_sigterm_drains_the_backend_and_still_runs_teardown(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+@pytest.mark.parametrize("sig", STOP_SIGNALS, ids=lambda sig: sig.name)
+async def test_run_backend_stop_signal_drains_the_backend_and_still_runs_teardown(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, sig: signal.Signals
 ) -> None:
-    """One SIGTERM, two subscribers — the composed-chain regression.
+    """One stop signal, two subscribers — the composed-chain regression.
 
-    The backend base wires its own drain onto SIGTERM while the launcher's
+    The backend base wires its own drain onto each stop signal while the launcher's
     main-task cancellation is already there. With a raw ``add_signal_handler``
     the second install destroys the first, so exactly one of these two
     assertions fails: either in-flight work is severed, or ``app_context``
@@ -622,8 +822,9 @@ async def test_run_backend_sigterm_drains_the_backend_and_still_runs_teardown(
     _DrainingWorker.latest = None
     monkeypatch.setenv("TAI_BACKEND_LIVENESS_PATH", str(tmp_path / "liveness"))
 
-    class _DrainApp:
+    class _DrainApp(_StopObservingApp):
         def __init__(self) -> None:
+            super().__init__()
             self.config = SimpleNamespace(config_manager=_FakeConfigManager())
             self.lifecycle = _ReadyLifecycle()
             self.torn_down = False
@@ -651,11 +852,12 @@ async def test_run_backend_sigterm_drains_the_backend_and_still_runs_teardown(
         # BOTH are on the signal at once. A raw ``add_signal_handler`` on either
         # side would leave exactly one here — silently, since asyncio reports no
         # collision — and one of the two assertions below would then fail.
-        assert signal_chain.subscribers(signal.SIGTERM) == (
+        assert signal_chain.subscribers(sig) == (
             "backend-main-task-cancel",
+            "backend-stop-began",
             "chain-test-worker-drain",
         )
-        signal_chain._dispatch(signal.SIGTERM)
+        signal_chain._dispatch(sig)
 
         with pytest.raises(asyncio.CancelledError):
             await task
@@ -665,7 +867,8 @@ async def test_run_backend_sigterm_drains_the_backend_and_still_runs_teardown(
     # The base's wiring is scoped to the run body and left; the launcher's
     # subscription survived that registration AND that departure, which raw
     # ``add_signal_handler``/``remove_signal_handler`` could not manage.
-    assert signal_chain.subscribers(signal.SIGTERM) == ("backend-main-task-cancel",)
+    assert signal_chain.subscribers(sig) == ("backend-main-task-cancel", "backend-stop-began")
+    assert app.stops_began == [(f"{sig.name} received", True)]
 
 
 async def _await_worker() -> _DrainingWorker:

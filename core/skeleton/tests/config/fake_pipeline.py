@@ -1,5 +1,6 @@
 """Shared fakes and helpers for the :class:`~tai42_skeleton.config.service.ConfigService`
-pipeline oracles — an in-memory config store (the transactional seams), a fake reload admin,
+pipeline oracles — an in-memory config store (the transactional seams), a fake reload admin
+and the failure a reload raises when its epoch build is discarded,
 a recording worker bus, a recording extension combo check, the service wiring helper, the
 env-toggle helpers, and the oauth / none connector descriptors the stickiness tests drive."""
 
@@ -25,33 +26,41 @@ from tai42_skeleton.app.bus import (
 from tai42_skeleton.app.bus.ops import FleetOp, fleet_op_wire
 from tai42_skeleton.app.recycle import RECYCLED, FreshLife, RecycleError, RecycleReport, RecycleRow, orchestrate_recycle
 from tai42_skeleton.config.deployment_env import published_deployment_keys, published_env_readers
+from tai42_skeleton.config.recycle_policy import RecycleDecision
 from tai42_skeleton.config.service import ConfigService
 from tai42_skeleton.tools.binding.errors import ExtensionComboRefusedError
 
-from .._fakes.bus import _row
+from .._fakes.bus import GracefulExit, _row
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Iterator, Sequence
+    from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 
     from tai42_contract.manifest import ExtensionElement
     from tai42_kit.settings import EnvReader
 
     from tai42_skeleton.config.file_manager import FileConfigManager
+    from tai42_skeleton.config.service.results import _ComboCheck
 
 
 class ComboChecks:
-    """A recording ``combo_check``: keeps every ``(tool, combo)`` it is handed.
+    """A recording ``combo_check``: serves ``served`` and keeps every ``(tool, combo, base)`` it is handed.
 
-    With ``refuse`` set, a combo carrying that value anywhere in an element's settings is
-    refused with :class:`ExtensionComboRefusedError` naming the extension and the tool.
+    ``served`` is what :meth:`served_bases` lists, read through the attribute on every call so a
+    test can change it mid-write. With ``refuse`` set, a combo carrying that value anywhere in an
+    element's settings is refused with :class:`ExtensionComboRefusedError` naming the extension
+    and the tool.
     """
 
-    def __init__(self, *, refuse: object = None) -> None:
+    def __init__(self, *, refuse: object = None, served: Mapping[str, Any] | None = None) -> None:
         self.refuse = refuse
-        self.calls: list[tuple[str, list[ExtensionElement]]] = []
+        self.served: Mapping[str, Any] = dict(served or {})
+        self.calls: list[tuple[str, list[ExtensionElement], Any]] = []
 
-    def __call__(self, tool: str, combo: Sequence[ExtensionElement]) -> None:
-        self.calls.append((tool, copy.deepcopy(list(combo))))
+    async def served_bases(self) -> Mapping[str, Any]:
+        return dict(self.served)
+
+    def check_combo(self, tool: str, combo: Sequence[ExtensionElement], *, base: Any) -> None:
+        self.calls.append((tool, copy.deepcopy(list(combo)), base))
         if self.refuse is None:
             return
         for element in combo:
@@ -165,7 +174,7 @@ class FakeReloadAdmin:
         served: dict[str, list[str]] | None = None,
         raise_listing: Exception | None = None,
     ) -> None:
-        self._result = result if result is not None else {"status": "ok", "env_keys": 0}
+        self._result = result if result is not None else {"status": "ok", "env_keys": 0, "awaiting_respawn": []}
         self._raise = raise_reload
         self._during_reload = during_reload
         self._served = served if served is not None else {}
@@ -173,7 +182,7 @@ class FakeReloadAdmin:
         self.calls = 0
         self.listed: list[str] = []
 
-    def reload_config(self) -> dict[str, Any]:
+    async def reload_config(self) -> dict[str, Any]:
         self.calls += 1
         if self._during_reload is not None:
             self._during_reload()
@@ -189,7 +198,7 @@ class FakeReloadAdmin:
         return list(self._served.get(config.title, []))
 
 
-class RecordingBus:
+class RecordingBus(GracefulExit):
     """A worker bus that records each publish and returns a crafted fleet report.
 
     ``remote_outcome`` shapes the report of a configured remote origin (``applied`` for
@@ -199,15 +208,19 @@ class RecordingBus:
     broadcast fault (e.g. a redis ``ResponseError``) that the bus does not fold into a
     returned bus-unreachable report.
 
-    ``live`` is the mutable census behind ``expected_at_start``: dropping a name from it
-    mid-apply is a worker's presence fading, and ``census_error`` makes the op-start
-    census itself raise. Each publish's snapshot is recorded in
+    ``live`` is the mutable census behind ``census`` and ``expected_at_start``: dropping a name
+    from it mid-apply is a worker's presence fading, and ``census_error`` makes every census
+    read raise (a test arms it once the fleet's ownership was read, so the op-start census
+    fails). ``remote_payload`` is the reload payload each remote states (a clean reload's
+    ``{"awaiting_respawn": []}`` by default). Each publish's snapshot is recorded in
     ``expected_at_start_calls``, separately from the ``publish_calls`` triples.
 
     ``census`` returns a ready row per worker: this process's, publishing its own deployment
     names, then one per remote, publishing none. Every row names this process's env-reader
     digest, as siblings running the same build do, and ``env_readers`` answers with this
     process's own body."""
+
+    heartbeat_ttl = 15.0
 
     def __init__(
         self,
@@ -218,6 +231,7 @@ class RecordingBus:
         error: str | None = None,
         publish_error: Exception | None = None,
         census_error: Exception | None = None,
+        remote_payload: dict[str, Any] | None = None,
     ) -> None:
         self.identity = WorkerIdentity(name="serve-test", kind=WorkerKind.serve, pid=1, generation=1)
         self.member_identity = self.identity
@@ -226,24 +240,31 @@ class RecordingBus:
         self._reachable = reachable
         self._error = error
         self._publish_error = publish_error
-        self._census_error = census_error
+        self.census_error = census_error
+        self._remote_payload = {"awaiting_respawn": []} if remote_payload is None else remote_payload
         self.live = set(self._remotes)
         self.publish_calls: list[tuple[dict[str, Any], list[str] | None, LocalApplyResult | None]] = []
         self.expected_at_start_calls: list[dict[str, int] | None] = []
+        super().__init__()
 
     async def expected_at_start(self) -> dict[str, int]:
-        if self._census_error is not None:
-            raise self._census_error
+        if self.census_error is not None:
+            raise self.census_error
         return dict.fromkeys(sorted(self.live), 1)
 
     async def census(self) -> list[WorkerRow]:
+        if self.census_error is not None:
+            raise self.census_error
         digest = published_env_readers().digest
         own = _row(self.identity.name, self.identity.kind, pid=1, generation=1, pttl_ms=15000)
         own.deployment_keys = list(published_deployment_keys())
-        remotes = [_row(name, WorkerKind.serve, pid=2, generation=1, pttl_ms=15000) for name in self._remotes]
+        remotes = [_row(name, WorkerKind.serve, pid=2, generation=1, pttl_ms=15000) for name in sorted(self.live)]
         for row in (own, *remotes):
             row.env_readers = digest
         return [own, *remotes]
+
+    def expected_from_census(self, rows: Sequence[WorkerRow]) -> dict[str, int]:
+        return {row.name: row.generation for row in rows if row.name != self.identity.name}
 
     async def env_readers(self, digests: Sequence[str]) -> dict[str, tuple[EnvReader, ...]]:
         own = published_env_readers()
@@ -270,7 +291,8 @@ class RecordingBus:
                 WorkerResult(name=self.identity.name, outcome=local.outcome, payload=local.payload, error=local.error)
             )
         for remote in self._remotes:
-            results.append(WorkerResult(name=remote, outcome=self._remote_outcome, detail="crafted"))
+            payload = dict(self._remote_payload) if self._remote_outcome is OpOutcome.applied else None
+            results.append(WorkerResult(name=remote, outcome=self._remote_outcome, detail="crafted", payload=payload))
         return FleetResult(op=op.op, results=results)
 
 
@@ -280,7 +302,7 @@ def _service(
     admin: Any = None,
     bus: Any = None,
     orchestrate: Callable[..., Awaitable[RecycleReport]] = orchestrate_recycle,
-    combo_check: Callable[[str, Sequence[ExtensionElement]], None] | None = None,
+    combo_check: _ComboCheck | None = None,
 ) -> tuple[ConfigService, Any, Any]:
     admin = admin or FakeReloadAdmin()
     bus = bus or RecordingBus()
@@ -292,6 +314,31 @@ def _service(
         orchestrate=orchestrate,
     )
     return service, admin, bus
+
+
+async def discarded_build_failure(error: Exception) -> Exception:
+    """``error`` as a reload raises it when its epoch build fails and is discarded before the swap.
+
+    Marked by the discard and stated as the reload states it: the recycle-class drift measured
+    after the discard (:func:`~tai42_skeleton.app.discarded_build.state_discarded_build`).
+    """
+    from tai42_skeleton.app.discarded_build import state_discarded_build
+    from tai42_skeleton.app.epoch import build_and_discard_epoch
+    from tai42_skeleton.app.lifecycle.config_reload import awaiting_respawn
+    from tai42_skeleton.config.deployment_env import DeploymentOwnership
+
+    async def _rebuild(_epoch: Any) -> None:
+        raise error
+
+    async def _no_serving_app(_epoch: Any) -> Any:
+        raise AssertionError("a failed rebuild builds no serving app")
+
+    with pytest.raises(type(error)) as raised:
+        await build_and_discard_epoch(
+            {}, ownership=DeploymentOwnership(), rebuild=_rebuild, build_serving_app=_no_serving_app
+        )
+    state_discarded_build(raised.value, awaiting_respawn())
+    return raised.value
 
 
 def _orchestrate_spy(
@@ -306,16 +353,14 @@ def _orchestrate_spy(
     async def spy(
         bus: Any,
         *,
-        excluded_name: str,
-        applier_generation: int,
+        decision: RecycleDecision,
         target_kinds: Any,
         applier_self_deferred: bool,
         step_timeout: float,
         expected: Any = None,
     ) -> RecycleReport:
         seen["expected"] = None if expected is None else dict(expected)
-        seen["excluded_name"] = excluded_name
-        seen["applier_generation"] = applier_generation
+        seen["decision"] = decision
         seen["target_kinds"] = list(target_kinds)
         seen["applier_self_deferred"] = applier_self_deferred
         seen["step_timeout"] = step_timeout

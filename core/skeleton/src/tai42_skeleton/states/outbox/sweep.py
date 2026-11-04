@@ -9,12 +9,12 @@ sweeps safe, so any process recovers any row.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 from datetime import UTC, datetime
 
 from tai42_skeleton.states import db as states_db
 from tai42_skeleton.states.db import states_settings
+from tai42_skeleton.utils.tasks import cancel_and_wait
 
 from .apply import apply_row, in_flight_tasks, run_calls
 from .drain import live_states_service
@@ -66,7 +66,7 @@ def _on_sweep_done(task: asyncio.Task[None]) -> None:
 
 
 def start_state_outbox_sweep() -> None:
-    """(Re)start the sweep on the serving loop and register its cancel with the epoch under construction.
+    """(Re)start the sweep on the serving loop and register its cancel with the current epoch.
 
     Reads the outbox settings, so a bad setting pair fails the boot loudly. A no-op while the
     states feature is off.
@@ -82,21 +82,23 @@ def start_state_outbox_sweep() -> None:
     task = asyncio.create_task(_sweep_loop(interval), name="tai-states-outbox-sweep")
     task.add_done_callback(_on_sweep_done)
     _sweep_task = task
-    from tai42_skeleton.app.epoch import epoch_under_construction_or_none
+    from tai42_skeleton.app.epoch import current_epoch_or_none
 
-    epoch = epoch_under_construction_or_none()
+    epoch = current_epoch_or_none()
     if epoch is None:
         return
 
     async def _cancel() -> None:
         if task.done():
             return
-        task.cancel()
-        if task.get_loop() is asyncio.get_running_loop():
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
+        await cancel_and_wait(task)
 
     epoch.register_periodic_loop(_cancel)
+
+
+def shutdown_drain_seconds() -> float:
+    """The bound of a healthy :func:`stop_state_outbox_sweep`: the in-flight applies' shutdown grace."""
+    return states_settings().outbox_shutdown_grace_seconds
 
 
 async def stop_state_outbox_sweep() -> None:
@@ -105,13 +107,11 @@ async def stop_state_outbox_sweep() -> None:
     task = _sweep_task
     _sweep_task = None
     if task is not None and not task.done():
-        task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await task
+        await cancel_and_wait(task)
     pending = in_flight_tasks()
     if not pending:
         return
-    grace = states_settings().outbox_shutdown_grace_seconds
+    grace = shutdown_drain_seconds()
     _done, still = await asyncio.wait(pending, timeout=grace)
     if not still:
         return

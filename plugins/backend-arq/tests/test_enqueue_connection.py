@@ -18,7 +18,7 @@ import weakref
 from collections.abc import Callable
 
 import pytest
-from tai42_kit.clients.base import shutdown_all_clients
+from tai42_kit.loop_bound import release_loop_bound_resources
 from tai42_kit.settings import cache_registry
 
 import tai42_backend_arq
@@ -54,7 +54,7 @@ async def _marker_alive_after_an_enqueue() -> bool:
         gc.collect()
         return marker() is not None
     finally:
-        await shutdown_all_clients()
+        await release_loop_bound_resources()
 
 
 @pytest.mark.usefixtures("redis_url")
@@ -82,4 +82,4 @@ async def test_a_reload_re_import_leases_the_same_pooled_client(monkeypatch: pyt
         # The re-import re-bound the one settings accessor to the re-imported module's class;
         # bind it back to the module the rest of the suite holds.
         cache_registry._CACHE_CLEARS[f"{settings_module.__name__}.arq_settings"].rebind(settings_module.ArqSettings)
-        await shutdown_all_clients()
+        await release_loop_bound_resources()

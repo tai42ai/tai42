@@ -18,9 +18,9 @@ from typing import Any, LiteralString
 
 import pytest
 from tai42_kit.clients import client_ctx
-from tai42_kit.clients.base import shutdown_all_clients
 from tai42_kit.clients.impl.postgres import PostgresClient
 from tai42_kit.db import apply_migrations, component_store_settings
+from tai42_kit.loop_bound import release_loop_bound_resources
 from tai42_kit.settings import reset_all_settings
 
 import tai42_skeleton.versioning.store as versioning_store
@@ -58,7 +58,7 @@ async def real_store(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[tuple[Pos
     await _wipe(kind1, kind2)
     yield PostgresVersionedStore(), kind1, kind2
     await _wipe(kind1, kind2)
-    await shutdown_all_clients()
+    await release_loop_bound_resources()
 
 
 async def _wipe(kind1: str, kind2: str) -> None:

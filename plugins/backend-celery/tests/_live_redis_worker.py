@@ -2,10 +2,9 @@
 
 The relay forwards in its own process (``_tcp_relay.py``), driven as a context manager.
 
-Point ``TAI_TEST_CELERY_BROKER`` at a Redis broker to run the live modules; once set, an
-unreachable broker fails them instead of skipping them. Unset, they probe
-``redis://localhost:6399/0`` and skip when nothing answers there. The ``run_worker`` fixture
-is registered for every module by ``conftest.py``.
+Point ``TAI_TEST_CELERY_BROKER`` at a Redis broker to run the live modules; unset, they are
+skipped, and once set, an unreachable broker fails them. The ``run_worker`` fixture is
+registered for every module by ``conftest.py``.
 """
 
 from __future__ import annotations
@@ -25,34 +24,26 @@ import pytest
 import redis
 from kombu import pools
 
+from tai42_backend_celery.core import liveness_step
 from tai42_backend_celery.core.settings import celery_settings
 from tai42_backend_celery.core.tasks import AsyncTask
 
 _BROKER_ENV = "TAI_TEST_CELERY_BROKER"
-_BROKER_REQUIRED = _BROKER_ENV in os.environ
-_BROKER = os.environ.get(_BROKER_ENV, "redis://localhost:6399/0")
+_BROKER = os.environ.get(_BROKER_ENV, "")
 _RELAY_PROGRAM = Path(__file__).with_name("_tcp_relay.py")
 
 
-def _redis_reachable(url: str) -> bool:
-    """Whether a Redis broker answers at ``url``; a configured broker that does not answer raises."""
-    try:
-        redis.Redis.from_url(url).ping()
-    except redis.ConnectionError:
-        if _BROKER_REQUIRED:
-            raise
-        return False
-    return True
-
-
 def _live_marks() -> list[pytest.MarkDecorator]:
-    """The marks of a module that drives a live worker: skipped when no broker answers.
+    """The marks of a module that drives a live worker: skipped when no broker is configured.
 
+    A configured broker is pinged here, so one that does not answer fails the module loudly.
     A live worker boot legitimately emits framework warnings; they are not errors for these
     integration tests.
     """
+    if _BROKER:
+        redis.Redis.from_url(_BROKER).ping()
     return [
-        pytest.mark.skipif(not _redis_reachable(_BROKER), reason=f"no Redis broker reachable at {_BROKER}"),
+        pytest.mark.skipif(not _BROKER, reason=f"{_BROKER_ENV} is unset"),
         pytest.mark.filterwarnings("ignore"),
     ]
 
@@ -154,7 +145,10 @@ def _app_on(monkeypatch: pytest.MonkeyPatch, url: str, *, result_retry_attempts:
 
 @pytest.fixture
 def run_worker() -> Iterator[Any]:
-    """Start a worker for an app in a background thread, solo unless the options say otherwise; stopped at teardown."""
+    """Start a worker for an app in a background thread, solo unless the options say otherwise; stopped at teardown.
+
+    The thread runs the worker's hub as the fork gate's engine loop, as the worker runtime runs it.
+    """
     from celery import _state
     from celery.worker import state
 
@@ -175,7 +169,12 @@ def run_worker() -> Iterator[Any]:
                 **options,
             }
         )
-        thread = threading.Thread(target=worker.start, name="live-seam-worker", daemon=True)
+
+        def run() -> None:
+            with liveness_step.hub_as_engine_loop(app):
+                worker.start()
+
+        thread = threading.Thread(target=run, name="live-seam-worker", daemon=True)
         thread.start()
         threads.append(thread)
         return worker
@@ -194,6 +193,10 @@ def run_worker() -> Iterator[Any]:
             app.backend.result_consumer.stop()
             app.backend.client.connection_pool.disconnect()
             app.close()
+        # A control call that awaits replies over the process-wide pool returns its connection
+        # with a reply BRPOP in flight, and a prefork child a later test forks from this process
+        # blocks reading it in kombu's after-fork cleanup; the pools are emptied here.
+        pools.reset()
         # Hosting a worker in-process arms Celery's "never call get() in a task"
         # guard process-wide; disarm it so later tests can collect results.
         _state._set_task_join_will_block(False)

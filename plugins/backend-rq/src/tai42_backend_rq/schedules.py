@@ -1,9 +1,10 @@
 """Writing a typed cadence into RQ: the scheduler factory and the one schedule writer.
 
-``apply_normalized_schedule`` is shared by the create, update, and import paths so every schedule
+``apply_normalized_schedule`` is shared by the create and import paths so every schedule
 lands the same way, mirroring the interval seconds or cron string into the job ``meta``
-for read-back. RQ cannot honour a relative interval, so every path refuses one loudly
-(:func:`refuse_relative`).
+for read-back. RQ cannot honour a relative interval: every write door refuses one first
+(:func:`~tai42_kit.backend.check_cadence_supported` over
+:class:`~tai42_backend_rq.schedule_store.RqScheduleStore`).
 """
 
 from __future__ import annotations
@@ -22,17 +23,6 @@ from tai42_backend_rq.settings import rq_settings
 def scheduler_for(connection: Any) -> Scheduler:
     """The scheduler over the configured queue, moving due jobs onto a :class:`TaskBudgetQueue`."""
     return Scheduler(queue_name=rq_settings().queue_name, connection=connection, queue_class=TaskBudgetQueue)
-
-
-def refuse_relative(cadence: IntervalCadence | CrontabCadence) -> None:
-    """Raise for a relative interval: the rq scheduler cannot honour ``relative=True``."""
-    if isinstance(cadence, IntervalCadence) and cadence.relative:
-        raise ValueError("the rq backend does not support relative interval schedules (relative=True)")
-
-
-def crontab_string(cadence: CrontabCadence) -> str:
-    """The 5-field cron expression of a crontab cadence."""
-    return f"{cadence.minute} {cadence.hour} {cadence.day_of_month} {cadence.month_of_year} {cadence.day_of_week}"
 
 
 def interval_seconds(cadence: IntervalCadence) -> int:
@@ -62,8 +52,7 @@ async def apply_normalized_schedule(
 
     An interval becomes a recurring ``scheduler.schedule`` call (whole seconds), a crontab a
     ``scheduler.cron`` call; the interval seconds or cron string is mirrored into the job
-    ``meta`` for read-back. A relative interval raises. The scheduler calls are blocking, so
-    they run off the event loop.
+    ``meta`` for read-back. The scheduler calls are blocking, so they run off the event loop.
 
     An interval schedule's FIRST run is one interval out, not at creation: an
     interval fires on its cadence, never the instant it is registered. Firing at
@@ -74,7 +63,6 @@ async def apply_normalized_schedule(
     delete removes cleanly. A crontab schedule is already anchored to its next
     matching wall-clock time, so it never fires at creation.
     """
-    refuse_relative(cadence)
     meta_data: dict[str, Any] = {}
 
     if isinstance(cadence, IntervalCadence):
@@ -93,7 +81,7 @@ async def apply_normalized_schedule(
             )
         )
     else:
-        cron = crontab_string(cadence)
+        cron = cadence.expression
         meta_data["cron_string"] = cron
 
         await asyncio.to_thread(

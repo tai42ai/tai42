@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import contextlib
 import importlib.resources
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Iterator, Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -155,10 +155,10 @@ def _verify_all_registered(ctx: _MountContext) -> None:
         )
 
 
-def build_mount_map(
+async def build_mount_map(
     manifest_modules: Sequence[str],
     reserved_prefixes: Sequence[str],
-    load_overrides: Callable[[], Mapping[str, Mapping[str, str]]],
+    load_overrides: Callable[[], Awaitable[Mapping[str, Mapping[str, str]]]],
 ) -> dict[str, MountBinding]:
     """Build the module → :class:`MountBinding` map for one registration pass.
 
@@ -167,7 +167,7 @@ def build_mount_map(
     item binds at its declared base, a route-LESS item binds a ``forbidden`` marker,
     and a module shipping no spec (an operator-authored module) gets no binding.
 
-    ``load_overrides`` yields the persisted ``{ref: {item_name: base}}`` route-mount
+    ``load_overrides`` is awaited for the persisted ``{ref: {item_name: base}}`` route-mount
     overrides — it is invoked ONLY when at least one real plugin route module is
     present, so a deployment with none takes no install-store round-trip.
     ``reserved_prefixes`` are the never-public prefixes a resolved public route may
@@ -185,7 +185,7 @@ def build_mount_map(
             continue
         resolved[module] = (spec.ref, item)
 
-    overrides = load_overrides() if resolved else {}
+    overrides = await load_overrides() if resolved else {}
     mapping = {module: _binding_for_item(ref, item, overrides.get(ref, {})) for module, (ref, item) in resolved.items()}
     _reject_reserved_public_routes(mapping, reserved_prefixes)
     return mapping

@@ -34,7 +34,6 @@ from tai42_skeleton.app import applied_env
 from tai42_skeleton.app.boot_rules import ConfigInvariantError
 from tai42_skeleton.app.bus import WorkerKind, WorkerRow
 from tai42_skeleton.app.fastmcp_settings import apply_fastmcp_settings
-from tai42_skeleton.app.lifecycle.bus_subscription import _set_by_withdrawn
 from tai42_skeleton.config.deployment_env import (
     DeploymentOwnership,
     fleet_deployment_ownership,
@@ -270,25 +269,14 @@ def test_a_reader_declared_after_the_capture_changes_the_published_readers(isola
     assert any(reader.qualname.endswith("FleetReadersDeclared") for reader in decode_env_readers(after.body))
 
 
-def test_a_withdrawn_name_sets_the_recycle_keys_a_sibling_s_reader_reads_for_its_field() -> None:
-    recapture_deployment_env()
-    _digest, bodies = _sibling_readers()
-    fleet = DeploymentOwnership(["FLEETRD_S_EXTRA"], bodies)
-
-    awaiting = ["FLEETRD_S_EXTRA__KEY", "FLEETRD_S_LEVEL"]
-
-    assert _set_by_withdrawn(awaiting, ["FLEETRD_S_EXTRA"], fleet) == ["FLEETRD_S_EXTRA__KEY"]
-    assert _set_by_withdrawn(awaiting, ["FLEETRD_S_EXTRA"], DeploymentOwnership(["FLEETRD_S_EXTRA"])) == []
-
-
 class _OldReader(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="FLEETRD_OLD_")
-    url: str | None = None
+    model_config = SettingsConfigDict(env_prefix="FLEETRD_OLD_", env_nested_delimiter="__")
+    extra: dict[str, str] = Field(default_factory=dict)
 
 
 class _NewReader(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="FLEETRD_NEW_")
-    url: str | None = None
+    model_config = SettingsConfigDict(env_prefix="FLEETRD_NEW_", env_nested_delimiter="__")
+    extra: dict[str, str] = Field(default_factory=dict)
 
 
 class _RollingBus:
@@ -314,9 +302,16 @@ def _described(cls: type[BaseSettings]) -> tuple[str, tuple[EnvReader, ...]]:
     return hashlib.sha256(encode_env_readers(readers).encode()).hexdigest(), readers
 
 
+# This worker's row publishes a group name of each reader: the ownership resolves the names inside
+# the group only through a reader body it holds.
+_GROUP_KEYS = ["FLEETRD_OLD_EXTRA", "FLEETRD_NEW_EXTRA"]
+
+
 def _reading_row(name: str, digest: str) -> WorkerRow:
     row = _row(name, WorkerKind.serve, pid=1, generation=1, pttl_ms=15000)
     row.env_readers = digest
+    if name == "serve-1":
+        row.deployment_keys = list(_GROUP_KEYS)
     return row
 
 
@@ -341,6 +336,6 @@ async def test_a_read_answers_by_the_bodies_its_census_needs_while_another_read_
     bus.release.set()
     ownership = await rolling
 
-    assert settled.fields_set_by("FLEETRD_OLD_URL") == frozenset()
-    assert ownership.fields_set_by("FLEETRD_OLD_URL")
-    assert ownership.fields_set_by("FLEETRD_NEW_URL")
+    assert not settled.owns("FLEETRD_OLD_EXTRA__URL")
+    assert ownership.owns("FLEETRD_OLD_EXTRA__URL")
+    assert ownership.owns("FLEETRD_NEW_EXTRA__URL")

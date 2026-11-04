@@ -70,6 +70,8 @@ def spawn_all(stack: TaiStack, manifest_path: Path, family_dirs: list[str]) -> N
                 (f"backend-{name}", process.args, process.env)
                 for name, process in backend.liveness_processes(stack.resources).items()
             ]
+        if stack.config.green_pool_workers:
+            extras += [(f"backend-{pool}", worker.args, {}) for pool, worker in backend.green_pool_workers().items()]
         for extra_name, extra_args, variant_env in extras:
             extra_cwd = stack.config.cwd_overrides.get(extra_name)
             spawn(

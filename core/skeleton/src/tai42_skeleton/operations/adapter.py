@@ -15,13 +15,11 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, get_args
 
 from fastmcp.utilities.types import Audio, File, Image
 from pydantic import BaseModel, ValidationError
 from pydantic_core import ErrorDetails
-from starlette.background import BackgroundTask
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.types import Message
@@ -44,25 +42,6 @@ ContextExtractor = Callable[[Request], Awaitable[dict[str, Any]]]
 
 # Path-template segment (``{name}`` / ``{name:path}``) → the argument name.
 _PATH_PARAM = re.compile(r"\{([^}:]+)(?::[^}]+)?\}")
-
-
-@dataclass(frozen=True)
-class OperationResponse:
-    """An operation result that carries a Starlette ``BackgroundTask`` to run after the reply.
-
-    The env-change doors return this to arm the writer's own post-reply graceful self-exit after
-    a recycle roll that converged. On the HTTP edge the adapter envelopes ``payload`` and attaches
-    ``background`` to the response, so it runs after the body flushes — never an inline
-    ``create_task`` that could race the flush and sever the transport before the reply ships.
-    The projected tool edge (every tool door: MCP ``tools/call``, ``tai tools run``, an agent, a
-    preset, a hook, a schedule or a submit run inside a backend job) runs ``background`` once the
-    operation returned and then answers with ``payload``; the exit is the worker's graceful stop,
-    whose drain lets the in-flight reply or job finish before the worker stops and its supervisor
-    respawns it. One reply, true on every edge.
-    """
-
-    payload: Any
-    background: BackgroundTask | None = None
 
 
 def _path_param_names(path: str) -> tuple[str, ...]:
@@ -287,18 +266,6 @@ async def _read_operation_kwargs(
     return kwargs
 
 
-def _unwrap_operation_result(result: Any) -> tuple[Any, BackgroundTask | None]:
-    """Split an operation result into ``(payload, background)``.
-
-    An :class:`OperationResponse` carries a post-flush ``BackgroundTask`` (an
-    env-change door's writer self-exit) alongside its payload; a bare payload
-    returns ``(result, None)``.
-    """
-    if isinstance(result, OperationResponse):
-        return result.payload, result.background
-    return result, None
-
-
 def _build_handler(
     op: OperationMetadata,
     method: str,
@@ -324,19 +291,11 @@ def _build_handler(
         except _ParseError as parse:
             return JSONResponse(parse.body, status_code=parse.status)
 
-        # Unwrap a post-flush ``BackgroundTask`` (the env-change writer's self-exit) from the
-        # payload; a bare payload's background stays ``None``. ``response_headers`` ride
-        # the SUCCESS response only (a caching directive the route's read carries); an
+        # ``response_headers`` ride the SUCCESS response only (a caching directive the route's read carries); an
         # error response is uncached and unadorned. ``success_status`` is the operation's
         # own success code — 200 for the common enveloped read/write, or an
         # accepted-but-detached ``202`` (the background tool-run submit door).
-        payload, background = _unwrap_operation_result(result)
-        return JSONResponse(
-            {"data": _serialize(payload)},
-            status_code=success_status,
-            headers=response_headers,
-            background=background,
-        )
+        return JSONResponse({"data": _serialize(result)}, status_code=success_status, headers=response_headers)
 
     handler.__name__ = op.name
     handler.__doc__ = op.func.__doc__

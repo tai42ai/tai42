@@ -128,7 +128,7 @@ def test_a_child_forked_during_a_module_reimport_wedges_unless_gated(
     gate = ForkGate()
     guarded = mode != "no_gate"
     if mode == "guard":
-        gate.guard_forks(timeout=_ARRIVES, tick=lambda: None)
+        gate.guard_forks(timeout=_ARRIVES)
     forked = threading.Event()
     pid_slot: dict[str, int] = {}
 

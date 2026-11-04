@@ -9,7 +9,7 @@
  * would leave them down:
  *
  *  1. CREATE → EDIT → DIFF. A profile carrying a user-secret-marked key AND a
- *     recycle-class key (`TAI_BUS_ACK_TIMEOUT`, a `TAI_BUS_*` field). The stack's bus
+ *     recycle-class key (`TAI_BUS_HEARTBEAT_TTL`, a `TAI_BUS_*` field). The stack's bus
  *     and shared-store URLs are set by the deployment, so the profile needs no copy of
  *     them. The diff preview masks EVERY value (`••••••`) and surfaces the recycle
  *     callout. This test never applies the profile and never touches the live env
@@ -36,16 +36,16 @@ import {
 } from './helpers';
 import { needs, test } from './needs';
 
-needs('mutable', 'setting:TAI_BUS_ACK_TIMEOUT=unset');
+needs('mutable', 'setting:TAI_BUS_HEARTBEAT_TTL=unset');
 
 /** The client-side mask ProfilesTab renders for a masked value (6 bullets). */
 const MASK = '••••••';
 
-/** A `TAI_BUS_*` field (`BusSettings.ack_timeout`): recycle-class — and, crucially,
+/** A `TAI_BUS_*` field (`BusSettings.heartbeat_ttl`): recycle-class — and, crucially,
  *  `BusSettings` is imported on every worker (core bus infra), so the serve worker that
  *  classifies the diff reliably resolves it as `recycle`. Neither a bus URL nor set by the
  *  deployment, so a diff carrying it shows the recycle callout without a refusal. */
-const RECYCLE_KEY = 'TAI_BUS_ACK_TIMEOUT';
+const RECYCLE_KEY = 'TAI_BUS_HEARTBEAT_TTL';
 
 /** The stored env map GET /api/config/env exposes under `data.env`. */
 async function storedEnv(request: APIRequestContext): Promise<Record<string, string>> {

@@ -29,12 +29,12 @@ import pytest
 from arq.connections import ArqRedis, RedisSettings, create_pool
 from arq.constants import in_progress_key_prefix, retry_key_prefix
 from arq.jobs import Job, JobStatus
+from tai42_kit.fork_gate import fork_gate
 from tai42_kit.utils.worker_secret_capability import WORKER_SECRET_CAPABILITY_ARG
 
 from tai42_backend_arq import scheduler
 from tai42_backend_arq.scheduler import wait_job_result
 from tai42_backend_arq.settings import TaskFailedError, arq_settings, job_deserializer, job_serializer
-from tai42_backend_arq.tools import backend_list_failed_tasks
 from tai42_backend_arq.worker import ArqWorkerRuntime
 
 #: The failure a caller and the failed-task listing read for a job whose run was cut.
@@ -79,6 +79,12 @@ async def _dispatch(queue: ArqRedis, **arguments: Any) -> Job:
 
 
 async def _runtime(*options: str) -> ArqWorkerRuntime:
+    """A built worker runtime, standing for a worker process of its own.
+
+    The fork guard a build installs is process-wide and takes one worker's tick, so the guard of
+    a worker built before it in this test is dropped first, as that worker's process would end.
+    """
+    fork_gate._fork_hooks.guard = None
     runtime = ArqWorkerRuntime.from_args(list(options))
     runtime.bind_progress(lambda *, next_within: None)
     await runtime.build()
@@ -117,7 +123,7 @@ async def test_a_job_picked_up_again_after_a_hard_worker_death_never_runs_its_bo
     assert refused.error_type == _CUT_TYPE
     assert refused.error_repr == _CUT
     bind_pool(queue)
-    assert await backend_list_failed_tasks() == [{"task_id": job.job_id, "error": _CUT}]
+    assert await stub_app.tools.registered["backend_list_failed_tasks"]() == [{"task_id": job.job_id, "error": _CUT}]
     # What the operator reads in the worker log for the refused pickup.
     assert f"{job.job_id}:tool_execution failed, {_CUT_TYPE}: the run was cut" in caplog.text
 

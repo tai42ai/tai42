@@ -58,6 +58,10 @@ dependencies = [
     "jsonschema-specifications>=2023.03.6",
     # Imported lazily by conversations/entry_params.py (the dropped-params counter).
     "prometheus-client>=0.24",
+    # Imported directly by backend/branches.py (the branch tools' composed signatures).
+    "makefun~=1.16.0",
+    # Imported directly by backend/queue_labels.py (the worker CLIs' queue-label option).
+    "click>=8",
 ]
 
 [project.urls]
@@ -172,6 +176,10 @@ dev = [
     "numpy>=2",
     # The clients' connection-context tests run on uvloop as well as asyncio.
     "uvloop>=0.22; sys_platform != 'win32'",
+    # The reshaped-threads tests run asyncio under the two thread-reshaping process preludes
+    # the backend plugins declare.
+    "gevent~=26.8.0",
+    "eventlet~=0.41.3",
 ]
 
 [project.entry-points.console_scripts]
@@ -201,6 +209,7 @@ testpaths = ["tests"]
 xfail_strict = true
 markers = [
     "integration: exercises a real external service (e.g. a live Postgres); skips VISIBLY with a clear reason when the service is not configured, never a silent skip",
+    "process_namespace: runs the sandbox exec scripts under a real shell, whose /proc scan must see only the test's own processes, so the tests run in a process namespace of their own (a container); skips VISIBLY with the reason when TAI42_KIT_PROCESS_NAMESPACE is not set; not run in the host gate",
 ]
 # Turn warnings into errors so a real defect that only surfaces as a warning
 # (e.g. a missing await -> "coroutine was never awaited") fails the suite loudly

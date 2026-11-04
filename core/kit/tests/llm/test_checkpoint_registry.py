@@ -1,5 +1,5 @@
 """CheckpointRegistry: per-key resource caching, close_all error collection,
-singleton-per-loop, usable-across-loops, and the settings-reset drop hook.
+singleton-per-loop, usable-across-loops, and the saver views kept per waiting.
 """
 
 import asyncio
@@ -167,45 +167,6 @@ async def test_checkpoint_registry_accessor_rebuilds_after_close_all():
     fresh = checkpoint_registry()
     assert fresh is not reg
     assert fresh._closed is False
-
-
-async def test_checkpoint_registry_settings_reset_drops_registry():
-    from tai42_kit.llm.checkpoint.checkpoint_registry import checkpoint_registry
-    from tai42_kit.settings import reset_all_settings
-
-    reg = checkpoint_registry()
-    reset_all_settings()
-    # The reset hook drops the per-loop registries so a soft restart rebuilds
-    # them with the fresh settings on next use.
-    assert checkpoint_registry() is not reg
-
-
-async def test_checkpoint_registry_settings_reset_raises_on_live_resource(monkeypatch):
-    from tai42_kit.llm.checkpoint import checkpoint_registry as reg_mod
-    from tai42_kit.settings import reset_all_settings
-
-    async def _fake_create(provider, conn_string):
-        async def _closer():
-            pass
-
-        return (object(), _closer)
-
-    monkeypatch.setattr(reg_mod, "create_checkpoint_resource", _fake_create)
-    monkeypatch.setattr(reg_mod, "get_saver_from_resource", lambda provider, resource: resource)
-
-    reg = reg_mod.checkpoint_registry()
-    await reg.get_checkpointer("memory", "c1")  # the running-loop registry now holds a live resource
-    assert reg.has_live_resources is True
-
-    # Dropping it here would leak an open resource, so the reset must fail loudly
-    # and demand an explicit close_all() first rather than silently clearing.
-    with pytest.raises(RuntimeError, match="close_all"):
-        reset_all_settings()
-
-    # After the explicit close_all the reset succeeds and rebuilds on next use.
-    await reg.close_all()
-    reset_all_settings()
-    assert reg_mod.checkpoint_registry() is not reg
 
 
 # --------------------------------------------------------------------------- #

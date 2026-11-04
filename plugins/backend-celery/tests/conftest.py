@@ -11,8 +11,9 @@ from __future__ import annotations
 
 import asyncio
 import fnmatch
+import threading
 from collections.abc import AsyncIterator, Callable, Iterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -24,6 +25,7 @@ from tai42_contract.app import tai42_app
 from tai42_contract.interactions import VisitOutcome
 from tai42_contract.template import TemplatedText
 from tai42_kit.utils.detached_util import in_detached_run
+from tai42_kit.utils.run_bound import in_bounded_run
 from tai42_kit.utils.state_context import current_state_context
 
 
@@ -36,6 +38,8 @@ class _RecordingTools:
         # The detached flag observed inside each call — a worker execution has no
         # live caller, so the tool must run detached and the turn budget be skipped.
         self.detached_seen: list[bool] = []
+        # The bounded flag observed inside each call — a worker execution runs under its job budget.
+        self.bounded_seen: list[bool] = []
         # The ``offload_sync`` value each call received — a worker execution runs a
         # blocking sync tool off the shared event loop.
         self.offloads: list[bool] = []
@@ -62,6 +66,7 @@ class _RecordingTools:
     ) -> Any:
         self.run_tool_calls.append((key, arguments))
         self.detached_seen.append(in_detached_run())
+        self.bounded_seen.append(in_bounded_run())
         self.offloads.append(offload_sync)
         self.secret_capability_seen.append(caller_may_read_secrets())
         return self.run_tool_result
@@ -107,15 +112,11 @@ class _ClientCtx:
 class _StubClients:
     def __init__(self) -> None:
         self.client: Any = None
-        self.shutdown_calls = 0
 
     def client_ctx(self, client_cls: Any, settings: Any = None, **kwargs: Any) -> _ClientCtx:
         if self.client is None:
             raise RuntimeError("test must set stub_app.clients.client before using a redis-backed tool")
         return _ClientCtx(self.client)
-
-    async def shutdown_clients(self) -> None:
-        self.shutdown_calls += 1
 
 
 class _StubAdmin:
@@ -136,19 +137,19 @@ class _StubAdmin:
     def update(self, manifest: Any) -> Any:
         return self._record("update", manifest)
 
-    def reload_mcp(self, title: str) -> Any:
+    async def reload_mcp(self, title: str) -> Any:
         return self._record("reload_mcp", title)
 
-    def deregister_mcp(self, title: str) -> Any:
+    async def deregister_mcp(self, title: str) -> Any:
         return self._record("deregister_mcp", title)
 
-    def reload_config(self) -> Any:
+    async def reload_config(self) -> Any:
         return self._record("reload_config")
 
     async def run_tool_reload(self, kind: str, action: str, name: str) -> Any:
         return self._record("run_tool_reload", kind, action, name)
 
-    def reload_failed_mcps(self) -> Any:
+    async def reload_failed_mcps(self) -> Any:
         return self._record("reload_failed_mcps")
 
     def list_failed_mcps(self) -> Any:
@@ -177,12 +178,16 @@ class _StubResourceManager:
 class _RecordingLifecycle:
     """Records ``on_fleet_op_applied`` registrations and drives the boot-ready latch
     the worker gate awaits. ``ready`` is pre-set, so ``wait_until_ready`` resolves at
-    once unless a test clears it to exercise the gate."""
+    once unless a test clears it to exercise the gate. ``waiting_on_fleet`` is set
+    inside a ``waiting_on_fleet_work`` span and ``fleet_waits`` counts the spans.
+    ``admitted_job`` admits nothing: no serving generation counts the stub's jobs."""
 
     def __init__(self) -> None:
         self.fleet_op_applied: list[Any] = []
         self.ready = asyncio.Event()
         self.ready.set()
+        self.fleet_waits = 0
+        self.waiting_on_fleet = False
 
     def on_fleet_op_applied(self, func: Any) -> Any:
         self.fleet_op_applied.append(func)
@@ -190,6 +195,19 @@ class _RecordingLifecycle:
 
     async def wait_until_ready(self) -> None:
         await self.ready.wait()
+
+    @asynccontextmanager
+    async def waiting_on_fleet_work(self) -> AsyncIterator[None]:
+        self.fleet_waits += 1
+        self.waiting_on_fleet = True
+        try:
+            yield
+        finally:
+            self.waiting_on_fleet = False
+
+    @contextmanager
+    def admitted_job(self) -> Iterator[None]:
+        yield
 
 
 class _RecordingInteractions:
@@ -271,14 +289,33 @@ class _StubApp:
         self.config = MagicMock()
 
 
+class _LoopReleases:
+    """Stands in for the kit's loop-end release in the task loops: counts each release and notes the loop it ran on."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.loops: list[asyncio.AbstractEventLoop] = []
+
+    async def release(self) -> None:
+        self.calls += 1
+        self.loops.append(asyncio.get_running_loop())
+
+
 stub_app_instance = _StubApp()
 tai42_app.bind(stub_app_instance)
+loop_release_recorder = _LoopReleases()
 
 # Import the plugin ONCE, after the stub is bound, so the import-time
 # registration side effects are recorded exactly as a host boot would fire
 # them. The single top-package import is the whole discovery surface: it must
 # register the backend, the Celery app + tasks, the tools, and the extensions.
+from tai42_kit.backend import private_loop as _private_loop  # noqa: E402
+
 import tai42_backend_celery  # noqa: E402,F401
+
+# A closed job loop's kit release is recorded rather than run, for the whole session, so a test can
+# count the releases and see which loop each ran on (``loop_releases``).
+pytest.MonkeyPatch().setattr(_private_loop, "release_loop_bound_resources", loop_release_recorder.release)
 
 # The live modules' in-process worker fixture, shared by every module that drives one.
 from ._live_redis_worker import run_worker  # noqa: E402,F401
@@ -287,6 +324,11 @@ from ._live_redis_worker import run_worker  # noqa: E402,F401
 @pytest.fixture
 def stub_app() -> _StubApp:
     return stub_app_instance
+
+
+@pytest.fixture
+def loop_releases() -> _LoopReleases:
+    return loop_release_recorder
 
 
 @pytest.fixture(autouse=True)
@@ -303,40 +345,62 @@ def liveness_path(monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.Temp
 
 @pytest.fixture(autouse=True)
 def _fresh_progress_registrations(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    """No reporter registered with the worker step or the beat scheduler, no embedded beat or job slots
-    watched, no fork guard installed, and the app's consumer and worker steps and the ``beat_init``
-    receivers restored.
+    """No process state on the app, no fork guard installed, and the app's consumer and worker steps,
+    the worker's signal receivers and celery's current app restored.
 
-    A launch registers its runtime's reporter process-wide, as one process runs one runtime; each
-    test stands for its own process. The fork gate's guard a worker build installs and the beat's
-    lock receiver a registration swaps in are process-wide too, so they are undone as well.
+    A launch's build sets its process's state on the app it runs (the reporters, the embedded beat,
+    the job watch, the host loop) and connects celery's process-wide signal receivers, as one
+    process runs one runtime; each test stands for its own process. The fork gate's guard a worker
+    build installs is process-wide too, so it is undone as well, and so is the current app a test's
+    own app takes over, which a task made with no app reads its process state from.
     """
-    from celery.signals import beat_init
+    from celery import _state as celery_state
+    from celery import signals
     from tai42_kit.fork_gate import fork_gate
 
-    from tai42_backend_celery.core import beat_scheduler, embedded_beat, job_slots, liveness_step
+    from tai42_backend_celery.core import embedded_beat, liveness_step
     from tai42_backend_celery.core.app import celery_app
 
     monkeypatch.setattr(fork_gate._fork_hooks, "guard", None)
-
-    monkeypatch.setattr(liveness_step, "_report", None)
-    monkeypatch.setattr(liveness_step, "_task_timeout", 0.0)
-    monkeypatch.setattr(beat_scheduler, "_report", None)
-    monkeypatch.setattr(embedded_beat, "_file", None)
-    monkeypatch.setattr(embedded_beat, "_grace", 0.0)
-    monkeypatch.setattr(embedded_beat, "_beat", None)
-    monkeypatch.setattr(job_slots, "_watch", None)
+    for state in ("beat_reporter", "worker_progress", "embedded_beat", "job_watch", "shared_loop"):
+        monkeypatch.setattr(celery_app, state, None)
     blueprints = [liveness_step.consumer_steps(celery_app), embedded_beat.worker_steps(celery_app)]
     before = [set(steps) for steps in blueprints]
+    connected = [
+        signals.beat_init,
+        signals.celeryd_after_setup,
+        signals.worker_ready,
+        signals.worker_process_init,
+        signals.worker_process_shutdown,
+        signals.worker_shutdown,
+        signals.setup_logging,
+    ]
     # A Signal instance always holds a receivers list; only the class attribute is None.
-    assert beat_init.receivers is not None
-    receivers = list(beat_init.receivers)
+    receivers = [list(signal.receivers or []) for signal in connected]
+    current_app = celery_state.get_current_app()
+    assert current_app is not None
     yield
-    beat_init.receivers = receivers
-    beat_init.sender_receivers_cache.clear()
+    current_app.set_current()
+    for signal, kept in zip(connected, receivers, strict=True):
+        signal.receivers = kept
+        signal.sender_receivers_cache.clear()
     for steps, kept in zip(blueprints, before, strict=True):
         steps.clear()
         steps.update(kept)
+
+
+@pytest.fixture
+def host_loop() -> Iterator[asyncio.AbstractEventLoop]:
+    """A loop the host runs on a thread of its own, as it runs its loop on a green pool's main green thread."""
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=loop.run_forever, name="host loop", daemon=True)
+    thread.start()
+    try:
+        yield loop
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join(5)
+        loop.close()
 
 
 @pytest.fixture(autouse=True)
@@ -363,6 +427,7 @@ def _reset_stub_state() -> Any:
     stub_app_instance.tools.run_tool_calls.clear()
     stub_app_instance.tools.run_tool_result = None
     stub_app_instance.tools.detached_seen.clear()
+    stub_app_instance.tools.bounded_seen.clear()
     stub_app_instance.tools.offloads.clear()
     stub_app_instance.tools.secret_capability_seen.clear()
     stub_app_instance.interactions.visit_calls.clear()
@@ -372,7 +437,8 @@ def _reset_stub_state() -> Any:
     stub_app_instance.interactions.park_sentinel = None
     stub_app_instance.storage.resource_manager.templates.clear()
     stub_app_instance.clients.client = None
-    stub_app_instance.clients.shutdown_calls = 0
+    loop_release_recorder.calls = 0
+    loop_release_recorder.loops.clear()
     stub_app_instance.admin.calls.clear()
     stub_app_instance.admin.results.clear()
     stub_app_instance.admin.live_manifest = {"backend_module": "tai42_backend_celery"}
@@ -381,7 +447,7 @@ def _reset_stub_state() -> Any:
     # Event would raise "bound to a different event loop".
     stub_app_instance.lifecycle.ready = asyncio.Event()
     stub_app_instance.lifecycle.ready.set()
-    stub_app_instance.monitoring.reset_mock()
+    stub_app_instance.monitoring.reset_mock(side_effect=True)
     stub_app_instance.config.reset_mock()
     return None
 

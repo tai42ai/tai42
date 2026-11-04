@@ -3,7 +3,7 @@
 The assembled app runs under uvicorn on a loopback port and the pinned SDK's own client
 drives a stateful streamable-HTTP session: its ``initialize`` POST creates the session,
 whose server task every later message is handled under, so the admission ContextVar a tool
-body inherits names that long-finished ``initialize`` request. ``current_request_admission``
+body inherits names that long-finished ``initialize`` request. ``current_admission``
 must name the ``tools/call`` POST instead — the request a reload driven by that call keeps
 its transport open for — on the main ``/mcp`` endpoint and under a sub-MCP mount.
 """

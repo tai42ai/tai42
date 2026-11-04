@@ -39,10 +39,8 @@ dependencies = [
     "rq~=2.12.0",
     "rq-scheduler~=0.14.0",
     "rq-dashboard~=0.9.0",
-    # Cooperative green-thread pool for `--pool gevent`.
+    # The green pool `tai backend worker --pool gevent` runs on.
     "gevent~=26.8.0",
-    # Builds the extension branch tools with concrete composed signatures.
-    "makefun~=1.16.0",
     # Imported directly: the worker CLI options and the listener thread's
     # dedicated sync connection (also transitive deps of rq itself).
     "click>=8",
@@ -50,9 +48,6 @@ dependencies = [
     # Settings models and the ScheduleRecord round-trip model.
     "pydantic>=2.12",
     "pydantic-settings>=2.15.0",
-    # Imported directly by the signature helpers (Context detection when a
-    # tool's kwargs are serialized into a queued job).
-    "fastmcp>=3.4.7",
 ]
 
 [project.urls]

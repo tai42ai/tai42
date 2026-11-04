@@ -13,15 +13,18 @@ booting a server. One test uses the REAL :func:`build_and_swap_epoch` (its own i
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
 import threading
 from collections.abc import Awaitable, Callable, Iterator
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
 from tai42_kit.fork_gate import fork_gate
+from tests._fakes.rebuild import no_rebuild
 
 # ``bus_settings`` is imported for its registration side effect — the apply's recycle
 # classification reflects only IMPORTED settings classes, and TAI_BUS_* are recycle-class.
@@ -29,9 +32,8 @@ import tai42_skeleton.app.bus_settings  # noqa: F401
 from tai42_skeleton.app import admission as admission_mod
 from tai42_skeleton.app import applied_env, instance
 from tai42_skeleton.app import epoch as epoch_mod
-from tai42_skeleton.app.admission import RequestAdmission
+from tai42_skeleton.app.admission import Admission
 from tai42_skeleton.app.bus import FleetResult, WorkerIdentity, WorkerKind, WorkerRow, WorkerState
-from tai42_skeleton.app.bus.ops import FleetOp
 from tai42_skeleton.app.epoch import Epoch, build_and_swap_epoch
 from tai42_skeleton.app.recycle import (
     FAILED,
@@ -47,12 +49,18 @@ from tai42_skeleton.app.recycle import (
 )
 from tai42_skeleton.app.reload_gate import reload_gate
 from tai42_skeleton.config.deployment_env import DeploymentOwnership, published_env_readers
+from tai42_skeleton.config.recycle_policy import RecycleDecision, RecycleReason, ReportedKeys
 from tai42_skeleton.config.service import ConfigService, ProfileApplyOutcome
-from tai42_skeleton.operations._broadcast import SELF_DEFERRED, profile_apply_response
+from tai42_skeleton.operations._broadcast import SELF_DEFERRED, FleetBroadcastError, profile_apply_response
+from tai42_skeleton.tools.binding.surface import bump_tool_surface_generation
 
 from .._fakes.bus import FakeBus
 from .._helpers import recapture_deployment_env
+from ..connectors.credential_path import job_loop, owner_loop
 from .fake_pipeline import ComboChecks, FakeConfigStore, FakeReloadAdmin, _orchestrate_spy
+
+# The door's edge settles the writer's exit its change owes; these tests drive the door below it.
+pytestmark = pytest.mark.usefixtures("writer_exit_edge")
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -64,12 +72,13 @@ def _service(
     bus: FakeBus | None = None,
     *,
     orchestrate: Callable[..., Awaitable[RecycleReport]] = orchestrate_recycle,
+    combo_check: ComboChecks | None = None,
 ) -> ConfigService:
     return ConfigService(
         config_manager=store,
         admin=FakeReloadAdmin(),
         bus=cast("Any", bus or FakeBus()),
-        combo_check=ComboChecks(),
+        combo_check=combo_check or ComboChecks(),
         orchestrate=orchestrate,
     )
 
@@ -105,6 +114,25 @@ def _discard_spy() -> tuple[Callable[..., Awaitable[None]], dict[str, Any]]:
     return spy, calls
 
 
+_MOVED = {"status": "ok", "env_keys": 1, "awaiting_respawn": ["TAI_BUS_HEARTBEAT_TTL"]}
+
+
+class _MovedBus(FakeBus):
+    """A fake bus whose every sibling answers the reload with the fact that its env moved."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        for name in kwargs.get("remotes") or []:
+            self.remote_payloads[name] = dict(_MOVED)
+
+
+def _writer_moved(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The applier's own swap states the recycle-class key moved off the value it bound it under."""
+    from tai42_skeleton.app.lifecycle import config_reload
+
+    monkeypatch.setattr(config_reload, "awaiting_respawn", lambda: ["TAI_BUS_HEARTBEAT_TTL"])
+
+
 # ---------------------------------------------------------------------------
 # Ordering / failure — env-write-LAST
 # ---------------------------------------------------------------------------
@@ -119,7 +147,7 @@ def _epoch_state() -> Iterator[None]:
     try:
         yield
     finally:
-        for name in ("_current", "_serving_slot", "_building_epoch"):
+        for name in ("_current", "_serving_slot"):
             setattr(epoch_mod, name, None)
         applied_env._loaded_env_keys = loaded_before
 
@@ -145,7 +173,7 @@ async def test_failed_build_leaves_store_untouched_and_restores_env(monkeypatch:
         # os.environ restore-on-failure + staged-abort actually run.
         return await build_and_swap_epoch(
             env,
-            rebuild=lambda: None,
+            rebuild=no_rebuild,
             build_serving_app=_fail_serve,
             establish_background_loops=_noop,
             ownership=ownership,
@@ -192,7 +220,7 @@ async def test_profile_apply_changing_the_default_database_retargets_the_states_
 
     seen: dict[str, str | None] = {}
 
-    def _read_during_build() -> None:
+    async def _read_during_build(_epoch: Epoch) -> None:
         seen["during"] = states_store_settings().pg_db
 
     async def _fail_serve(_epoch: Epoch) -> Any:
@@ -235,7 +263,7 @@ async def test_apply_records_its_own_request_as_the_swaps_driver(monkeypatch: py
     store = FakeConfigStore(env={"MY_APP_FLAG": "old"})
     serving = Epoch(number=0)
     serving.admit()  # the apply's own request, admitted on the generation the swap retires
-    request = RequestAdmission(epoch=serving)
+    request = Admission(epoch=serving, kind="served_request")
     driving_at_swap: list[bool] = []
 
     async def spy(env: dict[str, str], *, ownership: DeploymentOwnership) -> Epoch:
@@ -254,88 +282,17 @@ async def test_apply_records_its_own_request_as_the_swaps_driver(monkeypatch: py
     assert driving_at_swap == [True]
     # env-write-LAST landed after a successful build.
     assert store.env == {"MY_APP_FLAG": "new"}
-    # A hot-only diff neither recycles nor self-exits.
+    # A hot-only diff the fleet confirms clean neither recycles nor self-exits.
     assert outcome.hot == ["MY_APP_FLAG"]
     assert outcome.recycle is None
-    assert outcome.serve_affecting is False
-
-
-async def test_apply_releases_llm_pools_before_the_build(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The apply MUST close the loop-bound checkpoint/store pools BEFORE the build's
-    settings reset drops their per-loop registries — the build's reset refuses to drop a
-    registry still holding live resources on a running loop (an apply following any LLM run
-    otherwise 500s). Mirrors AppLifecycle._reload_config, the other build_and_swap_epoch
-    caller."""
-    store = FakeConfigStore(env={"MY_APP_FLAG": "old"})
-    order: list[str] = []
-
-    async def _release() -> None:
-        order.append("release")
-
-    async def _build(env: dict[str, str], *, ownership: DeploymentOwnership) -> Epoch:
-        order.append("build")
-        return Epoch(number=0)
-
-    await _service(store).apply_replace_env(
-        {"MY_APP_FLAG": "new"},
-        save_previous=_PrevSpy(),
-        build_and_swap=_build,
-        release_llm_pools=_release,
-    )
-    # Release strictly precedes the build (the ordering the kit reset contract requires).
-    assert order == ["release", "build"]
-
-
-def test_apply_releases_through_the_kit_call_by_default() -> None:
-    import inspect
-
-    from tai42_kit.llm import release_loop_bound_resources
-
-    default = inspect.signature(ConfigService.apply_replace_env).parameters["release_llm_pools"].default
-    assert default is release_loop_bound_resources
-
-
-async def test_apply_closes_the_store_when_the_checkpoint_close_fails(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A failing checkpoint close never skips the store close; the apply fails loudly before the build."""
-    from tai42_kit.llm.checkpoint.checkpoint_registry import checkpoint_registry
-    from tai42_kit.llm.store.store_registry import store_registry
-
-    closed: list[str] = []
-
-    async def _failing_close() -> None:
-        closed.append("checkpoint")
-        raise RuntimeError("checkpoint close failed")
-
-    async def _store_close() -> None:
-        closed.append("store")
-
-    async def _checkpoint_resource():
-        return object(), _failing_close
-
-    async def _store_resource():
-        return object(), _store_close
-
-    await checkpoint_registry()._get_or_init_resource("k", _checkpoint_resource)
-    await store_registry()._get_or_init_resource("k", _store_resource)
-    built: list[bool] = []
-
-    async def _build(env: dict[str, str], *, ownership: DeploymentOwnership) -> Epoch:
-        built.append(True)
-        return Epoch(number=0)
-
-    store = FakeConfigStore(env={"MY_APP_FLAG": "old"})
-    with pytest.raises(ExceptionGroup, match="errors releasing loop-bound kit resources"):
-        await _service(store).apply_replace_env({"MY_APP_FLAG": "new"}, save_previous=_PrevSpy(), build_and_swap=_build)
-    assert sorted(closed) == ["checkpoint", "store"]
-    assert built == []
-    assert store.env == {"MY_APP_FLAG": "old"}
+    assert outcome.decision is not None
+    assert outcome.decision.writer_needs is False
 
 
 async def test_apply_holds_the_fork_gate_across_the_build(monkeypatch: pytest.MonkeyPatch) -> None:
-    """This door drives ``build_and_swap`` directly instead of through
-    ``reload_gate.run``, so it must take the fork gate itself: its rebuild re-imports the
-    manifest modules, and a backend work loop forking a job child mid-reimport leaves the
-    child deadlocked on an inherited ``importlib`` per-module lock."""
+    """The build is a re-importing reload body (``reload_gate.run``), so the fork gate is held
+    across it: its rebuild re-imports the manifest modules, and a backend work loop forking a
+    job child mid-reimport leaves the child deadlocked on an inherited ``importlib`` per-module lock."""
     store = FakeConfigStore(env={"MY_APP_FLAG": "old"})
     seen: dict[str, Any] = {}
 
@@ -353,6 +310,78 @@ async def test_apply_holds_the_fork_gate_across_the_build(monkeypatch: pytest.Mo
     assert not fork_gate.blocked
 
 
+async def test_apply_driven_from_a_job_loop_builds_on_the_serving_loop_under_the_fork_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An apply an in-process job drives from its own loop builds the epoch on the serving loop,
+    where the epoch's loop-affine lifespan lives, holding the fork gate across the build."""
+    store = FakeConfigStore(env={"MY_APP_FLAG": "old"})
+    seen: dict[str, Any] = {}
+
+    async def _build(env: dict[str, str], *, ownership: DeploymentOwnership) -> Epoch:
+        seen["loop"] = asyncio.get_running_loop()
+        seen["blocked"] = fork_gate.blocked
+        return Epoch(number=0)
+
+    with owner_loop() as serving, job_loop() as job:
+        monkeypatch.setattr(instance, "_app", SimpleNamespace(serving_loop=lambda: serving))
+        await job.run_awaited(
+            _service(store).apply_replace_env({"MY_APP_FLAG": "new"}, save_previous=_PrevSpy(), build_and_swap=_build)
+        )
+    assert seen["loop"] is serving
+    assert seen["blocked"] is True
+    assert store.env == {"MY_APP_FLAG": "new"}
+
+
+class _LoopNotingChecks(ComboChecks):
+    """Combo checks that note the loop each served-tools read runs on."""
+
+    def __init__(self, *, served: dict[str, Any]) -> None:
+        super().__init__(served=served)
+        self.read_on: list[asyncio.AbstractEventLoop] = []
+
+    async def served_bases(self) -> Any:
+        self.read_on.append(asyncio.get_running_loop())
+        return await super().served_bases()
+
+
+async def test_a_tool_surface_change_before_the_build_retakes_the_bases_on_the_serving_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The tools a job-driven apply checks its combos against are re-taken right before the build,
+    on the serving loop the build runs on, when the tool surface moved since step 1."""
+    labelled = {"name": "labelled", "config": {"label": "y"}}
+    manifest = {
+        "tools": [
+            {
+                "title": "a",
+                "module": "tests.app._fixtures.tools_check",
+                "include": ["echo"],
+                "extensions": {"echo": [[labelled]]},
+            }
+        ]
+    }
+    store = FakeConfigStore(manifest=manifest, env={"MY_APP_FLAG": "old"})
+    before, after = object(), object()
+    checks = _LoopNotingChecks(served={"echo": before})
+
+    async def save_previous(_env: dict[str, str]) -> None:
+        bump_tool_surface_generation()
+        checks.served = {"echo": after}
+
+    build, _calls = _swap_spy()
+    with owner_loop() as serving, job_loop() as job:
+        monkeypatch.setattr(instance, "_app", SimpleNamespace(serving_loop=lambda: serving))
+        await job.run_awaited(
+            _service(store, combo_check=checks).apply_replace_env(
+                {"MY_APP_FLAG": "new"}, save_previous=save_previous, build_and_swap=build
+            )
+        )
+    assert [base for _tool, _combo, base in checks.calls] == [before, after]
+    assert checks.read_on[-1] is serving
+    assert store.env == {"MY_APP_FLAG": "new"}
+
+
 async def test_apply_releases_the_fork_gate_when_the_build_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     """A failed apply must not leave the gate held — that would block every subsequent
     job child for the process lifetime."""
@@ -368,17 +397,22 @@ async def test_apply_releases_the_fork_gate_when_the_build_raises(monkeypatch: p
 
 
 class _StoreChangingBus(FakeBus):
-    """A bus whose membership census stores a manifest marker on a key the profile omits."""
+    """A bus whose op-start census (its second read, after the ownership read) stores a manifest marker on a key
+    the profile omits."""
 
     def __init__(self, store: FakeConfigStore) -> None:
         super().__init__()
         self._store = store
+        self._reads = 0
 
-    async def expected_at_start(self) -> dict[str, int]:
+    async def census(self) -> list[WorkerRow]:
+        self._reads += 1
+        if self._reads < 2:
+            return await super().census()
         self._store.manifest["mcp"] = [
             {"title": "m", "config": {"url": "http://x", "headers": {"X-Race": "!ENV ${PROFILE_GONE}"}}}
         ]
-        return await super().expected_at_start()
+        return await super().census()
 
 
 async def test_a_store_change_before_the_gates_is_refused_before_the_build(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -406,26 +440,98 @@ async def test_a_store_change_before_the_gates_is_refused_before_the_build(monke
 # ---------------------------------------------------------------------------
 
 
-async def test_recycle_class_diff_orchestrates_and_flags_serve_affecting(monkeypatch: pytest.MonkeyPatch) -> None:
-    store = FakeConfigStore(env={"TAI_BUS_ACK_TIMEOUT": "5"})
-    bus = FakeBus(origin="serve-applier", remotes=["serve-b"])
+async def test_a_recycle_class_diff_restarts_every_worker_reporting_it_and_defers_the_applier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _writer_moved(monkeypatch)
+    store = FakeConfigStore(env={"TAI_BUS_HEARTBEAT_TTL": "5"})
+    bus = _MovedBus(origin="serve-applier", remotes=["serve-b"])
     spy, _ = _swap_spy()
     orch, seen = _orchestrate_spy()
     outcome = await _service(store, bus, orchestrate=orch).apply_replace_env(
-        {"TAI_BUS_ACK_TIMEOUT": "7"},
+        {"TAI_BUS_HEARTBEAT_TTL": "7"},
         save_previous=_PrevSpy(),
         build_and_swap=spy,
     )
-    # TAI_BUS_ACK_TIMEOUT is recycle-class → a recycle rolls, excluding the applier, and
-    # the conservative default treats it as serve-affecting.
-    assert outcome.serve_affecting is True
-    assert seen["excluded_name"] == "serve-applier"
-    assert seen["applier_generation"] == 1
+    # Every worker reports TAI_BUS_HEARTBEAT_TTL off its bound value: the recycle rolls over
+    # serve-b, and the applier's own restart is deferred to its exit.
+    assert outcome.decision is not None
+    assert outcome.decision.writer_needs is True
+    assert set(outcome.decision.reported) == {"serve-b"}
+    assert seen["decision"].writer.name == "serve-applier"
+    assert seen["decision"].writer.generation == 1
     assert seen["applier_self_deferred"] is True
     assert [k.value for k in seen["target_kinds"]] == ["backend", "serve"]
     assert outcome.recycle is not None
     assert [row.name for row in outcome.recycle.rows] == ["serve-b"]
-    assert store.env == {"TAI_BUS_ACK_TIMEOUT": "7"}
+    assert store.env == {"TAI_BUS_HEARTBEAT_TTL": "7"}
+
+
+class _UnreachableBus(FakeBus):
+    """A fake bus whose reload broadcast hits a transport fault: the report holds no worker row."""
+
+    async def publish(self, op: Any, targets: Any, local: Any, *, expected_at_start: Any = None) -> FleetResult:
+        await super().publish(op, targets, local, expected_at_start=expected_at_start)
+        return FleetResult(op=op.op, reachable=False, error="ConnectionError: bus down")
+
+
+async def test_an_applier_whose_swap_stated_no_drift_keeps_running_when_its_broadcast_misses_the_bus(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The report holds no row for the applier, yet its own swap stated no drift: the roll asks the
+    # sibling and leaves the applier running.
+    store = FakeConfigStore(env={"TAI_BUS_HEARTBEAT_TTL": "5"})
+    bus = _UnreachableBus(origin="serve-applier", remotes=["serve-b"])
+    spy, _ = _swap_spy()
+    orch, seen = _orchestrate_spy(RecycleReport())
+    outcome = await _service(store, bus, orchestrate=orch).apply_replace_env(
+        {"TAI_BUS_HEARTBEAT_TTL": "7"},
+        save_previous=_PrevSpy(),
+        build_and_swap=spy,
+    )
+
+    assert outcome.fleet.reachable is False
+    assert outcome.fleet.results == []
+    assert outcome.decision is not None
+    assert outcome.decision.writer_reason is None
+    assert set(outcome.decision.unconfirmed) == {"serve-b"}
+    assert seen["applier_self_deferred"] is False
+
+
+class _RaisingBus(FakeBus):
+    """A fake bus whose reload broadcast raises: the error's report holds no worker row."""
+
+    async def publish(self, op: Any, targets: Any, local: Any, *, expected_at_start: Any = None) -> FleetResult:
+        await super().publish(op, targets, local, expected_at_start=expected_at_start)
+        raise RuntimeError("ResponseError: WRONGTYPE")
+
+
+async def test_an_applier_whose_swap_stated_no_drift_keeps_running_when_its_broadcast_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The raised broadcast leaves a report with no row for the applier, yet its own swap stated no
+    # drift: the roll the error carries asks the sibling and leaves the applier running.
+    store = FakeConfigStore(env={"TAI_BUS_HEARTBEAT_TTL": "5"})
+    bus = _RaisingBus(origin="serve-applier", remotes=["serve-b"])
+    spy, _ = _swap_spy()
+    orch, seen = _orchestrate_spy(RecycleReport())
+
+    with pytest.raises(FleetBroadcastError, match="WRONGTYPE") as exc:
+        await _service(store, bus, orchestrate=orch).apply_replace_env(
+            {"TAI_BUS_HEARTBEAT_TTL": "7"},
+            save_previous=_PrevSpy(),
+            build_and_swap=spy,
+        )
+
+    assert exc.value.report.reachable is False
+    assert exc.value.report.results == []
+    roll = exc.value.roll
+    assert roll is not None
+    assert roll.decision.writer_reason is None
+    assert set(roll.decision.unconfirmed) == {"serve-b"}
+    assert seen["applier_self_deferred"] is False
+    assert roll.self_exit_armed is False
+    assert store.env == {"TAI_BUS_HEARTBEAT_TTL": "7"}
 
 
 # ---------------------------------------------------------------------------
@@ -503,11 +609,11 @@ async def test_applying_the_previous_snapshot_undoes_an_apply_that_removed_a_dea
 
 
 async def test_apply_rolls_no_recycle_for_a_removed_dead_copy(monkeypatch: pytest.MonkeyPatch) -> None:
-    # TAI_BUS_ACK_TIMEOUT is recycle-class; the deployment sets it, so its stored copy never counted
+    # TAI_BUS_HEARTBEAT_TTL is recycle-class; the deployment sets it, so its stored copy never counted
     # and dropping it changes nothing the reload produces: no hot key, no recycle, no self-exit.
-    monkeypatch.setenv("TAI_BUS_ACK_TIMEOUT", "4")
+    monkeypatch.setenv("TAI_BUS_HEARTBEAT_TTL", "4")
     recapture_deployment_env()
-    store = FakeConfigStore(env={"TAI_BUS_ACK_TIMEOUT": "3"})
+    store = FakeConfigStore(env={"TAI_BUS_HEARTBEAT_TTL": "3"})
     bus = FakeBus(origin="serve-applier", remotes=["serve-b"])
     spy, _calls = _swap_spy()
     orch, seen = _orchestrate_spy()
@@ -516,7 +622,8 @@ async def test_apply_rolls_no_recycle_for_a_removed_dead_copy(monkeypatch: pytes
     )
     assert outcome.hot == []
     assert outcome.recycle is None
-    assert outcome.serve_affecting is False
+    assert outcome.decision is not None
+    assert outcome.decision.writer_needs is False
     assert seen == {}
     assert store.env == {}
 
@@ -570,7 +677,7 @@ async def test_apply_report_carries_names_never_values(monkeypatch: pytest.Monke
     material = json.dumps(
         {
             "hot": outcome.hot,
-            "self_identity": outcome.self_identity.model_dump(),
+            "writer": outcome.decision.writer.model_dump() if outcome.decision else None,
             "recycle": outcome.recycle.model_dump() if outcome.recycle else None,
         }
     )
@@ -589,19 +696,35 @@ def _identity(name: str, generation: int) -> WorkerIdentity:
     return WorkerIdentity(name=name, kind=WorkerKind.serve, pid=1, generation=generation)
 
 
+def _decision(
+    writer: WorkerIdentity, *, writer_needs: bool, reported: tuple[str, ...] = (), clean: tuple[str, ...] = ()
+) -> RecycleDecision:
+    """A recycle decision whose ``reported`` workers and writer (when it needs its restart) report TAI_X."""
+    return RecycleDecision(
+        writer=writer,
+        reported=dict.fromkeys(reported, ReportedKeys(generation=1, keys=("TAI_X",))),
+        unconfirmed={},
+        clean=frozenset(clean),
+        writer_reason=RecycleReason(keys=("TAI_X",)) if writer_needs else None,
+        withheld={},
+        addressed=None,
+        report_unreachable=False,
+    )
+
+
 def test_profile_apply_response_shape() -> None:
     outcome = ProfileApplyOutcome(
         hot=["HOT_A", "HOT_B"],
         recycle=RecycleReport(
             rows=[
-                RecycleRow(name="serve-b", kind="serve", generation_before=1, status=RECYCLED),
-                RecycleRow(name="backend-z", kind="backend", generation_before=4, status=RECYCLED),
+                RecycleRow(name="serve-b", kind="serve", generation_before=1, status=RECYCLED, keys=["TAI_X"]),
+                RecycleRow(name="backend-z", kind="backend", generation_before=4, status=RECYCLED, keys=["TAI_X"]),
             ],
             fresh=[FreshLife(name="serve-b", kind="serve", generation=2)],
         ),
-        self_identity=_identity("serve-applier", 7),
-        serve_affecting=True,
+        decision=_decision(_identity("serve-applier", 7), writer_needs=True, reported=("serve-b", "backend-z")),
         fleet=FleetResult(op="reload_config", results=[]),
+        self_exit_armed=True,
     )
     response = profile_apply_response(outcome)
     assert response["hot"] == ["HOT_A", "HOT_B"]
@@ -612,6 +735,7 @@ def test_profile_apply_response_shape() -> None:
         "kind": "serve",
         "status": "recycled",
         "generation_before": 1,
+        "keys": ["TAI_X"],
         "detail": None,
     } in response["recycle"]
     assert {
@@ -619,6 +743,7 @@ def test_profile_apply_response_shape() -> None:
         "kind": "backend",
         "status": "recycled",
         "generation_before": 4,
+        "keys": ["TAI_X"],
         "detail": None,
     } in response["recycle"]
     # The per-kind fresh list surfaces the new lives — informational, never a successor.
@@ -626,8 +751,16 @@ def test_profile_apply_response_shape() -> None:
     # The applier's OWN line — always kind "serve", carrying its own current generation.
     applier = [entry for entry in response["recycle"] if entry["status"] == SELF_DEFERRED]
     assert applier == [
-        {"name": "serve-applier", "kind": "serve", "status": SELF_DEFERRED, "generation_before": 7, "detail": None}
+        {
+            "name": "serve-applier",
+            "kind": "serve",
+            "status": SELF_DEFERRED,
+            "generation_before": 7,
+            "keys": ["TAI_X"],
+            "detail": None,
+        }
     ]
+    assert response["skipped"] == []
     # No generation_after / names-only replacements anywhere in the surfaced report.
     blob = json.dumps(response)
     assert "generation_after" not in blob
@@ -636,16 +769,16 @@ def test_profile_apply_response_shape() -> None:
     assert response["recycle_stopped"] is None
 
 
-def test_profile_apply_response_omits_applier_when_not_serve_affecting() -> None:
+def test_a_profile_apply_the_fleet_confirms_clean_reports_every_worker_skipped() -> None:
     outcome = ProfileApplyOutcome(
         hot=["HOT_A"],
         recycle=None,
-        self_identity=_identity("serve-applier", 1),
-        serve_affecting=False,
+        decision=_decision(_identity("serve-applier", 1), writer_needs=False, clean=("serve-c", "backend-1")),
         fleet=FleetResult(op="reload_config", results=[]),
     )
     response = profile_apply_response(outcome)
     assert response["recycle"] == []  # no applier line, no siblings
+    assert response["skipped"] == ["backend-1", "serve-c"]
     assert response["fresh"] == []
     assert response["refused"] == []
 
@@ -669,11 +802,18 @@ def test_recycle_rows_carry_their_own_kind() -> None:
     outcome = ProfileApplyOutcome(
         hot=[],
         recycle=RecycleReport(
-            rows=[RecycleRow(name=row.name, kind=row.kind.value, generation_before=row.generation, status=RECYCLED)],
+            rows=[
+                RecycleRow(
+                    name=row.name,
+                    kind=row.kind.value,
+                    generation_before=row.generation,
+                    status=RECYCLED,
+                    keys=["TAI_X"],
+                )
+            ],
             fresh=[],
         ),
-        self_identity=bus.identity,
-        serve_affecting=False,
+        decision=_decision(bus.identity, writer_needs=False, reported=("backend-1",)),
         fleet=FleetResult(op="reload_config", results=[]),
     )
     (entry,) = profile_apply_response(outcome)["recycle"]
@@ -682,6 +822,7 @@ def test_recycle_rows_carry_their_own_kind() -> None:
         "kind": "backend",
         "status": "recycled",
         "generation_before": 1,
+        "keys": ["TAI_X"],
         "detail": None,
     }
 
@@ -694,20 +835,40 @@ def test_a_roll_that_stopped_yields_its_rows_and_no_self_deferred_entry() -> Non
         hot=[],
         recycle=RecycleReport(
             rows=[
-                RecycleRow(name="backend-1", kind="backend", generation_before=1, status=RECYCLED),
-                RecycleRow(name="backend-2", kind="backend", generation_before=3, status=TIMED_OUT, detail=detail),
+                RecycleRow(name="backend-1", kind="backend", generation_before=1, status=RECYCLED, keys=["TAI_X"]),
+                RecycleRow(
+                    name="backend-2",
+                    kind="backend",
+                    generation_before=3,
+                    status=TIMED_OUT,
+                    keys=["TAI_X"],
+                    detail=detail,
+                ),
             ],
             stopped=RecycleStop(kind="backend", name="backend-2", detail=detail),
         ),
-        self_identity=_identity("serve-applier", 7),
-        serve_affecting=True,
+        decision=_decision(_identity("serve-applier", 7), writer_needs=True, reported=("backend-1", "backend-2")),
         fleet=FleetResult(op="reload_config", results=[]),
     )
     assert outcome.self_exit_armed is False
     response = profile_apply_response(outcome)
     assert response["recycle"] == [
-        {"name": "backend-1", "kind": "backend", "status": "recycled", "generation_before": 1, "detail": None},
-        {"name": "backend-2", "kind": "backend", "status": "timed-out", "generation_before": 3, "detail": detail},
+        {
+            "name": "backend-1",
+            "kind": "backend",
+            "status": "recycled",
+            "generation_before": 1,
+            "keys": ["TAI_X"],
+            "detail": None,
+        },
+        {
+            "name": "backend-2",
+            "kind": "backend",
+            "status": "timed-out",
+            "generation_before": 3,
+            "keys": ["TAI_X"],
+            "detail": detail,
+        },
     ]
     assert response["recycle_stopped"] == {"kind": "backend", "name": "backend-2", "detail": detail}
 
@@ -719,11 +880,10 @@ def test_a_roll_stopped_with_no_target_in_hand_yields_the_stop_and_no_self_defer
     outcome = ProfileApplyOutcome(
         hot=[],
         recycle=RecycleReport(
-            rows=[RecycleRow(name="backend-1", kind="backend", generation_before=1, status=RECYCLED)],
+            rows=[RecycleRow(name="backend-1", kind="backend", generation_before=1, status=RECYCLED, keys=["TAI_X"])],
             stopped=RecycleStop(kind="backend", name=None, detail=detail),
         ),
-        self_identity=_identity("serve-applier", 7),
-        serve_affecting=True,
+        decision=_decision(_identity("serve-applier", 7), writer_needs=True, reported=("backend-1",)),
         fleet=FleetResult(op="reload_config", results=[]),
     )
     assert outcome.self_exit_armed is False
@@ -742,7 +902,7 @@ async def test_expected_membership_is_censused_before_the_swap(monkeypatch: pyte
     # epoch rebuild), so it is the widest window in which a sibling's presence can fade.
     # The step-5 broadcast censuses only when it publishes, so membership is read at
     # step 1 — before the swap — and handed to that publish.
-    store = FakeConfigStore(env={"TAI_BUS_ACK_TIMEOUT": "5"})
+    store = FakeConfigStore(env={"TAI_BUS_HEARTBEAT_TTL": "5"})
     bus = FakeBus(origin="serve-applier", remotes=["serve-b"])
     sibling = next(row for row in bus.rows if row.name == "serve-b")
 
@@ -752,7 +912,7 @@ async def test_expected_membership_is_censused_before_the_swap(monkeypatch: pyte
 
     orch, _seen = _orchestrate_spy()
     await _service(store, bus, orchestrate=orch).apply_replace_env(
-        {"TAI_BUS_ACK_TIMEOUT": "7"},
+        {"TAI_BUS_HEARTBEAT_TTL": "7"},
         save_previous=_PrevSpy(),
         build_and_swap=fading_swap,
     )
@@ -800,23 +960,25 @@ async def test_a_roll_that_stops_returns_the_partial_report(
     detail: str,
     make_error: Callable[[RecycleReport], RecycleError],
 ) -> None:
-    store = FakeConfigStore(env={"TAI_BUS_ACK_TIMEOUT": "5"})
-    bus = FakeBus(origin="serve-applier", remotes=["serve-b"])
+    _writer_moved(monkeypatch)
+    store = FakeConfigStore(env={"TAI_BUS_HEARTBEAT_TTL": "5"})
+    bus = _MovedBus(origin="serve-applier", remotes=["serve-b"])
     spy, _ = _swap_spy()
     partial = _stopped(status, detail)
     orch, _seen = _orchestrate_spy(raises=make_error(partial))
     with caplog.at_level(logging.ERROR):
         outcome = await _service(store, bus, orchestrate=orch).apply_replace_env(
-            {"TAI_BUS_ACK_TIMEOUT": "7"},
+            {"TAI_BUS_HEARTBEAT_TTL": "7"},
             save_previous=_PrevSpy(),
             build_and_swap=spy,
         )
     assert outcome.recycle is partial
-    assert outcome.serve_affecting is True
+    assert outcome.decision is not None
+    assert outcome.decision.writer_needs is True
     assert outcome.self_exit_armed is False
     # The env persisted before the roll ran: the apply landed.
-    assert store.env == {"TAI_BUS_ACK_TIMEOUT": "7"}
-    errors = [r for r in caplog.records if r.levelno == logging.ERROR and "recycle" in r.getMessage()]
+    assert store.env == {"TAI_BUS_HEARTBEAT_TTL": "7"}
+    errors = [r for r in caplog.records if r.levelno == logging.ERROR and "did not converge" in r.getMessage()]
     assert len(errors) == 1
     assert "backend-1" in errors[0].getMessage()
     assert status in errors[0].getMessage()
@@ -824,36 +986,25 @@ async def test_a_roll_that_stops_returns_the_partial_report(
 
 async def test_a_stop_without_a_row_for_the_target_escapes(monkeypatch: pytest.MonkeyPatch) -> None:
     # The bus replied without naming the published target: a bus contract violation,
-    # not an outcome of the roll, so it is not folded into the report.
-    store = FakeConfigStore(env={"TAI_BUS_ACK_TIMEOUT": "5"})
+    # not an outcome of the roll, so it is not folded into the recycle report. It raises
+    # after the env persisted, so the door raises the persisted env's error with it as the cause.
+    store = FakeConfigStore(env={"TAI_BUS_HEARTBEAT_TTL": "5"})
     spy, _ = _swap_spy()
     error = RecycleError(
         "recycle: worker 'backend-1' did not apply the recycle op (no reply from the target)", RecycleReport()
     )
     orch, _seen = _orchestrate_spy(raises=error)
-    with pytest.raises(RecycleError, match="no reply from the target"):
+    _writer_moved(monkeypatch)
+    with pytest.raises(FleetBroadcastError) as raised:
         await _service(store, FakeBus(origin="serve-applier"), orchestrate=orch).apply_replace_env(
-            {"TAI_BUS_ACK_TIMEOUT": "7"},
+            {"TAI_BUS_HEARTBEAT_TTL": "7"},
             save_previous=_PrevSpy(),
             build_and_swap=spy,
         )
 
-
-def test_self_exit_is_armed_only_on_a_converged_serve_affecting_roll() -> None:
-    def outcome(recycle: RecycleReport | None, *, serve_affecting: bool) -> ProfileApplyOutcome:
-        return ProfileApplyOutcome(
-            hot=[],
-            recycle=recycle,
-            self_identity=_identity("serve-applier", 1),
-            serve_affecting=serve_affecting,
-            fleet=FleetResult(op="reload_config", results=[]),
-        )
-
-    converged = RecycleReport(rows=[RecycleRow(name="b", kind="backend", generation_before=1, status=RECYCLED)])
-    assert outcome(converged, serve_affecting=True).self_exit_armed is True
-    assert outcome(converged, serve_affecting=False).self_exit_armed is False
-    assert outcome(_stopped(TIMED_OUT, "x"), serve_affecting=True).self_exit_armed is False
-    assert outcome(None, serve_affecting=False).self_exit_armed is False
+    assert raised.value.__cause__ is error
+    assert "no reply from the target" in str(raised.value.report.error)
+    assert store.env == {"TAI_BUS_HEARTBEAT_TTL": "7"}
 
 
 class _OrderedBus(FakeBus):
@@ -889,7 +1040,7 @@ class _OrderedBus(FakeBus):
 
 
 async def test_the_recycle_targets_are_pinned_before_the_swap(monkeypatch: pytest.MonkeyPatch) -> None:
-    store = FakeConfigStore(env={"TAI_BUS_ACK_TIMEOUT": "5"})
+    store = FakeConfigStore(env={"TAI_BUS_HEARTBEAT_TTL": "5"})
     events: list[str] = []
     bus = _OrderedBus(events)
 
@@ -899,7 +1050,7 @@ async def test_the_recycle_targets_are_pinned_before_the_swap(monkeypatch: pytes
 
     orch, seen = _orchestrate_spy()
     await _service(store, bus, orchestrate=orch).apply_replace_env(
-        {"TAI_BUS_ACK_TIMEOUT": "7"},
+        {"TAI_BUS_HEARTBEAT_TTL": "7"},
         save_previous=_PrevSpy(),
         build_and_swap=swap,
     )
@@ -916,21 +1067,24 @@ async def test_the_recycle_targets_are_pinned_before_the_swap(monkeypatch: pytes
 async def test_a_stop_with_no_target_in_hand_is_reported_not_re_raised(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    store = FakeConfigStore(env={"TAI_BUS_ACK_TIMEOUT": "5"})
+    store = FakeConfigStore(env={"TAI_BUS_HEARTBEAT_TTL": "5"})
     spy, _ = _swap_spy()
     detail = "bus unreachable while reading the census at the start of the backend roll: ConnectionError: Error 111"
     partial = RecycleReport(stopped=RecycleStop(kind="backend", name=None, detail=detail))
     orch, _seen = _orchestrate_spy(raises=RecycleError(f"recycle: {detail}", partial))
+    _writer_moved(monkeypatch)
     with caplog.at_level(logging.ERROR):
         outcome = await _service(store, FakeBus(origin="serve-applier"), orchestrate=orch).apply_replace_env(
-            {"TAI_BUS_ACK_TIMEOUT": "7"},
+            {"TAI_BUS_HEARTBEAT_TTL": "7"},
             save_previous=_PrevSpy(),
             build_and_swap=spy,
         )
     assert outcome.recycle is partial
     assert outcome.self_exit_armed is False
-    assert store.env == {"TAI_BUS_ACK_TIMEOUT": "7"}
-    errors = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR and "recycle" in r.getMessage()]
+    assert store.env == {"TAI_BUS_HEARTBEAT_TTL": "7"}
+    errors = [
+        r.getMessage() for r in caplog.records if r.levelno == logging.ERROR and "did not converge" in r.getMessage()
+    ]
     assert len(errors) == 1
     assert "backend" in errors[0]
     assert "no target in hand" in errors[0]
@@ -941,36 +1095,18 @@ async def test_a_stop_with_no_target_in_hand_is_reported_not_re_raised(
 # The operation's verdict — workers still awaiting a respawn after the apply
 # ---------------------------------------------------------------------------
 
-_MOVED = {"status": "ok", "env_keys": 1, "awaiting_respawn": ["TAI_BUS_ACK_TIMEOUT"]}
-
-
-class _MovedBus(FakeBus):
-    """A fake bus whose every sibling answers the reload with the fact that its env moved."""
-
-    async def publish(self, op: FleetOp, targets: Any, local: Any, *, expected_at_start: Any = None) -> Any:
-        from tai42_skeleton.app.bus import OpOutcome, WorkerResult
-
-        report = await super().publish(op, targets, local, expected_at_start=expected_at_start)
-        rows = [
-            row
-            if row.name == self.identity.name
-            else WorkerResult(name=row.name, outcome=OpOutcome.applied, payload=_MOVED)
-            for row in report.results
-        ]
-        return FleetResult(op=report.op, results=rows)
-
 
 async def test_a_converged_profile_roll_leaves_nobody_awaiting_a_respawn(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    store = FakeConfigStore(env={"TAI_BUS_ACK_TIMEOUT": "5"})
+    store = FakeConfigStore(env={"TAI_BUS_HEARTBEAT_TTL": "5"})
     spy, _ = _swap_spy()
     orch, _seen = _orchestrate_spy()
     with caplog.at_level(logging.ERROR):
         bus = _MovedBus(origin="serve-applier", remotes=["serve-b"])
         monkeypatch.setattr(instance.app, "_bus", bus)
         outcome = await _service(store, bus, orchestrate=orch).apply_replace_env(
-            {"TAI_BUS_ACK_TIMEOUT": "7"}, save_previous=_PrevSpy(), build_and_swap=spy
+            {"TAI_BUS_HEARTBEAT_TTL": "7"}, save_previous=_PrevSpy(), build_and_swap=spy
         )
     assert outcome.awaiting_respawn == []
     assert profile_apply_response(outcome)["awaiting_respawn"] == []
@@ -980,10 +1116,19 @@ async def test_a_converged_profile_roll_leaves_nobody_awaiting_a_respawn(
 async def test_a_stopped_profile_roll_leaves_the_unreached_awaiting(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    store = FakeConfigStore(env={"TAI_BUS_ACK_TIMEOUT": "5"})
+    store = FakeConfigStore(env={"TAI_BUS_HEARTBEAT_TTL": "5"})
     spy, _ = _swap_spy()
     partial = RecycleReport(
-        rows=[RecycleRow(name="serve-b", kind="serve", generation_before=1, status=TIMED_OUT, detail="slow")],
+        rows=[
+            RecycleRow(
+                name="serve-b",
+                kind="serve",
+                generation_before=1,
+                status=TIMED_OUT,
+                keys=["TAI_BUS_HEARTBEAT_TTL"],
+                detail="slow",
+            )
+        ],
         stopped=RecycleStop(kind="serve", name="serve-b", detail="slow"),
     )
     orch, _seen = _orchestrate_spy(raises=RecycleTimeoutError("serve-b", "slow", partial))
@@ -991,12 +1136,12 @@ async def test_a_stopped_profile_roll_leaves_the_unreached_awaiting(
     monkeypatch.setattr(instance.app, "_bus", bus)
     with caplog.at_level(logging.ERROR):
         outcome = await _service(store, bus, orchestrate=orch).apply_replace_env(
-            {"TAI_BUS_ACK_TIMEOUT": "7"}, save_previous=_PrevSpy(), build_and_swap=spy
+            {"TAI_BUS_HEARTBEAT_TTL": "7"}, save_previous=_PrevSpy(), build_and_swap=spy
         )
     assert [w.name for w in outcome.awaiting_respawn] == ["serve-b", "serve-c"]
     assert profile_apply_response(outcome)["awaiting_respawn"] == [
-        {"name": "serve-b", "keys": ["TAI_BUS_ACK_TIMEOUT"]},
-        {"name": "serve-c", "keys": ["TAI_BUS_ACK_TIMEOUT"]},
+        {"name": "serve-b", "keys": ["TAI_BUS_HEARTBEAT_TTL"]},
+        {"name": "serve-c", "keys": ["TAI_BUS_HEARTBEAT_TTL"]},
     ]
     assert len([r for r in caplog.records if "awaiting a respawn" in r.getMessage()]) == 1
 
@@ -1024,7 +1169,7 @@ async def test_a_profile_apply_in_a_forked_job_child_proves_the_build_swaps_noth
     # result, and the member parent converges as a sibling.
     # The applier is that member: excluded from the roll at its generation, reported
     # self-deferred, never left awaiting a respawn.
-    store = FakeConfigStore(env={"TAI_BUS_ACK_TIMEOUT": "5"})
+    store = FakeConfigStore(env={"TAI_BUS_HEARTBEAT_TTL": "5"})
     spy, swapped = _swap_spy()
     discard, discarded = _discard_spy()
     orch, seen = _orchestrate_spy(
@@ -1034,17 +1179,18 @@ async def test_a_profile_apply_in_a_forked_job_child_proves_the_build_swaps_noth
     monkeypatch.setattr(instance.app, "_bus", bus)
     with caplog.at_level(logging.ERROR):
         outcome = await _service(store, bus, orchestrate=orch).apply_replace_env(
-            {"TAI_BUS_ACK_TIMEOUT": "7"}, save_previous=_PrevSpy(), build_and_swap=spy, build_and_discard=discard
+            {"TAI_BUS_HEARTBEAT_TTL": "7"}, save_previous=_PrevSpy(), build_and_swap=spy, build_and_discard=discard
         )
     # The child proves the env builds and discards the build; it swaps nothing.
-    assert discarded == {"env": {"TAI_BUS_ACK_TIMEOUT": "7"}}
+    assert discarded == {"env": {"TAI_BUS_HEARTBEAT_TTL": "7"}}
     assert swapped == {}
-    assert store.env == {"TAI_BUS_ACK_TIMEOUT": "7"}
+    assert store.env == {"TAI_BUS_HEARTBEAT_TTL": "7"}
     assert [call[2] for call in bus.publish_calls] == [None]
-    assert seen["excluded_name"] == "backend-1"
-    assert seen["applier_generation"] == 3
+    assert seen["decision"].writer.name == "backend-1"
+    assert seen["decision"].writer.generation == 3
     assert seen["expected"] == {"serve-1": (WorkerKind.serve, 1)}
-    assert outcome.self_identity == bus.member_identity
+    assert outcome.decision is not None
+    assert outcome.decision.writer == bus.member_identity
     assert outcome.self_exit_armed is True
     assert outcome.awaiting_respawn == []
     deferred = profile_apply_response(outcome)["recycle"][-1]
@@ -1053,6 +1199,7 @@ async def test_a_profile_apply_in_a_forked_job_child_proves_the_build_swaps_noth
         "kind": "backend",
         "status": SELF_DEFERRED,
         "generation_before": 3,
+        "keys": ["TAI_BUS_HEARTBEAT_TTL"],
         "detail": None,
     }
     assert [r for r in caplog.records if r.levelno == logging.ERROR] == []
@@ -1061,7 +1208,7 @@ async def test_a_profile_apply_in_a_forked_job_child_proves_the_build_swaps_noth
 async def test_a_failed_build_in_a_forked_job_child_leaves_the_store_untouched(monkeypatch: pytest.MonkeyPatch) -> None:
     # The env-write-LAST contract holds on the non-member path too: the child's proof build
     # fails, so nothing is persisted, nothing is broadcast and nothing rolls.
-    store = FakeConfigStore(env={"TAI_BUS_ACK_TIMEOUT": "5"})
+    store = FakeConfigStore(env={"TAI_BUS_HEARTBEAT_TTL": "5"})
     built: list[dict[str, str]] = []
 
     async def failing_discard(env: dict[str, str], *, ownership: DeploymentOwnership) -> None:
@@ -1074,24 +1221,24 @@ async def test_a_failed_build_in_a_forked_job_child_leaves_the_store_untouched(m
     prev = _PrevSpy()
     with pytest.raises(_BuildBoomError):
         await _service(store, bus, orchestrate=orch).apply_replace_env(
-            {"TAI_BUS_ACK_TIMEOUT": "7"}, save_previous=prev, build_and_swap=swap, build_and_discard=failing_discard
+            {"TAI_BUS_HEARTBEAT_TTL": "7"}, save_previous=prev, build_and_swap=swap, build_and_discard=failing_discard
         )
-    assert built == [{"TAI_BUS_ACK_TIMEOUT": "7"}]
+    assert built == [{"TAI_BUS_HEARTBEAT_TTL": "7"}]
     assert swapped == {}
-    assert store.env == {"TAI_BUS_ACK_TIMEOUT": "5"}
+    assert store.env == {"TAI_BUS_HEARTBEAT_TTL": "5"}
     assert store.env_writes == []
     assert bus.publish_calls == []
     assert seen == {}
-    assert prev.saved == {"TAI_BUS_ACK_TIMEOUT": "5"}
+    assert prev.saved == {"TAI_BUS_HEARTBEAT_TTL": "5"}
 
 
 async def test_a_member_builds_and_swaps_and_never_discards(monkeypatch: pytest.MonkeyPatch) -> None:
-    store = FakeConfigStore(env={"TAI_BUS_ACK_TIMEOUT": "5"})
+    store = FakeConfigStore(env={"TAI_BUS_HEARTBEAT_TTL": "5"})
     swap, swapped = _swap_spy()
     discard, discarded = _discard_spy()
     orch, _seen = _orchestrate_spy()
     await _service(store, FakeBus(origin="serve-applier"), orchestrate=orch).apply_replace_env(
-        {"TAI_BUS_ACK_TIMEOUT": "7"}, save_previous=_PrevSpy(), build_and_swap=swap, build_and_discard=discard
+        {"TAI_BUS_HEARTBEAT_TTL": "7"}, save_previous=_PrevSpy(), build_and_swap=swap, build_and_discard=discard
     )
-    assert swapped == {"env": {"TAI_BUS_ACK_TIMEOUT": "7"}}
+    assert swapped == {"env": {"TAI_BUS_HEARTBEAT_TTL": "7"}}
     assert discarded == {}

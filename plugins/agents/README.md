@@ -20,9 +20,9 @@ platform's ready-made, batteries-included set. This repo is their per-agent
 reference doc home; the documentation site covers using them and the
 platform-level story:
 
-- Use the ready-made agents (guide): https://tai42.ai/guides/use-the-ready-made-agents
-- Agents concept: https://tai42.ai/concepts/agents
-- Ecosystem catalog: https://tai42.ai/reference/catalog
+- Use the ready-made agents (guide): https://docs.tai42.ai/guides/use-the-ready-made-agents
+- Agents concept: https://docs.tai42.ai/concepts/agents
+- Plugin catalog: https://docs.tai42.ai/plugins
 
 ## Install
 

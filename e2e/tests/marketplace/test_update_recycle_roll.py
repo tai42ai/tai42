@@ -10,6 +10,7 @@ ready, the writer recycles itself after replying, and the respawned workers read
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -34,6 +35,10 @@ from tai42_e2e.stack import TaiStack
 
 from ._market_support import MarketInstaller, installed_refs
 
+# The stack's drain budget: an epoch retire waits this long on a lease of the retired
+# generation before it force-closes it.
+_DRAIN_BUDGET_S = 90
+
 pytestmark = [
     pytest.mark.needs(
         "kind:marketplace_store",
@@ -45,7 +50,7 @@ pytestmark = [
         "store:redis",
         "process",
         "topology:supervised",
-        "setting:TAI_TOOL_RUNS_SHUTDOWN_DRAIN_SECONDS=90",
+        f"setting:TAI_TOOL_RUNS_SHUTDOWN_DRAIN_SECONDS={_DRAIN_BUDGET_S}",
         "setting:TAI_BUS_APPLY_TIMEOUT=330",
     ),
 ]
@@ -65,7 +70,7 @@ async def _probe_pool_url(stack: TaiStack) -> str:
 
 
 def _assert_rolled_every_target(receipt: dict[str, Any]) -> None:
-    """The operation's roll ran to its end: every backend recycled, the writer self-deferred, nobody awaits."""
+    """The operation's roll ran to its end: every backend recycled for the moved key, the writer self-deferred."""
     reload = receipt["reload"]
     roll = reload["recycle"]
     assert roll is not None, reload
@@ -73,6 +78,7 @@ def _assert_rolled_every_target(receipt: dict[str, Any]) -> None:
     backend_rows = [row for row in roll["recycle"] if row["kind"] == "backend"]
     assert backend_rows, roll
     assert all(row["status"] == "recycled" for row in backend_rows), roll
+    assert all(row["keys"] == [LAMBDA_POOL_URL_ENV] for row in backend_rows), roll
     assert [row["kind"] for row in roll["recycle"] if row["status"] == "self-deferred"] == ["serve"], roll
     assert reload["awaiting_respawn"] == [], reload
 
@@ -131,8 +137,12 @@ async def test_an_update_moving_a_recycle_class_key_rolls_every_supervised_worke
     await _wait_every_worker_respawned(stack, before)
     assert (await installed_refs(stack))[PI_REF]["version"] == PI_V2_VERSION
 
-    # The respawned workers bound the new value at boot: nothing awaits on the next reload.
+    # The respawned workers bound the new value at boot: nothing awaits on the next reload, and
+    # it answers in its own time — no worker's retire waits a drain budget on a publish.
+    started = time.monotonic()
     report = await api.post("/api/fleet/reload-config", json={"targets": None}, retry_on_reloading=True)
+    elapsed = time.monotonic() - started
+    assert elapsed < _DRAIN_BUDGET_S / 3, f"the fleet reload took {elapsed:.1f} s: {report}"
     assert report["ok"] is True, report
     assert all(row["payload"]["awaiting_respawn"] == [] for row in report["results"]), report
     assert await _probe_pool_url(stack) == new

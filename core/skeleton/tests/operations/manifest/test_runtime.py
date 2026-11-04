@@ -32,7 +32,7 @@ from .conftest import _Admin, _install, _install_pipeline, _ReloadAdmin, _Replac
 
 async def test_update_manifest_persists_through_and_reloads(monkeypatch: pytest.MonkeyPatch) -> None:
     store = _ReplaceStore()
-    admin = _ReloadAdmin({"status": "ok", "env_keys": 2})
+    admin = _ReloadAdmin({"status": "ok", "env_keys": 2, "awaiting_respawn": []})
     bus = _install_pipeline(monkeypatch, store=store, admin=admin)
 
     result = await manifest_ops.update_manifest("mcp: []\n")
@@ -50,6 +50,8 @@ async def test_update_manifest_persists_through_and_reloads(monkeypatch: pytest.
         "fanout": {"mode": "local-only", "note": "no worker bus configured; only this worker reloaded"},
         "recycle": None,
         "awaiting_respawn": [],
+        "roll_deferred": False,
+        "roll_deferred_to": None,
         "span_release_error": None,
     }
 

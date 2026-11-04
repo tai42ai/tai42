@@ -21,7 +21,7 @@ from tai42_e2e.variants import (
     resolve_variants,
     short_presence_ttl_env,
 )
-from tai42_e2e.variants.backends import LivenessProcess
+from tai42_e2e.variants.backends import GreenPoolWorker, LivenessProcess
 
 pytestmark = pytest.mark.needs("no-stack")
 
@@ -127,8 +127,14 @@ def test_arq_backend_feature_env_and_process_model() -> None:
     # A worker on a labelled queue takes the bare label; the plugin derives the queue.
     assert arq.queue_worker_args("b") == ["worker", "--queue", "b"]
     assert arq.task_timeout_env(8) == {"ARQ_TASK_TIMEOUT": "8"}
+    # arq's drain bound is its job-completion wait plus the teardown margin, never its job budget.
+    assert arq.drain_seconds({}) == 330.0
+    assert arq.drain_seconds({"ARQ_JOB_COMPLETION_WAIT": "12", "ARQ_TASK_TIMEOUT": "8"}) == 42.0
     # The worker and its queue workers are the only process shapes arq runs.
     assert arq.liveness_processes(_RES) == {}
+    assert arq.green_pool_workers() == {}
+    # The worker process itself runs each job, so a re-importing reload waits the job out.
+    assert arq.job_process == "worker"
 
 
 def test_rq_backend_feature_env_and_process_model() -> None:
@@ -145,8 +151,21 @@ def test_rq_backend_feature_env_and_process_model() -> None:
     assert rq.extra_backend_processes() == [["beat", "-i", "1"]]
     assert rq.queue_worker_args("b") == ["worker", "--queue", "b"]
     assert rq.task_timeout_env(8) == {"RQ_TASK_TIMEOUT": "8"}
+    # rq's drain bound is its job budget plus the teardown margin.
+    assert rq.drain_seconds({}) == 330.0
+    assert rq.drain_seconds({"RQ_TASK_TIMEOUT": "8"}) == 38.0
     # A solo worker runs its job in-process, so a monitor thread reports the job's progress.
     assert rq.liveness_processes(_RES) == {"solo": LivenessProcess(["worker", "--pool", "solo", "--queue", "solo"])}
+    # A gevent worker runs one job at a time on the queue named after its pool.
+    assert rq.green_pool_workers() == {
+        "gevent": GreenPoolWorker(
+            ["worker", "--pool", "gevent", "--queue", "gevent"],
+            jobs_at_once=1,
+            past_budget_error="Task exceeded maximum timeout value",
+        )
+    }
+    # The plain worker forks a work-horse child per job, which runs on while the worker reloads.
+    assert rq.job_process == "child"
 
 
 def test_celery_feature_env_and_process_model() -> None:
@@ -164,17 +183,36 @@ def test_celery_feature_env_and_process_model() -> None:
     # RedBeat only fires while a beat process runs; ``tai backend beat`` starts it.
     assert celery.extra_backend_processes() == [["beat", "--max-interval", "2"]]
     # A second Celery worker consumes the label's queue under its own node name.
-    assert celery.queue_worker_args("b") == ["worker", "-Q", "b", "-n", "b@%h"]
+    assert celery.queue_worker_args("b") == ["worker", "--queue", "b", "-n", "b@%h"]
     assert celery.task_timeout_env(8) == {"CELERY_TASK_TIMEOUT": "8"}
+    # celery's drain bound is its job budget plus the teardown margin.
+    assert celery.drain_seconds({}) == 330.0
+    assert celery.drain_seconds({"CELERY_TASK_TIMEOUT": "8"}) == 38.0
     # A solo worker and a worker embedding its beat report their liveness their own way; the
     # embedded beat keeps a RedBeat store of its own, apart from the stack's beat.
     assert celery.liveness_processes(_RES) == {
-        "solo": LivenessProcess(["worker", "-P", "solo", "-Q", "solo", "-n", "solo@%h"]),
+        "solo": LivenessProcess(["worker", "-P", "solo", "--queue", "solo", "-n", "solo@%h"]),
         "embedded-beat": LivenessProcess(
-            ["worker", "-B", "-Q", "embedded", "-n", "embedded@%h"],
+            ["worker", "-B", "--queue", "embedded", "-n", "embedded@%h"],
             env={
                 "CELERY_REDBEAT_KEY_PREFIX": f"{_RES.bus_namespace}:redbeat-embedded:",
                 "CELERY_BEAT_MAX_LOOP_INTERVAL": "2",
             },
         ),
     }
+    # A worker on each green pool runs two jobs at a time on the queue named after its pool; the
+    # gevent pool fails a job past the budget with Celery's time limit, the eventlet pool cannot end one.
+    assert celery.green_pool_workers() == {
+        "gevent": GreenPoolWorker(
+            ["worker", "-P", "gevent", "-c", "2", "--queue", "gevent", "-n", "gevent@%h"],
+            jobs_at_once=2,
+            past_budget_error="TimeLimitExceeded",
+        ),
+        "eventlet": GreenPoolWorker(
+            ["worker", "-P", "eventlet", "-c", "2", "--queue", "eventlet", "-n", "eventlet@%h"],
+            jobs_at_once=2,
+            past_budget_error=None,
+        ),
+    }
+    # The plain worker's prefork pool runs each job in a child, which runs on while the worker reloads.
+    assert celery.job_process == "child"

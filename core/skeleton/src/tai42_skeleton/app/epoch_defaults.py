@@ -25,65 +25,54 @@ def default_streamable_http_app() -> ASGIApp:
     return instance.app.http_app()
 
 
-def default_rebuild() -> None:
-    """Build the fresh serving core off to the side and re-initialise the process registries into it.
+async def default_rebuild(epoch: Epoch) -> None:
+    """Build ``epoch``'s fresh serving core off to the side and re-initialise the process registries into it.
 
     Runs under the ALREADY applied proposed env (the primitive applied it before
-    calling this). A fresh ``ServingCore`` (fresh FastMCP under a freshly-read AuthAdapter) is set
-    on the app's ``_building`` slot, so ``start()`` and the epoch handlers register
-    into it — the live core is NEVER touched. The env is NOT re-read from the store: the
-    proposed env is live in ``os.environ`` and the settings caches were cleared, so this
-    resolves every settings read under the env about to be persisted. On ANY
-    failure the half-built core is discarded (``_building`` dropped) and re-raised, so
-    the live epoch keeps serving untouched.
+    calling this), in the build's own work. A fresh ``ServingCore`` (fresh FastMCP under a
+    freshly-read AuthAdapter) is installed on ``epoch.core`` before anything else, so
+    ``start()`` and the epoch handlers, whose serving-core reads resolve the epoch being
+    built, register into it — the live core is NEVER touched. The env is NOT re-read from
+    the store: the proposed env is live in ``os.environ`` and the settings caches were
+    cleared, so this resolves every settings read under the env about to be persisted. A
+    failure propagates; the primitive discards the epoch whole and the live epoch keeps
+    serving untouched.
     """
     from tai42_skeleton.app import instance
     from tai42_skeleton.manifest import Manifest
 
     app = instance.app
-    app._building = app._build_serving_core()
-    try:
-        manifest = Manifest.model_validate(app.config.config_manager.read_manifest())
-        app.lifecycle.reload_registries(manifest)
-    except BaseException:
-        # Discard the half-built core so every read resolves back to the live epoch.
-        app._building = None
-        raise
+    epoch.core = app._build_serving_core()
+    manifest = Manifest.model_validate(app.config.config_manager.read_manifest())
+    await app.lifecycle.reload_registries(manifest)
 
 
 async def default_build_serving_app(epoch: Epoch) -> ASGIApp:
-    """Build this generation's fresh dispatch handle off the just-built core and enter its FastMCP lifespan.
+    """Build this generation's fresh dispatch handle off its core and enter its FastMCP lifespan.
 
-    A fresh serving app on the process's transport is built off the ``_building`` core's
-    fresh FastMCP, so its route table — including a reload-added router — is snapshotted
-    anew and actually serves. Its FastMCP lifespan (a fresh session manager) is entered
-    through a dedicated-task supervisor so the swap task can later close it in the same
-    context; the built core (the retire drops it) and, weakly, the lifespan-bearing app
-    (the serving surface every request's scope points at) are recorded on the epoch, and
-    ``_building`` is cleared so post-swap reads resolve through ``current_epoch()``.
+    Runs in the build's own work, after ``rebuild`` installed ``epoch.core``. A fresh serving
+    app on the process's transport is built off that core's fresh FastMCP, so its route
+    table — including a reload-added router — is snapshotted anew and actually serves. Its
+    FastMCP lifespan (a fresh session manager) is entered through a dedicated-task supervisor
+    so the swap task can later close it in the same context; the supervisor and, weakly, the
+    lifespan-bearing app (the serving surface every request's scope points at) are recorded
+    on the epoch.
     """
-    from tai42_skeleton.app import instance
     from tai42_skeleton.app.epoch import serving_app_builder
     from tai42_skeleton.app.sub_mcp_app import SubAppLifespan
 
-    app = instance.app
-    core = app._building
-    if core is None:
-        raise RuntimeError("no core was built for this epoch — the rebuild step must run first")
+    if epoch.core is None:
+        raise RuntimeError("the generation under construction has no serving core — rebuild() did not install one")
     build_inner = serving_app_builder()
-    try:
-        inner = build_inner()
-        lifespan_app = getattr(inner, "mcp_lifespan_app", inner)
-        supervisor = SubAppLifespan(lifespan_app)
-        # Enter the fresh FastMCP lifespan (fresh session-manager task group); a
-        # lifespan-enter failure has already unwound itself when start() re-raises.
-        await supervisor.start()
-        epoch.core = core
-        epoch.supervisor = supervisor
-        epoch.record_serving_surface(lifespan_app)
-        return EpochAdmissionApp(inner, epoch)
-    finally:
-        app._building = None
+    inner = build_inner()
+    lifespan_app = getattr(inner, "mcp_lifespan_app", inner)
+    supervisor = SubAppLifespan(lifespan_app)
+    # Enter the fresh FastMCP lifespan (fresh session-manager task group); a
+    # lifespan-enter failure has already unwound itself when start() re-raises.
+    await supervisor.start()
+    epoch.supervisor = supervisor
+    epoch.record_serving_surface(lifespan_app)
+    return EpochAdmissionApp(inner, epoch)
 
 
 async def default_establish_background_loops() -> None:
@@ -91,8 +80,9 @@ async def default_establish_background_loops() -> None:
 
     Covers the advisories poll and the conversations delivery sweep, registering
     each with the now-current epoch so it retires with the generation. The
-    per-epoch handlers ran on a throwaway build-thread loop and could not spawn a
-    loop that survives the build, so these are (re)started here instead. Loud but
+    per-epoch handlers run while the generation is still being built, before the
+    retire cancels the previous generation's loops, so these are (re)started here
+    instead. Loud but
     non-fatal on a single establisher's failure — the fresh epoch already serves.
     """
     from tai42_skeleton.app import instance

@@ -23,7 +23,7 @@ from rq_scheduler.scheduler import Scheduler
 from rq_scheduler.utils import setup_loghandlers
 from tai42_contract.backend.runtime import ProgressReporter
 
-from tai42_backend_rq.queue import TASK_BUDGET_QUEUE_PATH
+from tai42_backend_rq.queue import TaskBudgetQueue
 from tai42_backend_rq.worker import rq_redis_connection
 
 # The promise of a scheduler whose interval is not positive: its loop passes without sleeping,
@@ -94,7 +94,7 @@ def _run_scheduler(options: Mapping[str, Any], report_progress: ProgressReporter
             connection=connection,
             interval=options["interval"],
             job_class=options["job_class"],
-            queue_class=TASK_BUDGET_QUEUE_PATH,
+            queue_class=TaskBudgetQueue,
             report_progress=report_progress,
         )
         scheduler.run(burst=options["burst"])

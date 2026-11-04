@@ -23,10 +23,10 @@ import pytest
 import tai42_skeleton.backend.settings  # noqa: F401
 from tai42_skeleton.app import instance
 from tai42_skeleton.app.bus import WorkerIdentity, WorkerKind
-from tai42_skeleton.app.bus.ops import FleetOp
 from tai42_skeleton.app.recycle import RECYCLED, TIMED_OUT, RecycleError, RecycleReport, RecycleRow, RecycleStop
 from tai42_skeleton.config.deployment_env import DeploymentOwnership
 from tai42_skeleton.config.service import OrphanEnvWriteError
+from tai42_skeleton.operations._broadcast import FleetBroadcastError
 
 from .._fakes.bus import FakeBus
 from .._fakes.combo_check_app import booted_check_app, clean_server
@@ -48,6 +48,9 @@ from .fake_pipeline import (
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
+# The door's edge settles the writer's exit its change owes; these tests drive the door below it.
+pytestmark = pytest.mark.usefixtures("writer_exit_edge")
+
 # ---------------------------------------------------------------------------
 # apply_env_change
 # ---------------------------------------------------------------------------
@@ -66,7 +69,7 @@ async def test_apply_env_change_writes_reloads_broadcasts(monkeypatch: pytest.Mo
     assert bus.publish_calls[0] == ({"op": "reload_config"}, None, bus.publish_calls[0][2])
     # An env change touches no manifest document.
     assert result.document is None
-    assert result.local == {"status": "ok", "env_keys": 0}
+    assert result.local == {"status": "ok", "env_keys": 0, "awaiting_respawn": []}
 
 
 async def test_a_derived_env_change_derives_from_a_write_that_landed_while_it_waited(
@@ -253,17 +256,18 @@ class _OrderedAdmin(FakeReloadAdmin):
         super().__init__()
         self._events = events
 
-    def reload_config(self) -> dict[str, Any]:
+    async def reload_config(self) -> dict[str, Any]:
         self.calls += 1
         self._events.append("reload")
-        return {"status": "ok", "env_keys": 1, "awaiting_respawn": []}
+        return dict(_MOVED)
 
 
 class _OrderedBus(FakeBus):
-    """A fake bus that records each census read and carries one backend sibling."""
+    """A fake bus that records each census read and carries one backend sibling; serve-b states the moved key."""
 
     def __init__(self, events: list[str]) -> None:
         super().__init__(origin="serve-writer", remotes=["serve-b"])
+        self.remote_payloads["serve-b"] = dict(_MOVED)
         self._events = events
 
     async def census(self) -> list[Any]:
@@ -285,12 +289,14 @@ async def test_apply_env_change_rolls_a_recycle_for_a_recycle_class_key(
     result = await service.apply_env_change({"BACKEND_MANIFEST_KEY": "NEW"})
 
     assert store.env == {"BACKEND_MANIFEST_KEY": "NEW"}
-    assert seen["excluded_name"] == "serve-writer"
-    assert seen["applier_generation"] == 1
+    assert seen["decision"].writer.name == "serve-writer"
+    assert seen["decision"].writer.generation == 1
     assert seen["applier_self_deferred"] is True
     assert [kind.value for kind in seen["target_kinds"]] == ["backend", "serve"]
-    # The targets are pinned from a census read BEFORE the local reload.
+    # The targets are pinned from a census read BEFORE the local reload; the backend sibling
+    # has no row in the reload, so its state is unknown and it is restarted too.
     assert seen["expected"] == {"serve-b": (WorkerKind.serve, 1), "backend-1": (WorkerKind.backend, 3)}
+    assert seen["decision"].clean == set()
     assert events.index("census") < events.index("reload")
     assert result.recycle is not None
     assert [row.name for row in result.recycle.rows] == ["serve-b"]
@@ -314,13 +320,15 @@ async def test_apply_env_and_change_rolls_a_recycle_for_a_recycle_class_key(monk
     _with_bus(monkeypatch)
     store = FakeConfigStore(manifest={"mcp": []}, env={"BACKEND_MANIFEST_KEY": "OLD"})
     orch, seen = _orchestrate_spy()
-    service, _admin, _bus = _service(store, bus=FakeBus(origin="serve-writer", remotes=["serve-b"]), orchestrate=orch)
+    service, _admin, _bus = _service(
+        store, admin=_moved_admin(), bus=_MovedBus(origin="serve-writer", remotes=["serve-b"]), orchestrate=orch
+    )
 
     result = await service.apply_env_and_change(
         _prepare({"BACKEND_MANIFEST_KEY": "NEW", "GH": "s"}, _secret_marker_mutator("GH"))
     )
 
-    assert seen["excluded_name"] == "serve-writer"
+    assert seen["decision"].writer.name == "serve-writer"
     assert result.recycle is not None
     assert result.self_exit_armed is True
 
@@ -336,14 +344,16 @@ async def test_a_stopped_env_change_roll_returns_the_partial_report_and_arms_no_
         stopped=RecycleStop(kind="serve", name="serve-b", detail=detail),
     )
     orch, _seen = _orchestrate_spy(raises=RecycleError(f"recycle: {detail}", partial))
-    service, _admin, _bus = _service(store, bus=FakeBus(origin="serve-writer", remotes=["serve-b"]), orchestrate=orch)
+    service, _admin, _bus = _service(
+        store, admin=_moved_admin(), bus=_MovedBus(origin="serve-writer", remotes=["serve-b"]), orchestrate=orch
+    )
 
     with caplog.at_level(logging.ERROR):
         result = await service.apply_env_change({"BACKEND_MANIFEST_KEY": "NEW"})
 
     assert result.recycle is partial
     assert result.self_exit_armed is False
-    assert "recycle for this env change did not converge" in caplog.text
+    assert "recycle for this config change did not converge" in caplog.text
     assert store.env == {"BACKEND_MANIFEST_KEY": "NEW"}
 
 
@@ -351,10 +361,26 @@ async def test_an_env_change_roll_raising_with_no_recorded_stop_escapes(monkeypa
     _with_bus(monkeypatch)
     store = FakeConfigStore(manifest={"mcp": []}, env={"BACKEND_MANIFEST_KEY": "OLD"})
     orch, _seen = _orchestrate_spy(raises=RecycleError("recycle: contract violation", RecycleReport()))
-    service, _admin, _bus = _service(store, bus=FakeBus(origin="serve-writer", remotes=["serve-b"]), orchestrate=orch)
+    service, _admin, _bus = _service(store, bus=_MovedBus(origin="serve-writer", remotes=["serve-b"]), orchestrate=orch)
 
-    with pytest.raises(RecycleError, match="contract violation"):
+    # The roll raises after the env persisted: the door raises the landed change's error, the
+    # roll's raise its cause and named on its report, and the error's roll still lists serve-b,
+    # which no roll restarted, as awaiting its respawn.
+    with pytest.raises(FleetBroadcastError) as raised:
         await service.apply_env_change({"BACKEND_MANIFEST_KEY": "NEW"})
+
+    assert isinstance(raised.value.__cause__, RecycleError)
+    assert "the recycle roll the change owes failed: RecycleError: recycle: contract violation" in str(
+        raised.value.report.error
+    )
+    roll = raised.value.roll
+    assert roll is not None
+    assert roll.recycle is None
+    assert roll.self_exit_armed is False
+    assert [worker.model_dump() for worker in roll.awaiting_respawn] == [
+        {"name": "serve-b", "keys": ["BACKEND_MANIFEST_KEY"]}
+    ]
+    assert store.env == {"BACKEND_MANIFEST_KEY": "NEW"}
 
 
 _MOVED = {"status": "ok", "env_keys": 1, "awaiting_respawn": ["BACKEND_MANIFEST_KEY"]}
@@ -363,17 +389,10 @@ _MOVED = {"status": "ok", "env_keys": 1, "awaiting_respawn": ["BACKEND_MANIFEST_
 class _MovedBus(FakeBus):
     """A fake bus whose every sibling answers the reload with the fact that its env moved."""
 
-    async def publish(self, op: FleetOp, targets: Any, local: Any, *, expected_at_start: Any = None) -> Any:
-        from tai42_skeleton.app.bus import FleetResult, OpOutcome, WorkerResult
-
-        report = await super().publish(op, targets, local, expected_at_start=expected_at_start)
-        rows = [
-            row
-            if row.name == self.identity.name
-            else WorkerResult(name=row.name, outcome=OpOutcome.applied, payload=_MOVED)
-            for row in report.results
-        ]
-        return FleetResult(op=report.op, results=rows)
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        for name in kwargs.get("remotes") or []:
+            self.remote_payloads[name] = dict(_MOVED)
 
 
 def _moved_admin() -> Any:
@@ -405,7 +424,16 @@ async def test_a_stopped_env_change_roll_leaves_the_unreached_and_the_writer_awa
     _with_bus(monkeypatch)
     store = FakeConfigStore(manifest={"mcp": []}, env={"BACKEND_MANIFEST_KEY": "OLD"})
     partial = RecycleReport(
-        rows=[RecycleRow(name="serve-b", kind="serve", generation_before=1, status=TIMED_OUT, detail="slow")],
+        rows=[
+            RecycleRow(
+                name="serve-b",
+                kind="serve",
+                generation_before=1,
+                status=TIMED_OUT,
+                keys=["BACKEND_MANIFEST_KEY"],
+                detail="slow",
+            )
+        ],
         stopped=RecycleStop(kind="serve", name="serve-b", detail="slow"),
     )
     orch, _seen = _orchestrate_spy(raises=RecycleError("recycle: slow", partial))
@@ -425,20 +453,28 @@ async def test_a_stopped_env_change_roll_leaves_the_unreached_and_the_writer_awa
     assert "serve-b (BACKEND_MANIFEST_KEY), serve-c (BACKEND_MANIFEST_KEY), serve-writer" in awaiting_lines[0]
 
 
-async def test_a_hot_change_names_a_sibling_whose_env_moved_out_of_band(
+async def test_a_hot_change_restarts_a_sibling_whose_env_moved_out_of_band(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     _with_bus(monkeypatch)
     store = FakeConfigStore(manifest={"mcp": []}, env={"BACKEND_MANIFEST_KEY": "NEW"})
     orch, seen = _orchestrate_spy()
-    service, _admin, _bus = _service(store, bus=_MovedBus(origin="serve-writer", remotes=["serve-b"]), orchestrate=orch)
+    bus = _MovedBus(origin="serve-writer", remotes=["serve-b", "serve-c"])
+    bus.remote_payloads["serve-c"] = {"status": "ok", "env_keys": 1, "awaiting_respawn": []}
+    service, _admin, _bus = _service(store, bus=bus, orchestrate=orch)
 
-    with caplog.at_level(logging.ERROR):
+    with caplog.at_level(logging.INFO):
         result = await service.apply_env_change({"LOG_LEVEL": "debug"})
 
-    assert seen == {}
-    assert [(w.name, w.keys) for w in result.awaiting_respawn] == [("serve-b", ["BACKEND_MANIFEST_KEY"])]
-    assert len([r for r in caplog.records if "awaiting a respawn" in r.getMessage()]) == 1
+    # The change itself moves no recycle-class key, but serve-b reports one off its bound value:
+    # the decision reads the workers' reports, so serve-b is restarted and serve-c left running.
+    assert seen["decision"].clean == {"serve-c"}
+    assert result.decision is not None
+    assert set(result.decision.reported) == {"serve-b"}
+    assert result.self_exit_armed is False
+    assert result.awaiting_respawn == []
+    assert "restart serve-b (reports BACKEND_MANIFEST_KEY)" in caplog.text
+    assert "confirmed clean, left running: serve-c" in caplog.text
 
 
 class _ForkChildBus(_MovedBus):
@@ -483,10 +519,11 @@ async def test_an_env_change_in_a_forked_job_child_applies_nothing_locally_and_a
     assert store.env == {"BACKEND_MANIFEST_KEY": "NEW"}
     assert admin.calls == 0
     assert [call[2] for call in bus.publish_calls] == [None]
-    assert seen["excluded_name"] == "backend-1"
-    assert seen["applier_generation"] == 3
+    assert seen["decision"].writer.name == "backend-1"
+    assert seen["decision"].writer.generation == 3
     assert seen["expected"] == {"serve-1": (WorkerKind.serve, 1)}
-    assert result.self_identity == bus.member_identity
+    assert result.decision is not None
+    assert result.decision.writer == bus.member_identity
     assert result.self_exit_armed is True
     assert result.local == {"status": "ok", "env_keys": 1}
     assert {row.name for row in result.fleet.results} == {"backend-1", "serve-1"}
@@ -518,26 +555,33 @@ def _counting(
     return counted, calls
 
 
-async def test_a_reapply_that_continues_a_converged_change_carries_its_roll_and_rolls_nothing(
+async def test_a_reapply_that_continues_a_converged_change_decides_again_from_its_own_report(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     _with_bus(monkeypatch)
     store = FakeConfigStore(manifest={"mcp": []}, env={"BACKEND_MANIFEST_KEY": "OLD"})
-    spy, _seen = _orchestrate_spy()
+    spy, seen = _orchestrate_spy()
     orch, rolls = _counting(spy)
     bus = _CountingMovedBus(origin="serve-writer", remotes=["serve-b"])
     service, _admin, _bus = _service(store, admin=_moved_admin(), bus=bus, orchestrate=orch)
     prior = await service.apply_env_change({"BACKEND_MANIFEST_KEY": "NEW"})
+    # The first roll restarted serve-b under the new env; the writer still awaits its own exit.
+    bus.remote_payloads["serve-b"] = {"status": "ok", "env_keys": 1, "awaiting_respawn": []}
     census_after_change = bus.census_reads
 
     with caplog.at_level(logging.ERROR):
         result = await service.reapply_manifest(continues=prior)
 
-    assert rolls == [1]
-    # The reload reads the fleet's ownership once and pins no recycle.
-    assert bus.census_reads == census_after_change + 1
-    assert result.recycle is prior.recycle
-    assert result.self_identity == prior.self_identity
+    # The reapply's own report decides: serve-b is clean and left running, the writer still
+    # needs its restart, so the roll runs with no target and arms the writer's exit.
+    assert rolls == [1, 1]
+    assert seen["decision"].clean == {"serve-b"}
+    # The reload reads the fleet's ownership once and the op-start census once.
+    assert bus.census_reads == census_after_change + 2
+    assert result.decision is not None
+    assert result.decision.reported == {}
+    assert result.decision.unconfirmed == {}
+    assert result.decision.writer_needs
     assert result.self_exit_armed is True
     assert result.awaiting_respawn == []
     assert [r for r in caplog.records if r.levelno == logging.ERROR] == []
@@ -549,7 +593,16 @@ async def test_a_reapply_that_continues_a_stopped_change_names_the_unreached_and
     _with_bus(monkeypatch)
     store = FakeConfigStore(manifest={"mcp": []}, env={"BACKEND_MANIFEST_KEY": "OLD"})
     partial = RecycleReport(
-        rows=[RecycleRow(name="serve-b", kind="serve", generation_before=1, status=TIMED_OUT, detail="slow")],
+        rows=[
+            RecycleRow(
+                name="serve-b",
+                kind="serve",
+                generation_before=1,
+                status=TIMED_OUT,
+                keys=["BACKEND_MANIFEST_KEY"],
+                detail="slow",
+            )
+        ],
         stopped=RecycleStop(kind="serve", name="serve-b", detail="slow"),
     )
     orch, _seen = _orchestrate_spy(raises=RecycleError("recycle: slow", partial))
@@ -567,23 +620,7 @@ async def test_a_reapply_that_continues_a_stopped_change_names_the_unreached_and
     assert len([r for r in caplog.records if "awaiting a respawn" in r.getMessage()]) == 1
 
 
-async def test_a_reapply_given_both_a_continued_change_and_keys_of_its_own_is_refused(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _with_bus(monkeypatch)
-    store = FakeConfigStore(manifest={"mcp": []}, env={"BACKEND_MANIFEST_KEY": "OLD"})
-    orch, _seen = _orchestrate_spy()
-    service, _admin, _bus = _service(store, bus=FakeBus(origin="serve-writer", remotes=["serve-b"]), orchestrate=orch)
-    prior = await service.apply_env_change({"BACKEND_MANIFEST_KEY": "NEW"})
-
-    with pytest.raises(ValueError, match="rolls no recycle keys of its own"):
-        await service.reapply_manifest(continues=prior, recycle_keys=["BACKEND_MANIFEST_KEY"])
-
-
-async def test_a_local_reload_failure_carries_the_change_s_unrolled_recycle_keys(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from tai42_skeleton.operations._broadcast import FleetBroadcastError
+async def test_a_local_reload_failure_still_rolls_and_raises_with_the_roll(monkeypatch: pytest.MonkeyPatch) -> None:
 
     from .fake_pipeline import FakeReloadAdmin
 
@@ -598,21 +635,33 @@ async def test_a_local_reload_failure_carries_the_change_s_unrolled_recycle_keys
     with pytest.raises(FleetBroadcastError) as raised:
         await service.apply_env_change({"BACKEND_MANIFEST_KEY": "NEW"})
 
-    assert raised.value.unrolled_recycle_keys == ("BACKEND_MANIFEST_KEY",)
-    assert seen == {}
+    # The change landed; serve-b confirmed clean and is left running, and the writer, whose own
+    # reload failed, is restarted at its exit.
+    assert store.env == {"BACKEND_MANIFEST_KEY": "NEW"}
+    assert seen["decision"].clean == {"serve-b"}
+    assert seen["applier_self_deferred"] is True
+    assert raised.value.roll is not None
+    assert raised.value.roll.self_exit_armed is True
 
 
-async def test_a_reapply_handed_a_change_s_unrolled_keys_rolls_their_recycle(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_a_reapply_after_a_failed_change_restarts_every_worker_still_reporting_the_moved_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     _with_bus(monkeypatch)
     store = FakeConfigStore(manifest={"mcp": []}, env={"BACKEND_MANIFEST_KEY": "NEW"})
     orch, seen = _orchestrate_spy()
-    service, _admin, _bus = _service(store, bus=FakeBus(origin="serve-writer", remotes=["serve-b"]), orchestrate=orch)
+    bus = FakeBus(origin="serve-writer", remotes=["serve-b", "serve-c"])
+    bus.remote_payloads["serve-b"] = dict(_MOVED)
+    service, _admin, _bus = _service(store, admin=_moved_admin(), bus=bus, orchestrate=orch)
 
-    result = await service.reapply_manifest(recycle_keys=["BACKEND_MANIFEST_KEY"])
+    result = await service.reapply_manifest()
 
-    assert seen["excluded_name"] == "serve-writer"
+    assert seen["decision"].writer.name == "serve-writer"
+    assert seen["decision"].clean == {"serve-c"}
     assert result.recycle is not None
+    assert [row.name for row in result.recycle.rows] == ["serve-b"]
     assert result.self_exit_armed is True
+    assert result.awaiting_respawn == []
 
 
 # ---------------------------------------------------------------------------
@@ -977,21 +1026,21 @@ async def test_combined_env_write_setting_an_unknown_owned_name_is_refused(monke
     assert store.persisted == []
 
 
-def test_profile_replace_setting_an_unknown_owned_name_is_refused() -> None:
+async def test_profile_replace_setting_an_unknown_owned_name_is_refused() -> None:
     from tai42_kit.settings import UnknownOwnedSettingError
 
     store = FakeConfigStore(manifest={}, env={})
     service, _admin, _bus = _service(store)
 
     with pytest.raises(UnknownOwnedSettingError, match="ACCESS_CONTROL_ENABEL"):
-        service._validate_replace({"ACCESS_CONTROL_ENABEL": "true"}, DeploymentOwnership())
+        await service.validate_profile_env({"ACCESS_CONTROL_ENABEL": "true"}, DeploymentOwnership())
 
 
-def test_profile_replace_omitting_a_stored_unknown_owned_name_passes() -> None:
+async def test_profile_replace_omitting_a_stored_unknown_owned_name_passes() -> None:
     store = FakeConfigStore(manifest={}, env={"INTERACTIONS_TYPO": "x"})
     service, _admin, _bus = _service(store)
 
-    service._validate_replace({"INTERACTIONS_KEY_PREFIX": "k:"}, DeploymentOwnership())
+    await service.validate_profile_env({"INTERACTIONS_KEY_PREFIX": "k:"}, DeploymentOwnership())
 
 
 # ---------------------------------------------------------------------------
@@ -1071,7 +1120,7 @@ async def test_the_live_check_refuses_an_env_change_its_factory_refuses(monkeypa
     _with_bus(monkeypatch)
     async with booted_check_app():
         store = FakeConfigStore(manifest=copy.deepcopy(_MARKED_COMBO), env={"EXT_L": "ok"})
-        service, admin, _bus = _service(store, combo_check=instance.app.extensions.check_combo)
+        service, admin, _bus = _service(store, combo_check=instance.app.extensions)
 
         with pytest.raises(ValueError, match="bad label") as caught:
             await service.apply_env_change({"EXT_L": "x"})

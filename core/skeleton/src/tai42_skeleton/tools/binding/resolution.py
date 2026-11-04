@@ -81,12 +81,24 @@ class _ResolutionMixin(_ToolBindingBase):
             tools = await self._fast_mcp.list_tools()
         return {t.name: t for t in tools}
 
+    async def served_bases(self) -> dict[str, Tool]:
+        """Every tool the LIVE serving core's server serves, by name, as the bind registered it.
+
+        The live core even while a build is in flight, the core the combo check's extension
+        registry is read from. Read past the server's middleware chain, so a tool is the
+        registered object a combo binds over, never the client-shaped listing :meth:`get_tools`
+        returns; the server's visibility and component-auth filters apply as they do to
+        :meth:`get_tool`.
+        """
+        fast_mcp = self._app._live_serving_core._fast_mcp
+        return {t.name: t for t in await fast_mcp.list_tools(run_middleware=False)}
+
     async def get_tool(self, key: str) -> Tool:
         """The tool bound to ``key`` on the serving core, from that core's index when it holds it.
 
-        The index and the server it answers for come from ONE core read (the building core
-        during an epoch build, else the live one), and the generation is read before the
-        server is asked, so an answer given while the surface moved is never served after it.
+        The index and the server it answers for come from ONE core read (the core under
+        construction in an epoch build's own work, else the live one), and the generation is read
+        before the server is asked, so an answer given while the surface moved is never served after it.
         """
         core = self._app._serving_core
         index, fast_mcp = core._tool_index, core._fast_mcp

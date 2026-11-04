@@ -72,13 +72,6 @@ def test_the_store_format_error_is_a_conflict() -> None:
     assert records.ScheduleStoreFormatError.__tai_error_kind__ is ErrorKind.CONFLICT
 
 
-def test_refuse_relative() -> None:
-    records.refuse_relative(IntervalCadence(every=5))
-    records.refuse_relative(CrontabCadence())
-    with pytest.raises(ValueError, match="does not support relative interval schedules"):
-        records.refuse_relative(IntervalCadence(every=5, relative=True))
-
-
 def test_parse_cron_or_interval() -> None:
     assert records.parse_cron_or_interval("60") == 60
     assert isinstance(records.parse_cron_or_interval("60"), int)

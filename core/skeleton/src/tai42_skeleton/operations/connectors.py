@@ -73,11 +73,13 @@ logger = logging.getLogger(__name__)
 _MAX_LIST_LIMIT = 500
 
 # Upper bound on a single sub-service reachability probe (credential read + MCP
-# round-trip). The GET is idempotent, so the whole probe is bounded and a timeout
-# reads as unreachable — a read never blocks the caller on a slow/down provider.
-# Sits above ``probe``'s own wait for the server start (``_PROBE_WAIT_SECONDS``) so that
-# wait ends first; a start still in progress then goes on, on the MCP start loop, up to the
-# start budget, and the probe reads unreachable.
+# round-trip). The GET is idempotent, so a timeout reads as unreachable. With a serving
+# loop bound the probe ends within this bound: it sits above ``probe``'s own wait for the
+# server start (``_PROBE_WAIT_SECONDS``) so that wait ends first; a start still in progress
+# then goes on, on the serving loop, up to the start budget, and the probe reads
+# unreachable. With no serving loop bound the probe waits its start out
+# (``start_listing``): this bound's cancel is held until the start has ended, so the probe
+# can take up to the start budget before it reads unreachable.
 _SUB_SERVICE_PROBE_TIMEOUT_SECONDS = 8.0
 
 # The machine-readable code the connector START refusal carries when the token

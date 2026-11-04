@@ -152,14 +152,15 @@ def test_request_path_resolves_live_provider_during_an_in_flight_build(monkeypat
     """A request that interleaves with an in-flight build's serving-app enter must resolve
     the LIVE epoch's provider, never the generation being built.
 
-    The build path instantiates the fresh generation's provider and records it into
-    ``app._building`` (``probe_identity_provider``); a request-path reader (the verifier's
+    The build path instantiates the fresh generation's provider and records it on the core
+    of the epoch being built (``probe_identity_provider``); a request-path reader (the verifier's
     factory) resolves it through ``tai42_app.accounts.active_provider``. That accessor MUST
     return the live instance so a build that then FAILS can never leave a surviving epoch's
     memoized verifier bound onto the discarded generation's provider (the zero-mutation
     invariant). Drives the ``build_and_swap_epoch`` primitive directly with a
-    ``build_serving_app`` seam that captures what a request-path read sees at the exact
-    ``_building``-is-set window, then fails the build to take the discard branch."""
+    ``build_serving_app`` seam that captures what a live-provider read sees inside the build's
+    own work, after the rebuild recorded the new provider, then fails the build to take the
+    discard branch."""
     from tai42_contract.app import tai42_app
 
     from tai42_skeleton.app import epoch as epoch_mod
@@ -181,20 +182,15 @@ def test_request_path_resolves_live_provider_during_an_in_flight_build(monkeypat
 
             seen: dict[str, object] = {}
 
-            async def _capture_then_fail(_new_epoch):
+            async def _capture_then_fail(new_epoch):
                 # Mid-build: the default rebuild has already instantiated + recorded the
-                # NEW generation's provider into ``app._building``. A request-path read must
-                # STILL resolve the live epoch's instance, not the one being built. Clear
-                # ``_building`` in a finally exactly as the real ``default_build_serving_app``
-                # does, so a failure leaves no half-built core on the slot.
-                try:
-                    building = app._building
-                    assert building is not None
-                    seen["built"] = building.active_auth_providers.get(PROVIDER_NAME)
-                    seen["request_path"] = tai42_app.accounts.active_provider(PROVIDER_NAME)
-                    raise RuntimeError("totally_bogus_pkg_xyz: forced failure inside the build window")
-                finally:
-                    app._building = None
+                # NEW generation's provider on the epoch's core. The live-provider read must
+                # STILL resolve the live epoch's instance, not the one being built, even from
+                # the build's own work.
+                assert new_epoch.core is not None
+                seen["built"] = new_epoch.core.active_auth_providers.get(PROVIDER_NAME)
+                seen["request_path"] = tai42_app.accounts.active_provider(PROVIDER_NAME)
+                raise RuntimeError("totally_bogus_pkg_xyz: forced failure inside the build window")
 
             _patch_reload(monkeypatch, manifest=good, env=auth_env)
             with pytest.raises(Exception, match="totally_bogus_pkg_xyz"):

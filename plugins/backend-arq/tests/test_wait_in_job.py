@@ -12,7 +12,9 @@ from typing import Any
 import pytest
 from arq.jobs import JobStatus
 
-from tai42_backend_arq import extensions, tools, worker
+from tai42_backend_arq import inspection, task_door, worker
+
+from .conftest import StubApp, backend_tools
 
 _REFUSED = "cannot wait for another job's result from inside a job: chain it with a callback instead"
 
@@ -25,11 +27,18 @@ async def sample_tool(text: str) -> str:
 class _FakeArq:
     """Records enqueue calls and answers each with a job whose result is ``done``."""
 
+    job_deserializer = None
+
     def __init__(self) -> None:
         self.calls: list[tuple[Any, ...]] = []
 
     async def enqueue_job(self, *args: Any, **kwargs: Any) -> Any:
         self.calls.append(args)
+        return self.job()
+
+    @staticmethod
+    def job() -> Any:
+        """A job whose status is complete and whose result is ``done``."""
 
         class _Job:
             job_id = "job-1"
@@ -51,15 +60,17 @@ def fake(bind_pool: Callable[[Any], None], monkeypatch: pytest.MonkeyPatch) -> _
     async def handle(redis: Any, job_id: str) -> Any:
         return await arq.enqueue_job(job_id)
 
-    monkeypatch.setattr(tools, "job_handle", handle)
+    monkeypatch.setattr(inspection, "job_handle", handle)
+    monkeypatch.setattr(task_door, "Job", lambda job_id, redis, **_: _FakeArq.job())
     return arq
 
 
-def _waits() -> dict[str, Callable[[], Awaitable[Any]]]:
-    branch = extensions.sync_task(sample_tool, "sample_tool", "doc")
+def _waits(stub_app: StubApp) -> dict[str, Callable[[], Awaitable[Any]]]:
+    _kind, sync_task = stub_app.extensions.registered["sync_task"]
+    branch = sync_task(sample_tool, "sample_tool", "doc")
     return {
         "sample_tool_sync_task": lambda: branch(text="hi"),
-        "backend_task_result": lambda: tools.backend_task_result("job-1", timeout=5),
+        "backend_task_result": lambda: backend_tools().backend_task_result("job-1", timeout=5),
     }
 
 
@@ -71,19 +82,19 @@ async def _in_job(call: Callable[[], Awaitable[Any]]) -> Any:
 
 
 @pytest.mark.parametrize("name", ["sample_tool_sync_task", "backend_task_result"])
-async def test_a_wait_tool_refuses_inside_a_job(fake: _FakeArq, name: str) -> None:
+async def test_a_wait_tool_refuses_inside_a_job(fake: _FakeArq, stub_app: StubApp, name: str) -> None:
     with pytest.raises(RuntimeError) as refused:
-        await _in_job(_waits()[name])
+        await _in_job(_waits(stub_app)[name])
 
     assert str(refused.value) == f"{name} {_REFUSED}"
     assert fake.calls == []
 
 
 @pytest.mark.parametrize("name", ["sample_tool_sync_task", "backend_task_result"])
-async def test_a_wait_tool_returns_the_result_outside_a_job(fake: _FakeArq, name: str) -> None:
-    assert await _waits()[name]() == "done"
+async def test_a_wait_tool_returns_the_result_outside_a_job(fake: _FakeArq, stub_app: StubApp, name: str) -> None:
+    assert await _waits(stub_app)[name]() == "done"
 
 
 async def test_a_job_reads_another_jobs_finished_result_without_waiting(fake: _FakeArq) -> None:
     """With no ``timeout`` the tool only reads the result's current state, which a job may do."""
-    assert await _in_job(lambda: tools.backend_task_result("job-1")) == "done"
+    assert await _in_job(lambda: backend_tools().backend_task_result("job-1")) == "done"

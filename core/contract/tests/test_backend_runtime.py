@@ -19,11 +19,13 @@ from pydantic import ValidationError
 
 from tai42_contract.backend import (
     CONSUMING_RUNTIME,
+    PROCESS_PRELUDE_ENV,
     Backend,
     BackendRuntime,
     ExecutionMode,
     FleetOpApplied,
     FleetOpEffect,
+    ProcessPreludeRequired,
 )
 
 
@@ -53,6 +55,23 @@ def test_execution_mode_members():
 def test_consuming_runtime_is_the_manifest_export_name():
     # The CLI sniffs argv for this literal before the plugin module is imported.
     assert CONSUMING_RUNTIME == "worker"
+
+
+def test_a_runtime_declares_no_process_prelude_by_default():
+    assert _BareRuntime.from_args([]).process_prelude is None
+
+
+def test_the_process_prelude_marker_is_the_env_the_entry_sets():
+    assert PROCESS_PRELUDE_ENV == "TAI_PROCESS_PRELUDE"
+
+
+def test_the_prelude_refusal_names_the_prelude_and_the_marker():
+    refusal = ProcessPreludeRequired("engine.patch:apply")
+
+    assert isinstance(refusal, RuntimeError)
+    assert refusal.prelude == "engine.patch:apply"
+    assert "'engine.patch:apply'" in str(refusal)
+    assert PROCESS_PRELUDE_ENV in str(refusal)
 
 
 def test_the_fleet_op_effects_are_the_registry_and_the_template_cache():
@@ -112,6 +131,6 @@ def test_default_request_terminate_keeps_draining(caplog: pytest.LogCaptureFixtu
 
 
 def test_backend_abc_is_unchanged_by_the_runtime_module():
-    # The runtime surface is purely additive: ``Backend`` gains no abstract
-    # member, so an external implementor of ``launch`` keeps working.
-    assert Backend.__abstractmethods__ == frozenset({"launch"})
+    # The runtime surface is purely additive: it adds no abstract member to
+    # ``Backend``, whose abstract members stay ``launch`` and ``drain_timeout``.
+    assert Backend.__abstractmethods__ == frozenset({"launch", "drain_timeout"})

@@ -57,7 +57,7 @@ async def test_converge_reloads_and_broadcasts_the_persisted_change_once(monkeyp
     assert result.span_release_error == "OSError: the span stayed held"
 
 
-async def test_persist_change_of_a_leaving_oauth_connector_writes_its_secret_mark_and_carries_its_keys(
+async def test_persist_change_of_a_leaving_oauth_connector_writes_its_secret_mark_and_persists_its_document(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _with_bus(monkeypatch)
@@ -80,7 +80,7 @@ async def test_persist_change_of_a_leaving_oauth_connector_writes_its_secret_mar
 
     assert persisted.document["connectors"] == []
     assert "ACME_CLIENT_SECRET" in store.env["TAI_ENV_SECRET_KEYS"].split(",")
-    [(_document, recycle_keys)] = written
-    assert persisted.recycle_keys == tuple(recycle_keys)
+    [document] = written
+    assert persisted.document == document
     assert admin.calls == 0
     assert bus.publish_calls == []

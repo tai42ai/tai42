@@ -352,9 +352,10 @@ def build_caller_sweep_stack(res: StackResources, variants: Variants) -> StackCo
 
 
 def build_recycle_stack(res: StackResources, variants: Variants) -> StackConfig:
-    """MULTIWORKER(1) + backend, SUPERVISED — the settings-profile RECYCLE leg.
+    """MULTIWORKER(1) + backend + queue worker ``b``, SUPERVISED — the settings-profile RECYCLE leg.
 
-    One serve worker (the applier) plus one backend runtime on the bus, carrying the
+    One serve worker (the applier) plus two backend workers on the bus — the one on the
+    settings queue and the ``backend-queue-b`` worker serving only queue ``b`` — carrying the
     skeleton component store (profiles) and the sync-task probe branch (an observably
     in-flight backend job). ``supervised=True`` runs the harness respawn-on-exit supervisor, so
     a recycle self-exit (the applier's own deferred exit AND each orchestrated sibling) is
@@ -368,9 +369,12 @@ def build_recycle_stack(res: StackResources, variants: Variants) -> StackConfig:
     a backup ``env`` restore — an env write — rolls the same recycle.
 
     The tool doors of an env write beyond MCP ride here too: ``run_tool_async_task`` queues the
-    projected ``write_env`` or ``apply_profile`` as a backend job (the writer is then the backend
-    worker that ran it), and ``tools_agent`` on the scripted LLM stub (``res.llm_base_url``) calls
-    ``write_env`` from an agent run."""
+    projected ``write_env`` or ``apply_profile`` as a backend job and ``run_tool_sync_task`` runs
+    ``write_env`` as one, and ``tools_agent`` on the scripted LLM stub (``res.llm_base_url``) calls
+    ``write_env`` from an agent run. A backend job runs under its job budget, so its change hands
+    the roll to the backend worker that ran it, which rolls the serve worker and the queue
+    worker ``b`` — a backend sibling whose drain the job could not wait out — and then restarts
+    itself."""
     manifest = {
         "default_routers": "none",
         "routers_modules": [*_CORE_ROUTERS, "tai42_skeleton.routers.backup"],
@@ -392,12 +396,22 @@ def build_recycle_stack(res: StackResources, variants: Variants) -> StackConfig:
     env.update(_llm_env(res))
     # A recycled worker's replacement must boot + rejoin the census within the recycle
     # orchestrator's per-step budget (``shutdown_drain_seconds``); a fresh process boot is far
-    # slower than the 10s default, so widen it for this leg.
+    # slower than the 10s default, so widen it for this leg. The step stays the replacement's
+    # boot-and-rejoin window; the departing life's stop is covered by the drain it announces.
     env["TAI_TOOL_RUNS_SHUTDOWN_DRAIN_SECONDS"] = "90"
     # The fleet apply window covers the retire's drain floor at that budget (3 x 90 s) plus
     # the same 60 s of the reload's own time the platform default leaves above three default
     # drains (the fork quiesce, the probes, the post-apply hook and the rebuild).
     env["TAI_BUS_APPLY_TIMEOUT"] = "330"
+    # A leaving worker announces its runtime's stop phase plus the app's shutdown bounds, at this
+    # stack's env 2 x 20 s (hook runs) + 30 s (credential refreshes' close wait) + 20 s (states
+    # outbox) + 90 s (tool runs) = 180 s: a serve worker the 10 s graceful-shutdown cap
+    # (``APP_ARGS_TIMEOUT_GRACEFUL_SHUTDOWN``) plus 180 s, a backend worker its backend's drain
+    # plus 180 s. A serve writer's roll runs inside its request and lasts each target's announced
+    # drain plus the 90 s step — far past the serve workers' 10 s cap, after which a stopped serve
+    # worker cancels the requests still running. The cap stays at its default: the writer restarts
+    # only after its reply, and no leg stops a serve worker while its request still rolls. A
+    # backend job's roll runs on the backend worker that ran the job, after the job answered.
     return StackConfig(
         name="recycle",
         topology=Topology.MULTIWORKER,
@@ -405,6 +419,7 @@ def build_recycle_stack(res: StackResources, variants: Variants) -> StackConfig:
         env=env,
         workers=1,
         run_backend=True,
+        queue_workers=("b",),
         run_metrics=False,
         auth=False,
         supervised=True,

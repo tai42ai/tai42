@@ -60,10 +60,11 @@ jobs:
   # root fleet tests, or .github) runs the full workspace including e2e. A manual
   # `workflow_dispatch` on the default `full` lane treats everything as changed:
   # it forces core=true and every downstream gate on. `lane=ui-e2e` inverts that —
-  # every gate off and both matrices empty, so the browser job is the only one
-  # that runs. The dynamic `check_matrix` / `e2e_backends` outputs, plus the
-  # `run_monitoring` / `run_ui` / `run_browsers` gates, are computed from these
-  # booleans so an unchanged member never runs a silent green no-op.
+  # every gate off and every matrix empty, so the browser job is the only one
+  # that runs. The dynamic `check_matrix` / `process_namespace_matrix` /
+  # `e2e_backends` outputs, plus the `run_monitoring` / `run_ui` / `run_browsers`
+  # gates, are computed from these booleans so an unchanged member never runs a
+  # silent green no-op.
   changes:
     needs: reuse
     if: ${{ needs.reuse.outputs.should_skip != 'true' }}
@@ -72,6 +73,7 @@ jobs:
     outputs:
       core: ${{ steps.assemble.outputs.core }}
       check_matrix: ${{ steps.assemble.outputs.check_matrix }}
+      process_namespace_matrix: ${{ steps.assemble.outputs.process_namespace_matrix }}
       frontend_matrix: ${{ steps.assemble.outputs.frontend_matrix }}
       run_e2e: ${{ steps.assemble.outputs.run_e2e }}
       e2e_backends: ${{ steps.assemble.outputs.e2e_backends }}
@@ -161,12 +163,13 @@ jobs:
               printf '["chromium"]'
             fi
           }
-          # The dispatched browser lane runs the ui-e2e job and nothing else: both
-          # matrices are empty and every other gate is off, whatever the filter saw.
+          # The dispatched browser lane runs the ui-e2e job and nothing else: every
+          # matrix is empty and every other gate is off, whatever the filter saw.
           if [ "$UI_LANE" = "true" ]; then
             {
               echo 'core=false'
               echo 'check_matrix={"include":[]}'
+              echo 'process_namespace_matrix={"include":[]}'
               echo 'frontend_matrix={"include":[]}'
               echo 'run_e2e=false'
               echo 'e2e_backends=[]'
@@ -192,47 +195,52 @@ jobs:
           case "${HEAD_REF:-}" in
             release-please--*) CORE=true ;;
           esac
-          # member table: name|dir|package|import_path|sync_extra|legs|pytest_mode
+          # member table: name|dir|package|import_path|sync_extra|legs|pytest_mode|process_namespace_variable
           # import_path empty -> core/e2e (no packaged-descriptor gate);
           # legs empty -> the member has no e2e trigger;
           # pytest_mode collect -> infra-bound suite; check runs collect-only
           # (imports + plugin registration, no live infra); the live pytest is
           # the services-backed e2e job. Any other value -> full pytest with cov.
+          # process_namespace_variable non-empty -> the member carries
+          # ``process_namespace``-marked tests, and setting the variable lets them
+          # run (the process-namespace job); empty -> it carries none.
           read -r -d '' TABLE <<'EOF' || true
-          contract|core/contract|tai42-contract||--extra dev|arq,celery,rq|cov
-          kit|core/kit|tai42-kit||--extra dev --extra llm --extra jq --extra uvicorn --extra redis --extra curl --extra postgres --extra langgraph-checkpoint-postgres --extra langgraph-checkpoint-sqlite --extra typesafe --extra monitoring|arq,celery,rq|cov
-          cli|core/cli|tai42-cli||--extra dev --extra api-gate|arq,celery,rq|cov
-          skeleton|core/skeleton|tai42-skeleton||--extra dev|arq,celery,rq|cov
-          accounts-postgres|plugins/accounts-postgres|tai42-accounts-postgres|tai42_accounts_postgres|--extra dev|arq|cov
-          agents|plugins/agents|tai42-agents|tai42_agents|--extra dev|arq|cov
-          backend-arq|plugins/backend-arq|tai42-backend-arq|tai42_backend_arq||arq|cov
-          backend-celery|plugins/backend-celery|tai42-backend-celery|tai42_backend_celery||celery|cov
-          backend-rq|plugins/backend-rq|tai42-backend-rq|tai42_backend_rq||rq|cov
-          channel-slack|plugins/channel-slack|tai42-channel-slack|tai42_channel_slack||arq|cov
-          channel-telegram|plugins/channel-telegram|tai42-channel-telegram|tai42_channel_telegram||arq|cov
-          channel-twilio|plugins/channel-twilio|tai42-channel-twilio|tai42_channel_twilio||arq|cov
-          channel-web|plugins/channel-web|tai42-channel-web|tai42_channel_web||arq|cov
-          channel-whatsapp|plugins/channel-whatsapp|tai42-channel-whatsapp|tai42_channel_whatsapp||arq|cov
-          identity-redis|plugins/identity-redis|tai42-identity-redis|tai42_identity_redis|--extra dev|arq|cov
-          monitoring-langfuse|plugins/monitoring-langfuse|tai42-monitoring-langfuse|tai42_monitoring_langfuse||arq|cov
-          sandbox-docker|plugins/sandbox-docker|tai42-sandbox-docker|tai42_sandbox_docker||arq|cov
-          sandbox-local|plugins/sandbox-local|tai42-sandbox-local|tai42_sandbox_local||arq|cov
-          storage-github|plugins/storage-github|tai42-storage-github|tai42_storage_github||arq|cov
-          storage-local|plugins/storage-local|tai42-storage-local|tai42_storage_local||arq|cov
-          storage-s3|plugins/storage-s3|tai42-storage-s3|tai42_storage_s3||arq|cov
-          toolbox|plugins/toolbox|tai42-toolbox|tai42_toolbox|--extra dev|arq|cov
-          tools-github|plugins/tools-github|tai42-tools-github|tai42_tools_github|--extra dev|arq|cov
-          tools-stripe|plugins/tools-stripe|tai42-tools-stripe|tai42_tools_stripe|--extra dev|arq|cov
-          tools-twilio|plugins/tools-twilio|tai42-tools-twilio|tai42_tools_twilio|--extra dev|arq|cov
-          tools-whatsapp|plugins/tools-whatsapp|tai42-tools-whatsapp|tai42_tools_whatsapp|--extra dev|arq|cov
-          webhook-verifier-github|plugins/webhook-verifier-github|tai42-webhook-verifier-github|tai42_webhook_verifier_github||arq|cov
-          webhook-verifier-stripe|plugins/webhook-verifier-stripe|tai42-webhook-verifier-stripe|tai42_webhook_verifier_stripe||arq|cov
-          e2e|e2e|tai42-e2e|||arq|collect
+          contract|core/contract|tai42-contract||--extra dev|arq,celery,rq|cov|
+          kit|core/kit|tai42-kit||--extra dev --extra llm --extra jq --extra uvicorn --extra redis --extra curl --extra postgres --extra langgraph-checkpoint-postgres --extra langgraph-checkpoint-sqlite --extra typesafe --extra monitoring|arq,celery,rq|cov|TAI42_KIT_PROCESS_NAMESPACE
+          cli|core/cli|tai42-cli||--extra dev --extra api-gate|arq,celery,rq|cov|
+          skeleton|core/skeleton|tai42-skeleton||--extra dev|arq,celery,rq|cov|
+          accounts-postgres|plugins/accounts-postgres|tai42-accounts-postgres|tai42_accounts_postgres|--extra dev|arq|cov|
+          agents|plugins/agents|tai42-agents|tai42_agents|--extra dev|arq|cov|
+          backend-arq|plugins/backend-arq|tai42-backend-arq|tai42_backend_arq||arq|cov|
+          backend-celery|plugins/backend-celery|tai42-backend-celery|tai42_backend_celery||celery|cov|
+          backend-rq|plugins/backend-rq|tai42-backend-rq|tai42_backend_rq||rq|cov|
+          channel-slack|plugins/channel-slack|tai42-channel-slack|tai42_channel_slack||arq|cov|
+          channel-telegram|plugins/channel-telegram|tai42-channel-telegram|tai42_channel_telegram||arq|cov|
+          channel-twilio|plugins/channel-twilio|tai42-channel-twilio|tai42_channel_twilio||arq|cov|
+          channel-web|plugins/channel-web|tai42-channel-web|tai42_channel_web||arq|cov|
+          channel-whatsapp|plugins/channel-whatsapp|tai42-channel-whatsapp|tai42_channel_whatsapp||arq|cov|
+          identity-redis|plugins/identity-redis|tai42-identity-redis|tai42_identity_redis|--extra dev|arq|cov|
+          monitoring-langfuse|plugins/monitoring-langfuse|tai42-monitoring-langfuse|tai42_monitoring_langfuse||arq|cov|
+          sandbox-docker|plugins/sandbox-docker|tai42-sandbox-docker|tai42_sandbox_docker||arq|cov|SANDBOX_DOCKER_PROCESS_NAMESPACE
+          sandbox-local|plugins/sandbox-local|tai42-sandbox-local|tai42_sandbox_local||arq|cov|
+          storage-github|plugins/storage-github|tai42-storage-github|tai42_storage_github||arq|cov|
+          storage-local|plugins/storage-local|tai42-storage-local|tai42_storage_local||arq|cov|
+          storage-s3|plugins/storage-s3|tai42-storage-s3|tai42_storage_s3||arq|cov|
+          toolbox|plugins/toolbox|tai42-toolbox|tai42_toolbox|--extra dev|arq|cov|
+          tools-github|plugins/tools-github|tai42-tools-github|tai42_tools_github|--extra dev|arq|cov|
+          tools-stripe|plugins/tools-stripe|tai42-tools-stripe|tai42_tools_stripe|--extra dev|arq|cov|
+          tools-twilio|plugins/tools-twilio|tai42-tools-twilio|tai42_tools_twilio|--extra dev|arq|cov|
+          tools-whatsapp|plugins/tools-whatsapp|tai42-tools-whatsapp|tai42_tools_whatsapp|--extra dev|arq|cov|
+          webhook-verifier-github|plugins/webhook-verifier-github|tai42-webhook-verifier-github|tai42_webhook_verifier_github||arq|cov|
+          webhook-verifier-stripe|plugins/webhook-verifier-stripe|tai42-webhook-verifier-stripe|tai42_webhook_verifier_stripe||arq|cov|
+          e2e|e2e|tai42-e2e|||arq|collect|
           EOF
           entries='[]'
           legs=''
           run_e2e=false
-          while IFS='|' read -r name dir package import_path sync_extra memlegs pytest_mode; do
+          # The checked members carrying ``process_namespace``-marked tests.
+          process_namespace='[]'
+          while IFS='|' read -r name dir package import_path sync_extra memlegs pytest_mode process_namespace_variable; do
             [ -n "$name" ] || continue
             changed=$(printf '%s' "$CHANGES_JSON" | jq -r --arg n "$name" '.[$n] // "false"')
             if [ "$CORE" = "true" ] || [ "$changed" = "true" ]; then
@@ -245,6 +253,13 @@ jobs:
               if [ -n "$memlegs" ]; then
                 run_e2e=true
                 legs="$legs,$memlegs"
+              fi
+              if [ -n "$process_namespace_variable" ]; then
+                process_namespace=$(jq -c \
+                  --arg dir "$dir" --arg package "$package" \
+                  --arg sync_extra "$sync_extra" --arg variable "$process_namespace_variable" \
+                  '. + [{dir:$dir, package:$package, sync_extra:$sync_extra, variable:$variable}]' \
+                  <<<"$process_namespace")
               fi
             fi
           done <<<"$TABLE"
@@ -328,6 +343,7 @@ jobs:
           {
             echo "core=$CORE"
             echo "check_matrix=$(jq -c '{include: .}' <<<"$entries")"
+            echo "process_namespace_matrix=$(jq -c '{include: .}' <<<"$process_namespace")"
             echo "frontend_matrix=$(jq -c '{include: .}' <<<"$frontends")"
             echo "run_e2e=$run_e2e"
             echo "e2e_backends=$backends"
@@ -460,12 +476,13 @@ jobs:
         # must NOT see a configured database. So the two halves run as two passes with
         # coverage accumulated (--cov-append); the final report applies the package's
         # fail_under against the COMBINED data. The service starts each job empty, and the
-        # integration fixtures apply their schema and use per-run unique keys.
+        # integration fixtures apply their schema and use per-run unique keys. The
+        # ``process_namespace`` tests run in the process-namespace job instead.
         if: ${{ matrix.dir == 'core/kit' }}
         working-directory: ${{ matrix.dir }}
         run: |
           set -euo pipefail
-          uv run --no-sync pytest -m "not integration" --cov --cov-report= --cov-fail-under=0
+          uv run --no-sync pytest -m "not integration and not process_namespace" --cov --cov-report= --cov-fail-under=0
           TAI42_KIT_REAL_PG=1 \
           TAI_DATABASE_DEFAULT_PG_HOST=localhost \
           TAI_DATABASE_DEFAULT_PG_PASSWORD=postgres \
@@ -522,6 +539,46 @@ jobs:
             printf '%s\n' "$descriptor"
             exit 1
           }
+
+  # The ``process_namespace``-marked tests run the sandbox exec scripts under a
+  # real shell. The scripts' /proc scan reads every process of the exec's user
+  # that started after the exec's wrapper, so it must see only the test's own
+  # processes: each member runs them in a container of its own, whose process
+  # table holds only the job's steps, with an init that reaps the processes
+  # reparented to it, as the exec's own container has. The tests run serially,
+  # since tests sharing the one table would see each other's processes. The
+  # check matrix runs the rest of each member's suite on the runner: the kit's
+  # offline pass deselects these tests, and a plugin's unit pass skips them
+  # visibly. The scripts must hold under every shell a session image may carry
+  # as ``sh``, busybox's included, so the container installs busybox.
+  process-namespace:
+    needs: [reuse, changes]
+    if: ${{ needs.reuse.outputs.should_skip != 'true' && fromJSON(needs.changes.outputs.process_namespace_matrix).include[0] != null }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.changes.outputs.process_namespace_matrix) }}
+    container:
+      image: python:3.13-slim
+      options: --init
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          version: "0.11.26"
+          enable-cache: true
+      - run: uv python install 3.13
+      - name: Install busybox
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: apt-get update && apt-get install -y --no-install-recommends busybox
+      - run: uv sync --locked --package ${{ matrix.package }} ${{ matrix.sync_extra }}
+      - name: Pytest
+        working-directory: ${{ matrix.dir }}
+        env:
+          PROCESS_NAMESPACE_VARIABLE: ${{ matrix.variable }}
+        run: env "$PROCESS_NAMESPACE_VARIABLE=1" uv run --no-sync pytest -m process_namespace
 
   # Frontend gate for members with their own pnpm workspace. The bundle is
   # committed, so the rebuild-then-diff step is what keeps it from going stale.
@@ -1242,7 +1299,7 @@ jobs:
           uv run --no-project --python 3.13 --with pyyaml --with-editable ./core/cli python scripts/consumer_boot_gate.py --consumer-req "$REQ"
 
   ci-ok:
-    needs: [reuse, changes, check, plugin-frontend, fleet, stable-resolution, first-party-npm-majors, e2e, ui-e2e, consumer-boot-gate, consumer-boot-gate-plan, consumer-boot-gate-first-party]
+    needs: [reuse, changes, check, process-namespace, plugin-frontend, fleet, stable-resolution, first-party-npm-majors, e2e, ui-e2e, consumer-boot-gate, consumer-boot-gate-plan, consumer-boot-gate-first-party]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 15

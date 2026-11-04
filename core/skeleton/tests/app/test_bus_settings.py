@@ -27,9 +27,7 @@ def _settings(
     return BusSettings.model_validate({"redis": BusRedisSettings(redis_url=redis_url), **(fields or {})})
 
 
-@pytest.mark.parametrize(
-    "fields", [{"heartbeat_ttl": 21.0}, {"ack_timeout": 3.0}, {"apply_timeout": 120.0}], ids=lambda f: next(iter(f))
-)
+@pytest.mark.parametrize("fields", [{"heartbeat_ttl": 21.0}, {"apply_timeout": 120.0}], ids=lambda f: next(iter(f)))
 def test_settings_that_differ_only_in_how_a_member_takes_part_locate_the_same_fleet(fields: dict[str, float]) -> None:
     assert _settings(fields).fleet == _settings().fleet
 
@@ -60,7 +58,7 @@ def test_the_local_bus_is_on_the_busless_fleet(monkeypatch: pytest.MonkeyPatch) 
 def test_a_bus_carries_the_settings_it_was_built_under() -> None:
     settings = _settings({"heartbeat_ttl": 21.0})
 
-    assert WorkerBus(settings, kind=WorkerKind.serve).settings is settings
+    assert WorkerBus(settings, kind=WorkerKind.serve, exit_drain=lambda: None).settings is settings
 
 
 def test_the_fleet_env_names_are_every_name_read_for_the_redis_url_and_the_namespace() -> None:

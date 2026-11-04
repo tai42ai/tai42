@@ -7,10 +7,12 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 import tai42_skeleton.plugins.registry as reg
+from tai42_skeleton.app import instance
 from tai42_skeleton.marketplace import compat
 from tai42_skeleton.marketplace.compat import CorePluginBootError
 from tai42_skeleton.plugins.registry import (
@@ -521,18 +523,9 @@ async def test_rebuild_pass_reflects_reload(tmp_path, monkeypatch):
     studio = _write_plugin(tmp_path)
     monkeypatch.setattr(reg, "_studio_root", lambda package: studio)
 
-    # Fake the live-manifest seam + settings the handler reads at call time.
-    live = {"studio_plugins": []}
-
-    class _FakeAdmin:
-        @property
-        def live_manifest(self):
-            return live
-
-    class _FakeApp:
-        admin = _FakeAdmin()
-
-    monkeypatch.setattr("tai42_contract.app.tai42_app", _FakeApp())
+    # Fake the started-manifest seam + settings the handler reads at call time.
+    started = SimpleNamespace(studio_plugins=[])
+    monkeypatch.setattr(instance.app, "_require_manifest", lambda: started)
     monkeypatch.setattr(
         "tai42_skeleton.plugins.settings.plugins_settings", lambda: type("S", (), {"studio_dist_path": None})()
     )
@@ -541,7 +534,7 @@ async def test_rebuild_pass_reflects_reload(tmp_path, monkeypatch):
     assert reg.current_registry().plugins == {}
 
     # A reload adds the plugin -> the rebuilt registry reflects it WITHOUT restart.
-    live["studio_plugins"] = ["acme_plugin"]
+    started.studio_plugins = ["acme_plugin"]
     await reg.rebuild_studio_plugin_registry()
     assert "acme_plugin" in reg.current_registry().plugins
 

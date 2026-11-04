@@ -864,10 +864,10 @@ def server(mcp_server: mcp_fakes.FakeMcpServer) -> Iterator[mcp_fakes.FakeMcpSer
 
 @pytest.fixture
 async def closed_pools() -> AsyncIterator[None]:
-    from tai42_kit.clients.base import shutdown_all_clients
+    from tai42_kit.loop_bound import release_loop_bound_resources
 
     yield
-    await shutdown_all_clients()
+    await release_loop_bound_resources()
 
 
 def _input_model():

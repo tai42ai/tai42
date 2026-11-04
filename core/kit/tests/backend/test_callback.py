@@ -10,6 +10,7 @@ emitting nothing yields ``{}``) are exercised end to end against a fake app the
 from __future__ import annotations
 
 import time
+from contextlib import nullcontext
 from types import SimpleNamespace
 from typing import Any
 
@@ -25,6 +26,7 @@ from tai42_kit.settings.cache_registry import reset_all_settings
 from tai42_kit.utils import worker_secret_capability as capability_module
 from tai42_kit.utils.data import jq_util
 from tai42_kit.utils.detached_util import in_detached_run
+from tai42_kit.utils.run_bound import in_bounded_run
 from tai42_kit.utils.schedule_subject import (
     SCHEDULE_EXECUTION_FINGERPRINT_ARG,
     SCHEDULE_EXECUTION_KEY_ARG,
@@ -55,12 +57,13 @@ class _FakeResourceManager:
 
 
 class _FakeTools:
-    """Records each ``run_tool`` call, the detached-run flag and secret-read capability it
-    observed, and the offload flag it was dispatched with."""
+    """Records each ``run_tool`` call, the detached-run and bounded-run flags and secret-read
+    capability it observed, and the offload flag it was dispatched with."""
 
     def __init__(self) -> None:
         self.calls: list[tuple[str, Any]] = []
         self.detached_seen: list[bool] = []
+        self.bounded_seen: list[bool] = []
         self.capability_seen: list[bool] = []
         self.offloads: list[bool] = []
         self.result: Any = "ran"
@@ -68,6 +71,7 @@ class _FakeTools:
     async def run_tool(self, key: str, arguments: Any, *, offload_sync: bool = False) -> Any:
         self.calls.append((key, arguments))
         self.detached_seen.append(in_detached_run())
+        self.bounded_seen.append(in_bounded_run())
         self.capability_seen.append(caller_may_read_secrets())
         self.offloads.append(offload_sync)
         return self.result
@@ -77,6 +81,8 @@ class _FakeApp:
     def __init__(self) -> None:
         self.storage = SimpleNamespace(resource_manager=_FakeResourceManager())
         self.tools = _FakeTools()
+        # The app's job-admission door, entered by the run's ``dispatched_job``: admits nothing here.
+        self.lifecycle = SimpleNamespace(admitted_job=nullcontext)
 
 
 @pytest.fixture(autouse=True)
@@ -202,14 +208,16 @@ async def test_without_expr_runs_tool_with_empty_args(bound_app) -> None:
 
 
 async def test_callback_runs_tool_detached(bound_app) -> None:
-    # A worker executes a dequeued callback with no live caller, so the follow-up
-    # tool observes the detached flag set; the flag never leaks past the callback.
+    # A worker executes a dequeued callback with no live caller and under its job budget, so the
+    # follow-up tool observes the detached and bounded flags set; neither leaks past the callback.
     callback = _carrying(condition=TemplatedText(content=".ok"), expr=TemplatedText(content="{x: .value}"), tool="next")
     await callback_execution({"ok": True, "value": 5}, callback)
     assert bound_app.tools.detached_seen == [True]
+    assert bound_app.tools.bounded_seen == [True]
     # A dequeued callback offloads a blocking sync tool off the worker's event loop.
     assert bound_app.tools.offloads == [True]
     assert in_detached_run() is False
+    assert in_bounded_run() is False
 
 
 async def test_callback_jq_eval_is_timeout_bounded(bound_app, monkeypatch) -> None:

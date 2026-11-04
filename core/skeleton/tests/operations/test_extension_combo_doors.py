@@ -163,12 +163,10 @@ def test_the_backup_restore_records_the_refusal_as_the_section_error(live_store:
     live_store.env = {"EXT_L": "ok"}
 
     async def body() -> None:
-        restored = (
-            await import_backup(
-                {"version": 1, "sections": {"manifest": _with_extensions([[_REFUSED]]), "env": {"EXT_L": "x"}}},
-                ["manifest", "env"],
-            )
-        ).payload
+        restored = await import_backup(
+            {"version": 1, "sections": {"manifest": _with_extensions([[_REFUSED]]), "env": {"EXT_L": "x"}}},
+            ["manifest", "env"],
+        )
         assert restored.ok is False
         assert restored.sections["manifest"].errors == [_REFUSAL]
         assert restored.sections["env"].errors == [_REFUSAL]

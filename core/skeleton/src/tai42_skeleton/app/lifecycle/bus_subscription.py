@@ -1,19 +1,19 @@
 """The worker-bus subscription lifecycle and fleet-op dispatch."""
 
 import asyncio
-import functools
 import logging
 import time
-from typing import TYPE_CHECKING, Any, assert_never
+from collections.abc import Mapping
+from typing import Any, assert_never
 
 from tai42_contract.app import tai42_app
 from tai42_contract.backend import FleetOpApplied
-from tai42_kit.settings import fold_env_name
 
 from tai42_skeleton.app.boot_rules import BusNotDeploymentGivenError, check_bus_stays_deployment_given
-from tai42_skeleton.app.bus import TRANSPORT_ERRORS, FleetResult, WorkerBus, WorkerKind, WorkerRow
+from tai42_skeleton.app.bus import FleetResult, WorkerBus, WorkerKind
 from tai42_skeleton.app.bus.ops import (
     FLEET_OP_ADAPTER,
+    CarryRoll,
     ClearTemplateCache,
     DeploymentKeysChanged,
     DeregisterMcp,
@@ -27,37 +27,26 @@ from tai42_skeleton.app.bus.ops import (
     ReloadTool,
     RemoveTool,
     ReprobeFailedMcps,
+    recycle_reply,
 )
 from tai42_skeleton.app.bus_settings import bus_settings
-from tai42_skeleton.app.graceful_exit import request_graceful_exit
+from tai42_skeleton.app.discarded_build import discarded_build_statement
+from tai42_skeleton.app.lifecycle.config_reload import awaiting_respawn
 from tai42_skeleton.app.lifecycle.state import LifecycleState
 from tai42_skeleton.app.readiness_sentinel import write_ready_sentinel
-from tai42_skeleton.app.recycle import RecycleError, RecycleReport, orchestrate_recycle
+from tai42_skeleton.app.recycle import orchestrate_recycle
 from tai42_skeleton.app.reload_gate import reload_gate
-from tai42_skeleton.config.recycle_policy import CENSUS_TARGET_KINDS, _recycle_step_timeout
-
-if TYPE_CHECKING:
-    from tai42_skeleton.config.deployment_env import DeploymentOwnership
+from tai42_skeleton.app.writer_exit import hold_writer_exit, writer_exit_scope
 
 logger = logging.getLogger(__name__)
-
-
-def _set_by_withdrawn(keys: list[str], withdrawn: list[str], ownership: "DeploymentOwnership") -> list[str]:
-    """The keys of ``keys`` a withdrawn name set, in order.
-
-    A withdrawn name sets a key when it is the same name under any spelling, or when it sets a
-    field the key sets (a nested group's JSON name, a delimited name), as the index of env
-    readers the withdraw's ``ownership`` judged by resolves both
-    (:meth:`~tai42_skeleton.config.deployment_env.DeploymentOwnership.fields_set_by`).
-    """
-    folded = {fold_env_name(name) for name in withdrawn}
-    fields = {ref for name in withdrawn for ref in ownership.fields_set_by(name)}
-    return [key for key in keys if fold_env_name(key) in folded or not fields.isdisjoint(ownership.fields_set_by(key))]
 
 
 # The name of the one long-lived bus subscription task; ``/ready`` names it once it dies, or once
 # the subscription learns this process's bus is not the deployment's.
 BUS_SUBSCRIPTION_TASK = "tai-worker-bus-subscription"
+
+# The reason a worker recycled by a fleet ``Recycle`` op leaves for, as a later door reads it.
+_RECYCLE_OP_REASON = "a fleet recycle op"
 
 
 class BusSubscriptionMixin(LifecycleState):
@@ -75,16 +64,33 @@ class BusSubscriptionMixin(LifecycleState):
             raise RuntimeError("the worker bus is not built — call read_boot_manifest first")
         return bus
 
+    def stop_began(self, reason: str) -> bool:
+        """Begin this worker's leaving because its process was asked to stop, from outside, for ``reason``.
+
+        The process's host calls it at the first stop signal it observes, so the census reads the
+        stop as ``recycling`` from its start and a roll that reaches the worker meanwhile finds it
+        already leaving (:meth:`~tai42_skeleton.app.bus.WorkerBus.stop_began`). It sends no signal:
+        the stop is already under way. A signal that arrives before the boot read builds the bus
+        begins nothing on it, said at INFO; the lifespan stop then has no bus row to announce
+        either. Returns whether this call began the leaving.
+        """
+        bus = self._bus
+        if bus is None:
+            logger.info("%s before the worker bus was built — no census row to announce the stop on", reason)
+            return False
+        return bus.stop_began(reason)
+
     def _build_bus(self, kind: WorkerKind) -> WorkerBus:
         """Construct this process's one worker bus.
 
         With ``TAI_BUS_REDIS_URL`` set the real bus joins the fleet (its slot name + generation minted on
-        the first claim at subscribe time); otherwise the no-op ``WorkerBus.local`` variant — legal only
-        under the boot rules that permit a busless deployment (single worker, file mode, no backend).
+        the first claim at subscribe time), announcing this app's :attr:`exit_drain` when it leaves;
+        otherwise the no-op ``WorkerBus.local`` variant — legal only under the boot rules that permit
+        a busless deployment (single worker, file mode, no backend).
         """
         settings = bus_settings()
         if settings.enabled:
-            return WorkerBus(settings, kind=kind)
+            return WorkerBus(settings, kind=kind, exit_drain=self.exit_drain.seconds)
         return WorkerBus.local(kind)
 
     def _spawn_bus_subscription(self) -> None:
@@ -92,13 +98,14 @@ class BusSubscriptionMixin(LifecycleState):
 
         Owned by ``app_context``; runs until cancelled at shutdown. The subscription reconnects with backoff
         internally and fires ``on_ready`` (the self-resync) after subscribe+presence-register on every
-        (re)connect.
+        (re)connect. A delivered op that fails replies ``failed`` with the statement
+        :func:`_failed_op_statement` makes of its failure.
         """
         bus = self._bus
         if bus is None:
             raise RuntimeError("bus subscription spawned before the bus was built")
         self._bus_subscription_task = asyncio.create_task(
-            bus.subscribe(self._apply_bus_op, on_ready=self._resync_on_ready),
+            bus.subscribe(self._apply_bus_op, on_ready=self._resync_on_ready, failure_payload=_failed_op_statement),
             name=BUS_SUBSCRIPTION_TASK,
         )
         self._bus_subscription_task.add_done_callback(self._on_perpetual_task_done)
@@ -132,8 +139,10 @@ class BusSubscriptionMixin(LifecycleState):
         connect reloads only when it withdrew a key, so nothing it built keeps the withdrawn
         value. After every successful resync the worker is boot-ready and starts its join
         (:meth:`_spawn_join`): its presence row publishes its own names, every other worker
-        withdraws the applied keys they make owned, and the recycle-class keys a withdraw
-        leaves running are rolled as a recycle, this worker's own last. The join runs as a
+        withdraws the applied keys they make owned, and the join decides from their replies
+        and this worker's own resync reload which workers need a restart, rolling the recycle
+        over them, this worker's own last: a recycle-class key the resync reports off its bound
+        value (a withdraw, a roll it missed while away) restarts this worker as it does any. The join runs as a
         task, never awaited here, so this worker's message loop answers the fleet's ops,
         another joiner's announcement among them, while its own announcement collects; a
         worker still resyncing at the announcement replies once its own resync returns. A
@@ -143,16 +152,15 @@ class BusSubscriptionMixin(LifecycleState):
         try:
             # Every connect learns the fleet's names: they may have changed since the boot
             # bridge read them, or while a reconnecting worker was away.
-            withdrawn, ownership = await self._withdraw_fleet_owned_env()
-            self_recycle_keys: list[str] = []
+            withdrawn = await self._withdraw_fleet_owned_env()
+            # The FIRST connect's live config was JUST built by ``start()`` under the env it
+            # runs on, so with nothing withdrawn it is clean and not rebuilt.
+            own_reload: dict[str, Any] = {"awaiting_respawn": []}
             if self._boot_ready.is_set() or withdrawn:
                 # A RECONNECT re-reads persisted config by building and swapping in a fresh
                 # epoch, since a reload_config broadcast may have been missed while this worker
-                # was away. On the FIRST connect the live config was JUST built by ``start()``,
-                # so it is rebuilt only when the withdraw changed the env it was built under.
-                result = await self._reload_after_withdraw()
-                self_recycle_keys = _set_by_withdrawn(result["awaiting_respawn"], withdrawn, ownership)
-                self._judge_resync(result, joining_recycle_keys=self_recycle_keys)
+                # was away; a first connect rebuilds when the withdraw changed its env.
+                own_reload = await self._reload_after_withdraw()
         except asyncio.CancelledError:
             raise
         except BusNotDeploymentGivenError:
@@ -165,13 +173,12 @@ class BusSubscriptionMixin(LifecycleState):
             )
         else:
             self._mark_boot_ready()
-            self._spawn_join(self_recycle_keys)
+            self._spawn_join(own_reload)
 
-    async def _withdraw_fleet_owned_env(self) -> tuple[list[str], "DeploymentOwnership"]:
+    async def _withdraw_fleet_owned_env(self) -> list[str]:
         """Withdraw the applied stored keys the fleet's deployment owns, read from the census under the reload gate.
 
-        Returns the withdrawn names, sorted, and the ownership they were judged by. A failed
-        census read raises. A withdraw that itself
+        Returns the withdrawn names, sorted. A failed census read raises. A withdraw that itself
         moves the effective bus settings off the bus this process is a member of (a value locating
         it, its Redis URL or namespace, was a withdrawn copy:
         :func:`~tai42_skeleton.app.boot_rules.check_bus_stays_deployment_given`) ends the
@@ -199,9 +206,9 @@ class BusSubscriptionMixin(LifecycleState):
                 "worker bus: %s — this process exits for its supervisor to start it again", exc
             )
             self._dead_perpetual_task = (BUS_SUBSCRIPTION_TASK, type(exc).__name__)
-            request_graceful_exit(bus.identity.pid)
+            bus.request_graceful_exit("bus settings are no longer deployment-given")
             raise
-        return withdrawn, ownership
+        return withdrawn
 
     async def _reload_after_withdraw(self) -> dict[str, Any]:
         """Rebuild this worker's serving generation through the fleet-op apply path and return the reload's result.
@@ -214,208 +221,138 @@ class BusSubscriptionMixin(LifecycleState):
             ReloadConfig(op="reload_config"), deadline=time.monotonic() + bus_settings().apply_timeout
         )
 
-    async def _converge_after_withdraw(self, withdrawn: list[str], ownership: "DeploymentOwnership") -> dict[str, Any]:
+    async def _converge_after_withdraw(self, withdrawn: list[str]) -> dict[str, Any]:
         """Bring this worker's running state in line with a withdraw and report what still waits on a respawn.
 
-        Returns ``{"withdrawn": [...], "awaiting_respawn": [...]}``: the withdrawn names, and the
-        recycle-class keys a withdrawn name set that this worker still runs on (bound at boot, so
-        only a respawn ends them), judged by the withdraw's ``ownership`` (:func:`_set_by_withdrawn`).
-        A withdraw of nothing rebuilds nothing. A receiver whose withdraw took away a value
-        locating its bus never reaches here: the withdraw raises, the op fails with the refusal's
-        text, and the process exits.
+        Returns ``{"withdrawn": [...], "awaiting_respawn": [...]}``: the withdrawn names, and every
+        recycle-class key this worker still runs on off its effective value (bound at boot, so only
+        a respawn ends them), whatever change set it — the same statement every reload makes. A
+        withdraw of nothing rebuilds nothing and states the drift as it stands
+        (:func:`~tai42_skeleton.app.lifecycle.config_reload.awaiting_respawn`). A receiver whose
+        withdraw took away a value locating its bus never reaches here: the withdraw raises, the
+        op fails with the refusal's text, and the process exits.
         """
         if not withdrawn:
-            return {"withdrawn": [], "awaiting_respawn": []}
+            return {"withdrawn": [], "awaiting_respawn": awaiting_respawn()}
         result = await self._reload_after_withdraw()
-        return {
-            "withdrawn": withdrawn,
-            "awaiting_respawn": _set_by_withdrawn(result["awaiting_respawn"], withdrawn, ownership),
-        }
+        return {"withdrawn": withdrawn, "awaiting_respawn": result["awaiting_respawn"]}
 
-    def _spawn_join(self, self_recycle_keys: list[str]) -> None:
+    def _spawn_join(self, own_reload: dict[str, Any]) -> None:
         """Start this worker's join (:meth:`_join`) as a task, tracked until it ends and cancelled at shutdown."""
-        task = asyncio.create_task(self._join(list(self_recycle_keys)), name="tai-deployment-keys-join")
+        task = asyncio.create_task(self._join(dict(own_reload)), name="tai-deployment-keys-join")
         self._deployment_keys_join_tasks.add(task)
         task.add_done_callback(self._deployment_keys_join_tasks.discard)
         task.add_done_callback(self._log_task_exception)
 
-    async def _join(self, self_recycle_keys: list[str]) -> None:
-        """Announce this worker's deployment keys, then recycle the workers whose withdraw left keys running.
+    async def _join(self, own_reload: dict[str, Any]) -> None:
+        """Announce this worker's deployment keys, then restart the workers that need it, this worker last.
 
-        The roll (:meth:`_recycle_after_join`) runs when a worker replied with such keys, or
-        when ``self_recycle_keys`` (this worker's own withdraw's recycle-class keys) is
-        non-empty, and then recycles this worker last.
+        ``own_reload`` is this worker's own resync reload result, its row in the report the
+        recycle decision reads (:meth:`_recycle_after_join`). The join is this worker's own change:
+        it runs under one writer-exit scope that holds the worker's exit from the announcement on
+        (:func:`~tai42_skeleton.app.writer_exit.hold_writer_exit`), so a recycle op from another
+        worker's roll leaves the worker to the join, and settles once the roll ended. The recycle
+        targets are pinned before the announcement (:meth:`_pin_join_targets`), as every change pins
+        them before its reload: a worker's reply is tied to the life pinned before it answered,
+        even when that life leaves before the roll.
         """
-        announced, reporters = await self._announce_deployment_keys()
-        if reporters or self_recycle_keys:
-            await self._recycle_after_join(announced, reporters, self_recycle_keys)
+        bus = self.bus
+        change = f"the deployment keys of {bus.identity.name}"
+        with writer_exit_scope() as exits:
+            hold_writer_exit(bus, change)
+            pinned = await self._pin_join_targets()
+            announced = await self._announce_deployment_keys()
+            await self._recycle_after_join(announced, own_reload, pinned, change=change)
+            await exits.settle(change)
 
-    async def _announce_deployment_keys(self) -> tuple[FleetResult | None, dict[str, list[str]]]:
+    async def _pin_join_targets(self) -> dict[str, tuple[WorkerKind, int]]:
+        """The join's recycle targets, pinned from its op-start census read, before the announcement.
+
+        A census that cannot be read pins nothing (:func:`op_start_census`) and the join goes on
+        to announce: a worker whose reply reports keys then answered from a life the join did not
+        pin, so the decision asks it once it is ready rather than restarting it at once; when the
+        announcement fails too, the roll's own census names whom to ask
+        (:meth:`_announce_deployment_keys`).
+        """
+        from tai42_skeleton.config.recycle_roll import pinned_recycle_targets
+        from tai42_skeleton.operations._broadcast import op_start_census
+
+        bus = self.bus
+        rows = await op_start_census(bus.census, "deployment_keys_changed", without="no recycle target is pinned")
+        if rows is None:
+            return {}
+        return pinned_recycle_targets(rows, bus.identity.name)
+
+    async def _announce_deployment_keys(self) -> FleetResult:
         """Tell every other worker this one joined, so each withdraws the applied keys its names make owned.
 
         The announcement carries no names: each receiver re-reads the census, where this
-        worker's presence row publishes them, and replies with the recycle-class keys its
-        withdraw left running. Returns the announcement's result (``None`` when the publish
-        failed) and those keys by the name of the worker that replied with them. A failed
-        publish, or a worker that did not confirm, is logged at ERROR and leaves the
-        subscription live: this join rolls no such worker. A hot key it runs on converges at
-        its next reload, which applies by the fleet's ownership; a recycle-class key it still
-        runs on is named at each reload and waits for a restart through the deployment's
-        supervisor.
+        worker's presence row publishes them, and replies with every recycle-class key it still
+        runs on off its effective value (``awaiting_respawn``), as every reload replies. Returns
+        the announcement's report. A
+        failed publish is logged at ERROR and returns the bus-unreachable shape: no other worker
+        stated its env after the announcement, so the roll runs and asks each worker its census
+        shows once it is ready, pinned or not
+        (:class:`~tai42_skeleton.config.recycle_policy.RecycleDecision` ``report_unreachable``).
         """
         from tai42_skeleton.app.bus import LocalApplyResult, OpOutcome
-        from tai42_skeleton.operations._broadcast import _awaiting_keys
 
         bus = self._bus
         if bus is None:
             raise RuntimeError("the deployment keys announcement ran before the bus was built")
         try:
-            result = await bus.publish(
+            return await bus.publish(
                 DeploymentKeysChanged(op="deployment_keys_changed"),
                 targets=None,
                 local=LocalApplyResult(outcome=OpOutcome.applied),
             )
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception as exc:
             logger.error(
-                "worker bus: announcing this worker's deployment keys to the fleet failed — this join rolls no "
-                "other worker: a hot key converges at each worker's next reload, a recycle-class key a worker still "
-                "runs on is named at each reload and waits for a restart through the deployment's supervisor",
+                "worker bus: announcing this worker's deployment keys to the fleet failed — no other worker stated its "
+                "env after the announcement, so each one's state is unknown and the join's roll asks each worker its "
+                "census shows once it is ready",
                 exc_info=True,
             )
-            return None, {}
-        if not result.ok:
-            logger.error(
-                "worker bus: not every worker confirmed this worker's deployment keys announcement — this join "
-                "does not roll an unconfirmed worker: a hot key converges at its next reload, a recycle-class key "
-                "it still runs on is named at each reload and waits for a restart through the deployment's "
-                "supervisor: %s",
-                result.model_dump_json(),
-            )
-        reporters = {
-            row.name: keys
-            for row in result.results
-            if row.name != bus.identity.name and (keys := _awaiting_keys(row.payload))
-        }
-        return result, reporters
+            return FleetResult(op="deployment_keys_changed", reachable=False, error=f"{type(exc).__name__}: {exc}")
 
     async def _recycle_after_join(
-        self, announced: FleetResult | None, reporters: dict[str, list[str]], self_recycle_keys: list[str]
+        self,
+        announced: FleetResult,
+        own_reload: dict[str, Any],
+        pinned: Mapping[str, tuple[WorkerKind, int]],
+        *,
+        change: str,
     ) -> None:
-        """Recycle the workers whose withdraw left recycle-class keys running, one at a time, this worker last.
+        """Decide from the announcement's replies which workers need a restart, roll over them, this worker last.
 
-        The targets are pinned from one census read, filtered to ``reporters``; a census the bus
-        cannot answer pins nothing (WARNING), and the roll then reads the census itself and stops
-        on the outage. The roll recycles exactly the pinned workers, kind by kind
-        (``pinned_only``). A roll that stops is logged at ERROR with its partial report and
-        this worker does not recycle itself; a raise with no recorded stop is a bus contract
-        violation and escapes. A converged roll is logged at INFO; any worker it did not
-        recycle is named as still awaiting a respawn; then, when ``self_recycle_keys`` is
-        non-empty, this worker marks itself recycling and exits gracefully for its supervisor
-        to start it again.
+        ``pinned`` are the recycle targets read before the announcement (:meth:`_pin_join_targets`). The
+        report the decision reads is the announcement's, with this worker's row always its own resync
+        reload result ``own_reload`` — this worker's own known statement, which replaces the self
+        entry the announcement's publish put in a reachable report and is counted even when the
+        announcement could not reach the bus
+        (:func:`~tai42_skeleton.config.recycle_policy.with_own_statement`), so this worker is never
+        unknown here. A worker that reported keys is restarted, one whose reload was refused at its
+        epoch build yet reports keys is left running with its restart withheld, and a sibling whose
+        state is unknown is asked once it is ready, by the one decide-and-roll path every
+        reload settles through (:func:`~tai42_skeleton.config.recycle_roll.decide_and_roll`). When
+        this worker needs its own restart and the roll converged, the roll owes its exit into the
+        join's writer-exit scope, which the join settles once the roll ended
+        (:mod:`~tai42_skeleton.app.writer_exit`: marked recycling, one graceful exit) for
+        its supervisor to start it again. ``change`` names the join in the logs.
         """
-        from tai42_skeleton.app.bus import OpOutcome, WorkerResult
-        from tai42_skeleton.config.service.broadcast import _log_stopped_roll
-        from tai42_skeleton.operations._broadcast import awaiting_respawn_after, log_awaiting_respawn, recycle_roll
+        from tai42_skeleton.app.bus import LocalApplyResult, OpOutcome
+        from tai42_skeleton.config.recycle_policy import with_own_statement
+        from tai42_skeleton.config.recycle_roll import decide_and_roll
 
         bus = self.bus
         identity = bus.identity
-        change = f"deployment keys of {identity.name}"
-        try:
-            rows: list[WorkerRow] | None = await bus.census()
-        except TRANSPORT_ERRORS:
-            logger.warning(
-                "recycle targets for %r: the census could not be read — no target pinned, the roll reports the "
-                "bus as unreachable",
-                change,
-                exc_info=True,
-            )
-            rows = None
-        pinned = (
-            {}
-            if rows is None
-            else {
-                row.name: (row.kind, row.generation)
-                for row in rows
-                if row.name in reporters and row.kind in CENSUS_TARGET_KINDS and row.name != identity.name
-            }
-        )
-        target_kinds = (
-            CENSUS_TARGET_KINDS
-            if rows is None
-            else tuple(kind for kind in CENSUS_TARGET_KINDS if any(k == kind for k, _ in pinned.values()))
-        )
-        # The reporters' payloads, plus this worker's own keys, judged after the roll.
-        fleet = FleetResult(
-            op="deployment_keys_changed",
-            results=[
-                WorkerResult(
-                    name=identity.name, outcome=OpOutcome.applied, payload={"awaiting_respawn": self_recycle_keys}
-                ),
-                *(row for row in (announced.results if announced is not None else []) if row.name != identity.name),
-            ],
-        )
-        self_exit = bool(self_recycle_keys)
-        try:
-            report: RecycleReport = await orchestrate_recycle(
-                bus,
-                excluded_name=identity.name,
-                applier_generation=identity.generation,
-                target_kinds=target_kinds,
-                applier_self_deferred=self_exit,
-                step_timeout=_recycle_step_timeout(),
-                expected=pinned,
-                pinned_only=True,
-            )
-        except RecycleError as exc:
-            stopped = exc.report.stopped
-            if stopped is None:
-                raise
-            _log_stopped_roll(exc.report, stopped, pinned, change=change)
-            log_awaiting_respawn(awaiting_respawn_after(fleet, exc.report, identity, self_exit_armed=False))
-            return
-        logger.info("recycle for %s converged: %s", change, recycle_roll(report, identity, self_exit_armed=self_exit))
-        log_awaiting_respawn(awaiting_respawn_after(fleet, report, identity, self_exit_armed=self_exit))
-        if self_exit:
-            logger.info(
-                "worker bus: this worker still runs on withdrawn recycle-class key(s) %s — recycling itself",
-                ", ".join(self_recycle_keys),
-            )
-            await bus.mark_recycling()
-            request_graceful_exit(identity.pid)
-
-    def _judge_resync(self, result: Any, *, joining_recycle_keys: list[str]) -> None:
-        """Judge this worker's own resync reload: nothing in a resync respawns it.
-
-        The resyncing worker is the operation that started the reload, so the recycle-class
-        keys its reload states as moved off their bound value (a roll it missed while away, a stopped
-        roll that never reached it) are its own verdict, logged loudly. The
-        ``joining_recycle_keys`` its own withdraw left running are not: the join's recycle roll
-        recycles this worker for them, and judges them itself.
-        """
-        from tai42_skeleton.app.bus import FleetResult, OpOutcome, WorkerResult
-        from tai42_skeleton.operations._broadcast import awaiting_respawn_after, log_awaiting_respawn
-
-        bus = self._bus
-        if bus is None:
-            raise RuntimeError("bus resync ran before the bus was built")
-        report = FleetResult(
-            op="reload_config",
-            results=[
-                WorkerResult(
-                    name=bus.identity.name,
-                    outcome=OpOutcome.applied,
-                    payload={
-                        **result,
-                        "awaiting_respawn": [
-                            key for key in result["awaiting_respawn"] if key not in joining_recycle_keys
-                        ],
-                    },
-                )
-            ],
-        )
-        log_awaiting_respawn(awaiting_respawn_after(report, None, None, self_exit_armed=False))
+        own_row = LocalApplyResult(outcome=OpOutcome.applied, payload=own_reload).as_row(identity.name)
+        report = with_own_statement(announced, own_row)
+        roll = await decide_and_roll(bus, report, identity, pinned, change=change, orchestrate=orchestrate_recycle)
+        if roll.self_exit_armed:
+            logger.info("worker bus: %s need this worker's own restart — recycling itself", change)
 
     def _mark_boot_ready(self) -> None:
         """Latch the boot-ready signal on the FIRST successful self-resync.
@@ -438,31 +375,30 @@ class BusSubscriptionMixin(LifecycleState):
         await self._boot_ready.wait()
 
     async def _cancel_bus_subscription(self) -> None:
-        """Cancel the join, if one runs, and the bus subscription, and await their termination.
+        """Cancel the bus subscription, then the join, the carried rolls and the deferred recycle exit it started.
 
-        The shutdown counterpart of ``_spawn_bus_subscription``. A task that
-        died with a non-``CancelledError`` exception was already surfaced at
-        ERROR by its done-callback, so it is awaited-and-swallowed here rather
-        than re-raised — this runs inside ``app_context``'s shutdown
-        ``finally``, and one dead task must not skip the remaining teardown.
+        Awaits their end.
+
+        The shutdown counterpart of ``_spawn_bus_subscription``. The subscription is the one
+        producer of the other three: its resync spawns the join and its op handlers spawn the
+        carried rolls and the deferred recycle exit, so it is cancelled and awaited first and
+        nothing it would start can begin after the rest are cancelled. The subscription is a
+        run-until-cancelled lifespan task, cancelled as every such task is
+        (:meth:`_cancel_perpetual_task`); a death of one of the other three was already logged at
+        ERROR by its done-callback, so it is awaited here and not raised a second time.
         """
+        task, self._bus_subscription_task = self._bus_subscription_task, None
+        await self._cancel_perpetual_task(task)
         for join in list(self._deployment_keys_join_tasks):
             join.cancel()
+        await self._cancel_carried_rolls()
+        deferred_recycle, self._deferred_recycle_task = self._deferred_recycle_task, None
+        if deferred_recycle is not None:
+            deferred_recycle.cancel()
+            # A cancelled exit ends silently; one that raised was logged by its done-callback.
+            await asyncio.gather(deferred_recycle, return_exceptions=True)
         # A cancelled join ends silently; a join that raised was logged by its done-callback.
         await asyncio.gather(*self._deployment_keys_join_tasks, return_exceptions=True)
-        task = self._bus_subscription_task
-        self._bus_subscription_task = None
-        if task is None:
-            return
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
-        except Exception:  # noqa: S110 task failure already surfaced by the done-callback; swallowed so shutdown completes
-            # Already logged at ERROR by the done-callback; swallowed so a dead
-            # subscription cannot abort the remaining shutdown steps.
-            pass
 
     async def _apply_bus_op(self, raw: dict[str, Any], *, deadline: float) -> Any:
         """Apply one fleet op delivered from a sibling worker.
@@ -477,8 +413,8 @@ class BusSubscriptionMixin(LifecycleState):
         """Apply one fleet op (delivered, or the self-resync), then fire the post-apply hooks.
 
         The sibling-worker counterpart of a route-received admin call: it maps each op
-        to the local admin primitive. The heavy sync ops run on a worker thread through
-        the reload gate, identically to the HTTP path; the tool reload/remove ops
+        to the local admin primitive. The reload, MCP reload and deregister ops are awaited
+        through the reload gate, identically to the HTTP path; the tool reload/remove ops
         dispatch through the async per-kind reloader; ``reprobe_failed_mcps`` runs the
         set-scoped re-probe on the serving loop, taking the reload gate only to snapshot and
         bind; ``list_failed_mcps`` is a plain in-process read.
@@ -512,10 +448,20 @@ class BusSubscriptionMixin(LifecycleState):
                 return await self._apply_failed_mcps_op(op)
             case EvictTemplate() | ClearTemplateCache():
                 return self._apply_template_op(op)
+            case Recycle() | CarryRoll():
+                return await self._apply_restart_op(op)
+            case DeploymentKeysChanged():
+                return await self._converge_after_withdraw(await self._withdraw_fleet_owned_env())
+            case _:
+                assert_never(op)
+
+    async def _apply_restart_op(self, op: Recycle | CarryRoll) -> dict[str, Any]:
+        """Apply a fleet-restart op here: restart for another worker's roll, or carry a roll handed to this worker."""
+        match op:
             case Recycle():
                 return await self._apply_recycle()
-            case DeploymentKeysChanged():
-                return await self._converge_after_withdraw(*await self._withdraw_fleet_owned_env())
+            case CarryRoll():
+                return await self.accept_carried_roll(op)
             case _:
                 assert_never(op)
 
@@ -559,17 +505,75 @@ class BusSubscriptionMixin(LifecycleState):
     async def _apply_recycle(self) -> dict[str, Any]:
         """Apply a targeted recycle op.
 
-        Write ``state=recycling`` into presence, arm the bus's single-shot post-terminal-reply slot with
-        this process's graceful self-exit, then return the applied payload.
+        The worker decides to leave in one step with the check that nothing holds its exit
+        (:meth:`~tai42_skeleton.app.bus.WorkerBus.decide_departure`), so a carried roll or any
+        other change reaching it after the decision refuses to start. A worker already leaving
+        writes nothing and arms nothing, and answers ``{"recycling": kind, "already_leaving": reason}``.
+        A worker whose exit is deferred to its own in-flight change
+        (:attr:`~tai42_skeleton.app.bus.WorkerBus.exit_deferred`) writes nothing and arms nothing
+        either, and answers ``{"recycling": kind, "exit_deferred": change}``: that change's reply
+        is answered first, and once no change holds the exit any more the worker leaves for this
+        op unless it is already leaving (:meth:`_leave_for_deferred_recycle`), so the recycle is
+        carried out whether or not the change owed the worker's own restart. Otherwise it writes
+        ``state=recycling`` into presence, arms the bus's single-shot post-terminal-reply slot with
+        the departure's signal, and answers ``{"recycling": kind}``.
 
-        The recycling state is written BEFORE arming the self-SIGTERM — the only viable
-        seam, since the graceful-exit callable is sync and a ``create_task`` there would
-        race the SIGTERM — so the census shows WHY this worker is departing. The exit
-        fires only AFTER the terminal ``applied`` reply ships, so the orchestrator
-        records a successful recycle before this process departs. The payload names the
-        graceful-exit kind only — never an env value.
+        The decision starts the recycling announce (it begins the life's leaving), and this waits
+        for it BEFORE arming the signal — the slot's action is sync and a ``create_task`` there
+        would race the SIGTERM — so the census shows WHY this worker is departing; an announce
+        that fails sends the signal and raises, since the decision is final
+        (:meth:`~tai42_skeleton.app.bus.WorkerBus.announce_departure`). The
+        signal is sent only once the terminal reply was sent, so the orchestrator records the
+        recycle's outcome before this process departs; a reply that fails to ship still sends it,
+        and so does a post-apply handler that fails the op after the decision, its failure
+        reported in that reply. The payload names the graceful-exit kind and reason only — never an env
+        value.
         """
-        identity = self.bus.identity
-        await self.bus.mark_recycling()
-        self.bus.arm_post_reply(functools.partial(request_graceful_exit, identity.pid))
-        return {"recycling": identity.kind.value}
+        bus = self.bus
+        kind = bus.identity.kind.value
+        refusal = bus.decide_departure(_RECYCLE_OP_REASON)
+        if refusal is not None and refusal.kind == "already_leaving":
+            logger.info("worker bus: recycle op on a worker already leaving (%s) — nothing armed", refusal.reason)
+        elif refusal is not None:
+            logger.info(
+                "worker bus: recycle op on a worker whose exit is deferred to its own change (%s) — nothing armed",
+                refusal.reason,
+            )
+            self._leave_for_deferred_recycle()
+        else:
+            await bus.announce_departure()
+            bus.arm_post_reply(bus.signal_departure)
+        return recycle_reply(kind, refusal)
+
+    def _leave_for_deferred_recycle(self) -> None:
+        """Leave for a recycle op deferred to this worker's own changes once they are all answered.
+
+        One task carries every deferred recycle op out
+        (:func:`~tai42_skeleton.app.graceful_exit.leave_when_settled`): a second op deferred while
+        it waits adds nothing. The task is tracked until it ends, cancelled at shutdown, and a
+        failed exit is logged at ERROR by its done-callback.
+        """
+        from tai42_skeleton.app.graceful_exit import leave_when_settled
+
+        if self._deferred_recycle_task is not None and not self._deferred_recycle_task.done():
+            return
+        task = asyncio.create_task(leave_when_settled(self.bus, _RECYCLE_OP_REASON), name="tai-deferred-recycle-exit")
+        self._deferred_recycle_task = task
+        task.add_done_callback(self._log_task_exception)
+
+
+def _failed_op_statement(op: dict[str, Any], failure: Exception) -> dict[str, Any] | None:
+    """The payload of the ``failed`` reply to the delivered ``op`` that failed with ``failure``.
+
+    A ``reload_config`` refused at its epoch build states the discarded build
+    (:func:`~tai42_skeleton.app.discarded_build.discarded_build_statement`): the reload changes
+    no env before its build, so this worker keeps serving its previous epoch under the env the
+    discard restored, and the statement carries the recycle-class drift as it stands after the
+    discard, which the recycle decision reads like an applied reply's. Every other failure states
+    nothing, a ``deployment_keys_changed`` whose rebuild is refused among them: its withdraw
+    changed the env before the rebuild, so the previous epoch keeps serving on values the env no
+    longer holds.
+    """
+    if op.get("op") != "reload_config":
+        return None
+    return discarded_build_statement(failure)

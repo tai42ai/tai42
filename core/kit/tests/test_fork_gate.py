@@ -275,22 +275,64 @@ def _release_on_tick(release: threading.Event, ticks: list[float], count: int) -
     return tick
 
 
-def test_a_waiting_job_span_ticks_until_the_rebuild_releases(gate: ForkGate, joined: list[threading.Thread]):
+def test_a_job_span_waiting_on_the_engine_loop_s_thread_ticks_until_the_rebuild_releases(
+    gate: ForkGate, joined: list[threading.Thread]
+):
     ticks: list[float] = []
     entered_at: list[float] = []
     release = _hold_rebuild(gate, joined)
 
-    with gate.job_span(timeout=_ARRIVES, tick=_release_on_tick(release, ticks, 3), tick_every=_TINY):
+    with (
+        gate.engine_loop(tick=_release_on_tick(release, ticks, 3), tick_every=_TINY),
+        gate.job_span(timeout=_ARRIVES),
+    ):
         entered_at.append(time.monotonic())
 
     assert len(ticks) == 3
     assert all(at <= entered_at[0] for at in ticks)
 
 
+def test_a_job_span_waiting_on_another_thread_reports_no_pass_of_the_engine_loop(
+    gate: ForkGate, joined: list[threading.Thread]
+):
+    ticks: list[None] = []
+    entered = threading.Event()
+    release = _hold_rebuild(gate, joined)
+
+    def job() -> None:
+        with gate.job_span(timeout=_ARRIVES):
+            entered.set()
+
+    with gate.engine_loop(tick=lambda: ticks.append(None), tick_every=_TINY):
+        _spawn(joined, job)
+        time.sleep(0.3)
+        release.set()
+        assert entered.wait(_ARRIVES)
+
+    assert ticks == []
+
+
+def test_a_job_span_with_no_engine_loop_running_reports_nothing(gate: ForkGate, joined: list[threading.Thread]):
+    ticks: list[None] = []
+    release = _hold_rebuild(gate, joined)
+
+    def release_soon() -> None:
+        time.sleep(0.3)
+        release.set()
+
+    with gate.engine_loop(tick=lambda: ticks.append(None), tick_every=_TINY):
+        pass
+    _spawn(joined, release_soon)
+    with gate.job_span(timeout=_ARRIVES):
+        assert gate.live_spans == 1
+
+    assert ticks == []
+
+
 def test_an_uncontended_job_span_never_ticks(gate: ForkGate):
     ticks: list[None] = []
 
-    with gate.job_span(timeout=_ARRIVES, tick=lambda: ticks.append(None), tick_every=_TINY):
+    with gate.engine_loop(tick=lambda: ticks.append(None), tick_every=_TINY), gate.job_span(timeout=_ARRIVES):
         assert gate.live_spans == 1
 
     assert ticks == []
@@ -303,7 +345,7 @@ def test_a_job_span_that_overruns_its_wait_still_ticks_meanwhile(
     release = _hold_rebuild(gate, joined)
 
     with caplog.at_level(logging.ERROR, logger="tai42_kit.fork_gate"):
-        with gate.job_span(timeout=0.3, tick=lambda: ticks.append(None), tick_every=_TINY):
+        with gate.engine_loop(tick=lambda: ticks.append(None), tick_every=_TINY), gate.job_span(timeout=0.3):
             assert gate.live_spans == 1
         assert "could not enter within 0.3s" in caplog.text
 
@@ -325,7 +367,8 @@ def test_a_raising_tick_is_logged_once_and_the_wait_goes_on(
 
     with (
         caplog.at_level(logging.ERROR, logger="tai42_kit.fork_gate"),
-        gate.job_span(timeout=_ARRIVES, tick=tick, tick_every=_TINY),
+        gate.engine_loop(tick=tick, tick_every=_TINY),
+        gate.job_span(timeout=_ARRIVES),
     ):
         assert gate.live_spans == 1
 
@@ -337,12 +380,52 @@ def test_a_raising_tick_is_logged_once_and_the_wait_goes_on(
 
 @pytest.mark.parametrize("tick_every", [0.0, -1.0, float("inf"), float("nan")])
 def test_a_non_positive_tick_period_is_refused(gate: ForkGate, tick_every: float):
-    with (
-        pytest.raises(ValueError, match="tick_every must be positive seconds"),
-        gate.job_span(timeout=_ARRIVES, tick=lambda: None, tick_every=tick_every),
-    ):
+    with pytest.raises(ValueError, match="tick_every must be positive seconds"):
+        gate.engine_loop(tick=lambda: None, tick_every=tick_every)
+    assert gate._engine_loop.tick_here() is None
+
+
+def test_a_second_engine_loop_while_one_runs_is_refused(gate: ForkGate, joined: list[threading.Thread]):
+    refused: list[BaseException] = []
+
+    def second() -> None:
+        try:
+            with gate.engine_loop(tick=lambda: None, tick_every=_TINY):
+                pass
+        except RuntimeError as exc:
+            refused.append(exc)
+
+    with gate.engine_loop(tick=lambda: None, tick_every=_TINY):
+        thread = _spawn(joined, second)
+        thread.join(_ARRIVES)
+
+    assert len(refused) == 1
+    assert "an engine loop already runs" in str(refused[0])
+
+
+def test_an_engine_loop_reports_for_its_own_thread_only_and_only_while_it_runs(
+    gate: ForkGate, joined: list[threading.Thread]
+):
+    seen: list[object] = []
+
+    def tick() -> None:
         pass
-    assert gate.live_spans == 0
+
+    with gate.engine_loop(tick=tick, tick_every=_TINY):
+        loop = gate._engine_loop.tick_here()
+        thread = _spawn(joined, lambda: seen.append(gate._engine_loop.tick_here()))
+        thread.join(_ARRIVES)
+
+    assert loop is not None
+    assert (loop.tick, loop.tick_every) == (tick, _TINY)
+    assert seen == [None]
+    assert gate._engine_loop.tick_here() is None
+
+
+def test_a_child_s_reset_gate_runs_no_engine_loop(gate: ForkGate):
+    with gate.engine_loop(tick=lambda: None, tick_every=_TINY):
+        gate.reset_after_fork()
+        assert gate._engine_loop.tick_here() is None
 
 
 def test_a_job_span_is_reentrant_on_its_own_thread(gate: ForkGate, joined: list[threading.Thread]):
@@ -771,7 +854,7 @@ def _fork_reporting(gate: ForkGate, report: Callable[[], bytes]) -> tuple[int, b
 
 @_needs_fork
 def test_guard_forks_defers_a_fork_while_a_rebuild_is_held(gate: ForkGate, joined: list[threading.Thread]):
-    gate.guard_forks(timeout=_ARRIVES, tick=lambda: None)
+    gate.guard_forks(timeout=_ARRIVES)
     release = _hold_rebuild(gate, joined)
     forked = threading.Event()
     outcome: list[int] = []
@@ -790,7 +873,7 @@ def test_guard_forks_defers_a_fork_while_a_rebuild_is_held(gate: ForkGate, joine
 
 @_needs_fork
 def test_guard_forks_releases_its_span_after_the_fork(gate: ForkGate):
-    gate.guard_forks(timeout=_ARRIVES, tick=lambda: None)
+    gate.guard_forks(timeout=_ARRIVES)
 
     code, _ = _fork_reporting(gate, lambda: b"")
 
@@ -801,7 +884,7 @@ def test_guard_forks_releases_its_span_after_the_fork(gate: ForkGate):
 
 @_needs_fork
 def test_a_child_of_a_guarded_fork_starts_with_an_empty_gate(gate: ForkGate):
-    gate.guard_forks(timeout=_ARRIVES, tick=lambda: None)
+    gate.guard_forks(timeout=_ARRIVES)
 
     with gate.job_span(timeout=_ARRIVES):
         code, payload = _fork_reporting(gate, lambda: f"{gate.live_spans} {gate.blocked}".encode())
@@ -813,15 +896,64 @@ def test_a_child_of_a_guarded_fork_starts_with_an_empty_gate(gate: ForkGate):
 
 
 @_needs_fork
-def test_a_guarded_fork_reports_while_it_waits(gate: ForkGate, joined: list[threading.Thread]):
+def test_a_guarded_fork_runs_the_guard_s_child_hook_on_the_reset_gate(gate: ForkGate):
+    seen: list[int] = []
+    gate.guard_forks(timeout=_ARRIVES, after_in_child=lambda: seen.append(gate.live_spans))
+
+    with gate.job_span(timeout=_ARRIVES):
+        code, payload = _fork_reporting(gate, lambda: repr(seen).encode())
+
+    assert code == 0
+    assert payload == b"[0]"
+    assert seen == []
+
+
+def test_the_child_hook_of_a_gate_without_a_guard_leaves_the_gate_as_it_is(gate: ForkGate):
+    with gate.job_span(timeout=_ARRIVES):
+        gate._fork_hooks.after_in_child()
+        assert gate.live_spans == 1
+
+
+def test_a_guard_with_another_child_hook_is_refused(gate: ForkGate):
+    gate.guard_forks(timeout=_ARRIVES)
+    gate.guard_forks(timeout=_ARRIVES)
+    with pytest.raises(RuntimeError, match="already guards forks"):
+        gate.guard_forks(timeout=_ARRIVES, after_in_child=lambda: None)
+
+
+@_needs_fork
+def test_a_guarded_fork_on_the_engine_loop_s_thread_reports_while_it_waits(
+    gate: ForkGate, joined: list[threading.Thread]
+):
     ticks: list[float] = []
     release = _hold_rebuild(gate, joined)
-    gate.guard_forks(timeout=_ARRIVES, tick=_release_on_tick(release, ticks, 3), tick_every=_TINY)
+    gate.guard_forks(timeout=_ARRIVES)
 
-    code, _ = _fork_reporting(gate, lambda: b"")
+    with gate.engine_loop(tick=_release_on_tick(release, ticks, 3), tick_every=_TINY):
+        code, _ = _fork_reporting(gate, lambda: b"")
 
     assert code == 0
     assert len(ticks) == 3
+
+
+@_needs_fork
+def test_a_guarded_fork_on_another_thread_waits_and_reports_no_pass_of_the_engine_loop(
+    gate: ForkGate, joined: list[threading.Thread]
+):
+    ticks: list[None] = []
+    codes: list[int] = []
+    release = _hold_rebuild(gate, joined)
+    gate.guard_forks(timeout=_ARRIVES)
+
+    with gate.engine_loop(tick=lambda: ticks.append(None), tick_every=_TINY):
+        forker = _spawn(joined, lambda: codes.append(_fork_reporting(gate, lambda: b"")[0]))
+        time.sleep(0.3)
+        assert codes == []
+        release.set()
+        forker.join(_ARRIVES)
+
+    assert codes == [0]
+    assert ticks == []
 
 
 def _assert_forks_without_waiting(gate: ForkGate, caplog: pytest.LogCaptureFixture) -> None:
@@ -835,7 +967,7 @@ def _assert_forks_without_waiting(gate: ForkGate, caplog: pytest.LogCaptureFixtu
 
 @_needs_fork
 def test_a_fork_made_by_the_rebuild_does_not_wait_on_that_rebuild(gate: ForkGate, caplog: pytest.LogCaptureFixture):
-    gate.guard_forks(timeout=_SLOW_BUDGET, tick=lambda: None)
+    gate.guard_forks(timeout=_SLOW_BUDGET)
 
     with caplog.at_level(logging.ERROR, logger="tai42_kit.fork_gate"), gate.exclusive(timeout=_ARRIVES):
         _assert_forks_without_waiting(gate, caplog)
@@ -850,7 +982,7 @@ async def test_a_fork_from_a_rebuild_body_handed_to_the_loop_does_not_wait_on_th
     gate: ForkGate, caplog: pytest.LogCaptureFixture
 ):
     """A rebuild held on a worker thread that runs its body on the loop (``run_coroutine_threadsafe``)."""
-    gate.guard_forks(timeout=_SLOW_BUDGET, tick=lambda: None)
+    gate.guard_forks(timeout=_SLOW_BUDGET)
     loop = asyncio.get_running_loop()
     loop_thread = threading.get_ident()
 
@@ -870,7 +1002,7 @@ async def test_a_fork_from_a_rebuild_body_handed_to_the_loop_does_not_wait_on_th
 async def test_a_fork_from_an_async_rebuild_body_does_not_wait_on_that_rebuild(
     gate: ForkGate, caplog: pytest.LogCaptureFixture
 ):
-    gate.guard_forks(timeout=_SLOW_BUDGET, tick=lambda: None)
+    gate.guard_forks(timeout=_SLOW_BUDGET)
 
     with caplog.at_level(logging.ERROR, logger="tai42_kit.fork_gate"):
         async with gate.exclusive_async(timeout=_ARRIVES):
@@ -881,7 +1013,7 @@ async def test_a_fork_from_an_async_rebuild_body_does_not_wait_on_that_rebuild(
 @_needs_fork
 async def test_a_fork_on_the_loop_outside_the_rebuild_still_waits_for_it(gate: ForkGate):
     """Another task on the loop a rebuild body runs on is not that rebuild."""
-    gate.guard_forks(timeout=_ARRIVES, tick=lambda: None)
+    gate.guard_forks(timeout=_ARRIVES)
     forked = asyncio.Event()
     release = asyncio.Event()
 
@@ -910,7 +1042,7 @@ async def test_a_fork_on_the_loop_thread_never_blocks_the_rebuild_body_running_o
     gate: ForkGate, caplog: pytest.LogCaptureFixture
 ):
     """The rebuild body needs the loop the fork runs on: the fork goes ahead at once, loudly."""
-    gate.guard_forks(timeout=_SLOW_BUDGET, tick=lambda: None)
+    gate.guard_forks(timeout=_SLOW_BUDGET)
     body_resumed = asyncio.Event()
 
     async def rebuild() -> None:
@@ -943,7 +1075,7 @@ async def test_a_fork_on_the_loop_thread_behind_a_pending_rebuild_enters_its_spa
     gate: ForkGate, joined: list[threading.Thread], caplog: pytest.LogCaptureFixture
 ):
     """The fork instant counts as a job span the pending rebuild waits out, and nothing is reported."""
-    gate.guard_forks(timeout=_SLOW_BUDGET, tick=lambda: None)
+    gate.guard_forks(timeout=_SLOW_BUDGET)
 
     span_release = threading.Event()
     span_open = threading.Event()
@@ -978,7 +1110,7 @@ def test_a_fork_from_a_finished_rebuilds_context_waits_for_a_later_rebuild(
     gate: ForkGate, joined: list[threading.Thread]
 ):
     """Work the rebuild started inherits its context; once that rebuild ends, its forks are ordinary forks."""
-    gate.guard_forks(timeout=_ARRIVES, tick=lambda: None)
+    gate.guard_forks(timeout=_ARRIVES)
     with gate.exclusive(timeout=_ARRIVES):
         inherited = contextvars.copy_context()
     release = _hold_rebuild(gate, joined)
@@ -1002,7 +1134,7 @@ _request_scope: contextvars.ContextVar[str | None] = contextvars.ContextVar("req
 async def test_a_step_of_the_rebuild_run_in_a_fresh_context_forks_without_waiting(
     gate: ForkGate, caplog: pytest.LogCaptureFixture
 ):
-    gate.guard_forks(timeout=_SLOW_BUDGET, tick=lambda: None)
+    gate.guard_forks(timeout=_SLOW_BUDGET)
     _request_scope.set("the driving request")
 
     async def step() -> None:
@@ -1016,7 +1148,7 @@ async def test_a_step_of_the_rebuild_run_in_a_fresh_context_forks_without_waitin
 
 @_needs_fork
 def test_a_fresh_context_off_any_rebuild_forks_like_any_other(gate: ForkGate, joined: list[threading.Thread]):
-    gate.guard_forks(timeout=_ARRIVES, tick=lambda: None)
+    gate.guard_forks(timeout=_ARRIVES)
     fresh = gate.fresh_context()
     release = _hold_rebuild(gate, joined)
     forked = threading.Event()
@@ -1035,7 +1167,7 @@ def test_a_fresh_context_off_any_rebuild_forks_like_any_other(gate: ForkGate, jo
 @_needs_fork
 def test_a_bare_fresh_context_under_a_held_rebuild_is_not_that_rebuild(gate: ForkGate):
     """Only :meth:`ForkGate.fresh_context` carries the rebuild across an emptied context."""
-    gate.guard_forks(timeout=_TINY, tick=lambda: None)
+    gate.guard_forks(timeout=_TINY)
 
     with gate.exclusive(timeout=_ARRIVES):
         started = time.monotonic()
@@ -1123,7 +1255,7 @@ def test_a_fork_from_a_worker_thread_of_an_in_process_job_quiesces_cleanly(
 ):
     """A job that runs a sync tool through ``asyncio.to_thread`` and forks there, with a
     rebuild pending, forks at once; the rebuild then runs after the job, with no timeout."""
-    gate.guard_forks(timeout=_SLOW_BUDGET, tick=lambda: None)
+    gate.guard_forks(timeout=_SLOW_BUDGET)
 
     async def job() -> None:
         await asyncio.to_thread(_assert_forks_without_waiting, gate, caplog)
@@ -1151,7 +1283,7 @@ def test_an_interrupt_while_the_fork_hook_records_its_span_leaves_no_span_open(
 ):
     """CPython ignores an exception from a ``before`` fork hook and forks anyway; the span the
     hook was taking must not stay open, or every later rebuild would wait it out."""
-    gate.guard_forks(timeout=_ARRIVES, tick=lambda: None)
+    gate.guard_forks(timeout=_ARRIVES)
     gate._fork_hooks.fork_spans = _InterruptedRecord()
 
     # The exception is kept alive, as an unraisable hook may keep it: the span is closed by the
@@ -1168,33 +1300,24 @@ def test_an_interrupt_while_the_fork_hook_records_its_span_leaves_no_span_open(
 
 
 def test_a_second_guard_with_other_arguments_raises(gate: ForkGate):
-    def tick() -> None:
-        pass
-
-    gate.guard_forks(timeout=_ARRIVES, tick=tick)
+    gate.guard_forks(timeout=_ARRIVES)
 
     with pytest.raises(RuntimeError, match="already guards forks"):
-        gate.guard_forks(timeout=_ARRIVES + 1, tick=tick)
+        gate.guard_forks(timeout=_ARRIVES + 1)
 
 
 def test_a_second_guard_with_the_same_arguments_changes_nothing(gate: ForkGate):
-    def tick() -> None:
-        pass
-
-    gate.guard_forks(timeout=_ARRIVES, tick=tick, tick_every=0.5)
+    gate.guard_forks(timeout=_ARRIVES)
     installed = gate._fork_hooks.guard
 
-    gate.guard_forks(timeout=_ARRIVES, tick=tick, tick_every=0.5)
+    gate.guard_forks(timeout=_ARRIVES)
 
     assert gate._fork_hooks.guard is installed
 
 
-@pytest.mark.parametrize("argument", ["timeout", "tick_every"])
-def test_a_guard_with_non_positive_seconds_is_refused(gate: ForkGate, argument: str):
-    arguments = {"timeout": _ARRIVES, "tick_every": 1.0, argument: 0.0}
-
-    with pytest.raises(ValueError, match=f"{argument} must be positive seconds"):
-        gate.guard_forks(tick=lambda: None, **arguments)
+def test_a_guard_with_non_positive_seconds_is_refused(gate: ForkGate):
+    with pytest.raises(ValueError, match="timeout must be positive seconds"):
+        gate.guard_forks(timeout=0.0)
     assert gate._fork_hooks.guard is None
 
 
@@ -1759,7 +1882,7 @@ def test_a_rebuild_context_belongs_to_the_rebuild_and_not_to_the_job_that_drove_
 ):
     """Taken inside a job span and a held rebuild: a fork in it passes while the rebuild holds
     the gate, and a span entered in it once the rebuild has left is a span of its own."""
-    gate.guard_forks(timeout=_SLOW_BUDGET, tick=lambda: None)
+    gate.guard_forks(timeout=_SLOW_BUDGET)
 
     def spans_inside_a_span() -> int:
         with gate.job_span(timeout=_ARRIVES):
@@ -1776,7 +1899,7 @@ def test_a_rebuild_context_belongs_to_the_rebuild_and_not_to_the_job_that_drove_
 def test_a_fork_in_a_rebuild_context_waits_for_a_later_rebuild(gate: ForkGate, joined: list[threading.Thread]):
     """The rebuild mark counts only while its rebuild holds the gate: afterwards a fork in the
     context waits on a later rebuild like any other."""
-    gate.guard_forks(timeout=_ARRIVES, tick=lambda: None)
+    gate.guard_forks(timeout=_ARRIVES)
     with gate.job_span(timeout=_ARRIVES), gate.exclusive(timeout=_ARRIVES):
         context = gate.rebuild_context()
     release = _hold_rebuild(gate, joined)

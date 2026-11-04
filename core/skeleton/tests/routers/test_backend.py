@@ -36,16 +36,23 @@ class _Admin:
     def __init__(self) -> None:
         self.reload_calls = 0
 
-    def reload_config(self) -> dict:
+    async def reload_config(self) -> dict:
         self.reload_calls += 1
-        return {"status": "ok"}
+        return {"status": "ok", "env_keys": 1, "awaiting_respawn": []}
 
 
 @pytest.fixture
 def install(monkeypatch):
     def _install(*, backend=None, admin=None, bus: FakeBus | None = None) -> FakeBus:
         monkeypatch.setattr(
-            tai42_app, "_impl", SimpleNamespace(backends=SimpleNamespace(backend=backend), admin=admin or _Admin())
+            tai42_app,
+            "_impl",
+            SimpleNamespace(
+                backends=SimpleNamespace(backend=backend),
+                admin=admin or _Admin(),
+                # The fleet reload runs the config pipeline, which binds the config store it never reads.
+                config=SimpleNamespace(config_manager=None),
+            ),
         )
         bus = bus or FakeBus()
         monkeypatch.setattr(instance.app, "_bus", bus)
@@ -173,6 +180,9 @@ async def test_reload_happy_all_workers(install):
     assert admin.reload_calls == 1
     assert data["results"][0]["name"] == "serve-a"
     assert data["results"][0]["outcome"] == "applied"
+    # Every worker confirmed a clean reload, so no roll ran and nobody awaits a respawn.
+    assert data["recycle"] is None
+    assert data["awaiting_respawn"] == []
 
 
 async def test_reload_targets_a_named_worker(install):
@@ -184,6 +194,31 @@ async def test_reload_targets_a_named_worker(install):
     # Targets exclude the serving worker → it does not reload itself.
     assert admin.reload_calls == 0
     assert {r["name"] for r in data["results"]} == {"backend-b"}
+
+
+async def test_reload_whose_own_reload_fails_raises_with_the_roll_that_restarts_the_writer(
+    install, monkeypatch, writer_exit_edge
+):
+    # The fleet soft restart still decides and rolls when this worker's own reload failed: its
+    # state is unknown, so its own restart follows the roll, and the raised error carries it.
+    from tai42_skeleton.config import recycle_roll
+    from tai42_skeleton.operations._broadcast import FleetBroadcastError
+
+    class _FailingAdmin(_Admin):
+        async def reload_config(self) -> dict:
+            self.reload_calls += 1
+            raise RuntimeError("local reload boom")
+
+    monkeypatch.setattr(recycle_roll, "recycle_step_timeout", lambda: 1.0)
+    install(admin=_FailingAdmin(), bus=FakeBus(origin="serve-a"))
+
+    with pytest.raises(FleetBroadcastError, match="local reload boom") as exc:
+        await router.reload_config(_body_req(b'{"targets": null}'))
+
+    roll = exc.value.roll
+    assert roll is not None
+    assert roll.decision.writer_needs
+    assert roll.self_exit_armed is True
 
 
 async def test_reload_bad_json_400(install):

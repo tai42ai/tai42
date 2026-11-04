@@ -105,8 +105,9 @@ async def remount_reload(svc: ConfigService, prior: ApplyResult) -> ApplyResult:
     serving at their declared base until the next reboot re-reads the store, and MUST NOT
     unwind a good install. The failure is logged; the forward reload's ``prior`` result
     stands in for the receipt. The remount is the same change continued: it hands the
-    pipeline ``prior`` — the change's roll, already run or deferred to the operation's end — so
-    the remount pins and rolls nothing and carries that roll (one verdict). Returns the remount's result on
+    pipeline ``prior``, whose failed span release its result carries beside its own, and its
+    reload is recorded in the operation's deferred scope like the forward one, so the
+    operation's one recycle decision reads the latest report. Returns the remount's result on
     success, else ``prior`` — carrying, beside its own, the remount's failed span release when
     the remount's write landed and its propagation raised :class:`FleetBroadcastError`.
     """

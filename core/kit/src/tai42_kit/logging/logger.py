@@ -4,6 +4,8 @@ import logging
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
+from tai42_kit.logging.fork_safety import install_logging_fork_safety
+
 if TYPE_CHECKING:
     from tai42_kit.logging.settings import LoggingSettings
 
@@ -104,6 +106,11 @@ def setup_logging(settings: "LoggingSettings") -> None:
     request-line log carries the full outbound URL, credentials included, so it is fitted
     with a filter that strips the path and query, leaving only the origin. Both attaches are
     idempotent: a repeat call never stacks a second filter.
+
+    Logging's child-side fork hook
+    (:func:`~tai42_kit.logging.fork_safety.install_logging_fork_safety`) is registered here,
+    once per process, so a child forked while another thread writes a log line gets its own
+    streams.
     """
     mapping = logging.getLevelNamesMapping()
     level_name = settings.log_level.upper()
@@ -115,6 +122,7 @@ def setup_logging(settings: "LoggingSettings") -> None:
         datefmt="%m/%d/%y %H:%M:%S",
         force=True,
     )
+    install_logging_fork_safety()
     access_logger = logging.getLogger(_ACCESS_LOGGER_NAME)
     if not any(isinstance(existing, AccessLogQueryMaskingFilter) for existing in access_logger.filters):
         access_logger.addFilter(AccessLogQueryMaskingFilter())

@@ -617,6 +617,28 @@ async def run_recorded(
         raise
 
 
+def _in_flight(epoch: int | None, exclude: Collection[asyncio.Task[Any]]) -> list[asyncio.Task[None]]:
+    """The unfinished enrolled supervisors ``epoch`` admitted (every one when ``None``), less ``exclude``."""
+    return [
+        t
+        for t in _SUPERVISORS
+        if not t.done() and t not in exclude and (epoch is None or _SUPERVISOR_EPOCH.get(t) == epoch)
+    ]
+
+
+async def wait_supervisors(*, epoch: int | None = None, exclude: Collection[asyncio.Task[Any]] = ()) -> None:
+    """Wait, cancelling nothing, until every in-flight supervisor ``epoch`` admitted has ended.
+
+    The wait before the cut: a graceful stop lets the runs it admitted finish and record their
+    own result first, and :func:`drain_supervisors` cancels what is still running after it.
+    With ``epoch`` ``None`` it waits for every run; ``exclude`` names supervisors not waited
+    for. Repeats until a look finds none, so a run admitted while it waits is waited for too.
+    No bound of its own: the caller's stop bounds it.
+    """
+    while tasks := _in_flight(epoch, exclude):
+        await asyncio.wait(tasks)
+
+
 async def drain_supervisors(
     deadline: float | None = None,
     *,
@@ -626,8 +648,9 @@ async def drain_supervisors(
 ) -> None:
     """Cancel in-flight supervisors and wait, bounded, for each to write its terminal ``failed`` record.
 
-    Each terminal record names ``reason``. Reused by two retire paths: process shutdown
-    (:func:`_drain_supervisors`, all runs)
+    The cut after the wait: :func:`wait_supervisors` lets runs end on their own and cancels
+    nothing; this cancels the runs still in flight. Each terminal record names ``reason``.
+    Reused by two retire paths: process shutdown (:func:`_drain_supervisors`, all runs)
     and an epoch retire (a settings-profile apply swaps in a fresh serving surface and
     retires the old one). With ``epoch`` given, cancels ONLY the runs that generation
     admitted — a run admitted on the fresh epoch during the retire is left running;
@@ -637,18 +660,14 @@ async def drain_supervisors(
     ``reason`` is passed as the cancel message so each cancelled run records the actual
     cause. ``deadline`` is a drain budget in SECONDS — a relative duration, not an
     absolute time (mirrors the kit's ``drain_epoch`` vocabulary); defaults to
-    ``shutdown_drain_seconds``. ``exclude`` names supervisors left running: an epoch retire
+    :func:`shutdown_drain_seconds`. ``exclude`` names supervisors left running: an epoch retire
     passes the runs that drive or wait on the reload gate, which includes the run driving
     that very retire.
     """
-    tasks = [
-        t
-        for t in _SUPERVISORS
-        if not t.done() and t not in exclude and (epoch is None or _SUPERVISOR_EPOCH.get(t) == epoch)
-    ]
+    tasks = _in_flight(epoch, exclude)
     if not tasks:
         return
-    budget = deadline if deadline is not None else _pkg.tool_runs_settings().shutdown_drain_seconds
+    budget = deadline if deadline is not None else shutdown_drain_seconds()
     for t in tasks:
         _DRAINED[t] = reason
         t.cancel(reason)
@@ -661,9 +680,14 @@ async def drain_supervisors(
         )
 
 
+def shutdown_drain_seconds() -> float:
+    """The bound of a healthy :func:`_drain_supervisors`: the supervisors' terminal-write wait."""
+    return _pkg.tool_runs_settings().shutdown_drain_seconds
+
+
 @tai42_app.lifecycle.on_shutdown
 async def _drain_supervisors() -> None:
-    """Cancel every in-flight supervisor at shutdown and drain them bounded by ``shutdown_drain_seconds``.
+    """Cancel every in-flight supervisor at shutdown and drain them bounded by :func:`shutdown_drain_seconds`.
 
     Shutdown handlers run BEFORE ``_teardown_resources`` closes the pooled clients,
     so a cancelled supervisor still has a live Redis to write through.

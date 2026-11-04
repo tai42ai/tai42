@@ -25,9 +25,9 @@ open-ended: any package can back the same contract, so this repo is this
 channel's own full doc home, and the documentation site covers the
 platform-level story:
 
-- Interactions concept: https://tai42.ai/concepts/interactions
-- Build a channel plugin (author guide): https://tai42.ai/guides/authors/channel
-- Ecosystem catalog: https://tai42.ai/reference/catalog
+- Interactions concept: https://docs.tai42.ai/concepts/interactions
+- For channel authors (section of the interactions concept): https://docs.tai42.ai/concepts/interactions#for-channel-authors
+- Plugin catalog: https://docs.tai42.ai/plugins
 
 Its only tai-* dependencies are `tai42-contract` (the `Channel` protocol,
 `ChannelDelivery`, `ChannelDeliveryError`, and the `tai42_app` handle) and

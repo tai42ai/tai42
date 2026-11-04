@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 from tai42_kit.utils.detached_util import mark_detached_run, reset_detached_run
+from tai42_kit.utils.run_bound import in_bounded_run
 
 from tai42_skeleton.app.instance import app
 from tai42_skeleton.exceptions.exceptions import TurnTimeoutError
@@ -271,7 +272,40 @@ def test_turn_budget_unset_runs_unbounded():
     async def run() -> None:
         async with turn_budget():
             assert _turn_budget_armed.get() is False
+            assert in_bounded_run() is False
             await asyncio.sleep(0.05)
+
+    asyncio.run(run())
+
+
+def test_an_armed_turn_budget_marks_the_turn_a_bounded_run(set_turn_timeout):
+    # The armed window is a bound fixed before the turn's work started, so work whose length the
+    # turn does not control (a fleet recycle roll) reads the turn as a bounded run; the mark
+    # holds through a nested call and is gone once the window closes.
+    set_turn_timeout("5")
+
+    async def run() -> None:
+        assert in_bounded_run() is False
+        async with turn_budget():
+            assert in_bounded_run() is True
+            async with turn_budget():
+                assert in_bounded_run() is True
+        assert in_bounded_run() is False
+
+    asyncio.run(run())
+
+
+def test_a_detached_turn_under_a_set_budget_is_not_a_bounded_run(set_turn_timeout):
+    # The budget does not arm over a detached run, so it bounds nothing there.
+    set_turn_timeout("5")
+
+    async def run() -> None:
+        token = mark_detached_run()
+        try:
+            async with turn_budget():
+                assert in_bounded_run() is False
+        finally:
+            reset_detached_run(token)
 
     asyncio.run(run())
 

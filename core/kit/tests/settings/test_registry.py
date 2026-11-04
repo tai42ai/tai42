@@ -21,10 +21,13 @@ from tai42_kit.settings import (
     SettingsClassInfo,
     TaiBaseSettings,
     bind_respawn_class_env,
+    bind_unbound_respawn_class_env,
     on_settings_registered,
     registered_settings,
     registry,
+    respawn_class_bindings,
     respawn_class_env_drift,
+    restore_respawn_class_bindings,
     settings_field_env_value,
     unbind_respawn_class_env,
 )
@@ -944,6 +947,95 @@ def test_a_second_bind_overwrites_every_bound_value(monkeypatch):
     bind_respawn_class_env()
 
     assert respawn_class_env_drift() == frozenset()
+
+
+def test_a_restore_drops_the_bindings_a_registration_made_after_the_snapshot(monkeypatch):
+    monkeypatch.delenv("BOUNDPOOL_URL", raising=False)
+    bind_respawn_class_env()
+    bindings = respawn_class_bindings()
+    monkeypatch.setenv("BOUNDPOOL_URL", "redis://a")
+    _bound_group()
+    monkeypatch.delenv("BOUNDPOOL_URL")
+
+    restore_respawn_class_bindings(bindings)
+
+    assert respawn_class_env_drift() == frozenset()
+    assert _bound_values() == {}
+
+
+def test_a_group_re_registered_after_a_restore_binds_under_the_env_then(monkeypatch):
+    monkeypatch.delenv("BOUNDPOOL_URL", raising=False)
+    bind_respawn_class_env()
+    bindings = respawn_class_bindings()
+    monkeypatch.setenv("BOUNDPOOL_URL", "redis://a")
+    _bound_group()
+    restore_respawn_class_bindings(bindings)
+    monkeypatch.setenv("BOUNDPOOL_URL", "redis://b")
+
+    _bound_group()
+
+    assert _bound_values() == {"BOUNDPOOL_URL": "redis://b"}
+
+
+def test_a_restore_puts_back_the_bindings_held_at_the_snapshot(monkeypatch):
+    monkeypatch.setenv("BOUNDPOOL_URL", "redis://a")
+    _bound_group()
+    bind_respawn_class_env()
+    bindings = respawn_class_bindings()
+    monkeypatch.setenv("BOUNDPOOL_URL", "redis://b")
+    bind_respawn_class_env()
+
+    restore_respawn_class_bindings(bindings)
+
+    assert _bound_values() == {"BOUNDPOOL_URL": "redis://a"}
+    assert respawn_class_env_drift() == frozenset({"BOUNDPOOL_URL"})
+
+
+def test_a_snapshot_taken_while_unbound_restores_to_unbound(monkeypatch):
+    bindings = respawn_class_bindings()
+    monkeypatch.setenv("BOUNDPOOL_URL", "redis://a")
+    _bound_group()
+    bind_respawn_class_env()
+
+    restore_respawn_class_bindings(bindings)
+
+    assert registry._BOUND_ENV is None
+
+
+def test_a_field_a_restore_left_unbound_is_bound_under_the_env_at_the_bind_of_the_unbound(monkeypatch):
+    monkeypatch.delenv("BOUNDPOOL_URL", raising=False)
+    bind_respawn_class_env()
+    bindings = respawn_class_bindings()
+    monkeypatch.setenv("BOUNDPOOL_URL", "redis://a")
+    _bound_group()
+    restore_respawn_class_bindings(bindings)
+    monkeypatch.setenv("BOUNDPOOL_URL", "redis://b")
+
+    bind_unbound_respawn_class_env()
+
+    assert _bound_values() == {"BOUNDPOOL_URL": "redis://b"}
+    monkeypatch.setenv("BOUNDPOOL_URL", "redis://c")
+    assert respawn_class_env_drift() == frozenset({"BOUNDPOOL_URL"})
+
+
+def test_the_bind_of_the_unbound_keeps_every_binding_already_held(monkeypatch):
+    monkeypatch.setenv("BOUNDPOOL_URL", "redis://a")
+    _bound_group()
+    bind_respawn_class_env()
+    monkeypatch.setenv("BOUNDPOOL_URL", "redis://b")
+
+    bind_unbound_respawn_class_env()
+
+    assert _bound_values() == {"BOUNDPOOL_URL": "redis://a"}
+
+
+def test_the_bind_of_the_unbound_binds_nothing_while_unbound(monkeypatch):
+    monkeypatch.setenv("BOUNDPOOL_URL", "redis://a")
+    _bound_group()
+
+    bind_unbound_respawn_class_env()
+
+    assert registry._BOUND_ENV is None
 
 
 @pytest.fixture

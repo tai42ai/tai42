@@ -47,6 +47,9 @@ from .fake_pipeline import (
     _with_bus,
 )
 
+# The door's edge settles the writer's exit its change owes; these tests drive the door below it.
+pytestmark = pytest.mark.usefixtures("writer_exit_edge")
+
 SIBLING_KEY = "FLEET_OWNERSHIP_TEST_SIBLING_ONLY"
 
 
@@ -208,7 +211,7 @@ async def test_the_boot_read_judges_by_the_workers_of_its_own_major_beside_a_wor
     now = "2026-01-01T00:00:00+00:00"
     row = {"kind": "backend", "pid": 7, "generation": 1, "joined_at": now, "beat_at": now, "state": "ready"}
     readers = published_env_readers()
-    sibling = {**row, "deployment_keys": [SIBLING_KEY], "env_readers": readers.digest}
+    sibling = {**row, "deployment_keys": [SIBLING_KEY], "env_readers": readers.digest, "drain_seconds": None}
     client: Any = KitFakeRedis(server=server, decode_responses=True)
     await client.set(foreign.presence_key("backend-1"), json.dumps(row), px=5000)
     await client.sadd(foreign.presence_index, "backend-1")
@@ -217,7 +220,9 @@ async def test_the_boot_read_judges_by_the_workers_of_its_own_major_beside_a_wor
     await client.set(settings.env_readers_key(readers.digest), readers.body, px=10000)
     await client.aclose()
 
-    ownership = await resolve_deployment_ownership(WorkerBus(settings, kind=WorkerKind.serve), "boot env bridge")
+    ownership = await resolve_deployment_ownership(
+        WorkerBus(settings, kind=WorkerKind.serve, exit_drain=lambda: None), "boot env bridge"
+    )
 
     assert ownership.owns(SIBLING_KEY)
 
@@ -448,7 +453,7 @@ async def test_a_recycle_class_write_during_an_outage_reports_the_stopped_roll(
     assert "bus unreachable" in result.recycle.stopped.detail
     assert result.self_exit_armed is False
     assert any(
-        "recycle targets for 'this env change'" in r.getMessage() and r.exc_info is not None
+        "op-start census for 'reload_config' failed" in r.getMessage() and r.exc_info is not None
         for r in caplog.records
         if r.levelno == logging.WARNING
     )

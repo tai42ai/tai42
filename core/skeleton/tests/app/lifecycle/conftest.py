@@ -4,15 +4,12 @@ for the MCP server start tests, a rebuild whose reload wait is far shorter than 
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import Iterator
-from typing import Any
 
 import pytest
 from tai42_kit.settings import reset_all_settings
 
 from tai42_skeleton.app import lifecycle as lifecycle_module
-from tai42_skeleton.tools import mcp_start
 
 from ...connectors import mcp_fakes
 from ...connectors.credential_path import CredentialPath
@@ -46,11 +43,12 @@ def path(monkeypatch: pytest.MonkeyPatch, mcp_server, oauth_server) -> Iterator[
 
 
 @pytest.fixture
-def short_reload_wait(monkeypatch: pytest.MonkeyPatch) -> Any:
-    """A rebuild in progress whose reload wait (0.1s) is far shorter than the start budget (10s)."""
+def short_reload_wait(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A rebuild in progress whose reload wait (0.1s) is far shorter than the start budget (10s).
+
+    A start the test leaves running is a task of the loop that launched it, so it ends with that loop's close.
+    """
     monkeypatch.setenv("TAI_MCP_MCP_PROBE_TIMEOUT", "10")
     monkeypatch.setenv("TAI_MCP_MCP_RELOAD_PROBE_TIMEOUT", "0.1")
     reset_all_settings()
     monkeypatch.setattr(lifecycle_module, "is_epoch_rebuild_in_progress", lambda: True)
-    yield
-    asyncio.run(mcp_start.aclose())

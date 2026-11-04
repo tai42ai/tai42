@@ -16,14 +16,16 @@ from typing import Any
 import pytest
 from rq.job import JobStatus
 
-from tai42_backend_rq import extensions, tools, worker_pools
+from tai42_backend_rq import task_door, worker_pools
 from tai42_backend_rq.settings import rq_settings
 
-from .conftest import FakeAsyncRedis, _patch_redis
+from .conftest import FakeAsyncRedis, _patch_redis, backend_tools, stub_app
 
 _REFUSED = "cannot wait for another job's result from inside a job: chain it with a callback instead"
 _WAITS = ("sample_tool_sync_task", "backend_task_result")
 _POOLS = (worker_pools.CustomRQWorker, worker_pools.CustomRQSimpleWorker)
+
+tools = backend_tools()
 
 
 async def sample_tool(text: str) -> str:
@@ -49,11 +51,11 @@ def enqueued(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
     """Every job the tools queue, each finished at once with ``done``, its result readable."""
     calls: list[dict[str, Any]] = []
 
-    async def enqueue(*args: Any, **kwargs: Any) -> _FinishedJob:
+    async def submit(self: Any, args: Any, kwargs: dict[str, Any], options: Any, callback: Any) -> _FinishedJob:
         calls.append(kwargs)
         return _FinishedJob()
 
-    monkeypatch.setattr(extensions, "enqueue_task", enqueue)
+    monkeypatch.setattr(task_door.RqTaskDoor, "submit", submit)
     settings = rq_settings()
 
     redis = FakeAsyncRedis(
@@ -69,7 +71,7 @@ def enqueued(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
 def _call(name: str) -> Callable[[], Awaitable[Any]]:
     if name == "backend_task_result":
         return lambda: tools.backend_task_result("job-1", timeout=5)
-    branch = extensions.sync_task(sample_tool, "sample_tool", "doc")
+    branch = stub_app.extensions.factories["sync_task"](sample_tool, "sample_tool", "doc")
     return lambda: branch(text="hi")
 
 

@@ -271,7 +271,7 @@ async def test_a_held_call_stays_counted_beside_the_exempt_stream_and_answers_be
                 async with asyncio.timeout(DRAIN_BUDGET_S * 10):
                     while not _drain_errors(caplog):
                         await asyncio.sleep(0.05)
-                assert _drain_errors(caplog) == [f"epoch {boot.number} retire: 1 request(s) {DRAIN_ERROR}"]
+                assert _drain_errors(caplog) == [f"epoch {boot.number} retire: 1 unit(s) of work {DRAIN_ERROR}"]
                 state.release_held.set()
                 held_result = await held
                 assert not held_result.isError, held_result

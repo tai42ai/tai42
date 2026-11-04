@@ -11,9 +11,9 @@ import orjson
 import pytest
 from arq.jobs import JobStatus
 
-from tai42_backend_arq import pool, scheduler, tools
+from tai42_backend_arq import pool, scheduler
 
-from .conftest import handle_of, lease_of
+from .conftest import backend_tools, handle_of, lease_of
 
 
 class _FakeJob:
@@ -106,7 +106,7 @@ def _record(name: str, tool: str = "send_report", **overrides: Any) -> dict[str,
 
 async def _export(redis: Any) -> list[dict[str, Any]]:
     async with _redis_bound(redis):
-        return await tools.backend_export_schedules()
+        return await backend_tools().backend_export_schedules()
 
 
 async def _import(
@@ -114,8 +114,8 @@ async def _import(
 ) -> dict[str, Any]:
     async with _redis_bound(redis):
         if mode is None:
-            return await tools.backend_import_schedules(records)
-        return await tools.backend_import_schedules(records, mode)
+            return await backend_tools().backend_import_schedules(records)
+        return await backend_tools().backend_import_schedules(records, mode)
 
 
 def _read_hash(redis: Any, name: str) -> dict[bytes, bytes]:
@@ -210,7 +210,7 @@ async def test_export_and_list_skip_schedule_deleted_mid_scan(fake_redis, bind_p
     exported = await _export(src)
     assert [record["name"] for record in exported] == ["alive"]
 
-    listed = await tools.backend_list_schedules()
+    listed = await backend_tools().backend_list_schedules()
     assert [row["name"] for row in listed] == ["alive"]
 
 
@@ -292,7 +292,7 @@ async def test_failed_abort_of_replaced_job_surfaces_not_swallowed(fake_redis) -
     record = _record("dup")
 
     async with _redis_bound(dst, job_cls=_FailingAbortJob):
-        result = await tools.backend_import_schedules([record], "overwrite")
+        result = await backend_tools().backend_import_schedules([record], "overwrite")
 
     assert result["created"] == 0
     assert result["updated"] == 0
@@ -313,7 +313,7 @@ async def test_pending_abort_confirmation_does_not_block_import(fake_redis) -> N
     record = _record("dup")
 
     async with _redis_bound(dst, job_cls=_PendingAbortJob):
-        result = await tools.backend_import_schedules([record], "overwrite")
+        result = await backend_tools().backend_import_schedules([record], "overwrite")
 
     assert result == {"created": 0, "updated": 1, "skipped": 0, "skipped_existing": 0, "errors": []}
     assert _read_hash(dst, "dup")[b"job_id"] != b"seed-job"

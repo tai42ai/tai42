@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import logging
 import os
-import sys
 import threading
 import time
 from pathlib import Path
@@ -38,8 +37,9 @@ class _Reports:
 
 
 def _bare_scheduler() -> beat_scheduler.ProgressReportingScheduler:
-    """A scheduler with no Redis behind it: only ``tick`` is driven, with RedBeat's own patched."""
+    """A scheduler of the app with no Redis behind it: only ``tick`` is driven, with RedBeat's own patched."""
     scheduler: Any = object.__new__(beat_scheduler.ProgressReportingScheduler)
+    scheduler.app = celery_app
     return scheduler
 
 
@@ -61,7 +61,7 @@ def test_the_app_runs_the_reporting_scheduler() -> None:
 
 def test_a_tick_reports_the_interval_redbeat_returned_and_returns_it(redbeat_ticks: list[float]) -> None:
     report = _Reports()
-    beat_scheduler.register(report)
+    beat_scheduler.register(celery_app, report)
     redbeat_ticks.extend([2.0, 60.0])
     scheduler = _bare_scheduler()
 
@@ -74,7 +74,7 @@ def test_a_tick_reports_the_interval_redbeat_returned_and_returns_it(redbeat_tic
 @pytest.mark.parametrize("interval", [0.0, -1.0])
 def test_a_tick_that_returns_no_sleep_promises_the_spin_bound(redbeat_ticks: list[float], interval: float) -> None:
     report = _Reports()
-    beat_scheduler.register(report)
+    beat_scheduler.register(celery_app, report)
     redbeat_ticks.append(interval)
 
     assert _bare_scheduler().tick() == interval
@@ -91,8 +91,8 @@ def test_a_tick_with_no_reporter_raises(redbeat_ticks: list[float]) -> None:
 
 def test_a_second_register_with_the_same_reporter_changes_nothing(redbeat_ticks: list[float]) -> None:
     report = _Reports()
-    beat_scheduler.register(report)
-    beat_scheduler.register(report)
+    beat_scheduler.register(celery_app, report)
+    beat_scheduler.register(celery_app, report)
     redbeat_ticks.append(3.0)
 
     _bare_scheduler().tick()
@@ -101,10 +101,10 @@ def test_a_second_register_with_the_same_reporter_changes_nothing(redbeat_ticks:
 
 
 def test_a_second_register_with_another_reporter_raises() -> None:
-    beat_scheduler.register(_Reports())
+    beat_scheduler.register(celery_app, _Reports())
 
     with pytest.raises(RuntimeError, match="already reports its progress through another reporter"):
-        beat_scheduler.register(_Reports())
+        beat_scheduler.register(celery_app, _Reports())
 
 
 async def test_launch_beat_registers_its_reporter_and_removes_the_file(
@@ -113,12 +113,11 @@ async def test_launch_beat_registers_its_reporter_and_removes_the_file(
     seen: list[str] = []
     redbeat_ticks.append(4.0)
 
-    def _beat_cli() -> None:
+    def _beat_cli(*_: object) -> None:
         _bare_scheduler().tick()
         seen.append(liveness_path.read_text())
 
-    monkeypatch.setattr(backend_module, "_celery_cli_main", _beat_cli)
-    monkeypatch.setattr(sys, "argv", list(sys.argv))
+    monkeypatch.setattr(backend_module, "_run_celery_command", _beat_cli)
 
     await CeleryBackend().launch(["beat"])
 
@@ -165,7 +164,7 @@ def _wait_for(condition: Any, *, within: float) -> bool:
 
 def test_a_beat_waiting_for_redbeat_s_lock_reports_each_second(lock_redis: fakeredis.FakeRedis) -> None:
     report = _Reports()
-    beat_scheduler.register(report)
+    beat_scheduler.register(celery_app, report)
     lock_redis.set(_LOCK_KEY, "another beat")
     beat = _LockBeat()
 
@@ -188,8 +187,8 @@ def test_a_beat_waiting_for_redbeat_s_lock_reports_each_second(lock_redis: faker
 
 def test_register_replaces_redbeat_s_lock_receiver() -> None:
     report = _Reports()
-    beat_scheduler.register(report)
-    beat_scheduler.register(report)
+    beat_scheduler.register(celery_app, report)
+    beat_scheduler.register(celery_app, report)
 
     assert beat_init.receivers is not None
     receivers = [receiver for _, receiver in beat_init.receivers]
@@ -208,7 +207,7 @@ def test_a_held_lock_is_logged_once_at_warning(
     lock_redis: fakeredis.FakeRedis, caplog: pytest.LogCaptureFixture
 ) -> None:
     report = _Reports()
-    beat_scheduler.register(report)
+    beat_scheduler.register(celery_app, report)
     lock_redis.set(_LOCK_KEY, "another beat")
     beat = _LockBeat()
 
@@ -230,7 +229,7 @@ def test_a_held_lock_is_logged_once_at_warning(
 @pytest.mark.usefixtures("fast_lock_poll")
 def test_a_stop_while_waiting_leaves_the_lock_untaken(lock_redis: fakeredis.FakeRedis) -> None:
     report = _Reports()
-    beat_scheduler.register(report)
+    beat_scheduler.register(celery_app, report)
     lock_redis.set(_LOCK_KEY, "another beat")
     beat = _LockBeat()
 
@@ -246,7 +245,7 @@ def test_a_stop_while_waiting_leaves_the_lock_untaken(lock_redis: fakeredis.Fake
 
 def test_an_empty_lock_key_takes_no_lock(lock_redis: fakeredis.FakeRedis) -> None:
     report = _Reports()
-    beat_scheduler.register(report)
+    beat_scheduler.register(celery_app, report)
     beat = _LockBeat(lock_key="")
 
     beat_scheduler._acquire_lock_reporting(sender=beat)
@@ -257,7 +256,7 @@ def test_an_empty_lock_key_takes_no_lock(lock_redis: fakeredis.FakeRedis) -> Non
 
 
 def test_the_lock_is_built_with_redbeat_s_timeout_and_extend_script(lock_redis: fakeredis.FakeRedis) -> None:
-    beat_scheduler.register(_Reports())
+    beat_scheduler.register(celery_app, _Reports())
     beat = _LockBeat()
 
     beat_scheduler._acquire_lock_reporting(sender=beat)

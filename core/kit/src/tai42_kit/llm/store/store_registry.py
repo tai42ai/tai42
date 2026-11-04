@@ -5,9 +5,8 @@ from typing import Any
 
 from langgraph.store.base import BaseStore
 
-from tai42_kit.llm._resource_registry import LoopRegistryMap, ResourceRegistry
 from tai42_kit.llm.store.store import create_store_resource, get_store_from_resource
-from tai42_kit.settings.cache_registry import register_settings_reset
+from tai42_kit.loop_bound import LoopRegistryMap, ResourceRegistry
 
 
 class StoreRegistry(ResourceRegistry):
@@ -42,21 +41,13 @@ class StoreRegistry(ResourceRegistry):
         return get_store_from_resource(provider, resource, **kwargs)
 
 
-_registries: LoopRegistryMap[StoreRegistry] = LoopRegistryMap(StoreRegistry, "StoreRegistry")
+_registries: LoopRegistryMap[StoreRegistry] = LoopRegistryMap(StoreRegistry)
 
 
 def store_registry() -> StoreRegistry:
     """Return the StoreRegistry for the running event loop.
 
-    One registry per loop; after ``close_all()`` the next call builds a fresh
-    registry instead of returning the closed one.
+    One registry per loop and client epoch: the next call after the epoch
+    advances, or after ``close_all()``, builds a fresh registry.
     """
     return _registries.current()
-
-
-@register_settings_reset
-def _reset_store_registries() -> None:
-    # Drop the per-loop registries so a settings reload rebuilds them with the
-    # fresh configuration on next use. Raises if a running loop's registry still
-    # holds live resources (call close_all() first) rather than leaking them.
-    _registries.reset()

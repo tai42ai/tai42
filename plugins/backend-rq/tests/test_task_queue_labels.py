@@ -1,13 +1,12 @@
 """The ``queue`` task option and the worker ``--queue`` flag: a label that picks the worker queue.
 
-A label is letters, digits, ``_`` or ``-``. The plugin derives the RQ queue name
-``<RQ_QUEUE_NAME>.<label>`` from it, on the enqueue side and on the worker side; any
+The kit's label grammar decides what a label is; the RQ door and worker derive the RQ queue
+name ``<RQ_QUEUE_NAME>.<label>`` from it, on the enqueue side and on the worker side, and any
 other value is refused before Redis is written or the worker is built.
 """
 
 from __future__ import annotations
 
-import inspect
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
@@ -20,10 +19,10 @@ from tai42_kit.backend import CallbackSchema
 from tai42_kit.settings import reset_all_settings
 from tai42_kit.utils.worker_secret_capability import WORKER_SECRET_CAPABILITY_ARG
 
-from tai42_backend_rq import extensions, tasks
+from tai42_backend_rq import task_door
 from tai42_backend_rq import worker as worker_module
 from tai42_backend_rq.queue import TaskBudgetQueue
-from tai42_backend_rq.queues import check_queue_label, derived_queue
+from tai42_backend_rq.task_door import RqTaskDoor
 
 from .conftest import make_client_ctx
 
@@ -49,9 +48,8 @@ def settings_queue(monkeypatch) -> Iterator[str]:
 def redis(settings_queue, monkeypatch) -> fakeredis.FakeStrictRedis:
     """An in-memory Redis both the enqueue side and the worker build connect to."""
     conn = fakeredis.FakeStrictRedis(server=fakeredis.FakeServer())
-    monkeypatch.setattr(tasks, "client_ctx", make_client_ctx(conn))
+    monkeypatch.setattr(task_door, "client_ctx", make_client_ctx(conn))
     monkeypatch.setattr(worker_module, "rq_redis_connection", lambda redis_url: conn)
-    monkeypatch.setattr(worker_module, "install_fork_hooks", lambda: None)
     return conn
 
 
@@ -59,17 +57,22 @@ def _queue(redis: Any, name: str) -> TaskBudgetQueue:
     return TaskBudgetQueue(name, connection=redis)
 
 
+async def _submit(callback: CallbackSchema | None = None, **options: Any) -> Job:
+    """Submit a ``t`` job through the RQ door with ``options``."""
+    return await RqTaskDoor().submit((), {"backend_tool_name": "t"}, options, callback)
+
+
 @pytest.mark.parametrize("label", ["", "a:b", "a.b", "a b"])
 async def test_enqueue_refuses_a_label_outside_the_rule_before_writing(redis, label) -> None:
     with pytest.raises(ValueError, match=r"must match \[A-Za-z0-9_-\]\+"):
-        await tasks.enqueue_task(queue=label, backend_tool_name="t")
+        await _submit(queue=label)
 
     assert redis.keys("rq:job:*") == []
     assert redis.smembers("rq:queues") == set()
 
 
 async def test_enqueue_with_a_label_sends_the_job_to_the_derived_queue(redis) -> None:
-    job = await tasks.enqueue_task(queue="gpu", backend_tool_name="t")
+    job = await _submit(queue="gpu")
 
     assert _queue(redis, _GPU).job_ids == [job.id]
     assert Job.fetch(job.id, connection=redis).origin == _GPU
@@ -77,7 +80,7 @@ async def test_enqueue_with_a_label_sends_the_job_to_the_derived_queue(redis) ->
 
 
 async def test_enqueue_without_a_label_sends_the_job_to_the_settings_queue(redis) -> None:
-    job = await tasks.enqueue_task(backend_tool_name="t")
+    job = await _submit()
 
     assert _queue(redis, _SETTINGS_QUEUE).job_ids == [job.id]
     assert Job.fetch(job.id, connection=redis).origin == _SETTINGS_QUEUE
@@ -86,7 +89,7 @@ async def test_enqueue_without_a_label_sends_the_job_to_the_settings_queue(redis
 async def test_a_labelled_jobs_callback_waits_on_the_same_queue(redis) -> None:
     callback = CallbackSchema(tool="next", carried_kwargs={WORKER_SECRET_CAPABILITY_ARG: False})
 
-    job = await tasks.enqueue_task(queue="gpu", callback_kwargs=callback, backend_tool_name="t")
+    job = await _submit(callback, queue="gpu")
 
     [callback_id] = _queue(redis, _GPU).deferred_job_registry.get_job_ids()
     assert Job.fetch(callback_id, connection=redis).origin == _GPU
@@ -94,7 +97,7 @@ async def test_a_labelled_jobs_callback_waits_on_the_same_queue(redis) -> None:
 
 
 async def test_a_labelled_countdown_job_waits_in_its_queues_scheduled_registry(redis) -> None:
-    job = await tasks.enqueue_task(queue="gpu", countdown=30, backend_tool_name="t")
+    job = await _submit(queue="gpu", countdown=30)
 
     assert _queue(redis, _GPU).scheduled_job_registry.get_job_ids() == [job.id]
     assert _queue(redis, _SETTINGS_QUEUE).scheduled_job_registry.get_job_ids() == []
@@ -103,18 +106,9 @@ async def test_a_labelled_countdown_job_waits_in_its_queues_scheduled_registry(r
 async def test_a_labelled_eta_job_waits_in_its_queues_scheduled_registry(redis) -> None:
     eta = datetime.now(UTC) + timedelta(hours=1)
 
-    job = await tasks.enqueue_task(queue="gpu", eta=eta.isoformat(), backend_tool_name="t")
+    job = await _submit(queue="gpu", eta=eta.isoformat())
 
     assert _queue(redis, _GPU).scheduled_job_registry.get_job_ids() == [job.id]
-
-
-def test_a_label_is_letters_digits_underscore_or_dash() -> None:
-    assert check_queue_label("gpu_2-b") == "gpu_2-b"
-
-
-def test_no_label_derives_the_settings_queue(settings_queue) -> None:
-    assert derived_queue(None) == _SETTINGS_QUEUE
-    assert derived_queue("batch-2") == f"{_SETTINGS_QUEUE}.batch-2"
 
 
 def test_a_worker_on_a_label_serves_the_derived_queue_alone(redis) -> None:
@@ -159,29 +153,3 @@ async def test_the_worker_runtime_build_passes_the_label(monkeypatch) -> None:
 def test_a_worker_label_outside_the_rule_is_a_bad_parameter() -> None:
     with pytest.raises(click.BadParameter, match=r"must match \[A-Za-z0-9_-\]\+"):
         worker_module.RqWorkerRuntime.from_args(["--queue", "a:b"])
-
-
-async def sample_tool(text: str) -> str:
-    """Echo ``text``."""
-    return text
-
-
-@pytest.mark.parametrize("factory", [extensions.sync_task, extensions.async_task])
-def test_the_task_branches_take_an_optional_queue_label(factory) -> None:
-    branch = factory(sample_tool, "sample_tool", "doc")
-
-    queue = inspect.signature(branch).parameters["queue"]
-    assert queue.kind is inspect.Parameter.KEYWORD_ONLY
-    assert queue.default is None
-    assert queue.annotation == str | None
-
-
-async def _tool_with_its_own_queue(queue: str) -> str:
-    """A tool whose own parameter is named ``queue``."""
-    return queue
-
-
-@pytest.mark.parametrize("factory", [extensions.sync_task, extensions.async_task])
-def test_a_tool_owning_a_queue_parameter_cannot_take_a_task_branch(factory) -> None:
-    with pytest.raises(ValueError, match="duplicate parameter name: 'queue'"):
-        factory(_tool_with_its_own_queue, "own_queue", "doc")

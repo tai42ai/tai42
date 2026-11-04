@@ -18,8 +18,8 @@ from pathlib import Path
 
 import pytest
 import tai42_accounts_postgres
-from tai42_kit.clients.base import shutdown_all_clients
 from tai42_kit.db import SchemaOutOfDateError, apply_migrations
+from tai42_kit.loop_bound import release_loop_bound_resources
 from tai42_kit.settings import reset_all_settings
 from tai42_skeleton.db import assert_deployment_schemas_applied, installed_plugin_entries, skeleton_entry
 from tai42_skeleton.manifest import Manifest
@@ -91,4 +91,4 @@ async def test_the_schema_check_gates_the_accounts_chain_of_a_loaded_provider(sc
         await apply_migrations(installed_plugin_entries())
         await assert_deployment_schemas_applied(manifest, distribution_map())
     finally:
-        await shutdown_all_clients()
+        await release_loop_bound_resources()

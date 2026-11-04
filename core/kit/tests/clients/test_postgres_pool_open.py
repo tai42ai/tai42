@@ -142,7 +142,7 @@ def test_mask_dsn_password_redacts_an_unparseable_dsn():
 
 
 async def test_one_pool_per_dsn_across_prefixes_with_equal_sizes(monkeypatch):
-    from tai42_kit.clients import shutdown_all_clients
+    from tai42_kit.loop_bound import release_loop_bound_resources
 
     _install_probe(monkeypatch)
     pools = _install_ok_pool(monkeypatch)
@@ -158,11 +158,11 @@ async def test_one_pool_per_dsn_across_prefixes_with_equal_sizes(monkeypatch):
         assert pools[0].kwargs["name"] == "skeleton@h/db"
         assert "secret" not in pools[0].kwargs["name"]
     finally:
-        await shutdown_all_clients()
+        await release_loop_bound_resources()
 
 
 async def test_caller_omitting_sizes_shares_pool_with_default_sizes(monkeypatch):
-    from tai42_kit.clients import shutdown_all_clients
+    from tai42_kit.loop_bound import release_loop_bound_resources
 
     _install_probe(monkeypatch)
     pools = _install_ok_pool(monkeypatch)
@@ -184,11 +184,11 @@ async def test_caller_omitting_sizes_shares_pool_with_default_sizes(monkeypatch)
                 async with cls().current(dsn=dsn, min_size=pg_mod._DEFAULT_MIN_SIZE + 3):
                     pass
     finally:
-        await shutdown_all_clients()
+        await release_loop_bound_resources()
 
 
 async def test_differing_sizes_on_one_dsn_raise_with_masked_password(monkeypatch):
-    from tai42_kit.clients import shutdown_all_clients
+    from tai42_kit.loop_bound import release_loop_bound_resources
 
     _install_probe(monkeypatch)
     _install_ok_pool(monkeypatch)
@@ -207,7 +207,7 @@ async def test_differing_sizes_on_one_dsn_raise_with_masked_password(monkeypatch
         assert "'min_size': 2" in message
         assert "'min_size': 5" in message
     finally:
-        await shutdown_all_clients()
+        await release_loop_bound_resources()
 
 
 async def test_pinned_connection_builds_a_one_connection_pinned_pool(monkeypatch):

@@ -108,10 +108,8 @@ def _reset_preset_registry():
 
 # Reload/deregister are driven through the reload gate — the real production path
 # (``routers/manifest`` and the builtin MCP tool call them exactly this way). The
-# gate runs the sync admin facet on a worker thread, so the serving loop keeps
-# spinning and the preset reconcile the facet marshals back onto it can run. A
-# direct call from this on-loop coroutine would freeze the serving loop and
-# deadlock (the facet raises loudly on that misuse).
+# gate holds the reload lock and awaits the async admin door on the serving loop,
+# where the preset reconcile it drives runs too.
 async def _reload_mcp(title: str) -> dict[str, Any]:
     return await reload_gate.run(lambda: instance.app.admin.reload_mcp(title), reimports=False)
 

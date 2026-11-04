@@ -665,13 +665,12 @@ def test_enabled_by_default_the_middleware_is_registered(monkeypatch):
     from tai42_skeleton.app import instance, server
 
     monkeypatch.setattr(server, "audit_log_settings", lambda: AuditLogSettings())
-    classes = [
+    classes: list[object] = [
         middleware.cls
         for middleware in instance.build_app()._base_middleware(None, stream_path="/mcp", carries_replies=False)
     ]
 
-    assert classes[0] is AuditLogMiddleware
-    assert classes[1] is BodyLimitMiddleware
+    assert classes.index(AuditLogMiddleware) < classes.index(BodyLimitMiddleware)
 
 
 def test_disabled_toggle_leaves_the_middleware_unregistered(monkeypatch):

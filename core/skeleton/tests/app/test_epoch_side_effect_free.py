@@ -152,10 +152,9 @@ def test_failed_build_leaves_the_four_registries_bit_identical(monkeypatch):
 
 
 def test_reload_with_open_loop_bound_checkpoint_does_not_raise(monkeypatch):
-    """A reload with a live loop-bound checkpoint resource open succeeds — the
-    reload closes the langgraph checkpoint/store registries BEFORE the build's settings
-    reset drops their per-loop registries, so the reset never finds a registry still
-    holding live resources on the running loop (close-before-reset ordering guarded)."""
+    """A reload with a live loop-bound checkpoint resource open succeeds, and the swap moves
+    the loop onto a fresh registry: the registries are kept per client epoch, the swap advances
+    the epoch, so the next use on the serving loop builds a new registry for the new epoch."""
     from tai42_kit.llm.checkpoint import checkpoint_registry as reg_mod
 
     async def _fake_create(provider, conn_string):
@@ -170,17 +169,17 @@ def test_reload_with_open_loop_bound_checkpoint_does_not_raise(monkeypatch):
     async def run() -> None:
         async with app.app_context(Manifest.model_validate({"default_routers": "none"})):
             # Open a live loop-bound checkpoint resource on the serving loop the reload's
-            # close-and-swap runs on.
+            # build and swap run on.
             reg = reg_mod.checkpoint_registry()
             await reg.get_checkpointer("memory", "c1")
             assert reg.has_live_resources is True
 
             _patch_reload(monkeypatch, manifest={"default_routers": "none"}, env={"ACCESS_CONTROL_ENABLE": "false"})
-            # The reload MUST NOT raise "still holds live resources": ``reload_config``
-            # closes the LLM registries before the build resets settings.
+            # The reload MUST NOT raise with a live resource open on the current epoch's
+            # registry.
             await reload_gate.run(app.admin.reload_config, reimports=True)
 
-            # The reload rebuilt the registry (closed + dropped), so the live one is fresh.
+            # The swap advanced the client epoch, so the loop's current registry is a new one.
             assert reg_mod.checkpoint_registry() is not reg
 
     try:

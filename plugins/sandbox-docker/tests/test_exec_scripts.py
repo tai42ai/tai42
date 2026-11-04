@@ -1,7 +1,10 @@
-"""The in-container exec wrapper and sibling kill, run under a real host shell.
+"""The in-container exec wrapper and sibling kill, run under a real shell in a process namespace of their own.
 
-Each script's ``/tmp`` pidfile path is moved into the test's own directory, and the wrapper
-is started as a session leader, as the engine starts every exec. The host needs ``setsid``.
+The scripts' ``/proc`` scan must see only the test's own processes, as in the exec's container it
+sees only that container's. So the module runs only in a container of its own, with
+``SANDBOX_DOCKER_PROCESS_NAMESPACE=1`` set. Each script's ``/tmp`` pidfile path is moved into the
+test's own directory, and the wrapper is started as a session leader, as the engine starts every
+exec. The container needs ``setsid``.
 """
 
 from __future__ import annotations
@@ -19,6 +22,18 @@ from tai42_kit.sandbox.exec_group_scripts import KILL_NOTHING_RUNNING, KILL_SIGN
 from tai42_kit.sandbox.exec_status_scripts import STATUS_WAIT_SECONDS
 
 from tai42_sandbox_docker.exec_control import EXEC_WRAPPER, KILL_WRAPPER
+
+pytestmark = [
+    pytest.mark.process_namespace,
+    pytest.mark.skipif(
+        os.environ.get("SANDBOX_DOCKER_PROCESS_NAMESPACE") not in ("1", "true", "True"),
+        reason=(
+            "SANDBOX_DOCKER_PROCESS_NAMESPACE is not set: the exec scripts' /proc scan must see only the "
+            "test's own processes, so these tests run in a process namespace of their own; run "
+            "`pytest -m process_namespace` in a `docker run --init` container (CONTRIBUTING.md)"
+        ),
+    ),
+]
 
 _SCRIPT_TIMEOUT = 10
 

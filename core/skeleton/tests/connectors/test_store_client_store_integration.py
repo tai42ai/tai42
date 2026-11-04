@@ -19,9 +19,9 @@ import pytest
 from cryptography.exceptions import InvalidTag
 from psycopg.errors import CheckViolation, UniqueViolation
 from tai42_kit.clients import client_ctx
-from tai42_kit.clients.base import shutdown_all_clients
 from tai42_kit.clients.impl.postgres import PostgresClient
 from tai42_kit.db import apply_migrations, component_store_settings
+from tai42_kit.loop_bound import release_loop_bound_resources
 from tai42_kit.settings import reset_all_settings
 
 from tai42_skeleton.connectors.oauth import crypto
@@ -61,7 +61,7 @@ async def provider() -> AsyncIterator[str]:
     token = f"prov-it-{uuid.uuid4().hex[:12]}"
     yield token
     await _pg_exec("DELETE FROM connector_oauth_clients WHERE provider_id LIKE %s", (f"{token}%",))
-    await shutdown_all_clients()
+    await release_loop_bound_resources()
 
 
 def _registered(client_id: str, *, redirect_uri: str = CALLBACK, expires: datetime | None = None) -> RegisteredClient:

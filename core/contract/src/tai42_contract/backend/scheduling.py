@@ -9,17 +9,20 @@ schedule's name under :data:`SCHEDULE_NAME_KEY` and its typed cadence, dumped, u
 :data:`SCHEDULE_CADENCE_KEY`.
 
 A cadence is a :data:`ScheduleCadence`: an :class:`IntervalCadence` or a
-:class:`CrontabCadence`, discriminated by ``kind``. The marker tools speak
+:class:`CrontabCadence`, discriminated by ``kind``, validated by
+:data:`SCHEDULE_CADENCE_ADAPTER`. The marker tools speak
 :class:`ScheduleListRow` (list), :class:`ScheduleRecord` (export/import) and
-:class:`ScheduleImportReport` (import). The models are data only; parsing friendly
-cadence specs is the kit's.
+:class:`ScheduleImportReport` (import); a schedule's read speaks
+:class:`ScheduleDetail`. The models are data only; parsing friendly cadence specs is the
+kit's.
 """
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Annotated, Any, Final, Literal, cast
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
 
 from tai42_contract.interactions.door_contract import ParkableDoorMixin
 from tai42_contract.states import StateBinding, StateSubject
@@ -37,7 +40,8 @@ SCHEDULE_CADENCE_KEY: Final = "backend_schedule"
 #: The branch kwarg carrying the schedule's name (its revocation handle).
 SCHEDULE_NAME_KEY: Final = "backend_schedule_name"
 
-_CRONTAB_FIELDS: Final = ("minute", "hour", "day_of_month", "month_of_year", "day_of_week")
+#: A :class:`CrontabCadence`'s five fields, in the order a crontab expression lists them.
+CRONTAB_FIELDS: Final = ("minute", "hour", "day_of_month", "month_of_year", "day_of_week")
 
 
 class IntervalCadence(BaseModel):
@@ -73,7 +77,7 @@ class CrontabCadence(BaseModel):
         if not isinstance(data, dict):
             return data
         mapping = cast("dict[str, Any]", data)
-        if "expression" not in mapping or any(field in mapping for field in _CRONTAB_FIELDS):
+        if "expression" not in mapping or any(field in mapping for field in CRONTAB_FIELDS):
             return mapping
         rest: dict[str, Any] = {key: value for key, value in mapping.items() if key != "expression"}
         expression: Any = mapping["expression"]
@@ -84,10 +88,17 @@ class CrontabCadence(BaseModel):
             parts = parts[1:]
         if len(parts) != 5:
             raise ValueError(f"a crontab expression has 5 fields (6 with seconds); got {len(parts)}")
-        return {**rest, **dict(zip(_CRONTAB_FIELDS, parts, strict=True))}
+        return {**rest, **dict(zip(CRONTAB_FIELDS, parts, strict=True))}
+
+    @property
+    def expression(self) -> str:
+        """The five-field crontab expression; validating ``{"expression": ...}`` with it gives this cadence back."""
+        return " ".join(getattr(self, field) for field in CRONTAB_FIELDS)
 
 
 ScheduleCadence = Annotated[IntervalCadence | CrontabCadence, Field(discriminator="kind")]
+#: Validates a dumped :data:`ScheduleCadence` (a ``kind``-tagged mapping or its JSON) into its model.
+SCHEDULE_CADENCE_ADAPTER: Final[TypeAdapter[IntervalCadence | CrontabCadence]] = TypeAdapter(ScheduleCadence)
 
 
 class ScheduleRecord(BaseModel):
@@ -116,7 +127,13 @@ class ScheduleRowError(BaseModel):
 
 
 class ScheduleListRow(BaseModel):
-    """One row of the schedule listing: no arguments, no kwargs."""
+    """One row of the schedule listing: no arguments, no kwargs.
+
+    ``next_run_at_ts`` is the next run's POSIX timestamp, ``None`` when the schedule has no next
+    run (``0.0`` is a timestamp like any other). ``next_run_at_iso`` is derived from it, the UTC
+    ISO-8601 form or ``None``: a row is built without it, and a given value that disagrees with
+    the timestamp is refused.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -127,6 +144,28 @@ class ScheduleListRow(BaseModel):
     next_run_at_ts: float | None = None
     next_run_at_iso: str | None = None
     error: ScheduleRowError | None = None
+
+    @model_validator(mode="after")
+    def _next_run_at_iso(self) -> ScheduleListRow:
+        ts = self.next_run_at_ts
+        derived = None if ts is None else datetime.fromtimestamp(ts, tz=UTC).isoformat()
+        if "next_run_at_iso" in self.model_fields_set and self.next_run_at_iso != derived:
+            raise ValueError(
+                f"next_run_at_iso {self.next_run_at_iso!r} disagrees with next_run_at_ts {ts!r} (derived {derived!r})"
+            )
+        self.next_run_at_iso = derived
+        return self
+
+
+class ScheduleDetail(ScheduleListRow):
+    """One schedule as its read replies it: the listing row plus the arguments it fires with.
+
+    ``args`` and ``kwargs`` are the fired tool's arguments plus the reserved door stamps the
+    fire needs, as in :class:`ScheduleRecord`.
+    """
+
+    args: list[Any] = Field(default_factory=list)
+    kwargs: dict[str, Any] = Field(default_factory=dict)
 
 
 ScheduleImportMode = Literal["skip", "overwrite"]
