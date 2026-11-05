@@ -5995,7 +5995,10 @@ function Zl({ base: i, identity: a }) {
 			pendingLabel: "Turning on",
 			confirmVariant: "primary",
 			isPending: d.isPending,
-			error: d.isError ? d.error : null,
+			failure: {
+				error: d.isError ? d.error : null,
+				scope: "turn on entry gate"
+			},
 			onConfirm: () => {
 				d.mutate(!0);
 			},
@@ -6374,7 +6377,10 @@ function Tu({ base: t, identity: n, stored: i }) {
 				pendingLabel: "Clearing",
 				confirmVariant: "danger",
 				isPending: y.isPending,
-				error: y.isError ? y.error : null,
+				failure: {
+					error: y.isError ? y.error : null,
+					scope: "clear words"
+				},
 				onConfirm: () => {
 					y.mutate();
 				},

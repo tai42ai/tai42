@@ -151,10 +151,31 @@ export const FULL_PROJECTION: Projection = {
   route_patterns: [],
 } as unknown as Projection;
 
+type FailedRoll = NonNullable<ReturnType<ApiClient['failedReplyRoll']>>;
+
+/** A door's rejection whose reply carries a roll: the bus was unreachable mid-write. */
+export function withFailedRoll(error: Error): Error {
+  const roll = {
+    summary: {
+      status: 'unreachable',
+      note: null,
+      failures: [],
+      error: null,
+      awaiting: [],
+      restartsPending: [],
+      reloadsUnconfirmed: [],
+      spanReleaseError: null,
+    },
+    recycle: null,
+  } as FailedRoll;
+  return Object.assign(error, { roll });
+}
+
 /** A stub client carrying the authed request, the origin the chat link composes on, the
  *  caller's projection, and the failure readers the SDK's `ConfirmDialog` applies to a
  *  rejected action. The doors reject with plain errors, which the host's client reads as
- *  neither an MCP listing refusal nor a failed reply roll. */
+ *  no MCP listing refusal, and as a failed reply roll only when `withFailedRoll` put one
+ *  on the error. */
 export function stubClient(
   request: ReturnType<typeof doorRequest>,
   baseUrl = '',
@@ -166,7 +187,7 @@ export function stubClient(
     getMe: vi.fn().mockResolvedValue(projection),
     isMcpStartingError: () => false,
     isMcpNotLoadedError: () => false,
-    failedReplyRoll: () => null,
+    failedReplyRoll: (error: { readonly roll?: FailedRoll }) => error.roll ?? null,
   } as unknown as ApiClient;
 }
 
