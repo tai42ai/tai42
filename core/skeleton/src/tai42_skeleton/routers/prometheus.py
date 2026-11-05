@@ -7,7 +7,9 @@ are yanked mid-run:
 
 - ``wipe_prometheus_multiproc_dir`` — master-only, called once before workers are
   spawned. It clears stale db files from previous runs under an exclusive lock,
-  guarded by a per-run sentinel so only the first caller of a run wipes.
+  guarded by a per-run sentinel so only the first caller of a run wipes. It empties
+  the dir and never removes the dir itself, so a process that ensures or writes
+  into the dir meanwhile never finds it gone.
 - ``init_prometheus_multiproc_dir`` — every reader/worker path; ensures the dir
   exists without wiping, so the metrics server and backend worker never destroy a
   populated dir.
@@ -15,8 +17,9 @@ are yanked mid-run:
 Restart semantics (accepted, not engineered around): restarting the mcp_app
 master mid-run re-runs the single wipe while a still-running backend worker holds
 its mmap files open, silently orphaning those counters until the family restarts
-together. This is the standard prometheus multiproc operating model — the dir is
-cleared once at fresh deploy/boot, not per process.
+together. A db file such a worker creates while the wipe runs is not one the wipe
+found, so it stays. This is the standard prometheus multiproc operating model — the
+dir is cleared once at fresh deploy/boot, not per process.
 """
 
 import logging
@@ -35,11 +38,11 @@ logger = logging.getLogger(__name__)
 # announced exactly once (on the first scrape) rather than on every scrape.
 _mode_logged = False
 
-# Cross-platform exclusive file locking for the multiproc-init wipe-once protocol.
-# Both branches provide REAL, genuinely-blocking mutual exclusion (no silent
-# no-op): Windows locks the 1-byte region via ``msvcrt.locking`` and POSIX via
-# ``fcntl.flock``, so only one worker at a time holds the lock and the
-# ``shutil.rmtree`` wipe below runs under exclusive access.
+# Cross-platform exclusive file locking for the master's wipe-once protocol and the
+# health watch's alerted-totals file. Both branches provide REAL, genuinely-blocking
+# mutual exclusion (no silent no-op): Windows locks the 1-byte region via
+# ``msvcrt.locking`` and POSIX via ``fcntl.flock``, so only one process at a time
+# holds the lock and the wipe below runs under exclusive access.
 if sys.platform == "win32":
     import msvcrt
 
@@ -70,12 +73,12 @@ def _multiproc_lock_path(metrics_dir: str) -> str:
     """Path of the exclusive lock file guarding the multiproc dir's lifecycle.
 
     The lock sits *beside* the dir, never inside it: the dir may carry a trailing
-    slash, which would place the lock at ``dir/.lock`` where the wipe's rmtree would
-    take it along with the dir; stripping the slash keeps the lock next to the dir so
-    it survives the wipe. The parent directory is ensured to exist so the lock file
-    can be created (a parentless relative dir has no parent to create). Both the
-    non-wiping init and the master wipe lock on this one path, so their directory
-    lifecycle operations are mutually exclusive.
+    slash, which would place the lock at ``dir/.lock`` where the wipe would remove it
+    while it is held; stripping the slash keeps the lock next to the dir so it survives
+    the wipe. The parent directory is ensured to exist so the lock file can be created
+    (a parentless relative dir has no parent to create). The master wipe and the
+    monitoring health watch's alerted-totals file lock on this one path, so the wipe
+    never clears the dir while that file is being read or replaced.
     """
     parent_dir = os.path.dirname(metrics_dir.rstrip("/"))
     if parent_dir:
@@ -86,33 +89,32 @@ def _multiproc_lock_path(metrics_dir: str) -> str:
 def init_prometheus_multiproc_dir():
     """Ensure the multiproc dir exists WITHOUT wiping it.
 
-    Every reader/worker path (the router at import, the metrics server's
+    Every reader/worker path (the backend worker at boot, the metrics server's
     ``create_app``) runs this: it creates the dir if missing but never removes a
     populated one, so a live worker's mmap files survive. The once-per-run wipe is
-    the master's job (``wipe_prometheus_multiproc_dir``).
-
-    Ensuring the dir runs under the SAME exclusive lock as the wipe, because
-    ``os.makedirs(exist_ok=True)`` is NOT atomic against a concurrent remover: its
-    internal ``mkdir`` raises ``FileExistsError`` when the dir is present, and the
-    ``exist_ok`` shortcut only swallows that error if the dir still ``isdir`` at a
-    recheck. If the master's ``rmtree`` deletes the dir in the window between that
-    failed ``mkdir`` and the recheck, ``makedirs`` re-raises and this worker dies at
-    boot — exactly the window the wipe's rmtree opens when a sidecar inits
-    concurrently. Holding the wipe's lock closes it: while init holds the lock the
-    master's rmtree cannot run, and a wipe holding the lock blocks init, so the two
-    never interleave over the dir.
+    the master's job (``wipe_prometheus_multiproc_dir``); it never removes the dir,
+    so this ensure-exists needs no lock against it.
     """
     metrics_dir = metrics_settings().prometheus_multiproc_dir
-    lock_file_path = _multiproc_lock_path(metrics_dir)
-
-    with open(lock_file_path, "w") as lock_file:
-        try:
-            _lock_exclusive(lock_file.fileno())
-            os.makedirs(metrics_dir, exist_ok=True)
-        finally:
-            _unlock(lock_file.fileno())
-
+    os.makedirs(metrics_dir, exist_ok=True)
     return metrics_dir
+
+
+def _clear_dir_entries(metrics_dir: str) -> None:
+    """Remove every entry the multiproc dir holds now, keeping the dir itself.
+
+    The entries are listed once, before any removal: a file a live writer of the run
+    family creates while the clear runs (``prometheus_client`` creates a process's
+    ``<type>_<pid>.db`` at its first sample of that type, with no lock) is not one of
+    them, so it stays.
+    """
+    with os.scandir(metrics_dir) as listing:
+        entries = list(listing)
+    for entry in entries:
+        if entry.is_dir(follow_symlinks=False):
+            shutil.rmtree(entry.path)
+        else:
+            os.unlink(entry.path)
 
 
 def wipe_prometheus_multiproc_dir():
@@ -121,9 +123,10 @@ def wipe_prometheus_multiproc_dir():
     Removes stale db files left by previous runs so a scrape does not merge dead
     processes' counters. Guarded by an exclusive lock and a per-run sentinel so
     exactly one caller of a run wipes; the backend worker and metrics server never
-    call this. The rmtree+makedirs below run under the lock, and the non-wiping init
-    shares that lock, so no unlocked ensure-exists can interleave with the wipe's
-    delete-then-recreate window.
+    call this. The wipe empties the dir in place and never removes the dir itself:
+    the run family's writers create their db files without any lock, and a dir that
+    is never deleted is one their file creation and the readers' ensure-exists can
+    always land in.
     """
     metrics_dir = metrics_settings().prometheus_multiproc_dir
     lock_file_path = _multiproc_lock_path(metrics_dir)
@@ -150,12 +153,10 @@ def wipe_prometheus_multiproc_dir():
                         return metrics_dir
 
             # We are the designated initializer (first one here this run).
-            # Wipe the directory; a failed wipe must raise, not get papered
+            # Clear the directory; a failed clear must raise, not get papered
             # over by writing the sentinel anyway.
-            if os.path.exists(metrics_dir):
-                shutil.rmtree(metrics_dir)
-
             os.makedirs(metrics_dir, exist_ok=True)
+            _clear_dir_entries(metrics_dir)
 
             # Create the sentinel so subsequent workers (waiting on lock) skip the wipe
             with open(sentinel, "w") as f:
