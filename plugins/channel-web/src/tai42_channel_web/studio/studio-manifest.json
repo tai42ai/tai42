@@ -1,10 +1,10 @@
 {
   "name": "tai42_channel_web",
   "version": "12.0.0",
-  "api_version": 3,
-  "entry": "tai42-channel-web-69422pUl.js",
+  "api_version": 4,
+  "entry": "tai42-channel-web-thCLsRvl.js",
   "integrity": {
-    "tai42-channel-web-69422pUl.js": "sha384-rLZKtvlLU+fJ5A8l12k/0oQnSRPMPTozUYGptCxfkpmakdHl7MOr0IX/Hh7ySH0I"
+    "tai42-channel-web-thCLsRvl.js": "sha384-4/QeNb0RVdov43MFleb9wZ2mq5HEeiZy7eb8uEHucWvspboxtQ0j9JPBXrPszyLI"
   },
   "contributions": {
     "tool_panels": {},

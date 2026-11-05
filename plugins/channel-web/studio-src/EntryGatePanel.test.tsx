@@ -9,7 +9,7 @@ import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 
-import { makeCode, renderPanel } from './test-utils';
+import { makeCode, renderPanel, withFailedRoll } from './test-utils';
 
 /** A host api error as the api-client raises it. */
 function apiError(message: string, status: number): Error {
@@ -164,6 +164,21 @@ describe('EntryGatePanel — toggle', () => {
 
     await user.click(await screen.findByRole('checkbox', { name: 'Require an entry code' }));
     expect(await screen.findByText('flip denied')).toBeInTheDocument();
+  });
+
+  it('shows a failed zero-code turn-on in the confirm, its report naming the write', async () => {
+    const user = userEvent.setup();
+    const setGate = vi.fn().mockRejectedValue(withFailedRoll(apiError('flip denied', 500)));
+    const getGate = vi.fn().mockResolvedValue({ enabled: false, codes: [] });
+    renderPanel({ getGate, setGate });
+
+    await screen.findByText('No entry codes');
+    await user.click(screen.getByRole('checkbox', { name: 'Require an entry code' }));
+    const dialog = await screen.findByRole('dialog');
+    await user.click(within(dialog).getByRole('button', { name: 'Turn on anyway' }));
+
+    expect(await within(dialog).findByText('flip denied')).toBeInTheDocument();
+    expect(within(dialog).getByText('turn on entry gate')).toBeInTheDocument();
   });
 });
 

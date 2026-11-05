@@ -160,7 +160,10 @@ function GatePanel({
           pendingLabel="Turning on"
           confirmVariant="primary"
           isPending={toggleMutation.isPending}
-          error={toggleMutation.isError ? toggleMutation.error : null}
+          failure={{
+            error: toggleMutation.isError ? toggleMutation.error : null,
+            scope: 'turn on entry gate',
+          }}
           onConfirm={() => {
             toggleMutation.mutate(true);
           }}
