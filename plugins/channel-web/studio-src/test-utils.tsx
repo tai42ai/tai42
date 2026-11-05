@@ -151,14 +151,23 @@ export const FULL_PROJECTION: Projection = {
   route_patterns: [],
 } as unknown as Projection;
 
-/** A stub client carrying the authed request, the origin the chat link composes on, and
- *  the caller's projection. */
+/** A stub client carrying the authed request, the origin the chat link composes on, the
+ *  caller's projection, and the failure readers the SDK's `ConfirmDialog` applies to a
+ *  rejected action. The doors reject with plain errors, which the host's client reads as
+ *  neither an MCP listing refusal nor a failed reply roll. */
 export function stubClient(
   request: ReturnType<typeof doorRequest>,
   baseUrl = '',
   projection: Projection = FULL_PROJECTION,
 ): ApiClient {
-  return { baseUrl, request, getMe: vi.fn().mockResolvedValue(projection) } as unknown as ApiClient;
+  return {
+    baseUrl,
+    request,
+    getMe: vi.fn().mockResolvedValue(projection),
+    isMcpStartingError: () => false,
+    isMcpNotLoadedError: () => false,
+    failedReplyRoll: () => null,
+  } as unknown as ApiClient;
 }
 
 /** Renders its children once the projection is ready, as the host's route-panel slot does. */
