@@ -83,17 +83,19 @@ def test_allocate_db_leases_a_clean_db(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_reserve_specific_port_refuses_a_busy_port() -> None:
+    # The port is one this run has not reserved for anything else, so the refusal is the busy
+    # one; the refused reservation leaves nothing to release.
+    port = ports.allocate_port()
+    ports.release_port(port)
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    sock.bind(("127.0.0.1", 0))
+    sock.bind(("127.0.0.1", port))
     sock.listen(1)
-    port = sock.getsockname()[1]
     try:
         with pytest.raises(RuntimeError, match="already in use"):
             ports.reserve_specific_port(port)
     finally:
         sock.close()
-        ports.release_port(port)
 
 
 def test_pids_listening_yields_nothing_when_the_diagnostic_tools_are_absent(monkeypatch) -> None:
