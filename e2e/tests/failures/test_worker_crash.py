@@ -72,10 +72,14 @@ async def _run_status(stack: TaiStack, run_id: str) -> str:
 
 
 async def _submit_slow_run(stack: TaiStack, key: str, seconds: float) -> str:
+    # A submit can meet the retriable ``reloading`` refusal while a serve worker holds its reload
+    # gate: on a fresh stack for its boot resync, and after a backend restart while it reads the
+    # census for the backend's join announcement. It is retried as every client retries it.
     submitted = await stack.api().post(
         "/api/tool-runs",
         json={"tool_name": "e2e_slow_task_sync_task", "arguments": {"key": key, "seconds": seconds}},
         expect=202,
+        retry_on_reloading=True,
     )
     return submitted["run_id"]
 
