@@ -140,7 +140,9 @@ def expected_fleet_present(stack: TaiStack, workers: Sequence[BusWorker]) -> boo
 def _fleet_shortfall(stack: TaiStack, workers: Sequence[BusWorker]) -> list[str]:
     """What the census rows ``workers`` lack of the full expected fleet, one line per gap, naming
     each serve row that is not ``ready`` by its name, pid and state and each backend process
-    with no row by its name and pid; empty when the full fleet is present."""
+    with no row by its name and pid; empty when the full fleet is present. The backend pids are
+    read under the supervisor's lock, so a respawn in progress is read once it has started its
+    process."""
     gaps: list[str] = []
     serve = sorted((w for w in workers if w.kind == "serve"), key=lambda w: w.name)
     want = expected_serve_workers(stack)
@@ -149,10 +151,11 @@ def _fleet_shortfall(stack: TaiStack, workers: Sequence[BusWorker]) -> list[str]
         if len(serve) < want:
             gaps.append(f"{want - len(serve)} of {want} serve workers have no presence row")
     backend_pids = {w.pid for w in workers if w.kind == "backend"}
-    for name in expected_backend_processes(stack):
-        pid = stack.process(name).pid
-        if pid not in backend_pids:
-            gaps.append(f"backend process {name} (pid {pid}) has no presence row")
+    with stack.supervisor.lock:
+        for name in expected_backend_processes(stack):
+            pid = stack.process(name).pid
+            if pid not in backend_pids:
+                gaps.append(f"backend process {name} (pid {pid}) has no presence row")
     return gaps
 
 

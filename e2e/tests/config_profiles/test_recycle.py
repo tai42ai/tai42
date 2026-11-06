@@ -479,20 +479,22 @@ async def _see_the_reload_apply_after_the_job(
     """See the released job end before the job's worker stamps its reload or its life leaves.
 
     The worker stamps ``last_op`` right after its reload's reply, and the roll restarts that
-    life as soon as the reply reaches it, so the stamp may stand only for a moment: the life
-    leaving the census (or coming back at its next generation) ends the watch as the stamp does.
+    life as soon as the reply reaches it: the roll's recycle marks the life ``recycling`` and then
+    stamps ``last_op`` over the reload, so the reload stamp may stand only for a moment. The life
+    beginning to leave, leaving the census, or coming back at its next generation ends the watch
+    as the stamp does.
     """
 
     async def reloaded_or_left() -> BusWorker | bool | None:
         census = await asyncio.to_thread(stack.census)
         row = next((w for w in census if w.name == running_job), None)
-        left = row is None or row.generation != before_backend[running_job]
-        if not left and row is not None and row.last_op == stamps_before.get(running_job):
+        leaving = row is None or row.generation != before_backend[running_job] or row.state == "recycling"
+        if not leaving and row is not None and row.last_op == stamps_before.get(running_job):
             return None
         # The records are read after the census, so a ``done`` written before the stamp is seen.
         done_seen = "done" in await asyncio.to_thread(values)
         assert done_seen, f"the job's worker applied its reload or left before the job ended: {row}"
-        return True if left else row
+        return True if leaving else row
 
     seen = await wait_for_async(
         reloaded_or_left, deadline=60.0, message="the job's worker never applied its reload once the job was released"
