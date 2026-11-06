@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING
 
 import yaml
 
-from tai42_e2e import child_env, port_ownership, ports, readiness, restarts, spawning
+from tai42_e2e import child_env, diagnostics, port_ownership, ports, readiness, restarts, spawning
 from tai42_e2e.httpapi import ApiClient
 from tai42_e2e.mcp import McpClient, mcp_read_timeout
 from tai42_e2e.metrics import Scrape, scrape
@@ -116,6 +116,15 @@ class TaiStack:
         return manifest_path
 
     def boot(self) -> None:
+        """Start the stack's processes and wait until it is ready. A failed boot, a test timeout's
+        included, keeps the stack's report for the test's, before any caller tears the stack down."""
+        try:
+            self._start()
+        except BaseException:
+            diagnostics.record_failed_boot(diagnostics.stack_report(self))
+            raise
+
+    def _start(self) -> None:
         self.logs_dir.mkdir(parents=True, exist_ok=True)
         self.liveness_dir.mkdir(parents=True, exist_ok=True)
 

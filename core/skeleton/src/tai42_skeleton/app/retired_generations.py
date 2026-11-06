@@ -4,13 +4,16 @@ A retired generation stays reachable while a task, timer, transport or stream of
 runtime still carries the context of one of its requests: a cache's expiry timer or a
 keep-alive timer for seconds, a drain-exempt stream until its client disconnects, a task
 or a pooled connection one of its requests started for that task's or connection's life,
-which can be the process's. Two such holds have no seam on the platform's side: on uvloop
+which can be the process's. Three such holds have no seam on the platform's side: on uvloop
 an outbound keep-alive connection an httpx-backed client opens holds the request that opened
-it until its client epoch's pool is drained at that epoch's retire, and on the asyncio
-selector loop a Redis reply larger than the stream reader's pause threshold holds the request
-reading it until the next such reply on that connection or the connection's close. All of
-that reaches the generation through its serving
-surface (the object every request's ``scope["app"]`` points at). A retire therefore arms
+it until its client epoch's pool is drained at that epoch's retire; on the asyncio selector
+loop a Redis reply larger than the stream reader's pause threshold holds the request reading
+it until the next such reply on that connection or the connection's close; and on the asyncio
+loop the idle timers of an MCP streamable-HTTP session hold its requests after the session
+ends, because the loop keeps a cancelled timer until no earlier timer remains or cancelled
+timers outnumber the live ones in a heap of over a hundred, and one of them has no due time.
+All of that reaches the generation through its serving surface (the object every request's
+``scope["app"]`` points at). A retire therefore arms
 a finalizer on that surface; when the surface is collected (the generation is released)
 its epoch is swept for stale-config leaks on the serving loop, so every retired-epoch
 settings instance still reachable then is held by something else — a captured singleton
