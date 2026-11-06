@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING
 
 import httpx
 
-from tai42_e2e import ports
+from tai42_e2e import diagnostics, ports
 from tai42_e2e.httpapi import ApiClient
 from tai42_e2e.procs import ProcessHandle
 from tai42_e2e.waiting import wait_for
@@ -295,19 +295,24 @@ class MarketplaceService:
 
     def boot(self) -> None:
         """Apply the schema through the production DDL path, then spawn the API
-        server and wait for ``/healthz``."""
-        self._logs_dir.mkdir(parents=True, exist_ok=True)
-        self._apply_ddl()
-        tai42_mp = self._bin()
-        self._specs = {
-            "mp-api": _ProcSpec(
-                name="mp-api",
-                argv=[tai42_mp, "serve", "--host", self.host, "--port", str(self.port)],
-                log_path=self._logs_dir / "mp-api.log",
-            ),
-        }
-        self._spawn_all()
-        self._wait_ready()
+        server and wait for ``/healthz``. A failed boot, a test timeout's included,
+        keeps the service's report for the test's, before any caller tears it down."""
+        try:
+            self._logs_dir.mkdir(parents=True, exist_ok=True)
+            self._apply_ddl()
+            tai42_mp = self._bin()
+            self._specs = {
+                "mp-api": _ProcSpec(
+                    name="mp-api",
+                    argv=[tai42_mp, "serve", "--host", self.host, "--port", str(self.port)],
+                    log_path=self._logs_dir / "mp-api.log",
+                ),
+            }
+            self._spawn_all()
+            self._wait_ready()
+        except BaseException:
+            diagnostics.record_failed_boot(diagnostics.service_report("marketplace", self.port, self._procs))
+            raise
 
     def _apply_ddl(self) -> None:
         """Run ``tai42-marketplace db migrate`` to completion against the empty DB.
