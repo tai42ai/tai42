@@ -2,18 +2,21 @@
 
 Every connector mutation rides the same ``manifest_writer`` → ConfigService pipeline
 that fans a ``reload_config`` out over the worker bus, so a connect / disconnect /
-oauth-complete on ONE worker converges EVERY worker with NO manual reload. The
-observable is the REAL managed MCP server (``tai42_e2e_fixtures.managed_mcp_server``,
-launched by each fixture provider's sub-service): its ``ping`` tool binds fleet-wide,
-proven by the per-worker probe digest AND by the tool appearing on the served surface.
+oauth-complete on ONE worker converges EVERY worker with NO manual reload. The proof is
+the mutation's own fan-out report: every serve member on the bus census at the time of
+the call has an ``applied`` entry and no entry is anything else. The served surface is
+the caller's read of the change: the REAL managed MCP server
+(``tai42_e2e_fixtures.managed_mcp_server``, launched by each fixture provider's
+sub-service) has its ``ping`` tool served after a connect and not served after a
+disconnect.
 
-* connect a no-auth provider → managed tools visible on ALL workers; disconnect →
-  gone on all workers (the stale-serving regression).
+* connect a no-auth provider → every serve member applies it and the managed tool is
+  served; disconnect → every serve member applies it and the tool is not served.
 * PATCH the two-sub-service ``e2e_noauth_multi`` provider to toggle ONE sub-service
-  off (leaving the other enabled) → just that sub-service's tools gone on all workers;
-  toggle it back on → they return on all workers.
+  off (leaving the other enabled) → every serve member applies it and just that
+  sub-service's tool is not served; toggle it back on → it is served again.
 * OAuth-complete + reconnect via ``e2e_idp`` (whose sub-service rides the same
-  launchable server) → convergence.
+  launchable server) → every serve member applies each completion.
 """
 
 from __future__ import annotations
@@ -29,11 +32,11 @@ from tai42_e2e.stack import TaiStack
 from tai42_e2e_fixtures.managed_mcp_server import PING_ANNOTATIONS, PING_TITLE
 
 from ._fleet import (
+    assert_applied_by,
     assert_fleet_fanout,
     build_fleet_connectors_stack,
     connectors_resource_kwargs,
-    converged_baseline,
-    converged_digest,
+    serve_members,
     wait_present,
 )
 
@@ -45,7 +48,6 @@ pytestmark = [
         "mutable",
         "process",
         "topology:multiworker",
-        "setting:PYTHONHASHSEED=0",
         "setting:managed-mcp-server",
         "setting:manifest:connectors-fixtures",
         "setting:TAI_MCP_MCP_RELOAD_PROBE_TIMEOUT=15",
@@ -76,22 +78,23 @@ def _connectors_stack(fresh_stack: Callable[..., TaiStack], oauth_idp: OAuthIdp)
     return fresh_stack(build_fleet_connectors_stack, resource_kwargs=connectors_resource_kwargs(oauth_idp.base_url))
 
 
-# Each test boots its own stack (120) + the baseline poll (60); each manifest write over REST
-# polls past the reload gate (10) and answers within the HTTP bound (60), then the fleet
-# converges (60) and the tool poll runs (30): connect + disconnect, 2 x (70 + 60 + 30).
-@pytest.mark.timeout(510)
+# A liveness bound (a bound on a hang, not a performance limit): twice the slowest legitimate
+# run, stack boot included, measured on CI (arq, shard 2, 2026-11-06: 26.5s), rounded up to the
+# next 10s.
+@pytest.mark.timeout(60)
 async def test_noauth_connect_disconnect_converges(
     fresh_stack: Callable[..., TaiStack], oauth_idp: OAuthIdp, uniq: Callable[[str], str]
 ) -> None:
-    """Connecting the no-auth ``e2e_noauth_alpha`` provider makes its managed
-    server's tools visible on EVERY worker with no manual reload; disconnecting removes
-    them on every worker (the stale-serving regression). The connector-written mcp
-    entry is present/absent in ``GET /api/manifest`` as the persisted doc says."""
+    """Connecting the no-auth ``e2e_noauth_alpha`` provider is applied by EVERY serve member
+    with no manual reload and its managed server's tool is served; disconnecting is applied by
+    every serve member and the tool is not served (the stale-serving regression). The
+    connector-written mcp entry is served / not served in ``GET /api/manifest`` as the
+    persisted doc says."""
     stack = _connectors_stack(fresh_stack, oauth_idp)
     api = stack.api()
-    baseline = await converged_baseline(stack)
 
     alias = uniq("conn")
+    members = serve_members(stack)
     start = await api.post(
         "/api/connectors/connections/start",
         json={"provider_id": "e2e_noauth_alpha", "alias": alias, "enabled_sub_services": ["default"]},
@@ -99,54 +102,53 @@ async def test_noauth_connect_disconnect_converges(
     )
     connection_id = start["connection_id"]
     entry_title = start["added_manifest_entries"][0]
-    assert_fleet_fanout(start)
+    assert_applied_by(assert_fleet_fanout(start), members)
 
-    connected = await converged_digest(stack, differ_from=baseline)
     assert entry_title in await _manifest_mcp_titles(stack)  # live-vs-persisted projection
     tool = f"{entry_title}_ping"
-    await wait_present(
-        lambda: _serves(stack, tool), deadline=30.0, message=f"managed tool {tool} never served fleet-wide"
-    )
+    await wait_present(lambda: _serves(stack, tool), deadline=30.0, message=f"managed tool {tool} not served")
     # The bound tool is re-served with the display title and hints its server advertises.
     async with stack.mcp() as mcp:
         served = next(listed for listed in await mcp.list_tools() if listed.name == tool)
     assert (served.title, served.annotations) == (PING_TITLE, PING_ANNOTATIONS), served
 
-    # Disconnect → the manifest entry and its tools are gone on every worker.
+    # Disconnect → every serve member drops the manifest entry and its tools.
+    members = serve_members(stack)
     disconnect = await api.delete(f"/api/connectors/connections/{connection_id}", retry_on_reloading=True)
-    assert_fleet_fanout(disconnect)
+    assert_applied_by(assert_fleet_fanout(disconnect), members)
 
-    await converged_digest(stack, differ_from=connected)
     assert entry_title not in await _manifest_mcp_titles(stack)  # live-vs-persisted projection
     await wait_present(
         lambda: _not_serves(stack, tool), deadline=30.0, message=f"managed tool {tool} still served after disconnect"
     )
 
 
-# The fresh stack boot (120) + the baseline poll (60) + the connect (70 + 60 + two tool polls
-# 30 + 30) + each toggle (70 + 60 + 30), twice.
-@pytest.mark.timeout(700)
+# A liveness bound (a bound on a hang, not a performance limit): twice the slowest legitimate
+# run, stack boot included, measured on CI (arq, shard 8, 2026-11-06: 35.7s), rounded up to the
+# next 10s.
+@pytest.mark.timeout(80)
 async def test_sub_service_toggle_converges(
     fresh_stack: Callable[..., TaiStack], oauth_idp: OAuthIdp, uniq: Callable[[str], str]
 ) -> None:
     """Connecting the two-sub-service no-auth ``e2e_noauth_multi`` provider with
-    BOTH sub-services binds each one's managed tools (each under its own manifest-entry
-    prefix) on EVERY worker. A PATCH toggling ONE sub-service off — leaving the other
-    enabled, so the ``min_length=1`` floor holds — removes just that sub-service's tools
-    on every worker; toggling it back on restores them on every worker. Each direction
-    rides the ``manifest_writer`` seam and converges the fleet with no manual reload."""
+    BOTH sub-services is applied by EVERY serve member, and each one's managed tool (each
+    under its own manifest-entry prefix) is served. A PATCH toggling ONE sub-service off —
+    leaving the other enabled, so the ``min_length=1`` floor holds — is applied by every serve
+    member and just that sub-service's tool is not served; toggling it back on is applied by
+    every serve member and the tool is served again. Each direction rides the
+    ``manifest_writer`` seam and converges the fleet with no manual reload."""
     stack = _connectors_stack(fresh_stack, oauth_idp)
     api = stack.api()
-    baseline = await converged_baseline(stack)
 
     alias = uniq("conn")
+    members = serve_members(stack)
     start = await api.post(
         "/api/connectors/connections/start",
         json={"provider_id": "e2e_noauth_multi", "alias": alias, "enabled_sub_services": ["alpha", "beta"]},
         retry_on_reloading=True,
     )
     connection_id = start["connection_id"]
-    assert_fleet_fanout(start)
+    assert_applied_by(assert_fleet_fanout(start), members)
 
     # Each enabled sub-service binds its own manifest entry, titled per sub-service, so
     # each carries a distinct tool prefix over the same managed server.
@@ -156,29 +158,26 @@ async def test_sub_service_toggle_converges(
     alpha_tool = f"{alpha_title}_ping"
     beta_tool = f"{beta_title}_ping"
 
-    connected = await converged_digest(stack, differ_from=baseline)
     titles = await _manifest_mcp_titles(stack)
     assert alpha_title in titles  # live-vs-persisted projection
     assert beta_title in titles  # live-vs-persisted projection
     await wait_present(
-        lambda: _serves(stack, alpha_tool), deadline=30.0, message=f"managed tool {alpha_tool} never served fleet-wide"
+        lambda: _serves(stack, alpha_tool), deadline=30.0, message=f"managed tool {alpha_tool} not served"
     )
-    await wait_present(
-        lambda: _serves(stack, beta_tool), deadline=30.0, message=f"managed tool {beta_tool} never served fleet-wide"
-    )
+    await wait_present(lambda: _serves(stack, beta_tool), deadline=30.0, message=f"managed tool {beta_tool} not served")
 
-    # Toggle beta OFF (alpha stays enabled). Every worker converges away from the
-    # both-on digest, beta's tool gone fleet-wide, alpha's still served.
+    # Toggle beta OFF (alpha stays enabled). Every serve member applies it: beta's tool is
+    # not served, alpha's still is.
+    members = serve_members(stack)
     off = await api.request(
         "PATCH",
         f"/api/connectors/connections/{connection_id}/sub-services",
         json={"enabled_sub_services": ["alpha"]},
         retry_on_reloading=True,
     )
-    assert_fleet_fanout(off)
+    assert_applied_by(assert_fleet_fanout(off), members)
     assert off["removed_manifest_entries"] == [beta_title]
 
-    toggled_off = await converged_digest(stack, differ_from=connected)
     titles = await _manifest_mcp_titles(stack)
     assert beta_title not in titles  # live-vs-persisted projection
     assert alpha_title in titles  # live-vs-persisted projection
@@ -189,17 +188,17 @@ async def test_sub_service_toggle_converges(
     )
     assert await _serves(stack, alpha_tool), f"managed tool {alpha_tool} not served after toggle-off"
 
-    # Toggle beta back ON. Every worker converges again, beta's tool restored fleet-wide.
+    # Toggle beta back ON. Every serve member applies it and beta's tool is served again.
+    members = serve_members(stack)
     on = await api.request(
         "PATCH",
         f"/api/connectors/connections/{connection_id}/sub-services",
         json={"enabled_sub_services": ["alpha", "beta"]},
         retry_on_reloading=True,
     )
-    assert_fleet_fanout(on)
+    assert_applied_by(assert_fleet_fanout(on), members)
     assert on["added_manifest_entries"] == [beta_title]
 
-    await converged_digest(stack, differ_from=toggled_off)
     titles = await _manifest_mcp_titles(stack)
     assert beta_title in titles  # live-vs-persisted projection
     assert alpha_title in titles  # live-vs-persisted projection
@@ -211,20 +210,20 @@ async def test_sub_service_toggle_converges(
     assert await _serves(stack, alpha_tool), f"managed tool {alpha_tool} not served after toggle-on"
 
 
-# The fresh stack boot (120) + the baseline poll (60) + the start and completion writes (70 +
-# 10 authorize + 70) + the convergence (60) + the tool poll (30) + the reconnect and its
-# completion (70 + 10 + 70) + the convergence (60).
-@pytest.mark.timeout(640)
+# A liveness bound (a bound on a hang, not a performance limit): twice the slowest legitimate
+# run, stack boot included, measured on CI (arq, shard 7, 2026-11-06: 21.2s), rounded up to the
+# next 10s.
+@pytest.mark.timeout(50)
 @pytest.mark.needs("helper:idp")
 async def test_oauth_complete_and_reconnect_converges(
     fresh_stack: Callable[..., TaiStack], oauth_idp: OAuthIdp, uniq: Callable[[str], str]
 ) -> None:
-    """An OAuth connect completed against the stub IdP binds ``e2e_idp``'s managed
-    server fleet-wide; a reconnect (re-running the authorize flow) re-converges it. Both
-    the oauth-complete and the reconnect ride the ``manifest_writer`` seam."""
+    """An OAuth connect completed against the stub IdP is applied by every serve member and
+    ``e2e_idp``'s managed tool is served. A reconnect re-runs the authorize flow with the same
+    sub-services: its completion succeeds and the tool is still served, with no fleet
+    mutation, because the manifest entries it would write are already persisted."""
     stack = _connectors_stack(fresh_stack, oauth_idp)
     api = stack.api()
-    baseline = await converged_baseline(stack)
 
     alias = uniq("conn")
     start = await api.post(
@@ -233,13 +232,14 @@ async def test_oauth_complete_and_reconnect_converges(
         retry_on_reloading=True,
     )
     code, state = await _authorize(start["authorize_url"])
+    members = serve_members(stack)
     completed = await api.post(
         "/api/connectors/oauth/complete", json={"code": code, "state": state}, retry_on_reloading=True
     )
     assert completed["kind"] == "success", f"oauth completion failed: {completed}"
     connection_id = completed["connection_id"]
+    assert_applied_by(assert_fleet_fanout(completed), members)
 
-    await converged_digest(stack, differ_from=baseline)
     entry_title = f"e2e_idp_default_{alias}"
     assert entry_title in await _manifest_mcp_titles(stack)  # live-vs-persisted projection
     tool = f"{entry_title}_ping"
@@ -247,7 +247,7 @@ async def test_oauth_complete_and_reconnect_converges(
         lambda: _serves(stack, tool), deadline=30.0, message=f"managed tool {tool} never served after oauth connect"
     )
 
-    # Reconnect: re-run the authorize flow and complete again — the fleet re-converges.
+    # Reconnect: re-run the authorize flow and complete again; the manifest is unchanged.
     reconnect = await api.post(
         f"/api/connectors/connections/{connection_id}/reconnect",
         json={"enabled_sub_services": ["default"]},
@@ -258,9 +258,6 @@ async def test_oauth_complete_and_reconnect_converges(
         "/api/connectors/oauth/complete", json={"code": code2, "state": state2}, retry_on_reloading=True
     )
     assert completed2["kind"] == "success", f"oauth reconnect completion failed: {completed2}"
-
-    # Every worker converges on one digest, still serving the managed tool.
-    await converged_digest(stack)
     assert await _serves(stack, tool), f"managed tool {tool} not served after reconnect"
 
 

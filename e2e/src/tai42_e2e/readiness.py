@@ -1,23 +1,20 @@
-"""Readiness waits for the boot engine: HTTP health, the worker-bus census, and
-draining the boot-time self-resync reload gate fleet-wide, so a test acting the
-instant the stack fixture returns never races an incomplete fleet or a held gate."""
+"""Readiness waits for the boot engine: HTTP health and the worker-bus census, read until every
+expected serve worker's presence row reads ``ready`` and every backend process has a presence row
+under its own pid, so a test acting the instant the stack fixture returns never races an incomplete
+fleet or a serve worker still in its boot gate."""
 
 from __future__ import annotations
 
-import asyncio
-import contextlib
 from typing import TYPE_CHECKING, Any
 
 import httpx
 
-from tai42_e2e.binaries import _probe_tolerating_reloading
 from tai42_e2e.child_env import needs_bus
-from tai42_e2e.waiting import ThreadForCaller, WaitTimeoutError, wait_for, wait_for_async
+from tai42_e2e.waiting import wait_for
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Collection, Coroutine, Mapping, Sequence
+    from collections.abc import Collection, Mapping, Sequence
 
-    from tai42_e2e.procs import ProcessHandle
     from tai42_e2e.stack import TaiStack
     from tai42_e2e.variants import BusWorker
 
@@ -79,16 +76,19 @@ def assert_ready_names_dead_perpetual_task(
 
 
 def wait_fleet_converged(stack: TaiStack, deadline: float) -> None:
-    """Block until the whole expected fleet is on the bus AND every serve worker
-    has left its boot-time self-resync reload gate, so a test acting the instant
-    the stack fixture returns never races an incomplete fleet or a still-held gate.
+    """Block until the whole expected fleet is on the bus with every serve worker's
+    presence row reading ``ready`` (:func:`wait_full_census`).
+
+    A worker writes its row ``resyncing`` before its on-ready self-resync and ``ready``
+    only once that resync returns, and every hold of its reload gate its own boot makes sits
+    inside that resync, so a ``ready`` row is a worker that has left its boot gate. Each worker
+    publishes its own row, so the fact is read per worker, never through the shared port.
 
     A busless single-worker stack joins no bus — no presence keys, no on-ready
     self-resync — so HTTP health is its full readiness and this returns at once."""
     if not needs_bus(stack.config):
         return
     wait_full_census(stack, deadline)
-    drain_boot_gate(stack, deadline)
 
 
 def expected_serve_workers(stack: TaiStack) -> int:
@@ -127,145 +127,54 @@ def expected_backend_processes(stack: TaiStack) -> list[str]:
 
 
 def expected_fleet_present(stack: TaiStack, workers: Sequence[BusWorker]) -> bool:
-    """Whether the census rows ``workers`` hold the FULL expected fleet.
+    """Whether the census rows ``workers`` hold the FULL expected fleet (:func:`_fleet_shortfall`
+    finds nothing missing).
 
-    Every serve worker the topology spawns, plus every backend process by its own pid, so a
-    fleet with a process still respawning (it has no row) is not present however ready the
-    rows that are.
+    Every serve worker the topology spawns with its row reading ``ready``, plus every backend
+    process by its own pid, so a fleet with a process still respawning (it has no row) or a
+    serve worker still resyncing is not present however ready the other rows are.
     """
-    if sum(1 for w in workers if w.kind == "serve") < expected_serve_workers(stack):
-        return False
+    return not _fleet_shortfall(stack, workers)
+
+
+def _fleet_shortfall(stack: TaiStack, workers: Sequence[BusWorker]) -> list[str]:
+    """What the census rows ``workers`` lack of the full expected fleet, one line per gap, naming
+    each serve row that is not ``ready`` by its name, pid and state and each backend process
+    with no row by its name and pid; empty when the full fleet is present."""
+    gaps: list[str] = []
+    serve = sorted((w for w in workers if w.kind == "serve"), key=lambda w: w.name)
+    want = expected_serve_workers(stack)
+    if sum(1 for w in serve if w.state == "ready") < want:
+        gaps.extend(f"serve worker {w.name} (pid {w.pid}) is {w.state}" for w in serve if w.state != "ready")
+        if len(serve) < want:
+            gaps.append(f"{want - len(serve)} of {want} serve workers have no presence row")
     backend_pids = {w.pid for w in workers if w.kind == "backend"}
-    return all(stack.process(name).pid in backend_pids for name in expected_backend_processes(stack))
+    for name in expected_backend_processes(stack):
+        pid = stack.process(name).pid
+        if pid not in backend_pids:
+            gaps.append(f"backend process {name} (pid {pid}) has no presence row")
+    return gaps
 
 
 def wait_full_census(stack: TaiStack, deadline: float) -> None:
     """Poll the bus census until the FULL expected fleet is present (:func:`expected_fleet_present`),
-    so readiness never returns on a half-formed fleet."""
+    so readiness never returns on a half-formed fleet. A timeout names every worker that is
+    missing or not ready, as the last census read showed it."""
+    gaps: list[str] = []
 
     def probe() -> bool:
         early = early_exit_detail(stack)
         if early is not None:
             raise RuntimeError(f"fleet census: {early}")
-        return expected_fleet_present(stack, stack.census())
+        gaps[:] = _fleet_shortfall(stack, stack.census())
+        return not gaps
 
-    want = " + ".join([f"{expected_serve_workers(stack)} serve workers", *expected_backend_processes(stack)])
-    wait_for(probe, deadline=deadline, message=f"the worker-bus census never reached the full fleet ({want})")
-
-
-def drain_boot_gate(stack: TaiStack, deadline: float) -> None:
-    """Drive a gated probe on every app port until it answers non-``reloading``,
-    so the boot-time self-resync gate has cleared fleet-wide before the fixture
-    returns. A single-port MULTIWORKER master spreads stateless requests across its
-    workers, so the probe runs until every worker pid has answered clear; a
-    REPLICAS port owns one worker, so one clear answer per port suffices."""
-    run_readiness_coro(drain_gate_coro(stack, stack.app_ports, deadline))
-
-
-async def drain_gate_coro(stack: TaiStack, app_ports: list[int], deadline: float) -> None:
-    # A profile that carries no ``e2e_worker_info`` probe never fires an immediate
-    # gated tool call in its tests, so its gate needs no draining here — the
-    # full-census wait is that profile's convergence.
-    names: list[str] = []
-
-    async def list_tools() -> list[str]:
-        async with stack.mcp(auth=stack.auth_token) as client:
-            return await client.tool_names()
-
-    async def listed() -> bool:
-        got = await _probe_tolerating_reloading(
-            lambda: _unless_its_process_exits(stack, stack.app_ports[0], list_tools)
-        )
-        if got is None:
-            return False
-        names.extend(got)
-        return True
-
-    await wait_for_async(listed, deadline=deadline, message="the serve fleet never answered its tool list")
-    if "e2e_worker_info" not in names:
-        return
-    # Positive confirmation the boot self-resync gate has cleared: each serve worker
-    # answers a real ``e2e_worker_info`` call non-``reloading`` before the fixture
-    # returns, so a test firing a gated request the instant the stack is ready never
-    # races the gate.
-    workers = serve_workers_on_port(stack)
-    # The budget must model the stack: N workers each import the whole platform
-    # and hold their own ~2s self-resync gate, and on a contended CI runner the
-    # flat boot budget can elapse before even ONE of a wide pool answers. Scale
-    # the drain per worker; a healthy narrow stack still clears in a fraction of it.
-    for port in app_ports:
-        await stack.wait_workers(workers, port=port, deadline=deadline * max(1, workers))
-
-
-async def _unless_its_process_exits[T](stack: TaiStack, port: int, call: Callable[[], Awaitable[T]]) -> T | None:
-    """Await one probe ``call`` against the process serving ``port``, or ``None`` when that
-    process is not up to answer it.
-
-    A supervised worker can be recycled while the fleet boots. A server that stops
-    mid-request never answers the request it held, and the MCP client would wait out its
-    whole read bound, so the call is cancelled the moment its process exits; a respawned
-    process is polled only once its ``/health`` answers. A graceful stop closes the
-    listener before the process exits, so a call that fails while its process still runs
-    counts as the process going away when it stops answering ``/health``
-    (:func:`_going_away`); a call that fails while its process keeps answering raises.
-    Either way the enclosing wait polls again. A process that exited and stays down raises
-    its early-exit detail."""
-    handle = stack.process_on_port(port)
-    if not await _health_ok(stack, port):
-        _raise_on_early_exit(stack, port)
-        return None
-    task = asyncio.ensure_future(call())
-    while True:
-        done, _ = await asyncio.wait({task}, timeout=0.2)
-        if done:
-            if task.exception() is not None and await _going_away(stack, port, handle):
-                # The call failed because its process went away under it.
-                _raise_on_early_exit(stack, port)
-                return None
-            return task.result()
-        if not handle.is_running():
-            task.cancel()
-            await asyncio.wait({task})
-            _raise_on_early_exit(stack, port)
-            return None
-
-
-# How long a probe call that failed waits for its still-running process to show it is going
-# away. A server stopping gracefully (uvicorn on SIGTERM) closes its listener on its main
-# loop's next tick, a tenth of a second, and drains before the process exits; the window
-# covers that tick many times over.
-_GOING_AWAY_WINDOW = 1.0
-
-
-async def _going_away(stack: TaiStack, port: int, handle: ProcessHandle) -> bool:
-    """Whether the process ``handle`` a probe call failed against is going away.
-
-    It is when it has exited or, within :data:`_GOING_AWAY_WINDOW`, its ``/health`` on
-    ``port`` stops answering; a process that keeps answering for the whole window is up,
-    so the call's failure is its own."""
-
-    async def gone() -> bool:
-        return not handle.is_running() or not await _health_ok(stack, port)
-
-    try:
-        await wait_for_async(gone, deadline=_GOING_AWAY_WINDOW, message=f"the process on port {port} stays up")
-    except WaitTimeoutError:
-        return False
-    return True
-
-
-async def _health_ok(stack: TaiStack, port: int) -> bool:
-    try:
-        async with httpx.AsyncClient(timeout=2.0) as client:
-            return (await client.get(f"{stack.base_url(port)}/health")).status_code == 200
-    except httpx.HTTPError:
-        return False
-
-
-def _raise_on_early_exit(stack: TaiStack, port: int) -> None:
-    early = early_exit_detail(stack)
-    if early is not None:
-        raise RuntimeError(f"probe on port {port}: {early}")
+    want = " + ".join([f"{expected_serve_workers(stack)} ready serve workers", *expected_backend_processes(stack)])
+    wait_for(
+        probe,
+        deadline=deadline,
+        message=lambda: f"the worker-bus census never reached the full fleet ({want}): {'; '.join(gaps)}",
+    )
 
 
 def early_exit_detail(stack: TaiStack) -> str | None:
@@ -336,75 +245,3 @@ def wait_fresh_lives(
     else:
         want = f"{count} fresh ready {kind}-kind lives" if base else f"{count} ready {kind}-kind workers"
     wait_for(probe, deadline=deadline, message=f"{want} never appeared in the worker-bus census")
-
-
-def run_readiness_coro(coro: Coroutine[Any, Any, None]) -> None:
-    """Run a readiness coroutine to completion from synchronous boot/restart code.
-    Boot runs outside any event loop, but ``restart`` is called from within an
-    async test's running loop, so the coroutine is driven on a dedicated thread
-    with its own loop — correct whether or not the calling thread already owns one,
-    and whatever ends it, ``SystemExit`` and cancellation included, is re-raised on
-    the calling thread as it is.
-
-    Whatever cuts the caller cancels the coroutine, so a test's timeout also ends the
-    polling, and does not wait for it: a timeout that already fired could not cut a
-    coroutine that ignores its cancel. The thread is a daemon, so such a coroutine
-    does not keep the process alive either."""
-    loop = asyncio.new_event_loop()
-    task = loop.create_task(coro)
-    failure: list[BaseException] = []
-
-    def drive() -> None:
-        try:
-            with asyncio.Runner(loop_factory=lambda: loop):
-                loop.run_until_complete(task)
-        except BaseException as exc:
-            failure.append(exc)
-
-    thread = ThreadForCaller(target=drive, name="tai-e2e-readiness", daemon=True)
-    thread.start()
-    try:
-        thread.join()
-    except BaseException:
-        # A closed loop has nothing left to cancel, and is the only ``RuntimeError`` here.
-        with contextlib.suppress(RuntimeError):
-            loop.call_soon_threadsafe(task.cancel)
-        raise
-    if failure:
-        raise failure[0]
-
-
-async def wait_workers(stack: TaiStack, n: int, *, port: int | None = None, deadline: float = 10.0) -> dict[int, str]:
-    """Poll the ``e2e_worker_info`` probe until ``n`` distinct worker pids have
-    answered, returning each pid mapped to its reported state digest. Convergence
-    assertions compare those digests: every distinct pid reporting the same digest,
-    differing from the pre-mutation baseline, is fleet-wide convergence. ``port``
-    selects which app port to probe (default the primary). The stack's own auth token
-    authenticates the probe, so the drain reaches the fenced surface."""
-    seen: dict[int, str] = {}
-
-    async def worker_info() -> dict[str, Any]:
-        async with stack.mcp(port, auth=stack.auth_token) as client:
-            # A worker fresh in the census may still hold its boot-time reload gate
-            # (the ~2s self-resync), so poll past the retriable ``reloading`` rejection.
-            result = await client.call_tool("e2e_worker_info", retry_on_reloading=True)
-        data = result.data if result.data is not None else result.structured_content
-        if not isinstance(data, dict) or "pid" not in data or "state_digest" not in data:
-            raise RuntimeError(f"e2e_worker_info returned an unexpected shape: {data!r}")
-        return data
-
-    async def probe() -> bool:
-        # The MCP initialize handshake itself is rejected while the worker holds its
-        # self-resync gate (the client raises before a session exists, so the tool
-        # call's own ``retry_on_reloading`` cannot cover it); treat that envelope as
-        # "not ready yet" and keep polling.
-        data = await _probe_tolerating_reloading(
-            lambda: _unless_its_process_exits(stack, port if port is not None else stack.app_ports[0], worker_info)
-        )
-        if data is None:
-            return False
-        seen[int(data["pid"])] = str(data["state_digest"])
-        return len(seen) >= n
-
-    await wait_for_async(probe, deadline=deadline, message=lambda: f"only saw {sorted(seen)} of {n} workers")
-    return seen

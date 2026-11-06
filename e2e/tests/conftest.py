@@ -430,8 +430,8 @@ def bridge_stack(
     except BaseException:
         stack.teardown()
         raise
-    # Set the token BEFORE boot: this REPLICAS stack drains the boot reload gate through the
-    # MCP probe, which the access-controlled stack fences, so the probe must carry the root token.
+    # The access-controlled stack fences its MCP and API surfaces, so the stack's own clients
+    # (``stack.mcp`` / ``stack.api`` with the stack token) carry the root token.
     stack.auth_token = root_token
     with stack, diagnostics.track(stack):
         yield stack, root_token
@@ -465,8 +465,8 @@ def _working_signal_profile(
     except BaseException:
         stack.teardown()
         raise
-    # Set the token BEFORE boot: this REPLICAS stack drains the boot reload gate through the
-    # MCP probe, which the access-controlled stack fences, so the probe must carry the root token.
+    # The access-controlled stack fences its MCP and API surfaces, so the stack's own clients
+    # (``stack.mcp`` / ``stack.api`` with the stack token) carry the root token.
     stack.auth_token = root_token
     with stack, diagnostics.track(stack):
         yield stack, root_token
@@ -541,8 +541,8 @@ def media_bridge_stack(
     except BaseException:
         stack.teardown()
         raise
-    # Set the token BEFORE boot: this REPLICAS stack drains the boot reload gate through the
-    # MCP probe, which the access-controlled stack fences, so the probe must carry the root token.
+    # The access-controlled stack fences its MCP and API surfaces, so the stack's own clients
+    # (``stack.mcp`` / ``stack.api`` with the stack token) carry the root token.
     stack.auth_token = root_token
     with stack, diagnostics.track(stack):
         yield stack, root_token
@@ -612,8 +612,8 @@ def _web_media_profile(
     except BaseException:
         stack.teardown()
         raise
-    # Set the token BEFORE boot: this REPLICAS stack drains the boot reload gate through the
-    # MCP probe, which the access-controlled stack fences, so the probe must carry the root token.
+    # The access-controlled stack fences its MCP and API surfaces, so the stack's own clients
+    # (``stack.mcp`` / ``stack.api`` with the stack token) carry the root token.
     stack.auth_token = root_token
     with stack, diagnostics.track(stack):
         yield stack, root_token
@@ -706,8 +706,8 @@ def stripe_stack(
     except BaseException:
         stack.teardown()
         raise
-    # Set the token BEFORE boot: this REPLICAS stack drains the boot reload gate through the
-    # MCP probe, which the access-controlled stack fences, so the probe must carry the root token.
+    # The access-controlled stack fences its MCP and API surfaces, so the stack's own clients
+    # (``stack.mcp`` / ``stack.api`` with the stack token) carry the root token.
     stack.auth_token = root_token
     with stack, diagnostics.track(stack):
         yield stack, root_token
@@ -819,8 +819,8 @@ def agent_route_park_stack(
     except BaseException:
         stack.teardown()
         raise
-    # Set the token BEFORE boot: this REPLICAS stack drains the boot reload gate through the
-    # MCP probe, which the access-controlled stack fences, so the probe must carry the root token.
+    # The access-controlled stack fences its MCP and API surfaces, so the stack's own clients
+    # (``stack.mcp`` / ``stack.api`` with the stack token) carry the root token.
     stack.auth_token = root_token
     with stack, diagnostics.track(stack):
         yield stack, root_token

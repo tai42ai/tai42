@@ -126,8 +126,7 @@ def wait_after_restart(
     replaced: Collection[str] | None = None,
 ) -> None:
     """Wait until the restarted process ``name`` serves again: its health route (and, on a bus
-    stack, its fresh census lives and its drained boot gate), the metrics route, or the
-    backend's fresh census life."""
+    stack, its fresh READY census lives), the metrics route, or the backend's fresh census life."""
     deadline = stack.infra.settings.boot_timeout
     if name.startswith("serve") or name == "embed":
         idx = 0 if name in ("serve", "serve-a", "embed") else 1
@@ -135,12 +134,11 @@ def wait_after_restart(
         readiness.wait_http_ok(stack, f"{stack.base_url(port)}/health", deadline, "app health")
         if child_env.needs_bus(stack.config):
             # The respawned process answers /health and MCP requests before its workers
-            # have claimed their bus slots; hold until every fresh worker is on the census,
-            # then drain its boot self-resync gate (where the profile carries the probe) so
-            # a test acting right after the restart races neither.
+            # have claimed their bus slots and left their boot self-resync gate; a fresh
+            # life's presence row reads ``ready`` only once both hold, so a test acting
+            # right after the restart races neither.
             count = 1 if name == "embed" else readiness.serve_workers_on_port(stack)
             stack.wait_fresh_lives("serve", deadline, before=before, replaced=replaced, count=count)
-            readiness.run_readiness_coro(readiness.drain_gate_coro(stack, [port], deadline))
     elif name == "metrics":
         assert stack.metrics_port is not None
         readiness.wait_http_ok(stack, f"http://{stack.host}:{stack.metrics_port}/metrics", deadline, "metrics")
