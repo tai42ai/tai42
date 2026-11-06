@@ -131,12 +131,14 @@ def expected_fleet_present(stack: TaiStack, workers: Sequence[BusWorker]) -> boo
 
     Every serve worker the topology spawns, plus every backend process by its own pid, so a
     fleet with a process still respawning (it has no row) is not present however ready the
-    rows that are.
+    rows that are. The pids are read under the supervisor's lock, so a respawn in progress is
+    read once it has started its process.
     """
     if sum(1 for w in workers if w.kind == "serve") < expected_serve_workers(stack):
         return False
     backend_pids = {w.pid for w in workers if w.kind == "backend"}
-    return all(stack.process(name).pid in backend_pids for name in expected_backend_processes(stack))
+    with stack.supervisor.lock:
+        return all(stack.process(name).pid in backend_pids for name in expected_backend_processes(stack))
 
 
 def wait_full_census(stack: TaiStack, deadline: float) -> None:

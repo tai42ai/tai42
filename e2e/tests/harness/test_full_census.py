@@ -8,6 +8,7 @@ a controllable census and stand-in processes, no infra."""
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 from types import SimpleNamespace
 
@@ -108,6 +109,42 @@ def test_the_fleet_is_not_present_while_a_backend_process_is_missing_from_the_ce
     # A backend being respawned has no row; the rows that are present may all be ready.
     rows = [_row("serve", _SERVE_PID), _row("backend", _QUEUE_WORKER_PID)]
     assert not expected_fleet_present(_stack(rows), rows)
+
+
+class _Unstarted:
+    """A process the supervisor has published under its name but not started yet."""
+
+    name = "backend-queue-b"
+
+    @property
+    def pid(self) -> int:
+        raise RuntimeError(f"process {self.name!r} not started")
+
+
+def test_the_fleet_is_read_after_a_respawn_in_progress_has_started_its_process() -> None:
+    # The supervisor publishes a respawned handle under the process's name, then starts it,
+    # all under its lock: the presence check reads the pids under that lock, so it waits for
+    # the started process and never reads the handle in between.
+    census = [_row("serve", _SERVE_PID), _row("backend", _BACKEND_PID), _row("backend", _QUEUE_WORKER_PID + 1)]
+    stack = _stack(census)
+    result: list[bool | BaseException] = []
+
+    def read() -> None:
+        try:
+            result.append(expected_fleet_present(stack, census))
+        except RuntimeError as error:
+            result.append(error)
+
+    reader = threading.Thread(target=read)
+    with stack.supervisor.lock:
+        stack.procs["backend-queue-b"] = _Unstarted()  # type: ignore[assignment]
+        reader.start()
+        reader.join(timeout=0.5)
+        assert reader.is_alive(), f"the check read the fleet mid-respawn: {result}"
+        stack.procs["backend-queue-b"] = _Running("backend-queue-b", _QUEUE_WORKER_PID + 1)  # type: ignore[assignment]
+    reader.join(timeout=5)
+
+    assert result == [True]
 
 
 def test_the_backend_processes_include_a_worker_per_green_pool() -> None:
