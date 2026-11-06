@@ -80,9 +80,8 @@ def boot_stack(
     except BaseException:
         stack.teardown()
         raise
-    # Set the token BEFORE boot: readiness drains the boot reload gate through the
-    # MCP probe, which an access-controlled stack fences, so the probe must carry the
-    # seeded root token that boot's own readiness runs under.
+    # An access-controlled stack fences its MCP and API surfaces, so the stack's own
+    # clients (``stack.mcp`` / ``stack.api`` with the stack token) carry the seeded root token.
     stack.auth_token = auth_token
     with stack, diagnostics.track(stack):
         yield stack

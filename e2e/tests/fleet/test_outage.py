@@ -17,14 +17,14 @@ redis or a silent worker) is surfaced honestly and healed.
   separate test asserts that a config mutation during the outage returns a 200
   carrying the honest bus-unreachable fanout (connection error, no worker list),
   persists and local-reloads, and — once the relay is restored past the claim TTL —
-  re-mints each worker's life (SAME names, ADVANCED generations) and reconverges the
-  fleet without a restart.
+  re-mints each worker's life (SAME names, ADVANCED generations) without a restart, after
+  which a fleet reload is applied by every serve member.
 * A SILENT worker (one REPLICAS master SIGSTOPped, its presence key kept alive by
   a long TTL): a mutation's report NAMES that worker ``missing`` (not ``departed``),
   and, its state unknown, its recycle roll asks it once ready and, still silent, restarts
   it and stops at it while it stays silent; after SIGCONT the resumed worker runs the
-  queued recycle, the supervisor brings it back, and the fleet converges to the final
-  persisted state.
+  queued recycle, the supervisor brings it back, and a fleet reload is applied by every
+  serve member with nobody restarted.
 * A STALE worker (one REPLICAS master SIGSTOPped under a 30s TTL): its presence row
   decays past the server-computed freshness bound while still present, so the fleet
   listing flags it ``stale`` and a broadcast reports it ``outcome=stale``.
@@ -50,13 +50,13 @@ from tai42_e2e.variants import bus_census
 
 from ._fleet import (
     FLEET_WORKERS,
+    assert_applied_by,
     assert_fleet_fanout,
     build_fleet_connectors_stack,
     build_fleet_stack,
     connectors_resource_kwargs,
-    converged_baseline,
-    converged_digest,
     manifest_file,
+    serve_members,
 )
 
 if TYPE_CHECKING:
@@ -73,15 +73,16 @@ _UNREACHABLE = {"url": "http://127.0.0.1:1/mcp"}
 
 # ---- two concurrent writers both persist ---------------------------------
 
-# Liveness bounds (a bound on a hang, not a performance limit), each twice the slowest
-# legitimate completion measured with the race under host load 100-330 on 20 cores:
-# one connect request answered in at most 145.0s (server-side: the persist plus the reload
-# and its MCP probes), and the whole test, stack boot included, finished in at most 413.3s.
+# A liveness bound (a bound on a hang, not a performance limit): twice the slowest legitimate
+# completion of one connect request measured with the race under host load 100-330 on 20 cores
+# (145.0s server-side: the persist plus the reload and its MCP probes).
 _CONNECT_READ_TIMEOUT = 290.0
-_CONCURRENT_CONNECTS_TIMEOUT = 830
 
 
-@pytest.mark.timeout(_CONCURRENT_CONNECTS_TIMEOUT)
+# A liveness bound (a bound on a hang, not a performance limit): twice the slowest legitimate
+# run, stack boot included, measured on CI (arq, shard 4, 2026-11-06: 24.1s), rounded up to the
+# next 10s.
+@pytest.mark.timeout(50)
 @pytest.mark.needs(
     "kind:connectors",
     "probe-tools",
@@ -89,7 +90,6 @@ _CONCURRENT_CONNECTS_TIMEOUT = 830
     "process",
     "files",
     "topology:multiworker",
-    "setting:PYTHONHASHSEED=0",
     "setting:managed-mcp-server",
     "setting:manifest:connectors-fixtures",
 )
@@ -103,7 +103,6 @@ async def test_concurrent_connects_both_persist(
     and the assertion is the FINAL persisted state, not first-attempt success."""
     stack = fresh_stack(build_fleet_connectors_stack, resource_kwargs=connectors_resource_kwargs(oauth_idp.base_url))
     api = stack.api()
-    await converged_baseline(stack)
 
     async def connect(provider_id: str, alias: str) -> dict:
         return await api.post(
@@ -237,18 +236,16 @@ def _real_bus_url(infra: Infra, stack: TaiStack) -> str:
     return f"redis://{host}:{port}/{stack.resources.redis_idx}"
 
 
-# A liveness bound: twice the slowest legitimate run, stack boot included, measured under host
-# load 260-330 on 20 cores (419.5s: the relayed fleet's boot and convergence, the sever, the
-# feature-store call, the wait for every presence key to expire, and the stack's teardown),
-# rounded up to the next 10s.
-@pytest.mark.timeout(840)
+# A liveness bound (a bound on a hang, not a performance limit): twice the slowest legitimate
+# run, stack boot included, measured on CI (arq, shard 4, 2026-11-06: 19.2s), rounded up to the
+# next 10s.
+@pytest.mark.timeout(40)
 @pytest.mark.needs(
     "probe-tools",
     "process",
     "store:redis",
     "topology:multiworker",
     "helper:tcp-relay",
-    "setting:PYTHONHASHSEED=0",
     "setting:TAI_BUS_HEARTBEAT_TTL=3",
     "setting:TAI_BUS_REDIS_URL=relay",
 )
@@ -265,7 +262,6 @@ async def test_bus_outage_isolates_feature_stores_and_expires_presence(
     stack, bus_relay = relayed_bus_fleet
     api = stack.api()
 
-    await converged_baseline(stack)
     pre_names = {worker.name for worker in stack.census()}
     assert len(pre_names) >= FLEET_WORKERS, f"the fleet did not fully register before the outage: {pre_names}"
 
@@ -293,11 +289,10 @@ async def test_bus_outage_isolates_feature_stores_and_expires_presence(
     await wait_for_async(keys_expired, deadline=20.0, message="bus presence keys never expired during the outage")
 
 
-# A liveness bound: twice the slowest legitimate run, stack boot included, measured under host
-# load up to ~315 on 20 cores (566.3s: the relayed fleet's boot and convergence, the mutation
-# during the outage, the restore, the re-mint wait and the fleet reload), rounded up to the
+# A liveness bound (a bound on a hang, not a performance limit): twice the slowest legitimate
+# run, stack boot included, measured on CI (arq, shard 1, 2026-11-06: 25.9s), rounded up to the
 # next 10s.
-@pytest.mark.timeout(1140)
+@pytest.mark.timeout(60)
 @pytest.mark.needs(
     "probe-tools",
     "mutable",
@@ -306,7 +301,6 @@ async def test_bus_outage_isolates_feature_stores_and_expires_presence(
     "store:redis",
     "topology:multiworker",
     "helper:tcp-relay",
-    "setting:PYTHONHASHSEED=0",
     "setting:TAI_BUS_HEARTBEAT_TTL=3",
     "setting:TAI_BUS_REDIS_URL=relay",
 )
@@ -316,13 +310,13 @@ async def test_mutation_during_outage_reports_and_fleet_recovers(
     """With the bus severed a config mutation PERSISTS + local-reloads and returns a 200
     whose fanout is the honest bus-unreachable failure (connection error, NO worker list);
     holding the sever past the claim TTL lapses every claim, so restoring the relay re-mints
-    each worker's life — the SAME slot names re-appear at ADVANCED generations — and
-    reconverges the fleet without a restart, with a fleet reload as belt-and-braces."""
+    each worker's life — the SAME slot names re-appear at ADVANCED generations — without a
+    restart, and a fleet reload is then applied by every re-minted serve member (its fan-out
+    report)."""
     stack, bus_relay = relayed_bus_fleet
     api = stack.api()
 
-    baseline = await converged_baseline(stack)
-    pre_lives = {worker.name: worker.generation for worker in stack.census()}
+    pre_lives = {worker.name: worker.generation for worker in stack.census() if worker.kind == "serve"}
     bus_relay.sever()
 
     # A 200 (so the local persist + reload committed — a failed local reload would raise)
@@ -357,19 +351,17 @@ async def test_mutation_during_outage_reports_and_fleet_recovers(
 
     # Restore the bus — recovery WITHOUT a restart. Each lapsed claim re-mints a NEW life:
     # the SAME slot names re-appear (the fleet size is unchanged, so the lowest-free claims
-    # land on the same names) at ADVANCED generations (a fresh claim INCRs the counter).
+    # land on the same names) at ADVANCED generations (a fresh claim INCRs the counter). A
+    # re-minted life resyncs before its row reads ``ready``, so the wait is for READY lives.
     bus_relay.restore()
     wait_relay_ready(bus_relay)
+    stack.wait_generation_bump("serve", pre_lives)
+    members = serve_members(stack)
+    assert members == sorted(pre_lives), f"the re-minted fleet is not the pre-outage fleet: {members} != {pre_lives}"
 
-    async def relived() -> bool:
-        workers = (await api.get("/api/fleet/workers", retry_on_reloading=True))["workers"]
-        live = {worker["name"]: worker["generation"] for worker in workers}
-        return set(live) == set(pre_lives) and all(live[name] > pre_lives[name] for name in pre_lives)
-
-    await wait_for_async(relived, deadline=30.0, message="the fleet never re-minted its lives after bus restore")
-    await converged_digest(stack, differ_from=baseline)
-    # Belt-and-braces recovery path.
-    await api.post("/api/fleet/reload-config", json={"targets": None}, retry_on_reloading=True)
+    # The restored bus carries fleet ops again: every re-minted serve member applies a reload.
+    report = await api.post("/api/fleet/reload-config", json={"targets": None}, retry_on_reloading=True)
+    assert_applied_by(report, members)
 
 
 # ---- silent worker (SIGSTOP) ---------------------------------------------
@@ -394,12 +386,10 @@ def build_silent_worker_stack(res: StackResources, variants: Variants) -> StackC
     would be reaped in ~5s). ``supervised=True`` runs the harness respawn-on-exit
     supervisor: the mutation restarts the silent replica, whose state is unknown, and the
     resumed replica's recycle exit is brought back like a deployment's process manager
-    would. ``PYTHONHASHSEED`` pinned so the two replicas' probe digests are comparable;
-    the apply deadline and TTL pin the silent-worker envelope."""
+    would. The apply deadline and TTL pin the silent-worker envelope."""
     cfg = build_bare_stack(res, variants)
     env = {
         **cfg.env,
-        "PYTHONHASHSEED": "0",
         "TAI_BUS_APPLY_TIMEOUT": _SHORT_APPLY_TIMEOUT,
         "TAI_TOOL_RUNS_SHUTDOWN_DRAIN_SECONDS": _SHORT_DRAIN_BUDGET,
         "TAI_BUS_HEARTBEAT_TTL": _SILENT_WORKER_TTL,
@@ -415,40 +405,21 @@ def build_silent_worker_stack(res: StackResources, variants: Variants) -> StackC
     )
 
 
-async def _probe(stack: TaiStack, port: int) -> tuple[int, str]:
-    """The ``(pid, state_digest)`` a specific replica reports — REPLICAS gives each
-    replica its own port, so the probe addresses one worker deterministically (unlike
-    the load-balanced MULTIWORKER port the ``_fleet`` helpers sample)."""
+async def _replica_pid(stack: TaiStack, port: int) -> int:
+    """The pid of the replica that serves ``port`` — REPLICAS gives each replica its own
+    port, so the call addresses one worker."""
     async with stack.mcp(port=port) as mcp:
         result = await mcp.call_tool("e2e_worker_info", retry_on_reloading=True)
     data = result.data if result.data is not None else result.structured_content
-    if not isinstance(data, dict) or "pid" not in data or "state_digest" not in data:
+    if not isinstance(data, dict) or "pid" not in data:
         raise RuntimeError(f"e2e_worker_info returned an unexpected shape: {data!r}")
-    return int(data["pid"]), str(data["state_digest"])
+    return int(data["pid"])
 
 
-async def _replicas_converged(stack: TaiStack, *, deadline: float = 60.0, differ_from: str | None = None) -> str:
-    """Poll both replica ports until they report ONE identical digest, returning it.
-    With *differ_from*, additionally require it to differ from that baseline — so this
-    both waits out an in-flight resync AND asserts the fleet actually moved."""
-
-    async def attempt() -> str | None:
-        _, digest_a = await _probe(stack, stack.port_a)
-        _, digest_b = await _probe(stack, stack.port_b)
-        if digest_a != digest_b:
-            return None
-        if differ_from is not None and digest_a == differ_from:
-            return None
-        return digest_a
-
-    goal = "converge" if differ_from is None else "converge away from the baseline"
-    return await wait_for_async(attempt, deadline=deadline, message=f"the two replicas never reached: {goal}")
-
-
-# A liveness bound: twice the slowest legitimate run, stack boot included, measured under host
-# load 190-320 on 20 cores (465.7s: the two replicas' boot and convergence, the mutation cut to
-# its apply deadline, the resume and the converging fleet reload), rounded up to the next 10s.
-@pytest.mark.timeout(940)
+# A liveness bound (a bound on a hang, not a performance limit): twice the slowest legitimate
+# run, stack boot included, measured on CI (arq, shard 6, 2026-11-06: 31.5s), rounded up to the
+# next 10s.
+@pytest.mark.timeout(70)
 @pytest.mark.needs(
     "probe-tools",
     "mutable",
@@ -457,7 +428,6 @@ async def _replicas_converged(stack: TaiStack, *, deadline: float = 60.0, differ
     "store:redis",
     "topology:replicas",
     "topology:supervised",
-    "setting:PYTHONHASHSEED=0",
     "setting:TAI_BUS_APPLY_TIMEOUT=3",
     "setting:TAI_TOOL_RUNS_SHUTDOWN_DRAIN_SECONDS=1",
     "setting:TAI_BUS_HEARTBEAT_TTL=155",
@@ -471,17 +441,14 @@ async def test_silent_worker_reports_missing_then_converges(
     the mutation's recycle roll asks it once ready and, still silent, restarts it and
     stops at it while it stays silent. After SIGCONT the resumed replica runs the queued
     recycle and the supervisor brings it back at a new generation; a fleet reload then
-    finds every worker clean and both replicas land on the final persisted state."""
+    finds every worker clean, restarts nobody, and is applied by both replicas, each
+    re-reading the final persisted state."""
     stack = fresh_stack(build_silent_worker_stack)
     api_a = stack.api(port=stack.port_a)
 
-    # Normalize both replicas onto one baseline digest.
-    await api_a.post("/api/fleet/reload-config", json={"targets": None}, retry_on_reloading=True)
-    baseline = await _replicas_converged(stack)
-
     # Map replica B's bus slot name via the pid it serves on port_b (a single-process
     # ``--workers 1`` master answers the probe from the same pid the bus presence carries).
-    b_pid, _ = await _probe(stack, stack.port_b)
+    b_pid = await _replica_pid(stack, stack.port_b)
 
     async def both_serve_workers() -> list | None:
         serve = [worker for worker in stack.census() if worker.kind == "serve"]
@@ -523,11 +490,12 @@ async def test_silent_worker_reports_missing_then_converges(
     # it back at a new generation, booted on the persisted state.
     stack.wait_generation_bump(b_name, b_worker.generation)
 
-    # Final convergence: a fleet reload finds every worker clean and restarts nobody, and
-    # both replicas land on ONE new digest carrying the mutation.
+    # Final convergence: a fleet reload finds every worker clean, restarts nobody, and is
+    # applied by both replicas, each re-reading the persisted state that carries the mutation.
+    members = serve_members(stack)
     report = await api_a.post("/api/fleet/reload-config", json={"targets": None}, retry_on_reloading=True)
     assert report["recycle"] is None, f"the reload after the resume restarted a worker: {report}"
-    await _replicas_converged(stack, differ_from=baseline)
+    assert_applied_by(report, members)
     document = yaml.safe_load(manifest_file(stack).read_text()) or {}
     assert title in [entry["title"] for entry in document.get("mcp", [])], "the mutation did not persist"
 
@@ -552,7 +520,6 @@ def build_stale_stack(res: StackResources, variants: Variants) -> StackConfig:
     cfg = build_bare_stack(res, variants)
     env = {
         **cfg.env,
-        "PYTHONHASHSEED": "0",
         "TAI_BUS_APPLY_TIMEOUT": _SHORT_APPLY_TIMEOUT,
         "TAI_TOOL_RUNS_SHUTDOWN_DRAIN_SECONDS": _SHORT_DRAIN_BUDGET,
         "TAI_BUS_HEARTBEAT_TTL": _STALE_TTL,
@@ -562,10 +529,10 @@ def build_stale_stack(res: StackResources, variants: Variants) -> StackConfig:
     )
 
 
-# A liveness bound: twice the slowest legitimate run measured under host load 100-330 on
-# 20 cores (183.1s: the stack boot and readiness waits, the 20s decay to stale, the
-# broadcast and the post-resume reload).
-@pytest.mark.timeout(370)
+# A liveness bound (a bound on a hang, not a performance limit): twice the slowest legitimate
+# run, stack boot included, measured on CI (arq, shard 10, 2026-11-06: 31.7s), rounded up to the
+# next 10s.
+@pytest.mark.timeout(70)
 @pytest.mark.needs(
     "probe-tools",
     "mutable",
@@ -573,7 +540,6 @@ def build_stale_stack(res: StackResources, variants: Variants) -> StackConfig:
     "files",
     "store:redis",
     "topology:replicas",
-    "setting:PYTHONHASHSEED=0",
     "setting:TAI_BUS_APPLY_TIMEOUT=3",
     "setting:TAI_TOOL_RUNS_SHUTDOWN_DRAIN_SECONDS=1",
     "setting:TAI_BUS_HEARTBEAT_TTL=30",
@@ -584,15 +550,13 @@ async def test_stale_worker_flag_flips_and_broadcast_reports_stale(fresh_stack: 
     flags it ``stale``. A broadcast fired the instant the flag flips reports that worker
     ``outcome=stale`` — a quiet ``ready`` row past the freshness gate, never silently skipped.
     A flag-poll makes the exact moment deterministic (no fixed-sleep window). After
-    SIGCONT a fleet reload converges the resumed replica."""
+    SIGCONT, once the resumed replica's row is fresh again, a fleet reload is applied by
+    both replicas."""
     stack = fresh_stack(build_stale_stack)
     api_a = stack.api(port=stack.port_a)
 
-    await api_a.post("/api/fleet/reload-config", json={"targets": None}, retry_on_reloading=True)
-    await _replicas_converged(stack)
-
     # Map replica B's bus slot name via the pid it serves on port_b.
-    b_pid, _ = await _probe(stack, stack.port_b)
+    b_pid = await _replica_pid(stack, stack.port_b)
 
     async def both_serve_workers() -> list | None:
         serve = [worker for worker in stack.census() if worker.kind == "serve"]
@@ -632,6 +596,15 @@ async def test_stale_worker_flag_flips_and_broadcast_reports_stale(fresh_stack: 
         # Always resume replica B — a stopped process left behind would fail teardown.
         os.killpg(b_pgid, signal.SIGCONT)
 
-    # Post-recovery a fleet reload converges the resumed replica back onto the persisted state.
-    await api_a.post("/api/fleet/reload-config", json={"targets": None}, retry_on_reloading=True)
-    await _replicas_converged(stack)
+    # The resumed replica renews its presence key, so its row reads fresh again.
+    async def b_is_fresh() -> bool:
+        listing = (await api_a.get("/api/fleet/workers", retry_on_reloading=True))["workers"]
+        row = next((worker for worker in listing if worker["name"] == b_name), None)
+        return row is not None and not row["stale"] and row["state"] == "ready"
+
+    await wait_for_async(b_is_fresh, deadline=30.0, message="the resumed replica's row never read fresh again")
+
+    # Post-recovery a fleet reload is applied by both replicas, each re-reading the persisted state.
+    members = serve_members(stack)
+    report = await api_a.post("/api/fleet/reload-config", json={"targets": None}, retry_on_reloading=True)
+    assert_applied_by(report, members)

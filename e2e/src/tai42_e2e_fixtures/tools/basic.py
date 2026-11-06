@@ -67,8 +67,7 @@ def e2e_secret_value(credential: str) -> dict:
 
 @tai42_app.tools.tool(tags={"e2e"})
 async def e2e_worker_info() -> dict:
-    """Report identity + metrics/socket state + a state digest of the process that
-    ran this call.
+    """Report the identity + metrics/socket state of the process that ran this call.
 
     ``name`` + ``generation`` are this process's bus identity — the stable slot name it
     holds for one claim's life and the monotonic life counter minted with that claim
@@ -77,23 +76,11 @@ async def e2e_worker_info() -> dict:
     ``value_class`` is the frozen ``prometheus_client`` value backend —
     ``MmapedValue`` when the multiproc env froze correctly, ``MutexValue`` when
     it did not (the in-vivo probe). ``socket_class`` doubles as the
-    pristine-socket check (a proxy leak would leave a non-stdlib socket class).
-
-    ``state_digest`` is a PROBE-COMPUTED hash of this process's OWN live view —
-    ``tai42_app.admin.live_manifest`` plus its sorted live tool names, computed
-    in-process. It is not a SUT-emitted revision marker (none exists): convergence
-    is every distinct pid reporting the SAME digest, differing from a pre-mutation
-    baseline, so a test never recomputes an expected digest from the seeded file
-    (the live view is defaults-merged and ``!ENV``-resolved)."""
-    import hashlib
-
+    pristine-socket check (a proxy leak would leave a non-stdlib socket class)."""
     import prometheus_client.values
     from tai42_skeleton.app import instance
 
     value_class = getattr(prometheus_client.values.ValueClass, "__name__", repr(prometheus_client.values.ValueClass))
-    tool_names = sorted(await tai42_app.tools.get_tools())
-    material = json.dumps({"manifest": tai42_app.admin.live_manifest, "tools": tool_names}, sort_keys=True, default=str)
-    state_digest = hashlib.sha256(material.encode("utf-8")).hexdigest()
     identity = instance.app.bus.identity
     return {
         "pid": os.getpid(),
@@ -104,7 +91,6 @@ async def e2e_worker_info() -> dict:
         "value_class": value_class,
         "multiproc_dir_env": os.environ.get("PROMETHEUS_MULTIPROC_DIR"),
         "socket_class": f"{socket.socket.__module__}.{socket.socket.__qualname__}",
-        "state_digest": state_digest,
     }
 
 
