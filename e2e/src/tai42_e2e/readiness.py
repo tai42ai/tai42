@@ -5,14 +5,14 @@ instant the stack fixture returns never races an incomplete fleet or a held gate
 from __future__ import annotations
 
 import asyncio
-import threading
+import contextlib
 from typing import TYPE_CHECKING, Any
 
 import httpx
 
 from tai42_e2e.binaries import _probe_tolerating_reloading
 from tai42_e2e.child_env import needs_bus
-from tai42_e2e.waiting import WaitTimeoutError, wait_for, wait_for_async
+from tai42_e2e.waiting import ThreadForCaller, WaitTimeoutError, wait_for, wait_for_async
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Collection, Coroutine, Mapping, Sequence
@@ -191,9 +191,8 @@ async def drain_gate_coro(stack: TaiStack, app_ports: list[int], deadline: float
     workers = serve_workers_on_port(stack)
     # The budget must model the stack: N workers each import the whole platform
     # and hold their own ~2s self-resync gate, and on a contended CI runner the
-    # flat boot budget can elapse before even ONE of a wide pool answers (the
-    # observed "only saw [] of 4 workers" flake). Scale the drain per worker;
-    # a healthy narrow stack still clears in a fraction of it.
+    # flat boot budget can elapse before even ONE of a wide pool answers. Scale
+    # the drain per worker; a healthy narrow stack still clears in a fraction of it.
     for port in app_ports:
         await stack.wait_workers(workers, port=port, deadline=deadline * max(1, workers))
 
@@ -344,20 +343,35 @@ def run_readiness_coro(coro: Coroutine[Any, Any, None]) -> None:
     Boot runs outside any event loop, but ``restart`` is called from within an
     async test's running loop, so the coroutine is driven on a dedicated thread
     with its own loop — correct whether or not the calling thread already owns one,
-    and its failure is re-raised on the calling thread."""
-    box: dict[str, BaseException] = {}
+    and whatever ends it, ``SystemExit`` and cancellation included, is re-raised on
+    the calling thread as it is.
 
-    def runner() -> None:
+    Whatever cuts the caller cancels the coroutine, so a test's timeout also ends the
+    polling, and does not wait for it: a timeout that already fired could not cut a
+    coroutine that ignores its cancel. The thread is a daemon, so such a coroutine
+    does not keep the process alive either."""
+    loop = asyncio.new_event_loop()
+    task = loop.create_task(coro)
+    failure: list[BaseException] = []
+
+    def drive() -> None:
         try:
-            asyncio.run(coro)
-        except BaseException as exc:  # re-raised on the calling thread below
-            box["exc"] = exc
+            with asyncio.Runner(loop_factory=lambda: loop):
+                loop.run_until_complete(task)
+        except BaseException as exc:
+            failure.append(exc)
 
-    thread = threading.Thread(target=runner, name="tai-e2e-readiness")
+    thread = ThreadForCaller(target=drive, name="tai-e2e-readiness", daemon=True)
     thread.start()
-    thread.join()
-    if "exc" in box:
-        raise box["exc"]
+    try:
+        thread.join()
+    except BaseException:
+        # A closed loop has nothing left to cancel, and is the only ``RuntimeError`` here.
+        with contextlib.suppress(RuntimeError):
+            loop.call_soon_threadsafe(task.cancel)
+        raise
+    if failure:
+        raise failure[0]
 
 
 async def wait_workers(stack: TaiStack, n: int, *, port: int | None = None, deadline: float = 10.0) -> dict[int, str]:
@@ -392,5 +406,5 @@ async def wait_workers(stack: TaiStack, n: int, *, port: int | None = None, dead
         seen[int(data["pid"])] = str(data["state_digest"])
         return len(seen) >= n
 
-    await wait_for_async(probe, deadline=deadline, message=f"only saw {sorted(seen)} of {n} workers")
+    await wait_for_async(probe, deadline=deadline, message=lambda: f"only saw {sorted(seen)} of {n} workers")
     return seen

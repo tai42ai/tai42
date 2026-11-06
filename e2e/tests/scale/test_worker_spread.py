@@ -76,19 +76,21 @@ async def test_burst_spreads_across_four_workers_with_zero_failures(
 ) -> None:
     stack = fresh_stack(_scale_stack)
     key = uniq("spread")
+    saw: set[int] = set()
 
     # Back-to-back full-width bursts (each ≥32 in-flight, each raising on any failed
     # call — the zero-failures-under-width invariant) until at least 3 distinct
     # workers have served, bounded.
     async def spread_reached() -> bool:
         await _drive_burst(stack, key, _BURST)
-        return len(_worker_pids(stack, key)) >= 3
+        saw.update(_worker_pids(stack, key))
+        return len(saw) >= 3
 
     await wait_for_async(
         spread_reached,
         deadline=30.0,
         interval=0.0,
-        message=f"≥32-in-flight bursts never spread across ≥3 workers (saw {_worker_pids(stack, key)})",
+        message=lambda: f"≥32-in-flight bursts never spread across ≥3 workers (saw {saw})",
     )
 
 

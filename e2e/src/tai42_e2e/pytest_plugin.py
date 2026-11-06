@@ -1,5 +1,6 @@
 """The published pytest plugin: session infra, the ``fresh_stack`` factory, the
-variant-run identification, and the failure-diagnostics hook.
+variant-run identification, and the failure-diagnostics hook. It also registers
+:mod:`tai42_e2e.timeout_failures`, the hooks that decide how a test's timeout fails it.
 
 Registered as the ``tai42-e2e`` pytest11 entry point, so any repo that installs
 ``tai42-e2e`` gets these fixtures without copying conftest wiring. External stack
@@ -26,6 +27,8 @@ from tai42_e2e.target import Target, TargetError, check_needs, fetch_kinds, load
 from tai42_e2e.tcprelay import TcpRelay
 from tai42_e2e.topology import Infra, StackConfig, StackResources
 from tai42_e2e.variants import Variants
+
+pytest_plugins = ("tai42_e2e.timeout_failures",)
 
 
 def gated_collect_ignore(gates: Mapping[str, bool]) -> list[str]:
@@ -231,7 +234,7 @@ def fresh_stack(infra: Infra, tmp_path_factory: pytest.TempPathFactory) -> Itera
         except BaseException:
             # A boot failure must still reap the resources allocated above (stack DB, Redis
             # index, broker vhost lease); the stack is registered for teardown only after a
-            # successful boot.
+            # successful boot, and its boot has kept its evidence for this test's report.
             stack.teardown()
             raise
         booted.append(stack)
@@ -269,6 +272,10 @@ def uniq() -> Callable[[str], str]:
 def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo) -> Iterator[None]:
     outcome = yield
     report = outcome.get_result()
+    # Taken on every report, so a boot failure a test expected never reaches a later test's report.
+    failed_boots = diagnostics.take_failed_boots()
+    if report.failed and failed_boots:
+        report.sections.append(("tai42-e2e failed boot diagnostics", failed_boots))
     if report.when == "call" and report.failed:
         dump = diagnostics.report()
         if dump:
