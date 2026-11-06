@@ -328,7 +328,7 @@ function WordsForm({
           pendingLabel="Clearing"
           confirmVariant="danger"
           isPending={clear.isPending}
-          error={clear.isError ? clear.error : null}
+          failure={{ error: clear.isError ? clear.error : null, scope: 'clear words' }}
           onConfirm={() => {
             clear.mutate();
           }}

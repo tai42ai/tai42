@@ -9,7 +9,7 @@ import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 
-import { renderWordsPanel } from './test-utils';
+import { renderWordsPanel, withFailedRoll } from './test-utils';
 
 function apiError(message: string, status: number): Error {
   return Object.assign(new Error(message), { name: 'ApiError', status });
@@ -224,5 +224,18 @@ describe('WordsPanel — clearing', () => {
 
     expect(await within(dialog).findByRole('alert')).toHaveTextContent('clear boom');
     expect(screen.getByLabelText('Busy')).toHaveValue('Please wait a moment.');
+  });
+
+  it('names the write in a failed clear whose reply carries a roll', async () => {
+    const user = userEvent.setup();
+    const clearWords = vi.fn().mockRejectedValue(withFailedRoll(apiError('clear boom', 500)));
+    renderWordsPanel({ getWords: vi.fn().mockResolvedValue(SET_WORDS), clearWords });
+
+    await user.click(await screen.findByRole('button', { name: 'Clear words' }));
+    const dialog = await screen.findByRole('dialog');
+    await user.click(within(dialog).getByRole('button', { name: 'Clear words' }));
+
+    expect(await within(dialog).findByText('clear boom')).toBeInTheDocument();
+    expect(within(dialog).getByText('clear words')).toBeInTheDocument();
   });
 });

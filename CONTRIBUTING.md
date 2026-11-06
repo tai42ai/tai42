@@ -36,17 +36,23 @@ does.
 The tests marked `process_namespace` (in `core/kit` and `plugins/sandbox-docker`)
 run the sandbox exec scripts under a real shell. The scripts' `/proc` scan must
 see only the test's own processes, so these tests skip on the host and run in a
-container of their own. After the member's `uv sync`, this runs them with the
-checkout and the uv-managed interpreter mounted read-only (for
-`plugins/sandbox-docker`, set `SANDBOX_DOCKER_PROCESS_NAMESPACE=1` and its
-directory instead):
+container of their own. The container needs `busybox` and `strace`, as in CI:
+the tests run every scan under busybox `ls` as well as coreutils `ls`, and
+hold the kill's opens with `strace`; without them those cases skip. After the
+member's `uv sync`, this builds that image and runs the tests with the checkout
+and the uv-managed interpreter mounted read-only (for `plugins/sandbox-docker`,
+set `SANDBOX_DOCKER_PROCESS_NAMESPACE=1` and its directory instead):
 
 ```bash
 REPO="$(git rev-parse --show-toplevel)"
+docker build -t process-namespace-tests - <<'DOCKERFILE'
+FROM python:3.13-slim
+RUN apt-get update && apt-get install -y --no-install-recommends busybox strace
+DOCKERFILE
 docker run --init --rm --user "$(id -u):$(id -g)" -e HOME=/tmp \
   -e TAI42_KIT_PROCESS_NAMESPACE=1 \
   -v "$REPO:$REPO:ro" -v "$(uv python dir):$(uv python dir):ro" \
-  -w "$REPO/core/kit" python:3.13-slim \
+  -w "$REPO/core/kit" process-namespace-tests \
   "$REPO/.venv/bin/python" -m pytest -m process_namespace -p no:cacheprovider --basetemp=/tmp/pt
 ```
 
