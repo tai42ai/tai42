@@ -550,7 +550,9 @@ jobs:
   # check matrix runs the rest of each member's suite on the runner: the kit's
   # offline pass deselects these tests, and a plugin's unit pass skips them
   # visibly. The scripts must hold under every shell a session image may carry
-  # as ``sh``, busybox's included, so the container installs busybox.
+  # as ``sh``, busybox's included, so the container installs busybox; it
+  # installs strace too, which holds a script's open of a file for the tests
+  # of what the script decides from that open.
   process-namespace:
     needs: [reuse, changes]
     if: ${{ needs.reuse.outputs.should_skip != 'true' && fromJSON(needs.changes.outputs.process_namespace_matrix).include[0] != null }}
@@ -569,10 +571,10 @@ jobs:
           version: "0.11.26"
           enable-cache: true
       - run: uv python install 3.13
-      - name: Install busybox
+      - name: Install busybox and strace
         env:
           DEBIAN_FRONTEND: noninteractive
-        run: apt-get update && apt-get install -y --no-install-recommends busybox
+        run: apt-get update && apt-get install -y --no-install-recommends busybox strace
       - run: uv sync --locked --package ${{ matrix.package }} ${{ matrix.sync_extra }}
       - name: Pytest
         working-directory: ${{ matrix.dir }}

@@ -33,7 +33,7 @@ KILL_TIMEOUT_SECONDS = 5.0
 # Noted on an exec's timeout, and logged and noted when a cleanup kill reports it, when a
 # process still held the exec's output once the kill was done, and so may still be writing: one
 # the command started that left its group, which the kill does not reach, or one the kill
-# expected to end, the wrapper or a member of the group it signalled, that had not yet ended
+# expected to end, the wrapper or a member of the group its pidfile names, that had not yet ended
 # when the kill stopped waiting for it.
 OUTPUT_HELD_NOTE = (
     "a process the command started still held the sandbox exec's output after the stop, "
@@ -46,10 +46,10 @@ class KillOutcome(enum.Enum):
 
     # It SIGKILLed the exec's process group.
     SIGNALLED = "signalled"
-    # It found no pidfile or no group: the exec has not yet recorded its pid and so never starts
-    # its argv, or it has ended (or its command removed the pidfile). With
+    # It found no pidfile or no group: the exec has not yet started its own group and so never
+    # starts its argv, or it has ended (or its command removed the pidfile). With
     # :attr:`KillResult.output_held` false nothing holds its output either, so the exec has
-    # ended; with it true a process the command started still does.
+    # ended or its argv never starts; with it true a process the command started still does.
     NOTHING_RUNNING = "nothing running"
     # The exec has ended, as its runtime shows after a kill that could not run: nothing was left
     # to stop.
