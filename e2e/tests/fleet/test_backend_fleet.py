@@ -185,9 +185,9 @@ async def _normalize(stack: TaiStack) -> None:
 
 
 # A liveness bound (a bound on a hang, not a performance limit): twice the slowest legitimate
-# run, stack boot included, measured on CI (celery, shard 1, 2026-11-06: 31.9s), rounded up to the
-# next 10s.
-@pytest.mark.timeout(70)
+# run, stack boot included, measured on CI (arq, shard 10, 2026-11-06: 14.8s), rounded up to
+# the next 10s.
+@pytest.mark.timeout(30)
 @pytest.mark.needs("probe-tools", "setting:extension:sync_task", "setting:TAI_BUS_APPLY_TIMEOUT=30")
 async def test_fleet_op_reaches_backend_worker_under_load(
     fleet_mcp_stack: TaiStack, uniq: Callable[[str], str]
