@@ -1,5 +1,5 @@
 version = 1
-revision = 5
+revision = 3
 requires-python = ">=3.13"
 resolution-markers = [
     "python_full_version >= '3.14' and sys_platform == 'win32'",
@@ -5079,7 +5079,7 @@ wheels = [
 
 [[package]]
 name = "tai42-accounts-postgres"
-version = "9.0.0"
+version = "9.0.1"
 source = { editable = "plugins/accounts-postgres" }
 dependencies = [
     { name = "argon2-cffi" },
@@ -5113,7 +5113,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "tai42-agents"
-version = "16.0.0"
+version = "16.0.1"
 source = { editable = "plugins/agents" }
 dependencies = [
     { name = "anyio" },
@@ -5171,7 +5171,7 @@ provides-extras = ["park", "dev"]
 
 [[package]]
 name = "tai42-backend-arq"
-version = "10.0.0"
+version = "10.0.1"
 source = { editable = "plugins/backend-arq" }
 dependencies = [
     { name = "arq" },
@@ -5220,7 +5220,7 @@ dev = [
 
 [[package]]
 name = "tai42-backend-celery"
-version = "10.0.0"
+version = "10.0.1"
 source = { editable = "plugins/backend-celery" }
 dependencies = [
     { name = "celery" },
@@ -5279,7 +5279,7 @@ dev = [
 
 [[package]]
 name = "tai42-backend-rq"
-version = "10.0.0"
+version = "10.0.1"
 source = { editable = "plugins/backend-rq" }
 dependencies = [
     { name = "click" },
@@ -5330,7 +5330,7 @@ dev = [
 
 [[package]]
 name = "tai42-channel-slack"
-version = "10.0.0"
+version = "10.0.1"
 source = { editable = "plugins/channel-slack" }
 dependencies = [
     { name = "httpx" },
@@ -5373,7 +5373,7 @@ dev = [
 
 [[package]]
 name = "tai42-channel-telegram"
-version = "9.0.0"
+version = "9.0.1"
 source = { editable = "plugins/channel-telegram" }
 dependencies = [
     { name = "httpx" },
@@ -5416,7 +5416,7 @@ dev = [
 
 [[package]]
 name = "tai42-channel-twilio"
-version = "10.0.0"
+version = "10.0.1"
 source = { editable = "plugins/channel-twilio" }
 dependencies = [
     { name = "httpx" },
@@ -5459,7 +5459,7 @@ dev = [
 
 [[package]]
 name = "tai42-channel-web"
-version = "13.0.0"
+version = "13.0.1"
 source = { editable = "plugins/channel-web" }
 dependencies = [
     { name = "httpx" },
@@ -5502,7 +5502,7 @@ dev = [
 
 [[package]]
 name = "tai42-channel-whatsapp"
-version = "15.0.0"
+version = "15.0.1"
 source = { editable = "plugins/channel-whatsapp" }
 dependencies = [
     { name = "cryptography" },
@@ -5621,7 +5621,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "tai42-e2e"
-version = "28.0.1"
+version = "28.0.2"
 source = { editable = "e2e" }
 dependencies = [
     { name = "aiosqlite" },
@@ -5746,7 +5746,7 @@ dev = [
 
 [[package]]
 name = "tai42-identity-redis"
-version = "6.0.0"
+version = "6.0.1"
 source = { editable = "plugins/identity-redis" }
 dependencies = [
     { name = "tai42-contract" },
@@ -5778,7 +5778,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "tai42-kit"
-version = "17.0.0"
+version = "17.1.0"
 source = { editable = "core/kit" }
 dependencies = [
     { name = "anyio" },
@@ -6060,7 +6060,7 @@ wheels = [
 
 [[package]]
 name = "tai42-monitoring-langfuse"
-version = "7.0.0"
+version = "7.0.1"
 source = { editable = "plugins/monitoring-langfuse" }
 dependencies = [
     { name = "httpx" },
@@ -6103,7 +6103,7 @@ dev = [
 
 [[package]]
 name = "tai42-sandbox-docker"
-version = "4.0.0"
+version = "4.1.0"
 source = { editable = "plugins/sandbox-docker" }
 dependencies = [
     { name = "aiodocker" },
@@ -6148,7 +6148,7 @@ dev = [
 
 [[package]]
 name = "tai42-sandbox-local"
-version = "3.0.0"
+version = "3.0.1"
 source = { editable = "plugins/sandbox-local" }
 dependencies = [
     { name = "pydantic" },
@@ -6187,7 +6187,7 @@ dev = [
 
 [[package]]
 name = "tai42-skeleton"
-version = "35.0.0"
+version = "35.0.1"
 source = { editable = "core/skeleton" }
 dependencies = [
     { name = "anyio" },
@@ -6346,7 +6346,7 @@ provides-extras = ["toolbox", "files", "dev"]
 
 [[package]]
 name = "tai42-storage-github"
-version = "4.0.0"
+version = "4.0.1"
 source = { editable = "plugins/storage-github" }
 dependencies = [
     { name = "httpx" },
@@ -6387,7 +6387,7 @@ dev = [
 
 [[package]]
 name = "tai42-storage-local"
-version = "5.0.0"
+version = "5.0.1"
 source = { editable = "plugins/storage-local" }
 dependencies = [
     { name = "aiofiles" },
@@ -6426,7 +6426,7 @@ dev = [
 
 [[package]]
 name = "tai42-storage-s3"
-version = "5.0.0"
+version = "5.0.1"
 source = { editable = "plugins/storage-s3" }
 dependencies = [
     { name = "aioboto3" },
@@ -6471,7 +6471,7 @@ dev = [
 
 [[package]]
 name = "tai42-toolbox"
-version = "6.1.6"
+version = "6.1.7"
 source = { editable = "plugins/toolbox" }
 dependencies = [
     { name = "makefun" },
@@ -6549,7 +6549,7 @@ docs = [
 
 [[package]]
 name = "tai42-tools-github"
-version = "3.0.0"
+version = "3.0.1"
 source = { editable = "plugins/tools-github" }
 dependencies = [
     { name = "pydantic" },
@@ -6583,7 +6583,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "tai42-tools-stripe"
-version = "4.0.0"
+version = "4.0.1"
 source = { editable = "plugins/tools-stripe" }
 dependencies = [
     { name = "pydantic" },
@@ -6617,7 +6617,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "tai42-tools-twilio"
-version = "3.0.0"
+version = "3.0.1"
 source = { editable = "plugins/tools-twilio" }
 dependencies = [
     { name = "pydantic" },
@@ -6651,7 +6651,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "tai42-tools-whatsapp"
-version = "3.0.0"
+version = "3.0.1"
 source = { editable = "plugins/tools-whatsapp" }
 dependencies = [
     { name = "pydantic" },

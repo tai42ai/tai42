@@ -28,7 +28,7 @@ dependencies = [
     # The contract floor is rewritten by scripts/range_sync.py at release.
     "tai42-contract>=29.0,<30",
     # PooledClient + TaiBaseSettings + the settings cache registry.
-    "tai42-kit>=17.0,<18",
+    "tai42-kit>=17.1,<18",
     # The async S3 driver and its config/exception types (imported directly).
     "aioboto3>=15,<16",
     # The client's config and HTTP session classes (imported directly).
