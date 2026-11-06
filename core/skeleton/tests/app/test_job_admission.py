@@ -78,7 +78,7 @@ async def test_a_retire_waits_for_a_job_on_the_serving_loop_before_closing_its_r
     job = _Job()
 
     async def _run() -> None:
-        with dispatched_job():
+        async with dispatched_job(budget=60):
             await job.cache_resource()
             await job.may_end.wait()
             job.note_end()

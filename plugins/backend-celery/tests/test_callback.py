@@ -19,6 +19,8 @@ from tai42_kit.utils.schedule_subject import (
 )
 from tai42_kit.utils.worker_secret_capability import WORKER_SECRET_CAPABILITY_ARG
 
+from tai42_backend_celery.core.settings import celery_settings
+
 _SUBJECT = {"target_kind": "tool", "target_name": "assistant", "kind": "person", "key": "p-1"}
 _FORWARDED = {
     SCHEDULE_SUBJECT_ARG: _SUBJECT,
@@ -63,7 +65,7 @@ async def test_condition_failure_returns_none(stub_app) -> None:
         tool="follow_up",
         carried_kwargs=_CARRIED,
     )
-    result = await callback_execution({"k": 1}, callback)
+    result = await callback_execution({"k": 1}, callback, settings=celery_settings())
     assert result is None
     assert stub_app.tools.run_tool_calls == []
 
@@ -71,7 +73,7 @@ async def test_condition_failure_returns_none(stub_app) -> None:
 async def test_empty_condition_passes_and_runs_tool(stub_app) -> None:
     stub_app.tools.run_tool_result = {"ran": True}
     callback = CallbackSchema(expr=TemplatedText(content="{payload: .}"), tool="follow_up", carried_kwargs=_CARRIED)
-    result = await callback_execution(7, callback)
+    result = await callback_execution(7, callback, settings=celery_settings())
     assert result == {"ran": True}
     assert stub_app.tools.run_tool_calls == [("follow_up", {"payload": 7})]
 
@@ -82,7 +84,7 @@ async def test_callback_runs_tool_detached(stub_app) -> None:
     stub_app.tools.run_tool_result = {"ran": True}
     callback = CallbackSchema(expr=TemplatedText(content="{payload: .}"), tool="follow_up", carried_kwargs=_CARRIED)
 
-    await callback_execution(7, callback)
+    await callback_execution(7, callback, settings=celery_settings())
 
     assert stub_app.tools.detached_seen == [True]
     assert stub_app.tools.offloads == [True]
@@ -99,7 +101,7 @@ async def test_callback_binds_the_carried_capability(stub_app, capability: bool)
         carried_kwargs={WORKER_SECRET_CAPABILITY_ARG: capability},
     )
 
-    await callback_execution(7, callback)
+    await callback_execution(7, callback, settings=celery_settings())
 
     assert stub_app.tools.secret_capability_seen == [capability]
     assert caller_may_read_secrets() is False
@@ -107,7 +109,7 @@ async def test_callback_binds_the_carried_capability(stub_app, capability: bool)
 
 async def test_no_tool_returns_expression_output(stub_app) -> None:
     callback = CallbackSchema(condition=TemplatedText(content=". > 1"), expr=TemplatedText(content=". * 2"))
-    result = await callback_execution(3, callback)
+    result = await callback_execution(3, callback, settings=celery_settings())
     assert result == 6
     assert stub_app.tools.run_tool_calls == []
 
@@ -115,7 +117,7 @@ async def test_no_tool_returns_expression_output(stub_app) -> None:
 async def test_empty_expr_yields_empty_mapping(stub_app) -> None:
     stub_app.tools.run_tool_result = "done"
     callback = CallbackSchema(tool="follow_up", carried_kwargs=_CARRIED)
-    result = await callback_execution(3, callback)
+    result = await callback_execution(3, callback, settings=celery_settings())
     assert result == "done"
     assert stub_app.tools.run_tool_calls == [("follow_up", {})]
 
@@ -138,7 +140,7 @@ async def test_callback_jq_eval_is_timeout_bounded(stub_app, monkeypatch) -> Non
         callback = CallbackSchema(condition=TemplatedText(content=". > 1"), expr=TemplatedText(content=". * 2"))
         start = time.monotonic()
         with pytest.raises(TimeoutError, match="JQ_TIMEOUT_SECONDS"):
-            await callback_execution(3, callback)
+            await callback_execution(3, callback, settings=celery_settings())
         assert time.monotonic() - start < 0.5
     finally:
         reset_all_settings()
@@ -151,7 +153,7 @@ async def test_callback_that_asks_parks_under_the_forwarded_identity(stub_app) -
     stub_app.interactions.park_sentinel = sentinel
     callback = CallbackSchema(tool="follow", carried_kwargs={**_FORWARDED, **_CARRIED})
 
-    out = await callback_execution({"value": 3}, callback)
+    out = await callback_execution({"value": 3}, callback, settings=celery_settings())
 
     assert out is sentinel
     assert stub_app.interactions.binds == [("svc", "fp-1")]

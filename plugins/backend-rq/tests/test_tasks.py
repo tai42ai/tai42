@@ -119,7 +119,7 @@ async def test_callback_job_runs_callback_on_success(monkeypatch):
     _patch_job_fetch(monkeypatch, FakeFetchedJob(value={"n": 3}))
     seen: list[tuple[Any, Any]] = []
 
-    async def fake_callback_execution(result: Any, callback: Any) -> str:
+    async def fake_callback_execution(result: Any, callback: Any, *, settings: Any) -> str:
         seen.append((result, callback))
         return "chained"
 

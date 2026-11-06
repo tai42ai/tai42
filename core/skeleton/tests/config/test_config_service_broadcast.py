@@ -287,8 +287,10 @@ async def test_a_roll_hand_off_that_fails_after_the_persist_raises_the_landed_ch
     def add_server(document: dict[str, Any]) -> None:
         document["mcp"] = [{"title": "srv", "config": {"url": "http://x"}}]
 
-    with caplog.at_level(logging.ERROR), bounded_run(), pytest.raises(FleetBroadcastError) as exc:
-        await service.apply_change(add_server)
+    with caplog.at_level(logging.ERROR):
+        async with bounded_run(60):
+            with pytest.raises(FleetBroadcastError) as exc:
+                await service.apply_change(add_server)
 
     assert store.persisted == [{"mcp": [{"title": "srv", "config": {"url": "http://x"}}]}]
     assert isinstance(exc.value.__cause__, RuntimeError)
@@ -322,8 +324,9 @@ async def test_a_failed_roll_hand_off_states_the_workers_still_awaiting_a_respaw
     def add_server(document: dict[str, Any]) -> None:
         document["mcp"] = [{"title": "srv", "config": {"url": "http://x"}}]
 
-    with bounded_run(), pytest.raises(FleetBroadcastError) as exc:
-        await service.apply_change(add_server)
+    async with bounded_run(60):
+        with pytest.raises(FleetBroadcastError) as exc:
+            await service.apply_change(add_server)
 
     awaiting = [{"name": "serve-b", "keys": ["TAI_BUS_HEARTBEAT_TTL"]}]
     assert roll_outcome_body(exc.value.roll) == {
@@ -406,8 +409,9 @@ async def test_a_roll_whose_hand_off_answer_is_unknown_is_stated_deferred_to_its
     def add_server(document: dict[str, Any]) -> None:
         document["mcp"] = [{"title": "srv", "config": {"url": "http://x"}}]
 
-    with bounded_run(), pytest.raises(FleetBroadcastError) as exc:
-        await service.apply_change(add_server)
+    async with bounded_run(60):
+        with pytest.raises(FleetBroadcastError) as exc:
+            await service.apply_change(add_server)
 
     unknown = (
         "fleet recycle: the roll for this config change may have been sent to 'serve-test', the bus member the "
@@ -469,7 +473,7 @@ async def test_a_failed_reload_whose_roll_answer_is_unknown_says_so_on_the_backu
     monkeypatch.setattr(app, "carry_roll", answerless_carry_roll)
     monkeypatch.setattr(ConfigService, "from_app", classmethod(from_app))
 
-    with bounded_run():
+    async with bounded_run(60):
         section = await _import_manifest({"mcp": [{"title": "srv", "config": {"url": "http://x"}}]})
 
     assert section.errors == [
@@ -504,8 +508,9 @@ async def test_a_failed_broadcast_whose_roll_answer_is_unknown_names_both_on_its
     def add_server(document: dict[str, Any]) -> None:
         document["mcp"] = [{"title": "srv", "config": {"url": "http://x"}}]
 
-    with bounded_run(), pytest.raises(FleetBroadcastError) as exc:
-        await service.apply_change(add_server)
+    async with bounded_run(60):
+        with pytest.raises(FleetBroadcastError) as exc:
+            await service.apply_change(add_server)
 
     assert exc.value.report.error == (
         "RuntimeError: ResponseError: WRONGTYPE (the recycle roll the change owes may have been sent to its "

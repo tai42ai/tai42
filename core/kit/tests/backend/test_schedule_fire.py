@@ -20,6 +20,7 @@ from tai42_contract.states import StateSubject
 from tai42_contract.template import TemplatedText
 
 from tai42_kit.backend import CallbackSchema, backend_fire, callback_execution, fire_schedule_door
+from tai42_kit.backend.settings import BackendDispatchSettings
 from tai42_kit.utils.schedule_subject import (
     SCHEDULE_CONTRACT_ARG,
     SCHEDULE_EXECUTION_FINGERPRINT_ARG,
@@ -28,6 +29,9 @@ from tai42_kit.utils.schedule_subject import (
 )
 from tai42_kit.utils.state_context import current_state_context
 from tai42_kit.utils.worker_secret_capability import WORKER_SECRET_CAPABILITY_ARG
+
+# The backend's dispatch settings a callback job runs under.
+_SETTINGS = BackendDispatchSettings(task_timeout=90)
 
 _SUBJECT = {"target_kind": "tool", "target_name": "assistant", "kind": "person", "key": "p-1"}
 
@@ -203,7 +207,9 @@ async def test_backend_fire_with_identity_binds_then_drives(app: _FakeApp) -> No
 
 async def test_callback_with_no_forward_runs_plainly(app: _FakeApp) -> None:
     await callback_execution(
-        {"r": 1}, CallbackSchema(tool="follow", carried_kwargs={WORKER_SECRET_CAPABILITY_ARG: False})
+        {"r": 1},
+        CallbackSchema(tool="follow", carried_kwargs={WORKER_SECRET_CAPABILITY_ARG: False}),
+        settings=_SETTINGS,
     )
     assert app.tools.calls[0].key == "follow"
     # No forwarded door context → a plain follow-up, no visit and no identity bind.
@@ -221,7 +227,7 @@ async def test_callback_with_forwarded_pair_binds_and_subject_tracks(app: _FakeA
             WORKER_SECRET_CAPABILITY_ARG: False,
         },
     )
-    await callback_execution({"r": 1}, callback)
+    await callback_execution({"r": 1}, callback, settings=_SETTINGS)
     # The followed run's identity is re-bound and its subject context re-established; the follow-up
     # drives through the receiver-less visit, so a follow-up that async-asks is subject-tracked.
     assert app.interactions.binds == [("svc", "fp-1")]

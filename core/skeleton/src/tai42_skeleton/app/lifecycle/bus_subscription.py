@@ -21,6 +21,7 @@ from tai42_skeleton.app.bus.ops import (
     FleetOp,
     ListFailedMcps,
     Recycle,
+    ReleaseRoll,
     ReloadConfig,
     ReloadFailedMcps,
     ReloadMcp,
@@ -448,20 +449,26 @@ class BusSubscriptionMixin(LifecycleState):
                 return await self._apply_failed_mcps_op(op)
             case EvictTemplate() | ClearTemplateCache():
                 return self._apply_template_op(op)
-            case Recycle() | CarryRoll():
+            case Recycle() | CarryRoll() | ReleaseRoll():
                 return await self._apply_restart_op(op)
             case DeploymentKeysChanged():
                 return await self._converge_after_withdraw(await self._withdraw_fleet_owned_env())
             case _:
                 assert_never(op)
 
-    async def _apply_restart_op(self, op: Recycle | CarryRoll) -> dict[str, Any]:
-        """Apply a fleet-restart op here: restart for another worker's roll, or carry a roll handed to this worker."""
+    async def _apply_restart_op(self, op: Recycle | CarryRoll | ReleaseRoll) -> dict[str, Any]:
+        """Apply a fleet-restart op here: restart for another worker's roll, or hold or start a roll handed here.
+
+        A roll handed over the bus comes from a run in another process, which can end with no
+        word, so the held roll starts by that run's bound (``answers_within``) at the latest.
+        """
         match op:
             case Recycle():
                 return await self._apply_recycle()
             case CarryRoll():
-                return await self.accept_carried_roll(op)
+                return await self.accept_carried_roll(op, answers_within=op.answers_within)
+            case ReleaseRoll():
+                return self._release_carried_roll(op.roll, op.change)
             case _:
                 assert_never(op)
 

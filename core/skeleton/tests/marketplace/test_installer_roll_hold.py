@@ -285,7 +285,7 @@ def keys(monkeypatch: pytest.MonkeyPatch) -> SessionAdvisoryKeys:
 class _Carrier(TaiMCPLifecycleMixin):
     """The bus member a bounded operation hands its roll to: this process's own app, carrying it on this loop.
 
-    The process app's ``carry_roll`` is this carrier's.
+    The process app's ``carry_roll`` and ``release_carried_roll`` are this carrier's.
     """
 
     def __init__(self, bus: FakeBus) -> None:
@@ -305,6 +305,7 @@ class _Carrier(TaiMCPLifecycleMixin):
 async def carrier(monkeypatch: pytest.MonkeyPatch, world: _World) -> _Carrier:
     carrier = _Carrier(world.bus)
     monkeypatch.setattr(instance.build_app(), "carry_roll", carrier.carry_roll)
+    monkeypatch.setattr(instance.build_app(), "release_carried_roll", carrier.release_carried_roll)
     monkeypatch.setattr(carried_roll_module, "orchestrate_recycle", world._roll)
     return carrier
 
@@ -387,9 +388,10 @@ async def test_a_bounded_install_hands_its_roll_off_and_the_carrier_holds_the_ke
     world.roll_gate = asyncio.Event()
 
     # The door's edge answers the operation and settles the exit hold its change took.
-    with writer_exit_scope() as edge, bounded_run():
-        receipt = await world.install("NEW")
-        await edge.settle()
+    with writer_exit_scope() as edge:
+        async with bounded_run(60):
+            receipt = await world.install("NEW")
+            await edge.settle()
 
     # The operation answered with its roll handed to its member, which has not rolled yet.
     assert receipt["reload"].roll_deferred_to == "serve-writer"
@@ -422,8 +424,9 @@ async def test_a_bounded_install_whose_carrier_cannot_take_the_key_raises_its_ro
 
     monkeypatch.setitem(roll_holds._HOLDS, locks.MARKETPLACE_ROLL_HOLD, refused)
 
-    with bounded_run(), pytest.raises(UnrunRollError, match="did not complete"):
-        await world.install("NEW")
+    async with bounded_run(60):
+        with pytest.raises(UnrunRollError, match="did not complete"):
+            await world.install("NEW")
 
     assert world.probe.rolls == 0
     assert carrier._carried_roll_tasks == set()
