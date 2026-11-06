@@ -83,6 +83,22 @@ async def _wrapped(pidfile_dir: Path, exec_id: str, *argv: str) -> AsyncIterator
         await proc.wait()
 
 
+def _assert_left_once_killed(directory: Path, exec_id: str, status: int, *names: str) -> None:
+    """Assert ``directory`` holds only ``names`` once a kill that signalled exec ``exec_id`` and its wrapper have ended.
+
+    The wrapper removed its pidfile and its recorded status. The kill removed its mark, unless it
+    read the recorded status just as the wrapper was writing the mark: the mark then stays, holding
+    the argv's ``status``.
+    """
+    mark = directory / f"tai-exec.{exec_id}.kill"
+    left = sorted(path.name for path in directory.iterdir())
+    if mark.name not in left:
+        assert left == sorted(names)
+        return
+    assert left == sorted((*names, mark.name))
+    assert mark.read_text() == f"{status}\n"
+
+
 async def _until_exists(path: Path) -> None:
     while not path.exists():
         await asyncio.sleep(0.01)
@@ -118,8 +134,7 @@ async def test_a_kill_kills_the_commands_whole_process_group_and_its_wrapper_rep
     tmp_path,
 ) -> None:
     # The wrapper is outside the command's process group: it survives the kill, reaps the
-    # command and exits with its killed status, which the kill reports, and the wrapper removes
-    # its files and the kill its mark.
+    # command and exits with its killed status, which the kill reports.
     child_pidfile = tmp_path / "child"
     argv = ("sh", "-c", f"sleep 30 & echo $! > {child_pidfile}; wait")
     async with _wrapped(tmp_path, "group", *argv) as wrapper:
@@ -127,7 +142,7 @@ async def test_a_kill_kills_the_commands_whole_process_group_and_its_wrapper_rep
         assert await _run_kill(tmp_path, "group") == _found(KILL_SIGNALLED, str(128 + signal.SIGKILL))
         assert await asyncio.wait_for(wrapper.wait(), _SCRIPT_TIMEOUT) == 128 + signal.SIGKILL
         await asyncio.wait_for(_until_gone(int(child_pidfile.read_text())), _SCRIPT_TIMEOUT)
-    assert sorted(path.name for path in tmp_path.iterdir()) == ["child"]
+    _assert_left_once_killed(tmp_path, "group", 128 + signal.SIGKILL, "child")
 
 
 async def test_a_wrapped_argv_reads_its_stdin_and_reports_its_own_status(tmp_path) -> None:
@@ -312,4 +327,4 @@ async def test_a_kill_after_the_command_exited_kills_the_process_it_left_in_its_
         finally:
             with contextlib.suppress(ProcessLookupError):
                 os.kill(int(holder.read_text()), signal.SIGKILL)
-    assert sorted(path.name for path in tmp_path.iterdir()) == ["holder"]
+    _assert_left_once_killed(tmp_path, "held", 3, "holder")
