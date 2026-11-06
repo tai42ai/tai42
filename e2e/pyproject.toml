@@ -31,8 +31,8 @@ dependencies = [
     "tai42-contract>=29.0,<30",
     # The hosted LLM providers' extras: the real ``llm`` leg runs against whichever one
     # REAL_E2E_LLM_PROVIDER selects, in this process and in the stack it boots.
-    "tai42-kit[llm,anthropic,google,mistral,xai,jq,uvicorn,redis,postgres,curl,monitoring]>=17.1,<18",
-    "tai42-skeleton[toolbox,files]>=35.0,<36",
+    "tai42-kit[llm,anthropic,google,mistral,xai,jq,uvicorn,redis,postgres,curl,monitoring]>=18.0,<19",
+    "tai42-skeleton[toolbox,files]>=36.0,<37",
     "tai42-toolbox[http,prometheus,chain,embeddings,proxy,classifier]>=6.1,<7",
     # The Stripe payment tools plugin (split out of toolbox); its curl backing
     # dependency for the REST calls is unconditional.
@@ -49,9 +49,9 @@ dependencies = [
     # accounts auth stacks load.
     "tai42-accounts-postgres>=9.0,<10",
     # The Backend plugins the matrix legs run — one per TAI_E2E_BACKEND value.
-    "tai42-backend-arq>=10.0,<11",
-    "tai42-backend-celery>=10.0,<11",
-    "tai42-backend-rq>=10.0,<11",
+    "tai42-backend-arq>=11.0,<12",
+    "tai42-backend-celery>=11.0,<12",
+    "tai42-backend-rq>=11.0,<12",
     # The real Storage plugins: the local filesystem backing plus the S3 and
     # GitHub object stores the storage-axis variant sweep boots.
     "tai42-storage-local>=5.0,<6",
