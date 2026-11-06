@@ -1,23 +1,32 @@
 """Shared scaffolding for the fleet-convergence scenarios.
 
-Every convergence writer mutates the deployment through ONE worker and then proves
-that EVERY worker converged. Convergence is read off the REAL per-worker probe digest
-(``stack.wait_workers`` — a sha256 of each process's own ``live_manifest`` + sorted
-live tool names, computed in-process; never a fabricated signal): a fleet has
-converged when every distinct pid reports the SAME digest AND that digest DIFFERS
-from the pre-mutation baseline. The resync a mutation broadcasts may still be in
-flight when the mutating call returns, so :func:`wait_converged` POLLS (bounded by a
-deadline) rather than sampling once.
+Every convergence writer mutates the deployment through ONE worker and then proves that
+EVERY worker applied it. The proof is the mutation's own fan-out report, the per-worker
+outcome the platform returns in the response: the worker that served the request reports
+its local apply, every other targeted worker its reply over the worker bus. A fleet
+mutation converged when every serve member on the bus census at the time of the call has
+an ``applied`` entry and no entry is anything else (:func:`assert_applied_by`); a targeted
+op when exactly its targets applied and no other worker has an entry
+(:func:`assert_applied_by_exactly`).
 
-The stacks here are MULTIWORKER (``--workers 2`` behind ONE port), the shape whose
-shared socket lets ``wait_workers`` load-balance across both uvicorn workers and see
-two distinct pids — the fleet the digest convergence is asserted over. ``workers >
-1`` also wires the worker bus (harness policy; see ``TaiStack._needs_bus``), so a
-mutation on one worker fans its ``reload_config`` out to the sibling.
+That a call delivered its op to NO given worker is read off that worker's own presence row
+after the call: a worker stamps ``last_op`` (the op's name and the UTC instant ``at``) on its
+row for every op delivered to it over the bus, so a row whose generation is the one read
+before the call and whose ``last_op`` does not name the call's op at or after the call's
+start took no delivery of it (:func:`assert_no_op_delivered`). Ops the platform delivers on
+its own schedule (a boot join's announcement, a reconnect, a roll) name other ops and do
+not count.
+
+The served-surface reads beside the report (a tool listed, a manifest title present) prove
+what a caller reads after the change from the one worker that served that read.
+
+The stacks here are MULTIWORKER (``--workers 2`` behind ONE port). ``workers > 1`` wires the
+worker bus (harness policy; see ``TaiStack._needs_bus``), so a mutation on one worker fans
+its ``reload_config`` out to the sibling.
 
 The builders reuse the ``bare`` / ``connectors`` profiles and re-shape them to that
-MULTIWORKER-no-backend fleet, adding only what the scenarios need (the backup router;
-for the ``!ENV`` scenarios a raw-text manifest carrying a marker the digest resolves).
+MULTIWORKER-no-backend fleet, adding only what the scenarios need (the backup router; for
+the ``!ENV`` scenarios a raw-text manifest carrying a marker the written env key resolves).
 """
 
 from __future__ import annotations
@@ -25,53 +34,40 @@ from __future__ import annotations
 import base64
 import copy
 import secrets
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import pytest
 import yaml
 
-from tai42_e2e import StackConfig, Topology, wait_for_async
+from tai42_e2e import StackConfig, Topology, wait_for, wait_for_async
 from tai42_e2e.manifests import build_bare_stack, build_connectors_stack
-from tai42_e2e.waiting import WaitTimeoutError
 
 if TYPE_CHECKING:
     from tai42_e2e import StackResources
     from tai42_e2e.stack import TaiStack
-    from tai42_e2e.variants import Variants
+    from tai42_e2e.variants import BusWorker, Variants
 
 # The MULTIWORKER worker count every convergence fleet boots. Two uvicorn workers behind one
 # port is the minimum that exercises cross-worker convergence while keeping the
-# opt-in stack's boot cost down; ``wait_workers`` load-balances across both pids.
+# opt-in stack's boot cost down.
 FLEET_WORKERS = 2
-
-
-def _pin_hashseed(env: dict[str, str]) -> dict[str, str]:
-    """Pin ``PYTHONHASHSEED`` across the fleet. ``uvicorn --workers N`` SPAWNS its
-    workers as fresh interpreters, each with its own hash randomization; the probe
-    digest hashes ``live_manifest``, which model-dumps set-typed fields (e.g.
-    ``user_tools``) to lists whose order follows set iteration — so unpinned workers
-    serialize the SAME persisted state into DIFFERENT digests and never converge (an
-    artifact of the probe's serialization, not a real fleet divergence). A shared seed
-    gives every worker one set-iteration order, so identical state yields one digest."""
-    return {**env, "PYTHONHASHSEED": "0"}
 
 
 def build_fleet_stack(res: StackResources, variants: Variants) -> StackConfig:
     """The base convergence fleet: the ``bare`` profile (full core-router surface, no storage
     provider, no backend) re-shaped to MULTIWORKER(2) and given the backup router.
 
-    ``bare`` already carries the probe tools (``e2e_worker_info`` — the digest
-    source), ``tai42_toolbox.extensions.batch`` (the branch extension), and the
-    manifest / tool-extensions / config routers. Two workers wire the bus."""
+    ``bare`` already carries the probe tools, ``tai42_toolbox.extensions.batch`` (the branch
+    extension), and the manifest / tool-extensions / config routers. Two workers wire the bus."""
     cfg = build_bare_stack(res, variants)
     manifest = copy.deepcopy(cfg.manifest)
     manifest["routers_modules"] = [*manifest["routers_modules"], "tai42_skeleton.routers.backup"]
-    # No metrics sidecar: the fleet convergence proof is the probe digest, not a scrape,
+    # No metrics sidecar: the fleet convergence proof is the fan-out report, not a scrape,
     # so the extra process is pure boot/teardown cost this opt-in suite does not need.
-    return _replace(
-        cfg, name="fleet", manifest=manifest, env=_pin_hashseed(cfg.env), workers=FLEET_WORKERS, run_metrics=False
-    )
+    return _replace(cfg, name="fleet", manifest=manifest, workers=FLEET_WORKERS, run_metrics=False)
 
 
 def build_backup_source_stack(res: StackResources, variants: Variants) -> StackConfig:
@@ -81,7 +77,7 @@ def build_backup_source_stack(res: StackResources, variants: Variants) -> StackC
     cfg = build_bare_stack(res, variants)
     manifest = copy.deepcopy(cfg.manifest)
     manifest["routers_modules"] = [*manifest["routers_modules"], "tai42_skeleton.routers.backup"]
-    return _replace(cfg, name="backup-source", manifest=manifest, env=_pin_hashseed(cfg.env), run_metrics=False)
+    return _replace(cfg, name="backup-source", manifest=manifest, run_metrics=False)
 
 
 def build_backup_storage_stack(res: StackResources, variants: Variants) -> StackConfig:
@@ -152,7 +148,8 @@ def build_backup_populated_stack(res: StackResources, variants: Variants) -> Sta
 def build_fleet_env_stack_builder(env_key: str) -> Callable[[StackResources, Variants], StackConfig]:
     """A builder for a convergence fleet whose seeded manifest references *env_key* via an
     ``!ENV`` marker (in a zero-transport ``mcp`` entry's ``url``), so writing or
-    importing *env_key* changes the RESOLVED live view and therefore the digest.
+    importing *env_key* changes the RESOLVED config the write validates and every worker
+    reloads.
 
     The marker resolves to ``pyaml_env``'s ``"N/A"`` default while *env_key* is unset
     at boot, then to the written value after the mutation. The harness ``safe_dump``
@@ -163,7 +160,7 @@ def build_fleet_env_stack_builder(env_key: str) -> Callable[[StackResources, Var
         document = copy.deepcopy(cfg.manifest)
         # The marker lives on its own mcp entry so it never collides with a scenario's
         # mcp mutation; a zero-transport (unresolvable) url is skipped by the viability
-        # probe but still lands, resolved, in the live view the digest hashes.
+        # probe but still lands, resolved, in each worker's live view.
         document.pop("mcp", None)
         marker = f"mcp:\n  - title: e2e_env_probe\n    config:\n      url: !ENV ${{{env_key}}}\n"
         raw = yaml.safe_dump(document, sort_keys=False) + marker
@@ -187,7 +184,6 @@ def build_fleet_connectors_stack(res: StackResources, variants: Variants) -> Sta
     return _replace(
         cfg,
         name="fleet-connectors",
-        env=_pin_hashseed(cfg.env),
         topology=Topology.MULTIWORKER,
         workers=FLEET_WORKERS,
         run_backend=False,
@@ -212,62 +208,114 @@ def manifest_file(stack: TaiStack) -> Path:
     return stack.root / "config" / "manifest.yml"
 
 
-async def converged_digest(stack: TaiStack, *, deadline: float = 60.0, differ_from: str | None = None) -> str:
-    """Poll the per-worker probe until every worker reports ONE identical digest,
-    returning it. With *differ_from* set, the poll additionally requires the converged
-    digest to differ from that pre-mutation baseline — so this both waits out an
-    in-flight resync AND asserts the mutation actually moved the fleet.
-
-    Each attempt re-samples every worker via a fresh ``wait_workers`` call (uvicorn
-    load-balances the shared port), so a worker that answered pre-reload on one attempt
-    is re-read post-reload on the next; convergence is never inferred from one sample.
-    A ``wait_workers`` timeout inside an attempt — a worker still holding its reload
-    gate, so the shared port has not yet surfaced both pids — is a transient "not
-    converged yet", polled past on the outer deadline, not a hard failure."""
-
-    last_seen: dict[int, str] = {}
-
-    async def attempt() -> str | None:
-        try:
-            seen = await stack.wait_workers(FLEET_WORKERS, deadline=10.0)
-        except WaitTimeoutError:
-            return None
-        last_seen.clear()
-        last_seen.update(seen)
-        digests = set(seen.values())
-        if len(digests) != 1:
-            return None
-        (digest,) = tuple(digests)
-        if differ_from is not None and digest == differ_from:
-            return None
-        return digest
-
-    goal = "converge" if differ_from is None else "converge away from the pre-mutation baseline"
-
-    try:
-        return await wait_for_async(attempt, deadline=deadline, message="")
-    except WaitTimeoutError as exc:
-        raise WaitTimeoutError(
-            f"the {FLEET_WORKERS}-worker fleet never reached: {goal} "
-            f"(after {deadline:.1f}s; last per-pid digests: "
-            f"{ {pid: d[:12] for pid, d in last_seen.items()} }; "
-            f"differ_from={differ_from[:12] if differ_from else None})"
-        ) from exc
+def serve_members(stack: TaiStack) -> list[str]:
+    """The names of the serve workers on the bus census now, sorted — the members a fleet
+    mutation issued next must report applied."""
+    return sorted(w.name for w in stack.census() if w.kind == "serve")
 
 
-async def converged_baseline(stack: TaiStack, *, deadline: float = 60.0) -> str:
-    """The pre-mutation baseline digest, captured from a KNOWN-converged fleet.
+def serve_generations(stack: TaiStack) -> dict[str, int]:
+    """The generation of every serve worker on the bus census now, by worker name — read
+    before a call, the lives :func:`assert_no_op_delivered` requires unchanged after it."""
+    return {w.name: w.generation for w in stack.census() if w.kind == "serve"}
 
-    Every worker is first driven to reload from persisted state (``POST
-    /api/fleet/reload-config``), which puts both onto the identical persisted view
-    deterministically, then the converged digest is read. This normalizes away a
-    boot-time self-resync that, under the opt-in suite's heavy sequential load, can
-    briefly leave one worker off the persisted view — a divergence any reload heals and
-    which would otherwise make ``differ_from=<baseline>`` ill-defined. The scenario's
-    OWN mutation still converges the fleet on its own broadcast; this only fixes the
-    starting point the mutation is measured against."""
-    await stack.api().post("/api/fleet/reload-config", json={"targets": None}, retry_on_reloading=True)
-    return await converged_digest(stack, deadline=deadline)
+
+def call_start() -> datetime:
+    """The UTC instant a call starts, read just before issuing it: the workers on this host
+    stamp ``last_op.at`` from the same clock."""
+    return datetime.now(UTC)
+
+
+def _entries(report: Mapping[str, Any]) -> str:
+    return "; ".join(
+        f"{r['name']}: {r['outcome']}" + "".join(f" ({r[k]})" for k in ("detail", "error") if r.get(k))
+        for r in report.get("results") or []
+    )
+
+
+def assert_applied_by(report: Mapping[str, Any], members: Collection[str]) -> None:
+    """Assert a fleet fan-out report (``op`` + per-worker ``results``) shows every one of
+    ``members`` applied and no entry unconfirmed, naming every entry on a failure."""
+    outcomes = {r["name"]: r["outcome"] for r in report["results"]}
+    missing = sorted(set(members) - outcomes.keys())
+    unconfirmed = sorted(name for name, outcome in outcomes.items() if outcome != "applied")
+    if missing or unconfirmed:
+        pytest.fail(
+            f"{report['op']} did not converge on {sorted(members)}: "
+            f"no entry for {missing}, not applied by {unconfirmed}; entries: {_entries(report)}"
+        )
+
+
+def assert_applied_by_exactly(report: Mapping[str, Any], targets: Collection[str]) -> None:
+    """Assert a targeted fan-out report shows exactly ``targets`` applied and no entry for any
+    other worker, naming every entry on a failure."""
+    outcomes = {r["name"]: r["outcome"] for r in report["results"]}
+    assert outcomes == dict.fromkeys(targets, "applied"), (
+        f"{report['op']} targeted at {sorted(targets)} did not apply on exactly them; entries: {_entries(report)}"
+    )
+
+
+def wait_op_stamped(
+    stack: TaiStack, report: Mapping[str, Any], started_at: datetime, *, deadline: float = 15.0
+) -> None:
+    """Wait until the presence rows carry an untargeted op's deliveries.
+
+    ``report`` is the op's fan-out report and ``started_at`` the :func:`call_start` read
+    before the op was issued. A worker stamps ``last_op`` on its row once it has replied, so
+    the report can be in hand ahead of its stamps; the worker that served the request applied
+    the op in-process and takes no delivery, so every applied worker but that one stamps the
+    op at or after ``started_at``."""
+    op = report["op"]
+    applied = [r["name"] for r in report["results"] if r["outcome"] == "applied"]
+    rows: dict[str, BusWorker] = {}
+
+    def stamped() -> bool:
+        rows.clear()
+        rows.update((w.name, w) for w in stack.census())
+        stamped_by = [name for name in applied if name in rows and _stamped_since(rows[name], op, started_at)]
+        return len(stamped_by) >= len(applied) - 1
+
+    wait_for(
+        stamped,
+        deadline=deadline,
+        message=lambda: (
+            f"the presence rows never carried {op} since {started_at.isoformat()} on every applied worker but the "
+            f"one that served it: applied by {applied}; rows: {_rows_text(rows.values())}"
+        ),
+    )
+
+
+def assert_no_op_delivered(
+    stack: TaiStack, names: Collection[str], op: str, started_at: datetime, generations: Mapping[str, int]
+) -> None:
+    """Assert the call that started at ``started_at`` delivered ``op`` to none of ``names``.
+
+    Each named worker's presence row, read now, keeps the generation ``generations`` holds
+    for it (it did not restart) and its ``last_op`` does not name ``op`` at or after
+    ``started_at``. A stamp of another op, or of ``op`` dated before the call, is not a
+    delivery of this call."""
+    rows = {w.name: w for w in stack.census()}
+    reached = sorted(
+        name
+        for name in names
+        if name not in rows or rows[name].generation != generations[name] or _stamped_since(rows[name], op, started_at)
+    )
+    assert not reached, (
+        f"{op} since {started_at.isoformat()} reached {reached} (generations before the call: "
+        f"{ {n: generations[n] for n in reached} }); rows now: {_rows_text(rows[n] for n in reached if n in rows)}"
+    )
+
+
+def _stamped_since(row: BusWorker, op: str, started_at: datetime) -> bool:
+    """Whether ``row``'s ``last_op`` names ``op`` stamped at or after ``started_at``."""
+    last = row.last_op
+    if last is None or last["op"] != op:
+        return False
+    return datetime.fromisoformat(last["at"]) >= started_at
+
+
+def _rows_text(rows: Iterable[BusWorker]) -> str:
+    return "; ".join(f"{w.name} (pid {w.pid}, generation {w.generation}, {w.state}, last_op {w.last_op})" for w in rows)
 
 
 def assert_fleet_fanout(response: dict[str, Any]) -> dict[str, Any]:
@@ -282,8 +330,8 @@ def assert_fleet_fanout(response: dict[str, Any]) -> dict[str, Any]:
 
 async def wait_present(check: Callable[[], Awaitable[bool]], *, deadline: float = 10.0, message: str) -> None:
     """Poll an async predicate until true (a thin, typed wrapper over the sanctioned
-    async waiter) — used for the tool-listing side-observables that ride alongside the
-    digest proof (a bound managed tool appearing / disappearing on the served port)."""
+    async waiter) — used for the served-surface reads that ride alongside the fan-out
+    report (a bound managed tool appearing / disappearing on the served port)."""
     await wait_for_async(lambda: check(), deadline=deadline, message=message)
 
 

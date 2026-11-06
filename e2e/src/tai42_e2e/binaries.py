@@ -1,21 +1,12 @@
 """Console-script resolution and direct-spawn probes for the boot engine: the
-absolute ``tai``/``uvicorn`` paths a child launch env needs, a refuse-to-boot
-spawn for the boot-rules scenarios, and the reload-gate-tolerant probe wrapper."""
+absolute ``tai``/``uvicorn`` paths a child launch env needs and a refuse-to-boot
+spawn for the boot-rules scenarios."""
 
 from __future__ import annotations
 
 import contextlib
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING
-
-import httpx
-from mcp.shared.exceptions import McpError
-
-from tai42_e2e.httpapi import _is_reloading
-
-if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
 
 
 def venv_console_script(name: str) -> str:
@@ -81,33 +72,3 @@ def spawn_expect_refusal(argv: list[str], env: dict[str, str], cwd: str | Path, 
     if proc.returncode == 0:
         raise RuntimeError(f"process was expected to refuse to boot but exited 0: {argv!r}\nstderr:\n{stderr}")
     return stderr
-
-
-async def _probe_tolerating_reloading[T](open_and_call: Callable[[], Awaitable[T]]) -> T | None:
-    """Await a boot/restart wait probe that opens an MCP client, returning ``None`` when
-    it raises the reload gate's retriable ``reloading`` envelope so the enclosing wait
-    keeps polling within its own deadline; any other error propagates loudly.
-
-    A worker still holding its boot/reload self-resync gate rejects the MCP initialize
-    handshake with that envelope (a ``503`` the authenticated request path answers while
-    the identity registry is mid-rebuild). The fastmcp client raises ``HTTPStatusError``
-    from ``__aenter__`` — before a session exists — so the tool-call ``retry_on_reloading``
-    path never sees it, and the reloading-vs-real decision is made here on the raised
-    response through the one canonical :func:`_is_reloading` check. ``open_and_call`` must
-    never itself return ``None``, so a ``None`` result unambiguously means "still reloading"."""
-    try:
-        return await open_and_call()
-    except httpx.HTTPStatusError as exc:
-        if _is_reloading(exc.response):
-            return None
-        raise
-    except McpError as exc:
-        # A worker that swaps its epoch mid-probe (a reload / targeted deregister settling)
-        # terminates the just-opened MCP session — the fresh epoch serves a NEW
-        # session-id space, so the session opened against the old epoch is retired and the
-        # SDK raises "Session terminated". Treat it as "not settled yet" so the enclosing
-        # wait re-polls on a fresh session against the new epoch (exactly what a real client
-        # does — re-initialise). Any other MCP error propagates loudly.
-        if "Session terminated" in str(exc):
-            return None
-        raise

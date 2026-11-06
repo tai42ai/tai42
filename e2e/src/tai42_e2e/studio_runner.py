@@ -539,8 +539,8 @@ def _boot_studio_stack(
         # denies until the route table pins them public, so the seed must land
         # before the processes answer their first request.
         seed_studio_auth(infra, resources, api_key=runner.ui_api_key)
-        # Readiness drains the boot reload gate through the MCP probe, which this
-        # access-controlled stack fences; the probe runs under the seeded root key.
+        # This access-controlled stack fences its MCP and API surfaces, so the stack's
+        # own clients carry the seeded root key.
         stack.auth_token = runner.ui_api_key
         signal.signal(signal.SIGTERM, _handle_signal)
         signal.signal(signal.SIGINT, _handle_signal)
