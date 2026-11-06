@@ -24,6 +24,7 @@ from redis.exceptions import ConnectionError as RedisConnectionError
 
 from tai42_kit.clients.impl import redis as redis_mod
 
+from ._event_loops import on_every_loop
 from ._redis_kit_connections import async_kit_connection, kit_options, sync_kit_connection
 from ._redis_log import LOGGER, kit_warnings, on_warning
 from ._redis_socket_opens import count_async_connects, count_sync_connects
@@ -423,3 +424,31 @@ async def test_async_a_command_sent_on_a_dropped_socket_connects_under_the_retry
     assert len(logged) == warnings
     assert all(HANDSHAKE_DROP in warning for warning in logged)
     assert counter.calls == 1 + warnings
+
+
+async def _ping_after_a_reset() -> tuple[Any, int]:
+    """PING on a kit connection the stub reset once the loop closed its socket: the reply, the connections since."""
+    async with serving_stub() as stub:
+        connection = async_kit_connection(stub.url, **kit_options(1, sync=False))
+        try:
+            await connection.connect()
+            transport = connection._writer.transport
+            stub.reset()
+            async with asyncio.timeout(5):
+                while not transport.is_closing():
+                    await asyncio.sleep(0.01)
+            await connection.send_command("PING")
+            reply = await connection.read_response()
+            return reply, len(stub.writers)
+        finally:
+            await connection.disconnect()
+
+
+@on_every_loop
+def test_async_a_command_on_a_socket_the_server_reset_connects_again(
+    loop_factory: Callable[[], asyncio.AbstractEventLoop],
+) -> None:
+    reply, opens = asyncio.run(_ping_after_a_reset(), loop_factory=loop_factory)
+
+    assert reply == b"PONG"
+    assert opens == 1

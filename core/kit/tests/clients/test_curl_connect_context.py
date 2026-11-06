@@ -12,7 +12,6 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import gc
-import sys
 import weakref
 from collections.abc import Callable
 
@@ -22,13 +21,9 @@ pytest.importorskip("curl_cffi")
 
 from tai42_kit.clients.impl.curl import CurlClient
 
+from ._event_loops import on_every_loop
+
 _caller: contextvars.ContextVar[object] = contextvars.ContextVar("caller")
-
-_LOOP_FACTORIES: list[tuple[str, Callable[[], asyncio.AbstractEventLoop]]] = [("asyncio", asyncio.new_event_loop)]
-if sys.platform != "win32":
-    import uvloop
-
-    _LOOP_FACTORIES.append(("uvloop", uvloop.new_event_loop))
 
 
 class _Marker:
@@ -91,7 +86,7 @@ async def _marker_alive_after_requests(requests: int) -> tuple[bool, int]:
         await server.wait_closed()
 
 
-@pytest.mark.parametrize("loop_factory", [f for _, f in _LOOP_FACTORIES], ids=[n for n, _ in _LOOP_FACTORIES])
+@on_every_loop
 def test_a_pooled_session_connection_keeps_no_context_of_the_caller_that_opened_it(
     loop_factory: Callable[[], asyncio.AbstractEventLoop],
 ) -> None:
@@ -101,7 +96,7 @@ def test_a_pooled_session_connection_keeps_no_context_of_the_caller_that_opened_
     assert alive is False
 
 
-@pytest.mark.parametrize("loop_factory", [f for _, f in _LOOP_FACTORIES], ids=[n for n, _ in _LOOP_FACTORIES])
+@on_every_loop
 def test_a_reused_keep_alive_connection_keeps_no_context_of_its_caller(
     loop_factory: Callable[[], asyncio.AbstractEventLoop],
 ) -> None:
