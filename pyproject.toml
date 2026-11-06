@@ -9,6 +9,15 @@ exclude = [
     "plugins/connector-github",
 ]
 
+[tool.uv]
+# Security floors on transitive-only packages (pulled by heavy extras, never
+# directly imported), holding each at or above its first-patched release.
+constraint-dependencies = [
+    "pyasn1>=0.6.5",
+    "setuptools>=84.1.0",
+    "torch>=2.13.0",
+]
+
 [dependency-groups]
 # The whole-repo test closure: the root repo-integrity tests (tests/) and the
 # script tests (scripts/tests/) plus the

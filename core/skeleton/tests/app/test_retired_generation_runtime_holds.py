@@ -7,11 +7,16 @@ the first streaming response a worker serves, a pooled connection a request open
 reload then retires the generation that served it. The retired generation's serving
 surface (the object every request's ``scope["app"]`` points at) must be collected once
 its bounded holds expire; the failure message names every referrer chain still holding it.
+
+The one hold a generation may keep past that deadline is the MCP SDK's: on an asyncio loop
+the cancelled idle timers of a session it served (:class:`_SdkIdleTimerLoop`). They are the
+only excused referrers, and once the loop drops them the generation must be collected.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import gc
 import os
 import sys
@@ -24,6 +29,8 @@ from typing import Any
 import httpx
 import pytest
 import uvloop
+from mcp.server import streamable_http_manager
+from mcp.server.streamable_http import StreamableHTTPServerTransport
 from sse_starlette import EventSourceResponse
 
 from tai42_skeleton.app import applied_env
@@ -58,9 +65,55 @@ _RELEASE_DEADLINE_SECONDS = 15.0
 # How long a reload waits for the generation's in-flight requests.
 _DRAIN_DEADLINE_SECONDS = 5.0
 
+# More cancelled timers than asyncio tolerates: once they outnumber the live ones in a heap
+# of over a hundred, the loop's next iteration removes every cancelled timer from the heap.
+_CANCELLED_TIMERS_THAT_MAKE_THE_LOOP_PURGE = 1000
+
+
+def _armed_by_sdk_idle_code(callback: Callable[..., object], frame: types.FrameType | None) -> bool:
+    """Whether a timer armed from the stack at ``frame`` is one of the MCP SDK's session idle timers.
+
+    Those are the wait for the session to go idle, which has no due time, and the session's
+    idle deadline, which a request's end rearms on the transport's idle scope. Any other
+    timer a request arms has neither, however deep inside the SDK's request handling.
+    """
+    while frame is not None:
+        code = frame.f_code
+        if code.co_filename == streamable_http_manager.__file__ and code.co_name == "end_when_idle":
+            return True
+        if code is StreamableHTTPServerTransport.handle_request.__code__:
+            idle_scope = frame.f_locals["self"].idle_scope
+            return idle_scope is not None and getattr(callback, "__self__", None) is idle_scope
+        frame = frame.f_back
+    return False
+
+
+class _SdkIdleTimerLoop(asyncio.SelectorEventLoop):
+    """An asyncio loop that tells the MCP SDK's session idle timers from every other timer.
+
+    A cancelled timer no longer names its callback, so each one is recognised when it is
+    armed. The record is weak: it never keeps a timer, or the request it carries, alive.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._sdk_idle_timers: weakref.WeakValueDictionary[int, asyncio.TimerHandle] = weakref.WeakValueDictionary()
+
+    def call_at(
+        self, when: float, callback: Callable[..., object], *args: Any, context: contextvars.Context | None = None
+    ) -> asyncio.TimerHandle:
+        timer = super().call_at(when, callback, *args, context=context)
+        if _armed_by_sdk_idle_code(callback, sys._getframe(1)):
+            self._sdk_idle_timers[id(timer)] = timer
+        return timer
+
+    def is_cancelled_sdk_idle_timer(self, obj: object) -> bool:
+        return isinstance(obj, asyncio.TimerHandle) and obj.cancelled() and self._sdk_idle_timers.get(id(obj)) is obj
+
+
 _LOOPS = pytest.mark.parametrize(
     "loop_factory",
-    [asyncio.new_event_loop, uvloop.new_event_loop],
+    [_SdkIdleTimerLoop, uvloop.new_event_loop],
     ids=["asyncio", "uvloop"],
 )
 
@@ -124,8 +177,16 @@ def _is_root(obj: object) -> bool:
     return isinstance(obj, (types.ModuleType, types.FrameType, asyncio.Task, asyncio.Handle))
 
 
+def _is_excused_hold(obj: object) -> bool:
+    loop = asyncio.get_running_loop()
+    return isinstance(loop, _SdkIdleTimerLoop) and loop.is_cancelled_sdk_idle_timer(obj)
+
+
 def _referrer_chains(target: object, *, max_depth: int = 30, max_chains: int = 6) -> list[str]:
-    """The referrer chains from ``target`` up to a root (a module, a frame, a task, a loop callback)."""
+    """The referrer chains from ``target`` up to a root (a module, a frame, a task, a loop callback).
+
+    A chain that ends in an excused hold is left out, so ``max_chains`` never hides another.
+    """
     own_frames = {id(frame) for frame in _frames_of_this_module()}
     seen = {id(target)}
     frontier: list[list[object]] = [[target]]
@@ -141,6 +202,8 @@ def _referrer_chains(target: object, *, max_depth: int = 30, max_chains: int = 6
                     continue
                 seen.add(id(referrer))
                 extended = [*path, referrer]
+                if _is_excused_hold(referrer):
+                    continue
                 if _is_root(referrer):
                     chains.append(" <- ".join(_describe(obj) for obj in extended))
                     if len(chains) >= max_chains:
@@ -167,16 +230,40 @@ def _chains_to(surface: weakref.ref[object]) -> str:
     return "collected" if alive is None else "\n".join(_referrer_chains(alive))
 
 
-async def _assert_collected(surface: weakref.ref[object], held_by: str) -> None:
-    """Wait for the retired generation's serving surface to be collected; fail naming what still holds it."""
+async def _collected_by_the_deadline(surface: weakref.ref[object]) -> bool:
     deadline = asyncio.get_running_loop().time() + _RELEASE_DEADLINE_SECONDS
     while True:
         gc.collect()
         if surface() is None:
-            return
+            return True
         if asyncio.get_running_loop().time() >= deadline:
-            raise AssertionError(f"the retired generation that {held_by} is still reachable:\n{_chains_to(surface)}")
+            return False
         await asyncio.sleep(0.1)
+
+
+def _make_the_loop_purge_its_cancelled_timers() -> None:
+    loop = asyncio.get_running_loop()
+    for _ in range(_CANCELLED_TIMERS_THAT_MAKE_THE_LOOP_PURGE):
+        loop.call_later(_RELEASE_DEADLINE_SECONDS, int).cancel()
+
+
+async def _assert_collected(surface: weakref.ref[object], held_by: str) -> None:
+    """Wait for the retired generation's serving surface to be collected; fail naming what still holds it.
+
+    A surface past the deadline with no referrer chain but excused ones must be collected
+    once the loop has dropped its cancelled timers, so a holder the walk cannot see fails too.
+    """
+    if await _collected_by_the_deadline(surface):
+        return
+    chains = _chains_to(surface)
+    if chains or not isinstance(asyncio.get_running_loop(), _SdkIdleTimerLoop):
+        raise AssertionError(f"the retired generation that {held_by} is still reachable:\n{chains}")
+    _make_the_loop_purge_its_cancelled_timers()
+    if not await _collected_by_the_deadline(surface):
+        raise AssertionError(
+            f"the retired generation that {held_by} is still reachable with its loop's cancelled timers "
+            f"gone, by no referrer chain the walk can see:\n{_chains_to(surface)}"
+        )
 
 
 async def _reload() -> None:

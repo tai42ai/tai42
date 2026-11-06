@@ -227,14 +227,6 @@ precision = 2
 [tool.uv]
 cache-keys = [{ file = "pyproject.toml" }]
 
-# Security floors on transitive-only packages (pulled by heavy extras, never
-# directly imported), holding each at or above its first-patched release.
-constraint-dependencies = [
-    "pyasn1>=0.6.4",
-    "setuptools>=83.0.0",
-    "torch>=2.13.0",
-]
-
 
 # The version floors in [project] are the compatibility contract; these sources
 # resolve the tai42-* requirements to the in-tree workspace members instead of
