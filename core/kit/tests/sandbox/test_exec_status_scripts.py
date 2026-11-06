@@ -10,7 +10,7 @@ import asyncio
 import contextlib
 import os
 import signal
-from collections.abc import AsyncIterator
+from contextlib import AbstractAsyncContextManager
 from pathlib import Path
 
 import pytest
@@ -37,8 +37,9 @@ from tai42_kit.sandbox.exec_status_scripts import (
 )
 
 from .process_namespace import PROCESS_NAMESPACE_MARKS
+from .wrapped_exec import wrapped_exec
 
-pytestmark = PROCESS_NAMESPACE_MARKS
+pytestmark = [*PROCESS_NAMESPACE_MARKS, pytest.mark.usefixtures("ls_command")]
 
 _SCRIPT_TIMEOUT = 10
 
@@ -70,26 +71,9 @@ def _reported(finding: str, status: int) -> tuple[int, bytes, bytes]:
     return 0, f"{status}\n{finding}\n".encode(), b""
 
 
-@contextlib.asynccontextmanager
-async def _wrapped(directory: Path, exec_id: str, *argv: str) -> AsyncIterator[asyncio.subprocess.Process]:
-    """Run ``argv`` under :func:`_wrapper` as a session leader, its output on pipes; its group is killed on exit."""
-    proc = await asyncio.create_subprocess_exec(
-        "sh",
-        "-c",
-        _wrapper(directory),
-        exec_id,
-        *argv,
-        stdin=asyncio.subprocess.DEVNULL,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        start_new_session=True,
-    )
-    try:
-        yield proc
-    finally:
-        with contextlib.suppress(ProcessLookupError):
-            os.killpg(proc.pid, signal.SIGKILL)
-        await asyncio.wait_for(proc.communicate(), _SCRIPT_TIMEOUT)
+def _wrapped(directory: Path, exec_id: str, *argv: str) -> AbstractAsyncContextManager[asyncio.subprocess.Process]:
+    """Run ``argv`` under :func:`_wrapper` (:func:`wrapped_exec`)."""
+    return wrapped_exec(_wrapper(directory), directory, exec_id, *argv)
 
 
 async def _until_written(path: Path) -> str:
@@ -117,8 +101,12 @@ async def test_a_kill_of_a_running_argv_reports_its_killed_status_before_its_fin
         await asyncio.wait_for(_until_written(started), _SCRIPT_TIMEOUT)
         assert await _run_kill(tmp_path, "running") == _reported(KILL_SIGNALLED, KILLED_EXIT_CODE)
         assert await asyncio.wait_for(wrapper.wait(), _SCRIPT_TIMEOUT) == KILLED_EXIT_CODE
-    # The wrapper removed its pidfile and its recorded status, and the kill its mark.
-    assert [path.name for path in tmp_path.iterdir()] == ["started"]
+    # The wrapper removed its pidfile and its recorded status. The kill removed its mark, unless
+    # it read the recorded status just as the wrapper was writing the mark: the mark then stays,
+    # holding the argv's status.
+    mark = tmp_path / "tai-exec.running.kill"
+    left = sorted(path.name for path in tmp_path.iterdir())
+    assert left == ["started"] or (left == ["started", mark.name] and mark.read_text().strip() == str(KILLED_EXIT_CODE))
 
 
 @pytest.mark.parametrize(

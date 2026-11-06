@@ -116,19 +116,18 @@ async def kill_exec_group(
     opens for it.
 
     Returns what the kill found: the group signalled, with the status its argv ended with;
-    nothing running (the exec had not yet recorded its pid and so never starts its argv, or it
-    has ended); the session
-    gone, its container answered by the engine with a 404; the exec ended, which its own
-    inspect shows after a kill that could not run (a stopped container refuses every new
-    exec); or the exec not started, which its own inspect shows after a kill that could not
-    run (the kill's mark keeps its argv from ever starting, and an exec the engine never starts
-    never runs the wrapper that removes that mark). A kill that signalled the group or found
-    nothing running also reports whether a process the command started still holds the exec's
-    output. The kill's finding reaches the handle as soon as the kill knows it, before the
-    engine records the kill's own exit. A kill that fails while the exec still runs, a signalled
-    exec whose status the kill could not read, or a kill whose follow-up inspect fails, raises
-    :class:`SandboxError` carrying the kill's own output or the engine's error; so does a kill
-    that has not reported within
+    nothing running (the exec has not yet started its own group and so never starts its argv,
+    or it has ended); the session gone, its container answered by the engine with a 404; the
+    exec ended, which its own inspect shows after a kill that could not run (a stopped
+    container refuses every new exec); or the exec not started, which its own inspect shows
+    after a kill that could not run (the kill's mark keeps its argv from ever starting, and an
+    exec the engine never starts never runs the wrapper that removes that mark). A kill that
+    signalled the group or found nothing running also reports whether a process the command
+    started still holds the exec's output. The kill's finding reaches the handle as soon as the
+    kill knows it, before the engine records the kill's own exit. A kill that fails while the
+    exec still runs, a signalled exec whose status the kill could not read, or a kill whose
+    follow-up inspect fails, raises :class:`SandboxError` carrying the kill's own output or the
+    engine's error; so does a kill that has not reported within
     :data:`~tai42_kit.sandbox.exec_kill.KILL_TIMEOUT_SECONDS`, noted with the failure the kill
     met before then, or what it had written on its stderr, a partial line included.
     """

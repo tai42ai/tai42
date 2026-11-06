@@ -18,7 +18,8 @@ by the one :class:`~tai42_kit.sandbox.exec_deadline.ExecDeadline` its exec fixes
 A provider whose execs run inside a
 container and are killed through a sibling exec runs them under the scripts of
 :mod:`~tai42_kit.sandbox.exec_group_scripts` and
-:mod:`~tai42_kit.sandbox.exec_status_scripts`, reports each kill as a
+:mod:`~tai42_kit.sandbox.exec_status_scripts`, composes a scan of its own for the processes
+holding a file from the shell functions of :mod:`~tai42_kit.sandbox.open_file_scan`, reports each kill as a
 :class:`~tai42_kit.sandbox.exec_kill.KillResult`
 (:func:`~tai42_kit.sandbox.exec_status_scripts.kill_report`), runs a one-shot exec with
 :func:`~tai42_kit.sandbox.sibling_kill_one_shot.run_one_shot`, and builds its exec handle on
