@@ -24,23 +24,10 @@ import threading
 import time
 from collections.abc import Awaitable, Callable, Collection, Iterator
 from dataclasses import dataclass
-from typing import Any
 
 
 class WaitTimeoutError(TimeoutError):
     """A ``wait_for`` deadline elapsed before the predicate returned truthy."""
-
-
-class ThreadForCaller(threading.Thread):
-    """A thread whose work the thread that creates it waits on: a wait on it is that caller's as well as its own."""
-
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        super().__init__(*args, **kwargs)
-        self.caller = _caller_of(threading.current_thread())
-
-
-def _caller_of(thread: threading.Thread) -> threading.Thread:
-    return thread.caller if isinstance(thread, ThreadForCaller) else thread
 
 
 @dataclass(eq=False)
@@ -48,7 +35,6 @@ class _RunningWait:
     message: str | Callable[[], str]
     started: float
     thread: threading.Thread
-    caller: threading.Thread
     last: object = None
 
 
@@ -58,8 +44,7 @@ _running: list[_RunningWait] = []
 
 @contextlib.contextmanager
 def _polling(message: str | Callable[[], str]) -> Iterator[_RunningWait]:
-    thread = threading.current_thread()
-    wait = _RunningWait(message, time.monotonic(), thread, _caller_of(thread))
+    wait = _RunningWait(message, time.monotonic(), threading.current_thread())
     _running.append(wait)
     try:
         yield wait
@@ -91,8 +76,8 @@ def _text_that_cannot_raise(message: str | Callable[[], str]) -> str:
 
 def running_waits(*, started_since: float = -math.inf, not_on: Collection[threading.Thread] = ()) -> list[str]:
     """What each wait now polling says it has seen, in the words it would time out with: those that
-    started at or after the ``time.monotonic()`` moment ``started_since`` on, and for, threads outside
-    ``not_on``, every one by default.
+    started at or after the ``time.monotonic()`` moment ``started_since`` on threads outside ``not_on``,
+    every one by default.
 
     Safe from a signal handler: it takes no lock, and an error in a wait's message or in its last result's
     ``repr`` is named in the text, not raised."""
@@ -100,7 +85,7 @@ def running_waits(*, started_since: float = -math.inf, not_on: Collection[thread
     return [
         _said(_text_that_cannot_raise(wait.message), now - wait.started, _repr_that_cannot_raise(wait.last))
         for wait in list(_running)
-        if wait.started >= started_since and wait.thread not in not_on and wait.caller not in not_on
+        if wait.started >= started_since and wait.thread not in not_on
     ]
 
 

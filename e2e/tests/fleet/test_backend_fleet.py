@@ -7,15 +7,16 @@ with one extra ingredient: a manifest ``mcp`` server — the harness's self-cont
 managed MCP fixture (``tai42_e2e_fixtures.managed_mcp_server``) spawned as a stdio child
 in EVERY worker (both serve workers and the backend runtime). Its ``ping`` tool binds
 as ``fleetmcp_ping`` on each worker's live registry, which gives these scenarios a
-detachable tool whose presence/absence is observable two ways, matched to worker kind:
+detachable tool. Every op's proof is its fan-out report, by worker name; each kind adds
+its own read:
 
-* SERVE workers answer the HTTP ``e2e_worker_info`` probe, so their live view collapses
-  to the harness's probe-computed ``state_digest`` — a targeted detach on one serve
-  worker moves ONLY that worker's digest.
-* the BACKEND worker answers no HTTP probe (the digest never observes it), so its live
-  registry is read back through a REAL task it runs: ``run_tool_sync_task`` dispatches a
-  tool by name INSIDE the backend worker, and a detached tool is one the backend can no
-  longer dispatch.
+* a targeted detach on one SERVE worker is applied by exactly that worker (no entry for
+  any other), and after the call the untargeted serve worker's presence row keeps the
+  generation read before it and its ``last_op`` names no delivery of the detach since the
+  call started.
+* the BACKEND worker's live registry is read back through a REAL task it runs:
+  ``run_tool_sync_task`` dispatches a tool by name INSIDE the backend worker, and a
+  detached tool is one the backend can no longer dispatch.
 
 The stack sizes ``TAI_BUS_APPLY_TIMEOUT`` (:data:`_APPLY_TIMEOUT`) well ABOVE the
 in-flight fixture task's runtime (:data:`_TASK_SECONDS`) — the under-load scenario fires
@@ -45,7 +46,15 @@ from tai42_e2e.httpapi import ApiClient
 from tai42_e2e.manifests import MANAGED_SERVER_RELOAD_PROBE_ENV, build_core_stack
 from tai42_e2e.stack import TaiStack
 from tai42_e2e.variants import BusWorker
-from tai42_e2e.waiting import WaitTimeoutError
+
+from ._fleet import (
+    assert_applied_by,
+    assert_applied_by_exactly,
+    assert_no_op_delivered,
+    call_start,
+    serve_generations,
+    serve_members,
+)
 
 pytestmark = pytest.mark.needs(
     "kind:backend", "mutable", "store:redis", "topology:multiworker", "setting:TAI_MCP_MCP_RELOAD_PROBE_TIMEOUT=15"
@@ -77,7 +86,7 @@ def _build_fleet_mcp_stack(res: StackResources, variants: Variants) -> StackConf
     (this process's interpreter) already has ``tai42_e2e_fixtures`` importable, so
     ``sys.executable`` is a valid absolute command regardless of the child ``PATH``.
     Every worker (both serve workers and the backend runtime) probes and binds it at
-    boot, so ``fleetmcp_ping`` is live fleet-wide before the first assertion, and
+    boot, so ``fleetmcp_ping`` is live on every worker before the first assertion, and
     re-probes it on every reload within the reload probe budget the stack sizes to the
     child's start."""
     base = build_core_stack(res, variants)
@@ -147,33 +156,6 @@ async def _deregister_mcp(api: ApiClient, title: str, targets: list[str] | None)
     return await _post_past_reload_gate(api, f"/api/mcp-status/{title}/deregister", targets)
 
 
-async def _stable_serve_digests(stack: TaiStack, n: int) -> dict[int, str]:
-    """Poll the serve fleet until a ``{pid: digest}`` snapshot of all ``n`` serve
-    workers REPEATS unchanged (each worker settled, none mid-reload), then return it.
-
-    Cross-worker digest EQUALITY is deliberately NOT required: the probe digest hashes
-    each process's own live view, which is stable WITHIN a process but not identical
-    ACROSS processes once the manifest carries an ``mcp`` server (a live-manifest field
-    serializes per-process). The targeted narrowing is a per-worker delta — each worker
-    against its own baseline — so a stable snapshot is the right baseline, not a
-    converged one.
-
-    A ``wait_workers`` timeout inside an attempt — a worker still rebuilding after the
-    scenario's whole-fleet reload, so the shared port has not yet surfaced every pid — is a
-    transient "not settled yet", polled past within the harness boot bound."""
-
-    async def settled() -> dict[int, str] | None:
-        try:
-            first = await stack.wait_workers(n)
-            second = await stack.wait_workers(n)
-        except WaitTimeoutError:
-            return None
-        return first if len(first) == n and first == second else None
-
-    message = f"the {n} serve workers never settled to a stable per-worker digest snapshot"
-    return await wait_for_async(settled, deadline=stack.infra.settings.boot_timeout, message=message)
-
-
 async def _backend_dispatch(stack: TaiStack, tool: str, arguments: dict) -> CallToolResult:
     """Run ``tool`` INSIDE the backend worker via the ``run_tool_sync_task`` door (the
     task-execution readback) and return the raw MCP result — ``is_error`` when the
@@ -191,23 +173,21 @@ async def _normalize(stack: TaiStack) -> None:
     """Rebind ``fleetmcp`` on every worker via a whole-fleet reload, so each scenario
     starts from the seeded state regardless of a prior scenario's targeted detach (a
     detach is runtime-only; the reload re-reads the persisted manifest that carries the
-    server). Every worker must report ``applied``: a worker that did not finish its reload
-    would start the scenario from an unknown state."""
+    server). Every serve member must report ``applied``: a worker that did not finish
+    its reload would start the scenario from an unknown state."""
+    members = serve_members(stack)
     resp = await _fleet_reload(stack.api(), None)
     assert resp.status_code == 200, resp.text
-    result = resp.json()["data"]
-    outcomes = {r["name"]: r["outcome"] for r in result["results"]}
-    assert outcomes, f"the whole-fleet reload reported no worker: {result}"
-    assert set(outcomes.values()) == {"applied"}, f"a worker did not apply the whole-fleet reload: {result}"
+    assert_applied_by(resp.json()["data"], members)
 
 
 # ---- delivery under load ------------------------------------------------
 
 
-# The module stack boots inside whichever test runs first (120) + the normalizing reload over
-# REST (15 gate poll + 60 HTTP) + the census poll (20) + the in-flight marker poll (15) + the
-# fleet reload (15 + 60) + the in-flight task's own answer (20).
-@pytest.mark.timeout(330)
+# A liveness bound (a bound on a hang, not a performance limit): twice the slowest legitimate
+# run, stack boot included, measured on CI (celery, shard 1, 2026-11-06: 31.9s), rounded up to the
+# next 10s.
+@pytest.mark.timeout(70)
 @pytest.mark.needs("probe-tools", "setting:extension:sync_task", "setting:TAI_BUS_APPLY_TIMEOUT=30")
 async def test_fleet_op_reaches_backend_worker_under_load(
     fleet_mcp_stack: TaiStack, uniq: Callable[[str], str]
@@ -265,65 +245,46 @@ async def test_fleet_op_reaches_backend_worker_under_load(
 # ---- narrowing among SERVE workers --------------------------------------
 
 
-# The module stack boot (120) + the normalizing reload over REST (15 + 60) + the census poll
-# (20) + the stable-digest poll (the boot bound, 120) + the targeted deregister (15 + 60) +
-# the digest poll (15) + the final read (10).
-@pytest.mark.timeout(440)
+# A liveness bound (a bound on a hang, not a performance limit): twice the slowest legitimate
+# run, stack boot included, measured on CI (arq, shard 3, 2026-11-06: 32.4s), rounded up to the
+# next 10s.
+@pytest.mark.timeout(70)
 @pytest.mark.needs("probe-tools", "setting:managed-mcp-server", "setting:manifest:mcp-fleetmcp")
 async def test_targeted_deregister_narrows_to_one_serve_worker(fleet_mcp_stack: TaiStack) -> None:
-    """A TARGETED ``deregister_mcp`` of ONE serve worker moves ONLY that worker's
-    digest; every other serve digest is byte-identical.
-
-    The detach is the point: a targeted re-probe of unchanged config would leave the
-    digests identical, so the assertion needs a real change on the target and no change
-    anywhere else."""
+    """A TARGETED ``deregister_mcp`` of ONE serve worker is applied by exactly that worker:
+    its fan-out report has the target ``applied`` and no entry for any other worker, and
+    after the call the untargeted serve worker's presence row keeps the generation read
+    before it and names no delivery of the detach since the call started."""
     stack = fleet_mcp_stack
     await _normalize(stack)
 
     serve, _ = await _await_fleet(stack)
     target, other = serve[0], serve[1]
 
-    baseline = await _stable_serve_digests(stack, 2)
-    base_target = baseline[target.pid]
-    base_other = baseline[other.pid]
-
     # Detach fleetmcp on the target serve worker only.
+    generations = serve_generations(stack)
+    started_at = call_start()
     resp = await _deregister_mcp(stack.api(), _MCP_TITLE, [target.name])
     assert resp.status_code == 200, resp.text
     result = resp.json()["data"]
-    outcomes = {r["name"]: r["outcome"] for r in result["results"]}
-    assert outcomes.get(target.name) == "applied", f"the targeted serve worker did not apply: {result}"
-    # The report named ONLY the target — no other worker was delivered to.
-    assert set(outcomes) == {target.name}, f"a targeted detach reached non-target workers: {result}"
-
-    # The target's digest moves off its own baseline; the other serve worker's digest
-    # holds at its own baseline (each worker compared against itself — see
-    # :func:`_stable_serve_digests`).
-    async def target_changed() -> bool:
-        seen = await stack.wait_workers(2)
-        return seen.get(target.pid) not in (None, base_target)
-
-    await wait_for_async(target_changed, deadline=15.0, message="the targeted serve worker's digest never changed")
-    after = await stack.wait_workers(2)
-    assert after[target.pid] != base_target, "the targeted serve worker's digest did not change"
-    assert after[other.pid] == base_other, f"an untargeted serve worker's digest changed: {after} vs {baseline}"
+    assert_applied_by_exactly(result, [target.name])
+    assert_no_op_delivered(stack, [other.name], result["op"], started_at, generations)
 
 
 # ---- delivery TO a backend worker ---------------------------------------
 
 
-# The module stack boot (120) + the normalizing reload over REST (15 + 60) + the census poll
-# (20) + the backend dispatch (10) + the targeted deregister (15 + 60) + the readback poll
-# (15, one dispatch past it 10) + the serve listing (10).
-@pytest.mark.timeout(340)
+# A liveness bound (a bound on a hang, not a performance limit): twice the slowest legitimate
+# run, stack boot included, measured on CI (rq, shard 8, 2026-11-06: 26.2s), rounded up to the
+# next 10s.
+@pytest.mark.timeout(60)
 @pytest.mark.needs(
     "probe-tools", "setting:extension:sync_task", "setting:managed-mcp-server", "setting:manifest:mcp-fleetmcp"
 )
 async def test_targeted_deregister_reaches_the_backend_worker(fleet_mcp_stack: TaiStack, infra: Infra) -> None:
     """A TARGETED ``deregister_mcp`` of the BACKEND worker removes the detached tool
     from the backend worker's live registry, read back through a REAL task the backend
-    runs (the digest never observes backend workers). The serve workers, not targeted,
-    keep serving the tool.
+    runs. The serve workers, not targeted, keep serving the tool.
 
     Celery's backend runtime is a PREFORK pool: the managed stdio MCP server's live
     subprocess connection does not survive the fork into the pool child, so
@@ -353,10 +314,7 @@ async def test_targeted_deregister_reaches_the_backend_worker(fleet_mcp_stack: T
     # Detach fleetmcp on the backend worker only.
     resp = await _deregister_mcp(stack.api(), _MCP_TITLE, [backend.name])
     assert resp.status_code == 200, resp.text
-    result = resp.json()["data"]
-    outcomes = {r["name"]: r["outcome"] for r in result["results"]}
-    assert outcomes.get(backend.name) == "applied", f"the backend worker did not apply the detach: {result}"
-    assert set(outcomes) == {backend.name}, f"a backend-targeted detach reached other workers: {result}"
+    assert_applied_by_exactly(resp.json()["data"], [backend.name])
 
     # Task-execution readback: the backend can no longer dispatch the detached tool.
     async def backend_lost_tool() -> bool:
@@ -376,9 +334,10 @@ async def test_targeted_deregister_reaches_the_backend_worker(fleet_mcp_stack: T
 # ---- unknown-target rejection -------------------------------------------
 
 
-# The module stack boot (120) + the normalizing reload over REST (15 + 60) + the census poll
-# (20) + the refused deregister (15 + 60).
-@pytest.mark.timeout(300)
+# A liveness bound (a bound on a hang, not a performance limit): twice the slowest legitimate
+# run, stack boot included, measured on CI (arq, shard 4, 2026-11-06: 32.4s), rounded up to the
+# next 10s.
+@pytest.mark.timeout(70)
 @pytest.mark.needs("setting:managed-mcp-server", "setting:manifest:mcp-fleetmcp")
 async def test_publish_naming_unknown_target_is_a_named_error(fleet_mcp_stack: TaiStack) -> None:
     """A publish naming a NONEXISTENT target is rejected as a client error whose body

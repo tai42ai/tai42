@@ -220,10 +220,9 @@ def build_studio_setup_stack(res: StackResources, variants: Variants) -> StackCo
     setup door behind the pinned ``TAI_SETUP_TOKEN``, and the two-tier route map the ``studio``
     resource resolves through.
 
-    BUSLESS by construction so it boots with NO credential: an owner cannot be seeded without
-    flipping ``needs_setup`` false, so the authed MCP readiness drain — which needs an admin
-    key — can never run here. One worker, no task backend, no metrics keeps ``needs_bus`` false,
-    so readiness is HTTP ``/health`` alone (as ``build_accounts_fresh_stack``). It carries no
+    It boots with NO credential: an owner cannot be seeded without flipping ``needs_setup``
+    false. One worker, no task backend, no metrics keeps ``needs_bus`` false, so the stack is
+    BUSLESS and readiness is HTTP ``/health`` alone (as ``build_accounts_fresh_stack``). It carries no
     backend, agents, channels, connectors, or backend-branch probe tools — the login flow runs
     none of them, and each would demand the bus the busless stack does not run. The runner seeds
     only the route table (no owner, no key); the setup door initializes the deployment live, and

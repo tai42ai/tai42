@@ -2,20 +2,16 @@
 
 from __future__ import annotations
 
-import asyncio
 import subprocess
 import sys
 import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
-from types import SimpleNamespace
-from typing import Any, cast
 
 import pytest
 
-from tai42_e2e import readiness, waiting
-from tai42_e2e.stack import TaiStack
+from tai42_e2e import waiting
 from tai42_e2e.waiting import WaitTimeoutError, wait_for
 
 InnerPytest = Callable[..., str]
@@ -70,16 +66,6 @@ def test_a_message_given_as_a_callable_is_read_when_the_wait_ends() -> None:
 
     with pytest.raises(WaitTimeoutError, match=r"saw \[0, 1"):
         wait_for(looks, deadline=0.05, interval=0.01, message=lambda: f"saw {seen}")
-
-
-async def test_a_wait_for_workers_names_the_pids_that_answered(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def answers(_stack: object, _port: int, _call: object) -> dict[str, Any]:
-        return {"pid": 7, "state_digest": "d"}
-
-    monkeypatch.setattr(readiness, "_unless_its_process_exits", answers)
-    stack = cast(TaiStack, SimpleNamespace(app_ports=[1]))
-    with pytest.raises(WaitTimeoutError, match=r"only saw \[7\] of 4 workers"):
-        await readiness.wait_workers(stack, 4, deadline=0.01)
 
 
 def _names_the_condition() -> bool:
@@ -221,21 +207,6 @@ def test_a_timeout_on_the_test_function_only_names_the_wait_it_cuts(inner_pytest
     assert "1 failed" in output, output
 
 
-def test_a_test_timeout_names_a_wait_running_on_the_readiness_thread(inner_pytest: InnerPytest) -> None:
-    test = (
-        "from tai42_e2e.readiness import run_readiness_coro\n"
-        "from tai42_e2e.waiting import wait_for_async\n"
-        "seen = [7]\n"
-        "async def never():\n"
-        "    return False\n"
-        "def test_boots():\n"
-        "    run_readiness_coro(wait_for_async(never, deadline=6.0, message=lambda: f'only saw {seen}'))\n"
-    )
-    output = inner_pytest(test, "--timeout=3")
-    assert "Failed: only saw [7] (after " in output, output
-    assert "1 failed" in output, output
-
-
 def test_a_test_timeout_names_a_wait_whose_predicate_is_blocked(inner_pytest: InnerPytest) -> None:
     test = (
         "import time\n"
@@ -286,66 +257,12 @@ def test_a_test_timeout_names_no_wait_on_a_thread_an_earlier_test_left(inner_pyt
     assert "1 failed, 1 passed" in output, output
 
 
-def test_a_test_timeout_names_no_readiness_wait_a_thread_an_earlier_test_left_goes_on_starting(
-    inner_pytest: InnerPytest,
-) -> None:
-    test = (
-        "import contextlib\n"
-        "import threading\n"
-        "import time\n"
-        "from tai42_e2e.readiness import run_readiness_coro\n"
-        "from tai42_e2e.waiting import WaitTimeoutError, wait_for_async\n"
-        "async def never():\n"
-        "    return False\n"
-        "def keeps_starting_waits():\n"
-        "    while True:\n"
-        "        with contextlib.suppress(WaitTimeoutError):\n"
-        "            run_readiness_coro(wait_for_async(never, deadline=0.2, message='the leftover wait'))\n"
-        "def test_leaves_a_thread():\n"
-        "    threading.Thread(target=keeps_starting_waits, daemon=True).start()\n"
-        "def test_sleeps():\n"
-        "    time.sleep(300)\n"
-    )
-    output = inner_pytest(test, "--timeout=2")
-    assert "Failed: Timeout (>2.0s) from pytest-timeout." in output, output
-    assert "Failed: the leftover wait" not in output, output
-    assert "1 failed, 1 passed" in output, output
-
-
-def test_a_test_timeout_names_no_wait_a_readiness_coroutine_that_ignores_its_cancel_goes_on_starting(
-    inner_pytest: InnerPytest,
-) -> None:
-    test = (
-        "import contextlib\n"
-        "import asyncio\n"
-        "import time\n"
-        "from tai42_e2e.readiness import run_readiness_coro\n"
-        "from tai42_e2e.waiting import WaitTimeoutError, wait_for_async\n"
-        "async def never():\n"
-        "    return False\n"
-        "async def ignores_its_cancel():\n"
-        "    for _ in range(40):\n"
-        "        with contextlib.suppress(WaitTimeoutError, asyncio.CancelledError):\n"
-        "            await wait_for_async(never, deadline=0.2, message='the leftover wait')\n"
-        "def test_cut():\n"
-        "    run_readiness_coro(ignores_its_cancel())\n"
-        "def test_sleeps():\n"
-        "    time.sleep(300)\n"
-    )
-    output = inner_pytest(test, "--timeout=2")
-    assert "FAILED test_inner.py::test_cut - Failed: the leftover wait" in output, output
-    assert "FAILED test_inner.py::test_sleeps - Failed: Timeout" in output, output
-
-
-def test_a_test_timeout_names_the_readiness_wait_of_a_thread_the_test_started(inner_pytest: InnerPytest) -> None:
+def test_a_test_timeout_names_the_wait_of_a_thread_the_test_started(inner_pytest: InnerPytest) -> None:
     test = (
         "import threading\n"
-        "from tai42_e2e.readiness import run_readiness_coro\n"
-        "from tai42_e2e.waiting import wait_for_async\n"
-        "async def never():\n"
-        "    return False\n"
+        "from tai42_e2e.waiting import wait_for\n"
         "def waits():\n"
-        "    run_readiness_coro(wait_for_async(never, deadline=6.0, message='the awaited condition'))\n"
+        "    wait_for(lambda: False, deadline=6.0, message='the awaited condition')\n"
         "def test_waits_on_its_own_thread():\n"
         "    thread = threading.Thread(target=waits, daemon=True)\n"
         "    thread.start()\n"
@@ -373,137 +290,6 @@ def test_a_test_timeout_names_no_wait_an_earlier_test_left_on_a_shared_event_loo
     assert "Failed: the awaited condition (after " in output, output
     assert "Failed: Timeout (>2.0s) from pytest-timeout." in output, output
     assert "2 failed" in output, output
-
-
-def test_a_test_timeout_ends_the_polling_on_the_readiness_thread(inner_pytest: InnerPytest) -> None:
-    test = (
-        "import threading\n"
-        "import pytest\n"
-        "from tai42_e2e.readiness import run_readiness_coro\n"
-        "from tai42_e2e.waiting import wait_for, wait_for_async\n"
-        "async def never():\n"
-        "    return False\n"
-        "def readiness_thread_gone():\n"
-        "    return not any(thread.name == 'tai-e2e-readiness' for thread in threading.enumerate())\n"
-        "@pytest.mark.timeout(2)\n"
-        "def test_boots():\n"
-        "    run_readiness_coro(wait_for_async(never, deadline=20.0, message='the awaited condition'))\n"
-        "@pytest.mark.timeout(30)\n"
-        "def test_its_thread_ended():\n"
-        "    wait_for(readiness_thread_gone, deadline=10.0, message='the readiness thread still polls')\n"
-    )
-    output = inner_pytest(test)
-    assert "Failed: the awaited condition (after " in output, output
-    assert "1 failed, 1 passed" in output, output
-
-
-def test_a_readiness_coroutines_error_is_raised_on_the_calling_thread() -> None:
-    async def fails() -> None:
-        raise KeyError("gone")
-
-    with pytest.raises(KeyError, match="gone"):
-        readiness.run_readiness_coro(fails())
-
-
-@pytest.mark.parametrize("error", ["SystemExit", "KeyboardInterrupt"])
-def test_a_readiness_coroutine_ending_with_an_error_that_ends_its_loop_raises_it_on_the_caller_and_nowhere_else(
-    inner_pytest: InnerPytest, error: str
-) -> None:
-    test = (
-        "import threading\n"
-        "import pytest\n"
-        "from tai42_e2e.readiness import run_readiness_coro\n"
-        "from tai42_e2e.waiting import wait_for\n"
-        "async def ends_the_loop():\n"
-        f"    raise {error}\n"
-        "def readiness_thread_gone():\n"
-        "    return not any(thread.name == 'tai-e2e-readiness' for thread in threading.enumerate())\n"
-        "def test_raises():\n"
-        f"    with pytest.raises({error}):\n"
-        "        run_readiness_coro(ends_the_loop())\n"
-        "def test_later():\n"
-        "    wait_for(readiness_thread_gone, deadline=10.0, message='the readiness thread still runs')\n"
-    )
-    output = inner_pytest(test, "-W", "error")
-    assert "2 passed" in output, output
-
-
-def test_a_readiness_coroutines_cancelled_error_reaches_the_caller_as_it_is() -> None:
-    async def cancelled() -> None:
-        raise asyncio.CancelledError("its own")
-
-    with pytest.raises(asyncio.CancelledError, match="its own"):
-        readiness.run_readiness_coro(cancelled())
-
-
-def test_a_system_exit_in_a_readiness_coroutines_child_task_reaches_the_caller() -> None:
-    async def child() -> None:
-        raise SystemExit(3)
-
-    async def parent() -> None:
-        await asyncio.create_task(child())
-
-    with pytest.raises(SystemExit):
-        readiness.run_readiness_coro(parent())
-
-
-def test_a_readiness_coroutine_runs_for_a_caller_on_a_running_event_loop() -> None:
-    ran: list[str] = []
-
-    async def succeeds() -> None:
-        ran.append("ran")
-
-    async def caller() -> None:
-        readiness.run_readiness_coro(succeeds())
-
-    asyncio.run(caller())
-    assert ran == ["ran"]
-
-
-def test_a_readiness_coroutine_ignoring_its_cancel_does_not_keep_the_process_from_exiting(
-    inner_pytest: InnerPytest,
-) -> None:
-    test = (
-        "import asyncio\n"
-        "import contextlib\n"
-        "from tai42_e2e.readiness import run_readiness_coro\n"
-        "async def ignores_its_cancel():\n"
-        "    while True:\n"
-        "        with contextlib.suppress(asyncio.CancelledError):\n"
-        "            await asyncio.sleep(0.05)\n"
-        "def test_cut():\n"
-        "    run_readiness_coro(ignores_its_cancel())\n"
-    )
-    output = inner_pytest(test, "--timeout=2")
-    assert "Failed: Timeout (>2.0s) from pytest-timeout." in output, output
-    assert "1 failed" in output, output
-
-
-def test_a_cut_landing_as_the_readiness_loop_closes_reaches_the_caller(monkeypatch: pytest.MonkeyPatch) -> None:
-    class Cut(BaseException):
-        pass
-
-    join = waiting.ThreadForCaller.join
-
-    def join_then_cut(self: waiting.ThreadForCaller, timeout: float | None = None) -> None:
-        join(self, timeout)
-        raise Cut
-
-    monkeypatch.setattr(waiting.ThreadForCaller, "join", join_then_cut)
-
-    async def succeeds() -> None:
-        pass
-
-    with pytest.raises(Cut):
-        readiness.run_readiness_coro(succeeds())
-
-
-def test_a_thread_for_a_caller_that_such_a_thread_creates_is_for_the_same_caller() -> None:
-    created: list[waiting.ThreadForCaller] = []
-    thread = waiting.ThreadForCaller(target=lambda: created.append(waiting.ThreadForCaller()))
-    thread.start()
-    thread.join()
-    assert created[0].caller is threading.current_thread()
 
 
 def test_a_test_timeout_reads_a_timeout_failure_when_a_waits_message_and_result_raise(
