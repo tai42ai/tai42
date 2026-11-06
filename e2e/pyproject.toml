@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tai42-e2e"
-version = "28.0.1"
+version = "28.0.2"
 description = "Cross-repo end-to-end functional test suite for the tai / AgenticOS ecosystem: boots the real multi-process deployment topology (multi-worker skeleton server, backend worker, metrics server, real Redis, real Postgres) and exercises it over HTTP."
 readme = "README.md"
 requires-python = ">=3.13"
@@ -31,7 +31,7 @@ dependencies = [
     "tai42-contract>=29.0,<30",
     # The hosted LLM providers' extras: the real ``llm`` leg runs against whichever one
     # REAL_E2E_LLM_PROVIDER selects, in this process and in the stack it boots.
-    "tai42-kit[llm,anthropic,google,mistral,xai,jq,uvicorn,redis,postgres,curl,monitoring]>=17.0,<18",
+    "tai42-kit[llm,anthropic,google,mistral,xai,jq,uvicorn,redis,postgres,curl,monitoring]>=17.1,<18",
     "tai42-skeleton[toolbox,files]>=35.0,<36",
     "tai42-toolbox[http,prometheus,chain,embeddings,proxy,classifier]>=6.1,<7",
     # The Stripe payment tools plugin (split out of toolbox); its curl backing
@@ -41,7 +41,7 @@ dependencies = [
     # The sandbox provider plugins the sandbox-axis stacks boot: the Docker-backed
     # provider and the in-process local provider. Workspace siblings, floated at
     # their checkouts by the source overrides below.
-    "tai42-sandbox-docker>=4.0,<5",
+    "tai42-sandbox-docker>=4.1,<5",
     "tai42-sandbox-local>=3.0,<4",
     # The default identity-provider plugin; auth stacks need it in the SUT venv.
     "tai42-identity-redis>=6.0,<7",

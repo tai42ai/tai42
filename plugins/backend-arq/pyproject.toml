@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tai42-backend-arq"
-version = "10.0.0"
+version = "10.0.1"
 description = "arq execution backend for the TAI ecosystem — worker runtime and Redis-hash scheduling over arq."
 readme = "README.md"
 requires-python = ">=3.13"
@@ -32,7 +32,7 @@ dependencies = [
     # the redis extra the pooled Redis client the arq enqueue connection rides.
     # The floor names the first release carrying `tai42_kit.backend`
     # (ManagedBackend + BackendDispatchSettings), which this backend builds on.
-    "tai42-kit[jq,redis]>=17.0,<18",
+    "tai42-kit[jq,redis]>=17.1,<18",
     # The broker SDK: worker runtime, ArqRedis pool, Job status/result API.
     "arq~=0.28.0",
     # Crontab iteration for the Redis-hash scheduler.
