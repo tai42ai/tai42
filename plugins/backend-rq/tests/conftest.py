@@ -29,7 +29,7 @@ from tai42_contract.app import tai42_app
 from tai42_contract.interactions import VisitOutcome
 from tai42_contract.template import TemplatedText
 from tai42_kit.utils.detached_util import in_detached_run
-from tai42_kit.utils.run_bound import in_bounded_run
+from tai42_kit.utils.run_bound import run_bound
 from tai42_kit.utils.state_context import current_state_context
 
 
@@ -73,7 +73,7 @@ class RecordingTools:
     ) -> Any:
         self.run_calls.append((key, arguments))
         self.detached_seen.append(in_detached_run())
-        self.bounded_seen.append(in_bounded_run())
+        self.bounded_seen.append(run_bound() is not None)
         self.offloads.append(offload_sync)
         self.secret_capability_seen.append(caller_may_read_secrets())
         if self.run_error is not None:

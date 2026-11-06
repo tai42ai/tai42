@@ -23,6 +23,7 @@ from tai42_contract.states import StateContext
 from tai42_contract.tools import TOOL_META_CRASH_RESUME
 
 import tai42_skeleton.operations.tool_runs as _pkg
+from tai42_skeleton.app.root_task import spawn_root_task
 from tai42_skeleton.states.context import state_context
 from tai42_skeleton.tools.binding.errors import UnknownToolError
 
@@ -139,14 +140,18 @@ async def _tool_declares_crash_resume(tool_name: str) -> bool:
 
 
 def _spawn_crash_resume(run_id: str, record: dict[str, str]) -> None:
-    """Dispatch a crash-resume re-drive of ``record`` as a DETACHED background task.
+    """Dispatch a crash-resume re-drive of ``record`` as a DETACHED new root of execution.
 
     Never awaited inline: the reconciler runs on READ paths (get-by-id, list) and an
-    inline re-drive would block the reader for the run's whole wall-clock. The re-invoke
-    is logged loudly by run id; a re-invoke that itself raises is surfaced loudly by the
-    task's done-callback, never silently swallowed.
+    inline re-drive would block the reader for the run's whole wall-clock. The task is a
+    root (:func:`~tai42_skeleton.app.root_task.spawn_root_task`): it runs in a fresh context
+    and inherits none of the reader's ambient scope — its run bound, call chain, identity
+    or attribution — and :func:`_crash_resume` binds what the re-drive acts under from the
+    record. It is enrolled in the supervisor drain registry. The re-invoke is logged
+    loudly by run id; a re-invoke that itself raises is surfaced loudly by the task's
+    done-callback, never silently swallowed.
     """
-    task = asyncio.create_task(
+    task = spawn_root_task(
         _crash_resume(run_id, record),
         name=f"tai-crash-resume-{run_id}",
     )

@@ -20,6 +20,7 @@ from tai42_contract.states import StateSubject
 
 from tai42_kit.backend.job_run import dispatched_job
 from tai42_kit.backend.schedule_fire import visit_return
+from tai42_kit.backend.settings import BackendDispatchSettings
 from tai42_kit.utils.data import run_jq_first
 from tai42_kit.utils.lc.signature_util import exclude_fastmcp_ctx_from_kwargs
 from tai42_kit.utils.render import render_templated_text
@@ -185,8 +186,12 @@ def carry_forwarded_fire(callback: CallbackSchema | dict[str, Any], kwargs: dict
         callback["carried_kwargs"] = carried
 
 
-async def callback_execution(result: Any, callback: CallbackSchema) -> Any:
-    """Run ``callback`` over ``result``: gate on the condition, transform, then run the follow-up tool."""
+async def callback_execution(result: Any, callback: CallbackSchema, *, settings: BackendDispatchSettings) -> Any:
+    """Run ``callback`` over ``result``: gate on the condition, transform, then run the follow-up tool.
+
+    ``settings`` are the backend's dispatch settings: the follow-up tool runs as a dispatched job
+    under their ``task_timeout``.
+    """
     cond = await callback.rendered_condition()
     if cond:
         # An empty pipeline is falsy → skip, matching the ``if not cond_output`` gate.
@@ -205,8 +210,9 @@ async def callback_execution(result: Any, callback: CallbackSchema) -> Any:
         # connection and the job budget bounds it, and no HTTP request bound the secret-read
         # capability — the worker binds the one the callback carried.
         capability = _carried_capability(callback)
-        with dispatched_job(), bind_worker_secret_capability(capability):
-            return await _run_callback_tool(callback, expr_output)
+        async with dispatched_job(budget=settings.task_timeout):
+            with bind_worker_secret_capability(capability):
+                return await _run_callback_tool(callback, expr_output)
     return expr_output
 
 

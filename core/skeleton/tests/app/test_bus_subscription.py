@@ -66,6 +66,7 @@ from tai42_skeleton.app.discarded_build import DISCARDED_BUILD_STATUS, mark_disc
 from tai42_skeleton.app.instance import app
 from tai42_skeleton.app.lifecycle import TaiMCPLifecycleMixin
 from tai42_skeleton.app.lifecycle import bus_subscription as bus_subscription_module
+from tai42_skeleton.app.lifecycle.carried_roll import HeldRoll
 from tai42_skeleton.app.recycle import RECYCLED, RecycleError, RecycleReport, RecycleRow, RecycleStop
 from tai42_skeleton.config import recycle_roll as recycle_roll_module
 from tai42_skeleton.config.recycle_policy import CENSUS_TARGET_KINDS, UNREACHABLE_REPORT
@@ -736,8 +737,10 @@ async def test_a_roll_handed_to_a_worker_whose_stop_began_with_no_signal_is_refu
             report=FleetResult(op="reload_config", results=[]),
             pinned={},
             writer=writer,
+            roll="roll-1",
+            answers_within=30.0,
         )
-        answers.append(await app.accept_carried_roll(op))
+        answers.append(await app.accept_carried_roll(op, answers_within=op.answers_within))
 
     monkeypatch.setitem(app._shutdown_handlers, "test.hand_a_roll", hand_a_roll_from_a_shutdown_handler)
 
@@ -748,6 +751,24 @@ async def test_a_roll_handed_to_a_worker_whose_stop_began_with_no_signal_is_refu
 
     assert answers == [{"already_leaving": "shutdown"}]
     assert app._carried_roll_tasks == set()
+
+
+async def test_a_release_roll_op_releases_the_roll_it_names_and_answers_how_it_started() -> None:
+    m = _Mixin()
+    m._held_rolls["roll-1"] = HeldRoll(change="this config change")
+    raw = {"op": "release_roll", "roll": "roll-1", "change": "this config change"}
+
+    assert await m._apply_bus_op(raw, deadline=1e9) == {"started": "this config change"}
+    assert m._held_rolls["roll-1"].released.is_set()
+    # A second release of the same roll reads that it had started.
+    assert await m._apply_bus_op(raw, deadline=1e9) == {"already_started": "this config change"}
+
+
+async def test_a_release_roll_op_naming_no_held_roll_fails() -> None:
+    m = _Mixin()
+
+    with pytest.raises(LookupError, match="holds no roll roll-9 for this config change"):
+        await m._apply_bus_op({"op": "release_roll", "roll": "roll-9", "change": "this config change"}, deadline=1e9)
 
 
 # -- evict_template / clear_template_cache dispatch ---------------------------
