@@ -3,8 +3,10 @@ that runs a worker per queue label, or a worker per green pool, beside the backe
 
 Every backend process joins the census as a ``backend``-kind row, so the wait keys each
 expected process on its own pid: a fleet where only the queue worker has joined is not
-ready, nor is one whose green-pool worker has not joined. These pins drive the wait with
-a controllable census and stand-in processes, no infra."""
+ready, nor is one whose green-pool worker has not joined. A serve worker counts only once
+its own presence row reads ``ready``, and a wait that times out names each worker that is
+missing or not ready. These pins drive the wait with a controllable census and stand-in
+processes, no infra."""
 
 from __future__ import annotations
 
@@ -41,8 +43,17 @@ class _Running:
         return True
 
 
-def _row(kind: str, pid: int) -> BusWorker:
-    return BusWorker(name=f"{kind}-{pid}", kind=kind, pid=pid, generation=1, joined_at="t", beat_at="t", state="ready")
+def _row(kind: str, pid: int, *, state: str = "ready") -> BusWorker:
+    return BusWorker(name=f"{kind}-{pid}", kind=kind, pid=pid, generation=1, joined_at="t", beat_at="t", state=state)
+
+
+def _resyncing_serve_rows() -> list[BusWorker]:
+    """The full fleet of :func:`_stack` with its serve worker's row still ``resyncing``."""
+    return [
+        _row("serve", _SERVE_PID, state="resyncing"),
+        _row("backend", _BACKEND_PID),
+        _row("backend", _QUEUE_WORKER_PID),
+    ]
 
 
 def _stack(census: list[BusWorker]) -> TaiStack:
@@ -96,13 +107,34 @@ def test_the_wait_returns_once_every_backend_process_has_joined() -> None:
 
 def test_the_wait_holds_while_only_the_queue_worker_has_joined() -> None:
     stack = _stack([_row("serve", _SERVE_PID), _row("backend", _QUEUE_WORKER_PID)])
-    with pytest.raises(WaitTimeoutError, match=r"1 serve workers \+ backend \+ backend-queue-b"):
+    with pytest.raises(
+        WaitTimeoutError,
+        match=r"1 ready serve workers \+ backend \+ backend-queue-b\): backend process backend \(pid 101\) has no",
+    ):
+        wait_full_census(stack, 0.2)
+
+
+def test_the_wait_names_the_serve_worker_still_resyncing() -> None:
+    stack = _stack(_resyncing_serve_rows())
+    with pytest.raises(WaitTimeoutError, match=r"serve worker serve-201 \(pid 201\) is resyncing"):
+        wait_full_census(stack, 0.2)
+
+
+def test_the_wait_counts_the_serve_workers_with_no_row() -> None:
+    stack = _stack([_row("backend", _BACKEND_PID), _row("backend", _QUEUE_WORKER_PID)])
+    with pytest.raises(WaitTimeoutError, match=r"1 of 1 serve workers have no presence row"):
         wait_full_census(stack, 0.2)
 
 
 def test_the_fleet_is_present_with_every_serve_worker_and_backend_process_by_pid() -> None:
     rows = [_row("serve", _SERVE_PID), _row("backend", _BACKEND_PID), _row("backend", _QUEUE_WORKER_PID)]
     assert expected_fleet_present(_stack(rows), rows)
+
+
+def test_the_fleet_is_not_present_while_a_serve_worker_is_resyncing() -> None:
+    # Its row is on the census, but its on-ready self-resync (and with it the boot gate) has not returned.
+    rows = _resyncing_serve_rows()
+    assert not expected_fleet_present(_stack(rows), rows)
 
 
 def test_the_fleet_is_not_present_while_a_backend_process_is_missing_from_the_census() -> None:

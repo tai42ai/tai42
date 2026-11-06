@@ -1,12 +1,13 @@
-"""A backup exported from one deployment imports LIVE and fleet-wide onto a SECOND
+"""A backup exported from one deployment imports LIVE onto every worker of a SECOND
 deployment, both the manifest AND the env sections, with no restart.
 
-The two sections are imported in SEPARATE calls, each with its own digest-change proof
-(``POST /api/backup/import`` takes a ``sections`` name list per call). The env section's
-observable is real, not vacuous: the second stack's seeded manifest references the
-imported env key via ``!ENV``, so applying the env moves the RESOLVED live view — the
-digest — fleet-wide. The manifest section then replaces the live manifest, adding the
-source's mcp entry fleet-wide (it shows in ``GET /api/manifest``). Finally a CORRUPTED
+The two sections are imported in SEPARATE calls (``POST /api/backup/import`` takes a
+``sections`` name list per call), each proven by its section's own fan-out report: every
+serve member on the bus census at the time of the call has an ``applied`` entry and no
+entry is anything else. The second stack's seeded manifest references the imported env key
+via ``!ENV``, so applying the env changes the RESOLVED config every worker reloads. The
+manifest section then replaces the live manifest, adding the source's mcp entry (it is
+served in ``GET /api/manifest``). Finally a CORRUPTED
 manifest document is imported: its section report carries the error and the persisted
 manifest is byte-identical (nothing partial lands).
 """
@@ -26,14 +27,15 @@ from tai42_e2e.llmstub import LlmStub
 from tai42_e2e.stack import TaiStack
 
 from ._fleet import (
+    assert_applied_by,
+    assert_fleet_fanout,
     build_backup_definitions_stack,
     build_backup_populated_stack,
     build_backup_source_stack,
     build_backup_storage_stack,
     build_fleet_env_stack_builder,
-    converged_baseline,
-    converged_digest,
     manifest_file,
+    serve_members,
 )
 
 pytestmark = [pytest.mark.backendless, pytest.mark.needs("setting:router:backup")]
@@ -48,17 +50,16 @@ async def _manifest_mcp_titles(stack: TaiStack) -> list[str]:
     return [entry["title"] for entry in manifest["mcp"]]
 
 
-# The test boots two multi-worker stacks of its own and waits out four config reloads, two
-# of them converged fleet-wide, more than the package's per-test 120 s holds on a loaded
-# host, so it carries its own bound.
-@pytest.mark.timeout(360)
+# A liveness bound (a bound on a hang, not a performance limit): twice the slowest legitimate
+# run, both stack boots included, measured on CI (arq, shard 4, 2026-11-06: 29.2s), rounded up to the
+# next 10s.
+@pytest.mark.timeout(60)
 @pytest.mark.needs(
     "probe-tools",
     "mutable",
     "process",
     "files",
     "topology:multiworker",
-    "setting:PYTHONHASHSEED=0",
     "setting:two-stacks",
     "setting:manifest:mcp-env-probe",
 )
@@ -83,24 +84,26 @@ async def test_backup_import_applies_manifest_and_env_fleet_wide(
     # -- second stack: its seeded manifest references _KEY via ``!ENV``.
     target = fresh_stack(build_fleet_env_stack_builder(_KEY))
     api = target.api()
-    baseline = await converged_baseline(target)
 
     # Import #1 — env only: the ``!ENV``-referenced marker now resolves to the imported
-    # value, so the resolved live view moves fleet-wide.
+    # value, and every serve member reloads it.
+    members = serve_members(target)
     r_env = await api.post(
         "/api/backup/import", json={"document": document, "sections": ["env"]}, retry_on_reloading=True
     )
     assert r_env["ok"], f"env import failed: {r_env}"
-    after_env = await converged_digest(target, differ_from=baseline)
+    assert_applied_by(assert_fleet_fanout(r_env["sections"]["env"]), members)
 
-    # Import #2 — manifest only: the persisted manifest is replaced fleet-wide, adding
+    # Import #2 — manifest only: every serve member applies the replaced manifest, adding
     # the source's mcp entry.
+    members = serve_members(target)
     r_man = await api.post(
         "/api/backup/import", json={"document": document, "sections": ["manifest"]}, retry_on_reloading=True
     )
     assert r_man["ok"], f"manifest import failed: {r_man}"
-    await converged_digest(target, differ_from=after_env)
-    assert mcp_title in await _manifest_mcp_titles(target)  # the imported entry is live fleet-wide
+    assert_applied_by(assert_fleet_fanout(r_man["sections"]["manifest"]), members)
+    titles = await _manifest_mcp_titles(target)
+    assert mcp_title in titles, f"the imported entry is not served: {titles}"
 
 
 @pytest.mark.needs("probe-tools", "process")
@@ -167,7 +170,7 @@ async def test_backup_sub_mcp_import_mode_matrix_on_populated_instance(
     assert report["details"]["skipped_existing"] == 0, report
     assert report["errors"] == [], report
     after_over = await api.get("/api/sub-mcp", retry_on_reloading=True)
-    assert after_over[slug]["tools"] == ["e2e_echo"], "overwrite must restore the backup's record fleet-wide"
+    assert after_over[slug]["tools"] == ["e2e_echo"], "overwrite must restore the backup's record"
 
 
 @pytest.fixture(scope="module")

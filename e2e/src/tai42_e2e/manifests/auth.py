@@ -139,8 +139,8 @@ _SETUP_TOKEN = "e2e-setup-token"
 
 def build_setup_stack(res: StackResources, variants: Variants) -> StackConfig:
     """Access control ON with the redis key provider and NO seeded key — a one-worker,
-    busless stack so readiness is HTTP ``/health`` alone (no authed MCP drain), the fresh
-    install the setup door serves. The public ``/api/setup`` door (its own ``routers_modules``
+    busless stack so readiness is HTTP ``/health`` alone, the fresh install the setup door
+    serves. The public ``/api/setup`` door (its own ``routers_modules``
     entry) initializes the deployment behind the pinned setup token; ``login`` makes
     ``needs_setup`` observable, ``principals`` carries the principal listing, and ``api_keys``
     carries the authed ``/api/auth/me`` the owner's minted key then reaches."""
@@ -246,11 +246,10 @@ def build_accounts_fresh_stack(res: StackResources, variants: Variants) -> Stack
     install the setup door initializes.
 
     A fresh access-controlled deployment has no credential, and one cannot be seeded without
-    a principal (which would flip ``needs_setup`` false), so the authed MCP readiness drain
-    can never run here. A one-worker, backend-less stack keeps readiness to HTTP ``/health``
-    alone. Cross-replica session resolution is proven on the seeded REPLICAS accounts stack
-    (``test_boot_reload_no_quarantine``); this stack proves setup + login-attach + login on a
-    real fresh accounts deployment."""
+    a principal (which would flip ``needs_setup`` false). A one-worker, backend-less stack keeps
+    readiness to HTTP ``/health`` alone. Cross-replica session resolution is proven on the
+    seeded REPLICAS accounts stack (``test_boot_reload_no_quarantine``); this stack proves
+    setup + login-attach + login on a real fresh accounts deployment."""
     manifest = {
         "default_routers": "none",
         "lifecycle_modules": ["tai42_identity_redis", "tai42_accounts_postgres"],

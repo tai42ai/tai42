@@ -250,12 +250,6 @@ class TaiStack:
 
     # ---- readiness delegators --------------------------------------------
 
-    async def wait_workers(self, n: int, *, port: int | None = None, deadline: float = 10.0) -> dict[int, str]:
-        """Poll the ``e2e_worker_info`` probe until ``n`` distinct worker pids have
-        answered, returning each pid mapped to its reported state digest (see
-        :func:`tai42_e2e.readiness.wait_workers`)."""
-        return await readiness.wait_workers(self, n, port=port, deadline=deadline)
-
     def wait_fresh_lives(
         self,
         kind: str,
@@ -370,14 +364,6 @@ class TaiStack:
         if name == "metrics" and self.metrics_port is not None:
             return [self.metrics_port]
         return []
-
-    def process_on_port(self, port: int) -> ProcessHandle:
-        """The process currently serving the loopback ``port``."""
-        with self.supervisor.lock:
-            for name, handle in self.procs.items():
-                if port in self.ports_for(name):
-                    return handle
-        raise RuntimeError(f"stack {self.config.name!r}: no process serves port {port}")
 
     def kill(self, name: str) -> None:
         """SIGKILL one process immediately without respawning (dead-worker
