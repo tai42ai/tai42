@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import socket
+import struct
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
@@ -139,6 +140,14 @@ class Stub:
         for server in self.servers:
             server.close()
         for writer in self.writers:
+            writer.transport.abort()
+        self.writers.clear()
+
+    def reset(self) -> None:
+        """Send a reset on every open connection, as a cut link or a restarted server does."""
+        for writer in self.writers:
+            sock = writer.get_extra_info("socket")
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
             writer.transport.abort()
         self.writers.clear()
 

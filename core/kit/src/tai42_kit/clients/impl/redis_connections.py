@@ -178,7 +178,10 @@ class _AsyncConnectsUnderTheRetry(AbstractConnection):
     past the budget. A ``connect`` called during an attempt (a callback's reconnect after
     a drop) raises a connection error, which fails that attempt. A command sent on a
     dropped socket (:meth:`send_packed_command`) connects through :meth:`connect` first,
-    so its reconnect runs under the same retry, handshake included.
+    so its reconnect runs under the same retry, handshake included; a socket the loop has
+    already closed (a reset the server sent while the connection sat idle) counts as
+    dropped, so a command on it reconnects instead of raising the loop's closed-transport
+    error.
 
     :meth:`run_unretried` runs an action now whose error reaches the caller of the
     outermost retried operation as it is, never retried.
@@ -209,6 +212,12 @@ class _AsyncConnectsUnderTheRetry(AbstractConnection):
         _run_unretried(self._view, action)
 
     async def connect(self) -> None:
+        writer = self._writer
+        if writer is not None and writer.is_closing():
+            # The loop already closed the socket (the server reset it while it sat idle): a
+            # write on it raises the loop's own error, never a connection error, so the
+            # dead streams are dropped and the connect below opens a new socket.
+            await self.disconnect(nowait=True)
         if self.is_connected:
             return
         if self._in_attempt:

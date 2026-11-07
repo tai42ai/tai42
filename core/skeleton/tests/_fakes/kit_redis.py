@@ -6,7 +6,9 @@ connections, which connect under their retry and run that hook unretried.
 :class:`KitFakeRedis` keeps ``fakeredis``'s in-process server and takes the kit client's
 ``pubsub``, and its connections are the kit async connection class over ``fakeredis``'s
 connection, so code that passes ``on_reconnect`` runs against the fake as it does against
-the real client.
+the real client. That connection's writer reports whether it is closing, as the
+``asyncio.StreamWriter`` a real connection writes through does, since a kit connection
+reads it before each command.
 """
 
 from __future__ import annotations
@@ -17,8 +19,27 @@ from fakeredis import aioredis
 from tai42_kit.clients.impl.redis import KitAsyncRedis
 from tai42_kit.clients.impl.redis_connections import kit_async_connection_class
 
+
+class _ClosingAwareFakeWriter(aioredis.FakeWriter):
+    """``fakeredis``'s writer, closing once :meth:`close` has dropped its socket."""
+
+    def is_closing(self) -> bool:
+        """Whether the writer was closed, as ``asyncio.StreamWriter.is_closing`` reports it."""
+        return self._socket is None
+
+
+class _FakeStreamConnection(aioredis.FakeAsyncRedisConnection):
+    """``fakeredis``'s async connection, writing through :class:`_ClosingAwareFakeWriter`."""
+
+    async def _connect(self) -> None:
+        await super()._connect()
+        sock = self._sock
+        assert sock is not None
+        self._writer = _ClosingAwareFakeWriter(sock)
+
+
 # The kit async connection class over ``fakeredis``'s async connection.
-KitFakeConnection = kit_async_connection_class(aioredis.FakeAsyncRedisConnection)
+KitFakeConnection = kit_async_connection_class(_FakeStreamConnection)
 
 
 class KitFakeRedis(aioredis.FakeRedis, KitAsyncRedis):
