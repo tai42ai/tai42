@@ -6,7 +6,7 @@ the fleet soft restart and a joining worker's announcement — ends here
 (:func:`~tai42_skeleton.config.recycle_policy.recycle_decision`), the recycle orchestrator rolls
 over them one at a time (:func:`roll_decided`), and the workers still awaiting a respawn
 afterwards are the operation's verdict. A change run under a bound the roll's waits can outlast
-hands the roll to the bus member it acts for, which rolls after the change answered.
+hands the roll to the bus member it acts for, which rolls once the change's run ended.
 """
 
 from __future__ import annotations
@@ -140,7 +140,7 @@ async def decide_and_roll(
     for every other change holding the worker's exit, are waits the bound cannot hold. It hands
     the roll to the bus member it acts for
     (:func:`~tai42_skeleton.config.roll_handoff.hand_off_roll`), which carries it out as its own
-    task once the change answered — the bound's exit releases it — and departs itself last, once
+    task once the change's run ended — the bound's exit releases it — and departs itself last, once
     the roll converged, when the writer needs
     its restart, and returns with ``deferred_to`` naming that member. The member keeps the roll holds ``holds`` names
     (:mod:`~tai42_skeleton.config.roll_holds`) from before its answer until the roll ended: what

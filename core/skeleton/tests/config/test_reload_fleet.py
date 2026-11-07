@@ -421,10 +421,9 @@ async def test_a_soft_restart_whose_reload_and_roll_hand_off_both_fail_raises_th
 
     assert {row.name for row in exc.value.report.results} == {"serve-writer", "serve-b"}
     assert exc.value.report.error == (
-        "the recycle roll the change owes failed: RuntimeError: fleet recycle: the roll for the fleet soft restart "
-        "could not be handed to 'serve-writer', the bus member the change acts for — its app is not built. "
-        "The roll did "
-        "not start; the reload broadcast reached the bus"
+        "the recycle roll the change owes failed: RollNotHandedError: fleet recycle: the roll for the fleet soft "
+        "restart could not be handed to 'serve-writer', the bus member the change acts for — its app is not built. "
+        "The roll did not start; the reload broadcast reached the bus"
     )
     roll = exc.value.roll
     assert roll is not None

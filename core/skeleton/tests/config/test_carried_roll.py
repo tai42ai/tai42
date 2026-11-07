@@ -4,7 +4,7 @@ The ``carry_roll`` op (over the bus, or given to the member's own app) is answer
 member took the roll holds the op names: a member already leaving carries nothing; otherwise it
 holds its own exit for the change from the answer on, so a ``Recycle`` op from another worker's
 roll is deferred to it, and keeps the roll held as a tracked task. The run that handed the roll
-off releases it once it answered its caller (the ``release_roll`` op, or the in-process release
+off releases it once it ended (the ``release_roll`` op, or the in-process release
 onto the serving loop), and only then does the roll start; a roll handed over the bus starts by
 the run's bound (``answers_within``) at the latest, with an ERROR line. A hold the member cannot
 take leaves the op unapplied with nothing carried. A converged roll whose writer needs its own
@@ -18,7 +18,7 @@ import asyncio
 import logging
 import threading
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable, Coroutine
 from contextlib import asynccontextmanager
 from typing import Any, cast
 from unittest.mock import AsyncMock
@@ -276,6 +276,38 @@ async def test_a_carried_roll_cancelled_before_its_first_step_fails_the_answer_w
     assert bus.exit_deferred is None
 
 
+async def test_an_acceptance_cancelled_once_the_holds_are_taken_keeps_the_roll_and_the_release_starts_it(
+    member: tuple[_Lifecycle, FakeBus], monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The caller is cancelled in the step the carried task took the holds: the answer reads its
+    # cancellation, and the roll stays held for the run's release, which starts it.
+    lifecycle, bus = member
+    seen: list[str | None] = []
+    _rolls(monkeypatch, seen, bus)
+    lifecycle.bind_serving_loop()
+    callers: list[asyncio.Task[dict[str, str]]] = []
+    released = carried_roll_module._released
+
+    async def cancelling(roll: Any, answers_within: float | None) -> None:
+        callers[0].cancel()
+        await released(roll, answers_within)
+
+    monkeypatch.setattr(carried_roll_module, "_released", cancelling)
+    op = _op(writer_keys=[])
+
+    with caplog.at_level(logging.ERROR):
+        callers.append(asyncio.create_task(lifecycle.carry_roll(op)))
+        with pytest.raises(asyncio.CancelledError):
+            await callers[0]
+        await _settle()
+        assert op.roll in lifecycle._held_rolls
+        assert lifecycle._release_carried_roll(op.roll, op.change) == {"started": _CHANGE}
+        await _carried(lifecycle)
+
+    assert seen == [_CHANGE]
+    assert not [record for record in caplog.records if record.levelno >= logging.ERROR]
+
+
 def _register_holds(monkeypatch: pytest.MonkeyPatch, events: list[str], *, refuse: str | None = None) -> None:
     """Register the holds ``first`` and ``second``, recording entries and exits; ``refuse`` names one that fails."""
 
@@ -431,6 +463,272 @@ async def test_a_change_in_the_member_off_its_serving_loop_hands_and_releases_th
     assert loops == [serving]
 
 
+async def test_a_run_off_the_serving_loop_cancelled_after_the_member_accepted_is_released_at_its_bounds_exit(
+    member: tuple[_Lifecycle, FakeBus], monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A job on a backend worker's private task loop hands its roll to the member it runs in; the
+    # serving loop accepted it, and the job was cut before it read the answer. Its bound's exit
+    # releases the roll onto the serving loop, which starts it.
+    lifecycle, bus = member
+    seen: list[str | None] = []
+    _rolls(monkeypatch, seen, bus)
+    # The member's own app takes the op; the roll's drain budgets stay those of the built app.
+    monkeypatch.setattr(instance, "built_app", lambda: lifecycle)
+    lifecycle.bind_serving_loop()
+    callers: list[asyncio.Task[None]] = []
+    ends: list[str] = []
+    # The job's loop is held from the moment the holds are taken until its cut is queued behind
+    # the answer's arrival, so the job reads the cut before it can read the answer.
+    job_loop_held = threading.Event()
+    job_loop_may_run = threading.Event()
+
+    def hold_the_job_loop() -> None:
+        job_loop_held.set()
+        job_loop_may_run.wait(5)
+
+    taken = asyncio.Event()
+    released = carried_roll_module._released
+
+    async def taking(roll: Any, answers_within: float | None) -> None:
+        callers[0].get_loop().call_soon_threadsafe(hold_the_job_loop)
+        job_loop_held.wait(5)
+        taken.set()
+        await released(roll, answers_within)
+
+    monkeypatch.setattr(carried_roll_module, "_released", taking)
+    op = _op(writer_keys=[])
+
+    async def job() -> None:
+        async def change() -> None:
+            async with bounded_run(60) as bound:
+                await roll_handoff.hand_off_roll(
+                    cast("Any", bus),
+                    op.report,
+                    op.writer,
+                    op.pinned,
+                    bound=bound,
+                    change=_CHANGE,
+                    writer_exits=False,
+                    addressed=None,
+                )
+
+        caller = asyncio.create_task(change())
+        callers.append(caller)
+        try:
+            await caller
+        except asyncio.CancelledError:
+            ends.append("cancelled")
+
+    before = asyncio.all_tasks()
+    thread = threading.Thread(target=lambda: asyncio.run(job()))
+    with caplog.at_level(logging.INFO):
+        thread.start()
+        await asyncio.wait_for(taken.wait(), 5)
+        (roll,) = lifecycle._held_rolls.values()
+        hop = next(task for task in asyncio.all_tasks() - before if task not in lifecycle._carried_roll_tasks)
+        # The acceptance answered; its answer is queued on the held job loop, the cut right behind it.
+        await asyncio.wait({hop})
+        callers[0].get_loop().call_soon_threadsafe(callers[0].cancel)
+        job_loop_may_run.set()
+        await asyncio.to_thread(thread.join, 5)
+        await _settle()
+        assert ends == ["cancelled"]
+        assert roll.released.is_set()
+        await _carried(lifecycle)
+
+    assert seen == [_CHANGE]
+    assert not [record for record in caplog.records if record.levelno >= logging.ERROR]
+    messages = [record.getMessage() for record in caplog.records]
+    assert f"the run that handed this worker the roll for {_CHANGE} ended: the roll starts" in messages
+
+
+_ROLL_STARTS = f"the run that handed this worker the roll for {_CHANGE} ended: the roll starts"
+_NO_ROLL_HELD = (
+    f"fleet recycle: the run that handed this worker the roll for {_CHANGE} ended, but its release found no roll "
+    "held here — the roll was given up before it started (the acceptance was cancelled before the holds were taken, "
+    "or this worker is stopping); it did not start"
+)
+_STOPPED_WHILE_HELD = (
+    f"the fleet recycle for {_CHANGE} handed to this worker was cancelled before it was released (the worker is "
+    "stopping) — no target was rolled"
+)
+
+
+class _GatedHold:
+    """The roll hold ``gated``: its entry passes once the test lets it, and its exit waits for the test.
+
+    ``reached`` is set once the entry began, ``exiting`` once the exit began; the exit runs on
+    every ending, the entry cancelled included, and returns only once ``exit_may_run`` is set,
+    so a release can reach the member while the carried task is still unwinding.
+    """
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch, *, entry_passes: bool) -> None:
+        self.reached = asyncio.Event()
+        self.entry_may_pass = asyncio.Event()
+        self.exiting = asyncio.Event()
+        self.exit_may_run = asyncio.Event()
+        if entry_passes:
+            self.entry_may_pass.set()
+        monkeypatch.setattr(roll_holds, "_HOLDS", {"gated": self._hold})
+
+    @asynccontextmanager
+    async def _hold(self) -> AsyncIterator[None]:
+        try:
+            self.reached.set()
+            await self.entry_may_pass.wait()
+            yield
+        finally:
+            self.exiting.set()
+            await self.exit_may_run.wait()
+
+
+def _released_in_this_process(monkeypatch: pytest.MonkeyPatch, lifecycle: _Lifecycle) -> asyncio.Event:
+    """Return an event set on the serving loop once an in-process release of a roll was processed there."""
+    processed = asyncio.Event()
+    release = lifecycle._release_in_this_process
+
+    def releasing(roll: str, change: str) -> None:
+        release(roll, change)
+        processed.set()
+
+    monkeypatch.setattr(lifecycle, "_release_in_this_process", releasing)
+    return processed
+
+
+async def _carried_tasks_ended(lifecycle: _Lifecycle) -> None:
+    """Wait for every carried task to end, however it ends, and for its done-callbacks to have run."""
+    tasks = set(lifecycle._carried_roll_tasks)
+    if tasks:
+        _done, pending = await asyncio.wait(tasks, timeout=5)
+        assert not pending
+    assert lifecycle._carried_roll_tasks == set()
+
+
+def _handing_off_under_a_bound(bus: FakeBus, *, holds: tuple[str, ...]) -> Callable[[], Coroutine[Any, Any, None]]:
+    """A change that hands its roll, naming ``holds``, to the member it runs in, under its bound."""
+    op = _op(writer_keys=[])
+
+    async def change() -> None:
+        async with bounded_run(60) as bound:
+            await roll_handoff.hand_off_roll(
+                cast("Any", bus),
+                op.report,
+                op.writer,
+                op.pinned,
+                bound=bound,
+                change=_CHANGE,
+                writer_exits=False,
+                addressed=None,
+                holds=holds,
+            )
+
+    return change
+
+
+async def test_a_run_on_the_serving_loop_cut_before_the_member_took_the_holds_logs_that_no_roll_started(
+    member: tuple[_Lifecycle, FakeBus], monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A turn on the member's serving loop hands its roll to its own app and is cut while the
+    # carried task takes the holds: the roll is given up, and the release the bound's exit
+    # sends reaches the serving loop while the hold is still unwinding.
+    lifecycle, bus = member
+    seen: list[str | None] = []
+    _rolls(monkeypatch, seen, bus)
+    monkeypatch.setattr(instance, "built_app", lambda: lifecycle)
+    lifecycle.bind_serving_loop()
+    gated = _GatedHold(monkeypatch, entry_passes=False)
+    processed = _released_in_this_process(monkeypatch, lifecycle)
+    change = _handing_off_under_a_bound(bus, holds=("gated",))
+
+    with caplog.at_level(logging.INFO):
+        caller = asyncio.create_task(change())
+        await asyncio.wait_for(gated.reached.wait(), 5)
+        caller.cancel()
+        await asyncio.wait({caller}, timeout=5)
+        assert caller.cancelled()
+        await asyncio.wait_for(processed.wait(), 5)
+        gated.exit_may_run.set()
+        await _carried_tasks_ended(lifecycle)
+
+    assert seen == []
+    assert lifecycle._held_rolls == {}
+    assert [record.getMessage() for record in caplog.records if record.levelno >= logging.ERROR] == [_NO_ROLL_HELD]
+    assert _ROLL_STARTS not in [record.getMessage() for record in caplog.records]
+
+
+async def test_a_run_off_the_serving_loop_cut_before_the_member_took_the_holds_logs_that_no_roll_started(
+    member: tuple[_Lifecycle, FakeBus], monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A job on a backend worker's private task loop hands its roll to the member it runs in and
+    # is cut while the serving loop's carried task takes the holds; the hold's exit waits until
+    # the release the job's bound sent at its exit was processed on the serving loop.
+    lifecycle, bus = member
+    seen: list[str | None] = []
+    _rolls(monkeypatch, seen, bus)
+    monkeypatch.setattr(instance, "built_app", lambda: lifecycle)
+    lifecycle.bind_serving_loop()
+    gated = _GatedHold(monkeypatch, entry_passes=False)
+    processed = _released_in_this_process(monkeypatch, lifecycle)
+    change = _handing_off_under_a_bound(bus, holds=("gated",))
+    callers: list[asyncio.Task[None]] = []
+    ends: list[str] = []
+
+    async def job() -> None:
+        caller = asyncio.create_task(change())
+        callers.append(caller)
+        try:
+            await caller
+        except asyncio.CancelledError:
+            ends.append("cancelled")
+
+    thread = threading.Thread(target=lambda: asyncio.run(job()))
+    with caplog.at_level(logging.INFO):
+        thread.start()
+        await asyncio.wait_for(gated.reached.wait(), 5)
+        callers[0].get_loop().call_soon_threadsafe(callers[0].cancel)
+        await asyncio.wait_for(processed.wait(), 5)
+        gated.exit_may_run.set()
+        await asyncio.to_thread(thread.join, 5)
+        assert ends == ["cancelled"]
+        await _carried_tasks_ended(lifecycle)
+
+    assert seen == []
+    assert lifecycle._held_rolls == {}
+    assert [record.getMessage() for record in caplog.records if record.levelno >= logging.ERROR] == [_NO_ROLL_HELD]
+    assert _ROLL_STARTS not in [record.getMessage() for record in caplog.records]
+
+
+async def test_a_release_reaching_a_worker_stopping_while_it_held_the_roll_logs_that_no_roll_started(
+    member: tuple[_Lifecycle, FakeBus], monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The member holds the roll, waiting for its release, when the worker stops; the run's
+    # in-process release reaches the serving loop while the holds are still unwinding.
+    lifecycle, bus = member
+    seen: list[str | None] = []
+    _rolls(monkeypatch, seen, bus)
+    lifecycle.bind_serving_loop()
+    gated = _GatedHold(monkeypatch, entry_passes=True)
+    processed = _released_in_this_process(monkeypatch, lifecycle)
+    op = _op(writer_keys=[], holds=("gated",))
+
+    with caplog.at_level(logging.INFO):
+        answer = await asyncio.wait_for(lifecycle.accept_carried_roll(op, answers_within=None), 5)
+        assert answer == {"carrying": _CHANGE}
+        stopping = asyncio.create_task(lifecycle._cancel_carried_rolls())
+        await asyncio.wait_for(gated.exiting.wait(), 5)
+        lifecycle.release_carried_roll(op.roll, op.change)
+        await asyncio.wait_for(processed.wait(), 5)
+        gated.exit_may_run.set()
+        await asyncio.wait_for(stopping, 5)
+
+    assert seen == []
+    assert lifecycle._held_rolls == {}
+    assert lifecycle._carried_roll_tasks == set()
+    errors = [record.getMessage() for record in caplog.records if record.levelno >= logging.ERROR]
+    assert errors == [_STOPPED_WHILE_HELD, _NO_ROLL_HELD]
+    assert _ROLL_STARTS not in [record.getMessage() for record in caplog.records]
+
+
 class _ChildSender(FakeBus):
     """A forked job child acting for the member ``lifecycle``: each op it publishes is applied there.
 
@@ -486,7 +784,7 @@ async def test_a_carry_op_failed_by_a_post_apply_handler_after_the_member_took_t
                     writer_exits=False,
                     addressed=None,
                 )
-            # The member holds the roll until the run answered.
+            # The member holds the roll until the run ended.
             await _settle()
             assert seen == []
         await _carried(lifecycle)
@@ -580,10 +878,7 @@ async def test_an_in_process_release_of_a_roll_no_longer_held_is_logged_on_the_s
         await _settle()
 
     messages = [record.getMessage() for record in caplog.records if record.levelno == logging.ERROR]
-    assert messages == [
-        f"fleet recycle: the run that handed this worker the roll for {_CHANGE} answered, but its release found "
-        "no roll held here"
-    ]
+    assert messages == [_NO_ROLL_HELD]
 
 
 async def test_an_in_process_release_on_a_worker_with_no_serving_loop_raises(

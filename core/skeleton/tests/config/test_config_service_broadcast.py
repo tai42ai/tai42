@@ -297,7 +297,7 @@ async def test_a_roll_hand_off_that_fails_after_the_persist_raises_the_landed_ch
     assert exc.value.roll is not None
     assert exc.value.report.reachable is True
     assert exc.value.report.error == (
-        "the recycle roll the change owes failed: RuntimeError: fleet recycle: the roll for this config change "
+        "the recycle roll the change owes failed: RollNotHandedError: fleet recycle: the roll for this config change "
         "could not be handed to 'serve-test', the bus member the change acts for — its app is not built. The roll did "
         "not start; the reload broadcast reached the bus"
     )
