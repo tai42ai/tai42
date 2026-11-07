@@ -1,4 +1,4 @@
-"""SUT-side registrations for the three platform seams the harness observes:
+"""SUT-side registrations for the platform seams the harness observes:
 
 * a declared **preset seed** (``register_seed``) so a boot makes it a live callable
   preset tool — with an env-selected UPGRADED body so a reload drives the
@@ -7,6 +7,8 @@
   marked target (proving a plugin-declared reference blocks a rename and joins the
   ``/referees`` rename preview) plus a RAISING variant (proving a referee exception fails the
   rename loudly);
+* a **rename cascade** (``register_rename_cascade``) that raises for a marker name, so a cascade
+  failure can be driven through the public seam;
 * a **composing tool** (``e2e_composer``) whose declared ``tool_refs`` extractor names each
   ``steps`` entry as a composed tool, so a write naming an unserved step is refused;
 * an **invocation-seam probe** tool that reports the in-flight tool name
@@ -87,6 +89,22 @@ async def _fixture_rename_referee(old_names: frozenset[str]) -> dict[str, list[R
 
 
 tai42_app.tools.register_rename_referee(_fixture_rename_referee)
+
+
+# -- rename cascade ----------------------------------------------------------
+
+# A rename of a tool whose name carries this marker makes the fixture cascade raise, failing
+# the rename loudly and driving its undo; any other name re-keys nothing.
+_CASCADE_RAISE_MARKER = "e2e_cas_raise"
+
+
+async def _fixture_rename_cascade(old_name: str, new_name: str) -> None:
+    """Raise for a RAISE-marked old name; any other rename passes through untouched."""
+    if _CASCADE_RAISE_MARKER in old_name:
+        raise RuntimeError(f"e2e fixture cannot re-key {old_name!r}")
+
+
+tai42_app.tools.register_rename_cascade(_fixture_rename_cascade)
 
 
 # -- composing tool ----------------------------------------------------------

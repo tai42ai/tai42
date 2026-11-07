@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 
 def build_seams_stack(res: StackResources, variants: Variants) -> StackConfig:
     """MULTIWORKER(1) + backend — the platform-seams home carrying the seams fixture
-    (preset seed + rename referee + invocation probe).
+    (preset seed + rename referee + rename cascade + invocation probe).
 
     Backend + the ``schedule_task`` probe branch give the rename-integrity legs a live
     SCHEDULE and the schedule/hook platform referees to block a rename on; the full core

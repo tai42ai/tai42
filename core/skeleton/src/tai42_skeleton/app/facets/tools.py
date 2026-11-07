@@ -20,6 +20,7 @@ if TYPE_CHECKING:
         ToolDeleteCascade,
         ToolDeleteReferee,
         ToolRefsExtractor,
+        ToolRenameCascade,
         ToolRenameReferee,
     )
 
@@ -158,6 +159,14 @@ class ToolsFacet(_Facet):
         :meth:`PresetsFacet.write_validator` sets.
         """
         return self._app._rename_referee_registry.all()
+
+    def register_rename_cascade(self, provider: ToolRenameCascade) -> None:
+        """Register a rename cascade the preset rename runs once it proceeds."""
+        return self._app._rename_cascade_registry.register(provider)
+
+    def rename_cascades(self) -> list[ToolRenameCascade]:
+        """Every registered rename cascade, in registration order."""
+        return self._app._rename_cascade_registry.all()
 
     def register_delete_referee(self, provider: ToolDeleteReferee) -> None:
         """Register a delete referee (a veto only) consulted before a tool delete commits."""

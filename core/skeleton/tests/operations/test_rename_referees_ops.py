@@ -89,12 +89,14 @@ def _reset_preset_registry():
 
 
 @pytest.fixture(autouse=True)
-def _isolate_referee_registry():
+def _isolate_rename_seam_registries():
     """The referee collection lives on the app singleton and is re-armed with the
-    platform-internal referees on each ``start()``. Clear it after every test so a
-    test-registered provider never leaks into another suite that does not re-boot."""
+    platform-internal referees on each ``start()``; the rename cascades live beside it.
+    Clear both after every test so a test-registered provider never leaks into another
+    suite that does not re-boot."""
     yield
     instance.app._rename_referee_registry.reset()
+    instance.app._rename_cascade_registry.reset()
 
 
 async def _create(name: str, base_tool: str = "echo", **over: Any) -> None:
@@ -258,6 +260,24 @@ def test_preview_door_returns_union_of_presets_and_referees(pg) -> None:
                 {"kind": "preset", "tag": "presets", "name": "composer", "locator": {}, "summary": "preset 'composer'"},
                 _SCHEDULE_HOLDER.model_dump(),
             ]
+
+    asyncio.run(run())
+
+
+@pytest.mark.usefixtures("admin_caller")
+def test_the_rename_preview_consults_no_cascade(pg) -> None:
+    async def _boom_cascade(_old: str, _new: str) -> None:
+        raise RuntimeError("a preview must not re-key")
+
+    async def run() -> None:
+        async with instance.app.app_context(_manifest()):
+            instance.app._rename_referee_registry.reset()
+            instance.app.tools.register_rename_referee(_echo_holder)
+            instance.app.tools.register_rename_cascade(_boom_cascade)
+            await _create("alerts")
+
+            preview = await preset_ops.preset_referees(name="alerts", action="rename")
+            assert preview == {"action": "rename", "holders": [_SCHEDULE_HOLDER.model_dump()]}
 
     asyncio.run(run())
 
