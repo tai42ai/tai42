@@ -79,9 +79,9 @@ def _connectors_stack(fresh_stack: Callable[..., TaiStack], oauth_idp: OAuthIdp)
 
 
 # A liveness bound (a bound on a hang, not a performance limit): twice the slowest legitimate
-# run, stack boot included, measured on CI (arq, shard 2, 2026-11-06: 26.5s), rounded up to the
-# next 10s.
-@pytest.mark.timeout(60)
+# run, stack boot included, measured locally (arq, load average up to 31 on 20 cores,
+# 2026-11-06: 20.2s), rounded up to the next 10s.
+@pytest.mark.timeout(50)
 async def test_noauth_connect_disconnect_converges(
     fresh_stack: Callable[..., TaiStack], oauth_idp: OAuthIdp, uniq: Callable[[str], str]
 ) -> None:
@@ -124,9 +124,9 @@ async def test_noauth_connect_disconnect_converges(
 
 
 # A liveness bound (a bound on a hang, not a performance limit): twice the slowest legitimate
-# run, stack boot included, measured on CI (arq, shard 8, 2026-11-06: 35.7s), rounded up to the
-# next 10s.
-@pytest.mark.timeout(80)
+# run, stack boot included, measured locally (arq, load average up to 31 on 20 cores,
+# 2026-11-06: 25.8s), rounded up to the next 10s.
+@pytest.mark.timeout(60)
 async def test_sub_service_toggle_converges(
     fresh_stack: Callable[..., TaiStack], oauth_idp: OAuthIdp, uniq: Callable[[str], str]
 ) -> None:
@@ -211,9 +211,9 @@ async def test_sub_service_toggle_converges(
 
 
 # A liveness bound (a bound on a hang, not a performance limit): twice the slowest legitimate
-# run, stack boot included, measured on CI (arq, shard 7, 2026-11-06: 21.2s), rounded up to the
-# next 10s.
-@pytest.mark.timeout(50)
+# run, stack boot included, measured locally (arq, load average up to 31 on 20 cores,
+# 2026-11-06: 14.7s), rounded up to the next 10s.
+@pytest.mark.timeout(30)
 @pytest.mark.needs("helper:idp")
 async def test_oauth_complete_and_reconnect_converges(
     fresh_stack: Callable[..., TaiStack], oauth_idp: OAuthIdp, uniq: Callable[[str], str]
