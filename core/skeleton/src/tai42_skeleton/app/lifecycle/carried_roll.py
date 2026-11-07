@@ -1,9 +1,10 @@
 """The rolls a bounded change hands this worker: accepted, held until the run released them, then carried out.
 
 A roll handed here is answered once its holds are taken, mid-change; the run that handed it off
-releases it at its bound's exit, once it answered its caller, and only then does this worker
-start the roll, as its own task. A run in another process can end with no word, so a roll it
-handed over the bus starts by that run's bound at the latest, with an ERROR line.
+releases it at its bound's exit, once the run ended, its answer sent or the run cut, and only
+then does this worker start the roll, as its own task. A run in another process can end with no
+word, so a roll it handed over the bus starts by that run's bound at the latest, with an ERROR
+line.
 """
 
 import asyncio
@@ -42,7 +43,8 @@ class CarriedRollMixin(LifecycleState):
         reaches its publisher. The op is accepted on the serving loop, where the carried roll
         runs for the process lifetime (:meth:`accept_carried_roll`), through
         :func:`~tai42_skeleton.app.lifecycle.state.run_on_serving_loop`: a caller cancelled
-        meanwhile cancels the acceptance and returns once it has ended there. The run that
+        before the holds are taken cancels the acceptance; one cancelled after reads its
+        cancellation, the roll stays held, and the run's bound releases it at its exit. The run that
         handed the roll off is in this process, and its bound's exit releases the roll here
         (:meth:`release_carried_roll`), so the roll is held with no deadline.
         """
@@ -63,13 +65,17 @@ class CarriedRollMixin(LifecycleState):
         and starts a tracked root task (:meth:`_carry_under_holds`). That task first takes the
         roll holds the op names (:func:`~tai42_skeleton.config.roll_holds.enter_roll_holds`);
         once they are taken this answers ``{"carrying": change}``, and the task keeps them until
-        the roll ended. The task then waits for the run's release
+        the roll ended. The task then waits for the run's release, sent once the run ended
         (:meth:`_release_carried_roll`) — for ``answers_within`` seconds at most, when given — and
         carries the roll out. A hold it cannot take raises here, the op unapplied and nothing
         carried; so does a task stopped before it took them (the worker's shutdown); this answer
-        cancelled before the holds are taken cancels the task. The task is cancelled at shutdown
-        and a failed roll is logged at ERROR by its done-callback; whatever way it ends, the hold
-        it did not settle is released and the roll is no longer held.
+        cancelled before the holds are taken gives the roll up and cancels the task; cancelled
+        after, it keeps the roll held. The task is cancelled at shutdown and a failed roll is
+        logged at ERROR by its done-callback; whatever way it ends, the hold it did not settle is
+        released and the roll is no longer held. A roll given up before it started (this answer
+        cancelled before the holds are taken, or the worker stopping while the task waits for the
+        release) is no longer held from that step on, while its holds still unwind, so a release
+        reaching it then finds no roll held.
         """
         bus = self.bus
         hold = bus.defer_exit_unless_departing(op.change)
@@ -84,18 +90,22 @@ class CarriedRollMixin(LifecycleState):
         task = spawn_root_task(self._carry_under_holds(op, exits, held, roll, answers_within), name="tai-carried-roll")
         self._carried_roll_tasks.add(task)
         task.add_done_callback(self._carried_roll_tasks.discard)
-        task.add_done_callback(lambda _: self._held_rolls.pop(op.roll, None))
+        task.add_done_callback(lambda _: self._drop_held_roll(op.roll))
         task.add_done_callback(self._log_task_exception)
         task.add_done_callback(functools.partial(_stopped_before_holds, held, op.change))
         task.add_done_callback(
             lambda _: exits.abandon(f"the roll for {op.change} handed to this worker ended before its exit ran")
         )
         try:
-            # Shielded: the task resolves ``held``; an answer cancelled here cancels the task.
+            # Shielded: the task resolves ``held``. An answer cancelled before the holds are taken
+            # gives the roll up, no longer held from this step, and cancels the task; once they are
+            # taken the roll is held, whatever becomes of the answer.
             await asyncio.shield(held)
         except asyncio.CancelledError:
-            held.cancel()
-            task.cancel()
+            if not held.done():
+                self._drop_held_roll(op.roll)
+                held.cancel()
+                task.cancel()
             raise
         return CarryRollReply(kind="carrying", reason=op.change).reply()
 
@@ -114,9 +124,10 @@ class CarriedRollMixin(LifecycleState):
         ``roll`` to be released; with ``answers_within`` given, a release that has not come by
         then is logged at ERROR naming the change and the bound — the run was cut at its limit or
         died — and the roll starts anyway. A task cancelled once the holds were taken but before
-        the roll started (the worker's shutdown, or the answer cancelled) is logged at ERROR
-        naming the change, and re-raised. The holds are given back once the roll ended, whatever
-        way it ends.
+        the roll started (the worker's shutdown) gives the roll up: it is no longer held from that
+        step, before the holds are given back, it is logged at ERROR naming the change, and the
+        cancellation is re-raised. The holds are given back once the roll ended, whatever way it
+        ends.
         """
         from tai42_skeleton.config.roll_handoff import carry_handed_off_roll
         from tai42_skeleton.config.roll_holds import enter_roll_holds
@@ -127,9 +138,10 @@ class CarriedRollMixin(LifecycleState):
                 try:
                     await _released(roll, answers_within)
                 except asyncio.CancelledError:
+                    self._drop_held_roll(op.roll)
                     logger.exception(
                         "the fleet recycle for %s handed to this worker was cancelled before it was released (the "
-                        "worker is stopping, or its answer was cancelled) — no target was rolled",
+                        "worker is stopping) — no target was rolled",
                         op.change,
                     )
                     raise
@@ -140,8 +152,12 @@ class CarriedRollMixin(LifecycleState):
             # The holds were not taken: the answer raises why, and nothing is carried.
             held.set_exception(error)
 
+    def _drop_held_roll(self, roll: str) -> None:
+        """Stop holding the roll ``roll``: it can no longer start, and a release reaching it from now on finds none."""
+        self._held_rolls.pop(roll, None)
+
     def _release_carried_roll(self, roll: str, change: str) -> dict[str, str]:
-        """Release the held roll ``roll`` for ``change``: the run that handed it off has answered. Return the answer.
+        """Release the held roll ``roll`` for ``change``: the run that handed it off has ended. Return the answer.
 
         Runs on the serving loop, for the ``release_roll`` op and for the in-process release
         (:meth:`release_carried_roll`). Answers ``{"started": change}`` when it starts the roll
@@ -153,11 +169,11 @@ class CarriedRollMixin(LifecycleState):
         if held is None:
             raise LookupError(f"fleet recycle: this worker holds no roll {roll} for {change} to release")
         if held.started:
-            logger.info("the run that handed this worker the roll for %s answered after the roll had started", change)
+            logger.info("the run that handed this worker the roll for %s ended after the roll had started", change)
             return ReleaseRollReply(kind="already_started", reason=change).reply()
         held.started = True
         held.released.set()
-        logger.info("the run that handed this worker the roll for %s answered: the roll starts", change)
+        logger.info("the run that handed this worker the roll for %s ended: the roll starts", change)
         return ReleaseRollReply(kind="started", reason=change).reply()
 
     def release_carried_roll(self, roll: str, change: str) -> None:
@@ -179,8 +195,9 @@ class CarriedRollMixin(LifecycleState):
             self._release_carried_roll(roll, change)
         except LookupError:
             logger.exception(
-                "fleet recycle: the run that handed this worker the roll for %s answered, but its release found "
-                "no roll held here",
+                "fleet recycle: the run that handed this worker the roll for %s ended, but its release found no "
+                "roll held here — the roll was given up before it started (the acceptance was cancelled before "
+                "the holds were taken, or this worker is stopping); it did not start",
                 change,
             )
 

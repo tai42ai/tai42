@@ -225,7 +225,7 @@ class CarryRoll(_FleetOp):
     roll ended. ``roll`` is the roll's identity, which the run's release names; ``answers_within``
     the seconds left of the run's bound at the hand-off: the latest the run answers. The member
     answers (:class:`CarryRollReply`) as soon as it took those holds, then holds the roll until
-    the run released it (:class:`ReleaseRoll`), at its bound's exit, once it answered; over the
+    the run released it (:class:`ReleaseRoll`), at its bound's exit, once it ended; over the
     bus, where the run is in another process and can end with no word, it starts the roll once
     ``answers_within`` passed with no release.
     """
@@ -273,12 +273,13 @@ def carry_roll_reply(payload: object) -> CarryRollReply | None:
 
 
 class ReleaseRoll(_FleetOp):
-    """Start the roll a :class:`CarryRoll` op handed this worker: the run that handed it off has answered.
+    """Start the roll a :class:`CarryRoll` op handed this worker: the run that handed it off has ended.
 
     Sent at the exit of the run's bound (:func:`~tai42_kit.utils.run_bound.bounded_run`), after
-    its body returned or raised, to the member holding the roll ``roll`` for ``change``. The
-    member answers (:class:`ReleaseRollReply`) whether it started the roll now or had started it
-    already; it fails the op when it holds no such roll. Changes nothing a worker keeps.
+    its body returned or raised, its answer sent or the run cut, to the member holding the roll
+    ``roll`` for ``change``. The member answers (:class:`ReleaseRollReply`) whether it started
+    the roll now or had started it already; it fails the op when it holds no such roll. Changes
+    nothing a worker keeps.
     """
 
     op: Literal["release_roll"]

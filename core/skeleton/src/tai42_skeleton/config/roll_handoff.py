@@ -7,8 +7,9 @@ backend worker that forked its job, or the worker it runs in — through the bus
 :class:`~tai42_skeleton.app.bus.ops.CarryRoll` op (:func:`hand_off_roll`), and answers with the
 roll deferred to that member. The member answers the op once it took the roll holds, and holds
 the roll until the run released it: the release is owed to the run's bound, which sends it at
-its exit, once the run answered its caller (:class:`~tai42_skeleton.app.bus.ops.ReleaseRoll`
-over the bus from a forked job child, onto the serving loop in a member process). The member
+its exit, once the run ended, its answer sent or the run cut
+(:class:`~tai42_skeleton.app.bus.ops.ReleaseRoll` over the bus from a forked job child, onto the
+serving loop in a member process), unless the member provably took nothing. The member
 then carries the roll out as its own tracked task (:func:`carry_handed_off_roll`), outside every
 bound: it waits each target's drain plus the step, and, when the roll converged and the writer
 needs its own restart, departs itself last. What the change holds across its roll passes to the
@@ -43,14 +44,18 @@ class RollHandOffUnknownError(RuntimeError):
     """The roll may have been sent to the bus member ``member`` names, but its answer is not known.
 
     Whether the member started the roll is unknown, so the roll is the member's to carry out
-    and judge, never judged by the change that handed it off. Every other hand-off failure means
-    the roll did not start.
+    and judge, never judged by the change that handed it off. A refusal
+    (:class:`RollNotHandedError`) means the roll did not start.
     """
 
     def __init__(self, message: str, *, member: str) -> None:
         """Build the error from its ``message`` and the ``member`` the roll may have been sent to."""
         super().__init__(message)
         self.member = member
+
+
+class RollNotHandedError(RuntimeError):
+    """The bus member refused the roll, or could not take it: it holds nothing, and the roll did not start."""
 
 
 async def hand_off_roll(
@@ -76,15 +81,17 @@ async def hand_off_roll(
     the bus; a member process gives the op to its own app, on its serving loop, since a bus op
     never reaches its publisher. The roll's release is owed to ``bound`` before the op goes out
     (:class:`_OwedRelease`), so a bound that already settled raises then, with no op sent; the
-    bound's exit sends the release once the run answered (:func:`_release_over_bus`,
-    :func:`_release_in_this_member`) whenever the member may hold the roll: it answered that it
-    carries the roll, or its answer is not known.
+    bound's exit sends the release once the run ended, its answer sent or the run cut
+    (:func:`_release_over_bus`, :func:`_release_in_this_member`), unless the member provably took
+    nothing: its app could not take the op, or it is leaving.
 
     Raises when the hand-off fails, naming the member, the change, and whether the reload
     reached the bus (:func:`_reload_reach`); what the change persisted is not the roll's to
     state, so the error claims nothing of it. When the member is leaving, or, in a member
     process, its own app could not take the op (it is not built, or a hold the op names cannot
-    be taken), the error says the roll did not start, and no release is sent. When its answer
+    be taken), it raises :class:`RollNotHandedError`, whose text says the roll did not start,
+    and no release is sent. A cancellation of the run propagates as it is, and the release is
+    sent at the bound's exit all the same: the member may hold the roll. When its answer
     does not tell — the op's ``failed`` row over the bus (a bus op also fails on a post-apply
     handler that raised after the member took the roll), the bus failed while the op was out
     (its publish reported the bus unreachable, or raised), no answer came, or the answer is not
@@ -117,14 +124,13 @@ async def hand_off_roll(
         else:
             payload = await _send_to_member(bus, op, member)
         reply = _carry_reply(payload, member, op)
-    except RollHandOffUnknownError:
-        owed.due = True
+        if reply.kind == "already_leaving":
+            _raise_member_leaving(member, op, reply.reason)
+    except RollNotHandedError:
+        owed.due = False
         raise
-    if reply.kind == "already_leaving":
-        _raise_member_leaving(member, op, reply.reason)
-    owed.due = True
     logger.info(
-        "the fleet recycle for %s is handed to %r, which carries it out on its own once this run answered",
+        "the fleet recycle for %s is handed to %r, which carries it out on its own once this run ended",
         change,
         member,
     )
@@ -132,16 +138,16 @@ async def hand_off_roll(
 
 
 class _OwedRelease:
-    """The release of a handed-off roll, owed to the run's bound before the op goes out, sent only once due.
+    """The release of a handed-off roll, owed to the run's bound before the op goes out, sent while due.
 
-    The hand-off marks it ``due`` once the member may hold the roll; a hand-off the member
-    provably took nothing from leaves it not due, and the bound's exit then sends nothing.
+    It is ``due`` from the moment it is owed; the hand-off withdraws it on a refusal it can
+    prove, and the bound's exit then sends nothing.
     """
 
     def __init__(self, send: Callable[[], Awaitable[None]]) -> None:
-        """Hold the release ``send``, not yet due."""
+        """Hold the release ``send``, due."""
         self._send = send
-        self.due = False
+        self.due = True
 
     async def __call__(self) -> None:
         """Send the release when it is due."""
@@ -192,7 +198,7 @@ def _release_in_this_member(app: TaiMCP, op: CarryRoll) -> Callable[[], Awaitabl
             app.release_carried_roll(op.roll, op.change)
         except RuntimeError:
             logger.exception(
-                "fleet recycle: the run that handed this worker the roll %s for %s answered, but the release could "
+                "fleet recycle: the run that handed this worker the roll %s for %s ended, but the release could "
                 "not reach the serving loop",
                 op.roll,
                 op.change,
@@ -209,8 +215,9 @@ def _release_over_bus(bus: WorkerBus, member: str, op: CarryRoll, bound: RunBoun
     member started the roll on it or had started it by the run's bound; any other end — the
     member refused it, gave no answer, or the bus failed, or the wait reached the bound — is one
     ERROR line naming the member, the change, the roll and why. It never raises into the run's
-    answer: the change landed, and its answer says the member carries the roll, or may, which
-    stays true, since a member holding the roll starts it by the run's bound at the latest.
+    answer: the change landed, and its answer, when one was sent, says the member carries the
+    roll, or may, which stays true, since a member holding the roll starts it by the run's bound
+    at the latest.
     """
 
     async def release() -> None:
@@ -298,8 +305,8 @@ def _reload_reach(op: CarryRoll) -> str:
 
 
 def _raise_not_handed(member: str, op: CarryRoll, why: str) -> NoReturn:
-    """Raise that ``member`` refused the roll ``op`` hands off, and why: the roll did not start."""
-    raise RuntimeError(
+    """Raise :class:`RollNotHandedError`: ``member`` refused the roll ``op`` hands off, and why; it did not start."""
+    raise RollNotHandedError(
         f"fleet recycle: the roll for {op.change} could not be handed to {member!r}, "
         f"the bus member the change acts for — "
         f"{why}. The roll did not start; {_reload_reach(op)}"

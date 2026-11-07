@@ -7,7 +7,7 @@ waits for the worker's other changes — is not rolled there but handed to the m
 ``carry_roll`` op — over the bus from a forked job child, to the member's own app in a member
 process — and the change answers with the roll deferred to that member. The op names the roll and
 the seconds left of the run's bound; the roll's release is owed to the bound and sent at its exit,
-once the run answered — the ``release_roll`` op over the bus, the in-process release onto the
+once the run ended — the ``release_roll`` op over the bus, the in-process release onto the
 serving loop — and a release that is not confirmed is one ERROR line, never a raise into the run's
 answer. A hand-off that fails raises, naming the member and the change, whether the roll started,
 and whether the reload reached the bus. Every decision outside a bounded run rolls where it is
@@ -45,7 +45,7 @@ from tai42_skeleton.app.bus.ops import FLEET_OP_ADAPTER, CarryRoll, FleetOp, Rel
 from tai42_skeleton.app.recycle import RecycleReport
 from tai42_skeleton.app.writer_exit import writer_exit_scope
 from tai42_skeleton.config.recycle_roll import RollFailedError, decide_and_roll
-from tai42_skeleton.config.roll_handoff import RollHandOffUnknownError
+from tai42_skeleton.config.roll_handoff import RollHandOffUnknownError, RollNotHandedError
 from tai42_skeleton.tools.turn_budget import turn_budget
 
 from .._fakes.bus import FakeBus
@@ -214,7 +214,7 @@ async def test_a_bounded_member_hands_the_roll_to_its_own_app(monkeypatch: pytes
     with writer_exit_scope():
         async with bounded_run(60):
             outcome = await _decide(bus, _report(sibling_keys=[_KEY]), _never_rolls(seen))
-            # Handed off, and not released while the run has not answered.
+            # Handed off, and not released while the run has not ended.
             assert released == []
 
     assert seen == []
@@ -222,6 +222,38 @@ async def test_a_bounded_member_hands_the_roll_to_its_own_app(monkeypatch: pytes
     assert [op.change for op in given] == [_CHANGE]
     # The bound's exit released the roll onto the member's serving loop, not over the bus.
     assert released == [(given[0].roll, _CHANGE)]
+    assert bus.publish_calls == []
+
+
+async def test_a_bounded_members_hand_off_cancelled_after_its_app_accepted_releases_the_roll_at_the_exit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The serving loop accepted the roll, but the run was cut meanwhile: the hop raises the
+    # caller's cancellation, not the answer. The member may hold the roll, so the bound's exit
+    # releases it there all the same.
+    bus = FakeBus(origin=_MEMBER, remotes=["serve-b"])
+    given: list[CarryRoll] = []
+    released: list[tuple[str, str]] = []
+
+    class _App:
+        async def carry_roll(self, op: CarryRoll) -> dict[str, str]:
+            given.append(op)
+            raise asyncio.CancelledError()
+
+        def release_carried_roll(self, roll: str, change: str) -> None:
+            released.append((roll, change))
+
+    monkeypatch.setattr(instance, "_app", _App())
+    seen: list[str] = []
+
+    with writer_exit_scope():
+        async with bounded_run(60):
+            with pytest.raises(asyncio.CancelledError):
+                await _decide(bus, _report(sibling_keys=[_KEY]), _never_rolls(seen))
+            assert released == []
+
+    assert released == [(given[0].roll, _CHANGE)]
+    assert seen == []
     assert bus.publish_calls == []
 
 
@@ -265,7 +297,7 @@ async def test_a_change_in_a_live_callers_turn_hands_its_roll_off_only_under_an_
 
     assert outcome.deferred_to == deferred_to
     assert seen == ([] if deferred_to else ["rolled"])
-    # The turn's bound released the roll it handed off once the turn answered.
+    # The turn's bound released the roll it handed off once the turn ended.
     assert released == [op.roll for op in given]
 
 
@@ -513,13 +545,20 @@ async def test_a_carry_publish_that_raises_reads_as_a_hand_off_whose_answer_is_u
     ]
 
 
-async def test_a_carry_publish_cancelled_propagates_the_cancellation() -> None:
+async def test_a_carry_publish_cancelled_propagates_the_cancellation_and_releases_at_the_exit() -> None:
+    # The publish was cut by the run's cancellation: the op may have reached the member, so the
+    # bound's exit sends it the release.
     bus = _ChildBus(raises=asyncio.CancelledError())
 
     with writer_exit_scope():
         async with bounded_run(60):
             with pytest.raises(asyncio.CancelledError):
                 await _decide(bus, _report(sibling_keys=[_KEY]), _never_rolls([]))
+
+    assert [type(FLEET_OP_ADAPTER.validate_python(wire)) for wire, _targets, _local in bus.publish_calls] == [
+        CarryRoll,
+        ReleaseRoll,
+    ]
 
 
 async def test_a_bounded_member_with_no_app_built_raises(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -554,6 +593,7 @@ async def test_a_bounded_member_whose_app_does_not_take_the_op_raises_naming_the
     assert "its app did not take the op: LookupError: no roll hold is registered under 'a-roll-hold'" in message
     # The roll did not start, so it is judged here from the reload's report: serve-b still awaits.
     assert isinstance(raised.value, RollFailedError)
+    assert isinstance(raised.value.failure, RollNotHandedError)
     assert raised.value.outcome.deferred_to is None
     assert [worker.name for worker in raised.value.outcome.awaiting_respawn] == ["serve-b"]
 
@@ -666,7 +706,7 @@ async def test_a_bounded_child_owes_the_release_to_its_bound_and_sends_it_to_the
     with caplog.at_level(logging.INFO), writer_exit_scope():
         async with bounded_run(60):
             await _decide(bus, _report(sibling_keys=[_KEY]), _never_rolls([]))
-            # Handed off: only the carry went out while the run has not answered.
+            # Handed off: only the carry went out while the run has not ended.
             assert len(bus.publish_calls) == 1
 
     (carry_wire, _targets, _local), (release_wire, release_targets, release_local) = bus.publish_calls
@@ -772,4 +812,4 @@ async def test_a_member_release_that_finds_no_serving_loop_is_one_error_line(
 
     assert outcome.deferred_to == _MEMBER
     (message,) = [record.getMessage() for record in caplog.records if record.levelno >= logging.ERROR]
-    assert message.endswith(f"for {_CHANGE} answered, but the release could not reach the serving loop")
+    assert message.endswith(f"for {_CHANGE} ended, but the release could not reach the serving loop")
