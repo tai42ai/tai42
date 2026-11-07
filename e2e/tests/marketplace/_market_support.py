@@ -29,6 +29,7 @@ import importlib
 import importlib.metadata
 import json
 import os
+import shlex
 import subprocess
 import sys
 from collections.abc import Mapping
@@ -162,6 +163,29 @@ def layer_site_packages(stack: TaiStack) -> list[Path]:
 def server_environment(stack: TaiStack, package: str) -> Path:
     """The current build of ``package``'s own server environment (a virtual environment)."""
     return stack_plugins_dir(stack) / "servers" / canonicalize_name(package) / "current"
+
+
+# The start and the end of the exec line pip writes around the interpreter in a trampoline.
+_TRAMPOLINE_EXEC = "'''exec' "
+_TRAMPOLINE_ARGS = ' "$0" "$@"'
+
+
+def console_script_interpreter(script: Path) -> Path:
+    """The interpreter a console script runs: the one its shebang names, or, when that
+    path is too long for a shebang (127 bytes on Linux) or holds a space, the one the
+    ``/bin/sh`` trampoline pip writes in its place execs on its second line
+    (``'''exec' <interpreter> "$0" "$@"``, the interpreter double-quoted when it holds
+    a space)."""
+    first, second = script.read_text(encoding="utf-8").splitlines()[:2]
+    shebang = first.removeprefix("#!").strip()
+    if shebang != "/bin/sh":
+        return Path(shebang)
+    if not (second.startswith(_TRAMPOLINE_EXEC) and second.endswith(_TRAMPOLINE_ARGS)):
+        raise AssertionError(f"{script} runs /bin/sh with no exec trampoline on its second line: {second!r}")
+    words = shlex.split(second[len(_TRAMPOLINE_EXEC) : -len(_TRAMPOLINE_ARGS)])
+    if len(words) != 1:
+        raise AssertionError(f"{script}: its exec trampoline names {words!r}, not one interpreter")
+    return Path(words[0])
 
 
 def _holds(paths: list[Path] | None, package: str) -> bool:
