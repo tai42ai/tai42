@@ -59,7 +59,7 @@ async def test_a_dispatched_job_is_detached_bounded_by_its_budget_and_admitted(a
     assert admissions.marks_at_entry == [(True, True)]
 
 
-async def test_the_work_a_job_owes_once_it_answered_runs_after_its_admission_ended(admissions: _AdmissionLog) -> None:
+async def test_the_work_a_job_owes_at_its_exit_runs_after_its_admission_ended(admissions: _AdmissionLog) -> None:
     seen: list[tuple[list[str], bool]] = []
 
     async def owed() -> None:
@@ -68,7 +68,7 @@ async def test_the_work_a_job_owes_once_it_answered_runs_after_its_admission_end
     async with dispatched_job(budget=120):
         bound = run_bound()
         assert bound is not None
-        bound.once_answered(owed)
+        bound.once_ended(owed)
 
     assert seen == [(["enter", "exit"], True)]
 

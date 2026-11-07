@@ -299,8 +299,8 @@ def test_an_armed_turn_budget_runs_the_turn_as_a_bounded_run_of_its_timeout(set_
 
 @pytest.mark.parametrize("expires", [False, True], ids=["answered", "expired"])
 def test_the_work_a_turn_owes_runs_once_its_window_closed(set_turn_timeout, expires):
-    # The work a turn owes once it has answered runs at the bound's exit, after the window
-    # closed: a turn that returned and one cut at its budget alike.
+    # The work a turn owes runs at the bound's exit, after the window closed: a turn that
+    # returned and one cut at its budget alike.
     set_turn_timeout("0.05")
     events: list[str] = []
 
@@ -311,7 +311,7 @@ def test_the_work_a_turn_owes_runs_once_its_window_closed(set_turn_timeout, expi
         async with turn_budget():
             bound = run_bound()
             assert bound is not None
-            bound.once_answered(owed)
+            bound.once_ended(owed)
             if expires:
                 await asyncio.sleep(1)
             events.append("turn answered")

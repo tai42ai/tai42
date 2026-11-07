@@ -4,11 +4,11 @@ A worker executes a dequeued job with no live caller holding a connection, so th
 detached run (:mod:`tai42_kit.utils.detached_util`: the turn budget does not apply); it runs
 under the backend's job budget (``task_timeout``, the limit every backend binds its worker's
 job limit to), so it is a bounded run that ends at that budget and, at its exit, runs the work
-it owes once it has answered (:mod:`tai42_kit.utils.run_bound`); and it is admitted through the
-app's ``admitted_job`` door, so a job running on the serving loop is counted as the live
-serving generation's work, which a reload's retire drains before it closes that generation's
-loop-bound resources. :func:`dispatched_job` is the one place that sets and resets these
-facts. :func:`run_dispatched_tool` is every backend's job body: it runs the job's tool inside
+it owes (:mod:`tai42_kit.utils.run_bound`); and it is admitted through the app's
+``admitted_job`` door, so a job running on the serving loop is counted as the live serving
+generation's work, which a reload's retire drains before it closes that generation's loop-bound
+resources. :func:`dispatched_job` is the one place that sets and resets these facts.
+:func:`run_dispatched_tool` is every backend's job body: it runs the job's tool inside
 :func:`dispatched_job`.
 """
 
@@ -29,8 +29,8 @@ from tai42_kit.utils.worker_secret_capability import WORKER_SECRET_CAPABILITY_AR
 async def dispatched_job(*, budget: float) -> AsyncIterator[None]:
     """Run the scope as a dispatched job's run: detached, bounded by ``budget`` seconds and admitted on the app.
 
-    The job is admitted for its body only; the work its bound owes once it has answered runs
-    at the bound's exit, after the admission ended.
+    The job is admitted for its body only; the work its bound owes runs at the bound's exit,
+    after the admission ended.
     """
     detached_token = mark_detached_run()
     try:

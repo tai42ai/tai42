@@ -117,7 +117,7 @@ async def hand_off_roll(
     owed = _OwedRelease(
         _release_in_this_member(app, op) if app is not None else _release_over_bus(bus, member, op, bound)
     )
-    bound.once_answered(owed)
+    bound.once_ended(owed)
     try:
         if app is not None:
             payload = await _carry_in_this_member(app, op, member)
