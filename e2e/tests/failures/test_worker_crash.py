@@ -79,7 +79,6 @@ async def _submit_slow_run(stack: TaiStack, key: str, seconds: float) -> str:
         "/api/tool-runs",
         json={"tool_name": "e2e_slow_task_sync_task", "arguments": {"key": key, "seconds": seconds}},
         expect=202,
-        retry_on_reloading=True,
     )
     return submitted["run_id"]
 

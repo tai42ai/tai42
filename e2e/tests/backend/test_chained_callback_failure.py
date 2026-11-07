@@ -74,7 +74,7 @@ async def _dispatch(mcp: Any, payload: str, callback: dict[str, Any] | None = No
     if callback is not None:
         arguments["callback_kwargs"] = callback
     return await asyncio.wait_for(
-        mcp.call_tool("run_tool_sync_task", arguments, retry_on_reloading=True),
+        mcp.call_tool("run_tool_sync_task", arguments),
         timeout=_SYNC_CALL_DEADLINE,
     )
 
@@ -102,7 +102,7 @@ async def test_failed_chained_callback_is_isolated_and_never_wedges_the_worker(c
             )
 
         async def failed_callback_row() -> dict[str, Any] | None:
-            listed = await mcp.call_tool("backend_list_failed_tasks", retry_on_reloading=True)
+            listed = await mcp.call_tool("backend_list_failed_tasks")
             for row in _rows(listed):
                 if _FAILURE_MARKER in str(row.get("error", "")):
                     return row
@@ -118,5 +118,5 @@ async def test_failed_chained_callback_is_isolated_and_never_wedges_the_worker(c
 
         # The predecessor's own success is not in the failed listing — the failure row is
         # the callback job, not the predecessor.
-        final = _rows(await mcp.call_tool("backend_list_failed_tasks", retry_on_reloading=True))
+        final = _rows(await mcp.call_tool("backend_list_failed_tasks"))
         assert not any("predecessor-ok" in str(r.get("error", "")) for r in final), final

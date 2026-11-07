@@ -27,14 +27,13 @@ async def test_proxy_branch_tunnels_and_plain_does_not(
         proxied = await mcp.call_tool(
             "e2e_http_probe_proxy",
             {"url": f"{target_server.url}/ok", "proxies": [connect_proxy.url]},
-            retry_on_reloading=True,
         )
     assert proxied.data["status"] == 200
     assert len(target_server.records) == targets_before + 1
     assert len(connect_proxy.records) == connects_before + 1, "proxied call did not go through the CONNECT proxy"
 
     async with core_stack.mcp() as mcp:
-        plain = await mcp.call_tool("e2e_http_probe", {"url": f"{target_server.url}/ok"}, retry_on_reloading=True)
+        plain = await mcp.call_tool("e2e_http_probe", {"url": f"{target_server.url}/ok"})
     assert plain.data["status"] == 200
     assert len(target_server.records) == targets_before + 2
     # The plain call must NOT touch the proxy.
@@ -51,13 +50,12 @@ async def test_no_cross_task_socket_bleed_under_interleaving(
             result = await mcp.call_tool(
                 "e2e_http_probe_proxy",
                 {"url": f"{target_server.url}/slow?ms=500", "proxies": [connect_proxy.url]},
-                retry_on_reloading=True,
             )
         return result.data["status"]
 
     async def plain() -> int:
         async with core_stack.mcp() as mcp:
-            result = await mcp.call_tool("e2e_http_probe", {"url": f"{target_server.url}/ok"}, retry_on_reloading=True)
+            result = await mcp.call_tool("e2e_http_probe", {"url": f"{target_server.url}/ok"})
         return result.data["status"]
 
     results = await asyncio.gather(*([proxied() for _ in range(4)] + [plain() for _ in range(4)]))
@@ -75,7 +73,7 @@ async def test_no_cross_task_socket_bleed_under_interleaving(
     # CONNECT count above, is what keeps concurrent calls isolated.
     async with core_stack.mcp() as mcp:
         for _ in range(6):
-            info = await mcp.call_tool("e2e_worker_info", retry_on_reloading=True)
+            info = await mcp.call_tool("e2e_worker_info")
             assert info.data["socket_class"].endswith(".RoutingSocket"), f"proxy dispatcher not installed: {info.data}"
 
 
@@ -90,7 +88,6 @@ async def test_no_cross_replica_bleed(
             await mcp.call_tool(
                 "e2e_http_probe_proxy",
                 {"url": f"{target_server.url}/slow?ms=1000", "proxies": [connect_proxy.url]},
-                retry_on_reloading=True,
             )
 
     task = asyncio.create_task(long_proxied_on_a())
@@ -102,9 +99,7 @@ async def test_no_cross_replica_bleed(
         await wait_for_async(a_connected, deadline=3.0, message="A's proxied CONNECT never registered")
         async with replicas_stack.mcp(port=replicas_stack.port_b) as mcp:
             for _ in range(4):
-                result = await mcp.call_tool(
-                    "e2e_http_probe", {"url": f"{target_server.url}/ok"}, retry_on_reloading=True
-                )
+                result = await mcp.call_tool("e2e_http_probe", {"url": f"{target_server.url}/ok"})
                 assert result.data["status"] == 200
         assert len(connect_proxy.records) == connects_before + 1, "a plain B call bled through A's proxy"
     finally:

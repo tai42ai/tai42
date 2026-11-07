@@ -35,7 +35,7 @@ async def test_admin_env_reads_on_a_reloading_peer_are_never_forbidden(
 
     async def read_continuously() -> None:
         while not writes_done.is_set():
-            response = await reader.request_raw("GET", "/api/config/env")
+            response = await reader.request_raw("GET", "/api/config/env", retry_on_reloading=False)
             statuses.append(response.status_code)
             if response.status_code not in (200, 503):
                 bodies.append(f"{response.status_code} {response.text}")
@@ -44,7 +44,7 @@ async def test_admin_env_reads_on_a_reloading_peer_are_never_forbidden(
         try:
             for round_index in range(_RELOAD_ROUNDS):
                 key = uniq(f"E2E_RELOAD_WINDOW_{round_index}").upper().replace("-", "_")
-                await writer.post("/api/config/env", json={"env": {key: "1"}}, retry_on_reloading=True)
+                await writer.post("/api/config/env", json={"env": {key: "1"}})
         finally:
             writes_done.set()
 

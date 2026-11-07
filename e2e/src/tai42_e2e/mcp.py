@@ -42,9 +42,9 @@ from tai42_e2e.httpapi import _is_reloading as _response_is_reloading
 from tai42_e2e.waiting import wait_for_async
 
 # The substring the server stamps on a tool call it rejects while the reload gate is
-# held (the ~2s boot-time self-resync, and any in-flight config reload). A boot-time
-# call races that gate, so callers that fire a tool the instant a stack is ready poll
-# past it with ``retry_on_reloading`` rather than failing on the transient rejection.
+# held (a worker's boot-time self-resync, a sibling's deployment-keys join being applied,
+# an in-flight config reload). :meth:`McpClient.call_tool` polls past that retriable
+# rejection unless its caller opts out to assert the refusal itself.
 _RELOADING_MARKER = "reloading"
 
 # The SDK's ``McpError`` message for a request that landed on a session the server
@@ -152,8 +152,8 @@ class McpClient:
 
         Polls past a reload-gate rejection of the fresh ``initialize`` handshake (the
         swapped-in worker may still briefly hold its reload gate — the client raises
-        ``HTTPStatusError`` before a session exists, so a tool call's own
-        ``retry_on_reloading`` cannot cover it), bounded by the reinit deadline. The fresh
+        ``HTTPStatusError`` before a session exists, so the tool call's own reloading
+        retry cannot cover it), bounded by the reinit deadline. The fresh
         session lists the tools before its first call (:meth:`_list_on_session`)."""
 
         async def _reopened() -> bool | None:
@@ -208,7 +208,7 @@ class McpClient:
         arguments: dict[str, Any] | None = None,
         *,
         raise_on_error: bool = True,
-        retry_on_reloading: bool = False,
+        retry_on_reloading: bool = True,
         ready_deadline: float = RELOAD_GATE_DEADLINE,
         meta: dict[str, Any] | None = None,
     ) -> CallToolResult:
@@ -219,16 +219,19 @@ class McpClient:
         ``meta`` is sent as the ``tools/call`` request ``_meta`` — how a caller names its
         ``tai42/subject`` on the MCP edge, so a parking tool indexes its async park under it.
 
-        With ``retry_on_reloading=True`` a call that hits the boot-time reload gate
-        (the ~2s self-resync) is polled past on the sanctioned :func:`wait_for_async`
-        interval until the worker leaves the gate or ``ready_deadline`` elapses — the
-        retry every real client applies to the retriable ``reloading`` rejection. A
+        A call that meets the reload gate's retriable ``reloading`` rejection — a worker's
+        boot-time self-resync, a sibling's deployment-keys join being applied, an in-flight
+        config reload — is polled past on the sanctioned :func:`wait_for_async` interval
+        until the worker leaves the gate or ``ready_deadline`` elapses, the retry every real
+        client applies to the retriable answer; the deadline raises naming the tool. A
         non-reload error is returned/raised at once (never retried).
+        ``retry_on_reloading=False`` returns (or, with ``raise_on_error``, raises) the reload
+        gate's rejection itself, for a test that asserts the gate.
 
         A session termination (a prior reload's deferred close retiring this session) is
         handled underneath both paths: the session re-initialises and the call re-issues, so
-        the caller sees the real result — the ``reloading`` retry and ``raise_on_error``
-        semantics are unchanged. The tools are listed on the session before its first call,
+        the caller sees the real result under the same ``retry_on_reloading`` and
+        ``raise_on_error`` semantics. The tools are listed on the session before its first call,
         so a call whose reply was delivered sends nothing more and is never re-issued, even
         when its own reload then retires the session."""
 

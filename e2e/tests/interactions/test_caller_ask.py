@@ -34,7 +34,6 @@ async def _submit(api: Any, tool_name: str, arguments: dict[str, Any], subject: 
         "/api/tool-runs",
         json={"tool_name": tool_name, "arguments": arguments, "subject": subject},
         expect=202,
-        retry_on_reloading=True,
     )
     return submitted["run_id"]
 
@@ -97,7 +96,6 @@ async def test_a_preset_output_map_shapes_the_result_a_caller_ask_resumes_into(
             "description": "held_run with its result wrapped",
             "output_map": "{mapped: .}",
         },
-        retry_on_reloading=True,
     )
 
     # The preset parks on A through held_run's caller ask.
@@ -105,7 +103,6 @@ async def test_a_preset_output_map_shapes_the_result_a_caller_ask_resumes_into(
         "/api/tool-runs",
         json={"tool_name": name, "arguments": {"marker": uniq("q")}, "subject": subject},
         expect=202,
-        retry_on_reloading=True,
     )
     held_run_id = submitted["run_id"]
     await _await_status(api_b, held_run_id, "parked")

@@ -13,7 +13,6 @@ from collections.abc import Callable
 
 import pytest
 
-from tai42_e2e import wait_for_async
 from tai42_e2e.stack import TaiStack
 
 pytestmark = pytest.mark.needs(
@@ -31,14 +30,14 @@ async def test_reload_over_a_mount_answers_with_the_fleet_report(
 ) -> None:
     slug = uniq("mountreload").replace("_", "-")
     api_a = replicas_stack.api(port=replicas_stack.port_a)
-    await api_a.post("/api/sub-mcp", json={"slug": slug, "tools": ["reload_config"]}, retry_on_reloading=True)
+    await api_a.post("/api/sub-mcp", json={"slug": slug, "tools": ["reload_config"]})
     try:
         async with replicas_stack.mcp(port=replicas_stack.port_a, path=f"/app/{slug}") as mcp:
             # Prime the SDK's per-session tool-output-schema cache so the post-call result
             # validation issues no follow-up tools/list on the session the reload retires.
             assert await mcp.tool_names() == ["reload_config"]
             session_before = mcp.session_id
-            result = await mcp.call_tool("reload_config", {}, retry_on_reloading=True)
+            result = await mcp.call_tool("reload_config", {})
             # The call answered on the mount session it was made on.
             assert mcp.session_id == session_before
             data = result.data if isinstance(result.data, dict) else result.structured_content
@@ -55,12 +54,6 @@ async def test_reload_over_a_mount_answers_with_the_fleet_report(
             assert mcp.session_id is not None
             assert mcp.session_id != session_before
     finally:
-
-        async def _deleted() -> bool:
-            response = await api_a.request_raw("DELETE", f"/api/sub-mcp/{slug}")
-            if response.status_code == 503:  # the reload gate is still held: retriable
-                return False
-            assert response.status_code == 200, f"DELETE /api/sub-mcp/{slug} -> {response.status_code}"
-            return True
-
-        await wait_for_async(_deleted, deadline=10.0, message=f"sub-MCP {slug} delete never left the reload gate")
+        # The reload may still hold A's gate; the client polls past its retriable refusal.
+        response = await api_a.request_raw("DELETE", f"/api/sub-mcp/{slug}", ready_deadline=10.0)
+        assert response.status_code == 200, f"DELETE /api/sub-mcp/{slug} -> {response.status_code}"

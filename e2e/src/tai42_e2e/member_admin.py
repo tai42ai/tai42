@@ -29,16 +29,14 @@ MEMBERS_PATH = "/api/auth/members"
 _INVITE_TOKEN = "invite_token"
 
 
-async def resolve_action_key(
-    admin: ApiClient, *, scope: str, destructive: bool | None = None, retry_on_reloading: bool = False
-) -> str:
+async def resolve_action_key(admin: ApiClient, *, scope: str, destructive: bool | None = None) -> str:
     """The opaque catalog key of the one declared action with ``scope`` (and ``destructive``).
 
     Reads the catalog as the admin caller and selects by generic scope alone, or by scope
     plus the ``destructive`` flag where a scope holds more than one action. Exactly one match
     is required — zero or many is a loud failure, never a silent pick.
     """
-    catalog = await admin.get(CATALOG_PATH, retry_on_reloading=retry_on_reloading)
+    catalog = await admin.get(CATALOG_PATH)
     matches = [
         action
         for action in catalog["actions"]
@@ -52,14 +50,14 @@ async def resolve_action_key(
     return matches[0]["key"]
 
 
-async def resolve_invite_action_key(admin: ApiClient, *, retry_on_reloading: bool = False) -> str:
+async def resolve_invite_action_key(admin: ApiClient) -> str:
     """The opaque catalog key of the one page action whose result carries an ``invite_token``.
 
     Every accounts provider may declare its own page-scoped invite; the suites accept a
     one-time invite token, so the invite is selected by that declared result field. Exactly
     one match is required — zero or many is a loud failure, never a silent pick.
     """
-    catalog = await admin.get(CATALOG_PATH, retry_on_reloading=retry_on_reloading)
+    catalog = await admin.get(CATALOG_PATH)
     matches = [
         action
         for action in catalog["actions"]
@@ -73,17 +71,15 @@ async def resolve_invite_action_key(admin: ApiClient, *, retry_on_reloading: boo
     return matches[0]["key"]
 
 
-async def resolve_row_action_key(
-    admin: ApiClient, handle: str, *, scope: str, destructive: bool | None = None, retry_on_reloading: bool = False
-) -> str:
+async def resolve_row_action_key(admin: ApiClient, handle: str, *, scope: str, destructive: bool | None = None) -> str:
     """The opaque catalog key of the one action with ``scope`` (and ``destructive``) that the
     directory row ``handle`` offers.
 
     Joins the row's ``action_keys`` to the catalog by key, as a Members screen renders a
     row's menu. Exactly one match is required — zero or many is a loud failure.
     """
-    catalog = await admin.get(CATALOG_PATH, retry_on_reloading=retry_on_reloading)
-    row = await _directory_row(admin, "handle", handle, retry_on_reloading=retry_on_reloading)
+    catalog = await admin.get(CATALOG_PATH)
+    row = await _directory_row(admin, "handle", handle)
     offered = set(row["action_keys"])
     matches = [
         action
@@ -100,39 +96,39 @@ async def resolve_row_action_key(
     return matches[0]["key"]
 
 
-async def members_directory(admin: ApiClient, *, retry_on_reloading: bool = False) -> dict[str, Any]:
+async def members_directory(admin: ApiClient) -> dict[str, Any]:
     """The aggregated Members directory: ``{"members": [...], "invites": [...]}``."""
-    return await admin.get(MEMBERS_PATH, retry_on_reloading=retry_on_reloading)
+    return await admin.get(MEMBERS_PATH)
 
 
-async def _directory_row(admin: ApiClient, field: str, value: str, *, retry_on_reloading: bool) -> dict[str, Any]:
+async def _directory_row(admin: ApiClient, field: str, value: str) -> dict[str, Any]:
     """The directory row (member or invite) whose ``field`` equals ``value``, or raise loudly."""
-    directory = await members_directory(admin, retry_on_reloading=retry_on_reloading)
+    directory = await members_directory(admin)
     for row in [*directory["members"], *directory["invites"]]:
         if row[field] == value:
             return row
     raise AssertionError(f"no member or invite row with {field} {value!r} in {directory}")
 
 
-async def find_row(admin: ApiClient, email: str, *, retry_on_reloading: bool = False) -> dict[str, Any]:
+async def find_row(admin: ApiClient, email: str) -> dict[str, Any]:
     """The directory row (member or invite) whose ``email`` matches, or raise loudly.
 
     Returns the wire row carrying the opaque ``handle`` and the person's stable ``id``.
     """
-    return await _directory_row(admin, "email", email, retry_on_reloading=retry_on_reloading)
+    return await _directory_row(admin, "email", email)
 
 
-async def handle_for_user(admin: ApiClient, user_id: str, *, retry_on_reloading: bool = False) -> str:
+async def handle_for_user(admin: ApiClient, user_id: str) -> str:
     """The opaque routing handle of the directory row whose stable ``id`` matches ``user_id``.
 
     A caller that holds a person's stable id (minted elsewhere) reads back the opaque handle
     the admin actions target, rather than minting one.
     """
-    row = await _directory_row(admin, "id", user_id, retry_on_reloading=retry_on_reloading)
+    row = await _directory_row(admin, "id", user_id)
     return row["handle"]
 
 
-async def invite_member(admin: ApiClient, *, email: str, role: str, retry_on_reloading: bool = False) -> dict[str, Any]:
+async def invite_member(admin: ApiClient, *, email: str, role: str) -> dict[str, Any]:
     """Invite a new member through the page-scoped invite; return its identity and invite.
 
     Invokes the page action that returns a one-time invite token with ``{email, role}`` and reads the new row back from
@@ -140,14 +136,13 @@ async def invite_member(admin: ApiClient, *, email: str, role: str, retry_on_rel
     link from the action result, and the person's stable id and opaque routing handle from
     the directory, the tokens later admin actions target.
     """
-    key = await resolve_invite_action_key(admin, retry_on_reloading=retry_on_reloading)
+    key = await resolve_invite_action_key(admin)
     invoked = await admin.post(
         INVOKE_PATH,
         json={"action_key": key, "target_handle": None, "input": {"email": email, "role": role}},
-        retry_on_reloading=retry_on_reloading,
     )
     result = invoked["result"]
-    row = await find_row(admin, email, retry_on_reloading=retry_on_reloading)
+    row = await find_row(admin, email)
     return {
         "invite_token": result["invite_token"],
         "login_path": result["login_path"],

@@ -44,7 +44,7 @@ async def test_mcp_tool_round_trip(embed_stack: TaiStack, uniq: Callable[[str], 
     payload = uniq("echo")
     async with embed_stack.mcp() as mcp:
         # A boot-fresh embed worker may still hold its self-resync reload gate.
-        result = await mcp.call_tool("e2e_echo_prometheus_metrics", {"payload": payload}, retry_on_reloading=True)
+        result = await mcp.call_tool("e2e_echo_prometheus_metrics", {"payload": payload})
     assert result.data == payload, f"echo round-trip returned {result.data!r}, expected {payload!r}"
 
 
@@ -58,7 +58,7 @@ async def test_in_process_metrics_render_the_tool_counter(embed_stack: TaiStack)
     baseline = embed_stack.app_scrape().sample(_FAMILY, _LABELS) or 0.0
 
     async with embed_stack.mcp() as mcp:
-        await mcp.call_tool("e2e_echo_prometheus_metrics", {"payload": "metrics"}, retry_on_reloading=True)
+        await mcp.call_tool("e2e_echo_prometheus_metrics", {"payload": "metrics"})
 
     scrape = embed_stack.app_scrape()
     assert scrape.raw, "the embed /metrics returned an empty exposition body"
@@ -98,7 +98,7 @@ async def test_reload_fans_out_from_embedded_worker(embed_stack: TaiStack, uniq:
     # (a) The config-reload door published on the worker bus — the mode-wrapped fleet
     # fan-out shape (siblings apply asynchronously), never a bare local-only note.
     # Poll past the embed worker's boot-time reload gate.
-    data = await api.post("/api/config/env", json={"env": {marker: "1"}}, retry_on_reloading=True)
+    data = await api.post("/api/config/env", json={"env": {marker: "1"}})
     fanout = data.get("fanout")
     assert isinstance(fanout, dict), f"POST /api/config/env carried no fanout field: {data!r}"
     assert fanout["mode"] == "fleet", f"embedded worker did not broadcast the reload over the fleet: {fanout!r}"
@@ -114,7 +114,7 @@ async def test_reload_fans_out_from_embedded_worker(embed_stack: TaiStack, uniq:
         # space), so that follow-up would hit the orphaned session and raise
         # "Session terminated" even though the tool result was already delivered.
         await mcp.list_tools()
-        result = await mcp.call_tool("reload_config", {}, retry_on_reloading=True)
+        result = await mcp.call_tool("reload_config", {})
     result_data = result.data if isinstance(result.data, dict) else result.structured_content
     assert isinstance(result_data, dict), f"reload_config returned no result map: {result!r}"
     assert result_data["reachable"] is True, f"the bus was unreachable: {result_data}"

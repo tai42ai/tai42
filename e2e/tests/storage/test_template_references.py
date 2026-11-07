@@ -55,7 +55,7 @@ async def _refused(api: ApiClient, method: str, path: str, body: dict[str, Any])
 
 
 async def _preset_names(api: ApiClient) -> list[str]:
-    return [row["name"] for row in await api.get("/api/presets", retry_on_reloading=True)]
+    return [row["name"] for row in await api.get("/api/presets")]
 
 
 def _hook(name: str, tool: str, uniq: Callable[[str], str], **fields: Any) -> dict[str, Any]:
@@ -104,9 +104,9 @@ async def test_a_preset_naming_a_missing_output_schema_is_refused_until_it_is_st
     assert name not in await _preset_names(api)
     await _upload(api, schema_id, '{"type": "object"}')
     try:
-        await api.post("/api/presets", json=body, retry_on_reloading=True)
+        await api.post("/api/presets", json=body)
         assert name in await _preset_names(api)
-        await api.delete(f"/api/presets/{name}", retry_on_reloading=True)
+        await api.delete(f"/api/presets/{name}")
     finally:
         await api.delete(f"/api/storage/resources/{schema_id}")
 
@@ -128,9 +128,9 @@ async def test_an_agent_prompt_id_is_read_at_the_preset_and_hook_doors(
         assert await _refused(api, "POST", "/api/presets", body) == _missing(prompt_id, "system_prompt")
         assert name not in await _preset_names(api)
         await _upload(api, prompt_id, "You answer briefly.")
-        await api.post("/api/presets", json=body, retry_on_reloading=True)
+        await api.post("/api/presets", json=body)
         assert name in await _preset_names(api)
-        await api.delete(f"/api/presets/{name}", retry_on_reloading=True)
+        await api.delete(f"/api/presets/{name}")
     finally:
         await api.delete(f"/api/storage/resources/{prompt_id}@he")
         await api.delete(f"/api/storage/resources/{prompt_id}")
@@ -175,9 +175,9 @@ async def test_every_other_definition_door_reads_its_stored_ids(
     ]
 
     await _upload(api, jq_id, ".")
-    await api.post("/api/hooks", json=hook, retry_on_reloading=True)
+    await api.post("/api/hooks", json=hook)
     await api.post(f"/api/conversations/{route_name}", json=route)
-    await api.post("/api/schedules", json=schedule, retry_on_reloading=True)
+    await api.post("/api/schedules", json=schedule)
     await api.post("/api/auth/api-keys", json=key)
 
     await api.delete(f"/api/hooks/{hook['name']}")
@@ -214,11 +214,11 @@ async def test_a_template_a_preset_prompt_names_is_held_until_the_preset_is_dele
         "description": "agent",
         "fixed_kwargs": {"system_prompt": {"id": prompt_id}},
     }
-    await api.post("/api/presets", json=body, retry_on_reloading=True)
+    await api.post("/api/presets", json=body)
     try:
         await _assert_held(api, prompt_id, "preset", f"preset {name!r} names {prompt_id!r} at system_prompt")
     finally:
-        await api.delete(f"/api/presets/{name}", retry_on_reloading=True)
+        await api.delete(f"/api/presets/{name}")
     await api.delete(f"/api/storage/resources/{prompt_id}")
 
 
@@ -230,7 +230,7 @@ async def test_a_template_the_summary_prompt_setting_names_is_held(
     prompt_id = f"{uniq('prompts')}/summary"
     await _upload(api, prompt_id, "Summarize the conversation.")
     setting = json.dumps({"id": prompt_id})
-    await api.post("/api/config/env", json={"env": {_SUMMARY_PROMPT_ENV: setting}}, retry_on_reloading=True)
+    await api.post("/api/config/env", json={"env": {_SUMMARY_PROMPT_ENV: setting}})
     try:
         line = f"setting {_SUMMARY_PROMPT_ENV!r} names {prompt_id!r} at summary_prompt"
         response = await api.request_raw("DELETE", f"/api/storage/resources/{prompt_id}")
@@ -238,5 +238,5 @@ async def test_a_template_the_summary_prompt_setting_names_is_held(
         assert response.json()["error"] == _held_refusal(f"stored template {prompt_id!r}", line)
     finally:
         inline = json.dumps({"content": "Summarize the conversation."})
-        await api.post("/api/config/env", json={"env": {_SUMMARY_PROMPT_ENV: inline}}, retry_on_reloading=True)
-    await api.delete(f"/api/storage/resources/{prompt_id}", retry_on_reloading=True)
+        await api.post("/api/config/env", json={"env": {_SUMMARY_PROMPT_ENV: inline}})
+    await api.delete(f"/api/storage/resources/{prompt_id}")

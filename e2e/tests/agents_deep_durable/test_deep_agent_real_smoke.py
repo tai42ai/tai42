@@ -46,7 +46,6 @@ async def test_deep_agent_real_model_turn_lands_a_terminal_answer(
         result = await mcp.call_tool(
             AGENT,
             {"user_message": {"content": "Reply with exactly the single word: pong"}},
-            retry_on_reloading=True,
         )
     # A non-empty terminal answer came back (the exact text is the model's; assert it is a
     # real, non-empty terminal rather than a park/empty run).

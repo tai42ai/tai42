@@ -182,7 +182,7 @@ async def _setup_flow(stack: TaiStack, api: Any, uniq: Callable[[str], str]) -> 
         },
     )
     preset_name = uniq("buyitem")
-    await api.post("/api/presets", json=_preset_body(preset_name), retry_on_reloading=True)
+    await api.post("/api/presets", json=_preset_body(preset_name))
     return topic, preset_name
 
 
@@ -192,7 +192,7 @@ def _open_ask(stack: TaiStack, root_token: str, preset_name: str, question: str)
 
     async def run() -> Any:
         async with stack.mcp(port=stack.port_a, auth=root_token) as mcp:
-            result = await mcp.call_tool(preset_name, {"question": question}, retry_on_reloading=True)
+            result = await mcp.call_tool(preset_name, {"question": question})
         return result.data if result.data is not None else result.structured_content
 
     return asyncio.create_task(run())
@@ -379,7 +379,7 @@ async def test_stripe_payment_webhook_loop(
         for injected in ({"question": uniq("q"), "amount": 1}, {"question": uniq("q"), "answer_schema": {}}):
             count_before = fake_stripe.session_count
             async with stack.mcp(port=stack.port_a, auth=root_token) as mcp:
-                result = await mcp.call_tool(preset_name, injected, raise_on_error=False, retry_on_reloading=True)
+                result = await mcp.call_tool(preset_name, injected, raise_on_error=False)
             assert result.is_error, f"injecting a baked key must fail: {injected}"
             assert fake_stripe.session_count == count_before, "a rejected create still reached the stub"
 
@@ -480,7 +480,7 @@ async def test_stripe_reconciliation_recovers_a_lost_payment(
 
         # --- Item 2 + 3: a direct authed reconcile wakes it, with the whitelist payload ---
         async with stack.mcp(port=stack.port_a, auth=root_token) as mcp:
-            first = await mcp.call_tool("reconcile_stripe_payments", {"lookback_hours": 26}, retry_on_reloading=True)
+            first = await mcp.call_tool("reconcile_stripe_payments", {"lookback_hours": 26})
         summary = _as_answer(first.data if first.data is not None else first.structured_content)
         assert summary["selected"] == 1, summary
         assert summary["answered"] == 1, summary
@@ -508,7 +508,7 @@ async def test_stripe_reconciliation_recovers_a_lost_payment(
 
     # --- Item 4: a SECOND run reports the same session already_answered, no raise ---
     async with stack.mcp(port=stack.port_a, auth=root_token) as mcp:
-        second = await mcp.call_tool("reconcile_stripe_payments", {"lookback_hours": 26}, retry_on_reloading=True)
+        second = await mcp.call_tool("reconcile_stripe_payments", {"lookback_hours": 26})
     summary2 = _as_answer(second.data if second.data is not None else second.structured_content)
     assert summary2["selected"] == 1, summary2
     assert summary2["already_answered"] == 1, summary2
@@ -522,7 +522,7 @@ async def test_stripe_reconciliation_recovers_a_lost_payment(
         await _mint_filler(fake_stripe)
     fake_stripe.list_requests.clear()
     async with stack.mcp(port=stack.port_a, auth=root_token) as mcp:
-        paged = await mcp.call_tool("reconcile_stripe_payments", {"lookback_hours": 26}, retry_on_reloading=True)
+        paged = await mcp.call_tool("reconcile_stripe_payments", {"lookback_hours": 26})
     paged_summary = _as_answer(paged.data if paged.data is not None else paged.structured_content)
     # Only the genuinely selectable session counts; the fillers carry no tai_callback_url.
     assert paged_summary["selected"] == 1, paged_summary

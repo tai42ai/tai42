@@ -74,7 +74,7 @@ def _tool_text(result: Any) -> str:
 
 async def _call(stack: TaiStack, tool: str, arguments: dict[str, Any]) -> Any:
     async with stack.mcp() as mcp:
-        return await mcp.call_tool(tool, arguments, retry_on_reloading=True)
+        return await mcp.call_tool(tool, arguments)
 
 
 async def _send(stack: TaiStack, tool: str, arguments: dict[str, Any]) -> str:
@@ -125,7 +125,6 @@ async def test_a_run_submitted_over_http_with_a_queue_runs_on_the_worker_serving
         "/api/tool-runs",
         json={"tool_name": "e2e_worker_info_sync_task", "arguments": {"queue": _LABEL}},
         expect=202,
-        retry_on_reloading=True,
     )
     run_id = submitted["run_id"]
 
@@ -153,15 +152,13 @@ async def test_a_preset_fixing_the_queue_runs_on_the_worker_serving_it(
             "description": "worker info on the b queue",
             "fixed_kwargs": {"queue": _LABEL},
         },
-        retry_on_reloading=True,
     )
 
     async def served() -> dict[str, Any] | None:
         try:
             return _tool_map(await _call(stack, name, {}))
         except ToolError as exc:
-            text = str(exc)
-            if "reloading" in text or f"Unknown tool: '{name}'" in text:
+            if f"Unknown tool: '{name}'" in str(exc):
                 return None
             raise
 

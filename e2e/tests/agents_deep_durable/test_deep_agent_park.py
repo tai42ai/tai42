@@ -68,7 +68,6 @@ async def _park(stack: TaiStack, thread_id: str, question: str, expiry_seconds: 
                 "langgraph_config": {"configurable": {"thread_id": thread_id}},
             },
             raise_on_error=False,
-            retry_on_reloading=True,
         )
     if result.is_error:
         return {"error": " ".join(getattr(p, "text", "") for p in result.content)}
@@ -110,7 +109,6 @@ async def test_resume_checkpoint_id_is_unhonored(
             AGENT,
             {"user_message": {"content": uniq("q")}, "resume_checkpoint_id": uniq("ckpt")},
             raise_on_error=False,
-            retry_on_reloading=True,
         )
     assert result.is_error, "resume_checkpoint_id was accepted silently"
     text = " ".join(getattr(p, "text", "") for p in result.content)
@@ -153,9 +151,7 @@ async def test_park_answer_resumes_across_workers(
     # Answer through replica B's door: fires agent_resume on B — a different worker than the one
     # that parked on A — rebuilding the graph from the shared redis checkpoint.
     api_b = stack.api(port=stack.port_b)
-    answered = await api_b.post(
-        f"/api/interactions/{interaction_id}/answer", json={"answer": "resume-me"}, retry_on_reloading=True
-    )
+    answered = await api_b.post(f"/api/interactions/{interaction_id}/answer", json={"answer": "resume-me"})
     assert answered["status"] == "answered"
 
     # The answer fires agent_resume on B; the continuation is at-least-once (a transient failure is

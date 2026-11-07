@@ -58,7 +58,6 @@ async def _run_tool(api: ApiClient, tool_name: str, arguments: dict[str, Any], s
         "/api/run-tool",
         json={"tool_name": tool_name, "arguments": arguments, "subject": subject},
         expect=200,
-        retry_on_reloading=True,
     )
 
 

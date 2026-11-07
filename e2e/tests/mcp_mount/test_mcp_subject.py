@@ -35,7 +35,6 @@ async def _parked_ids(api: Any, subject: dict[str, str]) -> list[str]:
         "/api/run-tool",
         json={"tool_name": "list_parked", "arguments": {}, "subject": subject},
         expect=200,
-        retry_on_reloading=True,
     )
     assert answer["kind"] == "result", answer
     return [entry["id"] for entry in answer["result"]]
@@ -52,7 +51,6 @@ async def test_mcp_call_edge_carries_subject(replicas_stack: TaiStack, uniq: Cal
             "e2e_async_park_driver",
             {"question": marker, "expiry_seconds": _PARK_EXPIRY_SECONDS},
             meta={"tai42/subject": subject},
-            retry_on_reloading=True,
         )
     interaction_id = result.data["interaction_id"]
 
@@ -71,6 +69,5 @@ async def test_mcp_malformed_subject_meta_is_refused(replicas_stack: TaiStack, u
             {"question": marker, "expiry_seconds": _PARK_EXPIRY_SECONDS},
             meta={"tai42/subject": {"kind": "job", "key": "j1"}},
             raise_on_error=False,
-            retry_on_reloading=True,
         )
     assert result.is_error, result

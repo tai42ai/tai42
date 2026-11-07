@@ -51,7 +51,7 @@ def _ports(stack: TaiStack) -> tuple[int, int]:
 
 
 async def _rows(stack: TaiStack, port: int) -> dict:
-    return await stack.api(port=port).get(_ADVERTISED, retry_on_reloading=True)
+    return await stack.api(port=port).get(_ADVERTISED)
 
 
 async def _wait_rows(stack: TaiStack, expected: dict[str, tuple[bool, bool]], unadvertised: list[str]) -> None:
@@ -72,7 +72,7 @@ async def _wait_tools(stack: TaiStack, present: set[str], absent: set[str]) -> N
     for port in _ports(stack):
 
         async def settled(port: int = port) -> bool:
-            names = set(await stack.api(port=port).get("/api/tools", retry_on_reloading=True))
+            names = set(await stack.api(port=port).get("/api/tools"))
             return present <= names and not (absent & names)
 
         await wait_for_async(
@@ -92,7 +92,7 @@ async def test_a_pick_is_read_written_and_bound_on_every_replica(stack: TaiStack
     assert all(row["unbound_reason"] is None for row in body["tools"]), body
 
     # An exclude pick: the excluded tool is unpicked and unbound on both replicas.
-    await api_a.put(_FILTER, json={"include": [], "exclude": [_REFLECT]}, retry_on_reloading=True)
+    await api_a.put(_FILTER, json={"include": [], "exclude": [_REFLECT]})
     await _wait_rows(stack, {_PING: (True, True), _ECHO: (True, True), _REFLECT: (False, False)}, [])
     await _wait_tools(stack, present={_PING, _ECHO}, absent={_REFLECT})
 
@@ -107,7 +107,6 @@ async def test_a_pick_is_read_written_and_bound_on_every_replica(stack: TaiStack
             "description": "preset over a picked MCP tool",
             "fixed_kwargs": {"payload": "held"},
         },
-        retry_on_reloading=True,
     )
     refused = await api_a.request_raw("PUT", _FILTER, json={"include": [_PING], "exclude": []})
     assert refused.status_code == 409, refused.text
@@ -117,18 +116,18 @@ async def test_a_pick_is_read_written_and_bound_on_every_replica(stack: TaiStack
     assert [(holder["kind"], holder["name"]) for holder in payload["holders"]] == [("preset", preset)], payload
     await _wait_tools(stack, present={_PING, _ECHO}, absent={_REFLECT})
     for port in _ports(stack):
-        stored = await stack.api(port=port).get("/api/manifest", retry_on_reloading=True)
+        stored = await stack.api(port=port).get("/api/manifest")
         entry = next(item for item in stored["mcp"] if item["title"] == REPLICAS_MCP_TITLE)
         assert (entry.get("include", []), entry.get("exclude", [])) == ([], [_REFLECT]), entry
 
     # With the preset gone the include pick lands; a listed name the server does not
     # advertise reads as unadvertised.
-    await api_a.delete(f"/api/presets/{preset}", retry_on_reloading=True)
-    await api_a.put(_FILTER, json={"include": [_PING, _GONE], "exclude": []}, retry_on_reloading=True)
+    await api_a.delete(f"/api/presets/{preset}")
+    await api_a.put(_FILTER, json={"include": [_PING, _GONE], "exclude": []})
     await _wait_rows(stack, {_PING: (True, True), _ECHO: (False, False), _REFLECT: (False, False)}, [_GONE])
     await _wait_tools(stack, present={_PING}, absent={_ECHO, _REFLECT})
 
     # Both lists empty mounts every tool again.
-    await api_a.put(_FILTER, json={"include": [], "exclude": []}, retry_on_reloading=True)
+    await api_a.put(_FILTER, json={"include": [], "exclude": []})
     await _wait_rows(stack, every, [])
     await _wait_tools(stack, present={_PING, _ECHO, _REFLECT}, absent=set())

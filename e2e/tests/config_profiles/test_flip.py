@@ -44,7 +44,7 @@ async def _snapshot(stack: TaiStack) -> dict[str, Any]:
     """The ``e2e_settings_snapshot`` probe's return from replica A, read over a FRESH MCP
     session so a just-swapped epoch's tools are the ones observed."""
     async with stack.mcp(port=stack.port_a) as mcp:
-        result = await mcp.call_tool("e2e_settings_snapshot", {}, retry_on_reloading=True)
+        result = await mcp.call_tool("e2e_settings_snapshot", {})
     data = result.data if isinstance(result.data, dict) else result.structured_content
     assert isinstance(data, dict), f"e2e_settings_snapshot returned no result map: {result!r}"
     return data
@@ -79,11 +79,11 @@ async def test_hot_profile_flip_converges_and_fans_out(replicas_stack: TaiStack,
     stored = (await api.get("/api/config/env"))["env"]
     profile_env = {**stored, _LEVEL_VAR: new_level}
     name = uniq("flip")
-    await api.put(f"/api/config/profiles/{name}", json={"env": profile_env}, retry_on_reloading=True)
+    await api.put(f"/api/config/profiles/{name}", json={"env": profile_env})
 
     # Apply: build + swap a fresh epoch under the proposed env, broadcast the reload. The
     # dedicated ``profileApplyResponse`` names the hot diff key and refuses nothing.
-    applied = await api.post(f"/api/config/profiles/{name}/apply", retry_on_reloading=True)
+    applied = await api.post(f"/api/config/profiles/{name}/apply")
     assert _LEVEL_VAR in applied["hot"], f"the flipped level was not classified hot: {applied}"
     assert applied["refused"] == [], f"a clean hot apply refused a key: {applied}"
 

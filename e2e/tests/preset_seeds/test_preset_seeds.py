@@ -24,19 +24,19 @@ _SEED = "e2e_seed_probe"
 
 
 async def _active_body(stack: TaiStack) -> dict:
-    return await stack.api().get(f"/api/presets/{_SEED}", retry_on_reloading=True)
+    return await stack.api().get(f"/api/presets/{_SEED}")
 
 
 async def _versions(stack: TaiStack) -> list[dict]:
-    return await stack.api().get(f"/api/presets/{_SEED}/versions", retry_on_reloading=True)
+    return await stack.api().get(f"/api/presets/{_SEED}/versions")
 
 
 async def _reload_env(stack: TaiStack, env: dict[str, str]) -> None:
     """Drive a reload through the env-write door — an empty ``env`` re-applies the seed,
     a variant flip ships a drifted body — then wait past the reload gate on a probe."""
-    await stack.api().post("/api/config/env", json={"env": env}, retry_on_reloading=True)
+    await stack.api().post("/api/config/env", json={"env": env})
     async with stack.mcp() as mcp:
-        await mcp.call_tool("e2e_worker_info", retry_on_reloading=True)
+        await mcp.call_tool("e2e_worker_info")
 
 
 @pytest.mark.needs("kind:versioning", "probe-tools")
@@ -48,7 +48,7 @@ async def test_seed_is_live_callable_in_first_boot_epoch(
     # callable preset resolvable in the same epoch, returning its baked payload.
     async with stack.mcp() as mcp:
         assert _SEED in await mcp.tool_names()
-        result = await mcp.call_tool(_SEED, retry_on_reloading=True)
+        result = await mcp.call_tool(_SEED)
     value = result.data if result.data is not None else result.structured_content
     assert value == "seeded-base", value
 

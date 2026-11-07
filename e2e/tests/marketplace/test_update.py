@@ -104,7 +104,6 @@ async def test_update_keeps_an_mcp_entrys_tool_pick(
     await stack.api().put(
         f"/api/mcp-config/entries/{ETA_MCP_TITLE}/tool-filter",
         json={"include": [ETA_MCP_TOOL], "exclude": []},
-        retry_on_reloading=True,
     )
     assert _eta_entry(stack)["include"] == [ETA_MCP_TOOL]
 

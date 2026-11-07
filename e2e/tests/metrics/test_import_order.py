@@ -58,9 +58,9 @@ async def test_value_class_multiproc_in_every_process_kind(core_stack: TaiStack)
     )
 
     async with core_stack.mcp() as mcp:
-        http_info = _payload(await mcp.call_tool("e2e_worker_info", retry_on_reloading=True))
+        http_info = _payload(await mcp.call_tool("e2e_worker_info"))
         # Run the probe inside the backend-worker process via its sync_task branch.
-        backend_info = _payload(await mcp.call_tool("e2e_worker_info_sync_task", {}, retry_on_reloading=True))
+        backend_info = _payload(await mcp.call_tool("e2e_worker_info_sync_task", {}))
 
     for info in (http_info, backend_info):
         assert info["value_class"] == "MmapedValue", f"non-multiproc value class in {info}"

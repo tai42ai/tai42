@@ -46,7 +46,7 @@ _UNREACHABLE_MCP = {"config": {"url": "http://127.0.0.1:1/mcp"}}
 
 
 async def _manifest_mcp_titles(stack: TaiStack) -> list[str]:
-    manifest = await stack.api().get("/api/manifest", retry_on_reloading=True)
+    manifest = await stack.api().get("/api/manifest")
     return [entry["title"] for entry in manifest["mcp"]]
 
 
@@ -68,13 +68,11 @@ async def test_backup_import_applies_manifest_and_env_fleet_wide(
 ) -> None:
     # -- source: write the env key and add an mcp entry, then export both sections.
     source = fresh_stack(build_backup_source_stack)
-    await source.api().post("/api/config/env", json={"env": {_KEY: "imported-b4-value"}}, retry_on_reloading=True)
+    await source.api().post("/api/config/env", json={"env": {_KEY: "imported-b4-value"}})
     mcp_title = uniq("b4_mcp")
     src_doc = yaml.safe_load(manifest_file(source).read_text()) or {}
     src_doc["mcp"] = [*src_doc.get("mcp", []), {"title": mcp_title, **_UNREACHABLE_MCP}]
-    await source.api().post(
-        "/api/manifest/replace", json={"manifest_text": yaml.safe_dump(src_doc)}, retry_on_reloading=True
-    )
+    await source.api().post("/api/manifest/replace", json={"manifest_text": yaml.safe_dump(src_doc)})
     # The export door is a raw downloadable document (NOT the ``{"data": ...}`` envelope).
     export = await source.api().request_raw("POST", "/api/backup/export", json={"sections": ["env", "manifest"]})
     assert export.status_code == 200, export.text
@@ -88,18 +86,14 @@ async def test_backup_import_applies_manifest_and_env_fleet_wide(
     # Import #1 — env only: the ``!ENV``-referenced marker now resolves to the imported
     # value, and every serve member reloads it.
     members = serve_members(target)
-    r_env = await api.post(
-        "/api/backup/import", json={"document": document, "sections": ["env"]}, retry_on_reloading=True
-    )
+    r_env = await api.post("/api/backup/import", json={"document": document, "sections": ["env"]})
     assert r_env["ok"], f"env import failed: {r_env}"
     assert_applied_by(assert_fleet_fanout(r_env["sections"]["env"]), members)
 
     # Import #2 — manifest only: every serve member applies the replaced manifest, adding
     # the source's mcp entry.
     members = serve_members(target)
-    r_man = await api.post(
-        "/api/backup/import", json={"document": document, "sections": ["manifest"]}, retry_on_reloading=True
-    )
+    r_man = await api.post("/api/backup/import", json={"document": document, "sections": ["manifest"]})
     assert r_man["ok"], f"manifest import failed: {r_man}"
     assert_applied_by(assert_fleet_fanout(r_man["sections"]["manifest"]), members)
     titles = await _manifest_mcp_titles(target)
@@ -131,22 +125,21 @@ async def test_backup_sub_mcp_import_mode_matrix_on_populated_instance(
     slug = uniq("submcp").replace("_", "-")
 
     # -- populate: register a sub-MCP app over a real probe tool, then export the section.
-    await api.post("/api/sub-mcp", json={"slug": slug, "tools": ["e2e_echo"]}, retry_on_reloading=True)
+    await api.post("/api/sub-mcp", json={"slug": slug, "tools": ["e2e_echo"]})
     export = await api.request_raw("POST", "/api/backup/export", json={"sections": ["sub_mcp"]})
     assert export.status_code == 200, export.text
     document = export.json()
     assert document["sections"]["sub_mcp"][slug]["tools"] == ["e2e_echo"], document
 
     # -- drift: re-register the SAME slug with a different tools set (POST upserts the store).
-    await api.post("/api/sub-mcp", json={"slug": slug, "tools": ["e2e_echo", "e2e_fail"]}, retry_on_reloading=True)
-    drifted = await api.get("/api/sub-mcp", retry_on_reloading=True)
+    await api.post("/api/sub-mcp", json={"slug": slug, "tools": ["e2e_echo", "e2e_fail"]})
+    drifted = await api.get("/api/sub-mcp")
     assert drifted[slug]["tools"] == ["e2e_echo", "e2e_fail"], drifted
 
     # -- skip: the drifted record is left standing and reported skipped_existing.
     skip = await api.post(
         "/api/backup/import",
         json={"document": document, "sections": ["sub_mcp"], "mode": "skip"},
-        retry_on_reloading=True,
     )
     assert skip["ok"], skip
     report = skip["sections"]["sub_mcp"]
@@ -154,14 +147,13 @@ async def test_backup_sub_mcp_import_mode_matrix_on_populated_instance(
     assert report["created"] == 0, report
     assert report["updated"] == 0, report
     assert report["errors"] == [], report
-    after_skip = await api.get("/api/sub-mcp", retry_on_reloading=True)
+    after_skip = await api.get("/api/sub-mcp")
     assert after_skip[slug]["tools"] == ["e2e_echo", "e2e_fail"], "skip must not overwrite the drifted record"
 
     # -- overwrite: the record is upserted back to the backup's tools and reported updated.
     over = await api.post(
         "/api/backup/import",
         json={"document": document, "sections": ["sub_mcp"], "mode": "overwrite"},
-        retry_on_reloading=True,
     )
     assert over["ok"], over
     report = over["sections"]["sub_mcp"]
@@ -169,7 +161,7 @@ async def test_backup_sub_mcp_import_mode_matrix_on_populated_instance(
     assert report["created"] == 0, report
     assert report["details"]["skipped_existing"] == 0, report
     assert report["errors"] == [], report
-    after_over = await api.get("/api/sub-mcp", retry_on_reloading=True)
+    after_over = await api.get("/api/sub-mcp")
     assert after_over[slug]["tools"] == ["e2e_echo"], "overwrite must restore the backup's record"
 
 
@@ -222,7 +214,6 @@ async def test_skip_import_preserves_conversation_secret_and_token(
     minted = await api.post(
         "/api/auth/api-keys",
         json={"user_id": exec_key, "description": "backup-skip token", "scopes": ["e2e-all"]},
-        retry_on_reloading=True,
     )
     assert isinstance(minted, dict), minted
     assert minted["api_key"].startswith("sk-"), minted
@@ -237,7 +228,6 @@ async def test_skip_import_preserves_conversation_secret_and_token(
             "execution_key": exec_key,
             "callback_url": "https://127.0.0.1:9/callback",
         },
-        retry_on_reloading=True,
     )
     assert created["callback_secret"], created  # minted once here; reads withhold it
 
@@ -263,7 +253,6 @@ async def test_skip_import_preserves_conversation_secret_and_token(
     result = await api.post(
         "/api/backup/import",
         json={"document": document, "sections": ["access_control", "conversations"], "mode": "skip"},
-        retry_on_reloading=True,
     )
     assert result["ok"], result
 
@@ -298,7 +287,7 @@ async def test_backup_import_env_x_band_key_is_refused(fresh_stack: Callable[...
     sibling key in the same (atomically refused) section (validate-before-write)."""
     target = fresh_stack(build_backup_source_stack)
     api = target.api()
-    before = (await api.get("/api/config/env", retry_on_reloading=True))["env"]
+    before = (await api.get("/api/config/env"))["env"]
     assert _X_BAND_KEY not in before
 
     document = {
@@ -306,16 +295,14 @@ async def test_backup_import_env_x_band_key_is_refused(fresh_stack: Callable[...
         "sections": {"env": {"E2E_BACKUP_OK": "harmless", _X_BAND_KEY: "spoofed-sentinel"}},
         "errors": {},
     }
-    result = await api.post(
-        "/api/backup/import", json={"document": document, "sections": ["env"]}, retry_on_reloading=True
-    )
+    result = await api.post("/api/backup/import", json={"document": document, "sections": ["env"]})
     assert result["ok"] is False, f"an X-band backup env import must not report ok: {result}"
     errors = result["sections"]["env"]["errors"]
     assert errors, f"the env section report carried no error: {result}"
     assert any(_X_BAND_KEY in str(err) for err in errors), f"the refusal did not name the X-band key: {errors}"
 
     # Nothing landed — the whole section was refused before any write.
-    after = (await api.get("/api/config/env", retry_on_reloading=True))["env"]
+    after = (await api.get("/api/config/env"))["env"]
     assert _X_BAND_KEY not in after, f"the X-band value leaked into the stored env: {after}"
     assert after.get("E2E_BACKUP_OK") != "harmless", f"a refused section still wrote a sibling key: {after}"
 
@@ -333,9 +320,7 @@ async def test_corrupted_manifest_import_reports_error_and_persists_nothing(
     # ``tools`` must be a list; a string fails the ``Manifest`` schema inside the
     # pipeline's replace, so the importer imports nothing for the section.
     corrupt = {"version": 1, "sections": {"manifest": {"tools": "not-a-list"}}, "errors": {}}
-    result = await api.post(
-        "/api/backup/import", json={"document": corrupt, "sections": ["manifest"]}, retry_on_reloading=True
-    )
+    result = await api.post("/api/backup/import", json={"document": corrupt, "sections": ["manifest"]})
     assert result["ok"] is False, f"a corrupted manifest import must not report ok: {result}"
     assert result["sections"]["manifest"]["errors"], f"the section report carried no error: {result}"
     assert manifest_file(target).read_bytes() == before, "a failed manifest import must not have touched the manifest"
@@ -375,7 +360,6 @@ async def test_stored_definitions_restore_their_bindings_onto_a_fresh_stack(
             "subject_kinds": ["thread"],
             "default_subject_kind": "thread",
         },
-        retry_on_reloading=True,
     )
     await api.put(
         f"/api/state-templates/{template}",
@@ -384,7 +368,6 @@ async def test_stored_definitions_restore_their_bindings_onto_a_fresh_stack(
             "name": template,
             "schema": {"type": "object", "properties": {"items": {"type": "array"}}},
         },
-        retry_on_reloading=True,
     )
     binding = {"states": [{"state": state, "subject_expr": {"content": ".x"}, "templates": [template]}]}
     hook_name = uniq("bkp-hook").replace("_", "-")
@@ -397,16 +380,14 @@ async def test_stored_definitions_restore_their_bindings_onto_a_fresh_stack(
             "execution_key": uniq("bkp-exec"),
             "state_binding": binding,
         },
-        retry_on_reloading=True,
     )
     preset = uniq("bkp-preset").replace("_", "-")
     await api.post(
         "/api/presets",
         json={"name": preset, "base_tool": "e2e_echo", "description": "backup target", "fixed_kwargs": {}},
-        retry_on_reloading=True,
     )
     config_body = {"multichannel": False, "greeting_template": None, "state_binding": binding}
-    await api.put(f"/api/conversation-configs/tool/{preset}", json=config_body, retry_on_reloading=True)
+    await api.put(f"/api/conversation-configs/tool/{preset}", json=config_body)
     sections = ["states", "webhooks", "conversation_target_config", "versioned_documents"]
     export = await api.request_raw("POST", "/api/backup/export", json={"sections": sections})
     assert export.status_code == 200, export.text
@@ -419,19 +400,17 @@ async def test_stored_definitions_restore_their_bindings_onto_a_fresh_stack(
 
     target = fresh_stack(build_backup_definitions_stack)
     fresh = target.api()
-    result = await fresh.post(
-        "/api/backup/import", json={"document": document, "sections": sections}, retry_on_reloading=True
-    )
+    result = await fresh.post("/api/backup/import", json={"document": document, "sections": sections})
     assert result["ok"], result
     assert result["sections"]["webhooks"]["created"] == 1, result
     assert result["sections"]["conversation_target_config"]["created"] == 1, result
     assert all(result["sections"][name]["errors"] == [] for name in sections), result
 
-    served = await fresh.get(f"/api/states/{state}", retry_on_reloading=True)
+    served = await fresh.get(f"/api/states/{state}")
     assert [m["template"] for m in served["attachments"]] == [template], served
-    hooks = await fresh.get("/api/hooks", retry_on_reloading=True)
+    hooks = await fresh.get("/api/hooks")
     assert hook_name in {item["name"] for item in hooks["items"]}, hooks
-    config = await fresh.get(f"/api/conversation-configs/tool/{preset}", retry_on_reloading=True)
+    config = await fresh.get(f"/api/conversation-configs/tool/{preset}")
     restored_attach = config["state_binding"]["states"][0]
     assert (restored_attach["state"], restored_attach["templates"]) == (state, [template]), config
 
@@ -473,9 +452,7 @@ async def test_storage_section_restores_text_and_binary_objects_byte_equal(
     for resource_id in (text_id, binary_id):
         await api.delete(f"/api/storage/resources/{resource_id}")
 
-    result = await api.post(
-        "/api/backup/import", json={"document": document, "sections": ["storage"]}, retry_on_reloading=True
-    )
+    result = await api.post("/api/backup/import", json={"document": document, "sections": ["storage"]})
     assert result["ok"], result
     report = result["sections"]["storage"]
     assert report["created"] == 2, report
@@ -518,7 +495,6 @@ async def test_a_storage_import_refuses_rows_under_the_inbound_media_prefix_and_
     result = await api.post(
         "/api/backup/import",
         json={"document": document, "sections": ["storage"], "mode": "overwrite"},
-        retry_on_reloading=True,
     )
     report = result["sections"]["storage"]
     assert report["errors"] == [

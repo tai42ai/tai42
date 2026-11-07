@@ -120,9 +120,7 @@ def _callback(stack: TaiStack, port: int) -> str:
 
 
 async def _add(api: ApiClient, url: str, provider_id: str, **extra: Any) -> dict[str, Any]:
-    added = await api.post(
-        "/api/connectors/providers", json={"url": url, "id": provider_id, **extra}, retry_on_reloading=True
-    )
+    added = await api.post("/api/connectors/providers", json={"url": url, "id": provider_id, **extra})
     return added["provider"]
 
 
@@ -150,7 +148,6 @@ async def _start(api: ApiClient, provider_id: str, alias: str, *, origin: str | 
         "/api/connectors/connections/start",
         json={"provider_id": provider_id, "alias": alias, "enabled_sub_services": ["default"]},
         headers={"Origin": origin} if origin is not None else None,
-        retry_on_reloading=True,
     )
 
 
@@ -165,7 +162,6 @@ async def _reconnect(start_api: ApiClient, complete_api: ApiClient, connection_i
     started = await start_api.post(
         f"/api/connectors/connections/{connection_id}/reconnect",
         json={"enabled_sub_services": ["default"]},
-        retry_on_reloading=True,
     )
     redirect = await _authorize(started["authorize_url"])
     status, completed = await _complete(complete_api, redirect)
@@ -219,9 +215,7 @@ def _manifest_document(stack: TaiStack) -> dict[str, Any]:
 
 
 async def _replace_manifest(api: ApiClient, document: dict[str, Any]) -> dict[str, Any]:
-    return await api.post(
-        "/api/manifest/replace", json={"manifest_text": yaml.safe_dump(document)}, retry_on_reloading=True
-    )
+    return await api.post("/api/manifest/replace", json={"manifest_text": yaml.safe_dump(document)})
 
 
 # -- 1. add and connect with dynamic registration --------------------------------------------------
@@ -307,7 +301,7 @@ async def test_without_a_refresh_token_an_expired_grant_asks_for_a_reconnect(
     await _reconnect(admin_a, admin_a, connection_id)
     assert _ok(await _call(stack, tool)) == {"ok": "pong"}
 
-    await admin_a.delete(f"/api/connectors/connections/{connection_id}", retry_on_reloading=True)
+    await admin_a.delete(f"/api/connectors/connections/{connection_id}")
     assert server.counters().revocations[-1] == {"kind": "access"}
 
 
@@ -406,9 +400,9 @@ async def test_remove_waits_for_disconnect_then_frees_the_id_and_purges_a_lapsed
     assert "1 live connection" in refused["error"]
 
     revocations = len(server.counters().revocations)
-    await admin_a.delete(f"/api/connectors/connections/{connection_id}", retry_on_reloading=True)
+    await admin_a.delete(f"/api/connectors/connections/{connection_id}")
     assert len(server.counters().revocations) == revocations + 1
-    removed = await admin_a.delete(f"/api/connectors/providers/{provider_id}", retry_on_reloading=True)
+    removed = await admin_a.delete(f"/api/connectors/providers/{provider_id}")
     assert removed["removed_clients"] == 1
     for api in (admin_a, admin_b):
 
@@ -428,7 +422,7 @@ async def test_remove_waits_for_disconnect_then_frees_the_id_and_purges_a_lapsed
             (lapsed,),
         )
         conn.commit()
-    await admin_a.delete(f"/api/connectors/providers/{provider_id}", retry_on_reloading=True)
+    await admin_a.delete(f"/api/connectors/providers/{provider_id}")
     with _pg(stack) as conn, conn.cursor() as cur:
         cur.execute("SELECT count(*) FROM connector_connections WHERE connection_id = %s", (lapsed,))
         assert cur.fetchone() == (0,)
@@ -481,7 +475,7 @@ async def test_a_client_the_server_forgot_asks_for_a_reconnect_that_registers_ag
     server.expire_access_tokens()
     assert _connector_error(await _call(stack, tool))["code"] == "reconnect_required"
 
-    await admin_a.delete(f"/api/connectors/connections/{second}", retry_on_reloading=True)
+    await admin_a.delete(f"/api/connectors/connections/{second}")
     status, _missing = await _status(admin_a, "GET", f"/api/connectors/connections/{second}")
     assert status == 404
 
@@ -496,8 +490,8 @@ async def test_a_client_the_server_forgot_asks_for_a_reconnect_that_registers_ag
 
     status, _refused = await _status(admin_a, "DELETE", f"/api/connectors/providers/{provider_id}")
     assert status == 409
-    await admin_a.delete(f"/api/connectors/connections/{first}", retry_on_reloading=True)
-    await admin_a.delete(f"/api/connectors/providers/{provider_id}", retry_on_reloading=True)
+    await admin_a.delete(f"/api/connectors/connections/{first}")
+    await admin_a.delete(f"/api/connectors/providers/{provider_id}")
 
 
 # -- 9. the URL guard ------------------------------------------------------------------------------
@@ -648,7 +642,6 @@ async def test_a_connections_credential_goes_only_to_its_providers_server(
                 }
             ]
         },
-        retry_on_reloading=True,
     )
     await _served(stack, f"{forged}_ping", ports=(stack.port_a,))
     refused = _connector_error(await _call(stack, f"{forged}_ping"))

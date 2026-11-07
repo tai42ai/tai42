@@ -69,7 +69,6 @@ async def test_schedule_door_contract_parks_from_the_worker(
             "execution_key": execution_key,
             "start_expr": {"content": dispatch},
         },
-        retry_on_reloading=True,
     )
     try:
 
@@ -84,7 +83,7 @@ async def test_schedule_door_contract_parks_from_the_worker(
         assert record["identity"] == execution_key, record
         assert record["interaction_id"], record
     finally:
-        await api.delete(f"/api/schedules/{schedule_name}", retry_on_reloading=True)
+        await api.delete(f"/api/schedules/{schedule_name}")
 
 
 async def test_schedule_contract_jq_requires_execution_key(

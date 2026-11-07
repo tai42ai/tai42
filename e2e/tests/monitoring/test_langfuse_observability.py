@@ -143,7 +143,6 @@ async def _create_preset(api, name: str, base_tool: str, fixed_kwargs: dict) -> 
             "description": "runs deep-link composed e2e",
             "fixed_kwargs": fixed_kwargs,
         },
-        retry_on_reloading=True,
     )
 
 
@@ -245,9 +244,7 @@ async def test_a_run_with_a_deferred_step_is_one_trace_with_one_root(
     caller = uniq("dfcaller")
     await _create_preset(api, caller, "e2e_defer_after_reply", {"target": target})
 
-    answer = await api.post(
-        "/api/run-tool", json={"tool_name": caller, "arguments": {}}, expect=200, retry_on_reloading=True
-    )
+    answer = await api.post("/api/run-tool", json={"tool_name": caller, "arguments": {}}, expect=200)
     assert answer["kind"] == "result", answer
     trace_id = answer["result"]["trace_id"]
     live_span_id = answer["result"]["span_id"]

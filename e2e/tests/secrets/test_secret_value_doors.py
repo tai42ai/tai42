@@ -53,5 +53,5 @@ async def test_background_run_records_the_masked_placeholder(core_stack: TaiStac
 async def test_mcp_call_reveals_the_real_value(core_stack: TaiStack, uniq: Callable[[str], str]) -> None:
     secret = uniq("credential")
     async with core_stack.mcp(port=core_stack.port_a) as mcp:
-        result = (await mcp.call_tool(_TOOL, {"credential": secret}, retry_on_reloading=True)).data
+        result = (await mcp.call_tool(_TOOL, {"credential": secret})).data
     assert result == {"credential": secret}, result

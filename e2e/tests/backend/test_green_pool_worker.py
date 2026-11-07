@@ -99,7 +99,7 @@ def _tool_map(result: Any) -> dict[str, Any]:
 
 async def _call(stack: TaiStack, tool: str, arguments: dict[str, Any]) -> Any:
     async with stack.mcp() as mcp:
-        return await mcp.call_tool(tool, arguments, retry_on_reloading=True)
+        return await mcp.call_tool(tool, arguments)
 
 
 async def _send(stack: TaiStack, tool: str, arguments: dict[str, Any]) -> str:
@@ -124,7 +124,7 @@ async def _reload_fleet(stack: TaiStack) -> dict[str, str]:
         # Prime the session's tool-output-schema cache: the reload retires this session, so a
         # follow-up tools/list after the call would find it terminated.
         await mcp.list_tools()
-        result = await mcp.call_tool("reload_config", {}, retry_on_reloading=True)
+        result = await mcp.call_tool("reload_config", {})
     report = _tool_map(result)
     assert report["op"] == "reload_config", report
     assert report["reachable"] is True, report

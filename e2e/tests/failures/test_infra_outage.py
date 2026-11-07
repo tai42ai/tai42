@@ -127,7 +127,6 @@ async def _run_on_worker(stack: TaiStack, payload: str) -> Any:
                 "run_tool_sync_task",
                 {"tool_name": "e2e_echo", "arguments": {"payload": payload}},
                 raise_on_error=False,
-                retry_on_reloading=True,
             ),
             timeout=_WORKER_RUN_DEADLINE,
         )

@@ -64,7 +64,6 @@ async def test_run_tool_door_refuses_an_undeclared_park(
         "/api/run-tool",
         json={"tool_name": _UNDECLARED, "arguments": {"question": question, "expiry_seconds": _EXPIRY_SECONDS}},
         expect=501,
-        retry_on_reloading=True,
     )
     assert _REFUSAL in json.dumps(body), f"the run-tool door's refusal did not name the tool: {body}"
     _ask_fired_once(agent_async_park_stack, question)
@@ -79,7 +78,6 @@ async def test_mcp_edge_refuses_an_undeclared_park(
             _UNDECLARED,
             {"question": question, "expiry_seconds": _EXPIRY_SECONDS},
             raise_on_error=False,
-            retry_on_reloading=True,
         )
     assert result.is_error, f"the MCP edge returned an undeclared park: {result.data}"
     text = " ".join(getattr(part, "text", "") for part in result.content)
@@ -119,7 +117,6 @@ async def test_agent_run_fails_on_an_undeclared_park_inside_a_pausing_branch(
                 "langgraph_config": {"configurable": {"thread_id": uniq("thread")}},
             },
             raise_on_error=False,
-            retry_on_reloading=True,
         )
     tool_messages = [
         message

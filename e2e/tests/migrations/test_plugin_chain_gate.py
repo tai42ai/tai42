@@ -161,7 +161,7 @@ async def test_pending_plugin_chain_refuses_the_reload_until_migrated(
     assert _table_exists(stack)
 
     # The next reload passes the schema check and the plugin's tool answers.
-    report = await api.post("/api/config/reload", json={}, retry_on_reloading=True, timeout=60.0)
+    report = await api.post("/api/config/reload", json={}, timeout=60.0)
     outcomes = {r["name"]: r["outcome"] for r in report["results"]}
     assert outcomes, report
     assert all(outcome == "applied" for outcome in outcomes.values()), report

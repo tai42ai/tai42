@@ -71,9 +71,7 @@ async def test_execute_shell_and_file_tools_share_the_live_durable_volume(
         ]
     )
     async with stack.mcp(port=stack.port_a) as mcp:
-        await mcp.call_tool(
-            AGENT, {"user_message": {"content": "write then read the scratch file"}}, retry_on_reloading=True
-        )
+        await mcp.call_tool(AGENT, {"user_message": {"content": "write then read the scratch file"}})
 
     read_result = _tool_messages(llm_stub.requests[-1])[-1]
     assert token in json.dumps(read_result), (
@@ -104,9 +102,7 @@ async def test_caller_face_workspace_is_ephemeral_while_the_checkpoint_persists(
         ]
     )
     async with stack.mcp(port=port) as mcp:
-        await mcp.call_tool(
-            AGENT, {"user_message": {"content": "note the token"}, "langgraph_config": config}, retry_on_reloading=True
-        )
+        await mcp.call_tool(AGENT, {"user_message": {"content": "note the token"}, "langgraph_config": config})
 
     # Run 2 (same langgraph_config thread): read it back — the caller-face workspace was ephemeral,
     # so the file is GONE even though the conversation thread is the same.
@@ -117,9 +113,7 @@ async def test_caller_face_workspace_is_ephemeral_while_the_checkpoint_persists(
         ]
     )
     async with stack.mcp(port=port) as mcp:
-        await mcp.call_tool(
-            AGENT, {"user_message": {"content": "read the token"}, "langgraph_config": config}, retry_on_reloading=True
-        )
+        await mcp.call_tool(AGENT, {"user_message": {"content": "read the token"}, "langgraph_config": config})
 
     last = llm_stub.requests[-1]
     read_result = _tool_messages(last)[-1]

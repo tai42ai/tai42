@@ -35,7 +35,7 @@ async def _submit(api: Any, tool_name: str, arguments: dict[str, Any], subject: 
     body: dict[str, Any] = {"tool_name": tool_name, "arguments": arguments}
     if subject is not None:
         body["subject"] = subject
-    submitted = await api.post("/api/tool-runs", json=body, expect=202, retry_on_reloading=True)
+    submitted = await api.post("/api/tool-runs", json=body, expect=202)
     return submitted["run_id"]
 
 

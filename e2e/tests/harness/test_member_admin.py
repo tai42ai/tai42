@@ -63,10 +63,10 @@ class _StubApi:
     def __init__(self) -> None:
         self.invoked: list[dict[str, Any]] = []
 
-    async def get(self, path: str, *, retry_on_reloading: bool = False) -> dict[str, Any]:
+    async def get(self, path: str) -> dict[str, Any]:
         return {member_admin.CATALOG_PATH: _CATALOG, member_admin.MEMBERS_PATH: _DIRECTORY}[path]
 
-    async def post(self, path: str, *, json: dict[str, Any], retry_on_reloading: bool = False) -> dict[str, Any]:
+    async def post(self, path: str, *, json: dict[str, Any]) -> dict[str, Any]:
         assert path == member_admin.INVOKE_PATH
         self.invoked.append(json)
         return {"result": {"invite_token": "tok", "login_path": "/login?invite=tok"}}

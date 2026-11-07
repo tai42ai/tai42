@@ -87,7 +87,6 @@ async def test_async_ask_over_the_mcp_edge_is_refused(fresh_stack: Callable[...,
         result = await mcp.call_tool(
             "e2e_agent_async_ask",
             {"question": "proceed?", "expiry_seconds": 60},
-            retry_on_reloading=True,
             raise_on_error=False,
         )
     assert result.is_error, result.data

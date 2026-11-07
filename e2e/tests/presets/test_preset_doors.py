@@ -195,7 +195,6 @@ async def test_a_mapped_preset_runs_its_input_and_output_maps_on_the_http_and_mc
         "/api/tool-runs",
         json={"tool_name": name, "arguments": {"text": marker, "suffix": "s"}},
         expect=202,
-        retry_on_reloading=True,
     )
     run_id = submitted["run_id"]
 

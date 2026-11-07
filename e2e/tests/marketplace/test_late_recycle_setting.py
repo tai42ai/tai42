@@ -61,7 +61,7 @@ def _row_facts(fanout: dict[str, Any]) -> dict[str, Any]:
 
 async def _probe_pool_url(stack: TaiStack) -> str:
     async with stack.mcp(auth=stack.auth_token) as mcp:
-        result = await mcp.call_tool(LAMBDA_TOOL, {}, retry_on_reloading=True)
+        result = await mcp.call_tool(LAMBDA_TOOL, {})
     data = result.data if isinstance(result.data, dict) else result.structured_content
     assert isinstance(data, dict), f"{LAMBDA_TOOL} returned no result map: {result!r}"
     return data["pool_url"]
@@ -77,7 +77,7 @@ async def test_a_recycle_class_setting_an_install_loads_awaits_nothing_until_its
     first = f"redis://{uniq('pool').lower()}"
 
     # The key is not registered by any worker yet: a hot write, nothing rolled, nobody listed.
-    written = await api.post("/api/config/env", json={"env": {LAMBDA_POOL_URL_ENV: first}}, retry_on_reloading=True)
+    written = await api.post("/api/config/env", json={"env": {LAMBDA_POOL_URL_ENV: first}})
     assert written["recycle"] is None, written
     assert written["awaiting_respawn"] == [], written
     before = _lives(stack)
@@ -96,9 +96,7 @@ async def test_a_recycle_class_setting_an_install_loads_awaits_nothing_until_its
 
     # Registered now, the key is recycle-class: a change rolls the fleet and the writer exits after replying.
     second = f"redis://{uniq('pool').lower()}"
-    changed = await api.post(
-        "/api/config/env", json={"env": {LAMBDA_POOL_URL_ENV: second}}, retry_on_reloading=True, timeout=200.0
-    )
+    changed = await api.post("/api/config/env", json={"env": {LAMBDA_POOL_URL_ENV: second}}, timeout=200.0)
     roll = changed["recycle"]
     assert roll is not None, changed
     assert roll["recycle_stopped"] is None, changed
@@ -117,7 +115,7 @@ async def test_a_recycle_class_setting_an_install_loads_awaits_nothing_until_its
     await wait_for_async(everyone_respawned, deadline=150.0, message="a worker never respawned after the roll")
 
     # The respawned workers bound the new value at boot: nothing awaits on the next reload.
-    report = await api.post("/api/fleet/reload-config", json={"targets": None}, retry_on_reloading=True)
+    report = await api.post("/api/fleet/reload-config", json={"targets": None})
     assert report["ok"] is True, report
     assert all(row["payload"]["awaiting_respawn"] == [] for row in report["results"]), report
     assert await _probe_pool_url(stack) == second
