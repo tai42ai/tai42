@@ -28,10 +28,13 @@ def _subject(key: str) -> dict[str, str]:
 
 
 async def _submit(api: Any, tool_name: str, arguments: dict[str, Any], subject: dict[str, str]) -> str:
+    # A submit can meet the retriable ``reloading`` refusal while a serve worker of the fresh
+    # stack holds its reload gate for its boot resync. It is retried as every client retries it.
     submitted = await api.post(
         "/api/tool-runs",
         json={"tool_name": tool_name, "arguments": arguments, "subject": subject},
         expect=202,
+        retry_on_reloading=True,
     )
     return submitted["run_id"]
 
