@@ -30,9 +30,16 @@ async def test_create_refuses_an_unserved_composed_tool(seams_stack: TaiStack, u
     name = uniq("composing")
     ghost = uniq("ghost")
 
-    refused = await api.request_raw("POST", "/api/presets", json=_composer_body(name, ["e2e_echo", ghost]))
-    assert refused.status_code == 400, refused.text
-    assert refused.json()["error"] == f"composed tool {ghost!r} at step 1 is not a registered tool"
+    # The create can meet the retriable ``reloading`` refusal while a serve worker of the fresh
+    # stack holds its reload gate for its boot resync. It is retried as every client retries it.
+    refused = await api.request(
+        "POST",
+        "/api/presets",
+        json=_composer_body(name, ["e2e_echo", ghost]),
+        expect=400,
+        retry_on_reloading=True,
+    )
+    assert refused["error"] == f"composed tool {ghost!r} at step 1 is not a registered tool"
     assert name not in {row["name"] for row in await api.get("/api/presets")}
 
     created = await api.post("/api/presets", json=_composer_body(name, ["e2e_echo"]), retry_on_reloading=True)

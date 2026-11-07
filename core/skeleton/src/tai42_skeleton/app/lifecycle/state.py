@@ -67,6 +67,7 @@ if TYPE_CHECKING:
     from tai42_skeleton.tools.delete_referees import ToolDeleteRefereeRegistry
     from tai42_skeleton.tools.detach_referees import StateTemplateDetachRefereeRegistry
     from tai42_skeleton.tools.mcp_start import StartId
+    from tai42_skeleton.tools.rename_cascades import ToolRenameCascadeRegistry
     from tai42_skeleton.tools.rename_referees import ToolRenameRefereeRegistry
     from tai42_skeleton.webhooks.registry import WebhookVerifierRegistry
 
@@ -369,6 +370,7 @@ class LifecycleState(ABC):
     _tool_extras_registry: "ToolExtrasRegistry"
     _tool_pause_registry: "ToolPauseRegistry"
     _rename_referee_registry: "ToolRenameRefereeRegistry"
+    _rename_cascade_registry: "ToolRenameCascadeRegistry"
     _delete_referee_registry: "ToolDeleteRefereeRegistry"
     _delete_cascade_registry: "ToolDeleteCascadeRegistry"
     _detach_referee_registry: "StateTemplateDetachRefereeRegistry"
