@@ -628,6 +628,8 @@ class _FakeAdmin:
     served_mcp_names = staticmethod(no_mcp_listing)
 
 
+# The handler is called below the HTTP edge a request runs under.
+@pytest.mark.usefixtures("writer_exit_edge")
 async def test_write_env_reloads_through_gate_same_result_shape(monkeypatch: pytest.MonkeyPatch) -> None:
     """``POST /api/config/env`` awaits its reload through the gate on the serving loop
     and returns the reload result under a ``{"data": <reload result>}`` envelope."""

@@ -23,6 +23,9 @@ from tai42_skeleton.routers import backend as router
 
 from .._fakes.bus import FakeBus
 
+# These tests call the route handlers below the HTTP edge a request runs under.
+pytestmark = pytest.mark.usefixtures("http_edge")
+
 
 class _FakeBackend:
     def __init__(self) -> None:

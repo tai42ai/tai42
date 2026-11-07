@@ -57,6 +57,9 @@ from tai42_skeleton.operations import NotSupportedError
 
 from ..marketplace._specs import make_spec, mcp_server_item, tool_item
 
+# These tests call the route handlers below the HTTP edge a request runs under.
+pytestmark = pytest.mark.usefixtures("http_edge")
+
 
 @pytest.fixture(autouse=True)
 def _marketplace_store_configured(monkeypatch):

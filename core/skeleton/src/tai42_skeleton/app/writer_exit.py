@@ -1,13 +1,16 @@
 """The writer's own exit a change holds and owes, carried from the change to the edge that answers it.
 
-A change this worker runs holds the worker's exit from the change's start
-(:func:`hold_writer_exit`, called by every writing door as its change begins: the config
-service's write exclusion, the fleet soft restart and the join), so a recycle op from another
-worker's roll that reaches the worker mid-change leaves it to that change instead of ending it
-mid-reply. A change whose roll converged with the writer needing its own restart owes the
-writer's exit after the change's reply. The roll
+A change this worker runs holds the worker's exit from before it begins: the edge that admits it
+takes the hold (:meth:`WriterExitScope.hold_exit`): the route surface for an operation or custom
+route declaring ``holds_writer_exit``, the projected tool edge for such an operation, the join as
+its first statement. A recycle op from another worker's roll that reaches the worker mid-change
+leaves it to that change instead of ending it mid-reply, and a change that reaches the worker
+after it decided to leave is refused before anything of it runs (:class:`WorkerLeavingError`), so
+no change runs on a worker whose stop is under way. The config doors require the hold
+(:func:`require_writer_exit_held`). A change whose roll converged with the writer needing its own
+restart owes the writer's exit after the change's reply. The roll
 (:func:`~tai42_skeleton.config.recycle_roll.decide_and_roll`, the one place every reload's roll
-flows through) reuses the change's hold and records that debt in the open
+flows through) converts the change's hold into that exit and records that debt in the open
 :class:`WriterExitScope`. The edge that opened the scope answers the change and then settles it
 once:
 
@@ -43,6 +46,8 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import TYPE_CHECKING
 
+from tai42_contract.errors import UnavailableError
+
 if TYPE_CHECKING:
     from tai42_skeleton.app.bus import ExitHold, WorkerBus
 
@@ -52,12 +57,32 @@ WRITER_EXIT_REASON = "the writer's own restart after its change's roll"
 """The reason the writer of a change leaves for, as a door that finds it already leaving reads it."""
 
 
+class WorkerLeavingError(UnavailableError):
+    """This worker decided to leave and begins no change; the caller retries on a worker that is not leaving.
+
+    Raised by :meth:`WriterExitScope.hold_exit` for a change that reaches a worker after its
+    decision to leave, before the change validates, persists or broadcasts anything. The HTTP
+    edge answers it as ``503 {"error": …, "leaving": reason}`` and the tool edge as a
+    ``ToolError`` with the same text, through the ``OperationError`` rendering both already have.
+    """
+
+    def __init__(self, reason: str, change: str) -> None:
+        """Build the refusal of ``change`` on a worker leaving for ``reason``."""
+        super().__init__(
+            f"leaving — this worker is leaving ({reason}) and begins no change; retry shortly",
+            extra={"leaving": reason},
+        )
+        self.reason = reason
+        self.change = change
+
+
 class WriterExitScope:
     """The writer's exit the changes run under one edge hold and owe, settled once by that edge.
 
     Open from the edge's start until it settles or closes. A change run under it holds the
-    worker's exit from the change's start (:meth:`hold_exit`), so a recycle op from another
-    worker's roll leaves the worker to it until the edge answered; a roll records the exit its
+    worker's exit from the change's start (:meth:`hold_exit`), unless the worker decided to leave,
+    which refuses the change, so a recycle op from another worker's roll leaves the worker to it
+    until the edge answered; a roll records the exit its
     change owes into it (:meth:`owe`) only while it is open.
     """
 
@@ -74,18 +99,34 @@ class WriterExitScope:
         """Whether a change can still hold or owe the writer's exit in this scope (it is neither settled nor closed)."""
         return self._open
 
+    @property
+    def holds_exit(self) -> bool:
+        """Whether a change under this scope holds the worker's exit."""
+        return bool(self._holds)
+
     def hold_exit(self, bus: WorkerBus, change: str) -> None:
         """Hold the worker's exit on ``bus`` for ``change`` until this scope settles or closes.
 
-        One hold serves every change under the scope: a later change, or the roll of one, reuses
-        it. A process that does not own its exit (a forked job child) holds none. Raises once the
-        scope is closed: the edge already answered, so no one would release the hold.
+        The edge that admits the change calls it before the handler runs. One hold serves every
+        change under the scope: a later change, or the roll of one, reuses it. A process that does
+        not own its exit (a forked job child) holds none. The hold is taken in one step with the
+        check that the worker has not decided to leave
+        (:meth:`~tai42_skeleton.app.bus.WorkerBus.defer_exit_unless_departing`): a worker that has
+        begins no change and raises :class:`WorkerLeavingError`, so the change is refused before it
+        validates, persists or broadcasts anything, and the caller retries on a worker that is not
+        leaving. Raises ``RuntimeError`` once the scope is closed: the edge already answered, so no
+        one would release the hold.
         """
+        from tai42_skeleton.app.bus import ExitRefusal
+
         if not self._open:
             raise RuntimeError(f"writer exit: {change} began after its edge already answered")
         if self._holds or not bus.owns_exit:
             return
-        self._holds.append(bus.defer_exit(change))
+        hold = bus.defer_exit_unless_departing(change)
+        if isinstance(hold, ExitRefusal):
+            raise WorkerLeavingError(hold.reason, change)
+        self._holds.append(hold)
         self._bus = bus
 
     def adopt_hold(self, bus: WorkerBus, hold: ExitHold) -> None:
@@ -210,14 +251,36 @@ def open_writer_exit_scope(change: str) -> WriterExitScope:
     return scope
 
 
-def hold_writer_exit(bus: WorkerBus, change: str) -> None:
-    """Hold the worker's exit for ``change`` in the open writer-exit scope, from the change's start to its answer.
+def current_writer_exit_scope(change: str) -> WriterExitScope:
+    """The open writer-exit scope the route serving ``change`` holds the worker's exit in.
 
-    Every door's change calls this when it begins (:meth:`WriterExitScope.hold_exit`); the roll
-    that settles it reuses the hold. With no scope open the door settles no exit and nothing is
-    held: a roll of that change that would owe the writer's exit raises
-    (:func:`open_writer_exit_scope`).
+    Raises when none is open: the route surface holds the exit only under the scope
+    :class:`~tai42_skeleton.middleware.writer_exit.WriterExitMiddleware` opens for every request,
+    so a held route served outside it is a wiring error.
     """
     scope = _scope.get()
-    if scope is not None and scope.is_open:
-        scope.hold_exit(bus, change)
+    if scope is None or not scope.is_open:
+        raise RuntimeError(
+            f"writer exit: {change} is served outside a writer-exit scope — the route surface holds the "
+            "exit only under WriterExitMiddleware"
+        )
+    return scope
+
+
+def require_writer_exit_held(bus: WorkerBus, change: str) -> None:
+    """Raise unless the open writer-exit scope holds the worker's exit for the change that reaches a config door.
+
+    The edge that admitted the change holds the exit before anything of the change runs
+    (:meth:`WriterExitScope.hold_exit`, from the operation's or route's ``holds_writer_exit``
+    declaration, or the join's own first statement). A door reached under an open scope on a
+    worker that owns its exit with no hold is an undeclared change: raised, never held late, since
+    a hold taken here would refuse the change after its work began. With no scope open (a
+    host-side process, the boot converge) nothing is required: that door settles no exit.
+    """
+    scope = _scope.get()
+    if scope is None or not scope.is_open or not bus.owns_exit or scope.holds_exit:
+        return
+    raise RuntimeError(
+        f"writer exit: {change} reached a config door with no hold on the writer's exit — "
+        "its operation or route declares holds_writer_exit"
+    )

@@ -31,6 +31,7 @@ from tai42_skeleton.config.service import ConfigService
 from tai42_skeleton.tools.binding.errors import ExtensionComboRefusedError
 
 from .._fakes.bus import GracefulExit, _row
+from .._writer_exit_edge import admit_change
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
@@ -304,8 +305,13 @@ def _service(
     orchestrate: Callable[..., Awaitable[RecycleReport]] = orchestrate_recycle,
     combo_check: _ComboCheck | None = None,
 ) -> tuple[ConfigService, Any, Any]:
+    """The config service over ``store``.
+
+    Its change is admitted by the stand-in writer-exit edge when one is open (:func:`admit_change`).
+    """
     admin = admin or FakeReloadAdmin()
     bus = bus or RecordingBus()
+    admit_change(bus)
     service = ConfigService(
         config_manager=store,
         admin=admin,

@@ -6,7 +6,9 @@ releasing the hold when nothing is owed, or the scope abandons it on close — r
 the debt ERROR-logged. A scope opened inside another owns the changes under it, unless an
 enclosing one holds or owes the exit, which then takes the debt over; work spawned in a task under
 a scope owes into that scope. A closed scope refuses a new hold or debt, and with no scope open a
-debt is refused outright and a change holds nothing.
+debt is refused outright. A config door requires the hold the edge took: reached under an open scope
+on a worker that owns its exit with no hold it raises; with no scope open, or on a forked job child,
+it requires nothing.
 """
 
 from __future__ import annotations
@@ -16,11 +18,12 @@ from typing import cast
 
 import pytest
 
-from tai42_skeleton.app.bus import WorkerBus
+from tai42_skeleton.app.bus import WorkerBus, WorkerIdentity, WorkerKind
 from tai42_skeleton.app.writer_exit import (
     WRITER_EXIT_REASON,
-    hold_writer_exit,
+    WorkerLeavingError,
     open_writer_exit_scope,
+    require_writer_exit_held,
     writer_exit_scope,
 )
 
@@ -141,7 +144,7 @@ async def test_a_scope_holding_the_exit_and_owing_nothing_releases_it_on_settle(
     bus = _bus()
 
     with writer_exit_scope() as exits:
-        hold_writer_exit(cast("WorkerBus", bus), "the env change")
+        exits.hold_exit(cast("WorkerBus", bus), "the env change")
         assert bus.exit_deferred == "the env change"
         await exits.settle()
 
@@ -151,8 +154,8 @@ async def test_a_scope_holding_the_exit_and_owing_nothing_releases_it_on_settle(
 
 def _change_whose_edge_fails(bus: FakeBus) -> None:
     """A change that holds the exit in its scope, then fails before its edge answers."""
-    with writer_exit_scope():
-        hold_writer_exit(cast("WorkerBus", bus), "the env change")
+    with writer_exit_scope() as exits:
+        exits.hold_exit(cast("WorkerBus", bus), "the env change")
         raise ValueError("the edge failed")
 
 
@@ -168,10 +171,45 @@ async def test_a_scope_holding_the_exit_closed_unsettled_releases_it_and_logs_no
     assert not [record for record in caplog.records if record.levelname == "ERROR"]
 
 
-def test_with_no_scope_open_a_change_holds_nothing() -> None:
+def test_with_no_scope_open_a_config_door_requires_no_hold() -> None:
     bus = _bus()
 
-    hold_writer_exit(cast("WorkerBus", bus), "the env change")
+    require_writer_exit_held(cast("WorkerBus", bus), "the env change")
+
+    assert bus.exit_deferred is None
+
+
+async def test_a_config_door_reached_under_an_open_scope_with_no_hold_raises() -> None:
+    bus = _bus()
+
+    with writer_exit_scope(), pytest.raises(RuntimeError) as raised:
+        require_writer_exit_held(cast("WorkerBus", bus), "the env change")
+
+    assert str(raised.value) == (
+        "writer exit: the env change reached a config door with no hold on the writer's exit — "
+        "its operation or route declares holds_writer_exit"
+    )
+    assert bus.exit_deferred is None
+
+
+async def test_a_config_door_reached_under_a_scope_holding_the_exit_takes_no_further_hold() -> None:
+    bus = _bus()
+
+    with writer_exit_scope() as exits:
+        exits.hold_exit(cast("WorkerBus", bus), "the admitted change")
+        require_writer_exit_held(cast("WorkerBus", bus), "the env change")
+        assert bus.deferred_exits == ["the admitted change"]
+        await exits.settle()
+
+    assert bus.exit_deferred is None
+
+
+async def test_a_config_door_on_a_process_that_owns_no_exit_requires_no_hold() -> None:
+    bus = FakeBus(origin="backend-1/fork-7", remotes=["backend-1"])
+    bus._identity = WorkerIdentity(name="backend-1/fork-7", kind=WorkerKind.backend, pid=7, generation=0, member=False)
+
+    with writer_exit_scope():
+        require_writer_exit_held(cast("WorkerBus", bus), "the env change")
 
     assert bus.exit_deferred is None
 
@@ -189,7 +227,7 @@ async def test_a_scope_owing_the_exit_inside_one_that_only_holds_it_hands_it_the
     bus = _bus()
 
     with writer_exit_scope() as outer:
-        hold_writer_exit(cast("WorkerBus", bus), "the route's own change")
+        outer.hold_exit(cast("WorkerBus", bus), "the route's own change")
         with writer_exit_scope() as inner:
             _owe(bus, "a tool's change under the route")
             # Waiting here for the route's hold would never end: the route answers after this.
@@ -198,4 +236,35 @@ async def test_a_scope_owing_the_exit_inside_one_that_only_holds_it_hands_it_the
         await outer.settle()
 
     assert bus.exit_requests == [WRITER_EXIT_REASON]
+    assert bus.exit_deferred is None
+
+
+async def test_a_change_on_a_worker_that_decided_to_leave_is_refused_before_it_holds() -> None:
+    bus = _bus()
+    assert bus.decide_departure("a fleet recycle op") is None
+
+    with writer_exit_scope() as exits:
+        with pytest.raises(WorkerLeavingError) as refused:
+            exits.hold_exit(cast("WorkerBus", bus), "the env change")
+        assert not exits.holds_exit
+
+    assert str(refused.value) == (
+        "leaving — this worker is leaving (a fleet recycle op) and begins no change; retry shortly"
+    )
+    assert refused.value.extra == {"leaving": "a fleet recycle op"}
+    assert refused.value.status == 503
+    assert bus.exit_deferred is None
+
+
+async def test_a_scope_that_already_holds_the_exit_takes_no_second_hold_on_a_leaving_worker() -> None:
+    bus = _bus()
+
+    with writer_exit_scope() as exits:
+        exits.hold_exit(cast("WorkerBus", bus), "the env change")
+        assert bus.stop_began("SIGTERM received")
+        # The change in flight goes on under the hold it took at its start.
+        exits.hold_exit(cast("WorkerBus", bus), "a later change under the same edge")
+        assert bus.deferred_exits == ["the env change"]
+        await exits.settle()
+
     assert bus.exit_deferred is None

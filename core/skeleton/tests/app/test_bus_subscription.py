@@ -1486,6 +1486,36 @@ async def test_the_join_restarts_the_workers_that_reported_keys_and_leaves_the_c
     assert recorded_roll["events"] == ["roll"]
 
 
+async def test_a_join_on_a_worker_already_leaving_announces_nothing_and_logs_it(
+    recorded_roll: dict[str, Any], caplog: pytest.LogCaptureFixture
+) -> None:
+    bus = _JoinBus(
+        {"backend-1": {"withdrawn": [], "awaiting_respawn": [_SIBLING_KEY]}},
+        fleet_keys=[],
+        events=recorded_roll["events"],
+    )
+    m = _Mixin()
+    m._bus = cast("Any", bus)
+    assert bus.decide_departure("a fleet recycle op") is None
+
+    with caplog.at_level(logging.INFO):
+        m._spawn_join(dict(_CLEAN_JOIN))
+        await _join_done(m)
+
+    assert bus.publish_calls == []
+    # Only the leaving's own recycling announce ran: no roll.
+    assert recorded_roll["events"] == ["mark_recycling"]
+    leaving = [(r.levelno, r.getMessage()) for r in caplog.records if "already leaving" in r.getMessage()]
+    assert leaving == [
+        (
+            logging.INFO,
+            "worker bus: the join of serve-1 on a worker already leaving (a fleet recycle op) — its successor joins",
+        )
+    ]
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert bus.exit_deferred is None
+
+
 async def test_the_join_asks_a_worker_that_did_not_confirm_the_announcement_once_ready_before_any_restart(
     recorded_roll: dict[str, Any], caplog: pytest.LogCaptureFixture
 ) -> None:

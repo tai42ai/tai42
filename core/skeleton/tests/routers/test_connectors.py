@@ -94,7 +94,7 @@ def _provider():
 
 
 @pytest.fixture
-def wiring(monkeypatch):
+def wiring(monkeypatch, http_edge):
     monkeypatch.setattr(router, "compute_redirect_uri", lambda r: "https://app/oauth-bridge.html")
     monkeypatch.setattr(router, "compute_deployment_origin", lambda r: "https://app")
     monkeypatch.setattr(conn_ops, "list_providers", lambda: [_provider()])
@@ -451,7 +451,7 @@ async def test_disconnect_does_not_serving_filter_expired(wiring, monkeypatch):
 # -- oauth/complete (decode) -------------------------------------------------
 
 
-async def test_oauth_complete_off_is_not_configured(monkeypatch):
+async def test_oauth_complete_off_is_not_configured(monkeypatch, http_edge):
     # OFF state: with no connector store the flow cannot complete. This door
     # carries a discriminated body with a load-bearing status, so the OFF state rides
     # that native envelope — a 400 with ``kind: "not_configured"``, never ``{"error"}``.
@@ -517,6 +517,31 @@ async def test_oauth_complete_completion_error_maps_to_failed(wiring, monkeypatc
     body = _data(resp)["data"]
     assert body["kind"] == "failed"
     assert body["reason"] == type(exc).__name__
+
+
+async def test_oauth_complete_on_a_leaving_worker_is_refused_before_the_flow_state_is_consumed(
+    wiring, http_edge, monkeypatch
+):
+    """A completion reaching a worker that decided to leave answers the leaving 503 before the
+    completion runs: the single-use flow state and the authorization code stay unspent."""
+    monkeypatch.setattr(router.state, "decode", lambda s: state.DecodedState(flow_id="f1", origin="https://app"))
+    completions: list[dict] = []
+
+    async def _complete(**kw):
+        completions.append(kw)
+
+    monkeypatch.setattr(router.connection_service, "complete_connect", _complete)
+    assert http_edge.decide_departure("a fleet recycle op") is None
+
+    resp = await router.oauth_complete(_req({"state": "ok", "code": "c"}))
+
+    assert resp.status_code == 503
+    assert _data(resp) == {
+        "error": "leaving — this worker is leaving (a fleet recycle op) and begins no change; retry shortly",
+        "leaving": "a fleet recycle op",
+    }
+    assert completions == []
+    assert http_edge.exit_deferred is None
 
 
 async def test_oauth_complete_hands_the_redirects_iss_and_error_to_the_completion(wiring, monkeypatch):

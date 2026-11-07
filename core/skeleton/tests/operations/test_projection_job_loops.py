@@ -5,7 +5,10 @@ fresh loop run once for the job, or a persistent loop run once per job. Neither 
 again after the job's coroutine finishes, so the writer's graceful exit the call's change owes
 must have run by the time the projected call returned. A failing exit is logged at ERROR and
 never raised into the reply: the operation's change already landed. A call that fails after its
-change's roll armed the exit runs it all the same before the error raises.
+change's roll armed the exit runs it all the same before the error raises. An operation declaring
+``holds_writer_exit`` holds the worker's exit from before it runs, and on a worker that decided to
+leave raises the refusal's text as the call's tool error before it runs; one declaring no hold is
+not held.
 """
 
 from __future__ import annotations
@@ -93,14 +96,18 @@ def test_the_writer_exit_ran_before_a_fresh_job_loop_run_once_returned(bus: Fake
 
 
 def test_the_writer_exit_ran_before_a_persistent_job_loop_finished_the_job(bus: FakeBus) -> None:
+    from fastmcp.exceptions import ToolError
+
     tool = _projected_op_arming()
     loop = asyncio.new_event_loop()
     try:
         loop.run_until_complete(tool())
         # Nothing else runs on the loop until the next job: the exit already ran.
         assert bus.exit_requests == [WRITER_EXIT_REASON]
-        # The next job on the same loop runs only its own exit; nothing was left pending.
-        loop.run_until_complete(tool())
+        # The next job steps the same loop again: the worker is leaving, so that job's change is
+        # refused before it begins, and nothing was left pending to run.
+        with pytest.raises(ToolError, match=r"^leaving — "):
+            loop.run_until_complete(tool())
         assert bus.exit_requests == [WRITER_EXIT_REASON]
         assert bus.exit_deferred is None
     finally:
@@ -144,6 +151,61 @@ async def test_a_failed_call_runs_the_writer_exit_its_change_owes_before_the_err
         await _project(reg, "failing_armed_op")()
 
     assert bus.exit_requests == [WRITER_EXIT_REASON]
+
+
+def _projected_recording(
+    reg: OperationRegistry, ran: list[str | None], *, holds_writer_exit: bool
+) -> Callable[..., Any]:
+    """Project one operation that records the exit held while it runs; return the tool."""
+
+    @operation(
+        name="changing_op", summary="Change the thing", tags=["t"], registry=reg, holds_writer_exit=holds_writer_exit
+    )
+    async def changing_op() -> dict[str, str]:
+        ran.append(cast("FakeBus", instance.app.bus).exit_deferred)
+        return {"status": "ok"}
+
+    return _project(reg, "changing_op")
+
+
+async def test_a_projected_operation_holding_the_writer_exit_on_a_leaving_worker_raises_before_it_runs(
+    bus: FakeBus,
+) -> None:
+    from fastmcp.exceptions import ToolError
+
+    ran: list[str | None] = []
+    tool = _projected_recording(OperationRegistry(), ran, holds_writer_exit=True)
+    assert bus.decide_departure("a fleet recycle op") is None
+
+    with pytest.raises(ToolError) as refused:
+        await tool()
+
+    assert str(refused.value) == (
+        "leaving — this worker is leaving (a fleet recycle op) and begins no change; retry shortly"
+    )
+    assert ran == []
+    assert bus.exit_deferred is None
+
+
+async def test_a_projected_operation_holding_the_writer_exit_holds_it_from_before_it_runs(bus: FakeBus) -> None:
+    ran: list[str | None] = []
+    tool = _projected_recording(OperationRegistry(), ran, holds_writer_exit=True)
+
+    assert await tool() == {"status": "ok"}
+
+    assert ran == ["Change the thing"]
+    assert bus.exit_deferred is None
+
+
+async def test_a_projected_operation_declaring_no_hold_is_not_held(bus: FakeBus) -> None:
+    ran: list[str | None] = []
+    tool = _projected_recording(OperationRegistry(), ran, holds_writer_exit=False)
+    assert bus.decide_departure("a fleet recycle op") is None
+
+    assert await tool() == {"status": "ok"}
+
+    assert ran == [None]
+    assert bus.exit_deferred is None
 
 
 async def test_a_call_raising_a_broadcast_error_whose_roll_armed_the_writer_exit_runs_it_before_raising(

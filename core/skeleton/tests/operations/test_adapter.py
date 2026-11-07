@@ -200,6 +200,22 @@ def test_reload_gate_honored_on_route_edge():
     assert json.loads(bytes(resp.body))["reloading"] is True
 
 
+def test_an_operation_holding_the_writer_exit_declares_it_to_its_route():
+    reg = OperationRegistry()
+    _register(reg, path="/api/sample/held", holds_writer_exit=True)
+    recorded = next(r for r in route_registry.routes() if r.path == "/api/sample/held")
+    assert recorded.holds_writer_exit is True
+    assert 503 in recorded.error_statuses
+
+
+def test_an_operation_declaring_no_hold_declares_none_to_its_route():
+    reg = OperationRegistry()
+    _register(reg, path="/api/sample/unheld")
+    recorded = next(r for r in route_registry.routes() if r.path == "/api/sample/unheld")
+    assert recorded.holds_writer_exit is False
+    assert 503 not in recorded.error_statuses
+
+
 def test_path_params_passed_through():
     reg = OperationRegistry()
 

@@ -77,14 +77,16 @@ import tai42_skeleton.versioning.store as versioning_store
 from tai42_skeleton.access_control.request_scopes import reset_request_is_admin, set_request_is_admin
 from tai42_skeleton.app.bus import WorkerKind
 from tai42_skeleton.app.lifecycle.lifespan import LifespanMixin
-from tai42_skeleton.app.writer_exit import WriterExitScope, writer_exit_scope
+from tai42_skeleton.app.writer_exit import WriterExitScope
 from tai42_skeleton.config.deployment_env import capture_deployment_env, reset_deployment_env
 
 from ._fakes.advisory_locks import FakeAdvisoryLocks
+from ._fakes.bus import FakeBus
 from ._fakes.hook_runs import HookRunsHarness, fresh_runtime
 from ._fakes.interactions_redis import FakeRedis
 from ._module_identity import restore_states_module_identity
 from ._staged_generations import preserved_staged_generations
+from ._writer_exit_edge import stand_in_edge
 from .access_control.conftest import FakeAccessControlPg
 from .access_control.conftest import make_pg_ctx as make_access_control_pg_ctx
 from .connectors.credential_path import owner_loop
@@ -95,16 +97,24 @@ from .versioning.conftest import FakeVersioningPg
 
 @pytest.fixture
 async def writer_exit_edge() -> AsyncIterator[WriterExitScope]:
-    """The edge a door's change answers on, for a test driving the door below its edge.
-
-    In production every request, tool call and join runs under a writer-exit scope its edge
-    opens and settles (:mod:`tai42_skeleton.app.writer_exit`); a test calling a service or an
-    operation directly stands in for that edge here. The exit its change owes is settled when
-    the test ends, so the hold it took is released and the exit runs on the test's bus.
-    """
-    with writer_exit_scope() as exits:
+    """The edge a door's change answers on, for a test driving the door below its edge (:func:`stand_in_edge`)."""
+    async with stand_in_edge() as exits:
         yield exits
-        await exits.settle()
+
+
+@pytest.fixture
+def http_edge(monkeypatch: pytest.MonkeyPatch, writer_exit_edge: WriterExitScope) -> FakeBus:
+    """The HTTP edge a request runs under, for a test calling route handlers directly.
+
+    The writer-exit scope :class:`~tai42_skeleton.middleware.writer_exit.WriterExitMiddleware`
+    opens (``writer_exit_edge``), on an app whose worker bus is a fake bus member: a route declaring
+    ``holds_writer_exit`` holds that bus's exit. A test installing its own bus replaces it.
+    """
+    from tai42_skeleton.app import instance
+
+    bus = FakeBus(origin="serve-writer", remotes=[])
+    monkeypatch.setattr(instance.app, "_bus", bus)
+    return bus
 
 
 @pytest.fixture

@@ -85,7 +85,7 @@ _STATUS_DESCRIPTIONS: dict[int, str] = {
     415: "Unsupported media type.",
     422: "Request failed validation.",
     500: "Internal server error.",
-    503: "A dependency this route needs is temporarily unavailable; retry shortly.",
+    503: "The server cannot serve this request right now; retry shortly.",
 }
 
 # The reload gate's own ``503`` — a different body from the typed ``503`` above, so
@@ -93,8 +93,7 @@ _STATUS_DESCRIPTIONS: dict[int, str] = {
 # one.
 _RELOADING_DESCRIPTION = "The server is applying a config reload; retry shortly."
 _RELOADING_OR_UNAVAILABLE_DESCRIPTION = (
-    "The server is applying a config reload, or a dependency this route needs is "
-    "temporarily unavailable; retry shortly."
+    "The server is applying a config reload, or cannot serve this request right now; retry shortly."
 )
 
 

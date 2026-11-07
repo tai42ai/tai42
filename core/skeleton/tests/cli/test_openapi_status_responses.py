@@ -69,20 +69,11 @@ def test_gated_routes_declare_the_retriable_503(spec: dict, api_routes: list[Rou
 # Every route publishing a 503 is pinned into its class below, so a route changing
 # source — or a new one arriving — trips here and its shape is re-confirmed.
 _EXPECTED_503_GATE_ONLY: set[tuple[str, str]] = {
-    ("DELETE", "/api/agents-config/entries/{title}"),
-    ("DELETE", "/api/connectors/providers/{provider_id}"),
-    ("DELETE", "/api/mcp-config/entries/{title}"),
     ("DELETE", "/api/presets/{name}"),
     ("DELETE", "/api/sub-mcp/{slug}"),
-    ("DELETE", "/api/tools-config/entries/{title}"),
-    ("POST", "/api/agents-config/entries"),
     ("POST", "/api/agents/authored/{name}/runs"),
     ("POST", "/api/agents/{name}/runs"),
-    ("POST", "/api/api-tools"),
-    ("POST", "/api/backup/import"),
     ("POST", "/api/checkpoints/sweep"),
-    ("POST", "/api/config/reload"),
-    ("POST", "/api/connectors/providers"),
     ("POST", "/api/mcp-status/reload-failed"),
     ("POST", "/api/mcp-status/{title}/deregister"),
     ("POST", "/api/mcp-status/{title}/reload"),
@@ -97,17 +88,22 @@ _EXPECTED_503_GATE_ONLY: set[tuple[str, str]] = {
     # reports a skip, never a 503. So the reload gate is its only 503 source.
     ("POST", "/api/runs/prune"),
     ("POST", "/api/sub-mcp"),
-    ("POST", "/api/tools-config/entries"),
     ("POST", "/api/tools/reload"),
     ("POST", "/api/tools/remove"),
-    ("POST", "/api/tools/{name}/extensions"),
-    ("POST", "/api/tools/{name}/extensions/combos"),
 }
 
 # The versioning store-unconfigured refusal is a 501, not a 503, so ``validate`` and
 # the version-tags PUT (neither reload-gated) declare NO 503 at all and are absent
 # from this set.
 _EXPECTED_503_DECLARED_ONLY: set[tuple[str, str]] = {
+    # The fleet soft restart and the connector doors that write the managed manifest entries declare
+    # ``holds_writer_exit``, which publishes the leaving 503 (a worker that decided to leave refuses
+    # the change before it begins); none is reload-gated, so each carries that 503 alone.
+    ("POST", "/api/fleet/reload-config"),
+    ("POST", "/api/connectors/connections/start"),
+    ("DELETE", "/api/connectors/connections/{connection_id}"),
+    ("PATCH", "/api/connectors/connections/{connection_id}/sub-services"),
+    ("POST", "/api/connectors/oauth/complete"),
     # The operator thread/person doors — the forget-thread DELETE, the erase-person DELETE and
     # the operator-send POST — declare the per-thread FIFO's full-queue UnavailableError
     # (retriable), and none is reload-gated, so each carries that 503 alone.
@@ -154,6 +150,23 @@ _EXPECTED_503_DECLARED_ONLY: set[tuple[str, str]] = {
 }
 
 _EXPECTED_503_BOTH: set[tuple[str, str]] = {
+    # Every door that writes through the config service's write exclusion, or soft-restarts the
+    # fleet, declares ``holds_writer_exit``, which publishes the leaving 503: a worker that decided to
+    # leave refuses the change before it begins, with the plain envelope carrying ``leaving``. On
+    # these reload-gated doors that 503 sits beside the gate's own. The backup import is refused whole
+    # the same way.
+    ("POST", "/api/backup/import"),
+    ("DELETE", "/api/agents-config/entries/{title}"),
+    ("DELETE", "/api/connectors/providers/{provider_id}"),
+    ("DELETE", "/api/mcp-config/entries/{title}"),
+    ("DELETE", "/api/tools-config/entries/{title}"),
+    ("POST", "/api/agents-config/entries"),
+    ("POST", "/api/api-tools"),
+    ("POST", "/api/config/reload"),
+    ("POST", "/api/connectors/providers"),
+    ("POST", "/api/tools-config/entries"),
+    ("POST", "/api/tools/{name}/extensions"),
+    ("POST", "/api/tools/{name}/extensions/combos"),
     ("DELETE", "/api/schedules/{schedule_name}"),
     ("POST", "/api/conversations/{route_name}/events"),
     ("POST", "/api/conversations/{route_name}/messages"),
