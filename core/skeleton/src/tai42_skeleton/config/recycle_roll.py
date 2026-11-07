@@ -219,9 +219,10 @@ async def roll_decided(
     When ``writer_exits`` and the writer needs its own restart, the roll defers it to the writer's
     exit once the operation answers. The exit is owed into ``exits``, or into the open writer-exit
     scope the edge answering the operation settles when ``exits`` is ``None``
-    (:mod:`~tai42_skeleton.app.writer_exit`); the change's hold on the writer's exit from its start
-    (:func:`~tai42_skeleton.app.writer_exit.hold_writer_exit`) is reused, and taken here when the
-    change's door took none, so a recycle op from another worker's roll leaves the writer to it.
+    (:mod:`~tai42_skeleton.app.writer_exit`); the change's hold on the writer's exit from before it
+    began (:meth:`~tai42_skeleton.app.writer_exit.WriterExitScope.hold_exit`, taken by the edge that
+    admitted it) is the one the exit converts; a roll reached with none held raises, since no edge
+    would have refused the change on a leaving worker.
     Deferring with no scope open raises before anything rolls, since no edge would run the exit. A
     converged roll arms the exit; a roll that does not (it stopped, or raised) owes nothing, and
     the scope releases the hold once the edge answered. The roll runs when a worker reported keys
@@ -235,12 +236,15 @@ async def roll_decided(
 
     writer = decision.writer
     writer_deferred = writer_exits and decision.writer_needs
-    # The scope the exit this roll arms is owed into. The change's hold on the writer's exit is
-    # reused; a door that took none takes it here.
+    # The scope the exit this roll arms is owed into, holding the change's hold on the writer's exit.
     scope = None
     if writer_deferred:
         scope = exits if exits is not None else open_writer_exit_scope(change)
-        scope.hold_exit(bus, change)
+        if bus.owns_exit and not scope.holds_exit:
+            raise RuntimeError(
+                f"writer exit: {change} rolls the fleet and owes the writer's own restart, but its door "
+                "took no hold on the writer's exit at the change's start"
+            )
     recycle: RecycleReport | None = None
     armed = False
     if _roll_runs(decision, writer_exits=writer_exits):

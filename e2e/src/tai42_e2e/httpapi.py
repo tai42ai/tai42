@@ -37,6 +37,17 @@ class ApiError(AssertionError):
     """An admin API call returned an unexpected status; carries the body."""
 
 
+class WorkerLeavingError(ApiError):
+    """An admin API call reached a worker that decided to leave: its ``503 leaving`` refusal,
+    answered before the change began. ``reason`` is the worker's reason for leaving. That
+    worker is not coming back, so the call is not polled past; the caller re-reads the fleet
+    and retries on a worker that is not leaving."""
+
+    def __init__(self, message: str, *, reason: str) -> None:
+        super().__init__(message)
+        self.reason = reason
+
+
 def _is_reloading(response: httpx.Response) -> bool:
     """Whether a response is the reload gate's retriable ``503 reloading`` rejection —
     the boot-time self-resync (or an in-flight config reload) holding the gate.
@@ -55,6 +66,18 @@ def _is_reloading(response: httpx.Response) -> bool:
     except ValueError:
         return False
     return isinstance(body, dict) and body.get("reloading") is True
+
+
+def _is_leaving(response: httpx.Response) -> bool:
+    """Whether a response is a leaving worker's ``503 leaving`` refusal of a change — a
+    ``503`` whose JSON body carries the ``leaving`` key naming the worker's reason."""
+    if response.status_code != 503:
+        return False
+    try:
+        body = response.json()
+    except ValueError:
+        return False
+    return isinstance(body, dict) and "leaving" in body
 
 
 class ApiClient:
@@ -137,13 +160,15 @@ class ApiClient:
         timeout: float | None = None,
     ) -> Any:
         """Issue a request, assert the status, and return the unwrapped
-        ``data``. Raises :class:`ApiError` with the body on a status mismatch.
+        ``data``. Raises :class:`ApiError` with the body on a status mismatch, and
+        :class:`WorkerLeavingError` when the mismatch is a leaving worker's ``503 leaving``.
 
         With ``retry_on_reloading=True`` a request that hits the boot-time reload gate
         (a retriable ``503 reloading``) is polled past on the sanctioned
         :func:`wait_for_async` interval until the worker leaves the gate or
         ``ready_deadline`` elapses — the retry every real client applies. A gated
-        route fired the instant a stack is ready races the ~2s self-resync. ``timeout``
+        route fired the instant a stack is ready races the ~2s self-resync. A ``503 leaving``
+        is not polled past: that worker is not coming back, so it raises at once. ``timeout``
         overrides the client read timeout for a single slow call."""
         if retry_on_reloading:
 
@@ -157,7 +182,10 @@ class ApiClient:
         else:
             response = await self.request_raw(method, path, json=json, headers=headers, timeout=timeout)
         if response.status_code != expect:
-            raise ApiError(f"{method} {path} -> {response.status_code} (expected {expect}); body: {response.text}")
+            message = f"{method} {path} -> {response.status_code} (expected {expect}); body: {response.text}"
+            if _is_leaving(response):
+                raise WorkerLeavingError(message, reason=response.json()["leaving"])
+            raise ApiError(message)
         body = response.json()
         if isinstance(body, dict) and "data" in body:
             return body["data"]

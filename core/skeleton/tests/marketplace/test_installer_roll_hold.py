@@ -45,7 +45,7 @@ from tai42_skeleton.app.recycle import (
     RecycleRow,
     RecycleStop,
 )
-from tai42_skeleton.app.writer_exit import WRITER_EXIT_REASON, writer_exit_scope
+from tai42_skeleton.app.writer_exit import WRITER_EXIT_REASON, WriterExitScope
 from tai42_skeleton.config import roll_holds
 from tai42_skeleton.db.lock_keys import MARKETPLACE_LOCK_KEY
 from tai42_skeleton.marketplace import locks
@@ -383,15 +383,14 @@ async def test_a_failed_install_whose_undo_put_every_setting_back_rolls_no_recyc
 
 
 async def test_a_bounded_install_hands_its_roll_off_and_the_carrier_holds_the_key_shared_until_the_roll_ends(
-    world: _World, carrier: _Carrier
+    world: _World, carrier: _Carrier, writer_exit_edge: WriterExitScope
 ) -> None:
     world.roll_gate = asyncio.Event()
 
     # The door's edge answers the operation and settles the exit hold its change took.
-    with writer_exit_scope() as edge:
-        async with bounded_run(60):
-            receipt = await world.install("NEW")
-            await edge.settle()
+    async with bounded_run(60):
+        receipt = await world.install("NEW")
+        await writer_exit_edge.settle()
 
     # The operation answered with its roll handed to its member, which has not rolled yet.
     assert receipt["reload"].roll_deferred_to == "serve-writer"

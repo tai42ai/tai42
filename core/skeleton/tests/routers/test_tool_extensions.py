@@ -32,6 +32,7 @@ from tai42_skeleton.routers import tool_extensions as router
 from tai42_skeleton.tools.binding.surface import remove_surface_tool
 
 from .._fakes.bus import FakeBus
+from .._writer_exit_edge import stand_in_edge
 
 _EXT_MODULE = "tests.app._fixtures.ext_kinds"
 _EXTENDED_TOOLS = "tests.app._fixtures.extended_tools"
@@ -202,8 +203,9 @@ def _clean_server():
 
 @asynccontextmanager
 async def _running(cfg: dict[str, Any], manifest_dict: dict[str, Any]):
+    """The app serving ``manifest_dict``, its route handlers called below the HTTP edge a request runs under."""
     cfg["manifest"] = deepcopy(manifest_dict)
-    async with instance.app.app_context(Manifest.model_validate(manifest_dict)):
+    async with instance.app.app_context(Manifest.model_validate(manifest_dict)), stand_in_edge():
         yield
 
 
@@ -658,8 +660,13 @@ def test_post_apply_local_reload_failure_after_manifest_write_propagates(cfg, mo
                 raise RuntimeError("local reload boom")
 
             monkeypatch.setattr(instance.app, "_reload_config", _boom)
-            with pytest.raises(RuntimeError, match="local reload boom"):
-                await _post("shout", [["marka"]])
+            # The failed reload leaves this worker's state unknown, so the change owes its own
+            # restart, which the edge runs on a fake bus rather than on this process. The fake bus
+            # stands in for the request only, so the lifespan tears down the bus it joined.
+            with monkeypatch.context() as patch:
+                patch.setattr(instance.app, "_bus", FakeBus(origin="serve-x"))
+                with pytest.raises(RuntimeError, match="local reload boom"):
+                    await _post("shout", [["marka"]])
             # The write already landed before the reload/broadcast — the new combos
             # are persisted, so re-running the apply is the recovery.
             assert cfg["manifest"]["tools"][0]["extensions"] == {"shout": [["marka"]]}

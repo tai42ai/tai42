@@ -74,6 +74,10 @@ class RouteMetadata:
     request_model: type[BaseModel] | None
     response_model: type[BaseModel] | None
     reload_gated: bool
+    # Whether the operation changes this worker's own configuration or fleet: its edge holds the
+    # worker's exit from before the handler runs (``WriterExitScope.hold_exit``) and refuses it on a
+    # worker that decided to leave (``WorkerLeavingError``, 503).
+    holds_writer_exit: bool
     reads_body: bool
     error_statuses: tuple[int, ...]
     success_status: int

@@ -193,7 +193,8 @@ def _declared_metadata(
     the auth edge answers for an authed route. The reload gate's ``503`` is NOT among
     them — it answers a different body (the constant-message reloading envelope with a
     ``Retry-After`` header), and ``reload_gated`` already declares it, so the emitter
-    owns that response.
+    owns that response. The leaving ``503`` is declared by ``holds_writer_exit``, from which
+    the registry derives the status, as ``authed`` gives the ``401``.
 
     ``request_model`` is the model published for THIS route, so ``reads_body`` follows
     the shape the route actually documents.
@@ -204,6 +205,7 @@ def _declared_metadata(
     reads_body = request_model is not None and method in _BODY_METHODS
     return DeclaredRouteMetadata(
         reload_gated=op.reload_gated,
+        holds_writer_exit=op.holds_writer_exit,
         reads_body=reads_body,
         error_statuses=tuple(sorted(statuses)),
         success_status=success_status,
@@ -278,7 +280,8 @@ def _build_handler(
     reads_body = method in _BODY_METHODS
 
     async def handler(request: Request) -> Response:
-        # A ``reload_gated`` operation's 503 is the route surface's: ``custom_route`` wraps
+        # A ``reload_gated`` operation's 503 is the route surface's, and a ``holds_writer_exit``
+        # operation's leaving 503 is the route surface's the same way: ``custom_route`` wraps
         # this handler from the declared metadata.
         try:
             kwargs = await _read_operation_kwargs(request, path_params, context_extractor, request_model, reads_body)

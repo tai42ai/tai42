@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any, cast
 from pydantic import BaseModel
 from starlette.middleware import Middleware
 from starlette.requests import Request
-from starlette.responses import Response
+from starlette.responses import JSONResponse, Response
 from starlette.routing import BaseRoute, Mount, Route
 from tai42_contract.app import HostedUiPaths
 
@@ -21,6 +21,7 @@ from tai42_skeleton.app.mount_map import MountBinding, MountRegistrationError, c
 from tai42_skeleton.app.raw_path_route import RawPathRoute, SpaFallbackRoute
 from tai42_skeleton.app.reload_gate import reload_gate
 from tai42_skeleton.app.route_registry import CORE_OWNER, MOUNT_METHODS, RouteOwner, route_registry
+from tai42_skeleton.app.writer_exit import WorkerLeavingError, current_writer_exit_scope
 from tai42_skeleton.plugins.settings import hosted_ui_settings
 
 if TYPE_CHECKING:
@@ -76,6 +77,27 @@ def _reload_gated(fn: Callable[[Request], Awaitable[Response]]) -> Callable[[Req
         return await fn(request)
 
     return gated
+
+
+def _holding_writer_exit(
+    fn: Callable[[Request], Awaitable[Response]], change: str
+) -> Callable[[Request], Awaitable[Response]]:
+    """``fn`` holding the worker's exit for ``change`` from before it runs.
+
+    On a worker that decided to leave it is refused with the leaving ``503`` before ``fn`` runs.
+    """
+
+    @functools.wraps(fn)
+    async def held(request: Request) -> Response:
+        from tai42_skeleton.app import instance
+
+        try:
+            current_writer_exit_scope(change).hold_exit(instance.app.bus, change)
+        except WorkerLeavingError as exc:
+            return JSONResponse({"error": exc.message, **exc.extra}, status_code=exc.status)
+        return await fn(request)
+
+    return held
 
 
 def _mount_before_spa_fallback(routes: list[BaseRoute], mount: Mount) -> None:
@@ -167,7 +189,11 @@ class HttpSurface:
 
         A route declaring ``reload_gated`` is served — and returned — wrapped: while a config
         reload holds the gate it answers the retriable reload ``503`` without entering the
-        handler. The registry records the undecorated handler.
+        handler. A route declaring ``holds_writer_exit`` is served — and returned — holding the
+        worker's exit for its ``summary`` from before the body is read and the handler runs, and
+        answers the leaving ``503`` without entering the handler on a worker that decided to
+        leave; the reload gate is outermost, so a request it refuses takes no hold. The registry
+        records the undecorated handler.
         """
         binding = current_mount_binding()
         if binding is not None:
@@ -232,7 +258,11 @@ class HttpSurface:
                 enveloped=enveloped,
                 success_media_types=success_media_types,
             )
-            served = _reload_gated(fn) if declared is not None and declared.reload_gated else fn
+            served = fn
+            if declared is not None and declared.holds_writer_exit:
+                served = _holding_writer_exit(fn, summary)
+            if declared is not None and declared.reload_gated:
+                served = _reload_gated(served)
             return fastmcp_route(served)
 
         return decorator

@@ -32,6 +32,7 @@ from tai42_skeleton.config.service import ConfigService
 from tai42_skeleton.config.service import service as service_mod
 
 from .._fakes.bus import FakeBus
+from .._writer_exit_edge import admit_change
 from .fake_pipeline import (
     ComboChecks,
     FakeConfigStore,
@@ -110,10 +111,16 @@ class _World:
         monkeypatch.setattr(type(instance.app.presets), "list_active_bodies", list_active_bodies)
 
     def service(self, *, admin: FakeReloadAdmin | None = None, bus: FakeBus | None = None) -> ConfigService:
+        """The config service over this world's store.
+
+        Its change is admitted by the stand-in writer-exit edge when one is open (:func:`admit_change`).
+        """
+        bus = bus or FakeBus()
+        admit_change(bus)
         return ConfigService(
             config_manager=self.store,
             admin=admin or FakeReloadAdmin(),
-            bus=cast("Any", bus or FakeBus()),
+            bus=cast("Any", bus),
             combo_check=ComboChecks(),
         )
 

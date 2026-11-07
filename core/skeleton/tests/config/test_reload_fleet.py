@@ -4,27 +4,34 @@ The reload decides through the same recycle decision as every config write: an a
 whose reload built and reports a recycle-class key off its bound value, or whose state is unknown,
 is restarted; a worker whose reload was refused at its epoch build is left running, its restart
 withheld and named in the verdict, even when it reports keys; a worker that confirmed clean, or
-that a reload naming its targets did not address, is left running.
+that a reload naming its targets did not address, is left running. The soft restart requires the
+worker's exit held by the edge that admitted it: reached under an open writer-exit scope with no
+hold it raises before it reads the census, and with no scope open it reloads.
 """
 
 from __future__ import annotations
 
+import asyncio
+import contextvars
 import logging
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from tai42_kit.settings import bind_respawn_class_env
 from tai42_kit.utils.run_bound import bounded_run
 
 from tai42_skeleton.app import instance
-from tai42_skeleton.app.bus import FleetResult, WorkerRow
+from tai42_skeleton.app.bus import FleetResult, WorkerBus, WorkerRow
 from tai42_skeleton.app.discarded_build import DISCARDED_BUILD_STATUS
 from tai42_skeleton.app.recycle import RECYCLED, RecycleReport, RecycleRow
+from tai42_skeleton.app.writer_exit import WriterExitScope
 from tai42_skeleton.config.recycle_policy import REFUSED_BUILD, RecycleReason
+from tai42_skeleton.config.service import ConfigService
 from tai42_skeleton.operations._broadcast import FleetBroadcastError
 
 from .._fakes.bus import FakeBus
 from .fake_pipeline import (
+    ComboChecks,
     FakeConfigStore,
     FakeReloadAdmin,
     _orchestrate_spy,
@@ -433,3 +440,72 @@ async def test_a_soft_restart_whose_reload_and_roll_hand_off_both_fail_raises_th
         {"name": "serve-b", "keys": ["BACKEND_MANIFEST_KEY"]}
     ]
     assert "the recycle roll the change owes failed" in caplog.text
+
+
+class _CensusCountingBus(FakeBus):
+    """A fake bus that counts its census reads."""
+
+    def __init__(self) -> None:
+        super().__init__(origin="serve-writer", remotes=["serve-b"])
+        self.census_reads = 0
+
+    async def census(self) -> list[WorkerRow]:
+        self.census_reads += 1
+        return await super().census()
+
+
+def _counted_reload(monkeypatch: pytest.MonkeyPatch) -> tuple[Any, FakeReloadAdmin, _CensusCountingBus, dict[str, Any]]:
+    """A config service over a census-counting bus, built with no stand-in edge admitting its change."""
+    _with_bus(monkeypatch)
+    orch, seen = _orchestrate_spy()
+    bus = _CensusCountingBus()
+    admin = FakeReloadAdmin(result=dict(_CLEAN))
+    service = ConfigService(
+        config_manager=FakeConfigStore(), admin=admin, bus=cast("Any", bus), combo_check=ComboChecks(), orchestrate=orch
+    )
+    return service, admin, bus, seen
+
+
+async def test_a_fleet_reload_reaching_its_door_with_no_hold_on_the_writer_exit_raises(
+    monkeypatch: pytest.MonkeyPatch, writer_exit_edge: WriterExitScope
+) -> None:
+    service, admin, bus, seen = _counted_reload(monkeypatch)
+
+    with pytest.raises(RuntimeError) as raised:
+        await service.reload_fleet(["serve-b"], change="the fleet soft restart")
+
+    assert str(raised.value) == (
+        "writer exit: the fleet soft restart reached a config door with no hold on the writer's exit — "
+        "its operation or route declares holds_writer_exit"
+    )
+    assert not writer_exit_edge.holds_exit
+    assert bus.validate_calls == []
+    assert bus.census_reads == 0
+    assert bus.publish_calls == []
+    assert admin.calls == 0
+    assert seen == {}
+    assert bus.exit_deferred is None
+
+
+async def test_a_fleet_reload_under_a_scope_that_holds_the_exit_reloads(
+    monkeypatch: pytest.MonkeyPatch, writer_exit_edge: WriterExitScope
+) -> None:
+    service, admin, bus, _seen = _counted_reload(monkeypatch)
+    writer_exit_edge.hold_exit(cast("WorkerBus", bus), "the admitted soft restart")
+
+    await service.reload_fleet(None, change="the fleet soft restart")
+
+    assert admin.calls == 1
+    assert bus.exit_deferred == "the admitted soft restart"
+
+
+async def test_a_fleet_reload_with_no_scope_open_reloads(monkeypatch: pytest.MonkeyPatch) -> None:
+    service, admin, bus, _seen = _counted_reload(monkeypatch)
+
+    # A task run in a fresh context has no writer-exit scope open, as a host-side process has none.
+    await asyncio.create_task(
+        service.reload_fleet(None, change="the fleet soft restart"), context=contextvars.Context()
+    )
+
+    assert admin.calls == 1
+    assert bus.exit_deferred is None

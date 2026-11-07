@@ -326,6 +326,27 @@ async def test_manifest_roundtrip(monkeypatch):
     assert cm._manifest == manifest
 
 
+async def test_an_import_on_a_leaving_worker_is_refused_whole(monkeypatch):
+    manifest = {"mcp": [{"title": "x", "config": {"url": "http://x"}}]}
+    cm = _FakeConfigManager(env={"SAMPLE_KEY": "1"}, manifest=manifest)
+    _install(monkeypatch, config=SimpleNamespace(config_manager=cm))
+    doc = _json(await export_backup(_post_req({"sections": ["manifest", "env"]})))
+    cm._manifest, cm._env = {}, {}  # wipe
+    bus = instance.app.bus
+    assert bus.decide_departure("a fleet recycle op") is None
+
+    resp = await import_backup(_post_req({"document": doc, "sections": ["manifest", "env"]}))
+
+    # The whole import is refused before any section runs: no 200 report, nothing restored.
+    assert resp.status_code == 503
+    assert _json(resp) == {
+        "error": "leaving — this worker is leaving (a fleet recycle op) and begins no change; retry shortly",
+        "leaving": "a fleet recycle op",
+    }
+    assert (cm._manifest, cm._env) == ({}, {})
+    assert bus.exit_deferred is None
+
+
 async def test_manifest_restore_whose_span_fails_to_release_reports_it_on_the_section(monkeypatch):
     manifest = {"mcp": [{"title": "x", "config": {"url": "http://x"}}]}
     cm = _FakeConfigManager(manifest={})

@@ -161,6 +161,8 @@ async def test_over_cap_after_response_start_reraises(monkeypatch):
 # -- route-level regression: the escape is not a ValueError ------------------
 
 
+# The handler is called below the HTTP edge a request runs under.
+@pytest.mark.usefixtures("http_edge")
 async def test_over_cap_to_json_route_returns_413_not_400(monkeypatch):
     # The backup import door wraps ``request.json()`` in ``except ValueError``. The
     # over-cap escape must NOT be a ValueError subclass, or it would be swallowed
@@ -205,6 +207,7 @@ def _uploads_surface() -> list:
             request_model=None,
             response_model=None,
             reload_gated=False,
+            holds_writer_exit=False,
             reads_body=True,
             error_statuses=(),
             success_status=200,

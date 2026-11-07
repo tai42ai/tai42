@@ -8,6 +8,7 @@ import pytest
 
 import tai42_skeleton.backend.settings  # noqa: F401  — declares BACKEND_MANIFEST_KEY
 from tai42_skeleton.app.bus import FleetResult, OpOutcome, WorkerIdentity, WorkerKind, WorkerResult
+from tai42_skeleton.app.writer_exit import WriterExitScope
 from tai42_skeleton.config.service import DeferredRolls, deferring_rolls
 from tai42_skeleton.config.service.deferred_roll import DeferredReload
 from tai42_skeleton.operations._broadcast import FleetBroadcastError
@@ -317,12 +318,16 @@ async def test_a_roll_runs_on_an_unreachable_reload_when_the_writer_does_not_exi
     assert calls == [1]
 
 
-async def test_a_roll_whose_writer_exits_runs_though_no_target_needs_it(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_a_roll_whose_writer_exits_runs_though_no_target_needs_it(
+    monkeypatch: pytest.MonkeyPatch, writer_exit_edge: WriterExitScope
+) -> None:
     _with_bus(monkeypatch)
     orch, _seen = _orchestrate_spy()
     counted, calls = _counting(orch)
-    service, _admin, _bus = _service(FakeConfigStore(manifest={"mcp": []}, env={}), orchestrate=counted)
+    service, _admin, bus = _service(FakeConfigStore(manifest={"mcp": []}, env={}), orchestrate=counted)
 
+    # The op's edge holds the writer's exit from the change's start; the roll converts that hold.
+    writer_exit_edge.hold_exit(bus, "the op")
     # The writer's post-reply exit is armed only by a converged roll, so the roll runs.
     deferral = _deferred(_reload_report(writer=_MOVED, sibling=_SETTLED))
     outcome = await service.run_deferred_rolls(deferral, writer_exits=True, change="the op")

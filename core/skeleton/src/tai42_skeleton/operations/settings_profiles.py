@@ -382,6 +382,7 @@ async def _save_previous_version(stored_env: dict[str, str]) -> None:
     tags=["config"],
     destructive=True,
     reload_gated=True,
+    holds_writer_exit=True,
     authority_changing=True,
     errors=[BadRequestError, ConflictError, NotFoundError, NotSupportedError, UnavailableError, UpstreamError],
     response_model=ProfileApplyResponse,

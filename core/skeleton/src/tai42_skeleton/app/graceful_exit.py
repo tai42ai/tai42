@@ -12,7 +12,8 @@ responses; the worker ends its event streams, the ones MCP replies ride, only on
 are written and its in-process tool runs have ended (:mod:`~tai42_skeleton.app.serve_exit`), and
 uvicorn's ``timeout_graceful_shutdown`` caps that stop. For a backend worker it is the backend's
 drain, which lets the in-flight job finish and record its result. The latch acts once: a door that finds the
-worker already leaving sends nothing and says so.
+worker already leaving sends nothing and says so, and a change that reaches the worker after the
+decision is refused before it begins (:mod:`~tai42_skeleton.app.writer_exit`).
 
 Every door that decides a worker must leave ends at that latch. Inside the worker's process:
 the recycle handler decides to leave and arms the signal on the bus's post-reply slot (fired

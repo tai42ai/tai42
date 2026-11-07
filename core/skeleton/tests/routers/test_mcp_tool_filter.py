@@ -7,12 +7,14 @@ from typing import Any
 
 import pytest
 from starlette.applications import Starlette
+from starlette.middleware import Middleware
 from starlette.routing import Route
 from starlette.testclient import TestClient
 from tai42_contract.presets import PresetBody
 
 from tai42_skeleton.app import instance
 from tai42_skeleton.config.service import ConfigService
+from tai42_skeleton.middleware.writer_exit import WriterExitMiddleware
 from tai42_skeleton.routers import manifest as router
 
 from .._fakes.bus import FakeBus
@@ -52,7 +54,8 @@ def client() -> TestClient:
             routes=[
                 Route("/api/mcp-config/entries/{title}/tool-filter", router.set_mcp_tool_filter, methods=["PUT"]),
                 Route("/api/mcp-status/{title}/advertised-tools", router.list_mcp_advertised_tools, methods=["GET"]),
-            ]
+            ],
+            middleware=[Middleware(WriterExitMiddleware)],
         )
     )
 

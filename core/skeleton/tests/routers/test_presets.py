@@ -46,6 +46,7 @@ from tai42_skeleton.tools.binding import UnknownToolError
 from tai42_skeleton.tools.binding.surface import remove_surface_tool
 
 from .._fakes.recording_storage import RecordingStorage
+from .._writer_exit_edge import stand_in_edge
 from ..versioning.conftest import FakeVersioningPg
 
 _MANIFEST = {
@@ -3326,7 +3327,8 @@ def test_a_store_fault_during_a_preset_restore_fails_the_section_and_skips_nothi
     document = {"version": 1, "sections": {"versioned_documents": payload}}
 
     async def run():
-        async with instance.app.app_context(_manifest()):
+        # The handler is called below the HTTP edge a request runs under.
+        async with instance.app.app_context(_manifest()), stand_in_edge():
             resp = await import_backup(
                 _request("POST", "/api/backup/import", body={"document": document, "sections": ["versioned_documents"]})
             )

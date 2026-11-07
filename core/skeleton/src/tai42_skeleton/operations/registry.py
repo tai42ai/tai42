@@ -40,6 +40,10 @@ class OperationMetadata:
     tags: tuple[str, ...] = ()
     destructive: bool = False
     reload_gated: bool = False
+    # Whether the operation changes this worker's own configuration or fleet: its edge holds the
+    # worker's exit from before the handler runs (``WriterExitScope.hold_exit``) and refuses it on a
+    # worker that decided to leave (``WorkerLeavingError``, 503).
+    holds_writer_exit: bool = False
     meta_executor: bool = False
     caller_context: bool = False
     authority_changing: bool = False

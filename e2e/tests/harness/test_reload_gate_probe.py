@@ -1,18 +1,23 @@
-"""Harness self-tests for the reload gate's envelope predicate (:func:`_is_reloading`).
+"""Harness self-tests for the reload gate's envelope predicate (:func:`_is_reloading`) and
+for a leaving worker's ``503 leaving`` refusal (:class:`WorkerLeavingError`).
 
 A worker holding its reload gate answers the retriable ``503 reloading`` envelope. The
 admin and tool paths read it from the buffered body; an MCP initialize handshake the
 gate rejects is raised by the fastmcp client as ``httpx.HTTPStatusError`` from
 ``__aenter__`` with its streaming body never read, so the session re-open recognises
 the envelope on the RAISED response by the gate's ``Retry-After`` header. Any other
-status is not the reload gate."""
+status is not the reload gate. A worker that decided to leave refuses a change with
+``503 leaving``: the client raises it as the typed error at once, never polling past it
+as it polls past the reload gate."""
 
 from __future__ import annotations
+
+from typing import Any
 
 import httpx
 import pytest
 
-from tai42_e2e.httpapi import _is_reloading
+from tai42_e2e.httpapi import ApiClient, WorkerLeavingError, _is_reloading
 
 pytestmark = pytest.mark.needs("no-stack")
 
@@ -61,3 +66,22 @@ def test_is_reloading_rejects_non_503() -> None:
     assert _is_reloading(httpx.Response(200, json={"data": 1})) is False
     # A Retry-After on a non-503 (a 429 rate-limit) is not the reload gate.
     assert _is_reloading(httpx.Response(429, headers={"Retry-After": "5"})) is False
+
+
+async def test_a_leaving_503_raises_the_typed_error_and_is_not_polled_past(monkeypatch: pytest.MonkeyPatch) -> None:
+    body = {
+        "error": "leaving — this worker is leaving (a fleet recycle op) and begins no change; retry shortly",
+        "leaving": "a fleet recycle op",
+    }
+    calls: list[str] = []
+
+    async def leaving(self: ApiClient, method: str, path: str, **_: Any) -> httpx.Response:
+        calls.append(f"{method} {path}")
+        return httpx.Response(503, json=body)
+
+    monkeypatch.setattr(ApiClient, "request_raw", leaving)
+    client = ApiClient("http://127.0.0.1:1")
+    with pytest.raises(WorkerLeavingError) as raised:
+        await client.request("POST", "/api/fleet/reload-config", retry_on_reloading=True)
+    assert raised.value.reason == "a fleet recycle op"
+    assert calls == ["POST /api/fleet/reload-config"]

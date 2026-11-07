@@ -164,6 +164,7 @@ def _pointer_index(node: list[Any], segment: str, segments: list[str]) -> int:
     tags=["manifest"],
     destructive=True,
     reload_gated=True,
+    holds_writer_exit=True,
     errors=[BadRequestError, ConflictError, UnavailableError, UpstreamError],
     request_model=SetMcpSecretEnv,
     response_model=ApplyResponse,

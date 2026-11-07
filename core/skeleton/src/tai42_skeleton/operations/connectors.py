@@ -400,6 +400,7 @@ async def get_connection(connection_id: str) -> dict[str, Any]:
     summary="Start a connection flow",
     tags=["connectors"],
     destructive=True,
+    holds_writer_exit=True,
     errors=[BadRequestError, ConflictError, NotSupportedError],
     request_model=StartConnectRequest,
     response_model=StartConnectOutcome,
@@ -448,6 +449,7 @@ async def start_connect(
 @operation(
     summary="Disconnect a connection",
     tags=["connectors"],
+    holds_writer_exit=True,
     errors=[NotFoundError],
     response_model=DisconnectResponse,
 )
@@ -524,6 +526,7 @@ async def reconnect(
     summary="Patch a connection's enabled sub-services",
     tags=["connectors"],
     destructive=True,
+    holds_writer_exit=True,
     errors=[BadRequestError, NotFoundError, NotSupportedError],
     request_model=PatchSubServicesRequest,
     response_model=PatchSubServicesResponse,

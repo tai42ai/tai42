@@ -21,7 +21,7 @@ from tai42_skeleton.app.bus import (
 from tai42_skeleton.app.bus.ops import ReloadConfig
 from tai42_skeleton.app.discarded_build import discarded_build_statement
 from tai42_skeleton.app.reload_gate import reload_gate
-from tai42_skeleton.app.writer_exit import hold_writer_exit
+from tai42_skeleton.app.writer_exit import require_writer_exit_held
 from tai42_skeleton.config.recycle_policy import with_own_statement
 from tai42_skeleton.config.recycle_roll import (
     RollFailedError,
@@ -518,9 +518,9 @@ class _BroadcastMixin(_ConfigServiceBase):
         (:func:`_decision_report`).
         """
         bus = cast("WorkerBus", self._bus)
-        # The soft restart is this worker's own change from here: its exit is held until the edge
-        # answers it, so a recycle op from another worker's roll never ends it mid-reload.
-        hold_writer_exit(bus, change)
+        # The soft restart is this worker's own change: the edge that admitted it holds its exit
+        # until it answers, so a recycle op from another worker's roll never ends it mid-reload.
+        require_writer_exit_held(bus, change)
         await validate_fleet_targets(bus, targets)
         writer = bus.member_identity
         at_start, pinned = await self._census_at_start(writer, "reload_config", targets=targets)
