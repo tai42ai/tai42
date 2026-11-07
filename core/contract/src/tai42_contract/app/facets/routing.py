@@ -63,6 +63,10 @@ class DeclaredRouteMetadata:
     #: default applies. Every public route of one family declares the same budget; an operator's
     #: per-family setting overrides it field by field.
     rate_limit_budget: RateLimitBudget | None = None
+    #: Whether the operation changes this worker's own configuration or fleet: its edge holds the
+    #: worker's exit from before the handler runs (``WriterExitScope.hold_exit``) and refuses it on a
+    #: worker that decided to leave (``WorkerLeavingError``, 503).
+    holds_writer_exit: bool = False
 
 
 @dataclass(frozen=True)
