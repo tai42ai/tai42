@@ -29,7 +29,7 @@ dependencies = [
     "tai42-contract>=29.0,<30",
     # TaiBaseSettings + the settings cache registry, and the monitoring feature's
     # OpenTelemetry writer every record is written through (the monitoring extra).
-    "tai42-kit[monitoring]>=18.0,<19",
+    "tai42-kit[monitoring]>=19.0,<20",
     # The HTTP client the reader queries Langfuse's public REST API through.
     "httpx>=0.28",
     # Decodes the REST answers and the recorded ``tai42.metadata`` attribute.
