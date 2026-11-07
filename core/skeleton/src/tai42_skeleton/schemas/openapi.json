@@ -22200,14 +22200,21 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ReloadingError"
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/ReloadingError"
+                    },
+                    {
+                      "$ref": "#/components/schemas/Error"
+                    }
+                  ]
                 }
               }
             },
-            "description": "The server is applying a config reload; retry shortly.",
+            "description": "The server is applying a config reload, or cannot serve this request right now; retry shortly.",
             "headers": {
               "Retry-After": {
-                "description": "Seconds to wait before retrying.",
+                "description": "Seconds to wait before retrying; carried by the reloading answer.",
                 "schema": {
                   "type": "integer"
                 }
@@ -22294,14 +22301,21 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ReloadingError"
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/ReloadingError"
+                    },
+                    {
+                      "$ref": "#/components/schemas/Error"
+                    }
+                  ]
                 }
               }
             },
-            "description": "The server is applying a config reload; retry shortly.",
+            "description": "The server is applying a config reload, or cannot serve this request right now; retry shortly.",
             "headers": {
               "Retry-After": {
-                "description": "Seconds to wait before retrying.",
+                "description": "Seconds to wait before retrying; carried by the reloading answer.",
                 "schema": {
                   "type": "integer"
                 }
@@ -22625,14 +22639,21 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ReloadingError"
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/ReloadingError"
+                    },
+                    {
+                      "$ref": "#/components/schemas/Error"
+                    }
+                  ]
                 }
               }
             },
-            "description": "The server is applying a config reload; retry shortly.",
+            "description": "The server is applying a config reload, or cannot serve this request right now; retry shortly.",
             "headers": {
               "Retry-After": {
-                "description": "Seconds to wait before retrying.",
+                "description": "Seconds to wait before retrying; carried by the reloading answer.",
                 "schema": {
                   "type": "integer"
                 }
@@ -25430,14 +25451,21 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ReloadingError"
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/ReloadingError"
+                    },
+                    {
+                      "$ref": "#/components/schemas/Error"
+                    }
+                  ]
                 }
               }
             },
-            "description": "The server is applying a config reload; retry shortly.",
+            "description": "The server is applying a config reload, or cannot serve this request right now; retry shortly.",
             "headers": {
               "Retry-After": {
-                "description": "Seconds to wait before retrying.",
+                "description": "Seconds to wait before retrying; carried by the reloading answer.",
                 "schema": {
                   "type": "integer"
                 }
@@ -25787,7 +25815,7 @@
                 }
               }
             },
-            "description": "The server is applying a config reload, or a dependency this route needs is temporarily unavailable; retry shortly.",
+            "description": "The server is applying a config reload, or cannot serve this request right now; retry shortly.",
             "headers": {
               "Retry-After": {
                 "description": "Seconds to wait before retrying; carried by the reloading answer.",
@@ -26240,7 +26268,7 @@
                 }
               }
             },
-            "description": "The server is applying a config reload, or a dependency this route needs is temporarily unavailable; retry shortly.",
+            "description": "The server is applying a config reload, or cannot serve this request right now; retry shortly.",
             "headers": {
               "Retry-After": {
                 "description": "Seconds to wait before retrying; carried by the reloading answer.",
@@ -26638,14 +26666,21 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ReloadingError"
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/ReloadingError"
+                    },
+                    {
+                      "$ref": "#/components/schemas/Error"
+                    }
+                  ]
                 }
               }
             },
-            "description": "The server is applying a config reload; retry shortly.",
+            "description": "The server is applying a config reload, or cannot serve this request right now; retry shortly.",
             "headers": {
               "Retry-After": {
-                "description": "Seconds to wait before retrying.",
+                "description": "Seconds to wait before retrying; carried by the reloading answer.",
                 "schema": {
                   "type": "integer"
                 }
@@ -26866,6 +26901,16 @@
               }
             },
             "description": "Error."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "The server cannot serve this request right now; retry shortly."
           }
         },
         "security": [
@@ -26932,6 +26977,16 @@
               }
             },
             "description": "Resource not found."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "The server cannot serve this request right now; retry shortly."
           }
         },
         "security": [
@@ -27187,6 +27242,16 @@
               }
             },
             "description": "Error."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "The server cannot serve this request right now; retry shortly."
           }
         },
         "security": [
@@ -27263,6 +27328,16 @@
               }
             },
             "description": "Internal server error."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "The server cannot serve this request right now; retry shortly."
           }
         },
         "security": [
@@ -27396,14 +27471,21 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ReloadingError"
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/ReloadingError"
+                    },
+                    {
+                      "$ref": "#/components/schemas/Error"
+                    }
+                  ]
                 }
               }
             },
-            "description": "The server is applying a config reload; retry shortly.",
+            "description": "The server is applying a config reload, or cannot serve this request right now; retry shortly.",
             "headers": {
               "Retry-After": {
-                "description": "Seconds to wait before retrying.",
+                "description": "Seconds to wait before retrying; carried by the reloading answer.",
                 "schema": {
                   "type": "integer"
                 }
@@ -27585,14 +27667,21 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ReloadingError"
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/ReloadingError"
+                    },
+                    {
+                      "$ref": "#/components/schemas/Error"
+                    }
+                  ]
                 }
               }
             },
-            "description": "The server is applying a config reload; retry shortly.",
+            "description": "The server is applying a config reload, or cannot serve this request right now; retry shortly.",
             "headers": {
               "Retry-After": {
-                "description": "Seconds to wait before retrying.",
+                "description": "Seconds to wait before retrying; carried by the reloading answer.",
                 "schema": {
                   "type": "integer"
                 }
@@ -28315,7 +28404,7 @@
                 }
               }
             },
-            "description": "A dependency this route needs is temporarily unavailable; retry shortly."
+            "description": "The server cannot serve this request right now; retry shortly."
           }
         },
         "security": [
@@ -28494,7 +28583,7 @@
                 }
               }
             },
-            "description": "A dependency this route needs is temporarily unavailable; retry shortly."
+            "description": "The server cannot serve this request right now; retry shortly."
           }
         },
         "security": [
@@ -28927,7 +29016,7 @@
                 }
               }
             },
-            "description": "The server is applying a config reload, or a dependency this route needs is temporarily unavailable; retry shortly.",
+            "description": "The server is applying a config reload, or cannot serve this request right now; retry shortly.",
             "headers": {
               "Retry-After": {
                 "description": "Seconds to wait before retrying; carried by the reloading answer.",
@@ -29075,7 +29164,7 @@
                 }
               }
             },
-            "description": "The server is applying a config reload, or a dependency this route needs is temporarily unavailable; retry shortly.",
+            "description": "The server is applying a config reload, or cannot serve this request right now; retry shortly.",
             "headers": {
               "Retry-After": {
                 "description": "Seconds to wait before retrying; carried by the reloading answer.",
@@ -29425,7 +29514,7 @@
                 }
               }
             },
-            "description": "A dependency this route needs is temporarily unavailable; retry shortly."
+            "description": "The server cannot serve this request right now; retry shortly."
           }
         },
         "security": [
@@ -29541,7 +29630,7 @@
                 }
               }
             },
-            "description": "A dependency this route needs is temporarily unavailable; retry shortly."
+            "description": "The server cannot serve this request right now; retry shortly."
           }
         },
         "security": [
@@ -30301,6 +30390,16 @@
               }
             },
             "description": "Missing or invalid api key."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "The server cannot serve this request right now; retry shortly."
           }
         },
         "security": [
@@ -31629,7 +31728,7 @@
                 }
               }
             },
-            "description": "A dependency this route needs is temporarily unavailable; retry shortly."
+            "description": "The server cannot serve this request right now; retry shortly."
           }
         },
         "summary": "Serve interaction media stored by reference",
@@ -31690,7 +31789,7 @@
                 }
               }
             },
-            "description": "A dependency this route needs is temporarily unavailable; retry shortly."
+            "description": "The server cannot serve this request right now; retry shortly."
           }
         },
         "summary": "Serve interaction media stored by reference",
@@ -32455,7 +32554,7 @@
                 }
               }
             },
-            "description": "The server is applying a config reload, or a dependency this route needs is temporarily unavailable; retry shortly.",
+            "description": "The server is applying a config reload, or cannot serve this request right now; retry shortly.",
             "headers": {
               "Retry-After": {
                 "description": "Seconds to wait before retrying; carried by the reloading answer.",
@@ -32706,7 +32805,7 @@
                 }
               }
             },
-            "description": "The server is applying a config reload, or a dependency this route needs is temporarily unavailable; retry shortly.",
+            "description": "The server is applying a config reload, or cannot serve this request right now; retry shortly.",
             "headers": {
               "Retry-After": {
                 "description": "Seconds to wait before retrying; carried by the reloading answer.",
@@ -33295,7 +33394,7 @@
                 }
               }
             },
-            "description": "The server is applying a config reload, or a dependency this route needs is temporarily unavailable; retry shortly.",
+            "description": "The server is applying a config reload, or cannot serve this request right now; retry shortly.",
             "headers": {
               "Retry-After": {
                 "description": "Seconds to wait before retrying; carried by the reloading answer.",
@@ -33436,7 +33535,7 @@
                 }
               }
             },
-            "description": "The server is applying a config reload, or a dependency this route needs is temporarily unavailable; retry shortly.",
+            "description": "The server is applying a config reload, or cannot serve this request right now; retry shortly.",
             "headers": {
               "Retry-After": {
                 "description": "Seconds to wait before retrying; carried by the reloading answer.",
@@ -33527,7 +33626,7 @@
                 }
               }
             },
-            "description": "The server is applying a config reload, or a dependency this route needs is temporarily unavailable; retry shortly.",
+            "description": "The server is applying a config reload, or cannot serve this request right now; retry shortly.",
             "headers": {
               "Retry-After": {
                 "description": "Seconds to wait before retrying; carried by the reloading answer.",
@@ -33638,7 +33737,7 @@
                 }
               }
             },
-            "description": "The server is applying a config reload, or a dependency this route needs is temporarily unavailable; retry shortly.",
+            "description": "The server is applying a config reload, or cannot serve this request right now; retry shortly.",
             "headers": {
               "Retry-After": {
                 "description": "Seconds to wait before retrying; carried by the reloading answer.",
@@ -33749,7 +33848,7 @@
                 }
               }
             },
-            "description": "The server is applying a config reload, or a dependency this route needs is temporarily unavailable; retry shortly.",
+            "description": "The server is applying a config reload, or cannot serve this request right now; retry shortly.",
             "headers": {
               "Retry-After": {
                 "description": "Seconds to wait before retrying; carried by the reloading answer.",
@@ -33839,14 +33938,21 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ReloadingError"
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/ReloadingError"
+                    },
+                    {
+                      "$ref": "#/components/schemas/Error"
+                    }
+                  ]
                 }
               }
             },
-            "description": "The server is applying a config reload; retry shortly.",
+            "description": "The server is applying a config reload, or cannot serve this request right now; retry shortly.",
             "headers": {
               "Retry-After": {
-                "description": "Seconds to wait before retrying.",
+                "description": "Seconds to wait before retrying; carried by the reloading answer.",
                 "schema": {
                   "type": "integer"
                 }
@@ -33974,7 +34080,7 @@
                 }
               }
             },
-            "description": "The server is applying a config reload, or a dependency this route needs is temporarily unavailable; retry shortly.",
+            "description": "The server is applying a config reload, or cannot serve this request right now; retry shortly.",
             "headers": {
               "Retry-After": {
                 "description": "Seconds to wait before retrying; carried by the reloading answer.",
@@ -34130,7 +34236,7 @@
                 }
               }
             },
-            "description": "The server is applying a config reload, or a dependency this route needs is temporarily unavailable; retry shortly.",
+            "description": "The server is applying a config reload, or cannot serve this request right now; retry shortly.",
             "headers": {
               "Retry-After": {
                 "description": "Seconds to wait before retrying; carried by the reloading answer.",
@@ -34403,7 +34509,7 @@
                 }
               }
             },
-            "description": "A dependency this route needs is temporarily unavailable; retry shortly."
+            "description": "The server cannot serve this request right now; retry shortly."
           }
         },
         "security": [
@@ -34729,7 +34835,7 @@
                 }
               }
             },
-            "description": "A dependency this route needs is temporarily unavailable; retry shortly."
+            "description": "The server cannot serve this request right now; retry shortly."
           }
         },
         "security": [
@@ -37397,7 +37503,7 @@
                 }
               }
             },
-            "description": "The server is applying a config reload, or a dependency this route needs is temporarily unavailable; retry shortly.",
+            "description": "The server is applying a config reload, or cannot serve this request right now; retry shortly.",
             "headers": {
               "Retry-After": {
                 "description": "Seconds to wait before retrying; carried by the reloading answer.",
@@ -37761,7 +37867,7 @@
                 }
               }
             },
-            "description": "A dependency this route needs is temporarily unavailable; retry shortly."
+            "description": "The server cannot serve this request right now; retry shortly."
           }
         },
         "security": [
@@ -37891,7 +37997,7 @@
                 }
               }
             },
-            "description": "The server is applying a config reload, or a dependency this route needs is temporarily unavailable; retry shortly.",
+            "description": "The server is applying a config reload, or cannot serve this request right now; retry shortly.",
             "headers": {
               "Retry-After": {
                 "description": "Seconds to wait before retrying; carried by the reloading answer.",
@@ -38047,7 +38153,7 @@
                 }
               }
             },
-            "description": "The server is applying a config reload, or a dependency this route needs is temporarily unavailable; retry shortly.",
+            "description": "The server is applying a config reload, or cannot serve this request right now; retry shortly.",
             "headers": {
               "Retry-After": {
                 "description": "Seconds to wait before retrying; carried by the reloading answer.",
@@ -38457,7 +38563,7 @@
                 }
               }
             },
-            "description": "A dependency this route needs is temporarily unavailable; retry shortly."
+            "description": "The server cannot serve this request right now; retry shortly."
           }
         },
         "security": [
@@ -38906,7 +39012,7 @@
                 }
               }
             },
-            "description": "A dependency this route needs is temporarily unavailable; retry shortly."
+            "description": "The server cannot serve this request right now; retry shortly."
           }
         },
         "security": [
@@ -39083,7 +39189,7 @@
                 }
               }
             },
-            "description": "A dependency this route needs is temporarily unavailable; retry shortly."
+            "description": "The server cannot serve this request right now; retry shortly."
           }
         },
         "security": [
@@ -39455,7 +39561,7 @@
                 }
               }
             },
-            "description": "A dependency this route needs is temporarily unavailable; retry shortly."
+            "description": "The server cannot serve this request right now; retry shortly."
           }
         },
         "security": [
@@ -39567,7 +39673,7 @@
                 }
               }
             },
-            "description": "A dependency this route needs is temporarily unavailable; retry shortly."
+            "description": "The server cannot serve this request right now; retry shortly."
           }
         },
         "security": [
@@ -39811,7 +39917,7 @@
                 }
               }
             },
-            "description": "A dependency this route needs is temporarily unavailable; retry shortly."
+            "description": "The server cannot serve this request right now; retry shortly."
           }
         },
         "security": [
@@ -39896,7 +40002,7 @@
                 }
               }
             },
-            "description": "A dependency this route needs is temporarily unavailable; retry shortly."
+            "description": "The server cannot serve this request right now; retry shortly."
           }
         },
         "security": [
@@ -40118,7 +40224,7 @@
                 }
               }
             },
-            "description": "A dependency this route needs is temporarily unavailable; retry shortly."
+            "description": "The server cannot serve this request right now; retry shortly."
           }
         },
         "security": [
@@ -40254,7 +40360,7 @@
                 }
               }
             },
-            "description": "A dependency this route needs is temporarily unavailable; retry shortly."
+            "description": "The server cannot serve this request right now; retry shortly."
           }
         },
         "security": [
@@ -40389,7 +40495,7 @@
                 }
               }
             },
-            "description": "A dependency this route needs is temporarily unavailable; retry shortly."
+            "description": "The server cannot serve this request right now; retry shortly."
           }
         },
         "security": [
@@ -40525,7 +40631,7 @@
                 }
               }
             },
-            "description": "A dependency this route needs is temporarily unavailable; retry shortly."
+            "description": "The server cannot serve this request right now; retry shortly."
           }
         },
         "security": [
@@ -40663,7 +40769,7 @@
                 }
               }
             },
-            "description": "A dependency this route needs is temporarily unavailable; retry shortly."
+            "description": "The server cannot serve this request right now; retry shortly."
           }
         },
         "security": [
@@ -40801,7 +40907,7 @@
                 }
               }
             },
-            "description": "A dependency this route needs is temporarily unavailable; retry shortly."
+            "description": "The server cannot serve this request right now; retry shortly."
           }
         },
         "security": [
@@ -40947,7 +41053,7 @@
                 }
               }
             },
-            "description": "A dependency this route needs is temporarily unavailable; retry shortly."
+            "description": "The server cannot serve this request right now; retry shortly."
           }
         },
         "security": [
@@ -41090,7 +41196,7 @@
                 }
               }
             },
-            "description": "A dependency this route needs is temporarily unavailable; retry shortly."
+            "description": "The server cannot serve this request right now; retry shortly."
           }
         },
         "security": [
@@ -41228,7 +41334,7 @@
                 }
               }
             },
-            "description": "A dependency this route needs is temporarily unavailable; retry shortly."
+            "description": "The server cannot serve this request right now; retry shortly."
           }
         },
         "security": [
@@ -41313,7 +41419,7 @@
                 }
               }
             },
-            "description": "A dependency this route needs is temporarily unavailable; retry shortly."
+            "description": "The server cannot serve this request right now; retry shortly."
           }
         },
         "security": [
@@ -41398,7 +41504,7 @@
                 }
               }
             },
-            "description": "A dependency this route needs is temporarily unavailable; retry shortly."
+            "description": "The server cannot serve this request right now; retry shortly."
           }
         },
         "security": [
@@ -43151,7 +43257,7 @@
                 }
               }
             },
-            "description": "The server is applying a config reload, or a dependency this route needs is temporarily unavailable; retry shortly.",
+            "description": "The server is applying a config reload, or cannot serve this request right now; retry shortly.",
             "headers": {
               "Retry-After": {
                 "description": "Seconds to wait before retrying; carried by the reloading answer.",
@@ -43351,14 +43457,21 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ReloadingError"
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/ReloadingError"
+                    },
+                    {
+                      "$ref": "#/components/schemas/Error"
+                    }
+                  ]
                 }
               }
             },
-            "description": "The server is applying a config reload; retry shortly.",
+            "description": "The server is applying a config reload, or cannot serve this request right now; retry shortly.",
             "headers": {
               "Retry-After": {
-                "description": "Seconds to wait before retrying.",
+                "description": "Seconds to wait before retrying; carried by the reloading answer.",
                 "schema": {
                   "type": "integer"
                 }
@@ -43445,14 +43558,21 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ReloadingError"
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/ReloadingError"
+                    },
+                    {
+                      "$ref": "#/components/schemas/Error"
+                    }
+                  ]
                 }
               }
             },
-            "description": "The server is applying a config reload; retry shortly.",
+            "description": "The server is applying a config reload, or cannot serve this request right now; retry shortly.",
             "headers": {
               "Retry-After": {
-                "description": "Seconds to wait before retrying.",
+                "description": "Seconds to wait before retrying; carried by the reloading answer.",
                 "schema": {
                   "type": "integer"
                 }
@@ -43850,14 +43970,21 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ReloadingError"
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/ReloadingError"
+                    },
+                    {
+                      "$ref": "#/components/schemas/Error"
+                    }
+                  ]
                 }
               }
             },
-            "description": "The server is applying a config reload; retry shortly.",
+            "description": "The server is applying a config reload, or cannot serve this request right now; retry shortly.",
             "headers": {
               "Retry-After": {
-                "description": "Seconds to wait before retrying.",
+                "description": "Seconds to wait before retrying; carried by the reloading answer.",
                 "schema": {
                   "type": "integer"
                 }
@@ -43964,14 +44091,21 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ReloadingError"
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/ReloadingError"
+                    },
+                    {
+                      "$ref": "#/components/schemas/Error"
+                    }
+                  ]
                 }
               }
             },
-            "description": "The server is applying a config reload; retry shortly.",
+            "description": "The server is applying a config reload, or cannot serve this request right now; retry shortly.",
             "headers": {
               "Retry-After": {
-                "description": "Seconds to wait before retrying.",
+                "description": "Seconds to wait before retrying; carried by the reloading answer.",
                 "schema": {
                   "type": "integer"
                 }

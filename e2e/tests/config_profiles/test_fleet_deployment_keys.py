@@ -42,6 +42,7 @@ import redis
 
 from tai42_e2e import child_env, wait_for_async
 from tai42_e2e.binaries import spawn_expect_refusal, tai_bin
+from tai42_e2e.httpapi import WorkerLeavingError
 from tai42_e2e.llmstub import LlmStub
 from tai42_e2e.manifests import build_recycle_stack
 from tai42_e2e.readiness import expected_fleet_present
@@ -234,7 +235,12 @@ async def _wait_no_worker_awaits_a_respawn(stack: TaiStack) -> None:
         census = stack.census()
         if not expected_fleet_present(stack, census) or any(worker.state != "ready" for worker in census):
             return False
-        report = await _fleet_reload(stack)
+        try:
+            report = await _fleet_reload(stack)
+        except WorkerLeavingError:
+            # The reload hit a leaving worker: the next tick's census shows it recycling or absent until its
+            # successor is ready, and reloads then.
+            return False
         last[:] = [report]
         awaiting = _awaiting_respawn(report)
         return awaiting is not None and all(keys == [] for keys in awaiting.values())

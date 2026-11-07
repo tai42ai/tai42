@@ -788,9 +788,11 @@ def _http_requests(entry: dict, document: dict) -> list[tuple[str, str, dict]]:
 @pytest.mark.parametrize("door_index", range(4), ids=["tool-filter", "mcp-config", "entries-replace", "replace"])
 def test_each_http_door_answers_409_with_the_holders(world: _World, door_index: int) -> None:
     from starlette.applications import Starlette
+    from starlette.middleware import Middleware
     from starlette.routing import Route
     from starlette.testclient import TestClient
 
+    from tai42_skeleton.middleware.writer_exit import WriterExitMiddleware
     from tai42_skeleton.routers import manifest as router
 
     world.bodies = {"notify": _body("acme_send")}
@@ -800,7 +802,8 @@ def test_each_http_door_answers_409_with_the_holders(world: _World, door_index: 
             Route("/api/mcp-config", router.set_mcp_config, methods=["POST"]),
             Route("/api/mcp-config/entries", router.add_mcp_entries, methods=["POST"]),
             Route("/api/manifest/replace", router.update_manifest, methods=["POST"]),
-        ]
+        ],
+        middleware=[Middleware(WriterExitMiddleware)],
     )
     method, path, body = _http_requests(_entry(include=["acme_read"]), world.store.manifest)[door_index]
     before = copy.deepcopy(world.store.manifest)

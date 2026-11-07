@@ -28,6 +28,7 @@ from tai42_skeleton.config.deployment_env import DeploymentOwnership
 from tai42_skeleton.config.service import ConfigService
 
 from .._fakes.bus import FakeBus
+from .._writer_exit_edge import admit_change
 from ..config.fake_pipeline import ComboChecks, FakeConfigStore, FakeReloadAdmin
 from ..connectors.credential_path import bind_as_serving, job_loop, owner_loop
 from .lifecycle._doubles import _EnvConfig, _Mixin
@@ -75,10 +76,12 @@ async def test_an_apply_a_job_drives_after_its_loop_cached_a_saver_builds_on_the
     serving: asyncio.AbstractEventLoop,
 ) -> None:
     store = FakeConfigStore(env={"MY_APP_FLAG": "old"})
+    bus = FakeBus()
+    admit_change(bus)
     service = ConfigService(
         config_manager=store,
         admin=FakeReloadAdmin(),
-        bus=cast("Any", FakeBus()),
+        bus=cast("Any", bus),
         combo_check=ComboChecks(),
         orchestrate=orchestrate_recycle,
     )

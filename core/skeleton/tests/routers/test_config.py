@@ -27,6 +27,9 @@ from .._fakes.mcp_listing import no_mcp_listing
 from .._fakes.write_span import ExclusiveWriteStore
 from .._helpers import recapture_deployment_env
 
+# These tests call the route handlers below the HTTP edge a request runs under.
+pytestmark = pytest.mark.usefixtures("http_edge")
+
 
 class _AliasedEnvDemoSettings(TaiBaseSettings):
     """Registered at import time — one field read under two env names, so the env route can be

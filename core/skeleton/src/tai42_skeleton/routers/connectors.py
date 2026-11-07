@@ -427,6 +427,7 @@ def _parse_completion(body: dict) -> tuple[str, str | None, str | None, str | No
     declared=DeclaredRouteMetadata(
         reload_gated=False,
         reads_body=True,
+        holds_writer_exit=True,
         error_statuses=(400, 401, 500),
         success_status=200,
     ),

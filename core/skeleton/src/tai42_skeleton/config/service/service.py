@@ -97,7 +97,7 @@ from typing import TYPE_CHECKING, Any, cast
 from tai42_kit.process_lock import ProcessLock
 
 from tai42_skeleton.app.recycle import RecycleReport, orchestrate_recycle
-from tai42_skeleton.app.writer_exit import hold_writer_exit
+from tai42_skeleton.app.writer_exit import require_writer_exit_held
 from tai42_skeleton.config.deployment_env import DeploymentOwnership, resolve_deployment_ownership
 from tai42_skeleton.config.secret_seal import _leaving_connector_secrets
 from tai42_skeleton.config.service.broadcast import _BroadcastMixin
@@ -185,12 +185,12 @@ class ConfigService(_ProfileApplyMixin, _ValidationMixin, _ResolutionMixin, _Bro
         Every write entry holds this from before its first store read through its persist, its
         last statement inside it, and hands the yielded :class:`WriteSpan`'s ``release_error``
         to its tail. A caller waiting on either hold is recorded on its generation as waiting.
-        Asking for it is where every write entry's change begins: the worker's exit is held in
-        the open writer-exit scope from here until the edge answering the change settles
-        (:func:`~tai42_skeleton.app.writer_exit.hold_writer_exit`), so a recycle op from another
-        worker's roll never ends this worker mid-change.
+        Asking for it is where every write entry's change begins: the worker's exit is already
+        held in the open writer-exit scope by the edge that admitted the change, until that edge
+        settles (:func:`~tai42_skeleton.app.writer_exit.require_writer_exit_held`), so a recycle op
+        from another worker's roll never ends this worker mid-change.
         """
-        hold_writer_exit(cast("WorkerBus", self._bus), "this config change")
+        require_writer_exit_held(cast("WorkerBus", self._bus), "this config change")
         return write_exclusion(_config_write_lock, self._config_manager.exclusive_write())
 
     async def deployment_ownership(self, op_name: str) -> DeploymentOwnership:

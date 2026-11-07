@@ -641,6 +641,13 @@ async def test_a_failed_resource_teardown_still_drops_the_serving_generation_and
     assert raised.group_contains(OSError, match="pool close failed")
 
 
+# The bound on the boot ``app_context`` runs before the worker serves. The boot is CPU-bound (it
+# imports every plugin, projects the operations and lists the tools) with no wait of its own, so
+# coverage tracing triples it and a loaded host stretches it many times over; the bound only
+# stops a hung boot from holding the run.
+_BOOT_BOUND_S = 60.0
+
+
 @pytest.mark.usefixtures("app_context_requiring_the_boot_read")
 async def test_a_second_stop_signal_landing_while_a_background_task_winds_down_cuts_the_stop_short(
     monkeypatch: pytest.MonkeyPatch, fake_bus_server: fakeredis.FakeServer, caplog: pytest.LogCaptureFixture
@@ -685,9 +692,17 @@ async def test_a_second_stop_signal_landing_while_a_background_task_winds_down_c
             await asyncio.Event().wait()
 
     main_task = asyncio.create_task(serve_until_stopped())
+    serving_waiter = asyncio.create_task(serving.wait())
+    try:
+        async with asyncio.timeout(_BOOT_BOUND_S):
+            await asyncio.wait({serving_waiter, main_task}, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        serving_waiter.cancel()
+    if main_task.done():
+        # The boot ended before the worker served: raise what ended it.
+        await main_task
+    main_task.cancel()
     async with asyncio.timeout(5.0):
-        await serving.wait()
-        main_task.cancel()
         await winding_down.wait()
     main_task.cancel()
     wound_down.set()
@@ -1484,6 +1499,36 @@ async def test_the_join_restarts_the_workers_that_reported_keys_and_leaves_the_c
     assert decision.writer.name == "serve-1"
     assert call["applier_self_deferred"] is False
     assert recorded_roll["events"] == ["roll"]
+
+
+async def test_a_join_on_a_worker_already_leaving_announces_nothing_and_logs_it(
+    recorded_roll: dict[str, Any], caplog: pytest.LogCaptureFixture
+) -> None:
+    bus = _JoinBus(
+        {"backend-1": {"withdrawn": [], "awaiting_respawn": [_SIBLING_KEY]}},
+        fleet_keys=[],
+        events=recorded_roll["events"],
+    )
+    m = _Mixin()
+    m._bus = cast("Any", bus)
+    assert bus.decide_departure("a fleet recycle op") is None
+
+    with caplog.at_level(logging.INFO):
+        m._spawn_join(dict(_CLEAN_JOIN))
+        await _join_done(m)
+
+    assert bus.publish_calls == []
+    # Only the leaving's own recycling announce ran: no roll.
+    assert recorded_roll["events"] == ["mark_recycling"]
+    leaving = [(r.levelno, r.getMessage()) for r in caplog.records if "already leaving" in r.getMessage()]
+    assert leaving == [
+        (
+            logging.INFO,
+            "worker bus: the join of serve-1 on a worker already leaving (a fleet recycle op) — nothing announced",
+        )
+    ]
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert bus.exit_deferred is None
 
 
 async def test_the_join_asks_a_worker_that_did_not_confirm_the_announcement_once_ready_before_any_restart(

@@ -97,6 +97,7 @@ async def list_mcp_advertised_tools(title: str) -> dict[str, Any]:
     tags=["manifest"],
     destructive=True,
     reload_gated=True,
+    holds_writer_exit=True,
     authority_changing=True,
     errors=[BadRequestError, ConflictError, UnavailableError, UpstreamError],
     request_model=ManifestReplace,

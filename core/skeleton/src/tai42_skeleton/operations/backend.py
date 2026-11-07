@@ -114,6 +114,7 @@ async def list_workers() -> WorkerListing:
     summary="Soft-restart the worker fleet, restarting the drifted workers whose reload built",
     tags=["backend"],
     destructive=True,
+    holds_writer_exit=True,
     errors=[BadRequestError],
     request_model=ReloadConfig,
     response_model=FleetReloadResponse,

@@ -56,6 +56,7 @@ from tai42_skeleton.tools.binding.surface import bump_tool_surface_generation
 
 from .._fakes.bus import FakeBus
 from .._helpers import recapture_deployment_env
+from .._writer_exit_edge import admit_change
 from ..connectors.credential_path import job_loop, owner_loop
 from .fake_pipeline import ComboChecks, FakeConfigStore, FakeReloadAdmin, _orchestrate_spy
 
@@ -74,10 +75,13 @@ def _service(
     orchestrate: Callable[..., Awaitable[RecycleReport]] = orchestrate_recycle,
     combo_check: ComboChecks | None = None,
 ) -> ConfigService:
+    """The config service over ``store``, its change admitted by the stand-in edge (:func:`admit_change`)."""
+    bus = bus or FakeBus()
+    admit_change(bus)
     return ConfigService(
         config_manager=store,
         admin=FakeReloadAdmin(),
-        bus=cast("Any", bus or FakeBus()),
+        bus=cast("Any", bus),
         combo_check=combo_check or ComboChecks(),
         orchestrate=orchestrate,
     )

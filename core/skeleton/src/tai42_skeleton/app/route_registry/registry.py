@@ -143,6 +143,7 @@ class RouteRegistry:
         resolved_media_types = _resolve_success_media_types(path, method_key, success_media_types, enveloped=enveloped)
         if declared is None:
             reload_gated = False
+            holds_writer_exit = False
             reads_body = False
             error_statuses: tuple[int, ...] = ()
             success_status = 200
@@ -152,8 +153,13 @@ class RouteRegistry:
             rate_limit_budget: RateLimitBudget | None = None
         else:
             reload_gated = declared.reload_gated
+            holds_writer_exit = declared.holds_writer_exit
             reads_body = declared.reads_body
-            error_statuses = declared.error_statuses
+            # A route holding the writer's exit answers the leaving ``503`` on a worker that decided
+            # to leave: the declaration owns that status, as ``authed`` owns the ``401``.
+            error_statuses = (
+                tuple(sorted({*declared.error_statuses, 503})) if holds_writer_exit else declared.error_statuses
+            )
             success_status = declared.success_status
             additional_success_statuses = declared.additional_success_statuses
             max_body_bytes = declared.max_body_bytes
@@ -173,6 +179,7 @@ class RouteRegistry:
             response_model=response_model,
             query_model=query_model,
             reload_gated=reload_gated,
+            holds_writer_exit=holds_writer_exit,
             reads_body=reads_body,
             error_statuses=error_statuses,
             success_status=success_status,
@@ -245,6 +252,7 @@ class RouteRegistry:
             request_model=None,
             response_model=None,
             reload_gated=False,
+            holds_writer_exit=False,
             reads_body=False,
             error_statuses=(),
             success_status=200,

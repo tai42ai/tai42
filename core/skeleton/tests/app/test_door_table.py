@@ -23,6 +23,7 @@ def _meta(path: str, methods: list[str], *, max_body_bytes: int | None = None) -
         request_model=None,
         response_model=None,
         reload_gated=False,
+        holds_writer_exit=False,
         reads_body=False,
         error_statuses=(),
         success_status=200,

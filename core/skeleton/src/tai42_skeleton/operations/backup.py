@@ -91,6 +91,7 @@ async def list_sections() -> list:
     destructive=True,
     authority_changing=True,
     reload_gated=True,
+    holds_writer_exit=True,
     errors=[BadRequestError],
     request_model=BackupImport,
     response_model=BackupImportResult,

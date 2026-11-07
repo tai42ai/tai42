@@ -30,6 +30,7 @@ from tai42_skeleton.operations.projection import project_operations
 from .._fakes.bus import FakeBus
 from .._fakes.mcp_listing import no_mcp_listing
 from .._fakes.write_span import ExclusiveWriteStore
+from .._writer_exit_edge import admit_change
 from ..config.fake_pipeline import ComboChecks
 
 
@@ -98,6 +99,7 @@ async def test_reload_config_local_failure_still_broadcasts_then_raises(monkeypa
     bus = _install(monkeypatch, admin=admin)
 
     with writer_exit_scope() as exits:
+        admit_change(bus)
         with pytest.raises(FleetBroadcastError) as exc:
             await config_ops.reload_config()
         await exits.settle()
@@ -119,6 +121,7 @@ async def test_reload_config_local_failure_raises_with_the_roll_that_restarts_th
     bus = _install(monkeypatch, admin=admin)
 
     with writer_exit_scope() as exits:
+        admit_change(bus)
         with pytest.raises(FleetBroadcastError) as exc:
             await config_ops.reload_config()
         await exits.settle()
@@ -417,6 +420,7 @@ async def test_a_reload_door_restarts_the_sibling_reporting_drift_and_leaves_the
     op = config_ops.reload_config if door == "reload_config" else backend_ops.fleet_reload_config
 
     with writer_exit_scope() as exits:
+        admit_change(bus)
         response = await op(None)
         await exits.settle()
 
@@ -442,6 +446,7 @@ async def test_a_reload_door_whose_writer_reports_drift_runs_its_exit_after_the_
     op = config_ops.reload_config if door == "reload_config" else backend_ops.fleet_reload_config
 
     with writer_exit_scope() as exits:
+        admit_change(bus)
         response = await op(None)
         # The writer holds its exit until the edge answers the change.
         assert bus.exit_deferred is not None

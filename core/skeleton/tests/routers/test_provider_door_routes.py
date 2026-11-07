@@ -15,6 +15,9 @@ from tai42_skeleton.app.route_registry import load_all_routes
 from tai42_skeleton.connectors.oauth.discovery import DiscoveredAuthorization
 from tai42_skeleton.operations import connector_providers as ops
 
+# These tests call the route handlers below the HTTP edge a request runs under.
+pytestmark = pytest.mark.usefixtures("http_edge")
+
 _DOOR_ROUTES = {
     ("POST", "/api/connectors/providers/discover"),
     ("POST", "/api/connectors/providers"),

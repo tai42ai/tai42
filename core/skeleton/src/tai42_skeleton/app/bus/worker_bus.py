@@ -281,10 +281,12 @@ class WorkerBus(WorkerBusPublishMixin, WorkerBusSubscribeMixin, WorkerBusEnvRead
         (:meth:`signal_departure`) and starts the ``recycling`` announce on the census. Every later
         call sends and writes nothing: it logs at INFO that the worker is already leaving, naming
         both reasons, and returns ``False``. The latch leaves every deferred exit
-        (:meth:`defer_exit`) held by its change, which releases it; a door that must wait for the
-        held changes decides through :meth:`decide_departure` instead. A forked job child (a
-        non-member) owns no exit and raises: a change it runs is bounded, so it hands its roll, the
-        writer's restart included, to the member it acts for
+        (:meth:`defer_exit`) held by its change, which releases it: the stop that follows lets that
+        change finish within the worker's drain and cuts it at the drain's cap (for a serve worker,
+        uvicorn's ``timeout_graceful_shutdown``); a door that must wait for the held changes decides
+        through :meth:`decide_departure` instead. A forked job child (a non-member) owns no exit and
+        raises: a change it runs is bounded, so it hands its roll, the writer's restart included, to
+        the member it acts for
         (:func:`~tai42_skeleton.config.roll_handoff.hand_off_roll`).
         """
         self._require_own_exit(f"cannot end its member's life ({reason}) — {_HANDED_TO_THE_MEMBER}")
@@ -317,9 +319,11 @@ class WorkerBus(WorkerBusPublishMixin, WorkerBusSubscribeMixin, WorkerBusEnvRead
         The stop's first signal already arrived (or the app's lifespan shutdown began with no
         signal of ours), so this sends none: it pulls the latch and starts the ``recycling``
         announce (:meth:`_begin_leaving`), after which a recycle op answers ``already_leaving`` and
-        a carried roll is refused. A life already leaving is left alone: logged at INFO naming
-        both reasons, ``False``. A process that does not own its exit (:attr:`owns_exit`: a forked
-        job child) never ends its member's life: it does nothing, logged at INFO, ``False``.
+        a carried roll is refused. A change in flight keeps its hold and finishes within the drain
+        the stop allows; what outlasts the cap is cut by the stop, not by this. A life already
+        leaving is left alone: logged at INFO naming both reasons, ``False``. A process that does
+        not own its exit (:attr:`owns_exit`: a forked job child) never ends its member's life: it
+        does nothing, logged at INFO, ``False``.
         """
         if not self.owns_exit:
             logger.info("worker bus: a non-member process does not end its member's life — %s ignored here", reason)

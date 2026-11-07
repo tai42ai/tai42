@@ -224,6 +224,7 @@ async def read_settings_schema() -> dict:
     tags=["config"],
     destructive=True,
     reload_gated=True,
+    holds_writer_exit=True,
     errors=[BadRequestError, ConflictError, UnavailableError, UpstreamError],
     request_model=EnvUpdate,
     response_model=ApplyResponse,
@@ -282,6 +283,7 @@ async def write_env(env: dict[str, str], secret_keys: list[str] | None = None) -
     tags=["config"],
     destructive=True,
     reload_gated=True,
+    holds_writer_exit=True,
     request_model=ReloadConfigRequest,
     response_model=FleetReloadResponse,
 )
