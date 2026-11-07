@@ -76,9 +76,7 @@ async def _create_tool_api_route(api: ApiClient, *, route_name: str, tool: str, 
 
 async def _run_tool(api: ApiClient, tool_name: str, arguments: dict[str, Any]) -> dict:
     """The finished run's own value: the sync door's answer must be a ``result``."""
-    answer = await api.post(
-        "/api/run-tool", json={"tool_name": tool_name, "arguments": arguments}, expect=200, retry_on_reloading=True
-    )
+    answer = await api.post("/api/run-tool", json={"tool_name": tool_name, "arguments": arguments}, expect=200)
     assert answer["kind"] == "result", answer
     return answer["result"]
 
@@ -195,7 +193,6 @@ async def _drive_keyless_door_refusal(stack: TaiStack, uniq: Callable[[str], str
             "schedule_name": schedule_name,
         },
         expect=200,
-        retry_on_reloading=True,
     )
     try:
 
@@ -209,7 +206,7 @@ async def _drive_keyless_door_refusal(stack: TaiStack, uniq: Callable[[str], str
         assert record["error"] == "UnauthenticatedApiCallerError", record
         assert record["door"] == door, record
     finally:
-        await api.delete(f"/api/schedules/{schedule_name}", retry_on_reloading=True)
+        await api.delete(f"/api/schedules/{schedule_name}")
 
 
 @pytest.mark.needs(

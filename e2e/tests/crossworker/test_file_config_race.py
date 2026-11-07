@@ -10,30 +10,20 @@ from collections.abc import Callable
 
 import pytest
 
-from tai42_e2e import wait_for_async
 from tai42_e2e.httpapi import ApiClient
 from tai42_e2e.stack import TaiStack
 
 
 async def _write_env(api: ApiClient, body: dict[str, str]) -> None:
-    """Persist one env write, honouring the endpoint's documented retriable 503.
+    """Persist one env write.
 
     A write on one replica fans a ``reload_config`` out to its sibling, whose
-    reload gate then rejects the sibling's own concurrent write with a retriable
-    ``503 reloading`` — before that write reaches the flock'd read-modify-write.
-    Re-sending until it lands is the contract's intended client behaviour: the
-    file write itself is flock-serialized across processes, so once the gate
-    frees the key is persisted without loss (exactly what this test asserts)."""
-
-    async def _attempt() -> bool:
-        resp = await api.request_raw("POST", "/api/config/env", json={"env": body})
-        if resp.status_code == 503:  # retriable "reloading" — re-send
-            return False
-        if resp.status_code != 200:
-            raise AssertionError(f"POST /api/config/env -> {resp.status_code}: {resp.text}")
-        return True
-
-    await wait_for_async(_attempt, deadline=15.0, message=f"env write {body} never left the reloading gate")
+    reload gate then answers the sibling's own concurrent write with the retriable
+    ``503 reloading`` before that write reaches the flock'd read-modify-write; the
+    client re-sends it until it lands, the contract's intended client behaviour. The
+    file write itself is flock-serialized across processes, so once the gate frees the
+    key is persisted without loss (exactly what this test asserts)."""
+    await api.post("/api/config/env", json={"env": body}, ready_deadline=15.0)
 
 
 # The number of concurrent A/B write rounds. What the assertion needs is (a) both
@@ -100,8 +90,8 @@ async def test_replace_env_is_whole_map_and_deletes_omitted_keys(
 
     profile_env = {key: value for key, value in baseline.items() if key != marker}
     name = uniq("replace")
-    await api.put(f"/api/config/profiles/{name}", json={"env": profile_env}, retry_on_reloading=True)
-    await api.post(f"/api/config/profiles/{name}/apply", retry_on_reloading=True)
+    await api.put(f"/api/config/profiles/{name}", json={"env": profile_env})
+    await api.post(f"/api/config/profiles/{name}/apply")
 
     # Whole-map replace under the flock: the store reads back as EXACTLY the profile's env —
     # the omitted hot marker deleted, every preserved key intact.

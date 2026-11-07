@@ -158,7 +158,7 @@ async def test_corrupt_record_counts_unreadable_and_sweep_moves_it_to_failed(
 
     # (b) Drive one delivery sweep pass inside the worker; the unreadable pending row is failed.
     async with stack.mcp(auth=bridge.root_token) as mcp:
-        swept = await mcp.call_tool("e2e_sweep_stalled_deliveries", {}, retry_on_reloading=True)
+        swept = await mcp.call_tool("e2e_sweep_stalled_deliveries", {})
     assert swept.data["swept"] is True, swept.data
 
     # The row is terminal ``failed``: its status hash flipped and it moved out of the pending

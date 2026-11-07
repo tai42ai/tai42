@@ -478,10 +478,8 @@ async def _apply_hot_flip(api: ApiClient, uniq: Callable[[str], str]) -> None:
     stored = (await api.get("/api/config/env"))["env"]
     new_level = "DEBUG" if (stored.get("TAI_LOG_LEVEL") or "INFO").upper() != "DEBUG" else "INFO"
     name = uniq("swap")
-    await api.put(
-        f"/api/config/profiles/{name}", json={"env": {**stored, "TAI_LOG_LEVEL": new_level}}, retry_on_reloading=True
-    )
-    await api.post(f"/api/config/profiles/{name}/apply", retry_on_reloading=True, timeout=120.0)
+    await api.put(f"/api/config/profiles/{name}", json={"env": {**stored, "TAI_LOG_LEVEL": new_level}})
+    await api.post(f"/api/config/profiles/{name}/apply", timeout=120.0)
 
 
 @pytest.mark.timeout(300)

@@ -180,9 +180,7 @@ async def test_each_loop_process_reads_alive_with_its_own_pid(liveness_stack: Ta
 
 async def _send_long_job(stack: TaiStack, key: str, arguments: Mapping[str, Any], *, tool: str) -> None:
     async with stack.mcp() as mcp:
-        result = await mcp.call_tool(
-            f"{tool}_async_task", {"key": key, "seconds": _LONG_JOB_SECONDS, **arguments}, retry_on_reloading=True
-        )
+        result = await mcp.call_tool(f"{tool}_async_task", {"key": key, "seconds": _LONG_JOB_SECONDS, **arguments})
     queued = result.data if isinstance(result.data, dict) else result.structured_content
     assert isinstance(queued, dict), queued
     assert queued.get("status") == "submitted", queued
@@ -421,14 +419,13 @@ async def _restart_withdrawing_at_first_connect(stack: TaiStack, relay: TcpRelay
 async def _run_job(stack: TaiStack, worker: str, dispatch: Mapping[str, str]) -> None:
     """Run an ``e2e_worker_info`` job sent with ``dispatch``; asserts ``worker`` or a child it forked ran it."""
     async with stack.mcp() as mcp:
-        queued = await mcp.call_tool("e2e_worker_info_async_task", dict(dispatch), retry_on_reloading=True)
+        queued = await mcp.call_tool("e2e_worker_info_async_task", dict(dispatch))
         submitted = queued.data if isinstance(queued.data, dict) else queued.structured_content
         assert isinstance(submitted, dict), submitted
         assert submitted.get("status") == "submitted", submitted
         result = await mcp.call_tool(
             "backend_task_result",
             {"task_id": submitted["task_id"], "timeout": _RESULT_TIMEOUT},
-            retry_on_reloading=True,
         )
     info = result.data if isinstance(result.data, dict) else result.structured_content
     assert isinstance(info, dict), info
@@ -472,7 +469,7 @@ async def test_after_a_fleet_reload_every_process_runs_whole_and_the_stop_reaps_
     for process in _processes(stack):
         await _until_alive(stack, process)
 
-    report = await stack.api().post("/api/fleet/reload-config", json={"targets": None}, retry_on_reloading=True)
+    report = await stack.api().post("/api/fleet/reload-config", json={"targets": None})
     assert report["ok"] is True, report
     assert {row["outcome"] for row in report["results"]} == {"applied"}, report
     lives = {worker.name for worker in stack.census()}

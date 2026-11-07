@@ -83,16 +83,11 @@ async def test_a_resume_buffered_dispatch_over_mcp_records_parked_and_applies_no
                 ]
             },
         },
-        retry_on_reloading=True,
     )
 
     async with async_park_stack.mcp() as mcp:
-        control = await mcp.call_tool(
-            preset, {"key": key, "mark": "control", "buffer": False}, raise_on_error=False, retry_on_reloading=True
-        )
-        buffered = await mcp.call_tool(
-            preset, {"key": key, "mark": "buffered", "buffer": True}, raise_on_error=False, retry_on_reloading=True
-        )
+        control = await mcp.call_tool(preset, {"key": key, "mark": "control", "buffer": False}, raise_on_error=False)
+        buffered = await mcp.call_tool(preset, {"key": key, "mark": "buffered", "buffer": True}, raise_on_error=False)
 
     assert control.is_error is False, control.content
     assert buffered.is_error is False, buffered.content

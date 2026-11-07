@@ -35,7 +35,6 @@ async def _create_sync_task_preset(stack: TaiStack, name: str) -> str:
             "fixed_kwargs": {"payload": "baked"},
             "extensions": [["sync_task"]],
         },
-        retry_on_reloading=True,
     )
     branch = f"{name}_sync_task"
     async with stack.mcp() as mcp:
@@ -87,7 +86,6 @@ async def test_plain_tool_branch_is_a_valid_preset_base(seams_stack: TaiStack, u
     created = await api.post(
         "/api/presets",
         json={"name": name, "base_tool": _PLAIN_TOOL_BRANCH, "description": "preset over a plain tool branch"},
-        retry_on_reloading=True,
     )
     assert created["base_tool"] == _PLAIN_TOOL_BRANCH
     assert created["conflicted"] is False

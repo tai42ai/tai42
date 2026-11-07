@@ -115,7 +115,6 @@ async def _drive_stub_inbound(
                 "provider_message_id": provider_message_id,
                 "text": text,
             },
-            retry_on_reloading=True,
         )
     assert not result.is_error, result
     return result.data["message_id"]

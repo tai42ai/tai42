@@ -55,7 +55,6 @@ async def test_delete_preview_lists_a_bound_route(bridge: BridgeHarness, uniq: C
             "description": "route-bound echo preset",
             "fixed_kwargs": {"payload": "bound"},
         },
-        retry_on_reloading=True,
     )
     assert await api.get(f"/api/presets/{preset}/referees?action=delete") == {"action": "delete", "holders": []}
 

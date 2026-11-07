@@ -89,7 +89,6 @@ async def test_cancel_withdraws_a_pending_ask_and_a_later_reply_bridges_fresh(
                     "answer_format": "external",
                     "link": "https://ext.example/act?cb={callback_url}",
                 },
-                retry_on_reloading=True,
             )
         return result.data.answer
 

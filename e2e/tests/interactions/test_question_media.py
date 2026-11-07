@@ -68,7 +68,7 @@ async def _ask(stack: TaiStack, question: str, media: list[dict[str, object]] | 
     async with stack.mcp(port=stack.port_a) as mcp:
         # A boot-time ask races the ~2s self-resync gate (a retriable ``reloading``);
         # poll past it so the call parks on the real question, not the reload gate.
-        result = await mcp.call_tool("ask", arguments, retry_on_reloading=True)
+        result = await mcp.call_tool("ask", arguments)
     return result.data.answer
 
 
@@ -202,9 +202,7 @@ async def test_invalid_media_fails_loudly_and_writes_zero_state(
         async with replicas_stack.mcp(port=replicas_stack.port_a) as mcp:
             # Retry past a boot-time ``reloading`` gate; the invalid-media rejection is
             # a non-reload error, so it is returned at once (never retried).
-            result = await mcp.call_tool(
-                "ask", {"question": question, "media": media}, raise_on_error=False, retry_on_reloading=True
-            )
+            result = await mcp.call_tool("ask", {"question": question, "media": media}, raise_on_error=False)
         assert result.is_error, f"expected invalid media to reject {question!r}"
         text = "".join(getattr(block, "text", "") for block in (result.content or []))
         assert needle in text, f"error for {question!r} did not name the media rule: {text!r}"

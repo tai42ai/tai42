@@ -35,5 +35,5 @@ async def test_create_refuses_an_unserved_composed_tool(seams_stack: TaiStack, u
     assert refused.json()["error"] == f"composed tool {ghost!r} at step 1 is not a registered tool"
     assert name not in {row["name"] for row in await api.get("/api/presets")}
 
-    created = await api.post("/api/presets", json=_composer_body(name, ["e2e_echo"]), retry_on_reloading=True)
+    created = await api.post("/api/presets", json=_composer_body(name, ["e2e_echo"]))
     assert created["name"] == name

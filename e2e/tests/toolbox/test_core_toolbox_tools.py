@@ -37,7 +37,7 @@ from tai42_e2e.stack import TaiStack
 async def test_request_tool_hits_the_target_server(core_stack: TaiStack, target_server: TargetServer) -> None:
     before = len(target_server.records)
     async with core_stack.mcp(port=core_stack.port_a) as mcp:
-        result = await mcp.call_tool("request", {"url": f"{target_server.url}/ok"}, retry_on_reloading=True)
+        result = await mcp.call_tool("request", {"url": f"{target_server.url}/ok"})
     data = result.data
     assert data["status_code"] == 200, data
     assert data["text"] == "target-ok", data
@@ -61,7 +61,7 @@ async def test_generate_and_pad_embeddings(core_stack: TaiStack, llm_stub: LlmSt
         "embedding_kwargs": {"base_url": llm_stub.base_url, "api_key": "e2e-test"},
     }
     async with core_stack.mcp(port=core_stack.port_a) as mcp:
-        first = (await mcp.call_tool("generate_embeddings", call_args, retry_on_reloading=True)).data
+        first = (await mcp.call_tool("generate_embeddings", call_args)).data
         second = (await mcp.call_tool("generate_embeddings", call_args)).data
 
     assert isinstance(first, list), first
@@ -85,7 +85,7 @@ async def test_generate_and_pad_embeddings(core_stack: TaiStack, llm_stub: LlmSt
 @pytest.mark.needs("setting:tool:toolbox.current_time_info")
 async def test_current_time_info(core_stack: TaiStack) -> None:
     async with core_stack.mcp(port=core_stack.port_a) as mcp:
-        info = (await mcp.call_tool("current_time_info", retry_on_reloading=True)).data
+        info = (await mcp.call_tool("current_time_info")).data
     assert set(info) >= {"utc", "local", "system"}, info
     assert info["utc"]["year"] >= 2024, info["utc"]
     assert isinstance(info["system"]["epoch_seconds"], (int, float)), info["system"]
@@ -163,7 +163,7 @@ async def test_classify_is_deterministic_against_the_stub(core_stack: TaiStack, 
     # answer, so a state dropped or corrupted on the wire is detectable here.
     other_args = {**call_args, "state": {**_CLASSIFY_STATE, "count": _CLASSIFY_STATE["count"] + 1}}
     async with core_stack.mcp(port=core_stack.port_a) as mcp:
-        first = await mcp.call_tool("classify", call_args, retry_on_reloading=True)
+        first = await mcp.call_tool("classify", call_args)
         second = await mcp.call_tool("classify", call_args)
         other = await mcp.call_tool("classify", other_args)
 
@@ -224,7 +224,7 @@ async def test_classify_refuses_an_answer_outside_its_declared_sets(
     llm_stub.override_classifier_answer(name, answer)
     try:
         async with core_stack.mcp(port=core_stack.port_a) as mcp:
-            result = await mcp.call_tool("classify", call_args, raise_on_error=False, retry_on_reloading=True)
+            result = await mcp.call_tool("classify", call_args, raise_on_error=False)
     finally:
         llm_stub.reset()
 
@@ -245,7 +245,7 @@ async def test_classify_refuses_an_answer_outside_its_declared_sets(
 async def test_classify_against_the_real_vendor(core_stack: TaiStack) -> None:
     call_args = {"state": _CLASSIFY_STATE, "questions": _CLASSIFY_QUESTIONS}
     async with core_stack.mcp(port=core_stack.port_a) as mcp:
-        result = await mcp.call_tool("classify", call_args, retry_on_reloading=True)
+        result = await mcp.call_tool("classify", call_args)
     # The vendor's exact probabilities are the model's; the real leg asserts the response
     # shape only, never the values.
     _assert_classify_shape(ClassifyResponse.model_validate(result.structured_content))

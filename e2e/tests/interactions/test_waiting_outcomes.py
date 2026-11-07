@@ -164,7 +164,6 @@ async def test_an_untaken_waiting_outcome_is_swept_and_fires_its_event(
             "start_expr": {"content": f'{{key: "{sweep_key}", value: .completion_id}}'},
             "execution_key": uniq("sweep-exec"),
         },
-        retry_on_reloading=True,
     )
 
     run_id = await submit(api_a, "held_run", {"marker": uniq("q")}, subj)

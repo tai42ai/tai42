@@ -138,14 +138,10 @@ async def _await_fleet(stack: TaiStack) -> tuple[list[BusWorker], BusWorker]:
 
 
 async def _post_past_reload_gate(api: ApiClient, path: str, targets: list[str] | None) -> httpx.Response:
-    """POST a reload-gated fleet door, polling past the boot-time / in-flight reload
-    gate's retriable ``503`` so the returned response is the door's real verdict."""
-
-    async def settled() -> httpx.Response | None:
-        resp = await api.request_raw("POST", path, json={"targets": targets})
-        return resp if resp.status_code != 503 else None
-
-    return await wait_for_async(settled, deadline=15.0, message=f"{path} never left the reload gate")
+    """POST a reload-gated fleet door; the client polls past the boot-time / in-flight
+    reload gate's retriable ``503 reloading``, so the returned response is the door's real
+    verdict."""
+    return await api.request_raw("POST", path, json={"targets": targets}, ready_deadline=15.0)
 
 
 async def _fleet_reload(api: ApiClient, targets: list[str] | None = None) -> httpx.Response:
@@ -165,7 +161,6 @@ async def _backend_dispatch(stack: TaiStack, tool: str, arguments: dict) -> Call
             "run_tool_sync_task",
             {"tool_name": tool, "arguments": arguments},
             raise_on_error=False,
-            retry_on_reloading=True,
         )
 
 
@@ -185,9 +180,9 @@ async def _normalize(stack: TaiStack) -> None:
 
 
 # A liveness bound (a bound on a hang, not a performance limit): twice the slowest legitimate
-# run, stack boot included, measured on CI (arq, shard 10, 2026-11-06: 14.8s), rounded up to
+# run, stack boot included, measured on CI (celery, shard 2, 2026-11-07: 28.4s), rounded up to
 # the next 10s.
-@pytest.mark.timeout(30)
+@pytest.mark.timeout(60)
 @pytest.mark.needs("probe-tools", "setting:extension:sync_task", "setting:TAI_BUS_APPLY_TIMEOUT=30")
 async def test_fleet_op_reaches_backend_worker_under_load(
     fleet_mcp_stack: TaiStack, uniq: Callable[[str], str]
@@ -211,9 +206,7 @@ async def test_fleet_op_reaches_backend_worker_under_load(
         # ``e2e_slow_task_sync_task`` RPUSHes a ``started`` marker then blocks IN the
         # backend worker — the record-then-block probe purpose-built for in-flight work.
         async with stack.mcp() as mcp:
-            await mcp.call_tool(
-                "e2e_slow_task_sync_task", {"key": key, "seconds": _TASK_SECONDS}, retry_on_reloading=True
-            )
+            await mcp.call_tool("e2e_slow_task_sync_task", {"key": key, "seconds": _TASK_SECONDS})
 
     task = asyncio.create_task(run_slow())
     try:

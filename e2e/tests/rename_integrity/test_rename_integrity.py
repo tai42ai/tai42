@@ -87,7 +87,7 @@ async def test_fixture_referee_raise_fails_rename_loudly(seams_stack: TaiStack, 
     failed = await rename_raw(seams_stack, name, uniq("renamed"))
     assert failed.status_code >= 500, failed.text
     # The preset is untouched under its old name — the loud failure committed no rename.
-    row = await seams_stack.api().get(f"/api/presets/{name}", retry_on_reloading=True)
+    row = await seams_stack.api().get(f"/api/presets/{name}")
     assert row["name"] == name
 
 

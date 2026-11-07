@@ -9,7 +9,6 @@ from collections.abc import Callable
 from typing import Any
 
 import pytest
-from fastmcp.exceptions import ToolError
 
 from tai42_e2e import wait_for_async
 from tai42_e2e.stack import TaiStack
@@ -35,16 +34,6 @@ def _tool_text(result: Any) -> str:
     if result.structured_content is not None:
         return str(result.structured_content)
     return "".join(getattr(block, "text", "") for block in (result.content or []))
-
-
-def _reloading(exc: ToolError) -> bool:
-    """True for the worker's retriable mid-reload rejection.
-
-    A worker applying a config reload refuses tool calls with a "reloading —
-    retry shortly" error; a polled predicate treats that as "not yet" and
-    polls again, exactly as a client would. Any other tool error is real and
-    propagates."""
-    return "reloading" in str(exc)
 
 
 async def _call_preset(stack: TaiStack, port: int, name: str) -> str:
@@ -73,7 +62,6 @@ async def test_preset_create_always_persists(replicas_stack: TaiStack, uniq: Cal
             "description": "cross-worker echo preset",
             "fixed_kwargs": {"payload": "baked"},
         },
-        retry_on_reloading=True,
     )
     # Versioned-only: no ephemeral/persisted tier keys, an int active_version.
     assert "persisted" not in record
@@ -84,9 +72,7 @@ async def test_preset_create_always_persists(replicas_stack: TaiStack, uniq: Cal
     names_b = [p["name"] for p in await replicas_stack.api(port=replicas_stack.port_b).get("/api/presets")]
     assert name in names_a
     assert name in names_b
-    await api_a.request(
-        "POST", "/api/config/env", json={"env": {}}, retry_on_reloading=True, ready_deadline=_SIBLING_RELOAD_S
-    )
+    await api_a.request("POST", "/api/config/env", json={"env": {}}, ready_deadline=_SIBLING_RELOAD_S)
     assert name in [p["name"] for p in await api_a.get("/api/presets")]
 
 
@@ -113,7 +99,6 @@ async def test_preset_created_on_a_visible_on_b_and_rebinds_on_reload(
             "description": "cross-worker echo preset",
             "fixed_kwargs": {"payload": baked},
         },
-        retry_on_reloading=True,
     )
     original_version = created["active_version"]
 
@@ -122,20 +107,13 @@ async def test_preset_created_on_a_visible_on_b_and_rebinds_on_reload(
     assert await _call_preset(replicas_stack, replicas_stack.port_a, name) == baked
 
     # B's live binding follows only after B's own reload.
-    await api_b.request(
-        "POST", "/api/config/env", json={"env": {}}, retry_on_reloading=True, ready_deadline=_SIBLING_RELOAD_S
-    )
+    await api_b.request("POST", "/api/config/env", json={"env": {}}, ready_deadline=_SIBLING_RELOAD_S)
 
     async def b_serves_baked() -> bool:
-        try:
-            async with replicas_stack.mcp(port=replicas_stack.port_b) as mcp:
-                if name not in await mcp.tool_names():
-                    return False
-            return await _call_preset(replicas_stack, replicas_stack.port_b, name) == baked
-        except ToolError as exc:
-            if _reloading(exc):
+        async with replicas_stack.mcp(port=replicas_stack.port_b) as mcp:
+            if name not in await mcp.tool_names():
                 return False
-            raise
+        return await _call_preset(replicas_stack, replicas_stack.port_b, name) == baked
 
     await wait_for_async(b_serves_baked, deadline=5.0, message="B never rebound the preset after its reload")
 
@@ -146,12 +124,7 @@ async def test_preset_created_on_a_visible_on_b_and_rebinds_on_reload(
     assert await _call_preset(replicas_stack, replicas_stack.port_b, name) == new_payload
 
     async def backend_sees_new() -> bool:
-        try:
-            return await _backend_call(replicas_stack, name) == new_payload
-        except ToolError as exc:
-            if _reloading(exc):
-                return False
-            raise
+        return await _backend_call(replicas_stack, name) == new_payload
 
     await wait_for_async(backend_sees_new, deadline=5.0, message="backend worker never saw the new preset version")
 

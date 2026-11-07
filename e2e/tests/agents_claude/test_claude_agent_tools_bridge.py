@@ -57,7 +57,6 @@ async def test_the_tool_proxy_is_identity_gated_on_both_doors(
         result = await mcp.call_tool(
             "claude_code",
             {"user_message": {"content": "hi"}, "tool_names": ["e2e_echo"]},
-            retry_on_reloading=True,
             raise_on_error=False,
         )
     assert result.is_error, result.data

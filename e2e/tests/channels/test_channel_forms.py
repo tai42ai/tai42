@@ -1034,7 +1034,7 @@ _NOTIFY_FORM_SCHEMA = {
 
 async def _notify(stack: TaiStack, arguments: dict) -> CallToolResult:
     async with stack.mcp(port=stack.port_a) as mcp:
-        return await mcp.call_tool("notify_user", arguments, raise_on_error=False, retry_on_reloading=True)
+        return await mcp.call_tool("notify_user", arguments, raise_on_error=False)
 
 
 @pytest.mark.needs("store:redis", "setting:tai42_e2e_fixtures.stub_form_channel")

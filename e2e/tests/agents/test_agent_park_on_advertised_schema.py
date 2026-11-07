@@ -58,7 +58,6 @@ async def test_a_preset_with_an_output_schema_over_a_parking_agent_parks_over_mc
             "description": "A tools agent answering in a fixed shape.",
             "output_schema": _ANSWER_SCHEMA,
         },
-        retry_on_reloading=True,
     )
 
     llm_stub.reset()
@@ -89,7 +88,6 @@ async def test_a_preset_with_an_output_schema_over_a_parking_agent_parks_over_mc
                 "langgraph_config": {"configurable": {"thread_id": thread_id}},
             },
             raise_on_error=False,
-            retry_on_reloading=True,
         )
 
     # The client validated the park against the advertised schema and reads it as a park, not an error.

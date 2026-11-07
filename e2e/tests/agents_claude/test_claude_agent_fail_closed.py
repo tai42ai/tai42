@@ -51,7 +51,6 @@ async def test_tool_names_on_identity_less_tool_face_is_refused(
         result = await mcp.call_tool(
             "claude_code",
             {"user_message": {"content": "hi"}, "tool_names": ["e2e_echo"]},
-            retry_on_reloading=True,
             raise_on_error=False,
         )
     assert result.is_error, result.data

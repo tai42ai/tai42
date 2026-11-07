@@ -26,7 +26,7 @@ async def create_preset(stack: TaiStack, name: str, *, schedulable: bool = False
     }
     if schedulable:
         body["extensions"] = [["schedule_task"]]
-    return await stack.api().post("/api/presets", json=body, retry_on_reloading=True)
+    return await stack.api().post("/api/presets", json=body)
 
 
 async def schedule_preset(stack: TaiStack, preset: str, schedule_name: str) -> None:
@@ -40,12 +40,11 @@ async def schedule_preset(stack: TaiStack, preset: str, schedule_name: str) -> N
             "cadence": {"kind": "interval", "every": _INERT_INTERVAL_SECONDS},
             "schedule_name": schedule_name,
         },
-        retry_on_reloading=True,
     )
 
 
 async def unschedule(stack: TaiStack, schedule_name: str) -> None:
-    await stack.api().delete(f"/api/schedules/{schedule_name}", retry_on_reloading=True)
+    await stack.api().delete(f"/api/schedules/{schedule_name}")
 
 
 async def register_hook(stack: TaiStack, uniq: Callable[[str], str], preset: str) -> str:
@@ -60,18 +59,17 @@ async def register_hook(stack: TaiStack, uniq: Callable[[str], str], preset: str
             "tool": preset,
             "execution_key": uniq("exec"),
         },
-        retry_on_reloading=True,
     )
     return hook_name
 
 
 async def delete_hook(stack: TaiStack, hook_name: str) -> None:
-    await stack.api().delete(f"/api/hooks/{hook_name}", retry_on_reloading=True)
+    await stack.api().delete(f"/api/hooks/{hook_name}")
 
 
 async def referees(stack: TaiStack, preset: str) -> list[str]:
     """The rename preview door's holder summaries for ``preset``."""
-    body = await stack.api().get(f"/api/presets/{preset}/referees?action=rename", retry_on_reloading=True)
+    body = await stack.api().get(f"/api/presets/{preset}/referees?action=rename")
     assert body["action"] == "rename"
     return [holder["summary"] for holder in body["holders"]]
 

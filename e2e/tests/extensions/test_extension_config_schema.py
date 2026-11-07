@@ -56,7 +56,7 @@ def _error_text(result: CallToolResult) -> str:
 
 
 async def _preserved(stack: TaiStack) -> dict[str, Any]:
-    return await stack.api().get("/api/manifest/preserved", retry_on_reloading=True)
+    return await stack.api().get("/api/manifest/preserved")
 
 
 async def _served_tools(stack: TaiStack) -> list[str]:
@@ -65,7 +65,7 @@ async def _served_tools(stack: TaiStack) -> list[str]:
 
 
 async def test_the_catalog_serves_each_extension_config_schema(extensions_stack: TaiStack) -> None:
-    listing = await extensions_stack.api().get("/api/extensions", retry_on_reloading=True)
+    listing = await extensions_stack.api().get("/api/extensions")
     by_name = {entry["name"]: entry for entry in listing}
     output_schema = by_name["output_schema"]["config_schema"]
     assert output_schema["properties"]["schema"]["$ref"] == _META_SCHEMA
@@ -74,16 +74,14 @@ async def test_the_catalog_serves_each_extension_config_schema(extensions_stack:
     assert by_name["cache"]["config_schema"] is None
 
     async with extensions_stack.mcp() as mcp:
-        result = await mcp.call_tool("list_extensions", {}, retry_on_reloading=True)
+        result = await mcp.call_tool("list_extensions", {})
     assert isinstance(result.structured_content, dict), result
     assert result.structured_content["result"] == listing
 
 
 async def test_a_bare_output_schema_combo_is_refused_naming_schema(extensions_stack: TaiStack) -> None:
     before = await _preserved(extensions_stack)
-    refused = await extensions_stack.api().post(
-        _EXTENSIONS_PATH, json={"combos": [["output_schema"]]}, expect=400, retry_on_reloading=True
-    )
+    refused = await extensions_stack.api().post(_EXTENSIONS_PATH, json={"combos": [["output_schema"]]}, expect=400)
     assert "'schema'" in refused["error"], refused
     assert await _preserved(extensions_stack) == before
 
@@ -92,9 +90,7 @@ async def test_a_schema_with_an_unresolved_ref_is_refused_on_every_door(extensio
     before = await _preserved(extensions_stack)
     tools_before = await _served_tools(extensions_stack)
 
-    refused = await extensions_stack.api().post(
-        _EXTENSIONS_PATH, json={"combos": _UNRESOLVED_REF_COMBOS}, expect=400, retry_on_reloading=True
-    )
+    refused = await extensions_stack.api().post(_EXTENSIONS_PATH, json={"combos": _UNRESOLVED_REF_COMBOS}, expect=400)
     assert refused == {"error": _UNRESOLVED_REF_ERROR}
 
     async with extensions_stack.mcp() as mcp:
@@ -102,7 +98,6 @@ async def test_a_schema_with_an_unresolved_ref_is_refused_on_every_door(extensio
             "set_tool_extensions",
             {"name": _TOOL, "combos": _UNRESOLVED_REF_COMBOS},
             raise_on_error=False,
-            retry_on_reloading=True,
         )
     assert result.is_error, result
     assert _error_text(result) == _UNRESOLVED_REF_ERROR
@@ -112,9 +107,7 @@ async def test_a_schema_with_an_unresolved_ref_is_refused_on_every_door(extensio
 
 
 async def test_settings_on_a_base_no_server_serves_yet_are_refused(extensions_stack: TaiStack) -> None:
-    refused = await extensions_stack.api().post(
-        "/api/mcp-config/entries", json={"entries": [_LATE_ENTRY]}, expect=400, retry_on_reloading=True
-    )
+    refused = await extensions_stack.api().post("/api/mcp-config/entries", json={"entries": [_LATE_ENTRY]}, expect=400)
     assert refused == {"error": _LATE_ERROR}
     stored = await _preserved(extensions_stack)
     assert all(entry["title"] != "late" for entry in stored["mcp"]), stored["mcp"]
@@ -122,10 +115,10 @@ async def test_settings_on_a_base_no_server_serves_yet_are_refused(extensions_st
 
 async def test_a_marker_resolving_to_a_wrong_type_is_refused_without_its_value(extensions_stack: TaiStack) -> None:
     api = extensions_stack.api()
-    await api.post("/api/config/env", json={"env": {"E2E_SETTING_SECRET": _SECRET}}, retry_on_reloading=True)
+    await api.post("/api/config/env", json={"env": {"E2E_SETTING_SECRET": _SECRET}})
     before = await _preserved(extensions_stack)
 
-    refused = await api.post(_EXTENSIONS_PATH, json={"combos": _MARKER_COMBOS}, expect=400, retry_on_reloading=True)
+    refused = await api.post(_EXTENSIONS_PATH, json={"combos": _MARKER_COMBOS}, expect=400)
     assert refused == {"error": _MARKER_ERROR}
     raw = await api.request_raw("POST", _EXTENSIONS_PATH, json={"combos": _MARKER_COMBOS})
     assert raw.status_code == 400, raw.text
@@ -136,7 +129,6 @@ async def test_a_marker_resolving_to_a_wrong_type_is_refused_without_its_value(e
             "set_tool_extensions",
             {"name": _TOOL, "combos": _MARKER_COMBOS},
             raise_on_error=False,
-            retry_on_reloading=True,
         )
     assert result.is_error, result
     assert _error_text(result) == _MARKER_ERROR

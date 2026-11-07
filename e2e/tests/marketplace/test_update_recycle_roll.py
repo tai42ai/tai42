@@ -63,7 +63,7 @@ def _lives(stack: TaiStack) -> dict[str, tuple[str, int]]:
 
 async def _probe_pool_url(stack: TaiStack) -> str:
     async with stack.mcp(auth=stack.auth_token) as mcp:
-        result = await mcp.call_tool(LAMBDA_TOOL, {}, retry_on_reloading=True)
+        result = await mcp.call_tool(LAMBDA_TOOL, {})
     data = result.data if isinstance(result.data, dict) else result.structured_content
     assert isinstance(data, dict), f"{LAMBDA_TOOL} returned no result map: {result!r}"
     return data["pool_url"]
@@ -130,7 +130,6 @@ async def test_an_update_moving_a_recycle_class_key_rolls_every_supervised_worke
     updated = await api.post(
         "/api/marketplace/update",
         json={"ref": PI_REF, "version": PI_V2_VERSION, "env": {LAMBDA_POOL_URL_ENV: new}},
-        retry_on_reloading=True,
         timeout=330.0,
     )
     _assert_rolled_every_target(updated)
@@ -140,7 +139,7 @@ async def test_an_update_moving_a_recycle_class_key_rolls_every_supervised_worke
     # The respawned workers bound the new value at boot: nothing awaits on the next reload, and
     # it answers in its own time — no worker's retire waits a drain budget on a publish.
     started = time.monotonic()
-    report = await api.post("/api/fleet/reload-config", json={"targets": None}, retry_on_reloading=True)
+    report = await api.post("/api/fleet/reload-config", json={"targets": None})
     elapsed = time.monotonic() - started
     assert elapsed < _DRAIN_BUDGET_S / 3, f"the fleet reload took {elapsed:.1f} s: {report}"
     assert report["ok"] is True, report
@@ -148,5 +147,5 @@ async def test_an_update_moving_a_recycle_class_key_rolls_every_supervised_worke
     assert await _probe_pool_url(stack) == new
 
     for ref in (PI_REF, LAMBDA_REF):
-        await api.post("/api/marketplace/uninstall", json={"ref": ref}, retry_on_reloading=True)
+        await api.post("/api/marketplace/uninstall", json={"ref": ref})
     assert not {PI_REF, LAMBDA_REF} & set(await installed_refs(stack))

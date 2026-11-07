@@ -7,8 +7,8 @@ redis or a silent worker) is surfaced honestly and healed.
 * Two connector connects fired SIMULTANEOUSLY (``e2e_noauth_alpha`` +
   ``e2e_noauth_beta``) — both are read-modify-write APPENDS to the ``mcp`` list,
   so a lawful order can erase NEITHER — both survive in the persisted manifest
-  (the lost-update regression). A writer 503'd by the reload gate retries with
-  backoff (``retry_on_reloading``); the assertion is on the FINAL state.
+  (the lost-update regression). A writer 503'd by the reload gate is retried by
+  the client past that retriable answer; the assertion is on the FINAL state.
 * A ruamel-normalized COMMENTED manifest, seeded byte-verbatim, survives a UI-path
   config edit: the unedited lines are byte-identical afterward (the guarantee is
   "byte-stable modulo edited keys", not whole-file byte equality).
@@ -108,7 +108,6 @@ async def test_concurrent_connects_both_persist(
         return await api.post(
             "/api/connectors/connections/start",
             json={"provider_id": provider_id, "alias": alias, "enabled_sub_services": ["default"]},
-            retry_on_reloading=True,
             timeout=_CONNECT_READ_TIMEOUT,
         )
 
@@ -180,7 +179,6 @@ async def test_comment_preservation(fresh_stack: Callable[..., TaiStack], uniq: 
     await stack.api().post(
         "/api/mcp-config",
         json={"mcp": [{"title": new_title, "config": _UNREACHABLE}]},
-        retry_on_reloading=True,
     )
 
     persisted = path.read_text()
@@ -276,7 +274,6 @@ async def test_bus_outage_isolates_feature_stores_and_expires_presence(
         "/api/tool-runs",
         json={"tool_name": "e2e_echo", "arguments": {"payload": "x"}},
         expect=202,
-        retry_on_reloading=True,
     )
 
     # The outage outlasts the TTL: every presence key expires on the (directly-read) bus
@@ -322,9 +319,7 @@ async def test_mutation_during_outage_reports_and_fleet_recovers(
     # A 200 (so the local persist + reload committed — a failed local reload would raise)
     # whose fanout is the honest unreachable shape (connection error, no worker list).
     title = uniq("outage_mcp")
-    result = await api.post(
-        "/api/mcp-config", json={"mcp": [{"title": title, "config": _UNREACHABLE}]}, retry_on_reloading=True
-    )
+    result = await api.post("/api/mcp-config", json={"mcp": [{"title": title, "config": _UNREACHABLE}]})
     fanout = result.get("fanout")
     assert isinstance(fanout, dict), f"the mutation carried no fanout report: {result}"
     assert fanout["mode"] == "unreachable", f"a dead bus must report unreachable, not {fanout!r}"
@@ -360,7 +355,7 @@ async def test_mutation_during_outage_reports_and_fleet_recovers(
     assert members == sorted(pre_lives), f"the re-minted fleet is not the pre-outage fleet: {members} != {pre_lives}"
 
     # The restored bus carries fleet ops again: every re-minted serve member applies a reload.
-    report = await api.post("/api/fleet/reload-config", json={"targets": None}, retry_on_reloading=True)
+    report = await api.post("/api/fleet/reload-config", json={"targets": None})
     assert_applied_by(report, members)
 
 
@@ -409,7 +404,7 @@ async def _replica_pid(stack: TaiStack, port: int) -> int:
     """The pid of the replica that serves ``port`` — REPLICAS gives each replica its own
     port, so the call addresses one worker."""
     async with stack.mcp(port=port) as mcp:
-        result = await mcp.call_tool("e2e_worker_info", retry_on_reloading=True)
+        result = await mcp.call_tool("e2e_worker_info")
     data = result.data if result.data is not None else result.structured_content
     if not isinstance(data, dict) or "pid" not in data:
         raise RuntimeError(f"e2e_worker_info returned an unexpected shape: {data!r}")
@@ -470,9 +465,7 @@ async def test_silent_worker_reports_missing_then_converges(
         # state is unknown, so the roll asks it once ready and, still silent, restarts it;
         # silent, it never comes back ready and the roll stops at it.
         title = uniq("silent_mcp")
-        result = await api_a.post(
-            "/api/mcp-config", json={"mcp": [{"title": title, "config": _UNREACHABLE}]}, retry_on_reloading=True
-        )
+        result = await api_a.post("/api/mcp-config", json={"mcp": [{"title": title, "config": _UNREACHABLE}]})
         fanout = assert_fleet_fanout(result)
         outcomes = {entry["name"]: entry["outcome"] for entry in fanout["results"]}
         assert outcomes.get(b_name) == "missing", f"the SIGSTOPped replica was not reported missing: {fanout}"
@@ -493,7 +486,7 @@ async def test_silent_worker_reports_missing_then_converges(
     # Final convergence: a fleet reload finds every worker clean, restarts nobody, and is
     # applied by both replicas, each re-reading the persisted state that carries the mutation.
     members = serve_members(stack)
-    report = await api_a.post("/api/fleet/reload-config", json={"targets": None}, retry_on_reloading=True)
+    report = await api_a.post("/api/fleet/reload-config", json={"targets": None})
     assert report["recycle"] is None, f"the reload after the resume restarted a worker: {report}"
     assert_applied_by(report, members)
     document = yaml.safe_load(manifest_file(stack).read_text()) or {}
@@ -574,7 +567,7 @@ async def test_stale_worker_flag_flips_and_broadcast_reports_stale(fresh_stack: 
         # Poll the fleet listing until replica B's server-computed ``stale`` flag flips true
         # while its row is still a ``ready`` row (present but past the freshness bound).
         async def b_is_stale() -> bool:
-            listing = (await api_a.get("/api/fleet/workers", retry_on_reloading=True))["workers"]
+            listing = (await api_a.get("/api/fleet/workers"))["workers"]
             row = next((worker for worker in listing if worker["name"] == b_name), None)
             return row is not None and row["stale"] and row["state"] == "ready"
 
@@ -589,7 +582,7 @@ async def test_stale_worker_flag_flips_and_broadcast_reports_stale(fresh_stack: 
         # census lands well inside the ~10s stale window. A config mutation's local reload
         # outlasts that window on a loaded host (up to 21.4s measured), and the row would
         # expire before the census.
-        result = await api_a.post("/api/mcp-status/reload-failed", json={}, retry_on_reloading=True)
+        result = await api_a.post("/api/mcp-status/reload-failed", json={})
         outcomes = {entry["name"]: entry["outcome"] for entry in result["results"]}
         assert outcomes.get(b_name) == "stale", f"the stale replica was not reported stale: {result}"
     finally:
@@ -598,7 +591,7 @@ async def test_stale_worker_flag_flips_and_broadcast_reports_stale(fresh_stack: 
 
     # The resumed replica renews its presence key, so its row reads fresh again.
     async def b_is_fresh() -> bool:
-        listing = (await api_a.get("/api/fleet/workers", retry_on_reloading=True))["workers"]
+        listing = (await api_a.get("/api/fleet/workers"))["workers"]
         row = next((worker for worker in listing if worker["name"] == b_name), None)
         return row is not None and not row["stale"] and row["state"] == "ready"
 
@@ -606,5 +599,5 @@ async def test_stale_worker_flag_flips_and_broadcast_reports_stale(fresh_stack: 
 
     # Post-recovery a fleet reload is applied by both replicas, each re-reading the persisted state.
     members = serve_members(stack)
-    report = await api_a.post("/api/fleet/reload-config", json={"targets": None}, retry_on_reloading=True)
+    report = await api_a.post("/api/fleet/reload-config", json={"targets": None})
     assert_applied_by(report, members)

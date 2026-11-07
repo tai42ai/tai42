@@ -40,15 +40,15 @@ def _probe_entry(settings: dict[str, Any]) -> dict[str, Any]:
 
 @pytest.mark.parametrize("path", ["/api/manifest", "/api/manifest/preserved"])
 async def test_the_manifest_reads_serve_the_extension_settings(extensions_stack: TaiStack, path: str) -> None:
-    body = await extensions_stack.api().get(path, retry_on_reloading=True)
+    body = await extensions_stack.api().get(path)
     settings = body["extension_settings"]
     assert settings["extensions_modules"] == _EXTENSIONS_MODULES
     assert _probe_entry(settings)["extensions"]["e2e_record"] == [["cache"]]
 
 
 async def test_the_projected_get_manifest_tool_serves_the_same_extension_settings(extensions_stack: TaiStack) -> None:
-    served = (await extensions_stack.api().get("/api/manifest", retry_on_reloading=True))["extension_settings"]
+    served = (await extensions_stack.api().get("/api/manifest"))["extension_settings"]
     async with extensions_stack.mcp() as mcp:
-        result = await mcp.call_tool("get_manifest", {}, retry_on_reloading=True)
+        result = await mcp.call_tool("get_manifest", {})
     assert isinstance(result.structured_content, dict), result
     assert result.structured_content["extension_settings"] == served

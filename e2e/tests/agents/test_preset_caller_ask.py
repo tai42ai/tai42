@@ -58,7 +58,7 @@ async def test_a_caller_ask_behind_a_preset_answers_with_the_caller_ask_at_the_s
         # A ``to="caller"`` ask indexes its park on the run's subject, so the door names one.
         "subject": {"target_kind": "agent", "target_name": "tools_agent", "kind": "job", "key": uniq("preset-subj")},
     }
-    answer = await stack.api().post("/api/run-tool", json=body, expect=200, retry_on_reloading=True)
+    answer = await stack.api().post("/api/run-tool", json=body, expect=200)
 
     assert answer["kind"] == "asks", answer
     (entry,) = answer["asks"]

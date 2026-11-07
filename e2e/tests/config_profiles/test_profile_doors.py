@@ -27,7 +27,7 @@ _X_BAND_KEY = "TAI_RUN_MODE"
 
 
 async def _put(stack: TaiStack, name: str, body: dict[str, Any]) -> Any:
-    return await stack.api().put(f"/api/config/profiles/{name}", json=body, retry_on_reloading=True)
+    return await stack.api().put(f"/api/config/profiles/{name}", json=body)
 
 
 @pytest.mark.needs("kind:versioning")
@@ -110,7 +110,6 @@ async def test_diff_buckets(agents_stack: TaiStack, uniq: Callable[[str], str]) 
     await api.post(
         "/api/config/env",
         json={"env": {"E2E_DIFF_KEEP": "same", "E2E_DIFF_CHANGE": "old", "E2E_DIFF_GONE": "x"}},
-        retry_on_reloading=True,
     )
     name = uniq("profile")
     await _put(
@@ -214,11 +213,11 @@ async def test_previous_revert_round_trip(agents_stack: TaiStack, uniq: Callable
 
     name = uniq("profile")
     await _put(agents_stack, name, {"description": "", "env": {**before, marker: "on"}, "secret_keys": []})
-    await api.post(f"/api/config/profiles/{name}/apply", retry_on_reloading=True)
+    await api.post(f"/api/config/profiles/{name}/apply")
     assert marker in (await api.get("/api/config/env"))["env"], "the applied profile did not land in the stored env"
 
     # @previous holds the pre-apply band; applying it writes that whole band back exactly.
-    await api.post("/api/config/profiles/@previous/apply", retry_on_reloading=True)
+    await api.post("/api/config/profiles/@previous/apply")
     after = (await api.get("/api/config/env"))["env"]
     assert after == before, f"applying @previous did not restore the pre-apply stored env: {after} != {before}"
 
@@ -236,11 +235,11 @@ async def test_applied_profile_keeps_its_secret_marks(agents_stack: TaiStack, un
     name = uniq("profile")
     await _put(agents_stack, name, {"description": "", "env": {**rows, marked: "s3cr3t"}, "secret_keys": [marked]})
     try:
-        await api.post(f"/api/config/profiles/{name}/apply", retry_on_reloading=True)
-        after = await api.get("/api/config/env", retry_on_reloading=True)
+        await api.post(f"/api/config/profiles/{name}/apply")
+        after = await api.get("/api/config/env")
         assert marked in after["secret_keys"], f"the applied profile's mark did not survive: {after['secret_keys']}"
     finally:
-        await api.post("/api/config/profiles/@previous/apply", retry_on_reloading=True)
+        await api.post("/api/config/profiles/@previous/apply")
 
 
 def _string_leaves(node: Any) -> list[str]:

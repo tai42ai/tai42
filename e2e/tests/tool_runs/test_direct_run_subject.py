@@ -41,7 +41,6 @@ async def _run_tool(api: Any, tool_name: str, arguments: dict[str, Any], subject
         "/api/run-tool",
         json={"tool_name": tool_name, "arguments": arguments, "subject": subject},
         expect=200,
-        retry_on_reloading=True,
     )
     assert answer["kind"] == "result", answer
     return answer["result"]
@@ -95,7 +94,6 @@ async def test_background_submit_door_carries_subject(replicas_stack: TaiStack, 
             "subject": subject,
         },
         expect=202,
-        retry_on_reloading=True,
     )
     run_id = submitted["run_id"]
 

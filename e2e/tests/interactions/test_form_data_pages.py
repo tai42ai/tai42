@@ -110,7 +110,6 @@ async def test_form_data_pages_render_prefilled_stepped_and_the_post_carries_eve
                     "data": data,
                     "pages": pages,
                 },
-                retry_on_reloading=True,
             )
         return result.data.answer
 
@@ -190,7 +189,6 @@ async def test_form_shapes_ride_the_page_and_the_door_refuses_with_the_fields_se
                     "schema": _SHAPED_SCHEMA,
                     "wording": {"form": {"fields": {"email": {"invalid": "Enter your full address"}}}},
                 },
-                retry_on_reloading=True,
             )
         return result.data.answer
 
@@ -260,7 +258,7 @@ async def test_bad_form_data_and_pages_are_refused_at_the_ask_door_before_any_st
 
     async def ask(arguments: dict) -> CallToolResult:
         async with stack.mcp(port=stack.port_a) as mcp:
-            return await mcp.call_tool("ask", arguments, raise_on_error=False, retry_on_reloading=True)
+            return await mcp.call_tool("ask", arguments, raise_on_error=False)
 
     # A ``values`` key naming a property the schema does not declare is refused at the ask
     # door, naming the field, BEFORE any state is written (nothing pending).

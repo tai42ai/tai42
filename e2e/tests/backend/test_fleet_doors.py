@@ -15,7 +15,6 @@ from collections.abc import Callable
 import httpx
 import pytest
 
-from tai42_e2e import wait_for_async
 from tai42_e2e.httpapi import ApiClient
 from tai42_e2e.member_admin import invite_member
 from tai42_e2e.stack import TaiStack
@@ -24,14 +23,9 @@ _PASSWORD = "fleet-fence-password-1"
 
 
 async def _reload(api: ApiClient, targets: list[str] | None) -> httpx.Response:
-    """POST the fleet reload door, polling past the boot-time reload gate (a held gate
-    answers a retriable 503) so the returned response is the door's real verdict."""
-
-    async def settled() -> httpx.Response | None:
-        resp = await api.request_raw("POST", "/api/fleet/reload-config", json={"targets": targets})
-        return resp if resp.status_code != 503 else None
-
-    return await wait_for_async(settled, deadline=10.0, message="fleet reload never left the reload gate")
+    """POST the fleet reload door; the client polls past the reload gate's retriable
+    ``503 reloading``, so the returned response is the door's real verdict."""
+    return await api.request_raw("POST", "/api/fleet/reload-config", json={"targets": targets}, ready_deadline=10.0)
 
 
 @pytest.mark.needs("kind:backend", "setting:harness-backend-variant")
@@ -90,9 +84,7 @@ async def test_fleet_reload_config_bogus_target_raises_naming_it(core_stack: Tai
     # on the fleet ``reload_config`` tool.
     async def _call_bogus_tool():
         async with core_stack.mcp() as mcp:
-            return await mcp.call_tool(
-                "reload_config", {"targets": [bogus]}, raise_on_error=False, retry_on_reloading=True
-            )
+            return await mcp.call_tool("reload_config", {"targets": [bogus]}, raise_on_error=False)
 
     # A prior test's fleet reload can retire a freshly-opened MCP session mid-call
     # (a swap terminates sessions); ``McpClient`` re-initialises transparently and

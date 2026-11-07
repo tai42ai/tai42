@@ -43,14 +43,12 @@ def fleet(infra: Infra, tmp_path_factory: pytest.TempPathFactory) -> Iterator[tu
 
 
 async def _row(stack: TaiStack, port: int) -> dict:
-    body = await stack.api(port=port).get(_ADVERTISED, retry_on_reloading=True)
+    body = await stack.api(port=port).get(_ADVERTISED)
     return next(row for row in body["tools"] if row["name"] == _NAME)
 
 
 async def _run(stack: TaiStack, port: int) -> str:
-    outcome = await stack.api(port=port).post(
-        "/api/run-tool", json={"tool_name": _NAME, "arguments": {}}, retry_on_reloading=True
-    )
+    outcome = await stack.api(port=port).post("/api/run-tool", json={"tool_name": _NAME, "arguments": {}})
     assert outcome["kind"] == "result", outcome
     return json.dumps(outcome["result"])
 
@@ -82,18 +80,17 @@ async def test_a_stored_preset_keeps_its_name_over_a_served_mcp_tool_on_every_re
             "description": "echo preset under an MCP tool name",
             "fixed_kwargs": {"payload": _PRESET_PAYLOAD},
         },
-        retry_on_reloading=True,
     )
 
     server.start()
     await server.wait_serving()
-    report = await api_a.post(f"/api/mcp-status/{REPLICAS_MCP_TITLE}/reload", json={}, retry_on_reloading=True)
+    report = await api_a.post(f"/api/mcp-status/{REPLICAS_MCP_TITLE}/reload", json={})
     assert report["reachable"] is True, report
     stack.restart("serve-b")
 
     await _wait_row(stack, bound=False, reason="preset_conflict")
     for port in (stack.port_a, stack.port_b):
-        presets = await stack.api(port=port).get("/api/presets", retry_on_reloading=True)
+        presets = await stack.api(port=port).get("/api/presets")
         row = next(item for item in presets if item["name"] == _NAME)
         assert row["conflicted"] is False, row
         result = await _run(stack, port)
@@ -101,8 +98,8 @@ async def test_a_stored_preset_keeps_its_name_over_a_served_mcp_tool_on_every_re
         assert "pong" not in result, result
 
     # The remedy the row names: delete the preset, reload the server; the MCP tool takes the name.
-    await api_a.delete(f"/api/presets/{_NAME}", retry_on_reloading=True)
-    report = await api_a.post(f"/api/mcp-status/{REPLICAS_MCP_TITLE}/reload", json={}, retry_on_reloading=True)
+    await api_a.delete(f"/api/presets/{_NAME}")
+    report = await api_a.post(f"/api/mcp-status/{REPLICAS_MCP_TITLE}/reload", json={})
     assert report["reachable"] is True, report
 
     await _wait_row(stack, bound=True, reason=None)

@@ -69,7 +69,7 @@ def short_ttl_auth_stack(infra: Infra, tmp_path_factory: pytest.TempPathFactory)
 async def _snapshot(stack: TaiStack) -> dict[str, Any]:
     """The ``e2e_settings_snapshot`` probe's return from replica A."""
     async with stack.mcp(port=stack.port_a, auth=stack.auth_token) as mcp:
-        result = await mcp.call_tool("e2e_settings_snapshot", {}, retry_on_reloading=True)
+        result = await mcp.call_tool("e2e_settings_snapshot", {})
     data = result.data if isinstance(result.data, dict) else result.structured_content
     assert isinstance(data, dict), f"e2e_settings_snapshot returned no result map: {result!r}"
     return data
@@ -93,7 +93,7 @@ async def test_reloads_with_access_control_on_release_every_retired_generation_a
     ):
         assert response.status_code == 200, f"interactions SSE did not open: {response.status_code}"
         for _ in range(3):
-            await api.post("/api/fleet/reload-config", json={"targets": None}, retry_on_reloading=True)
+            await api.post("/api/fleet/reload-config", json={"targets": None})
         during = await _snapshot(stack)
         assert during["settings_epoch"] >= stream_epoch + 3, f"the reloads did not advance the epoch: {during}"
         # The generation serving the open stream stays reachable by design.

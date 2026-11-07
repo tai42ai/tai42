@@ -69,7 +69,7 @@ async def _fire_self_exit(stack: TaiStack, name: str, arguments: dict[str, Any],
 
         async def _call() -> None:
             async with stack.mcp() as mcp:
-                await mcp.call_tool(name, arguments, retry_on_reloading=True)
+                await mcp.call_tool(name, arguments)
 
         await asyncio.wait_for(_call(), timeout=timeout)
 
@@ -95,9 +95,7 @@ async def test_dead_serve_perpetual_task_readies_503_then_graceful_exit_respawns
     # Mark the reaper dead WITHOUT the graceful exit, so the pre-exit /ready 503 truth is
     # readable over real HTTP on a process that stays up.
     async with stack.mcp() as mcp:
-        marked = await mcp.call_tool(
-            "e2e_kill_perpetual_task", {"name": task_name, "request_exit": False}, retry_on_reloading=True
-        )
+        marked = await mcp.call_tool("e2e_kill_perpetual_task", {"name": task_name, "request_exit": False})
     assert marked.data["name"] == task_name, marked.data
     readiness.assert_ready_names_dead_perpetual_task(stack, task_name, _REASON)
 

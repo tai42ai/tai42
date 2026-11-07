@@ -62,7 +62,7 @@ _BUILD_POISON_VAR = "ACCESS_CONTROL_CACHE_SIZE"
 
 async def _settings_epoch(stack: TaiStack) -> int:
     async with stack.mcp(port=stack.port_a) as mcp:
-        result = await mcp.call_tool("e2e_settings_snapshot", {}, retry_on_reloading=True)
+        result = await mcp.call_tool("e2e_settings_snapshot", {})
     data = result.data if isinstance(result.data, dict) else result.structured_content
     assert isinstance(data, dict), f"e2e_settings_snapshot returned no result map: {result!r}"
     return data["settings_epoch"]
@@ -74,7 +74,7 @@ async def _effective_settings_values(stack: TaiStack) -> dict[str, Any]:
     from ``os.environ``). Used to assert a failed build RESTORED ``os.environ`` (not just the
     stored env) — matching the skeleton unit ``test_profile_apply.py`` os.environ==before check."""
     async with stack.mcp(port=stack.port_a) as mcp:
-        result = await mcp.call_tool("e2e_settings_snapshot", {}, retry_on_reloading=True)
+        result = await mcp.call_tool("e2e_settings_snapshot", {})
     data = result.data if isinstance(result.data, dict) else result.structured_content
     assert isinstance(data, dict), f"e2e_settings_snapshot returned no result map: {result!r}"
     return {
@@ -88,7 +88,7 @@ async def _effective_settings_values(stack: TaiStack) -> dict[str, Any]:
 async def _snapshot_epoch_over(mcp: McpClient) -> int:
     """The ``settings_epoch`` read over an ALREADY-OPEN stateful session (not a fresh one) —
     so a re-init after a swap is observed on the same client handle."""
-    result = await mcp.call_tool("e2e_settings_snapshot", {}, retry_on_reloading=True)
+    result = await mcp.call_tool("e2e_settings_snapshot", {})
     data = result.data if isinstance(result.data, dict) else result.structured_content
     assert isinstance(data, dict), f"e2e_settings_snapshot returned no result map: {result!r}"
     return data["settings_epoch"]
@@ -101,10 +101,8 @@ async def _apply_hot_flip(stack: TaiStack, uniq: Callable[[str], str]) -> None:
     stored = (await api.get("/api/config/env"))["env"]
     new_level = "DEBUG" if (stored.get("TAI_LOG_LEVEL") or "INFO").upper() != "DEBUG" else "INFO"
     name = uniq("swap")
-    await api.put(
-        f"/api/config/profiles/{name}", json={"env": {**stored, "TAI_LOG_LEVEL": new_level}}, retry_on_reloading=True
-    )
-    await api.post(f"/api/config/profiles/{name}/apply", retry_on_reloading=True, timeout=120.0)
+    await api.put(f"/api/config/profiles/{name}", json={"env": {**stored, "TAI_LOG_LEVEL": new_level}})
+    await api.post(f"/api/config/profiles/{name}/apply", timeout=120.0)
 
 
 @pytest.mark.timeout(300)
@@ -124,7 +122,7 @@ async def test_failed_epoch_build_keeps_old_surface_and_stored_env(
     # rejects it.
     name = uniq("poison")
     profile_env = {**before_env, _BUILD_POISON_VAR: "not-an-integer"}
-    await api.put(f"/api/config/profiles/{name}", json={"env": profile_env}, retry_on_reloading=True)
+    await api.put(f"/api/config/profiles/{name}", json={"env": profile_env})
 
     # The apply fails (the build raised); it is an error, never a 200. The exact code is
     # secondary — a construction ValidationError is not the door's ValueError path, so it

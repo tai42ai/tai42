@@ -64,22 +64,13 @@ def _session_of(pid: int) -> int | None:
 
 
 async def _send(api: ApiClient, method: str, path: str, body: dict | None = None) -> httpx.Response:
-    """Send one write, re-sending on the documented retriable ``503 reloading``; return its final answer.
+    """Send one write and return its answer past the documented retriable ``503 reloading``.
 
     A write on one replica fans a reload out to the other, whose reload gate answers its own
-    concurrent write with a retriable 503 before that write reaches the store.
+    concurrent write with that retriable 503 before the write reaches the store; the client
+    re-sends it until the store's own answer comes back.
     """
-    answer: list[httpx.Response] = []
-
-    async def _attempt() -> bool:
-        resp = await api.request_raw(method, path, json=body)
-        if resp.status_code == 503:
-            return False
-        answer.append(resp)
-        return True
-
-    await wait_for_async(_attempt, deadline=60.0, message=f"{method} {path} never left the reloading gate")
-    return answer[0]
+    return await api.request_raw(method, path, json=body, ready_deadline=60.0)
 
 
 @pytest.mark.timeout(300)
@@ -98,13 +89,13 @@ async def test_a_marker_written_on_one_replica_during_a_profile_apply_on_another
     key = uniq("E2E_XW_GONE").upper()
     title = uniq("xw_marker")
 
-    await api_a.post("/api/config/env", json={"env": {key: "1"}}, retry_on_reloading=True)
+    await api_a.post("/api/config/env", json={"env": {key: "1"}})
     baseline = (await api_a.get("/api/config/env"))["env"]
     assert key in baseline, baseline
     # Every other stored key keeps its value, so the profile's only change is dropping ``key``.
     profile_env = {name: value for name, value in baseline.items() if name != key}
     profile = uniq("xw_drop")
-    await api_a.put(f"/api/config/profiles/{profile}", json={"env": profile_env}, retry_on_reloading=True)
+    await api_a.put(f"/api/config/profiles/{profile}", json={"env": profile_env})
 
     async def _previous_holds_key() -> bool:
         resp = await api_b.request_raw("GET", f"/api/config/profiles/{_PREVIOUS_PROFILE}")

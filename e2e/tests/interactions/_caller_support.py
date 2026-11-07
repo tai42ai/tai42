@@ -20,7 +20,7 @@ async def submit(api: Any, tool_name: str, arguments: dict[str, Any], subj: dict
     body: dict[str, Any] = {"tool_name": tool_name, "arguments": arguments}
     if subj is not None:
         body["subject"] = subj
-    submitted = await api.post("/api/tool-runs", json=body, expect=202, retry_on_reloading=True)
+    submitted = await api.post("/api/tool-runs", json=body, expect=202)
     return submitted["run_id"]
 
 

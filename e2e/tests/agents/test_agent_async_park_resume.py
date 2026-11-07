@@ -113,7 +113,6 @@ async def _park_agent_run(stack: TaiStack, thread_id: str, question: str) -> str
                 "tool_names": _TOOL_NAMES,
                 "langgraph_config": {"configurable": {"thread_id": thread_id}},
             },
-            retry_on_reloading=True,
         )
     # A park crossing the agent run tool over MCP is the platform's reserved park marker in the
     # result's structured content, the same marker every parking tool and preset emits. A completed
@@ -199,7 +198,7 @@ async def test_agent_park_expiry_resumes(
     # race the submit latency — then never answer: the 1s expiry reaper claims the now-due park
     # and fires agent_resume, which rebuilds and drives the graph to completion.
     async with agent_async_park_stack.mcp(port=agent_async_park_stack.port_b) as mcp:
-        await mcp.call_tool("e2e_expire_park", {"interaction_id": interaction_id}, retry_on_reloading=True)
+        await mcp.call_tool("e2e_expire_park", {"interaction_id": interaction_id})
 
     record = await wait_for_async(
         lambda: _resume_record(agent_async_park_stack, thread_id),
