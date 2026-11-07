@@ -57,7 +57,7 @@ async def test_the_owed_work_runs_in_order_at_the_exit_after_the_body_returned()
 
         bound = run_bound()
         assert bound is not None
-        bound.once_answered(work)
+        bound.once_ended(work)
 
     async with bounded_run(30):
         owe("first")
@@ -77,7 +77,7 @@ async def test_the_owed_work_runs_at_the_exit_when_the_body_raised(raised: BaseE
 
     async def run() -> None:
         async with bounded_run(30) as bound:
-            bound.once_answered(work)
+            bound.once_ended(work)
             raise raised
 
     with pytest.raises(type(raised)):
@@ -95,7 +95,7 @@ async def test_owed_work_owed_inside_an_inner_scope_runs_at_the_run_s_exit() -> 
 
     async with bounded_run(30):
         async with bounded_run(5) as inner:
-            inner.once_answered(work)
+            inner.once_ended(work)
         assert events == []
     assert events == ["owed work"]
 
@@ -113,8 +113,8 @@ async def test_a_raise_from_owed_work_propagates_with_the_run_s_error_as_its_con
 
     async def run() -> None:
         async with bounded_run(30) as bound:
-            bound.once_answered(failing)
-            bound.once_answered(later)
+            bound.once_ended(failing)
+            bound.once_ended(later)
             raise run_error
 
     with pytest.raises(ValueError, match="the owed work failed") as raised:
@@ -133,8 +133,8 @@ async def test_several_raises_from_owed_work_propagate_together() -> None:
 
     async def run() -> None:
         async with bounded_run(30) as bound:
-            bound.once_answered(failing)
-            bound.once_answered(failing)
+            bound.once_ended(failing)
+            bound.once_ended(failing)
 
     with pytest.raises(ExceptionGroup) as raised:
         await run()
@@ -152,7 +152,7 @@ async def test_work_owed_to_a_bound_that_settled_raises() -> None:
         pass
 
     with pytest.raises(RuntimeError, match="the bounded run has already settled the work it owed at its exit"):
-        bound.once_answered(owed)
+        bound.once_ended(owed)
 
 
 async def test_work_owed_while_the_bound_settles_raises_from_the_settle() -> None:
@@ -164,10 +164,10 @@ async def test_work_owed_while_the_bound_settles_raises_from_the_settle() -> Non
     async def owing_more() -> None:
         current = run_bound()
         assert current is not None
-        current.once_answered(late)
+        current.once_ended(late)
 
     with pytest.raises(RuntimeError, match="already settled"):
         async with bounded_run(60) as bound:
-            bound.once_answered(owing_more)
+            bound.once_ended(owing_more)
 
     assert ran == []

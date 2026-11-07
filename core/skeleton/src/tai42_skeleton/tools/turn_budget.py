@@ -12,8 +12,8 @@ guard armed and runs unwrapped, so the outer window bounds the whole turn rather
 each nested call resetting the clock. A detached run (no live caller) and an unset
 budget both run unbounded. An armed window runs the turn as a bounded run of the budget's
 seconds (:mod:`tai42_kit.utils.run_bound`), so work the window cannot hold — a fleet recycle
-roll — is carried outside it, and the work the turn owes once it has answered runs at the
-bound's exit, after the window closed.
+roll — is carried outside it, and the work the turn owes runs at the bound's exit, after the
+window closed.
 """
 
 import asyncio
