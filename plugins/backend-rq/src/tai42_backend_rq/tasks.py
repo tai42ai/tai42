@@ -26,7 +26,7 @@ async def tool_execution(*args: Any, **kwargs: Any) -> Any:
     the job runs on, and the release of the kit's resources bound to it, are its job class's
     (:mod:`tai42_backend_rq.job_loop`).
     """
-    return await run_dispatched_tool(kwargs, tool_name_arg=rq_settings().tool_name_arg)
+    return await run_dispatched_tool(kwargs, settings=rq_settings())
 
 
 async def callback_job(previous_job_id: str, callback: CallbackSchema) -> Any:
@@ -56,4 +56,4 @@ async def callback_job(previous_job_id: str, callback: CallbackSchema) -> Any:
 
         value = await asyncio.to_thread(_read_result)
 
-    return await callback_execution(value, callback)
+    return await callback_execution(value, callback, settings=rq_settings())

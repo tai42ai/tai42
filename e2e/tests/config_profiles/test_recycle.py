@@ -894,6 +894,50 @@ async def test_an_env_write_run_as_a_sync_task_hands_the_roll_to_the_backend_wor
     )
 
 
+# How long the job holds its answer after its env write handed the roll off: past the time a roll
+# started at the hand-off takes to restart the serve worker and cut the reply that worker still owes.
+_ANSWER_HOLD_SECONDS = 40.0
+
+
+@pytest.mark.timeout(480)
+@pytest.mark.needs(*_SUPERVISED_RECYCLE_NEEDS, "probe-tools", "setting:extension:sync_task")
+async def test_a_sync_task_whose_job_answers_long_after_its_env_write_gets_its_answer_before_the_roll(
+    own_recycle_stack: TaiStack, uniq: Callable[[str], str]
+) -> None:
+    """A job run through ``run_tool_sync_task`` that writes env and answers only
+    ``_ANSWER_HOLD_SECONDS`` later still answers its caller: the backend worker it handed the roll
+    to starts that roll once the job answered, so no serve worker restarts while the reply it owes
+    the caller waits on the job; the roll then runs as it does for a job that answers at once."""
+    before_backend = _lives(own_recycle_stack, "backend")
+    before_serve = _lives(own_recycle_stack, "serve")
+    writer = _slot_of(own_recycle_stack, "backend")
+    offsets = _log_offsets(own_recycle_stack)
+    arguments = {
+        "tool_name": "write_env",
+        "arguments": {"env": {_RECYCLE_VAR: uniq("mkey").upper()}},
+        "seconds": _ANSWER_HOLD_SECONDS,
+    }
+
+    async with own_recycle_stack.mcp(auth=own_recycle_stack.auth_token) as mcp:
+        written = _tool_map(
+            await asyncio.wait_for(
+                mcp.call_tool(
+                    "run_tool_sync_task",
+                    {"tool_name": "e2e_run_then_hold", "arguments": arguments},
+                    retry_on_reloading=True,
+                ),
+                timeout=_ANSWER_HOLD_SECONDS + 90.0,
+            )
+        )
+
+    assert written["recycle"] is None, written
+    _assert_every_worker_applied(written["fanout"])
+    own_recycle_stack.wait_generation_bump("serve", before_serve, deadline=200.0)
+    await _assert_the_backend_worker_carries_the_roll(
+        own_recycle_stack, written, writer, {**before_backend, **before_serve}, offsets
+    )
+
+
 def _assert_every_worker_applied(fanout: dict[str, Any]) -> None:
     """The reload fan-out a backend job published reached the whole fleet, every worker ``applied`` —
     the worker running the job included, whose pool turnover does not wait for that job."""

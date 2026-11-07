@@ -16,7 +16,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence, Set
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from tai42_kit.utils.run_bound import in_bounded_run
+from tai42_kit.utils.run_bound import run_bound
 
 from tai42_skeleton.app.recycle import WITHHELD, RecycleError, RecycleReport, RecycleStop
 from tai42_skeleton.config.recycle_policy import (
@@ -135,12 +135,13 @@ async def decide_and_roll(
     caller whose reply cannot arm it passes ``False``).
 
     A change run under a bound its roll's waits can outlast
-    (:func:`~tai42_kit.utils.run_bound.in_bounded_run`: a dispatched job's budget, an armed turn
+    (:func:`~tai42_kit.utils.run_bound.run_bound`: a dispatched job's budget, an armed turn
     budget) never runs a roll itself: each target's drain, and the writer's own exit, which waits
     for every other change holding the worker's exit, are waits the bound cannot hold. It hands
     the roll to the bus member it acts for
     (:func:`~tai42_skeleton.config.roll_handoff.hand_off_roll`), which carries it out as its own
-    task after answering and departs itself last, once the roll converged, when the writer needs
+    task once the change answered — the bound's exit releases it — and departs itself last, once
+    the roll converged, when the writer needs
     its restart, and returns with ``deferred_to`` naming that member. The member keeps the roll holds ``holds`` names
     (:mod:`~tai42_skeleton.config.roll_holds`) from before its answer until the roll ended: what
     the caller holds across its roll, which it releases once it answers. Every other roll runs here
@@ -157,12 +158,14 @@ async def decide_and_roll(
     decision = recycle_decision(report, pinned, writer, addressed=addressed)
     _log_decision(decision, change=change)
     try:
-        if in_bounded_run() and _roll_runs(decision, writer_exits=writer_exits):
+        bound = run_bound()
+        if bound is not None and _roll_runs(decision, writer_exits=writer_exits):
             member = await hand_off_roll(
                 bus,
                 report,
                 writer,
                 pinned,
+                bound=bound,
                 change=change,
                 writer_exits=writer_exits,
                 addressed=addressed,

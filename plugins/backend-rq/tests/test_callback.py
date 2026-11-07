@@ -14,6 +14,8 @@ from tai42_kit.utils.data import jq_util
 from tai42_kit.utils.detached_util import in_detached_run
 from tai42_kit.utils.worker_secret_capability import WORKER_SECRET_CAPABILITY_ARG
 
+from tai42_backend_rq.settings import rq_settings
+
 # The secret-read capability the enqueue path carries onto every callback spec.
 _CARRIED = {WORKER_SECRET_CAPABILITY_ARG: False}
 
@@ -51,7 +53,7 @@ async def test_rendered_condition_unknown_id_raises(app):
 
 async def test_callback_execution_condition_failure_returns_none(app):
     callback = CallbackSchema(tool="next", condition=TemplatedText(content=". > 5"), carried_kwargs=_CARRIED)
-    assert await callback_execution(3, callback) is None
+    assert await callback_execution(3, callback, settings=rq_settings()) is None
     assert app.tools.run_calls == []
 
 
@@ -64,7 +66,7 @@ async def test_callback_execution_runs_tool_with_expr_output(app):
         carried_kwargs=_CARRIED,
     )
 
-    result = await callback_execution(10, callback)
+    result = await callback_execution(10, callback, settings=rq_settings())
     assert result == "chained-result"
     assert app.tools.run_calls == [("next", {"value": 10})]
 
@@ -80,7 +82,7 @@ async def test_callback_execution_runs_tool_detached(app):
         carried_kwargs=_CARRIED,
     )
 
-    await callback_execution(10, callback)
+    await callback_execution(10, callback, settings=rq_settings())
 
     assert app.tools.detached_seen == [True]
     assert app.tools.offloads == [True]
@@ -98,7 +100,7 @@ async def test_callback_binds_the_carried_capability(app, capability: bool):
         carried_kwargs={WORKER_SECRET_CAPABILITY_ARG: capability},
     )
 
-    await callback_execution(10, callback)
+    await callback_execution(10, callback, settings=rq_settings())
 
     assert app.tools.secret_capability_seen == [capability]
     assert caller_may_read_secrets() is False
@@ -107,19 +109,19 @@ async def test_callback_binds_the_carried_capability(app, capability: bool):
 async def test_callback_execution_without_condition_always_runs(app):
     app.tools.run_result = "ok"
     callback = CallbackSchema(tool="next", expr=TemplatedText(content="{value: .}"), carried_kwargs=_CARRIED)
-    assert await callback_execution(1, callback) == "ok"
+    assert await callback_execution(1, callback, settings=rq_settings()) == "ok"
 
 
 async def test_callback_execution_without_tool_returns_expr_output(app):
     callback = CallbackSchema(expr=TemplatedText(content="{doubled: (. * 2)}"))
-    assert await callback_execution(4, callback) == {"doubled": 8}
+    assert await callback_execution(4, callback, settings=rq_settings()) == {"doubled": 8}
     assert app.tools.run_calls == []
 
 
 async def test_callback_execution_without_expr_passes_empty_kwargs(app):
     app.tools.run_result = "ran"
     callback = CallbackSchema(tool="next", carried_kwargs=_CARRIED)
-    assert await callback_execution({"anything": 1}, callback) == "ran"
+    assert await callback_execution({"anything": 1}, callback, settings=rq_settings()) == "ran"
     assert app.tools.run_calls == [("next", {})]
 
 
@@ -170,7 +172,7 @@ async def test_callback_jq_eval_is_timeout_bounded(app, monkeypatch):
         callback = CallbackSchema(tool="t", condition=TemplatedText(content=". > 5"), carried_kwargs=_CARRIED)
         start = time.monotonic()
         with pytest.raises(TimeoutError, match="JQ_TIMEOUT_SECONDS"):
-            await callback_execution(10, callback)
+            await callback_execution(10, callback, settings=rq_settings())
         assert time.monotonic() - start < 0.5
     finally:
         reset_all_settings()
@@ -182,4 +184,4 @@ def test_bare_condition_syntax_error_propagates():
 
     callback = CallbackSchema(tool="t", condition=TemplatedText(content="((broken"), carried_kwargs=_CARRIED)
     with pytest.raises(ValueError, match="syntax error"):
-        asyncio.run(callback_execution(1, callback))
+        asyncio.run(callback_execution(1, callback, settings=rq_settings()))

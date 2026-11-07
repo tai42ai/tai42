@@ -148,7 +148,7 @@ class AsyncTask(Task):
 
 async def run_tool(**kwargs: Any) -> Any:
     """Run the tool the job names (under the ``tool_name_arg`` kwarg) with the rest, as a dispatched job."""
-    return await run_dispatched_tool(kwargs, tool_name_arg=celery_settings().tool_name_arg)
+    return await run_dispatched_tool(kwargs, settings=celery_settings())
 
 
 @celery_app.task(name=CALLBACK_TASK, base=AsyncTask, bind=True)
@@ -158,7 +158,7 @@ def callback_task(self: AsyncTask, result: Any, callback: CallbackSchema) -> Any
     Linked to ``tool_execution`` via ``apply_async(link=...)``: Celery runs it only after the
     parent succeeded, and ``result`` is the parent's return value, handed to the jq inputs as-is.
     """
-    return self.run_async(callback_execution(result, callback))
+    return self.run_async(callback_execution(result, callback, settings=celery_settings()))
 
 
 @celery_app.task(name=TOOL_EXECUTION_TASK, base=AsyncTask, bind=True)

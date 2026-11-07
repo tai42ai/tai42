@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     from tai42_skeleton.app.bus.ops import CarryRoll
     from tai42_skeleton.app.clients import ClientsFacet
     from tai42_skeleton.app.http import HttpSurface
+    from tai42_skeleton.app.lifecycle.carried_roll import HeldRoll
     from tai42_skeleton.app.server import ServingCore
     from tai42_skeleton.app.sessions import SessionRegistry
     from tai42_skeleton.app.sub_mcp_app import SubMcpAppRouter
@@ -119,9 +120,13 @@ class LifecycleState(ABC):
         self._deployment_keys_join_tasks: set[asyncio.Task[None]] = set()
         # The exit a recycle op deferred to this worker's own in-flight changes runs once they are answered.
         self._deferred_recycle_task: asyncio.Task[bool] | None = None
-        # The rolls bounded changes handed to this worker (the ``carry_roll`` op), each carried out
-        # as its own task; tracked until it ends, and cancelled at shutdown.
+        # The rolls bounded changes handed to this worker (the ``carry_roll`` op), each held until
+        # the run that handed it off released it (the ``release_roll`` op), then carried out, as
+        # its own task; tracked until it ends, and cancelled at shutdown.
         self._carried_roll_tasks: set[asyncio.Task[None]] = set()
+        # Those rolls by their identity, from their acceptance until their task ended, so a
+        # release finds the roll it starts, or reads that the roll had started already.
+        self._held_rolls: dict[str, HeldRoll] = {}
         # Latched once this process's first boot self-resync completes: the tool
         # registry is then fully built and stable for the run. A forking/consuming
         # backend runtime awaits this (``wait_until_ready``) before its work loop
@@ -292,10 +297,11 @@ class LifecycleState(ABC):
         def _build_bus(self, kind: WorkerKind) -> WorkerBus: ...
         def _spawn_bus_subscription(self) -> None: ...
         async def _cancel_bus_subscription(self) -> None: ...
-        async def accept_carried_roll(self, op: CarryRoll) -> dict[str, str]:
+        async def accept_carried_roll(self, op: CarryRoll, *, answers_within: float | None) -> dict[str, str]:
             """Accept the roll ``op`` hands this worker (implemented on the carried-roll mixin)."""
             ...
 
+        def _release_carried_roll(self, roll: str, change: str) -> dict[str, str]: ...
         async def _cancel_carried_rolls(self) -> None: ...
         async def start(self, manifest: "Manifest"):
             """Boot the app from ``manifest`` (implemented on the boot mixin)."""

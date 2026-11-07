@@ -51,7 +51,7 @@ async def callback_job(
         await asyncio.sleep(0.1)
 
     result = await wait_job_result(job)
-    return await callback_execution(result, callback)
+    return await callback_execution(result, callback, settings=arq_settings())
 
 
 async def tool_execution(ctx: dict[str, Any], *args: Any, **kwargs: Any) -> Any:
@@ -61,7 +61,7 @@ async def tool_execution(ctx: dict[str, Any], *args: Any, **kwargs: Any) -> Any:
     this job's id; a tool that raised chains nothing.
     """
     callback = kwargs.pop(CALLBACK_OPTION, None)
-    result = await run_dispatched_tool(kwargs, tool_name_arg=arq_settings().tool_name_arg)
+    result = await run_dispatched_tool(kwargs, settings=arq_settings())
     if callback is not None:
         # The worker pool's default queue is this worker's queue: the job's own.
         await ctx["redis"].enqueue_job("callback_job", ctx["job_id"], callback)

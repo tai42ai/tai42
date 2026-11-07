@@ -35,7 +35,7 @@ from tai42_contract.agent.events import (
 from tai42_contract.interactions import ParkedEntry
 from tai42_contract.tools import current_call_chain, get_run_delivery_id
 from tai42_kit.settings import reset_all_settings
-from tai42_kit.utils.run_bound import in_bounded_run
+from tai42_kit.utils.run_bound import run_bound
 from tests.agent._memoryless import MemorylessTestAgent
 
 from tai42_skeleton.agent import (
@@ -700,7 +700,7 @@ class _BoundRecordingAgent(_FakeAgent):
         self.bounded: bool | None = None
 
     async def astream(self, **kwargs: Any):  # type: ignore[override]
-        self.bounded = in_bounded_run()
+        self.bounded = run_bound() is not None
         async for event in super().astream(**kwargs):
             yield event
 

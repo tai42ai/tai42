@@ -21,12 +21,13 @@ from tai42_contract.app import tai42_app
 from tai42_contract.template import TemplatedText
 
 from tai42_kit.backend import CallbackSchema, callback_execution, carry_forwarded_fire, prepare_backend_kwargs
+from tai42_kit.backend.settings import BackendDispatchSettings
 from tai42_kit.registry import StagedSlot
 from tai42_kit.settings.cache_registry import reset_all_settings
 from tai42_kit.utils import worker_secret_capability as capability_module
 from tai42_kit.utils.data import jq_util
 from tai42_kit.utils.detached_util import in_detached_run
-from tai42_kit.utils.run_bound import in_bounded_run
+from tai42_kit.utils.run_bound import run_bound
 from tai42_kit.utils.schedule_subject import (
     SCHEDULE_EXECUTION_FINGERPRINT_ARG,
     SCHEDULE_EXECUTION_KEY_ARG,
@@ -35,6 +36,9 @@ from tai42_kit.utils.schedule_subject import (
 )
 from tai42_kit.utils.unset import UNSET
 from tai42_kit.utils.worker_secret_capability import WORKER_SECRET_CAPABILITY_ARG, set_access_control_gate_state
+
+# The backend's dispatch settings the callback job runs under.
+_SETTINGS = BackendDispatchSettings(task_timeout=90)
 
 _FORWARDED = {
     SCHEDULE_SUBJECT_ARG: {"target_kind": "app", "target_name": "svc", "kind": "user", "key": "u1"},
@@ -57,13 +61,13 @@ class _FakeResourceManager:
 
 
 class _FakeTools:
-    """Records each ``run_tool`` call, the detached-run and bounded-run flags and secret-read
-    capability it observed, and the offload flag it was dispatched with."""
+    """Records each ``run_tool`` call, the detached-run flag, the seconds of the run's bound and the
+    secret-read capability it observed, and the offload flag it was dispatched with."""
 
     def __init__(self) -> None:
         self.calls: list[tuple[str, Any]] = []
         self.detached_seen: list[bool] = []
-        self.bounded_seen: list[bool] = []
+        self.bounded_seen: list[float | None] = []
         self.capability_seen: list[bool] = []
         self.offloads: list[bool] = []
         self.result: Any = "ran"
@@ -71,7 +75,8 @@ class _FakeTools:
     async def run_tool(self, key: str, arguments: Any, *, offload_sync: bool = False) -> Any:
         self.calls.append((key, arguments))
         self.detached_seen.append(in_detached_run())
-        self.bounded_seen.append(in_bounded_run())
+        bound = run_bound()
+        self.bounded_seen.append(None if bound is None else round(bound.seconds_left()))
         self.capability_seen.append(caller_may_read_secrets())
         self.offloads.append(offload_sync)
         return self.result
@@ -157,14 +162,14 @@ async def test_rendered_fields_resolve_through_resource_manager(bound_app) -> No
 
 async def test_condition_pass_runs_tool_with_transformed_value(bound_app) -> None:
     callback = _carrying(condition=TemplatedText(content=".ok"), expr=TemplatedText(content="{x: .value}"), tool="next")
-    out = await callback_execution({"ok": True, "value": 5}, callback)
+    out = await callback_execution({"ok": True, "value": 5}, callback, settings=_SETTINGS)
     assert out == "ran"
     assert bound_app.tools.calls == [("next", {"x": 5})]
 
 
 async def test_condition_fail_returns_none(bound_app) -> None:
     callback = _carrying(condition=TemplatedText(content=".ok"), expr=TemplatedText(content="{x: .value}"), tool="next")
-    out = await callback_execution({"ok": False, "value": 5}, callback)
+    out = await callback_execution({"ok": False, "value": 5}, callback, settings=_SETTINGS)
     assert out is None
     assert bound_app.tools.calls == []
 
@@ -177,7 +182,7 @@ async def test_condition_empty_pipeline_skips(bound_app) -> None:
         expr=TemplatedText(content="{x: .value}"),
         tool="next",
     )
-    out = await callback_execution({"errors": [{"fatal": False}], "value": 5}, callback)
+    out = await callback_execution({"errors": [{"fatal": False}], "value": 5}, callback, settings=_SETTINGS)
     assert out is None
     assert bound_app.tools.calls == []
 
@@ -188,36 +193,37 @@ async def test_expr_empty_pipeline_yields_empty_mapping(bound_app) -> None:
     callback = _carrying(
         condition=TemplatedText(content=".ok"), expr=TemplatedText(content=".errors[] | select(.fatal)"), tool="next"
     )
-    out = await callback_execution({"ok": True, "errors": [{"fatal": False}]}, callback)
+    out = await callback_execution({"ok": True, "errors": [{"fatal": False}]}, callback, settings=_SETTINGS)
     assert out == "ran"
     assert bound_app.tools.calls == [("next", {})]
 
 
 async def test_without_tool_returns_expr_output(bound_app) -> None:
     callback = CallbackSchema(expr=TemplatedText(content="{doubled: (.value * 2)}"))
-    out = await callback_execution({"value": 4}, callback)
+    out = await callback_execution({"value": 4}, callback, settings=_SETTINGS)
     assert out == {"doubled": 8}
     assert bound_app.tools.calls == []
 
 
 async def test_without_expr_runs_tool_with_empty_args(bound_app) -> None:
     callback = _carrying(tool="next")
-    out = await callback_execution({"value": 4}, callback)
+    out = await callback_execution({"value": 4}, callback, settings=_SETTINGS)
     assert out == "ran"
     assert bound_app.tools.calls == [("next", {})]
 
 
 async def test_callback_runs_tool_detached(bound_app) -> None:
     # A worker executes a dequeued callback with no live caller and under its job budget, so the
-    # follow-up tool observes the detached and bounded flags set; neither leaks past the callback.
+    # follow-up tool runs detached and bounded by the backend's ``task_timeout``; neither leaks past
+    # the callback.
     callback = _carrying(condition=TemplatedText(content=".ok"), expr=TemplatedText(content="{x: .value}"), tool="next")
-    await callback_execution({"ok": True, "value": 5}, callback)
+    await callback_execution({"ok": True, "value": 5}, callback, settings=_SETTINGS)
     assert bound_app.tools.detached_seen == [True]
-    assert bound_app.tools.bounded_seen == [True]
+    assert bound_app.tools.bounded_seen == [_SETTINGS.task_timeout]
     # A dequeued callback offloads a blocking sync tool off the worker's event loop.
     assert bound_app.tools.offloads == [True]
     assert in_detached_run() is False
-    assert in_bounded_run() is False
+    assert run_bound() is None
 
 
 async def test_callback_jq_eval_is_timeout_bounded(bound_app, monkeypatch) -> None:
@@ -240,7 +246,7 @@ async def test_callback_jq_eval_is_timeout_bounded(bound_app, monkeypatch) -> No
         )
         start = time.monotonic()
         with pytest.raises(TimeoutError, match="JQ_TIMEOUT_SECONDS"):
-            await callback_execution({"ok": True, "value": 5}, callback)
+            await callback_execution({"ok": True, "value": 5}, callback, settings=_SETTINGS)
         assert time.monotonic() - start < 0.5
     finally:
         reset_all_settings()
@@ -295,7 +301,7 @@ def test_carry_forwarded_fire_without_a_declared_gate_state_raises() -> None:
 @pytest.mark.parametrize("capability", [True, False])
 async def test_callback_binds_the_carried_capability(bound_app, capability: bool) -> None:
     callback = _carrying(capability, tool="next")
-    await callback_execution({"value": 1}, callback)
+    await callback_execution({"value": 1}, callback, settings=_SETTINGS)
     assert bound_app.tools.capability_seen == [capability]
     assert caller_may_read_secrets() is False
 
@@ -303,7 +309,7 @@ async def test_callback_binds_the_carried_capability(bound_app, capability: bool
 async def test_callback_without_a_carried_capability_raises(bound_app) -> None:
     callback = CallbackSchema(tool="next")
     with pytest.raises(KeyError, match=WORKER_SECRET_CAPABILITY_ARG):
-        await callback_execution({"value": 1}, callback)
+        await callback_execution({"value": 1}, callback, settings=_SETTINGS)
     assert bound_app.tools.calls == []
 
 
@@ -314,7 +320,7 @@ async def test_a_re_run_of_the_same_callback_spec_binds_the_carried_capability_a
     """A backend that retries a callback re-runs the spec object it was handed; the run leaves it intact."""
     callback = _carrying(capability, tool="next")
     before = dict(callback.carried_kwargs)
-    await callback_execution({"value": 1}, callback)
+    await callback_execution({"value": 1}, callback, settings=_SETTINGS)
     assert callback.carried_kwargs == before
-    await callback_execution({"value": 1}, callback)
+    await callback_execution({"value": 1}, callback, settings=_SETTINGS)
     assert bound_app.tools.capability_seen == [capability, capability]

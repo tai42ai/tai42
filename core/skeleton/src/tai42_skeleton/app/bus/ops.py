@@ -29,6 +29,8 @@ __all__ = [
     "FleetOp",
     "ListFailedMcps",
     "Recycle",
+    "ReleaseRoll",
+    "ReleaseRollReply",
     "ReloadConfig",
     "ReloadFailedMcps",
     "ReloadMcp",
@@ -39,6 +41,7 @@ __all__ = [
     "fleet_op_wire",
     "recycle_leaving",
     "recycle_reply",
+    "release_roll_reply",
 ]
 
 _REGISTRY: frozenset[FleetOpEffect] = frozenset({FleetOpEffect.registry})
@@ -219,12 +222,18 @@ class CarryRoll(_FleetOp):
     whole fleet) — names, kinds, generations and key names, never an env value. ``writer_exits``
     says whether the writer's own restart may follow the roll. ``holds`` names the roll holds
     (:mod:`~tai42_skeleton.config.roll_holds`) the member keeps from before its answer until the
-    roll ended. The member answers (:class:`CarryRollReply`) as soon as it took those holds, and
-    starts the roll once that answer is given, without waiting for the answer's reply frame to ship.
+    roll ended. ``roll`` is the roll's identity, which the run's release names; ``answers_within``
+    the seconds left of the run's bound at the hand-off: the latest the run answers. The member
+    answers (:class:`CarryRollReply`) as soon as it took those holds, then holds the roll until
+    the run released it (:class:`ReleaseRoll`), at its bound's exit, once it answered; over the
+    bus, where the run is in another process and can end with no word, it starts the roll once
+    ``answers_within`` passed with no release.
     """
 
     op: Literal["carry_roll"]
     change: str
+    roll: str
+    answers_within: float
     report: FleetResult
     pinned: dict[str, tuple[WorkerKind, int]]
     writer: WorkerIdentity
@@ -263,6 +272,51 @@ def carry_roll_reply(payload: object) -> CarryRollReply | None:
     return None if named is None else CarryRollReply(kind=named[0], reason=named[1])
 
 
+class ReleaseRoll(_FleetOp):
+    """Start the roll a :class:`CarryRoll` op handed this worker: the run that handed it off has answered.
+
+    Sent at the exit of the run's bound (:func:`~tai42_kit.utils.run_bound.bounded_run`), after
+    its body returned or raised, to the member holding the roll ``roll`` for ``change``. The
+    member answers (:class:`ReleaseRollReply`) whether it started the roll now or had started it
+    already; it fails the op when it holds no such roll. Changes nothing a worker keeps.
+    """
+
+    op: Literal["release_roll"]
+    roll: str
+    change: str
+    effects: ClassVar[frozenset[FleetOpEffect]] = _NONE
+    awaited_mid_resync: ClassVar[bool] = True
+
+
+ReleaseRollReplyKind = Literal["started", "already_started"]
+
+
+@dataclass(frozen=True)
+class ReleaseRollReply:
+    """How a member answered a :class:`ReleaseRoll` op, and the change it names.
+
+    ``started``: it started the held roll on the release. ``already_started``: the roll had
+    started before this release came, because the run's bound passed or an earlier release
+    started it.
+    """
+
+    kind: ReleaseRollReplyKind
+    reason: str
+
+    def reply(self) -> dict[str, str]:
+        """The ``applied`` payload the member answers with."""
+        return {self.kind: self.reason}
+
+
+def release_roll_reply(payload: object) -> ReleaseRollReply | None:
+    """The :class:`ReleaseRollReply` an ``applied`` :class:`ReleaseRoll` payload names, else ``None`` (no such reply).
+
+    Raises :class:`TypeError` when the reply names a kind whose reason is not text.
+    """
+    named = _named_reason(payload, get_args(ReleaseRollReplyKind))
+    return None if named is None else ReleaseRollReply(kind=named[0], reason=named[1])
+
+
 FleetOp = Annotated[
     ReloadConfig
     | ReloadMcp
@@ -276,6 +330,7 @@ FleetOp = Annotated[
     | ClearTemplateCache
     | Recycle
     | CarryRoll
+    | ReleaseRoll
     | DeploymentKeysChanged,
     Field(discriminator="op"),
 ]

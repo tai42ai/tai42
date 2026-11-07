@@ -24,7 +24,7 @@ from tai42_kit.utils.schedule_subject import (
 from tai42_kit.utils.worker_secret_capability import WORKER_SECRET_CAPABILITY_ARG
 
 from tai42_backend_arq import tasks
-from tai42_backend_arq.settings import ArqSettings, TaskFailedError
+from tai42_backend_arq.settings import ArqSettings, TaskFailedError, arq_settings
 
 from .conftest import handle_of
 
@@ -185,7 +185,7 @@ async def test_callback_condition_pass_runs_tool(stub_app) -> None:
         carried_kwargs=_CARRIED,
     )
 
-    out = await callback_execution({"ok": True, "value": 5}, cb)
+    out = await callback_execution({"ok": True, "value": 5}, cb, settings=arq_settings())
 
     assert out == "ran"
     stub_app.tools.run_tool_mock.assert_awaited_once_with("next", {"x": 5})
@@ -201,7 +201,7 @@ async def test_callback_runs_tool_detached(stub_app) -> None:
         carried_kwargs=_CARRIED,
     )
 
-    await callback_execution({"ok": True, "value": 5}, cb)
+    await callback_execution({"ok": True, "value": 5}, cb, settings=arq_settings())
 
     assert stub_app.tools.detached_seen == [True]
     assert stub_app.tools.offloads == [True]
@@ -218,7 +218,7 @@ async def test_callback_binds_the_carried_capability(stub_app, capability: bool)
         carried_kwargs={WORKER_SECRET_CAPABILITY_ARG: capability},
     )
 
-    await callback_execution({"ok": True, "value": 5}, cb)
+    await callback_execution({"ok": True, "value": 5}, cb, settings=arq_settings())
 
     assert stub_app.tools.secret_capability_seen == [capability]
     assert caller_may_read_secrets() is False
@@ -231,7 +231,7 @@ async def test_callback_condition_fail_returns_none(stub_app) -> None:
         tool="next",
         carried_kwargs=_CARRIED,
     )
-    out = await callback_execution({"ok": False, "value": 5}, cb)
+    out = await callback_execution({"ok": False, "value": 5}, cb, settings=arq_settings())
     assert out is None
     stub_app.tools.run_tool_mock.assert_not_called()
 
@@ -245,7 +245,7 @@ async def test_callback_condition_empty_pipeline_skips(stub_app) -> None:
         tool="next",
         carried_kwargs=_CARRIED,
     )
-    out = await callback_execution({"errors": [{"fatal": False}], "value": 5}, cb)
+    out = await callback_execution({"errors": [{"fatal": False}], "value": 5}, cb, settings=arq_settings())
     assert out is None
     stub_app.tools.run_tool_mock.assert_not_called()
 
@@ -260,21 +260,21 @@ async def test_callback_expr_empty_pipeline_yields_empty_mapping(stub_app) -> No
         tool="next",
         carried_kwargs=_CARRIED,
     )
-    out = await callback_execution({"ok": True, "errors": [{"fatal": False}]}, cb)
+    out = await callback_execution({"ok": True, "errors": [{"fatal": False}]}, cb, settings=arq_settings())
     assert out == "ran"
     stub_app.tools.run_tool_mock.assert_awaited_once_with("next", {})
 
 
 async def test_callback_without_tool_returns_expr_output() -> None:
     cb = CallbackSchema(expr=TemplatedText(content="{doubled: (.value * 2)}"))
-    out = await callback_execution({"value": 4}, cb)
+    out = await callback_execution({"value": 4}, cb, settings=arq_settings())
     assert out == {"doubled": 8}
 
 
 async def test_callback_without_expr_yields_empty_kwargs(stub_app) -> None:
     stub_app.tools.run_tool_mock = AsyncMock(return_value="ran")
     cb = CallbackSchema(tool="next", carried_kwargs=_CARRIED)
-    out = await callback_execution({"value": 4}, cb)
+    out = await callback_execution({"value": 4}, cb, settings=arq_settings())
     assert out == "ran"
     stub_app.tools.run_tool_mock.assert_awaited_once_with("next", {})
 
@@ -302,7 +302,7 @@ async def test_callback_jq_eval_is_timeout_bounded(stub_app, monkeypatch) -> Non
         )
         start = time.monotonic()
         with pytest.raises(TimeoutError, match="JQ_TIMEOUT_SECONDS"):
-            await callback_execution({"ok": True, "value": 5}, cb)
+            await callback_execution({"ok": True, "value": 5}, cb, settings=arq_settings())
         assert time.monotonic() - start < 0.5
     finally:
         reset_all_settings()

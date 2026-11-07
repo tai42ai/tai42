@@ -389,8 +389,9 @@ async def test_a_soft_restart_whose_roll_hand_off_fails_raises_what_the_roll_lay
     )
     monkeypatch.setattr(instance, "_app", None)
 
-    with bounded_run(), pytest.raises(RuntimeError) as raised:
-        await service.reload_fleet(None, change="the fleet soft restart")
+    async with bounded_run(60):
+        with pytest.raises(RuntimeError) as raised:
+            await service.reload_fleet(None, change="the fleet soft restart")
 
     assert not isinstance(raised.value, FleetBroadcastError)
     assert str(raised.value) == (
@@ -413,8 +414,10 @@ async def test_a_soft_restart_whose_reload_and_roll_hand_off_both_fail_raises_th
     )
     monkeypatch.setattr(instance, "_app", None)
 
-    with caplog.at_level(logging.ERROR), bounded_run(), pytest.raises(FleetBroadcastError, match="reload boom") as exc:
-        await service.reload_fleet(None, change="the fleet soft restart")
+    with caplog.at_level(logging.ERROR):
+        async with bounded_run(60):
+            with pytest.raises(FleetBroadcastError, match="reload boom") as exc:
+                await service.reload_fleet(None, change="the fleet soft restart")
 
     assert {row.name for row in exc.value.report.results} == {"serve-writer", "serve-b"}
     assert exc.value.report.error == (

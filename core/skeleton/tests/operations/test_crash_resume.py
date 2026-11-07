@@ -319,3 +319,28 @@ async def test_reconcile_leaves_a_live_run_untouched(wired, monkeypatch) -> None
     result = await _reconcile_lost_with_liveness(fake, store, "r5", record, liveness_present=True, ttl=60)
     assert result["status"] == "running"
     assert spawned == []
+
+
+async def test_a_crash_resume_spawned_inside_a_bounded_run_starts_as_a_root_that_inherits_no_bound(
+    monkeypatch,
+) -> None:
+    # The reconcile runs on a reader's path, maybe inside a bounded run (a backend job, an armed
+    # turn): the re-drive is a new root of execution, so it reads none of the reader's scope, its
+    # bound included, and stays enrolled in the drain registry until it ends.
+    from tai42_kit.utils.run_bound import bounded_run, run_bound
+
+    from tai42_skeleton.operations.tool_runs import reconcile, supervisor
+
+    seen: list[object] = []
+
+    async def _fake_run_recorded(tool_name, arguments, *, extras=None, crash_resume_eligible) -> None:
+        seen.append(run_bound())
+
+    monkeypatch.setattr(supervisor, "run_recorded", _fake_run_recorded)
+    async with bounded_run(60):
+        reconcile._spawn_crash_resume("r-root", {"tool_name": "alpha"})
+        (task,) = [t for t in supervisor._SUPERVISORS if t.get_name() == "tai-crash-resume-r-root"]
+    await task
+
+    assert seen == [None]
+    assert task not in supervisor._SUPERVISORS
