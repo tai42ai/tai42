@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tai42-sandbox-local"
-version = "3.0.2"
+version = "3.0.3"
 description = "Direct/host sandbox provider for the TAI ecosystem — runs a session's code as a plain host subprocess, no container and no isolation."
 readme = "README.md"
 requires-python = ">=3.13"
@@ -33,7 +33,7 @@ dependencies = [
     # HostExecHandle (the exec as a host child process, and its handle), and the
     # importable conformance suite. The floor is rewritten by scripts/range_sync.py at
     # release, so it names the kit release this provider was built against.
-    "tai42-kit>=18.0,<19",
+    "tai42-kit>=19.0,<20",
     # SettingsConfigDict / SecretStr for the settings model and the env credential
     # channel; imported directly, so declared directly rather than leaned on as a
     # transitive.
