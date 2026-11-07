@@ -16,7 +16,7 @@ title prefix. The leg asserts that landed contract:
   and that tool answers its marker payload over the product's own ``/mcp``.
 * Its own environment: the package is built into a virtual environment of its own
   at ``servers/tai-e2e-market-eta/current`` under ``TAI_PLUGINS_DIR``. The console
-  script's shebang names that environment's interpreter, and eta's one dependency
+  script runs that environment's interpreter, and eta's one dependency
   (``tai-e2e-market-etalib``) is in that environment and in neither the plugin layer
   nor the image.
 * Uninstall unmounts: the projected tool leaves ``/mcp`` + ``/api/tools``, the
@@ -75,6 +75,7 @@ from ._market_support import (
     api_tool_names,
     assert_mcp_server_not_failed,
     cli_env,
+    console_script_interpreter,
     image_holds,
     installed_refs,
     layer_holds,
@@ -111,9 +112,8 @@ def _assert_eta_in_its_own_environment(stack: TaiStack) -> None:
     assert (environment / "pyvenv.cfg").is_file(), f"{environment} is not a virtual environment"
     build = environment.resolve()
     script = environment / "bin" / ETA_SCRIPT
-    shebang = script.read_text(encoding="utf-8").splitlines()[0]
-    interpreter = shebang.removeprefix("#!").strip()
-    assert Path(interpreter).parent == build / "bin", f"{script} runs {interpreter!r}, outside {build}"
+    interpreter = console_script_interpreter(script)
+    assert interpreter.parent == build / "bin", f"{script} runs {interpreter}, outside {build}"
     for distribution in (ETA_PACKAGE, ETALIB_PACKAGE):
         assert server_environment_holds(stack, ETA_PACKAGE, distribution), f"{distribution} not in {environment}"
         assert not layer_holds(stack, distribution), f"{distribution} is in the plugin layer"

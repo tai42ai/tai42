@@ -17,7 +17,6 @@ node_modules/
 
 # e2e workspace artifacts
 junit*.xml
-stack-*/
 tai-e2e-studio-*/
 .tai42-e2e-marketplace-*/
 
@@ -34,5 +33,6 @@ REAL_E2E_CREDENTIALS.env
 .cache/
 site/
 
-# pytest --basetemp scratch of the e2e suites (CI and host runs)
+# pytest --basetemp of the e2e suites: ci.yml pins e2e/stacks-tmp, a host run names its own .stacks-tmp*
+stacks-tmp/
 .stacks-tmp*/

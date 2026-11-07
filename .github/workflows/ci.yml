@@ -850,7 +850,7 @@ jobs:
       - name: Run the suite
         working-directory: e2e
         run: >-
-          uv run --no-sync pytest -x -q --timeout=120 -o log_cli=true
+          uv run --no-sync pytest -x -q --timeout=120 --basetemp=stacks-tmp -o log_cli=true
           ${{ matrix.backend != 'arq' && '-m "not backendless"' || '' }}
           --splits 10 --group ${{ matrix.shard }} --durations-path .test_durations --splitting-algorithm least_duration
       - name: Run the fixture identity/storage axis (default leg)
@@ -866,7 +866,7 @@ jobs:
           TAI_E2E_IDENTITY: fixture
           TAI_E2E_STORAGE: fixture
         run: >-
-          uv run --no-sync pytest -x -q --timeout=120 -o log_cli=true --junitxml=junit-fixture-axis.xml
+          uv run --no-sync pytest -x -q --timeout=120 --basetemp=stacks-tmp -o log_cli=true --junitxml=junit-fixture-axis.xml
           tests/redis_semantics tests/storage tests/harness
       - name: Run the s3 storage axis (default leg)
         # Third storage-axis value: the s3 provider against a MinIO object store. A
@@ -881,7 +881,7 @@ jobs:
           TAI_E2E_STORAGE: s3
         run: |
           docker compose --profile storage up -d --wait storage-minio
-          uv run --no-sync pytest -x -q --timeout=120 --junitxml=junit-s3-storage.xml tests/storage
+          uv run --no-sync pytest -x -q --timeout=120 --basetemp=stacks-tmp --junitxml=junit-s3-storage.xml tests/storage
       - name: Run the github storage axis (default leg)
         # Fourth storage-axis value: the github provider against the in-process fake
         # GitHub REST stub (brought up by tests/storage/conftest; variant default base
@@ -891,7 +891,7 @@ jobs:
         working-directory: e2e
         env:
           TAI_E2E_STORAGE: github
-        run: uv run --no-sync pytest -x -q --timeout=120 --junitxml=junit-github-storage.xml tests/storage
+        run: uv run --no-sync pytest -x -q --timeout=120 --basetemp=stacks-tmp --junitxml=junit-github-storage.xml tests/storage
       - name: Run the docker sandbox isolation leg (default leg)
         # The one docker-gated sandbox leg (tests/sandbox_docker): the real
         # sandbox-docker provider driven against a REAL rootless-dind engine, for
@@ -927,7 +927,7 @@ jobs:
           # reaches the run log — dump the engine's own logs before failing.
           docker compose --profile sandbox up -d --wait sandbox-engine \
             || { echo "::group::sandbox-engine logs"; docker compose --profile sandbox logs sandbox-engine; echo "::endgroup::"; exit 1; }
-          uv run --no-sync pytest -x -q --timeout=120 --junitxml=junit-sandbox-docker.xml tests/sandbox_docker
+          uv run --no-sync pytest -x -q --timeout=120 --basetemp=stacks-tmp --junitxml=junit-sandbox-docker.xml tests/sandbox_docker
           docker compose --profile sandbox down -v
       - name: Upload the JUnit report
         if: ${{ !cancelled() }}
@@ -942,11 +942,22 @@ jobs:
         with:
           paths: e2e/junit*.xml
       - name: Upload diagnostics
+        # Every stack a test boots is rooted in pytest's temp root, which each
+        # invocation above pins to e2e/stacks-tmp (--basetemp) and KEEP_STACKS keeps
+        # past teardown. Pytest empties that root the first time a test asks for a
+        # temp dir, so the artifact holds the stacks of the last invocation that
+        # booted one, each once (the ``<name>current`` links pytest keeps at the
+        # latest root of each name are left out): a step that fails before its
+        # first stack boots leaves the earlier invocation's stacks in place. Only
+        # the per-process logs travel: a stack's config dir carries the keys the
+        # failure report masks.
         if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: e2e-diagnostics-${{ matrix.backend }}-s${{ matrix.shard }}
-          path: e2e/**/stack-*/
+          path: |
+            e2e/stacks-tmp/**/logs/
+            !e2e/stacks-tmp/*current/**
           if-no-files-found: ignore
 
   ui-e2e:
