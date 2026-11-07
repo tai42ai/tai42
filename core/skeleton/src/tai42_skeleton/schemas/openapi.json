@@ -36509,7 +36509,7 @@
     },
     "/api/presets/{name}/rename": {
       "post": {
-        "description": "Rename a preset, ATOMIC (a preset's name IS its live tool name).\n\nRuns create's ordered name pre-checks on the NEW name, BLOCKS with a 409 listing every holder of\nthe current name or one of its extension branch tools, binds the new tool BEFORE tearing the old\none down, fires one ``list_changed``, and fans the rebind out NEW-first then the old removal. The\nresponse embeds the primary rebind (new-name) fan-out report under ``fanout``; the old-name removal\nstays log-only.\n\nA preset's NAME is its identity everywhere — it IS the live tool binding, and every\nreference (preset bodies, platform wiring, plugin holders) keys on it deliberately;\nrename integrity is enforced at THIS gate, and there are no surrogate ids.",
+        "description": "Rename a preset, ATOMIC (a preset's name IS its live tool name).\n\nRuns create's ordered name pre-checks on the NEW name, BLOCKS with a 409 listing every holder of\nthe current name or one of its extension branch tools, binds the new tool, runs every rename\ncascade (a raising cascade undoes the rename and answers a 500 carrying its message) BEFORE\ntearing the old one down, fires one ``list_changed``, and fans the rebind out NEW-first then the\nold removal. The response embeds the primary rebind (new-name) fan-out report under ``fanout``;\nthe old-name removal stays log-only.\n\nA preset's NAME is its identity everywhere — it IS the live tool binding, and every\nreference (preset bodies, platform wiring, plugin holders) keys on it deliberately;\nrename integrity is enforced at THIS gate, and there are no surrogate ids.",
         "operationId": "post_api_presets_name_rename",
         "parameters": [
           {

@@ -1,6 +1,7 @@
 """Rename integrity over the REAL referees union: a preset rename is BLOCKED (409, every
 holder named) while any live reference would be stranded, FAILS LOUDLY when a referee
-raises, and PROCEEDS (moving the tool_meta overlay) only when nothing references it.
+raises or a rename cascade raises (undoing the rename), and PROCEEDS (moving the tool_meta
+overlay) only when nothing references it.
 
 Drives every reachable holder: a live SCHEDULE and a HOOK (the platform-internal
 referees), the FIXTURE-registered plugin referee (holder + raising arms), and the
@@ -89,6 +90,26 @@ async def test_fixture_referee_raise_fails_rename_loudly(seams_stack: TaiStack, 
     # The preset is untouched under its old name — the loud failure committed no rename.
     row = await seams_stack.api().get(f"/api/presets/{name}")
     assert row["name"] == name
+
+
+@pytest.mark.needs("setting:fixture-seams")
+async def test_fixture_cascade_raise_fails_rename_loudly_and_unwinds(
+    seams_stack: TaiStack, uniq: Callable[[str], str]
+) -> None:
+    # A RAISE-marker name makes the fixture rename cascade raise once the new name is bound;
+    # the rename is undone and the 500 carries the cascade's own message.
+    api = seams_stack.api()
+    name = uniq("e2e_cas_raise")
+    new_name = uniq("renamed")
+    await create_preset(seams_stack, name)
+    failed = await rename_raw(seams_stack, name, new_name)
+    assert failed.status_code == 500, failed.text
+    error = failed.json()["error"]
+    assert f"a rename cascade failed for {name!r} -> {new_name!r}: e2e fixture cannot re-key {name!r}" in error, error
+    # The undo re-pointed the record and unbound the new name: the preset stays under its old name.
+    row = await api.get(f"/api/presets/{name}")
+    assert row["name"] == name
+    await api.get(f"/api/presets/{new_name}", expect=404)
 
 
 @pytest.mark.needs("kind:tool_meta")

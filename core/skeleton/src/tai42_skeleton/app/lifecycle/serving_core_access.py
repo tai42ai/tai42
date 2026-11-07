@@ -56,6 +56,7 @@ if TYPE_CHECKING:
     from tai42_skeleton.tools.delete_cascades import ToolDeleteCascadeRegistry
     from tai42_skeleton.tools.delete_referees import ToolDeleteRefereeRegistry
     from tai42_skeleton.tools.detach_referees import StateTemplateDetachRefereeRegistry
+    from tai42_skeleton.tools.rename_cascades import ToolRenameCascadeRegistry
     from tai42_skeleton.tools.rename_referees import ToolRenameRefereeRegistry
     from tai42_skeleton.webhooks.registry import WebhookVerifierRegistry
 
@@ -302,6 +303,10 @@ class ServingCoreAccessMixin(LifecycleState):
     @property
     def _rename_referee_registry(self) -> "ToolRenameRefereeRegistry":
         return self._serving_core._rename_referee_registry
+
+    @property
+    def _rename_cascade_registry(self) -> "ToolRenameCascadeRegistry":
+        return self._serving_core._rename_cascade_registry
 
     @property
     def _delete_referee_registry(self) -> "ToolDeleteRefereeRegistry":

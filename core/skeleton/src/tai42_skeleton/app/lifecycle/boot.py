@@ -227,6 +227,7 @@ class BootMixin(LifecycleState):
         # platform-internal referees re-arm through their startup/reload handler, so a
         # stale referee or a dropped seed never lingers across update()/reload.
         self._rename_referee_registry.reset()
+        self._rename_cascade_registry.reset()
         self._delete_referee_registry.reset()
         self._delete_cascade_registry.reset()
         self._detach_referee_registry.reset()
