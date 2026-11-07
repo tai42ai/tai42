@@ -130,19 +130,18 @@ async def test_schedule_fires_across_reload_then_unschedules_cross_worker(
     # replica's pool, so a request landing before a replica leaves its boot-time
     # reload gate is answered with a retriable ``503 reloading`` — ``fired_after_reload``
     # only proves the schedule-bearing worker resumed firing, not that this replica's
-    # API surface left the gate. Poll past it on the sanctioned bounded deadline
-    # (``retry_on_reloading``), exactly as every other post-reload call in the suite.
+    # API surface left the gate. The client polls past it on the sanctioned bounded
+    # deadline, exactly as every other post-reload call in the suite.
     async with schedule_stack.mcp(port=schedule_stack.port_a) as mcp:
         dispatched = await mcp.call_tool(
             "run_tool_sync_task",
             {"tool_name": "e2e_echo", "arguments": {"payload": "after-reload"}},
-            retry_on_reloading=True,
         )
     assert not dispatched.is_error, dispatched
 
     # The schedule appears in the cross-worker listing read from replica B — which may
     # still be finishing its own reload, so ride past the gate rather than race it.
-    listing = await api_b.get("/api/schedules", retry_on_reloading=True)
+    listing = await api_b.get("/api/schedules")
     (row,) = [row for row in listing if row.get("name") == schedule_name]
     # A typed ``ScheduleListRow`` on every backend: the fired tool and the cadence.
     assert row["tool"] == "e2e_record", row
@@ -150,7 +149,7 @@ async def test_schedule_fires_across_reload_then_unschedules_cross_worker(
 
     # Unschedule THROUGH replica B — the schedule B never created, proving the
     # state is shared, not worker-local.
-    await api_b.delete(f"/api/schedules/{schedule_name}", retry_on_reloading=True)
+    await api_b.delete(f"/api/schedules/{schedule_name}")
 
     # Firing stops: the count holds steady through a quiet window (one already
     # in-flight firing may still land, so assert quiescence, not an exact count).
@@ -158,5 +157,5 @@ async def test_schedule_fires_across_reload_then_unschedules_cross_worker(
     assert quiet_count >= 2
 
     # And it is gone from the listing.
-    listing_after = await api_b.get("/api/schedules", retry_on_reloading=True)
+    listing_after = await api_b.get("/api/schedules")
     assert not any(row.get("name") == schedule_name for row in listing_after), listing_after

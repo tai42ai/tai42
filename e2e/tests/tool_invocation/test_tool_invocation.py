@@ -26,7 +26,7 @@ def _data(result: Any) -> dict:
 
 async def test_seam_populated_over_mcp_edge_and_none_outside(seams_stack: TaiStack) -> None:
     async with seams_stack.mcp() as mcp:
-        result = await mcp.call_tool("e2e_invocation_probe", retry_on_reloading=True)
+        result = await mcp.call_tool("e2e_invocation_probe")
     data = _data(result)
     # The MCP call edge deposits the called tool's own name for the span of the call.
     assert data["inside"] == "e2e_invocation_probe", data
@@ -40,7 +40,6 @@ async def test_seam_populated_over_run_tool_path(seams_stack: TaiStack) -> None:
         result = await mcp.call_tool(
             "run_tool",
             {"tool_name": "e2e_invocation_probe", "arguments": {}},
-            retry_on_reloading=True,
         )
     data = _data(result)
     # The in-process run_tool dispatch arms the seam for the DISPATCHED tool, so the probe
@@ -55,7 +54,6 @@ async def test_seam_populated_over_backend_dispatch(seams_stack: TaiStack) -> No
         result = await mcp.call_tool(
             "run_tool_sync_task",
             {"tool_name": "e2e_invocation_probe", "arguments": {}},
-            retry_on_reloading=True,
         )
     data = _data(result)
     # The cross-process backend dispatch runs the probe INSIDE the backend worker and still

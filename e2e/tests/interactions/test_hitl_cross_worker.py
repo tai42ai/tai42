@@ -58,7 +58,6 @@ async def test_ask_blocked_on_a_answered_via_b(replicas_stack: TaiStack, uniq: C
         "/api/tool-runs",
         json={"tool_name": "ask", "arguments": {"question": question}},
         expect=202,
-        retry_on_reloading=True,
     )
     run_id = submitted["run_id"]
 
@@ -98,7 +97,6 @@ async def test_external_callback_answer_is_single_use(replicas_stack: TaiStack, 
                     "answer_format": "external",
                     "link": "https://ext.example/act?cb={callback_url}",
                 },
-                retry_on_reloading=True,
             )
         return result.data.answer
 

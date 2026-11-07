@@ -68,7 +68,7 @@ def _mcp_entry(title: str) -> dict:
 async def _manifest_mcp_titles(stack: TaiStack, port: int | None = None) -> list[str]:
     """The titles of the persisted mcp section ``GET /api/manifest`` serves: the manifest file,
     read on every call, so the answer is what is on disk whichever worker serves it."""
-    manifest = await stack.api(port=port).get("/api/manifest", retry_on_reloading=True)
+    manifest = await stack.api(port=port).get("/api/manifest")
     return [entry["title"] for entry in manifest["mcp"]]
 
 
@@ -81,7 +81,7 @@ async def test_fleet_workers_lists_every_worker(fresh_stack: Callable[..., TaiSt
     view is exactly the bus presence census the harness scans, one ``serve`` slot
     per uvicorn worker."""
     stack = fresh_stack(build_fleet_stack)
-    workers = (await stack.api().get("/api/fleet/workers", retry_on_reloading=True))["workers"]
+    workers = (await stack.api().get("/api/fleet/workers"))["workers"]
     names = {w["name"] for w in workers}
     assert names == {worker.name for worker in stack.census()}
     assert all(w["kind"] == "serve" for w in workers), workers
@@ -105,7 +105,7 @@ async def test_tool_extensions_apply_converges(fresh_stack: Callable[..., TaiSta
     api = stack.api()
 
     members = serve_members(stack)
-    result = await api.post("/api/tools/e2e_echo/extensions", json={"combos": [["batch"]]}, retry_on_reloading=True)
+    result = await api.post("/api/tools/e2e_echo/extensions", json={"combos": [["batch"]]})
     assert_applied_by(assert_fleet_fanout(result), members)
 
     # The branch tool is served (the live tool listing gained ``e2e_echo_batch``).
@@ -131,7 +131,7 @@ async def test_mcp_config_add_server_converges(
 
     title = uniq("b1_mcp")
     members = serve_members(stack)
-    result = await api.post("/api/mcp-config", json={"mcp": [_mcp_entry(title)]}, retry_on_reloading=True)
+    result = await api.post("/api/mcp-config", json={"mcp": [_mcp_entry(title)]})
     assert_applied_by(assert_fleet_fanout(result), members)
 
     titles = await _manifest_mcp_titles(stack)
@@ -155,15 +155,13 @@ async def test_update_manifest_persists_across_fleet_reload(
     title = uniq("b5a_mcp")
     document["mcp"] = [*document.get("mcp", []), _mcp_entry(title)]
     members = serve_members(stack)
-    result = await api.post(
-        "/api/manifest/replace", json={"manifest_text": yaml.safe_dump(document)}, retry_on_reloading=True
-    )
+    result = await api.post("/api/manifest/replace", json={"manifest_text": yaml.safe_dump(document)})
     assert_applied_by(assert_fleet_fanout(result), members)
     assert title in await _manifest_mcp_titles(stack), "the replaced manifest's entry is not served"
 
     # The update persisted: every serve member re-reads it on a fleet reload.
     members = serve_members(stack)
-    reload = await api.post("/api/fleet/reload-config", json={"targets": None}, retry_on_reloading=True)
+    reload = await api.post("/api/fleet/reload-config", json={"targets": None})
     assert_applied_by(reload, members)
     assert title in await _manifest_mcp_titles(stack), "the persisted update is not served after a fleet reload"
 
@@ -195,7 +193,7 @@ async def test_fleet_reload_applies_out_of_band_edit(
 
     # The fleet route makes every serve member re-read the file.
     members = serve_members(stack)
-    reload = await api.post("/api/fleet/reload-config", json={"targets": None}, retry_on_reloading=True)
+    reload = await api.post("/api/fleet/reload-config", json={"targets": None})
     assert_applied_by(reload, members)
 
 
@@ -219,7 +217,7 @@ async def test_env_write_moves_resolved_view(fresh_stack: Callable[..., TaiStack
     api = stack.api()
 
     members = serve_members(stack)
-    result = await api.post("/api/config/env", json={"env": {key: "b6-converged-value"}}, retry_on_reloading=True)
+    result = await api.post("/api/config/env", json={"env": {key: "b6-converged-value"}})
     assert_applied_by(assert_fleet_fanout(result), members)
 
 
@@ -241,7 +239,7 @@ _UNREACHABLE_MCP_ALT = {"config": {"url": "http://127.0.0.1:2/mcp"}}
 async def _manifest_mcp(stack: TaiStack) -> list[dict]:
     """The full mcp entries of the persisted mcp section ``GET /api/manifest`` serves (not just
     the titles): the operand for the in-place-replace position/field assertions."""
-    manifest = await stack.api().get("/api/manifest", retry_on_reloading=True)
+    manifest = await stack.api().get("/api/manifest")
     return list(manifest["mcp"])
 
 
@@ -269,11 +267,11 @@ async def test_mcp_entries_add_converges(fresh_stack: Callable[..., TaiStack], u
     api = stack.api()
 
     seed = uniq("a1_seed")
-    await api.post("/api/mcp-config", json={"mcp": [_mcp_entry(seed)]}, retry_on_reloading=True)
+    await api.post("/api/mcp-config", json={"mcp": [_mcp_entry(seed)]})
 
     added = uniq("a1_add")
     members = serve_members(stack)
-    result = await api.post("/api/mcp-config/entries", json={"entries": [_mcp_entry(added)]}, retry_on_reloading=True)
+    result = await api.post("/api/mcp-config/entries", json={"entries": [_mcp_entry(added)]})
     assert_applied_by(assert_fleet_fanout(result), members)
 
     titles = await _manifest_mcp_titles(stack)
@@ -294,16 +292,14 @@ async def test_mcp_entries_add_duplicate_refused(
 
     title = uniq("a2_mcp")
     seed_started = call_start()
-    seed = await api.post("/api/mcp-config", json={"mcp": [_mcp_entry(title)]}, retry_on_reloading=True)
+    seed = await api.post("/api/mcp-config", json={"mcp": [_mcp_entry(title)]})
     seeded = assert_fleet_fanout(seed)
     # The seed's own stamps land before the refused call starts.
     wait_op_stamped(stack, seeded, seed_started)
 
     generations = serve_generations(stack)
     started_at = call_start()
-    body = await api.post(
-        "/api/mcp-config/entries", json={"entries": [_mcp_entry(title)]}, expect=400, retry_on_reloading=True
-    )
+    body = await api.post("/api/mcp-config/entries", json={"entries": [_mcp_entry(title)]}, expect=400)
     assert title in body["error"], body
 
     assert_no_op_delivered(stack, generations, seeded["op"], started_at, generations)
@@ -321,13 +317,11 @@ async def test_mcp_entries_add_replace_in_place(
 
     first = uniq("a3_first")
     second = uniq("a3_second")
-    await api.post("/api/mcp-config", json={"mcp": [_mcp_entry(first), _mcp_entry(second)]}, retry_on_reloading=True)
+    await api.post("/api/mcp-config", json={"mcp": [_mcp_entry(first), _mcp_entry(second)]})
 
     replacement = {"title": first, **_UNREACHABLE_MCP_ALT}
     members = serve_members(stack)
-    result = await api.post(
-        "/api/mcp-config/entries", json={"entries": [replacement], "replace": True}, retry_on_reloading=True
-    )
+    result = await api.post("/api/mcp-config/entries", json={"entries": [replacement], "replace": True})
     assert_applied_by(assert_fleet_fanout(result), members)
 
     entries = await _manifest_mcp(stack)
@@ -349,10 +343,10 @@ async def test_mcp_entry_remove_converges_and_persists(
 
     keep = uniq("a4_keep")
     drop = uniq("a4_drop")
-    await api.post("/api/mcp-config", json={"mcp": [_mcp_entry(keep), _mcp_entry(drop)]}, retry_on_reloading=True)
+    await api.post("/api/mcp-config", json={"mcp": [_mcp_entry(keep), _mcp_entry(drop)]})
 
     members = serve_members(stack)
-    result = await api.delete(f"/api/mcp-config/entries/{drop}", retry_on_reloading=True)
+    result = await api.delete(f"/api/mcp-config/entries/{drop}")
     assert_applied_by(assert_fleet_fanout(result), members)
 
     titles = await _manifest_mcp_titles(stack)
@@ -360,7 +354,7 @@ async def test_mcp_entry_remove_converges_and_persists(
     assert keep in titles, titles
 
     members = serve_members(stack)
-    reload = await api.post("/api/fleet/reload-config", json={"targets": None}, retry_on_reloading=True)
+    reload = await api.post("/api/fleet/reload-config", json={"targets": None})
     assert_applied_by(reload, members)
     persisted = await _manifest_mcp_titles(stack)
     assert drop not in persisted, persisted
@@ -374,7 +368,7 @@ async def test_mcp_entry_remove_unknown_404(fresh_stack: Callable[..., TaiStack]
     api = stack.api()
 
     missing = uniq("a5_absent")
-    body = await api.delete(f"/api/mcp-config/entries/{missing}", expect=404, retry_on_reloading=True)
+    body = await api.delete(f"/api/mcp-config/entries/{missing}", expect=404)
     assert missing in body["error"], body
 
 
@@ -411,16 +405,16 @@ async def test_tools_entries_add_remove_converges(
     title = uniq("b6_tools")
     entry = {"title": title, "module": _TOOLS_MODULE, "include": _TOOLS_INCLUDE}
     members = serve_members(stack)
-    result = await api.post("/api/tools-config/entries", json={"entries": [entry]}, retry_on_reloading=True)
+    result = await api.post("/api/tools-config/entries", json={"entries": [entry]})
     assert_applied_by(assert_fleet_fanout(result), members)
     assert title in _section_titles(await _exported_manifest(stack), "tools")
 
     members = serve_members(stack)
-    removed = await api.delete(f"/api/tools-config/entries/{title}", retry_on_reloading=True)
+    removed = await api.delete(f"/api/tools-config/entries/{title}")
     assert_applied_by(assert_fleet_fanout(removed), members)
 
     members = serve_members(stack)
-    reload = await api.post("/api/fleet/reload-config", json={"targets": None}, retry_on_reloading=True)
+    reload = await api.post("/api/fleet/reload-config", json={"targets": None})
     assert_applied_by(reload, members)
     assert title not in _section_titles(await _exported_manifest(stack), "tools")
 
@@ -444,16 +438,16 @@ async def test_agents_entries_add_remove_converges(
     title = uniq("b7_agents")
     entry = {"title": title, "module": _AGENTS_MODULE, "include": _AGENTS_INCLUDE}
     members = serve_members(stack)
-    result = await api.post("/api/agents-config/entries", json={"entries": [entry]}, retry_on_reloading=True)
+    result = await api.post("/api/agents-config/entries", json={"entries": [entry]})
     assert_applied_by(assert_fleet_fanout(result), members)
     assert title in _section_titles(await _exported_manifest(stack), "agents")
 
     members = serve_members(stack)
-    removed = await api.delete(f"/api/agents-config/entries/{title}", retry_on_reloading=True)
+    removed = await api.delete(f"/api/agents-config/entries/{title}")
     assert_applied_by(assert_fleet_fanout(removed), members)
 
     members = serve_members(stack)
-    reload = await api.post("/api/fleet/reload-config", json={"targets": None}, retry_on_reloading=True)
+    reload = await api.post("/api/fleet/reload-config", json={"targets": None})
     assert_applied_by(reload, members)
     assert title not in _section_titles(await _exported_manifest(stack), "agents")
 
@@ -481,7 +475,7 @@ async def test_api_tools_lists_update_converges(
     name = uniq("c8_op")
     members = serve_members(stack)
     add_started = call_start()
-    result = await api.post("/api/api-tools", json={"exclude_add": [name]}, retry_on_reloading=True)
+    result = await api.post("/api/api-tools", json={"exclude_add": [name]})
     fanout = assert_fleet_fanout(result)
     assert_applied_by(fanout, members)
     # The add's own stamps land before the refused call starts.
@@ -491,17 +485,17 @@ async def test_api_tools_lists_update_converges(
     # Adding the same name again → loud 400 naming it; no op reaches any worker.
     generations = serve_generations(stack)
     started_at = call_start()
-    dup = await api.post("/api/api-tools", json={"exclude_add": [name]}, expect=400, retry_on_reloading=True)
+    dup = await api.post("/api/api-tools", json={"exclude_add": [name]}, expect=400)
     assert name in dup["error"], dup
     assert_no_op_delivered(stack, generations, fanout["op"], started_at, generations)
 
     # Removing a name absent from the list → loud 404 naming it.
     absent = uniq("c8_absent")
-    missing = await api.post("/api/api-tools", json={"exclude_remove": [absent]}, expect=404, retry_on_reloading=True)
+    missing = await api.post("/api/api-tools", json={"exclude_remove": [absent]}, expect=404)
     assert absent in missing["error"], missing
 
     # Removing the real name clears the block again on every serve member.
     members = serve_members(stack)
-    cleared = await api.post("/api/api-tools", json={"exclude_remove": [name]}, retry_on_reloading=True)
+    cleared = await api.post("/api/api-tools", json={"exclude_remove": [name]})
     assert_applied_by(assert_fleet_fanout(cleared), members)
     assert name not in (await _exported_manifest(stack)).get("api_tools", {}).get("exclude", [])

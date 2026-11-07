@@ -72,7 +72,6 @@ async def _park(stack: TaiStack, question: str, expiry_seconds: float, on_expiry
         result = await mcp.call_tool(
             "e2e_async_park_driver",
             {"question": question, "expiry_seconds": expiry_seconds, "on_expiry": on_expiry},
-            retry_on_reloading=True,
         )
     return result.data
 
@@ -110,7 +109,6 @@ async def test_async_multipark_super_step_resolves_once(async_park_stack: TaiSta
                 "slow_seconds": 2.5,
                 "on_expiry": "resume",
             },
-            retry_on_reloading=True,
         )
     frame = result.data
     interaction_ids = frame["interaction_ids"]

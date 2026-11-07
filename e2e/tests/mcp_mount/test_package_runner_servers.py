@@ -105,11 +105,11 @@ async def _remove_on_server(stack: TaiStack, path: str, title: str) -> None:
     """
     api = stack.api()
     entry = {"title": title, "config": {"command": "rm", "args": ["-rf", path]}}
-    await api.post("/api/mcp-config/entries", json={"entries": [entry]}, retry_on_reloading=True)
+    await api.post("/api/mcp-config/entries", json={"entries": [entry]})
     try:
 
         async def ended() -> bool:
-            failed = await api.get("/api/mcp-status/failed", retry_on_reloading=True)
+            failed = await api.get("/api/mcp-status/failed")
             # One result per worker: each runs the entry's command on its own filesystem.
             return bool(failed["results"]) and all(
                 any(row["title"] == title and row["category"] != "starting" for row in result["payload"])
@@ -118,7 +118,7 @@ async def _remove_on_server(stack: TaiStack, path: str, title: str) -> None:
 
         await wait_for_async(ended, deadline=_BIND_S, interval=1.0, message=f"{title} never ran `rm -rf {path}`")
     finally:
-        await api.delete(f"/api/mcp-config/entries/{title}", retry_on_reloading=True)
+        await api.delete(f"/api/mcp-config/entries/{title}")
 
 
 @pytest.fixture
@@ -148,14 +148,14 @@ async def test_a_package_runner_server_binds_its_tools(
         "title": title,
         "config": {"command": server.command, "args": list(server.args), "env": {server.cache_env: runner_cache}},
     }
-    await api.post("/api/mcp-config/entries", json={"entries": [entry]}, retry_on_reloading=True)
+    await api.post("/api/mcp-config/entries", json={"entries": [entry]})
     try:
 
         async def bound() -> bool:
-            names = set(await api.get("/api/tools", retry_on_reloading=True))
+            names = set(await api.get("/api/tools"))
             if expected <= names:
                 return True
-            failed = await api.get("/api/mcp-status/failed", retry_on_reloading=True)
+            failed = await api.get("/api/mcp-status/failed")
             torn = [
                 entry
                 for row in failed["results"]
@@ -168,10 +168,10 @@ async def test_a_package_runner_server_binds_its_tools(
         try:
             await wait_for_async(bound, deadline=_BIND_S, interval=1.0, message=f"{title} never bound {expected}")
         except WaitTimeoutError as exc:
-            failed = await api.get("/api/mcp-status/failed", retry_on_reloading=True)
+            failed = await api.get("/api/mcp-status/failed")
             raise AssertionError(f"{exc}; the failed servers: {failed}") from exc
-        report = await api.post(f"/api/mcp-status/{title}/reload", json={}, retry_on_reloading=True)
+        report = await api.post(f"/api/mcp-status/{title}/reload", json={})
         assert report["reachable"] is True, report
         assert all(row["payload"]["status"] == "ok" for row in report["results"]), report
     finally:
-        await api.delete(f"/api/mcp-config/entries/{title}", retry_on_reloading=True)
+        await api.delete(f"/api/mcp-config/entries/{title}")

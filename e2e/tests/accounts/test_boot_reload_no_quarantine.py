@@ -59,9 +59,7 @@ async def test_dual_role_accounts_boots_and_reloads(accounts_stack: TaiStack, un
     # password round-trip another, proving both route families are mounted (/api/auth,
     # /api/login) and both serving.
     user_email = f"{uniq('user')}@e2e.test"
-    _user_id, session = await invite_accept_login(
-        admin, public_a, email=user_email, role="admin", password=_PASSWORD, retry_on_reloading=True
-    )
+    _user_id, session = await invite_accept_login(admin, public_a, email=user_email, role="admin", password=_PASSWORD)
 
     # routes_users serves: the invited admin's session reads the authed members directory
     # under /api/auth on the OTHER replica, so the session minted by routes_login authorizes a
@@ -72,7 +70,7 @@ async def test_dual_role_accounts_boots_and_reloads(accounts_stack: TaiStack, un
 
     # A fleet reload re-imports every manifest module under its binding on every worker: the
     # dual-role distribution must re-fire each route submodule once and stay live.
-    report = await admin.post("/api/config/reload", json={}, retry_on_reloading=True, timeout=60.0)
+    report = await admin.post("/api/config/reload", json={}, timeout=60.0)
     assert report["reachable"] is True, f"the reload broadcast was unreachable: {report}"
     outcomes = {r["name"]: r["outcome"] for r in report["results"]}
     census = {worker.name for worker in stack.census()}
@@ -85,12 +83,6 @@ async def test_dual_role_accounts_boots_and_reloads(accounts_stack: TaiStack, un
 
     # Both route families still serve after the reload: a fresh password login and an authed
     # members read both succeed against the re-imported route table.
-    relogin = await public_a.post(
-        "/api/login/password", json={"email": user_email, "password": _PASSWORD}, retry_on_reloading=True
-    )
-    reread = (
-        await stack.api(port=stack.port_b)
-        .with_token(relogin["token"])
-        .get("/api/auth/members", retry_on_reloading=True)
-    )
+    relogin = await public_a.post("/api/login/password", json={"email": user_email, "password": _PASSWORD})
+    reread = await stack.api(port=stack.port_b).with_token(relogin["token"]).get("/api/auth/members")
     assert any(m["email"] == user_email for m in reread["members"]), reread

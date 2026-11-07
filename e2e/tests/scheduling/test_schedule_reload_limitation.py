@@ -31,7 +31,6 @@ from collections.abc import Callable
 from typing import Any
 
 import pytest
-from fastmcp.exceptions import ToolError
 
 from tai42_e2e import Infra, StackConfig, StackResources, wait_for_async
 from tai42_e2e.manifests import PROBE_TOOLS_TITLE, build_replicas_stack
@@ -79,10 +78,6 @@ def _tool_text(result: Any) -> str:
     if result.structured_content is not None:
         return str(result.structured_content)
     return "".join(getattr(block, "text", "") for block in (result.content or []))
-
-
-def _reloading(exc: ToolError) -> bool:
-    return "reloading" in str(exc)
 
 
 async def _call_preset(stack: TaiStack, port: int, name: str) -> str:
@@ -140,15 +135,10 @@ async def test_schedule_branch_plus_reload_churn_wedges_celery_prefork(
     await api_b.post("/api/config/env", json={"env": {}})
 
     async def b_serves_baked() -> bool:
-        try:
-            async with stack.mcp(port=stack.port_b) as mcp:
-                if name not in await mcp.tool_names():
-                    return False
-            return await _call_preset(stack, stack.port_b, name) == baked
-        except ToolError as exc:
-            if _reloading(exc):
+        async with stack.mcp(port=stack.port_b) as mcp:
+            if name not in await mcp.tool_names():
                 return False
-            raise
+        return await _call_preset(stack, stack.port_b, name) == baked
 
     await wait_for_async(b_serves_baked, deadline=5.0, message="B never rebound the preset after its reload")
 
@@ -156,12 +146,7 @@ async def test_schedule_branch_plus_reload_churn_wedges_celery_prefork(
     await api_b.post(f"/api/presets/{name}/versions", json={"fixed_kwargs": {"payload": new_payload}})
 
     async def backend_sees_new() -> bool:
-        try:
-            return await _backend_call(stack, name) == new_payload
-        except ToolError as exc:
-            if _reloading(exc):
-                return False
-            raise
+        return await _backend_call(stack, name) == new_payload
 
     await wait_for_async(backend_sees_new, deadline=5.0, message="backend worker never saw the new preset version")
 

@@ -33,9 +33,8 @@ def _tool_text(result: Any) -> str:
 
 
 def _not_yet_served(exc: ToolError, tool: str) -> bool:
-    """A worker mid-reload, or a sibling API worker whose own reload has not bound ``tool`` yet."""
-    text = str(exc)
-    return "reloading" in text or f"Unknown tool: '{tool}'" in text
+    """A sibling API worker whose own reload has not bound ``tool`` yet."""
+    return f"Unknown tool: '{tool}'" in str(exc)
 
 
 async def _call(stack: TaiStack, tool: str, arguments: dict[str, Any]) -> str:
@@ -73,7 +72,6 @@ async def test_a_preset_branch_left_without_an_optional_property_runs_the_preset
             "input_map": '{payload: (.text + ":" + (.suffix // "none"))}',
             "extensions": [["sync_task"]],
         },
-        retry_on_reloading=True,
     )
     branch = f"{name}_sync_task"
     marker = uniq("omitted")

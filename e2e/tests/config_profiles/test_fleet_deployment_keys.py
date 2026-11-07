@@ -74,7 +74,7 @@ def _backend_owned_stack(fresh_stack: Callable[..., TaiStack], llm_stub: LlmStub
 
 async def _schema_field(stack: TaiStack, env_var: str) -> dict[str, Any]:
     """The settings-schema row of the field read from ``env_var``, as the serve worker answers."""
-    schema = await stack.api().get("/api/config/settings-schema", retry_on_reloading=True)
+    schema = await stack.api().get("/api/config/settings-schema")
     rows = [field for group in schema["groups"] for field in group["fields"] if field["env_var"] == env_var]
     assert len(rows) == 1, f"expected one settings-schema field for {env_var}: {rows}"
     return rows[0]
@@ -89,13 +89,13 @@ async def test_a_key_only_the_backend_starts_with_is_refused_and_reported_on_ser
     field = await _schema_field(stack, _KEY)
     assert field["value_source"] == "deployment", field
 
-    before = await api.get("/api/config/env", retry_on_reloading=True)
+    before = await api.get("/api/config/env")
     resp = await api.request_raw("POST", "/api/config/env", json={"env": {_KEY: "DEBUG", "E2E_SIBLING": "x"}})
     assert resp.status_code == 400, resp.text
     error = resp.json()["error"]
     assert "Refusing an env write setting keys set by the deployment:" in error, error
     assert _KEY in error, error
-    assert await api.get("/api/config/env", retry_on_reloading=True) == before
+    assert await api.get("/api/config/env") == before
 
 
 async def test_no_process_applies_a_stored_copy_of_a_key_only_the_backend_starts_with(
@@ -110,9 +110,9 @@ async def test_no_process_applies_a_stored_copy_of_a_key_only_the_backend_starts
     # then a fleet reload.
     stack.config.stored_env[_KEY] = _STORED_VALUE
     child_env.render_env_file(stack)
-    await api.post("/api/config/reload", json={}, retry_on_reloading=True)
+    await api.post("/api/config/reload", json={})
 
-    view = await api.get("/api/config/env", retry_on_reloading=True)
+    view = await api.get("/api/config/env")
     assert view["env"].get(_KEY) == _STORED_VALUE, view
     assert view["deployment_keys"] == [_KEY], view
 
@@ -152,13 +152,13 @@ async def test_a_fastmcp_setting_only_the_backend_starts_with_is_refused_on_serv
     api = stack.api()
     value = '{"url": "memory://stored"}' if name == "FASTMCP_DOCKET" else "memory://stored"
 
-    before = await api.get("/api/config/env", retry_on_reloading=True)
+    before = await api.get("/api/config/env")
     resp = await api.request_raw("POST", "/api/config/env", json={"env": {name: value}})
     assert resp.status_code == 400, resp.text
     error = resp.json()["error"]
     assert "Refusing an env write setting keys set by the deployment:" in error, error
     assert name in error, error
-    assert await api.get("/api/config/env", retry_on_reloading=True) == before
+    assert await api.get("/api/config/env") == before
 
 
 # -- a recycle-class key ---------------------------------------------------------
@@ -202,7 +202,7 @@ _SETTLING_OUTCOMES = frozenset({"departed", "resyncing", "recycling", "stale"})
 
 async def _fleet_reload(stack: TaiStack) -> dict[str, Any]:
     """The report of one fleet reload over every worker."""
-    return await stack.api().post("/api/fleet/reload-config", json={"targets": None}, retry_on_reloading=True)
+    return await stack.api().post("/api/fleet/reload-config", json={"targets": None})
 
 
 def _awaiting_respawn(report: dict[str, Any]) -> dict[str, list[str]] | None:
@@ -250,7 +250,7 @@ async def _assert_serve_runs_the_field_default(stack: TaiStack) -> None:
     """The serve worker reports the recycle-class field as the deployment's and runs its default."""
     field = await _schema_field(stack, _RECYCLE_KEY)
     assert (field["value_source"], field["value"]) == ("deployment", _RECYCLE_DEFAULT), field
-    view = await stack.api().get("/api/config/env", retry_on_reloading=True)
+    view = await stack.api().get("/api/config/env")
     assert view["env"].get(_RECYCLE_KEY) == _RECYCLE_STORED, view
     assert _RECYCLE_KEY in view["deployment_keys"], view
 

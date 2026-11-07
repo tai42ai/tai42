@@ -98,11 +98,11 @@ def resilience_mcp_stack(
 
 async def _call_ping(stack: TaiStack, *, raise_on_error: bool = True):
     async with stack.mcp(port=stack.port_a) as mcp:
-        return await mcp.call_tool(_PING_TOOL, {}, raise_on_error=raise_on_error, retry_on_reloading=True)
+        return await mcp.call_tool(_PING_TOOL, {}, raise_on_error=raise_on_error)
 
 
 async def _health(stack: TaiStack) -> dict:
-    status = await stack.api().get("/api/mcp-status", retry_on_reloading=True)
+    status = await stack.api().get("/api/mcp-status")
     health = status["health"]
     assert RESILIENCE_MCP_TITLE in health, f"no health block for {RESILIENCE_MCP_TITLE!r}: {status}"
     return health[RESILIENCE_MCP_TITLE]
@@ -187,9 +187,7 @@ async def test_mcp_connection_resilience_incident_chain(
     # health recovers.
     server.start()
     await server.wait_serving()
-    reload_report = await stack.api().post(
-        f"/api/mcp-status/{RESILIENCE_MCP_TITLE}/reload", json={}, retry_on_reloading=True
-    )
+    reload_report = await stack.api().post(f"/api/mcp-status/{RESILIENCE_MCP_TITLE}/reload", json={})
     assert reload_report["reachable"] is True, f"the reload broadcast was unreachable: {reload_report}"
     assert all(r["outcome"] == "applied" for r in reload_report["results"]), f"a worker did not apply: {reload_report}"
 

@@ -28,7 +28,7 @@ async def test_reload_config_fans_out_confirmed(replicas_stack: TaiStack, uniq: 
     marker = uniq("E2E_MARKER").upper()
     api_a = replicas_stack.api(port=replicas_stack.port_a)
     # Seed a config change (polling past the boot-time reload gate), then fan the reload.
-    await api_a.post("/api/config/env", json={"env": {marker: "1"}}, retry_on_reloading=True)
+    await api_a.post("/api/config/env", json={"env": {marker: "1"}})
 
     # Every worker's life (slot name -> generation) before the reload: a rebuild blocks a
     # worker's serving loop, never its bus heartbeat, so no worker loses its slot to it.
@@ -39,7 +39,7 @@ async def test_reload_config_fans_out_confirmed(replicas_stack: TaiStack, uniq: 
         # validation issues no follow-up tools/list: reload_config retires this session
         # (new session-id space), which would otherwise raise "Session terminated".
         await mcp.list_tools()
-        result = await mcp.call_tool("reload_config", {}, retry_on_reloading=True)
+        result = await mcp.call_tool("reload_config", {})
     data = result.data if isinstance(result.data, dict) else result.structured_content
     assert isinstance(data, dict), f"reload_config returned no result map: {result!r}"
     # A FleetResult (no ``workers`` key): reachable, one per-worker outcome each.
@@ -96,7 +96,7 @@ async def test_dispatch_names_dead_worker(fresh_stack: Callable[..., TaiStack], 
     # Drain worker A's boot-time self-resync gate first, so the dispatch below is not
     # itself rejected as reloading while the corpse's presence-TTL counts down.
     async with stack.mcp(port=stack.port_a) as mcp:
-        await mcp.call_tool("e2e_worker_info", retry_on_reloading=True)
+        await mcp.call_tool("e2e_worker_info")
 
     # The backend worker's bus slot name, matched by kind + pid off the presence census.
     dead_pid = stack.process("backend").pid
@@ -110,7 +110,7 @@ async def test_dispatch_names_dead_worker(fresh_stack: Callable[..., TaiStack], 
     stack.kill("backend")
     async with stack.mcp(port=stack.port_a) as mcp:
         await mcp.list_tools()
-        result = await mcp.call_tool("reload_config", {}, raise_on_error=False, retry_on_reloading=True)
+        result = await mcp.call_tool("reload_config", {}, raise_on_error=False)
     data = result.data if isinstance(result.data, dict) else result.structured_content
     assert isinstance(data, dict), f"reload_config returned no result map: {result!r}"
     # The dead worker is NAMED with a non-applied outcome (departed/missing), never a
@@ -129,7 +129,7 @@ async def test_dispatch_names_dead_worker(fresh_stack: Callable[..., TaiStack], 
     epochs_before = {port: await _settings_epoch(stack, port) for port in survivor_ports}
     async with stack.mcp(port=stack.port_a) as mcp:
         await mcp.list_tools()
-        ok = await mcp.call_tool("reload_config", {}, retry_on_reloading=True)
+        ok = await mcp.call_tool("reload_config", {})
     ok_data = ok.data if isinstance(ok.data, dict) else ok.structured_content
     assert isinstance(ok_data, dict), f"reload_config returned no result map: {ok!r}"
     ok_outcomes = {r["name"]: r["outcome"] for r in ok_data["results"]}
@@ -155,7 +155,7 @@ async def test_dispatch_names_dead_worker(fresh_stack: Callable[..., TaiStack], 
 async def _settings_epoch(stack: TaiStack, port: int) -> int:
     """The settings epoch of the worker serving ``port`` — every applied reload advances it."""
     async with stack.mcp(port=port) as mcp:
-        result = await mcp.call_tool("e2e_settings_snapshot", {}, retry_on_reloading=True)
+        result = await mcp.call_tool("e2e_settings_snapshot", {})
     data = result.data if isinstance(result.data, dict) else result.structured_content
     assert isinstance(data, dict), f"e2e_settings_snapshot returned no result map: {result!r}"
     return int(data["settings_epoch"])

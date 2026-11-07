@@ -234,9 +234,7 @@ async def test_a_version_1_accounts_archive_is_refused(accounts_stack: TaiStack)
         ],
     }
     document = {"version": 1, "sections": {"accounts": archive}, "errors": {}}
-    result = await root.post(
-        "/api/backup/import", json={"document": document, "sections": ["accounts"]}, retry_on_reloading=True
-    )
+    result = await root.post("/api/backup/import", json={"document": document, "sections": ["accounts"]})
     assert result["ok"] is False, f"a version-1 accounts archive must not import ok: {result}"
     errors = result["sections"]["accounts"]["errors"]
     assert any("version 1" in str(error) for error in errors), f"the refusal must name version 1: {errors}"

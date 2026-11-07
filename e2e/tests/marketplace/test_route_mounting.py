@@ -225,7 +225,7 @@ async def test_plugin_routes_survive_in_process_config_reload(
         await _wait_status(stack.api(), _DEFAULT_OPEN, 200)
 
         # Drive the in-process reload (fenced admin door; the seeded root token opens it).
-        await stack.api().post("/api/config/reload", json={}, timeout=240.0, retry_on_reloading=True)
+        await stack.api().post("/api/config/reload", json={}, timeout=240.0)
 
         # The plugin routes still serve after the reload — the rebuilt epoch re-fired the
         # sibling's registrations instead of silently dropping them.

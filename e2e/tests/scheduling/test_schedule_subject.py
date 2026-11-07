@@ -77,7 +77,6 @@ async def test_scheduled_job_with_subject_writes_record_via_the_schedule_door(
             "cadence": {"kind": "interval", "every": _INTERVAL_SECONDS},
             "schedule_name": schedule_name,
         },
-        retry_on_reloading=True,
     )
     try:
 
@@ -97,7 +96,7 @@ async def test_scheduled_job_with_subject_writes_record_via_the_schedule_door(
         # A schedule fire is anonymous/system — no accountable principal.
         assert origin["actor"] is None, origin
     finally:
-        await api.delete(f"/api/schedules/{schedule_name}", retry_on_reloading=True)
+        await api.delete(f"/api/schedules/{schedule_name}")
 
 
 async def test_malformed_schedule_subject_is_refused_at_create(

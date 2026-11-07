@@ -53,7 +53,6 @@ async def _seed_mcp_entry(stack: TaiStack, title: str) -> None:
     await stack.api().post(
         "/api/mcp-config",
         json={"mcp": [{"title": title, "config": {"url": "http://127.0.0.1:1/mcp"}}]},
-        retry_on_reloading=True,
     )
 
 
@@ -87,7 +86,7 @@ async def test_combined_op_atomic_success(agents_stack: TaiStack, uniq: Callable
 async def test_combined_op_explicit_key_collision_refused(agents_stack: TaiStack, uniq: Callable[[str], str]) -> None:
     api = agents_stack.api()
     key = uniq("COLLIDE").upper()
-    await api.post("/api/config/env", json={"env": {key: "live-value"}}, retry_on_reloading=True)
+    await api.post("/api/config/env", json={"env": {key: "live-value"}})
     await _seed_mcp_entry(agents_stack, uniq("cop"))
 
     resp = await api.request_raw(
@@ -111,7 +110,7 @@ async def test_combined_op_generated_key_collision_mints_fresh(
     api = agents_stack.api()
     # A stored key EQUAL to the generator's first candidate (the hint uppercases to itself).
     hint = uniq("COP_SEED").upper()
-    await api.post("/api/config/env", json={"env": {hint: "seeded-value"}}, retry_on_reloading=True)
+    await api.post("/api/config/env", json={"env": {hint: "seeded-value"}})
     await _seed_mcp_entry(agents_stack, uniq("cop"))
 
     resp = await api.request_raw(
@@ -138,7 +137,6 @@ async def test_combined_op_secret_marks_appended_not_clobbered(
     await api.post(
         "/api/mcp-config/secret-env",
         json={"value": "first-secret", "key_hint": uniq("COP_FIRST").upper(), "manifest_pointer": _POINTER},
-        retry_on_reloading=True,
     )
     first_key = _marker_key(await _authorization_marker(agents_stack))
 
@@ -147,7 +145,6 @@ async def test_combined_op_secret_marks_appended_not_clobbered(
     await api.post(
         "/api/mcp-config/secret-env",
         json={"value": "second-secret", "key_hint": uniq("COP_SECOND").upper(), "manifest_pointer": _POINTER},
-        retry_on_reloading=True,
     )
     second_key = _marker_key(await _authorization_marker(agents_stack))
     assert second_key != first_key, "the two ops minted the same key"

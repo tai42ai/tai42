@@ -108,7 +108,6 @@ async def test_a_route_edit_on_one_replica_is_seen_by_the_next_message_everywher
             },
         },
         expect=202,
-        retry_on_reloading=True,
     )
 
     async def succeeded() -> dict | None:

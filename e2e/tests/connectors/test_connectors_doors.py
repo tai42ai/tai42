@@ -86,7 +86,7 @@ async def _oauth_complete(api: ApiClient, authorize_url: str) -> dict:
 
 
 async def _entry(api: ApiClient, title: str) -> dict:
-    manifest = await api.get("/api/manifest", retry_on_reloading=True)
+    manifest = await api.get("/api/manifest")
     return next(item for item in manifest["mcp"] if item["title"] == title)
 
 
@@ -113,7 +113,6 @@ async def test_a_pick_on_a_connections_entry_survives_a_reconnect(
     started = await api_a.post(
         "/api/connectors/connections/start",
         json={"provider_id": "e2e_idp", "alias": alias, "enabled_sub_services": ["default"]},
-        retry_on_reloading=True,
     )
     connection_id = (await _oauth_complete(api_b, started["authorize_url"]))["connection_id"]
 
@@ -121,7 +120,7 @@ async def test_a_pick_on_a_connections_entry_survives_a_reconnect(
         for api in (api_a, api_b):
 
             async def settled(api: ApiClient = api) -> bool:
-                names = set(await api.get("/api/tools", retry_on_reloading=True))
+                names = set(await api.get("/api/tools"))
                 return present <= names and not (absent & names)
 
             await wait_for_async(settled, deadline=_REBIND_S, message=f"tools never read {present} without {absent}")
@@ -131,14 +130,12 @@ async def test_a_pick_on_a_connections_entry_survives_a_reconnect(
     await api_a.put(
         f"/api/mcp-config/entries/{title}/tool-filter",
         json={"include": [], "exclude": [unpicked]},
-        retry_on_reloading=True,
     )
     await bound_on_both(kept, {unpicked})
 
     restarted = await api_a.post(
         f"/api/connectors/connections/{connection_id}/reconnect",
         json={"enabled_sub_services": ["default"]},
-        retry_on_reloading=True,
     )
     await _oauth_complete(api_b, restarted["authorize_url"])
 
@@ -148,4 +145,4 @@ async def test_a_pick_on_a_connections_entry_survives_a_reconnect(
         assert entry["managed"]["connection_id"] == connection_id, entry
     await bound_on_both(kept, {unpicked})
 
-    await api_a.delete(f"/api/connectors/connections/{connection_id}", retry_on_reloading=True)
+    await api_a.delete(f"/api/connectors/connections/{connection_id}")

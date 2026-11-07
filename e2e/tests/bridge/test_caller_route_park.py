@@ -135,7 +135,6 @@ async def test_a_route_parked_caller_ask_resumes_from_a_direct_run_on_its_subjec
         "/api/tool-runs",
         json={"tool_name": "caller_relay", "arguments": {"payload": "direct-answer"}, "subject": resume_subject},
         expect=202,
-        retry_on_reloading=True,
     )
     run_id = submitted["run_id"]
 

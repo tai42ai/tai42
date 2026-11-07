@@ -87,7 +87,7 @@ _REAL_LLM = HarnessSettings().is_real("llm")
 async def _expire(stack: TaiStack, interaction_id: str) -> None:
     """Force a live park's deadline into the past so the 1s reaper resolves it next pass."""
     async with stack.mcp(port=stack.port_a) as mcp:
-        await mcp.call_tool("e2e_expire_park", {"interaction_id": interaction_id}, retry_on_reloading=True)
+        await mcp.call_tool("e2e_expire_park", {"interaction_id": interaction_id})
 
 
 async def _await_subject_cleared(stack: TaiStack, subj: dict[str, str], *, deadline: float = 15.0) -> None:
@@ -643,7 +643,6 @@ async def test_a_route_started_user_ask_lapsed_past_its_horizon_is_surfaced_once
             "start_expr": {"content": f'{{key: "{probe}", value: (.interaction_id + "|" + .expiry_at)}}'},
             "execution_key": execution_key,
         },
-        retry_on_reloading=True,
     )
     await api.post(
         f"/api/conversations/{route_name}",
@@ -969,7 +968,7 @@ async def _lapse_on(stack: TaiStack, token: str, interaction_id: str) -> None:
 
     The stack has access control ON, so the MCP edge is authenticated with the seeded root token."""
     async with stack.mcp(port=stack.port_b, auth=token) as mcp:
-        await mcp.call_tool("e2e_lapse_park", {"interaction_id": interaction_id}, retry_on_reloading=True)
+        await mcp.call_tool("e2e_lapse_park", {"interaction_id": interaction_id})
 
 
 async def _expire_on(stack: TaiStack, token: str, interaction_id: str) -> None:
@@ -977,4 +976,4 @@ async def _expire_on(stack: TaiStack, token: str, interaction_id: str) -> None:
 
     The stack has access control ON, so the MCP edge is authenticated with the seeded root token."""
     async with stack.mcp(port=stack.port_b, auth=token) as mcp:
-        await mcp.call_tool("e2e_expire_park", {"interaction_id": interaction_id}, retry_on_reloading=True)
+        await mcp.call_tool("e2e_expire_park", {"interaction_id": interaction_id})

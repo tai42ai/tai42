@@ -83,7 +83,7 @@ def _tool_text(result: Any) -> str:
 
 async def _call(stack: TaiStack, tool: str, arguments: dict[str, Any]) -> Any:
     async with stack.mcp() as mcp:
-        return await mcp.call_tool(tool, arguments, retry_on_reloading=True)
+        return await mcp.call_tool(tool, arguments)
 
 
 def _runs_lane(stack: TaiStack, lane: str | None) -> bool:

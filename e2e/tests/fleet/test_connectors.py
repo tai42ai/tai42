@@ -56,7 +56,7 @@ pytestmark = [
 
 
 async def _manifest_mcp_titles(stack: TaiStack) -> list[str]:
-    manifest = await stack.api().get("/api/manifest", retry_on_reloading=True)
+    manifest = await stack.api().get("/api/manifest")
     return [entry["title"] for entry in manifest["mcp"]]
 
 
@@ -98,7 +98,6 @@ async def test_noauth_connect_disconnect_converges(
     start = await api.post(
         "/api/connectors/connections/start",
         json={"provider_id": "e2e_noauth_alpha", "alias": alias, "enabled_sub_services": ["default"]},
-        retry_on_reloading=True,
     )
     connection_id = start["connection_id"]
     entry_title = start["added_manifest_entries"][0]
@@ -114,7 +113,7 @@ async def test_noauth_connect_disconnect_converges(
 
     # Disconnect → every serve member drops the manifest entry and its tools.
     members = serve_members(stack)
-    disconnect = await api.delete(f"/api/connectors/connections/{connection_id}", retry_on_reloading=True)
+    disconnect = await api.delete(f"/api/connectors/connections/{connection_id}")
     assert_applied_by(assert_fleet_fanout(disconnect), members)
 
     assert entry_title not in await _manifest_mcp_titles(stack)  # live-vs-persisted projection
@@ -145,7 +144,6 @@ async def test_sub_service_toggle_converges(
     start = await api.post(
         "/api/connectors/connections/start",
         json={"provider_id": "e2e_noauth_multi", "alias": alias, "enabled_sub_services": ["alpha", "beta"]},
-        retry_on_reloading=True,
     )
     connection_id = start["connection_id"]
     assert_applied_by(assert_fleet_fanout(start), members)
@@ -173,7 +171,6 @@ async def test_sub_service_toggle_converges(
         "PATCH",
         f"/api/connectors/connections/{connection_id}/sub-services",
         json={"enabled_sub_services": ["alpha"]},
-        retry_on_reloading=True,
     )
     assert_applied_by(assert_fleet_fanout(off), members)
     assert off["removed_manifest_entries"] == [beta_title]
@@ -194,7 +191,6 @@ async def test_sub_service_toggle_converges(
         "PATCH",
         f"/api/connectors/connections/{connection_id}/sub-services",
         json={"enabled_sub_services": ["alpha", "beta"]},
-        retry_on_reloading=True,
     )
     assert_applied_by(assert_fleet_fanout(on), members)
     assert on["added_manifest_entries"] == [beta_title]
@@ -229,13 +225,10 @@ async def test_oauth_complete_and_reconnect_converges(
     start = await api.post(
         "/api/connectors/connections/start",
         json={"provider_id": "e2e_idp", "alias": alias, "enabled_sub_services": ["default"]},
-        retry_on_reloading=True,
     )
     code, state = await _authorize(start["authorize_url"])
     members = serve_members(stack)
-    completed = await api.post(
-        "/api/connectors/oauth/complete", json={"code": code, "state": state}, retry_on_reloading=True
-    )
+    completed = await api.post("/api/connectors/oauth/complete", json={"code": code, "state": state})
     assert completed["kind"] == "success", f"oauth completion failed: {completed}"
     connection_id = completed["connection_id"]
     assert_applied_by(assert_fleet_fanout(completed), members)
@@ -251,12 +244,9 @@ async def test_oauth_complete_and_reconnect_converges(
     reconnect = await api.post(
         f"/api/connectors/connections/{connection_id}/reconnect",
         json={"enabled_sub_services": ["default"]},
-        retry_on_reloading=True,
     )
     code2, state2 = await _authorize(reconnect["authorize_url"])
-    completed2 = await api.post(
-        "/api/connectors/oauth/complete", json={"code": code2, "state": state2}, retry_on_reloading=True
-    )
+    completed2 = await api.post("/api/connectors/oauth/complete", json={"code": code2, "state": state2})
     assert completed2["kind"] == "success", f"oauth reconnect completion failed: {completed2}"
     assert await _serves(stack, tool), f"managed tool {tool} not served after reconnect"
 

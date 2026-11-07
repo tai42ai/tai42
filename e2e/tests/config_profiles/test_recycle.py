@@ -106,7 +106,7 @@ async def _profile_from_stored(stack: TaiStack, changes: dict[str, str], name: s
     """Save a profile that is the CURRENT stored env plus ``changes`` — so every stored key
     stays at its current value (zero diff) and the only diff is ``changes``."""
     stored = (await stack.api().get("/api/config/env"))["env"]
-    await stack.api().put(f"/api/config/profiles/{name}", json={"env": {**stored, **changes}}, retry_on_reloading=True)
+    await stack.api().put(f"/api/config/profiles/{name}", json={"env": {**stored, **changes}})
 
 
 @pytest.mark.timeout(300)
@@ -132,7 +132,7 @@ async def test_recycle_apply_rolls_the_fleet_and_self_defers_applier(
 
     # The apply blocks through the orchestrated backend recycle (self-exit → respawn →
     # rejoin) before it returns, so give the client room.
-    applied = await api.post(f"/api/config/profiles/{name}/apply", retry_on_reloading=True, timeout=200.0)
+    applied = await api.post(f"/api/config/profiles/{name}/apply", timeout=200.0)
     assert applied["refused"] == [], f"a recycle apply on a supervised stack refused a key: {applied}"
     assert applied["recycle_stopped"] is None, f"the recycle roll stopped: {applied}"
     assert applied["awaiting_respawn"] == [], f"a converged apply named a worker awaiting a respawn: {applied}"
@@ -308,7 +308,7 @@ async def test_recycle_drains_in_flight_backend_job(own_recycle_stack: TaiStack,
     # worker) dispatches it INTO the backend, which RPUSHes a ``started`` marker (its own backend
     # pid), holds until the test releases it, and RPUSHes ``done``.
     probe = {"tool_name": "e2e_drain_hold_sync_task", "arguments": {"key": key, "seconds": _DRAIN_HOLD_SECONDS}}
-    await api.post("/api/tool-runs", json=probe, expect=202, retry_on_reloading=True)
+    await api.post("/api/tool-runs", json=probe, expect=202)
 
     def _values() -> list[str]:
         return [json.loads(rec)["value"] for rec in own_recycle_stack.records(key)]
@@ -326,7 +326,7 @@ async def test_recycle_drains_in_flight_backend_job(own_recycle_stack: TaiStack,
 
     # The apply blocks through the roll; meanwhile the job's backend is seen waiting on the job.
     applying_from = time.monotonic()
-    apply = asyncio.create_task(api.post(f"/api/config/profiles/{name}/apply", retry_on_reloading=True, timeout=200.0))
+    apply = asyncio.create_task(api.post(f"/api/config/profiles/{name}/apply", timeout=200.0))
     try:
         try:
             if job_process == "child":
@@ -627,9 +627,7 @@ async def test_an_env_write_of_a_recycle_class_key_rolls_the_fleet_and_self_defe
     before_backend = _lives(own_recycle_stack, "backend")
     before_serve = _lives(own_recycle_stack, "serve")
 
-    written = await api.post(
-        "/api/config/env", json={"env": {_RECYCLE_VAR: uniq("mkey").upper()}}, retry_on_reloading=True, timeout=200.0
-    )
+    written = await api.post("/api/config/env", json={"env": {_RECYCLE_VAR: uniq("mkey").upper()}}, timeout=200.0)
     assert written["fanout"]["mode"] in ("fleet", "local-only"), written
     # The operation's verdict: a converged roll with the writer recycling itself leaves nobody.
     assert written["awaiting_respawn"] == [], written
@@ -702,9 +700,7 @@ async def test_an_env_write_over_mcp_rolls_the_fleet_and_the_writer_recycles_its
         # The write's reload retires this session and the writer then exits: the tool listing
         # is read first so the client asks this session nothing after the call answered.
         await mcp.list_tools()
-        result = await mcp.call_tool(
-            "write_env", {"env": {_RECYCLE_VAR: uniq("mkey").upper()}}, retry_on_reloading=True, ready_deadline=30.0
-        )
+        result = await mcp.call_tool("write_env", {"env": {_RECYCLE_VAR: uniq("mkey").upper()}}, ready_deadline=30.0)
     written = result.data if isinstance(result.data, dict) else result.structured_content
     assert isinstance(written, dict), f"write_env returned no result map: {result!r}"
     assert written["awaiting_respawn"] == [], written
@@ -733,7 +729,6 @@ async def test_a_backup_env_restore_of_a_recycle_class_key_rolls_the_fleet_and_s
     imported = await api.post(
         "/api/backup/import",
         json={"document": document, "sections": ["env"], "mode": "overwrite"},
-        retry_on_reloading=True,
         timeout=200.0,
     )
     assert imported["ok"] is True, imported
@@ -882,7 +877,6 @@ async def test_an_env_write_run_as_a_sync_task_hands_the_roll_to_the_backend_wor
             await mcp.call_tool(
                 "run_tool_sync_task",
                 {"tool_name": "write_env", "arguments": {"env": {_RECYCLE_VAR: uniq("mkey").upper()}}},
-                retry_on_reloading=True,
             )
         )
 
@@ -924,7 +918,6 @@ async def test_a_sync_task_whose_job_answers_long_after_its_env_write_gets_its_a
                 mcp.call_tool(
                     "run_tool_sync_task",
                     {"tool_name": "e2e_run_then_hold", "arguments": arguments},
-                    retry_on_reloading=True,
                 ),
                 timeout=_ANSWER_HOLD_SECONDS + 90.0,
             )
@@ -1001,11 +994,7 @@ def _assert_the_writer_joined_last(stack: TaiStack, writer: str, before: dict[st
 async def _queue_as_backend_job(stack: TaiStack, tool_name: str, arguments: dict[str, Any]) -> str:
     """Queue ``tool_name`` as a backend job (``run_tool_async_task``) and return its task id."""
     async with stack.mcp(auth=stack.auth_token) as mcp:
-        queued = _tool_map(
-            await mcp.call_tool(
-                "run_tool_async_task", {"tool_name": tool_name, "arguments": arguments}, retry_on_reloading=True
-            )
-        )
+        queued = _tool_map(await mcp.call_tool("run_tool_async_task", {"tool_name": tool_name, "arguments": arguments}))
     return str(queued["task_id"])
 
 
@@ -1016,7 +1005,6 @@ async def _backend_job_result(stack: TaiStack, task_id: str) -> Any:
             "backend_task_result",
             {"task_id": task_id, "timeout": 120},
             raise_on_error=False,
-            retry_on_reloading=True,
             ready_deadline=60.0,
         )
 
@@ -1066,7 +1054,7 @@ async def _leaving_row(stack: TaiStack, slot: str) -> BusWorker | None:
 
 async def _settings_epoch(stack: TaiStack) -> int:
     async with stack.mcp(auth=stack.auth_token) as mcp:
-        snapshot = _tool_map(await mcp.call_tool("e2e_settings_snapshot", {}, retry_on_reloading=True))
+        snapshot = _tool_map(await mcp.call_tool("e2e_settings_snapshot", {}))
     return int(snapshot["settings_epoch"])
 
 
@@ -1082,7 +1070,6 @@ async def _hold_the_queue_worker(stack: TaiStack, key: str) -> None:
         await mcp.call_tool(
             "run_tool_async_task",
             {"tool_name": "e2e_hold_until_released", "arguments": {"key": key}, "queue": "b"},
-            retry_on_reloading=True,
         )
     wait_for(lambda: _held_by(stack, key) != [], deadline=60.0, message="the queue worker never started its hold")
 
@@ -1149,7 +1136,6 @@ async def test_a_serve_worker_held_in_its_lifespan_shutdown_keeps_announcing_its
                     "tool_kwargs": {"key": hook_hold},
                     "execution_key": uniq("exec"),
                 },
-                retry_on_reloading=True,
             )
             fired = await api.request_raw("POST", f"/universal_webhook/{topic}", json={"any": "payload"})
             assert fired.status_code == 200, fired.text
@@ -1236,7 +1222,6 @@ async def test_a_backend_worker_stopped_from_outside_mid_job_reads_leaving_and_a
             "arguments": {"key": key, "seconds": _OUTSIDE_STOP_PROBE_SECONDS},
         },
         expect=202,
-        retry_on_reloading=True,
     )
 
     def _values() -> list[str]:
@@ -1261,7 +1246,7 @@ async def test_a_backend_worker_stopped_from_outside_mid_job_reads_leaving_and_a
 
     name = uniq("outsidestopprofile")
     await _profile_from_stored(stack, {_RECYCLE_VAR: uniq("mkey").upper()}, name)
-    applied = await api.post(f"/api/config/profiles/{name}/apply", retry_on_reloading=True, timeout=200.0)
+    applied = await api.post(f"/api/config/profiles/{name}/apply", timeout=200.0)
 
     # The fan-out finds the stopping worker leaving, not applying: its outcome is ``recycling``, which
     # the change logs loudly as not converged, and its roll waits that worker's next life out.
@@ -1371,7 +1356,6 @@ async def test_a_profile_whose_build_fails_applied_as_a_backend_job_persists_not
     await api.put(
         f"/api/config/profiles/{name}",
         json={"env": {**before_env, _BUILD_POISON_VAR: "not-an-integer"}},
-        retry_on_reloading=True,
     )
 
     task_id = await _queue_as_backend_job(recycle_stack, "apply_profile", {"name": name})
@@ -1421,7 +1405,6 @@ async def test_an_env_write_by_an_agent_rolls_the_fleet_and_the_writer_recycles_
             "arguments": {"user_message": {"content": "write the setting"}, "tool_names": ["write_env"]},
         },
         expect=202,
-        retry_on_reloading=True,
     )
     run_id = submitted["run_id"]
 
@@ -1429,7 +1412,7 @@ async def test_an_env_write_by_an_agent_rolls_the_fleet_and_the_writer_recycles_
     own_recycle_stack.wait_generation_bump("serve", before_serve, deadline=200.0)
 
     async def _terminal() -> dict[str, Any] | None:
-        view = await own_recycle_stack.api().get(f"/api/tool-runs/{run_id}", retry_on_reloading=True)
+        view = await own_recycle_stack.api().get(f"/api/tool-runs/{run_id}")
         return view if view["status"] not in ("pending", "running") else None
 
     view = await wait_for_async(_terminal, deadline=60.0, message=f"agent run {run_id} never ended")

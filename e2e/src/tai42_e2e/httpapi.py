@@ -81,12 +81,36 @@ class ApiClient:
         headers: dict[str, str] | None = None,
         content: bytes | None = None,
         timeout: float | None = None,
+        retry_on_reloading: bool = True,
+        ready_deadline: float = RELOAD_GATE_DEADLINE,
     ) -> httpx.Response:
         """Issue a request and return the raw response (no envelope unwrapping). ``timeout``
-        overrides the client default for this ONE call (a slow install/reload POST)."""
+        overrides the client default for this ONE call (a slow install/reload POST).
+
+        A request that meets the reload gate's retriable ``503 reloading`` — a worker's
+        boot-time self-resync, a sibling's deployment-keys join being applied, an in-flight
+        config reload — is polled past on the sanctioned :func:`wait_for_async` interval until
+        the worker leaves the gate or ``ready_deadline`` elapses, the retry every real client
+        applies to the retriable answer; the deadline raises naming the request. Every other
+        answer, a ``503`` that is not the reload gate's included, is returned as answered.
+        ``retry_on_reloading=False`` returns the reload gate's refusal itself, for a test that
+        asserts the gate."""
         merged = {**self._headers, **(headers or {})}
-        async with httpx.AsyncClient(base_url=self._base_url, timeout=timeout or self._timeout) as client:
-            return await client.request(method, path, json=json, headers=merged, content=content)
+
+        async def send() -> httpx.Response:
+            async with httpx.AsyncClient(base_url=self._base_url, timeout=timeout or self._timeout) as client:
+                return await client.request(method, path, json=json, headers=merged, content=content)
+
+        if not retry_on_reloading:
+            return await send()
+
+        async def settled() -> httpx.Response | None:
+            response = await send()
+            return None if _is_reloading(response) else response
+
+        return await wait_for_async(
+            settled, deadline=ready_deadline, message=f"{method} {path} never left the reload gate"
+        )
 
     def post_and_disconnect(self, path: str, *, json: Any = None, hold_seconds: float = 0.0) -> None:
         """Send one POST over a raw socket, hold it open ``hold_seconds``, then close it without
@@ -132,30 +156,27 @@ class ApiClient:
         json: Any = None,
         headers: dict[str, str] | None = None,
         expect: int = 200,
-        retry_on_reloading: bool = False,
+        retry_on_reloading: bool = True,
         ready_deadline: float = RELOAD_GATE_DEADLINE,
         timeout: float | None = None,
     ) -> Any:
         """Issue a request, assert the status, and return the unwrapped
         ``data``. Raises :class:`ApiError` with the body on a status mismatch.
 
-        With ``retry_on_reloading=True`` a request that hits the boot-time reload gate
-        (a retriable ``503 reloading``) is polled past on the sanctioned
-        :func:`wait_for_async` interval until the worker leaves the gate or
-        ``ready_deadline`` elapses — the retry every real client applies. A gated
-        route fired the instant a stack is ready races the ~2s self-resync. ``timeout``
-        overrides the client read timeout for a single slow call."""
-        if retry_on_reloading:
-
-            async def settled() -> httpx.Response | None:
-                resp = await self.request_raw(method, path, json=json, headers=headers, timeout=timeout)
-                return None if _is_reloading(resp) else resp
-
-            response = await wait_for_async(
-                settled, deadline=ready_deadline, message=f"{method} {path} never left the reload gate"
-            )
-        else:
-            response = await self.request_raw(method, path, json=json, headers=headers, timeout=timeout)
+        The request goes through :meth:`request_raw`, so a reload gate's retriable
+        ``503 reloading`` is polled past until ``ready_deadline`` and the status asserted is
+        the worker's real answer; ``retry_on_reloading=False`` asserts against the reload
+        gate's refusal itself. ``timeout`` overrides the client read timeout for a single
+        slow call."""
+        response = await self.request_raw(
+            method,
+            path,
+            json=json,
+            headers=headers,
+            timeout=timeout,
+            retry_on_reloading=retry_on_reloading,
+            ready_deadline=ready_deadline,
+        )
         if response.status_code != expect:
             raise ApiError(f"{method} {path} -> {response.status_code} (expected {expect}); body: {response.text}")
         body = response.json()
@@ -164,9 +185,22 @@ class ApiClient:
         return body
 
     async def get(
-        self, path: str, *, expect: int = 200, headers: dict[str, str] | None = None, retry_on_reloading: bool = False
+        self,
+        path: str,
+        *,
+        expect: int = 200,
+        headers: dict[str, str] | None = None,
+        retry_on_reloading: bool = True,
+        ready_deadline: float = RELOAD_GATE_DEADLINE,
     ) -> Any:
-        return await self.request("GET", path, expect=expect, headers=headers, retry_on_reloading=retry_on_reloading)
+        return await self.request(
+            "GET",
+            path,
+            expect=expect,
+            headers=headers,
+            retry_on_reloading=retry_on_reloading,
+            ready_deadline=ready_deadline,
+        )
 
     async def post(
         self,
@@ -175,7 +209,8 @@ class ApiClient:
         json: Any = None,
         expect: int = 200,
         headers: dict[str, str] | None = None,
-        retry_on_reloading: bool = False,
+        retry_on_reloading: bool = True,
+        ready_deadline: float = RELOAD_GATE_DEADLINE,
         timeout: float | None = None,
     ) -> Any:
         return await self.request(
@@ -185,6 +220,7 @@ class ApiClient:
             expect=expect,
             headers=headers,
             retry_on_reloading=retry_on_reloading,
+            ready_deadline=ready_deadline,
             timeout=timeout,
         )
 
@@ -195,10 +231,17 @@ class ApiClient:
         json: Any = None,
         expect: int = 200,
         headers: dict[str, str] | None = None,
-        retry_on_reloading: bool = False,
+        retry_on_reloading: bool = True,
+        ready_deadline: float = RELOAD_GATE_DEADLINE,
     ) -> Any:
         return await self.request(
-            "PUT", path, json=json, expect=expect, headers=headers, retry_on_reloading=retry_on_reloading
+            "PUT",
+            path,
+            json=json,
+            expect=expect,
+            headers=headers,
+            retry_on_reloading=retry_on_reloading,
+            ready_deadline=ready_deadline,
         )
 
     async def delete(
@@ -208,8 +251,15 @@ class ApiClient:
         json: Any = None,
         expect: int = 200,
         headers: dict[str, str] | None = None,
-        retry_on_reloading: bool = False,
+        retry_on_reloading: bool = True,
+        ready_deadline: float = RELOAD_GATE_DEADLINE,
     ) -> Any:
         return await self.request(
-            "DELETE", path, json=json, expect=expect, headers=headers, retry_on_reloading=retry_on_reloading
+            "DELETE",
+            path,
+            json=json,
+            expect=expect,
+            headers=headers,
+            retry_on_reloading=retry_on_reloading,
+            ready_deadline=ready_deadline,
         )

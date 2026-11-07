@@ -37,7 +37,6 @@ async def test_real_claude_turn_lands_a_message_final(claude_agent_stack: TaiSta
         result = await mcp.call_tool(
             "claude_code",
             {"user_message": {"content": "Reply with exactly the single word: pong"}},
-            retry_on_reloading=True,
         )
     # A real terminal answer drains to a non-empty message string (the contract terminal rule);
     # the exact wording is the model's, so the smoke asserts a MessageFinal landed, not its text.

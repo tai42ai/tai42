@@ -61,7 +61,6 @@ async def test_create_stripe_payment_link_mints_a_session(
                 "cancel_url": "https://acme.example/cancelled",
                 "metadata": {"external_ref": ref},
             },
-            retry_on_reloading=True,
         )
     payload = result.data
     assert set(payload) == {"link", "session_id"}, payload

@@ -78,7 +78,7 @@ async def test_static_cred_reaches_the_clean_session_env(
 ) -> None:
     stack = claude_stack(fresh_stack, llm_stub, "session_creds", TAI_AGENTS_CLAUDE_CREDS=_static_creds())
     async with stack.mcp() as mcp:
-        result = await mcp.call_tool("claude_code", {"user_message": {"content": "hi"}}, retry_on_reloading=True)
+        result = await mcp.call_tool("claude_code", {"user_message": {"content": "hi"}})
     # The runner echoed ``E2E_SVC_TOKEN`` from its session env; the known token round-tripped.
     assert result.data == _KNOWN_TOKEN, result.data
 
@@ -89,9 +89,7 @@ async def test_connection_cred_on_identity_less_tool_face_fails_closed(
 ) -> None:
     stack = claude_stack(fresh_stack, llm_stub, "session_creds", TAI_AGENTS_CLAUDE_CREDS=_connection_creds())
     async with stack.mcp() as mcp:
-        result = await mcp.call_tool(
-            "claude_code", {"user_message": {"content": "hi"}}, retry_on_reloading=True, raise_on_error=False
-        )
+        result = await mcp.call_tool("claude_code", {"user_message": {"content": "hi"}}, raise_on_error=False)
     assert result.is_error, result.data
     assert "no execution identity bound" in error_text(result), error_text(result)
 

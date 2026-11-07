@@ -48,12 +48,11 @@ async def test_a_background_agent_run_whose_tool_call_reloads_the_config_succeed
             "arguments": {"user_message": {"content": "reload the config"}, "tool_names": ["reload_config"]},
         },
         expect=202,
-        retry_on_reloading=True,
     )
     run_id = submitted["run_id"]
 
     async def _terminal() -> dict[str, Any] | None:
-        view = await api.get(f"/api/tool-runs/{run_id}", retry_on_reloading=True)
+        view = await api.get(f"/api/tool-runs/{run_id}")
         return view if view["status"] not in ("pending", "running") else None
 
     view = await wait_for_async(

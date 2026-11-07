@@ -97,7 +97,6 @@ async def test_a_channel_inbound_during_a_reload_is_refused_and_its_redelivery_r
         api_b.post(
             "/api/run-tool",
             json={"tool_name": "e2e_hold_until_released", "arguments": {"key": hold_key}},
-            retry_on_reloading=True,
             timeout=_FLEET_WRITE_TIMEOUT_SECONDS,
         )
     )
@@ -110,7 +109,6 @@ async def test_a_channel_inbound_during_a_reload_is_refused_and_its_redelivery_r
             api_a.post(
                 "/api/config/env",
                 json={"env": {env_key: "1"}},
-                retry_on_reloading=True,
                 timeout=_FLEET_WRITE_TIMEOUT_SECONDS,
             )
         )
@@ -118,7 +116,10 @@ async def test_a_channel_inbound_during_a_reload_is_refused_and_its_redelivery_r
         # B's gate is locked: a neutral gated probe answers the reload envelope.
         async def b_reloading() -> bool | None:
             resp = await api_b.request_raw(
-                "POST", "/api/run-tool", json={"tool_name": "e2e_echo", "arguments": {"payload": "probe"}}
+                "POST",
+                "/api/run-tool",
+                json={"tool_name": "e2e_echo", "arguments": {"payload": "probe"}},
+                retry_on_reloading=False,
             )
             return True if _is_reloading(resp) else None
 

@@ -37,7 +37,6 @@ async def _run_naming(stack: TaiStack, llm_stub: LlmStub, preset: str) -> tuple[
             "tools_agent",
             {"user_message": {"content": "call the tool"}, "tool_names": [preset]},
             raise_on_error=False,
-            retry_on_reloading=True,
         )
     return result, list(llm_stub.requests)
 

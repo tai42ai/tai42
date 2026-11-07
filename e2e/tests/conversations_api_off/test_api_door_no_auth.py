@@ -39,7 +39,6 @@ async def test_ac_off_api_door_admits_and_keys_by_the_synthetic_principal(
             "execution_key": "acoff-exec",
             "callback_url": _UNREACHABLE_CALLBACK,
         },
-        retry_on_reloading=True,
     )
     assert created["created"] is True
 

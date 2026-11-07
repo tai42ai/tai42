@@ -54,7 +54,7 @@ async def test_too_broad_metric_page_is_400_not_the_install_path(monitoring_stac
     # the shared skeleton translator maps it to 400 monitoring-read-too-broad — the
     # caller narrows the request.
     api: ApiClient = monitoring_stack.api()
-    caps = await api.get("/api/observability/capabilities", retry_on_reloading=True)
+    caps = await api.get("/api/observability/capabilities")
     page_size = caps["pageSizeMax"]
     # ``cost`` is one of the globally metric-ranked sorts this door exposes.
     assert "cost" in caps["sortKeys"], caps["sortKeys"]
@@ -64,7 +64,7 @@ async def test_too_broad_metric_page_is_400_not_the_install_path(monitoring_stac
     query = urlencode(
         {"from": _window_start(), "sort": "cost", "dir": "desc", "page": over_cap_page, "pageSize": page_size}
     )
-    body = await api.request("GET", f"/api/observability/runs?{query}", expect=400, retry_on_reloading=True)
+    body = await api.request("GET", f"/api/observability/runs?{query}", expect=400)
 
     assert body["code"] == _READ_TOO_BROAD_CODE, body
     # The body carries the backend's own guidance, not an empty "no runs" answer.
@@ -92,7 +92,7 @@ async def test_a_metric_sort_combines_with_every_filter(monitoring_stack: TaiSta
     # backend declares no filter it cannot combine with the sort, and the read answers a
     # normal 200 page.
     api: ApiClient = monitoring_stack.api()
-    caps = await api.get("/api/observability/capabilities", retry_on_reloading=True)
+    caps = await api.get("/api/observability/capabilities")
     assert "cost" in caps["sortKeys"], caps["sortKeys"]
     assert caps["incompatibleFilters"] == {}, caps["incompatibleFilters"]
 
@@ -100,7 +100,7 @@ async def test_a_metric_sort_combines_with_every_filter(monitoring_stack: TaiSta
     query = urlencode(
         {"from": _window_start(), "sort": "cost", "dir": "desc", param: _METRIC_SORT_FILTER_SAMPLES[param], "page": 1}
     )
-    page = await api.get(f"/api/observability/runs?{query}", retry_on_reloading=True)
+    page = await api.get(f"/api/observability/runs?{query}")
 
     assert isinstance(page["items"], list), page
     assert page["page"] == 1, page
@@ -114,7 +114,7 @@ async def test_valid_empty_filter_is_200_empty_page(monitoring_stack: TaiStack, 
     absent_user = uniq("nouser")
 
     query = urlencode({"from": _window_start(), "user": absent_user, "pageSize": 50})
-    page = await api.get(f"/api/observability/runs?{query}", retry_on_reloading=True)
+    page = await api.get(f"/api/observability/runs?{query}")
 
     assert page["items"] == [], page
     assert page["page"] == 1

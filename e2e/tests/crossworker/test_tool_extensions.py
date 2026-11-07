@@ -26,7 +26,7 @@ async def test_tool_extension_apply_visible_on_sibling(replicas_stack: TaiStack,
     api_a = replicas_stack.api(port=replicas_stack.port_a)
 
     # Apply the extension on A, polling past A's boot-time reload gate.
-    result = await api_a.post("/api/tools/e2e_echo/extensions", json={"combos": [["batch"]]}, retry_on_reloading=True)
+    result = await api_a.post("/api/tools/e2e_echo/extensions", json={"combos": [["batch"]]})
 
     # A serves the branch locally (the local apply).
     async def a_serves_batch() -> bool:
@@ -47,7 +47,6 @@ async def test_tool_extension_apply_visible_on_sibling(replicas_stack: TaiStack,
         await mcp.call_tool(
             "run_tool_sync_task",
             {"tool_name": "e2e_echo_batch", "arguments": {"params": []}},
-            retry_on_reloading=True,
         )
 
     # The sibling HTTP replica rebound from the same fan-out, so it serves the branch too.

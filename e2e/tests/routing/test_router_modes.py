@@ -22,7 +22,6 @@ import httpx
 import pytest
 
 from tai42_e2e.stack import TaiStack
-from tai42_e2e.waiting import wait_for_async
 
 # These stacks drive no backend worker — they are route-mounting only.
 pytestmark = pytest.mark.backendless
@@ -33,22 +32,9 @@ _DEFAULTED_UNLISTED = "/api/backup/sections"
 
 
 async def _status(stack: TaiStack, method: str, path: str, json: dict | None = None) -> httpx.Response:
-    """Issue one raw request against the app port, polling only past the boot-time
-    reload gate (a ``503 reloading`` while a worker self-resyncs is not a route verdict)."""
-    api = stack.api()
-
-    async def settled() -> httpx.Response | None:
-        resp = await api.request_raw(method, path, json=json)
-        if resp.status_code == 503:
-            try:
-                body = resp.json()
-            except ValueError:
-                body = None
-            if isinstance(body, dict) and body.get("reloading") is True:
-                return None
-        return resp
-
-    return await wait_for_async(settled, deadline=15.0, message=f"{method} {path} never left the reload gate")
+    """Issue one raw request against the app port; the client polls past the reload gate's
+    retriable ``503 reloading`` (a worker's self-resync is not a route verdict)."""
+    return await stack.api().request_raw(method, path, json=json, ready_deadline=15.0)
 
 
 @pytest.mark.needs("setting:default-routers-api")

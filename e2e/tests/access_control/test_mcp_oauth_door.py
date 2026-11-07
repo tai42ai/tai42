@@ -78,9 +78,7 @@ def door_studio_routes_stack(infra: Infra, tmp_path_factory: pytest.TempPathFact
 
 
 async def _register_sub_mcp(stack: TaiStack, slug: str, transport: str, port: int | None = None) -> None:
-    await stack.api(port=port).post(
-        "/api/sub-mcp", json={"slug": slug, "tools": [PROBE_TOOL], "transport": transport}, retry_on_reloading=True
-    )
+    await stack.api(port=port).post("/api/sub-mcp", json={"slug": slug, "tools": [PROBE_TOOL], "transport": transport})
 
 
 # -- 1. the pointer and the document --------------------------------------------------------

@@ -84,7 +84,7 @@ async def test_a_reload_over_the_sse_transport_answers_without_waiting_the_drain
         assert "reload_config" in await before.tool_names()
         assert "reload_config" in await mcp.tool_names()
         start = time.monotonic()
-        result = await mcp.call_tool("reload_config", {}, retry_on_reloading=True)
+        result = await mcp.call_tool("reload_config", {})
         took = time.monotonic() - start
         data = result.data if isinstance(result.data, dict) else result.structured_content
         assert isinstance(data, dict), f"reload_config returned no result map: {result!r}"

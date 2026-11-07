@@ -117,7 +117,6 @@ async def test_secret_reference_round_trips_every_door(
     imported = await api.post(
         "/api/backup/import",
         json={"document": document, "sections": ["versioned_documents"]},
-        retry_on_reloading=True,
     )
     assert imported["ok"], imported
     reread = await api.get(f"/api/presets/{name}")
@@ -125,7 +124,7 @@ async def test_secret_reference_round_trips_every_door(
 
     # The MCP-projected read serves the SAME operation the HTTP door does — marker verbatim.
     async with stack.mcp(port=stack.port_a) as mcp:
-        projected = (await mcp.call_tool("get_preset", {"name": name}, retry_on_reloading=True)).data
+        projected = (await mcp.call_tool("get_preset", {"name": name})).data
     assert projected["fixed_kwargs"] == {"payload": _MARKER}
 
     # -- dispatch: the probe receives the resolved value; the record masks it ----------

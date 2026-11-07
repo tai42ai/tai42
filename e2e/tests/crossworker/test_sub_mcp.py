@@ -9,7 +9,6 @@ from collections.abc import Callable
 import pytest
 
 from tai42_e2e import wait_for_async
-from tai42_e2e.httpapi import ApiClient
 from tai42_e2e.stack import TaiStack
 
 pytestmark = pytest.mark.needs("probe-tools", "mutable", "topology:replicas", "setting:SUB_MCP_REDIS_URL")
@@ -23,25 +22,6 @@ async def _serves(stack: TaiStack, port: int, slug: str) -> bool:
         return False
 
 
-async def _delete_sub_mcp(api: ApiClient, slug: str) -> None:
-    """DELETE a sub-MCP registration, honouring the reload gate's retriable 503.
-
-    A prior fleet ``reload_config`` fan-out may still hold this replica's reload
-    gate (sub-MCP requests are not gated, so serving can resume before the gate
-    frees), and a registry mutation on a reloading worker returns a retriable
-    ``503 reloading`` — re-send until it lands, as an operator/client would."""
-
-    async def _attempt() -> bool:
-        resp = await api.request_raw("DELETE", f"/api/sub-mcp/{slug}")
-        if resp.status_code == 503:  # retriable "reloading"
-            return False
-        if resp.status_code != 200:
-            raise AssertionError(f"DELETE /api/sub-mcp/{slug} -> {resp.status_code}: {resp.text}")
-        return True
-
-    await wait_for_async(_attempt, deadline=10.0, message=f"sub-MCP {slug} delete never left the reloading gate")
-
-
 # The module's only test boots its stack (120) + the register (10 gate poll + 60) + B's serve
 # poll (5) and call (15) + A's whole-fleet reload (60) + A's serve read (15) + B's serve poll (5)
 # + the delete poll (10) + the two listings (2 x 15) + A's second reload (60) + its poll (5).
@@ -51,7 +31,7 @@ async def test_sub_mcp_registered_on_a_serves_on_b(replicas_stack: TaiStack, uni
     slug = uniq("submcp").replace("_", "-")
     api_a = replicas_stack.api(port=replicas_stack.port_a)
 
-    await api_a.post("/api/sub-mcp", json={"slug": slug, "tools": ["e2e_echo"]}, retry_on_reloading=True)
+    await api_a.post("/api/sub-mcp", json={"slug": slug, "tools": ["e2e_echo"]})
 
     # B never saw the registration; the store fallback builds it on demand.
     await wait_for_async(
@@ -75,9 +55,11 @@ async def test_sub_mcp_registered_on_a_serves_on_b(replicas_stack: TaiStack, uni
         message="B stopped serving the slug after A's fleet reload",
     )
 
-    # Delete on B: the store-backed list drops the slug on both immediately.
+    # Delete on B: the store-backed list drops the slug on both immediately. A's fleet reload
+    # may still hold B's reload gate (sub-MCP requests are not gated, so B serves before its
+    # gate frees); the client polls past the retriable refusal within the delete's budget.
     api_b = replicas_stack.api(port=replicas_stack.port_b)
-    await _delete_sub_mcp(api_b, slug)
+    await api_b.delete(f"/api/sub-mcp/{slug}", ready_deadline=10.0)
     listing_a = await api_a.get("/api/sub-mcp")
     listing_b = await api_b.get("/api/sub-mcp")
     assert slug not in listing_a

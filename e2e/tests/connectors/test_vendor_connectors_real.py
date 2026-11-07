@@ -139,7 +139,6 @@ class _Leg:
             "/api/connectors/connections/start",
             json={"provider_id": self.vendor, "alias": alias, "enabled_sub_services": [self.sub_service]},
             headers={"Origin": self.public_origin},
-            retry_on_reloading=True,
         )
         start_seconds = time.monotonic() - started_at
         authorize_url = started["authorize_url"]
@@ -174,7 +173,7 @@ class _Leg:
 
     async def _probe(self, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
         async with self.stack.mcp() as mcp:
-            result = await mcp.call_tool(tool, arguments, retry_on_reloading=True)
+            result = await mcp.call_tool(tool, arguments)
         return result.data
 
     def served_name(self, alias: str, tool: str) -> str:
@@ -234,7 +233,7 @@ class _Leg:
 
     async def _answer(self, name: str) -> str:
         async with self.stack.mcp() as mcp:
-            result = await mcp.call_tool(name, {}, raise_on_error=False, retry_on_reloading=True)
+            result = await mcp.call_tool(name, {}, raise_on_error=False)
         text = "".join(getattr(part, "text", "") for part in result.content)
         assert not result.is_error, f"{name} failed: {text[:500]}"
         return text
@@ -257,13 +256,11 @@ class _Leg:
         document["connectors"] = [
             candidate if entry.get("id") == self.vendor else entry for entry in document.get("connectors", [])
         ]
-        await self.api.post(
-            "/api/manifest/replace", json={"manifest_text": yaml.safe_dump(document)}, retry_on_reloading=True
-        )
+        await self.api.post("/api/manifest/replace", json={"manifest_text": yaml.safe_dump(document)})
         return candidate
 
     async def disconnect(self, connection_id: str) -> dict[str, Any]:
-        result = await self.api.delete(f"/api/connectors/connections/{connection_id}", retry_on_reloading=True)
+        result = await self.api.delete(f"/api/connectors/connections/{connection_id}")
         listed = await self.api.get("/api/connectors/connections")
         assert connection_id not in {item["connection_id"] for item in listed["items"]}, listed
         return {

@@ -38,13 +38,11 @@ def _assert_fleet_fanout(response: dict) -> None:
 
 
 async def _upload(api, path: str, content: str) -> dict:
-    return await api.post("/api/upload-template", json={"path": path, "content": content}, retry_on_reloading=True)
+    return await api.post("/api/upload-template", json={"path": path, "content": content})
 
 
 async def _render(api, template_id: str, *, expect: int = 200) -> dict:
-    return await api.post(
-        "/api/render-template", json={"text": {"id": template_id}}, expect=expect, retry_on_reloading=True
-    )
+    return await api.post("/api/render-template", json={"text": {"id": template_id}}, expect=expect)
 
 
 async def test_template_upload_evicts_stale_compilation_fleet_wide(
@@ -90,7 +88,7 @@ async def test_template_dir_delete_evicts_prefix_fleet_wide(
 
     # Delete the whole directory through A: the response carries the fleet fanout, and the
     # prefix eviction drops B's stale compilation under the directory.
-    deleted = await api_a.post("/api/delete-template-dir", json={"path": directory}, retry_on_reloading=True)
+    deleted = await api_a.post("/api/delete-template-dir", json={"path": directory})
     _assert_fleet_fanout(deleted)
 
     # Replica B no longer finds the deleted template — it re-read the store past the
@@ -133,11 +131,11 @@ async def test_a_resource_upload_rerenders_the_template_jq_that_reads_it_on_ever
     await api_a.put(f"/api/states/{state}/attachments/{template}", json={"path": ["box"]})
     record = f"/api/states/{state}/records/agent/a-42/thread/t1/template-jq/probe"
     for api in (api_a, api_b):
-        assert (await api.get(record, retry_on_reloading=True))["value"] == "first program"
+        assert (await api.get(record))["value"] == "first program"
 
     _assert_fleet_fanout(await _upload(api_a, path, '"second program"'))
     for api in (api_a, api_b):
-        evaluated = await api.get(record, retry_on_reloading=True)
+        evaluated = await api.get(record)
         assert evaluated["value"] == "second program", f"a worker served a stale rendered program: {evaluated}"
 
 
@@ -158,9 +156,7 @@ async def test_a_template_created_through_the_storage_door_is_rendered_next_on_a
     assert (await _render(api_b, page))["rendered"] == "[]"
 
     for resource_id, body in ((path, "created-body"), (part, "part-body")):
-        stored = await api_a.post(
-            "/api/storage/resources", json={"id": resource_id, "content_text": body}, retry_on_reloading=True
-        )
+        stored = await api_a.post("/api/storage/resources", json={"id": resource_id, "content_text": body})
         assert stored == {"id": resource_id, "stored": True}, stored
 
     assert (await _render(api_b, path))["rendered"] == "created-body"
@@ -179,7 +175,7 @@ async def test_a_template_deleted_through_the_storage_door_is_not_rendered_on_a_
     _assert_fleet_fanout(await _upload(api_a, path, "gone-body"))
     assert (await _render(api_b, path))["rendered"] == "gone-body"
 
-    deleted = await api_a.delete(f"/api/storage/resources/{path}", retry_on_reloading=True)
+    deleted = await api_a.delete(f"/api/storage/resources/{path}")
     assert deleted == {"id": path, "deleted": True}, deleted
 
     missing = await _render(api_b, path, expect=404)

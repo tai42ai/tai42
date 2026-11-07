@@ -58,9 +58,7 @@ def _awaiting(report: dict[str, Any]) -> dict[str, list[str]]:
 
 
 async def _reload(stack: TaiStack) -> dict[str, Any]:
-    return await stack.api().post(
-        "/api/fleet/reload-config", json={"targets": None}, retry_on_reloading=True, timeout=200.0
-    )
+    return await stack.api().post("/api/fleet/reload-config", json={"targets": None}, timeout=200.0)
 
 
 @pytest.mark.timeout(420)
