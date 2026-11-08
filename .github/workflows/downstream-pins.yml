@@ -3,16 +3,17 @@
 # tai42-contract>=1.5,<2) silently fails to resolve the new version — a class of
 # breakage this dispatch surfaces at release time instead of by hand-audit after the
 # downstream goes red or latent-stale. It reads each known downstream manifest, extracts every
-# tai42-<core> requirement, checks the JUST-RELEASED version against it, and opens
-# (or updates) a tracking issue on the offending downstream repo per stale pin. It
-# never widens a downstream pin — that is the downstream maintainer's call.
+# tai42-<core> requirement, checks every core member's current released version against it,
+# opens (or updates) a tracking issue on the offending downstream repo per stale pin, and
+# closes the tracking issues whose pin is no longer stale. It never widens a downstream
+# pin — that is the downstream maintainer's call.
 name: downstream-pins
 
 on:
   push:
     # CORE members only: only these can strand a downstream. The component tag
-    # release.yml publishes (tai42-<package>-v<version>) carries the released
-    # version the checker parses out of the tag name.
+    # release.yml publishes (tai42-<package>-v<version>) is the trigger; the checker
+    # cross-checks it against the checked-out tree and audits every core member.
     tags:
       - "tai42-contract-v*"
       - "tai42-kit-v*"
@@ -24,8 +25,9 @@ on:
 permissions:
   contents: read
 
-# One sweep at a time; a burst of core release tags collapses to a single
-# convergent check. Never cancel an in-flight sweep.
+# One sweep at a time; a burst of core release tags collapses to the runs that
+# survive the queue, which is correct: each run is a full, convergent audit of
+# the tree it checked out. Never cancel an in-flight sweep.
 concurrency:
   group: downstream-pins
   cancel-in-progress: false
@@ -37,8 +39,8 @@ jobs:
     permissions:
       contents: read
     steps:
-      # The tree carries the checker and — for a manual dispatch — the current CORE
-      # member versions (release-please-config.json + each member's pyproject.toml).
+      # The tree carries the checker and every CORE member's current version
+      # (release-please-config.json + each member's pyproject.toml), for every event.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
@@ -46,8 +48,8 @@ jobs:
           enable-cache: true
       - run: uv python install 3.13
       # Pure stdlib + packaging; --no-project skips resolving the workspace just to
-      # run it. RELEASE_PLEASE_TOKEN reads the dependent repos and opens the tracking
-      # issue on each — it is the broadest-scoped token available to this repo. The
+      # run it. RELEASE_PLEASE_TOKEN reads the dependent repos and writes the tracking
+      # issues on each — it is the broadest-scoped token available to this repo. The
       # audited downstream manifest map is supplied by configuration
       # (DOWNSTREAM_PINS_MANIFESTS). GITHUB_REPOSITORY (owner/repo, provided by
       # Actions) supplies the owner the downstreams live under.
