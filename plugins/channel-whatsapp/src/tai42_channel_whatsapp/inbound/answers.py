@@ -137,13 +137,14 @@ async def _bridge_inbound(
     """Route an uncorrelated inbound message into the conversation bridge.
 
     ``our_identity`` = phone_number_id, ``client_address`` = wa_id (verbatim);
-    ``form`` is an ask-less form submission's structured copy, riding beside its
-    rendered ``text``; ``form_tag`` is the caller-set opaque per-send tag the notify-form
-    token carried back, handed to the bridge beside ``form`` (the platform bounds it,
-    never interprets it); ``params`` are the channel's opaque entry-params (reply ids,
-    referral, media identity — see the ``params`` vocabulary block) forwarded verbatim to
-    the tool target's payload; ``reply_to_medium_message_id`` is the ``wamid`` the message
-    quotes (``None`` when it quotes none), which the platform resolves into the quoted text.
+    ``form`` is a submitted form's structured copy (an ask-less form, or a completed Flow
+    that answers no pending ask), riding beside its rendered ``text``; ``form_tag`` is the
+    caller-set opaque per-send tag the notify-form token carried back, handed to the bridge
+    beside ``form`` (the platform bounds it, never interprets it); ``params`` are the
+    channel's opaque entry-params (reply ids, referral, media identity — see the ``params``
+    vocabulary block) forwarded verbatim to the tool target's payload;
+    ``reply_to_medium_message_id`` is the ``wamid`` the message quotes (``None`` when it
+    quotes none), which the platform resolves into the quoted text.
     ``attachments`` (typed participant media) and
     ``location`` (a shared geographic point) are the structured inbound content that lands on
     a tool target's payload under the stable ``attachments``/``location`` keys; inbound media

@@ -3,7 +3,8 @@
 A completed WhatsApp Flow form arrives as an ``nfm_reply``. A reply whose flow
 token matches a pending ask is coerced to the schema's types and resolved through
 the shared ladder; a token in the ``tai42-nf:`` namespace is an ASK-LESS form (a
-``notify`` Flow) that enters the conversation as a structured participant message.
+``notify`` Flow) that enters the conversation as a structured participant message;
+a token that names no pending ask bridges the submitted values as a fresh turn.
 A door-rejected answer is recovered by re-sending a fresh Flow, bounded by a cap.
 """
 
@@ -18,6 +19,7 @@ from tai42_contract.app import tai42_app
 from tai42_contract.channels import AnswerForwardError, SendOutcome
 from tai42_contract.conversations import AnswerPart
 from tai42_contract.interactions.models import Wording
+from tai42_kit.conversations.entry_params import put_entry_param
 from tai42_kit.utils.data.form_text import render_form_text
 
 from tai42_channel_whatsapp.channel import _NOTIFY_FORM_TOKEN_PREFIX, send_form_ask_flow
@@ -38,6 +40,7 @@ from tai42_channel_whatsapp.correlation import (
 )
 from tai42_channel_whatsapp.flows_components import _chips_single_pick, split_range_values
 from tai42_channel_whatsapp.inbound.answers import _bridge_inbound, _resolve_answer
+from tai42_channel_whatsapp.inbound.params import _merged_params
 from tai42_channel_whatsapp.settings import whatsapp_settings
 
 logger = logging.getLogger(__name__)
@@ -70,7 +73,7 @@ def _extract_form_response(interactive: dict[str, Any]) -> dict[str, Any] | None
     Meta wraps the completed form as a JSON string in
     ``interactive.nfm_reply.response_json``; a missing field, a non-string value,
     invalid JSON, or a JSON value that is not an object all yield ``None`` (the
-    caller bridges instead of forwarding).
+    caller drops the message).
     """
     nfm = interactive.get("nfm_reply")
     if not isinstance(nfm, dict):
@@ -132,6 +135,11 @@ def _coerce_bool(value: str) -> bool:
     raise ValueError(f"not a boolean string: {value!r}")
 
 
+def _submitted_values(response: dict[str, Any]) -> dict[str, Any]:
+    """The values a completed Flow submitted: its ``response_json`` object minus the ``flow_token``."""
+    return {key: value for key, value in response.items() if key != "flow_token"}
+
+
 def _coerce_form_answer(
     response: dict[str, Any], schema: dict[str, Any] | None, labels: dict[str, str]
 ) -> dict[str, Any]:
@@ -150,9 +158,7 @@ def _coerce_form_answer(
     properties = schema.get("properties", {}) if isinstance(schema, dict) else {}
     props = properties if isinstance(properties, dict) else {}
     coerced: dict[str, Any] = {}
-    for key, value in response.items():
-        if key == "flow_token":
-            continue
+    for key, value in _submitted_values(response).items():
         schema_key = labels.get(key)
         if schema_key is None:
             logger.warning("whatsapp nfm_reply carried unknown payload label %r; forwarding under its own key", key)
@@ -170,12 +176,20 @@ async def _handle_form_reply(
     *,
     reply_to_medium_message_id: str | None,
 ) -> None:
-    """A completed Flow form (``nfm_reply``): forward the coerced answer dict to the pending form question, else bridge.
+    """A completed Flow form (``nfm_reply``): answer the pending form question, else bridge it; drop a malformed one.
 
     The reply matches ONLY when its ``flow_token`` equals the pending ask's
-    ``interaction_id``; a malformed ``response_json``, a missing/mismatched token,
-    or no pending ask bridges the message (its shape carries no human-readable
-    title, so a blank bridge — the same shape an uncorrelated interactive takes).
+    ``interaction_id``. A reply whose token names no pending ask of the pair (a
+    withdrawn, lapsed or already-answered ask, another ask's token, or no ask at all)
+    is still the participant's completed form: it bridges as a fresh turn carrying the
+    submitted values — as readable text (one ``label: value`` line per value; a form that
+    carried only its token reads ``{}``), as the turn's ``form`` and, when the token is a
+    string, under the ``flow_token`` entry parameter, the way a stale tap carries
+    ``reply_id`` — so the conversation decides what the late form means. The
+    values ride keyed as the Flow submitted them: the schema that would map them back to
+    the ask's property names is gone with the ask. A ``response_json`` that is not a JSON
+    object carries no values to bridge and no text the intake would take: it is dropped
+    with a warning and its ``wamid`` marked seen, so Meta does not redeliver it.
     ``params`` are the message-level referral entries, carried onto a bridged turn (the
     correlated-answer path takes none); ``reply_to_medium_message_id`` is the ``wamid`` the
     reply quotes, carried on both the answer and the bridged turn. The pending ask is peeked
@@ -188,15 +202,8 @@ async def _handle_form_reply(
     """
     response = _extract_form_response(interactive)
     if response is None:
-        logger.warning("whatsapp nfm_reply %s carried no JSON-object response_json; bridging", wamid)
-        await _bridge_inbound(
-            phone_number_id,
-            wa_id,
-            "",
-            wamid,
-            params=params or None,
-            reply_to_medium_message_id=reply_to_medium_message_id,
-        )
+        logger.warning("whatsapp nfm_reply %s carried no JSON-object response_json; dropped", wamid)
+        await mark_seen(wamid)
         return
 
     flow_token = response.get("flow_token")
@@ -214,12 +221,16 @@ async def _handle_form_reply(
 
     pending = await peek_pending(phone_number_id, wa_id)
     if pending is None or not isinstance(flow_token, str) or flow_token != pending.interaction_id:
+        values = _submitted_values(response)
+        form_params: dict[str, str] = {}
+        put_entry_param(form_params, "flow_token", flow_token, door="whatsapp")
         await _bridge_inbound(
             phone_number_id,
             wa_id,
-            "",
+            render_form_text(values, None),
             wamid,
-            params=params or None,
+            form=values,
+            params=_merged_params(params, form_params),
             reply_to_medium_message_id=reply_to_medium_message_id,
         )
         return
@@ -280,7 +291,7 @@ async def _handle_notify_form_reply(
             schema_hash,
         )
         schema = None
-        form = {key: value for key, value in response.items() if key != "flow_token"}
+        form = _submitted_values(response)
     else:
         schema = cached.schema
         form = _coerce_form_answer(response, schema, cached.names)

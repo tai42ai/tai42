@@ -610,22 +610,106 @@ async def test_form_deliver_then_rejection_reuses_the_same_flow_through_the_real
     assert resend["flow_action_payload"]["data"] == first["flow_action_payload"]["data"]  # same prefill/options
 
 
-async def test_form_reply_flow_token_mismatch_bridges_and_keeps_pending(
-    handler, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+async def test_form_reply_flow_token_mismatch_bridges_the_values_and_keeps_pending(
+    handler, stub_app, channels, fake_redis: FakeRedis, fake_httpx: FakeHttpx
 ):
+    # The pair's live ask is int-1; the participant sends the form of an earlier ask (int-999),
+    # withdrawn since. Its values still reach the conversation as a fresh turn — the readable
+    # text, the form, and the token under params — and the live ask is left for its own reply.
     await _seed_pending_form(interaction_id="int-1")
+    pending_before = fake_redis.store[_PENDING_KEY]
 
-    result = await handler(signed_request(form_reply_payload({"flow_token": "int-999", "note": "x"})))
+    result = await handler(
+        signed_request(form_reply_payload({"flow_token": "int-999", "Full name": "Alice", "Count": 7}))
+    )
 
     assert result.status_code == 200
-    assert not fake_httpx.calls  # not forwarded
-    assert await _pending_intact(fake_redis)  # the live ask is untouched
-    assert len(stub_app.conversations.accept_calls) == 1  # bridged like an uncorrelated interactive
+    assert not fake_httpx.calls  # nothing forwarded to the door, nothing sent
+    assert channels.inbound_calls == []  # the ladder never saw it
+    assert fake_redis.store[_PENDING_KEY] == pending_before  # the live ask is untouched
+    assert _SEEN_KEY in fake_redis.store
+    [turn] = stub_app.conversations.accept_calls
+    assert turn["text"] == "Full name: Alice\nCount: 7"
+    assert turn["form"] == {"Full name": "Alice", "Count": 7}
+    assert turn["params"] == {"flow_token": "int-999"}
+    assert turn["provider_message_id"] == _WAMID
 
 
-async def test_form_reply_malformed_response_json_bridges(
+async def test_form_reply_without_any_pending_ask_bridges_the_values(
+    handler, stub_app, channels, fake_redis: FakeRedis
+):
+    # No ask is pending on the pair at all (the ask lapsed or was answered): the late form
+    # bridges the same way, so the conversation reads what the participant filled in.
+    result = await handler(signed_request(form_reply_payload({"flow_token": "int-gone", "note": "late"})))
+
+    assert result.status_code == 200
+    assert channels.inbound_calls == []
+    assert _PENDING_KEY not in fake_redis.store
+    [turn] = stub_app.conversations.accept_calls
+    assert turn["text"] == "note: late"
+    assert turn["form"] == {"note": "late"}
+    assert turn["params"] == {"flow_token": "int-gone"}
+
+
+async def test_form_reply_without_a_pending_ask_merges_the_referral_params_with_the_token(
+    handler, stub_app, fake_redis: FakeRedis
+):
+    # The message-level entry params (here a click-to-WhatsApp referral) ride on the bridged
+    # turn beside the stale token, as on any other bridged message.
+    payload = form_reply_payload({"flow_token": "int-gone", "note": "late"})
+    payload["entry"][0]["changes"][0]["value"]["messages"][0]["referral"] = {
+        "source_url": "https://fb.me/ad/123",
+        "source_id": "ad-123",
+        "source_type": "ad",
+    }
+
+    result = await handler(signed_request(payload))
+
+    assert result.status_code == 200
+    [turn] = stub_app.conversations.accept_calls
+    assert turn["form"] == {"note": "late"}
+    assert turn["params"] == {
+        "referral_source_url": "https://fb.me/ad/123",
+        "referral_source_id": "ad-123",
+        "referral_source_type": "ad",
+        "flow_token": "int-gone",
+    }
+
+
+async def test_form_reply_with_a_non_string_flow_token_bridges_the_values_without_the_param(
+    handler, stub_app, fake_redis: FakeRedis
+):
+    # A token that is not a string can name no ask and is no opaque token to carry: the
+    # values bridge, params stay empty (None on the turn), and the live ask is untouched.
+    await _seed_pending_form(interaction_id="int-1")
+
+    result = await handler(signed_request(form_reply_payload({"flow_token": 42, "note": "x"})))
+
+    assert result.status_code == 200
+    assert await _pending_intact(fake_redis)
+    [turn] = stub_app.conversations.accept_calls
+    assert turn["text"] == "note: x"
+    assert turn["form"] == {"note": "x"}
+    assert turn["params"] is None
+
+
+async def test_form_reply_with_only_a_stale_token_bridges_a_non_blank_text(handler, stub_app, fake_redis: FakeRedis):
+    # A submitted form with no values beyond its token still bridges a non-blank text
+    # (the intake refuses a blank one), with an empty form and the token under params.
+    result = await handler(signed_request(form_reply_payload({"flow_token": "int-gone"})))
+
+    assert result.status_code == 200
+    [turn] = stub_app.conversations.accept_calls
+    assert turn["text"] == "{}"
+    assert turn["form"] == {}
+    assert turn["params"] == {"flow_token": "int-gone"}
+
+
+async def test_form_reply_malformed_response_json_is_dropped(
     handler, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx, caplog: pytest.LogCaptureFixture
 ):
+    # A response_json that is not JSON carries no values and no text: dropped with a warning,
+    # the wamid marked seen so a redelivery is not re-run, the live ask untouched.
     await _seed_pending_form()
     interactive = {"type": "nfm_reply", "nfm_reply": {"response_json": "{not json"}}
     payload = interactive_payload(interactive=interactive)
@@ -636,11 +720,12 @@ async def test_form_reply_malformed_response_json_bridges(
     assert result.status_code == 200
     assert not fake_httpx.calls  # nothing forwarded
     assert await _pending_intact(fake_redis)  # the live ask is untouched
-    assert len(stub_app.conversations.accept_calls) == 1  # bridged
+    assert stub_app.conversations.accept_calls == []  # no turn
+    assert _SEEN_KEY in fake_redis.store
     assert any("response_json" in record.message for record in caplog.records)
 
 
-async def test_form_reply_non_object_response_json_bridges(
+async def test_form_reply_non_object_response_json_is_dropped(
     handler, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx
 ):
     await _seed_pending_form()
@@ -652,13 +737,14 @@ async def test_form_reply_non_object_response_json_bridges(
     assert result.status_code == 200
     assert not fake_httpx.calls
     assert await _pending_intact(fake_redis)
-    assert len(stub_app.conversations.accept_calls) == 1
+    assert stub_app.conversations.accept_calls == []
+    assert _SEEN_KEY in fake_redis.store
 
 
-async def test_form_reply_missing_response_json_bridges(
+async def test_form_reply_missing_response_json_is_dropped(
     handler, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx
 ):
-    # An nfm_reply whose nfm_reply object carries no response_json string is bridged.
+    # An nfm_reply whose nfm_reply object carries no response_json string has nothing to bridge.
     await _seed_pending_form()
     interactive = {"type": "nfm_reply", "nfm_reply": {"foo": "bar"}}
     payload = interactive_payload(interactive=interactive)
@@ -668,7 +754,8 @@ async def test_form_reply_missing_response_json_bridges(
     assert result.status_code == 200
     assert not fake_httpx.calls
     assert await _pending_intact(fake_redis)
-    assert len(stub_app.conversations.accept_calls) == 1
+    assert stub_app.conversations.accept_calls == []
+    assert _SEEN_KEY in fake_redis.store
 
 
 async def test_form_reply_door_5xx_raises_and_keeps_pending(handler, channels, fake_redis: FakeRedis):
@@ -1190,15 +1277,3 @@ async def test_a_notify_form_reply_hands_accept_the_flow_message_id(waba_env, ha
     (call,) = stub_app.conversations.accept_calls
     assert call["reply_to_medium_message_id"] == _QUOTED_FLOW_MESSAGE
     assert call["params"] is None
-
-
-async def test_a_form_reply_without_a_readable_response_bridges_with_the_flow_message_id(
-    handler, stub_app, fake_redis: FakeRedis
-):
-    payload = _quoting_form_reply({"flow_token": "int-1"})
-    payload["entry"][0]["changes"][0]["value"]["messages"][0]["interactive"]["nfm_reply"]["response_json"] = "{bad"
-
-    await handler(signed_request(payload))
-
-    (call,) = stub_app.conversations.accept_calls
-    assert call["reply_to_medium_message_id"] == _QUOTED_FLOW_MESSAGE

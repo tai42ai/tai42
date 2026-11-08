@@ -563,8 +563,7 @@ async def test_button_tap_carries_reply_id_onto_the_tool_payload_params(
 
     Driven end to end over the live stack: signed whatsapp webhook → inbound decode →
     ``conversations.accept(params=…)`` → route → tool dispatch → the tool records what it
-    received. Born red before the channel carried the tap's id into ``params`` (the payload
-    had no ``params`` key, so ``.params.reply_id`` resolved to the ``"none"`` fallback)."""
+    received."""
     exec_key = uniq("l7-rid-exec")
     await bridge.mint_key(user_id=exec_key, scopes=["e2e-all"])
     identity = _fresh_phone_id()
@@ -595,6 +594,60 @@ async def test_button_tap_carries_reply_id_onto_the_tool_payload_params(
     recorded = await wait_probe_record(bridge, probe)
     # The tool saw the tapped wire id under .params.reply_id — not the "none" fallback.
     assert [entry["value"] for entry in recorded] == [reply_id]
+
+
+@pytest.mark.needs(
+    "kind:channels:whatsapp",
+    "probe-tools",
+    "helper:whatsapp",
+    "setting:conversations",
+    "setting:seeded-access-control",
+    "store:redis",
+)
+async def test_completed_form_without_a_pending_ask_bridges_its_values_and_flow_token(
+    bridge: BridgeHarness, uniq: Callable[[str], str]
+) -> None:
+    """A completed Flow (``nfm_reply``) whose flow token names no pending ask of the pair —
+    the ask was withdrawn, lapsed or already answered — is still the participant's message:
+    it bridges as a fresh turn whose ROUTED TOOL PAYLOAD carries the submitted values as the
+    readable ``label: value`` text and as ``.form``, and the token under ``.params.flow_token``.
+
+    Driven end to end over the live stack: signed whatsapp webhook → inbound decode →
+    ``conversations.accept(text=…, form=…, params=…)`` → route → tool dispatch → the tool records
+    what it received."""
+    exec_key = uniq("l7-stale-form-exec")
+    await bridge.mint_key(user_id=exec_key, scopes=["e2e-all"])
+    identity = _fresh_phone_id()
+    probe = uniq("l7-stale-form")
+    # One string carries the three seams a consumer reads; the fallback makes a turn without
+    # params an observably-different value, not a jq error.
+    await bridge.create_tool_channel_route(
+        route_name=uniq("l7-stale-form-route").replace("_", "-"),
+        tool="e2e_record",
+        execution_key=exec_key,
+        channel="whatsapp",
+        our_identity=identity,
+        start_expr=(
+            f'{{key: "{probe}", value: ((.params.flow_token // "none") + "|" + (.form | tojson) + "|" + .message)}}'
+        ),
+        reply_expr="null",
+    )
+
+    stale_token = uniq("l7-stale-form-token")
+    reply = bridge.whatsapp_nfm_reply(
+        phone_number_id=identity,
+        wa_id=_fresh_wa_id(),
+        response={"flow_token": stale_token, "Full name": "Alice", "Count": "7"},
+    )
+    resp = await post_inbound(bridge.stack, WHATSAPP_INBOUND_PATH, reply, port=bridge.stack.port_b)
+    assert resp.status_code == 200, resp.text
+
+    recorded = await wait_probe_record(bridge, probe)
+    [value] = [entry["value"] for entry in recorded]
+    token, form, text = value.split("|", 2)
+    assert token == stale_token
+    assert json.loads(form) == {"Full name": "Alice", "Count": "7"}
+    assert text == "Full name: Alice\nCount: 7"
 
 
 @pytest.mark.needs(
