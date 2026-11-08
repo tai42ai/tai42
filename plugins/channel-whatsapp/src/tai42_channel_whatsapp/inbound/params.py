@@ -13,6 +13,9 @@ option). Keys, and where each is set:
                         (the question-bound wire id), bridged when the tap is NOT an
                         answer (no/other pending ask).
   reply_description   — a ``list_reply.description`` when the picked row carried one.
+  flow_token          — a completed Flow's (``nfm_reply``) ``flow_token``, bridged when the
+                        form is NOT an answer to a pending ask (no/other pending ask); the
+                        submitted values ride as the turn's text and ``form``.
   button_payload      — a template quick-reply tap's ``button.payload`` (the developer-
                         defined payload behind the visible ``button.text``).
   referral_source_url — a click-to-WhatsApp / QR ``referral.source_url``.

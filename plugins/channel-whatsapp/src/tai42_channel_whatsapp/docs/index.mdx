@@ -219,6 +219,14 @@ than by the identifier-safe names; the channel maps those labels back to the sch
 when it decodes the reply. The channel sends the labels in drawing order, each paired
 time right after its date.
 
+A completed form whose flow token names **no pending ask** of the pair — the ask was
+withdrawn, lapsed or already answered, or the token is another ask's — is still the
+participant's message: it enters the conversation as a fresh turn whose text is the
+submitted values rendered readably (one `label: value` line per value; a form that
+carried only its token reads `{}`), with the values as the turn's `form` (keyed as the
+Flow submitted them) and the token under the `flow_token` entry parameter (see
+**Inbound entry parameters**).
+
 If the platform rejects a submitted answer (a value fails the answer schema at the
 door — a case no in-form check could see), the **same form is re-sent** — same steps,
 same prefill, with the door's reason shown above it as *Label: sentence* (*Your last
@@ -247,6 +255,10 @@ keys it understands:
 
 - `reply_id` (+ `reply_description` for a list row) — an interactive tap that is
   not an answer carries its question-bound wire id.
+- `flow_token` — a completed Flow (`nfm_reply`) that is not an answer to a pending
+  ask (the ask was withdrawn, lapsed or already answered, or the token is another
+  ask's) carries the token the Flow held; the submitted values ride as the turn
+  text and its `form` (see **Form asks**).
 - `button_payload` — a **template quick-reply** tap (`button` message) carries the
   developer payload behind the visible button text.
 - `referral_source_url` / `referral_source_id` / `referral_source_type` /

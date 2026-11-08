@@ -196,7 +196,14 @@ of both and cached under `CHANNEL_WHATSAPP_WABA_ID`; when the cache has no entry
 channel first looks the Flow up on the WABA by that name and reuses a published one
 (a stale draft under the name is deleted), and only otherwise creates and publishes it. The
 completed form returns as an `nfm_reply`, its values coerced to the schema's
-types before the answer object is forwarded. When the callback door **rejects**
+types before the answer object is forwarded. A completed form whose flow token
+names **no pending ask** of the pair — the ask was withdrawn, lapsed or already
+answered, or the token is another ask's — is still the participant's message: it
+enters the conversation as a fresh turn whose text is the submitted values rendered
+readably (one `label: value` line per value; a form that carried only its token reads
+`{}`), with the values as the turn's `form` (keyed as the Flow submitted them) and the
+token under the `flow_token` entry parameter (see **Inbound entry parameters** below).
+When the callback door **rejects**
 a forwarded form answer (`400` — a schema rule the Flow could not enforce, e.g. a
 minimum or pattern), a completed Flow has no re-reply surface, so the channel
 **re-sends a fresh Flow** for the same interaction: same flow token, the cached
@@ -339,6 +346,7 @@ whichever keys it understands. This is the channel's public inbound contract:
 |---|---|---|
 | `reply_id` | An interactive reply button / list row is tapped but is **not** an answer to a pending ask (no ask, or a stale/other id) | The question-bound wire id the outbound carried (`button_reply.id` / `list_reply.id`) |
 | `reply_description` | The tapped item is a **list row** that carried a secondary description line | `list_reply.description` |
+| `flow_token` | A completed Flow (`nfm_reply`) is submitted but is **not** an answer to a pending ask (no ask, or a withdrawn / lapsed / already-answered / other ask's token); the submitted values ride as the turn text and its `form` | The `flow_token` the Flow carried |
 | `button_payload` | A **template quick-reply** button is tapped (a `button`-type message) | The developer-defined `button.payload` behind the visible `button.text` |
 | `referral_source_url` | The message enters via **click-to-WhatsApp / QR** (`referral`) | `referral.source_url` |
 | `referral_source_id` | " | `referral.source_id` |
