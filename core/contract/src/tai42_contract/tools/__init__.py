@@ -138,6 +138,17 @@ TemplateRefsExtractor = Callable[[dict[str, Any]], Iterable[TemplateRef]]
 #: platform gathers every registered referee's answers and blocks the rename when any holds.
 ToolRenameReferee = Callable[[frozenset[str]], Awaitable[dict[str, list[ReferenceHolder]]]]
 
+#: A rename cascade: given the old and the new name of one tool a rename moves, re-keys
+#: what its owner holds against the old name onto the new. The platform calls it once for
+#: each tool the rename moves (the preset, then each extension branch tool), only after
+#: every veto and guard has passed and the new name is bound, before the old name is torn
+#: down. A cascade raising fails the rename loudly: the platform calls every cascade it
+#: already applied with the names swapped, unbinds the new name, re-points the record and
+#: answers the cascade's own message. A cascade is its own undo — called with the names
+#: swapped it re-keys back — so a re-key onto a name that already holds records is an error
+#: it raises, never a merge. The platform does not order the cascades among themselves.
+ToolRenameCascade = Callable[[str, str], Awaitable[None]]
+
 #: A delete referee: given the set of tool names a delete is about to remove — the preset and
 #: every extension branch tool bound off it — answers, keyed by asked name, one
 #: :class:`ReferenceHolder` per live reference it will not let the delete strand (nothing held
@@ -423,8 +434,26 @@ class AppTools(Protocol):
         on the rename preview; it answers holders keyed by asked name and has no side
         effect. Any holder blocks the rename and the holders are named. Registering
         the same provider object twice raises loudly — a double registration is a
-        plugin bug, never a silent duplicate consult.
+        plugin bug, never a silent duplicate consult. Re-keying what the plugin holds under
+        the name belongs in a rename cascade (:meth:`register_rename_cascade`).
         """
+        ...
+
+    def register_rename_cascade(self, provider: ToolRenameCascade) -> None:
+        """Register a :data:`ToolRenameCascade` run when a preset rename proceeds.
+
+        A plugin holding records keyed by a preset/tool name calls this through the
+        ``tai42_app`` handle when its module loads. A cascade is called once for each tool
+        the rename moves (the preset, then each extension branch tool bound off it), with
+        that tool's old and new name, only after every veto and guard has passed and the
+        new name is bound, before the old name is torn down; a cascade raising fails the
+        rename and undoes it. Registering the same provider object twice raises loudly — a
+        double registration is a plugin bug, never a silent duplicate re-key.
+        """
+        ...
+
+    def rename_cascades(self) -> list[ToolRenameCascade]:
+        """Every registered :data:`ToolRenameCascade`, in registration order."""
         ...
 
     def register_delete_referee(self, provider: ToolDeleteReferee) -> None:
@@ -520,6 +549,7 @@ __all__ = [
     "ToolInfo",
     "ToolInvocation",
     "ToolRefsExtractor",
+    "ToolRenameCascade",
     "ToolRenameReferee",
     "ToolRetryBackoff",
     "ToolRetryPolicy",

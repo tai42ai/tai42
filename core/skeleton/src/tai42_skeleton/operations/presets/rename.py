@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import sys
-from typing import Any
+from typing import Any, NoReturn
 
 from tai42_contract.agent import PRESET_NAME_PATTERN
 from tai42_contract.presets.errors import (
@@ -12,6 +12,7 @@ from tai42_contract.presets.errors import (
     PresetNameConflictError,
     PresetNotFoundError,
 )
+from tai42_contract.tools import ToolRenameCascade
 from tai42_kit.db import component_store_configured
 
 from tai42_skeleton.app import instance
@@ -59,9 +60,10 @@ async def _rebind_new_then_drop_old(mgr: Any, store: Any, name: str, new_name: s
     """The local apply of a rename, NEW FIRST.
 
     Move the store key, bind ``new_name`` from the moved row's active body (compensating by re-pointing the
-    store back on a re-register failure so store + live never diverge), tear the OLD binding down, then
-    re-key the tool_meta overlay of ``name`` and of each of its extension ``branches``. Returns the moved
-    store record; raises the mapped 409s.
+    store back on a re-register failure so store + live never diverge), run every rename cascade for the
+    preset and each extension branch pair (undoing the rename when one raises), tear the OLD binding down
+    — the point of no return — then re-key the tool_meta overlay of ``name`` and of each of its extension
+    ``branches``. Returns the moved store record; raises the mapped 409s and a cascade failure's 500.
     """
     # Move the store key. The pre-checks make the typed conflicts race-window catches,
     # mapped exactly as create maps its post-write errors.
@@ -95,6 +97,12 @@ async def _rebind_new_then_drop_old(mgr: Any, store: Any, name: str, new_name: s
         raise
     new_branches = bound_branches(new_name)
 
+    # The cascades run once the new name is bound (the new branch names are only real then)
+    # and before the old name is torn down, so a cascade raising is still undone.
+    await _run_rename_cascades(
+        mgr, store, name, new_name, [(name, new_name), *zip(branches, new_branches, strict=True)]
+    )
+
     # Then tear the OLD binding down. A failure here leaves BOTH names bound (old is
     # stale-but-functional: its baked spec is in-memory and its base tool is untouched);
     # it re-raises loudly and ``reload_config`` is the documented recovery (rehydration
@@ -121,6 +129,54 @@ async def _rebind_new_then_drop_old(mgr: Any, store: Any, name: str, new_name: s
     return record
 
 
+async def _run_rename_cascades(mgr: Any, store: Any, name: str, new_name: str, pairs: list[tuple[str, str]]) -> None:
+    """Call every rename cascade for each ``(old, new)`` tool pair, cascade outer, pair inner.
+
+    ``pairs`` is the preset's pair, then each extension branch pair. A cascade raising undoes the
+    rename (:func:`_unwind_rename`), which raises.
+    """
+    applied: list[tuple[ToolRenameCascade, str, str]] = []
+    for cascade in instance.app.tools.rename_cascades():
+        for old, new in pairs:
+            try:
+                await cascade(old, new)
+            except Exception as exc:
+                await _unwind_rename(mgr, store, name, new_name, applied, cause=exc, failed=(old, new))
+            applied.append((cascade, old, new))
+
+
+async def _unwind_rename(
+    mgr: Any,
+    store: Any,
+    name: str,
+    new_name: str,
+    applied: list[tuple[ToolRenameCascade, str, str]],
+    *,
+    cause: Exception,
+    failed: tuple[str, str],
+) -> NoReturn:
+    """Undo a rename whose cascade ``failed`` raised ``cause``, then raise the cascade's message as a 500.
+
+    Calls every ``applied`` cascade back with the names swapped (latest first), unbinds ``new_name`` and
+    re-points the store record to ``name``. The undo stops at the first step that raises: that failure is
+    logged with its traceback and raised, naming the step, chained to the undo step's exception.
+    """
+    head = f"preset {name!r} cannot be renamed — a rename cascade failed for {failed[0]!r} -> {failed[1]!r}: {cause}"
+    step = ""
+    try:
+        for cascade, old, new in reversed(applied):
+            step = f"re-keying {new!r} back to {old!r}"
+            await cascade(new, old)
+        step = f"unbinding {new_name!r}"
+        await mgr.remove(new_name)
+        step = f"re-pointing the record to {name!r}"
+        await store.rename_preset(new_name, name)
+    except Exception as undo_exc:
+        logger.exception("rename of preset %r could not be undone at %s", name, step)
+        raise OperationFailedError(f"{head}; the undo stopped at {step}: {undo_exc}") from undo_exc
+    raise OperationFailedError(head) from cause
+
+
 @operation(
     summary="Rename a preset",
     tags=["presets"],
@@ -134,10 +190,11 @@ async def rename_preset(name: str, new_name: str) -> dict[str, Any]:
     """Rename a preset, ATOMIC (a preset's name IS its live tool name).
 
     Runs create's ordered name pre-checks on the NEW name, BLOCKS with a 409 listing every holder of
-    the current name or one of its extension branch tools, binds the new tool BEFORE tearing the old
-    one down, fires one ``list_changed``, and fans the rebind out NEW-first then the old removal. The
-    response embeds the primary rebind (new-name) fan-out report under ``fanout``; the old-name removal
-    stays log-only.
+    the current name or one of its extension branch tools, binds the new tool, runs every rename
+    cascade (a raising cascade undoes the rename and answers a 500 carrying its message) BEFORE
+    tearing the old one down, fires one ``list_changed``, and fans the rebind out NEW-first then the
+    old removal. The response embeds the primary rebind (new-name) fan-out report under ``fanout``;
+    the old-name removal stays log-only.
 
     A preset's NAME is its identity everywhere — it IS the live tool binding, and every
     reference (preset bodies, platform wiring, plugin holders) keys on it deliberately;
@@ -180,9 +237,10 @@ async def rename_preset(name: str, new_name: str) -> dict[str, Any]:
 
     await _check_rename_target(mgr, new_name)
 
-    # Referential integrity: BLOCK (never silently cascade-rewrite) a rename that would
-    # strand any live holder of the name or one of its branches, listing every holder so the
-    # operator updates them first. A referee raising fails the rename loudly.
+    # Referential integrity: BLOCK (a holder is never rewritten) a rename that would strand
+    # any live holder of the name or one of its branches, listing every holder so the
+    # operator updates them first, before any rename cascade runs. A referee raising fails
+    # the rename loudly.
     holders = await rename_holders(name, branches, await StoredPresets.read())
     if holders:
         raise await holders_refusal(f"preset {name!r} cannot be renamed", holders, "update those references first")

@@ -51,6 +51,7 @@ from tai42_skeleton.tools.binding.surface import SurfaceToolIndex, bump_tool_sur
 from tai42_skeleton.tools.delete_cascades import ToolDeleteCascadeRegistry
 from tai42_skeleton.tools.delete_referees import ToolDeleteRefereeRegistry
 from tai42_skeleton.tools.detach_referees import StateTemplateDetachRefereeRegistry
+from tai42_skeleton.tools.rename_cascades import ToolRenameCascadeRegistry
 from tai42_skeleton.tools.rename_referees import ToolRenameRefereeRegistry
 from tai42_skeleton.webhooks.registry import WebhookVerifierRegistry
 
@@ -319,6 +320,7 @@ class ServingCore:
         # modules (and re-arms the platform-internal referees) cleanly. The referee
         # collection gates every rename; the seeds drive the startup/reload applier.
         self._rename_referee_registry = ToolRenameRefereeRegistry()
+        self._rename_cascade_registry = ToolRenameCascadeRegistry()
         self._delete_referee_registry = ToolDeleteRefereeRegistry()
         self._delete_cascade_registry = ToolDeleteCascadeRegistry()
         self._detach_referee_registry = StateTemplateDetachRefereeRegistry()
