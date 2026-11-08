@@ -1,13 +1,17 @@
 """A worker's own change holds its exit from the change's start, and a recycle op deferred onto it is carried out.
 
-Every door's change takes the hold as it begins: the config service's write exclusion (every
-config write: an env write, a profile apply, a manifest change, a backup import), the fleet soft
-restart and the join (:func:`~tai42_skeleton.app.writer_exit.hold_writer_exit`). A ``Recycle`` op
-from another worker's roll that reaches the worker anywhere inside the change — here at its
-broadcast, after the persist and before the roll's decision — answers ``exit_deferred`` and arms
-nothing, so the change's reply is never cut by the recycle. Once the edge answered, the worker
-leaves exactly once: for its own change's exit when the change owed it, else for the deferred
-recycle op, which is never dropped.
+The edge that admits a change takes the hold before anything of it runs
+(:meth:`~tai42_skeleton.app.writer_exit.WriterExitScope.hold_exit`): here the scope the test
+opens stands in for that edge. The config doors — the config service's write exclusion (every
+config write: an env write, a profile apply, a manifest change, a backup import) and the fleet
+soft restart — require the hold
+(:func:`~tai42_skeleton.app.writer_exit.require_writer_exit_held`): a write reaching its door
+under an open scope with no hold raises before anything is read or written, and with no scope
+open it writes. A ``Recycle`` op from another worker's roll that reaches the worker anywhere
+inside the change — here at its broadcast, after the persist and before the roll's decision —
+answers ``exit_deferred`` and arms nothing, so the change's reply is never cut by the recycle.
+Once the edge answered, the worker leaves exactly once: for its own change's exit when the change
+owed it, else for the deferred recycle op, which is never dropped.
 """
 
 from __future__ import annotations
@@ -23,7 +27,7 @@ from tai42_contract.app import tai42_app
 import tai42_skeleton.app.bus_settings  # noqa: F401
 import tai42_skeleton.app.lifecycle.bus_subscription as bus_subscription_module
 from tai42_skeleton.app import instance
-from tai42_skeleton.app.bus import FleetResult, LocalApplyResult, WorkerIdentity, WorkerKind
+from tai42_skeleton.app.bus import FleetResult, LocalApplyResult, WorkerBus, WorkerIdentity, WorkerKind
 from tai42_skeleton.app.bus.ops import FleetOp
 from tai42_skeleton.app.epoch import Epoch
 from tai42_skeleton.app.lifecycle import TaiMCPLifecycleMixin
@@ -44,6 +48,7 @@ tai42_app.bind(instance.app)
 
 _KEY = "TAI_BUS_HEARTBEAT_TTL"
 _RECYCLE_OP_REASON = "a fleet recycle op"
+_ADMITTED = "the admitted change"
 
 
 class _Lifecycle(TaiMCPLifecycleMixin):
@@ -144,6 +149,7 @@ async def _run_change(door: Any, lifecycle: _Lifecycle, monkeypatch: pytest.Monk
     # The reply's fan-out summary reads the process bus, so the door runs through this one.
     monkeypatch.setattr(instance.app, "_bus", bus)
     with writer_exit_scope() as exits:
+        exits.hold_exit(cast("WorkerBus", bus), _ADMITTED)
         await door(bus, writer_keys, monkeypatch)
         # The edge has not answered yet: the worker still runs, its exit held by the change.
         assert bus.exit_requests == []
@@ -193,6 +199,7 @@ async def test_a_deferred_recycle_waits_for_every_change_still_holding_the_exit(
     monkeypatch.setattr(instance.app, "_bus", bus)
     other = bus.defer_exit("another in-flight change")
     with writer_exit_scope() as exits:
+        exits.hold_exit(cast("WorkerBus", bus), _ADMITTED)
         await _write_env(bus, [], monkeypatch)
         await exits.settle()
 
@@ -206,7 +213,8 @@ async def test_a_deferred_recycle_waits_for_every_change_still_holding_the_exit(
 
 async def _write_env_whose_edge_fails(bus: FakeBus, monkeypatch: pytest.MonkeyPatch) -> None:
     """An env write in its scope whose edge fails after the change ran."""
-    with writer_exit_scope():
+    with writer_exit_scope() as exits:
+        exits.hold_exit(cast("WorkerBus", bus), _ADMITTED)
         await _write_env(bus, [], monkeypatch)
         raise RuntimeError("the edge failed")
 
@@ -275,4 +283,55 @@ async def test_the_join_holds_the_exit_from_its_announcement_and_carries_out_a_d
     assert bus.armed_mid_change == [0]
     await _carried_out(lifecycle)
     assert bus.exit_requests == [_RECYCLE_OP_REASON]
+    assert bus.exit_deferred is None
+
+
+def _writing_service(monkeypatch: pytest.MonkeyPatch) -> tuple[Any, FakeConfigStore, FakeBus]:
+    _with_bus(monkeypatch)
+    bus = FakeBus(origin="serve-writer", remotes=["serve-b"])
+    monkeypatch.setattr(instance.app, "_bus", bus)
+    store = FakeConfigStore(env={_KEY: "5"})
+    service, _admin, _bus = _service(store, bus=bus, orchestrate=_no_roll)
+    return service, store, bus
+
+
+async def test_a_config_write_reaching_its_door_with_no_hold_on_the_writer_exit_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, store, bus = _writing_service(monkeypatch)
+
+    with writer_exit_scope() as exits:
+        with pytest.raises(RuntimeError) as raised:
+            await service.apply_env_change({_KEY: "7"})
+        assert not exits.holds_exit
+
+    assert str(raised.value) == (
+        "writer exit: this config change reached a config door with no hold on the writer's exit — "
+        "its operation or route declares holds_writer_exit"
+    )
+    assert store.events == []
+    assert store.env == {_KEY: "5"}
+    assert bus.publish_calls == []
+    assert bus.exit_deferred is None
+
+
+async def test_a_config_write_under_a_scope_that_holds_the_exit_writes(monkeypatch: pytest.MonkeyPatch) -> None:
+    service, store, bus = _writing_service(monkeypatch)
+
+    with writer_exit_scope() as exits:
+        exits.hold_exit(cast("WorkerBus", bus), _ADMITTED)
+        await service.apply_env_change({_KEY: "7"})
+        assert bus.exit_deferred == _ADMITTED
+        await exits.settle()
+
+    assert store.env == {_KEY: "7"}
+    assert bus.exit_deferred is None
+
+
+async def test_a_config_write_with_no_scope_open_writes(monkeypatch: pytest.MonkeyPatch) -> None:
+    service, store, bus = _writing_service(monkeypatch)
+
+    await service.apply_env_change({_KEY: "7"})
+
+    assert store.env == {_KEY: "7"}
     assert bus.exit_deferred is None

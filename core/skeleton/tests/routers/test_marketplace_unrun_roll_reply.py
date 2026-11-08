@@ -28,6 +28,7 @@ from tai42_contract.manifest import ApiToolsConfig
 
 import tai42_skeleton.operations.marketplace as mkt_ops
 import tai42_skeleton.routers.marketplace as router
+from tai42_skeleton.app import instance
 from tai42_skeleton.app.error_envelope import install_error_handlers
 from tai42_skeleton.marketplace import locks
 from tai42_skeleton.marketplace.errors import UnrunRollError
@@ -35,6 +36,8 @@ from tai42_skeleton.middleware.writer_exit import WriterExitMiddleware
 from tai42_skeleton.operations import OperationRegistry, operation_metadata_of
 from tai42_skeleton.operations.projection import project_operations
 
+from .._fakes.bus import FakeBus
+from .._writer_exit_edge import admit_change
 from ..config.fake_pipeline import _reset_settings_after  # noqa: F401  — autouse fixture, active on import
 from ..marketplace._specs import make_resolved
 from ..marketplace.test_installer_roll_hold import (  # noqa: F401  — fixtures
@@ -73,7 +76,8 @@ def session(world: _World, monkeypatch: pytest.MonkeyPatch) -> _Session:  # noqa
 
 @pytest.fixture
 def dropped_session(world: _World, session: _Session, monkeypatch: pytest.MonkeyPatch) -> _World:  # noqa: F811
-    """The world serving the marketplace routes, its writer's session dropping after each commit."""
+    """The world serving the marketplace routes on its bus, its writer's session dropping after each commit."""
+    monkeypatch.setattr(instance.app, "_bus", world.bus)
     monkeypatch.setattr(mkt_ops, "Installer", lambda *args, **kwargs: world.installer)
     monkeypatch.setattr(mkt_ops, "component_store_configured", lambda component: True)
     world.registry.resolved = make_resolved(_relay_spec())
@@ -115,8 +119,10 @@ async def test_an_http_install_whose_session_dropped_after_commit_says_the_chang
 async def test_an_http_update_whose_session_dropped_after_commit_says_the_change_landed_and_the_roll_did_not_run(
     dropped_session: _World, session: _Session, writer_exit_edge: object
 ) -> None:
-    # The setup install runs below any door, under the edge fixture; the update under test is served over HTTP.
+    # The setup install runs below any door, under the edge fixture admitting it; the update under test is
+    # served over HTTP.
     session.drops = False
+    admit_change(dropped_session.bus)
     await dropped_session.install("NEW")
     session.drops = True
     newer = _relay_spec("1.1.0")
@@ -191,6 +197,7 @@ class _UnrunRollInstaller:
 async def test_an_http_uninstall_or_upgrade_all_whose_roll_did_not_run_says_the_change_landed(
     monkeypatch: pytest.MonkeyPatch, path: str
 ) -> None:
+    monkeypatch.setattr(instance.app, "_bus", FakeBus())
     monkeypatch.setattr(mkt_ops, "Installer", lambda *args, **kwargs: _UnrunRollInstaller())
     monkeypatch.setattr(mkt_ops, "component_store_configured", lambda component: True)
 

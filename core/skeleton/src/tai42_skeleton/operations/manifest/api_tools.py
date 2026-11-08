@@ -42,6 +42,7 @@ def _edit_name_list(current: list[Any], add: list[str], remove: list[str], field
     authority_changing=True,
     destructive=True,
     reload_gated=True,
+    holds_writer_exit=True,
     errors=[BadRequestError, NotFoundError],
     request_model=ApiToolsListsUpdate,
     response_model=ApplyResponse,

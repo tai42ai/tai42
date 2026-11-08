@@ -226,6 +226,7 @@ async def _look_up_provider(provider_id: str) -> _LookUp:
     tags=["connectors"],
     destructive=True,
     reload_gated=True,
+    holds_writer_exit=True,
     errors=[BadRequestError, ConflictError, NotSupportedError],
     request_model=AddServerRequest,
     response_model=ProviderMutationResponse,
@@ -295,6 +296,7 @@ async def add_connector_provider(
     tags=["connectors"],
     destructive=True,
     reload_gated=True,
+    holds_writer_exit=True,
     errors=[ConflictError, NotFoundError, NotSupportedError],
     response_model=RemoveProviderResponse,
 )

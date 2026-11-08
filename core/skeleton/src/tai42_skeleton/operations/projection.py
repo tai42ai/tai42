@@ -97,10 +97,13 @@ def _make_tool(op: OperationMetadata) -> Callable[..., Awaitable[object]]:
     """A projected-tool wrapper carrying ``op``'s flat typed signature.
 
     It honors the reload gate on the tool edge (a reload-gated op racing a
-    registry teardown raises the same retriable rejection its route answers) and
-    maps the operation's declared errors to loud ``ToolError``s carrying the same
-    message. The success payload is the operation's own value — no ``{"data": …}``
-    envelope (that is the HTTP-edge concern only).
+    registry teardown raises the same retriable rejection its route answers), holds
+    the worker's exit from before a ``holds_writer_exit`` operation runs (one on a
+    worker that decided to leave raises the leaving error before anything of it
+    runs, as its route answers the leaving ``503``) and maps the operation's
+    declared errors to loud ``ToolError``s carrying the same message. The success
+    payload is the operation's own value — no ``{"data": …}`` envelope (that is the
+    HTTP-edge concern only).
     """
     import inspect
 
@@ -122,6 +125,10 @@ def _make_tool(op: OperationMetadata) -> Callable[..., Awaitable[object]]:
         # its member. A call cancelled before it settled abandons the exit, ERROR-logged.
         with writer_exit_scope() as exits:
             try:
+                if op.holds_writer_exit:
+                    from tai42_skeleton.app import instance
+
+                    exits.hold_exit(instance.app.bus, op.summary)
                 result = await func(**kwargs)
             except OperationError as exc:
                 await _settle_writer_exit(exits)

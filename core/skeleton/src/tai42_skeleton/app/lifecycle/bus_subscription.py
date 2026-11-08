@@ -32,12 +32,13 @@ from tai42_skeleton.app.bus.ops import (
 )
 from tai42_skeleton.app.bus_settings import bus_settings
 from tai42_skeleton.app.discarded_build import discarded_build_statement
+from tai42_skeleton.app.graceful_exit import leave_when_settled
 from tai42_skeleton.app.lifecycle.config_reload import awaiting_respawn
 from tai42_skeleton.app.lifecycle.state import LifecycleState
 from tai42_skeleton.app.readiness_sentinel import write_ready_sentinel
 from tai42_skeleton.app.recycle import orchestrate_recycle
 from tai42_skeleton.app.reload_gate import reload_gate
-from tai42_skeleton.app.writer_exit import hold_writer_exit, writer_exit_scope
+from tai42_skeleton.app.writer_exit import WorkerLeavingError, writer_exit_scope
 
 logger = logging.getLogger(__name__)
 
@@ -250,17 +251,28 @@ class BusSubscriptionMixin(LifecycleState):
 
         ``own_reload`` is this worker's own resync reload result, its row in the report the
         recycle decision reads (:meth:`_recycle_after_join`). The join is this worker's own change:
-        it runs under one writer-exit scope that holds the worker's exit from the announcement on
-        (:func:`~tai42_skeleton.app.writer_exit.hold_writer_exit`), so a recycle op from another
-        worker's roll leaves the worker to the join, and settles once the roll ended. The recycle
-        targets are pinned before the announcement (:meth:`_pin_join_targets`), as every change pins
-        them before its reload: a worker's reply is tied to the life pinned before it answered,
-        even when that life leaves before the roll.
+        it runs under one writer-exit scope that holds the worker's exit from its first statement on
+        (:meth:`~tai42_skeleton.app.writer_exit.WriterExitScope.hold_exit`), so a recycle op from another
+        worker's roll leaves the worker to the join, and settles once the roll ended. A worker that
+        decided to leave refuses the join before it announces anything (:class:`WorkerLeavingError`):
+        no caller reads that refusal, so it is logged at INFO and the join ends with nothing
+        announced; a worker that starts in its place joins with its own announcement. The recycle
+        targets are pinned before the announcement (:meth:`_pin_join_targets`), as every change
+        pins them before its reload: a worker's reply is tied to the life pinned before it
+        answered, even when that life leaves before the roll.
         """
         bus = self.bus
         change = f"the deployment keys of {bus.identity.name}"
         with writer_exit_scope() as exits:
-            hold_writer_exit(bus, change)
+            try:
+                exits.hold_exit(bus, change)
+            except WorkerLeavingError as leaving:
+                logger.info(
+                    "worker bus: the join of %s on a worker already leaving (%s) — nothing announced",
+                    bus.identity.name,
+                    leaving.reason,
+                )
+                return
             pinned = await self._pin_join_targets()
             announced = await self._announce_deployment_keys()
             await self._recycle_after_join(announced, own_reload, pinned, change=change)
@@ -560,8 +572,6 @@ class BusSubscriptionMixin(LifecycleState):
         it waits adds nothing. The task is tracked until it ends, cancelled at shutdown, and a
         failed exit is logged at ERROR by its done-callback.
         """
-        from tai42_skeleton.app.graceful_exit import leave_when_settled
-
         if self._deferred_recycle_task is not None and not self._deferred_recycle_task.done():
             return
         task = asyncio.create_task(leave_when_settled(self.bus, _RECYCLE_OP_REASON), name="tai-deferred-recycle-exit")

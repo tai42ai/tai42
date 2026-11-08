@@ -18,6 +18,9 @@ from .._fakes.bus import FakeBus
 from .._fakes.mcp_listing import no_mcp_listing
 from .._fakes.write_span import ExclusiveWriteStore
 
+# These tests call the route handlers below the HTTP edge a request runs under.
+pytestmark = pytest.mark.usefixtures("http_edge")
+
 
 def _req(body=None, **path_params) -> Request:
     async def _json():

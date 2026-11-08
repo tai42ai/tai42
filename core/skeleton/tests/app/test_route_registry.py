@@ -73,8 +73,48 @@ def test_undeclared_route_records_trivial_defaults() -> None:
     (meta,) = registry.routes()
     assert meta.reload_gated is False
     assert meta.reads_body is False
+    assert meta.holds_writer_exit is False
     assert meta.error_statuses == ()
     assert meta.success_status == 200
+
+
+def _record_declaring(registry: RouteRegistry, *, holds_writer_exit: bool) -> None:
+    registry.record(
+        path="/api/thing",
+        methods=["POST"],
+        name="change",
+        handler=_plain,
+        summary="Thing",
+        tags=["t"],
+        authed=True,
+        action="write",
+        request_model=None,
+        response_model=None,
+        no_body_reason="test fixture: response body not under test",
+        declared=DeclaredRouteMetadata(
+            reload_gated=False,
+            reads_body=True,
+            holds_writer_exit=holds_writer_exit,
+            error_statuses=(400, 401),
+            success_status=200,
+        ),
+    )
+
+
+def test_a_route_holding_the_writer_exit_records_the_leaving_503_among_its_error_statuses() -> None:
+    registry = RouteRegistry()
+    _record_declaring(registry, holds_writer_exit=True)
+    (meta,) = registry.routes()
+    assert meta.holds_writer_exit is True
+    assert meta.error_statuses == (400, 401, 503)
+
+
+def test_a_route_declaring_no_hold_records_no_leaving_503() -> None:
+    registry = RouteRegistry()
+    _record_declaring(registry, holds_writer_exit=False)
+    (meta,) = registry.routes()
+    assert meta.holds_writer_exit is False
+    assert meta.error_statuses == (400, 401)
 
 
 def test_docstring_becomes_description() -> None:

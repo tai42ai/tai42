@@ -37,6 +37,7 @@ def operation(
     tags: list[str] | None = None,
     destructive: bool = False,
     reload_gated: bool = False,
+    holds_writer_exit: bool = False,
     meta_executor: bool = False,
     caller_context: bool = False,
     authority_changing: bool = False,
@@ -61,6 +62,10 @@ def operation(
     ``authority_changing`` marks an operation that mints/scopes keys, edits policy,
     replaces the manifest, or restores/runs unshipped state — off the default MCP
     surface (tier 2), includable by an explicit ``api_tools``.
+    ``holds_writer_exit`` marks an operation that changes this worker's own configuration or
+    fleet: its edge holds the worker's exit from before the handler runs
+    (``WriterExitScope.hold_exit``) and refuses it on a worker that decided to leave
+    (``WorkerLeavingError``, 503).
 
     ``request_model`` types the operation's inputs: the emitted spec documents it as
     the JSON ``requestBody`` of a write method, and as the ``in: query`` parameters of
@@ -94,6 +99,7 @@ def operation(
             tags=tuple(tags or ()),
             destructive=destructive,
             reload_gated=reload_gated,
+            holds_writer_exit=holds_writer_exit,
             meta_executor=meta_executor,
             caller_context=caller_context,
             authority_changing=authority_changing,

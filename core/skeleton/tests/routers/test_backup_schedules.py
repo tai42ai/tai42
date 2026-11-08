@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
+import pytest
 from starlette.requests import Request
 from tai42_contract.app import tai42_app
 
@@ -19,6 +20,9 @@ from tai42_skeleton.backup.registry import BackupRegistry
 from tai42_skeleton.backup.sections import register_core_sections
 from tai42_skeleton.routers.backup import export_backup, import_backup
 from tai42_skeleton.tools.binding import UnknownToolError
+
+# These tests call the route handlers below the HTTP edge a request runs under.
+pytestmark = pytest.mark.usefixtures("http_edge")
 
 
 def _post_req(payload: dict) -> Request:

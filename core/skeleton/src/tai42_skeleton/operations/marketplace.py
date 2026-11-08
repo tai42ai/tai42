@@ -414,6 +414,7 @@ def render_receipt(receipt: dict[str, Any]) -> dict[str, Any]:
     tags=["marketplace"],
     destructive=True,
     reload_gated=True,
+    holds_writer_exit=True,
     authority_changing=True,
     errors=[
         BadRequestError,
@@ -503,6 +504,7 @@ async def marketplace_install_preview(
     tags=["marketplace"],
     destructive=True,
     reload_gated=True,
+    holds_writer_exit=True,
     authority_changing=True,
     errors=[BadRequestError, NotFoundError, NotSupportedError, UnavailableError, OperationFailedError],
     request_model=MarketplaceUninstall,
@@ -530,6 +532,7 @@ async def marketplace_uninstall(ref: str) -> Any:
     tags=["marketplace"],
     destructive=True,
     reload_gated=True,
+    holds_writer_exit=True,
     authority_changing=True,
     errors=[
         BadRequestError,
@@ -586,6 +589,7 @@ async def marketplace_update(
     tags=["marketplace"],
     destructive=True,
     reload_gated=True,
+    holds_writer_exit=True,
     authority_changing=True,
     errors=[NotSupportedError, UnavailableError, OperationFailedError],
     response_model=UpgradeAllResult,
