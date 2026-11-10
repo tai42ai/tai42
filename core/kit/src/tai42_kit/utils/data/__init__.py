@@ -13,7 +13,14 @@ from tai42_kit.utils.data.env_markers import (
     scan_env_marker_refs,
 )
 from tai42_kit.utils.data.form_text import render_form_text
-from tai42_kit.utils.data.jq_util import get_compiled_jq, run_jq_bounded, run_jq_first
+from tai42_kit.utils.data.jq_errors import (
+    JqBudgetExceededError,
+    JqCompileError,
+    JqEvaluationError,
+    JqNoOutputError,
+    JqProgramError,
+)
+from tai42_kit.utils.data.jq_util import run_jq_bounded, run_jq_first
 from tai42_kit.utils.data.json_schema_util import json_schema_to_pydantic_model
 from tai42_kit.utils.data.mcp_output_util import (
     extract_tool_error,
@@ -34,6 +41,11 @@ __all__ = [
     "ENV_REF",
     "EnvMarkerRef",
     "EnvRef",
+    "JqBudgetExceededError",
+    "JqCompileError",
+    "JqEvaluationError",
+    "JqNoOutputError",
+    "JqProgramError",
     "ManifestParseCache",
     "build_url",
     "dump_manifest",
@@ -41,7 +53,6 @@ __all__ = [
     "extract_tool_error",
     "extract_tool_output",
     "format_env_marker",
-    "get_compiled_jq",
     "is_env_marker",
     "json_schema_to_pydantic_model",
     "load_manifest",

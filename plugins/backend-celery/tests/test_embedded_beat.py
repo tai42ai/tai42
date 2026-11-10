@@ -7,6 +7,7 @@ that promise is overdue, and the worker removes the beat's file once the beat ha
 
 from __future__ import annotations
 
+import asyncio
 import importlib
 import multiprocessing
 import os
@@ -19,9 +20,11 @@ from typing import Any
 
 import fakeredis
 import pytest
+from billiard.context import ForkProcess
 from celery.signals import beat_init
 from kombu.utils.imports import symbol_by_name
 from redbeat import RedBeatScheduler
+from tai42_kit.compute import compute_pool
 from tai42_kit.liveness import BackendLivenessSettings, backend_liveness_settings
 
 import tai42_backend_celery.core
@@ -299,3 +302,23 @@ def test_a_beat_forked_after_the_scheduler_module_is_re_imported_reports_through
 
     assert child.exitcode == 0
     assert _beat_path(liveness_path).read_text() == f"{child.pid}\n8\n"
+
+
+def _end_at_once() -> None:
+    """A forked child's whole work: nothing, so its exit code and stderr are its exit path's alone."""
+
+
+@pytest.mark.filterwarnings("ignore:This process .* is multi-threaded:DeprecationWarning")
+def test_a_billiard_fork_child_of_a_process_that_ran_a_compute_job_ends_with_exit_code_0(
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    """celery forks its embedded beat as a billiard child of a worker whose boot already ran a compute job."""
+    asyncio.run(compute_pool().run(os.getpid))
+    capfd.readouterr()
+
+    child = ForkProcess(target=_end_at_once, name="Beat")
+    child.start()
+    child.join(10)
+
+    assert child.exitcode == 0
+    assert capfd.readouterr().err == ""

@@ -24,6 +24,7 @@ from tai42_contract.access_control import caller_may_read_secrets
 from tai42_contract.app import tai42_app
 from tai42_contract.interactions import VisitOutcome
 from tai42_contract.template import TemplatedText
+from tai42_kit.compute import stop_compute_pool
 from tai42_kit.utils.detached_util import in_detached_run
 from tai42_kit.utils.run_bound import run_bound
 from tai42_kit.utils.state_context import current_state_context
@@ -401,6 +402,17 @@ def host_loop() -> Iterator[asyncio.AbstractEventLoop]:
         loop.call_soon_threadsafe(loop.stop)
         thread.join(5)
         loop.close()
+
+
+@pytest.fixture(autouse=True)
+def _no_compute_pool_left_running() -> Iterator[None]:
+    """The process compute pool a test's jq evaluation started is stopped when the test ends.
+
+    The pool is process-wide state (worker processes plus its manager threads); each test stands for
+    its own process, so the next test starts with none running.
+    """
+    yield
+    stop_compute_pool()
 
 
 @pytest.fixture(autouse=True)

@@ -3725,6 +3725,15 @@ wheels = [
 ]
 
 [[package]]
+name = "pebble"
+version = "5.2.3"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/a1/05/8b55d257b54bc0841db1dac5e28e495adc19b4227d73089ce95fc24bf37b/pebble-5.2.3.tar.gz", hash = "sha256:6fce8cc8cbf367588406f66e4b62ec36e22594a6c720bff1d08cc2e565a66af3", size = 42668, upload-time = "2026-10-04T22:29:04.063Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/4c/a2/ab7713b3b90f240500259fd2b90a284259ed332a03de4813cb5e1efe1758/pebble-5.2.3-py3-none-any.whl", hash = "sha256:9f25c2b8bf4716b51f78b74fea4d58b26c4dfd03160e8223b99f1e3424b3914a", size = 36956, upload-time = "2026-10-04T22:29:02.663Z" },
+]
+
+[[package]]
 name = "pillow"
 version = "13.0.0"
 source = { registry = "https://pypi.org/simple" }
@@ -5876,6 +5885,7 @@ dependencies = [
     { name = "jsonschema-specifications" },
     { name = "makefun" },
     { name = "mcp" },
+    { name = "pebble" },
     { name = "prometheus-client" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
@@ -6093,6 +6103,7 @@ requires-dist = [
     { name = "orjson", marker = "extra == 'llm'", specifier = ">=3.11,<4" },
     { name = "orjson", marker = "extra == 'monitoring'", specifier = ">=3.11" },
     { name = "orjson", marker = "extra == 'postgres'", specifier = ">=3.11.8,<4" },
+    { name = "pebble", specifier = ">=5.2.3,<6" },
     { name = "prometheus-client", specifier = ">=0.24" },
     { name = "psycopg", extras = ["binary", "pool"], marker = "extra == 'postgres'", specifier = ">=3.3.7" },
     { name = "psycopg", extras = ["pool"], marker = "extra == 'langgraph-checkpoint-postgres'", specifier = ">=3.3.7" },

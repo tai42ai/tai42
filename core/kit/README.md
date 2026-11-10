@@ -174,6 +174,41 @@ is at most its horizon plus the grace (`--grace`, default
 `TAI_BACKEND_LIVENESS_GRACE`), and 1 when the file is stale or missing, so it
 serves as an orchestrator's exec liveness probe.
 
+## Compute pool
+
+`tai42_kit.compute` runs CPU-bound work in worker processes, so a job that holds
+the interpreter lock for seconds leaves the caller's event loop serving every
+other request. `compute_pool()` returns the process's `ComputePool`, starting it
+on the first call in the process; `stop_compute_pool()` ends it (the skeleton's
+lifespan does this at shutdown). `await compute_pool().run(fn, *args,
+timeout=...)` runs `fn(*args)` in a worker started with `spawn`: `fn` is a
+module-level function and its arguments and result are picklable. The worker
+imports `fn`'s module afresh in a process with no app bound, so that module must
+import without touching `tai42_app`: no `@tai42_app.tools.tool` registration
+beside the job and no module-level `tai42_app.settings` read. A job from a
+module that does fails in the worker, and that import error is raised in the
+caller like any exception the job raises. The job's own exception is raised in
+the caller as itself, with the worker's traceback chained as its cause
+(`WorkerTraceback`); an exception that cannot be rebuilt in the caller raises
+`ComputeJobFailedError`, which carries its type and message, with the same
+cause. Past `timeout` (seconds, counted from the moment a worker takes the job
+up) the worker is terminated at once and replaced, and the caller gets
+`TimeoutError`; nothing the job itself started (a process, a file) is cleaned
+up. Cancelling the caller terminates the worker the same way. A pool that is not
+started, was stopped or broke raises `ComputePoolUnavailableError`, and a worker
+that ends mid-job raises `ComputeWorkerLostError`; both classify as an
+unavailable platform transport (`ErrorKind.UNAVAILABLE`, `is_transport_error`
+true), and a job never falls back to running on the caller's loop. When the pool
+breaks because an idle worker died (for example, killed by the out-of-memory
+killer), the next `compute_pool()` call stops it, starts a fresh pool and logs
+the warning "compute pool replaced after its workers died"; a job that was
+running in the broken pool still raises `ComputePoolUnavailableError`. A forked
+child never uses the pool it inherited: its first job starts its own.
+
+`COMPUTE_WORKERS` (default `2`, at least `1`) sizes each process's pool; a job
+waits for a free worker when every worker is busy. A plugin reaches the pool
+through the app as `tai42_app.compute.run(fn, *args, timeout=...)`.
+
 ## Development
 
 ```bash

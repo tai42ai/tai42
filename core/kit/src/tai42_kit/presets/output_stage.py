@@ -14,7 +14,7 @@ from tai42_contract.interactions import RunFailed
 from tai42_contract.presets import PresetOutputStage
 from tai42_contract.secrets import contains_secrets, unwrap_secrets
 
-from tai42_kit.utils.data import run_jq_first
+from tai42_kit.utils.data import JqProgramError, run_jq_first
 from tai42_kit.utils.data.json_schema_util import JsonSchemaValidationError, validate_against_json_schema
 
 logger = logging.getLogger(__name__)
@@ -56,7 +56,7 @@ async def run_output_stage(stage: PresetOutputStage, value: Any, *, carries_secr
             )
         try:
             value = await run_jq_first(stage.output_map, value)
-        except (ValueError, TypeError, TimeoutError) as exc:
+        except (JqProgramError, TypeError) as exc:
             logger.warning("preset %r output map failed: %s", stage.preset, exc)
             raise PresetOutputError(f"preset {stage.preset!r} output map failed", preset=stage.preset) from None
     if stage.output_schema is not None:

@@ -62,6 +62,9 @@ dependencies = [
     "makefun~=1.16.0",
     # Imported directly by backend/queue_labels.py (the worker CLIs' queue-label option).
     "click>=8",
+    # Imported directly by compute/pool.py (the worker-process pool: a timed-out job's worker
+    # is terminated and replaced).
+    "pebble>=5.2.3,<6",
 ]
 
 [project.urls]

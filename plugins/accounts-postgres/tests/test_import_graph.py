@@ -47,6 +47,8 @@ ALLOWED_THIRD_PARTY = frozenset(
         "opentelemetry",
         # The kit Postgres client's json/jsonb read loader (``tai42-kit[postgres]``).
         "orjson",
+        # tai42_kit's compute pool, which runs the kit's jq evaluation in worker processes.
+        "pebble",
         "psycopg",
         "psycopg_binary",
         "psycopg_pool",

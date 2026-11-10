@@ -1,69 +1,70 @@
-import time
+"""The caller side of the jq seam: evaluation semantics, the compile check, the digest-first protocol."""
+
+import pickle
 
 import pytest
 
 pytest.importorskip("jq")
 
+from tai42_contract.errors import ErrorKind, error_kind, is_transport_error
+
+from tai42_kit.compute.errors import ComputeWorkerLostError
 from tai42_kit.settings.cache_registry import reset_all_settings
-from tai42_kit.utils.data import jq_util
-from tai42_kit.utils.data.jq_util import compile_check, get_compiled_jq, run_jq_bounded, run_jq_first
+from tai42_kit.utils.data import jq_util, jq_worker
+from tai42_kit.utils.data.jq_errors import (
+    JqBudgetExceededError,
+    JqCompileError,
+    JqEvaluationError,
+    JqNoOutputError,
+    JqProgramError,
+)
+from tai42_kit.utils.data.jq_util import (
+    _program_key,
+    compile_check,
+    run_jq_bounded,
+    run_jq_first,
+)
 
 
-def _first(program, data, variables=None):
-    """Evaluate a compiled program over the ``{"v", "d"}`` envelope and take ``.first()``."""
-    return program.input(jq_util._envelope(data, variables)).first()
+class _InProcessPool:
+    """Runs each job in this process and records the job's name and arguments."""
+
+    def __init__(self, raises: BaseException | None = None) -> None:
+        self.calls: list[tuple[str, tuple]] = []
+        self.raises = raises
+
+    async def run(self, fn, /, *args, timeout=None):
+        self.calls.append((fn.__name__, args))
+        if self.raises is not None:
+            raise self.raises
+        return fn(*args)
 
 
-def _all(program, data, variables=None):
-    """Evaluate a compiled program over the ``{"v", "d"}`` envelope and take ``.all()``."""
-    return program.input(jq_util._envelope(data, variables)).all()
-
-
-class TestGetCompiledJq:
-    def test_compiles_and_evaluates(self):
-        program = get_compiled_jq(".a")
-        assert _first(program, {"a": 42}) == 42
-
-    def test_array_iteration(self):
-        program = get_compiled_jq(".[] | .n")
-        assert _all(program, [{"n": 1}, {"n": 2}]) == [1, 2]
-
-    def test_cached_returns_same_object(self):
-        # lru_cache means the same expression yields the identical compiled object.
-        assert get_compiled_jq(".cached.expr") is get_compiled_jq(".cached.expr")
-
-    def test_invalid_expression_raises(self):
-        with pytest.raises(ValueError, match="syntax error"):
-            get_compiled_jq("this is (not valid")
+@pytest.fixture
+def in_process_pool(monkeypatch):
+    pool = _InProcessPool()
+    jq_worker._compiled.clear()
+    monkeypatch.setattr(jq_util, "compute_pool", lambda: pool)
+    yield pool
+    jq_worker._compiled.clear()
 
 
 class TestEnvGuard:
     # jq's ``env``/``$ENV`` read the whole process environment; the guard seals
     # both without breaking any legitimate ``.env``/``{env: …}`` usage.
 
-    @pytest.fixture(autouse=True)
-    def _canary(self, monkeypatch):
+    async def test_env_builtin_disabled_and_secret_absent(self, monkeypatch):
         monkeypatch.setenv("CANARY", "s3cr3t-should-never-surface")
-        get_compiled_jq.cache_clear()
-        yield
-        get_compiled_jq.cache_clear()
-
-    async def test_env_builtin_disabled_and_secret_absent(self):
         with pytest.raises(ValueError, match="env builtin is disabled") as exc:
             await run_jq_first("env.CANARY", {})
         assert "s3cr3t-should-never-surface" not in str(exc.value)
 
-    def test_env_variable_rejected_at_compile(self):
-        for expr in ("$ENV.CANARY", '"\\($ENV.CANARY)"', ". as $ENV | ."):
-            with pytest.raises(ValueError, match=r"\$ENV is disabled"):
-                get_compiled_jq(expr)
+    async def test_env_variable_refused(self):
+        with pytest.raises(ValueError, match=r"\$ENV is disabled"):
+            await run_jq_first("$ENV.CANARY", {})
 
     async def test_user_env_definition_shadows_and_runs(self):
         assert await run_jq_first("def env: 1; env", {}) == 1
-
-    def test_user_def_referencing_env_variable_rejected(self):
-        with pytest.raises(ValueError, match=r"\$ENV is disabled"):
-            get_compiled_jq("def env: $ENV; env")
 
     async def test_dot_env_key_access_is_legitimate(self):
         assert await run_jq_first(".env", {"env": "x"}) == "x"
@@ -77,44 +78,15 @@ class TestEnvGuard:
     async def test_trailing_line_comment_is_accepted(self):
         assert await run_jq_first(".a\n# trailing comment", {"a": 11}) == 11
 
-    def test_syntax_error_reports_author_position(self):
-        # A failed compile is reworded from the bare program, so the reported error
-        # names the author's own position, not an offset shifted by the guard.
-        with pytest.raises(ValueError, match="syntax error"):
-            get_compiled_jq("this is (not valid")
-
-    def test_empty_expression_still_raises(self):
-        with pytest.raises(ValueError, match="error"):
-            get_compiled_jq("")
-
 
 class TestEnvelopeSealed:
-    # ``$__in`` is the binding mechanism's envelope; a program or a prelude def that
-    # names it is refused before the compile, so channel data reaches a program
-    # only as ``.`` and variables only as their own ``$name``.
-
-    @pytest.fixture(autouse=True)
-    def _fresh_cache(self):
-        get_compiled_jq.cache_clear()
-        yield
-        get_compiled_jq.cache_clear()
-
-    @pytest.mark.parametrize("expr", ["$__in.d", '"\\($__in.d)"', ". as $__in | .", "$__in"])
-    def test_an_expression_naming_the_envelope_is_refused(self, expr):
-        with pytest.raises(ValueError, match=r"\$__in is reserved"):
-            get_compiled_jq(expr)
-
-    def test_a_prelude_def_naming_the_envelope_is_refused(self):
-        with pytest.raises(ValueError, match=r"\$__in is reserved"):
-            get_compiled_jq("f", prelude="def f: $__in.d;")
-
     async def test_the_refusal_reaches_run_jq_first(self):
         with pytest.raises(ValueError, match=r"\$__in is reserved"):
             await run_jq_first("$__in.v", {})
 
-    def test_the_refusal_reaches_compile_check(self):
+    async def test_the_refusal_reaches_compile_check(self):
         with pytest.raises(ValueError, match=r"\$__in is reserved"):
-            compile_check("$__in.d.outputs")
+            await compile_check("$__in.d.outputs")
 
     async def test_a_longer_name_sharing_the_prefix_compiles(self):
         assert await run_jq_first(".a as $__inbox | $__inbox + 1", {"a": 1}) == 2
@@ -122,48 +94,28 @@ class TestEnvelopeSealed:
 
 class TestRunJqFirst:
     async def test_returns_evaluated_value(self):
-        # Evaluates off-loop and returns .first() over a plain python payload.
         assert await run_jq_first(".a", {"a": 42}) == 42
 
-    async def test_empty_pipeline_without_default_raises_valueerror(self):
-        # An empty pipeline (``.first()`` raises ``StopIteration``) surfaces as a
-        # loud ``ValueError`` — NOT the opaque ``RuntimeError: StopIteration
-        # interacts badly with generators ...`` the raw future boundary produced.
-        with pytest.raises(ValueError, match="empty pipeline"):
-            await run_jq_first(".[] | select(.x)", [])
+    async def test_empty_pipeline_without_default_raises_no_output(self):
+        # An empty pipeline surfaces loudly, never as a silent ``None``.
+        with pytest.raises(JqNoOutputError) as exc:
+            await run_jq_first(".x[]", {"x": []})
+        assert str(exc.value) == "jq expression produced no output (empty pipeline): '.x[]'"
 
     async def test_empty_pipeline_returns_default_when_supplied(self):
         # A supplied default substitutes for the empty pipeline; ``None`` and ``{}``
         # are both honoured (the sentinel distinguishes them from "no default").
         assert await run_jq_first(".[] | select(.x)", [], default=None) is None
+        assert await run_jq_first(".x[]", {"x": []}, default=None) is None
         assert await run_jq_first(".[] | select(.x)", [], default={}) == {}
 
     async def test_non_empty_pipeline_returns_first_unchanged_with_default(self):
         # A default never shadows a real first value.
         assert await run_jq_first(".a", {"a": 42}, default=None) == 42
 
-    async def test_timeout_raises_named_promptly(self, monkeypatch):
-        # A slow evaluation is bounded by JQ_TIMEOUT_SECONDS; the raised
-        # TimeoutError names the env var and returns promptly (well under the
-        # 1s the fake would otherwise block for).
-        class _SlowProgram:
-            def input_text(self, text):
-                return self
-
-            def first(self):
-                time.sleep(1)
-                return None
-
-        monkeypatch.setattr(jq_util, "get_compiled_jq", lambda expr, prelude="", variables=(): _SlowProgram())
-        monkeypatch.setenv("JQ_TIMEOUT_SECONDS", "0.01")
-        reset_all_settings()
-        try:
-            start = time.monotonic()
-            with pytest.raises(TimeoutError, match="JQ_TIMEOUT_SECONDS"):
-                await run_jq_first(".", {})
-            assert time.monotonic() - start < 0.5
-        finally:
-            reset_all_settings()
+    async def test_a_syntax_error_raises_valueerror(self):
+        with pytest.raises(ValueError, match="syntax error"):
+            await run_jq_first("this is (not valid", {})
 
 
 class TestRunJqBounded:
@@ -182,185 +134,12 @@ class TestRunJqBounded:
             await run_jq_bounded(".", {}, limit=0)
 
     async def test_unbounded_stream_is_not_materialized(self):
-        # An expression emitting 100M values with limit 1 must take at most limit + 1
-        # lazily and return promptly — never allocating the whole stream.
-        start = time.monotonic()
-        result = await run_jq_bounded("range(100000000)", None, limit=1)
-        assert len(result) <= 2
-        assert time.monotonic() - start < 0.5
+        # An expression emitting 100M values with limit 1 takes at most limit + 1 lazily.
+        assert await run_jq_bounded("range(100000000)", None, limit=1) == [0, 1]
 
     async def test_binds_named_variables(self):
-        # The bounded stream reads the same per-evaluation variables as run_jq_first.
         result = await run_jq_bounded(".[] | . + $bump", [1, 2, 3], limit=5, variables={"bump": 10})
         assert result == [11, 12, 13]
-
-    async def test_timeout_raises_named_promptly(self, monkeypatch):
-        # A slow evaluation is bounded by JQ_TIMEOUT_SECONDS; the raised TimeoutError
-        # names the env var and returns promptly (well under the 1s the fake blocks for).
-        class _SlowProgram:
-            def input_text(self, text):
-                return self
-
-            def __iter__(self):
-                time.sleep(1)
-                return iter([])
-
-        monkeypatch.setattr(jq_util, "get_compiled_jq", lambda expr, prelude="", variables=(): _SlowProgram())
-        monkeypatch.setenv("JQ_TIMEOUT_SECONDS", "0.01")
-        reset_all_settings()
-        try:
-            start = time.monotonic()
-            with pytest.raises(TimeoutError, match="JQ_TIMEOUT_SECONDS"):
-                await run_jq_bounded(".", {}, limit=1)
-            assert time.monotonic() - start < 0.5
-        finally:
-            reset_all_settings()
-
-
-class TestPrelude:
-    # ``get_compiled_jq(expression, prelude)`` compiles a run of ``def …;``
-    # declarations ahead of the expression so the expression may call them; the
-    # cache key is the (expression, prelude, variable-names) triple.
-
-    def test_prelude_def_callable_from_expression(self):
-        program = get_compiled_jq("double(.a)", prelude="def double($x): $x * 2;")
-        assert _first(program, {"a": 21}) == 42
-
-    def test_prelude_def_calling_a_sibling_def(self):
-        # A prelude def may call an earlier sibling def by its bare name — the
-        # nested-library shape a views prelude emits.
-        prelude = "def one: 1;\ndef two: one + one;"
-        program = get_compiled_jq(".x + two", prelude=prelude)
-        assert _first(program, {"x": 40}) == 42
-
-    def test_prelude_def_placed_after_guard_still_evaluates(self):
-        # The prelude lands after the guard's ``{} as $ENV | `` and the variable
-        # bindings; a def there must still resolve and evaluate.
-        program = get_compiled_jq("greet", prelude='def greet: "hi";')
-        assert _first(program, None) == "hi"
-
-    def test_cache_keyed_on_the_pair(self):
-        # Same expression, two preludes -> two distinct compiled programs.
-        p_one = get_compiled_jq(".x", prelude="def f: 1;")
-        p_two = get_compiled_jq(".x", prelude="def f: 2;")
-        assert p_one is not p_two
-        # An identical pair returns the identical cached object.
-        assert get_compiled_jq(".x", prelude="def f: 1;") is p_one
-        # The bare-expression cache and the pair cache never collide.
-        assert get_compiled_jq(".x") is not p_one
-
-    def test_env_variable_in_prelude_rejected(self):
-        with pytest.raises(ValueError, match=r"\$ENV is disabled"):
-            get_compiled_jq(".x", prelude="def leak: $ENV;")
-
-    def test_author_line_number_preserved_despite_prelude(self):
-        # An expression whose only syntax error sits on its own line 3 reports
-        # line 3 — the prelude's lines are subtracted back out of the message.
-        prelude = "def a: 1;\ndef b: 2;\ndef c: 3;\ndef d: 4;"
-        expr = ".a |\n.b |\n.c d"
-        with pytest.raises(ValueError, match="syntax error") as bare:
-            get_compiled_jq(expr)
-        assert "line 3" in str(bare.value)
-        with pytest.raises(ValueError, match="syntax error") as shifted:
-            get_compiled_jq(expr, prelude=prelude)
-        assert "line 3" in str(shifted.value)
-        assert "line 7" not in str(shifted.value)
-
-    def test_prelude_without_trailing_newline_keeps_line_arithmetic(self):
-        # A prelude that does not end in a newline is normalised so the
-        # expression's first line is still line 1 for error reporting.
-        prelude = "def a: 1;\ndef b: 2;"  # two lines, no trailing newline
-        expr = ".a\n.b c"  # error on expr line 2
-        with pytest.raises(ValueError, match="syntax error") as exc:
-            get_compiled_jq(expr, prelude=prelude)
-        assert "line 2" in str(exc.value)
-
-    async def test_empty_prelude_is_unchanged_behavior(self):
-        # The default empty prelude yields a program identical in behavior to a
-        # bare call (the guard wrapper and variable bindings alone, no extra defs).
-        assert await run_jq_first(".a", {"a": 42}, prelude="") == 42
-        assert _first(get_compiled_jq(".a", prelude=""), {"a": 5}) == 5
-
-
-class TestOneCompilePerMiss:
-    """A cache miss compiles the guarded program once; the raw program is compiled only to word a failure."""
-
-    @pytest.fixture
-    def compiles(self, monkeypatch):
-        import jq
-
-        get_compiled_jq.cache_clear()
-        seen: list[str] = []
-        real = jq.compile
-
-        def _counting(source, *args, **kwargs):
-            seen.append(source)
-            return real(source, *args, **kwargs)
-
-        monkeypatch.setattr(jq, "compile", _counting)
-        yield seen
-        get_compiled_jq.cache_clear()
-
-    def test_a_successful_miss_compiles_once(self, compiles):
-        get_compiled_jq(".a + $n", "def f: 1;", ("n",))
-        assert len(compiles) == 1
-        assert compiles[0].startswith("def env:")
-
-    def test_a_hit_compiles_nothing(self, compiles):
-        get_compiled_jq(".hit")
-        get_compiled_jq(".hit")
-        assert len(compiles) == 1
-
-    def test_the_paren_escape_is_refused(self):
-        for prelude in ("", "def a: 1;"):
-            with pytest.raises(ValueError, match="syntax error"):
-                get_compiled_jq(".a) | (.b", prelude)
-
-    @pytest.mark.parametrize(
-        ("expression", "prelude", "variables", "message"),
-        [
-            (
-                "this is (not valid",
-                "",
-                (),
-                "jq: error: syntax error, unexpected IDENT, expecting end of file at <top-level>, line 1, column 29:\n"
-                "    . as $__in | $__in.d | this is (not valid\n"
-                "                                ^^\n"
-                "jq: 1 compile error",
-            ),
-            (
-                ".a |\n.b |\n.c d",
-                "def a: 1;\ndef b: 2;\ndef c: 3;\ndef d: 4;",
-                (),
-                "jq: error: syntax error, unexpected IDENT, expecting end of file at <top-level>, line 3, column 4:\n"
-                "    .c d\n"
-                "       ^\n"
-                "jq: 1 compile error",
-            ),
-            (
-                ".a + $nope",
-                "",
-                (),
-                "jq: error: $nope is not defined at <top-level>, line 1, column 29:\n"
-                "    . as $__in | $__in.d | .a + $nope\n"
-                "                                ^^^^^\n"
-                "jq: 1 compile error",
-            ),
-            (
-                ".a + $nope",
-                "def a: 1;",
-                ("x",),
-                "jq: error: $nope is not defined at <top-level>, line 1, column 16:\n"
-                "    $__in.d | .a + $nope\n"
-                "                   ^^^^^\n"
-                "jq: 1 compile error",
-            ),
-        ],
-    )
-    def test_a_failed_compile_reports_the_author_relative_message(self, expression, prelude, variables, message):
-        with pytest.raises(ValueError, match="jq: 1 compile error") as exc:
-            get_compiled_jq(expression, prelude, variables)
-        assert str(exc.value) == message
 
 
 class TestNamedVariables:
@@ -368,14 +147,11 @@ class TestNamedVariables:
         assert await run_jq_first(".a + $extra.b", {"a": 1}, variables={"extra": {"b": 4}}) == 5
 
     async def test_run_jq_first_without_the_variable_fails_loudly(self):
-        # An expression referencing an undeclared variable never silently degrades: jq
-        # resolves the reference at compile time and refuses loudly.
+        # jq resolves a variable reference at compile time and refuses an undeclared one loudly.
         with pytest.raises(ValueError, match=r"\$extra is not defined"):
             await run_jq_first(".a + $extra.b", {"a": 1})
 
     async def test_prelude_def_reads_a_bound_variable_inside_map(self):
-        # A prelude def, defined after the variable bindings, reads a bound variable
-        # even inside ``map(...)`` where ``.`` is rebound to each item.
         result = await run_jq_first(
             "shift",
             [1, 2, 3],
@@ -384,40 +160,41 @@ class TestNamedVariables:
         )
         assert result == [11, 12, 13]
 
-    async def test_same_names_different_values_reuse_one_compile(self, monkeypatch):
-        # The compile is keyed on the variable NAMES, not the values: two evaluations
-        # with the same names and different values compile exactly once.
-        get_compiled_jq.cache_clear()
-        calls = 0
-        real = jq_util._compile_jq
-
-        def _counting(expression, prelude, variable_names):
-            nonlocal calls
-            calls += 1
-            return real(expression, prelude, variable_names)
-
-        monkeypatch.setattr(jq_util, "_compile_jq", _counting)
-        assert await run_jq_first(".a + $bump", {"a": 1}, variables={"bump": 10}) == 11
-        assert await run_jq_first(".a + $bump", {"a": 5}, variables={"bump": 100}) == 105
-        assert calls == 1
-
-    def test_compile_check_declares_variables(self):
-        compile_check(".a <= $limit", variables=("limit",))
-        with pytest.raises(ValueError, match=r"\$limit is not defined"):
-            compile_check(".a <= $limit")
-
-    def test_compile_check_still_refuses_a_syntax_error(self):
-        with pytest.raises(ValueError, match="syntax error"):
-            compile_check(".a <=", variables=("limit",))
-
-    def test_reserved_variable_name_is_refused(self):
-        for name in ("__in", "ENV", "__loc__"):
-            with pytest.raises(ValueError, match="reserved"):
-                compile_check(".", variables=(name,))
-
-    async def test_reserved_variable_name_refused_on_evaluation(self):
-        with pytest.raises(ValueError, match="reserved"):
+    async def test_a_reserved_variable_name_on_evaluation_is_a_compile_error(self):
+        with pytest.raises(JqCompileError, match="reserved"):
             await run_jq_first(".", {}, variables={"__in": 1})
+
+
+class TestCompileCheck:
+    async def test_compile_check_declares_variables(self):
+        await compile_check(".a <= $limit", variables=("limit",))
+        with pytest.raises(ValueError, match=r"\$limit is not defined"):
+            await compile_check(".a <= $limit")
+
+    async def test_compile_check_still_refuses_a_syntax_error(self):
+        with pytest.raises(ValueError, match="syntax error"):
+            await compile_check(".a <=", variables=("limit",))
+
+    async def test_compile_check_resolves_prelude_defs(self):
+        await compile_check("double(.a)", prelude="def double($x): $x * 2;")
+        with pytest.raises(ValueError, match="double/1 is not defined"):
+            await compile_check("double(.a)")
+
+    @pytest.mark.parametrize("name", ["__in", "ENV", "__loc__"])
+    async def test_reserved_variable_name_is_refused(self, name):
+        with pytest.raises(ValueError, match="reserved"):
+            await compile_check(".", variables=(name,))
+
+    async def test_a_compile_past_the_budget_names_it(self, monkeypatch):
+        monkeypatch.setattr(jq_util, "compute_pool", lambda: _InProcessPool(raises=TimeoutError("job killed")))
+        monkeypatch.setenv("JQ_TIMEOUT_SECONDS", "0.5")
+        reset_all_settings()
+        try:
+            with pytest.raises(JqBudgetExceededError) as exc:
+                await compile_check(".a")
+            assert str(exc.value) == "jq compile exceeded 0.5s (JQ_TIMEOUT_SECONDS); its worker was killed"
+        finally:
+            reset_all_settings()
 
 
 class TestPreludePassthrough:
@@ -427,3 +204,121 @@ class TestPreludePassthrough:
     async def test_run_jq_bounded_passes_prelude(self):
         result = await run_jq_bounded(".[] | double(.)", [1, 2, 3], limit=5, prelude="def double($x): $x * 2;")
         assert result == [2, 4, 6]
+
+    async def test_empty_prelude_is_unchanged_behavior(self):
+        assert await run_jq_first(".a", {"a": 42}, prelude="") == 42
+
+
+class TestDigestFirstProtocol:
+    """A worker is sent the program's digest first; the source only when it reports a miss."""
+
+    async def test_a_cold_evaluation_sends_the_source_after_the_miss(self, in_process_pool):
+        assert await run_jq_first(".a", {"a": 1}) == 1
+        assert [name for name, _ in in_process_pool.calls] == ["evaluate_cached_job", "compile_and_evaluate_job"]
+        assert isinstance(in_process_pool.calls[1][1][1], jq_worker.JqSource)
+
+    async def test_a_warm_evaluation_sends_the_digest_and_the_input_only(self, in_process_pool):
+        await run_jq_first(".a + $bump", {"a": 1}, prelude="def f: 1;", variables={"bump": 10})
+        in_process_pool.calls.clear()
+        assert await run_jq_first(".a + $bump", {"a": 5}, prelude="def f: 1;", variables={"bump": 100}) == 105
+        [(name, args)] = in_process_pool.calls
+        assert name == "evaluate_cached_job"
+        assert not any(isinstance(arg, jq_worker.JqSource) for arg in args)
+        assert args[0] == _program_key(".a + $bump", "def f: 1;", ("bump",))
+
+    async def test_a_compile_check_leaves_the_program_warm_for_its_evaluation(self, in_process_pool):
+        await compile_check(".a + $n", variables=("n",))
+        in_process_pool.calls.clear()
+        assert await run_jq_first(".a + $n", {"a": 1}, variables={"n": 2}) == 3
+        assert [name for name, _ in in_process_pool.calls] == ["evaluate_cached_job"]
+
+    async def test_an_evaluation_past_the_budget_names_it(self, monkeypatch):
+        monkeypatch.setattr(jq_util, "compute_pool", lambda: _InProcessPool(raises=TimeoutError("job killed")))
+        with pytest.raises(JqBudgetExceededError, match=r"jq evaluation exceeded .*s \(JQ_TIMEOUT_SECONDS\)"):
+            await run_jq_first(".a", {})
+
+    def test_the_digest_separates_every_part(self):
+        # Length-prefixed parts: moving characters across a part boundary changes the digest.
+        assert _program_key("ab", "c", ()) != _program_key("a", "bc", ())
+        assert _program_key(".a", "", ("x", "y")) != _program_key(".a", "", ("xy",))
+        assert _program_key(".a", "", ()) != _program_key(".a", "", ("",))
+        assert _program_key(".a", "def f: 1;", ("n",)) == _program_key(".a", "def f: 1;", ("n",))
+
+
+class TestCompileErrorType:
+    """A compile failure raises :class:`JqCompileError`; an evaluation failure :class:`JqEvaluationError`."""
+
+    @pytest.mark.parametrize(
+        ("expression", "prelude", "message"),
+        [
+            ("this is (not valid", "", "syntax error"),
+            (".a + $extra.b", "", r"\$extra is not defined"),
+            ("$ENV.CANARY", "", r"\$ENV is disabled"),
+            ("$__in.v", "", r"\$__in is reserved"),
+            (".a", "def broken: (;", "syntax error"),
+        ],
+    )
+    async def test_a_compile_failure_from_run_jq_first_is_typed(self, expression, prelude, message):
+        with pytest.raises(JqCompileError, match=message):
+            await run_jq_first(expression, {"a": 1}, prelude=prelude)
+
+    async def test_a_compile_failure_from_run_jq_bounded_is_typed(self):
+        with pytest.raises(JqCompileError, match=r"\$extra is not defined"):
+            await run_jq_bounded(".a + $extra.b", {"a": 1}, limit=1)
+
+    async def test_a_compile_failure_from_compile_check_is_typed(self):
+        with pytest.raises(JqCompileError, match="syntax error"):
+            await compile_check(".a <=")
+
+    async def test_an_evaluation_failure_is_an_evaluation_error(self):
+        with pytest.raises(JqEvaluationError, match="cannot be added"):
+            await run_jq_first(".a + 1", {"a": "x"})
+
+    async def test_a_bounded_evaluation_failure_is_an_evaluation_error(self):
+        with pytest.raises(JqEvaluationError, match="cannot be added"):
+            await run_jq_bounded(".[] | . + 1", ["x"], limit=1)
+
+    async def test_a_lone_surrogate_reaches_the_caller_as_a_compile_error(self):
+        with pytest.raises(JqCompileError, match="not valid Unicode text at offset 1: surrogates not allowed"):
+            await compile_check('"\ud800"')
+
+    @pytest.mark.parametrize("error_type", [JqCompileError, JqEvaluationError, JqBudgetExceededError, JqNoOutputError])
+    def test_each_type_survives_the_pickle_round_trip(self, error_type):
+        restored = pickle.loads(pickle.dumps(error_type("jq: the message")))  # noqa: S301 -- the test's own payload
+        assert type(restored) is error_type
+        assert str(restored) == "jq: the message"
+
+
+class TestProgramErrorClassification:
+    """The author's program failing is bad input, never a transport failure; a pool fault passes through as itself."""
+
+    async def test_a_budget_overrun_is_bad_input_and_not_transport(self, monkeypatch):
+        monkeypatch.setattr(jq_util, "compute_pool", lambda: _InProcessPool(raises=TimeoutError("job killed")))
+        with pytest.raises(JqBudgetExceededError) as exc:
+            await run_jq_first(".a", {})
+        assert isinstance(exc.value.__cause__, TimeoutError)
+        assert error_kind(exc.value) is ErrorKind.BAD_INPUT
+        assert is_transport_error(exc.value) is False
+
+    @pytest.mark.parametrize("error_type", [JqCompileError, JqEvaluationError, JqBudgetExceededError, JqNoOutputError])
+    def test_every_member_is_a_program_error_of_kind_bad_input(self, error_type):
+        exc = error_type("x")
+        assert isinstance(exc, JqProgramError)
+        assert error_kind(exc) is ErrorKind.BAD_INPUT
+        assert is_transport_error(exc) is False
+
+    @pytest.mark.parametrize(
+        "call",
+        [
+            lambda: run_jq_first(".a", {}),
+            lambda: run_jq_bounded(".a", {}, 1),
+            lambda: compile_check(".a"),
+        ],
+        ids=["run_jq_first", "run_jq_bounded", "compile_check"],
+    )
+    async def test_a_lost_worker_leaves_the_seam_as_itself(self, monkeypatch, call):
+        lost = ComputeWorkerLostError("the worker running compute job j ended with exit code -9")
+        monkeypatch.setattr(jq_util, "compute_pool", lambda: _InProcessPool(raises=lost))
+        with pytest.raises(ComputeWorkerLostError) as exc:
+            await call()
+        assert exc.value is lost

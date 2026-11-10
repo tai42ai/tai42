@@ -200,9 +200,9 @@ async def callback_execution(result: Any, callback: CallbackSchema, *, settings:
             return None
 
     expr = await callback.rendered_expr()
-    # Empty expr is not an error: ``get_compiled_jq("")`` raises, so it yields {}.
-    # An empty PIPELINE from a non-empty expr also yields {} (default). Evaluated
-    # through ``run_jq_first`` so the JQ_TIMEOUT_SECONDS budget holds.
+    # Empty expr is not an error: an empty program does not compile, so it is not
+    # evaluated and yields {}. An empty PIPELINE from a non-empty expr also yields {}
+    # (default). Evaluated through ``run_jq_first`` so the JQ_TIMEOUT_SECONDS budget holds.
     expr_output = (await run_jq_first(expr, result, default={})) if expr else {}
 
     if callback.tool:

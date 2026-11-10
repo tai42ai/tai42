@@ -80,6 +80,8 @@ ALLOWED_THIRD_PARTY = frozenset(
         "orjson",
         "ormsgpack",
         "packaging",
+        # tai42_kit's compute pool, which runs the kit's jq evaluation in worker processes.
+        "pebble",
         "platformdirs",
         "pydantic",
         "pydantic_core",

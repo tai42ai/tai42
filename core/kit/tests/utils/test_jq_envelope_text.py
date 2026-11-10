@@ -16,14 +16,14 @@ pytest.importorskip("jq")
 
 import numpy as np
 
-from tai42_kit.utils.data import jq_util
 from tai42_kit.utils.data.jq_util import run_jq_bounded, run_jq_first
+from tai42_kit.utils.data.jq_worker import JqSource, compile_jq, envelope
 
 
 def _through_json_dumps(payload: Any, expression: str = ".") -> Any:
     """The result jq gives when the envelope is encoded by ``json.dumps``."""
-    text = json.dumps(jq_util._envelope(payload, {}))
-    return jq_util.get_compiled_jq(expression).input_text(text).first()
+    text = json.dumps(envelope(payload, {}))
+    return compile_jq(JqSource(expression, "", ())).input_text(text).first()
 
 
 class _Str(str):
@@ -123,7 +123,7 @@ class TestValueParity:
     )
     async def test_a_value_json_dumps_refuses_raises_its_text(self, value):
         with pytest.raises(TypeError) as today:
-            json.dumps(jq_util._envelope({"x": value}, {}))
+            json.dumps(envelope({"x": value}, {}))
         with pytest.raises(TypeError) as now:
             await run_jq_first(".", {"x": value})
         assert str(now.value) == str(today.value)

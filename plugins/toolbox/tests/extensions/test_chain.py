@@ -10,6 +10,7 @@ import tai42_kit.utils.data.jq_util as jq_util
 from tai42_contract.extensions import ExtensionKind
 from tai42_contract.template import TemplatedText
 from tai42_kit.settings import reset_all_settings
+from tai42_kit.utils.data import JqBudgetExceededError
 
 import tai42_toolbox.extensions.chain as chain_module
 from tai42_toolbox._internal.extensions.chain_executor import execute_chain
@@ -230,21 +231,9 @@ def test_jq_expression_by_id_renders_then_evaluates(bind_fake_app):
     assert received == {"total": 6}
 
 
-class _BlockingProgram:
-    """A stand-in compiled jq program whose evaluation blocks on the worker
-    thread, standing in for a pathological expression such as ``[range(1e9)]``."""
-
-    def input_text(self, text: str) -> "_BlockingProgram":
-        return self
-
-    def first(self) -> Any:
-        time.sleep(2)
-        return None
-
-
 def test_pathological_jq_expression_surfaces_timeout_through_chain(bind_fake_app, monkeypatch):
-    # A pathological jq expression must not block the loop: the JQ_TIMEOUT_SECONDS budget surfaces
-    # as a loud TimeoutError through execute_chain, and the second tool is never called.
+    # A runaway jq expression is killed in its worker at the JQ_TIMEOUT_SECONDS budget, which surfaces
+    # as a loud JqBudgetExceededError through execute_chain; the second tool is never called.
     async def run_tool(key: str, arguments: dict[str, Any]) -> Any:
         if key == "source":
             return {"n": 1}
@@ -252,19 +241,22 @@ def test_pathological_jq_expression_surfaces_timeout_through_chain(bind_fake_app
 
     bind_fake_app(FakeTools(run_tool=run_tool))
 
-    monkeypatch.setattr(jq_util, "get_compiled_jq", lambda expression, prelude="", variables=(): _BlockingProgram())
-    monkeypatch.setenv("JQ_TIMEOUT_SECONDS", "0.05")
+    monkeypatch.setenv("JQ_TIMEOUT_SECONDS", "0.2")
     reset_all_settings()
     try:
-        with pytest.raises(TimeoutError, match="JQ_TIMEOUT_SECONDS"):
+        # A first evaluation starts the compute pool, so the timed call measures the budget alone.
+        assert asyncio.run(jq_util.run_jq_first(".", 1)) == 1
+        start = time.monotonic()
+        with pytest.raises(JqBudgetExceededError, match="JQ_TIMEOUT_SECONDS"):
             asyncio.run(
                 execute_chain(
                     tool_name="source",
                     tool_arguments={},
-                    jq_expression=TemplatedText(content="[range(1e9)]"),
+                    jq_expression=TemplatedText(content="last(range(1e18))"),
                     next_tool_name="sink",
                 )
             )
+        assert time.monotonic() - start < 1.0
     finally:
         reset_all_settings()
 

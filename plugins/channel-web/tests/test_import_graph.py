@@ -46,6 +46,8 @@ ALLOWED_THIRD_PARTY = frozenset(
         # redis<6 imports PyJWT eagerly at import time.
         "jwt",
         "opentelemetry",
+        # tai42_kit's compute pool, which runs the kit's jq evaluation in worker processes.
+        "pebble",
         "pydantic",
         "pydantic_core",
         "pydantic_settings",

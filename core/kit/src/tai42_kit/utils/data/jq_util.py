@@ -1,9 +1,21 @@
-"""jq expression compilation and bounded evaluation, with the process environment sealed out."""
+"""jq compilation and bounded evaluation in a compute worker, with the process environment sealed out.
 
-import asyncio
-import itertools
+The compile and the evaluation of a jq program run in a worker process of
+:func:`tai42_kit.compute.compute_pool` (the jq binding holds the GIL for both), under the
+``JQ_TIMEOUT_SECONDS`` budget: a job past it has its worker killed, so the caller's event loop
+keeps serving while a program runs and a runaway program is stopped. The program shape and the
+per-worker compiled cache live in :mod:`~tai42_kit.utils.data.jq_worker`.
+
+The author's program's failure — it does not compile, it raised while it ran, it ran past
+``JQ_TIMEOUT_SECONDS``, or it emitted nothing where a value is required — raises a
+:class:`~tai42_kit.utils.data.jq_errors.JqProgramError` (``JqCompileError``, ``JqEvaluationError``,
+``JqBudgetExceededError``, ``JqNoOutputError``): bad input, never a transport failure. A failure of
+the pool to run it raises the pool's own error and is never reworded here. A caller catches
+``JqProgramError``, never ``ValueError`` or ``TimeoutError``.
+"""
+
+import hashlib
 import json
-import re
 from collections.abc import Iterable
 from functools import lru_cache
 from typing import Any, Final
@@ -11,54 +23,18 @@ from typing import Any, Final
 from pydantic import Field
 from pydantic_settings import SettingsConfigDict
 
+from tai42_kit.compute import compute_pool
 from tai42_kit.settings import TaiBaseSettings, settings_cache
-
-# Guard prefix that seals the process environment out of every compiled
-# expression: ``env`` is shadowed by a builtin that raises when called (it cannot
-# be substring-scanned — ``.env`` and ``{env: …}`` are legitimate), and ``$ENV``
-# is bound to an empty object as the defense-in-depth floor. ``$ENV`` itself is a
-# literal 4-char token with no splicing, so the caller rejects it up front with
-# zero false negatives. The substring reject over-rejects (false positive) an
-# expression that merely contains ``$ENV`` inside a string literal, key, or
-# comment — a loud refusal, the correct bias for a security gate.
-# The prefix opens no paren: in jq's grammar both ``def …; Exp`` and
-# ``Term as $x | Exp`` take the whole remaining program, so the guarded program
-# compiles exactly when the bare one does and an unbalanced ``)`` in the
-# expression cannot close a scope the guard opened.
-_GUARD_PREAMBLE = (
-    'def env: error("jq: the env builtin is disabled '
-    '(process environment is not readable from expressions)"); '
-    "{} as $ENV | "
+from tai42_kit.utils.data.jq_errors import JqBudgetExceededError, JqNoOutputError
+from tai42_kit.utils.data.jq_worker import (
+    JqSource,
+    compile_and_evaluate_job,
+    compile_job,
+    envelope,
+    evaluate_cached_job,
 )
 
-# The two envelope keys every compiled program reads its evaluation input from:
-# ``d`` carries the data the expression is about (its ``.``), ``v`` the map of
-# variable values. The binding preamble unpacks both.
-_ENVELOPE_DATA = "d"
-_ENVELOPE_VARS = "v"
-
-# Variable names an author may not bind, because the binding mechanism and jq
-# reserve them: ``__in`` is the envelope binding, ``ENV`` the sealed environment
-# object, ``__loc__`` a jq built-in location variable. ``__in`` is not readable
-# either: an expression or a prelude that names ``$__in`` is refused before the
-# compile (``_ENVELOPE_VARIABLE_RE``), so the data reaches a program only as ``.``
-# and each variable only as its own ``$name``.
-_RESERVED_VARIABLE_NAMES = frozenset({"__in", "ENV", "__loc__"})
-
-# ``$__in`` as a whole token (``$__inbox`` is another name). Like the ``$ENV``
-# check, a match inside a string literal or a comment is refused too.
-_ENVELOPE_VARIABLE_RE = re.compile(r"\$__in\b")
-
-
-def _envelope(payload: Any, variables: dict[str, Any] | None = None) -> dict[str, Any]:
-    """The evaluation input every compiled program takes.
-
-    The data lands under ``d`` (the expression's ``.``) and the variable values under
-    ``v``; the binding preamble the compile generates unpacks both back into ``.`` and
-    the named ``$name`` bindings.
-    """
-    return {_ENVELOPE_VARS: dict(variables or {}), _ENVELOPE_DATA: payload}
-
+__all__ = ["JqSettings", "compile_check", "jq_settings", "run_jq_bounded", "run_jq_first"]
 
 # orjson's own refusals (no ``__cause__``) of input ``json.dumps`` encodes or
 # refuses by its own rules: an int above 64 bits, a dict key that is not an exact
@@ -84,7 +60,7 @@ def _to_json_base(o: Any) -> Any:
     raise TypeError(f"Object of type {type(o).__name__} is not JSON serializable")
 
 
-def _envelope_text(envelope: Any) -> str:
+def _envelope_text(document: Any) -> str:
     """The envelope as JSON text for jq's ``input_text``.
 
     Every value and key gives the jq result ``json.dumps`` text gives, or the same
@@ -100,93 +76,29 @@ def _envelope_text(envelope: Any) -> str:
     # ``_to_json_base``.
     option = orjson.OPT_PASSTHROUGH_DATETIME | orjson.OPT_PASSTHROUGH_DATACLASS | orjson.OPT_PASSTHROUGH_SUBCLASS
     try:
-        return orjson.dumps(envelope, default=_to_json_base, option=option).decode()
+        return orjson.dumps(document, default=_to_json_base, option=option).decode()
     except orjson.JSONEncodeError as exc:
         if isinstance(exc.__cause__, TypeError):
             raise exc.__cause__ from None
         if exc.__cause__ is None and str(exc) in _JSON_DUMPS_FALLBACK:
-            return json.dumps(envelope)
-        raise
-
-
-def _binding_preamble(prelude: str, variable_names: tuple[str, ...]) -> str:
-    """The generated jq that unpacks the ``{"v": {…}, "d": data}`` envelope.
-
-    ``.`` starts as the envelope: it is captured as ``$__in``, each name is bound from
-    ``$__in.v.<name>`` to ``$<name>`` (readable anywhere, inside ``map(...)`` too), the
-    ``prelude`` ``def``s follow the bindings so they may read the variables, and
-    ``$__in.d`` restores the data as ``.`` for the expression. The prelude is a run of
-    ``def …;`` and takes NO pipe after it.
-    """
-    bindings = "".join(f"$__in.{_ENVELOPE_VARS}.{name} as ${name} | " for name in variable_names)
-    return f". as $__in | {bindings}{prelude}$__in.{_ENVELOPE_DATA} | "
-
-
-def _compile_jq(expression: str, prelude: str, variable_names: tuple[str, ...]):
-    # Opt-in dependency (the "jq" extra) — imported at call time so the module
-    # (and the utils.data namespace re-exporting it) stays importable without it.
-    import jq
-
-    if "$ENV" in expression or "$ENV" in prelude:
-        raise ValueError("jq: $ENV is disabled (process environment is not readable from expressions)")
-    if _ENVELOPE_VARIABLE_RE.search(expression) or _ENVELOPE_VARIABLE_RE.search(prelude):
-        raise ValueError("jq: $__in is reserved (the binding envelope is not readable from expressions)")
-    reserved = sorted(_RESERVED_VARIABLE_NAMES.intersection(variable_names))
-    if reserved:
-        raise ValueError(f"jq: the variable name(s) {reserved} are reserved and cannot be bound as jq variables")
-    # ``prelude`` is a run of ``def …;`` declarations the expression may call. It
-    # ends with a newline so the expression's first line is line ``prelude_lines
-    # + 1`` — keeping the bare-compile error's line arithmetic exact below. The
-    # binding preamble adds no newline, so it does not shift the expression's line.
-    if prelude and not prelude.endswith("\n"):
-        prelude += "\n"
-    prelude_lines = prelude.count("\n")
-    binding = _binding_preamble(prelude, variable_names)
-    try:
-        return jq.compile(_GUARD_PREAMBLE + binding + expression)
-    except ValueError:
-        # The guarded message carries the guard text and shifted columns, so the
-        # bare program is compiled to word the failure in the author's own
-        # line/column, with the prelude's line count subtracted.
-        try:
-            jq.compile(binding + expression)
-        except ValueError as exc:
-            if not prelude:
-                raise
-            message = str(exc)
-
-            def _shift(match: re.Match[str]) -> str:
-                return f"{match.group(1)}{int(match.group(2)) - prelude_lines}"
-
-            raise ValueError(re.sub(r"(, line )(\d+)", _shift, message)) from exc
+            return json.dumps(document)
         raise
 
 
 @lru_cache(maxsize=512)
-def get_compiled_jq(expression: str, prelude: str = "", variables: tuple[str, ...] = ()):
-    """Compile ``expression`` (LRU-cached) over the ``{"v": …, "d": data}`` envelope.
+def _program_key(expression: str, prelude: str, variables: tuple[str, ...]) -> str:
+    """The digest a worker caches the program built from these three under.
 
-    ``prelude`` is an optional run of ``def`` declarations the expression may call.
-    ``variables`` is the tuple of variable NAMES the expression may read as ``$name``;
-    the compile is keyed on ``(expression, prelude, variables)`` and the VALUES are
-    delivered per evaluation through the envelope, so one compiled program serves every
-    set of values for the same names. A caller that assembles ``variables`` from an
-    unordered set passes it sorted so the cache keys on a stable name tuple.
+    sha256 over each part's length and bytes, so no two sources share a digest by
+    concatenation. Memoized here so a warm caller re-hashes no program text. Any ``str``
+    hashes, a lone surrogate included: whether the text is valid is the compile's to say.
     """
-    return _compile_jq(expression, prelude, variables)
-
-
-def compile_check(expression: str, *, variables: Iterable[str] = ()) -> None:
-    """Prove ``expression`` is a valid jq program, with ``variables`` predeclared as named ``$name`` bindings.
-
-    jq resolves variable references at compile time, so
-    an expression that will read a ``$name`` bound only at evaluation must have that name
-    declared here or it fails to compile; the bound VALUES are irrelevant to a compile
-    check. Raises ``ValueError`` on a syntax error or a reference to a
-    variable outside ``variables``. Compiles through the shared (cached) path — a caller
-    wanting to run it later reuses the same compiled program via :func:`run_jq_first`.
-    """
-    get_compiled_jq(expression, "", tuple(sorted(set(variables))))
+    digest = hashlib.sha256()
+    for part in (expression, prelude, *variables):
+        data = part.encode("utf-8", "surrogatepass")
+        digest.update(len(data).to_bytes(8, "big"))
+        digest.update(data)
+    return digest.hexdigest()
 
 
 class JqSettings(TaiBaseSettings):
@@ -194,7 +106,9 @@ class JqSettings(TaiBaseSettings):
 
     model_config = SettingsConfigDict(env_prefix="JQ_")
 
-    # Wall-clock budget for one jq evaluation, run on a worker thread. Must be positive.
+    # Budget in seconds for one jq job (a compile, an evaluation, or both) in its
+    # compute worker, counted from the moment a worker takes the job up; past it the worker
+    # is killed and the caller gets ``JqBudgetExceededError``. Must be positive.
     timeout_seconds: float = Field(default=10, gt=0)
 
 
@@ -202,6 +116,53 @@ class JqSettings(TaiBaseSettings):
 def jq_settings() -> JqSettings:
     """Return the process-wide :class:`JqSettings`, cached after first load."""
     return JqSettings()
+
+
+async def compile_check(expression: str, *, prelude: str = "", variables: Iterable[str] = ()) -> None:
+    """Prove ``expression`` is a valid jq program, with ``variables`` predeclared as named ``$name`` bindings.
+
+    jq resolves variable references at compile time, so an expression that will read a
+    ``$name`` bound only at evaluation must have that name declared here or it fails to
+    compile; the bound VALUES are irrelevant to a compile check. ``prelude`` is the run of
+    ``def`` declarations the expression may call, as in :func:`run_jq_first`. Raises
+    :class:`~tai42_kit.utils.data.jq_errors.JqCompileError` on a syntax error, a reference to a
+    variable outside ``variables``, or a reserved name. The compile runs in a compute worker under
+    ``JQ_TIMEOUT_SECONDS`` (:class:`~tai42_kit.utils.data.jq_errors.JqBudgetExceededError` past it)
+    and leaves the program in that worker's cache.
+    """
+    names = tuple(sorted(set(variables)))
+    key = _program_key(expression, prelude, names)
+    timeout = jq_settings().timeout_seconds
+    try:
+        await compute_pool().run(compile_job, key, JqSource(expression, prelude, names), timeout=timeout)
+    except TimeoutError as exc:
+        # The pool's timeout of a jq job is the author's program running past its budget.
+        raise JqBudgetExceededError(
+            f"jq compile exceeded {timeout}s (JQ_TIMEOUT_SECONDS); its worker was killed"
+        ) from exc
+
+
+async def _evaluate(expression: str, payload: Any, prelude: str, variables: dict[str, Any], count: int) -> list[Any]:
+    """The first ``count`` values ``expression`` emits over ``payload``, evaluated in a compute worker.
+
+    The worker is sent the program's digest and the envelope text; only when it holds no
+    program under that digest is the source sent, compiled there and cached.
+    """
+    names = tuple(sorted(variables))
+    key = _program_key(expression, prelude, names)
+    input_text = _envelope_text(envelope(payload, variables))
+    timeout = jq_settings().timeout_seconds
+    pool = compute_pool()
+    try:
+        values = await pool.run(evaluate_cached_job, key, input_text, count, timeout=timeout)
+        if values is None:
+            source = JqSource(expression, prelude, names)
+            values = await pool.run(compile_and_evaluate_job, key, source, input_text, count, timeout=timeout)
+    except TimeoutError as exc:
+        raise JqBudgetExceededError(
+            f"jq evaluation exceeded {timeout}s (JQ_TIMEOUT_SECONDS); its worker was killed"
+        ) from exc
+    return values
 
 
 # Sentinel distinguishing "no default supplied" from a caller passing ``None`` as
@@ -217,45 +178,30 @@ async def run_jq_first(
     prelude: str = "",
     variables: dict[str, Any] | None = None,
 ) -> Any:
-    """Compile (cached) and evaluate ``expression`` over ``payload`` on a worker thread.
+    """Compile (cached per worker) and evaluate ``expression`` over ``payload`` in a compute worker.
 
-    Bounded by ``JQ_TIMEOUT_SECONDS``; returns ``.first()``.
+    Bounded by ``JQ_TIMEOUT_SECONDS`` (the worker is killed past it and
+    :class:`~tai42_kit.utils.data.jq_errors.JqBudgetExceededError` raises); returns the first
+    emitted value.
 
     ``variables`` predeclares named jq variables: each key ``k`` is readable as ``$k`` in
     the expression, bound to its value delivered per call through the evaluation envelope.
-    An expression referencing an undeclared ``$name`` fails loudly at compile (jq: not
-    defined), so a caller that omits a variable the expression needs never silently
-    degrades. The compile is cached on the variable NAMES, so repeated calls with the same
-    names and different VALUES reuse the one compiled program.
+    An expression referencing an undeclared ``$name`` fails loudly at compile
+    (:class:`~tai42_kit.utils.data.jq_errors.JqCompileError`, jq: not defined), so a caller that omits a variable the
+    expression needs never silently degrades. The compile is cached on the variable NAMES,
+    so repeated calls with the same names and different VALUES reuse the one compiled
+    program.
 
-    On an empty pipeline (``.first()`` raises ``StopIteration``, which cannot cross
-    the ``to_thread`` future boundary so it is converted in the worker thread):
-    returns ``default`` when one was supplied, else raises ``ValueError`` — never
-    the opaque ``RuntimeError``, and never silently ``None`` (an empty pipeline is
-    distinct from a real ``None`` result).
-
-    Honest limitation: ``asyncio.to_thread`` cannot kill the C evaluation. On
-    timeout the worker thread is abandoned and keeps burning CPU until it
-    finishes on its own; the budget only protects the event loop and the
-    caller's latency, and the timeout is raised loudly.
+    On an empty pipeline: returns ``default`` when one was supplied, else raises
+    :class:`~tai42_kit.utils.data.jq_errors.JqNoOutputError` — never silently ``None`` (an
+    empty pipeline is distinct from a real ``None`` result).
     """
-    values = variables or {}
-    program = get_compiled_jq(expression, prelude, tuple(sorted(values)))
-    envelope = _envelope(payload, values)
-    timeout = jq_settings().timeout_seconds
-
-    def _run() -> Any:
-        try:
-            return program.input_text(_envelope_text(envelope)).first()
-        except StopIteration:
-            if default is _NO_DEFAULT:
-                raise ValueError(f"jq expression produced no output (empty pipeline): {expression!r}") from None
-            return default
-
-    try:
-        return await asyncio.wait_for(asyncio.to_thread(_run), timeout)
-    except TimeoutError as exc:
-        raise TimeoutError(f"jq evaluation exceeded {timeout}s (JQ_TIMEOUT_SECONDS); expression aborted") from exc
+    values = await _evaluate(expression, payload, prelude, variables or {}, 1)
+    if values:
+        return values[0]
+    if default is _NO_DEFAULT:
+        raise JqNoOutputError(f"jq expression produced no output (empty pipeline): {expression!r}")
+    return default
 
 
 async def run_jq_bounded(
@@ -266,7 +212,7 @@ async def run_jq_bounded(
     prelude: str = "",
     variables: dict[str, Any] | None = None,
 ) -> list[Any]:
-    """Compile (cached) and evaluate ``expression`` over ``payload`` on a worker thread.
+    """Compile (cached per worker) and evaluate ``expression`` over ``payload`` in a compute worker.
 
     Bounded by ``JQ_TIMEOUT_SECONDS``; returns AT MOST ``limit + 1`` emitted values, taken lazily
     from the program's iterator. ``variables`` behaves exactly as in :func:`run_jq_first`.
@@ -276,18 +222,9 @@ async def run_jq_bounded(
     lets an over-emit be distinguished from an exact ``limit`` without ever
     materializing the full stream. The bound is on the NUMBER of values taken (at most
     ``limit + 1``); a single value's size is bounded only by the timeout, not by
-    ``limit``. ``limit`` must be positive. Same timeout semantics as :func:`run_jq_first`.
+    ``limit``. ``limit`` must be positive (a caller's misuse raises a plain ``ValueError``). Same
+    budget semantics as :func:`run_jq_first`.
     """
     if limit < 1:
         raise ValueError(f"run_jq_bounded limit must be positive, got {limit}")
-    values = variables or {}
-    program = get_compiled_jq(expression, prelude, tuple(sorted(values)))
-    envelope = _envelope(payload, values)
-    timeout = jq_settings().timeout_seconds
-    try:
-        return await asyncio.wait_for(
-            asyncio.to_thread(lambda: list(itertools.islice(program.input_text(_envelope_text(envelope)), limit + 1))),
-            timeout,
-        )
-    except TimeoutError as exc:
-        raise TimeoutError(f"jq evaluation exceeded {timeout}s (JQ_TIMEOUT_SECONDS); expression aborted") from exc
+    return await _evaluate(expression, payload, prelude, variables or {}, limit + 1)

@@ -10,8 +10,10 @@ from tai42_contract.interactions import RunFailed
 from tai42_contract.presets import PresetOutputStage
 from tai42_contract.secrets import SecretValue
 
+from tai42_kit.compute.errors import ComputeWorkerLostError
 from tai42_kit.presets import output_stage
 from tai42_kit.presets.output_stage import PresetOutputError, run_output_stage, run_output_stages
+from tai42_kit.utils.data.jq_errors import JqBudgetExceededError
 
 _TOKEN_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -119,13 +121,25 @@ async def test_an_empty_map_output_is_a_failure() -> None:
         await run_output_stage(PresetOutputStage(preset="p", output_map="empty"), {"a": 1})
 
 
-async def test_a_jq_timeout_is_a_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_a_jq_budget_overrun_is_a_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     async def _slow(*_args: Any, **_kwargs: Any) -> Any:
-        raise TimeoutError("jq evaluation exceeded 10s")
+        raise JqBudgetExceededError("jq evaluation exceeded 10s (JQ_TIMEOUT_SECONDS); its worker was killed")
 
     monkeypatch.setattr(output_stage, "run_jq_first", _slow)
     with pytest.raises(PresetOutputError, match=r"^preset 'p' output map failed$"):
         await run_output_stage(PresetOutputStage(preset="p", output_map="."), {"a": 1})
+
+
+async def test_a_lost_compute_worker_propagates_out_of_the_stage(monkeypatch: pytest.MonkeyPatch) -> None:
+    lost = ComputeWorkerLostError("the worker running compute job j ended with exit code -9")
+
+    async def _lost(*_args: Any, **_kwargs: Any) -> Any:
+        raise lost
+
+    monkeypatch.setattr(output_stage, "run_jq_first", _lost)
+    with pytest.raises(ComputeWorkerLostError) as caught:
+        await run_output_stage(PresetOutputStage(preset="p", output_map="."), {"a": 1})
+    assert caught.value is lost
 
 
 async def test_the_stages_apply_in_order_and_stop_at_the_first_refusal() -> None:

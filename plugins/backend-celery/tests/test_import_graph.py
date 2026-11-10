@@ -61,6 +61,8 @@ ALLOWED_THIRD_PARTY = frozenset(
         "makefun",
         # kombu's Redis transport, which the plugin's Redis seam subclasses, imports it eagerly.
         "packaging",
+        # tai42_kit's compute pool, which runs the kit's jq evaluation in worker processes.
+        "pebble",
         "pydantic",
         "pydantic_core",
         "pydantic_settings",

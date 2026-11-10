@@ -14,7 +14,8 @@ from tai42_contract.interactions import SuspendedInteraction
 from tai42_contract.template import TemplatedText
 from tai42_kit.backend import CallbackSchema, callback_execution, prepare_backend_kwargs
 from tai42_kit.settings.cache_registry import reset_all_settings
-from tai42_kit.utils.data import jq_util
+from tai42_kit.utils.data import JqBudgetExceededError
+from tai42_kit.utils.data.jq_util import run_jq_first
 from tai42_kit.utils.detached_util import in_detached_run
 from tai42_kit.utils.schedule_subject import (
     SCHEDULE_EXECUTION_FINGERPRINT_ARG,
@@ -280,30 +281,23 @@ async def test_callback_without_expr_yields_empty_kwargs(stub_app) -> None:
 
 
 async def test_callback_jq_eval_is_timeout_bounded(stub_app, monkeypatch) -> None:
-    # The callback path evaluates jq through ``run_jq_first``, so a slow program
-    # is aborted by JQ_TIMEOUT_SECONDS and the named TimeoutError is raised.
-    class _SlowProgram:
-        def input_text(self, text):
-            return self
-
-        def first(self):
-            time.sleep(1)
-            return None
-
-    monkeypatch.setattr(jq_util, "get_compiled_jq", lambda expr, prelude="", variables=(): _SlowProgram())
-    monkeypatch.setenv("JQ_TIMEOUT_SECONDS", "0.01")
+    # The callback path evaluates jq through ``run_jq_first``, so a runaway condition is killed in
+    # its worker at JQ_TIMEOUT_SECONDS and JqBudgetExceededError, naming that setting, is raised.
+    monkeypatch.setenv("JQ_TIMEOUT_SECONDS", "0.2")
     reset_all_settings()
     try:
+        # A first evaluation starts the compute pool, so the timed call measures the budget alone.
+        assert await run_jq_first(".", 1) == 1
         cb = CallbackSchema(
-            condition=TemplatedText(content=".ok"),
+            condition=TemplatedText(content="last(range(1e18))"),
             expr=TemplatedText(content="{x: .value}"),
             tool="next",
             carried_kwargs=_CARRIED,
         )
         start = time.monotonic()
-        with pytest.raises(TimeoutError, match="JQ_TIMEOUT_SECONDS"):
+        with pytest.raises(JqBudgetExceededError, match="JQ_TIMEOUT_SECONDS"):
             await callback_execution({"ok": True, "value": 5}, cb, settings=arq_settings())
-        assert time.monotonic() - start < 0.5
+        assert time.monotonic() - start < 1.0
     finally:
         reset_all_settings()
 

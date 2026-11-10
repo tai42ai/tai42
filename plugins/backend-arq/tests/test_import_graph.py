@@ -54,6 +54,8 @@ ALLOWED_THIRD_PARTY = frozenset(
         "jwt",
         "makefun",
         "orjson",
+        # tai42_kit's compute pool, which runs the kit's jq evaluation in worker processes.
+        "pebble",
         "pydantic",
         "pydantic_core",
         "pydantic_settings",
