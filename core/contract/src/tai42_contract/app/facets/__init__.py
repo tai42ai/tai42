@@ -10,6 +10,7 @@ Vendor return types follow the ``TYPE_CHECKING`` rule.
 from __future__ import annotations
 
 from tai42_contract.app.facets.authoring import AppPresets, AppToolMeta, AppVersioning
+from tai42_contract.app.facets.compute import AppCompute
 from tai42_contract.app.facets.execution import (
     AppAgents,
     AppBackends,
@@ -52,6 +53,7 @@ __all__ = [
     "AppBackup",
     "AppChannels",
     "AppClients",
+    "AppCompute",
     "AppConfig",
     "AppConnectors",
     "AppConversations",

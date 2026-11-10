@@ -30,7 +30,7 @@ def protocol_members(proto: type) -> set[str]:
     return {m for m in members if m not in _PROTOCOL_SCAFFOLDING and not m.startswith("__")}
 
 
-# The frozen facade surface: the 178 (sub-protocol, member) pairs over 174
+# The frozen facade surface: the 179 (sub-protocol, member) pairs over 175
 # distinct flat names. This is the
 # contract's own source of truth — no external lookup needed. Two leaf names
 # are shared: ``store`` (versioning + presets + tool_meta) and ``register``/``get``
@@ -242,6 +242,8 @@ EXPECTED_FACADE = {
     "register_template_seed",
     "register_attach_validator",
     "register_attach_reconciler",
+    # compute (1)
+    "run",
 }
 
 
@@ -313,6 +315,7 @@ def test_facade_partition_against_frozen_surface():
         AppBackup,
         AppChannels,
         AppClients,
+        AppCompute,
         AppConfig,
         AppConnectors,
         AppConversations,
@@ -359,6 +362,7 @@ def test_facade_partition_against_frozen_surface():
         AppPresets,
         AppToolMeta,
         AppStates,
+        AppCompute,
     ]
     union: set[str] = set()
     total = 0
@@ -369,14 +373,14 @@ def test_facade_partition_against_frozen_surface():
     assert union == EXPECTED_FACADE, (
         f"only-facade={sorted(union - EXPECTED_FACADE)} only-frozen={sorted(EXPECTED_FACADE - union)}"
     )
-    # 178 (sub-protocol, member) pairs over 174 distinct names — ``store`` is exposed
+    # 179 (sub-protocol, member) pairs over 175 distinct names — ``store`` is exposed
     # by AppVersioning, AppPresets and AppToolMeta (two duplicate pairs), and
     # ``register``/``get`` by both AppWebhookVerifiers and AppChannels (one each).
-    assert len(union) == 174, f"union={len(union)}"
-    assert total == 178 == len(union) + 4, f"partition broken: sum={total} union={len(union)}"
+    assert len(union) == 175, f"union={len(union)}"
+    assert total == 179 == len(union) + 4, f"partition broken: sum={total} union={len(union)}"
 
 
-def test_taiapp_exposes_twenty_five_namespaces():
+def test_taiapp_exposes_twenty_six_namespaces():
     from tai42_contract.app import TaiApp
 
     assert protocol_members(TaiApp) == {
@@ -405,6 +409,7 @@ def test_taiapp_exposes_twenty_five_namespaces():
         "presets",
         "tool_meta",
         "states",
+        "compute",
     }
 
 

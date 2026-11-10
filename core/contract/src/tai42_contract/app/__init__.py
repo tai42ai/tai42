@@ -24,6 +24,7 @@ from .facets import (
     AppBackup,
     AppChannels,
     AppClients,
+    AppCompute,
     AppConfig,
     AppConnectors,
     AppConversations,
@@ -183,6 +184,11 @@ class TaiApp(Protocol):
         """The subject-keyed state store."""
         ...
 
+    @property
+    def compute(self) -> AppCompute:
+        """CPU-bound work in worker processes."""
+        ...
+
 
 class _TaiAppRuntime(TaiApp, Protocol):
     """The runtime forwarding handle: the assembled ``TaiApp`` facade plus the two binders.
@@ -209,6 +215,7 @@ __all__ = [
     "AppBackup",
     "AppChannels",
     "AppClients",
+    "AppCompute",
     "AppConfig",
     "AppConnectors",
     "AppConversations",
