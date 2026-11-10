@@ -84,6 +84,13 @@ def build_extensions_stack(res: StackResources, variants: Variants) -> StackConf
     # ask_external opens an external-format ask, which mints a callback ticket from a
     # public base URL (the host is never dialed).
     env["INTERACTIONS_PUBLIC_BASE_URL"] = "https://e2e.local"
+    # The budget of one jq job in its compute worker (the chain's transform included): a
+    # program past it has its worker killed and the call fails. Every jq program the
+    # extension specs run ends in milliseconds; the runaway-program spec waits this long.
+    env["JQ_TIMEOUT_SECONDS"] = "2"
+    # One compute worker in the serve process: the call that follows a runaway program runs
+    # on the worker pebble started in place of the killed one, so it proves the replacement.
+    env["COMPUTE_WORKERS"] = "1"
     return StackConfig(
         name="extensions",
         topology=Topology.MULTIWORKER,
