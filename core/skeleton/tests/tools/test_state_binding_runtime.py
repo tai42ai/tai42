@@ -36,10 +36,11 @@ from tai42_contract.states.errors import (
     ValueValidationError,
 )
 from tai42_contract.template import TemplatedText
+from tai42_kit.states.template_jq import select_template_jq
+from tai42_kit.utils.data import JqCompileError
 
 from tai42_skeleton.app import instance
 from tai42_skeleton.states.service.subjects import _SubjectMixin
-from tai42_skeleton.states.service.template_jq import select_template_jq
 from tai42_skeleton.storage import StorageRegistry
 from tai42_skeleton.template import ResourceManager
 from tai42_skeleton.template.errors import TemplateNotFoundError
@@ -937,7 +938,7 @@ async def test_save_resolves_one_batch_per_attached_state_and_none_for_a_state_w
         # A bad custom jq comes first: its compile error is the save's, not the later slot's refusal.
         (
             [StateInjection(jq=TemplatedText(content="(("), into="y"), StateInjection(template_jq="ghost", into="x")],
-            ValueError,
+            JqCompileError,
         ),
     ],
 )

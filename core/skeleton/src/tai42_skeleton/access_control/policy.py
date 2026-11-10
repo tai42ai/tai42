@@ -193,8 +193,8 @@ class PolicyEnforcer:
     async def evaluate(context: dict[str, Any], rendered: RenderedCondition) -> ConditionVerdict:
         """ALLOW when not configured or jq emits exactly True; DENY otherwise; RENDERED_EMPTY when configured and empty.
 
-        jq/timeout errors propagate unwrapped. The evaluation runs off-loop under a wall-clock
-        budget (``JQ_TIMEOUT_SECONDS``) so a hostile/buggy expression cannot block the loop.
+        jq/timeout errors propagate unwrapped. The evaluation runs in a compute worker under the
+        ``JQ_TIMEOUT_SECONDS`` budget, so a hostile/buggy expression cannot block the loop.
         """
         if not rendered.text:
             return ConditionVerdict.RENDERED_EMPTY if rendered.configured else ConditionVerdict.ALLOW

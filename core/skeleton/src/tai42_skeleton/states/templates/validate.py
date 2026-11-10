@@ -25,6 +25,7 @@ from tai42_contract.states.models import (
     StateTemplateReconcile,
 )
 from tai42_contract.template import TemplatedText
+from tai42_kit.utils.data.jq_errors import JqProgramError
 from tai42_kit.utils.data.jq_util import compile_check
 
 from tai42_skeleton.states.schema import _validate_schema, check_document_rules
@@ -61,15 +62,15 @@ def _require_type(value: Any, kind: type, *, where: str) -> Any:
     return value
 
 
-def _compile_check_jq(expr: str, *, where: str) -> None:
+async def _compile_check_jq(expr: str, *, where: str) -> None:
     """Compile-check the declarations ``check`` predicate.
 
     Declares the named variables the attach seam binds at evaluation (``$parameters`` — the
     effective attach parameters) so an author may reference them; a failure is a loud template error.
     """
     try:
-        compile_check(expr, variables=DECLARATIONS_CHECK_VARIABLES)
-    except Exception as exc:
+        await compile_check(expr, variables=DECLARATIONS_CHECK_VARIABLES)
+    except JqProgramError as exc:
         raise TemplateValidationError(f"{where} is not a valid jq expression: {exc}") from exc
 
 
@@ -86,7 +87,7 @@ def _check_value_schema(schema: dict[str, Any], *, where: str) -> None:
         raise TemplateValidationError(str(exc)) from exc
 
 
-def _check_declarations(declarations: StateTemplateDeclarations) -> None:
+async def _check_declarations(declarations: StateTemplateDeclarations) -> None:
     """The declarations schema is a value schema (:func:`_check_value_schema`); an inline ``check`` compiles.
 
     An inline ``check`` is a non-empty jq predicate that compiles. A by-id check is rendered and
@@ -98,7 +99,7 @@ def _check_declarations(declarations: StateTemplateDeclarations) -> None:
         return
     if not check.content.strip():
         raise TemplateValidationError("declarations check must be a non-empty jq predicate or omitted")
-    _compile_check_jq(check.content, where="declarations check")
+    await _compile_check_jq(check.content, where="declarations check")
 
 
 def _check_identifier_list(values: list[str], *, where: str) -> None:
@@ -128,7 +129,7 @@ def _check_program_body(text: TemplatedText, *, where: str) -> None:
         raise TemplateValidationError(f"{where} must be a non-empty jq program")
 
 
-def _check_template_jq(programs: dict[str, StateTemplateJq]) -> None:
+async def _check_template_jq(programs: dict[str, StateTemplateJq]) -> None:
     """Each program name and its ``params`` are jq identifiers, each body non-empty, each path well formed.
 
     An all-inline section then compiles over the sibling INPUT-purpose prelude (so any program may
@@ -143,10 +144,10 @@ def _check_template_jq(programs: dict[str, StateTemplateJq]) -> None:
         _check_identifier_list(program.params, where=f"{where} params")
         _check_path_list(program.reads, where=f"{where} reads")
         _check_path_list(program.writes, where=f"{where} writes")
-    _compile_template_jq_inline(programs)
+    await _compile_template_jq_inline(programs)
 
 
-def _check_reconcile(reconcile: StateTemplateReconcile) -> None:
+async def _check_reconcile(reconcile: StateTemplateReconcile) -> None:
     """Each inline reconcile program is non-empty and compiles with its label's variables bound.
 
     A by-id body defers its compile to the save door
@@ -158,8 +159,8 @@ def _check_reconcile(reconcile: StateTemplateReconcile) -> None:
         _check_program_body(text, where=f"reconcile {label}")
         if text.content is not None:
             try:
-                compile_check(text.content, variables=RECONCILE_JQ_VARIABLES[label])
-            except Exception as exc:
+                await compile_check(text.content, variables=RECONCILE_JQ_VARIABLES[label])
+            except JqProgramError as exc:
                 raise TemplateValidationError(f"reconcile {label} is not a valid jq expression: {exc}") from exc
 
 
@@ -209,7 +210,7 @@ def _check_program_paths(programs: dict[str, StateTemplateJq], fragment: dict[st
                 raise TemplateValidationError(f"template_jq {program_name!r}: {exc}") from exc
 
 
-def validate_template(doc: Any) -> StateTemplate:
+async def validate_template(doc: Any) -> StateTemplate:
     """Parse and validate a raw platform state-template document into a :class:`StateTemplate`.
 
     The document must carry ``kind == "state-template"`` and a dict fragment ``schema`` (a by-id
@@ -239,13 +240,13 @@ def validate_template(doc: Any) -> StateTemplate:
         _validate_regime_path(defaults_fragment, list(rule.path))
 
     if typed.declarations is not None:
-        _check_declarations(typed.declarations)
+        await _check_declarations(typed.declarations)
 
     template_jq = dict(typed.template_jq or {})
-    _check_template_jq(template_jq)
+    await _check_template_jq(template_jq)
     _check_program_paths(template_jq, defaults_fragment)
     if typed.reconcile is not None:
-        _check_reconcile(typed.reconcile)
+        await _check_reconcile(typed.reconcile)
 
     return StateTemplate(
         name=name,

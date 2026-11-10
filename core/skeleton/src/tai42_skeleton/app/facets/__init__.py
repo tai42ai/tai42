@@ -12,6 +12,7 @@ facade. The facets carry no state of their own.
 from __future__ import annotations
 
 from .base import _Facet
+from .compute import ComputeFacet
 from .http import HttpFacet
 from .interactions import InteractionsFacet
 from .lifecycle import AdminFacet, ConfigFacet, LifecycleFacet, SubAppFacet
@@ -36,6 +37,7 @@ __all__ = [
     "AgentsFacet",
     "BackendsFacet",
     "BackupFacet",
+    "ComputeFacet",
     "ConfigFacet",
     "ConnectorsFacet",
     "ExtensionsFacet",

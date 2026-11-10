@@ -8,6 +8,8 @@ from collections.abc import Callable, Sequence
 from contextlib import asynccontextmanager
 from typing import Any
 
+from tai42_kit.compute import stop_compute_pool
+
 from tai42_skeleton.app import lifecycle as _lifecycle
 from tai42_skeleton.app.boot_rules import (
     require_apply_window_covers_drain,
@@ -305,9 +307,10 @@ class LifespanMixin(LifecycleState):
 
         Runs on ``app_context`` — the single seam both the served (HTTP / stdio)
         and backend-worker entrypoints cross — so neither path leaks the kit's
-        loop-bound resources (pooled clients, checkpoint savers, stores), nor loses
-        buffered monitoring spans. Each step runs whatever an earlier one raised
-        (:class:`_StopSteps`), and what the steps raised is raised once the last ran.
+        loop-bound resources (pooled clients, checkpoint savers, stores) or the
+        compute pool's worker processes, nor loses buffered monitoring spans. Each
+        step runs whatever an earlier one raised (:class:`_StopSteps`), and what the
+        steps raised is raised once the last ran.
         """
         await _StopSteps(
             "shutdown teardown",
@@ -315,6 +318,9 @@ class LifespanMixin(LifecycleState):
                 # Releases only: ``app_context`` does not own the loop, so it does not mark it
                 # closing; a later ``app_context`` on the same loop leases anew.
                 ("loop-bound kit resources", lambda: _lifecycle.release_loop_bound_resources()),
+                # End the process's compute pool and its worker processes; a job still running
+                # raises in its caller. The next compute job in this process starts a fresh pool.
+                ("compute pool stop", lambda: asyncio.to_thread(stop_compute_pool)),
                 # Flush buffered monitoring spans last, so spans emitted during the
                 # teardown above are captured before the process exits rather than lost
                 # to a SIGTERM / container restart ahead of the SDK's periodic flush.

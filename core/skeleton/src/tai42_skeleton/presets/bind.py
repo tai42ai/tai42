@@ -62,7 +62,7 @@ from fastmcp.tools.tool_transform import ArgTransform, forward, forward_raw
 from tai42_contract.presets import PresetOutputStage
 from tai42_contract.secrets import SecretValue
 from tai42_contract.template import TemplatedText
-from tai42_kit.utils.data import run_jq_first
+from tai42_kit.utils.data import JqProgramError, run_jq_first
 from tai42_kit.utils.data.json_schema_util import (
     JsonSchemaValidationError,
     validate_against_json_schema,
@@ -337,7 +337,7 @@ def _bind_mapped_input(
         _validate_caller_object(caller_object, input_schema)
         try:
             mapped = await run_jq_first(input_map, caller_object, variables={"fixed": stored_fixed})
-        except (ValueError, TypeError, TimeoutError) as exc:
+        except (JqProgramError, TypeError) as exc:
             # The jq text can quote ``$fixed`` or the caller's values: it stays in the server log.
             logger.warning("preset %r input map failed: %s", name, exc)
             raise ToolError(f"preset {name!r} input map failed") from None

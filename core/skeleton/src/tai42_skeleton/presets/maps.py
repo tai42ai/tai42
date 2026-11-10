@@ -7,6 +7,7 @@ and may read the stored fixed kwargs as ``$fixed``; an output map reads only the
 from __future__ import annotations
 
 from tai42_contract.template import TemplatedText
+from tai42_kit.utils.data.jq_errors import JqProgramError
 from tai42_kit.utils.data.jq_util import compile_check
 from tai42_kit.utils.render import resolve_text_body
 
@@ -37,12 +38,12 @@ async def resolve_preset_maps(
         if not has_input_schema:
             raise PresetMapError("an input map needs an input schema that describes what the caller sends")
         try:
-            compile_check(input_map, variables=INPUT_MAP_VARIABLES)
-        except ValueError as exc:
+            await compile_check(input_map, variables=INPUT_MAP_VARIABLES)
+        except JqProgramError as exc:
             raise PresetMapError(f"input_map does not compile: {exc}") from exc
     if output_map is not None:
         try:
-            compile_check(output_map, variables=OUTPUT_MAP_VARIABLES)
-        except ValueError as exc:
+            await compile_check(output_map, variables=OUTPUT_MAP_VARIABLES)
+        except JqProgramError as exc:
             raise PresetMapError(f"output_map does not compile: {exc}") from exc
     return input_map, output_map

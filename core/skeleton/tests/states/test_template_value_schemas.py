@@ -177,10 +177,12 @@ async def test_attach_checks_values_against_value_schemas_with_local_references(
     await svc.attach("alerts", "p", AttachBody(path=["sub"], parameters={"cap": {}, "size": 2}, declarations={"n": 3}))
 
 
-def _unchecked_template(*, parameter: dict[str, Any] | None = None, declarations: dict[str, Any] | None = None) -> Any:
+async def _unchecked_template(
+    *, parameter: dict[str, Any] | None = None, declarations: dict[str, Any] | None = None
+) -> Any:
     # A template as the attach validators receive it, holding value schemas no write door saw:
     # the validators themselves must fetch nothing.
-    template = validate_template(_parameter_doc({}).model_dump(by_alias=True))
+    template = await validate_template(_parameter_doc({}).model_dump(by_alias=True))
     return dataclasses.replace(
         template,
         parameters={"cap": StateTemplateParameter.model_validate({"schema": parameter or {}})},
@@ -190,9 +192,9 @@ def _unchecked_template(*, parameter: dict[str, Any] | None = None, declarations
     )
 
 
-def test_the_attach_parameter_validator_fetches_no_schema(hits: tuple[str, list[str]]) -> None:
+async def test_the_attach_parameter_validator_fetches_no_schema(hits: tuple[str, list[str]]) -> None:
     url, asked = hits
-    template = _unchecked_template(parameter={"$ref": f"{url}/param.json"})
+    template = await _unchecked_template(parameter={"$ref": f"{url}/param.json"})
     with pytest.raises(referencing.exceptions.Unresolvable):
         _validate_effective_parameters(template, {"cap": 1})
     assert asked == []
@@ -200,7 +202,7 @@ def test_the_attach_parameter_validator_fetches_no_schema(hits: tuple[str, list[
 
 async def test_the_attach_declarations_validator_fetches_no_schema(hits: tuple[str, list[str]]) -> None:
     url, asked = hits
-    template = _unchecked_template(declarations={"$ref": f"{url}/decl.json"})
+    template = await _unchecked_template(declarations={"$ref": f"{url}/decl.json"})
     with pytest.raises(referencing.exceptions.Unresolvable):
         await _validate_attach_declarations(template, {"n": 1}, {})
     assert asked == []

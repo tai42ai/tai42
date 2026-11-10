@@ -81,12 +81,12 @@ async def test_null_start_expr_starts_nothing(make_app) -> None:
     assert call.cancel == ["i-1"]
 
 
-def test_validate_jq_fields_refuses_a_bad_door_jq() -> None:
+async def test_validate_jq_fields_refuses_a_bad_door_jq() -> None:
     with pytest.raises(ValueError, match="start_expr is not valid jq"):
-        InMemoryHooksManager.validate_jq_fields(_hook(start_expr=TemplatedText(content="this is ( not jq")))
+        await InMemoryHooksManager.validate_jq_fields(_hook(start_expr=TemplatedText(content="this is ( not jq")))
 
 
-def test_validate_jq_fields_declares_the_parked_variable() -> None:
+async def test_validate_jq_fields_declares_the_parked_variable() -> None:
     # A door jq reading $parked compiles (the variable is declared), where a plain jq compile would
     # fail on the undeclared $name.
-    InMemoryHooksManager.validate_jq_fields(_hook(cancel_expr=TemplatedText(content="$parked[0].id")))
+    await InMemoryHooksManager.validate_jq_fields(_hook(cancel_expr=TemplatedText(content="$parked[0].id")))

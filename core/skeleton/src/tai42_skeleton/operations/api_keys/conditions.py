@@ -7,7 +7,8 @@ from typing import Any
 from jinja2 import TemplateError
 from pydantic import ValidationError
 from tai42_contract.access_control.models import AccessCondition, JqAuthContext
-from tai42_kit.utils.data.jq_util import get_compiled_jq
+from tai42_kit.utils.data import JqProgramError
+from tai42_kit.utils.data.jq_util import compile_check
 
 from tai42_skeleton.access_control.policy import ConditionVerdict, PolicyEnforcer, render_condition
 from tai42_skeleton.operations import BadRequestError, operation
@@ -33,7 +34,7 @@ async def validate_condition(
     A syntactically broken condition raises at enforcement and DENIES the key (a
     lock-out), so authoring flows validate here before saving. The condition is
     rendered through the SAME ``render_condition`` enforcement uses, compiled with
-    ``get_compiled_jq``, and — when a ``sample_context`` is supplied — decided by the SAME
+    ``compile_check``, and — when a ``sample_context`` is supplied — decided by the SAME
     ``PolicyEnforcer.evaluate`` against a ``JqAuthContext``-shaped sample, so the
     validator's verdict is enforcement's by construction. This ONLY compiles/evaluates; it
     never writes any store. Returns ``{"ok": true, "result": <bool|null>}`` (``result`` is
@@ -48,7 +49,7 @@ async def validate_condition(
         if rendered.text:
             # Compile-validate the expression (the compile half of this endpoint):
             # a broken expression raises here and lands in the verbatim-400 handler.
-            get_compiled_jq(rendered.text)
+            await compile_check(rendered.text)
             if sample_context is not None:
                 # The sample result is enforcement's own verdict on the sample (ALLOW only
                 # when the jq emits exactly ``True``) — a clean ``bool | null``.
@@ -63,13 +64,14 @@ async def validate_condition(
                 "condition renders empty, which denies at enforcement and would lock the key out; "
                 "author a condition that renders to a non-empty jq expression"
             )
-    except (ValueError, ValidationError, TemplateError, TemplateNotFoundError) as exc:
-        # AUTHOR errors only — the jq compile/eval ``ValueError`` (the jq lib's error
-        # type), the pydantic ``ValidationError`` from a malformed ``sample_context``,
-        # a jinja ``TemplateError`` from a broken inline condition, and
-        # ``TemplateNotFoundError`` for a missing stored condition ``id``. Their message is
-        # the actionable feedback the author needs, surfaced verbatim as a 400. Any
-        # other exception (an unconfigured resource manager ``RuntimeError``, a
-        # redis/storage outage) is a server fault and propagates as a loud 500.
+    except (JqProgramError, ValidationError, TemplateError, TemplateNotFoundError) as exc:
+        # AUTHOR errors only — the jq seam's ``JqProgramError`` (the condition does not
+        # compile, raised while it ran, ran past its budget, or emitted nothing), the
+        # pydantic ``ValidationError`` from a malformed ``sample_context``, a jinja
+        # ``TemplateError`` from a broken inline condition, and ``TemplateNotFoundError``
+        # for a missing stored condition ``id``. Their message is the actionable feedback
+        # the author needs, surfaced verbatim as a 400. Any other exception (an
+        # unconfigured resource manager ``RuntimeError``, a redis/storage outage, a
+        # compute-pool fault) is a server fault and propagates as a loud 500.
         raise BadRequestError(str(exc)) from exc
     return {"ok": True, "result": result}

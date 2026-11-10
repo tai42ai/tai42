@@ -26,6 +26,7 @@ from tai42_skeleton.app.facets import (
     AgentsFacet,
     BackendsFacet,
     BackupFacet,
+    ComputeFacet,
     ConfigFacet,
     ConnectorsFacet,
     ExtensionsFacet,
@@ -139,6 +140,7 @@ class TaiMCP(TaiMCPLifecycleMixin):
         self._presets_facet = PresetsFacet(self)
         self._tool_meta_facet = ToolMetaFacet(self)
         self._states_facet = StatesFacet(self)
+        self._compute_facet = ComputeFacet(self)
 
         # The eager boot-scaffold core, the un-booted app's read target: an un-booted app
         # (bare construction, an embedded read, the boot-time ``http_app`` build) needs a
@@ -282,6 +284,11 @@ class TaiMCP(TaiMCPLifecycleMixin):
     def states(self) -> StatesFacet:
         """The subject-keyed state store facet — the ``tai42_contract.app.AppStates`` namespace."""
         return self._states_facet
+
+    @property
+    def compute(self) -> ComputeFacet:
+        """The compute facet — the ``tai42_contract.app.AppCompute`` namespace."""
+        return self._compute_facet
 
     @property
     def tool_meta(self) -> ToolMetaFacet:

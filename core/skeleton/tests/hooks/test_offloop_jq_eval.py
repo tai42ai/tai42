@@ -1,7 +1,7 @@
-"""The hooks firing path evaluates its authored jq off the event loop. The condition routes
-through the shared ``run_jq_first`` helper; the door-contract ``start_expr`` routes through the
-door-contract evaluator (also off-loop). A fire-time jq error still propagates loudly — no site
-swallows it."""
+"""The hooks firing path evaluates its authored jq off the event loop, in a compute worker. The
+condition routes through the shared ``run_jq_first`` helper; the door-contract ``start_expr``
+routes through the door-contract evaluator, which evaluates through the same seam. A fire-time
+jq error still propagates loudly — no site swallows it."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from tai42_skeleton.hooks.managers.in_memory_hooks_manager import InMemoryHooksM
 from tai42_skeleton.hooks.settings import HooksSettings
 
 
-async def test_condition_and_expr_evaluate_through_off_loop_helper(hook_runs, make_app, monkeypatch):
+async def test_condition_and_expr_evaluate_through_the_compute_worker_helper(hook_runs, make_app, monkeypatch):
     calls: list[tuple[str, dict]] = []
     real = bhm.run_jq_first
 
@@ -43,7 +43,7 @@ async def test_condition_and_expr_evaluate_through_off_loop_helper(hook_runs, ma
     await manager.on_event("t", {"id": 3, "status": "ready"})
     await hook_runs.drain()
 
-    # The condition runs through the off-loop ``run_jq_first`` helper; the ``start_expr`` runs
+    # The condition runs through the compute-worker ``run_jq_first`` helper; the ``start_expr`` runs
     # through the door-contract evaluator, and its transformed result reaching the tool proves it.
     assert app.tools.runs == [("noop", {"id": 3})]
     assert ('.status == "ready"', {"id": 3, "status": "ready"}) in calls

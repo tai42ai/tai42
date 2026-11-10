@@ -15,16 +15,16 @@ from tai42_contract.states.consumer_seams import AttachReconcileContext
 from tai42_contract.states.errors import TemplateValidationError
 from tai42_contract.states.models import StateSubject, StateTemplateReconcile
 from tai42_contract.template import TemplatedText
+from tai42_kit.states.template_jq import rebase_op, record_subtree
+from tai42_kit.utils.data.jq_errors import JqProgramError
 from tai42_kit.utils.data.jq_util import run_jq_first
 
 from tai42_skeleton.states.service.base import _StatesServiceBase
 from tai42_skeleton.states.service.reconcile_support import (
     _RECONCILE_ORIGIN,
     _RECONCILE_PAGE,
-    _rebase_op,
     _reconcile_orphans_extra,
     _reconcile_refusal,
-    _record_subtree,
 )
 from tai42_skeleton.states.templates import validate_template
 from tai42_skeleton.template.errors import TEMPLATE_RENDER_ERRORS, template_render_refusal
@@ -44,7 +44,7 @@ class _ReconcileMixin(_StatesServiceBase):
         resolved_body, _by_id = await self._resolve_template_body(
             context.template.name, context.template.model_dump(by_alias=True)
         )
-        template = validate_template(resolved_body)
+        template = await validate_template(resolved_body)
         if template.reconcile is None:
             return
         path = await self._reconcile_attach_path(context.state, context.template.name)
@@ -90,7 +90,7 @@ class _ReconcileMixin(_StatesServiceBase):
                     (subject, item)
                     for item in await self._reconcile_orphans(
                         reconcile,
-                        _record_subtree(view.data, path),
+                        record_subtree(view.data, path),
                         previous=previous,
                         new=new,
                         template_name=context.template.name,
@@ -124,7 +124,7 @@ class _ReconcileMixin(_StatesServiceBase):
         await self._reconcile_guard_resolution(context, reconcile, context.new_declarations, resolution)
         for subject, item in orphans:
             current = await context.records.read(subject)
-            subtree = _record_subtree(current.data, path) if current is not None else {}
+            subtree = record_subtree(None if current is None else current.data, path)
             ops = await self._run_reconcile_jq(
                 "close",
                 reconcile.close,
@@ -134,7 +134,7 @@ class _ReconcileMixin(_StatesServiceBase):
             )
             if not isinstance(ops, list):
                 raise TemplateValidationError(f"reconcile close must return a list of ops, got {type(ops).__name__}")
-            await context.records.apply(subject, [_rebase_op(op, path) for op in ops], origin=_RECONCILE_ORIGIN)
+            await context.records.apply(subject, [rebase_op(op, path) for op in ops], origin=_RECONCILE_ORIGIN)
 
     async def _reconcile_orphans(
         self,
@@ -189,8 +189,9 @@ class _ReconcileMixin(_StatesServiceBase):
         """One reconcile jq program over its ``.`` (``data``) with the per-label ``variables`` bound as ``$name``.
 
         Its body is a templated text rendered to jq text IMMEDIATELY before it runs — a body whose stored
-        resource cannot be fetched, or that cannot be rendered, is a LOUD refusal naming the program. Loud,
-        too, on an evaluation failure, carrying the program's own ``error(...)`` message out.
+        resource cannot be fetched, or that cannot be rendered, is a LOUD refusal naming the program. The
+        program's failure (:class:`JqProgramError`) is the same loud refusal carrying the seam's text; a
+        compute-pool fault is not the program's and propagates as raised.
         """
         try:
             expr = await tai42_app.storage.resource_manager.render_templated_text(text)
@@ -200,5 +201,5 @@ class _ReconcileMixin(_StatesServiceBase):
             ) from exc
         try:
             return await run_jq_first(expr, data, variables=variables)
-        except Exception as exc:
+        except JqProgramError as exc:
             raise TemplateValidationError(f"reconcile {label} failed to evaluate: {exc}") from exc

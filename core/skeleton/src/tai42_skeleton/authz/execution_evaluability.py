@@ -57,7 +57,7 @@ async def _assert_condition_evaluable(policy: AccessPolicy, *, principal: str) -
     if not condition:
         return
     try:
-        assert_token_free_evaluable(condition)
+        await assert_token_free_evaluable(condition)
     except TokenFreeConditionError as exc:
         raise ExecutionConditionError(
             f"the policy condition of {principal!r} is unusable at a fire: {exc}", principal=principal

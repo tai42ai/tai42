@@ -285,8 +285,8 @@ async def test_condition_rendered_via_template_id(hook_runs, make_app):
     assert app.tools.runs == []
 
 
-def test_validate_jq_accepts_valid_expr_and_condition():
-    BaseHooksManager.validate_jq_fields(
+async def test_validate_jq_accepts_valid_expr_and_condition():
+    await BaseHooksManager.validate_jq_fields(
         HookParams(
             name="ok",
             topic="t",
@@ -298,12 +298,12 @@ def test_validate_jq_accepts_valid_expr_and_condition():
         )
     )
     # Nothing to validate when both inline fields are absent.
-    BaseHooksManager.validate_jq_fields(
+    await BaseHooksManager.validate_jq_fields(
         HookParams(name="ok2", topic="t", tool="noop", execution_key="k-fire", execution_key_fingerprint="fp-fire")
     )
 
 
-def test_validate_jq_rejects_bad_expr():
+async def test_validate_jq_rejects_bad_expr():
     bad = HookParams(
         name="bad",
         topic="t",
@@ -313,7 +313,7 @@ def test_validate_jq_rejects_bad_expr():
         start_expr=TemplatedText(content="this is ( not jq"),
     )
     with pytest.raises(ValueError, match="expr is not valid jq"):
-        BaseHooksManager.validate_jq_fields(bad)
+        await BaseHooksManager.validate_jq_fields(bad)
 
 
 # -- tool_kwargs_override ----------------------------------------------

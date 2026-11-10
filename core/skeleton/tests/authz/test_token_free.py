@@ -20,7 +20,7 @@ from typing import Any
 from unittest import mock
 
 import pytest
-from tai42_kit.utils.data.jq_util import _envelope, get_compiled_jq
+from tai42_kit.utils.data.jq_worker import JqSource, compile_jq, envelope
 
 from tai42_skeleton.access_control.roles import editor_jq, viewer_jq
 from tai42_skeleton.authz.token_free import (
@@ -216,32 +216,32 @@ _REFUSED_BEFORE_ANY_TOKEN_IS_READ = [
 
 
 @pytest.mark.parametrize("condition", _EVALUABLE)
-def test_a_token_free_condition_is_accepted(condition: str) -> None:
-    assert_token_free_evaluable(condition)  # no raise
+async def test_a_token_free_condition_is_accepted(condition: str) -> None:
+    await assert_token_free_evaluable(condition)  # no raise
 
 
 @pytest.mark.parametrize("condition", _REFUSED)
-def test_a_condition_needing_absent_claims_is_refused(condition: str) -> None:
+async def test_a_condition_needing_absent_claims_is_refused(condition: str) -> None:
     with pytest.raises(TokenFreeConditionError):
-        assert_token_free_evaluable(condition)
+        await assert_token_free_evaluable(condition)
 
 
 @pytest.mark.parametrize("condition", _REFUSED_OUTSIDE_THE_MINIMAL_GRAMMAR)
-def test_a_construct_outside_the_grammar_is_refused(condition: str) -> None:
+async def test_a_construct_outside_the_grammar_is_refused(condition: str) -> None:
     # Unknown defaults to REFUSE: over-refusal is repairable, under-refusal is a silent allow.
     with pytest.raises(TokenFreeConditionError):
-        assert_token_free_evaluable(condition)
+        await assert_token_free_evaluable(condition)
 
 
 @pytest.mark.parametrize("builder", [editor_jq, viewer_jq])
-def test_the_seeded_role_conditions_bind_freely(builder) -> None:
+async def test_the_seeded_role_conditions_bind_freely(builder) -> None:
     # Every non-admin role holder's policy carries these, so their keys must be bindable.
     # Both embed ``"/api/auth/api-keys"``, which lexes as a string and not the ``keys`` builtin.
-    assert_token_free_evaluable(builder())
+    await assert_token_free_evaluable(builder())
 
 
 @pytest.mark.parametrize(("builder", "tokens", "depth"), [(editor_jq, 106, 16), (viewer_jq, 192, 22)])
-def test_the_seeded_role_conditions_cost_what_the_budget_comment_says(builder, tokens: int, depth: int) -> None:
+async def test_the_seeded_role_conditions_cost_what_the_budget_comment_says(builder, tokens: int, depth: int) -> None:
     # The seeded conditions are the platform's real worst case (the viewer condition spends
     # the most of the token/depth allowance). An edit eating the margin must fail here rather
     # than as a PermissionDeniedError on every fire under a viewer-role key.
@@ -256,7 +256,7 @@ def test_the_seeded_role_conditions_cost_what_the_budget_comment_says(builder, t
         peak = max(peak, self.depth)
 
     with mock.patch.object(_Budget, "descend", _record_depth):
-        assert_token_free_evaluable(condition)
+        await assert_token_free_evaluable(condition)
     _lex(condition, budget)
     assert (budget.tokens, peak) == (tokens, depth)
     assert budget.tokens < _MAX_TOKENS
@@ -264,35 +264,35 @@ def test_the_seeded_role_conditions_cost_what_the_budget_comment_says(builder, t
 
 
 @pytest.mark.parametrize("condition", _REFUSED_BEFORE_ANY_TOKEN_IS_READ)
-def test_a_condition_outside_the_accepted_source_shape_is_refused_before_it_is_lexed(condition: str) -> None:
+async def test_a_condition_outside_the_accepted_source_shape_is_refused_before_it_is_lexed(condition: str) -> None:
     # The gate reads raw characters only, so it holds where the scan's lexer and jq's would
     # part company. The message is asserted to be the GATE's, not the parser's: a case that
     # started dying at the parser would mean the gate had stopped covering it.
     with pytest.raises(TokenFreeConditionError, match=r"comment|single line|tab|control character|non-ASCII"):
-        assert_token_free_evaluable(condition)
+        await assert_token_free_evaluable(condition)
 
 
-def test_a_newline_in_a_condition_is_refused_at_the_bind_gate() -> None:
+async def test_a_newline_in_a_condition_is_refused_at_the_bind_gate() -> None:
     # The single-line requirement, pinned on its own: a newline is the seam a ``#`` comment
     # can be continued across, so every spelling of it is refused before a token is lexed.
     for newline in ("\n", "\r\n", "\r"):
         with pytest.raises(TokenFreeConditionError, match=r"single line"):
-            assert_token_free_evaluable(f'.sub =={newline}"a"')
+            await assert_token_free_evaluable(f'.sub =={newline}"a"')
 
     # The exact fail-open the gate closes: jq runs the continued line's identity predicate,
     # while a scan that ended the comment at the newline would accept.
     with pytest.raises(TokenFreeConditionError, match=r"comment|single line"):
-        assert_token_free_evaluable('# \\\n"a"\n.identity.suspended != true')
+        await assert_token_free_evaluable('# \\\n"a"\n.identity.suspended != true')
 
     # Over-refusal guard: the seeded single-line conditions must still bind.
-    assert_token_free_evaluable(editor_jq())
-    assert_token_free_evaluable(viewer_jq())
+    await assert_token_free_evaluable(editor_jq())
+    await assert_token_free_evaluable(viewer_jq())
 
 
-def test_the_compile_gate_answers_before_the_source_shape_gate() -> None:
+async def test_the_compile_gate_answers_before_the_source_shape_gate() -> None:
     # An unrendered template must not read as a formatting complaint.
     with pytest.raises(TokenFreeConditionError, match="does not compile"):
-        assert_token_free_evaluable("# \\\n{{ tier }}\n(")
+        await assert_token_free_evaluable("# \\\n{{ tier }}\n(")
 
 
 # Builtin names inside string literals are text, and a field of a named subpath is a field.
@@ -306,55 +306,55 @@ _WORDS_INSIDE_STRING_LITERALS = [
 
 
 @pytest.mark.parametrize("condition", _WORDS_INSIDE_STRING_LITERALS)
-def test_a_word_inside_a_string_literal_is_a_string(condition: str) -> None:
-    assert_token_free_evaluable(condition)
+async def test_a_word_inside_a_string_literal_is_a_string(condition: str) -> None:
+    await assert_token_free_evaluable(condition)
 
 
-def test_a_string_interpolation_is_analyzed_as_code() -> None:
+async def test_a_string_interpolation_is_analyzed_as_code() -> None:
     # ``\\(...)`` re-enters CODE context, so the same rule applies inside the hole.
-    assert_token_free_evaluable('.request.path == "/api/\\(.request.method)"')
+    await assert_token_free_evaluable('.request.path == "/api/\\(.request.method)"')
     for condition in ('"\\(.)" | test("eng")', '"\\(.identity.dept)" == "eng"', '.sub == "\\(.identity)"'):
         with pytest.raises(TokenFreeConditionError):
-            assert_token_free_evaluable(condition)
+            await assert_token_free_evaluable(condition)
 
 
-def test_a_condition_that_does_not_compile_is_refused_loudly() -> None:
+async def test_a_condition_that_does_not_compile_is_refused_loudly() -> None:
     # The compile gate runs first: an unrendered or truncated condition must never pass.
     for condition in ("", "{{ tier }}", ".request.path | startswith(", "|"):
         with pytest.raises(TokenFreeConditionError, match="does not compile"):
-            assert_token_free_evaluable(condition)
+            await assert_token_free_evaluable(condition)
 
 
-def test_the_refusal_names_the_offending_reference() -> None:
+async def test_the_refusal_names_the_offending_reference() -> None:
     # The refusal quotes the text it refused on, so the author knows which clause tripped it.
     with pytest.raises(TokenFreeConditionError) as ei:
-        assert_token_free_evaluable('.sub == "svc" and .identity.description == "ops"')
+        await assert_token_free_evaluable('.sub == "svc" and .identity.description == "ops"')
     assert ".identity.description" in str(ei.value)
     assert "owner_user_id" in str(ei.value)
 
     with pytest.raises(TokenFreeConditionError) as ei:
-        assert_token_free_evaluable('.sub == "svc" and (. | tojson | test("eng"))')
+        await assert_token_free_evaluable('.sub == "svc" and (. | tojson | test("eng"))')
     assert "tojson" in str(ei.value)
 
     with pytest.raises(TokenFreeConditionError) as ei:
-        assert_token_free_evaluable('.sub == "svc" and ("\\(.)" | test("eng"))')
+        await assert_token_free_evaluable('.sub == "svc" and ("\\(.)" | test("eng"))')
     assert "interpolation" in str(ei.value)
 
 
-def test_a_negative_identity_predicate_is_refused_not_merely_unevaluable() -> None:
+async def test_a_negative_identity_predicate_is_refused_not_merely_unevaluable() -> None:
     # A negative predicate evaluates TRUE against the absent claim and ALLOWS; the positive
     # form fails closed yet is refused with it — over-refusing, never under-refusing.
     for condition in (".identity.suspended != true", ".identity.suspended == true"):
         with pytest.raises(TokenFreeConditionError):
-            assert_token_free_evaluable(condition)
+            await assert_token_free_evaluable(condition)
 
 
-def test_the_serialized_context_cannot_be_pattern_matched() -> None:
+async def test_the_serialized_context_cannot_be_pattern_matched() -> None:
     # A real request's claims serialize to include the string and DENY; a fire's reduced
     # identity does not and ALLOWS. Every spelling of "serialize the input" is refused.
     for builtin in ("tojson", "tostring", "@json", "@text", "@base64", "@csv", "@uri", "@sh"):
         with pytest.raises(TokenFreeConditionError):
-            assert_token_free_evaluable(f'(. | {builtin} | test("engineering")) | not')
+            await assert_token_free_evaluable(f'(. | {builtin} | test("engineering")) | not')
 
 
 # The rule follows the VALUE, not the spelling: a rebound ``.`` inside a filter is a safe
@@ -367,11 +367,11 @@ _REBOUND_EVALUABLE = [
 
 
 @pytest.mark.parametrize("condition", _REBOUND_EVALUABLE)
-def test_a_rebound_input_is_analyzed_as_the_value_it_carries(condition: str) -> None:
-    assert_token_free_evaluable(condition)
+async def test_a_rebound_input_is_analyzed_as_the_value_it_carries(condition: str) -> None:
+    await assert_token_free_evaluable(condition)
 
 
-def test_rebinding_the_input_moves_the_rule_with_it() -> None:
+async def test_rebinding_the_input_moves_the_rule_with_it() -> None:
     # Binding the context to a variable carries the refusal onto the variable.
     for condition in (
         ". as $c | $c.identity.dept",
@@ -381,19 +381,19 @@ def test_rebinding_the_input_moves_the_rule_with_it() -> None:
         ". as $c | .scopes | map($c) | length == 1",
     ):
         with pytest.raises(TokenFreeConditionError):
-            assert_token_free_evaluable(condition)
+            await assert_token_free_evaluable(condition)
 
 
-def test_a_field_name_is_compared_after_its_escapes_are_decoded() -> None:
+async def test_a_field_name_is_compared_after_its_escapes_are_decoded() -> None:
     # A statically named index IS the field it decodes to, so an escape hides nothing.
-    assert_token_free_evaluable('."identity"."owner_user_id" == "alice"')
-    assert_token_free_evaluable('.policy."a\\/b" == 1')
+    await assert_token_free_evaluable('."identity"."owner_user_id" == "alice"')
+    await assert_token_free_evaluable('.policy."a\\/b" == 1')
     for condition in ('.["identity"].team', '."identity".dept'):
         with pytest.raises(TokenFreeConditionError):
-            assert_token_free_evaluable(condition)
+            await assert_token_free_evaluable(condition)
 
 
-def test_a_unicode_escape_is_refused_rather_than_decoded() -> None:
+async def test_a_unicode_escape_is_refused_rather_than_decoded() -> None:
     # ``\\uXXXX`` is the one escape that conjures a character the source-shape gate never saw
     # in the raw text, so refusing it keeps the gate's guarantee about raw characters a
     # guarantee about the values the scan reasons over.
@@ -403,14 +403,14 @@ def test_a_unicode_escape_is_refused_rather_than_decoded() -> None:
         '.sub == "\\u0041"',
     ):
         with pytest.raises(TokenFreeConditionError, match="unsupported escape"):
-            assert_token_free_evaluable(condition)
+            await assert_token_free_evaluable(condition)
 
 
-def test_every_code_position_inside_a_string_is_analyzed() -> None:
+async def test_every_code_position_inside_a_string_is_analyzed() -> None:
     # Interpolation nests, and an object key is a place code can hide: both are parsed as code.
     for condition in ('"\\("\\(.)")" | test("x")', '{"\\(.identity.dept)": 1} | length == 1'):
         with pytest.raises(TokenFreeConditionError):
-            assert_token_free_evaluable(condition)
+            await assert_token_free_evaluable(condition)
 
 
 # Past the LENGTH bound: each compiles, so each must be refused for being long rather than
@@ -437,20 +437,20 @@ _PAST_THE_NESTING_BOUND = [
 
 
 @pytest.mark.parametrize("condition", _PAST_THE_LENGTH_BOUND)
-def test_an_overlong_condition_is_refused_rather_than_overflowing_the_stack(condition: str) -> None:
+async def test_an_overlong_condition_is_refused_rather_than_overflowing_the_stack(condition: str) -> None:
     # A caller can author and bind its own key's condition, so the answer must be the
     # ordinary refusal, never a RecursionError escaping the bind door as a 500. The message
     # is asserted so a case cannot silently migrate onto the other bound.
     with pytest.raises(TokenFreeConditionError, match="longer than"):
-        assert_token_free_evaluable(condition)
+        await assert_token_free_evaluable(condition)
 
 
 @pytest.mark.parametrize("condition", _PAST_THE_NESTING_BOUND)
-def test_a_deeply_nested_condition_is_refused_rather_than_overflowing_the_stack(condition: str) -> None:
+async def test_a_deeply_nested_condition_is_refused_rather_than_overflowing_the_stack(condition: str) -> None:
     # The scan recurses on nesting in the parser AND the lexer, and the depth counter is
     # shared by both, so a hole in a string cannot restart it at zero.
     with pytest.raises(TokenFreeConditionError, match="nests more than"):
-        assert_token_free_evaluable(condition)
+        await assert_token_free_evaluable(condition)
 
 
 # Over-refusal guard for the bounds: ordinary policy expressions, deeply parenthesised or
@@ -463,8 +463,8 @@ _WITHIN_THE_BOUNDS = [
 
 
 @pytest.mark.parametrize("condition", _WITHIN_THE_BOUNDS)
-def test_the_bounds_sit_far_above_a_real_condition(condition: str) -> None:
-    assert_token_free_evaluable(condition)
+async def test_the_bounds_sit_far_above_a_real_condition(condition: str) -> None:
+    await assert_token_free_evaluable(condition)
 
 
 # Every condition this module asserts the scan ACCEPTS, so the differential check below
@@ -512,16 +512,16 @@ def _jq_outcome(condition: str, context: dict[str, Any]) -> object:
     """What real libjq does with ``condition`` over ``context``: the whole output stream, or
     the error. Errors count — a jq error message quotes the values that produced it."""
     try:
-        return ("values", get_compiled_jq(condition).input(_envelope(context)).all())
+        return ("values", compile_jq(JqSource(condition, "", ())).input(envelope(context)).all())
     except Exception as exc:
         return ("error", f"{type(exc).__name__}: {exc}")
 
 
 @pytest.mark.parametrize("condition", _ACCEPTED_CORPUS)
-def test_an_accepted_condition_decides_identically_under_the_reduced_claim_set(condition: str) -> None:
+async def test_an_accepted_condition_decides_identically_under_the_reduced_claim_set(condition: str) -> None:
     # Run against the real libjq the enforcer evaluates with, not the scan's reading of the
     # text: sampling cannot prove independence, but a disagreement proves a defect.
-    assert_token_free_evaluable(condition)  # no raise: the corpus is the ACCEPTED set
+    await assert_token_free_evaluable(condition)  # no raise: the corpus is the ACCEPTED set
     assert _jq_outcome(condition, _FULL_CLAIMS) == _jq_outcome(condition, _REDUCED_CLAIMS)
 
 

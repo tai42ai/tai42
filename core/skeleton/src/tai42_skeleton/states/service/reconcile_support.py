@@ -71,30 +71,6 @@ class _AttachReconcileRecords:
         return await self._service.apply(self._state, subject, ops, op_id=None, origin=origin, conn=self._conn)
 
 
-def _record_subtree(data: dict[str, Any], path: list[str]) -> dict[str, Any]:
-    """The record document at an attachment's ``path`` — the subtree a template's jq programs operate over.
-
-    ``.`` at the seam. An absent or non-object node reads as ``{}``.
-    """
-    node: Any = data
-    for seg in path:
-        if not isinstance(node, dict):
-            return {}
-        node = node.get(seg)
-    return node if isinstance(node, dict) else {}
-
-
-def _rebase_op(op: Any, path: list[str]) -> dict[str, Any]:
-    """One template-relative op with its ``path`` rebased under the attachment ``path``.
-
-    So an update program (like a fill) authors its ops in its own coordinates. A
-    malformed op is a loud refusal.
-    """
-    if not isinstance(op, dict) or not isinstance(op.get("path"), list):
-        raise ValueValidationError(f"an update-program op must be an object carrying a list path, got {op!r}")
-    return {**op, "path": [*path, *op["path"]]}
-
-
 def _reconcile_refusal(context: AttachReconcileContext, orphans: list[tuple[StateSubject, dict[str, Any]]]) -> str:
     shown = orphans[:_RECONCILE_LIST_CAP]
     listed = "; ".join(

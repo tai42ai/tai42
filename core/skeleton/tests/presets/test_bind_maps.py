@@ -17,6 +17,8 @@ from fastmcp.tools import Tool
 from tai42_contract.app import TaiApp
 from tai42_contract.presets import PresetInputSchemaSupport
 from tai42_contract.secrets import SecretValue
+from tai42_kit.compute import ComputeWorkerLostError
+from tai42_kit.utils.data import JqBudgetExceededError
 
 from tai42_skeleton.presets import bind as bind_module
 from tai42_skeleton.presets.bind import merge_fixed, preset_bind
@@ -262,15 +264,27 @@ async def test_input_map_failure_names_the_preset_and_quotes_nothing(expression:
     assert caught.value.__suppress_context__ is True
 
 
-async def test_input_map_timeout_is_a_tool_error(monkeypatch: pytest.MonkeyPatch):
+async def test_input_map_past_its_budget_is_a_tool_error(monkeypatch: pytest.MonkeyPatch):
     async def _slow(*args: Any, **kwargs: Any) -> Any:
-        raise TimeoutError("jq evaluation exceeded 10s")
+        raise JqBudgetExceededError("jq evaluation exceeded 10s (JQ_TIMEOUT_SECONDS); its worker was killed")
 
     monkeypatch.setattr(bind_module, "run_jq_first", _slow)
     tool = await preset_bind(
         _app(_runner()), "runner", {}, name="p", input_schema=_PLACE_SCHEMA, input_map="{payload: .}"
     )
     with pytest.raises(ToolError, match=r"^preset 'p' input map failed$"):
+        await tool.run({"place": "xy"})
+
+
+async def test_a_pool_fault_in_an_input_map_propagates(monkeypatch: pytest.MonkeyPatch):
+    async def _worker_lost(*args: Any, **kwargs: Any) -> Any:
+        raise ComputeWorkerLostError("the compute worker ended before it returned a result")
+
+    monkeypatch.setattr(bind_module, "run_jq_first", _worker_lost)
+    tool = await preset_bind(
+        _app(_runner()), "runner", {}, name="p", input_schema=_PLACE_SCHEMA, input_map="{payload: .}"
+    )
+    with pytest.raises(ComputeWorkerLostError):
         await tool.run({"place": "xy"})
 
 
@@ -337,15 +351,27 @@ async def test_plain_output_schema_mismatch_is_the_preset_refusal():
         await tool.run({"city": "paris"})
 
 
-async def test_output_map_timeout_is_a_tool_error(monkeypatch: pytest.MonkeyPatch):
+async def test_output_map_past_its_budget_is_a_tool_error(monkeypatch: pytest.MonkeyPatch):
     from tai42_kit.presets import output_stage as kit_stage
 
     async def _slow(*args: Any, **kwargs: Any) -> Any:
-        raise TimeoutError("jq evaluation exceeded 10s")
+        raise JqBudgetExceededError("jq evaluation exceeded 10s (JQ_TIMEOUT_SECONDS); its worker was killed")
 
     monkeypatch.setattr(kit_stage, "run_jq_first", _slow)
     tool = await preset_bind(_app(_report()), "report", {}, name="r", output_map=".temp")
     with pytest.raises(ToolError, match=r"^preset 'r' output map failed$"):
+        await tool.run({"city": "paris"})
+
+
+async def test_a_pool_fault_in_an_output_map_propagates(monkeypatch: pytest.MonkeyPatch):
+    from tai42_kit.presets import output_stage as kit_stage
+
+    async def _worker_lost(*args: Any, **kwargs: Any) -> Any:
+        raise ComputeWorkerLostError("the compute worker ended before it returned a result")
+
+    monkeypatch.setattr(kit_stage, "run_jq_first", _worker_lost)
+    tool = await preset_bind(_app(_report()), "report", {}, name="r", output_map=".temp")
+    with pytest.raises(ComputeWorkerLostError):
         await tool.run({"city": "paris"})
 
 

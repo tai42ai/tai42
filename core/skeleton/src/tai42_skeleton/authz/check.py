@@ -129,14 +129,14 @@ def _own_route(op: OperationMetadata, path: str, method: str) -> RouteMetadata:
     return meta
 
 
-def _assert_execution_condition_evaluable(condition: str, *, principal: str, template_id: str | None) -> None:
+async def _assert_execution_condition_evaluable(condition: str, *, principal: str, template_id: str | None) -> None:
     """Deny unless a RENDERED policy condition is evaluable under a background execution's reduced claim set.
 
     Must be asserted on the rendered text about to be enforced, not only at bind time: a
     template edit changes that text with no write to the bound record.
     """
     try:
-        assert_token_free_evaluable(condition)
+        await assert_token_free_evaluable(condition)
     except TokenFreeConditionError as exc:
         logger.warning(
             "authz: background execution denied — the policy condition enforced for %s (template %r) is not "
@@ -461,7 +461,7 @@ async def _enforce_pinned_conditions(
         for jq_pass in passes:
             rendered = await _render_condition(jq_pass.condition, principal=jq_pass.principal)
             if is_execution_fire and rendered.text and jq_pass.condition is not None:
-                _assert_execution_condition_evaluable(
+                await _assert_execution_condition_evaluable(
                     rendered.text, principal=jq_pass.principal, template_id=jq_pass.condition.id
                 )
             await enforcer.enforce(jq_pass.context_for(method, path), rendered)

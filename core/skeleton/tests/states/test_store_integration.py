@@ -166,7 +166,7 @@ async def test_traced_keyed_write_from_metaless_origin_stamps_null_meta(
         "trace": {"enabled": True},
     }
     effective = compose_effective_schema(
-        {"type": "object", "properties": {}}, [(validate_template(template_body), ["a"], {})]
+        {"type": "object", "properties": {}}, [(await validate_template(template_body), ["a"], {})]
     )
     # the composed schema carries the real injected trace schema on the array's items
     assert "_trace" in effective["properties"]["a"]["properties"]["items"]["items"]["properties"]

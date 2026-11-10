@@ -130,7 +130,7 @@ def _inner_timeout_manifest() -> Manifest:
 
 
 def test_inner_timeout_error_passes_through_not_reclassified(set_turn_timeout):
-    # A builtin TimeoutError raised by the turn's OWN work (e.g. a jq budget abort)
+    # A builtin TimeoutError raised by the turn's OWN work (e.g. a compute-pool job past its own timeout)
     # under a generous turn budget reaches the caller unchanged — the wrapper must
     # not mistake it for the turn overrunning its limit.
     set_turn_timeout("300")

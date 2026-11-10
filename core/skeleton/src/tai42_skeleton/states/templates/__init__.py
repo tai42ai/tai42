@@ -25,7 +25,6 @@ Three pure entry points carry the feature:
 from __future__ import annotations
 
 from tai42_skeleton.states.templates.compose import compose_effective_schema
-from tai42_skeleton.states.templates.jq import MEMBER_JQ_VARIABLES, input_order, sibling_prelude, template_jq_prelude
 from tai42_skeleton.states.templates.model import TEMPLATE_KIND, StateTemplate
 from tai42_skeleton.states.templates.parameters import substitute_parameters
 from tai42_skeleton.states.templates.regimes import REGIMES, regime_for
@@ -37,16 +36,12 @@ from tai42_skeleton.states.templates.validate import (
 
 __all__ = [
     "DECLARATIONS_CHECK_VARIABLES",
-    "MEMBER_JQ_VARIABLES",
     "RECONCILE_JQ_VARIABLES",
     "REGIMES",
     "TEMPLATE_KIND",
     "StateTemplate",
     "compose_effective_schema",
-    "input_order",
     "regime_for",
-    "sibling_prelude",
     "substitute_parameters",
-    "template_jq_prelude",
     "validate_template",
 ]

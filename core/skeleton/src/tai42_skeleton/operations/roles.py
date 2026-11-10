@@ -21,7 +21,7 @@ from tai42_contract.access_control import UNIVERSAL_SCOPE
 from tai42_contract.access_control.models import RoleDefinition
 from tai42_contract.template import TemplatedText
 from tai42_contract.versioning.errors import DocumentExistsError, DocumentNotFoundError, DocumentVersionNotFoundError
-from tai42_kit.utils.data import get_compiled_jq
+from tai42_kit.utils.data.jq_util import compile_check
 
 from tai42_skeleton.access_control.role_audit import role_audit
 from tai42_skeleton.access_control.roles import (
@@ -114,7 +114,7 @@ def _validate_grants(grants: Mapping[str, str]) -> None:
         raise BadRequestError(f"grant level(s) must be one of {sorted(_GRANT_LEVELS)}: {bad_levels}")
 
 
-def _resolved_create(name: str, description: str, base_tier: str, grants: Mapping[str, str]) -> RoleDefinition:
+async def _resolved_create(name: str, description: str, base_tier: str, grants: Mapping[str, str]) -> RoleDefinition:
     if name == RESERVED_ADMIN_ROLE:
         raise ForbiddenError("the 'admin' role is reserved and permanent; it cannot be created or replaced")
     if base_tier not in _BASE_TIER_BUILDERS:
@@ -127,7 +127,7 @@ def _resolved_create(name: str, description: str, base_tier: str, grants: Mappin
     # non-compiling base would deny every request the role governs). The grant LEVELS are
     # already the validated ``none``/``read``/``write`` Literal (the request model / the
     # RoleDefinition validator enforce it), so the cast only re-narrows the value type.
-    get_compiled_jq(condition)
+    await compile_check(condition)
     try:
         return RoleDefinition(
             name=name,
@@ -157,7 +157,7 @@ async def create_role(name: str, description: str, base_tier: str, grants: dict[
     """
     caller = await resolve_caller()
     require_admin(caller)
-    role = _resolved_create(name, description, base_tier, grants)
+    role = await _resolved_create(name, description, base_tier, grants)
     body = role.model_dump()
     # Atomic unit of work: the role create and its audit append commit together, so a
     # live role can never exist without its audit record. The Redis version bump follows

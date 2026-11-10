@@ -158,9 +158,10 @@ class _DispatchMixin(_ResolutionMixin):
         # receives the unresolved sentinel object).
         fn = mcp_tool.fn
         resolved_fn = without_injected_parameters(fn)
-        # A coroutine tool never blocks the loop, so it is never offloaded; only a
-        # sync callable is, and only when the caller opted in. ``iscoroutinefunction``
-        # tracks the wrapped async-ness through ``without_injected_parameters``.
+        # A coroutine tool runs on the loop and is never offloaded: its author keeps CPU
+        # work off the loop through ``tai42_app.compute``. Only a sync callable is
+        # offloaded, and only when the caller opted in. ``iscoroutinefunction`` tracks the
+        # wrapped async-ness through ``without_injected_parameters``.
         offload = offload_sync and not inspect.iscoroutinefunction(resolved_fn)
 
         # A stable per-(resolved_fn, offload) wrapper: fastmcp caches

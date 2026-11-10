@@ -32,6 +32,8 @@ from tai42_contract.states.rendered import (
     RenderedTemplateJq,
 )
 from tai42_contract.template import TemplatedText
+from tai42_kit.states.template_jq import input_order, program_variables, sibling_prelude, template_jq_prelude
+from tai42_kit.utils.data.jq_errors import JqProgramError
 from tai42_kit.utils.data.jq_util import compile_check
 from tai42_kit.utils.render import resolve_schema_body
 
@@ -42,13 +44,9 @@ from tai42_skeleton.states.service.rows import _SCHEMA_BODY_ADAPTER, _resolve_st
 from tai42_skeleton.states.template_refs import state_template_template_refs
 from tai42_skeleton.states.templates import (
     DECLARATIONS_CHECK_VARIABLES,
-    MEMBER_JQ_VARIABLES,
     RECONCILE_JQ_VARIABLES,
     StateTemplate,
     compose_effective_schema,
-    input_order,
-    sibling_prelude,
-    template_jq_prelude,
     validate_template,
 )
 from tai42_skeleton.template.errors import TEMPLATE_RENDER_ERRORS, template_render_refusal
@@ -109,7 +107,7 @@ class _TemplateMixin(_StatesServiceBase):
         if cached is not None and cached.template is not None:
             return cached.template, cached
         resolved_body, by_id = await self._resolve_template_body(name, body)
-        template = validate_template(resolved_body)
+        template = await validate_template(resolved_body)
         entry = self._catalog.insert_template(
             name, TemplateEntry(version=version, body=body, template=None if by_id else template)
         )
@@ -192,8 +190,8 @@ class _TemplateMixin(_StatesServiceBase):
                 f"template {template.name!r} declarations check {template_render_refusal(check, exc)}"
             ) from exc
         try:
-            compile_check(rendered, variables=DECLARATIONS_CHECK_VARIABLES)
-        except Exception as exc:
+            await compile_check(rendered, variables=DECLARATIONS_CHECK_VARIABLES)
+        except JqProgramError as exc:
             raise TemplateValidationError(
                 f"template {template.name!r} declarations check is not a valid jq expression: {exc}"
             ) from exc
@@ -230,10 +228,9 @@ class _TemplateMixin(_StatesServiceBase):
         rendered_inputs = {name: rendered[name] for name, p in programs.items() if p.purpose == "input"}
         prelude = template_jq_prelude(rendered_inputs)
         for name, program in programs.items():
-            extra = "params" if program.purpose == "input" else "input"
             try:
-                compile_check(prelude + rendered[name], variables=(*MEMBER_JQ_VARIABLES, extra))
-            except Exception as exc:
+                await compile_check(prelude + rendered[name], variables=program_variables(program.purpose))
+            except JqProgramError as exc:
                 raise TemplateValidationError(
                     f"template {template.name!r} template_jq {name!r} is not a valid jq expression: {exc}"
                 ) from exc
@@ -263,8 +260,8 @@ class _TemplateMixin(_StatesServiceBase):
                     f"template {template.name!r} reconcile {label} {template_render_refusal(text, exc)}"
                 ) from exc
             try:
-                compile_check(rendered, variables=RECONCILE_JQ_VARIABLES[label])
-            except Exception as exc:
+                await compile_check(rendered, variables=RECONCILE_JQ_VARIABLES[label])
+            except JqProgramError as exc:
                 raise TemplateValidationError(
                     f"template {template.name!r} reconcile {label} is not a valid jq expression: {exc}"
                 ) from exc
@@ -282,7 +279,7 @@ class _TemplateMixin(_StatesServiceBase):
         await assert_templates_stored(state_template_template_refs(doc), TemplateValidationError)
         body = doc.model_dump(by_alias=True)
         resolved_body, _by_id = await self._resolve_template_body(doc.name, body)
-        template = validate_template(resolved_body)
+        template = await validate_template(resolved_body)
         await self._compile_by_id_declarations_check(template)
         await self._compile_by_id_template_jq(template)
         await self._compile_by_id_reconcile(template)

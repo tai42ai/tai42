@@ -28,6 +28,7 @@ from tai42_contract.states.models import (
     StateTemplateDocument,
 )
 from tai42_contract.states.pending import HeldPendingSave
+from tai42_kit.utils.data.jq_errors import JqProgramError
 from tai42_kit.utils.data.jq_util import run_jq_first
 from tai42_kit.utils.data.json_schema_util import SCHEMA_REFS
 
@@ -37,6 +38,7 @@ from tai42_skeleton.states.service.base import _StatesServiceBase
 from tai42_skeleton.states.service.catalog import StateEntry, served_row
 from tai42_skeleton.states.service.rows import _resolve_state_schema, _row_to_declaration
 from tai42_skeleton.states.templates import StateTemplate, compose_effective_schema, regime_for
+from tai42_skeleton.template.errors import TEMPLATE_RENDER_ERRORS
 
 
 def _deadline() -> float:
@@ -475,12 +477,10 @@ async def _validate_attach_declarations(
         ) from exc
     if template.declarations.check is not None:
         try:
-            # Render the templated check to its jq program IMMEDIATELY before evaluating
-            # it; a by-id text whose stored resource cannot be fetched raises here and is
-            # surfaced as the loud check-evaluation failure.
+            # The program's failure is the check's refusal; a pool fault is not and propagates.
             rendered = await tai42_app.storage.resource_manager.render_templated_text(template.declarations.check)
             result = await run_jq_first(rendered, declarations, variables={"parameters": effective})
-        except Exception as exc:
+        except (JqProgramError, *TEMPLATE_RENDER_ERRORS) as exc:
             raise TemplateValidationError(
                 f"template {template.name!r} declarations check failed to evaluate: {exc}"
             ) from exc

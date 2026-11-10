@@ -11,6 +11,7 @@ import mcp
 import pytest
 from tai42_contract.connectors.models import AuthHealthState
 from tai42_contract.manifest import MCPConfig, TaiMCPConfig
+from tai42_kit.compute import ComputePoolUnavailableError, compute_pool, stop_compute_pool
 
 from tai42_skeleton.manifest import Manifest
 
@@ -42,6 +43,18 @@ def test_teardown_resources_releases_the_kits_loop_bound_resources_then_flushes(
     writer.flush.assert_called_once_with()
     assert steps == ["loop-bound kit resources", "monitoring flush"]
     assert [r.getMessage() for r in caplog.records] == ["shutdown teardown finished: every step ran"]
+
+
+def test_teardown_resources_stops_the_processs_compute_pool(monkeypatch):
+    m, _steps, _release, _writer = _teardown_mixin(monkeypatch)
+    pool = compute_pool()
+    try:
+        asyncio.run(m._teardown_resources())
+        with pytest.raises(ComputePoolUnavailableError, match="was stopped"):
+            asyncio.run(pool.run(abs, -1))
+        assert compute_pool() is not pool
+    finally:
+        stop_compute_pool()
 
 
 def test_teardown_resources_flushes_when_the_kit_release_raises_then_raises_the_one_failure(monkeypatch):

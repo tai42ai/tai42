@@ -349,7 +349,7 @@ def test_validate_schema_refuses_a_pointer_segment_that_is_not_an_array_index(se
         RecordValidator(schema)
 
 
-def test_a_template_whose_pointer_is_not_an_array_index_is_refused_at_save() -> None:
+async def test_a_template_whose_pointer_is_not_an_array_index_is_refused_at_save() -> None:
     ref = "#/properties/a/anyOf/-1"
     fragment = {
         "type": "object",
@@ -360,7 +360,7 @@ def test_a_template_whose_pointer_is_not_an_array_index_is_refused_at_save() -> 
         f"JSON Schema rules: {_not_an_index(ref, '-1')}"
     )
     with pytest.raises(TemplateValidationError, match=re.escape(refusal)):
-        validate_template({"kind": "state-template", "name": "t1", "schema": fragment})
+        await validate_template({"kind": "state-template", "name": "t1", "schema": fragment})
 
 
 @pytest.mark.parametrize("segment", ["01", "00", "\uff11", "-1"])
@@ -529,11 +529,11 @@ def test_validate_schema_refuses_a_root_id_naming_a_meta_schema(uri: str) -> Non
         compose_effective_schema(schema, [])
 
 
-def test_a_template_under_a_meta_schema_identifier_is_refused_at_save() -> None:
+async def test_a_template_under_a_meta_schema_identifier_is_refused_at_save() -> None:
     fragment = {"$id": _APPLICATOR, "type": "object", "properties": {"m": {"$ref": _M20}}}
     refusal = f"template 't1' schema fragment is not a valid object schema: {_taken(_APPLICATOR)}"
     with pytest.raises(TemplateValidationError, match=re.escape(refusal)):
-        validate_template({"kind": "state-template", "name": "t1", "schema": fragment})
+        await validate_template({"kind": "state-template", "name": "t1", "schema": fragment})
 
 
 def test_validate_schema_accepts_a_pointer_into_a_meta_schema_subschema_binding_no_dynamic_name() -> None:
@@ -584,8 +584,8 @@ def test_a_declared_schema_a_validator_cannot_use_is_refused(subschema: dict, me
         RecordValidator(schema)
 
 
-def _shape_template():
-    return validate_template(
+async def _shape_template():
+    return await validate_template(
         {
             "kind": "state-template",
             "name": "shape",
@@ -596,11 +596,11 @@ def _shape_template():
 
 
 @pytest.mark.parametrize(("subschema", "message"), _UNUSABLE)
-def test_a_composed_schema_a_validator_cannot_use_is_refused(subschema: dict, message: str) -> None:
+async def test_a_composed_schema_a_validator_cannot_use_is_refused(subschema: dict, message: str) -> None:
     # The template is valid on its own; the attach parameter makes the composed document unusable.
     base = {"type": "object", "properties": {"n": {"type": "integer"}}}
     with pytest.raises(SchemaValidationError, match=re.escape("state schema property 'box' ")) as raised:
-        compose_effective_schema(base, [(_shape_template(), ["box"], {"shape": subschema})])
+        compose_effective_schema(base, [(await _shape_template(), ["box"], {"shape": subschema})])
     assert message in str(raised.value)
 
 
@@ -692,11 +692,11 @@ def test_record_validator_is_exported_by_the_states_package() -> None:
     assert states_pkg.RecordValidator is RecordValidator
 
 
-def test_record_validator_over_a_composed_effective_schema_with_trace() -> None:
+async def test_record_validator_over_a_composed_effective_schema_with_trace() -> None:
     # A neutral consumer: a base schema and a tracing template parsed by the public template
     # parser, composed at a path into the effective schema a declared state validates against.
     base = {"type": "object", "properties": {"n": {"type": "integer"}}, "additionalProperties": False}
-    template = validate_template(
+    template = await validate_template(
         {
             "kind": "state-template",
             "name": "tag-box",

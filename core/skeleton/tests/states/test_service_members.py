@@ -16,10 +16,15 @@ from tai42_contract.states.errors import (
 )
 from tai42_contract.states.models import AttachBody, StateTemplateDocument, WriteOrigin
 from tai42_contract.template import TemplatedText
+from tai42_kit.compute import ComputeWorkerLostError
+from tai42_kit.states import template_jq as template_jq_mod
+from tai42_kit.utils.data import JqBudgetExceededError
 
 from tai42_skeleton.app import instance
 from tai42_skeleton.states import service as service_mod
 from tai42_skeleton.states.service import StatesService
+from tai42_skeleton.states.service import reconcile as reconcile_mod
+from tai42_skeleton.states.service import templates as templates_mod
 
 from .._fakes.recording_storage import MappedStorage
 from .fake_service_store import _STATE, FakeStatesStore, _subject
@@ -423,6 +428,99 @@ async def test_program_evaluation_failure_is_loud(svc: StatesService) -> None:
     await svc.replace(_STATE.name, _subject(), {"ledger": []}, origin=_ORIGIN)
     with pytest.raises(ValueValidationError, match="failed to evaluate"):
         await svc.eval_template_jq(_STATE.name, _subject(), "bad", {})
+
+
+async def _worker_lost(*_args: object, **_kwargs: object) -> object:
+    raise ComputeWorkerLostError("the compute worker ended before it returned a result")
+
+
+async def test_a_pool_fault_in_an_input_program_is_not_the_author_s_error(
+    svc: StatesService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await _attached(svc)
+    monkeypatch.setattr(template_jq_mod, "run_jq_first", _worker_lost)
+    with pytest.raises(ComputeWorkerLostError):
+        await svc.eval_template_jq(_STATE.name, _subject(), "count", {})
+
+
+async def test_a_pool_fault_in_an_update_program_is_not_the_author_s_error(
+    svc: StatesService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await _attached(svc)
+    monkeypatch.setattr(template_jq_mod, "run_jq_first", _worker_lost)
+    with pytest.raises(ComputeWorkerLostError):
+        await svc.apply_template_jq(_STATE.name, _subject(), "add", {"id": "b"}, op_id=None, origin=_ORIGIN)
+
+
+async def test_a_pool_fault_in_a_reconcile_program_is_not_the_author_s_error(
+    svc: StatesService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await _attached_reconciler(svc)
+    monkeypatch.setattr(reconcile_mod, "run_jq_first", _worker_lost)
+    # The attach-reconciler seam turns every fault but the author's refusal into the server's error.
+    with pytest.raises(RuntimeError, match=r"attach reconciler .* failed") as excinfo:
+        await svc.update_attachment_declarations(_STATE.name, "reconciler", {"allowed": ["a"]})
+    assert isinstance(excinfo.value.__cause__, ComputeWorkerLostError)
+
+
+async def _budget_exceeded(*_args: object, **_kwargs: object) -> object:
+    raise JqBudgetExceededError("jq evaluation exceeded 10s (JQ_TIMEOUT_SECONDS); its worker was killed")
+
+
+async def test_an_input_program_past_its_budget_is_the_author_s_refusal(
+    svc: StatesService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await _attached(svc)
+    monkeypatch.setattr(template_jq_mod, "run_jq_first", _budget_exceeded)
+    with pytest.raises(ValueValidationError) as excinfo:
+        await svc.eval_template_jq(_STATE.name, _subject(), "count", {})
+    assert str(excinfo.value) == (
+        "template_jq 'count' on template 'summary' failed to evaluate: "
+        "jq evaluation exceeded 10s (JQ_TIMEOUT_SECONDS); its worker was killed"
+    )
+
+
+async def test_an_update_program_past_its_budget_is_the_author_s_refusal(
+    svc: StatesService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await _attached(svc)
+    monkeypatch.setattr(template_jq_mod, "run_jq_first", _budget_exceeded)
+    with pytest.raises(ValueValidationError, match=r"^template_jq 'add' on template 'summary' failed to evaluate: "):
+        await svc.apply_template_jq(_STATE.name, _subject(), "add", {"id": "b"}, op_id=None, origin=_ORIGIN)
+
+
+async def test_a_reconcile_program_past_its_budget_is_the_author_s_refusal(
+    svc: StatesService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await _attached_reconciler(svc)
+    monkeypatch.setattr(reconcile_mod, "run_jq_first", _budget_exceeded)
+    with pytest.raises(
+        TemplateValidationError, match=r"^reconcile orphans failed to evaluate: jq evaluation exceeded 10s"
+    ):
+        await svc.update_attachment_declarations(_STATE.name, "reconciler", {"allowed": ["a"]})
+
+
+async def test_a_save_time_compile_past_its_budget_is_the_author_s_refusal(
+    svc: StatesService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def _compile_budget_exceeded(*_args: object, **_kwargs: object) -> None:
+        raise JqBudgetExceededError("jq compile exceeded 10s (JQ_TIMEOUT_SECONDS); its worker was killed")
+
+    template = StateTemplateDocument.model_validate(
+        {
+            "name": "byid",
+            "schema": {"type": "object", "properties": {"ledger": {"type": "array"}}},
+            "template_jq": {"any_due": {"purpose": "input", "jq": {"id": "stored-anything-due"}}},
+        }
+    )
+    await svc.put_declaration(_STATE)
+    monkeypatch.setattr(templates_mod, "compile_check", _compile_budget_exceeded)
+    with pytest.raises(TemplateValidationError) as excinfo:
+        await svc.put_template(template, replace=False)
+    assert str(excinfo.value) == (
+        "template 'byid' template_jq 'any_due' is not a valid jq expression: "
+        "jq compile exceeded 10s (JQ_TIMEOUT_SECONDS); its worker was killed"
+    )
 
 
 async def test_reconcile_unknown_directive_is_loud(svc: StatesService) -> None:

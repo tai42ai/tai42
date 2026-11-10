@@ -454,7 +454,7 @@ async def _validate_injections(app: TaiMCP, attach: StateAttach, resolutions: It
     """Compile each injection's custom jq, or take each named ``template_jq``'s ``"input"`` resolution."""
     for injection in attach.input_injections:
         if injection.jq is not None:
-            compile_check(
+            await compile_check(
                 await _render_slot(app, f"injection jq for state {attach.state!r}", injection.jq),
                 variables=["input"],
             )
@@ -468,12 +468,12 @@ async def _validate_updates(app: TaiMCP, attach: StateAttach, resolutions: Itera
     """Compile op_id/custom-jq, take each named update's resolution, and enforce the adapter-params rule."""
     for update in attach.updates:
         if update.op_id is not None:
-            compile_check(
+            await compile_check(
                 await _render_slot(app, f"op_id expression for state {attach.state!r}", update.op_id),
                 variables=["input"],
             )
         if update.jq is not None:
-            compile_check(
+            await compile_check(
                 await _render_slot(app, f"update jq for state {attach.state!r}", update.jq),
                 variables=["input", "record"],
             )
@@ -482,7 +482,7 @@ async def _validate_updates(app: TaiMCP, attach: StateAttach, resolutions: Itera
                 raise AssertionError
             program = _next_resolution(resolutions)
             if update.adapter is not None:
-                compile_check(
+                await compile_check(
                     await _render_slot(app, f"update adapter for state {attach.state!r}", update.adapter),
                     variables=["input"],
                 )
@@ -505,9 +505,9 @@ async def _validate_binding(app: TaiMCP, binding: StateBinding, *, do_attach: bo
     await assert_templates_stored(binding_template_refs(binding), ValueValidationError)
     for attach in binding.states:
         await _validate_templates(app, attach, do_attach=do_attach)
-        compile_check(await _render_slot(app, f"subject_expr for state {attach.state!r}", attach.subject_expr))
+        await compile_check(await _render_slot(app, f"subject_expr for state {attach.state!r}", attach.subject_expr))
         if attach.scope_expr is not None:
-            compile_check(await _render_slot(app, f"scope_expr for state {attach.state!r}", attach.scope_expr))
+            await compile_check(await _render_slot(app, f"scope_expr for state {attach.state!r}", attach.scope_expr))
         resolutions = await _resolve_named_references(app, attach)
         await _validate_injections(app, attach, resolutions)
         await _validate_updates(app, attach, resolutions)

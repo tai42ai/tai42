@@ -277,8 +277,8 @@ async def test_reconciler_runs_after_the_validator(svc: StatesService) -> None:
     assert order == ["validator", "reconciler"]
 
 
-def test_regime_for_path(svc: StatesService) -> None:
-    template = validate_template(
+async def test_regime_for_path(svc: StatesService) -> None:
+    template = await validate_template(
         {
             "kind": "state-template",
             "name": "m",

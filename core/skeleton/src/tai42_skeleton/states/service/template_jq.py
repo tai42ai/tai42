@@ -1,8 +1,9 @@
-"""Resolving, rendering and running a state's ``template_jq`` programs.
+"""Resolving a state's ``template_jq`` programs, reading what they run over, and routing what they give.
 
-An ``input`` program evaluates over a subject's attached subtree and returns a value; an
-``update`` program returns a template-relative op batch that is rebased under the attachment
-path and applied through the same ``apply`` chokepoint as any delta.
+This module resolves, reads and routes; what a program gives is the kit's
+(:mod:`tai42_kit.states.template_jq`). An ``input`` program's value is returned; an ``update``
+program's op batch, rebased under the attachment path, is applied through the same ``apply``
+chokepoint as any delta.
 """
 
 from __future__ import annotations
@@ -21,59 +22,20 @@ from tai42_contract.states.models import (
     TemplateJqResult,
     WriteOrigin,
 )
-from tai42_kit.utils.data.jq_util import run_jq_first
+from tai42_kit.states.template_jq import (
+    BoundProgram,
+    derive_update_ops,
+    evaluate_input_program,
+    select_template_jq,
+)
 
 from tai42_skeleton.states.outbox.drain import drained
 from tai42_skeleton.states.service.base import _StatesServiceBase
-from tai42_skeleton.states.service.reconcile_support import _rebase_op, _record_subtree
 from tai42_skeleton.states.service.unit import current_state_unit
 from tai42_skeleton.states.templates import StateTemplate
 
 # ``(template, template_version, path, parameters, declarations, program_name)`` of a resolved program.
 ResolvedProgram = tuple[StateTemplate, int, list[str], dict[str, Any], dict[str, Any], str]
-
-
-def select_template_jq(
-    state: str, name: str, purpose: str, candidates: Sequence[tuple[str, Mapping[str, Any]]]
-) -> tuple[int, str]:
-    """Pick the program a ``template_jq`` reference ``name`` names among ``candidates``.
-
-    ``candidates`` are ``(template name, its programs by name)`` pairs, each program carrying a
-    ``purpose``; returns ``(index of the declaring candidate, program name)``. A QUALIFIED
-    ``<template>.<name>`` picks that template's program — a template not among the candidates, or
-    one that declares no such program, is a :class:`StateNotFoundError`. An UNQUALIFIED name picks
-    the one candidate that declares it — none is a :class:`StateNotFoundError`, two or more a
-    :class:`ValueValidationError` (the caller qualifies it). A program whose purpose is not
-    ``purpose`` is a :class:`ValueValidationError`.
-    """
-    if "." in name:
-        template_name, program_name = name.split(".", 1)
-        matches = [i for i, (candidate, _programs) in enumerate(candidates) if candidate == template_name]
-        if not matches:
-            raise StateNotFoundError(f"template {template_name!r} is not attached on state {state!r}")
-        if program_name not in candidates[matches[0]][1]:
-            raise StateNotFoundError(
-                f"template {template_name!r} attached on state {state!r} declares no template_jq {program_name!r}"
-            )
-    else:
-        program_name = name
-        matches = [i for i, (_candidate, programs) in enumerate(candidates) if name in programs]
-        if not matches:
-            raise StateNotFoundError(f"no template_jq {name!r} on any template attached on state {state!r}")
-        if len(matches) > 1:
-            templates = ", ".join(sorted(candidates[i][0] for i in matches))
-            raise ValueValidationError(
-                f"template_jq {name!r} is declared by more than one template attached on state {state!r} "
-                f"({templates}); qualify it as <template>.{name}"
-            )
-    index = matches[0]
-    actual = candidates[index][1][program_name].purpose
-    if actual != purpose:
-        raise ValueValidationError(
-            f"template_jq {program_name!r} on template {candidates[index][0]!r} has purpose {actual!r}, "
-            f"needs {purpose!r}"
-        )
-    return index, program_name
 
 
 class _TemplateJqMixin(_StatesServiceBase):
@@ -169,13 +131,30 @@ class _TemplateJqMixin(_StatesServiceBase):
         template, template_version, path, parameters, declarations = candidates[index]
         return template, template_version, path, parameters, declarations, program_name
 
-    async def _render_template_jq(self, template: StateTemplate, version: int, program_name: str) -> tuple[str, str]:
-        """``program_name``'s rendered body and the sibling input-program prelude, from the rendered-template cache.
+    async def _bound_program(self, resolved: ResolvedProgram) -> BoundProgram:
+        """The resolved program rendered from the rendered-template cache and bound to its attachment.
 
         A body that cannot be fetched or rendered raises loudly.
         """
+        template, version, path, parameters, declarations, program_name = resolved
         rendered = await self._rendered(template, version)
-        return rendered.bodies[program_name], rendered.sibling_prelude
+        return BoundProgram(
+            template=template.name,
+            name=program_name,
+            params=list(template.template_jq[program_name].params),
+            body=rendered.bodies[program_name],
+            prelude=rendered.sibling_prelude,
+            path=path,
+            parameters=parameters,
+            declarations=declarations,
+        )
+
+    async def _record_data(
+        self, state: str, subject: StateSubject, conn: AsyncConnection[Any] | None
+    ) -> Mapping[str, Any] | None:
+        """``subject``'s record document — a bound unit's projection when one is bound — or ``None`` with no record."""
+        record = await self._projected_record_view(state, subject, conn=conn)
+        return record["data"] if record is not None else None
 
     async def eval_template_jq(
         self,
@@ -197,28 +176,8 @@ class _TemplateJqMixin(_StatesServiceBase):
         """
         self._ensure_available()
         version, _kinds, _default = await self._admit_subject(state, subject)
-        template, template_version, path, parameters, declarations, program_name = await self._resolve_template_jq(
-            state, version, name, purpose="input"
-        )
-        program = template.template_jq[program_name]
-        missing = sorted(set(program.params) - set(args))
-        unknown = sorted(set(args) - set(program.params))
-        if missing or unknown:
-            raise ValueValidationError(
-                f"template_jq {program_name!r} on template {template.name!r} takes params {program.params}"
-                + (f", missing {missing}" if missing else "")
-                + (f", got unknown {unknown}" if unknown else "")
-            )
-        record = await self._projected_record_view(state, subject, conn=conn)
-        subtree = _record_subtree(record["data"], path) if record is not None else {}
-        variables: dict[str, Any] = {"parameters": parameters, "declarations": declarations, "params": dict(args)}
-        body, prelude = await self._render_template_jq(template, template_version, program_name)
-        try:
-            value = await run_jq_first(body, subtree, prelude=prelude, variables=variables)
-        except Exception as exc:
-            raise ValueValidationError(
-                f"template_jq {program_name!r} on template {template.name!r} failed to evaluate: {exc}"
-            ) from exc
+        program = await self._bound_program(await self._resolve_template_jq(state, version, name, purpose="input"))
+        value = await evaluate_input_program(program, args, lambda: self._record_data(state, subject, conn))
         return TemplateJqResult(name=name, value=value)
 
     async def _resolve_template_jq_ops(
@@ -246,45 +205,8 @@ class _TemplateJqMixin(_StatesServiceBase):
         erase mark is admitted.
         """
         version, _kinds, _default = await self._admit_subject(state, subject, admit_erasing=admit_erasing)
-        template, template_version, path, parameters, declarations, program_name = await self._resolve_template_jq(
-            state, version, name, purpose="update"
-        )
-        program = template.template_jq[program_name]
-        if program.params:
-            if not isinstance(input_, dict):
-                raise ValueValidationError(
-                    f"template_jq {program_name!r} on template {template.name!r} declares params "
-                    f"{program.params}, so its input must be an object, got {type(input_).__name__}"
-                )
-            missing = sorted(set(program.params) - set(input_))
-            unknown = sorted(set(input_) - set(program.params))
-            if missing or unknown:
-                raise ValueValidationError(
-                    f"template_jq {program_name!r} on template {template.name!r} declares params {program.params}"
-                    + (f", input missing {missing}" if missing else "")
-                    + (f", input has undeclared {unknown}" if unknown else "")
-                )
-        record = await self._projected_record_view(state, subject, conn=conn)
-        subtree = _record_subtree(record["data"], path) if record is not None else {}
-        variables: dict[str, Any] = {"parameters": parameters, "declarations": declarations, "input": input_}
-        body, prelude = await self._render_template_jq(template, template_version, program_name)
-        try:
-            result = await run_jq_first(
-                body,
-                subtree,
-                prelude=prelude,
-                variables=variables,
-            )
-        except Exception as exc:
-            raise ValueValidationError(
-                f"template_jq {program_name!r} on template {template.name!r} failed to evaluate: {exc}"
-            ) from exc
-        if not isinstance(result, list):
-            raise ValueValidationError(
-                f"template_jq {program_name!r} on template {template.name!r} is an update program, so its jq must "
-                f"return an op batch (a list of ops), got {type(result).__name__}"
-            )
-        return [_rebase_op(op, path) for op in result]
+        program = await self._bound_program(await self._resolve_template_jq(state, version, name, purpose="update"))
+        return await derive_update_ops(program, input_, lambda: self._record_data(state, subject, conn))
 
     async def apply_template_jq(
         self,

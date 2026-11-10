@@ -22,7 +22,8 @@ from tai42_contract.template import TemplatedText
 from tai42_contract.tools import TOOL_EXTRA_IDEMPOTENCY_KEY
 from tai42_kit.interactions import evaluate_door_contract, parked_entries_for_jq
 from tai42_kit.utils.data import run_jq_first
-from tai42_kit.utils.data.jq_util import compile_check, get_compiled_jq
+from tai42_kit.utils.data.jq_errors import JqProgramError
+from tai42_kit.utils.data.jq_util import compile_check
 
 from tai42_skeleton.authz.execution import bind_execution_identity
 from tai42_skeleton.hooks.runs.models import (
@@ -59,7 +60,7 @@ class BaseHooksManager(ABC):
         self.settings = settings
 
     @staticmethod
-    def validate_jq_fields(params: HookParams) -> None:
+    async def validate_jq_fields(params: HookParams) -> None:
         """Reject inline jq that does not compile, at registration time.
 
         A broken condition or door-contract expression would otherwise surface only as a hook
@@ -72,16 +73,16 @@ class BaseHooksManager(ABC):
         condition: TemplatedText | None = params.condition
         if condition is not None and condition.content:
             try:
-                get_compiled_jq(condition.content)
-            except Exception as exc:
+                await compile_check(condition.content)
+            except JqProgramError as exc:
                 raise ValueError(f"hook {params.name!r}: condition is not valid jq: {exc}") from exc
         for field in ("start_expr", "cancel_expr", "resume_expr", "extras_expr"):
             text: TemplatedText | None = getattr(params, field)
             if text is None or not text.content:
                 continue
             try:
-                compile_check(text.content, variables=(PARKED_VARIABLE,))
-            except Exception as exc:
+                await compile_check(text.content, variables=(PARKED_VARIABLE,))
+            except JqProgramError as exc:
                 raise ValueError(f"hook {params.name!r}: {field} is not valid jq: {exc}") from exc
 
     async def _check_condition(self, hook: HookParams, payload: dict[str, Any]) -> bool:
@@ -201,7 +202,7 @@ class BaseHooksManager(ABC):
         hook. A refusal raises before anything is stored.
         """
         await assert_templates_stored(hook_template_refs(params), ValueError)
-        self.validate_jq_fields(params)
+        await self.validate_jq_fields(params)
         if params.state_binding is not None:
             from tai42_skeleton.app import instance
             from tai42_skeleton.tools import state_binding

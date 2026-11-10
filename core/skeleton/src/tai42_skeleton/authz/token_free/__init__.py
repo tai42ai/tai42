@@ -17,7 +17,8 @@ lex, parse and taint-analyze.
 
 from __future__ import annotations
 
-from tai42_kit.utils.data.jq_util import get_compiled_jq
+from tai42_kit.utils.data.jq_errors import JqProgramError
+from tai42_kit.utils.data.jq_util import compile_check
 
 from .budget import _Budget
 from .errors import TokenFreeConditionError
@@ -29,7 +30,7 @@ from .taint import _TaintAnalysis
 __all__ = ["TokenFreeConditionError", "assert_token_free_evaluable"]
 
 
-def assert_token_free_evaluable(condition_text: str) -> None:
+async def assert_token_free_evaluable(condition_text: str) -> None:
     """Assert that ``condition_text`` can be evaluated for a background execution.
 
     Returns on an evaluable condition; raises :class:`TokenFreeConditionError` naming the
@@ -38,8 +39,8 @@ def assert_token_free_evaluable(condition_text: str) -> None:
     """
     _assert_no_control_characters(condition_text)
     try:
-        get_compiled_jq(condition_text)
-    except ValueError as exc:
+        await compile_check(condition_text)
+    except JqProgramError as exc:
         raise TokenFreeConditionError(
             f"condition does not compile as a jq program ({exc}), so it cannot be shown evaluable for a background "
             "execution"

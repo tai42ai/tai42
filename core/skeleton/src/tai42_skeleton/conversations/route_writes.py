@@ -17,6 +17,7 @@ from dataclasses import dataclass
 
 from tai42_contract.app import tai42_app
 from tai42_contract.conversations import ConversationRoute
+from tai42_kit.utils.data.jq_errors import JqProgramError
 from tai42_kit.utils.data.jq_util import compile_check
 
 from tai42_skeleton.conversations.address import canonical_address
@@ -91,8 +92,8 @@ async def _assert_exprs_compile(route: ConversationRoute) -> None:
         except TEMPLATE_RENDER_ERRORS as exc:
             raise RouteWriteRefusedError(f"{field} {template_render_refusal(text, exc)}") from exc
         try:
-            compile_check(program, variables=variables)
-        except Exception as exc:
+            await compile_check(program, variables=variables)
+        except JqProgramError as exc:
             raise RouteWriteRefusedError(f"invalid {field}: {exc}") from exc
 
 

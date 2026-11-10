@@ -15,10 +15,13 @@ from tai42_contract.states.errors import (
     TemplateValidationError,
 )
 from tai42_contract.states.models import AttachBody, StateDeclaration
+from tai42_kit.compute import ComputeWorkerLostError
+from tai42_kit.utils.data import JqBudgetExceededError
 
 from tai42_skeleton.app import instance
 from tai42_skeleton.states import service as service_mod
 from tai42_skeleton.states.service import StatesService
+from tai42_skeleton.states.service import attachments as attachments_mod
 from tai42_skeleton.states.templates import validate_template
 
 from .._fakes.recording_storage import MappedStorage
@@ -169,7 +172,7 @@ async def test_detach_missing_raises(svc: StatesService) -> None:
 
 
 async def test_validate_attach_values_parameter_branches(svc: StatesService) -> None:
-    param_template = validate_template(
+    param_template = await validate_template(
         {
             "kind": "state-template",
             "name": "m",
@@ -186,13 +189,13 @@ async def test_validate_attach_values_parameter_branches(svc: StatesService) -> 
 
 
 async def test_validate_attach_values_declaration_branches(svc: StatesService) -> None:
-    plain = validate_template(
+    plain = await validate_template(
         {"kind": "state-template", "name": "m", "schema": {"type": "object", "properties": {"x": {"type": "string"}}}}
     )
     with pytest.raises(TemplateValidationError, match="declares no declarations section"):
         await svc._validate_attach_values(plain, {}, {"x": 1})
 
-    checked = validate_template(
+    checked = await validate_template(
         {
             "kind": "state-template",
             "name": "m",
@@ -212,7 +215,7 @@ async def test_validate_attach_values_declaration_branches(svc: StatesService) -
 
 
 async def test_validate_attach_values_check_string_message_and_eval_error(svc: StatesService) -> None:
-    stringy = validate_template(
+    stringy = await validate_template(
         {
             "kind": "state-template",
             "name": "m",
@@ -226,7 +229,7 @@ async def test_validate_attach_values_check_string_message_and_eval_error(svc: S
     with pytest.raises(TemplateValidationError, match="n must be positive"):
         await svc._validate_attach_values(stringy, {}, {"n": -1})
 
-    erroring = validate_template(
+    erroring = await validate_template(
         {
             "kind": "state-template",
             "name": "m",
@@ -239,6 +242,54 @@ async def test_validate_attach_values_check_string_message_and_eval_error(svc: S
     )
     with pytest.raises(TemplateValidationError, match="failed to evaluate"):
         await svc._validate_attach_values(erroring, {}, {"n": 1})
+
+
+async def test_a_pool_fault_in_the_declarations_check_is_not_the_author_s_error(
+    svc: StatesService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def _worker_lost(*_args: object, **_kwargs: object) -> object:
+        raise ComputeWorkerLostError("the compute worker ended before it returned a result")
+
+    checked = await validate_template(
+        {
+            "kind": "state-template",
+            "name": "m",
+            "schema": {"type": "object", "properties": {"x": {"type": "string"}}},
+            "declarations": {
+                "schema": {"type": "object", "properties": {"n": {"type": "integer"}}},
+                "check": {"content": ".n > 0"},
+            },
+        }
+    )
+    monkeypatch.setattr(attachments_mod, "run_jq_first", _worker_lost)
+    with pytest.raises(ComputeWorkerLostError):
+        await svc._validate_attach_values(checked, {}, {"n": 1})
+
+
+async def test_a_declarations_check_past_its_budget_is_the_author_s_refusal(
+    svc: StatesService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def _budget_exceeded(*_args: object, **_kwargs: object) -> object:
+        raise JqBudgetExceededError("jq evaluation exceeded 10s (JQ_TIMEOUT_SECONDS); its worker was killed")
+
+    checked = await validate_template(
+        {
+            "kind": "state-template",
+            "name": "m",
+            "schema": {"type": "object", "properties": {"x": {"type": "string"}}},
+            "declarations": {
+                "schema": {"type": "object", "properties": {"n": {"type": "integer"}}},
+                "check": {"content": ".n > 0"},
+            },
+        }
+    )
+    monkeypatch.setattr(attachments_mod, "run_jq_first", _budget_exceeded)
+    with pytest.raises(TemplateValidationError) as excinfo:
+        await svc._validate_attach_values(checked, {}, {"n": 1})
+    assert str(excinfo.value) == (
+        "template 'm' declarations check failed to evaluate: "
+        "jq evaluation exceeded 10s (JQ_TIMEOUT_SECONDS); its worker was killed"
+    )
 
 
 def test_validate_attach_path_refusals(svc: StatesService) -> None:
