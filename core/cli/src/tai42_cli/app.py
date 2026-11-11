@@ -22,15 +22,17 @@ client), :class:`~tai42_cli.client.ApiClient`, and the
 :mod:`tai42_cli.render` helpers.
 """
 
+import copy
+import functools
 import os
 from importlib.metadata import entry_points
-from typing import Any, cast
+from typing import Annotated, Any, cast
 
 import click
 import typer
 from dotenv import find_dotenv
 from tai42_contract.config.manager import CONFIG_MODE_ENV, CONFIG_MODE_PATTERN, FILE_CONFIG_MODE
-from typer.core import TyperGroup, TyperOption
+from typer.core import TyperGroup
 from typer.main import get_command
 
 from tai42_cli import completion, version
@@ -122,21 +124,39 @@ def _apply_json_flag(ctx: click.Context, _param: click.Parameter, value: bool | 
     return value
 
 
-def _json_flag_option() -> TyperOption:
-    """A fresh trailing ``--json/--no-json`` flag that merges into the context.
+def _json_flag_option() -> click.Parameter:
+    """A fresh copy of the trailing ``--json/--no-json`` flag, for one command."""
+    return copy.copy(_compiled_json_flag_option())
 
-    Built as a :class:`TyperOption` so its parse handling matches the Typer context
-    the compiled commands run under (a raw ``click.Option`` reads a context attribute
-    Typer's vendored context does not carry).
+
+@functools.cache
+def _compiled_json_flag_option() -> click.Parameter:
+    """The trailing ``--json/--no-json`` flag that merges into the context, compiled once.
+
+    The flag is declared on a one-command probe app and compiled through
+    :func:`typer.main.get_command`, so it is the option Typer itself builds: the
+    installed Typer's own option class, with the parse handling the Typer context the
+    compiled commands run under expects (a raw ``click.Option`` reads a context
+    attribute Typer's vendored context does not carry).
     """
-    return TyperOption(
-        param_decls=["--json/--no-json"],
-        is_flag=True,
-        default=None,
-        expose_value=False,
-        callback=_apply_json_flag,
-        help="Emit raw JSON instead of human tables.",
-    )
+
+    def probe(
+        json: Annotated[
+            bool | None,
+            typer.Option(
+                "--json/--no-json",
+                callback=_apply_json_flag,
+                expose_value=False,
+                help="Emit raw JSON instead of human tables.",
+            ),
+        ] = None,
+    ) -> None:  # pragma: no cover - only its compiled parameter is used
+        pass
+
+    probe_app = typer.Typer(add_completion=False)
+    probe_app.command()(probe)
+    (param,) = [p for p in get_command(probe_app).params if p.name == "json"]
+    return cast(click.Parameter, param)
 
 
 def inject_json_flag(command: click.Command) -> None:
@@ -158,7 +178,7 @@ def inject_json_flag(command: click.Command) -> None:
         for sub in subcommands.values():
             inject_json_flag(cast(click.Command, sub))
     else:
-        command.params.append(cast(click.Parameter, _json_flag_option()))
+        command.params.append(_json_flag_option())
 
 
 def mount_launcher(group: click.Group, launcher: click.Command, name: str) -> None:

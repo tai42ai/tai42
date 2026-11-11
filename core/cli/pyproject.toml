@@ -28,7 +28,7 @@ dependencies = [
     # The contract floor is rewritten by scripts/range_sync.py at release.
     "tai42-contract>=29.1,<30",
     "typer>=0.27.2",
-    # Imported directly (TyperGroup/TyperOption plumbing, click.shell_completion).
+    # Imported directly (TyperGroup plumbing, click.shell_completion).
     "click>=8.3",
     # The one HTTP client the remote commands talk through.
     "httpx>=0.28",
