@@ -38,7 +38,7 @@ def _redis_reachable(url: str) -> bool:
 
 pytestmark = pytest.mark.skipif(not _redis_reachable(_REDIS_URL), reason=f"no Redis reachable at {_REDIS_URL}")
 
-# The worker process: patch first, as the gevent pool's process prelude does, and bind asyncio's
+# The worker process: patch first and name the prelude, as the gevent pool's process prelude does, and bind asyncio's
 # future chaining after it, as the host's entry does; bind the suite's stub app (``conftest``); on
 # the host's loop, run a ticking task and a pubsub subscription, build the gevent-pool runtime,
 # delay one job by a second and run rq's work loop with its scheduler on a worker thread until it
@@ -54,9 +54,12 @@ _WORKER_SCRIPT = textwrap.dedent(
 
     bind_future_chaining()
 
+    import os
+
+    os.environ["TAI_PROCESS_PRELUDE"] = "gevent.monkey:patch_all"
+
     import asyncio
     import json
-    import os
     import sys
     import threading
     import time

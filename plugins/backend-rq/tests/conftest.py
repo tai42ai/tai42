@@ -335,6 +335,19 @@ def _unguarded_fork_gate(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _unshared_compute_pool(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the fork guard a test installs from sharing the test session's compute pool.
+
+    Sharing starts a serving thread for the life of the process and points every later fork at this
+    process's pool; each test stands for its own process, so one that shares does so in a process
+    it forks.
+    """
+    from tai42_kit.backend import fork_safety
+
+    monkeypatch.setattr(fork_safety, "share_compute_pool", lambda: None)
+
+
+@pytest.fixture(autouse=True)
 def liveness_path(monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory) -> Iterator[Path]:
     """Point the liveness file at a per-test path, so no test reads or writes the default one."""
     from tai42_kit.liveness import backend_liveness_settings
