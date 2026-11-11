@@ -10,8 +10,10 @@ from typing import Protocol, runtime_checkable
 class AppCompute(Protocol):
     """CPU-bound work off the event loop (``app.compute``).
 
-    A job runs in a worker process of the platform process's compute pool, so a job that holds
-    the interpreter lock for seconds leaves the caller's event loop serving every other request.
+    A job runs in a worker process of a compute pool: the platform process's own, the pool or pool
+    host of a process it was forked from, or a pool host of its own when the process runs under a
+    process prelude. So a job that holds the
+    interpreter lock for seconds leaves the caller's event loop serving every other request.
     A job is a picklable callable (a module-level function) with picklable arguments, and it
     returns a picklable result. A worker imports the job's module afresh in a process with no app
     bound, so that module imports without reaching ``tai42_app`` (no tool registration beside the
