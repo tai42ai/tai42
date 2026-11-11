@@ -4,12 +4,13 @@ The stack runs the queue-choice stack plus, for a backend that has them, one wor
 each serving only the queue named after its pool, and binds a stdio managed MCP server
 (``tai42_e2e_fixtures.managed_mcp_server``) on every worker. Such a worker restarts itself once, in
 place, through its runtime's prelude: its jobs run in the process the harness started, a job sent
-with a countdown runs there once it falls due, it runs two slow jobs as many at once as its pool
-declares (side by side, or one after the other), on a pool that can end a job at the job budget a
-job past it fails with that pool's budget error and the worker runs the next job (a pool that
-cannot end one skips that step), it applies a fleet ``reload_config`` (re-probing its stdio MCP
-child) and runs jobs after it, it logs no fork-gate refusal, and the harness's stop ends it with
-exit status 0.
+with a countdown runs there once it falls due, a job's callback whose jq ``expr`` maps the job's
+result into the follow-up tool's arguments runs there with the mapped values, it runs two slow
+jobs as many at once as its pool declares (side by side, or one after the other), on a pool that
+can end a job at the job budget a job past it fails with that pool's budget error and the worker
+runs the next job (a pool that cannot end one skips that step), it applies a fleet
+``reload_config`` (re-probing its stdio MCP child) and runs jobs after it, it logs no fork-gate
+refusal, and the harness's stop ends it with exit status 0.
 """
 
 from __future__ import annotations
@@ -131,6 +132,24 @@ async def _reload_fleet(stack: TaiStack) -> dict[str, str]:
     return {row["name"]: row["outcome"] for row in report["results"]}
 
 
+async def _jq_callback_record(stack: TaiStack, pool: str, key: str) -> dict[str, Any]:
+    """Send an ``e2e_worker_info`` job to ``pool``'s queue with a callback whose jq ``expr`` maps the
+    job's result into an ``e2e_record`` call under ``key``; return the record the callback left."""
+    callback = {"tool": "e2e_record", "expr": {"content": f'{{key: "{key}", value: (.pid | tostring)}}'}}
+    await _result(stack, await _send(stack, "e2e_worker_info", {"queue": pool, "callback_kwargs": callback}))
+
+    async def recorded() -> dict[str, Any] | None:
+        records = stack.records(key)
+        return json.loads(records[0]) if records else None
+
+    return await wait_for_async(
+        recorded,
+        deadline=_RESULT_TIMEOUT,
+        interval=0.2,
+        message=f"the {pool} worker's jq callback left no record",
+    )
+
+
 async def _start_slow_jobs(stack: TaiStack, pool: str, green: GreenPoolWorker, keys: list[str]) -> list[str]:
     """Send a slow job per key to ``pool``'s queue and wait until each has started, as many at once as
     the pool runs: side by side within ``_BOTH_STARTED_DEADLINE``, or one after the other, the next
@@ -176,9 +195,10 @@ async def _overrun_the_budget(stack: TaiStack, pool: str, past_budget_error: str
 
 @pytest.mark.parametrize("pool", _POOLS)
 # The stack boot inside the first case's timer (120) + the first job (60) + the delayed job (60) + the
-# slow jobs (2 x 8 + 2 x 60) + the overrunning job (60) + the job after it (60) + the reload call's read
-# bound (210) + the job after it (60) + the stop (60).
-@pytest.mark.timeout(880)
+# job with a jq callback and its record (2 x 60) + the slow jobs (2 x 8 + 2 x 60) + the overrunning
+# job (60) + the job after it (60) + the reload call's read bound (210) + the job after it (60) + the
+# stop (60).
+@pytest.mark.timeout(1000)
 async def test_a_green_pool_worker_runs_its_jobs_reloads_and_stops_clean(
     green_pool_stack: TaiStack, pool: str, uniq: Callable[[str], str]
 ) -> None:
@@ -196,6 +216,9 @@ async def test_a_green_pool_worker_runs_its_jobs_reloads_and_stops_clean(
 
     delayed = await _worker_info(stack, pool, countdown=1)
     assert delayed["pid"] == worker.pid, (delayed, worker.log_tail())
+
+    record = await _jq_callback_record(stack, pool, uniq(f"{pool}-jq-callback"))
+    assert record == {"value": str(worker.pid), "pid": worker.pid}, (record, worker.log_tail())
 
     task_ids = await _start_slow_jobs(stack, pool, green, [uniq(f"{pool}-slow") for _ in range(2)])
     for task_id in task_ids:
