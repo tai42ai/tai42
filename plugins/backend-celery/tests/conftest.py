@@ -390,6 +390,19 @@ def _fresh_progress_registrations(monkeypatch: pytest.MonkeyPatch) -> Iterator[N
         steps.update(kept)
 
 
+@pytest.fixture(autouse=True)
+def _unshared_compute_pool(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the fork guard a test installs from sharing the test session's compute pool.
+
+    Sharing starts a serving thread for the life of the process and points every later fork at this
+    process's pool; each test stands for its own process, so one that shares does so in a process
+    it forks.
+    """
+    from tai42_kit.backend import fork_safety
+
+    monkeypatch.setattr(fork_safety, "share_compute_pool", lambda: None)
+
+
 @pytest.fixture
 def host_loop() -> Iterator[asyncio.AbstractEventLoop]:
     """A loop the host runs on a thread of its own, as it runs its loop on a green pool's main green thread."""
