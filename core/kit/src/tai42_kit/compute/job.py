@@ -34,6 +34,11 @@ class JobOutcome:
     traceback: str | None = None
 
 
+def job_name(fn: Callable[..., object]) -> str:
+    """The ``<module>.<qualname>`` a job's errors name it by."""
+    return f"{getattr(fn, '__module__', '?')}.{getattr(fn, '__qualname__', repr(fn))}"
+
+
 def pack(fn: Callable[..., object], args: tuple[object, ...]) -> bytes:
     """Pickle the job and its arguments; a job or an argument that cannot be pickled raises here."""
     return pickle.dumps((fn, args))
@@ -84,12 +89,12 @@ def _message(exc: BaseException) -> str:
         return f"<str() raised {type(str_error).__module__}.{type(str_error).__qualname__}>"
 
 
-def outcome_value(outcome: JobOutcome, job_name: str) -> Any:
+def outcome_value(outcome: JobOutcome, name: str) -> Any:
     """Return the job's result, or raise what the job raised, in the caller.
 
     A raised exception is raised as itself, the worker's traceback chained as its cause; one that
     does not rebuild raises :class:`~tai42_kit.compute.errors.ComputeJobFailedError` naming
-    ``job_name`` and the exception's type and message, with the same cause. A result that cannot
+    ``name`` and the exception's type and message, with the same cause. A result that cannot
     be unpickled here raises the unpickling error.
     """
     if outcome.result is not None:
@@ -97,4 +102,4 @@ def outcome_value(outcome: JobOutcome, job_name: str) -> Any:
     cause = WorkerTraceback(outcome.traceback)
     if outcome.exception is not None:
         raise pickle.loads(outcome.exception) from cause  # noqa: S301 - pickled by run_job in the pool's own worker
-    raise ComputeJobFailedError(f"compute job {job_name} raised {outcome.failure}") from cause
+    raise ComputeJobFailedError(f"compute job {name} raised {outcome.failure}") from cause

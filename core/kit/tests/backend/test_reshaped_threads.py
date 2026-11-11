@@ -14,9 +14,6 @@ import asyncio
 import asyncio.futures
 import concurrent.futures
 import json
-import subprocess
-import sys
-import textwrap
 import threading
 import time
 
@@ -24,10 +21,7 @@ import pytest
 
 from tai42_kit.backend.reshaped_threads import bind_future_chaining, future_chaining_bound
 
-_PRELUDES = ["gevent.monkey:patch_all", "eventlet:monkey_patch"]
-
-# Bound on one reshaped process: its prelude's import and one door take well under a second.
-_PROCESS_BOUND_SECONDS = 30
+from .preludes import RESHAPING_PRELUDES, run_reshaped
 
 # The reshaped process: run the prelude named in argv[1], bind the chaining, then run the door
 # named in argv[2] and print its outcome. Nothing on the host loop arms a timer, so only the
@@ -132,20 +126,11 @@ print(json.dumps(DOORS[door]()), flush=True)
         ("own_loop_on_a_thread", "worked"),
     ],
 )
-@pytest.mark.parametrize("prelude", _PRELUDES)
+@pytest.mark.parametrize("prelude", RESHAPING_PRELUDES)
 def test_a_future_another_reshaped_thread_completes_or_cancels_wakes_its_loop(
     prelude: str, door: str, outcome: str
 ) -> None:
-    try:
-        completed = subprocess.run(
-            [sys.executable, "-c", textwrap.dedent(_RESHAPED), prelude, door],
-            capture_output=True,
-            text=True,
-            timeout=_PROCESS_BOUND_SECONDS,
-            check=False,
-        )
-    except subprocess.TimeoutExpired as exc:
-        pytest.fail(f"{door} under {prelude} never woke its loop within {_PROCESS_BOUND_SECONDS} s:\n{exc.stderr}")
+    completed = run_reshaped(_RESHAPED, prelude, door)
 
     assert completed.returncode == 0, completed.stderr
     assert json.loads(completed.stdout.strip().splitlines()[-1]) == outcome, completed.stderr

@@ -178,9 +178,60 @@ serves as an orchestrator's exec liveness probe.
 
 `tai42_kit.compute` runs CPU-bound work in worker processes, so a job that holds
 the interpreter lock for seconds leaves the caller's event loop serving every
-other request. `compute_pool()` returns the process's `ComputePool`, starting it
-on the first call in the process; `stop_compute_pool()` ends it (the skeleton's
-lifespan does this at shutdown). `await compute_pool().run(fn, *args,
+other request. `compute_pool()` returns what runs the process's jobs, by the
+kind of process, the first of these that applies:
+
+- a process forked, at any remove, from one that shares its pool or from one
+  whose pool host had started and was not stopped by it: that pool or host,
+  which it never stops or replaces;
+- a process started through a process prelude (`TAI_PROCESS_PRELUDE` names
+  one), or forked at any remove from one: a pool host of its own, which its
+  first job starts;
+- any other process: its own `ComputePool`, started on the first call, or on
+  the first job of a child it shares the pool with.
+
+`stop_compute_pool()` ends the process's own pool, or the pool host it started
+(the skeleton's lifespan does this at shutdown). A process that forks children
+which run compute jobs calls `share_compute_pool()` first: each child that keeps
+the descriptors it inherited then runs its jobs in the parent's pool (or, when
+the parent itself reaches another process's pool, in that one), under the
+same timeout and cancellation, and starts no workers of its own. What a job
+raises reaches the child as itself; a pool error (`TimeoutError`,
+`ComputeWorkerLostError`, `ComputePoolUnavailableError`) reaches it without its
+cause. A child that closed its inherited descriptors, or whose pool's process ended or
+stopped serving, gets `ComputePoolUnavailableError` on a job. The backend fork
+safety, `tai42_kit.backend.fork_safety.guard_forks`, shares in a process whose
+threads are OS threads; in a process started through a process prelude, or
+forked at any remove from one, `share_compute_pool()` changes nothing: the list above says where its
+children's jobs run.
+`share_compute_pool()` raises `ComputePoolUnavailableError` where it cannot
+start serving (a process at its descriptor limit, or a serving thread that
+cannot start or run a loop of its own).
+
+A pool runs only in a process whose threads are OS threads: its threads wait on
+its workers, which a process a prelude reshaped does not let them do, so
+`ComputePool.start()` there raises `ComputePoolUnavailableError`. Such a process
+runs its jobs in a pool host instead: a fresh interpreter, started with the
+process's interpreter flags, its environment less `TAI_PROCESS_PRELUDE` and its
+module search path, that runs a pool of its own (sized by `COMPUTE_WORKERS`) and
+serves the process's jobs over a socket pair, with the same timeout,
+cancellation and errors as a shared parent's pool. The first job pays the host's
+start (about a second, once per host) and every job one socket hop (under a
+millisecond); a process that runs no compute job starts no host. The host ends
+when the process stops it, and when the process and every forked descendant of
+it that holds the host's end ended, however they ended: its pool's workers end with it. A host that ended fails the
+jobs sent to it that had not returned with `ComputePoolUnavailableError`; the
+next job starts a fresh host and logs the warning "compute pool host replaced
+after it ended". A child forked from the process once its host had started, and before the
+process stopped it, keeps reaching that host, and its jobs raise `ComputePoolUnavailableError` once that
+host ended; a child forked while the host starts holds none of its sockets (but for an end numbered at or
+above a soft descriptor limit lowered below it, which a process prelude that puts off a watched
+socket's close keeps in the child until its event loop runs). A
+job the serving process (a pool host, or a sharing parent) could not take
+because it has no file descriptor free raises `ComputePoolUnavailableError` in
+its caller alone; the serving process logs it and keeps serving its other jobs.
+
+`await compute_pool().run(fn, *args,
 timeout=...)` runs `fn(*args)` in a worker started with `spawn`: `fn` is a
 module-level function and its arguments and result are picklable. The worker
 imports `fn`'s module afresh in a process with no app bound, so that module must
@@ -194,18 +245,22 @@ the caller as itself, with the worker's traceback chained as its cause
 cause. Past `timeout` (seconds, counted from the moment a worker takes the job
 up) the worker is terminated at once and replaced, and the caller gets
 `TimeoutError`; nothing the job itself started (a process, a file) is cleaned
-up. Cancelling the caller terminates the worker the same way. A pool that is not
+up. Cancelling the caller terminates the worker the same way. The timeout is
+kept by the process that runs the pool: when that process is killed, a worker
+runs its job to the end before it ends. A pool that is not
 started, was stopped or broke raises `ComputePoolUnavailableError`, and a worker
 that ends mid-job raises `ComputeWorkerLostError`; both classify as an
 unavailable platform transport (`ErrorKind.UNAVAILABLE`, `is_transport_error`
 true), and a job never falls back to running on the caller's loop. When the pool
 breaks because an idle worker died (for example, killed by the out-of-memory
-killer), the next `compute_pool()` call stops it, starts a fresh pool and logs
+killer), the next `compute_pool()` call, or the next job of a child the pool is
+shared with, stops it, starts a fresh pool and logs
 the warning "compute pool replaced after its workers died"; a job that was
 running in the broken pool still raises `ComputePoolUnavailableError`. A forked
-child never uses the pool it inherited: its first job starts its own.
+child's inherited pool state is reset, and the list above picks again. A
+pool still running when its process exits is stopped by that exit.
 
-`COMPUTE_WORKERS` (default `2`, at least `1`) sizes each process's pool; a job
+`COMPUTE_WORKERS` (default `2`, at least `1`) sizes each pool; a job
 waits for a free worker when every worker is busy. A plugin reaches the pool
 through the app as `tai42_app.compute.run(fn, *args, timeout=...)`.
 

@@ -1,4 +1,4 @@
-"""The ``COMPUTE_`` settings group: how many worker processes the process's compute pool runs."""
+"""The ``COMPUTE_`` settings group: how many worker processes a compute pool runs."""
 
 from pydantic import Field
 from pydantic_settings import SettingsConfigDict
@@ -15,9 +15,10 @@ class ComputeSettings(TaiBaseSettings):
         default=2,
         ge=1,
         description=(
-            "The number of worker processes in each platform process's compute pool. A job waits for a free "
-            "worker when every worker is busy. The pool is sized when it starts, so a change converges through "
-            "a process recycle."
+            "The number of worker processes in each compute pool, wherever the pool a platform process's jobs "
+            "run in lives: the process's own, the one the process it was forked from shares, runs a host for or "
+            "reaches, or its pool host's. A job waits for a free worker when every worker is busy. The pool is "
+            "sized when it starts, so a change converges through a process recycle."
         ),
         json_schema_extra={"reload": "recycle"},
     )

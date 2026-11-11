@@ -8,7 +8,11 @@ from tai42_contract.errors import ErrorKind
 
 
 class ComputePoolUnavailableError(RuntimeError):
-    """The pool cannot take a job: it was never started, it was stopped, or it broke."""
+    """The compute pool facility cannot serve: a pool, a pool host or a share cannot run or start, or ended.
+
+    It is raised when a job cannot reach a pool that runs it, or gets no result from it, and when
+    a pool's share cannot start serving the children of its process.
+    """
 
     __tai_error_kind__ = ErrorKind.UNAVAILABLE
     __tai_transport_error__ = True
