@@ -1,4 +1,4 @@
-"""The served-media ingestion facet (``app.media``)."""
+"""The served-media facet (``app.media``): ingest, bind and read stored media."""
 
 from __future__ import annotations
 
@@ -6,17 +6,18 @@ from collections.abc import AsyncIterator
 from typing import Protocol, runtime_checkable
 
 from tai42_contract.conversations import InboundMediaKind
-from tai42_contract.interactions.models.media import IngestedMedia, MediaOrigin
+from tai42_contract.interactions.models.media import IngestedMedia, MediaOrigin, StoredMedia
 
 
 @runtime_checkable
 class AppMedia(Protocol):
-    """The served-media ingestion namespace (``app.media``).
+    """The served-media seam (ingest, bind, read) — the ``app.media`` namespace.
 
     A channel adapter or the web upload door streams inbound bytes through the ONE
     ``ingest_media`` chokepoint; the platform caps, sniffs, stores, and mints a served
-    reference, returning the typed :class:`IngestedMedia`. The body is the skeleton's; this facet
-    is the contract the doors and the impl agree on.
+    reference, returning the typed :class:`IngestedMedia`. ``read_media`` reads a stored media
+    back by its id under the served route's rules. The body is the skeleton's; this facet is the
+    contract the doors and the impl agree on.
     """
 
     async def ingest_media(
@@ -60,6 +61,26 @@ class AppMedia(Protocol):
         are indistinguishable to the caller);
         :class:`~tai42_contract.interactions.MediaAlreadyBoundError` — the item is already bound to a
         DIFFERENT message. Returns the now-bound :class:`IngestedMedia` (``pending == False``).
+        """
+        ...
+
+    async def read_media(self, media_id: str, *, max_bytes: int) -> StoredMedia:
+        """Read the stored media the served route ``{MEDIA_ROUTE_PREFIX}{media_id}`` serves.
+
+        The same rules as that route apply. ``max_bytes`` is the caller's bound on the size it
+        accepts; a larger media is refused, never truncated, and an inbound item is refused from its
+        recorded size before its bytes are loaded. Returns the bytes and their stored MIME type.
+        Raises loudly, never silently:
+        :class:`~tai42_contract.interactions.MediaNotFoundError` — one uniform error for a malformed
+        id, an unknown id (never stored, or its media removed), an item still pending (not yet bound
+        to its message), an inbound record whose bytes are absent, and a deployment with no media
+        store configured (no oracle; the route answers a malformed id with its own error and the rest
+        alike);
+        :class:`~tai42_contract.interactions.MediaStoreUnavailableError` — the record exists and no
+        blob provider is registered;
+        :class:`~tai42_contract.interactions.MediaTooLargeError` — the stored media is larger than
+        ``max_bytes``.
+        A fault of the store itself propagates unchanged.
         """
         ...
 

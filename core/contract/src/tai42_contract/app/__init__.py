@@ -111,7 +111,7 @@ class TaiApp(Protocol):
 
     @property
     def media(self) -> AppMedia:
-        """Served-media ingestion entry surface for channel adapters and the upload door."""
+        """Served-media seam (ingest, bind, read) for channel adapters, plugins and the upload door."""
         ...
 
     @property

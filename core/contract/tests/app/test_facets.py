@@ -113,9 +113,10 @@ EXPECTED_FACADE = {
     "send_recorded",
     "register_target_validator",
     "notify_inbound_rejected",
-    # media (2)
+    # media (3)
     "ingest_media",
     "bind_media",
+    "read_media",
     # monitoring (2)
     "register_monitoring",
     "active",
@@ -373,11 +374,11 @@ def test_facade_partition_against_frozen_surface():
     assert union == EXPECTED_FACADE, (
         f"only-facade={sorted(union - EXPECTED_FACADE)} only-frozen={sorted(EXPECTED_FACADE - union)}"
     )
-    # 179 (sub-protocol, member) pairs over 175 distinct names — ``store`` is exposed
+    # 180 (sub-protocol, member) pairs over 176 distinct names — ``store`` is exposed
     # by AppVersioning, AppPresets and AppToolMeta (two duplicate pairs), and
     # ``register``/``get`` by both AppWebhookVerifiers and AppChannels (one each).
-    assert len(union) == 175, f"union={len(union)}"
-    assert total == 179 == len(union) + 4, f"partition broken: sum={total} union={len(union)}"
+    assert len(union) == 176, f"union={len(union)}"
+    assert total == 180 == len(union) + 4, f"partition broken: sum={total} union={len(union)}"
 
 
 def test_taiapp_exposes_twenty_six_namespaces():
@@ -847,6 +848,27 @@ def test_app_media_facet_methods_are_coroutines_with_the_expected_parameters():
     assert list(bind_sig.parameters) == ["self", "media_id", "origin"]
     assert bind_sig.parameters["media_id"].kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
     assert bind_sig.parameters["origin"].kind is inspect.Parameter.KEYWORD_ONLY
+    assert inspect.iscoroutinefunction(AppMedia.read_media)
+    read_sig = inspect.signature(AppMedia.read_media)
+    assert list(read_sig.parameters) == ["self", "media_id", "max_bytes"]
+    assert read_sig.parameters["media_id"].kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
+    assert read_sig.parameters["max_bytes"].kind is inspect.Parameter.KEYWORD_ONLY
+    assert read_sig.parameters["max_bytes"].default is inspect.Parameter.empty
+    assert protocol_members(AppMedia) == {"ingest_media", "bind_media", "read_media"}
+
+
+def test_stored_media_is_a_frozen_value_of_mime_and_bytes():
+    from pydantic import ValidationError
+
+    from tai42_contract.interactions import StoredMedia
+    from tai42_contract.interactions.models import StoredMedia as ModelsStoredMedia
+
+    assert StoredMedia is ModelsStoredMedia
+    assert set(StoredMedia.model_fields) == {"mime", "data"}
+    stored = StoredMedia(mime="image/png", data=b"\x89PNG")
+    assert (stored.mime, stored.data) == ("image/png", b"\x89PNG")
+    with pytest.raises(ValidationError):
+        stored.mime = "image/jpeg"  # pyright: ignore[reportAttributeAccessIssue]
 
 
 def test_accounts_facet_exposes_the_authenticated_credential():

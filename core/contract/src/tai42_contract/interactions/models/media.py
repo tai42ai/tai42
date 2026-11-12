@@ -4,7 +4,7 @@
 ``check_media_list`` bounds a list of them; ``validate_action_url`` validates a tappable
 link-action URL; ``served_media_id`` extracts a served-media reference's stored id.
 ``MediaOrigin`` and ``IngestedMedia`` are the origin/result shapes of the served-media
-ingestion seam.
+ingestion seam; ``StoredMedia`` is the result of its read.
 """
 
 from __future__ import annotations
@@ -350,6 +350,15 @@ class IngestedMedia(BaseModel):
     sha256: str
     mime: str
     pending: bool = False
+
+
+class StoredMedia(BaseModel):
+    """One stored media read back by its id: the bytes and their stored MIME type. Frozen."""
+
+    model_config = ConfigDict(frozen=True)
+
+    mime: str
+    data: bytes
 
 
 def check_media_list(items: Sequence[MediaItem]) -> None:
