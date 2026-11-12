@@ -248,6 +248,7 @@ function FormSurface({
   value,
   errors,
   slots,
+  imageSources,
   idPrefix,
   reactionError,
   busy,
@@ -276,6 +277,7 @@ function FormSurface({
   readonly value: unknown;
   readonly errors: SchemaFormErrors;
   readonly slots: Readonly<Record<string, unknown>>;
+  readonly imageSources: ReadonlyMap<string, string | null>;
   readonly idPrefix: string;
   readonly reactionError: ReactionError | null;
   readonly busy: boolean;
@@ -308,7 +310,7 @@ function FormSurface({
         </p>
       ) : null}
       <div className="tcw-form-page" ref={pageRef}>
-        <DisplayBlocks blocks={page.display} slots={slots} />
+        <DisplayBlocks blocks={page.display} slots={slots} imageSources={imageSources} />
         {page.kind === 'review' ? (
           <ReviewReadback schema={schema} value={objectValue} fieldWording={fieldWording} />
         ) : (
@@ -390,6 +392,7 @@ export function SchemaFormAnswer(
       value={form.value}
       errors={form.errors}
       slots={form.slots}
+      imageSources={form.imageSources}
       idPrefix={idPrefix}
       reactionError={form.reactionError}
       busy={form.busy}

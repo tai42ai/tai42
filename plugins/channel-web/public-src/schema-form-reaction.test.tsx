@@ -432,3 +432,116 @@ describe('SchemaFormAnswer display + review', () => {
     await waitFor(() => expect(screen.getByText('Dependent')).toBeInTheDocument());
   });
 });
+
+describe('SchemaFormAnswer image slots', () => {
+  const schema: JsonSchema = {
+    type: 'object',
+    properties: { qty: { type: 'string', title: 'Qty' } },
+  };
+
+  /** One page carrying the `chart` image slot, with or without a starting source. */
+  function chartPage(src: string | null): readonly FormPage[] {
+    return [
+      {
+        title: '',
+        fields: ['qty'],
+        display: [block({ kind: 'image', slot: 'chart', src, alt: 'Chart' })],
+        kind: 'input',
+        buttonLabel: null,
+      },
+    ];
+  }
+
+  /** A fetch stub answering each reaction round-trip with the next update in turn. */
+  function stubUpdates(...updates: Record<string, unknown>[]): void {
+    const fetchMock = vi.fn();
+    for (const update of updates) fetchMock.mockResolvedValueOnce(okUpdate(update));
+    vi.stubGlobal('fetch', fetchMock);
+  }
+
+  it("draws a reaction's picture in place of the block's own source", async () => {
+    const user = userEvent.setup();
+    stubUpdates({ display: { chart: 'https://a.example/2.png' } });
+    renderCard(
+      formQuestion(
+        schema,
+        null,
+        chartPage('https://a.example/1.png'),
+        reactions({ fieldChanged: ['qty'] }),
+      ),
+    );
+    expect(screen.getByRole('img', { name: 'Chart' })).toHaveAttribute(
+      'src',
+      'https://a.example/1.png',
+    );
+
+    await user.type(screen.getByRole('textbox'), 'x');
+
+    await waitFor(() =>
+      expect(screen.getByRole('img', { name: 'Chart' })).toHaveAttribute(
+        'src',
+        'https://a.example/2.png',
+      ),
+    );
+    expect(screen.getByTestId('form-slot-chart')).toBe(screen.getByRole('img', { name: 'Chart' }));
+  });
+
+  it('turns a source-less slot from its alt text into the picture, and back on null', async () => {
+    const user = userEvent.setup();
+    stubUpdates({ display: { chart: 'https://a.example/2.png' } }, { display: { chart: null } });
+    renderCard(formQuestion(schema, null, chartPage(null), reactions({ fieldChanged: ['qty'] })));
+    expect(screen.getByText('Chart')).toBeInTheDocument();
+    expect(screen.queryByRole('img')).not.toBeInTheDocument();
+
+    await user.type(screen.getByRole('textbox'), 'x');
+    await waitFor(() =>
+      expect(screen.getByRole('img', { name: 'Chart' })).toHaveAttribute(
+        'src',
+        'https://a.example/2.png',
+      ),
+    );
+
+    await user.type(screen.getByRole('textbox'), 'y');
+    await waitFor(() => expect(screen.queryByRole('img')).not.toBeInTheDocument());
+    expect(screen.getByText('Chart')).toBeInTheDocument();
+  });
+
+  it('refuses an update whose image value is not an https source, keeping the first picture', async () => {
+    const user = userEvent.setup();
+    stubUpdates({ display: { chart: 'http://a.example/2.png' } });
+    renderCard(
+      formQuestion(
+        schema,
+        null,
+        chartPage('https://a.example/1.png'),
+        reactions({ fieldChanged: ['qty'] }),
+      ),
+    );
+
+    await user.type(screen.getByRole('textbox'), 'x');
+
+    await waitFor(() =>
+      expect(screen.getByTestId('form-reaction-error')).toHaveTextContent(
+        'The form could not update: the reaction door returned a malformed form update',
+      ),
+    );
+    expect(screen.getByRole('img', { name: 'Chart' })).toHaveAttribute(
+      'src',
+      'https://a.example/1.png',
+    );
+  });
+
+  it('never draws a send-data value named like an image slot', () => {
+    renderCard(
+      formQuestion(
+        schema,
+        { values: { chart: 'https://a.example/9.png' }, options: {} },
+        chartPage(null),
+        reactions({ fieldChanged: ['qty'] }),
+      ),
+    );
+
+    expect(screen.queryByRole('img')).not.toBeInTheDocument();
+    expect(screen.getByText('Chart')).toBeInTheDocument();
+  });
+});

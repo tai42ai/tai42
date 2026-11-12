@@ -96,13 +96,16 @@ export interface FormReactions {
 
 /** The form update a reaction door returns: `values` sets field values; `options`
  * replaces the per-send choice list of option-bearing fields; `errors` shows per-field
- * messages (keyed by field name); `display` fills display slots (keyed by slot name) — a
- * computed total among them. Each is empty when the reaction supplied none. */
+ * messages (keyed by field name); `display` fills text display slots (keyed by slot name) —
+ * a computed total among them; `images` fills image slots. Each is empty when the reaction
+ * supplied none. */
 export interface FormUpdate {
   readonly values: Readonly<Record<string, unknown>>;
   readonly options: Readonly<Record<string, readonly FormOptionData[]>>;
   readonly errors: Readonly<Record<string, string>>;
   readonly display: Readonly<Record<string, unknown>>;
+  /** A reaction's vetted source per image slot; null clears the picture. */
+  readonly images: ReadonlyMap<string, string | null>;
 }
 
 /** Which of the three declared events a reaction round-trip reports. */

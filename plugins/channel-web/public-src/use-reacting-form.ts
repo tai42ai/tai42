@@ -18,6 +18,7 @@ import {
   changedTopLevelKeys,
   errorsForFields,
   firstPageWithError,
+  imageSlotsOf,
   initialFormValue,
   isPlainObject,
   resolvePages,
@@ -56,6 +57,7 @@ export interface ReactingForm {
   readonly errors: SchemaFormErrors;
   readonly options: Readonly<Record<string, readonly FormOptionData[]>>;
   readonly slots: Readonly<Record<string, unknown>>;
+  readonly imageSources: ImageSources;
   readonly page: FormPage;
   readonly pageIndex: number;
   readonly pageCount: number;
@@ -72,6 +74,7 @@ export interface ReactingForm {
 }
 
 type OptionMap = Readonly<Record<string, readonly FormOptionData[]>>;
+type ImageSources = ReadonlyMap<string, string | null>;
 
 interface FormState {
   readonly value: unknown;
@@ -83,6 +86,7 @@ interface FormState {
   readonly resetErrors: () => void;
   readonly options: OptionMap;
   readonly slots: Readonly<Record<string, unknown>>;
+  readonly imageSources: ImageSources;
   readonly applyUpdate: (update: FormUpdate) => void;
 }
 
@@ -95,8 +99,10 @@ const EMPTY_PAGE: FormPage = {
   buttonLabel: null,
 };
 
-/** The value, validation/reaction errors, per-send choices, and display slots of one open
- * form, plus `applyUpdate` which folds a reaction's returned update into all of them. */
+/** The value, validation/reaction errors, per-send choices, display slots and image-slot
+ * sources of one open form, plus `applyUpdate` which folds a reaction's returned update into
+ * all of them. Image sources come from a reaction only, never from the send values, so every
+ * `src` an image slot draws went through the update parser's vetting. */
 function useFormState(schema: JsonSchema, formData: FormPrefill | null): FormState {
   const [value, setValue] = useState<unknown>(() => initialFormValue(schema, formData));
   const [errors, setErrors] = useState<SchemaFormErrors>({});
@@ -107,6 +113,7 @@ function useFormState(schema: JsonSchema, formData: FormPrefill | null): FormSta
   const [slots, setSlots] = useState<Record<string, unknown>>(() => ({
     ...(formData?.values ?? {}),
   }));
+  const [imageSources, setImageSources] = useState<ImageSources>(() => new Map());
   const applyUpdate = (update: FormUpdate): void => {
     if (Object.keys(update.values).length > 0) {
       setValue((current: unknown) => ({
@@ -118,6 +125,7 @@ function useFormState(schema: JsonSchema, formData: FormPrefill | null): FormSta
       setOptions((cur) => ({ ...cur, ...update.options }));
     setReactionErrors(update.errors);
     if (Object.keys(update.display).length > 0) setSlots((cur) => ({ ...cur, ...update.display }));
+    if (update.images.size > 0) setImageSources((cur) => new Map([...cur, ...update.images]));
   };
   return {
     value,
@@ -131,6 +139,7 @@ function useFormState(schema: JsonSchema, formData: FormPrefill | null): FormSta
     },
     options,
     slots,
+    imageSources,
     applyUpdate,
   };
 }
@@ -153,9 +162,11 @@ interface ReactionRunner {
 }
 
 /** The reaction round-trip: fire one event, apply only the LATEST response, and surface a
- * failure loudly (returning `null` so a gated page/submit holds). */
+ * failure loudly (returning `null` so a gated page/submit holds). `pages` are the form's
+ * resolved pages, whose image slots the update parser vets. */
 function useReactionRunner(
   interactionId: string | null,
+  pages: readonly FormPage[],
   applyUpdate: (update: FormUpdate) => void,
 ): ReactionRunner {
   const [reacting, setReacting] = useState(false);
@@ -170,7 +181,7 @@ function useReactionRunner(
     setReacting(true);
     setReactionError(null);
     try {
-      const update = await reactToForm(interactionId, event, partial);
+      const update = await reactToForm(interactionId, event, partial, imageSlotsOf(pages));
       if (mine !== seq.current) return update;
       applyUpdate(update);
       return update;
@@ -288,7 +299,7 @@ export function useReactingForm(input: ReactingFormInput): ReactingForm {
   const stepped = resolvedPages.length > 1;
   const [pageIndex, setPageIndex] = useState(0);
   const st = useFormState(schema, formData);
-  const runner = useReactionRunner(interactionId, st.applyUpdate);
+  const runner = useReactionRunner(interactionId, resolvedPages, st.applyUpdate);
   const { pageRef, headingRef, armStepMove } = useStepFocus(pageIndex);
   // `resolvePages` always yields at least one page; the fallback never renders.
   const page = resolvedPages[Math.min(pageIndex, resolvedPages.length - 1)] ?? EMPTY_PAGE;
@@ -310,6 +321,7 @@ export function useReactingForm(input: ReactingFormInput): ReactingForm {
     errors: { ...st.errors, ...st.reactionErrors },
     options: st.options,
     slots: st.slots,
+    imageSources: st.imageSources,
     page,
     pageIndex,
     pageCount: resolvedPages.length,

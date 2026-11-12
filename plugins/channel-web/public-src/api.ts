@@ -390,14 +390,16 @@ function reactionEndpoint(interactionId: string): string {
  * `tai_web_session` cookie rides it on its own, exactly as every other call here); the door
  * forwards it server-side to the interaction's ticket react door and returns the update.
  *
- * A non-2xx becomes a {@link ChatApiError}; a 2xx whose body is not a well-formed update
- * throws LOUDLY. The caller surfaces either as a visible notice and never applies a stale
+ * `imageSlots` names the form's image slots, whose values the update parser vets as an
+ * image source. A non-2xx becomes a {@link ChatApiError}; a 2xx whose body is not a
+ * well-formed update throws LOUDLY. The caller surfaces either as a visible notice and never applies a stale
  * value — a failed reaction holds the form open rather than accepting an unvetted change.
  */
 export async function reactToForm(
   interactionId: string,
   event: ReactionEvent,
   values: Record<string, unknown>,
+  imageSlots: ReadonlySet<string>,
 ): Promise<FormUpdate> {
   const response = await fetch(reactionEndpoint(interactionId), {
     method: 'POST',
@@ -406,7 +408,7 @@ export async function reactToForm(
   });
   if (!response.ok) throw await failure(response, REACTION_DOOR);
   const data = await readData<unknown>(response, 'updating a form');
-  const update = formUpdateOf(data);
+  const update = formUpdateOf(data, imageSlots);
   if (update === undefined) throw new Error('the reaction door returned a malformed form update');
   return update;
 }

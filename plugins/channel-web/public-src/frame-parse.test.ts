@@ -20,6 +20,7 @@ import {
 } from '@/frame-parse';
 
 const MEDIA_REF = `/api/interactions/media/${'M'.repeat(43)}`;
+const NO_IMAGE_SLOTS: ReadonlySet<string> = new Set();
 
 describe('isRecord', () => {
   it('accepts a plain object and rejects arrays, null, and primitives', () => {
@@ -235,31 +236,40 @@ describe('formPrefillOf', () => {
 
 describe('formUpdateOf', () => {
   it('rejects a non-record and non-record values/display', () => {
-    expect(formUpdateOf(123)).toBeUndefined();
-    expect(formUpdateOf({ values: 'x' })).toBeUndefined();
-    expect(formUpdateOf({ display: 123 })).toBeUndefined();
+    expect(formUpdateOf(123, NO_IMAGE_SLOTS)).toBeUndefined();
+    expect(formUpdateOf({ values: 'x' }, NO_IMAGE_SLOTS)).toBeUndefined();
+    expect(formUpdateOf({ display: 123 }, NO_IMAGE_SLOTS)).toBeUndefined();
   });
 
   it('rejects an off-shape options or errors map', () => {
-    expect(formUpdateOf({ options: 123 })).toBeUndefined();
-    expect(formUpdateOf({ options: { f: [{ value: '' }] } })).toBeUndefined();
-    expect(formUpdateOf({ options: { f: [123] } })).toBeUndefined();
-    expect(formUpdateOf({ options: { f: [{ value: 'v', description: 7 }] } })).toBeUndefined();
-    expect(formUpdateOf({ errors: 123 })).toBeUndefined();
-    expect(formUpdateOf({ errors: { f: 123 } })).toBeUndefined();
+    expect(formUpdateOf({ options: 123 }, NO_IMAGE_SLOTS)).toBeUndefined();
+    expect(formUpdateOf({ options: { f: [{ value: '' }] } }, NO_IMAGE_SLOTS)).toBeUndefined();
+    expect(formUpdateOf({ options: { f: [123] } }, NO_IMAGE_SLOTS)).toBeUndefined();
+    expect(
+      formUpdateOf({ options: { f: [{ value: 'v', description: 7 }] } }, NO_IMAGE_SLOTS),
+    ).toBeUndefined();
+    expect(formUpdateOf({ errors: 123 }, NO_IMAGE_SLOTS)).toBeUndefined();
+    expect(formUpdateOf({ errors: { f: 123 } }, NO_IMAGE_SLOTS)).toBeUndefined();
   });
 
   it('rejects a form option with a non-string label', () => {
-    expect(formUpdateOf({ options: { f: [{ value: 'v', label: 123 }] } })).toBeUndefined();
+    expect(
+      formUpdateOf({ options: { f: [{ value: 'v', label: 123 }] } }, NO_IMAGE_SLOTS),
+    ).toBeUndefined();
   });
 
   it('treats a null label or description as absent (a JSON-dumped option)', () => {
     expect(
-      formUpdateOf({ options: { f: [{ value: 'a', label: 'A', description: null }] } })?.options,
+      formUpdateOf(
+        { options: { f: [{ value: 'a', label: 'A', description: null }] } },
+        NO_IMAGE_SLOTS,
+      )?.options,
     ).toEqual({ f: [{ value: 'a', label: 'A' }] });
     expect(
-      formUpdateOf({ options: { f: [{ value: 'a', label: null, description: 'later' }] } })
-        ?.options,
+      formUpdateOf(
+        { options: { f: [{ value: 'a', label: null, description: 'later' }] } },
+        NO_IMAGE_SLOTS,
+      )?.options,
     ).toEqual({ f: [{ value: 'a', label: null, description: 'later' }] });
     expect(
       formPrefillOf({
@@ -270,22 +280,74 @@ describe('formUpdateOf', () => {
   });
 
   it('rejects a form option with a non-string non-null description', () => {
-    expect(formUpdateOf({ options: { f: [{ value: 'v', description: 7 }] } })).toBeUndefined();
-    expect(formUpdateOf({ options: { f: [{ value: 'v', description: '  ' }] } })).toBeUndefined();
+    expect(
+      formUpdateOf({ options: { f: [{ value: 'v', description: 7 }] } }, NO_IMAGE_SLOTS),
+    ).toBeUndefined();
+    expect(
+      formUpdateOf({ options: { f: [{ value: 'v', description: '  ' }] } }, NO_IMAGE_SLOTS),
+    ).toBeUndefined();
   });
 
   it('fills every absent part with an empty default', () => {
-    expect(formUpdateOf({})).toEqual({ values: {}, options: {}, errors: {}, display: {} });
+    expect(formUpdateOf({}, NO_IMAGE_SLOTS)).toEqual({
+      values: {},
+      options: {},
+      errors: {},
+      display: {},
+      images: new Map(),
+    });
   });
 
   it('parses a populated update', () => {
     expect(
-      formUpdateOf({ values: { a: 1 }, options: { f: [{ value: 'v' }] }, errors: { a: 'bad' } }),
+      formUpdateOf(
+        { values: { a: 1 }, options: { f: [{ value: 'v' }] }, errors: { a: 'bad' } },
+        NO_IMAGE_SLOTS,
+      ),
     ).toEqual({
       values: { a: 1 },
       options: { f: [{ value: 'v', label: null }] },
       errors: { a: 'bad' },
       display: {},
+      images: new Map(),
+    });
+  });
+
+  it("moves an image slot's vetted source out of display and into images", () => {
+    const slots = new Set(['chart']);
+    const https = formUpdateOf({ display: { chart: 'https://a.example/2.png', total: 3 } }, slots);
+    expect(https?.display).toEqual({ total: 3 });
+    expect(https?.images).toEqual(new Map([['chart', 'https://a.example/2.png']]));
+    expect(formUpdateOf({ display: { chart: MEDIA_REF } }, slots)?.images).toEqual(
+      new Map([['chart', MEDIA_REF]]),
+    );
+  });
+
+  it('reads a null or empty image-slot value as a cleared picture', () => {
+    const slots = new Set(['chart']);
+    expect(formUpdateOf({ display: { chart: null } }, slots)?.images).toEqual(
+      new Map([['chart', null]]),
+    );
+    expect(formUpdateOf({ display: { chart: '' } }, slots)?.images).toEqual(
+      new Map([['chart', null]]),
+    );
+  });
+
+  it('refuses the whole update when an image-slot value is not an https URL or a served-media reference', () => {
+    const slots = new Set(['chart']);
+    for (const bad of ['http://a.example/2.png', 'img/2.png', 'https://u@a.example/2.png', 7, {}])
+      expect(formUpdateOf({ display: { chart: bad } }, slots)).toBeUndefined();
+  });
+
+  it('leaves a URL in a slot no image block names as a display value', () => {
+    expect(
+      formUpdateOf({ display: { note: 'https://a.example/2.png' } }, new Set(['chart'])),
+    ).toEqual({
+      values: {},
+      options: {},
+      errors: {},
+      display: { note: 'https://a.example/2.png' },
+      images: new Map(),
     });
   });
 });

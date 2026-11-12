@@ -223,6 +223,12 @@ function isServedMediaRef(value: unknown): value is string {
   return typeof value === 'string' && SERVED_MEDIA_REF.test(value);
 }
 
+/** A source the widget may fetch a file body from (an image, document, video or audio
+ * `src`): an absolute `https:` URL or the same-origin served-media reference. */
+function isFileSource(value: unknown): value is string {
+  return isAbsoluteUrl(value, ['https:']) || isServedMediaRef(value);
+}
+
 /** One media attachment, validated: a known kind, a vetted source (a
  * scheme-appropriate absolute URL, or for a file kind the same-origin served-media
  * reference), an optional string caption, and a `filename` that rides a `document`
@@ -235,7 +241,7 @@ function mediaItemOf(raw: unknown): MediaItem | undefined {
     return undefined;
   if (kind === 'link') {
     if (!isAbsoluteUrl(url, ['http:', 'https:'])) return undefined;
-  } else if (!isAbsoluteUrl(url, ['https:']) && !isServedMediaRef(url)) {
+  } else if (!isFileSource(url)) {
     return undefined;
   }
   const caption = captionOf(raw.caption);
@@ -341,10 +347,16 @@ export function formPrefillOf(raw: unknown): FormPrefill | null | undefined {
 
 /** The validated form update a reaction door returned (its `{data}` payload): `values`
  * sets fields, `options` replaces option-bearing fields' choice lists, `errors` carries
- * per-field messages, `display` fills display slots. Each is absent → empty. `undefined`
- * (malformed) on anything off-shape — the caller then raises LOUDLY rather than applying a
- * half-understood change. */
-export function formUpdateOf(raw: unknown): FormUpdate | undefined {
+ * per-field messages, `display` fills display slots. Each is absent → empty. A `display`
+ * entry keyed by one of `imageSlots` (the slots the form's image blocks name) moves to
+ * `images`, vetted as an image block's own `src`: `null` or `''` clears the picture, any
+ * other value that is not a {@link isFileSource} source makes the whole update malformed.
+ * `undefined` (malformed) on anything off-shape — the caller then raises LOUDLY rather than
+ * applying a half-understood change. */
+export function formUpdateOf(
+  raw: unknown,
+  imageSlots: ReadonlySet<string>,
+): FormUpdate | undefined {
   if (!isRecord(raw)) return undefined;
   const values = raw.values === undefined ? {} : raw.values;
   if (!isRecord(values)) return undefined;
@@ -352,9 +364,22 @@ export function formUpdateOf(raw: unknown): FormUpdate | undefined {
   if (options === undefined) return undefined;
   const errors = stringMapOf(raw.errors);
   if (errors === undefined) return undefined;
-  const display = raw.display === undefined ? {} : raw.display;
-  if (!isRecord(display)) return undefined;
-  return { values, options, errors, display };
+  const rawDisplay = raw.display === undefined ? {} : raw.display;
+  if (!isRecord(rawDisplay)) return undefined;
+  const display: Record<string, unknown> = {};
+  const images = new Map<string, string | null>();
+  for (const [slot, value] of Object.entries(rawDisplay)) {
+    if (!imageSlots.has(slot)) {
+      display[slot] = value;
+    } else if (value === null || value === '') {
+      images.set(slot, null);
+    } else if (isFileSource(value)) {
+      images.set(slot, value);
+    } else {
+      return undefined;
+    }
+  }
+  return { values, options, errors, display, images };
 }
 
 /** The display-block kinds a page may carry. */
@@ -383,8 +408,7 @@ function displayBlockOf(raw: unknown): DisplayBlock | undefined {
   if (text === undefined) return undefined;
   const src = displayStringOf(raw.src);
   if (src === undefined) return undefined;
-  if (kind === 'image' && src !== null && !isAbsoluteUrl(src, ['https:']) && !isServedMediaRef(src))
-    return undefined;
+  if (kind === 'image' && src !== null && !isFileSource(src)) return undefined;
   const alt = displayStringOf(raw.alt);
   if (alt === undefined) return undefined;
   const slot = displayStringOf(raw.slot);

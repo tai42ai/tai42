@@ -5,9 +5,10 @@
  * a page's fields.
  *
  * UNTRUSTED PAYLOADS: a block's `text`/`alt` renders only as React-escaped text; an image
- * `src` is set as an attribute only after the frame parser has vetted it (an absolute
- * `https` URL or the same-origin served-media reference — the SAME gate the chat's media
- * cards ride on), with the page CSP's `img-src` as the backstop.
+ * `src` — the block's own or a reaction's value for its slot — is set as an attribute only
+ * after the parser has vetted it (an absolute `https` URL or the same-origin served-media
+ * reference — the SAME gate the chat's media cards ride on: the frame parser for the block,
+ * the update parser for a reaction), with the page CSP's `img-src` as the backstop.
  */
 import type { JsonSchema } from '@tai42/studio-sdk';
 import { fieldDrawingOrder, isFieldVisible } from '@tai42/studio-sdk';
@@ -40,30 +41,49 @@ function slotValueText(value: unknown): string | undefined {
   return toText(value);
 }
 
-/** An image display block: the frame-vetted image, degrading to its alt text with no src. */
-function renderDisplayImage(block: DisplayBlock): ReactElement | null {
+/** An image display block: the reaction's source for its slot when one arrived (`null`
+ * clears it), else the block's own; with no source it degrades to its alt text. */
+function renderDisplayImage(
+  block: DisplayBlock,
+  reactionSource: string | null | undefined,
+): ReactElement | null {
   const alt = block.alt !== null && block.alt.trim() !== '' ? block.alt : undefined;
-  // `src` was vetted by the frame parser (an absolute https URL or the same-origin
-  // served-media reference), so it is set as an attribute without re-checking; the page
-  // CSP's `img-src` gate is the backstop. A block with no source degrades to its alt text
-  // as body, never a broken image.
-  if (block.src !== null) {
-    return <img className="tcw-form-display-image" src={block.src} alt={alt ?? ''} />;
+  // Both sources were vetted by a parser (an absolute https URL or the same-origin
+  // served-media reference), so `src` is set as an attribute without re-checking; the page
+  // CSP's `img-src` gate is the backstop. No source degrades to the alt text as body,
+  // never a broken image.
+  const src = reactionSource === undefined ? block.src : reactionSource;
+  if (src !== null) {
+    return (
+      <img
+        className="tcw-form-display-image"
+        src={src}
+        alt={alt ?? ''}
+        data-testid={block.slot !== null ? `form-slot-${block.slot}` : undefined}
+      />
+    );
   }
   return alt !== undefined ? <p className="tcw-form-display-body">{alt}</p> : null;
 }
 
-/** One display block: an image, or a heading/body whose text is its slot's current value
- * (when it names one) or its static `text`. An empty text block renders nothing. */
+/** One display block: an image (its slot's reaction source, else its own), or a
+ * heading/body whose text is its slot's current value (when it names one) or its static
+ * `text`. An empty text block renders nothing. */
 function DisplayBlockView({
   block,
   slots,
+  imageSources,
 }: {
   readonly block: DisplayBlock;
   readonly slots: Readonly<Record<string, unknown>>;
+  readonly imageSources: ReadonlyMap<string, string | null>;
 }): ReactElement | null {
+  if (block.kind === 'image')
+    return renderDisplayImage(
+      block,
+      block.slot !== null ? imageSources.get(block.slot) : undefined,
+    );
   const slotText = block.slot !== null ? slotValueText(slots[block.slot]) : undefined;
-  if (block.kind === 'image') return renderDisplayImage(block);
   const text = slotText ?? block.text ?? '';
   if (text === '') return null;
   const className = block.kind === 'heading' ? 'tcw-form-display-heading' : 'tcw-form-display-body';
@@ -81,15 +101,17 @@ function DisplayBlockView({
 export function DisplayBlocks({
   blocks,
   slots,
+  imageSources,
 }: {
   readonly blocks: readonly DisplayBlock[];
   readonly slots: Readonly<Record<string, unknown>>;
+  readonly imageSources: ReadonlyMap<string, string | null>;
 }): ReactElement | null {
   if (blocks.length === 0) return null;
   return (
     <div className="tcw-form-display">
       {blocks.map((block, index) => (
-        <DisplayBlockView key={index} block={block} slots={slots} />
+        <DisplayBlockView key={index} block={block} slots={slots} imageSources={imageSources} />
       ))}
     </div>
   );

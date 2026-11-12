@@ -78,8 +78,10 @@ A `notify_user` addressed at a web visitor carries richer content than plain tex
 notification's `media` renders as a **media card** — this channel renders the whole media
 vocabulary as real UI:
 
-- an **image** inline (an absolute-`https` source; an `http:` or `data:` image is refused
-  loudly — the page renders an image only from an https source),
+- an **image** inline (an absolute-`https` source or a media file the deployment serves; an
+  `http:` or `data:` image is refused loudly — the page renders an image only from such a
+  source; a picture a form reaction puts in a form's image slot passes the same check, and an
+  empty value shows the slot's alt text),
 - a **document** as a download card (its `filename` is the label, its caption a secondary
   line, with a download affordance),
 - a **video** and an **audio** item as native `<video>`/`<audio>` players,

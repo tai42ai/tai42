@@ -1,6 +1,6 @@
 /**
  * The pure value/schema/step helpers the form renderer and its reaction hook share:
- * object guards, the per-send page resolution and initial value, per-page error slicing,
+ * object guards, the per-send page resolution, its image slots and the initial value, per-page error slicing,
  * the single-field schema the SDK renders one control from, the caller's per-field words
  * in the SDK's `fieldWording` shape, and the step-focus hook. No JSX — the presentational
  * pieces live in `schema-form-answer`.
@@ -44,6 +44,16 @@ export function resolvePages(
     ];
   }
   return pages.map((page) => ({ ...page, fields: fieldDrawingOrder(page.fields, properties) }));
+}
+
+/** The slot names the pages' image blocks fill — the display keys a reaction's update
+ * carries as image sources. */
+export function imageSlotsOf(pages: readonly FormPage[]): ReadonlySet<string> {
+  const slots = new Set<string>();
+  for (const page of pages)
+    for (const block of page.display)
+      if (block.kind === 'image' && block.slot !== null) slots.add(block.slot);
+  return slots;
 }
 
 /** The initial form value: the schema's defaults overlaid with any prefilled
