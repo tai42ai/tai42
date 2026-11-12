@@ -26,10 +26,10 @@ dependencies = [
     # The pure interface contract — Channel, ChannelDelivery, ChannelDeliveryError,
     # and the tai42_app handle the plugin registers through.
     # The contract floor is rewritten by scripts/range_sync.py at release.
-    "tai42-contract>=29.2,<30",
+    "tai42-contract>=29.3,<30",
     # HttpxClient + RedisClient (redis extra) + TaiBaseSettings + the settings
     # cache registry + RedisConnectionSettings.
-    "tai42-kit[redis]>=20.0,<21",
+    "tai42-kit[redis]>=20.1,<21",
     # The whole transport: Bot API calls, the callback forward, and the error
     # types the channel classifies. No Telegram SDK — the Bot API is flat
     # JSON-over-HTTPS and there is no official Python SDK.

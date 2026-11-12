@@ -9,7 +9,7 @@ description: >-
 license: Apache-2.0
 homepage: https://tai42.ai
 repository: https://github.com/tai42ai/tai42/tree/main/plugins/monitoring-langfuse
-contract: '>=29.2,<30'
+contract: '>=29.3,<30'
 categories:
   - monitoring
 tags:
