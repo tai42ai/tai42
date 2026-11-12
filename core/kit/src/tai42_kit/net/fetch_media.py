@@ -58,13 +58,13 @@ class MediaFetchError(Exception):
     transport-exception class ONLY — never the request URL — so a credential riding
     the URL path or query never reaches an error string. ``status_code`` is the HTTP
     status when the fault was an error response (or an unfollowed redirect), else
-    ``None`` (a transport fault — timeout, connection error, a torn read — or a
-    malformed response header). ``transient`` tells the caller whether a redelivery
+    ``None`` (a transport fault — timeout, connection error, a torn read — a
+    malformed response header, or a URL that cannot be parsed). ``transient`` tells the caller whether a redelivery
     could plausibly succeed; it is derived from the status — a 5xx, a 408 (Request
     Timeout) or a 429 (Too Many Requests, a vendor throttle) is transient, and so is a
     transport fault (status ``None``); every other 4xx/3xx is permanent — unless an
     explicit value is given for a fault the status cannot classify (a malformed response
-    header is permanent).
+    header or a URL that cannot be parsed is permanent).
     """
 
     def __init__(
@@ -109,9 +109,33 @@ class MediaStream:
     chunks: AsyncIterator[bytes]
 
 
+_UNKNOWN_HOST = "<unknown host>"
+
+
 def _host(url: httpx.URL) -> str:
     """Return ``url``'s host for a fault message — never its path, query, or userinfo."""
-    return url.host or "<unknown host>"
+    return url.host or _UNKNOWN_HOST
+
+
+def _parse_url(url: str) -> httpx.URL:
+    """Return ``url`` parsed; a URL httpx cannot parse is a permanent fault naming no host."""
+    try:
+        return httpx.URL(url)
+    except httpx.InvalidURL:
+        pass
+    # Raised OUTSIDE the ``except`` so httpx's text, which may quote part of the URL, is not
+    # chained onto the URL-free fault. A redelivery would carry the same URL, so it is permanent.
+    raise MediaFetchError(host=_UNKNOWN_HOST, cause_class="InvalidURL", transient=False)
+
+
+def media_url_host(url: str) -> str:
+    """The host a media fetch of ``url`` contacts first, for error and log text only.
+
+    Parses ``url`` as :func:`fetch_media` and :func:`open_media_stream` do, so a URL this
+    returns a host for is never refused by them as unparsable; one that cannot be parsed raises
+    the same permanent, URL-free :class:`MediaFetchError`.
+    """
+    return _host(_parse_url(url))
 
 
 def _same_origin(a: httpx.URL, b: httpx.URL) -> bool:
@@ -156,15 +180,19 @@ def _content_length(response: httpx.Response, host: str) -> int | None:
     raise MediaFetchError(host=host, cause_class="malformed Content-Length", transient=False)
 
 
-def _transient_for_transport(exc: BaseException) -> bool | None:
-    """Classify a transport fault's transience: an unsupported URL scheme is permanent, else unknown.
+def _transient_for_open_fault(exc: BaseException) -> bool | None:
+    """Classify a fault raised while opening a hop: a permanently bad URL is permanent, else unknown.
 
-    An unsupported scheme (``file:``, ``data:``, …) is a permanently malformed URL — a
-    redelivery would carry the same scheme — so it is non-transient. Every other transport
-    fault (timeout, connection error, a torn read) is left for :class:`MediaFetchError` to
-    derive as transient.
+    An unsupported scheme (``file:``, ``data:``, …) and a redirect ``Location`` that cannot be
+    parsed are permanent — a redelivery would meet the same URL. httpx reads ``Location`` itself
+    for every redirect answer: one it cannot parse is a ``RemoteProtocolError`` raised while
+    handling ``InvalidURL``, and one too long once joined is an ``InvalidURL``. Every other fault
+    (timeout, connection error, a torn or garbled answer) is left for :class:`MediaFetchError`
+    to derive as transient.
     """
-    if isinstance(exc, httpx.UnsupportedProtocol):
+    if isinstance(exc, httpx.UnsupportedProtocol | httpx.InvalidURL):
+        return False
+    if isinstance(exc, httpx.RemoteProtocolError) and isinstance(exc.__context__, httpx.InvalidURL):
         return False
     return None
 
@@ -201,7 +229,7 @@ async def _stream_media(
     max_redirects = url_guard.url_guard_settings().max_redirects
     transport = PinningTransport() if url_guard.guard_enabled() else None
     base_headers = dict(headers) if headers is not None else {}
-    current_url = httpx.URL(url)
+    current_url = _parse_url(url)
     credentials_dropped = False
 
     async with AsyncExitStack() as stack:
@@ -246,7 +274,7 @@ async def _stream_media(
                 # exception is carrying it.
                 raise guard_error from guard_error.__context__
             transport_class = type(exc).__name__
-            transport_transient = _transient_for_transport(exc)
+            transport_transient = _transient_for_open_fault(exc)
         if response is None:
             # An httpx transport fault (timeout, connection error, a torn read) carries the
             # request URL in its text. Re-wrap it OUTSIDE the ``except`` block so that
@@ -290,7 +318,8 @@ async def open_media_stream(
     carry the request URL: an SSRF rejection surfaces as
     :class:`~tai42_kit.net.url_guard.UrlGuardError` (host only); an HTTP-status, transport,
     or malformed-header fault as :class:`MediaFetchError` (vendor host + status/class only) —
-    at open, or from the ``chunks`` iterator on a mid-body fault.
+    at open, or from the ``chunks`` iterator on a mid-body fault; a ``url`` that cannot be
+    parsed as a permanent :class:`MediaFetchError` naming no host.
     """
     async with _stream_media(url, headers=headers, auth=auth, follow_redirects=follow_redirects) as stream:
         yield stream

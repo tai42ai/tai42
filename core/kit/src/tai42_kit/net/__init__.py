@@ -29,7 +29,13 @@ from tai42_kit.net.url_guard import (
 )
 
 if TYPE_CHECKING:
-    from tai42_kit.net.fetch_media import MediaFetchError, MediaStream, fetch_media, open_media_stream
+    from tai42_kit.net.fetch_media import (
+        MediaFetchError,
+        MediaStream,
+        fetch_media,
+        media_url_host,
+        open_media_stream,
+    )
     from tai42_kit.net.fetch_url import fetch_url
     from tai42_kit.net.guarded_request import (
         GuardedRequestError,
@@ -41,6 +47,7 @@ if TYPE_CHECKING:
 _LAZY_NAMES = (
     "fetch_url",
     "fetch_media",
+    "media_url_host",
     "open_media_stream",
     "MediaFetchError",
     "MediaStream",
@@ -64,6 +71,7 @@ __all__ = [
     "guard_enabled",
     "guarded_request",
     "is_loopback_host",
+    "media_url_host",
     "open_media_stream",
     "resolve_and_validate",
     "url_guard_settings",
@@ -73,9 +81,9 @@ __all__ = [
 def __getattr__(name: str) -> object:
     """Load the ``httpx``-backed request helpers and media symbols on first access.
 
-    :func:`fetch_url`, :func:`fetch_media`, :func:`open_media_stream`, :func:`guarded_request` and
-    their error and result types are bound lazily so that importing a lighter ``net`` utility never
-    pulls in the ``httpx``/``httpcore`` backend they ride on.
+    :func:`fetch_url`, :func:`fetch_media`, :func:`open_media_stream`, :func:`media_url_host`,
+    :func:`guarded_request` and their error and result types are bound lazily so that importing a
+    lighter ``net`` utility never pulls in the ``httpx``/``httpcore`` backend they ride on.
 
     All the names are cached in the module globals together, so the FUNCTION or CLASS (not
     the same-named submodule that importing it binds on the package) is what ``net.<name>``
@@ -90,7 +98,13 @@ def __getattr__(name: str) -> object:
         # Loading these submodules binds the ``fetch_url`` and ``guarded_request`` MODULES onto
         # this package; rebinding every name together on the first access of any of them keeps
         # every later package-level import a function.
-        from tai42_kit.net.fetch_media import MediaFetchError, MediaStream, fetch_media, open_media_stream
+        from tai42_kit.net.fetch_media import (
+            MediaFetchError,
+            MediaStream,
+            fetch_media,
+            media_url_host,
+            open_media_stream,
+        )
         from tai42_kit.net.fetch_url import fetch_url
         from tai42_kit.net.guarded_request import (
             GuardedRequestError,
@@ -101,6 +115,7 @@ def __getattr__(name: str) -> object:
 
         globals()["fetch_url"] = fetch_url
         globals()["fetch_media"] = fetch_media
+        globals()["media_url_host"] = media_url_host
         globals()["open_media_stream"] = open_media_stream
         globals()["MediaFetchError"] = MediaFetchError
         globals()["MediaStream"] = MediaStream

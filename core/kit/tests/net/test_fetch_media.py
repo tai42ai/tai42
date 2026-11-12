@@ -248,6 +248,129 @@ async def test_fetch_media_unfollowed_redirect_is_a_fault(
     assert media_server_2.records == []
 
 
+def _chain_text(exc: BaseException) -> str:
+    text = ""
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        text += f"{current!s}{current!r}"
+        seen.add(id(current))
+        current = current.__cause__ or current.__context__
+    return text
+
+
+async def _fetch_through(door: str, url: str) -> None:
+    if door == "fetch_media":
+        await fetch_media(url, follow_redirects=True, max_bytes=1024)
+        return
+    async with open_media_stream(url, follow_redirects=True):
+        pass
+
+
+@pytest.mark.parametrize("door", ["fetch_media", "open_media_stream"])
+@pytest.mark.parametrize(
+    "url", ["https://ex\x00ample.com/a?token=SECRET", "https://media.example/a.png?token=SECRET\n"]
+)
+async def test_an_unparsable_url_is_a_permanent_url_free_fault(
+    monkeypatch: pytest.MonkeyPatch, door: str, url: str
+) -> None:
+    """A URL httpx cannot parse is a permanent fault naming no host and carrying no URL in its chain."""
+    _enable(monkeypatch, allow_cidrs=["127.0.0.0/8"])
+    with pytest.raises(MediaFetchError) as ei:
+        await _fetch_through(door, url)
+    exc = ei.value
+    assert str(exc) == "media fetch from host '<unknown host>' failed: InvalidURL"
+    assert exc.transient is False
+    assert exc.status_code is None
+    assert exc.__cause__ is None
+    assert "SECRET" not in _chain_text(exc)
+
+
+@pytest.mark.parametrize("door", ["fetch_media", "open_media_stream"])
+@pytest.mark.parametrize(
+    ("location", "cause_class"),
+    [
+        ("http://127.0.0.1:abc/x?token=SECRET", "RemoteProtocolError"),
+        # Under httpx's 65 536-character URL limit alone, over it once joined to the server's origin.
+        ("/" + "a" * 65510 + "?token=SECRET", "InvalidURL"),
+    ],
+    ids=["unparsable", "too-long-once-joined"],
+)
+async def test_an_unparsable_redirect_location_is_a_permanent_url_free_fault(
+    monkeypatch: pytest.MonkeyPatch, media_server: _MediaServer, door: str, location: str, cause_class: str
+) -> None:
+    """A redirect ``Location`` httpx cannot parse is a permanent fault naming the host that sent it, URL-free."""
+    _enable(monkeypatch, allow_cidrs=["127.0.0.0/8"])
+    media_server.redirect("/start", location)
+    with pytest.raises(MediaFetchError) as ei:
+        await _fetch_through(door, f"{media_server.base_url}/start")
+    exc = ei.value
+    assert str(exc) == f"media fetch from host '127.0.0.1' failed: {cause_class}"
+    assert exc.transient is False
+    assert exc.status_code is None
+    assert exc.__cause__ is None
+    assert "SECRET" not in _chain_text(exc)
+
+
+class _DroppedAnswerHandler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self) -> None:  # http.server dispatch name
+        # Half a status line, then the connection closes: an answer dropped mid-header.
+        self.wfile.write(b"HTTP/1.1 200 O")
+
+    def log_message(self, *args: Any) -> None:  # silence per-request logging
+        pass
+
+
+@pytest.mark.parametrize("door", ["fetch_media", "open_media_stream"])
+async def test_an_answer_dropped_mid_header_is_a_transient_url_free_fault(
+    monkeypatch: pytest.MonkeyPatch, door: str
+) -> None:
+    """A ``RemoteProtocolError`` from a dropped answer, not from a bad ``Location``, stays transient."""
+    _enable(monkeypatch, allow_cidrs=["127.0.0.0/8"])
+    server = http.server.HTTPServer(("127.0.0.1", 0), _DroppedAnswerHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with pytest.raises(MediaFetchError) as ei:
+            await _fetch_through(door, f"http://127.0.0.1:{server.server_address[1]}/x?token=SECRET")
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+    exc = ei.value
+    assert str(exc) == "media fetch from host '127.0.0.1' failed: RemoteProtocolError"
+    assert exc.transient is True
+    assert exc.status_code is None
+    assert "SECRET" not in _chain_text(exc)
+
+
+def test_media_url_host_names_the_host_a_fetch_contacts() -> None:
+    """``media_url_host`` returns the URL's host only, never its path or query."""
+    from tai42_kit.net import media_url_host
+
+    assert media_url_host("https://media.example/a.png?token=SECRET") == "media.example"
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://ex\x00ample.com/a?token=SECRET",
+        "https://media.example/a.png?token=SECRET\n",
+        "http://media.example:abc/a?token=SECRET",
+    ],
+)
+def test_media_url_host_refuses_an_unparsable_url_as_the_fetch_does(url: str) -> None:
+    """A URL the fetch cannot parse raises the fetch's own permanent, URL-free fault."""
+    from tai42_kit.net import media_url_host
+
+    with pytest.raises(MediaFetchError) as ei:
+        media_url_host(url)
+    exc = ei.value
+    assert str(exc) == "media fetch from host '<unknown host>' failed: InvalidURL"
+    assert exc.transient is False
+    assert "SECRET" not in _chain_text(exc)
+
+
 async def test_fetch_media_drops_credential_on_cross_origin_redirect(
     monkeypatch: pytest.MonkeyPatch, media_server: _MediaServer, media_server_2: _MediaServer
 ) -> None:
@@ -505,10 +628,10 @@ def test_media_symbol_first_leaves_fetch_url_callable():
     probe = (
         "from tai42_kit.net import open_media_stream\n"
         "from tai42_kit.net import fetch_url\n"
-        "from tai42_kit.net import MediaStream, MediaFetchError, fetch_media\n"
+        "from tai42_kit.net import MediaStream, MediaFetchError, fetch_media, media_url_host\n"
         "import tai42_kit.net as net\n"
         "assert callable(fetch_url) and callable(net.fetch_url), type(net.fetch_url)\n"
-        "assert callable(fetch_media) and callable(open_media_stream)\n"
+        "assert callable(fetch_media) and callable(open_media_stream) and callable(media_url_host)\n"
         "assert isinstance(MediaStream, type) and isinstance(MediaFetchError, type)\n"
     )
     subprocess.run([sys.executable, "-c", probe], check=True)
@@ -629,13 +752,7 @@ async def test_open_media_stream_unsupported_scheme_is_permanent_and_url_free(
     exc = ei.value
     assert exc.transient is False
     assert exc.status_code is None
-    chain_text = ""
-    current: BaseException | None = exc
-    seen: set[int] = set()
-    while current is not None and id(current) not in seen:
-        chain_text += f"{current!s}{current!r}"
-        seen.add(id(current))
-        current = current.__cause__ or current.__context__
+    chain_text = _chain_text(exc)
     assert url not in chain_text
     assert "/etc/hostname" not in chain_text
 
