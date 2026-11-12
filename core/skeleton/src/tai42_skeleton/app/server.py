@@ -67,7 +67,7 @@ if TYPE_CHECKING:
     from tai42_contract.channels import SendOutcome
     from tai42_contract.connectors.models import ResolvedConnectionAuth
     from tai42_contract.conversations import AnswerPart, DeliveryReceipt, InboundMediaKind, InboundRejectionReason
-    from tai42_contract.interactions.models import IngestedMedia, LocationElement, MediaItem, MediaOrigin
+    from tai42_contract.interactions.models import IngestedMedia, LocationElement, MediaItem, MediaOrigin, StoredMedia
     from tai42_contract.presets import PresetStore
     from tai42_contract.tool_meta import ToolMetaStore
 
@@ -646,8 +646,9 @@ class TaiMCP(TaiMCPLifecycleMixin):
         )
 
     # -- Media (AppMedia facet body) ------------------------------------------
-    # ``app.media`` forwards here; the ingestion chokepoint lives in its own module,
-    # reached through a deferred import so the app package never imports it at construction.
+    # ``app.media`` forwards here; the ingestion chokepoint and the stored-media reader live in
+    # their own modules, reached through a deferred import so the app package never imports them
+    # at construction.
 
     async def _media_ingest_media(
         self,
@@ -674,6 +675,14 @@ class TaiMCP(TaiMCPLifecycleMixin):
         from tai42_skeleton.interactions.media_ingest import bind_media
 
         return await bind_media(media_id, origin=origin)
+
+    async def _media_read_media(self, media_id: str, *, max_bytes: int) -> "StoredMedia":
+        from tai42_contract.interactions.models import StoredMedia
+
+        from tai42_skeleton.interactions.served_media import load_served_media
+
+        record = await load_served_media(media_id, max_bytes=max_bytes)
+        return StoredMedia(mime=record.mime, data=record.data)
 
     # -- Versioning + presets seams --------------------------------------------
     # ``app.versioning.store`` and ``app.presets.store`` forward here; ``bind`` is

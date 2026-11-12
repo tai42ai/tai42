@@ -292,6 +292,7 @@ async def test_media_facet_forwarding():
     app = _app()
     app._media_ingest_media = AsyncMock(return_value="ingested")
     app._media_bind_media = AsyncMock(return_value="bound")
+    app._media_read_media = AsyncMock(return_value="read")
     f = MediaFacet(app)
     source = MagicMock()
     origin = MagicMock()
@@ -316,6 +317,8 @@ async def test_media_facet_forwarding():
     )
     assert await f.bind_media("mid", origin=origin) == "bound"
     app._media_bind_media.assert_awaited_once_with("mid", origin=origin)
+    assert await f.read_media("mid", max_bytes=10) == "read"
+    app._media_read_media.assert_awaited_once_with("mid", max_bytes=10)
 
 
 # -- MonitoringFacet ----------------------------------------------------------

@@ -8,6 +8,7 @@ import pytest
 
 from tai42_skeleton.interactions import InteractionStore
 from tai42_skeleton.interactions import helper as helper_module
+from tai42_skeleton.interactions import served_media as served_media_module
 from tai42_skeleton.interactions.settings import InteractionsSettings
 from tai42_skeleton.operations import interactions as ops
 from tai42_skeleton.routers import interactions as router
@@ -34,6 +35,9 @@ def wired(monkeypatch, fake_redis, fake_client_ctx):
     monkeypatch.setattr(ops, "interactions_settings", lambda: settings)
     monkeypatch.setattr(helper_module, "client_ctx", fake_client_ctx)
     monkeypatch.setattr(helper_module, "interactions_settings", lambda: settings)
+    # The media door reads both stores through the shared stored-media reader.
+    monkeypatch.setattr(served_media_module, "client_ctx", fake_client_ctx)
+    monkeypatch.setattr(served_media_module, "interactions_settings", lambda: settings)
     monkeypatch.setattr(helper_module.secrets, "token_urlsafe", lambda n: "TKT")
     store = InteractionStore(settings.key_prefix)
     return SimpleNamespace(settings=settings, store=store, fake=fake_redis, monkeypatch=monkeypatch)

@@ -24,6 +24,7 @@ from tai42_skeleton.access_control import verifier as verifier_module
 from tai42_skeleton.access_control.adapter import AuthAdapter
 from tai42_skeleton.access_control.settings import AccessControlSettings
 from tai42_skeleton.app.route_registry import CORE_OWNER, RouteAction, RouteRegistry
+from tai42_skeleton.interactions import served_media
 from tai42_skeleton.interactions.settings import InteractionsSettings
 from tai42_skeleton.routers import interactions as router
 
@@ -118,6 +119,8 @@ def boundary_client(monkeypatch):
 
     monkeypatch.setattr(router, "client_ctx", interactions_ctx)
     monkeypatch.setattr(router, "interactions_settings", lambda: isettings)
+    monkeypatch.setattr(served_media, "client_ctx", interactions_ctx)
+    monkeypatch.setattr(served_media, "interactions_settings", lambda: isettings)
 
     routes = [
         Route("/api/interactions/stream", router.stream, methods=["GET"]),

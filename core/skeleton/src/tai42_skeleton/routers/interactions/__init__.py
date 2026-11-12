@@ -12,7 +12,9 @@ Doors:
 * ``GET /api/interactions/media/{media_id}`` — the UNAUTHENTICATED served-media
   door: the media id is the capability secret (a vendor fetches the url from its
   own servers, a browser ``<img>`` from the inbox origin). Serves the stored bytes
-  with their mime; a malformed id is a 400, a miss/expired id a 404.
+  with their mime, read through the shared stored-media reader
+  (:mod:`tai42_skeleton.interactions.served_media`); a malformed id is a 400, a
+  miss/expired id a 404.
 * ``POST /api/interactions/{interaction_id}/answer`` — the authenticated human
   answer door. The value is validated server-side against the stored question's
   ``answer_format`` before the blocked caller is woken; an invalid answer is
@@ -47,8 +49,9 @@ Doors:
 Importing this package imports each door submodule, registering every route. The
 door callables are re-exported here (the public path ``tai42_skeleton.routers.interactions``
 is unchanged). ``client_ctx``, ``interactions_settings`` and ``_KEEPALIVE_SECONDS`` are
-homed here so a test's patch at this package alias is the single point every door reads
-through at call time.
+homed here so a test's patch at this package alias is the single point every door that opens
+the interactions store itself reads through at call time; the media door reads through its
+shared reader instead.
 """
 
 from __future__ import annotations

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import importlib
 import time
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -16,17 +15,13 @@ from tai42_contract.interactions import MEDIA_ROUTE_PREFIX, InteractionResponse,
 from tai42_skeleton.conversations import media_meta as meta_module
 from tai42_skeleton.conversations.media_meta import InboundMediaMetaStore
 from tai42_skeleton.conversations.settings import ConversationsSettings
-from tai42_skeleton.interactions import ask
+from tai42_skeleton.interactions import ask, served_media
 from tai42_skeleton.interactions import helper as helper_module
 from tai42_skeleton.interactions.media import read_media
 from tai42_skeleton.routers import interactions as router
 
 from ..._helpers import await_add_event
 from ._harness import _DATA_PNG, _PNG_BYTES, _store_media, make_request
-
-# The package re-exports the ``media`` route callable, shadowing the submodule attribute;
-# resolve the actual submodule so a ``_blob_provider`` patch lands in the route's globals.
-media_mod = importlib.import_module("tai42_skeleton.routers.interactions.media")
 
 
 async def test_media_route_serves_stored_bytes_with_headers(wired):
@@ -56,13 +51,13 @@ async def test_media_route_miss_is_404(wired):
 async def test_media_route_off_store_is_uniform_404(wired, monkeypatch):
     # An unconfigured store answers the SAME 404 as a miss — never a 501 that would
     # oracle the store's absence on this unauthenticated door.
-    monkeypatch.setattr(router, "interactions_store_configured", lambda: False)
+    monkeypatch.setattr(served_media, "interactions_store_configured", lambda: False)
     resp = await router.media(make_request("GET", path_params={"media_id": "a" * 43}))
     assert resp.status_code == 404
 
 
 class _FakeStorage:
-    """A blob provider standing in for the served route's ``load_bytes``."""
+    """A blob provider standing in for the stored-media reader's ``load_bytes``."""
 
     def __init__(self) -> None:
         self.blobs: dict[str, bytes] = {}
@@ -88,7 +83,7 @@ async def inbound(wired):
 
     monkeypatch.setattr(meta_module, "client_ctx", fake_client_ctx)
     provider = _FakeStorage()
-    monkeypatch.setattr(media_mod, "_blob_provider", lambda: provider)
+    monkeypatch.setattr(served_media, "_blob_provider", lambda: provider)
     store = InboundMediaMetaStore(ConversationsSettings())
     try:
         yield SimpleNamespace(redis=r, provider=provider, store=store, monkeypatch=monkeypatch)
@@ -181,7 +176,7 @@ async def test_inbound_record_without_provider_is_503(inbound):
     # that would mask the outage (the id is valid, so there is no oracle to protect).
     media_id = "u" * 43
     await _seed_inbound(inbound, media_id, kind=MediaKind.IMAGE, mime="image/png", filename="pic.png")
-    inbound.monkeypatch.setattr(media_mod, "_blob_provider", lambda: None)
+    inbound.monkeypatch.setattr(served_media, "_blob_provider", lambda: None)
     resp = await router.media(make_request("GET", path_params={"media_id": media_id}))
     assert resp.status_code == 503
 
@@ -189,7 +184,7 @@ async def test_inbound_record_without_provider_is_503(inbound):
 async def test_no_provider_inbound_lookup_is_404_not_oracle(inbound):
     # No record + no provider → the SAME uniform 404 as any miss (the provider is never
     # consulted for an unknown id, so its absence cannot be oracled).
-    inbound.monkeypatch.setattr(media_mod, "_blob_provider", lambda: None)
+    inbound.monkeypatch.setattr(served_media, "_blob_provider", lambda: None)
     resp = await router.media(make_request("GET", path_params={"media_id": "n" * 43}))
     assert resp.status_code == 404
 
