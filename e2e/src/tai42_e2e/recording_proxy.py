@@ -13,9 +13,10 @@ import time
 from dataclasses import dataclass
 
 from fastapi import FastAPI, Request
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import PlainTextResponse, Response
 
 from tai42_e2e._threaded import ThreadedServer
+from tai42_e2e.channel_stubs import TINY_PNG
 from tai42_e2e.ports import allocate_port
 from tai42_e2e.waiting import wait_for
 
@@ -61,6 +62,12 @@ class TargetServer:
             # unique marker so the extracted text is asserted against what was served.
             self.records.append(RequestRecord(path="/doc.txt", headers=dict(request.headers)))
             return PlainTextResponse(body)
+
+        @app.get("/picture.png")
+        async def picture(request: Request) -> Response:
+            # A PNG picture a form's image block names by link.
+            self.records.append(RequestRecord(path="/picture.png", headers=dict(request.headers)))
+            return Response(TINY_PNG, media_type="image/png")
 
         @app.get("/slow")
         async def slow(request: Request, ms: int = 0) -> PlainTextResponse:

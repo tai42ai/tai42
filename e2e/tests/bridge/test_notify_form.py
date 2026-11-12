@@ -11,7 +11,8 @@ second participant turn, a foreign or unknown token is ONE uniform 404, and the 
 validates the values against the schema — schema-violating values bridge verbatim (the
 pinned no-validation transport contract). The whatsapp legs drive the Flow rendering on
 the FakeWhatsApp stub: the flow token rides the ``tai42-nf:`` namespace with NO pending
-reservation, a signed ``nfm_reply`` carrying it bridges the schema-coerced dict, a reply
+reservation, an image block given as a link is fetched at send and embedded in the Flow as
+base64, a signed ``nfm_reply`` carrying it bridges the schema-coerced dict, a reply
 on a pair with a LIVE ask never touches that ask (the masquerade fence), and a schema
 sidecar miss degrades the reply to raw string values — accepted, never dropped; a shape no
 Flow control checks is refused inside the form by the data endpoint, which finds the ask-less
@@ -22,7 +23,9 @@ capability leg pins the 501 refusal (a channel without the flag) leaving no feed
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
+import re
 import uuid
 from collections.abc import Callable
 from typing import Any, cast
@@ -31,11 +34,13 @@ import httpx
 import pytest
 import redis as redis_lib
 
+from tai42_e2e.channel_stubs import TINY_PNG
 from tai42_e2e.manifests import (
     BRIDGE_TWILIO_CLIENT,
     BRIDGE_WHATSAPP_PHONE_ID,
     BRIDGE_WHATSAPP_WABA_ID,
 )
+from tai42_e2e.recording_proxy import TargetServer
 from tai42_e2e.settings import HarnessSettings
 from tai42_e2e.waiting import wait_for_async
 from tai42_e2e.webchat import WebChatClient
@@ -44,6 +49,7 @@ from ._bridge_support import (
     WHATSAPP_INBOUND_PATH,
     BridgeHarness,
     cancel_and_join,
+    flow_components_of_type,
     post_inbound,
     script_reply,
     wait_probe_record,
@@ -340,13 +346,15 @@ async def test_web_form_reply_part_opens_the_card_prefilled(bridge: BridgeHarnes
     "store:redis",
 )
 async def test_whatsapp_notify_form_sends_namespaced_flow_and_reply_bridges_coerced_form(
-    bridge: BridgeHarness, uniq: Callable[[str], str]
+    bridge: BridgeHarness, uniq: Callable[[str], str], target_server: TargetServer
 ) -> None:
     identity = _fresh_phone_id()
     await _form_record_route(bridge, uniq, channel="whatsapp", identity=identity)
     wa_id = _fresh_wa_id()
     prompt = uniq("l27-wa-prompt")
     form_tag = uniq("l27-wa-tag")
+    picture_link = f"{target_server.url}/picture.png"
+    pictures_fetched = sum(record.path == "/picture.png" for record in target_server.records)
 
     await bridge.api().post(
         "/api/notifications",
@@ -355,6 +363,13 @@ async def test_whatsapp_notify_form_sends_namespaced_flow_and_reply_bridges_coer
             "channel": "whatsapp",
             "recipient": wa_id,
             "schema": _whatsapp_schema("flow-and-coerce"),
+            "pages": [
+                {
+                    "title": "Answer",
+                    "fields": ["topic", "amount"],
+                    "display": [{"kind": "image", "src": picture_link, "alt": "A picture"}],
+                }
+            ],
             "form_tag": form_tag,
         },
     )
@@ -373,6 +388,12 @@ async def test_whatsapp_notify_form_sends_namespaced_flow_and_reply_bridges_coer
     # The caller-set tag rides the token as its 4th ``:``-delimited segment, not the Flow.
     assert flow_token.split(":") == ["tai42-nf", *flow_token.split(":")[1:3], form_tag]
     assert _stack_redis_get(bridge, _whatsapp_pending_key(BRIDGE_WHATSAPP_PHONE_ID, wa_id)) is None
+    # The image block's link was fetched once at send and its picture embedded in the Flow as base64.
+    flow_json = json.loads(bridge.fake_whatsapp.flows[0]["flow_json"])
+    assert [image["src"] for image in flow_components_of_type(flow_json, "Image")] == [
+        base64.b64encode(TINY_PNG).decode("ascii")
+    ]
+    assert sum(record.path == "/picture.png" for record in target_server.records) == pictures_fetched + 1
 
     # The signed completed-Flow reply carrying that token enters the conversation as a
     # structured participant turn: values coerced to the schema's types (Flow inputs arrive as
@@ -390,6 +411,67 @@ async def test_whatsapp_notify_form_sends_namespaced_flow_and_reply_bridges_coer
     assert turn["message"] == f"Topic: {marker}\nAmount: 4"
     # The tag the Flow token carried round-trips to the tool payload beside the coerced form.
     assert turn["form_tag"] == form_tag
+
+
+_STORED_REFERENCE_RE = re.compile(r"/api/interactions/media/[A-Za-z0-9_-]{43}")
+
+
+@_whatsapp_mock_leg
+@pytest.mark.needs(
+    "kind:channels:whatsapp",
+    "helper:whatsapp",
+    "setting:INTERACTIONS_PUBLIC_BASE_URL",
+    "setting:router:notifications",
+    "setting:seeded-access-control",
+    "store:redis",
+)
+async def test_whatsapp_notify_form_embeds_a_picture_given_as_a_stored_reference(
+    bridge: BridgeHarness, uniq: Callable[[str], str]
+) -> None:
+    wa_id = _fresh_wa_id()
+    # A notify carrying an inline picture stores it by reference; the image send's link is the
+    # absolute served reference, whose path is the stored reference a form may name.
+    shot = uniq("stored-picture-shot")
+    data_image = "data:image/png;base64," + base64.b64encode(TINY_PNG).decode("ascii")
+    await bridge.api().post(
+        "/api/notifications",
+        json={
+            "message": "",
+            "channel": "whatsapp",
+            "recipient": wa_id,
+            "media": [{"kind": "image", "url": data_image, "caption": shot}],
+        },
+    )
+    image_send = await wait_whatsapp_send(bridge.fake_whatsapp, shot)
+    found = _STORED_REFERENCE_RE.search(image_send["payload"]["image"]["link"])
+    assert found is not None, image_send["payload"]
+    stored_reference = found.group(0)
+
+    prompt = uniq("stored-picture-form")
+    await bridge.api().post(
+        "/api/notifications",
+        json={
+            "message": prompt,
+            "channel": "whatsapp",
+            "recipient": wa_id,
+            "schema": _whatsapp_schema(uniq("stored-picture")),
+            "pages": [
+                {
+                    "title": "Answer",
+                    "fields": ["topic", "amount"],
+                    "display": [{"kind": "image", "src": stored_reference, "alt": "A picture"}],
+                }
+            ],
+        },
+    )
+
+    # The channel read the stored picture in process and embedded its bytes in the Flow as base64.
+    send = await wait_whatsapp_send(bridge.fake_whatsapp, prompt)
+    flow_id = send["payload"]["interactive"]["action"]["parameters"]["flow_id"]
+    (flow,) = [flow for flow in bridge.fake_whatsapp.flows if flow["id"] == flow_id]
+    assert [image["src"] for image in flow_components_of_type(json.loads(flow["flow_json"]), "Image")] == [
+        base64.b64encode(TINY_PNG).decode("ascii")
+    ]
 
 
 @_whatsapp_mock_leg
@@ -665,6 +747,57 @@ async def test_whatsapp_notify_form_refuses_in_the_callers_error_line_and_carrie
     assert refused["screen"] == "SCREEN_A", refused
     assert refused["data"]["email__err"] == "Use name@example.com"
     assert refused["data"]["error_message"] == error_line
+
+
+@_whatsapp_mock_leg
+@pytest.mark.needs(
+    "kind:channels:whatsapp",
+    "helper:whatsapp",
+    "setting:conversations",
+    "setting:router:notifications",
+    "setting:seeded-access-control",
+    "store:redis",
+)
+async def test_whatsapp_notify_form_starts_a_slot_as_its_blocks_own_text_and_shares_one_flow_across_start_texts(
+    bridge: BridgeHarness, uniq: Callable[[str], str]
+) -> None:
+    schema = _whatsapp_schema(uniq("l27-wa-slot"))
+
+    async def notify(start_text: str) -> dict[str, Any]:
+        prompt = uniq("l27-wa-slot-prompt")
+        pages = [
+            {
+                "title": "Note",
+                "fields": ["topic", "amount"],
+                "display": [{"kind": "body", "slot": "status", "text": start_text}],
+            }
+        ]
+        await bridge.api().post(
+            "/api/notifications",
+            json={
+                "message": prompt,
+                "channel": "whatsapp",
+                "recipient": _fresh_wa_id(),
+                "schema": schema,
+                "pages": pages,
+            },
+        )
+        send = await wait_whatsapp_send(bridge.fake_whatsapp, prompt)
+        return send["payload"]["interactive"]["action"]["parameters"]
+
+    first = await notify("Status: alpha")
+    created = [flow for flow in bridge.fake_whatsapp.flows if flow["id"] == first["flow_id"]]
+    assert len(created) == 1
+    # The published Flow reads the slot from the send data and carries no start text of its own.
+    assert "${data.slot_status}" in created[0]["flow_json"]
+    assert "Status: alpha" not in created[0]["flow_json"]
+    assert first["flow_action_payload"]["data"]["slot_status"] == "Status: alpha"
+    flows_after_first = len(bridge.fake_whatsapp.flows)
+
+    second = await notify("Status: beta")
+    assert second["flow_id"] == first["flow_id"]
+    assert len(bridge.fake_whatsapp.flows) == flows_after_first
+    assert second["flow_action_payload"]["data"]["slot_status"] == "Status: beta"
 
 
 # A form schema the channel-renderable subset refuses: a nested object property.

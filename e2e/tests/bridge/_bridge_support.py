@@ -115,6 +115,26 @@ def whatsapp_flow_action_request(
     return {"version": "3.0", "action": "data_exchange", "screen": screen, "flow_token": flow_token, "data": resolved}
 
 
+def flow_components_of_type(flow_json: dict[str, Any], ctype: str) -> list[dict[str, Any]]:
+    """Every layout component of type ``ctype`` across the Flow's screens, in document order.
+
+    A ``visibleWhen`` field renders under one or more nested ``If`` components; their ``then``
+    lists are descended so a component is found whether or not it is conditionally gated.
+    """
+    out: list[dict[str, Any]] = []
+
+    def _walk(children: list[dict[str, Any]]) -> None:
+        for child in children:
+            if child.get("type") == "If":
+                _walk(child.get("then", []))
+            elif child.get("type") == ctype:
+                out.append(child)
+
+    for screen in flow_json["screens"]:
+        _walk(screen["layout"]["children"])
+    return out
+
+
 def extract_pair_code(text: str) -> str:
     """The single ``LINK-XXXXXXXX`` pair code carried in ``text`` (a link reply or a
     greeting). Raises unless EXACTLY one is present — a leg that asked for a code never

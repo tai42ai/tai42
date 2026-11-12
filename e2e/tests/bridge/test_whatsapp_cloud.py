@@ -27,6 +27,7 @@ non-admin key (403) before any Graph call.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import re
 import uuid
@@ -37,6 +38,7 @@ import pytest
 import redis as redis_lib
 
 from tai42_e2e import wait_absent_async
+from tai42_e2e.channel_stubs import TINY_PNG
 from tai42_e2e.httpapi import ApiClient
 from tai42_e2e.manifests import (
     BRIDGE_TWILIO_CLIENT,
@@ -45,6 +47,7 @@ from tai42_e2e.manifests import (
     BRIDGE_WHATSAPP_PHONE_ID_B,
     BRIDGE_WHATSAPP_PHONE_ID_C,
 )
+from tai42_e2e.recording_proxy import TargetServer
 from tai42_e2e.settings import HarnessSettings
 
 from ._bridge_support import (
@@ -52,6 +55,7 @@ from ._bridge_support import (
     WHATSAPP_INBOUND_PATH,
     BridgeHarness,
     cancel_and_join,
+    flow_components_of_type,
     post_inbound,
     request_mentions,
     script_reply,
@@ -158,40 +162,16 @@ def _text_input_by_name(flow_json: dict, name: str) -> dict:
     return matches[0]
 
 
-def _layout_children(flow_json: dict) -> list[dict]:
-    """Every layout child across the Flow's screens, flattened (an ``If`` wrapper's ``then`` unwrapped).
-
-    A ``visibleWhen`` field renders under one or more nested ``If`` components; this descends into
-    their ``then`` lists so a control is found whether or not it is conditionally gated."""
-    out: list[dict] = []
-
-    def _walk(children: list[dict]) -> None:
-        for child in children:
-            if child.get("type") == "If":
-                _walk(child.get("then", []))
-            else:
-                out.append(child)
-
-    for screen in flow_json["screens"]:
-        _walk(screen["layout"]["children"])
-    return out
-
-
-def _components_of_type(flow_json: dict, ctype: str) -> list[dict]:
-    """Every layout component of type ``ctype`` across the Flow's screens."""
-    return [child for child in _layout_children(flow_json) if child.get("type") == ctype]
-
-
 def _component_by_name(flow_json: dict, ctype: str, name: str) -> dict:
     """The single ``ctype`` component carrying ``name`` across the Flow's screens."""
-    matches = [c for c in _components_of_type(flow_json, ctype) if c.get("name") == name]
+    matches = [c for c in flow_components_of_type(flow_json, ctype) if c.get("name") == name]
     assert len(matches) == 1, f"expected exactly one {ctype} named {name!r}, saw {len(matches)}"
     return matches[0]
 
 
 def _terminal_footer_label(flow_json: dict) -> str:
     """The ``label`` of the terminal screen's Footer (the form's submit button)."""
-    footers = _components_of_type(flow_json, "Footer")
+    footers = flow_components_of_type(flow_json, "Footer")
     assert footers, "the published Flow carries no Footer"
     return footers[-1]["label"]
 
@@ -707,9 +687,11 @@ async def test_stale_button_tap_restores_pending_ask(bridge: BridgeHarness, uniq
     "topology:replicas",
 )
 async def test_form_over_whatsapp_flow_and_nfm_reply_answers_with_a_typed_dict(
-    bridge: BridgeHarness, uniq: Callable[[str], str]
+    bridge: BridgeHarness, uniq: Callable[[str], str], target_server: TargetServer
 ) -> None:
     question = uniq("l7-form-q")
+    picture_link = f"{target_server.url}/picture.png"
+    pictures_fetched = sum(record.path == "/picture.png" for record in target_server.records)
     good_answer = {
         "label": uniq("l7-form-label"),
         "amount": 4,
@@ -728,6 +710,13 @@ async def test_form_over_whatsapp_flow_and_nfm_reply_answers_with_a_typed_dict(
                     "recipient": wa_id,
                     "answer_format": "form",
                     "schema": _FORM_SCHEMA,
+                    "pages": [
+                        {
+                            "title": "Form",
+                            "fields": ["label", "amount", "when", "contact"],
+                            "display": [{"kind": "image", "src": picture_link, "alt": "A picture"}],
+                        }
+                    ],
                 },
             )
         return result.data.answer
@@ -748,12 +737,17 @@ async def test_form_over_whatsapp_flow_and_nfm_reply_answers_with_a_typed_dict(
         # as the typed string, coerced only by the schema type (the integer below).
         flow_json = json.loads(bridge.fake_whatsapp.flows[0]["flow_json"])
         assert _text_input_by_name(flow_json, "contact")["input-type"] == "email"
+        # The image block's link was fetched once at send and its picture embedded as base64.
+        assert [image["src"] for image in flow_components_of_type(flow_json, "Image")] == [
+            base64.b64encode(TINY_PNG).decode("ascii")
+        ]
+        assert sum(record.path == "/picture.png" for record in target_server.records) == pictures_fetched + 1
         # Every shape here is one Meta's controls check themselves (required, the integer's
         # whole-number pattern, a calendar date), so the Flow stays the static navigate Flow.
         assert "data_api_version" not in flow_json
         assert bridge.fake_whatsapp.flows[0]["endpoint_uri"] is None
         assert _text_input_by_name(flow_json, "amount")["pattern"] == "^-?[0-9]+$"
-        assert _components_of_type(flow_json, "Footer")[-1]["on-click-action"]["name"] == "complete"
+        assert flow_components_of_type(flow_json, "Footer")[-1]["on-click-action"]["name"] == "complete"
         params = interactive["action"]["parameters"]
         assert params["flow_id"] == created
         flow_token = params["flow_token"]
@@ -901,14 +895,14 @@ async def test_form_controls_render_native_flow_components_and_answer_resolves(
         assert chips["max-selected-items"] == 1
         # The one-choice chips field falls below Meta's floor and degrades to the default control —
         # a RadioButtonsGroup, never a ChipsSelector.
-        assert [c["name"] for c in _components_of_type(flow_json, "ChipsSelector")] == ["colour"]
+        assert [c["name"] for c in flow_components_of_type(flow_json, "ChipsSelector")] == ["colour"]
         assert _component_by_name(flow_json, "RadioButtonsGroup", "size")
         # The textarea string draws a TextArea carrying the declared maximum.
         assert _component_by_name(flow_json, "TextArea", "notes")["max-length"] == 600
         # The rangeStart date pair draws ONE range-mode CalendarPicker, keyed by the start, its two
         # ends labelled by their own titles (here their names) and the span carried as min/max-days
         # (Meta counts the difference, one less than the platform's inclusive day count).
-        ranges = [c for c in _components_of_type(flow_json, "CalendarPicker") if c.get("mode") == "range"]
+        ranges = [c for c in flow_components_of_type(flow_json, "CalendarPicker") if c.get("mode") == "range"]
         assert len(ranges) == 1
         assert ranges[0]["name"] == "start"
         assert ranges[0]["label"] == {"start-date": "start", "end-date": "end"}
@@ -979,7 +973,7 @@ async def test_form_range_pair_degrades_to_two_controls_when_a_sibling_depends_o
         # A sibling's visibleWhen names the end, so the pair is NOT merged: no range-mode control,
         # and the two date fields draw as their own single-mode calendars, so ${form.end} resolves;
         # the split pair's span is the data endpoint's to check, so the Flow is endpoint-driven.
-        assert [c for c in _components_of_type(flow_json, "CalendarPicker") if c.get("mode") == "range"] == []
+        assert [c for c in flow_components_of_type(flow_json, "CalendarPicker") if c.get("mode") == "range"] == []
         assert _component_by_name(flow_json, "CalendarPicker", "start")["mode"] == "single"
         assert _component_by_name(flow_json, "CalendarPicker", "end")["mode"] == "single"
         assert flow_json["data_api_version"] == "3.0"
@@ -1196,7 +1190,7 @@ async def test_timed_range_with_a_review_page_draws_and_reads_back_each_time_aft
         assert _component_by_name(flow_json, "CalendarPicker", "end")["mode"] == "single"
         readback = [
             child["text"]
-            for child in _components_of_type(flow_json, "TextBody")
+            for child in flow_components_of_type(flow_json, "TextBody")
             if isinstance(child.get("text"), str) and "__val}" in child["text"]
         ]
         assert readback == [
