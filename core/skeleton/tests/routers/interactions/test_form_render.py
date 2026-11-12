@@ -524,6 +524,31 @@ async def test_get_form_ticket_renders_display_blocks_and_review(wired):
     assert "data-labels=" in body
 
 
+async def test_get_form_ticket_marks_slotted_images_so_the_script_draws_a_reaction_picture(wired):
+    # A slotted image carries its kind on whichever element draws it, so the script turns a
+    # reaction's value into a picture (or back into the alt text) whatever the element is.
+    schema = {"type": "object", "properties": {"name": {"type": "string"}}}
+    pages = [
+        {
+            "title": "Who",
+            "fields": ["name"],
+            "display": [
+                {"kind": "image", "slot": "chart", "src": "https://cdn.example/1.png", "alt": "Chart"},
+                {"kind": "image", "slot": "badge", "alt": "Badge"},
+                {"kind": "body", "slot": "total"},
+            ],
+        },
+    ]
+    await _seed_form_payload(wired, format_payload={"schema": schema, "pages": pages})
+    resp = await router.callback(make_request("GET", path_params={"ticket": "TKT"}))
+    body = bytes(resp.body).decode()
+    assert '<img data-slot="chart" data-slot-kind="image" src="https://cdn.example/1.png" alt="Chart">' in body
+    assert '<p data-slot="badge" data-slot-kind="image" class="display-alt">Badge</p>' in body
+    assert '<p data-slot="total" class="display-body"></p>' in body
+    assert "function drawImageSlot(el, value)" in body
+    assert "slots[i].getAttribute('data-slot-kind') === 'image'" in body
+
+
 async def test_get_form_ticket_renders_conditional_field(wired):
     schema = {
         "type": "object",

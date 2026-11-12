@@ -545,12 +545,15 @@ def _render_display(block: dict[str, Any]) -> str:
     An image with a static ``src`` renders an ``<img>`` (its ``alt`` the text a surface that
     cannot draw it shows); a slotted image with no static source DEGRADES to its alt text, never
     a broken image. A ``slot`` rides a ``data-slot`` attribute (the live channel fills it; the
-    static page shows the given/empty content).
+    static page shows the given/empty content); a slotted image's element also carries
+    ``data-slot-kind="image"``, so the page script draws a reaction's value as its picture.
     """
     kind = block.get("kind")
     slot = block.get("slot")
     slot_attr = f' data-slot="{_attr(slot)}"' if isinstance(slot, str) else ""
     if kind == "image":
+        if slot_attr:
+            slot_attr += ' data-slot-kind="image"'
         src = block.get("src")
         alt = str(block.get("alt") or "")
         if src:

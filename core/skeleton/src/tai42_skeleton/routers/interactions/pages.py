@@ -493,13 +493,28 @@ _FORM_SUBMIT_SCRIPT = """<script>
     if (timeBeforeStart(el, value)) { return shapeSentence(el, 'range_order'); }
     return null;
   }
+  // An image slot's value is its picture's source: a value draws an <img>, null or '' the
+  // alt-text paragraph; the element is swapped when the other one is needed.
+  function drawImageSlot(el, value) {
+    var empty = value === null || value === '';
+    var isImg = el.tagName === 'IMG';
+    if (empty && !isImg) { return; }
+    if (!empty && isImg) { el.setAttribute('src', String(value)); return; }
+    var next = document.createElement(empty ? 'p' : 'img');
+    next.setAttribute('data-slot', el.getAttribute('data-slot'));
+    next.setAttribute('data-slot-kind', 'image');
+    if (empty) { next.className = 'display-alt'; next.textContent = el.getAttribute('alt') || ''; }
+    else { next.setAttribute('alt', el.textContent || ''); next.setAttribute('src', String(value)); }
+    el.parentNode.replaceChild(next, el);
+  }
   function applyDisplay(display) {
     var slots = form.querySelectorAll('[data-slot]');
     for (var i = 0; i < slots.length; i++) {
       var slot = slots[i].getAttribute('data-slot');
       if (Object.prototype.hasOwnProperty.call(display, slot)) {
-        if (slots[i].tagName === 'IMG') { slots[i].setAttribute('src', String(display[slot])); }
-        else { slots[i].textContent = String(display[slot]); }
+        var v = display[slot];
+        if (slots[i].getAttribute('data-slot-kind') === 'image') { drawImageSlot(slots[i], v); }
+        else { slots[i].textContent = v === null ? '' : String(v); }
       }
     }
   }
