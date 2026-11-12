@@ -33,8 +33,10 @@ from .conftest import (
     _SEEN_KEY,
     _WAMID,
     PHONE_NUMBER_ID,
+    PICTURE_JPEG,
     WA_ID,
     FakeHttpx,
+    FakePictureFetch,
     FakeRedis,
     _pending_intact,
     _seed_pending_form,
@@ -1277,3 +1279,78 @@ async def test_a_notify_form_reply_hands_accept_the_flow_message_id(waba_env, ha
     (call,) = stub_app.conversations.accept_calls
     assert call["reply_to_medium_message_id"] == _QUOTED_FLOW_MESSAGE
     assert call["params"] is None
+
+
+async def test_a_correction_re_send_reuses_the_embedded_picture_without_fetching(
+    waba_env, handler, channels, fake_redis: FakeRedis, fake_httpx: FakeHttpx, picture_fetch: FakePictureFetch
+):
+    # The pending ask holds the picture already embedded, so a link that died after the first
+    # send cannot break the correction: the same Flow, the same data, no second fetch.
+    from tai42_contract.interactions.models import DisplayBlock, FormPage
+    from tai42_kit.net import MediaFetchError
+
+    link = "https://pics.example/a.jpg"
+    pages = [
+        FormPage(
+            title="Form",
+            fields=list(_FORM_SCHEMA["properties"]),
+            display=[DisplayBlock(kind="image", src=link), DisplayBlock(kind="image", slot="preview", src=link)],
+        )
+    ]
+    delivery = make_delivery(answer_format="form", schema=_FORM_SCHEMA, question=_FORM_QUESTION, pages=pages)
+    fake_httpx.get_responses.append(flow_list_page())
+    fake_httpx.responses.append(_flow_created("flow-picture"))
+    fake_httpx.responses.append(_published())
+    fake_httpx.responses.append(_flow_accepted("wamid.FIRST"))
+    await WhatsAppChannel().deliver(delivery)
+    first = fake_httpx.calls[-1]["json"]["interactive"]["action"]["parameters"]
+
+    picture_fetch.faults[link] = MediaFetchError(host="pics.example", status_code=503)
+    channels.inbound_outcome = InboundAnswerOutcome.RETRY_KEPT
+    channels.inbound_retry_reason = "note: must not be blank"
+    fake_httpx.responses.append(_flow_accepted())
+    result = await handler(signed_request(form_reply_payload({"flow_token": "int-1", "note": "x"})))
+
+    assert result.status_code == 200
+    resend = fake_httpx.calls[-1]["json"]["interactive"]["action"]["parameters"]
+    assert resend["flow_id"] == first["flow_id"] == "flow-picture"
+    assert resend["flow_action_payload"] == first["flow_action_payload"]
+    assert [url for url, _ in picture_fetch.calls] == [link]
+
+
+async def test_a_correction_re_send_reuses_the_embedded_stored_picture_without_reading_it(
+    waba_env, stub_app, handler, channels, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    # The pending ask holds the stored picture already embedded, so a picture that expired after
+    # the first send cannot break the correction: the same Flow, the same data, no second read.
+    from tai42_contract.interactions import MediaNotFoundError, StoredMedia
+    from tai42_contract.interactions.models import DisplayBlock, FormPage
+
+    stored = "/api/interactions/media/" + "S" * 43
+    pages = [
+        FormPage(
+            title="Form",
+            fields=list(_FORM_SCHEMA["properties"]),
+            display=[DisplayBlock(kind="image", src=stored), DisplayBlock(kind="image", slot="preview", src=stored)],
+        )
+    ]
+    stub_app.media.read_result = StoredMedia(mime="image/jpeg", data=PICTURE_JPEG)
+    delivery = make_delivery(answer_format="form", schema=_FORM_SCHEMA, question=_FORM_QUESTION, pages=pages)
+    fake_httpx.get_responses.append(flow_list_page())
+    fake_httpx.responses.append(_flow_created("flow-stored"))
+    fake_httpx.responses.append(_published())
+    fake_httpx.responses.append(_flow_accepted("wamid.FIRST"))
+    await WhatsAppChannel().deliver(delivery)
+    first = fake_httpx.calls[-1]["json"]["interactive"]["action"]["parameters"]
+
+    stub_app.media.read_error = MediaNotFoundError("stored media not found")
+    channels.inbound_outcome = InboundAnswerOutcome.RETRY_KEPT
+    channels.inbound_retry_reason = "note: must not be blank"
+    fake_httpx.responses.append(_flow_accepted())
+    result = await handler(signed_request(form_reply_payload({"flow_token": "int-1", "note": "x"})))
+
+    assert result.status_code == 200
+    resend = fake_httpx.calls[-1]["json"]["interactive"]["action"]["parameters"]
+    assert resend["flow_id"] == first["flow_id"] == "flow-stored"
+    assert resend["flow_action_payload"] == first["flow_action_payload"]
+    assert len(stub_app.media.read_calls) == 1

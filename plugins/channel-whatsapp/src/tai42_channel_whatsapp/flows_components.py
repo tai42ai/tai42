@@ -729,20 +729,25 @@ def _forward_field_data(
 def _display_component(block: dict[str, Any], slots: dict[str, str]) -> dict[str, Any]:
     """One Flow display component (TextHeading / TextBody / Image) for a page display block.
 
-    A static block carries its own ``text``/``src``; a slotted block reads ``${data.<slot>}``
-    (filled by a reaction while the form is open, empty until then). An image maps to the vendor
+    A static block carries its own ``text``/``src``; a slotted block reads ``${data.<slot>}``,
+    which starts as the block's own content (or empty when it carries none) and a reaction may
+    replace while the form is open. An image maps to the vendor
     ``Image`` (base64 ``src`` + ``alt-text``), a heading to ``TextHeading``, a body to ``TextBody``.
     """
     kind = block.get("kind")
     slot = block.get("slot")
+    content = f"${{data.{slots[slot]}}}" if isinstance(slot, str) else block.get(display_content_member(block))
     if kind == "image":
-        src = f"${{data.{slots[slot]}}}" if isinstance(slot, str) else block.get("src")
-        component: dict[str, Any] = {"type": "Image", "src": src}
+        component: dict[str, Any] = {"type": "Image", "src": content}
         if isinstance(block.get("alt"), str):
             component["alt-text"] = block["alt"]
         return component
-    text = f"${{data.{slots[slot]}}}" if isinstance(slot, str) else block.get("text")
-    return {"type": "TextHeading" if kind == "heading" else "TextBody", "text": text}
+    return {"type": "TextHeading" if kind == "heading" else "TextBody", "text": content}
+
+
+def display_content_member(block: dict[str, Any]) -> str:
+    """The display block member that holds its own content: ``src`` for an image, ``text`` for a heading or body."""
+    return "src" if block.get("kind") == "image" else "text"
 
 
 def _display_component_list(page: dict[str, Any], slots: dict[str, str]) -> list[dict[str, Any]]:

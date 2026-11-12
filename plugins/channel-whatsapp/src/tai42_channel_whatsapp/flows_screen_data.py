@@ -2,8 +2,10 @@
 
 :class:`_RenderSpec` carries the cross-cutting inputs of one Flow build. From it each screen
 declares its ``data`` model (:func:`_screen_data_model`): every field's init/ds/err, the ``__val``
-carriers of fields collected earlier, and the caller-word carriers an ask-less endpoint-driven form
-rides; and forwards the carriers its later fields still need (:func:`_later_carriers`).
+carriers of fields collected earlier, the display slots of its own and every later page, and the
+caller-word carriers an ask-less endpoint-driven form rides; and forwards the carriers its later
+fields and later pages' slots still need (:func:`_later_carriers`). Everything a later screen needs
+enters at the entry screen, so each step forwards what its successors still read.
 """
 
 from __future__ import annotations
@@ -18,6 +20,7 @@ from tai42_channel_whatsapp.flows_components import (
     _value_type_decl,
 )
 from tai42_channel_whatsapp.flows_endpoint import FORM_LINE_MEMBERS, form_line_carrier
+from tai42_channel_whatsapp.flows_resolve import slot_keys
 from tai42_channel_whatsapp.flows_shapes import ERROR_EXAMPLE
 
 
@@ -75,14 +78,20 @@ def _range_error_decl() -> dict[str, Any]:
 
 
 def _screen_data_model(
-    index: int, this_fields: list[str], later_fields: list[str], earlier_fields: list[str], spec: _RenderSpec
+    index: int,
+    this_fields: list[str],
+    later_fields: list[str],
+    earlier_fields: list[str],
+    pages: list[dict[str, Any]],
+    spec: _RenderSpec,
 ) -> dict[str, Any]:
-    """The screen's ``data`` declarations.
+    """The ``data`` declarations of screen ``index`` of the form's resolved ``pages``.
 
     The entry screen declares EVERY field's init/ds/err (the send injects them all there); a later screen
     declares its own and its successors' init/ds/err plus a ``__val`` carrier for each field collected
     earlier. A merged range START's ``__err`` is the pair's one error object (:func:`_range_error_decl`)
-    and a merged range END declares nothing.
+    and a merged range END declares nothing. Every screen declares, as a string, the display slots of
+    its own page and of every later page (the send injects them all at the entry screen).
     Every screen of an ask-less endpoint-driven form declares each shaped field's ``__invalid``, each
     field's ``__required`` the form-shape check can report missing, and the form-line carriers.
     """
@@ -105,6 +114,8 @@ def _screen_data_model(
                 _range_value_type_decl() if name in merged_starts else _value_type_decl(spec.properties[name])
             )
     data_model.update(_caller_word_decls(spec))
+    for key in slot_keys(pages[index:], spec.slots):
+        data_model[key] = {"type": "string", "__example__": ""}
     return data_model
 
 
@@ -123,10 +134,10 @@ def _caller_word_decls(spec: _RenderSpec) -> dict[str, Any]:
     return decls
 
 
-def _later_carriers(later_fields: list[str], spec: _RenderSpec) -> dict[str, str]:
-    # The carriers each later (unrendered) field still needs on a later screen: its init/ds and its
-    # ``__err`` (a merged START's the pair's one error object, a merged END none), forwarded from
-    # this screen's data.
+def _later_carriers(later_fields: list[str], later_pages: list[dict[str, Any]], spec: _RenderSpec) -> dict[str, str]:
+    # The carriers a later screen still needs, forwarded from this screen's data: each later
+    # (unrendered) field's init/ds and its ``__err`` (a merged START's the pair's one error object, a
+    # merged END none), and the display slot of each block on ``later_pages``.
     merged_ends = set(spec.range_merges)
     forward: dict[str, str] = {}
     for name in later_fields:
@@ -134,4 +145,5 @@ def _later_carriers(later_fields: list[str], spec: _RenderSpec) -> dict[str, str
             forward.update(_forward_field_data(name, spec.properties[name], spec.option_fields, spec.names))
         if name in spec.err_fields and name not in merged_ends:
             forward[f"{spec.names[name]}__err"] = f"${{data.{spec.names[name]}__err}}"
+    forward.update({key: f"${{data.{key}}}" for key in slot_keys(later_pages, spec.slots)})
     return forward

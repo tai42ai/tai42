@@ -22,6 +22,7 @@ from typing import Any
 from tai42_contract.channels import ChannelInputError
 from tai42_contract.interactions import SHAPE_KEYWORDS, FormReactionEventKind
 
+from tai42_channel_whatsapp.flow_crypto import request_plaintext_max_bytes
 from tai42_channel_whatsapp.flows_components import _field_control
 from tai42_channel_whatsapp.flows_shapes import ERROR_MESSAGE_TYPES, field_needs_endpoint
 from tai42_channel_whatsapp.flows_visibility import answer_refs, form_splits_fields
@@ -48,6 +49,23 @@ CARRIER_SUFFIXES = ("__init", "__ds", "__err", "__invalid", "__required", "__val
 # an ask-less form carries each as screen data under :func:`form_line_carrier`. The carriers are
 # reserved property names but NOT reaction markers: an answer's echo of the screen data keeps them.
 FORM_LINE_MEMBERS = ("error_line", "update_failed")
+
+# The largest request body the data endpoint reads; a larger one is answered 413, never truncated.
+ENDPOINT_BODY_MAX_BYTES = 1 * 1024 * 1024
+
+# The room a footer request needs beside the screen's echoed data: its wrapper, the event markers
+# and the person's answers (an earlier page's answer rides again under its schema name).
+_FOOTER_REQUEST_RESERVE_BYTES = 64 * 1024
+
+
+def echoed_screen_data_max_bytes() -> int:
+    """The largest screen data whose footer request the data endpoint can still read.
+
+    Every footer of an endpoint-driven form echoes the screen's whole data (:func:`screen_data_refs`)
+    inside a request that also carries the wrapper, the markers and the answers; this is the
+    largest decrypted request within :data:`ENDPOINT_BODY_MAX_BYTES` less the room kept for those.
+    """
+    return request_plaintext_max_bytes(ENDPOINT_BODY_MAX_BYTES) - _FOOTER_REQUEST_RESERVE_BYTES
 
 
 def form_line_carrier(member: str) -> str:

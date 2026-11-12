@@ -1651,6 +1651,101 @@ def test_display_slot_reads_dynamic_data_and_declares_its_key():
     assert flow_json["screens"][0]["data"]["slot_total"] == {"type": "string", "__example__": ""}
 
 
+def test_send_data_starts_each_slot_as_its_blocks_own_content():
+    # A slot's start value is its block's own ``text`` (heading/body) or ``src`` (image), "" when it
+    # carries none.
+    schema = {"type": "object", "properties": {"amount": {"type": "string"}}}
+    pages = [
+        {
+            "title": "Form",
+            "fields": ["amount"],
+            "kind": "input",
+            "display": [
+                {"kind": "heading", "slot": "head", "text": "Total: 0"},
+                {"kind": "image", "slot": "pic", "src": "aW1hZ2U=", "alt": "Chart"},
+                {"kind": "body", "slot": "bare"},
+            ],
+        }
+    ]
+    data = build_flow_data(schema, None, None, pages)
+    assert data["slot_head"] == "Total: 0"
+    assert data["slot_pic"] == "aW1hZ2U="
+    assert data["slot_bare"] == ""
+
+
+_STATIC_SLOT_SCHEMA = {
+    "type": "object",
+    "properties": {"amount": {"type": "string"}, "color": {"type": "string"}, "size": {"type": "string"}},
+}
+_STATIC_SLOT_PAGES = [
+    {"title": "One", "fields": ["amount"], "kind": "input", "display": []},
+    {"title": "Two", "fields": ["color"], "kind": "input", "display": [{"kind": "body", "slot": "mid"}]},
+    {
+        "title": "Three",
+        "fields": ["size"],
+        "kind": "input",
+        "display": [{"kind": "body", "slot": "total", "text": "Total: 0"}],
+    },
+]
+
+
+def test_static_form_forwards_a_later_pages_slot_start_value_from_the_entry_data():
+    # A static form has no data endpoint: a later page's slot reaches its screen the way a later
+    # field's carriers do — the entry screen declares it, the send injects its start value there, and
+    # each step's navigate payload forwards it to the screens after.
+    assert not form_needs_endpoint(_STATIC_SLOT_SCHEMA, _STATIC_SLOT_PAGES)
+    flow_json, _ = build_form_flow(_STATIC_SLOT_SCHEMA, _STATIC_SLOT_PAGES)
+    screens = flow_json["screens"]
+    string_decl = {"type": "string", "__example__": ""}
+    assert screens[0]["data"]["slot_mid"] == string_decl
+    assert screens[0]["data"]["slot_total"] == string_decl
+    assert screens[1]["data"]["slot_total"] == string_decl
+    first_forward = screens[0]["layout"]["children"][-1]["on-click-action"]["payload"]
+    second_forward = screens[1]["layout"]["children"][-1]["on-click-action"]["payload"]
+    assert first_forward["slot_mid"] == "${data.slot_mid}"
+    assert first_forward["slot_total"] == "${data.slot_total}"
+    assert second_forward["slot_total"] == "${data.slot_total}"
+    # A screen forwards only the slots of the screens after it.
+    assert "slot_mid" not in second_forward
+    data = build_flow_data(_STATIC_SLOT_SCHEMA, None, None, _STATIC_SLOT_PAGES)
+    assert data["slot_mid"] == ""
+    assert data["slot_total"] == "Total: 0"
+
+
+def test_slot_start_value_is_send_data_never_part_of_the_published_flow():
+    # The published Flow declares a slot as a string read from ``${data.<key>}`` whether or not its
+    # block carries content of its own; the start value rides the per-send data only.
+    schema = {"type": "object", "properties": {"amount": {"type": "string"}}}
+
+    def pages(block: dict) -> list[dict]:
+        return [{"title": "Form", "fields": ["amount"], "kind": "input", "display": [block]}]
+
+    with_text, _ = build_form_flow(schema, pages({"kind": "body", "slot": "total", "text": "Total: 0"}))
+    without_text, _ = build_form_flow(schema, pages({"kind": "body", "slot": "total"}))
+    assert with_text == without_text
+    assert _screen_children(with_text)[0] == {"type": "TextBody", "text": "${data.slot_total}"}
+    assert with_text["screens"][0]["data"]["slot_total"] == {"type": "string", "__example__": ""}
+
+
+def test_form_flow_key_ignores_a_slotted_blocks_own_content_and_folds_a_static_blocks():
+    # A slotted block's own content is send data, so forms that differ only in it share one
+    # published Flow; a static block's content is Flow JSON, so it keys a different one.
+    schema = {"type": "object", "properties": {"amount": {"type": "string"}}}
+
+    def pages(*blocks: dict) -> list[dict]:
+        return [{"title": "Form", "fields": ["amount"], "kind": "input", "display": list(blocks)}]
+
+    _, total_zero = build_form_flow(schema, pages({"kind": "body", "slot": "total", "text": "Total: 0"}))
+    _, total_twelve = build_form_flow(schema, pages({"kind": "body", "slot": "total", "text": "Total: 12"}))
+    assert total_zero == total_twelve
+    _, image_one = build_form_flow(schema, pages({"kind": "image", "slot": "chart", "src": "aW1hZ2Ux"}))
+    _, image_two = build_form_flow(schema, pages({"kind": "image", "slot": "chart", "src": "aW1hZ2Uy"}))
+    assert image_one == image_two
+    _, static_zero = build_form_flow(schema, pages({"kind": "body", "text": "Total: 0"}))
+    _, static_twelve = build_form_flow(schema, pages({"kind": "body", "text": "Total: 12"}))
+    assert static_zero != static_twelve
+
+
 def test_review_page_renders_a_readback_of_every_field():
     schema = {"type": "object", "properties": {"a": {"type": "string"}, "b": {"type": "string"}}}
     pages = [

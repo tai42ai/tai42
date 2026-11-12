@@ -270,17 +270,28 @@ class _StubConversations:
 
 
 class _StubMedia:
-    """Stands in for the skeleton's ``app.media`` served-media ingestion facet.
+    """Stands in for the skeleton's ``app.media`` served-media facet.
 
-    The plugin's test venv cannot import the skeleton, so the ingest chokepoint is faked at this
-    contract seam. A test sets ``ingest_result`` (an :class:`IngestedMedia`) or ``ingest_error``
-    (a ``MediaIngestError`` subclass to raise) and reads back the recorded ``ingest_calls`` —
-    including the ``source`` byte stream — to assert what the channel handed the seam."""
+    The plugin's test venv cannot import the skeleton, so the media seam is faked at this
+    contract seam. For ingestion a test sets ``ingest_result`` (an :class:`IngestedMedia`) or
+    ``ingest_error`` (a ``MediaIngestError`` subclass to raise) and reads back the recorded
+    ``ingest_calls`` — including the ``source`` byte stream — to assert what the channel handed
+    the seam. For reads a test sets ``read_result`` (a :class:`StoredMedia`) or ``read_error`` and
+    reads back ``read_calls``, one ``(media_id, max_bytes)`` pair per read."""
 
     def __init__(self) -> None:
         self.ingest_calls: list[dict[str, Any]] = []
         self.ingest_result: Any = None
         self.ingest_error: Exception | None = None
+        self.read_calls: list[tuple[str, int]] = []
+        self.read_result: Any = None
+        self.read_error: Exception | None = None
+
+    async def read_media(self, media_id: str, *, max_bytes: int) -> Any:
+        self.read_calls.append((media_id, max_bytes))
+        if self.read_error is not None:
+            raise self.read_error
+        return self.read_result
 
     async def ingest_media(
         self,
@@ -648,6 +659,65 @@ def fake_redis(stub_app: _StubApp, fake_httpx: FakeHttpx) -> FakeRedis:
     fake = FakeRedis(events=fake_httpx.events)
     stub_app.clients.by_class[RedisClient] = fake
     return fake
+
+
+# The smallest bytes each drawable picture format starts with.
+PICTURE_JPEG = b"\xff\xd8\xff\xe0" + b"jpeg-body" * 4
+PICTURE_PNG = b"\x89PNG\r\n\x1a\n" + b"png-body" * 4
+
+
+class FakePictureFetch:
+    """Stands in for the kit's ``fetch_media`` where form pictures are fetched.
+
+    Serves ``served[url]`` (a JPEG by default) or raises ``faults[url]``; a link in ``stalled`` never
+    answers until its fetch is cancelled, which ``cancelled`` records. Records each call and the most
+    fetches ever in flight at once.
+    """
+
+    def __init__(self) -> None:
+        self.served: dict[str, bytes] = {}
+        self.faults: dict[str, BaseException] = {}
+        self.stalled: set[str] = set()
+        self.cancelled: list[str] = []
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+        self.in_flight = 0
+        self.most_in_flight = 0
+
+    async def __call__(self, url: str, **kwargs: Any) -> tuple[bytes, str | None]:
+        self.calls.append((url, kwargs))
+        self.in_flight += 1
+        self.most_in_flight = max(self.most_in_flight, self.in_flight)
+        try:
+            if url in self.stalled:
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    self.cancelled.append(url)
+                    raise
+            await asyncio.sleep(0.01)
+            if url in self.faults:
+                raise self.faults[url]
+            return self.served.get(url, PICTURE_JPEG), "image/jpeg"
+        finally:
+            self.in_flight -= 1
+
+
+@pytest.fixture
+def picture_fetch(monkeypatch: pytest.MonkeyPatch) -> FakePictureFetch:
+    from tai42_channel_whatsapp import flow_pictures
+
+    fake = FakePictureFetch()
+    monkeypatch.setattr(flow_pictures, "fetch_media", fake)
+    return fake
+
+
+@pytest.fixture
+def picture_fetch_limit(monkeypatch: pytest.MonkeyPatch) -> float:
+    """A short total time limit on one form picture fetch; the seconds it is set to."""
+    from tai42_channel_whatsapp import flow_pictures
+
+    monkeypatch.setattr(flow_pictures, "_PICTURE_FETCH_SECONDS", 0.2)
+    return 0.2
 
 
 def make_delivery(**overrides: Any) -> ChannelDelivery:

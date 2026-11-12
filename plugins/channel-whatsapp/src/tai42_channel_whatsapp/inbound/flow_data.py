@@ -63,6 +63,7 @@ from tai42_channel_whatsapp.flow_crypto import (
     encrypt_response,
     load_private_key,
 )
+from tai42_channel_whatsapp.flow_pictures import embed_display_pictures, require_pictured_data_fits
 from tai42_channel_whatsapp.flows import (
     FORM_ENTRY_SCREEN,
     SUCCESS_SCREEN,
@@ -76,6 +77,7 @@ from tai42_channel_whatsapp.flows import (
 )
 from tai42_channel_whatsapp.flows_components import _chips_single_pick, split_range_values
 from tai42_channel_whatsapp.flows_endpoint import (
+    ENDPOINT_BODY_MAX_BYTES,
     FORM_LINE_MEMBERS,
     REACTION_EVENT_KEY,
     REACTION_FIELD_KEY,
@@ -85,7 +87,7 @@ from tai42_channel_whatsapp.flows_endpoint import (
     error_fields,
     form_line_carrier,
 )
-from tai42_channel_whatsapp.flows_resolve import form_drawing_order
+from tai42_channel_whatsapp.flows_resolve import form_drawing_order, slot_keys
 from tai42_channel_whatsapp.flows_send_data import _field_init_value, _init_value
 from tai42_channel_whatsapp.flows_shapes import channel_word
 from tai42_channel_whatsapp.flows_visibility import split_answer_cases
@@ -94,9 +96,6 @@ from tai42_channel_whatsapp.inbound.forms import _coerce_value, _parse_notify_fo
 from tai42_channel_whatsapp.settings import whatsapp_settings
 
 logger = logging.getLogger(__name__)
-
-# Bound what the endpoint reads into memory — loud 413, never truncation.
-_MAX_BODY_BYTES = 1 * 1024 * 1024
 
 # The generic notice shown to the participant (via a screen ``error_message``) when a reaction
 # or the shape check cannot be computed — the vendor's error surface, paired with a loud operator
@@ -129,7 +128,7 @@ async def whatsapp_flow_data(request: Request) -> Response:
     a 5xx that would have Meta retry a poison request forever.
     """
     try:
-        raw = await read_bounded_body(request, _MAX_BODY_BYTES)
+        raw = await read_bounded_body(request, ENDPOINT_BODY_MAX_BYTES)
     except RequestBodyTooLargeError:
         return PlainTextResponse("payload too large", status_code=413)
 
@@ -252,11 +251,11 @@ async def _handle_data_exchange(payload: dict[str, Any]) -> dict[str, Any]:
             if event.field not in reactions.field_changed:
                 logger.error("whatsapp flow request for %s names undeclared field trigger %r", flow_token, event.field)
                 return _error_response(form, screen, data, "")
-            update = await tai42_app.interactions.react(flow_token, event, partial)
-            return {
-                "screen": screen,
-                "data": _screen_answer(form, screen, data, _update_data(update or {}, form, data)),
-            }
+            update = await _react(flow_token, event, partial)
+            return _fitting(
+                form,
+                {"screen": screen, "data": _screen_answer(form, screen, data, await _update_data(update, form, data))},
+            )
         refusal = _shape_refusal(form, screen, event, partial, data)
         if refusal is not None:
             return refusal
@@ -265,8 +264,8 @@ async def _handle_data_exchange(payload: dict[str, Any]) -> dict[str, Any]:
             isinstance(event, PageAdvancedEvent) and event.page in reactions.page_advanced
         )
         if declared:
-            update = await tai42_app.interactions.react(flow_token, event, partial) or {}
-        return _translate_update(event, update, screen, flow_token, form, partial, data)
+            update = await _react(flow_token, event, partial)
+        return await _translate_update(event, update, screen, flow_token, form, partial, data)
     except FormReactionError as exc:
         # The reaction door refused or failed; its reason fills the caller's ``update_failed``.
         logger.exception("whatsapp flow request for %s: the reaction failed; surfacing the vendor error", flow_token)
@@ -280,6 +279,20 @@ async def _handle_data_exchange(payload: dict[str, Any]) -> dict[str, Any]:
     except Exception:
         logger.exception("whatsapp flow request for %s failed; surfacing the vendor error", flow_token)
         return _error_response(form, screen, data, "")
+
+
+async def _react(flow_token: str, event: FormReactionEvent, partial: dict[str, Any]) -> dict[str, Any]:
+    """Run the consumer's reaction; its FORM UPDATE, empty when it returned none."""
+    return await tai42_app.interactions.react(flow_token, event, partial) or {}
+
+
+def _fitting(form: EndpointForm, answer: dict[str, Any]) -> dict[str, Any]:
+    """``answer``, which keeps ``form`` open, once its data fits the form's picture budget.
+
+    Raises ``ChannelInputError`` when it does not (:func:`require_pictured_data_fits`).
+    """
+    require_pictured_data_fits(form.pages, answer["data"], endpoint=True)
+    return answer
 
 
 def _build_event(data: dict[str, Any]) -> FormReactionEvent | None:
@@ -536,7 +549,7 @@ def _shape_refusal(
     return {"screen": screen, "data": _screen_answer(form, screen, data, out)}
 
 
-def _translate_update(
+async def _translate_update(
     event: FormReactionEvent,
     update: dict[str, Any],
     screen: str,
@@ -564,19 +577,24 @@ def _translate_update(
             flow_token, properties, payload_labels(properties), merges, _filled(partial), update.get("values") or {}
         )
     if isinstance(event, PageAdvancedEvent) and not errors:
-        advanced = _advance_screen(screen, form, data, update)
+        advanced = await _advance_screen(screen, form, data, update)
         if advanced is not None:
-            return advanced
-    return {
-        "screen": screen,
-        "data": _screen_answer(form, screen, data, _update_data(update, form, data), clear_errors=True),
-    }
+            return _fitting(form, advanced)
+    return _fitting(
+        form,
+        {
+            "screen": screen,
+            "data": _screen_answer(form, screen, data, await _update_data(update, form, data), clear_errors=True),
+        },
+    )
 
 
-def _update_data(update: dict[str, Any], form: EndpointForm, data: dict[str, Any]) -> dict[str, Any]:
+async def _update_data(update: dict[str, Any], form: EndpointForm, data: dict[str, Any]) -> dict[str, Any]:
     """The screen-``data`` keys a FORM UPDATE sets: field values, option lists, display slots, error message.
 
-    The error message of an update carrying field errors is the caller's ``error_line`` (an ask's
+    A display value on an image slot that is a link is fetched, and one that is a stored-media
+    reference is read, and embedded (:func:`embed_display_pictures`). The
+    error message of an update carrying field errors is the caller's ``error_line`` (an ask's
     sidecar or the carrier of ``data``, the request's), else ``Label: message`` per field.
     """
     properties = form.schema.get("properties")
@@ -596,7 +614,7 @@ def _update_data(update: dict[str, Any], form: EndpointForm, data: dict[str, Any
         prop = properties.get(name)
         prop = prop if isinstance(prop, dict) else {}
         out[f"{names[name]}__ds"] = data_source_rows(name, prop, option_list)
-    for slot, value in (update.get("display") or {}).items():
+    for slot, value in (await embed_display_pictures(update.get("display"), form.pages) or {}).items():
         if slot in slots:
             out[slots[slot]] = value
     errors = update.get("errors") or {}
@@ -634,28 +652,32 @@ def _completion(
     return {"screen": SUCCESS_SCREEN, "data": {"extension_message_response": {"params": params}}}
 
 
-def _forwarded_carriers(data: dict[str, Any], names: dict[str, str], later_fields: list[str]) -> dict[str, Any]:
+def _forwarded_carriers(
+    data: dict[str, Any], names: dict[str, str], later_fields: list[str], later_slots: list[str]
+) -> dict[str, Any]:
     # The carriers the next screen declares that the request carried — each later field's
-    # ``__init``/``__ds``/``__err``, every ``__invalid`` and ``__required``, and the form-line
-    # carriers — passed on verbatim. The rest of the screen's data (its own fields' carriers, the
-    # ``__val`` carriers rebuilt here, its display slots) is not the next screen's.
+    # ``__init``/``__ds``/``__err``, every ``__invalid`` and ``__required``, the form-line carriers
+    # and the later pages' display slots — passed on verbatim. The rest of the screen's data (its own
+    # fields' carriers, the ``__val`` carriers rebuilt here, its own page's slots) is not the next
+    # screen's.
     keys = {f"{names[name]}{suffix}" for name in later_fields for suffix in ("__init", "__ds", "__err")}
     keys |= {f"{cname}{suffix}" for cname in names.values() for suffix in ("__invalid", "__required")}
     keys |= {form_line_carrier(member) for member in FORM_LINE_MEMBERS}
+    keys |= set(later_slots)
     return {key: value for key, value in data.items() if key in keys}
 
 
-def _advance_screen(
+async def _advance_screen(
     screen: str, form: EndpointForm, data: dict[str, Any], update: dict[str, Any]
 ) -> dict[str, Any] | None:
     """The next-screen response for a clean page advance, or ``None`` when there is no next screen.
 
     Stateless: the next screen's whole data is the carriers the step footer carried for it (each
-    later field's ``__init``/``__ds``/``__err``, every ``__invalid`` and ``__required``, and the
-    form-line carriers), a ``__val`` carrier for
-    each field collected so far — the control-shaped value the request carried (a merged range
-    START its pair's object), or the reaction's value shaped for the control — and the next page's
-    display slots, empty, with the update applied on top.
+    later field's ``__init``/``__ds``/``__err``, every ``__invalid`` and ``__required``, the
+    form-line carriers, and the later pages' display slots — each as the send started it or a
+    reaction since set it), a ``__val`` carrier for each field collected so far — the control-shaped
+    value the request carried (a merged range START its pair's object), or the reaction's value
+    shaped for the control — with the update applied on top.
     """
     properties = form.schema.get("properties")
     properties = properties if isinstance(properties, dict) else {}
@@ -670,8 +692,7 @@ def _advance_screen(
     merged_starts = {start: end for end, start in range_merges.items()}
     update_values = update.get("values") or {}
     later = [field for group in fields_by_screen[current + 1 :] for field in group]
-    data_out = _forwarded_carriers(data, names, later)
-    data_out.update(dict.fromkeys(slot_datanames(resolved[current + 1 : current + 2]).values(), ""))
+    data_out = _forwarded_carriers(data, names, later, slot_keys(resolved[current + 1 :], slot_datanames(resolved)))
     collected = [field for group in fields_by_screen[: current + 1] for field in group]
     for name in collected:
         if name in merged_ends:
@@ -693,7 +714,7 @@ def _advance_screen(
             data_out[f"{cname}__val"] = _field_init_value(name, prop, update_values)
         else:
             data_out[f"{cname}__val"] = data[name]
-    data_out.update(_update_data(update, form, data))
+    data_out.update(await _update_data(update, form, data))
     return {"screen": next_screen, "data": data_out}
 
 

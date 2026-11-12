@@ -13,7 +13,12 @@ Flow, so a deprecated probe Flow stays listed on the WABA).
 
 from __future__ import annotations
 
+import base64
+import json
 import os
+import random
+import struct
+import zlib
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
@@ -21,7 +26,7 @@ from uuid import uuid4
 
 import httpx
 import pytest
-from tai42_contract.channels import ChannelDeliveryError
+from tai42_contract.channels import ChannelDeliveryError, SendOutcome
 from tai42_kit.clients import client_ctx as kit_client_ctx
 from tai42_kit.clients.impl.http import HttpxClient
 from tai42_kit.clients.impl.redis import RedisClient
@@ -29,9 +34,12 @@ from tai42_kit.loop_bound import release_loop_bound_resources
 from tai42_kit.settings import reset_all_settings
 
 from tai42_channel_whatsapp import WhatsAppChannel
+from tai42_channel_whatsapp.channel.forms import send_form_ask_flow
 from tai42_channel_whatsapp.client import send_message
 from tai42_channel_whatsapp.flow_assets import FlowCreateResult, create_flow, delete_flow, list_flows, publish_flow
-from tai42_channel_whatsapp.flows import build_form_flow
+from tai42_channel_whatsapp.flow_pictures import _PICTURE_MAX_BYTES, _PICTURED_DATA_MAX_BYTES
+from tai42_channel_whatsapp.flows import build_flow_data, build_form_flow
+from tai42_channel_whatsapp.flows_resolve import slot_datanames
 from tai42_channel_whatsapp.graph import send_request
 from tai42_channel_whatsapp.settings import whatsapp_settings
 
@@ -481,3 +489,256 @@ async def test_shape_checked_form_publishes_endpoint_driven_and_sends(host_store
         "empty required text; pattern mismatch on Code; dhdhdh in the email keyboard; 0 in Quantity; "
         "a same-screen refusal; an empty error-message on every clean field; every typed value kept after it",
     )
+
+
+# --- display blocks bound to screen data, and pictures ------------------------------------
+
+
+def _png(side: int, seed: int = 0) -> bytes:
+    """A real ``side`` x ``side`` RGB PNG of noise pixels, stored uncompressed so its size follows ``side``."""
+    noise = random.Random(seed).randbytes(side * side * 3)
+    rows = b"".join(b"\x00" + noise[row * side * 3 : (row + 1) * side * 3] for row in range(side))
+
+    def chunk(tag: bytes, body: bytes) -> bytes:
+        return struct.pack(">I", len(body)) + tag + body + struct.pack(">I", zlib.crc32(tag + body))
+
+    header = struct.pack(">IIBBBBB", side, side, 8, 2, 0, 0, 0)
+    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", header) + chunk(b"IDAT", zlib.compress(rows, 0)) + chunk(b"IEND", b"")
+
+
+def _b64(picture: bytes) -> str:
+    return base64.b64encode(picture).decode("ascii")
+
+
+# A 1x1 GIF: a picture in a format other than JPEG or PNG.
+_GIF = (
+    b"GIF89a\x01\x00\x01\x00\x80\x00\x00\xff\xff\xff\x00\x00\x00,\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02D\x01\x00;"
+)
+
+_NOTE_SCHEMA: dict[str, Any] = {"type": "object", "properties": {"note": {"type": "string", "title": "Note"}}}
+
+_SLOT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {"note": {"type": "string", "title": "Note"}, "agree": {"type": "boolean", "title": "Agree"}},
+}
+
+
+def _slotted_pages(picture: str) -> list[dict[str, Any]]:
+    """Two pages: a static picture and three slotted blocks on the first, a slotted body on the second."""
+    return [
+        {
+            "title": "Overview",
+            "fields": ["note"],
+            "kind": "input",
+            "display": [
+                {"kind": "image", "src": picture, "alt": "Chart"},
+                {"kind": "heading", "slot": "total", "text": "Total 42"},
+                {"kind": "body", "slot": "preview", "text": "Preview"},
+                {"kind": "image", "slot": "chart", "src": picture, "alt": "Chart"},
+            ],
+        },
+        {"title": "Confirm", "fields": ["agree"], "kind": "input", "display": [{"kind": "body", "slot": "tier"}]},
+    ]
+
+
+def _picture_pages(*pictures: str) -> list[dict[str, Any]]:
+    """One page drawing each of ``pictures`` as a static image, ahead of one text field."""
+    display = [{"kind": "image", "src": picture, "alt": "Chart"} for picture in pictures]
+    return [{"title": "Pictures", "fields": ["note"], "kind": "input", "display": display}]
+
+
+async def _create_outcome(flows: _ProbeFlows, flow_json: dict[str, Any]) -> str:
+    """Create ``flow_json`` as a draft and say whether Meta accepted it, listed validation errors, or refused it."""
+    try:
+        created = await flows.create(_probe_name(), flow_json)
+    except ChannelDeliveryError as exc:
+        return f"refused: {exc}"
+    if created.validation_errors:
+        return f"validation errors: {created.validation_errors}"
+    return f"accepted: draft {created.flow_id}"
+
+
+@_needs_waba
+async def test_display_blocks_bound_to_screen_data_publish_without_validation_errors():
+    # The vendor authority for display blocks bound to screen data: a static two-page Flow whose entry
+    # screen draws a static picture as bare base64, a ``TextHeading``, a ``TextBody`` and an ``Image``
+    # each reading ``${data.<slot>}`` declared ``{"type": "string", "__example__": ""}``, and which also
+    # declares the second page's slot, drawn by none of its components and forwarded only by its
+    # navigate payload, created as a draft — Meta returns its validation errors for anything it refuses.
+    pages = _slotted_pages(_b64(_png(8)))
+    keys = slot_datanames(pages)
+    flow_json, _ = build_form_flow(_SLOT_SCHEMA, pages)
+    entry = flow_json["screens"][0]
+    assert entry["data"][keys["chart"]] == {"type": "string", "__example__": ""}
+    *drawn, footer = entry["layout"]["children"]
+    assert f"${{data.{keys['chart']}}}" in json.dumps(drawn)
+    assert f"${{data.{keys['tier']}}}" not in json.dumps(drawn)
+    assert footer["on-click-action"]["payload"][keys["tier"]] == f"${{data.{keys['tier']}}}"
+    async with _probe_flows() as flows:
+        created = await flows.create(_probe_name(), flow_json)
+        assert created.validation_errors == []
+
+
+@_needs_flow_endpoint
+async def test_endpoint_driven_display_slots_publish_without_validation_errors():
+    # The same display blocks on an endpoint-driven Flow (an email field only the data endpoint
+    # checks), whose ``data_exchange`` payloads forward every later page's slot as ``${data.<slot>}``,
+    # created as a draft against the configured data endpoint — Meta returns its validation errors
+    # for anything it refuses.
+    schema = {
+        "type": "object",
+        "properties": {**_SLOT_SCHEMA["properties"], "email": {"type": "string", "title": "Email", "format": "email"}},
+    }
+    pages = _slotted_pages(_b64(_png(8)))
+    pages[0]["fields"] = ["note", "email"]
+    flow_json, _ = build_form_flow(schema, pages)
+    assert flow_json["data_api_version"] == "3.0"
+    tier = slot_datanames(pages)["tier"]
+    assert f"${{data.{tier}}}" in json.dumps(flow_json["screens"][0]["layout"]["children"][-1])
+    async with _probe_flows() as flows:
+        created = await flows.create(_probe_name(), flow_json, endpoint_uri=whatsapp_settings().flow_endpoint_uri)
+        assert created.validation_errors == []
+
+
+async def _deliver_slotted_form(
+    monkeypatch: pytest.MonkeyPatch, picture: bytes, heading: str, question: str
+) -> SendOutcome:
+    # A two-page static form whose slotted picture and heading start from the send's data, delivered
+    # through the real Graph API; the outcome of the send.
+    from tai42_contract.interactions.models import DisplayBlock, FormPage
+
+    monkeypatch.setenv("CHANNEL_WHATSAPP_REDIS_URL", "redis://in-memory-fake/0")
+    reset_all_settings()
+    pages = [
+        FormPage(
+            title="Overview",
+            fields=["note"],
+            display=[
+                DisplayBlock(kind="image", slot="chart", src=_b64(picture), alt="Chart"),
+                DisplayBlock(kind="heading", slot="total", text=heading),
+            ],
+        ),
+        FormPage(
+            title="Confirm", fields=["agree"], display=[DisplayBlock(kind="body", slot="preview", text="Preview")]
+        ),
+    ]
+    return await WhatsAppChannel().deliver(
+        make_delivery(
+            recipient=whatsapp_settings().allowed_recipients[0],
+            answer_format="form",
+            schema=_SLOT_SCHEMA,
+            pages=pages,
+            question=question,
+        )
+    )
+
+
+@_needs_waba
+async def test_a_slotted_picture_form_sends_with_its_picture_in_the_send_data(
+    monkeypatch: pytest.MonkeyPatch, record_property
+):
+    # deliver() SUCCEEDS only if Meta published the Flow and accepted a send whose
+    # ``flow_action_payload.data`` carries the slotted picture as base64 and the slots' start texts.
+    # What the person reads is then observed on the phone and recorded beside the run.
+    outcome = await _deliver_slotted_form(
+        monkeypatch, _png(8), "Total 42", "tai42-channel-whatsapp live probe: slotted picture form — open it."
+    )
+    assert outcome.message_ids[0].startswith("wamid.")
+    record_property(
+        "slotted_form_observe",
+        "page 1 draws the 8x8 noise picture and reads 'Total 42'; page 2 reads 'Preview' (forwarded by navigate)",
+    )
+
+
+@_needs_waba
+async def test_a_slotted_picture_at_the_size_cap_sends(monkeypatch: pytest.MonkeyPatch):
+    # Meta accepts a send whose data carries one slotted picture just under the plugin's picture size cap.
+    picture = _png(310, seed=1)
+    assert len(picture) <= _PICTURE_MAX_BYTES
+    outcome = await _deliver_slotted_form(
+        monkeypatch, picture, "Total 42", "tai42-channel-whatsapp live probe: picture at the size cap."
+    )
+    assert outcome.message_ids[0].startswith("wamid.")
+
+
+@_needs_waba
+async def test_an_over_length_slotted_heading_send_outcome(monkeypatch: pytest.MonkeyPatch, record_property):
+    # A slotted heading's start text rides the send's data, where Meta's create-time length check
+    # never sees it. This probe sends one longer than a ``TextHeading`` draws and records Meta's
+    # answer; what the phone shows (the whole text, a cut one, or nothing) is observed and recorded.
+    heading = "Acme total " * 12
+    try:
+        outcome = await _deliver_slotted_form(
+            monkeypatch, _png(8), heading, "tai42-channel-whatsapp live probe: over-length heading — open it."
+        )
+    except ChannelDeliveryError as exc:
+        record_property("long_heading_send_outcome", f"refused: {exc}")
+    else:
+        record_property("long_heading_send_outcome", f"accepted: {outcome.message_ids}")
+        record_property("long_heading_observe", f"page 1 heading of {len(heading)} characters: whole, cut or blank")
+
+
+@_needs_waba
+async def test_pictured_data_over_the_documented_payload_figure_send_outcome(
+    monkeypatch: pytest.MonkeyPatch, record_property
+):
+    # Meta documents 1 Mb as the total data channel payload; the plugin refuses pictured data above
+    # it before sending. This probe drives the plugin's sender past that refusal with three slotted
+    # pictures each within the picture cap and records whether Meta accepts the send.
+    monkeypatch.setenv("CHANNEL_WHATSAPP_REDIS_URL", "redis://in-memory-fake/0")
+    reset_all_settings()
+    settings = whatsapp_settings()
+    assert settings.default_phone_number_id is not None
+    pictures = [_png(310, seed=seed) for seed in range(3)]
+    assert all(len(picture) <= _PICTURE_MAX_BYTES for picture in pictures)
+    display = [{"kind": "image", "slot": f"chart{n}", "src": _b64(p), "alt": "Chart"} for n, p in enumerate(pictures)]
+    pages = [{"title": "Pictures", "fields": ["note"], "kind": "input", "display": display}]
+    data = build_flow_data(_NOTE_SCHEMA, {}, {}, pages)
+    assert len(json.dumps(data, separators=(",", ":")).encode("utf-8")) > _PICTURED_DATA_MAX_BYTES
+    try:
+        sent = await send_form_ask_flow(
+            phone_number_id=settings.default_phone_number_id,
+            to=settings.allowed_recipients[0],
+            body_text="tai42-channel-whatsapp live probe: pictured data over 1 Mb.",
+            flow_token=_probe_name(),
+            schema=_NOTE_SCHEMA,
+            pages=pages,
+            values={},
+            options={},
+        )
+    except ChannelDeliveryError as exc:
+        record_property("over_payload_send_outcome", f"refused: {exc}")
+    else:
+        record_property("over_payload_send_outcome", f"accepted: {sent.wamid}")
+
+
+@_needs_waba
+async def test_a_picture_over_the_recommended_size_create_outcome(record_property):
+    # Meta recommends pictures "up to 300kb" without saying what it does above. This probe creates a
+    # draft drawing a larger static picture and records whether Meta accepts it, lists validation
+    # errors, or refuses the create.
+    picture = _png(380)
+    assert len(picture) > _PICTURE_MAX_BYTES
+    flow_json, _ = build_form_flow(_NOTE_SCHEMA, _picture_pages(_b64(picture)))
+    async with _probe_flows() as flows:
+        record_property("over_size_picture_create_outcome", await _create_outcome(flows, flow_json))
+
+
+@_needs_waba
+async def test_a_picture_in_another_format_create_outcome(record_property):
+    # Meta draws JPEG and PNG. This probe creates a draft drawing a GIF and records whether Meta
+    # accepts it, lists validation errors, or refuses the create.
+    flow_json, _ = build_form_flow(_NOTE_SCHEMA, _picture_pages(_b64(_GIF)))
+    async with _probe_flows() as flows:
+        record_property("other_format_picture_create_outcome", await _create_outcome(flows, flow_json))
+
+
+@_needs_waba
+async def test_a_fourth_picture_on_a_screen_create_outcome(record_property):
+    # Meta documents at most three images per screen without saying how a fourth is answered. This
+    # probe creates a draft drawing four and records whether Meta accepts it, lists validation
+    # errors, or refuses the create.
+    picture = _b64(_png(8))
+    flow_json, _ = build_form_flow(_NOTE_SCHEMA, _picture_pages(*[picture] * 4))
+    async with _probe_flows() as flows:
+        record_property("fourth_picture_create_outcome", await _create_outcome(flows, flow_json))

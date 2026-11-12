@@ -442,10 +442,11 @@ def test_every_data_exchange_action_carries_its_screens_whole_data():
     assert selects == 1
 
 
-def test_the_send_data_supplies_the_entry_screens_display_slots_empty():
+def test_the_send_data_supplies_every_pages_contentless_display_slot_empty():
+    # The entry screen carries every page's slots; a block with no content of its own starts empty.
     data = build_flow_data(_REACTING, {}, {}, _REACTING_PAGES)
     assert data["slot_total"] == ""
-    assert "slot_summary" not in data
+    assert data["slot_summary"] == ""
 
 
 def test_an_endpoint_driven_form_refuses_a_property_named_like_a_display_slot():

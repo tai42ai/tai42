@@ -1,21 +1,26 @@
-"""Resolving a form's page layout, its range-pair merges and its display slots' data keys.
+"""Resolving a form's page layout, its range-pair merges and its display slots' data.
 
 A form's screens come from its ``pages`` (absent → one screen carrying every
 property in schema order); the range-pair merge map says which ``rangeStart`` date
 pairs draw as a single range control; the slot map names each display slot's
-screen-``data`` key. The Flow-JSON builder, the per-send data builder and the data
-endpoint read this shared geometry, so a pair's merge decision, a screen's field
-list and a slot's data key are identical on every surface.
+screen-``data`` key and the slot start data its value before any reaction, a value the
+published Flow's key leaves out (:func:`pages_without_slot_content`); the image readers
+name the image slots and strip the pictures from what the data endpoint reads. The
+Flow-JSON builder, the per-send data builder and the data endpoint read this shared
+geometry, so a pair's merge decision, a screen's field list and a slot's data key and
+start value are identical on every surface.
 """
 
 from __future__ import annotations
 
+import copy
+from collections.abc import Iterator
 from typing import Any
 
 from tai42_contract.channels import ChannelInputError
 from tai42_kit.interactions import TIME_OF_KEY, drawing_order
 
-from tai42_channel_whatsapp.flows_components import _sanitize_name, range_pairs
+from tai42_channel_whatsapp.flows_components import _sanitize_name, display_content_member, range_pairs
 
 # The default top-bar title of the page-less form's single screen, shown when the
 # caller passes no ``form_title``. A form ask carries no domain-specific chrome.
@@ -111,27 +116,85 @@ def _form_range_merges(
     return merges
 
 
-def slot_datanames(pages: list[dict[str, Any]] | None) -> dict[str, str]:
-    """Map each declared display ``slot`` to a unique identifier-safe screen-``data`` key.
-
-    A slotted display block reads ``${data.<key>}``; a reaction's ``display`` update fills it
-    through the data endpoint. Slot names are unique across a form (the contract enforces it);
-    each is sanitised to Meta's identifier grammar and disambiguated deterministically on a
-    sanitisation collision, so the renderer and the data endpoint recompute an identical map.
-    """
-    mapping: dict[str, str] = {}
-    used: set[str] = set()
+def _slotted_blocks(pages: list[dict[str, Any]] | None) -> Iterator[tuple[str, dict[str, Any]]]:
+    # Each display block on ``pages`` that declares a ``slot``, with its slot name, in page order.
     for page in pages or []:
         for block in page.get("display") or []:
             slot = block.get("slot") if isinstance(block, dict) else None
-            if not isinstance(slot, str) or slot in mapping:
-                continue
-            base = f"slot_{_sanitize_name(slot)}"
-            candidate = base
-            suffix = 2
-            while candidate in used:
-                candidate = f"{base}_{suffix}"
-                suffix += 1
-            used.add(candidate)
-            mapping[slot] = candidate
+            if isinstance(slot, str):
+                yield slot, block
+
+
+def slot_datanames(pages: list[dict[str, Any]] | None) -> dict[str, str]:
+    """Map each declared display ``slot`` to a unique identifier-safe screen-``data`` key.
+
+    A slotted display block reads ``${data.<key>}``, starting at :func:`slot_start_data`'s value; a
+    reaction's ``display`` update replaces it through the data endpoint. Slot names are unique across
+    a form (the contract enforces it); each is sanitised to Meta's identifier grammar and
+    disambiguated deterministically on a sanitisation collision, so the renderer and the data
+    endpoint recompute an identical map.
+    """
+    mapping: dict[str, str] = {}
+    used: set[str] = set()
+    for slot, _ in _slotted_blocks(pages):
+        if slot in mapping:
+            continue
+        base = f"slot_{_sanitize_name(slot)}"
+        candidate = base
+        suffix = 2
+        while candidate in used:
+            candidate = f"{base}_{suffix}"
+            suffix += 1
+        used.add(candidate)
+        mapping[slot] = candidate
     return mapping
+
+
+def slot_keys(pages: list[dict[str, Any]], datanames: dict[str, str]) -> list[str]:
+    """The screen-``data`` keys of the slots declared on ``pages``, in page order.
+
+    ``datanames`` is the whole form's :func:`slot_datanames` map, so a key is the same whichever
+    pages are read.
+    """
+    return [datanames[slot] for slot, _ in _slotted_blocks(pages)]
+
+
+def slot_start_data(pages: list[dict[str, Any]], datanames: dict[str, str]) -> dict[str, str]:
+    """The screen data each slot declared on ``pages`` starts with, keyed by its ``data`` key.
+
+    A slot starts as its block's own content — ``src`` for an image, ``text`` for a heading or
+    body — and as the empty string when the block carries none. ``datanames`` is the whole form's
+    :func:`slot_datanames` map.
+    """
+    return {datanames[slot]: block.get(display_content_member(block)) or "" for slot, block in _slotted_blocks(pages)}
+
+
+def pages_without_slot_content(pages: list[dict[str, Any]] | None) -> list[dict[str, Any]] | None:
+    """A copy of ``pages`` with each slotted block's own content removed (``None`` stays ``None``).
+
+    What remains is what the published Flow and the data endpoint read of the pages: a slotted
+    block's content is :func:`slot_start_data`, which rides the per-send data, never the Flow.
+    """
+    stripped = copy.deepcopy(pages)
+    for _, block in _slotted_blocks(stripped):
+        block.pop(display_content_member(block), None)
+    return stripped
+
+
+def image_slots(pages: list[dict[str, Any]] | None) -> set[str]:
+    """The slot names of the image blocks declared on ``pages``."""
+    return {slot for slot, block in _slotted_blocks(pages) if block.get("kind") == "image"}
+
+
+def pages_without_picture_content(pages: list[dict[str, Any]] | None) -> list[dict[str, Any]] | None:
+    """A copy of ``pages`` with every image block's ``src`` removed (``None`` stays ``None``).
+
+    The data endpoint reads a form's geometry and slot names, never its pictures, so the records it
+    reads carry none.
+    """
+    stripped = copy.deepcopy(pages)
+    for page in stripped or []:
+        for block in page.get("display") or []:
+            if isinstance(block, dict) and block.get("kind") == "image":
+                block.pop("src", None)
+    return stripped

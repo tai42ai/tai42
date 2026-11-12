@@ -399,6 +399,12 @@ beside the unchanged answer; the answer arm sends no entry parameters, so the as
 > turn so no message is lost. The Bearer rides the fetch calls only, never a log, param,
 > or error string.
 
+> **Stored form pictures.** A form image whose `src` is a stored-media reference
+> (`/api/interactions/media/<id>`) is read through the platform's `app.media.read_media`, bounded
+> to the 300 kB a form embeds, and embedded as base64 like a fetched link. An unknown,
+> expired or not-yet-attached reference, or an unavailable media store, refuses the send;
+> no refusal text names the id.
+
 Params ride **only on the bridge path**. A tap or quick-reply that **answers** a
 pending question does not surface them: the answer path forwards `{"answer": …}`
 to the callback door — a seam that carries no params — and a tap's id is already

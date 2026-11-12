@@ -30,6 +30,9 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 _GCM_TAG_BYTES = 16
 # The AES key Meta sends is 128-bit.
 _AES_KEY_BYTES = 16
+# The wrapped AES key under an RSA-2048 business key, and the AES-GCM IV Meta sends.
+_WRAPPED_KEY_BYTES = 256
+_IV_BYTES = 16
 
 
 class FlowPayloadDecryptError(Exception):
@@ -109,6 +112,29 @@ def decrypt_request(body: dict[str, Any], private_key: rsa.RSAPrivateKey) -> tup
     if not isinstance(request, dict):
         raise FlowPayloadDecryptError("flow endpoint request payload is not a JSON object")
     return request, aes_key, iv
+
+
+def request_plaintext_max_bytes(body_max_bytes: int) -> int:
+    """The largest request JSON whose encrypted request body stays within ``body_max_bytes``.
+
+    The body is the JSON object of the three base64 fields; ``encrypted_flow_data`` is the
+    plaintext plus the GCM tag, base64-encoded. The envelope is measured with JSON's default
+    separators, the wider of the common serialisations.
+    """
+    import json
+
+    envelope = json.dumps(
+        {
+            "encrypted_aes_key": "A" * _base64_length(_WRAPPED_KEY_BYTES),
+            "initial_vector": "A" * _base64_length(_IV_BYTES),
+            "encrypted_flow_data": "",
+        }
+    )
+    return (body_max_bytes - len(envelope)) // 4 * 3 - _GCM_TAG_BYTES
+
+
+def _base64_length(raw_bytes: int) -> int:
+    return -(-raw_bytes // 3) * 4
 
 
 def encrypt_response(response: dict[str, Any], aes_key: bytes, iv: bytes) -> str:

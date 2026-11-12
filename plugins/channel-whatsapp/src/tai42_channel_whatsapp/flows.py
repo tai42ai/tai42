@@ -88,8 +88,9 @@ per-send option list on a NON-STRING property cannot be honored (only a string m
 to a dropdown) and is refused loudly, naming the field.
 
 ``build_form_flow`` returns the ``(flow_json, key)`` pair; ``key`` is a sha256 over
-the ``(schema, pages, option_fields, flow_json)`` — the emitted Flow folded in, so a
-change to the emitted shape re-keys the published-Flow cache — and keys that cache.
+the ``(schema, pages, option_fields, flow_json)``, the pages read without each slotted
+display block's own content — the emitted Flow folded in, so a change to the emitted
+shape re-keys the published-Flow cache — and keys that cache.
 """
 
 from __future__ import annotations
@@ -123,7 +124,12 @@ from tai42_channel_whatsapp.flows_endpoint import (
     screen_data_refs,
     shaped_fields,
 )
-from tai42_channel_whatsapp.flows_resolve import _form_range_merges, _resolve_pages, slot_datanames
+from tai42_channel_whatsapp.flows_resolve import (
+    _form_range_merges,
+    _resolve_pages,
+    pages_without_slot_content,
+    slot_datanames,
+)
 from tai42_channel_whatsapp.flows_screen_data import _later_carriers, _RenderSpec, _screen_data_model
 from tai42_channel_whatsapp.flows_second_line import data_source_rows, field_caption, range_captions
 from tai42_channel_whatsapp.flows_send_data import build_flow_data
@@ -228,10 +234,19 @@ def _canonical_hash_pages(
     different option-bearing set, OR a different emitted Flow shape keys a different
     published Flow; the ``schema`` member keeps the notify sidecar's exact-schema
     identity, and folding in the emitted ``flow_json`` means a change to the emitted
-    shape alone re-keys (a corrected shape can never resolve an earlier one).
+    shape alone re-keys (a corrected shape can never resolve an earlier one). The pages
+    are hashed without each slotted block's own content (:func:`pages_without_slot_content`):
+    that content is the slot's start value in the per-send data, so forms that differ only
+    in it share one published Flow, while a static block's content, a slot name and
+    everything else on the pages still key a different one.
     """
     canonical = json.dumps(
-        {"schema": schema, "pages": pages, "option_fields": sorted(option_fields), "flow": flow_json},
+        {
+            "schema": schema,
+            "pages": pages_without_slot_content(pages),
+            "option_fields": sorted(option_fields),
+            "flow": flow_json,
+        },
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=False,
@@ -390,15 +405,17 @@ def _step_footer(
     variants: dict[str, list[tuple[str, list[str]]]],
     button_label: str | None,
     screen_data: dict[str, str],
+    later_pages: list[dict[str, Any]],
 ) -> dict[str, Any]:
     # A non-terminal screen's Footer, labelled by the page's ``button_label`` (else
     # ``_CONTINUE_LABEL``). An endpoint-driven form fires a ``page_advanced`` data_exchange carrying
-    # the values so far and the screen's whole data, which holds the later fields' carriers (the
-    # data endpoint checks this screen's shapes and any declared advance reaction, then names the
-    # next screen or keeps the person here); a static form navigates directly, forwarding
-    # successors' carriers and every collected value. A merged range END forwards no value — its
-    # START carries the pair's object value.
-    # Either way the transition is recorded in ``routing_model``.
+    # the values so far and the screen's whole data, which holds the later fields' carriers and the
+    # later pages' slots (the data endpoint checks this screen's shapes and any declared advance
+    # reaction, then names the next screen or keeps the person here); a static form navigates
+    # directly, forwarding what :func:`_later_carriers` names for its successors (the later fields'
+    # carriers and the slots of ``later_pages``) and every collected value. A merged range END
+    # forwards no value — its START carries the pair's object value. Either way
+    # the transition is recorded in ``routing_model``.
     label = button_label or _CONTINUE_LABEL
     merged_ends = set(spec.range_merges)
     screen_id = _screen_id(index)
@@ -421,7 +438,7 @@ def _step_footer(
             "label": label,
             "on-click-action": {"name": "data_exchange", "payload": payload},
         }
-    forward = _later_carriers(later_fields, spec)
+    forward = _later_carriers(later_fields, later_pages, spec)
     for name in earlier_fields:
         if name in merged_ends:
             continue
@@ -439,7 +456,7 @@ def _step_footer(
 
 def _build_form_screen(
     index: int,
-    page: dict[str, Any],
+    pages: list[dict[str, Any]],
     spec: _RenderSpec,
     fields_by_screen: list[list[str]],
     earlier_fields: list[str],
@@ -456,19 +473,17 @@ def _build_form_screen(
     reference per case for the data endpoint to read from the shown case
     (:func:`screen_field_variants`, :func:`emit_field_variants`,
     :func:`~tai42_channel_whatsapp.flows_visibility.answer_refs`); a review page adds
-    the generic value readback. The footer records any transition in ``routing_model``.
+    the generic value readback. The footer records any transition in ``routing_model``. The screen's
+    ``data`` (its own and every later page's display slots among it) is :func:`_screen_data_model`.
     """
+    page = pages[index]
     this_fields = fields_by_screen[index]
     later_fields = [field for screen in fields_by_screen[index + 1 :] for field in screen]
     is_terminal = index == screen_count - 1
     page_title = str(page["title"])
     button_label = _resolve_button_label(page)
 
-    data_model = _screen_data_model(index, this_fields, later_fields, earlier_fields, spec)
-    for block in page.get("display") or []:
-        slot = block.get("slot") if isinstance(block, dict) else None
-        if isinstance(slot, str):
-            data_model[spec.slots[slot]] = {"type": "string", "__example__": ""}
+    data_model = _screen_data_model(index, this_fields, later_fields, earlier_fields, pages, spec)
     screen_data = screen_data_refs(data_model) if spec.endpoint else {}
 
     variants = screen_field_variants(this_fields, earlier_fields, spec.properties, spec.names)
@@ -537,6 +552,7 @@ def _build_form_screen(
             variants,
             button_label,
             screen_data,
+            pages[index + 1 :],
         )
     )
 
@@ -622,7 +638,8 @@ def build_form_flow(
 
     ``key`` is the hash of the ``(schema, pages, option_fields)`` and the emitted ``flow_json``
     — which folds in the reactions/display/date-constraint/``visibleWhen``/shape layout, so a
-    changed form re-publishes. Pure — no I/O. Raises ``ChannelInputError`` naming any property
+    changed form re-publishes; a slotted display block's own content is per-send data and
+    outside the key (:func:`_canonical_hash_pages`). Pure — no I/O. Raises ``ChannelInputError`` naming any property
     outside the subset or any page field that is not a declared property.
     """
     option_fields = option_fields or set()
@@ -663,9 +680,11 @@ def build_form_flow(
     screens: list[dict[str, Any]] = []
     routing_model: dict[str, list[str]] = {}
     earlier_fields: list[str] = []
-    for index, page in enumerate(resolved_pages):
+    for index in range(screen_count):
         screens.append(
-            _build_form_screen(index, page, spec, fields_by_screen, earlier_fields, screen_count, routing_model)
+            _build_form_screen(
+                index, resolved_pages, spec, fields_by_screen, earlier_fields, screen_count, routing_model
+            )
         )
         earlier_fields = [*earlier_fields, *fields_by_screen[index]]
 

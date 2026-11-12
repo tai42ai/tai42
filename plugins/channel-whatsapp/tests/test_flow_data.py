@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
+import dataclasses
 import json
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
@@ -26,12 +28,17 @@ from tai42_kit.settings import reset_all_settings
 
 import tai42_channel_whatsapp.inbound  # noqa: F401  (registers the /flow-data route on the bound stub app)
 from tai42_channel_whatsapp.correlation import EndpointForm, cache_endpoint_form, cache_flow_form
-from tai42_channel_whatsapp.flows import build_form_flow
+from tai42_channel_whatsapp.flow_crypto import request_plaintext_max_bytes
+from tai42_channel_whatsapp.flows import build_flow_data, build_form_flow
+from tai42_channel_whatsapp.flows_endpoint import ENDPOINT_BODY_MAX_BYTES, echoed_screen_data_max_bytes
+from tai42_channel_whatsapp.flows_resolve import pages_without_picture_content
 from tai42_channel_whatsapp.flows_shapes import channel_word
 from tai42_channel_whatsapp.inbound.flow_data import _partial_values, _screen_fields
 
 from .conftest import (
     APP_SECRET,
+    PICTURE_JPEG,
+    FakePictureFetch,
     FakeRedis,
     _StubApp,
     build_request,
@@ -462,23 +469,92 @@ async def test_page_advance_moves_to_the_next_screen_with_collected_values(
 async def test_page_advance_answers_the_next_screens_display_slots(
     flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis
 ):
-    # The next screen's data is whole: a display slot no reaction filled reads empty.
+    # The next screen's data is whole: a later slot whose block carries no content reads empty, and
+    # this screen's own slot is not the next screen's.
     pages = [
         {"title": "First", "fields": ["tier", "qty"], "kind": "input", "display": [{"kind": "body", "slot": "a"}]},
         {"title": "Second", "fields": ["total"], "kind": "input", "display": [{"kind": "body", "slot": "b"}]},
     ]
     await _seed(fake_redis, pages=pages)
     stub_app.interactions.react_result = {}
+    entry_data = build_flow_data(_SCHEMA, None, None, pages)
     payload = {
         "action": "data_exchange",
         "flow_token": _TOKEN,
         "screen": "SCREEN_A",
-        "data": {"tai42_event": "page_advanced", "tai42_page": "First", "tier": "g", "qty": "5", "slot_a": "x"},
+        "data": {**entry_data, "tai42_event": "page_advanced", "tai42_page": "First", "tier": "g", "qty": "5"},
     }
     request, aes_key, iv = _request(payload)
     out = _decrypt_response(await flow_handler(request), aes_key, iv)
     assert out["data"]["slot_b"] == ""
     assert "slot_a" not in out["data"]
+
+
+_START_PAGES = [
+    {
+        "title": "First",
+        "fields": ["tier", "qty"],
+        "kind": "input",
+        "display": [{"kind": "body", "slot": "a", "text": "A: 0"}],
+    },
+    {
+        "title": "Second",
+        "fields": ["total"],
+        "kind": "input",
+        "display": [{"kind": "body", "slot": "b", "text": "B: 0"}],
+    },
+]
+
+
+@pytest.mark.parametrize(
+    ("react_result", "expected"),
+    [({}, "B: 0"), ({"display": {"b": "B: 5"}}, "B: 5")],
+    ids=["start-value", "display-update-replaces"],
+)
+async def test_page_advance_carries_the_next_slots_start_value_under_the_update(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis, react_result: dict, expected: str
+):
+    # The request carries the screen data the send started the form with; the next page's slot starts
+    # as its block's own text, and the advance reaction's ``display`` update replaces it.
+    await _seed(fake_redis, pages=_START_PAGES)
+    stub_app.interactions.react_result = react_result
+    entry_data = build_flow_data(_SCHEMA, None, None, _START_PAGES)
+    payload = {
+        "action": "data_exchange",
+        "flow_token": _TOKEN,
+        "screen": "SCREEN_A",
+        "data": {**entry_data, "tai42_event": "page_advanced", "tai42_page": "First", "tier": "g", "qty": "5"},
+    }
+    request, aes_key, iv = _request(payload)
+    out = _decrypt_response(await flow_handler(request), aes_key, iv)
+    assert out["screen"] == "SCREEN_B"
+    assert out["data"]["slot_b"] == expected
+    assert "slot_a" not in out["data"]
+
+
+@pytest.mark.parametrize(
+    ("react_result", "expected"),
+    [({}, "A: 0"), ({"display": {"a": "A: 7"}}, "A: 7")],
+    ids=["start-value", "display-update-replaces"],
+)
+async def test_staying_on_the_screen_keeps_the_slots_start_value_until_an_update(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis, react_result: dict, expected: str
+):
+    # A field change keeps the person on the screen with its whole data: the slot's start value the
+    # send carried stays, and a ``display`` update replaces it.
+    await _seed(fake_redis, pages=_START_PAGES)
+    stub_app.interactions.react_result = react_result
+    entry_data = build_flow_data(_SCHEMA, None, None, _START_PAGES)
+    payload = {
+        "action": "data_exchange",
+        "flow_token": _TOKEN,
+        "screen": "SCREEN_A",
+        "data": {**entry_data, "tai42_event": "field_changed", "tai42_field": "tier", "tier": "g"},
+    }
+    request, aes_key, iv = _request(payload)
+    out = _decrypt_response(await flow_handler(request), aes_key, iv)
+    assert out["screen"] == "SCREEN_A"
+    assert out["data"]["slot_a"] == expected
 
 
 async def test_missing_app_secret_is_a_loud_500(flow_handler, fake_redis: FakeRedis, no_whatsapp_env):
@@ -500,9 +576,91 @@ async def test_registered_public_key_matches_the_private_key():
 
 
 async def test_oversize_body_is_413(flow_env, flow_handler, fake_redis: FakeRedis):
-    request, _, _ = _request({"action": "ping"}, body_override=b"x" * (1024 * 1024 + 1))
+    request, _, _ = _request({"action": "ping"}, body_override=b"x" * (ENDPOINT_BODY_MAX_BYTES + 1))
     response = await flow_handler(request)
     assert response.status_code == 413
+
+
+def _ping_of_size(size: int) -> dict[str, Any]:
+    payload = {"action": "ping", "pad": ""}
+    payload["pad"] = "x" * (size - len(json.dumps(payload)))
+    return payload
+
+
+async def test_the_largest_readable_request_is_the_plaintext_maximum_of_the_body_cap(
+    flow_env, flow_handler, fake_redis: FakeRedis
+):
+    largest = request_plaintext_max_bytes(ENDPOINT_BODY_MAX_BYTES)
+    request, aes_key, iv = _request(_ping_of_size(largest))
+    assert _decrypt_response(await flow_handler(request), aes_key, iv) == {"data": {"status": "active"}}
+    request, _, _ = _request(_ping_of_size(largest + 1))
+    assert (await flow_handler(request)).status_code == 413
+
+
+def _first_page_picture_pages(src: str) -> list[dict[str, Any]]:
+    return [
+        {
+            "title": "First",
+            "fields": ["tier", "total"],
+            "kind": "input",
+            "display": [{"kind": "image", "slot": "preview", "src": src}],
+        },
+        {"title": "Second", "fields": ["qty"], "kind": "input", "display": []},
+    ]
+
+
+async def test_a_footer_carrying_answers_beside_screen_data_at_the_budget_reaches_the_endpoint(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis
+):
+    # The form is sent with screen data of exactly the budget; its footer echoes that data beside the
+    # wrapper, the markers and 60 000 bytes of answers, and the endpoint still reads it.
+    budget = echoed_screen_data_max_bytes()
+    unfilled = len(
+        json.dumps(build_flow_data(_SCHEMA, None, None, _first_page_picture_pages("")), separators=(",", ":"))
+    )
+    pages = _first_page_picture_pages("A" * (budget - unfilled))
+    sent = build_flow_data(_SCHEMA, None, None, pages)
+    assert len(json.dumps(sent, separators=(",", ":"))) == budget
+    reactions = {"field_changed": ["tier"], "page_advanced": ["First", "Second"], "submitted": True, "choices": []}
+    form = EndpointForm(
+        schema=_SCHEMA,
+        pages=pages_without_picture_content(pages),
+        reactions=reactions,
+        option_fields=[],
+        invalid={},
+        required={},
+        lines={},
+    )
+    await cache_endpoint_form(_TOKEN, form, datetime.now(UTC) + timedelta(minutes=5))
+    stub_app.interactions.react_result = {}
+    screens = build_form_flow(_SCHEMA, pages, set(), reactions)[0]["screens"]
+    footer = phone_footer_payload(screens[0], {"tier": "g", "total": "t" * 60_000}, sent)
+    payload = {"version": "3.0", "action": "data_exchange", "screen": "SCREEN_A", "flow_token": _TOKEN, "data": footer}
+    request, aes_key, iv = _request(payload)
+    response = await flow_handler(request)
+    assert response.status_code == 200
+    out = _decrypt_response(response, aes_key, iv)
+    assert out["screen"] == "SCREEN_B"
+    assert out["data"]["total__val"] == "t" * 60_000
+
+
+async def test_a_clean_submit_on_a_picture_slot_form_completes_whatever_the_answers_size(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis
+):
+    # The completion answer is echoed by no footer, so it is not held to the screen-data budget.
+    await _seed(fake_redis, pages=_picture_slot_pages("preview"))
+    stub_app.interactions.react_result = {}
+    long_text = "x" * (echoed_screen_data_max_bytes() + 10_000)
+    payload = {
+        "action": "data_exchange",
+        "flow_token": _TOKEN,
+        "screen": "SCREEN_A",
+        "data": {"tai42_event": "submitted", "tier": "g", "total": long_text},
+    }
+    request, aes_key, iv = _request(payload)
+    out = _decrypt_response(await flow_handler(request), aes_key, iv)
+    assert out["screen"] == "SUCCESS"
+    assert out["data"]["extension_message_response"]["params"]["total"] == long_text
 
 
 async def test_unreadable_private_key_is_a_loud_500(
@@ -1799,3 +1957,252 @@ async def test_a_clean_advance_forwards_the_form_lines_and_required_carriers(
     assert out["screen"] == "SCREEN_B"
     for key, value in carried.items():
         assert out["data"][key] == value
+
+
+# --- form pictures a reaction gives as a link ---
+
+_PICTURE_LINK = "https://pics.example/a.jpg"
+
+
+def _picture_slot_pages(*slots: str) -> list[dict[str, Any]]:
+    display = [{"kind": "image", "slot": slot} for slot in slots] + [{"kind": "body", "slot": "caption"}]
+    return [{"title": "Form", "fields": ["tier", "qty", "total"], "kind": "input", "display": display}]
+
+
+async def _seed_pictures(*slots: str, lines: dict[str, str] | None = None) -> None:
+    form = _reacting_form(_SCHEMA, _picture_slot_pages(*slots))
+    form = dataclasses.replace(form, lines=lines or {})
+    await cache_endpoint_form(_TOKEN, form, datetime.now(UTC) + timedelta(minutes=5))
+
+
+_TIER_CHANGED = {
+    "action": "data_exchange",
+    "flow_token": _TOKEN,
+    "screen": "SCREEN_A",
+    "data": {"tai42_event": "field_changed", "tai42_field": "tier", "tier": "g"},
+}
+
+
+async def test_a_reaction_picture_link_on_an_image_slot_is_embedded(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis, picture_fetch: FakePictureFetch
+):
+    await _seed_pictures("preview")
+    stub_app.interactions.react_result = {"display": {"preview": _PICTURE_LINK}}
+    request, aes_key, iv = _request(_TIER_CHANGED)
+    out = _decrypt_response(await flow_handler(request), aes_key, iv)
+    assert out["data"]["slot_preview"] == base64.b64encode(PICTURE_JPEG).decode()
+
+
+async def test_a_link_on_a_text_slot_is_kept_as_text_and_nothing_is_fetched(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis, picture_fetch: FakePictureFetch
+):
+    await _seed_pictures("preview")
+    stub_app.interactions.react_result = {"display": {"caption": "https://text.example/page"}}
+    request, aes_key, iv = _request(_TIER_CHANGED)
+    out = _decrypt_response(await flow_handler(request), aes_key, iv)
+    assert out["data"]["slot_caption"] == "https://text.example/page"
+    assert picture_fetch.calls == []
+
+
+@pytest.mark.parametrize(
+    ("lines", "shown"),
+    [({"update_failed": "We could not refresh the form ({reason})."}, "We could not refresh the form ()."), ({}, None)],
+)
+async def test_a_reaction_picture_that_cannot_be_fetched_shows_the_update_failed_line(
+    flow_env,
+    flow_handler,
+    stub_app: _StubApp,
+    fake_redis: FakeRedis,
+    picture_fetch: FakePictureFetch,
+    lines: dict[str, str],
+    shown: str | None,
+):
+    from tai42_kit.net import MediaFetchError
+
+    await _seed_pictures("preview", lines=lines)
+    picture_fetch.faults[_PICTURE_LINK] = MediaFetchError(host="pics.example", status_code=404)
+    stub_app.interactions.react_result = {"display": {"preview": _PICTURE_LINK}}
+    request, aes_key, iv = _request(_TIER_CHANGED)
+    out = _decrypt_response(await flow_handler(request), aes_key, iv)
+    assert out["screen"] == "SCREEN_A"
+    assert out["data"]["error_message"] == (shown or _LINE_DEFAULT_NOTICE)
+    assert "slot_preview" not in out["data"]
+
+
+async def test_a_reaction_picture_link_that_cannot_be_parsed_is_refused_as_an_update_that_cannot_render(
+    flow_env,
+    flow_handler,
+    stub_app: _StubApp,
+    fake_redis: FakeRedis,
+    picture_fetch: FakePictureFetch,
+    caplog: pytest.LogCaptureFixture,
+):
+    await _seed_pictures("preview")
+    stub_app.interactions.react_result = {"display": {"preview": "http://pics.example:abc/x.png"}}
+    request, aes_key, iv = _request(_TIER_CHANGED)
+    out = _decrypt_response(await flow_handler(request), aes_key, iv)
+    assert out["screen"] == "SCREEN_A"
+    assert out["data"]["error_message"] == _LINE_DEFAULT_NOTICE
+    assert "slot_preview" not in out["data"]
+    assert picture_fetch.calls == []
+    refused = [record for record in caplog.records if "cannot render" in record.getMessage()]
+    assert [str(record.exc_info[1]) for record in refused if record.exc_info] == [
+        "form picture link cannot be parsed (display slot 'preview')"
+    ]
+
+
+_STORED_PICTURE = "/api/interactions/media/" + "S" * 43
+
+
+async def test_a_reaction_stored_picture_on_an_image_slot_is_embedded_and_on_a_text_slot_kept_as_text(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis
+):
+    from tai42_contract.interactions import StoredMedia
+
+    await _seed_pictures("preview")
+    stub_app.media.read_result = StoredMedia(mime="image/jpeg", data=PICTURE_JPEG)
+    stub_app.interactions.react_result = {"display": {"preview": _STORED_PICTURE}}
+    request, aes_key, iv = _request(_TIER_CHANGED)
+    out = _decrypt_response(await flow_handler(request), aes_key, iv)
+    assert out["data"]["slot_preview"] == base64.b64encode(PICTURE_JPEG).decode()
+    assert stub_app.media.read_calls == [("S" * 43, 300_000)]
+
+    stub_app.media.read_calls.clear()
+    stub_app.interactions.react_result = {"display": {"caption": _STORED_PICTURE}}
+    request, aes_key, iv = _request(_TIER_CHANGED)
+    out = _decrypt_response(await flow_handler(request), aes_key, iv)
+    assert out["data"]["slot_caption"] == _STORED_PICTURE
+    assert stub_app.media.read_calls == []
+
+
+@pytest.mark.parametrize(
+    ("lines", "shown"),
+    [({"update_failed": "We could not refresh the form ({reason})."}, "We could not refresh the form ()."), ({}, None)],
+)
+async def test_a_reaction_stored_picture_that_is_not_found_shows_the_update_failed_line(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis, lines: dict[str, str], shown: str | None
+):
+    from tai42_contract.interactions import MediaNotFoundError
+
+    await _seed_pictures("preview", lines=lines)
+    stub_app.media.read_error = MediaNotFoundError("stored media not found")
+    stub_app.interactions.react_result = {"display": {"preview": _STORED_PICTURE}}
+    request, aes_key, iv = _request(_TIER_CHANGED)
+    out = _decrypt_response(await flow_handler(request), aes_key, iv)
+    assert out["screen"] == "SCREEN_A"
+    assert out["data"]["error_message"] == (shown or _LINE_DEFAULT_NOTICE)
+    assert "slot_preview" not in out["data"]
+
+
+@pytest.mark.parametrize(
+    ("lines", "shown"),
+    [({"update_failed": "We could not refresh the form ({reason})."}, "We could not refresh the form ()."), ({}, None)],
+)
+async def test_a_reaction_picture_that_misses_the_time_limit_shows_the_update_failed_line(
+    flow_env,
+    flow_handler,
+    stub_app: _StubApp,
+    fake_redis: FakeRedis,
+    picture_fetch: FakePictureFetch,
+    picture_fetch_limit: float,
+    caplog: pytest.LogCaptureFixture,
+    lines: dict[str, str],
+    shown: str | None,
+):
+    await _seed_pictures("preview", lines=lines)
+    picture_fetch.stalled.add(_PICTURE_LINK)
+    stub_app.interactions.react_result = {"display": {"preview": _PICTURE_LINK}}
+    request, aes_key, iv = _request(_TIER_CHANGED)
+    async with asyncio.timeout(3.0):
+        out = _decrypt_response(await flow_handler(request), aes_key, iv)
+    assert out["screen"] == "SCREEN_A"
+    assert out["data"]["error_message"] == (shown or _LINE_DEFAULT_NOTICE)
+    assert "slot_preview" not in out["data"]
+    limit_text = "form picture was not fetched within 0.2 seconds (display slot 'preview', host 'pics.example')"
+    assert any(record.exc_info and str(record.exc_info[1]) == limit_text for record in caplog.records)
+
+
+_SUBMIT = {
+    "action": "data_exchange",
+    "flow_token": _TOKEN,
+    "screen": "SCREEN_A",
+    "data": {"tai42_event": "submitted", "tier": "g"},
+}
+
+
+async def test_a_clean_submit_completes_as_without_its_display_and_fetches_no_picture(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis, picture_fetch: FakePictureFetch
+):
+    from tai42_kit.net import MediaFetchError
+
+    await _seed_pictures("preview")
+    picture_fetch.faults[_PICTURE_LINK] = MediaFetchError(host="pics.example", status_code=404)
+    answers = []
+    for reaction in ({"values": {"total": "42"}}, {"values": {"total": "42"}, "display": {"preview": _PICTURE_LINK}}):
+        stub_app.interactions.react_result = reaction
+        request, aes_key, iv = _request(_SUBMIT)
+        answers.append(_decrypt_response(await flow_handler(request), aes_key, iv))
+    assert answers[0]["screen"] == "SUCCESS"
+    assert answers[1] == answers[0]
+    assert picture_fetch.calls == []
+
+
+async def test_a_submit_a_reaction_refuses_embeds_its_display_picture(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis, picture_fetch: FakePictureFetch
+):
+    await _seed_pictures("preview")
+    stub_app.interactions.react_result = {"errors": {"tier": "not available"}, "display": {"preview": _PICTURE_LINK}}
+    request, aes_key, iv = _request(_SUBMIT)
+    out = _decrypt_response(await flow_handler(request), aes_key, iv)
+    assert out["screen"] == "SCREEN_A"
+    assert out["data"]["slot_preview"] == base64.b64encode(PICTURE_JPEG).decode()
+    assert "tier: not available" in out["data"]["error_message"]
+
+
+async def test_a_submit_a_reaction_refuses_with_a_picture_that_cannot_be_fetched_shows_the_update_failed_line(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis, picture_fetch: FakePictureFetch
+):
+    from tai42_kit.net import MediaFetchError
+
+    await _seed_pictures("preview")
+    picture_fetch.faults[_PICTURE_LINK] = MediaFetchError(host="pics.example", status_code=404)
+    stub_app.interactions.react_result = {"errors": {"tier": "not available"}, "display": {"preview": _PICTURE_LINK}}
+    request, aes_key, iv = _request(_SUBMIT)
+    out = _decrypt_response(await flow_handler(request), aes_key, iv)
+    assert out["screen"] == "SCREEN_A"
+    assert out["data"]["error_message"] == _LINE_DEFAULT_NOTICE
+    assert "slot_preview" not in out["data"]
+
+
+async def test_a_reaction_whose_pictures_take_the_data_over_the_budget_keeps_the_screen_and_shows_the_notice(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis, picture_fetch: FakePictureFetch
+):
+    # Two pictures near the picture size are 773 336 bytes of base64, over the endpoint's budget.
+    links = [f"https://pics.example/{n}.jpg" for n in range(2)]
+    for link in links:
+        picture_fetch.served[link] = PICTURE_JPEG + b"x" * (290_000 - len(PICTURE_JPEG))
+    await _seed_pictures("p0", "p1")
+    stub_app.interactions.react_result = {"display": {f"p{n}": link for n, link in enumerate(links)}}
+    carried = {"slot_p0": "", "slot_p1": "", "slot_caption": "Hi"}
+    request, aes_key, iv = _request(
+        {**_TIER_CHANGED, "data": {"tai42_event": "page_advanced", "tai42_page": "Form", "tier": "g", **carried}}
+    )
+    out = _decrypt_response(await flow_handler(request), aes_key, iv)
+    assert out == {
+        "screen": "SCREEN_A",
+        "data": {**carried, "tier__init": "g", "error_message": _LINE_DEFAULT_NOTICE},
+    }
+
+
+async def test_a_reaction_on_a_form_without_picture_slots_answers_whatever_its_size(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis
+):
+    await _seed(fake_redis)
+    option_list = [{"value": f"v{n}", "label": f"Choice {n:06d}"} for n in range(25_000)]
+    stub_app.interactions.react_result = {"options": {"tier": option_list}}
+    request, aes_key, iv = _request(_TIER_CHANGED)
+    out = _decrypt_response(await flow_handler(request), aes_key, iv)
+    rows = out["data"]["tier__ds"]
+    assert len(json.dumps(rows, separators=(",", ":"))) > 800_000
+    assert rows == [{"id": f"v{n}", "title": f"Choice {n:06d}"} for n in range(25_000)]
+    assert "error_message" not in out["data"]

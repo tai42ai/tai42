@@ -33,7 +33,7 @@ from tai42_channel_whatsapp.flows_endpoint import (
     required_fields,
     shaped_fields,
 )
-from tai42_channel_whatsapp.flows_resolve import _form_range_merges, _resolve_pages, slot_datanames
+from tai42_channel_whatsapp.flows_resolve import _form_range_merges, _resolve_pages, slot_datanames, slot_start_data
 from tai42_channel_whatsapp.flows_second_line import data_source_rows
 
 
@@ -70,7 +70,8 @@ def build_flow_data(
     endpoint-driven form) every shaped field's ``__invalid`` carries the caller's ``field_invalid``
     sentence, every field the shape check can report missing its ``__required`` the caller's
     ``field_required`` sentence, and each form-line carrier the caller's ``form_lines`` line, each else
-    the empty string. Each display slot of the entry page reads the empty string.
+    the empty string. Every display slot of the form (the entry screen declares them all, as it does
+    every field's carriers) carries its start value (:func:`slot_start_data`).
     Raises ``ChannelInputError``.
     """
     values = values or {}
@@ -119,8 +120,7 @@ def build_flow_data(
             _CallerWords(field_invalid or {}, field_required or {}, form_lines or {}) if carry_invalid else None,
         )
     )
-    # The entry screen's display slots read empty until a reaction fills them.
-    data.update(dict.fromkeys(slot_datanames(resolved_pages[:1]).values(), ""))
+    data.update(slot_start_data(resolved_pages, slot_datanames(resolved_pages)))
     return data
 
 

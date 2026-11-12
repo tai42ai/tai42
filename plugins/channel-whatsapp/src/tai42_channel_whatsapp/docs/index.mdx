@@ -95,9 +95,39 @@ per-send prefill values and option lists open the form already filled in. A shor
 string `enum` renders a radio group (longer, a dropdown), an array of strings a
 checkbox group, a `format: date` a calendar picker (bounded by its date constraints); a page's
 display blocks and a review page render too, and a `visibleWhen` field is shown or
-hidden client-side. A field shown for several values of its controlling field is drawn
+hidden client-side. A display block that names a `slot` shows its own `text` (an image
+its `src`) until a reaction's `display` update replaces it, and is empty until then when
+it carries none. A field shown for several values of its controlling field is drawn
 as one control per value; such a form is endpoint-driven (below), and the data endpoint
 keeps the value of the case whose condition holds under the field's own name.
+
+An image block's `src` may be an `http` or `https` link: the channel fetches the
+picture when the form is sent and embeds it in the form. It may also be a stored-media
+reference (`/api/interactions/media/<id>`): the channel reads the stored picture through
+the platform's media store and embeds it the same way. Any other `src` is taken as the
+picture's base64 data and sent as it is. A fetched or stored picture must be a JPEG or a
+PNG of at most 300 kB, and a link that cannot be fetched, a stored reference that is
+unknown, has expired or is not attached to a message yet, or a picture that breaks
+either rule, refuses the send,
+naming the page and the picture. The fetch goes through the platform's URL guard and
+its [settings](/reference/settings#urlguardsettings). A picture outside any slot is part
+of the published Flow, so a picture that changes from send to send belongs in a slotted
+block: a send whose unslotted picture differs publishes its own Flow. A reaction's
+`display` update may give a link or a stored reference for an image slot too; when its
+picture cannot be fetched or read, the screen shows the `update_failed` line (below). Slotted pictures ride the
+form's data, so a form with picture slots has a size for that data: 1 MB in all, and
+about 720 kB when the form is endpoint-driven (below), which leaves room for the
+person's answers on the way back to the data endpoint. A send over that size is
+refused, naming both sizes; a reaction's update over it shows the `update_failed`
+line. A form without picture slots is not measured.
+
+Each picture link has **5 seconds** in all to be fetched — finding the host, connecting,
+any redirects and the download together. A link that takes longer refuses the send with
+a retryable delivery error that names the picture and its host; the form is never sent
+without its picture. When a reaction's `display` update gives the link, the picture is
+fetched while WhatsApp waits for the answer (WhatsApp documents that wait as 10 seconds,
+the reaction tool's own time included); a picture that misses the 5 seconds shows the
+form's `update_failed` line.
 
 A string field's `inputMode` hint picks the text field's keyboard: `numeric` and
 `decimal` draw the numeric keypad (it admits a decimal separator), `tel` the phone

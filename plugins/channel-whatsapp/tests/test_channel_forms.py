@@ -4,6 +4,7 @@ reservation, schema sidecar)."""
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 import httpx
@@ -26,7 +27,10 @@ from .conftest import (
     ALLOWED_A,
     ALLOWED_B,
     PHONE_NUMBER_ID,
+    PICTURE_JPEG,
+    PICTURE_PNG,
     FakeHttpx,
+    FakePictureFetch,
     FakeRedis,
     _accepted,
     expected_flow_identity,
@@ -192,6 +196,26 @@ async def test_form_with_pages_and_data_publishes_once_and_carries_data_per_send
     assert action_payload["screen"] == "SCREEN_A"
     assert action_payload["data"]["note__init"] == "hi"
     assert action_payload["data"]["tier__ds"] == [{"id": "g", "title": "Gold"}]
+
+
+def _slot_start_pages():
+    from tai42_contract.interactions.models import DisplayBlock, FormPage
+
+    block = DisplayBlock(kind="body", slot="total", text="Total: 0")
+    return [FormPage(title="Form", fields=["note", "qty"], display=[block])]
+
+
+async def test_form_send_starts_a_slot_as_its_blocks_own_text(waba_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx):
+    # A form ask's entry screen data starts a slotted block's slot as the block's own text.
+    fake_httpx.get_responses.append(flow_list_page())
+    fake_httpx.responses.append(_flow_created("flow-slot"))
+    fake_httpx.responses.append(_published())
+    fake_httpx.responses.append(_accepted("wamid.SLOT"))
+
+    await WhatsAppChannel().deliver(_form_delivery(pages=_slot_start_pages()))
+
+    action_payload = fake_httpx.calls[2]["json"]["interactive"]["action"]["parameters"]["flow_action_payload"]
+    assert action_payload["data"]["slot_total"] == "Total: 0"
 
 
 async def test_form_send_carries_a_per_send_option_second_line_in_the_data_source(
@@ -597,8 +621,8 @@ async def test_form_create_with_validation_errors_refuses_and_deletes_draft(
 
 
 async def test_form_clean_create_still_publishes_and_caches(waba_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx):
-    # A create with no validation_errors (an empty array is the clean case) publishes
-    # and caches exactly as before — the refusal is scoped to a non-empty list.
+    # A create whose validation_errors is an empty array is clean: the Flow is published, cached
+    # and sent. Only a non-empty list refuses the form.
     _, schema_hash = build_form_flow(_FORM_SCHEMA)
     fake_httpx.get_responses.append(flow_list_page())
     fake_httpx.responses.append(response(200, json={"id": "flow-ok", "validation_errors": []}))
@@ -884,6 +908,54 @@ async def test_notify_form_prefill_and_pages_reach_send_flow(waba_env, fake_redi
     # The prefill value and the per-send option list reach the Flow's screen data model.
     assert action_payload["data"]["note__init"] == "hi"
     assert action_payload["data"]["tier__ds"] == [{"id": "g", "title": "Gold"}]
+
+
+async def test_notify_form_send_starts_a_slot_as_its_blocks_own_text(
+    waba_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    # An ask-less form's entry screen data starts a slotted block's slot as the block's own text.
+    block = {"kind": "body", "slot": "total", "text": "Total: 0"}
+    _, schema_hash = build_form_flow(
+        _FORM_SCHEMA, [{"title": "Form", "fields": ["note", "qty"], "kind": "input", "display": [block]}]
+    )
+    fake_redis.store[_flow_cache_key(schema_hash)] = "flow-nf-slot"
+    fake_httpx.responses.append(_accepted("wamid.FLOW"))
+
+    await WhatsAppChannel().notify(_form_notification(pages=_slot_start_pages()))
+
+    params = fake_httpx.calls[0]["json"]["interactive"]["action"]["parameters"]
+    assert params["flow_id"] == "flow-nf-slot"
+    assert params["flow_action_payload"]["data"]["slot_total"] == "Total: 0"
+
+
+async def test_notify_forms_differing_only_in_a_slots_start_text_share_one_flow_and_sidecar(
+    waba_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    # The start text is send data: both sends resolve the one cached Flow (no publish) and write one
+    # sidecar value, while each send's data carries its own start text.
+    from tai42_contract.interactions.models import DisplayBlock, FormPage
+
+    def pages(text: str) -> list[FormPage]:
+        return [
+            FormPage(title="Form", fields=["note", "qty"], display=[DisplayBlock(kind="body", slot="total", text=text)])
+        ]
+
+    _, schema_hash = build_form_flow(
+        _FORM_SCHEMA,
+        [{"title": "Form", "fields": ["note", "qty"], "kind": "input", "display": [{"kind": "body", "slot": "total"}]}],
+    )
+    fake_redis.store[_flow_cache_key(schema_hash)] = "flow-nf-shared"
+    sidecars = []
+    for index, text in enumerate(["Total: 0", "Total: 12"]):
+        fake_httpx.responses.append(_accepted(f"wamid.FLOW{index}"))
+        await WhatsAppChannel().notify(_form_notification(pages=pages(text)))
+        params = fake_httpx.calls[index]["json"]["interactive"]["action"]["parameters"]
+        assert params["flow_id"] == "flow-nf-shared"
+        assert params["flow_action_payload"]["data"]["slot_total"] == text
+        sidecars.append(fake_redis.store[_schema_cache_key(schema_hash)])
+    assert len(fake_httpx.calls) == 2
+    assert sidecars[0] == sidecars[1]
+    assert "Total:" not in sidecars[0]
 
 
 async def test_channel_advertises_form_notification_capability():
@@ -1659,8 +1731,6 @@ async def test_reacting_form_identity_covers_endpoint_uri(
 async def test_concurrent_first_sends_publish_one_flow(waba_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx):
     # Two first sends of one form race on a cold cache: the resolve lock lets exactly one list,
     # create and publish; the other re-reads the cache under the lock and reuses that Flow.
-    import asyncio
-
     _, schema_hash = build_form_flow(_FORM_SCHEMA)
     fake_httpx.get_responses.append(flow_list_page())
     fake_httpx.responses.append(_flow_created("flow-1"))
@@ -1809,3 +1879,365 @@ async def test_a_shape_checked_notify_form_without_key_material_sends_nothing(
             )
         )
     assert fake_httpx.calls == []
+
+
+# --- Form pictures given as a link --------------------------------------------
+
+_PICTURE_LINK = "https://pics.example/a.jpg"
+_SLOT_PICTURE_LINK = "https://pics.example/slot.png"
+
+
+def _picture_pages():
+    from tai42_contract.interactions.models import DisplayBlock, FormPage
+
+    return [
+        FormPage(
+            title="Form",
+            fields=["tier", "note"],
+            display=[
+                DisplayBlock(kind="image", src=_PICTURE_LINK, alt="A picture"),
+                DisplayBlock(kind="image", slot="preview", src=_SLOT_PICTURE_LINK),
+            ],
+        )
+    ]
+
+
+def _image_srcs(pages) -> list:
+    return [block.get("src") for page in pages or [] for block in page["display"] if block["kind"] == "image"]
+
+
+async def test_a_form_ask_with_a_dead_picture_link_reserves_and_sends_nothing(
+    reacting_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx, picture_fetch: FakePictureFetch
+):
+    from tai42_kit.net import MediaFetchError
+
+    picture_fetch.faults[_PICTURE_LINK] = MediaFetchError(host="pics.example", status_code=404)
+    with pytest.raises(ChannelInputError, match=r"form picture could not be fetched \(page 1, picture 1\)"):
+        await WhatsAppChannel().deliver(_reacting_delivery(pages=_picture_pages()))
+    assert fake_httpx.calls == []
+    assert not [key for _, key in fake_redis.events if key.startswith("channel:whatsapp:pending:")]
+    assert "channel:whatsapp:endpoint-form:int-1" not in fake_redis.store
+
+
+async def test_a_form_ask_stores_embedded_pictures_on_the_pending_ask_and_none_on_the_endpoint_record(
+    reacting_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx, picture_fetch: FakePictureFetch
+):
+    import base64
+    import json
+
+    picture_fetch.served[_SLOT_PICTURE_LINK] = PICTURE_PNG
+    fake_httpx.get_responses.append(flow_list_page())
+    fake_httpx.responses.append(_flow_created("flow-picture"))
+    fake_httpx.responses.append(_published())
+    fake_httpx.responses.append(_accepted("wamid.PIC"))
+
+    await WhatsAppChannel().deliver(_reacting_delivery(pages=_picture_pages()))
+
+    jpeg, png = base64.b64encode(PICTURE_JPEG).decode(), base64.b64encode(PICTURE_PNG).decode()
+    pending = json.loads(fake_redis.store[f"channel:whatsapp:pending:{PHONE_NUMBER_ID}:{ALLOWED_A}"])
+    assert _image_srcs(pending["form_pages"]) == [jpeg, png]
+    sidecar = json.loads(fake_redis.store["channel:whatsapp:endpoint-form:int-1"])
+    assert _image_srcs(sidecar["pages"]) == [None, None]
+    flow = json.loads(fake_httpx.calls[0]["json"]["flow_json"])
+    assert jpeg in json.dumps(flow)
+    data = fake_httpx.calls[2]["json"]["interactive"]["action"]["parameters"]["flow_action_payload"]["data"]
+    assert data["slot_preview"] == png
+
+
+async def test_a_notify_form_with_a_picture_link_writes_one_sidecar_without_pictures(
+    waba_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx, picture_fetch: FakePictureFetch
+):
+    import base64
+
+    from tai42_contract.interactions.models import DisplayBlock, FormPage
+
+    pages = [FormPage(title="Form", fields=["note", "qty"], display=[DisplayBlock(kind="image", src=_PICTURE_LINK)])]
+    embedded = [
+        {
+            "title": "Form",
+            "fields": ["note", "qty"],
+            "kind": "input",
+            "display": [{"kind": "image", "src": base64.b64encode(PICTURE_JPEG).decode()}],
+        }
+    ]
+    _, schema_hash = build_form_flow(_FORM_SCHEMA, embedded)
+    fake_redis.store[_flow_cache_key(schema_hash)] = "flow-nf-picture"
+    sidecars = []
+    for index in range(2):
+        fake_httpx.responses.append(_accepted(f"wamid.NFP{index}"))
+        await WhatsAppChannel().notify(_form_notification(pages=pages))
+        assert fake_httpx.calls[index]["json"]["interactive"]["action"]["parameters"]["flow_id"] == "flow-nf-picture"
+        sidecars.append(fake_redis.store[_schema_cache_key(schema_hash)])
+    assert len(fake_httpx.calls) == 2
+    assert sidecars[0] == sidecars[1]
+    assert '"src"' not in sidecars[0]
+
+
+async def test_a_notify_form_with_a_dead_picture_link_sends_nothing_not_even_its_media(
+    waba_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx, picture_fetch: FakePictureFetch
+):
+    from tai42_contract.interactions.models import DisplayBlock, FormPage
+    from tai42_kit.net import MediaFetchError
+
+    picture_fetch.faults[_PICTURE_LINK] = MediaFetchError(host="pics.example", status_code=503)
+    pages = [FormPage(title="Form", fields=["note", "qty"], display=[DisplayBlock(kind="image", src=_PICTURE_LINK)])]
+    with pytest.raises(ChannelDeliveryError, match=r"form picture could not be fetched \(page 1, picture 1\)"):
+        await WhatsAppChannel().notify(
+            _form_notification(
+                pages=pages,
+                media=[MediaItem(kind=MediaKind.LINK, url="https://docs.example/p/1", caption="Details page")],
+            )
+        )
+    assert fake_httpx.calls == []
+
+
+# --- Form pictures given as a stored-media reference ---------------------------
+
+_STORED_ID = "S" * 43
+_STORED_PICTURE = f"/api/interactions/media/{_STORED_ID}"
+
+
+def _stored_picture_pages():
+    from tai42_contract.interactions.models import DisplayBlock, FormPage
+
+    return [
+        FormPage(
+            title="Form",
+            fields=["tier", "note"],
+            display=[
+                DisplayBlock(kind="image", src=_STORED_PICTURE, alt="A picture"),
+                DisplayBlock(kind="image", slot="preview", src=_STORED_PICTURE),
+            ],
+        )
+    ]
+
+
+async def test_a_form_ask_with_an_unknown_stored_picture_reserves_and_sends_nothing(
+    reacting_env, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    from tai42_contract.interactions import MediaNotFoundError
+
+    stub_app.media.read_error = MediaNotFoundError("stored media not found")
+    with pytest.raises(ChannelInputError, match=r"^stored form picture was not found \(page 1, picture 1\)"):
+        await WhatsAppChannel().deliver(_reacting_delivery(pages=_stored_picture_pages()))
+    assert fake_httpx.calls == []
+    assert not [key for _, key in fake_redis.events if key.startswith("channel:whatsapp:pending:")]
+    assert "channel:whatsapp:endpoint-form:int-1" not in fake_redis.store
+
+
+async def test_a_form_ask_stores_an_embedded_stored_picture_on_the_pending_ask_and_none_on_the_endpoint_record(
+    reacting_env, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    import base64
+    import json
+
+    from tai42_contract.interactions import StoredMedia
+
+    stub_app.media.read_result = StoredMedia(mime="image/png", data=PICTURE_PNG)
+    fake_httpx.get_responses.append(flow_list_page())
+    fake_httpx.responses.append(_flow_created("flow-stored"))
+    fake_httpx.responses.append(_published())
+    fake_httpx.responses.append(_accepted("wamid.STORED"))
+
+    await WhatsAppChannel().deliver(_reacting_delivery(pages=_stored_picture_pages()))
+
+    png = base64.b64encode(PICTURE_PNG).decode()
+    pending = json.loads(fake_redis.store[f"channel:whatsapp:pending:{PHONE_NUMBER_ID}:{ALLOWED_A}"])
+    assert _image_srcs(pending["form_pages"]) == [png, png]
+    sidecar = json.loads(fake_redis.store["channel:whatsapp:endpoint-form:int-1"])
+    assert _image_srcs(sidecar["pages"]) == [None, None]
+    assert png in fake_httpx.calls[0]["json"]["flow_json"]
+    data = fake_httpx.calls[2]["json"]["interactive"]["action"]["parameters"]["flow_action_payload"]["data"]
+    assert data["slot_preview"] == png
+    assert stub_app.media.read_calls == [(_STORED_ID, 300_000)]
+
+
+async def test_a_notify_form_with_an_unknown_stored_picture_sends_nothing_not_even_its_media(
+    waba_env, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    from tai42_contract.interactions import MediaNotFoundError
+    from tai42_contract.interactions.models import DisplayBlock, FormPage
+
+    stub_app.media.read_error = MediaNotFoundError("stored media not found")
+    pages = [FormPage(title="Form", fields=["note", "qty"], display=[DisplayBlock(kind="image", src=_STORED_PICTURE)])]
+    with pytest.raises(ChannelInputError, match=r"^stored form picture was not found \(page 1, picture 1\)"):
+        await WhatsAppChannel().notify(
+            _form_notification(
+                pages=pages,
+                media=[MediaItem(kind=MediaKind.LINK, url="https://docs.example/p/1", caption="Details page")],
+            )
+        )
+    assert fake_httpx.calls == []
+
+
+_UNPARSABLE_PICTURE_LINK = "http://pics.example:abc/x.png"
+
+
+async def test_a_form_ask_with_a_picture_link_that_cannot_be_parsed_reserves_and_sends_nothing(
+    reacting_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx, picture_fetch: FakePictureFetch
+):
+    from tai42_contract.interactions.models import DisplayBlock, FormPage
+
+    pages = [
+        FormPage(
+            title="Form", fields=["tier", "note"], display=[DisplayBlock(kind="image", src=_UNPARSABLE_PICTURE_LINK)]
+        )
+    ]
+    with pytest.raises(ChannelInputError, match=r"^form picture link cannot be parsed \(page 1, picture 1\)$"):
+        await WhatsAppChannel().deliver(_reacting_delivery(pages=pages))
+    assert picture_fetch.calls == []
+    assert fake_httpx.calls == []
+    assert not [key for _, key in fake_redis.events if key.startswith("channel:whatsapp:pending:")]
+    assert "channel:whatsapp:endpoint-form:int-1" not in fake_redis.store
+
+
+async def test_a_notify_form_with_a_picture_link_that_cannot_be_parsed_sends_nothing(
+    waba_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx, picture_fetch: FakePictureFetch
+):
+    from tai42_contract.interactions.models import DisplayBlock, FormPage
+
+    pages = [
+        FormPage(
+            title="Form", fields=["note", "qty"], display=[DisplayBlock(kind="image", src=_UNPARSABLE_PICTURE_LINK)]
+        )
+    ]
+    with pytest.raises(ChannelInputError, match=r"^form picture link cannot be parsed \(page 1, picture 1\)$"):
+        await WhatsAppChannel().notify(_form_notification(pages=pages))
+    assert picture_fetch.calls == []
+    assert fake_httpx.calls == []
+
+
+_PICTURE_LIMIT_TEXT = r"^form picture was not fetched within 0\.2 seconds \(page 1, picture 1, host 'pics\.example'\)$"
+
+
+async def test_a_form_ask_whose_picture_misses_the_time_limit_reserves_and_sends_nothing(
+    reacting_env,
+    fake_redis: FakeRedis,
+    fake_httpx: FakeHttpx,
+    picture_fetch: FakePictureFetch,
+    picture_fetch_limit: float,
+):
+    picture_fetch.stalled.add(_PICTURE_LINK)
+    async with asyncio.timeout(3.0):
+        with pytest.raises(ChannelDeliveryError, match=_PICTURE_LIMIT_TEXT) as caught:
+            await WhatsAppChannel().deliver(_reacting_delivery(pages=_picture_pages()))
+    assert caught.value.retryable is True
+    assert fake_httpx.calls == []
+    assert not [key for _, key in fake_redis.events if key.startswith("channel:whatsapp:pending:")]
+    assert "channel:whatsapp:endpoint-form:int-1" not in fake_redis.store
+
+
+async def test_a_notify_form_whose_picture_misses_the_time_limit_sends_nothing(
+    waba_env,
+    fake_redis: FakeRedis,
+    fake_httpx: FakeHttpx,
+    picture_fetch: FakePictureFetch,
+    picture_fetch_limit: float,
+):
+    from tai42_contract.interactions.models import DisplayBlock, FormPage
+
+    picture_fetch.stalled.add(_PICTURE_LINK)
+    pages = [FormPage(title="Form", fields=["note", "qty"], display=[DisplayBlock(kind="image", src=_PICTURE_LINK)])]
+    async with asyncio.timeout(3.0):
+        with pytest.raises(ChannelDeliveryError, match=_PICTURE_LIMIT_TEXT):
+            await WhatsAppChannel().notify(_form_notification(pages=pages))
+    assert fake_httpx.calls == []
+
+
+_REFUSED_SIZE = r"^form data is \d+ bytes, over the {budget} bytes this channel sends in a form with picture slots; "
+_LARGE_PICTURE = PICTURE_JPEG + b"x" * (290_000 - len(PICTURE_JPEG))
+
+
+def _slotted_picture_pages(count: int):
+    from tai42_contract.interactions.models import DisplayBlock, FormPage
+
+    links = [f"https://pics.example/{n}.jpg" for n in range(count)]
+    blocks = [DisplayBlock(kind="image", slot=f"pic{n}", src=link) for n, link in enumerate(links)]
+    return links, [FormPage(title="Form", fields=["tier", "note"], display=blocks)]
+
+
+@pytest.mark.parametrize("count", [2, 3])
+async def test_a_reacting_form_ask_whose_slotted_pictures_overflow_the_echo_budget_is_refused(
+    reacting_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx, picture_fetch: FakePictureFetch, count: int
+):
+    # Two pictures near the picture size are 773 336 bytes of base64: within Meta's figure, over
+    # what the data endpoint can read back beside the answers.
+    links, pages = _slotted_picture_pages(count)
+    for link in links:
+        picture_fetch.served[link] = _LARGE_PICTURE
+    with pytest.raises(ChannelInputError, match=_REFUSED_SIZE.format(budget=720547)):
+        await WhatsAppChannel().deliver(_reacting_delivery(pages=pages))
+    assert fake_httpx.calls == []
+    assert not [key for _, key in fake_redis.events if key.startswith("channel:whatsapp:pending:")]
+    assert "channel:whatsapp:endpoint-form:int-1" not in fake_redis.store
+
+
+async def test_a_static_form_ask_with_two_large_slotted_pictures_is_sent(
+    waba_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx, picture_fetch: FakePictureFetch
+):
+    links, pages = _slotted_picture_pages(2)
+    for link in links:
+        picture_fetch.served[link] = _LARGE_PICTURE
+    fake_httpx.get_responses.append(flow_list_page())
+    fake_httpx.responses.append(_flow_created("flow-pictures"))
+    fake_httpx.responses.append(_published())
+    fake_httpx.responses.append(_accepted("wamid.PICTURES"))
+    await WhatsAppChannel().deliver(_form_delivery(schema=_REACT_SCHEMA, pages=pages))
+    assert _http_order(fake_httpx)[-1] == ("post", _MESSAGES_URL)
+    assert _pending_key() in fake_redis.store
+
+
+async def test_a_static_form_ask_with_three_large_slotted_pictures_is_refused(
+    waba_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx, picture_fetch: FakePictureFetch
+):
+    links, pages = _slotted_picture_pages(3)
+    for link in links:
+        picture_fetch.served[link] = _LARGE_PICTURE
+    with pytest.raises(ChannelInputError, match=_REFUSED_SIZE.format(budget=1000000)):
+        await WhatsAppChannel().deliver(_form_delivery(schema=_REACT_SCHEMA, pages=pages))
+    assert fake_httpx.calls == []
+    assert not [key for _, key in fake_redis.events if key.startswith("channel:whatsapp:pending:")]
+
+
+_LIST_SCHEMA = {"type": "object", "properties": {"pick": {"type": "string"}, "note": {"type": "string"}}}
+
+
+def _large_option_data():
+    from tai42_contract.interactions.models import FormData, FormOption
+
+    return FormData(
+        values={}, options={"pick": [FormOption(value=f"v{n}", label=f"Choice {n:06d}") for n in range(30_000)]}
+    )
+
+
+def _sent_data(fake_httpx: FakeHttpx) -> dict:
+    return fake_httpx.calls[-1]["json"]["interactive"]["action"]["parameters"]["flow_action_payload"]["data"]
+
+
+async def test_a_form_ask_without_picture_slots_is_sent_whatever_its_data_size(
+    waba_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    import json
+
+    fake_httpx.get_responses.append(flow_list_page())
+    fake_httpx.responses.append(_flow_created("flow-list"))
+    fake_httpx.responses.append(_published())
+    fake_httpx.responses.append(_accepted("wamid.LIST"))
+    await WhatsAppChannel().deliver(_form_delivery(schema=_LIST_SCHEMA, data=_large_option_data()))
+    assert _http_order(fake_httpx)[-1] == ("post", _MESSAGES_URL)
+    assert len(json.dumps(_sent_data(fake_httpx), separators=(",", ":"))) > 1_000_000
+    assert _pending_key() in fake_redis.store
+
+
+async def test_a_notify_form_without_picture_slots_is_sent_whatever_its_data_size(
+    waba_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    import json
+
+    fake_httpx.get_responses.append(flow_list_page())
+    fake_httpx.responses.append(_flow_created("flow-list"))
+    fake_httpx.responses.append(_published())
+    fake_httpx.responses.append(_accepted("wamid.LIST"))
+    await WhatsAppChannel().notify(_form_notification(schema=_LIST_SCHEMA, data=_large_option_data()))
+    assert _http_order(fake_httpx)[-1] == ("post", _MESSAGES_URL)
+    assert len(json.dumps(_sent_data(fake_httpx), separators=(",", ":"))) > 1_000_000
