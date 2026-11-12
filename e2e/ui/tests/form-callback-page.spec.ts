@@ -9,7 +9,9 @@
  * channel that opens it); the ticket is read from the SUT Redis, as the pytest harness
  * reads it, because the admin API never serializes it. The remote https image is served
  * by a Playwright route, so the load needs no network while the page policy still governs
- * whether the browser may issue it.
+ * whether the browser may issue it. A reacting form's reaction may fill an image slot: its
+ * https value is drawn as the slot's picture under the same policy, and a `null` returns the
+ * slot to its alt text.
  *
  * The `@docs` test also writes the page's docs screenshot, `form-field-error.png`, into
  * `SHOTS_OUT` (a gitignored local default when unset): the form with a broken email
@@ -61,6 +63,17 @@ interface CallbackForm {
   answered: Promise<APIResponse>;
 }
 
+/** Register a fresh browser visitor on the web chat page and return its channel recipient. */
+async function registerWebVisitor(page: Page, prefix: string): Promise<string> {
+  const identity = uniq(prefix).replace(/_/g, '-');
+  await page.goto(`/api/channels/web/chat/${identity}`);
+  const cookies = await page.context().cookies();
+  const token = cookies.find((c) => c.name === WEB_SESSION_COOKIE)?.value;
+  expect(token, 'the chat page minted no web-session cookie').toBeTruthy();
+  const visitorId = await resolveWebVisitorId(token as string);
+  return `${identity}:${visitorId}`;
+}
+
 /**
  * Park a blocking web-channel form ask at a freshly registered browser visitor and open its
  * callback page: the chat page registers the visitor, the ask fires WITHOUT being awaited
@@ -72,14 +85,8 @@ async function openCallbackForm(
   prefix: string,
   ask: Record<string, unknown>,
 ): Promise<CallbackForm> {
-  const identity = uniq(prefix).replace(/_/g, '-');
   const question = uniq(`${prefix}_q`);
-
-  await page.goto(`/api/channels/web/chat/${identity}`);
-  const cookies = await page.context().cookies();
-  const token = cookies.find((c) => c.name === WEB_SESSION_COOKIE)?.value;
-  expect(token, 'the chat page minted no web-session cookie').toBeTruthy();
-  const visitorId = await resolveWebVisitorId(token as string);
+  const recipient = await registerWebVisitor(page, prefix);
 
   const answered = request.post('/api/run-tool', {
     headers: apiHeaders(),
@@ -89,7 +96,7 @@ async function openCallbackForm(
       arguments: {
         question,
         channel: 'web',
-        recipient: `${identity}:${visitorId}`,
+        recipient,
         answer_format: 'form',
         timeout: 120,
         ...ask,
@@ -157,6 +164,94 @@ test('the callback form page draws a display-block image from a remote https sou
   expect(await askResult(answered)).toEqual({
     kind: 'result',
     result: { answer: { notes }, reply_to: null, params: null },
+  });
+});
+
+/** The https source the `e2e_form_image_reaction` handler fills the `chart` image slot with. */
+const SLOT_IMAGE_URL = 'https://images.e2e.test/slot.png';
+
+/** A reacting form whose `picture` pick fills (`show`) or clears (`clear`) two slots. */
+const SLOTTED_SCHEMA = {
+  type: 'object',
+  required: [] as string[],
+  properties: { picture: { type: 'string', enum: ['show', 'clear'], title: 'Picture' } },
+};
+
+const SLOTTED_PAGES = [
+  {
+    title: 'Look',
+    fields: ['picture'],
+    display: [
+      { kind: 'image', slot: 'chart', alt: 'Chart' },
+      { kind: 'body', slot: 'total', text: 'pending' },
+    ],
+  },
+];
+
+// Parking a form with a picture slot takes a probe tool; that extra need rides a nested group
+// so the tests around it keep their lighter declaration.
+test.describe('with a reacting picture slot', () => {
+  needs('kind:channels:web', 'kind:interactions', 'store:redis', 'probe-tools');
+
+  test("the callback form page draws a reaction's picture in an image slot and clears it on null", async ({
+    page,
+    request,
+  }) => {
+    const recipient = await registerWebVisitor(page, 'formslot');
+    const parked = await request.post('/api/run-tool', {
+      headers: apiHeaders(),
+      timeout: 30_000,
+      data: {
+        tool_name: 'e2e_image_slot_form_ask',
+        arguments: {
+          question: uniq('formslot_q'),
+          channel: 'web',
+          recipient,
+          schema: SLOTTED_SCHEMA,
+          pages: SLOTTED_PAGES,
+          reactions: { field_changed: ['picture'] },
+          expiry_seconds: 120,
+        },
+      },
+    });
+    expect(parked.status(), await parked.text()).toBe(200);
+    const { interaction_id: interactionId } = (
+      (await parked.json()) as { data: { result: { interaction_id: string } } }
+    ).data.result;
+    const ticket = await resolveCallbackTicket(interactionId);
+
+    await page.route(SLOT_IMAGE_URL, (route) =>
+      route.fulfill({ status: 200, contentType: 'image/png', body: PNG_1X1 }),
+    );
+    await gotoCallbackPage(page, ticket);
+
+    // Before any reaction the source-less image slot shows its alt text.
+    const chart = page.locator('[data-slot="chart"]');
+    const total = page.locator('[data-slot="total"]');
+    await expect(chart).toHaveText('Chart');
+    await expect(page.locator('img[data-slot="chart"]')).toHaveCount(0);
+
+    // The reaction's value becomes the slot's picture, and the picture LOADED.
+    await page.locator('input[data-field="picture"][value="show"]').check();
+    const image = page.locator('img[data-slot="chart"]');
+    await expect(image).toHaveAttribute('src', SLOT_IMAGE_URL);
+    await expect(image).toHaveAttribute('alt', 'Chart');
+    await expect
+      .poll(() => image.evaluate((el: HTMLImageElement) => (el.complete ? el.naturalWidth : -1)), {
+        timeout: 10_000,
+      })
+      .toBeGreaterThan(0);
+    await expect(total).toHaveText('shown');
+
+    // A null clears both: the image slot back to its alt text, the text slot to nothing.
+    await page.locator('input[data-field="picture"][value="clear"]').check();
+    await expect(page.locator('img[data-slot="chart"]')).toHaveCount(0);
+    await expect(chart).toHaveText('Chart');
+    await expect(total).toHaveText('');
+
+    // The page still answers: submitting closes the parked form.
+    await page.getByRole('button', { name: 'Submit' }).click();
+    await expect(page.getByText('Your response has been submitted.')).toBeVisible();
   });
 });
 

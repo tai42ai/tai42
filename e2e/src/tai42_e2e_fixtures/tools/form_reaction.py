@@ -1,5 +1,5 @@
-"""Reacting-form probe tools: a driver that parks a reacting form ask over a delivery channel,
-and the reaction handler that form runs while it is open. Each registers at import via
+"""Reacting-form probe tools: drivers that park a reacting form ask over a delivery channel, and
+the reaction handlers those forms run while they are open. Each registers at import via
 ``@tai42_app.tools.tool`` and exposes an ``e2e_record`` Redis observable or its return value."""
 
 from __future__ import annotations
@@ -26,6 +26,52 @@ FORM_REACTION_FAILING_TIER = "silver"
 FORM_REACTION_REFUSED_TIER = "bronze"
 FORM_REACTION_REFUSED_SENTENCE = "The e2e reaction refuses this tier"
 
+# The https source ``e2e_form_image_reaction`` fills the ``chart`` image slot with; a leg answers
+# it with a routed image so the load needs no network.
+FORM_IMAGE_SLOT_SOURCE = "https://images.e2e.test/slot.png"
+
+
+async def _park_reacting_form(
+    *,
+    question: str,
+    channel: str,
+    recipient: str,
+    schema: dict[str, Any],
+    reactions: dict[str, Any],
+    reaction_tool: str,
+    expiry_seconds: float,
+    pages: list[dict[str, Any]] | None = None,
+    wording: dict[str, Any] | None = None,
+) -> dict:
+    """Park an async form ask over ``channel`` whose open form runs ``reaction_tool``.
+
+    Binds ``e2e_async_resume`` as the resume continuation and drives under the caller's own
+    execution identity (the door binds it from the calling key), so the reaction handler and
+    the resume both run as that key. Returns the parked ``interaction_id``; the answer fires
+    ``e2e_async_resume``, which records it under ``async_resume:{interaction_id}``.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    from tai42_skeleton.interactions import ask
+
+    with driving_as(continuation="e2e_async_resume"):
+        suspended = parked(
+            await ask(
+                question,
+                answer_format="form",
+                schema=schema,
+                pages=pages,
+                channel=channel,
+                recipient=recipient,
+                reaction_tool=reaction_tool,
+                reactions=reactions,
+                wording=wording,
+                mode="async",
+                expiry_at=datetime.now(UTC) + timedelta(seconds=expiry_seconds),
+            )
+        )
+    return {"interaction_id": suspended.interaction_id}
+
 
 @tai42_app.tools.tool(tags={"e2e"})
 async def e2e_reacting_form_ask(
@@ -39,32 +85,46 @@ async def e2e_reacting_form_ask(
 ) -> dict:
     """Park an async form ask over ``channel`` whose open form runs ``e2e_form_reaction``.
 
-    Binds ``e2e_async_resume`` as the resume continuation and drives under the caller's own
-    execution identity (the door binds it from the calling key), so the reaction handler and
-    the resume both run as that key. ``wording`` is the ask's caller words, passed as they are.
-    Returns the parked ``interaction_id``; the answer fires
-    ``e2e_async_resume``, which records it under ``async_resume:{interaction_id}``.
+    ``wording`` is the ask's caller words, passed as they are. Returns the parked
+    ``interaction_id``; the answer fires ``e2e_async_resume``.
     """
-    from datetime import UTC, datetime, timedelta
+    return await _park_reacting_form(
+        question=question,
+        channel=channel,
+        recipient=recipient,
+        schema=schema,
+        reactions=reactions,
+        reaction_tool="e2e_form_reaction",
+        expiry_seconds=expiry_seconds,
+        wording=wording,
+    )
 
-    from tai42_skeleton.interactions import ask
 
-    with driving_as(continuation="e2e_async_resume"):
-        suspended = parked(
-            await ask(
-                question,
-                answer_format="form",
-                schema=schema,
-                channel=channel,
-                recipient=recipient,
-                reaction_tool="e2e_form_reaction",
-                reactions=reactions,
-                wording=wording,
-                mode="async",
-                expiry_at=datetime.now(UTC) + timedelta(seconds=expiry_seconds),
-            )
-        )
-    return {"interaction_id": suspended.interaction_id}
+@tai42_app.tools.tool(tags={"e2e"})
+async def e2e_image_slot_form_ask(
+    question: str,
+    channel: str,
+    recipient: str,
+    schema: dict[str, Any],
+    pages: list[dict[str, Any]],
+    reactions: dict[str, Any],
+    expiry_seconds: float,
+) -> dict:
+    """Park an async paged form ask over ``channel`` whose open form runs ``e2e_form_image_reaction``.
+
+    ``pages`` carries the display blocks whose ``chart`` image slot and ``total`` text slot the
+    handler fills. Returns the parked ``interaction_id``; the answer fires ``e2e_async_resume``.
+    """
+    return await _park_reacting_form(
+        question=question,
+        channel=channel,
+        recipient=recipient,
+        schema=schema,
+        reactions=reactions,
+        reaction_tool="e2e_form_image_reaction",
+        expiry_seconds=expiry_seconds,
+        pages=pages,
+    )
 
 
 @tai42_app.tools.tool(tags={"e2e"})
@@ -93,4 +153,20 @@ async def e2e_form_reaction(interaction_id: str, event: dict[str, Any], values: 
         if values.get("tier") == FORM_REACTION_REFUSED_TIER:
             return {"errors": {"tier": FORM_REACTION_REFUSED_SENTENCE}}
         return {"values": {"label": f"{FORM_REACTION_LABEL_PREFIX}{values.get('tier', '')}"}}
+    return {}
+
+
+@tai42_app.tools.tool(tags={"e2e"})
+async def e2e_form_image_reaction(interaction_id: str, event: dict[str, Any], values: dict[str, Any]) -> dict:
+    """The reaction handler of a form parked by ``e2e_image_slot_form_ask``.
+
+    Answers a ``field_changed`` of ``picture``: ``show`` fills the ``chart`` image slot with
+    :data:`FORM_IMAGE_SLOT_SOURCE` and the ``total`` text slot with ``"shown"``; ``clear`` sets
+    both slots to ``None``. Every other event gets an empty update.
+    """
+    if event.get("kind") == "field_changed" and event.get("field") == "picture":
+        if values.get("picture") == "show":
+            return {"display": {"chart": FORM_IMAGE_SLOT_SOURCE, "total": "shown"}}
+        if values.get("picture") == "clear":
+            return {"display": {"chart": None, "total": None}}
     return {}
