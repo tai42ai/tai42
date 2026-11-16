@@ -32,6 +32,7 @@ def test_inbound_rejection_reason_values():
     assert InboundRejectionReason.UNSUPPORTED_TYPE == "unsupported_type"
     assert InboundRejectionReason.TOO_LARGE == "too_large"
     assert InboundRejectionReason.COULD_NOT_RECEIVE == "could_not_receive"
+    assert InboundRejectionReason.UNREADABLE == "unreadable"
 
     import tai42_contract.conversations as conv
 

@@ -118,13 +118,15 @@ class Channel(Protocol):
     provider_message_id: str | None = None, active: bool = True) -> None`` asserts
     (``active=True``) or clears (``active=False``) the working-on-it indicator to
     ``recipient`` (the participant address, as ``notify`` addresses one), optionally
-    from ``sender_identity`` (``None`` = channel default), referencing the inbound
-    ``provider_message_id`` where the medium's API ties the indicator to a specific
-    inbound message. A channel whose indicator self-expires implements only the assert
-    and treats ``active=False`` as a no-op; a channel that emits explicit frames sends a
-    start frame on ``True`` and a stop frame on ``False``. It is fire-and-forget,
-    carries no reply, and raises :class:`ChannelDeliveryError` ONLY on a genuine send
-    failure the caller logs, never for a transient it can ignore.
+    from ``sender_identity`` (``None`` = channel default). ``provider_message_id`` is the
+    id of the newest inbound message from the recipient that this work answers, as the
+    channel reported it, or ``None`` when there is none; a medium whose API ties the
+    indicator to a specific inbound message references it. A channel whose indicator
+    self-expires implements only the assert and treats ``active=False`` as a no-op; a
+    channel that emits explicit frames sends a start frame on ``True`` and a stop frame
+    on ``False``. It is fire-and-forget, carries no reply, and raises
+    :class:`ChannelDeliveryError` ONLY on a genuine send failure the caller logs, never
+    for a transient it can ignore.
 
     A channel that keeps something per delivered question MAY also declare one OPTIONAL
     method, ``async def withdraw(self, withdrawal: ChannelWithdrawal) -> None`` — the same

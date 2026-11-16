@@ -256,6 +256,7 @@ _REPLY_MEMBERS = (
     "rejected_unsupported_type",
     "rejected_too_large",
     "rejected_could_not_receive",
+    "rejected_unreadable",
 )
 
 
@@ -405,7 +406,8 @@ _STORED_CHANNEL_ROW = (
     '"reply_texts":{"error":"sorry","slow_down":null,"pairing_linked":null,"pairing_unlinked":null,'
     '"pairing_not_linked":null,"pairing_code_invalid":null,"pairing_code":null,'
     '"pairing_link_unavailable":null,"pairing_unlink_unavailable":null,'
-    '"rejected_unsupported_type":null,"rejected_too_large":null,"rejected_could_not_receive":null},'
+    '"rejected_unsupported_type":null,"rejected_too_large":null,"rejected_could_not_receive":null,'
+    '"rejected_unreadable":null},'
     '"locale":null,"overlap":{"running":"continue","deliver":"one",'
     '"settle_seconds":0},"callback_secret":null,"execution_key_fingerprint":"fp-2"}'
 )

@@ -587,16 +587,18 @@ class AppConversations(Protocol):
 
         The ONE shared chokepoint a channel adapter calls instead of silently ack-and-ignoring a
         vendor content it recognises but cannot represent as a turn — an unmappable media kind, a
-        file over the platform cap, a byte source it could not fetch, or an unsupported content
-        type. Sends a single participant notice back over ``channel_id`` to ``recipient`` from
-        ``sender_identity`` (the receiving identity, the conversation route's key), and records a
-        platform event naming the generic ``kind`` refused and the ``reason``, so the drop is
-        operator-visible. The notice is the route's ``reply_texts`` member for ``reason``
-        (``rejected_<reason>``), else the built-in notice. ``kind`` is a generic, domain-neutral label
-        (e.g. an :class:`~tai42_contract.conversations.InboundMediaKind` value or a channel's neutral
+        file over the platform cap, a byte source it could not fetch, an unsupported content
+        type, or a body it could not read. Sends a single participant notice back over
+        ``channel_id`` to ``recipient`` from ``sender_identity`` (the receiving identity, the
+        conversation route's key), and records a platform event naming the generic ``kind``
+        refused and the ``reason``, so the drop is operator-visible. The notice is the route's
+        ``reply_texts`` member for ``reason`` (``rejected_<reason>``), else the built-in notice.
+        ``kind`` is a generic, domain-neutral label (e.g. an
+        :class:`~tai42_contract.conversations.InboundMediaKind` value or a channel's neutral
         content word); it names WHAT was refused, never a participant value. ``reason`` selects the
-        notice the platform sends. A blank or unroutable message is a different fault and
-        stays its own handling — this seam is for content the channel recognises but cannot bridge.
+        notice the platform sends. A readable message whose address no conversation route serves
+        is a different fault with its own handling — this seam is for content that cannot become
+        a turn, whether or not a route serves the receiving identity.
         """
         ...
 

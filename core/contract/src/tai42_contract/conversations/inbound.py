@@ -14,10 +14,14 @@ from tai42_contract.locale import normalize_optional_locale
 
 
 class BlankInboundTextError(ValueError):
-    """The channel door was handed a blank/whitespace-only message body — nothing to run a turn on.
+    """The intake was handed a blank or whitespace-only message body — nothing to run a turn on.
 
-    Raised by ``AppConversations.accept``; a channel adapter catches it and
-    drops the inbound (log + ack), exactly as it drops an unrouted one.
+    Raised by ``AppConversations.accept`` before any state is written. A webhook
+    channel reads the participant's words before it routes a typed message and answers
+    an unreadable body through ``notify_inbound_rejected``, so such a message never
+    reaches this error; a door that routes another value without that read (a tapped
+    option's value, checked only for being non-empty) can still raise it. A synchronous
+    door returns it to its caller as that request's error.
     """
 
 

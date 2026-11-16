@@ -32,8 +32,8 @@ ConversationDoor = Literal["api", "channel"]
 #: lines that forbid binding the target to the route (empty = allow). Consulted after the
 #: target exists but before the row is written, so a defect the target carries against the
 #: route's own door fields is refused at bind, not discovered at run time. The candidate body
-#: lets the owner judge an UNSAVED version of the target (a version a write has not yet
-#: committed), not only the active one. Passing the whole create model (not just the name) lets
+#: lets the owner judge a NOT-YET-ACTIVE version of the target (a version a write would make
+#: active), not only the active one. Passing the whole create model (not just the name) lets
 #: the owner judge the target against those door fields. Blocking only — a warning is not a
 #: bind-path concept.
 TargetBindValidator = Callable[
@@ -118,8 +118,9 @@ class ReplyTexts(BaseModel):
     with no conversion or format spec; ``pairing_link_unavailable`` when a redeem met a person being
     erased (its code is consumed, so the reply asks for a new one); ``pairing_unlink_unavailable``
     when ``/unlink`` met the sender's person being erased; ``rejected_unsupported_type`` / ``rejected_too_large`` /
-    ``rejected_could_not_receive`` are the notices for an inbound message the channel cannot
-    bridge, a file over the cap, and a file the channel could not fetch. Every member but
+    ``rejected_could_not_receive`` / ``rejected_unreadable`` are the notices for an inbound message the
+    channel cannot bridge, a file over the cap, a file the channel could not fetch, and an inbound
+    message whose body the channel could not read. Every member but
     ``pairing_code`` is literal text: a ``{`` in it is drawn as written. Each is a
     :data:`~tai42_contract.interactions.ReplyText` in the line's language; absent, the built-in
     English reply is sent. An empty catalogue names nothing and is refused; an unknown key is
@@ -140,6 +141,7 @@ class ReplyTexts(BaseModel):
     rejected_unsupported_type: ReplyText | None = None
     rejected_too_large: ReplyText | None = None
     rejected_could_not_receive: ReplyText | None = None
+    rejected_unreadable: ReplyText | None = None
 
     @field_validator("pairing_code")
     @classmethod
