@@ -217,6 +217,13 @@ def create_route(
             help="Notice for an inbound file the channel could not fetch. Unset sends the built-in English text.",
         ),
     ] = None,
+    reply_rejected_unreadable: Annotated[
+        str | None,
+        typer.Option(
+            "--reply-rejected-unreadable",
+            help="Notice for an inbound message the channel could not read. Unset sends the built-in English text.",
+        ),
+    ] = None,
     locale: Annotated[
         str | None,
         typer.Option(
@@ -322,6 +329,7 @@ def create_route(
             "rejected_unsupported_type": reply_rejected_unsupported_type,
             "rejected_too_large": reply_rejected_too_large,
             "rejected_could_not_receive": reply_rejected_could_not_receive,
+            "rejected_unreadable": reply_rejected_unreadable,
         }
     )
     if reply_texts:

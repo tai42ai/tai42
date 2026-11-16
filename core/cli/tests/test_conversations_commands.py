@@ -289,6 +289,7 @@ _REPLY_FLAGS = [
     ("--reply-rejected-unsupported-type", "rejected_unsupported_type"),
     ("--reply-rejected-too-large", "rejected_too_large"),
     ("--reply-rejected-could-not-receive", "rejected_could_not_receive"),
+    ("--reply-rejected-unreadable", "rejected_unreadable"),
 ]
 
 
