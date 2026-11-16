@@ -393,7 +393,7 @@ def test_a_shape_checked_form_routes_every_footer_through_the_endpoint():
 
 
 def test_a_notify_form_carries_each_shaped_fields_sentence_through_the_flow():
-    flow, _ = build_form_flow(_STEPPED, _PAGES, carry_invalid=True)
+    flow, _ = build_form_flow(_STEPPED, _PAGES, askless=True)
     for index in range(3):
         assert {"email__invalid", "qty__invalid"} <= set(flow["screens"][index]["data"]), index
         assert "name__invalid" not in flow["screens"][index]["data"]
@@ -401,7 +401,7 @@ def test_a_notify_form_carries_each_shaped_fields_sentence_through_the_flow():
     assert step["email__invalid"] == "${data.email__invalid}"
     assert step["qty__invalid"] == "${data.qty__invalid}"
     assert _footer(flow, 2)["on-click-action"]["payload"]["qty__invalid"] == "${data.qty__invalid}"
-    data = build_flow_data(_STEPPED, {}, {}, _PAGES, field_invalid={"qty": "One or more"}, carry_invalid=True)
+    data = build_flow_data(_STEPPED, {}, {}, _PAGES, field_invalid={"qty": "One or more"}, askless=True)
     assert data["qty__invalid"] == "One or more"
     assert data["email__invalid"] == ""
 
@@ -428,18 +428,26 @@ _REACTING_PAGES = [
 def test_every_data_exchange_action_carries_its_screens_whole_data():
     # The data an endpoint answers with is the screen's state from then on, so every action that
     # reaches the endpoint carries the screen's whole data for the answer to start from.
-    flow, _ = build_form_flow(_REACTING, _REACTING_PAGES, reactions={"field_changed": ["size"]}, carry_invalid=True)
+    # A reacting form, and an ask-less form whose every screen also declares the caller's words.
+    reacting, _ = build_form_flow(_REACTING, _REACTING_PAGES, reactions={"field_changed": ["size"]})
+    askless, _ = build_form_flow(_STEPPED, _PAGES, askless=True)
     selects = 0
-    for index, screen in enumerate(flow["screens"]):
-        whole = {key: f"${{data.{key}}}" for key in screen["data"]}
-        actions = [_footer(flow, index)["on-click-action"]]
-        for control in _controls(flow, index):
-            if "on-select-action" in control:
-                actions.append(control["on-select-action"])
-                selects += 1
-        for action in actions:
-            assert whole.items() <= action["payload"].items(), (index, action["payload"])
+    for flow in (reacting, askless):
+        for index, screen in enumerate(flow["screens"]):
+            whole = {key: f"${{data.{key}}}" for key in screen["data"]}
+            actions = [_footer(flow, index)["on-click-action"]]
+            for control in _controls(flow, index):
+                if "on-select-action" in control:
+                    actions.append(control["on-select-action"])
+                    selects += 1
+            for action in actions:
+                assert whole.items() <= action["payload"].items(), (index, action["payload"])
     assert selects == 1
+
+
+def test_an_ask_less_form_takes_no_reactions():
+    with pytest.raises(ValueError, match="reacts to nothing"):
+        build_form_flow(_REACTING, _REACTING_PAGES, reactions={"field_changed": ["size"]}, askless=True)
 
 
 def test_the_send_data_supplies_every_pages_contentless_display_slot_empty():

@@ -37,10 +37,12 @@ from tai42_channel_whatsapp.flows import (
     build_flow_data,
     build_form_flow,
     component_names,
+    form_date_bounds,
     form_needs_endpoint,
     payload_labels,
 )
 from tai42_channel_whatsapp.flows_components import _field_control
+from tai42_channel_whatsapp.flows_dates import schema_without_date_bound_values
 from tai42_channel_whatsapp.flows_endpoint import FORM_LINE_MEMBERS
 from tai42_channel_whatsapp.flows_resolve import pages_without_picture_content, pages_without_slot_content
 from tai42_channel_whatsapp.flows_shapes import ERROR_MESSAGE_MAX_CHARS
@@ -396,7 +398,7 @@ async def _deliver_form(
     Flow) and the payload-label reverse map (so the reply's label-keyed answers map
     back to the schema keys), and uses the ``interaction_id`` as the ``flow_token`` correlating the
     completed form. The published Flow is keyed by the ``(schema, pages, option_fields)``
-    triple (a slotted display block's own content apart), the emitted shape (the option-bearing
+    triple (a slotted display block's own content and a date bound's value apart), the emitted shape (the option-bearing
     fields decide which string properties render as dropdowns) and the data-endpoint URI, and REUSED across sends
     (found on the WABA by name, else created, and cached under the WABA id); the prefilled values and
     per-send option lists ride the send's ``flow_action_payload.data`` (a dynamic
@@ -568,8 +570,9 @@ async def _send_form_notification(
     # data are built and validated BEFORE any work with WhatsApp, and the send navigates to the
     # entry screen injecting that data — so an ask-less form opens already filled in. The
     # published Flow is keyed by the ``(schema, pages, option_fields)`` triple (a slotted display
-    # block's own content apart) and reused across sends; the prefilled values, the per-send option
-    # lists and the slots' start values ride the send's data.
+    # block's own content and a date bound's value apart) and reused across sends; the prefilled
+    # values, the per-send option lists, the slots' start values and the date bound values ride the
+    # send's data.
     pages = _form_pages_list(notification)
     values, options = _form_values_and_options(notification)
     form = _form_wording(notification)
@@ -590,7 +593,7 @@ async def _send_form_notification(
         form_title=form_title,
         form_submit=form_submit,
         field_invalid=field_invalid,
-        carry_invalid=endpoint,
+        askless=True,
         boolean_words=_boolean_words(form),
     )
     flow_data = build_flow_data(
@@ -599,7 +602,7 @@ async def _send_form_notification(
         options,
         pages,
         field_invalid=field_invalid,
-        carry_invalid=endpoint,
+        askless=True,
         field_required=field_required,
         form_lines=_form_lines(form),
     )
@@ -611,16 +614,19 @@ async def _send_form_notification(
     flow_id = await _resolve_flow_id(waba_id, schema_hash, flow_json, endpoint_uri)
     # Written beside every flow-id use — the reply side cannot repopulate it. The
     # payload-label reverse map rides with the schema so the reply decodes to schema keys; the
-    # pages and option fields let the data endpoint check an endpoint-driven form's steps. The pages
-    # are stored without the slotted blocks' own content, which the hash leaves out, so every send
-    # under one hash writes one value, and without pictures, which the data endpoint never reads.
+    # pages, option fields and declared date bounds let the data endpoint check an endpoint-driven
+    # form's steps. The schema is stored without its date bound values and the pages without the
+    # slotted blocks' own content, both of which the hash leaves out and each send carries, so every
+    # send under one hash writes one value; the pages are stored without pictures too, which the
+    # data endpoint never reads.
     await cache_flow_form(
         waba_id,
         schema_hash,
-        notification.schema,
+        schema_without_date_bound_values(notification.schema),
         _reverse_payload_labels(notification.schema),
         pages_without_picture_content(pages_without_slot_content(pages)),
         sorted(options),
+        form_date_bounds(notification.schema, pages, set(options)),
     )
     flow_token = f"{_NOTIFY_FORM_TOKEN_PREFIX}{schema_hash}:{uuid4().hex}"
     if notification.form_tag is not None:

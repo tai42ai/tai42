@@ -773,6 +773,12 @@ def test_form_flow_key_folds_the_emitted_shape():
     assert _canonical_hash_pages(schema, resolved_pages, set(), flow_json) == key
     mutated = {**flow_json, "screens": []}
     assert _canonical_hash_pages(schema, resolved_pages, set(), mutated) != key
+    # A date field's bound values ride the send: the key hashes the schema without them.
+    bounded = {"type": "object", "properties": {"when": {"type": "string", "format": "date", "minDate": "2026-01-01"}}}
+    bounded_json, bounded_key = build_form_flow(bounded)
+    when_pages = [{"title": "Form", "fields": ["when"]}]
+    stripped = {"type": "object", "properties": {"when": {"type": "string", "format": "date"}}}
+    assert _canonical_hash_pages(stripped, when_pages, set(), bounded_json) == bounded_key
 
 
 def test_form_flow_unknown_page_field_raises():
@@ -1363,16 +1369,23 @@ def test_constrained_date_renders_a_bounded_calendar_picker():
         },
         "required": ["when"],
     }
-    field = _controls(build_form_flow(schema)[0])[0]
+    flow_json, _ = build_form_flow(schema)
+    field = _controls(flow_json)[0]
     assert field["type"] == "CalendarPicker"
     assert field["mode"] == "single"
     assert field["required"] is True
-    assert field["min-date"] == "2026-01-01"
-    assert field["max-date"] == "2026-12-31"
-    assert field["unavailable-dates"] == ["2026-07-04"]
-    # Excluded weekdays are dropped from include-days (the days that stay selectable).
-    assert field["include-days"] == ["Mon", "Tue", "Wed", "Thu", "Fri"]
+    # The bounds bind the send's data; which bounds the field has is the Flow's.
+    assert field["min-date"] == "${data.when__min}"
+    assert field["max-date"] == "${data.when__max}"
+    assert field["unavailable-dates"] == "${data.when__unavailable}"
+    assert field["include-days"] == "${data.when__days}"
     assert field["init-value"] == "${data.when__init}"
+    data = build_flow_data(schema, {}, {})
+    assert data["when__min"] == "2026-01-01"
+    assert data["when__max"] == "2026-12-31"
+    assert data["when__unavailable"] == ["2026-07-04"]
+    # Excluded weekdays are dropped from include-days (the days that stay selectable).
+    assert data["when__days"] == ["Mon", "Tue", "Wed", "Thu", "Fri"]
 
 
 def _range_schema(**end_extra: object) -> dict:
@@ -1429,16 +1442,26 @@ def test_merged_range_bounds_are_never_looser_than_either_field():
                 "minDate": "2026-02-01",
                 "maxDate": "2026-12-31",
                 "unavailableDates": ["2026-03-03", "sunday"],
+                "minDays": 3,
+                "maxDays": 7,
             },
         },
         "required": ["start", "end"],
     }
     picker = _controls(build_form_flow(schema)[0])[0]
-    assert picker["min-date"] == "2026-02-01"  # the LATER minDate
-    assert picker["max-date"] == "2026-06-30"  # the EARLIER maxDate
-    assert set(picker["unavailable-dates"]) == {"2026-02-02", "2026-03-03"}  # the UNION
+    # The one range control binds the START's carriers; the span stays literal.
+    assert picker["min-date"] == "${data.start__min}"
+    assert picker["max-date"] == "${data.start__max}"
+    assert picker["unavailable-dates"] == "${data.start__unavailable}"
+    assert picker["include-days"] == "${data.start__days}"
+    assert picker["min-days"] == 2
+    assert picker["max-days"] == 6
+    data = build_flow_data(schema, {}, {})
+    assert data["start__min"] == "2026-02-01"  # the LATER minDate
+    assert data["start__max"] == "2026-06-30"  # the EARLIER maxDate
+    assert set(data["start__unavailable"]) == {"2026-02-02", "2026-03-03"}  # the UNION
     # Both Saturday and Sunday are excluded (union), so include-days keeps Mon..Fri.
-    assert picker["include-days"] == ["Mon", "Tue", "Wed", "Thu", "Fri"]
+    assert data["start__days"] == ["Mon", "Tue", "Wed", "Thu", "Fri"]
 
 
 def test_range_pair_with_a_sibling_visible_when_on_an_end_draws_two_date_controls():
@@ -2369,7 +2392,7 @@ def test_range_start_pair_on_non_date_fields_draws_two_plain_controls():
 
 def test_range_pairs_skips_a_non_dict_property():
     # A property whose schema is not an object contributes no merge (guarded before any date check).
-    assert range_pairs(["start", "end"], {"start": {"type": "string", "format": "date"}, "end": "oops"}) == {}
+    assert range_pairs(["start", "end"], {"start": {"type": "string", "format": "date"}, "end": "oops"}, set()) == {}
 
 
 def test_merged_range_union_skips_a_non_string_unavailable_entry():
@@ -2385,7 +2408,8 @@ def test_merged_range_union_skips_a_non_string_unavailable_entry():
     }
     picker = _controls(build_form_flow(schema)[0])[0]
     assert picker["type"] == "CalendarPicker"
-    assert picker["unavailable-dates"] == ["2026-01-01"]
+    assert picker["unavailable-dates"] == "${data.start__unavailable}"
+    assert build_flow_data(schema, {}, {})["start__unavailable"] == ["2026-01-01"]
 
 
 def test_merged_range_prefill_that_is_not_an_iso_date_is_refused():
@@ -2619,7 +2643,7 @@ _LINED_PAGES = [
 
 
 def test_an_ask_less_endpoint_form_declares_the_line_and_required_carriers_on_every_screen():
-    flow_json, _ = build_form_flow(_LINED_SCHEMA, _LINED_PAGES, carry_invalid=True)
+    flow_json, _ = build_form_flow(_LINED_SCHEMA, _LINED_PAGES, askless=True)
     assert flow_json.get("data_api_version")
     for screen in flow_json["screens"]:
         declared = screen["data"]
@@ -2640,7 +2664,7 @@ def test_build_flow_data_fills_the_line_and_required_carriers_of_an_ask_less_end
         None,
         None,
         _LINED_PAGES,
-        carry_invalid=True,
+        askless=True,
         field_required={"email": "We need your email"},
         form_lines={"error_line": "Please check the form"},
     )
@@ -2651,7 +2675,7 @@ def test_build_flow_data_fills_the_line_and_required_carriers_of_an_ask_less_end
     assert "code__required" not in data
 
 
-def test_build_flow_data_carries_no_line_or_required_carrier_without_carry_invalid():
+def test_build_flow_data_carries_no_line_or_required_carrier_outside_an_ask_less_form():
     data = build_flow_data(
         _LINED_SCHEMA, None, None, _LINED_PAGES, field_required={"email": "x"}, form_lines={"error_line": "y"}
     )

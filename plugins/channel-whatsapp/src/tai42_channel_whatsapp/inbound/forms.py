@@ -17,7 +17,7 @@ from typing import Any
 
 from tai42_contract.app import tai42_app
 from tai42_contract.channels import AnswerForwardError, SendOutcome
-from tai42_contract.conversations import AnswerPart
+from tai42_contract.conversations import AnswerPart, InboundRejectionReason
 from tai42_contract.interactions.models import Wording
 from tai42_kit.conversations.entry_params import put_entry_param
 from tai42_kit.utils.data.form_text import render_form_text
@@ -41,6 +41,7 @@ from tai42_channel_whatsapp.correlation import (
 from tai42_channel_whatsapp.flows_components import _chips_single_pick, split_range_values
 from tai42_channel_whatsapp.inbound.answers import _bridge_inbound, _resolve_answer
 from tai42_channel_whatsapp.inbound.params import _merged_params
+from tai42_channel_whatsapp.inbound.rejection import _notify_rejected
 from tai42_channel_whatsapp.settings import whatsapp_settings
 
 logger = logging.getLogger(__name__)
@@ -73,7 +74,7 @@ def _extract_form_response(interactive: dict[str, Any]) -> dict[str, Any] | None
     Meta wraps the completed form as a JSON string in
     ``interactive.nfm_reply.response_json``; a missing field, a non-string value,
     invalid JSON, or a JSON value that is not an object all yield ``None`` (the
-    caller drops the message).
+    caller sends the unreadable notice).
     """
     nfm = interactive.get("nfm_reply")
     if not isinstance(nfm, dict):
@@ -176,7 +177,7 @@ async def _handle_form_reply(
     *,
     reply_to_medium_message_id: str | None,
 ) -> None:
-    """A completed Flow form (``nfm_reply``): answer the pending form question, else bridge it; drop a malformed one.
+    """A completed Flow form (``nfm_reply``): answer the pending form question, else bridge it; refuse a malformed one.
 
     The reply matches ONLY when its ``flow_token`` equals the pending ask's
     ``interaction_id``. A reply whose token names no pending ask of the pair (a
@@ -188,8 +189,9 @@ async def _handle_form_reply(
     ``reply_id`` — so the conversation decides what the late form means. The
     values ride keyed as the Flow submitted them: the schema that would map them back to
     the ask's property names is gone with the ask. A ``response_json`` that is not a JSON
-    object carries no values to bridge and no text the intake would take: it is dropped
-    with a warning and its ``wamid`` marked seen, so Meta does not redeliver it.
+    object carries no values to bridge and no text the intake would take: it is logged with a
+    warning, the participant gets one ``UNREADABLE`` rejection notice, and its ``wamid`` is
+    marked seen, so a redelivery sends no second notice.
     ``params`` are the message-level referral entries, carried onto a bridged turn (the
     correlated-answer path takes none); ``reply_to_medium_message_id`` is the ``wamid`` the
     reply quotes, carried on both the answer and the bridged turn. The pending ask is peeked
@@ -202,8 +204,10 @@ async def _handle_form_reply(
     """
     response = _extract_form_response(interactive)
     if response is None:
-        logger.warning("whatsapp nfm_reply %s carried no JSON-object response_json; dropped", wamid)
-        await mark_seen(wamid)
+        logger.warning(
+            "whatsapp nfm_reply %s carried no JSON-object response_json; sending the unreadable notice", wamid
+        )
+        await _notify_rejected(phone_number_id, wa_id, wamid, kind="form", reason=InboundRejectionReason.UNREADABLE)
         return
 
     flow_token = response.get("flow_token")

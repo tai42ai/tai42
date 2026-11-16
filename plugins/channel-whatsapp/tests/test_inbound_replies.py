@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import pytest
 from tai42_contract.channels import InboundAnswerOutcome
-from tai42_contract.conversations import BlankInboundTextError
+from tai42_contract.conversations import InboundRejectionReason
 
 import tai42_channel_whatsapp.inbound  # noqa: F401  (route registration side-effect)
 
@@ -142,22 +142,125 @@ async def test_uncorrelated_unrouted_inbound_logged_ack_no_turn(
     assert _SEEN_KEY in fake_redis.store  # replay of the same wamid dedupes
 
 
-async def test_uncorrelated_blank_inbound_logged_ack_no_turn(
-    handler, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx, caplog: pytest.LogCaptureFixture
-):
-    # A whitespace-only body passes the door's own text pre-filter, reaches the
-    # bridge, and accept() raises BlankInboundTextError: the drop is logged and the
-    # webhook still 200-acks (no 5xx that would make Meta retry-storm), no turn made.
-    stub_app.conversations.accept_error = BlankInboundTextError("inbound text is blank")
+def _unreadable_notice(kind: str) -> dict:
+    return {
+        "channel_id": "whatsapp",
+        "recipient": WA_ID,
+        "sender_identity": PHONE_NUMBER_ID,
+        "kind": kind,
+        "reason": InboundRejectionReason.UNREADABLE,
+    }
 
-    with caplog.at_level("WARNING"):
-        result = await handler(signed_request(message_payload(text="   ")))
+
+def _button_message(text: object) -> dict:
+    return {"id": _WAMID, "from": WA_ID, "type": "button", "button": {"text": text, "payload": "CONFIRM_42"}}
+
+
+async def test_uncorrelated_blank_inbound_gets_one_unreadable_notice(
+    handler, stub_app, channels, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    # A whitespace-only body is read as unreadable before any routing: one notice, no turn,
+    # the webhook still 200-acks (no 5xx that would make Meta retry-storm).
+    result = await handler(signed_request(message_payload(text="   ")))
 
     assert result.status_code == 200
     assert not fake_httpx.calls  # no ask forward
-    assert len(stub_app.conversations.accept_calls) == 1  # the bridge was attempted, no turn produced
-    assert any("blank" in record.message for record in caplog.records)
+    assert stub_app.conversations.accept_calls == []
+    assert channels.inbound_calls == []
+    assert stub_app.conversations.rejected_calls == [_unreadable_notice("text")]
     assert _SEEN_KEY in fake_redis.store  # replay of the same wamid dedupes
+
+
+async def test_a_text_with_no_body_field_gets_one_unreadable_notice(handler, stub_app, channels, fake_redis: FakeRedis):
+    message = {"id": _WAMID, "from": WA_ID, "type": "text", "text": {}}
+
+    result = await handler(signed_request(_params_envelope(message)))
+
+    assert result.status_code == 200
+    assert stub_app.conversations.accept_calls == []
+    assert channels.inbound_calls == []
+    assert stub_app.conversations.rejected_calls == [_unreadable_notice("text")]
+    assert _SEEN_KEY in fake_redis.store
+
+
+async def test_blank_text_while_a_question_is_pending_gets_one_unreadable_notice_and_leaves_the_ask(
+    handler, stub_app, channels, fake_redis: FakeRedis
+):
+    await _seed_pending()
+
+    result = await handler(signed_request(message_payload(text="   ")))
+
+    assert result.status_code == 200
+    assert channels.inbound_calls == []  # never handed to the ladder as an answer
+    assert stub_app.conversations.accept_calls == []
+    assert stub_app.conversations.rejected_calls == [_unreadable_notice("text")]
+    assert await _pending_intact(fake_redis)  # the next real reply still answers it
+
+
+async def test_blank_quick_reply_while_a_question_is_pending_gets_one_unreadable_notice(
+    handler, stub_app, channels, fake_redis: FakeRedis
+):
+    await _seed_pending()
+
+    result = await handler(signed_request(_params_envelope(_button_message("  "))))
+    await handler(signed_request(_params_envelope(_button_message("  "))))
+
+    assert result.status_code == 200
+    assert channels.inbound_calls == []
+    assert stub_app.conversations.accept_calls == []
+    assert stub_app.conversations.rejected_calls == [_unreadable_notice("button")]
+    assert await _pending_intact(fake_redis)
+
+
+async def test_blank_title_tap_with_no_pending_gets_one_unreadable_notice(
+    handler, stub_app, channels, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    # A button reply whose title is blank is unreadable: one notice, no turn; a redelivery of
+    # the same wamid sends no second notice.
+    request_payload = interactive_payload(reply_id="int-1:0", title="  ")
+
+    result = await handler(signed_request(request_payload))
+    await handler(signed_request(request_payload))
+
+    assert result.status_code == 200
+    assert stub_app.conversations.accept_calls == []
+    assert channels.inbound_calls == []
+    assert stub_app.conversations.rejected_calls == [_unreadable_notice("button_reply")]
+    assert _SEEN_KEY in fake_redis.store
+
+
+async def test_blank_title_tap_while_a_question_is_pending_gets_one_unreadable_notice(
+    handler, stub_app, channels, fake_redis: FakeRedis
+):
+    await _seed_pending_select(options=["a", "b"])
+
+    result = await handler(signed_request(interactive_payload(reply_id="int-1:0", title="  ")))
+
+    assert result.status_code == 200
+    assert channels.inbound_calls == []
+    assert stub_app.conversations.accept_calls == []
+    assert stub_app.conversations.rejected_calls == [_unreadable_notice("button_reply")]
+    assert await _pending_intact(fake_redis)
+
+
+@pytest.mark.parametrize(
+    ("missing", "payload"),
+    [
+        ("from", message_payload(text="   ", wa_id="")),
+        ("phone_number_id", message_payload(text="   ", phone_number_id="")),
+    ],
+)
+async def test_a_rejection_the_channel_cannot_reply_to_is_logged(
+    missing, payload, handler, stub_app, fake_redis: FakeRedis, caplog: pytest.LogCaptureFixture
+):
+    with caplog.at_level("WARNING"):
+        result = await handler(signed_request(payload))
+
+    assert result.status_code == 200
+    assert stub_app.conversations.accept_calls == []
+    assert stub_app.conversations.rejected_calls == []
+    warnings = [record.getMessage() for record in caplog.records if record.levelname == "WARNING"]
+    assert any(_WAMID in message and f"no {missing}" in message for message in warnings)
 
 
 async def test_expired_question_reply_reaches_bridge(handler, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx):
@@ -191,8 +294,8 @@ async def test_expired_question_reply_reaches_bridge(handler, stub_app, fake_red
 async def test_unknown_message_type_acked_no_turn(
     handler, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx, caplog: pytest.LogCaptureFixture
 ):
-    # A type the channel does not model (a future/system type) is not bridged — logged and
-    # 200-acked, never consumed (nothing to dedupe).
+    # A vendor non-content notification (``system``) is not bridged and gets no reply — logged
+    # and 200-acked, never consumed (nothing to dedupe).
     with caplog.at_level("INFO"):
         result = await handler(signed_request(message_payload(msg_type="system")))
 
@@ -420,46 +523,37 @@ async def test_stale_tap_does_not_pop_pending_so_a_later_genuine_reply_answers(
     assert not await _pending_intact(fake_redis)  # now consumed
 
 
-async def test_malformed_interactive_object_bridges_empty_title(
-    handler, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+@pytest.mark.parametrize(
+    ("interactive", "kind"),
+    [({"type": "nope"}, "nope"), ({}, "interactive"), ("not-an-object", "interactive")],
+)
+@pytest.mark.parametrize("pending", [True, False])
+async def test_interactive_subtype_without_a_reader_gets_one_unsupported_notice(
+    interactive, kind, pending, handler, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx
 ):
-    # A well-signed interactive message with an odd interactive object (no
-    # button_reply/list_reply) is a non-answer with an empty title — acked, bridged,
-    # never a 500.
-    result = await handler(signed_request(interactive_payload(interactive={"type": "nope"})))
+    # An interactive message whose subtype this channel has no reader for is refused like an
+    # unknown top-level type: one unsupported notice naming the subtype, no turn, never a 500;
+    # a pending ask stays untouched; a redelivery of the same wamid sends no second notice.
+    if pending:
+        await _seed_pending_select(options=["a", "b"])
+
+    result = await handler(signed_request(interactive_payload(interactive=interactive)))  # type: ignore[arg-type]
+    await handler(signed_request(interactive_payload(interactive=interactive)))  # type: ignore[arg-type]
 
     assert result.status_code == 200
     assert not fake_httpx.calls
-    assert stub_app.conversations.accept_calls[0]["text"] == ""
+    assert stub_app.conversations.accept_calls == []
+    assert stub_app.conversations.rejected_calls == [
+        {
+            "channel_id": "whatsapp",
+            "recipient": WA_ID,
+            "sender_identity": PHONE_NUMBER_ID,
+            "kind": kind,
+            "reason": InboundRejectionReason.UNSUPPORTED_TYPE,
+        }
+    ]
     assert _SEEN_KEY in fake_redis.store
-
-
-async def test_non_dict_interactive_object_bridges_empty_title(
-    handler, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx
-):
-    # An interactive field that is not even an object is a non-answer with an empty
-    # title — acked and bridged, never a 500.
-    result = await handler(signed_request(interactive_payload(interactive="not-an-object")))  # type: ignore[arg-type]
-
-    assert result.status_code == 200
-    assert not fake_httpx.calls
-    assert stub_app.conversations.accept_calls[0]["text"] == ""
-
-
-async def test_odd_interactive_shape_with_pending_restores_and_bridges(
-    handler, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx
-):
-    # An interactive object with no button_reply/list_reply (reply id unresolvable)
-    # while a select ask is pending: not an answer — the ask is restored and the
-    # (empty) title bridges.
-    await _seed_pending_select(options=["a", "b"])
-
-    result = await handler(signed_request(interactive_payload(interactive={"type": "nope"})))
-
-    assert result.status_code == 200
-    assert not fake_httpx.calls  # not forwarded
-    assert await _pending_intact(fake_redis)  # restored
-    assert stub_app.conversations.accept_calls[0]["text"] == ""
+    assert await _pending_intact(fake_redis) is pending
 
 
 async def test_interactive_tap_dedupes_on_replay(handler, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx):

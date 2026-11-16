@@ -15,6 +15,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from starlette.responses import Response
+from tai42_contract.channels import ChannelInputError
 from tai42_contract.interactions import (
     AnswerFormat,
     FieldChangedEvent,
@@ -29,11 +30,11 @@ from tai42_kit.settings import reset_all_settings
 import tai42_channel_whatsapp.inbound  # noqa: F401  (registers the /flow-data route on the bound stub app)
 from tai42_channel_whatsapp.correlation import EndpointForm, cache_endpoint_form, cache_flow_form
 from tai42_channel_whatsapp.flow_crypto import request_plaintext_max_bytes
-from tai42_channel_whatsapp.flows import build_flow_data, build_form_flow
+from tai42_channel_whatsapp.flows import build_flow_data, build_form_flow, form_date_bounds
 from tai42_channel_whatsapp.flows_endpoint import ENDPOINT_BODY_MAX_BYTES, echoed_screen_data_max_bytes
 from tai42_channel_whatsapp.flows_resolve import pages_without_picture_content
 from tai42_channel_whatsapp.flows_shapes import channel_word
-from tai42_channel_whatsapp.inbound.flow_data import _partial_values, _screen_fields
+from tai42_channel_whatsapp.inbound.data_exchange import _partial_values, _screen_fields
 
 from .conftest import (
     APP_SECRET,
@@ -1179,7 +1180,9 @@ async def test_a_notify_form_resolves_its_sidecar_and_reads_its_sentences_from_t
     monkeypatch.setenv("CHANNEL_WHATSAPP_WABA_ID", "waba-1")
     reset_all_settings()
     names = {"Name": "name", "Email address": "email", "Quantity": "qty", "note": "note"}
-    await cache_flow_form("waba-1", "hash1", _SHAPE_SCHEMA, names, _SHAPE_PAGES, [])
+    await cache_flow_form(
+        "waba-1", "hash1", _SHAPE_SCHEMA, names, _SHAPE_PAGES, [], form_date_bounds(_SHAPE_SCHEMA, _SHAPE_PAGES)
+    )
     token = "tai42-nf:hash1:nonce1"
     stub_app.interactions.shape_errors = [_shape_error("email", FormShapeKind.FORMAT, "Enter a valid email address")]
     data = {**_SHAPE_ADVANCE, "email__invalid": "Use your work address", "qty__invalid": ""}
@@ -1783,7 +1786,9 @@ async def test_an_ask_less_shape_refusal_shows_the_carried_error_line(
     monkeypatch.setenv("CHANNEL_WHATSAPP_WABA_ID", "waba-1")
     reset_all_settings()
     names = {"Name": "name", "Email address": "email", "Quantity": "qty", "note": "note"}
-    await cache_flow_form("waba-1", "hash1", _SHAPE_SCHEMA, names, _SHAPE_PAGES, [])
+    await cache_flow_form(
+        "waba-1", "hash1", _SHAPE_SCHEMA, names, _SHAPE_PAGES, [], form_date_bounds(_SHAPE_SCHEMA, _SHAPE_PAGES)
+    )
     token = "tai42-nf:hash1:nonce1"
     stub_app.interactions.shape_errors = [_shape_error("email", FormShapeKind.FORMAT, "Enter a valid email address")]
     data = {**_SHAPE_ADVANCE, "tai42_error_line": "Please check the form"}
@@ -1893,7 +1898,9 @@ async def test_an_ask_less_failure_draws_the_carried_update_failed(
     monkeypatch.setenv("CHANNEL_WHATSAPP_WABA_ID", "waba-1")
     reset_all_settings()
     names = {"Name": "name", "Email address": "email", "Quantity": "qty", "note": "note"}
-    await cache_flow_form("waba-1", "hash1", _SHAPE_SCHEMA, names, _SHAPE_PAGES, [])
+    await cache_flow_form(
+        "waba-1", "hash1", _SHAPE_SCHEMA, names, _SHAPE_PAGES, [], form_date_bounds(_SHAPE_SCHEMA, _SHAPE_PAGES)
+    )
     data = {"email": "a@b.co", "tai42_update_failed": "Not refreshed: {reason}", **_CONTACT_DATA}
     request, aes_key, iv = _request(_shape_exchange(data, token="tai42-nf:hash1:nonce1"))
     out = _decrypt_response(await flow_handler(request), aes_key, iv)
@@ -1933,7 +1940,9 @@ async def test_an_ask_less_missing_value_shows_the_carried_required_sentence(
     monkeypatch.setenv("CHANNEL_WHATSAPP_WABA_ID", "waba-1")
     reset_all_settings()
     names = {"Name": "name", "Email address": "email", "Quantity": "qty", "note": "note"}
-    await cache_flow_form("waba-1", "hash1", _SHAPE_SCHEMA, names, _SHAPE_PAGES, [])
+    await cache_flow_form(
+        "waba-1", "hash1", _SHAPE_SCHEMA, names, _SHAPE_PAGES, [], form_date_bounds(_SHAPE_SCHEMA, _SHAPE_PAGES)
+    )
     stub_app.interactions.shape_errors = [_shape_error("email", FormShapeKind.REQUIRED, "This field is required")]
     data = {**_SHAPE_ADVANCE, "email__required": "We need your email", "email__invalid": "Not this one"}
     request, aes_key, iv = _request(_shape_exchange(data, token="tai42-nf:hash1:nonce1"))
@@ -2206,3 +2215,291 @@ async def test_a_reaction_on_a_form_without_picture_slots_answers_whatever_its_s
     assert len(json.dumps(rows, separators=(",", ":"))) > 800_000
     assert rows == [{"id": f"v{n}", "title": f"Choice {n:06d}"} for n in range(25_000)]
     assert "error_message" not in out["data"]
+
+
+# --- a date field's bounds ride the request -------------------------------------------------
+
+_BOUND_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "label": {"type": "string", "title": "Label"},
+        "when": {
+            "type": "string",
+            "format": "date",
+            "title": "When",
+            "minDate": "2026-01-01",
+            "maxDate": "2026-12-31",
+            "unavailableDates": ["2026-07-04", "sunday"],
+        },
+        "email": {"type": "string", "format": "email", "title": "Email"},
+        "later": {"type": "string", "format": "date", "title": "Later", "unavailableDates": ["saturday"]},
+    },
+    "required": ["when"],
+}
+# The sidecar of an ask-less form: its schema without the bound values, which ride each send.
+_BOUND_SIDECAR_SCHEMA = {
+    **_BOUND_SCHEMA,
+    "properties": {
+        "label": {"type": "string", "title": "Label"},
+        "when": {"type": "string", "format": "date", "title": "When"},
+        "email": {"type": "string", "format": "email", "title": "Email"},
+        "later": {"type": "string", "format": "date", "title": "Later"},
+    },
+}
+_BOUND_PAGES = [
+    {"title": "One", "fields": ["label", "when"], "kind": "input", "display": []},
+    {"title": "Two", "fields": ["email", "later"], "kind": "input", "display": []},
+]
+_BOUND_CARRIED = {
+    "when__min": "2026-03-01",
+    "when__max": "2026-03-31",
+    "when__unavailable": ["2026-03-10"],
+    "when__days": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat"],
+    "later__unavailable": [],
+    "later__days": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sun"],
+}
+_BOUND_ADVANCE = {
+    "tai42_event": "page_advanced",
+    "tai42_page": "One",
+    "label": "x",
+    "when": "2026-03-02",
+    "label__init": "",
+    "when__init": "",
+    "email__init": "",
+    "email__err": "",
+    "later__init": "",
+    **_BOUND_CARRIED,
+}
+_NOTIFY_TOKEN = "tai42-nf:hash1:nonce1"
+
+
+async def _seed_bound_sidecar(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CHANNEL_WHATSAPP_WABA_ID", "waba-1")
+    reset_all_settings()
+    from tai42_channel_whatsapp.flows import payload_labels
+
+    names = {label: key for key, label in payload_labels(_BOUND_SIDECAR_SCHEMA["properties"]).items()}
+    declared = form_date_bounds(_BOUND_SCHEMA, _BOUND_PAGES)
+    await cache_flow_form("waba-1", "hash1", _BOUND_SIDECAR_SCHEMA, names, _BOUND_PAGES, [], declared)
+
+
+def _checked_property(stub_app: _StubApp, name: str) -> dict[str, Any]:
+    return stub_app.interactions.shape_calls[-1]["question"].format_payload["schema"]["properties"][name]
+
+
+async def test_an_ask_less_step_checks_the_bounds_its_request_carries(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis, monkeypatch
+):
+    await _seed_bound_sidecar(monkeypatch)
+    request, aes_key, iv = _request(_shape_exchange(_BOUND_ADVANCE, token=_NOTIFY_TOKEN))
+    _decrypt_response(await flow_handler(request), aes_key, iv)
+    when = _checked_property(stub_app, "when")
+    assert when["minDate"] == "2026-03-01"
+    assert when["maxDate"] == "2026-03-31"
+    assert when["unavailableDates"] == ["2026-03-10", "sunday"]
+    assert _checked_property(stub_app, "later")["unavailableDates"] == ["saturday"]
+
+
+async def test_an_ask_less_advance_forwards_every_date_fields_bound_carriers(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis, monkeypatch
+):
+    # An ask-less endpoint-driven form declares every date field's bound carriers on every screen.
+    await _seed_bound_sidecar(monkeypatch)
+    request, aes_key, iv = _request(_shape_exchange(_BOUND_ADVANCE, token=_NOTIFY_TOKEN))
+    out = _decrypt_response(await flow_handler(request), aes_key, iv)
+    assert out["screen"] == "SCREEN_B"
+    assert {key: out["data"][key] for key in _BOUND_CARRIED} == _BOUND_CARRIED
+
+
+async def test_an_asks_advance_forwards_only_the_later_fields_bound_carriers(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis
+):
+    form = EndpointForm(
+        schema=_BOUND_SCHEMA, pages=_BOUND_PAGES, reactions=None, option_fields=[], invalid={}, required={}, lines={}
+    )
+    await cache_endpoint_form("int-bound-1", form, datetime.now(UTC) + timedelta(minutes=5))
+    request, aes_key, iv = _request(_shape_exchange(_BOUND_ADVANCE, token="int-bound-1"))
+    out = _decrypt_response(await flow_handler(request), aes_key, iv)
+    assert out["screen"] == "SCREEN_B"
+    next_declared = set(build_form_flow(_BOUND_SCHEMA, _BOUND_PAGES)[0]["screens"][1]["data"])
+    assert set(out["data"]) <= next_declared
+    assert out["data"]["later__unavailable"] == []
+    assert out["data"]["later__days"] == ["Mon", "Tue", "Wed", "Thu", "Fri", "Sun"]
+    assert not {"when__min", "when__max", "when__unavailable", "when__days"} & set(out["data"])
+    # An ask's check reads its own per-send schema.
+    assert _checked_property(stub_app, "when")["minDate"] == "2026-01-01"
+
+
+async def test_a_malformed_bound_carrier_answers_the_vendor_error(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis, monkeypatch
+):
+    await _seed_bound_sidecar(monkeypatch)
+    request, aes_key, iv = _request(_shape_exchange({**_BOUND_ADVANCE, "when__min": "soon"}, token=_NOTIFY_TOKEN))
+    response = await flow_handler(request)
+    assert response.status_code == 200
+    out = _decrypt_response(response, aes_key, iv)
+    assert out["screen"] == "SCREEN_A"
+    assert "could not be updated" in out["data"]["error_message"]
+    assert stub_app.interactions.shape_calls == []
+
+
+async def test_a_request_lacking_a_bound_carrier_answers_the_vendor_error_naming_the_carrier(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis, monkeypatch, caplog
+):
+    # The published Flow declares ``when__max`` on every screen, so a request without it is not
+    # what the Flow sends: the step is refused, never checked without that bound.
+    await _seed_bound_sidecar(monkeypatch)
+    carried = {key: value for key, value in _BOUND_ADVANCE.items() if key != "when__max"}
+    request, aes_key, iv = _request(_shape_exchange(carried, token=_NOTIFY_TOKEN))
+    out = _decrypt_response(await flow_handler(request), aes_key, iv)
+    assert out["screen"] == "SCREEN_A"
+    assert "could not be updated" in out["data"]["error_message"]
+    assert stub_app.interactions.shape_calls == []
+    refusals = [record.exc_info[1] for record in caplog.records if record.exc_info]
+    assert any(isinstance(exc, ChannelInputError) and "'when__max'" in str(exc) for exc in refusals)
+
+
+async def test_an_ask_less_merged_pair_checks_both_ends_against_the_starts_carried_bounds(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis, monkeypatch
+):
+    # The one range control enforces the merged bounds for both ends, so the check does too: a
+    # ``maxDate`` only the END declares rides the START's carrier and bounds the END.
+    monkeypatch.setenv("CHANNEL_WHATSAPP_WABA_ID", "waba-1")
+    reset_all_settings()
+    schema = {
+        "type": "object",
+        "properties": {
+            "start": {"type": "string", "format": "date", "title": "From"},
+            "end": {"type": "string", "format": "date", "rangeStart": "start", "title": "To"},
+            "email": {"type": "string", "format": "email", "title": "Email"},
+        },
+        "required": ["start", "end"],
+    }
+    pages = [{"title": "Dates", "fields": ["start", "end", "email"], "kind": "input", "display": []}]
+    names = {"From": "start", "To": "end", "Email": "email"}
+    await cache_flow_form("waba-1", "hash1", schema, names, pages, [], {"start": ["maxDate"]})
+    stub_app.interactions.shape_errors = [_shape_error("end", FormShapeKind.MAX_DATE, "Too late", maxDate="2026-06-30")]
+    data = {
+        "tai42_event": "submitted",
+        "start": {"start-date": "2026-06-20", "end-date": "2026-07-10"},
+        "email": "a@b.co",
+        "start__init": _NO_RANGE_ERROR,
+        "start__err": _NO_RANGE_ERROR,
+        "email__init": "",
+        "email__err": "",
+        "start__max": "2026-06-30",
+    }
+    request, aes_key, iv = _request(_shape_exchange(data, token=_NOTIFY_TOKEN))
+    out = _decrypt_response(await flow_handler(request), aes_key, iv)
+    assert _checked_property(stub_app, "start")["maxDate"] == "2026-06-30"
+    assert _checked_property(stub_app, "end")["maxDate"] == "2026-06-30"
+    assert out["screen"] == "SCREEN_A"
+    assert out["data"]["start__err"] == {
+        "start-date": "",
+        "end-date": channel_word(FormShapeKind.MAX_DATE, {"maxDate": "2026-06-30"}),
+    }
+
+
+# --- a date-time field's bounds ride the request -----------------------------------------------
+
+_AT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "label": {"type": "string", "title": "Label"},
+        "at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "At",
+            "minDate": "2026-01-01",
+            "maxDate": "2026-12-31",
+        },
+        "email": {"type": "string", "format": "email", "title": "Email"},
+        "later": {"type": "string", "format": "date-time", "title": "Later", "unavailableDates": ["saturday"]},
+    },
+    "required": ["at"],
+}
+# A sidecar still holding an earlier send's bound: the check reads the bound the request carries.
+_AT_STALE_SIDECAR_SCHEMA = {
+    **_AT_SCHEMA,
+    "properties": {
+        **_AT_SCHEMA["properties"],
+        "at": {"type": "string", "format": "date-time", "title": "At", "minDate": "2026-01-01"},
+        "later": {"type": "string", "format": "date-time", "title": "Later"},
+    },
+}
+_AT_PAGES = [
+    {"title": "One", "fields": ["label", "at"], "kind": "input", "display": []},
+    {"title": "Two", "fields": ["email", "later"], "kind": "input", "display": []},
+]
+_AT_CARRIED = {
+    "at__min": "2026-03-01",
+    "at__max": "2026-03-31",
+    "later__unavailable": [],
+    "later__days": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sun"],
+}
+_AT_ADVANCE = {
+    "tai42_event": "page_advanced",
+    "tai42_page": "One",
+    "label": "x",
+    "at": "2026-02-15T10:00:00Z",
+    "label__init": "",
+    "label__err": "",
+    "at__init": "",
+    "at__err": "",
+    "email__init": "",
+    "email__err": "",
+    "later__init": "",
+    "later__err": "",
+    **_AT_CARRIED,
+}
+
+
+async def _seed_at_sidecar(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CHANNEL_WHATSAPP_WABA_ID", "waba-1")
+    reset_all_settings()
+    names = {"Label": "label", "At": "at", "Email": "email", "Later": "later"}
+    await cache_flow_form(
+        "waba-1", "hash1", _AT_STALE_SIDECAR_SCHEMA, names, _AT_PAGES, [], form_date_bounds(_AT_SCHEMA, _AT_PAGES)
+    )
+
+
+async def test_an_ask_less_step_refuses_a_date_time_answer_outside_the_bound_its_request_carries(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis, monkeypatch
+):
+    await _seed_at_sidecar(monkeypatch)
+    stub_app.interactions.shape_errors = [_shape_error("at", FormShapeKind.MIN_DATE, "Too early", minDate="2026-03-01")]
+    request, aes_key, iv = _request(_shape_exchange(_AT_ADVANCE, token=_NOTIFY_TOKEN))
+    out = _decrypt_response(await flow_handler(request), aes_key, iv)
+    at = _checked_property(stub_app, "at")
+    assert at["minDate"] == "2026-03-01"
+    assert at["maxDate"] == "2026-03-31"
+    assert _checked_property(stub_app, "later")["unavailableDates"] == ["saturday"]
+    assert out["screen"] == "SCREEN_A"
+    assert out["data"]["at__err"] == channel_word(FormShapeKind.MIN_DATE, {"minDate": "2026-03-01"})
+    assert {key: out["data"][key] for key in _AT_CARRIED} == _AT_CARRIED
+
+
+async def test_an_ask_less_advance_forwards_every_date_time_fields_bound_carriers(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis, monkeypatch
+):
+    await _seed_at_sidecar(monkeypatch)
+    request, aes_key, iv = _request(_shape_exchange(_AT_ADVANCE, token=_NOTIFY_TOKEN))
+    out = _decrypt_response(await flow_handler(request), aes_key, iv)
+    assert out["screen"] == "SCREEN_B"
+    assert {key: out["data"][key] for key in _AT_CARRIED} == _AT_CARRIED
+
+
+async def test_an_asks_date_time_check_reads_its_own_per_send_schema(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis
+):
+    form = EndpointForm(
+        schema=_AT_SCHEMA, pages=_AT_PAGES, reactions=None, option_fields=[], invalid={}, required={}, lines={}
+    )
+    await cache_endpoint_form("int-at-1", form, datetime.now(UTC) + timedelta(minutes=5))
+    request, aes_key, iv = _request(_shape_exchange(_AT_ADVANCE, token="int-at-1"))
+    out = _decrypt_response(await flow_handler(request), aes_key, iv)
+    assert _checked_property(stub_app, "at")["minDate"] == "2026-01-01"
+    assert out["screen"] == "SCREEN_B"
+    assert set(out["data"]) <= set(build_form_flow(_AT_SCHEMA, _AT_PAGES)[0]["screens"][1]["data"])
+    # No control binds a date-time field's carriers and the ask's check reads its own schema, so none rides.
+    assert not set(_AT_CARRIED) & set(out["data"])

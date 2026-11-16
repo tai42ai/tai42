@@ -30,6 +30,7 @@ _SCREEN_TITLE = "Form"
 def _resolve_pages(
     properties: dict[str, Any],
     pages: list[dict[str, Any]] | None,
+    option_fields: set[str],
     form_title: str | None = None,
     form_submit: str | None = None,
 ) -> tuple[list[dict[str, Any]], list[list[str]]]:
@@ -41,8 +42,9 @@ def _resolve_pages(
     form WITH ``pages`` shows each step's own page ``title`` and ``button_label``, so ``form_title``
     and ``form_submit`` apply only to the page-less default. Each page's names are in
     :func:`form_drawing_order`, the one order the screens, the per-send data, the footers and the
-    data endpoint read. Raises ``ChannelInputError`` for a page that names a property the schema
-    does not declare.
+    data endpoint read; ``option_fields`` (the send's option-bearing fields) takes part in which
+    ``rangeStart`` pairs merge (:func:`_form_range_merges`). Raises ``ChannelInputError`` for a page
+    that names a property the schema does not declare.
     """
     resolved_pages = pages or [
         {
@@ -58,7 +60,7 @@ def _resolve_pages(
             if field not in properties:
                 raise ChannelInputError(f"form page names unknown property {field!r}")
         fields_by_screen.append(drawing_order(page_fields, properties))
-    merges = _form_range_merges(properties, resolved_pages, fields_by_screen)
+    merges = _form_range_merges(properties, resolved_pages, fields_by_screen, option_fields)
     return resolved_pages, [_place_merged_ends(fields, properties, merges) for fields in fields_by_screen]
 
 
@@ -100,7 +102,10 @@ def _place_merged_ends(ordered: list[str], properties: dict[str, Any], merges: d
 
 
 def _form_range_merges(
-    properties: dict[str, Any], resolved_pages: list[dict[str, Any]], fields_by_screen: list[list[str]]
+    properties: dict[str, Any],
+    resolved_pages: list[dict[str, Any]],
+    fields_by_screen: list[list[str]],
+    option_fields: set[str],
 ) -> dict[str, str]:
     """The ``END name -> START name`` merge map for every ``rangeStart`` pair drawn as one control.
 
@@ -112,7 +117,7 @@ def _form_range_merges(
     has_review_page = any(isinstance(page, dict) and page.get("kind") == "review" for page in resolved_pages)
     merges: dict[str, str] = {}
     for this_fields in fields_by_screen:
-        merges.update(range_pairs(this_fields, properties, has_review_page))
+        merges.update(range_pairs(this_fields, properties, option_fields, has_review_page))
     return merges
 
 

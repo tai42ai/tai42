@@ -9,6 +9,7 @@ import logging
 import httpx
 import pytest
 from tai42_contract.channels import AnswerForwardError, ChannelDeliveryError, InboundAnswerOutcome
+from tai42_contract.conversations import InboundRejectionReason
 from tai42_contract.interactions.models import AnswerWording, FormWording, Wording
 from tai42_kit.settings import reset_all_settings
 
@@ -707,57 +708,58 @@ async def test_form_reply_with_only_a_stale_token_bridges_a_non_blank_text(handl
     assert turn["params"] == {"flow_token": "int-gone"}
 
 
-async def test_form_reply_malformed_response_json_is_dropped(
-    handler, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx, caplog: pytest.LogCaptureFixture
+_UNREADABLE_FORM_REPLIES = [
+    pytest.param({"type": "nfm_reply", "nfm_reply": "not an object"}, id="nfm-reply-not-an-object"),
+    pytest.param({"type": "nfm_reply", "nfm_reply": {"foo": "bar"}}, id="response-json-missing"),
+    pytest.param({"type": "nfm_reply", "nfm_reply": {"response_json": 7}}, id="response-json-not-a-string"),
+    pytest.param({"type": "nfm_reply", "nfm_reply": {"response_json": "{not json"}}, id="response-json-not-json"),
+    pytest.param(
+        {"type": "nfm_reply", "nfm_reply": {"response_json": json.dumps(["not", "an", "object"])}},
+        id="response-json-not-an-object",
+    ),
+]
+
+
+@pytest.mark.parametrize("interactive", _UNREADABLE_FORM_REPLIES)
+async def test_an_unreadable_form_reply_gets_one_unreadable_notice(
+    interactive, handler, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx, caplog: pytest.LogCaptureFixture
 ):
-    # A response_json that is not JSON carries no values and no text: dropped with a warning,
-    # the wamid marked seen so a redelivery is not re-run, the live ask untouched.
+    # A form reply whose response cannot be read carries no values and no text: the user gets
+    # one UNREADABLE notice, the warning names the message, the wamid is marked seen, the live
+    # ask stays untouched, and nothing is forwarded or bridged.
     await _seed_pending_form()
-    interactive = {"type": "nfm_reply", "nfm_reply": {"response_json": "{not json"}}
     payload = interactive_payload(interactive=interactive)
 
     with caplog.at_level("WARNING"):
         result = await handler(signed_request(payload))
 
     assert result.status_code == 200
-    assert not fake_httpx.calls  # nothing forwarded
-    assert await _pending_intact(fake_redis)  # the live ask is untouched
-    assert stub_app.conversations.accept_calls == []  # no turn
+    assert stub_app.conversations.rejected_calls == [
+        {
+            "channel_id": "whatsapp",
+            "recipient": WA_ID,
+            "sender_identity": PHONE_NUMBER_ID,
+            "kind": "form",
+            "reason": InboundRejectionReason.UNREADABLE,
+        }
+    ]
+    assert not fake_httpx.calls
+    assert await _pending_intact(fake_redis)
+    assert stub_app.conversations.accept_calls == []
     assert _SEEN_KEY in fake_redis.store
     assert any("response_json" in record.message for record in caplog.records)
 
 
-async def test_form_reply_non_object_response_json_is_dropped(
-    handler, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+@pytest.mark.parametrize("interactive", _UNREADABLE_FORM_REPLIES)
+async def test_a_redelivered_unreadable_form_reply_sends_no_second_notice(
+    interactive, handler, stub_app, fake_redis: FakeRedis
 ):
-    await _seed_pending_form()
-    interactive = {"type": "nfm_reply", "nfm_reply": {"response_json": json.dumps(["not", "an", "object"])}}
     payload = interactive_payload(interactive=interactive)
 
-    result = await handler(signed_request(payload))
+    await handler(signed_request(payload))
+    await handler(signed_request(payload))
 
-    assert result.status_code == 200
-    assert not fake_httpx.calls
-    assert await _pending_intact(fake_redis)
-    assert stub_app.conversations.accept_calls == []
-    assert _SEEN_KEY in fake_redis.store
-
-
-async def test_form_reply_missing_response_json_is_dropped(
-    handler, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx
-):
-    # An nfm_reply whose nfm_reply object carries no response_json string has nothing to bridge.
-    await _seed_pending_form()
-    interactive = {"type": "nfm_reply", "nfm_reply": {"foo": "bar"}}
-    payload = interactive_payload(interactive=interactive)
-
-    result = await handler(signed_request(payload))
-
-    assert result.status_code == 200
-    assert not fake_httpx.calls
-    assert await _pending_intact(fake_redis)
-    assert stub_app.conversations.accept_calls == []
-    assert _SEEN_KEY in fake_redis.store
+    assert len(stub_app.conversations.rejected_calls) == 1
 
 
 async def test_form_reply_door_5xx_raises_and_keeps_pending(handler, channels, fake_redis: FakeRedis):
@@ -792,7 +794,7 @@ def _seed_schema_cache(fake_redis: FakeRedis) -> None:
     """The durable schema+map entry the notify-form send left beside the flow id."""
     labels = {label: key for key, label in payload_labels(_FORM_SCHEMA["properties"]).items()}
     fake_redis.store[_schema_cache_key()] = json.dumps(
-        {"schema": _FORM_SCHEMA, "names": labels, "pages": None, "option_fields": []}
+        {"schema": _FORM_SCHEMA, "names": labels, "pages": None, "option_fields": [], "date_bounds": {}}
     )
 
 
@@ -1068,7 +1070,7 @@ async def test_notify_form_reply_maps_payload_labels_back_to_schema_keys(
     _, schema_hash = build_form_flow(_ODD_SCHEMA)
     labels = {label: key for key, label in payload_labels(_ODD_SCHEMA["properties"]).items()}
     fake_redis.store[f"channel:whatsapp:flow-schema:{_WABA_ID}:{schema_hash}"] = json.dumps(
-        {"schema": _ODD_SCHEMA, "names": labels, "pages": None, "option_fields": []}
+        {"schema": _ODD_SCHEMA, "names": labels, "pages": None, "option_fields": [], "date_bounds": {}}
     )
     token = f"{_NF_PREFIX}{schema_hash}:cafef00d"
     plabels = payload_labels(_ODD_SCHEMA["properties"])

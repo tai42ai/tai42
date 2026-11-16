@@ -458,14 +458,17 @@ class CachedFlowForm:
     """An ask-less form's durable sidecar, keyed by ``(waba_id, schema_hash)``.
 
     ``schema`` and ``names`` (each completion-payload label back to its schema key) decode a reply;
-    ``pages`` and ``option_fields`` (the per-send option-bearing fields, which fold into the
-    schema hash) let the data endpoint check an endpoint-driven form's steps.
+    ``pages``, ``option_fields`` (the per-send option-bearing fields, which fold into the
+    schema hash) and ``date_bounds`` (the declared bound keys of each field the Flow names bound
+    carriers after, a merged range pair's under its START, whose carriers every request echoes)
+    let the data endpoint check an endpoint-driven form's steps.
     """
 
     schema: dict[str, Any]
     names: dict[str, str]
     pages: list[dict[str, Any]] | None
     option_fields: list[str]
+    date_bounds: dict[str, list[str]]
 
 
 async def cache_flow_form(
@@ -475,14 +478,16 @@ async def cache_flow_form(
     names: dict[str, str],
     pages: list[dict[str, Any]] | None,
     option_fields: list[str],
+    date_bounds: dict[str, list[str]],
 ) -> None:
     """Store an ask-less form's sidecar under ``(waba_id, schema_hash)``, with no TTL.
 
     Beside the published-flow id it renders as. ``names`` maps each completion-payload key
     (the field's human-readable label) back to its schema key, so the notify reply (keyed by
     those payload keys, as Meta relays them) decodes to the schema keys and coerces by type;
-    ``pages`` and ``option_fields`` are what the data endpoint reads to check an endpoint-driven
-    form's steps (each fixed per schema hash, which already keys the published Flow).
+    ``pages``, ``option_fields`` and ``date_bounds`` (the declared bound keys of each field the Flow
+    names bound carriers after, the carriers a request must echo) are what the data endpoint reads
+    to check an endpoint-driven form's steps (each fixed per schema hash, which already keys the published Flow).
     Durability is load-bearing here, not an optimization: an inbound reply carries
     only the schema HASH (inside its flow token), never the schema, so this entry can
     NOT be repopulated from the reply — a miss is permanent for every form already
@@ -491,7 +496,15 @@ async def cache_flow_form(
     overwrite on every send is idempotent. Everything is stored as one value, so a
     hit yields all of it or the read is a clean miss (no half-populated entry to reason about).
     """
-    value = json.dumps({"schema": schema, "names": names, "pages": pages, "option_fields": sorted(option_fields)})
+    value = json.dumps(
+        {
+            "schema": schema,
+            "names": names,
+            "pages": pages,
+            "option_fields": sorted(option_fields),
+            "date_bounds": date_bounds,
+        }
+    )
     async with tai42_app.clients.client_ctx(RedisClient, _redis_settings()) as redis:
         await redis.set(_flow_schema_key(waba_id, schema_hash), value)
 
@@ -501,8 +514,8 @@ async def get_cached_flow_form(waba_id: str, schema_hash: str) -> CachedFlowForm
 
     A miss means a reply for that schema cannot be decoded/coerced and lands with its raw
     values (see :func:`cache_flow_form`). A stored value that is not a JSON object carrying an
-    object ``schema``, an object ``names``, a list (or null) ``pages`` and a list ``option_fields``
-    is treated as a miss (never a crash on the webhook path).
+    object ``schema``, an object ``names``, a list (or null) ``pages``, a list ``option_fields`` and
+    an object ``date_bounds`` of lists is treated as a miss (never a crash on the webhook path).
     """
     async with tai42_app.clients.client_ctx(RedisClient, _redis_settings()) as redis:
         raw = await redis.get(_flow_schema_key(waba_id, schema_hash))
@@ -519,15 +532,18 @@ async def get_cached_flow_form(waba_id: str, schema_hash: str) -> CachedFlowForm
     names = parsed.get("names")
     pages = parsed.get("pages")
     option_fields = parsed.get("option_fields")
+    date_bounds = parsed.get("date_bounds")
     if (
         not isinstance(schema, dict)
         or not isinstance(names, dict)
         or not (pages is None or isinstance(pages, list))
         or not isinstance(option_fields, list)
+        or not isinstance(date_bounds, dict)
+        or not all(isinstance(keys, list) for keys in date_bounds.values())
     ):
         logger.warning("cached flow form under %s is not a complete form sidecar; treating as a miss", schema_hash)
         return None
-    return CachedFlowForm(schema=schema, names=names, pages=pages, option_fields=option_fields)
+    return CachedFlowForm(schema=schema, names=names, pages=pages, option_fields=option_fields, date_bounds=date_bounds)
 
 
 @dataclass(frozen=True)

@@ -24,6 +24,7 @@ from tai42_contract.interactions import SHAPE_KEYWORDS, FormReactionEventKind
 
 from tai42_channel_whatsapp.flow_crypto import request_plaintext_max_bytes
 from tai42_channel_whatsapp.flows_components import _field_control
+from tai42_channel_whatsapp.flows_dates import DATE_BOUND_SUFFIXES
 from tai42_channel_whatsapp.flows_shapes import ERROR_MESSAGE_TYPES, field_needs_endpoint
 from tai42_channel_whatsapp.flows_visibility import answer_refs, form_splits_fields
 
@@ -42,7 +43,7 @@ _SELECTABLE_CONTROLS = frozenset(
 )
 
 # The per-field screen-data carriers, by suffix on the field's component name.
-CARRIER_SUFFIXES = ("__init", "__ds", "__err", "__invalid", "__required", "__val")
+CARRIER_SUFFIXES = ("__init", "__ds", "__err", "__invalid", "__required", "__val", *DATE_BOUND_SUFFIXES)
 
 # The caller's form-level lines the data endpoint draws: ``error_line`` (the pop-up summary of a
 # refusal) and ``update_failed`` (the could-not-update notice). An ask reads them from its sidecar;

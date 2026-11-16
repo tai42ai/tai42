@@ -2,10 +2,10 @@
 
 Each field's prefilled ``init`` value (shaped for its control) and each choice
 field's per-send ``data-source`` option list, keyed by the identifier-safe
-component name the published Flow uses. A merged ``rangeStart`` pair carries one
-object ``init`` under its START; a date prefill that is not a ``YYYY-MM-DD`` string,
-or a per-send option list on a non-choice property, is refused loudly before any
-network work.
+component name the published Flow uses, and each date field's bound values. A merged
+``rangeStart`` pair carries one object ``init`` and the pair's bounds under its START; a
+date prefill that is not a ``YYYY-MM-DD`` string, or a per-send option list on a
+non-choice property, is refused loudly before any network work.
 """
 
 from __future__ import annotations
@@ -20,9 +20,14 @@ from tai42_channel_whatsapp.flows_components import (
     _choice_options_enum,
     _is_array_of_strings,
     _is_choice_field,
-    _is_date_field,
-    _valid_iso_date,
     component_names,
+)
+from tai42_channel_whatsapp.flows_dates import (
+    date_bound_values,
+    is_date_field,
+    merged_range_bound_values,
+    reads_bound_carriers,
+    valid_iso_date,
 )
 from tai42_channel_whatsapp.flows_endpoint import (
     FORM_LINE_MEMBERS,
@@ -43,7 +48,7 @@ def build_flow_data(
     options: dict[str, list[dict[str, Any]]] | None,
     pages: list[dict[str, Any]] | None = None,
     field_invalid: dict[str, str] | None = None,
-    carry_invalid: bool = False,
+    askless: bool = False,
     field_required: dict[str, str] | None = None,
     form_lines: dict[str, str] | None = None,
 ) -> dict[str, Any]:
@@ -66,12 +71,17 @@ def build_flow_data(
     string. ``pages`` (the same step layout the Flow was built with) decides which ``rangeStart``
     pairs merge, so the data agrees with the published controls. Every field whose control binds an
     ``error-message`` gets an empty ``__err`` (no error shown; a merged range START's is the object
-    ``{start-date, end-date}`` of two empty strings); with ``carry_invalid`` (an ask-less
-    endpoint-driven form) every shaped field's ``__invalid`` carries the caller's ``field_invalid``
+    ``{start-date, end-date}`` of two empty strings); for an ask-less (``askless``)
+    endpoint-driven form every shaped field's ``__invalid`` carries the caller's ``field_invalid``
     sentence, every field the shape check can report missing its ``__required`` the caller's
     ``field_required`` sentence, and each form-line carrier the caller's ``form_lines`` line, each else
-    the empty string. Every display slot of the form (the entry screen declares them all, as it does
-    every field's carriers) carries its start value (:func:`slot_start_data`).
+    the empty string. Every date field whose carriers are read
+    (:func:`~tai42_channel_whatsapp.flows_dates.reads_bound_carriers`: a ``CalendarPicker``, or any
+    date field of an ask-less endpoint-driven form) carries the values of the bounds its schema declares
+    (:func:`~tai42_channel_whatsapp.flows_dates.date_bound_values`; a merged range START the pair's,
+    never looser than either end's, refused when they leave no date to pick). Every display slot
+    of the form (the entry screen declares them all, as it does every field's carriers) carries
+    its start value (:func:`slot_start_data`).
     Raises ``ChannelInputError``.
     """
     values = values or {}
@@ -89,14 +99,21 @@ def build_flow_data(
                 "— only a string or an array of strings maps to a choice control"
             )
 
-    resolved_pages, fields_by_screen = _resolve_pages(properties, pages)
-    range_merges = _form_range_merges(properties, resolved_pages, fields_by_screen)
+    option_fields = set(options)
+    resolved_pages, fields_by_screen = _resolve_pages(properties, pages, option_fields)
+    range_merges = _form_range_merges(properties, resolved_pages, fields_by_screen, option_fields)
     merged_ends = set(range_merges)
     merged_starts = {start: end for end, start in range_merges.items()}
 
-    option_fields = set(options)
     required_raw = schema.get("required")
     required = {str(name) for name in required_raw} if isinstance(required_raw, list) else set()
+    # An ask-less endpoint-driven form's data endpoint reads the caller's words and every date
+    # field's bound carriers from the request, as the Flow declares them. An ask's send data carries
+    # neither, so only an ask-less form asks whether the form is endpoint-driven. An ask-less form reacts
+    # to nothing (``build_form_flow`` refuses reactions with ``askless``), so its Flow draws the same decision.
+    askless_endpoint = askless and form_endpoint_driven(
+        properties, required, option_fields, names, range_merges, reacting=False, fields_by_screen=fields_by_screen
+    )
     data: dict[str, Any] = {}
     for name, prop in properties.items():
         if name in merged_ends:
@@ -105,8 +122,11 @@ def build_flow_data(
         cname = names[name]
         if name in merged_starts:
             data[f"{cname}__init"] = _range_init_value(name, merged_starts[name], values)
+            data.update(merged_range_bound_values(cname, name, merged_starts[name], properties))
             continue
         data[f"{cname}__init"] = _field_init_value(name, prop, values)
+        if reads_bound_carriers(name, prop, option_fields, every_screen=askless_endpoint):
+            data.update(date_bound_values(cname, prop))
         if isinstance(prop, dict) and _is_choice_field(name, prop, option_fields):
             data[f"{cname}__ds"] = _choice_data_source(name, prop, options)
     data.update(
@@ -116,8 +136,7 @@ def build_flow_data(
             option_fields,
             names,
             range_merges,
-            fields_by_screen,
-            _CallerWords(field_invalid or {}, field_required or {}, form_lines or {}) if carry_invalid else None,
+            _CallerWords(field_invalid or {}, field_required or {}, form_lines or {}) if askless_endpoint else None,
         )
     )
     data.update(slot_start_data(resolved_pages, slot_datanames(resolved_pages)))
@@ -130,7 +149,6 @@ def _shape_carriers(
     option_fields: set[str],
     names: dict[str, str],
     range_merges: dict[str, str],
-    fields_by_screen: list[list[str]],
     words: _CallerWords | None,
 ) -> dict[str, Any]:
     # The per-send shape carriers: an empty ``__err`` for every control binding an error-message (a
@@ -139,10 +157,7 @@ def _shape_carriers(
     # field's ``__required`` sentence and each form-line carrier's line, empty when unset.
     bound = error_fields(properties, required, option_fields, names, set(range_merges))
     carriers = error_carriers(properties, names, bound, range_merges, {})
-    endpoint = form_endpoint_driven(
-        properties, required, option_fields, names, range_merges, reacting=False, fields_by_screen=fields_by_screen
-    )
-    if words is not None and endpoint:
+    if words is not None:
         for name in shaped_fields(properties):
             carriers[f"{names[name]}__invalid"] = words.invalid.get(name, "")
         for name in required_fields(properties, required):
@@ -172,7 +187,7 @@ def _field_init_value(name: str, prop: dict[str, Any], values: dict[str, Any]) -
     prop_type = prop.get("type") if isinstance(prop, dict) else None
     if name in values:
         raw = values[name]
-        if _is_date_field(prop) and not (isinstance(raw, str) and _valid_iso_date(raw)):
+        if is_date_field(prop) and not (isinstance(raw, str) and valid_iso_date(raw)):
             raise ChannelInputError(
                 f"form property {name!r}: a date field prefill must be a 'YYYY-MM-DD' string "
                 f"(the shape Meta's date picker sets and returns), got {raw!r}"
@@ -197,7 +212,7 @@ def _range_init_value(start: str, end: str, values: dict[str, Any]) -> dict[str,
         raw = values.get(name)
         if raw is None:
             return ""
-        if not (isinstance(raw, str) and _valid_iso_date(raw)):
+        if not (isinstance(raw, str) and valid_iso_date(raw)):
             raise ChannelInputError(
                 f"form property {name!r}: a date field prefill must be a 'YYYY-MM-DD' string "
                 f"(the shape Meta's date picker sets and returns), got {raw!r}"

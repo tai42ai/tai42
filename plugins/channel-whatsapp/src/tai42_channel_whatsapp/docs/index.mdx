@@ -99,7 +99,10 @@ hidden client-side. A display block that names a `slot` shows its own `text` (an
 its `src`) until a reaction's `display` update replaces it, and is empty until then when
 it carries none. A field shown for several values of its controlling field is drawn
 as one control per value; such a form is endpoint-driven (below), and the data endpoint
-keeps the value of the case whose condition holds under the field's own name.
+keeps the value of the case whose condition holds under the field's own name. A
+`format: date` or `format: date-time` field's `minDate`, `maxDate` and `unavailableDates`
+values ride each send's form data, not the published Flow, which holds only which of
+those bounds the field has: forms that differ only in a date bound's value share one Flow.
 
 An image block's `src` may be an `http` or `https` link: the channel fetches the
 picture when the form is sent and embeds it in the form. It may also be a stored-media
@@ -149,7 +152,7 @@ the screen, with the field's sentence under it, before the submit leaves the for
 | `minLength` / `maxLength` | The control's character limits (a text area has no minimum: the data endpoint checks it) |
 | `minimum` / `maximum`, `exclusiveMinimum` / `exclusiveMaximum`, `multipleOf` | The data endpoint |
 | `minItems` / `maxItems` | The checkbox group's or chip grid's selection limits |
-| `minDate` / `maxDate` / `unavailableDates` | The calendar picker's bounds and excluded days |
+| `minDate` / `maxDate` / `unavailableDates` | The calendar picker's bounds and excluded days on a `format: date` drawn as a calendar (a pair drawn as one range control: both ends' bounds together, and a send that leaves the pair no date to pick is refused, naming the pair); the data endpoint on a `format: date-time`, and on a `format: date` drawn as a choice (one with an `enum` or per-send options) |
 | a date range's order and `minDays` / `maxDays` | The range calendar picker when the pair draws as one control; else the data endpoint |
 | a range end's time order (`timeOf`: an end time before the start time on the same day) | The data endpoint |
 | any other keyword | The data endpoint |
@@ -182,7 +185,8 @@ the count. A `control: textarea` string draws a
 multi-line text area, and a declared `maxLength`/`minLength` is drawn as the field's
 character limit (`max-chars`/`min-chars` on a single-line field, `max-length` on the
 text area). A declared date range (a `rangeStart` pairing) draws as one range
-CalendarPicker when both ends sit on the same page with the same visibility, no
+CalendarPicker when both ends are drawn as calendars (neither has an `enum` or
+per-send options) and sit on the same page with the same visibility, no
 other field depends on either end, and the form has no review page, else as two date
 fields (a review page reads each field's value back as text, which a range object
 cannot render); either way the answer is the two date strings. A time paired with a
@@ -256,6 +260,12 @@ submitted values rendered readably (one `label: value` line per value; a form th
 carried only its token reads `{}`), with the values as the turn's `form` (keyed as the
 Flow submitted them) and the token under the `flow_token` entry parameter (see
 **Inbound entry parameters**).
+
+A completed form whose response the channel cannot read (Meta sent no `response_json`, or
+one that is not a JSON object) is logged at warning and the participant gets one
+`unreadable` rejection notice ("That message could not be read. Please send it again.",
+or the route's `reply_texts.rejected_unreadable`) with a rejection event of kind `form`;
+a redelivery of the same message sends no second notice.
 
 If the platform rejects a submitted answer (a value fails the answer schema at the
 door — a case no in-form check could see), the **same form is re-sent** — same steps,
@@ -356,12 +366,18 @@ Params ride only on the bridge path — a tap or quick-reply that **answers** a
 pending question surfaces none (the answer path carries no params). Meta inbound
 error notices (`errors[]`) are always logged at warning and never bridged; an
 **unsupported-message-type** notice (`code 131051`) — participant content the
-channel cannot receive — additionally sends the participant one generic
-"unsupported content" reply and records a rejection event, while every other error
+channel cannot receive — additionally sends the participant the one generic
+unsupported-type reply and records a rejection event, while every other error
 code stays log-only (an operator-facing vendor signal, not participant content). An
 unhandled participant **content type** the plugin has no handler for likewise gets
-the generic reply + event; a vendor **non-content** notification (`system` /
-`request_welcome`) stays log-only. Each reply is sent once, deduped per message.
+the generic reply + event, and so does an **interactive** message whose subtype the
+plugin has no reader for (anything but a reply button, a list row or a completed form);
+a vendor **non-content** notification (`system` / `request_welcome`) stays log-only. A
+participant message whose text is blank (a reply button or list row with a blank title,
+a text with no body, a quick-reply with no text) is not bridged, with or without a
+question pending (the question stays open): it gets the one `unreadable` reply ("That
+message could not be read. Please send it again.") and a rejection event of kind `text`,
+`button`, or `button_reply`/`list_reply`. Each reply is sent once, deduped per message.
 
 ## The 24-hour window and templates
 
@@ -418,13 +434,19 @@ the ids and addresses it records:
 
 ## Working-on-it signal
 
-While a message runs its turn, the platform keeps WhatsApp's **typing indicator**
-alive: it re-sends the indicator ahead of Meta's ~25 s dismissal window until the
-reply is sent, so the participant sees it for the whole wait rather than only the
-first few seconds. The refresh is bounded by the
-`CONVERSATIONS_WORKING_SIGNAL_MAX_SECONDS` ceiling (`0` disables it entirely), with
-`CONVERSATIONS_WORKING_SIGNAL_REFRESH_MARGIN_SECONDS` the margin it refreshes ahead
-of each lapse. An inbound message is marked **read** the moment it is received,
+While a reply is owed to the participant — a message running its turn, the wait
+after they answer a question, a parked run that resumes — the platform keeps
+WhatsApp's **typing indicator** alive: it re-sends the indicator ahead of Meta's
+~25 s dismissal window until the reply is sent, so the participant sees it for the
+wait rather than only the first few seconds. It is paused while a question the run
+sent stands, to the participant or to anyone else (no longer re-sent, so the indicator
+lapses on its own), and shown again once no question the run sent stands. WhatsApp's
+indicator points at an inbound message of the participant, so a parked run that resumes
+on no message of the participant — resumed by its expiry, by an answer from someone
+else, or by an answer given through the link — shows no indicator. One stretch of showing it is
+bounded by the `CONVERSATIONS_WORKING_SIGNAL_MAX_SECONDS` ceiling (`0` disables it
+entirely), with `CONVERSATIONS_WORKING_SIGNAL_REFRESH_MARGIN_SECONDS` the margin it
+refreshes ahead of each lapse. An inbound message is marked **read** the moment it is received,
 independent of the indicator.
 
 ## See also

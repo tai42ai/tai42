@@ -15,7 +15,6 @@ from tai42_contract.channels import (
     InboundAnswerOutcome,
     InboundBridge,
 )
-from tai42_contract.conversations import BlankInboundTextError
 from tai42_contract.interactions.models import LocationElement, MediaItem
 from tai42_kit.conversations.entry_params import OverBoundParamsMode, bound_entry_params
 from tai42_kit.utils.data.form_text import render_form_text
@@ -149,10 +148,10 @@ async def _bridge_inbound(
     ``location`` (a shared geographic point) are the structured inbound content that lands on
     a tool target's payload under the stable ``attachments``/``location`` keys; inbound media
     passes the served :class:`MediaItem` it was ingested to (see the INBOUND MEDIA note in
-    ``rich_content``), and an inbound location passes its typed :class:`LocationElement`. A
-    message with no route bound,
-    or with blank text (an empty interactive title), is logged and skipped; a retryable
-    overflow or infrastructure failure propagates as a 5xx so Meta redelivers.
+    ``rich_content``), and an inbound location passes its typed :class:`LocationElement`.
+    ``text`` is non-blank: every caller has read it from the message first. A message with no
+    route bound is logged and skipped; a retryable overflow or infrastructure failure
+    propagates as a 5xx so Meta redelivers.
 
     ``params`` are bounded HERE before accept: a bound violation (which would otherwise 5xx and
     have Meta redeliver the same poison message forever) drops the whole params set (logged and
@@ -178,8 +177,6 @@ async def _bridge_inbound(
             location=location,
             form_tag=form_tag,
         )
-    except BlankInboundTextError as exc:
-        logger.warning("blank whatsapp inbound %s dropped: %s", wamid, exc)
     except LookupError as exc:
         logger.warning("unrouted whatsapp inbound %s dropped: %s", wamid, exc)
     await mark_seen(wamid)

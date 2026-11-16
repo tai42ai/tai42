@@ -88,9 +88,10 @@ per-send option list on a NON-STRING property cannot be honored (only a string m
 to a dropdown) and is refused loudly, naming the field.
 
 ``build_form_flow`` returns the ``(flow_json, key)`` pair; ``key`` is a sha256 over
-the ``(schema, pages, option_fields, flow_json)``, the pages read without each slotted
-display block's own content — the emitted Flow folded in, so a change to the emitted
-shape re-keys the published-Flow cache — and keys that cache.
+the ``(schema, pages, option_fields, flow_json)``, the schema read without its date
+bound values and the pages without each slotted display block's own content (both are
+per-send data) — the emitted Flow folded in, so a change to the emitted shape re-keys
+the published-Flow cache — and keys that cache.
 """
 
 from __future__ import annotations
@@ -112,6 +113,10 @@ from tai42_channel_whatsapp.flows_components import (
     component_names,
     payload_labels,
 )
+from tai42_channel_whatsapp.flows_dates import (
+    declared_date_bounds,
+    schema_without_date_bound_values,
+)
 from tai42_channel_whatsapp.flows_endpoint import (
     REACTION_PAGE_KEY,
     _attach_field_reaction,
@@ -120,9 +125,7 @@ from tai42_channel_whatsapp.flows_endpoint import (
     event_payload,
     form_endpoint_driven,
     guard_endpoint_names,
-    required_fields,
     screen_data_refs,
-    shaped_fields,
 )
 from tai42_channel_whatsapp.flows_resolve import (
     _form_range_merges,
@@ -148,6 +151,7 @@ __all__ = [
     "build_form_flow",
     "component_names",
     "data_source_rows",
+    "form_date_bounds",
     "form_needs_endpoint",
     "payload_labels",
     "slot_datanames",
@@ -232,17 +236,19 @@ def _canonical_hash_pages(
 
     The published-Flow cache key for a per-send form. A different page layout, a
     different option-bearing set, OR a different emitted Flow shape keys a different
-    published Flow; the ``schema`` member keeps the notify sidecar's exact-schema
-    identity, and folding in the emitted ``flow_json`` means a change to the emitted
+    published Flow; the ``schema`` member keys the notify sidecar's stored, bound-stripped
+    schema, and folding in the emitted ``flow_json`` means a change to the emitted
     shape alone re-keys (a corrected shape can never resolve an earlier one). The pages
     are hashed without each slotted block's own content (:func:`pages_without_slot_content`):
     that content is the slot's start value in the per-send data, so forms that differ only
     in it share one published Flow, while a static block's content, a slot name and
-    everything else on the pages still key a different one.
+    everything else on the pages still key a different one. The schema is hashed without its date
+    bound values (:func:`schema_without_date_bound_values`), which ride the per-send data too; which
+    bounds a field has is in the emitted Flow, so gaining or losing one still re-keys.
     """
     canonical = json.dumps(
         {
-            "schema": schema,
+            "schema": schema_without_date_bound_values(schema),
             "pages": pages_without_slot_content(pages),
             "option_fields": sorted(option_fields),
             "flow": flow_json,
@@ -586,10 +592,28 @@ def form_needs_endpoint(
     properties, required = _validate_object_schema(schema)
     names = component_names(properties)
     _validate_form_properties(properties, required, option_fields, names)
-    resolved_pages, fields_by_screen = _resolve_pages(properties, pages)
+    resolved_pages, fields_by_screen = _resolve_pages(properties, pages, option_fields)
     reacting = _reaction_sets(reactions, properties, option_fields, names)[3]
-    range_merges = _form_range_merges(properties, resolved_pages, fields_by_screen)
+    range_merges = _form_range_merges(properties, resolved_pages, fields_by_screen, option_fields)
     return form_endpoint_driven(properties, required, option_fields, names, range_merges, reacting, fields_by_screen)
+
+
+def form_date_bounds(
+    schema: dict[str, Any], pages: list[dict[str, Any]] | None = None, option_fields: set[str] | None = None
+) -> dict[str, list[str]]:
+    """The declared bound keys of each field whose bound carriers the form's Flow names after it.
+
+    :func:`~tai42_channel_whatsapp.flows_dates.declared_date_bounds` over the ``rangeStart`` pairs
+    the Flow merges for these ``pages`` and ``option_fields``, so the value depends only on what the
+    publish key folds in. Pure. Raises ``ChannelInputError`` as :func:`build_form_flow` does for a
+    schema outside the subset.
+    """
+    option_fields = option_fields or set()
+    properties, _ = _validate_object_schema(schema)
+    resolved_pages, fields_by_screen = _resolve_pages(properties, pages, option_fields)
+    return declared_date_bounds(
+        properties, _form_range_merges(properties, resolved_pages, fields_by_screen, option_fields)
+    )
 
 
 def build_form_flow(
@@ -600,7 +624,7 @@ def build_form_flow(
     form_title: str | None = None,
     form_submit: str | None = None,
     field_invalid: dict[str, str] | None = None,
-    carry_invalid: bool = False,
+    askless: bool = False,
     boolean_words: dict[str, tuple[str, str]] | None = None,
 ) -> tuple[dict[str, Any], str]:
     """The ``(flow_json, key)`` for a per-send/stepped form ask — publishable Flow JSON.
@@ -630,26 +654,33 @@ def build_form_flow(
     endpoint answers (shape check, then any declared reaction), and the reacting fields fire their
     own. Otherwise the Flow is the static navigate Flow. ``field_invalid`` is the caller's per-field
     ``invalid`` sentence (the helper text a native pattern requires when the field has no second
-    line); ``carry_invalid`` (an ask-less endpoint-driven form, which has no per-send sidecar) makes
-    every shaped field's sentence ride the Flow as ``__invalid`` screen data, every field the shape
-    check can report missing carry a ``__required`` one, and the caller's form-level lines ride the
-    form-line carriers. ``boolean_words`` (property name → ``(true, false)`` words) are the words a
+    line). ``askless`` marks a form sent with no ask. An ask-less form reacts to nothing, so it is
+    endpoint-driven only for its shapes or split fields, the same decision :func:`build_flow_data`
+    draws its send data by; ``reactions`` given with ``askless`` raise ``ValueError``. An ask-less
+    endpoint-driven form has no
+    per-send sidecar, so every shaped field's sentence rides its Flow as ``__invalid`` screen data,
+    every field the shape check can report missing carries a ``__required`` one, the caller's
+    form-level lines ride the form-line carriers, and every screen declares every date field's
+    bound carriers. ``boolean_words`` (property name → ``(true, false)`` words) are the words a
     review page reads a boolean back with, baked into the Flow JSON (default ``Yes`` / ``No``).
 
     ``key`` is the hash of the ``(schema, pages, option_fields)`` and the emitted ``flow_json``
-    — which folds in the reactions/display/date-constraint/``visibleWhen``/shape layout, so a
-    changed form re-publishes; a slotted display block's own content is per-send data and
-    outside the key (:func:`_canonical_hash_pages`). Pure — no I/O. Raises ``ChannelInputError`` naming any property
-    outside the subset or any page field that is not a declared property.
+    — which folds in the reactions/display/``visibleWhen``/shape layout and which bounds each date
+    field has, so a changed form re-publishes; a slotted display block's own content and a date
+    bound's value are per-send data and outside the key (:func:`_canonical_hash_pages`). Pure — no
+    I/O. Raises ``ChannelInputError`` naming any property outside the subset or any page field that
+    is not a declared property.
     """
+    if askless and reactions:
+        raise ValueError("an ask-less form reacts to nothing: build_form_flow takes no reactions with askless")
     option_fields = option_fields or set()
     properties, required = _validate_object_schema(schema)
     names = component_names(properties)
     labels = payload_labels(properties)
     _validate_form_properties(properties, required, option_fields, names)
-    resolved_pages, fields_by_screen = _resolve_pages(properties, pages, form_title, form_submit)
+    resolved_pages, fields_by_screen = _resolve_pages(properties, pages, option_fields, form_title, form_submit)
     field_changed, page_advanced, submitted, reacting = _reaction_sets(reactions, properties, option_fields, names)
-    range_merges = _form_range_merges(properties, resolved_pages, fields_by_screen)
+    range_merges = _form_range_merges(properties, resolved_pages, fields_by_screen, option_fields)
     endpoint = form_endpoint_driven(
         properties, required, option_fields, names, range_merges, reacting, fields_by_screen
     )
@@ -670,9 +701,7 @@ def build_form_flow(
         range_merges=range_merges,
         field_invalid=dict(field_invalid or {}),
         err_fields=error_fields(properties, required, option_fields, names, set(range_merges)),
-        invalid_fields=shaped_fields(properties) if endpoint and carry_invalid else frozenset(),
-        required_fields=required_fields(properties, required) if endpoint and carry_invalid else frozenset(),
-        form_lines=endpoint and carry_invalid,
+        askless_endpoint=askless and endpoint,
         boolean_words=dict(boolean_words or {}),
     )
 

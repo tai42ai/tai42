@@ -14,13 +14,13 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
 
-from tai42_contract.app import tai42_app
 from tai42_contract.channels import ChannelDeliveryError
 from tai42_contract.conversations import InboundRejectionReason
 
 from tai42_channel_whatsapp.client import mark_read
-from tai42_channel_whatsapp.correlation import already_seen, mark_known_contact, mark_reply_window, mark_seen
+from tai42_channel_whatsapp.correlation import mark_known_contact, mark_reply_window
 from tai42_channel_whatsapp.inbound.params import _message_context, _MessageContext
+from tai42_channel_whatsapp.inbound.rejection import _notify_rejected
 from tai42_channel_whatsapp.inbound.replies import _handle_button, _handle_interactive, _handle_text
 from tai42_channel_whatsapp.inbound.rich_content import (
     _handle_contacts,
@@ -76,27 +76,6 @@ def _notice_names_unsupported_type(errors: Any) -> tuple[bool, str | None]:
             title = entry.get("title")
             return True, title.strip() if isinstance(title, str) and title.strip() else None
     return False, None
-
-
-async def _notify_unsupported(phone_number_id: str, wa_id: str, wamid: str, *, kind: str) -> None:
-    """Send one generic unsupported-type reply and record the platform rejection event.
-
-    Replies only from a known receiving ``phone_number_id`` (the identity to reply from) to a
-    present participant ``wa_id``; with neither there is no reply to send and the branch stays
-    operator-log-only. Deduped per ``wamid`` so a Meta redelivery never sends a second reply.
-    """
-    if not phone_number_id or not wa_id:
-        return
-    if await already_seen(wamid):
-        return
-    await tai42_app.conversations.notify_inbound_rejected(
-        channel_id="whatsapp",
-        recipient=wa_id,
-        sender_identity=phone_number_id,
-        kind=kind,
-        reason=InboundRejectionReason.UNSUPPORTED_TYPE,
-    )
-    await mark_seen(wamid)
 
 
 def _message_sent_at(message: dict[str, Any], wamid: str) -> datetime | None:
@@ -160,8 +139,8 @@ async def _handle_message(message: dict[str, Any], value: dict[str, Any]) -> Non
 
     # Mark the inbound read the moment it lands — the read receipt for every inbound,
     # sent BEFORE the type branches so it covers text, interactive, media, and
-    # correlated question-replies alike. The turn-scoped working signal (the typing
-    # indicator) is owned by the skeleton's refresh loop, not this receipt. A delivery
+    # correlated question-replies alike. The working signal (the typing indicator, shown
+    # while a reply is owed) is owned by the skeleton's refresh loop, not this receipt. A delivery
     # failure is logged, never raised: an error here would 5xx the batch and make Meta
     # redeliver it.
     if phone_number_id:
@@ -187,7 +166,13 @@ async def _handle_message(message: dict[str, Any], value: dict[str, Any]) -> Non
         logger.warning("whatsapp inbound error notice for %s: %r", wamid, errors)
         unsupported, title = _notice_names_unsupported_type(errors)
         if unsupported:
-            await _notify_unsupported(phone_number_id, wa_id, wamid, kind=title or str(message_type))
+            await _notify_rejected(
+                phone_number_id,
+                wa_id,
+                wamid,
+                kind=title or str(message_type),
+                reason=InboundRejectionReason.UNSUPPORTED_TYPE,
+            )
     else:
         # Any other/future type is not bridged; name the type so an operator sees WHAT was
         # dropped, not just that something was. A type outside ``_NON_CONTENT_NOTICE_TYPES`` is
@@ -195,4 +180,6 @@ async def _handle_message(message: dict[str, Any], value: dict[str, Any]) -> Non
         # rejection event; a non-content notification (system / welcome-request) stays log-only.
         logger.info("unhandled whatsapp message type %r for %s; not bridged", message_type, wamid)
         if message_type not in _NON_CONTENT_NOTICE_TYPES:
-            await _notify_unsupported(phone_number_id, wa_id, wamid, kind=str(message_type))
+            await _notify_rejected(
+                phone_number_id, wa_id, wamid, kind=str(message_type), reason=InboundRejectionReason.UNSUPPORTED_TYPE
+            )

@@ -396,6 +396,33 @@ async def test_a_merged_range_publishes_without_validation_errors():
         assert created.validation_errors == []
 
 
+@_needs_waba
+async def test_a_bounded_date_publishes_without_validation_errors():
+    # The vendor authority for a date bound drawn from screen data: a single-mode CalendarPicker and a
+    # merged range-mode one each binding ``min-date``, ``max-date``, ``unavailable-dates`` and
+    # ``include-days`` to their declared carriers, the range on a later screen so the navigate payload
+    # forwards them, created as a draft — Meta returns its validation errors for any binding it refuses.
+    bounds = {"minDate": "2026-01-01", "maxDate": "2026-12-31", "unavailableDates": ["2026-07-04", "sunday"]}
+    schema = {
+        "type": "object",
+        "properties": {
+            "on": {**_SHAPED_LIVE_SCHEMA["properties"]["on"], **bounds},
+            "start": {**_SHAPED_LIVE_SCHEMA["properties"]["start"], **bounds},
+            "end": _SHAPED_LIVE_SCHEMA["properties"]["end"],
+        },
+        "required": ["on", "start", "end"],
+    }
+    pages = [
+        {"title": "First", "fields": ["on"], "kind": "input", "display": []},
+        {"title": "Second", "fields": ["start", "end"], "kind": "input", "display": []},
+    ]
+    flow_json, _ = build_form_flow(schema, pages)
+    assert "data_api_version" not in flow_json
+    async with _probe_flows() as flows:
+        created = await flows.create(_probe_name(), flow_json)
+        assert created.validation_errors == []
+
+
 @_needs_flow_endpoint
 async def test_a_multi_value_visible_when_publishes_without_validation_errors():
     # The vendor authority for a field shown for several values of its controller: one Dropdown and

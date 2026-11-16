@@ -779,6 +779,7 @@ async def test_notify_form_sends_media_prelude_then_flow_last_no_reservation(
         "names": expected_labels,
         "pages": None,
         "option_fields": [],
+        "date_bounds": {},
     }
     assert _schema_cache_key(schema_hash) not in fake_redis.ttls
 
@@ -956,6 +957,122 @@ async def test_notify_forms_differing_only_in_a_slots_start_text_share_one_flow_
     assert len(fake_httpx.calls) == 2
     assert sidecars[0] == sidecars[1]
     assert "Total:" not in sidecars[0]
+
+
+def _bounded_schema(first_day: str) -> dict:
+    return {
+        "type": "object",
+        "properties": {"note": {"type": "string"}, "when": {"type": "string", "format": "date", "minDate": first_day}},
+        "required": ["note"],
+    }
+
+
+async def test_asks_differing_only_in_a_date_bound_publish_one_flow_and_each_send_carries_its_own(
+    waba_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    fake_httpx.get_responses.append(flow_list_page())
+    fake_httpx.responses.append(_flow_created("flow-dated"))
+    fake_httpx.responses.append(_published())
+    fake_httpx.responses.append(_accepted("wamid.ONE"))
+    fake_httpx.responses.append(_accepted("wamid.TWO"))
+
+    await WhatsAppChannel().deliver(_form_delivery(schema=_bounded_schema("2026-03-01")))
+    await WhatsAppChannel().deliver(
+        _form_delivery(schema=_bounded_schema("2026-03-02"), interaction_id="int-2", recipient=ALLOWED_B)
+    )
+
+    assert _http_order(fake_httpx) == [
+        ("get", f"https://graph.facebook.com/v23.0/{_WABA_ID}/flows"),
+        ("post", f"https://graph.facebook.com/v23.0/{_WABA_ID}/flows"),
+        ("post", "https://graph.facebook.com/v23.0/flow-dated/publish"),
+        ("post", _MESSAGES_URL),
+        ("post", _MESSAGES_URL),
+    ]
+    sends = [call["json"]["interactive"]["action"]["parameters"] for call in fake_httpx.calls[2:]]
+    assert [send["flow_id"] for send in sends] == ["flow-dated", "flow-dated"]
+    assert [send["flow_action_payload"]["data"]["when__min"] for send in sends] == ["2026-03-01", "2026-03-02"]
+
+
+async def test_notifies_differing_only_in_a_date_bound_share_one_flow_and_a_sidecar_without_the_bound(
+    waba_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    import json
+
+    _, schema_hash = build_form_flow(_bounded_schema("2026-03-01"))
+    fake_redis.store[_flow_cache_key(schema_hash)] = "flow-nf-dated"
+    for index, first_day in enumerate(["2026-03-01", "2026-03-02"]):
+        fake_httpx.responses.append(_accepted(f"wamid.FLOW{index}"))
+        await WhatsAppChannel().notify(_form_notification(schema=_bounded_schema(first_day)))
+        params = fake_httpx.calls[index]["json"]["interactive"]["action"]["parameters"]
+        assert params["flow_id"] == "flow-nf-dated"
+        assert params["flow_action_payload"]["data"]["when__min"] == first_day
+    assert len(fake_httpx.calls) == 2
+    sidecar = json.loads(fake_redis.store[_schema_cache_key(schema_hash)])
+    assert sidecar["schema"]["properties"]["when"] == {"type": "string", "format": "date"}
+
+
+def _range_schema(start: dict, end: dict) -> dict:
+    return {
+        "type": "object",
+        "properties": {
+            "start": {"type": "string", "format": "date", **start},
+            "end": {"type": "string", "format": "date", "rangeStart": "start", **end},
+        },
+        "required": ["start", "end"],
+    }
+
+
+async def test_notifies_of_one_range_pair_bounded_on_either_end_write_one_sidecar(
+    waba_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    import json
+
+    on_start = _range_schema({"minDate": "2026-03-01"}, {})
+    on_end = _range_schema({}, {"minDate": "2026-03-01"})
+    _, schema_hash = build_form_flow(on_start)
+    assert build_form_flow(on_end)[1] == schema_hash
+    fake_redis.store[_flow_cache_key(schema_hash)] = "flow-nf-range"
+    sidecars = []
+    for index, schema in enumerate([on_start, on_end]):
+        fake_httpx.responses.append(_accepted(f"wamid.RANGE{index}"))
+        await WhatsAppChannel().notify(_form_notification(schema=schema))
+        sidecars.append(json.loads(fake_redis.store[_schema_cache_key(schema_hash)]))
+    assert sidecars[0] == sidecars[1]
+    assert sidecars[0]["date_bounds"] == {"start": ["minDate"]}
+
+
+async def test_notifies_differing_only_in_a_date_time_bound_publish_one_flow_and_a_sidecar_without_the_bound(
+    reacting_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    import json
+
+    def schema(first_day: str) -> dict:
+        return {
+            "type": "object",
+            "properties": {"at": {"type": "string", "format": "date-time", "minDate": first_day}},
+            "required": ["at"],
+        }
+
+    fake_httpx.get_responses.append(flow_list_page())
+    fake_httpx.responses.append(_flow_created("flow-nf-at"))
+    fake_httpx.responses.append(_published())
+    fake_httpx.responses.append(_accepted("wamid.AT0"))
+    fake_httpx.responses.append(_accepted("wamid.AT1"))
+    for first_day in ("2026-03-01", "2026-03-02"):
+        await WhatsAppChannel().notify(_form_notification(schema=schema(first_day)))
+
+    assert _http_order(fake_httpx) == [
+        ("get", f"https://graph.facebook.com/v23.0/{_WABA_ID}/flows"),
+        ("post", f"https://graph.facebook.com/v23.0/{_WABA_ID}/flows"),
+        ("post", "https://graph.facebook.com/v23.0/flow-nf-at/publish"),
+        ("post", _MESSAGES_URL),
+        ("post", _MESSAGES_URL),
+    ]
+    sends = [call["json"]["interactive"]["action"]["parameters"] for call in fake_httpx.calls[2:]]
+    assert [send["flow_action_payload"]["data"]["at__min"] for send in sends] == ["2026-03-01", "2026-03-02"]
+    _, schema_hash = build_form_flow(schema("2026-03-01"), askless=True)
+    sidecar = json.loads(fake_redis.store[_schema_cache_key(schema_hash)])
+    assert sidecar["schema"]["properties"]["at"] == {"type": "string", "format": "date-time"}
 
 
 async def test_channel_advertises_form_notification_capability():
@@ -1860,9 +1977,7 @@ async def test_a_shape_checked_notify_form_publishes_endpoint_driven_and_carries
     send = next(call["json"] for call in fake_httpx.calls if (call.get("json") or {}).get("type") == "interactive")
     data = send["interactive"]["action"]["parameters"]["flow_action_payload"]["data"]
     assert data["email__invalid"] == "Use your work address"
-    _, schema_hash = build_form_flow(
-        _SHAPED_SCHEMA, field_invalid={"email": "Use your work address"}, carry_invalid=True
-    )
+    _, schema_hash = build_form_flow(_SHAPED_SCHEMA, field_invalid={"email": "Use your work address"}, askless=True)
     sidecar = json.loads(fake_redis.store[_schema_cache_key(schema_hash)])
     assert sidecar["pages"] is None
     assert sidecar["option_fields"] == []

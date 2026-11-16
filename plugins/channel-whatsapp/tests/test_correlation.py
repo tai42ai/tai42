@@ -539,12 +539,12 @@ async def test_drop_endpoint_form_deletes_the_sidecar_and_is_idempotent(fake_red
     await drop_endpoint_form("int-9")
 
 
-async def test_notify_form_sidecar_round_trips_its_pages_and_option_fields(fake_redis: FakeRedis):
+async def test_notify_form_sidecar_round_trips_its_pages_option_fields_and_date_bounds(fake_redis: FakeRedis):
     from tai42_channel_whatsapp.correlation import CachedFlowForm, cache_flow_form, get_cached_flow_form
 
     schema = {"type": "object", "properties": {"a": {"type": "string"}}}
     pages = [{"title": "T", "fields": ["a"], "kind": "input", "display": []}]
-    await cache_flow_form("waba-1", "h1", schema, {"a": "a"}, pages, ["a"])
+    await cache_flow_form("waba-1", "h1", schema, {"a": "a"}, pages, ["a"], {"a": ["minDate"]})
     assert await get_cached_flow_form("waba-1", "h1") == CachedFlowForm(
-        schema=schema, names={"a": "a"}, pages=pages, option_fields=["a"]
+        schema=schema, names={"a": "a"}, pages=pages, option_fields=["a"], date_bounds={"a": ["minDate"]}
     )

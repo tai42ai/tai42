@@ -89,7 +89,7 @@ async def test_inbound_fires_read_receipt_before_branches(
 ):
     # A bridge (uncorrelated) text marks the inbound read: the read-only Graph v23.0
     # body (no typing_indicator) to /{phone_number_id}/messages, Bearer-authed, and
-    # the message still bridges. The turn-scoped typing indicator is the loop's job.
+    # the message still bridges. The typing indicator is the loop's job.
     result = await handler(signed_request(message_payload(text="ship it")))
 
     assert result.status_code == 200
@@ -245,8 +245,8 @@ async def test_duplicate_unsupported_delivery_sends_no_second_reply(
 async def test_unhandled_message_type_logged_at_info_naming_the_type(
     handler, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx, caplog: pytest.LogCaptureFixture
 ):
-    # A type the channel does not model (media/location/contacts/reactions now bridge) is
-    # dropped, and the drop log names the type at INFO so an operator sees WHAT was dropped.
+    # A vendor non-content notification (``system``) is not bridged, and the log names the type
+    # at INFO so an operator sees WHAT was not bridged.
     with caplog.at_level("INFO"):
         result = await handler(signed_request(message_payload(msg_type="system")))
 

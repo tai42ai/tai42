@@ -147,16 +147,22 @@ keypad**, `email` the **email keyboard**, and `url` **degrades to a plain text
 field** (Meta has no `url` input-type); `text` (or no hint) is the plain text
 field. `inputMode` only chooses the keyboard — the value is always submitted as
 the typed string, never coerced. A `string` with
-`format: date` that carries platform date constraints (`minDate`/`maxDate`,
-`unavailableDates`, or a two-field range pairing) renders a bounded
-**CalendarPicker** (an unconstrained date stays a plain date picker); a declared
-date range is drawn as **one range control** when both ends sit on the same page
-with the same visibility, no other field depends on either end, and the form has no
+`format: date` renders a **CalendarPicker**, bounded by the platform date
+constraints it carries (`minDate`/`maxDate`, `unavailableDates`); a `format: date-time`
+field's same constraints are checked by the data endpoint, as are those of a
+`format: date` field drawn as a choice (one with an `enum` or per-send options). For both, the published
+Flow holds only which of those bounds a field has; their values ride each send's
+form data, so forms that differ only in a date bound's value share one Flow. A declared
+date range is drawn as **one range control** when both ends are drawn as calendars
+and sit on the same page with the same visibility, no other field depends on either end, and the form has no
 **review** page, else as **two date fields** (a documented degrade — a review page
 reads each field's value back as text, which a range object cannot render) — either
 way its ordering/span is enforced at
 the single answer facet, so the submitted answer is always the two date values,
-never a combined object. The platform-drawn texts of a send ride the sender's `wording` catalogue. The chat
+never a combined object. The one range control is bounded by both ends' date bounds
+together (the later `minDate`, the earlier `maxDate`, every excluded day of either end);
+a send whose pair would leave no date to pick (that merged `minDate` later than that
+merged `maxDate`) is refused before anything is sent, naming the pair. The platform-drawn texts of a send ride the sender's `wording` catalogue. The chat
 button that **opens** the Flow reads `wording.form.open` (else *Fill form*; ≤20
 characters), a page-less form's screen **title** reads `wording.form.title` (else
 *Form*) and its terminal button reads `wording.form.submit` (else *Submit*; ≤35
@@ -191,7 +197,7 @@ form is endpoint-driven (below): each case rides the data exchange as its own pl
 reference and the data endpoint keeps the value of the case whose condition holds
 under the field's own name, so the shape check, the next screen and the completed
 answer see the one value the person entered. One Flow is
-published per distinct answer schema and data endpoint, named on the WABA by a hash
+published per distinct answer schema (its date bound values aside) and data endpoint, named on the WABA by a hash
 of both and cached under `CHANNEL_WHATSAPP_WABA_ID`; when the cache has no entry the
 channel first looks the Flow up on the WABA by that name and reuses a published one
 (a stale draft under the name is deleted), and only otherwise creates and publishes it. The
@@ -203,6 +209,11 @@ enters the conversation as a fresh turn whose text is the submitted values rende
 readably (one `label: value` line per value; a form that carried only its token reads
 `{}`), with the values as the turn's `form` (keyed as the Flow submitted them) and the
 token under the `flow_token` entry parameter (see **Inbound entry parameters** below).
+A completed form whose response the channel cannot read (no `response_json`, or one
+that is not a JSON object) is logged at warning and the participant gets one
+`unreadable` rejection notice (the route's `reply_texts.rejected_unreadable`, else the
+built-in text) with a rejection event of kind `form`; a redelivery sends no second
+notice.
 When the callback door **rejects**
 a forwarded form answer (`400` — a schema rule the Flow could not enforce, e.g. a
 minimum or pattern), a completed Flow has no re-reply surface, so the channel
@@ -414,9 +425,18 @@ individual value over the per-value cap is dropped (never truncated), and in the
 rare case the aggregate still overflows a bound the whole set is dropped and the
 turn bridges without it — a participant message is never lost to a params bound.
 
-Meta inbound **error notices** (e.g. an unsupported message type the participant sent,
-carried as an `errors[]` array) are logged at **warning** with the detail and are
-never bridged as participant turns.
+Meta inbound **error notices** (carried as an `errors[]` array) are logged at **warning**
+with the detail and are never bridged as participant turns. An unsupported-message-type
+notice (`code 131051`, content the participant sent that the channel cannot receive) and
+a message type the channel has no handler for each get the one `unsupported_type` notice
+and a rejection event; every other error code stays log-only, and so does a vendor
+non-content notification (`system` / `request_welcome`), which gets no reply. An interactive message whose subtype the channel
+has no reader for (anything but a reply button, a list row or a completed form) gets
+the one `unsupported_type` notice, like an unknown message type; a participant message
+whose text is blank (a reply with a blank title, a text with no body, a quick-reply
+with no text) is not bridged and gets the one `unreadable` notice, with or without a
+question pending (the question stays open); its rejection event names the kind `text`,
+`button`, or `button_reply`/`list_reply`. Each notice is sent once per `wamid`.
 
 ## Delivery statuses
 
@@ -466,7 +486,7 @@ status is acknowledged, never retried.
 | One pending question per `(phone_number_id, wa_id)` pair | A second concurrent `ask` over this channel fails loudly with `PendingQuestionExistsError` while the first is unanswered/unexpired. The pair is released at once when the platform withdraws the first question (a cancel, a route's `cancel_expr`, or an erase of its thread, route or person); nothing is sent to the participant |
 | Freeform sends need the 24h window | A freeform send (question, reply, media) outside the human's 24-hour session window is rejected by Meta (error 131047), synchronously as a delivery error or asynchronously as a `failed` status. A template is the only send Meta accepts outside the window. The reported `turn.reply_window` is read once per turn, so a turn that runs past `closes_at` may still see `open`; a client message whose `timestamp` is missing or unreadable opens no window and logs a warning |
 | Single send attempt per part | A transient Cloud API outage fails the send instead of retrying (no idempotency key → a blind retry risks double-messaging). A multi-part media send that fails on the Nth part raises naming the wamids already delivered |
-| Form schema is a flat object subset | A `form` ask's answer schema is a top-level `object` whose properties are `string`, `string`+`enum`, an **array of strings** (a multiple-choice field), `boolean`, `integer`, or `number`. The platform enforces this subset at ask-time, so nested objects, arrays of non-strings, and `oneOf`/`anyOf` are refused before the question is stored; the Flow mapping refuses them defensively too, and additionally rejects a property named `flow_token` — Meta reserves that key on the Flow response, so a field of that name is unanswerable on this channel. An **endpoint-driven** form additionally reserves the property names `tai42_event`, `tai42_field`, and `tai42_page` (its data-exchange event markers) any name spelled like another field's screen-data carrier (`<field>__init`, `__ds`, `__err`, `__invalid`, `__required`, `__val`) or like a form-line carrier (`tai42_error_line`, `tai42_update_failed`), and any name spelled like a display slot's screen-data key (`slot_<slot>`), and refuses a form where a per-case control's name (`<field>__<value>`) is spelled like a property, another field's control, a marker, a carrier or a slot key, or is drawn by two fields |
+| Form schema is a flat object subset | A `form` ask's answer schema is a top-level `object` whose properties are `string`, `string`+`enum`, an **array of strings** (a multiple-choice field), `boolean`, `integer`, or `number`. The platform enforces this subset at ask-time, so nested objects, arrays of non-strings, and `oneOf`/`anyOf` are refused before the question is stored; the Flow mapping refuses them defensively too, and additionally rejects a property named `flow_token` — Meta reserves that key on the Flow response, so a field of that name is unanswerable on this channel. An **endpoint-driven** form additionally reserves the property names `tai42_event`, `tai42_field`, and `tai42_page` (its data-exchange event markers) any name spelled like another field's screen-data carrier (`<field>__init`, `__ds`, `__err`, `__invalid`, `__required`, `__val`, `__min`, `__max`, `__unavailable`, `__days`) or like a form-line carrier (`tai42_error_line`, `tai42_update_failed`), and any name spelled like a display slot's screen-data key (`slot_<slot>`), and refuses a form where a per-case control's name (`<field>__<value>`) is spelled like a property, another field's control, a marker, a carrier or a slot key, or is drawn by two fields |
 | Template audio header unsupported | A `ChannelTemplate` maps `header_media` (image/video/document), `body_parameters`, and quick-reply/url `buttons` onto the template-message components. An **audio** `header_media` has no Cloud API template representation and is refused loudly (`ChannelInputError`); an audio interactive **header** on a notification is instead sent as its own message ahead of the interactive |
 | No timestamp in Meta's signature scheme | Replay of a captured request validates forever for that body; `wamid` dedupe (48h default window) + HTTPS are the guards (a Meta protocol property) |
 

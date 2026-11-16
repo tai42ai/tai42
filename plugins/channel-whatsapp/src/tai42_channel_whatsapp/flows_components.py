@@ -14,13 +14,11 @@ screen/footer assembly and the public ``build_form_flow`` / ``build_flow_data`` 
 from __future__ import annotations
 
 import copy
-import datetime
 import re
 from typing import Any, assert_never
 
 from tai42_contract.channels import ChannelInputError
 from tai42_contract.interactions import FormControl, FormInputMode
-from tai42_kit.interactions import FORM_WEEKDAYS
 
 from tai42_channel_whatsapp.flows_choices import (
     _CHIPS_MAX_CHOICES,
@@ -30,6 +28,12 @@ from tai42_channel_whatsapp.flows_choices import (
     _draws_chips,
     _is_array_of_strings,
     _is_choice_field,
+)
+from tai42_channel_whatsapp.flows_dates import (
+    control_bound_decls,
+    control_bound_forwards,
+    date_bound_bindings,
+    draws_calendar_picker,
 )
 from tai42_channel_whatsapp.flows_second_line import (
     _CHIPS_DS_ITEM_EXAMPLE,
@@ -49,48 +53,6 @@ _RESERVED_PROPERTY = "flow_token"
 # Meta's grammar for a Flow component ``name`` / screen-``data`` key / ``${data.…}``
 # reference: a letter or underscore, then letters, digits, underscores.
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-
-# Meta's ``CalendarPicker`` (Flow JSON ≥ 6.1) sets and returns a ``YYYY-MM-DD`` string. A date
-# field's prefill must be exactly that shape, so the emitted ``init-value`` is a value the
-# control accepts. The regex fixes the hyphenated calendar-date form; the ``date.fromisoformat``
-# check then rejects an impossible date (e.g. ``2026-13-40``).
-_ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-
-# The platform's form vocabulary, from ``tai42_kit.interactions``: the weekday names an
-# ``unavailableDates`` entry may carry. Each weekday maps onto Meta's CalendarPicker
-# ``include-days`` enum code below; an excluded weekday is dropped from ``include-days`` (the
-# days that STAY selectable).
-
-
-_WEEKDAY_CODES = {
-    "monday": "Mon",
-    "tuesday": "Tue",
-    "wednesday": "Wed",
-    "thursday": "Thu",
-    "friday": "Fri",
-    "saturday": "Sat",
-    "sunday": "Sun",
-}
-
-
-def _is_date_field(prop: Any) -> bool:
-    """Whether a property renders as a date ``CalendarPicker`` — a ``string`` carrying ``"format": "date"``.
-
-    ``format: time`` and ``format: date-time`` are not this: the vendor has no time-of-day
-    picker, so they stay a ``TextInput``.
-    """
-    return isinstance(prop, dict) and prop.get("type") == "string" and prop.get("format") == "date"
-
-
-def _valid_iso_date(value: str) -> bool:
-    """Whether ``value`` is a ``YYYY-MM-DD`` calendar date the ``CalendarPicker`` accepts."""
-    if not _ISO_DATE_RE.match(value):
-        return False
-    try:
-        datetime.date.fromisoformat(value)
-    except ValueError:
-        return False
-    return True
 
 
 def _sanitize_name(key: str) -> str:
@@ -208,35 +170,24 @@ def _chips_component(cname: str, label: str, required: bool, prop: dict[str, Any
 def _calendar_component(cname: str, label: str, required: bool, prop: dict[str, Any], init: str) -> dict[str, Any]:
     """A single-mode ``CalendarPicker`` for a date field.
 
-    Every date draws this control: unlike Meta's ``DatePicker`` it carries ``required``, a
-    ``helper-text`` and an ``error-message``. Bounds (``min-date``/``max-date``), excluded explicit
-    dates (``unavailable-dates``) and excluded weekdays (dropped from ``include-days``, the days
-    that stay selectable) are baked as literals from the schema (they are fixed per published
-    Flow). The control sets and returns a ``YYYY-MM-DD`` string. A range pairing drawn as two
-    controls has its span (``minDays``/``maxDays``) checked at the data endpoint and the answer
-    door, so the submitted answer stays the two scalar date fields.
+    A date field no choice draws (:func:`~tai42_channel_whatsapp.flows_dates.draws_calendar_picker`)
+    draws this control: unlike Meta's ``DatePicker`` it carries ``required``, a
+    ``helper-text`` and an ``error-message``. Each bound the schema declares (``min-date``/``max-date``,
+    excluded explicit dates as ``unavailable-dates``, excluded weekdays dropped from ``include-days``)
+    binds its screen-data carrier (:func:`~tai42_channel_whatsapp.flows_dates.date_bound_bindings`),
+    whose value each send carries. The control sets and returns a ``YYYY-MM-DD`` string. A range
+    pairing drawn as two controls has its span (``minDays``/``maxDays``) checked at the data endpoint
+    and the answer door, so the submitted answer stays the two scalar date fields.
     """
-    component: dict[str, Any] = {
+    return {
         "type": "CalendarPicker",
         "name": cname,
         "label": label,
         "mode": "single",
         "required": required,
         "init-value": init,
+        **date_bound_bindings(cname, prop),
     }
-    if isinstance(prop.get("minDate"), str):
-        component["min-date"] = prop["minDate"]
-    if isinstance(prop.get("maxDate"), str):
-        component["max-date"] = prop["maxDate"]
-    unavailable = prop.get("unavailableDates")
-    if isinstance(unavailable, list):
-        dates = [entry for entry in unavailable if isinstance(entry, str) and _ISO_DATE_RE.match(entry)]
-        excluded = {entry.lower() for entry in unavailable if isinstance(entry, str) and entry.lower() in FORM_WEEKDAYS}
-        if dates:
-            component["unavailable-dates"] = dates
-        if excluded:
-            component["include-days"] = [_WEEKDAY_CODES[day] for day in FORM_WEEKDAYS if day not in excluded]
-    return component
 
 
 def _sibling_depends_on(fields: list[str], properties: dict[str, Any], pair: set[str]) -> bool:
@@ -256,11 +207,15 @@ def _sibling_depends_on(fields: list[str], properties: dict[str, Any], pair: set
     return False
 
 
-def range_pairs(this_fields: list[str], properties: dict[str, Any], has_review_page: bool = False) -> dict[str, str]:
+def range_pairs(
+    this_fields: list[str], properties: dict[str, Any], option_fields: set[str], has_review_page: bool = False
+) -> dict[str, str]:
     """The ``END name -> START name`` map for every ``rangeStart`` pair drawable as ONE range control.
 
     A ``rangeStart`` pair (the END names its START) draws as one :func:`_calendar_range_component`
-    when both ends sit on THIS screen, both are ``format: date``, both carry the SAME ``visibleWhen``
+    when both ends sit on THIS screen, both draw a ``CalendarPicker``
+    (:func:`~tai42_channel_whatsapp.flows_dates.draws_calendar_picker`: ``format: date`` and no
+    choice, ``option_fields`` the send's option-bearing fields), both carry the SAME ``visibleWhen``
     (both absent or deep-equal) and it is not shown for several values, and no OTHER field anywhere
     in the form has a ``visibleWhen`` naming either end (:func:`_sibling_depends_on`, checked over
     all ``properties`` so a dependant on a later screen degrades the pair too). Any pair failing a
@@ -288,7 +243,11 @@ def range_pairs(this_fields: list[str], properties: dict[str, Any], has_review_p
         if not isinstance(start, str) or start not in on_screen:
             continue
         start_prop = properties.get(start)
-        if not isinstance(start_prop, dict) or not _is_date_field(end_prop) or not _is_date_field(start_prop):
+        if (
+            not isinstance(start_prop, dict)
+            or not draws_calendar_picker(end, end_prop, option_fields)
+            or not draws_calendar_picker(start, start_prop, option_fields)
+        ):
             continue
         shared = end_prop.get("visibleWhen")
         if shared != start_prop.get("visibleWhen") or _splits_into_variants(shared):
@@ -308,44 +267,6 @@ def _splits_into_variants(predicate: Any) -> bool:
     # (Meta's ``||`` cannot test membership, so each value becomes its own ``If`` branch). An
     # ``equals``/``notEmpty`` or a single-entry ``in`` is one case.
     return isinstance(predicate, dict) and isinstance(predicate.get("in"), list) and len(predicate["in"]) > 1
-
-
-def _union_exclusions(start_prop: dict[str, Any], end_prop: dict[str, Any]) -> tuple[list[str], set[str]]:
-    # The UNION of both fields' excluded explicit dates (order-preserving, de-duplicated) and excluded
-    # weekday names — a merged range control is never looser than either field.
-    excluded_dates: list[str] = []
-    excluded_days: set[str] = set()
-    for prop in (start_prop, end_prop):
-        unavailable = prop.get("unavailableDates")
-        if not isinstance(unavailable, list):
-            continue
-        for entry in unavailable:
-            if not isinstance(entry, str):
-                continue
-            if _ISO_DATE_RE.match(entry) and entry not in excluded_dates:
-                excluded_dates.append(entry)
-            elif entry.lower() in FORM_WEEKDAYS:
-                excluded_days.add(entry.lower())
-    return excluded_dates, excluded_days
-
-
-def _merged_date_bounds(start_prop: dict[str, Any], end_prop: dict[str, Any]) -> dict[str, Any]:
-    # The bounds a merged range CalendarPicker carries: never looser than either field. ``min-date``
-    # is the LATER of the two ``minDate``s, ``max-date`` the EARLIER of the two ``maxDate``s (ISO dates
-    # sort lexically), and the excluded dates / weekdays are the UNION of both fields' exclusions.
-    out: dict[str, Any] = {}
-    min_dates = [p["minDate"] for p in (start_prop, end_prop) if isinstance(p.get("minDate"), str)]
-    max_dates = [p["maxDate"] for p in (start_prop, end_prop) if isinstance(p.get("maxDate"), str)]
-    if min_dates:
-        out["min-date"] = max(min_dates)
-    if max_dates:
-        out["max-date"] = min(max_dates)
-    excluded_dates, excluded_days = _union_exclusions(start_prop, end_prop)
-    if excluded_dates:
-        out["unavailable-dates"] = excluded_dates
-    if excluded_days:
-        out["include-days"] = [_WEEKDAY_CODES[day] for day in FORM_WEEKDAYS if day not in excluded_days]
-    return out
 
 
 def _range_span(end_prop: dict[str, Any]) -> dict[str, Any]:
@@ -387,10 +308,10 @@ def _calendar_range_component(
     (``{start-date, end-date}``), so the two ends carry their own titles and required flags. The
     ``error-message`` is ONE binding to the START's ``__err`` screen-data key, declared as the object
     ``{start-date, end-date}`` that carries each end's error text (Meta's validator refuses a binding
-    per end). The bounds are never looser than either field (:func:`_merged_date_bounds`) and the span rides the
-    END's ``minDays``/``maxDays`` (:func:`_range_span`). The value is the object ``{start-date,
-    end-date}``; the inbound decode splits it back onto the two schema date keys, so the submitted
-    answer stays the two scalar date strings.
+    per end). Each bound either end declares binds the START's carrier, whose per-send value is never
+    looser than either end's; the span rides the END's ``minDays``/``maxDays`` (:func:`_range_span`).
+    The value is the object ``{start-date, end-date}``; the inbound decode splits it back onto the
+    two schema date keys, so the submitted answer stays the two scalar date strings.
     """
     component: dict[str, Any] = {
         "type": "CalendarPicker",
@@ -400,7 +321,7 @@ def _calendar_range_component(
         "required": {"start-date": required_start, "end-date": required_end},
         "init-value": f"${{data.{start_cname}__init}}",
     }
-    component.update(_merged_date_bounds(start_prop, end_prop))
+    component.update(date_bound_bindings(start_cname, start_prop, end_prop))
     component.update(_range_span(end_prop))
     component["error-message"] = error_binding(start_cname)
     return component
@@ -603,7 +524,7 @@ def _dynamic_component(
     name). Every control reads its ``init-value`` from the screen ``data`` model and a
     choice field reads a dynamic ``data-source``, so the send injects the values/options. An
     array of strings renders a CheckboxGroup, a short string enum a RadioButtonsGroup (else a
-    Dropdown), and a date field with platform constraints a bounded CalendarPicker. Raises
+    Dropdown), and a ``format: date`` field a CalendarPicker bound to its carriers. Raises
     ``ChannelInputError`` naming a property outside the supported subset. A field's second line
     (its schema ``description``) rides the control as ``helper-text`` where Meta allows it
     (:func:`_with_helper_text`); elsewhere :func:`field_caption` draws it beside the control.
@@ -647,7 +568,7 @@ def _field_control(
         return _choice_component(cname, label, required, prop, init)
     if _is_choice_field(name, prop, option_fields):
         return _choice_component(cname, label, required, prop, init)
-    if _is_date_field(prop):
+    if draws_calendar_picker(name, prop, option_fields):
         return _calendar_component(cname, label, required, prop, init)
     if prop_type == "string":
         return _string_component(name, cname, label, required, prop, init)
@@ -687,18 +608,25 @@ def _value_type_decl(prop: dict[str, Any]) -> dict[str, Any]:
 
 
 def _field_data_decls(
-    name: str, prop: dict[str, Any], option_fields: set[str], names: dict[str, str], merged_start: bool = False
+    name: str,
+    prop: dict[str, Any],
+    option_fields: set[str],
+    names: dict[str, str],
+    range_end: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """The screen-``data`` declarations a field needs where it is RENDERED.
 
-    Its ``init-value`` source and, for a choice field, its dynamic ``data-source`` —
-    keyed by the field's identifier-safe component name. A merged range START declares its
-    ``init`` as the range object (two date strings) and carries no ``data-source``.
+    Its ``init-value`` source, for a choice field its dynamic ``data-source``, and for a date field
+    the bound carriers its ``CalendarPicker`` binds
+    (:func:`~tai42_channel_whatsapp.flows_dates.control_bound_decls`) — keyed by the
+    field's identifier-safe component name. A merged range START (``range_end`` is its END's
+    definition) declares its ``init`` as the range object (two date strings), the pair's bound
+    carriers, and no ``data-source``.
     """
     cname = names[name]
-    init_decl = _range_value_type_decl() if merged_start else _value_type_decl(prop)
+    init_decl = _range_value_type_decl() if range_end is not None else _value_type_decl(prop)
     decls: dict[str, Any] = {f"{cname}__init": init_decl}
-    if not merged_start and _is_choice_field(name, prop, option_fields):
+    if range_end is None and _is_choice_field(name, prop, option_fields):
         chips = _draws_chips(prop)
         decls[f"{cname}__ds"] = {
             "type": "array",
@@ -708,21 +636,30 @@ def _field_data_decls(
             },
             "__example__": copy.deepcopy(_CHIPS_DS_ITEM_EXAMPLE if chips else _DS_ITEM_EXAMPLE),
         }
+    decls.update(control_bound_decls(name, cname, prop, option_fields, range_end))
     return decls
 
 
 def _forward_field_data(
-    name: str, prop: dict[str, Any], option_fields: set[str], names: dict[str, str]
+    name: str,
+    prop: dict[str, Any],
+    option_fields: set[str],
+    names: dict[str, str],
+    range_end: dict[str, Any] | None = None,
 ) -> dict[str, str]:
-    """The navigate-payload entries that carry a downstream field's ``init``/``ds`` on to the next screen.
+    """The navigate-payload entries that carry a downstream field's ``init``/``ds`` and bounds on to the next screen.
 
     They enter only at the entry screen, so each step re-forwards the ones its successors
-    still need — keyed by the field's identifier-safe component name.
+    still need — keyed by the field's identifier-safe component name. The bounds are the carriers
+    the field's ``CalendarPicker`` binds
+    (:func:`~tai42_channel_whatsapp.flows_dates.control_bound_forwards`); a merged range START
+    (``range_end`` is its END's definition) forwards the pair's.
     """
     cname = names[name]
     forwarded = {f"{cname}__init": f"${{data.{cname}__init}}"}
     if _is_choice_field(name, prop, option_fields):
         forwarded[f"{cname}__ds"] = f"${{data.{cname}__ds}}"
+    forwarded.update(control_bound_forwards(name, cname, prop, option_fields, range_end))
     return forwarded
 
 
