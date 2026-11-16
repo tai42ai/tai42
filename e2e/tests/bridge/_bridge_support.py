@@ -478,11 +478,13 @@ class BridgeHarness:
         wamid: str | None = None,
         valid: bool = True,
         context_id: str | None = None,
+        response_json: str | None = None,
     ) -> SignedInbound:
         """A genuinely-signed completed-Flow reply (``nfm_reply``) from ``wa_id`` to the
         ``phone_number_id`` the form ask was sent FROM. ``response`` is the filled form
         values (Flow inputs arrive as strings) plus the ``flow_token`` the send carried
-        (the pending ask's ``interaction_id``). ``context_id`` names the Flow message's wamid."""
+        (the pending ask's ``interaction_id``). ``context_id`` names the Flow message's wamid.
+        ``response_json`` sets the relayed string verbatim in place of the encoded ``response``."""
         return self.fake_whatsapp.build_nfm_reply(
             app_secret=self.whatsapp_secret,
             phone_number_id=phone_number_id,
@@ -491,6 +493,7 @@ class BridgeHarness:
             wamid=wamid,
             valid=valid,
             context_id=context_id,
+            response_json=response_json,
         )
 
     async def whatsapp_flow_exchange(self, payload: dict[str, Any], *, port: int | None = None) -> dict[str, Any]:
@@ -559,12 +562,14 @@ class BridgeHarness:
             secret=self.telegram_secret, chat_id=chat_id, reply_to_message_id=reply_to_message_id, text=text
         )
 
-    def telegram_callback_query(self, *, chat_id: str, message_id: int, data: str) -> SignedInbound:
+    def telegram_callback_query(
+        self, *, chat_id: str, message_id: int, data: str, keyboard: list[list[dict[str, str]]] | None = None
+    ) -> SignedInbound:
         """A genuinely-signed inline-keyboard tap on message ``message_id`` in ``chat_id`` carrying
-        the tapped button's ``data``."""
+        the tapped button's ``data``; ``keyboard`` is the message's ``inline_keyboard`` rows."""
         assert self.fake_telegram is not None, "telegram_callback_query requires the media-bridge profile"
         return self.fake_telegram.build_callback_query(
-            secret=self.telegram_secret, chat_id=chat_id, message_id=message_id, data=data
+            secret=self.telegram_secret, chat_id=chat_id, message_id=message_id, data=data, keyboard=keyboard
         )
 
     def slack_inbound_text(self, *, channel: str, thread_ts: str, text: str, event_id: str) -> SignedInbound:

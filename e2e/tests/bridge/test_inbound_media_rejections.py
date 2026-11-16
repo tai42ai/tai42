@@ -25,7 +25,6 @@ from __future__ import annotations
 import json
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
-from typing import Any
 
 import pytest
 
@@ -39,7 +38,6 @@ from tai42_e2e.manifests import (
 )
 from tai42_e2e.provider_stub import SignedInbound
 from tai42_e2e.settings import HarnessSettings
-from tai42_e2e.waiting import wait_for_async
 
 from ._bridge_support import (
     TELEGRAM_INBOUND_PATH,
@@ -50,6 +48,7 @@ from ._bridge_support import (
     wait_channel_send_count,
     wait_probe_record,
 )
+from ._rejection_support import assert_rejected
 
 pytestmark = [
     pytest.mark.needs(
@@ -60,41 +59,6 @@ pytestmark = [
         reason="the media-bridge stubs are the mock leg; real legs run under TAI_E2E_REAL",
     ),
 ]
-
-# The one fixed participant notice per rejection reason (mirrors the skeleton chokepoint's copy).
-_NOTICES = {
-    "too_large": "That file is too large to accept here.",
-    "unsupported_type": "This content type is not supported here.",
-    "could_not_receive": "That attachment could not be received.",
-}
-_REJECTED_TOPIC = "conversations_inbound_rejected"
-
-
-async def _register_reject_hook(
-    bridge: BridgeHarness, uniq: Callable[[str], str], *, probe: str, recipient: str
-) -> None:
-    """Register a hook recording ``reason`` for a ``conversations_inbound_rejected`` event whose
-    ``client_address`` is this test's recipient — so a concurrent rejection never lands in the probe."""
-    exec_key = uniq("mrej-exec")
-    await bridge.mint_key(user_id=exec_key, scopes=["e2e-all"])
-    await bridge.api().post(
-        "/api/hooks",
-        json={
-            "name": uniq("mrej-hook").replace("_", "-"),
-            "topic": _REJECTED_TOPIC,
-            "tool": "e2e_record",
-            "start_expr": {
-                "content": f'if .client_address == "{recipient}" then {{key: "{probe}", value: .reason}} else null end'
-            },
-            "execution_key": exec_key,
-        },
-    )
-
-
-def _notices_to(fake: Any, notice: str, recipient: str, recipient_field: str) -> list[dict]:
-    """Recorded sends carrying the ``notice`` copy addressed to ``recipient`` (scoped so a stale
-    send from another test on the session-shared stub is never counted)."""
-    return [record for record in fake.sends_matching(notice) if record.get(recipient_field) == recipient]
 
 
 @asynccontextmanager
@@ -123,44 +87,6 @@ async def _worded_route(
         await bridge.api().delete(f"/api/conversations/{route_name}", expect=200)
 
 
-async def _assert_rejected(
-    bridge: BridgeHarness,
-    uniq: Callable[[str], str],
-    *,
-    inbound_path: str,
-    inbound: SignedInbound,
-    fake: Any,
-    recipient: str,
-    recipient_field: str,
-    reason: str,
-    notice: str | None = None,
-) -> None:
-    """Post a permanently-failing media inbound; assert the 2xx ack + one reason notice + one event.
-
-    ``notice`` is the copy the participant reads: the route's own sentence when the leg's route
-    words it, else the built-in notice for ``reason``."""
-    expected_notice = _NOTICES[reason] if notice is None else notice
-    probe = uniq("mrej-probe")
-    await _register_reject_hook(bridge, uniq, probe=probe, recipient=recipient)
-
-    resp = await post_inbound(bridge.stack, inbound_path, inbound, port=bridge.stack.port_b)
-    assert resp.status_code in (200, 204), resp.text
-
-    async def _notice_landed() -> list[dict] | None:
-        got = _notices_to(fake, expected_notice, recipient, recipient_field)
-        return got if got else None
-
-    notices = await wait_for_async(_notice_landed, deadline=12.0, message=f"the {reason} notice never reached the stub")
-    assert len(notices) == 1, f"expected exactly one {reason} notice, saw {notices!r}"
-
-    async def _event_recorded() -> list[str] | None:
-        rows = [json.loads(raw)["value"] for raw in bridge.stack.records(probe)]
-        return rows if rows else None
-
-    reasons = await wait_for_async(_event_recorded, deadline=12.0, message="the rejection event never fired the hook")
-    assert reasons == [reason], f"expected one {reason} event, saw {reasons!r}"
-
-
 @pytest.mark.needs("kind:channels:telegram", "helper:telegram", "setting:MEDIA_INGEST_MAX_IMAGE_BYTES=8192")
 async def test_telegram_oversize_image_rejected_too_large(
     media_bridge: BridgeHarness, uniq: Callable[[str], str]
@@ -172,7 +98,7 @@ async def test_telegram_oversize_image_rejected_too_large(
         body=TINY_PNG + b"\x00" * (BRIDGE_MEDIA_INGEST_MAX_IMAGE_BYTES + 1024), content_type="image/png"
     )
     inbound = media_bridge.telegram_inbound_photo(chat_id=chat_id, file_id=file_id)
-    await _assert_rejected(
+    await assert_rejected(
         media_bridge,
         uniq,
         inbound_path=TELEGRAM_INBOUND_PATH,
@@ -199,7 +125,7 @@ async def test_whatsapp_html_under_image_rejected_unsupported_type(
         media_id=media_id,
         mime_type="image/png",
     )
-    await _assert_rejected(
+    await assert_rejected(
         media_bridge,
         uniq,
         inbound_path=WHATSAPP_INBOUND_PATH,
@@ -224,7 +150,7 @@ async def test_twilio_permanent_miss_rejected_could_not_receive(
         media_url=media_bridge.fake_twilio.media_url(ref),
         content_type="image/jpeg",
     )
-    await _assert_rejected(
+    await assert_rejected(
         media_bridge,
         uniq,
         inbound_path=TWILIO_INBOUND_PATH,
@@ -254,7 +180,7 @@ async def test_telegram_oversize_image_reads_the_routes_too_large_notice(
         our_identity=media_bridge.telegram_our_identity,
         reply_texts={"rejected_too_large": notice},
     ):
-        await _assert_rejected(
+        await assert_rejected(
             media_bridge,
             uniq,
             inbound_path=TELEGRAM_INBOUND_PATH,
@@ -288,7 +214,7 @@ async def test_whatsapp_html_under_image_reads_the_routes_unsupported_type_notic
         our_identity=BRIDGE_WHATSAPP_PHONE_ID,
         reply_texts={"rejected_unsupported_type": notice},
     ):
-        await _assert_rejected(
+        await assert_rejected(
             media_bridge,
             uniq,
             inbound_path=WHATSAPP_INBOUND_PATH,
@@ -321,7 +247,7 @@ async def test_twilio_permanent_miss_reads_the_routes_could_not_receive_notice(
         our_identity=BRIDGE_TWILIO_FROM,
         reply_texts={"rejected_could_not_receive": notice},
     ):
-        await _assert_rejected(
+        await assert_rejected(
             media_bridge,
             uniq,
             inbound_path=TWILIO_INBOUND_PATH,
@@ -344,7 +270,7 @@ async def test_telegram_store_unavailable_rejected_could_not_receive(
     file_id = uniq("tg-nostore")
     media_bridge_no_store.telegram.media[file_id] = MediaBlob(body=TINY_PNG, content_type="image/png")
     inbound = media_bridge_no_store.telegram_inbound_photo(chat_id=chat_id, file_id=file_id)
-    await _assert_rejected(
+    await assert_rejected(
         media_bridge_no_store,
         uniq,
         inbound_path=TELEGRAM_INBOUND_PATH,

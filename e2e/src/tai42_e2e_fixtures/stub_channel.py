@@ -13,7 +13,7 @@ Registering NO route keeps the fixture additive: it touches only the channel
 registry, never the ``/api/*`` route table other stacks' gates enumerate.
 
 Beside the deliver-only stub, two working-signal stubs prove the skeleton's
-per-turn "working-on-it" refresh loop end to end: ``stub_working`` advertises the
+"working-on-it" refresh loop, shown while a reply is owed, end to end: ``stub_working`` advertises the
 short vendor-indicator lifetime the stack's ``E2E_WORKING_SIGNAL_EXPIRY_SECONDS``
 names (registered only when it is set) so the loop refreshes it repeatedly over a
 long turn, and ``stub_working_off`` advertises none so the loop never starts. Both

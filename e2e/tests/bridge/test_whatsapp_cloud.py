@@ -32,6 +32,7 @@ import json
 import re
 import uuid
 from collections.abc import Callable
+from typing import Any
 from urllib.parse import urlencode
 
 import pytest
@@ -775,6 +776,95 @@ async def test_form_over_whatsapp_flow_and_nfm_reply_answers_with_a_typed_dict(
     # The Flow response is coerced to the schema's types (``"4"`` -> ``4``) and the
     # ``flow_token`` dropped — the caller gets the validated dict.
     assert resolved == good_answer
+
+
+@pytest.mark.needs(
+    "kind:channels:whatsapp",
+    "helper:whatsapp",
+    "setting:seeded-access-control",
+    "setting:tool:ask",
+    "topology:replicas",
+)
+async def test_form_asks_differing_only_in_a_date_bound_share_one_flow_and_each_send_carries_its_bound(
+    bridge: BridgeHarness, uniq: Callable[[str], str]
+) -> None:
+    first_question = uniq("l7-bound-q1")
+    second_question = uniq("l7-bound-q2")
+    # The date's ``title`` is unique to this test, so no earlier test's Flow is the one reused here.
+    title = uniq("l7-bound-title")
+
+    def schema(min_date: str) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {"when": {"type": "string", "format": "date", "title": title, "minDate": min_date}},
+            "required": ["when"],
+        }
+
+    async def ask(question: str, wa_id: str, min_date: str) -> object:
+        async with bridge.stack.mcp(port=bridge.stack.port_a, auth=bridge.root_token) as mcp:
+            result = await mcp.call_tool(
+                "ask",
+                {
+                    "question": question,
+                    "channel": "whatsapp",
+                    "recipient": wa_id,
+                    "answer_format": "form",
+                    "schema": schema(min_date),
+                },
+            )
+        return result.data.answer
+
+    async def answer(send: dict[str, Any], wa_id: str, when: str) -> None:
+        flow_token = send["payload"]["interactive"]["action"]["parameters"]["flow_token"]
+        reply = bridge.whatsapp_nfm_reply(
+            phone_number_id=BRIDGE_WHATSAPP_PHONE_ID, wa_id=wa_id, response={"flow_token": flow_token, "when": when}
+        )
+        resp = await post_inbound(bridge.stack, WHATSAPP_INBOUND_PATH, reply, port=bridge.stack.port_b)
+        assert resp.status_code == 200, resp.text
+
+    def sent_data(send: dict[str, Any]) -> dict[str, Any]:
+        return send["payload"]["interactive"]["action"]["parameters"]["flow_action_payload"]["data"]
+
+    first_wa_id, second_wa_id = _fresh_wa_id(), _fresh_wa_id()
+    first_task = asyncio.create_task(ask(first_question, first_wa_id, "2026-09-01"))
+    try:
+        first = await wait_whatsapp_send(bridge.fake_whatsapp, first_question)
+        # The published Flow binds the picker's lower bound to a screen-data carrier; the send
+        # carries the bound's value.
+        assert len(bridge.fake_whatsapp.flows) == 1
+        created = bridge.fake_whatsapp.flows[0]["id"]
+        flow_json = json.loads(bridge.fake_whatsapp.flows[0]["flow_json"])
+        [picker] = flow_components_of_type(flow_json, "CalendarPicker")
+        assert picker["min-date"] == "${data.when__min}"
+        assert sent_data(first)["when__min"] == "2026-09-01"
+        await answer(first, first_wa_id, "2026-09-27")
+        assert await asyncio.wait_for(first_task, timeout=15.0) == {"when": "2026-09-27"}
+    finally:
+        await cancel_and_join(first_task)
+
+    second_task = asyncio.create_task(ask(second_question, second_wa_id, "2026-10-01"))
+    try:
+        second = await wait_whatsapp_send(bridge.fake_whatsapp, second_question)
+        # The second ask differs only in the bound's value: it opens the same published Flow,
+        # nothing new is created or published, and its send carries its own bound.
+        assert len(bridge.fake_whatsapp.flows) == 1
+        assert bridge.fake_whatsapp.published_flows == [created]
+        assert second["payload"]["interactive"]["action"]["parameters"]["flow_id"] == created
+        assert sent_data(second)["when__min"] == "2026-10-01"
+
+        # A date the first ask allowed falls before this ask's bound: the door rejects it and
+        # re-sends the same Flow carrying this ask's bound again.
+        await answer(second, second_wa_id, "2026-09-27")
+        sends = await wait_channel_send_count(bridge.fake_whatsapp, second_question, 2)
+        resend = sends[-1]
+        assert resend["payload"]["interactive"]["action"]["parameters"]["flow_id"] == created
+        assert sent_data(resend)["when__min"] == "2026-10-01"
+        assert "Your last answer could not be accepted" in resend["payload"]["interactive"]["body"]["text"]
+
+        await answer(resend, second_wa_id, "2026-10-02")
+        assert await asyncio.wait_for(second_task, timeout=15.0) == {"when": "2026-10-02"}
+    finally:
+        await cancel_and_join(second_task)
 
 
 @pytest.mark.needs(

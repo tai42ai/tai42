@@ -114,9 +114,10 @@ WEB_MEDIA_EXPIRY_PENDING_TTL_SECONDS = 3
 WEB_MEDIA_EXPIRY_REAPER_INTERVAL_SECONDS = 1
 
 
-# The working-signal profile's hard ceiling on ONE turn's refresh loop, pinned LOW on the
-# CAPPED leg so the ceiling stops the loop after a couple of refreshes even on a long-held
-# turn — the observable a low ``CONVERSATIONS_WORKING_SIGNAL_MAX_SECONDS`` produces.
+# The working-signal profile's hard ceiling on ONE stretch of the refresh loop, pinned LOW on
+# the CAPPED leg so the ceiling ends the stretch after a couple of refreshes even on a long-held
+# turn: the indicator is cleared and the loop waits dormant until the turn ends — the observable
+# a low ``CONVERSATIONS_WORKING_SIGNAL_MAX_SECONDS`` produces.
 WORKING_SIGNAL_CAPPED_MAX_SECONDS = 1.2
 
 # The vendor-indicator lifetime the ``stub_working`` channel advertises on a working-signal
@@ -238,7 +239,9 @@ def build_bridge_stack(res: StackResources, variants: Variants) -> StackConfig:
     ``tools_agent`` + ``langchain_deep_agent`` agents on the scripted LLM stub. Access control is ON so
     the API door resolves a caller principal and the turn runs AS a route's bound execution
     key; the ``bridge_stack`` fixture seeds the root key + the public-channel-door route
-    table before boot."""
+    table before boot. The backup router is mounted so a suite on this stack can read what the
+    platform stored through a backup export: the ``versioned_documents`` section a preset save
+    leaves (exported and restored), and the ``storage`` section the media ingest writes."""
     manifest = {
         "default_routers": "none",
         "lifecycle_modules": [variants.identity.lifecycle_module],
@@ -255,6 +258,7 @@ def build_bridge_stack(res: StackResources, variants: Variants) -> StackConfig:
             "tai42_skeleton.routers.api_keys",
             "tai42_skeleton.routers.agents",
             "tai42_skeleton.routers.notifications",
+            "tai42_skeleton.routers.backup",
         ],
         "extensions_modules": _EXTENSION_MODULES,
         "backend_module": variants.backend.module,
@@ -331,8 +335,7 @@ def build_media_bridge_stack(res: StackResources, variants: Variants) -> StackCo
     Identical to :func:`build_bridge_stack` (backend + metrics + the redis conversations backend +
     the hooks manager an unsupported event is observed through) with the telegram + slack channel
     plugins added, so one stack bridges a media inbound to a turn AND replies + emits the platform
-    rejection event on every channel. The backup router is mounted so a suite exports the
-    storage section after an ingest. Telegram's ``setWebhook`` needs its inbound-door origin, so
+    rejection event on every channel. Telegram's ``setWebhook`` needs its inbound-door origin, so
     ``CHANNEL_TELEGRAM_PUBLIC_BASE_URL`` joins the replica-B origin fill; the shared
     ``^/api/channels/.*$`` public route already covers the telegram + slack inbound doors."""
     base = build_bridge_stack(res, variants)
@@ -344,7 +347,6 @@ def build_media_bridge_stack(res: StackResources, variants: Variants) -> StackCo
             "tai42_channel_telegram.register",
             "tai42_channel_slack.register",
         ],
-        "routers_modules": [*base.manifest["routers_modules"], "tai42_skeleton.routers.backup"],
     }
     # The blob provider the ingest chokepoint writes through is already live on the base stack (its
     # ``storage_module`` = ``variants.storage.module`` registers ``tai42_storage_local``, rooted at
@@ -452,8 +454,9 @@ def build_working_signal_capped_stack(res: StackResources, variants: Variants) -
     """The working-signal profile with a LOW refresh ceiling — the ceiling-caps-the-count leg.
 
     Identical to :func:`build_working_signal_stack` with ``CONVERSATIONS_WORKING_SIGNAL_MAX_SECONDS``
-    pinned low, so the loop stops at the ceiling after a couple of refreshes even while the turn is
-    still held open — the count a long turn would otherwise keep growing is capped. Kept apart from
+    pinned low, so the ceiling ends the stretch after a couple of refreshes even while the turn is
+    still held open (the indicator is cleared and the loop waits dormant) — the count a long turn
+    would otherwise keep growing is capped. Kept apart from
     the default-ceiling profile because a low ceiling would pre-empt that profile's stop-at-send
     leg."""
     base = build_working_signal_stack(res, variants)

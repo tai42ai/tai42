@@ -214,10 +214,23 @@ class FakeTelegram:
             message["caption"] = caption
         return self._inbound_update(secret=secret, chat_id=chat_id, message=message, update_id=update_id)
 
-    def build_callback_query(self, *, secret: str, chat_id: str, message_id: int, data: str) -> SignedInbound:
+    def build_callback_query(
+        self,
+        *,
+        secret: str,
+        chat_id: str,
+        message_id: int,
+        data: str,
+        keyboard: list[list[dict[str, str]]] | None = None,
+    ) -> SignedInbound:
         """A genuine inline-keyboard tap: a ``callback_query`` update whose ``message`` is the
         message holding the keyboard (``message_id`` in chat ``chat_id``) and whose ``data`` is the
-        tapped button's ``callback_data``."""
+        tapped button's ``callback_data``. ``keyboard`` is that message's ``inline_keyboard`` rows
+        (buttons of ``text`` + ``callback_data``) as Telegram echoes them; omitted, the message
+        carries no ``reply_markup``."""
+        message: dict[str, Any] = {"message_id": message_id, "chat": {"id": int(chat_id)}}
+        if keyboard is not None:
+            message["reply_markup"] = {"inline_keyboard": keyboard}
         body = json.dumps(
             {
                 "update_id": next(self._ids),
@@ -225,7 +238,7 @@ class FakeTelegram:
                     "id": f"cbq-{next(self._ids)}",
                     "from": {"id": int(chat_id)},
                     "data": data,
-                    "message": {"message_id": message_id, "chat": {"id": int(chat_id)}},
+                    "message": message,
                 },
             }
         ).encode()
@@ -238,6 +251,11 @@ class FakeTelegram:
         pinned to replay the identical update (a vendor redelivery)."""
         message = {"from": {"id": int(chat_id)}, "poll": {"id": "poll-1", "question": "?", "options": []}}
         return self._inbound_update(secret=secret, chat_id=chat_id, message=message, update_id=update_id)
+
+    def build_inbound_member(self, *, secret: str, chat_id: str, member: str, value: Any) -> SignedInbound:
+        """A genuine inbound update whose message carries ``member`` set to ``value`` and no text."""
+        message = {"from": {"id": int(chat_id)}, member: value}
+        return self._inbound_update(secret=secret, chat_id=chat_id, message=message)
 
     def _build_app(self) -> FastAPI:
         app = FastAPI()
@@ -982,6 +1000,7 @@ class FakeWhatsApp:
         wamid: str | None = None,
         valid: bool = True,
         context_id: str | None = None,
+        response_json: str | None = None,
     ) -> SignedInbound:
         """A genuine completed-Flow reply: Meta relays the filled form as an
         ``nfm_reply`` whose ``response_json`` is the form values (Flow number inputs
@@ -989,14 +1008,16 @@ class FakeWhatsApp:
         (the pending ask's ``interaction_id``). Signed X-Hub-Signature-256 like
         ``build_inbound``; ``valid=False`` signs under the WRONG secret. ``context_id``
         names the Flow message the reply answers (Meta's ``context.id``); omitted, the
-        reply carries no context."""
+        reply carries no context. ``response_json`` sets that string verbatim in place of
+        the encoded ``response``."""
         message_id = wamid if wamid is not None else self._mint_wamid()
+        encoded = json.dumps(response) if response_json is None else response_json
         message: dict[str, Any] = {
             "id": message_id,
             "from": wa_id,
             "timestamp": _meta_timestamp(None),
             "type": "interactive",
-            "interactive": {"type": "nfm_reply", "nfm_reply": {"response_json": json.dumps(response)}},
+            "interactive": {"type": "nfm_reply", "nfm_reply": {"response_json": encoded}},
         }
         _set_reply_context(message, phone_number_id, context_id)
         value = {"metadata": {"phone_number_id": phone_number_id}, "messages": [message]}

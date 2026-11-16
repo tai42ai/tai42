@@ -2,11 +2,11 @@
 
 A content a channel recognises but cannot bridge — a telegram poll, a slack file exposing neither a
 fetchable reference nor a name, a whatsapp ``errors`` notice naming the unsupported-message-type
-code (131051) — is never silently dropped: the participant gets the ONE generic notice
+code (131051), a twilio inbound with an empty ``Body`` and no media (a shared location, for one) — is
+never silently dropped: the participant gets the ONE generic notice
 ("This content type is not supported here.") on the vendor stub, the platform emits a single
 ``conversations_inbound_rejected`` event carrying ``reason == "unsupported_type"`` (observed through a
-hook fired on that topic), and no conversation turn is accepted. Twilio has no unsupported case — every
-MMS content type maps to a generic kind — so it is not exercised here.
+hook fired on that topic), and no conversation turn is accepted.
 
 Driven over the live media-bridge stack (all four channels + the hooks manager), signed webhook →
 inbound decode → ``notify_inbound_rejected`` chokepoint → the vendor reply + the platform event.
@@ -25,7 +25,7 @@ from typing import Any
 import httpx
 import pytest
 
-from tai42_e2e.manifests import BRIDGE_WHATSAPP_PHONE_ID
+from tai42_e2e.manifests import BRIDGE_TWILIO_FROM, BRIDGE_WHATSAPP_PHONE_ID
 from tai42_e2e.provider_stub import SignedInbound
 from tai42_e2e.settings import HarnessSettings
 from tai42_e2e.stack import TaiStack
@@ -127,7 +127,8 @@ async def _assert_rejects_once(
     )
     assert reasons == ["unsupported_type"], f"expected one unsupported_type event, saw {reasons!r}"
 
-    # A vendor redelivery of the SAME message is deduped at the door (slack event_id / whatsapp wamid)
+    # A vendor redelivery of the SAME message is deduped at the door (slack event_id / whatsapp wamid /
+    # twilio MessageSid)
     # BEFORE any notify/emit, so it produces no second notice and no second event — asserted straight
     # after the ack, which the door only returns once the redelivery is fully (and inertly) processed.
     resp2 = await _post(stack, path, redelivery)
@@ -230,18 +231,40 @@ async def test_whatsapp_non_content_notice_sends_no_reply(
     assert _notices_to(fake_whatsapp, wa_id, "to") == [], "a non-content notice must send no participant reply"
 
 
-@pytest.mark.needs("kind:channels:telegram", "helper:channel-fake:telegram", "setting:CHANNEL_TELEGRAM_WEBHOOK_SECRET")
-async def test_telegram_poll_is_rejected_and_acked(
-    media_bridge_stack: tuple[TaiStack, str], fake_telegram: Any, uniq: Callable[[str], str]
+@pytest.mark.needs("kind:channels:twilio", "helper:channel-fake:twilio", "setting:CHANNEL_TWILIO_AUTH_TOKEN")
+async def test_twilio_blank_inbound_is_rejected_once(
+    media_bridge_stack: tuple[TaiStack, str], fake_twilio: Any, uniq: Callable[[str], str]
 ) -> None:
-    """A telegram poll gets the generic refusal + event and the door acks 200 ``ignored`` — the
-    2xx is what stops the real vendor from ever redelivering (telegram redelivers only on a non-2xx,
-    and the unsupported path carries no message-level dedup, so the ack IS the redelivery guard)."""
+    """An inbound with an empty ``Body`` and no media carries nothing the channel can read — a shared
+    location arrives this way — so it gets the generic notice + event, never a turn."""
     stack, _root = media_bridge_stack
-    chat_id = str(920000000 + uuid.uuid4().int % 10**7)
-    secret = stack.config.env["CHANNEL_TELEGRAM_WEBHOOK_SECRET"]
-    inbound = fake_telegram.build_inbound_poll(secret=secret, chat_id=chat_id)
+    path = "/api/channels/twilio/inbound"
+    human_number = f"+1650{uuid.uuid4().int % 10**7:07d}"
+    inbound = fake_twilio.build_inbound(
+        auth_token=stack.config.env["CHANNEL_TWILIO_AUTH_TOKEN"],
+        public_url=f"{stack.origin(stack.port_b)}{path}",
+        twilio_number=BRIDGE_TWILIO_FROM,
+        human_number=human_number,
+        text="",
+    )
+    # Twilio dedupes per MessageSid, so a redelivery re-posts the same signed form.
+    await _assert_rejects_once(
+        stack,
+        uniq,
+        path=path,
+        inbound=inbound,
+        fake=fake_twilio,
+        recipient=human_number,
+        recipient_field="to",
+        redelivery=inbound,
+    )
 
+
+async def _assert_telegram_refuses_and_acks(
+    stack: TaiStack, fake_telegram: Any, uniq: Callable[[str], str], *, chat_id: str, inbound: SignedInbound
+) -> None:
+    """Post a telegram update the door refuses; assert the 200 ``ignored`` ack, one refusal on the
+    stub and one ``unsupported_type`` event."""
     probe = uniq("rej-probe")
     await _register_reject_hook(stack, uniq, probe=probe, client_address=chat_id)
 
@@ -253,7 +276,7 @@ async def test_telegram_poll_is_rejected_and_acked(
         got = _notices_to(fake_telegram, chat_id, "chat_id")
         return got if got else None
 
-    notices = await wait_for_async(_notice_landed, deadline=12.0, message="the poll refusal never reached the stub")
+    notices = await wait_for_async(_notice_landed, deadline=12.0, message="the refusal never reached the stub")
     assert len(notices) == 1, f"expected exactly one refusal, saw {notices!r}"
 
     async def _event_recorded() -> list[str] | None:
@@ -264,3 +287,32 @@ async def test_telegram_poll_is_rejected_and_acked(
         _event_recorded, deadline=12.0, message="the conversations_inbound_rejected event never fired the hook"
     )
     assert reasons == ["unsupported_type"], f"expected one unsupported_type event, saw {reasons!r}"
+
+
+@pytest.mark.needs("kind:channels:telegram", "helper:channel-fake:telegram", "setting:CHANNEL_TELEGRAM_WEBHOOK_SECRET")
+async def test_telegram_poll_is_rejected_and_acked(
+    media_bridge_stack: tuple[TaiStack, str], fake_telegram: Any, uniq: Callable[[str], str]
+) -> None:
+    """A telegram poll gets the generic refusal + event and the door acks 200 ``ignored`` — the
+    2xx is what stops the real vendor from ever redelivering (telegram redelivers only on a non-2xx,
+    and the unsupported path carries no message-level dedup, so the ack IS the redelivery guard)."""
+    stack, _root = media_bridge_stack
+    chat_id = str(920000000 + uuid.uuid4().int % 10**7)
+    secret = stack.config.env["CHANNEL_TELEGRAM_WEBHOOK_SECRET"]
+    inbound = fake_telegram.build_inbound_poll(secret=secret, chat_id=chat_id)
+    await _assert_telegram_refuses_and_acks(stack, fake_telegram, uniq, chat_id=chat_id, inbound=inbound)
+
+
+@pytest.mark.needs("kind:channels:telegram", "helper:channel-fake:telegram", "setting:CHANNEL_TELEGRAM_WEBHOOK_SECRET")
+async def test_telegram_unlabelled_content_gets_the_unsupported_refusal(
+    media_bridge_stack: tuple[TaiStack, str], fake_telegram: Any, uniq: Callable[[str], str]
+) -> None:
+    """A message member the channel neither reads, labels nor lists as a service message falls to the
+    default: the generic refusal + an ``unsupported_type`` event, and the door acks 200 ``ignored``."""
+    stack, _root = media_bridge_stack
+    chat_id = str(920000000 + uuid.uuid4().int % 10**7)
+    secret = stack.config.env["CHANNEL_TELEGRAM_WEBHOOK_SECRET"]
+    inbound = fake_telegram.build_inbound_member(
+        secret=secret, chat_id=chat_id, member="passport_data", value={"data": [], "credentials": {}}
+    )
+    await _assert_telegram_refuses_and_acks(stack, fake_telegram, uniq, chat_id=chat_id, inbound=inbound)

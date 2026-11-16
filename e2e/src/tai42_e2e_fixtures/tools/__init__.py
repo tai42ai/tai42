@@ -26,6 +26,7 @@ from tai42_e2e_fixtures.tools import (
     record_probe,
     reply_to,
     sandbox,
+    sibling_asks,
     tool_target,
 )
 
@@ -46,5 +47,6 @@ __all__ = [
     "record_probe",
     "reply_to",
     "sandbox",
+    "sibling_asks",
     "tool_target",
 ]

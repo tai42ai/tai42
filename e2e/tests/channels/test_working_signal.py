@@ -1,9 +1,10 @@
-"""The skeleton's per-turn working-on-it (typing) refresh loop, end to end.
+"""The skeleton's working-on-it (typing) refresh loop over a turn, end to end.
 
 A channel that advertises a vendor working-on-it indicator has it refreshed for the life of a
 bridged turn: the skeleton spawns one detached loop at the schedule seam, re-asserts the
-indicator before it lapses, and stops the instant the turn's answer is about to send (or at a hard
-ceiling). These legs drive that over a real bridged turn on the ``stub_working`` counting channel,
+indicator before it lapses, and stops the instant the turn's answer is about to send; a hard
+ceiling ends a stretch earlier, clearing the indicator while the loop waits dormant. These legs
+drive that over a real bridged turn on the ``stub_working`` counting channel,
 which RPUSHes every ``signal_working`` call onto a harness probe list:
 
 * a long-held turn is refreshed at least twice and stops once the record leaves the in-flight
@@ -254,7 +255,7 @@ async def test_a_low_ceiling_caps_the_working_signal_count(
     )
 
     await _wait_barrier(stack, marker, deadline=20.0)
-    # The loop asserts at least once before the low ceiling stops it.
+    # The loop asserts at least once before the low ceiling ends the stretch.
     await _wait_min_active(stack, provider_message_id, 1, deadline=15.0)
     # The turn stays held well past the ceiling; once it finally sends, the record leaves the
     # in-flight states.
@@ -336,13 +337,11 @@ async def test_api_door_turn_never_starts_a_working_signal(
     caller = stack.api(stack.port_b).with_token(created["api_key"])
 
     # The api door builds its record with no channel, so the loop's ``record.channel is None`` gate
-    # returns before it starts — the turn runs and answers with no working signal. An api-door
-    # record carries no provider message id, so a signal for it would land under the ``None`` key,
-    # and its composed address embeds the external user id.
+    # returns before it starts — the turn runs and answers with no working signal. A signal for
+    # it would be addressed to its composed address, which embeds the external user id.
     data = await caller.post(
         f"/api/conversations/{route_name}/messages",
         json={"external_user_id": external_user_id, "text": uniq("wsigapi-text"), "wait_seconds": 20},
     )
     assert data["answer"]["status"] == "answered", data
-    assert _signal_records(stack, "None") == []
     assert not any(external_user_id in recipient for recipient in _all_signal_recipients(stack))
