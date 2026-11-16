@@ -103,9 +103,10 @@ configuration at startup):
 
 A `text` or `select` question arrives as a normal SMS (a select ask lists its
 options numbered). The human **just replies** — no code to quote, no prefix.
-Correlation is fully out-of-band: any reply from the configured number resolves
+Correlation is fully out-of-band: any text reply from the configured number resolves
 the pair's pending question, so one question can be pending per number pair at
-a time; a second concurrent one is rejected loudly.
+a time; a second concurrent one is rejected loudly. A reply that carries media is
+never an answer: it bridges as one turn per media item and the question stays pending.
 
 A `confirm` or `external` question arrives as a tappable link and is answered
 in the browser via the callback door — no SMS reply is expected or matched, and

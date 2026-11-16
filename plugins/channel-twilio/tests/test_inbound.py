@@ -12,7 +12,6 @@ import pytest
 from starlette.responses import Response
 from tai42_contract.channels import AnswerForwardError, InboundAnswerOutcome
 from tai42_contract.conversations import (
-    BlankInboundTextError,
     DeliveryReceipt,
     InboundMediaKind,
     InboundRejectionReason,
@@ -318,22 +317,95 @@ async def test_uncorrelated_unrouted_inbound_logged_ack_no_turn(
     assert _SEEN_KEY in fake_redis.store  # replay of the same sid dedupes
 
 
-async def test_uncorrelated_blank_inbound_logged_ack_no_turn(
-    handler, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx, caplog: pytest.LogCaptureFixture
+@pytest.mark.parametrize(
+    ("pairs", "kind"),
+    [
+        # A WhatsApp location shared over Twilio arrives with an empty Body, NumMedia=0 and the
+        # Latitude/Longitude/Address/Label parameters.
+        (
+            {"Body": "", "NumMedia": "0", "Latitude": "37.78", "Longitude": "-122.39", "Label": "Acme"},
+            "location",
+        ),
+        ({"Body": "   "}, "empty"),
+    ],
+)
+async def test_a_blank_inbound_gets_one_unsupported_notice(
+    pairs, kind, handler, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx, caplog: pytest.LogCaptureFixture
 ):
-    # No pending question and a whitespace-only body: accept() raises
-    # BlankInboundTextError -> the bridge logs and success-acks, marks the sid seen,
-    # and starts no forward (never a 5xx retry-storm), no turn produced.
-    stub_app.conversations.accept_error = BlankInboundTextError("inbound text is blank")
-
+    # No body and no media: the door logs, sends the user one unsupported-type notice,
+    # success-acks and marks the sid seen (never a 5xx retry-storm), no turn produced,
+    # nothing forwarded.
     with caplog.at_level("WARNING"):
-        result = await handler(signed_request(_pairs(Body="   ")))
+        result = await handler(signed_request(_pairs(**pairs)))
 
     assert result.status_code == 204
     assert not fake_httpx.calls  # no ask forward
-    assert len(stub_app.conversations.accept_calls) == 1  # the bridge was attempted, no turn produced
+    assert stub_app.conversations.accept_calls == []  # no turn
+    assert stub_app.conversations.rejected_calls == [
+        {
+            "channel_id": "twilio",
+            "recipient": _HUMAN,
+            "sender_identity": _TWILIO,
+            "kind": kind,
+            "reason": InboundRejectionReason.UNSUPPORTED_TYPE,
+        }
+    ]
     assert any("blank" in record.message for record in caplog.records)
     assert _SEEN_KEY in fake_redis.store  # replay of the same sid dedupes
+
+
+async def test_a_redelivered_blank_inbound_sends_no_second_notice(handler, stub_app, fake_redis: FakeRedis):
+    await handler(signed_request(_pairs(Body="")))
+    await handler(signed_request(_pairs(Body="")))
+
+    assert len(stub_app.conversations.rejected_calls) == 1
+
+
+_LOCATION = {"Body": "", "NumMedia": "0", "Latitude": "37.78", "Longitude": "-122.39"}
+
+
+@pytest.mark.parametrize("pending", [True, False])
+async def test_a_blank_inbound_is_never_an_answer(
+    pending, handler, stub_app, channels, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    # A blank inbound is content this channel cannot read: it never reaches the answer
+    # ladder (where a text question would take "" as its answer), whether or not a question
+    # is pending. The user gets one unsupported-type notice, the message is acked and seen,
+    # and a pending question stays parked.
+    if pending:
+        await _seed_pending()
+    channels.inbound_outcome = InboundAnswerOutcome.FORWARDED
+
+    result = await handler(signed_request(_pairs(**_LOCATION)))
+
+    assert result.status_code == 204
+    assert channels.inbound_calls == []
+    assert stub_app.conversations.accept_calls == []
+    assert stub_app.conversations.rejected_calls == [
+        {
+            "channel_id": "twilio",
+            "recipient": _HUMAN,
+            "sender_identity": _TWILIO,
+            "kind": "location",
+            "reason": InboundRejectionReason.UNSUPPORTED_TYPE,
+        }
+    ]
+    assert not fake_httpx.calls
+    assert _SEEN_KEY in fake_redis.store
+    assert await _pending_intact(fake_redis) is pending
+
+
+async def test_the_message_after_a_blank_one_answers_the_pending_question(handler, channels, fake_redis: FakeRedis):
+    await _seed_pending()
+    channels.inbound_outcome = InboundAnswerOutcome.FORWARDED
+
+    await handler(signed_request(_pairs(**_LOCATION)))
+    result = await handler(signed_request(_pairs(MessageSid="SM778", Body="yes")))
+
+    assert result.status_code == 204
+    (call,) = channels.inbound_calls
+    assert call.answer == "yes"
+    assert call.correlation_key == f"{_TWILIO}:{_HUMAN}"
 
 
 # --- Bridge branch (correlation miss) -----------------------------------------
@@ -538,6 +610,32 @@ async def test_mms_multiple_media_bridges_one_served_turn_per_item(
     assert accepts[1]["attachments"] == [served1.item]
     assert accepts[1]["params"]["media_kind"] == "video"
     assert _SEEN_KEY in fake_redis.store
+
+
+@pytest.mark.parametrize(("body", "turn_text"), [("", "[image]"), ("look at this", "look at this")])
+async def test_a_media_message_is_never_an_answer_to_a_pending_question(
+    body, turn_text, handler, stub_app, stub_media, channels, fake_redis: FakeRedis, monkeypatch: pytest.MonkeyPatch
+):
+    # A message that carries media bridges as a turn per media item, with or without a caption:
+    # it never reaches the answer ladder (where a text question would take its Body as the answer
+    # and the media would be lost), and the pending question stays parked.
+    await _seed_pending()
+    channels.inbound_outcome = InboundAnswerOutcome.FORWARDED
+    served = _ingested()
+    stub_media.ingest_results.append(served)
+    _patch_stream(monkeypatch, [], [_FakeStream()])
+
+    result = await handler(signed_request(_media_pairs(body=body, MediaUrl0=_MEDIA0, MediaContentType0="image/jpeg")))
+
+    assert result.status_code == 204
+    assert channels.inbound_calls == []
+    (accept,) = stub_app.conversations.accept_calls
+    assert accept["text"] == turn_text
+    assert accept["provider_message_id"] == "SM777-0"
+    assert accept["attachments"] == [served.item]
+    assert stub_app.conversations.rejected_calls == []
+    assert _SEEN_KEY in fake_redis.store
+    assert await _pending_intact(fake_redis) is True
 
 
 async def test_mms_blank_body_document_bridges_with_sanitised_placeholder(
@@ -819,18 +917,19 @@ async def test_mms_redelivery_deduped_no_second_fetch(
     assert len(stub_app.conversations.accept_calls) == 1
 
 
-async def test_no_body_no_media_is_legit_ack_drop(
+async def test_no_body_no_media_is_acked_with_one_notice(
     handler, stub_app, fake_redis: FakeRedis, caplog: pytest.LogCaptureFixture
 ):
-    # NumMedia=0 and an empty Body: the text path calls accept(text=""), the seam raises
-    # BlankInboundTextError, and the bridge logs and success-acks (no notify, no turn, no retry).
-    stub_app.conversations.accept_error = BlankInboundTextError("inbound text is blank")
-
+    # NumMedia=0 and an empty Body: the door logs, sends one notice and success-acks (no turn,
+    # no retry).
     with caplog.at_level("WARNING"):
         result = await handler(signed_request(_media_pairs(body="", num=0)))
 
     assert result.status_code == 204
-    assert stub_app.conversations.rejected_calls == []
+    assert stub_app.conversations.accept_calls == []
+    (rejected,) = stub_app.conversations.rejected_calls
+    assert rejected["kind"] == "empty"
+    assert rejected["reason"] is InboundRejectionReason.UNSUPPORTED_TYPE
     assert any("blank" in record.message for record in caplog.records)
     assert _SEEN_KEY in fake_redis.store
 

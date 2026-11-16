@@ -73,6 +73,17 @@ async def test_a_correlated_whatsapp_answer_opens_the_window_too(
     assert _WA_KEY in fake_redis.store
 
 
+async def test_a_shared_whatsapp_location_opens_the_window_too(
+    handler, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    pairs = [*_pairs()[:3], ("Body", ""), ("NumMedia", "0"), ("Latitude", "37.78"), ("Longitude", "-122.39")]
+
+    result = await handler(signed_request(pairs))
+
+    assert result.status_code == 204
+    assert _WA_KEY in fake_redis.store
+
+
 async def test_an_sms_inbound_writes_no_window(handler, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx):
     await handler(signed_request(_pairs(to=_SMS_TWILIO, sender=_SMS_HUMAN)))
 

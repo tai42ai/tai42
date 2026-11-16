@@ -15,7 +15,8 @@ before any byte of the body is trusted. Two correctness rules:
 Twilio's scheme carries no timestamp, so the ``MessageSid`` dedupe is the replay
 guard. A reply matching a pending question is forwarded as ``{"answer": <Body
 verbatim, outer whitespace stripped>}``; on a correlation miss the message enters
-the conversation bridge instead. The signed status door reuses the same auth.
+the conversation bridge instead. A message with no body and no media is never an
+answer: it gets one unsupported-type notice. The signed status door reuses the same auth.
 """
 
 from __future__ import annotations
@@ -31,7 +32,6 @@ from starlette.responses import JSONResponse, PlainTextResponse, Response
 from tai42_contract.app import tai42_app
 from tai42_contract.channels import InboundAnswerOutcome, InboundBridge
 from tai42_contract.conversations import (
-    BlankInboundTextError,
     DeliveryReceipt,
     InboundMediaKind,
     InboundRejectionReason,
@@ -170,8 +170,13 @@ async def twilio_inbound(request: Request) -> Response:
     """Receive a Twilio inbound message and resolve the pair's pending question, or route it to the bridge.
 
     Order is load-bearing: bounded body read (413) → signature (nothing trusted
-    before it) → MessageSid dedupe → the shared inbound-answer ladder. A correlated
-    reply is resolved by the ladder (forward / retry-in-place / bridge over the
+    before it) → MessageSid dedupe → the WhatsApp reply-window mark → the blank check →
+    the media check → the shared inbound-answer ladder. A message with no body and no media is
+    content this channel cannot read and never an answer: it skips the ladder (a pending question
+    stays parked), gets one unsupported-type notice, acks 204 and marks the sid seen. A message
+    that carries media is never an answer either: it skips the ladder (a pending question stays
+    parked) and bridges as one turn per media item, its caption riding the first. A text-only
+    correlated reply is resolved by the ladder (forward / retry-in-place / bridge over the
     plugin's :class:`CorrelationStore`); a correlation MISS (``NO_CORRELATION``)
     goes to this channel's bridge. Every resolved/kept/bridged
     outcome acks 204 and marks the ``MessageSid`` seen; an ``AnswerForwardError``
@@ -201,7 +206,11 @@ async def twilio_inbound(request: Request) -> Response:
     # what the message is, and a retry after a raised ladder opens it from the same instant.
     if human_number.startswith(WHATSAPP_ADDRESS_PREFIX):
         await mark_reply_window(twilio_number, human_number, message_sid)
+    if _is_blank_inbound(form):
+        return await _reject_blank_inbound(form, message_sid)
     quoted_sid = _replied_message_sid(form)
+    if _media_count(form) > 0:
+        return await _bridge_inbound(form, message_sid, reply_to_medium_message_id=quoted_sid)
     result = await tai42_app.channels.handle_inbound_answer(
         channel_id="twilio",
         correlation_key=correlation_key(twilio_number, human_number),
@@ -257,7 +266,7 @@ def _media_count(form: dict[str, str]) -> int:
 async def _bridge_inbound(
     form: dict[str, str], message_sid: str, *, reply_to_medium_message_id: str | None
 ) -> Response:
-    """Route an uncorrelated inbound message into the conversation bridge.
+    """Route an uncorrelated text message, or any message that carries media, into the conversation bridge.
 
     ``our_identity`` = To, ``client_address`` = From (verbatim). A text-only message
     bridges one turn under the bare ``MessageSid``; an MMS fetches and ingests each
@@ -267,20 +276,45 @@ async def _bridge_inbound(
     turn is never blank. Every turn carries ``reply_to_medium_message_id``, the sid of the
     message this one replies to (``None`` when it replies to none). A permanent media failure
     notifies the participant once and acks; a transient fetch/read fault propagates so Twilio
-    redelivers. A message with no route bound, or with no body and no media, is logged and
-    success-acked (the provider must not retry-storm a permanently-unrouted or empty message);
+    redelivers. A message with no route bound is logged and success-acked (the provider must
+    not retry-storm a permanently-unrouted message);
     a retryable overflow, a message refused while the server reloads, or an infrastructure
     failure propagates as a 5xx so Twilio redelivers when its webhook URL carries the
     ``#rp=5xx`` override, rather than silently dropping it.
     """
     try:
         await _accept_inbound(form, message_sid, reply_to_medium_message_id=reply_to_medium_message_id)
-    except BlankInboundTextError as exc:
-        logger.warning("blank Twilio inbound %s dropped: %s", message_sid, exc)
     except LookupError as exc:
         logger.warning("unrouted Twilio inbound %s dropped: %s", message_sid, exc)
     await mark_seen(message_sid)
     return Response(status_code=204)
+
+
+def _is_blank_inbound(form: dict[str, str]) -> bool:
+    """Whether the inbound carries no body and no media — content this channel cannot read, never an answer."""
+    return not form.get("Body", "").strip() and _media_count(form) <= 0
+
+
+async def _reject_blank_inbound(form: dict[str, str], message_sid: str) -> Response:
+    """Answer a blank inbound with one unsupported-type notice, success-ack it and mark it seen.
+
+    A pending question to the user is left parked, so their next message still answers it.
+    """
+    logger.warning("blank Twilio inbound %s not bridged; sending the unsupported notice", message_sid)
+    await tai42_app.conversations.notify_inbound_rejected(
+        channel_id="twilio",
+        recipient=form.get("From", ""),
+        sender_identity=form.get("To", ""),
+        kind=_blank_inbound_kind(form),
+        reason=InboundRejectionReason.UNSUPPORTED_TYPE,
+    )
+    await mark_seen(message_sid)
+    return Response(status_code=204)
+
+
+def _blank_inbound_kind(form: dict[str, str]) -> str:
+    """The content label of an inbound with no body and no media: ``location`` when it shares one."""
+    return "location" if "Latitude" in form else "empty"
 
 
 async def _accept_inbound(form: dict[str, str], message_sid: str, *, reply_to_medium_message_id: str | None) -> None:
@@ -431,13 +465,14 @@ async def _reject_media_item(
     """Notify the participant once that one media could not be received, then keep any caption.
 
     The notice is guarded by a per-item seen marker (``f"{message_sid}:media:{index}:rejected"`` —
-    which cannot collide with a bare ``MessageSid``, as Twilio sids carry no colon): the notice
-    fires and the marker is set ONLY after the send succeeds, so a redelivery driven by a SIBLING
-    item's transient fault never repeats a rejection already delivered. A failed send leaves the
-    marker unset and raises into the door's guard, so the retry re-sends. When the item carried the
-    message ``Body`` as a caption, that text is still bridged as a turn (with the kind/mime parity
-    params but no served reference — the media does not exist); that turn is idempotent under its
-    ``provider_message_id``.
+    which cannot collide with a bare ``MessageSid``, as Twilio sids carry no colon): the marker is
+    set once the rejection seam returns, so a redelivery driven by a SIBLING item's transient fault
+    never repeats a rejection already handled. The seam logs a failed send of the notice and does
+    not raise, so that item is not notified again; a fault the seam propagates (a route-resolution
+    store fault) leaves the marker unset and reaches the door's guard, so the retry notifies. When
+    the item carried the message ``Body`` as a caption, that text is still bridged as a turn (with
+    the kind/mime parity params but no served reference — the media does not exist); that turn is
+    idempotent under its ``provider_message_id``.
     """
     item_key = f"{message_sid}:media:{index}:rejected"
     if not await already_seen(item_key):

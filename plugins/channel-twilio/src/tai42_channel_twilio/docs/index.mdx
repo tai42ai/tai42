@@ -63,7 +63,9 @@ major type resolves the kind (`image`/`audio`/`video`, `application`/`text` →
 `document`, otherwise `file`). The `Body` caption rides the first item's text; an
 item with no caption gets a `[kind]` placeholder (a document reads
 `[document: <name>]` from the platform-sanitised filename), so a media message with
-a blank body is never dropped as empty.
+a blank body is never dropped as empty. A message that carries media is never taken
+as an answer, with or without a caption: it bridges as above, and a question pending
+for the user stays open, so their next text message still answers it.
 
 Entry params are bounded at the door (at most 16 keys, each value at most 512 characters,
 the whole set at most 2048 bytes). Because Twilio redelivers a failed webhook, this door
@@ -79,8 +81,11 @@ or no configured store reads as *could not receive*; a file over the platform ca
 first item is still bridged as its own text turn. A transient fault (a `5xx` or
 timeout from Twilio or its CDN, a torn read) instead returns a non-2xx webhook so
 Twilio redelivers; the `MessageSid` dedupe keeps the redelivery from
-double-processing. A message with no body and no media stays the legitimate
-acknowledged drop.
+double-processing. A message with no body and no media (a location shared over
+WhatsApp arrives so) is not bridged and is never taken as an answer: the user gets
+one *unsupported* notice, the rejection event names its kind (`location` when it
+carries `Latitude`, else `empty`), and the message is acknowledged. A question
+pending for the user stays open, so their next message still answers it.
 
 ## Create a bridge route
 
