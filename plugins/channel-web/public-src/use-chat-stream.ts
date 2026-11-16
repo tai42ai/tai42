@@ -9,7 +9,7 @@
  */
 import { useEffect, useRef, useState } from 'react';
 
-import { applyFrame } from '@/frame-reducer';
+import { applyFrame, type WorkingFrame } from '@/frame-reducer';
 import { type ChatItem, EMPTY_MODEL, type StreamModel } from '@/transcript-model';
 import { streamTranscript, type TranscriptSink } from '@/transcript-subscription';
 
@@ -17,6 +17,9 @@ import { streamTranscript, type TranscriptSink } from '@/transcript-subscription
 export interface ChatStreamState {
   readonly items: readonly ChatItem[];
   readonly answeredIds: ReadonlySet<string>;
+  /** The latest `chat.working` frame, or null before one arrives. A fresh object
+   * per frame, so a repeated assert is a new value. */
+  readonly working: WorkingFrame | null;
   readonly connected: boolean;
   /** The replayed backlog has arrived at least once — until then the page shows
    * its loading state rather than an empty conversation. */
@@ -32,6 +35,7 @@ export interface ChatStreamState {
 const INITIAL_STATE: ChatStreamState = {
   items: EMPTY_MODEL.items,
   answeredIds: EMPTY_MODEL.answeredIds,
+  working: null,
   connected: false,
   backlogLoaded: false,
   error: null,
@@ -70,6 +74,10 @@ export function useChatStream(identity: string, epoch: number): ChatStreamState 
         }
         if (outcome.kind === 'backlog-done') {
           setState((prev) => ({ ...prev, backlogLoaded: true, error: null }));
+          return;
+        }
+        if (outcome.kind === 'working') {
+          setState((prev) => ({ ...prev, working: outcome.working, error: null }));
           return;
         }
         modelRef.current = outcome.model;

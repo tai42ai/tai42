@@ -3,6 +3,7 @@ import type userEvent from '@testing-library/user-event';
 import type { ReactElement } from 'react';
 
 import { ChatApp } from '@/app';
+import type { WorkingFrame } from '@/frame-reducer';
 import type { ChatItem } from '@/transcript-model';
 import type { ChatStreamState } from '@/use-chat-stream';
 
@@ -15,6 +16,7 @@ export function streamState(overrides: Partial<ChatStreamState> = {}): ChatStrea
   return {
     items: [],
     answeredIds: new Set(),
+    working: null,
     connected: true,
     backlogLoaded: true,
     error: null,
@@ -22,6 +24,11 @@ export function streamState(overrides: Partial<ChatStreamState> = {}): ChatStrea
     sessionExpired: false,
     ...overrides,
   };
+}
+
+/** A `chat.working` frame as the stream state carries it; each call is a new frame. */
+export function working(active: boolean, id = '1-0', ttlSeconds = 10): WorkingFrame {
+  return { id, active, ttlSeconds };
 }
 
 export function agentSaid(id: string, text: string): ChatItem {

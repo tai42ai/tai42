@@ -1,11 +1,12 @@
 """The SSE generator — transcript backlog, the ``chat.backlog_done`` marker, the
-live tail, deadline keepalives, the loud stall on a black-holed XREAD, the pooled
-connection's release before the first yield, and the concurrent-stream slot
+live tail over the transcript and the working frame, deadline keepalives, the loud
+stall on a black-holed XREAD, the pooled connection's release before the first yield, and the concurrent-stream slot
 accounting."""
 
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import ExitStack, asynccontextmanager, contextmanager
 from types import SimpleNamespace
@@ -16,7 +17,7 @@ from starlette.requests import Request
 from tai42_kit.clients.impl.redis import RedisClient
 from tai42_kit.settings import reset_all_settings
 
-from tai42_channel_web import stream
+from tai42_channel_web import WebChannel, stream
 from tai42_channel_web.settings import WebSettings, web_settings
 from tai42_channel_web.store import connection, transcript
 from tai42_channel_web.store.transcript import append_message
@@ -27,6 +28,20 @@ from .conftest import IDENTITY, VISITOR_ID, FakeRedis
 pytestmark = pytest.mark.usefixtures("web_env")
 
 _TRANSCRIPT_KEY = f"channel:web:transcript:{IDENTITY}:{VISITOR_ID}"
+_WORKING_KEY = f"channel:web:working:{IDENTITY}:{VISITOR_ID}"
+_BACKLOG_DONE = "event: chat.backlog_done\ndata: {}\n\n"
+
+
+def _event(frame: str) -> str:
+    return frame.split("\n", 1)[0].removeprefix("event: ")
+
+
+def _data(frame: str) -> dict:
+    return json.loads(frame.split("data: ", 1)[1].split("\n\n", 1)[0])
+
+
+def _message_fields(text: str) -> dict[str, str]:
+    return {"event": "chat.message", "data": json.dumps({"id": text, "direction": "out", "text": text})}
 
 
 def _open_stream(request: Any, settings: WebSettings, address: str = VISITOR_ID):
@@ -110,6 +125,77 @@ async def test_tail_forwards_new_entry(fake_redis: FakeRedis):
             # The entry lands AFTER cursor capture, so it can come only from the tail.
             await append_message(IDENTITY, VISITOR_ID, "out", "live")
     assert any('"text": "live"' in f for f in frames)
+
+
+async def test_tail_emits_a_placeholder_for_a_malformed_entry(fake_redis: FakeRedis, caplog: pytest.LogCaptureFixture):
+    frames: list[str] = []
+    with caplog.at_level("WARNING"):
+        async for frame in _open_stream(_AliveRequest(alive=1), web_settings()):
+            frames.append(frame)
+            if frame == _BACKLOG_DONE:
+                fake_redis.streams[_TRANSCRIPT_KEY] = [("1-0", {"garbage": "x"})]
+    assert _event(frames[-1]) == "chat.unavailable"
+    assert _data(frames[-1])["id"] == "1-0"
+    assert any("malformed" in r.message for r in caplog.records)
+
+
+# -- the working frame ----------------------------------------------------------
+
+
+async def test_the_retained_working_frame_follows_the_backlog(fake_redis: FakeRedis):
+    # A reconnecting page reads the current state: the one retained frame comes first
+    # from the tail, and the backlog itself never carries a working frame.
+    await append_message(IDENTITY, VISITOR_ID, "in", "hello")
+    await WebChannel().signal_working(recipient=VISITOR_ID, sender_identity=IDENTITY, active=True)
+
+    frames = await _collect(_open_stream(_AliveRequest(alive=1), web_settings()))
+
+    backlog = frames[: frames.index(_BACKLOG_DONE)]
+    assert [_event(frame) for frame in backlog] == ["chat.message"]
+    assert frames[frames.index(_BACKLOG_DONE) + 1] == (
+        'event: chat.working\ndata: {"id": "1-0", "active": true, "ttl": 10.0}\n\n'
+    )
+
+
+async def test_the_tail_forwards_each_working_frame_once(fake_redis: FakeRedis):
+    frames: list[str] = []
+    async for frame in _open_stream(_AliveRequest(alive=3), web_settings()):
+        frames.append(frame)
+        if frame == _BACKLOG_DONE:
+            await WebChannel().signal_working(recipient=VISITOR_ID, sender_identity=IDENTITY, active=False)
+
+    working = [_data(frame) for frame in frames if _event(frame) == "chat.working"]
+    assert working == [{"id": "1-0", "active": False, "ttl": 10.0}]
+
+
+async def test_one_read_emits_both_streams_in_entry_id_order(fake_redis: FakeRedis):
+    # Both streams' ids come from the one server clock; on a tie the working frame goes
+    # first, which is the order the channel writes a pause before its question.
+    frames: list[str] = []
+    async for frame in _open_stream(_AliveRequest(alive=1), web_settings()):
+        frames.append(frame)
+        if frame == _BACKLOG_DONE:
+            fake_redis.streams[_TRANSCRIPT_KEY] = [("3-0", _message_fields("a")), ("5-0", _message_fields("b"))]
+            fake_redis.streams[_WORKING_KEY] = [("5-0", {"active": "0", "ttl": "10.0"})]
+
+    tail = frames[frames.index(_BACKLOG_DONE) + 1 :]
+    assert [(_event(frame), _data(frame)["id"]) for frame in tail] == [
+        ("chat.message", "a"),
+        ("chat.working", "5-0"),
+        ("chat.message", "b"),
+    ]
+
+
+async def test_a_malformed_working_entry_is_logged_and_not_emitted(
+    fake_redis: FakeRedis, caplog: pytest.LogCaptureFixture
+):
+    fake_redis.streams[_WORKING_KEY] = [("1-0", {"active": "maybe"})]
+
+    with caplog.at_level("WARNING"):
+        frames = await _collect(_open_stream(_AliveRequest(alive=1), web_settings()))
+
+    assert all(_event(frame) != "chat.working" for frame in frames)
+    assert any("malformed web working entry 1-0" in r.message for r in caplog.records)
 
 
 async def test_keepalive_then_disconnect(fake_redis: FakeRedis):

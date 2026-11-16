@@ -110,7 +110,7 @@ export function ChatApp({ identity, title }: ChatAppProps): ReactElement {
   const ended = reset.sessionEnded || stream.sessionExpired;
   const streamHealthy = stream.connected && stream.error === null;
 
-  const typing = useTypingIndicator({ items, ended, streamHealthy });
+  const typing = useTypingIndicator({ working: stream.working, ended, streamHealthy });
   const outbox = useOutbox({
     identity,
     items,
@@ -118,8 +118,6 @@ export function ChatApp({ identity, title }: ChatAppProps): ReactElement {
     generationRef: reset.generationRef,
     composerRef,
     onSessionEnded: reset.endConversation,
-    markAwaitingReply: typing.markAwaitingReply,
-    clearTyping: typing.clearTyping,
   });
   const answer = useAnswerSubmit({
     generationRef: reset.generationRef,

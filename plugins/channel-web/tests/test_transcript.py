@@ -1,5 +1,5 @@
 """The transcript stream — the message/media/question/answer appenders, the exact
-max-entries trim, the one-pipeline write, and the backlog/tail replay reads."""
+max-entries trim, the one-pipeline write, and the backlog replay read."""
 
 from __future__ import annotations
 
@@ -18,7 +18,6 @@ from tai42_channel_web.store.transcript import (
     append_question,
     capture_cursor,
     read_backlog_batch,
-    read_tail,
 )
 
 from .conftest import CALLBACK, IDENTITY, VISITOR_ID, FakeRedis, _deadline
@@ -380,30 +379,3 @@ async def test_read_backlog_stops_at_the_end_bound(fake_redis: FakeRedis):
     assert start is None
     assert len(frames) == 1
     assert '"text": "before"' in frames[0]
-
-
-async def test_read_tail_advances_cursor_and_returns_new_frames(fake_redis: FakeRedis):
-    await append_message(IDENTITY, VISITOR_ID, "in", "one")
-    async with connection.pooled_redis_ctx() as redis:
-        cursor = await capture_cursor(redis, IDENTITY, VISITOR_ID)
-        await append_message(IDENTITY, VISITOR_ID, "out", "two")
-        new_cursor, frames = await read_tail(redis, IDENTITY, VISITOR_ID, cursor, 1)
-    assert len(frames) == 1
-    assert '"text": "two"' in frames[0]
-    assert new_cursor != cursor
-
-
-async def test_read_tail_emits_a_placeholder_for_a_malformed_entry(
-    fake_redis: FakeRedis, caplog: pytest.LogCaptureFixture
-):
-    fake_redis.streams[_TRANSCRIPT_KEY] = [("1-0", {"garbage": "x"})]
-    with caplog.at_level("WARNING"):
-        async with connection.pooled_redis_ctx() as redis:
-            new_cursor, frames = await read_tail(redis, IDENTITY, VISITOR_ID, "0-0", 1)
-    assert len(frames) == 1
-    assert _frame_event(frames[0]) == UNAVAILABLE_EVENT
-    placeholder = _frame_data(frames[0])
-    assert placeholder["id"] == "1-0"
-    assert datetime.fromisoformat(placeholder["ts"])  # a parseable ordering timestamp
-    assert new_cursor == "1-0"
-    assert any("malformed" in r.message for r in caplog.records)

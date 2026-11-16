@@ -417,8 +417,10 @@ unknown token.
   field is absent from every frame whose sender sent no key.
 - `GET /api/channels/web/stream?identity=<id>` — the SSE feed of the session's own
   conversation, keyed by `(identity, visitor id)`: the transcript backlog, a
-  `chat.backlog_done` marker, then a live tail of `chat.message` / `chat.question` /
-  `chat.answered` frames with keepalive comments. A missing or unusable `identity`
+  `chat.backlog_done` marker, then a live tail of `chat.message` / `chat.media` /
+  `chat.form` / `chat.question` / `chat.answered` / `chat.working` frames with keepalive
+  comments; a transcript entry that cannot be read is sent as a `chat.unavailable`
+  placeholder in its place. A missing or unusable `identity`
   → `400`; an `identity` the caller's session was not minted on → `401`; past a
   concurrent-stream cap → `503`, whose message names which ceiling was hit (this
   session's or the whole server's).

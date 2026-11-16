@@ -161,15 +161,12 @@ function useOutboxActions(params: {
   generationRef: RefObject<number>;
   composerRef: RefObject<HTMLTextAreaElement | null>;
   onSessionEnded: () => void;
-  markAwaitingReply: () => void;
-  clearTyping: () => void;
   outbox: readonly OutboxItem[];
   setOutbox: Dispatch<SetStateAction<readonly OutboxItem[]>>;
   setPinToken: Dispatch<SetStateAction<number>>;
 }): { send: Outbox['send']; onRetry: Outbox['onRetry'] } {
   const { identity, ended, generationRef, composerRef } = params;
-  const { onSessionEnded, markAwaitingReply, clearTyping } = params;
-  const { outbox, setOutbox, setPinToken } = params;
+  const { onSessionEnded, outbox, setOutbox, setPinToken } = params;
 
   const deliver = useCallback(
     (
@@ -188,25 +185,15 @@ function useOutboxActions(params: {
           setOutbox((prev) =>
             withStatus(prev, localId, { status: 'sent', error: null, messageId }),
           );
-          markAwaitingReply();
         },
         (err: unknown) => {
           if (generationRef.current !== generation) return;
           setOutbox((prev) => withStatus(prev, localId, failurePatch(err)));
-          clearTyping();
           if (isSessionMissing(err)) onSessionEnded();
         },
       );
     },
-    [
-      identity,
-      generationRef,
-      markAwaitingReply,
-      clearTyping,
-      onSessionEnded,
-      setOutbox,
-      setPinToken,
-    ],
+    [identity, generationRef, onSessionEnded, setOutbox, setPinToken],
   );
 
   const send = useCallback(
@@ -275,11 +262,8 @@ export function useOutbox(params: {
   generationRef: RefObject<number>;
   composerRef: RefObject<HTMLTextAreaElement | null>;
   onSessionEnded: () => void;
-  markAwaitingReply: () => void;
-  clearTyping: () => void;
 }): Outbox {
-  const { identity, items, ended, generationRef, composerRef } = params;
-  const { onSessionEnded, markAwaitingReply, clearTyping } = params;
+  const { identity, items, ended, generationRef, composerRef, onSessionEnded } = params;
   const [outbox, setOutbox] = useState<readonly OutboxItem[]>([]);
   const [pinToken, setPinToken] = useState(0);
 
@@ -319,8 +303,6 @@ export function useOutbox(params: {
     generationRef,
     composerRef,
     onSessionEnded,
-    markAwaitingReply,
-    clearTyping,
     outbox,
     setOutbox,
     setPinToken,

@@ -96,6 +96,41 @@ describe('useChatStream', () => {
     expect(result.current.items).toHaveLength(1);
   });
 
+  it('publishes each working frame as the latest working state, never as an item', async () => {
+    const feed = pushable();
+    api.openChatStream.mockResolvedValue(feed.response);
+
+    const { result } = renderHook(() => useChatStream('site-alpha', 0));
+    await waitFor(() => expect(result.current.connected).toBe(true));
+    expect(result.current.working).toBeNull();
+
+    feed.push(BACKLOG_DONE);
+    feed.push(frame('chat.working', { id: '1-0', active: true, ttl: 10 }));
+    await waitFor(() =>
+      expect(result.current.working).toEqual({ id: '1-0', active: true, ttlSeconds: 10 }),
+    );
+
+    feed.push(frame('chat.working', { id: '2-0', active: false, ttl: 10 }));
+    await waitFor(() => expect(result.current.working?.active).toBe(false));
+    expect(result.current.items).toHaveLength(0);
+  });
+
+  it('starts a rotated session with no working state', async () => {
+    api.openChatStream.mockResolvedValue(
+      open(BACKLOG_DONE, frame('chat.working', { id: '1-0', active: true, ttl: 10 })),
+    );
+    const { result, rerender } = renderHook(({ epoch }) => useChatStream('site-alpha', epoch), {
+      initialProps: { epoch: 0 },
+    });
+    await waitFor(() => expect(result.current.working?.active).toBe(true));
+
+    api.openChatStream.mockResolvedValue(open(BACKLOG_DONE));
+    rerender({ epoch: 1 });
+
+    await waitFor(() => expect(result.current.backlogLoaded).toBe(true));
+    expect(result.current.working).toBeNull();
+  });
+
   it('backs off and retries after an ordinary connection failure', async () => {
     api.openChatStream
       .mockRejectedValueOnce(new Error('network down'))

@@ -1,4 +1,4 @@
-r"""The chat page's SSE generator: transcript backlog, then a live tail.
+r"""The chat page's SSE generator: transcript backlog, then a live tail of the transcript and the working frame.
 
 Reimplements the interactions-stream backlog/XREAD/keepalive loop over the kit
 ``RedisClient`` (a channel plugin never imports the skeleton). The shape is
@@ -15,6 +15,14 @@ load-bearing and copied faithfully:
   stripped (the keepalive XREAD blocks legitimately), bounded by an outer
   ``asyncio.wait_for`` (block window + grace) so a black-holed Redis raises loudly
   rather than hanging;
+* the tail reads the transcript and the pair's working stream in one XREAD; the
+  working cursor starts at ``0-0`` after the backlog, so the one retained working
+  frame (the current state) reaches a page that just connected, and the backlog
+  itself never carries one. One read's entries are emitted in the order of their ids'
+  millisecond time (both streams' ids come from the one server clock), a working frame
+  ahead of a transcript entry of the same millisecond and each stream's own entries in
+  their stream order (an id's sequence part counts within its own stream only, so it
+  never compares across the two; the sort is stable);
 * the keepalive is DEADLINE-driven off a monotonic loop clock; a frame reaching the
   caller restarts the countdown, an idle window past the deadline emits ``":
   keepalive\\n\\n"``.
@@ -29,14 +37,19 @@ back — see ``check_stream_admission``.
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections import Counter
 from collections.abc import AsyncIterator, Iterator
 from contextlib import contextmanager
+from typing import Any
 
 from starlette.requests import Request
 
 from tai42_channel_web.settings import WebSettings
-from tai42_channel_web.store import connection, transcript
+from tai42_channel_web.store import connection, transcript, working
+from tai42_channel_web.store.connection import _as_str
+
+logger = logging.getLogger(__name__)
 
 
 class StreamLimitError(RuntimeError):
@@ -118,8 +131,50 @@ def _now() -> float:
     return asyncio.get_running_loop().time()
 
 
+def _stream_milliseconds(entry_id: str) -> int:
+    # The server-clock time part of a stream entry id (``<milliseconds>-<sequence>``).
+    return int(entry_id.partition("-")[0])
+
+
+async def _read_tail(
+    redis: Any, identity: str, address: str, cursors: tuple[str, str], block_ms: int
+) -> tuple[tuple[str, str], list[str]]:
+    """One live-tail XREAD past the ``(transcript, working)`` cursors.
+
+    Returns the advanced cursors and the new entries as SSE frames ordered by their ids'
+    millisecond time, a working frame ahead of a transcript entry of the same millisecond and
+    each stream's entries kept in their stream order (the sort is stable). A malformed transcript
+    entry becomes a placeholder frame; a malformed working entry is logged and emitted as
+    nothing (the page's frame lifetime ends what it last showed).
+    """
+    transcript_key = transcript.transcript_key(identity, address)
+    working_key = working.working_key(identity, address)
+    transcript_cursor, working_cursor = cursors
+    result = await redis.xread({transcript_key: transcript_cursor, working_key: working_cursor}, block=block_ms)
+    ordered: list[tuple[int, int, str]] = []
+    for stream_name, messages in result or ():
+        is_working = _as_str(stream_name) == working_key
+        for message_id, raw_fields in messages:
+            entry_id = _as_str(message_id)
+            fields = {_as_str(k): _as_str(v) for k, v in raw_fields.items()}
+            if is_working:
+                working_cursor = entry_id
+                rendered = working.working_frame(entry_id, fields)
+                if rendered is None:
+                    logger.warning("skipping malformed web working entry %s", entry_id)
+                    continue
+                ordered.append((_stream_milliseconds(entry_id), 0, rendered))
+            else:
+                transcript_cursor = entry_id
+                ordered.append((_stream_milliseconds(entry_id), 1, transcript.tail_frame(entry_id, fields)))
+    ordered.sort(key=lambda entry: (entry[0], entry[1]))
+    return (transcript_cursor, working_cursor), [rendered for _ms, _rank, rendered in ordered]
+
+
 async def stream_transcript(request: Request, identity: str, address: str, settings: WebSettings) -> AsyncIterator[str]:
-    """Yield the pair's transcript backlog, a ``chat.backlog_done`` marker, then a live tail of new entries.
+    """Yield the pair's transcript backlog, a ``chat.backlog_done`` marker, then a live tail.
+
+    The tail carries new transcript entries and the pair's working frames.
 
     The stream's slot is taken HERE and released however the stream ends; the door
     only checked that one was available (``check_stream_admission``).
@@ -144,6 +199,7 @@ async def stream_transcript(request: Request, identity: str, address: str, setti
 
         # The tail blocks per iteration; a fresh dedicated connection keeps it off
         # the shared pool. The outer wait_for bounds a black-holed Redis.
+        cursors = (cursor, "0-0")
         next_keepalive = _now() + settings.keepalive_seconds
         async with connection.tail_redis_ctx() as tail_conn:
             while True:
@@ -151,8 +207,8 @@ async def stream_transcript(request: Request, identity: str, address: str, setti
                     break
                 block_seconds = max(0.0, next_keepalive - _now())
                 try:
-                    cursor, frames = await asyncio.wait_for(
-                        transcript.read_tail(tail_conn, identity, address, cursor, max(1, int(block_seconds * 1000))),
+                    cursors, frames = await asyncio.wait_for(
+                        _read_tail(tail_conn, identity, address, cursors, max(1, int(block_seconds * 1000))),
                         timeout=block_seconds + settings.blocking_grace_seconds,
                     )
                 except TimeoutError as exc:

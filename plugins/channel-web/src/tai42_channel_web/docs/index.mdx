@@ -377,11 +377,20 @@ ids and addresses it records:
 
 ## Working-on-it signal
 
-While a turn runs, the chat page shows its own **typing bubble** from the moment the
-visitor's message is sent until the reply lands — driven entirely by the page, with
-no server-driven frame. Because the page owns the indicator it never lapses
-mid-turn, so this channel opts out of the platform's server-side working-on-it
-refresh.
+While the agent works on something the visitor waits for, the chat page shows a
+**typing bubble**, driven by the server. The platform asserts this channel's working
+signal and repeats it within the channel's 10-second frame lifetime; the channel writes
+each assert and each stop as a `chat.working` frame (`id`, `active`, `ttl`) on the
+conversation's stream. A frame never enters the transcript: the conversation keeps only
+its latest one, which expires one lifetime after it is written.
+
+The bubble shows on an active frame and stays through the agent's messages while the
+work goes on. It hides on a stop frame (the reply landed, the run asks a question of
+the visitor or of anyone else and waits for the answer, the run ends without a word,
+or one stretch of work reached the platform's ceiling), when a frame's lifetime passes
+with no later frame, when the stream drops, and when the session has ended. A page
+that connects or reconnects reads the latest frame right after the transcript backlog
+replay, so it shows the current state.
 
 ## Flood control
 

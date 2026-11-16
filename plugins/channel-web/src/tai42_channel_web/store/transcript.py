@@ -1,7 +1,7 @@
 """The browser-replay transcript stream.
 
-One Redis STREAM per conversation, its write-order gate, the appenders, and the
-backlog/tail reads.
+One Redis STREAM per conversation, its write-order gate, the appenders, the backlog
+read, and the frame of an entry the live tail reads.
 """
 
 from __future__ import annotations
@@ -28,7 +28,8 @@ FORM_EVENT = "chat.form"
 UNAVAILABLE_EVENT = "chat.unavailable"
 
 
-def _transcript_key(identity: str, address: str) -> str:
+def transcript_key(identity: str, address: str) -> str:
+    """The Redis key of the pair's transcript stream."""
     return f"channel:web:transcript:{identity}:{address}"
 
 
@@ -105,7 +106,7 @@ async def _append(identity: str, address: str, event: str, data: dict[str, Any])
     command.
     """
     settings = web_settings()
-    key = _transcript_key(identity, address)
+    key = transcript_key(identity, address)
     async with _redis() as redis:
         pipe = redis.pipeline()
         pipe.xadd(
@@ -367,7 +368,7 @@ async def capture_cursor(redis: Any, identity: str, address: str) -> str:
     No live entry arriving during the backlog is missed. Empty stream → ``"0-0"`` (``"$"``
     would drop an entry written before the first XREAD).
     """
-    tail = await redis.xrevrange(_transcript_key(identity, address), count=1)
+    tail = await redis.xrevrange(transcript_key(identity, address), count=1)
     return _as_str(tail[0][0]) if tail else "0-0"
 
 
@@ -394,7 +395,7 @@ async def read_backlog_batch(
     placeholder frame (logged) — one bad entry is never fatal to the replay, and its
     gap is marked in place rather than silently dropped.
     """
-    entries = await redis.xrange(_transcript_key(identity, address), min=start, max=end, count=count)
+    entries = await redis.xrange(transcript_key(identity, address), min=start, max=end, count=count)
     frames: list[str] = []
     for entry_id, fields in entries:
         rendered = _decode_entry({_as_str(k): _as_str(v) for k, v in fields.items()})
@@ -408,22 +409,13 @@ async def read_backlog_batch(
     return _next_id(_as_str(entries[-1][0])), frames
 
 
-async def read_tail(redis: Any, identity: str, address: str, cursor: str, block_ms: int) -> tuple[str, list[str]]:
-    """One live-tail XREAD past ``cursor``.
+def tail_frame(entry_id: str, fields: dict[str, str]) -> str:
+    """One transcript entry the live tail read as its SSE frame.
 
-    Returns the advanced cursor and the new entries as SSE frames (a malformed entry
-    becomes a placeholder frame, logged).
+    A malformed entry becomes a placeholder frame, logged.
     """
-    key = _transcript_key(identity, address)
-    result = await redis.xread({key: cursor}, block=block_ms)
-    frames: list[str] = []
-    for _stream, messages in result or ():
-        for message_id, fields in messages:
-            cursor = _as_str(message_id)
-            rendered = _decode_entry({_as_str(k): _as_str(v) for k, v in fields.items()})
-            if rendered is None:
-                logger.warning("skipping malformed web transcript tail entry %s", cursor)
-                frames.append(_unavailable_frame(cursor))
-                continue
-            frames.append(rendered)
-    return cursor, frames
+    rendered = _decode_entry(fields)
+    if rendered is None:
+        logger.warning("skipping malformed web transcript tail entry %s", entry_id)
+        return _unavailable_frame(entry_id)
+    return rendered

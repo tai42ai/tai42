@@ -1,4 +1,4 @@
-"""Session registrations + transcript streams + pending-question + form records (plugin-owned Redis).
+"""Session registrations + transcript and working streams + pending-question + form records (plugin-owned Redis).
 
 The store is split by the record family it owns, each submodule reaching Redis
 through the shared connection helpers in :mod:`connection`:
@@ -44,4 +44,9 @@ through the shared connection helpers in :mod:`connection`:
   READ, never claimed: a form may be submitted again and again (each submission is its
   own participant message), and its TTL is the transcript TTL — the card ages out of
   the replay buffer and its answerability with it.
+* :mod:`working` — the live working-on-it frame, one Redis STREAM per conversation
+  ``channel:web:working:{identity}:{address}`` holding only the latest ``chat.working``
+  frame (XADD trims to exactly one entry and sets the key to expire one frame lifetime
+  later, one pipeline). It never enters the transcript; the SSE tail reads it beside
+  the transcript so a page that connects reads the current state.
 """

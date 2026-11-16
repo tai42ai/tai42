@@ -37,11 +37,21 @@ import {
 } from '@/transcript-model';
 import { wordingOf } from '@/wording-parse';
 
-/** What one frame did: advanced the model, completed the backlog, or arrived
- * malformed (which the caller surfaces — it is never swallowed). */
+/** One `chat.working` frame: the agent is working on a reply (`active`) or has
+ * stopped, and how long the page shows an active frame no later one replaces. */
+export interface WorkingFrame {
+  readonly id: string;
+  readonly active: boolean;
+  readonly ttlSeconds: number;
+}
+
+/** What one frame did: advanced the model, completed the backlog, carried the
+ * agent's working state (never a transcript item), or arrived malformed (which the
+ * caller surfaces — it is never swallowed). */
 export type FrameOutcome =
   | { readonly kind: 'model'; readonly model: StreamModel }
   | { readonly kind: 'backlog-done' }
+  | { readonly kind: 'working'; readonly working: WorkingFrame }
   | { readonly kind: 'malformed'; readonly event: string };
 
 function malformed(event: string): FrameOutcome {
@@ -283,6 +293,17 @@ function applyAnsweredFrame(
   };
 }
 
+function applyWorkingFrame(
+  payload: Record<string, unknown>,
+  id: string,
+  event: string,
+): FrameOutcome {
+  const { active, ttl } = payload;
+  if (typeof active !== 'boolean') return malformed(event);
+  if (typeof ttl !== 'number' || !Number.isFinite(ttl) || ttl <= 0) return malformed(event);
+  return { kind: 'working', working: { id, active, ttlSeconds: ttl } };
+}
+
 /**
  * Fold one frame into the model. Pure — the same model and frame always give the
  * same outcome — so the whole transcript behaviour is testable without a stream.
@@ -308,6 +329,8 @@ export function applyFrame(model: StreamModel, frame: SseFrame): FrameOutcome {
       return applyAnsweredFrame(model, payload, frame.event);
     case 'chat.unavailable':
       return applyUnavailableFrame(model, payload, id, frame.event);
+    case 'chat.working':
+      return applyWorkingFrame(payload, id, frame.event);
     default:
       return malformed(frame.event);
   }

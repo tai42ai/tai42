@@ -10,6 +10,7 @@ import {
   pendingQuestion,
   send,
   streamState,
+  working,
 } from '@/app.test-support';
 
 const api = vi.hoisted(() => ({
@@ -44,85 +45,136 @@ afterEach(() => {
 });
 
 describe('typing indicator', () => {
-  it('runs from an accepted send until the agent answers', async () => {
-    const user = userEvent.setup();
+  const BUBBLE = 'Typing a reply';
+
+  it('shows while the server says the agent is working and hides on its stop frame', () => {
     const { rerender } = render(app());
+    expect(screen.queryByLabelText(BUBBLE)).not.toBeInTheDocument();
 
-    expect(screen.queryByLabelText('Typing a reply')).not.toBeInTheDocument();
-
-    await send(user, 'hello');
-    expect(await screen.findByLabelText('Typing a reply')).toBeInTheDocument();
-
-    stream.state = streamState({ items: [agentSaid('m2', 'Hi!')] });
+    stream.state = streamState({ working: working(true) });
     rerender(app());
+    expect(screen.getByLabelText(BUBBLE)).toBeInTheDocument();
 
-    await waitFor(() => expect(screen.queryByLabelText('Typing a reply')).not.toBeInTheDocument());
+    stream.state = streamState({ working: working(false, '2-0') });
+    rerender(app());
+    expect(screen.queryByLabelText(BUBBLE)).not.toBeInTheDocument();
   });
 
-  it('clears when the agent turn is a media card', async () => {
-    const user = userEvent.setup();
+  it('stays through an agent message while the work goes on', () => {
     const { rerender } = render(app());
+    const active = working(true);
 
-    await send(user, 'hello');
-    expect(await screen.findByLabelText('Typing a reply')).toBeInTheDocument();
-
-    stream.state = streamState({ items: [agentSentMedia('md1', ['See all'])] });
+    stream.state = streamState({ working: active });
+    rerender(app());
+    // The pause before a question: an agent turn lands while the agent still works.
+    stream.state = streamState({ working: active, items: [agentSaid('m2', 'One moment')] });
     rerender(app());
 
-    await waitFor(() => expect(screen.queryByLabelText('Typing a reply')).not.toBeInTheDocument());
+    expect(screen.getByText('One moment')).toBeInTheDocument();
+    expect(screen.getByLabelText(BUBBLE)).toBeInTheDocument();
   });
 
-  it('never starts when the send was refused', async () => {
-    const user = userEvent.setup();
-    api.sendMessage.mockRejectedValueOnce(new ChatApiError('nope', 500, null));
+  it('shows the same way whatever the agent sends next', () => {
+    stream.state = streamState({
+      working: working(true),
+      items: [agentSentMedia('md1', ['See all']), pendingQuestion()],
+    });
     render(app());
 
-    await send(user, 'hello');
-
-    await screen.findByRole('alert');
-    expect(screen.queryByLabelText('Typing a reply')).not.toBeInTheDocument();
+    expect(screen.getByLabelText(BUBBLE)).toBeInTheDocument();
   });
 
-  it('stops when the stream drops — the reply cannot arrive on a dead stream', async () => {
-    const user = userEvent.setup();
-    const { rerender } = render(app());
-
-    await send(user, 'hello');
-    expect(await screen.findByLabelText('Typing a reply')).toBeInTheDocument();
-
-    stream.state = streamState({ connected: false, error: new Error('dropped') });
-    rerender(app());
-
-    await waitFor(() => expect(screen.queryByLabelText('Typing a reply')).not.toBeInTheDocument());
-    expect(screen.getByText('Reconnecting…')).toBeInTheDocument();
-  });
-
-  it('re-arms for a second send whose reply is still owed', async () => {
-    const user = userEvent.setup();
-    const { rerender } = render(app());
-
-    await send(user, 'one');
-    expect(await screen.findByLabelText('Typing a reply')).toBeInTheDocument();
-
-    let accept = (_id: string): void => {};
-    api.sendMessage.mockReturnValue(
-      new Promise<string>((resolve) => {
-        accept = resolve;
-      }),
-    );
-    await send(user, 'two');
-
-    // The reply to the FIRST send lands while the second is still in flight: it
-    // settles the first wait and must not settle the second.
-    stream.state = streamState({ items: [agentSaid('m2', 'Hi!')] });
-    rerender(app());
-    await waitFor(() => expect(screen.queryByLabelText('Typing a reply')).not.toBeInTheDocument());
-
-    await act(async () => {
-      accept('msg-2');
+  describe('frame lifetime', () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+    afterEach(() => {
+      vi.useRealTimers();
     });
 
-    expect(screen.getByLabelText('Typing a reply')).toBeInTheDocument();
+    it('hides once the frame lifetime passes with no later frame', () => {
+      stream.state = streamState({ working: working(true, '1-0', 10) });
+      render(app());
+      expect(screen.getByLabelText(BUBBLE)).toBeInTheDocument();
+
+      act(() => {
+        vi.advanceTimersByTime(9_999);
+      });
+      expect(screen.getByLabelText(BUBBLE)).toBeInTheDocument();
+
+      act(() => {
+        vi.advanceTimersByTime(1);
+      });
+      expect(screen.queryByLabelText(BUBBLE)).not.toBeInTheDocument();
+    });
+
+    it('restarts the lifetime on every repeated assert', () => {
+      stream.state = streamState({ working: working(true, '1-0', 10) });
+      const { rerender } = render(app());
+
+      act(() => {
+        vi.advanceTimersByTime(8_000);
+      });
+      stream.state = streamState({ working: working(true, '2-0', 10) });
+      rerender(app());
+      act(() => {
+        vi.advanceTimersByTime(8_000);
+      });
+
+      expect(screen.getByLabelText(BUBBLE)).toBeInTheDocument();
+    });
+  });
+
+  it('hides when the stream drops and comes back with the replayed frame on reconnect', () => {
+    const active = working(true);
+    stream.state = streamState({ working: active });
+    const { rerender } = render(app());
+
+    stream.state = streamState({ working: active, connected: false, error: new Error('dropped') });
+    rerender(app());
+    expect(screen.queryByLabelText(BUBBLE)).not.toBeInTheDocument();
+    expect(screen.getByText('Reconnecting…')).toBeInTheDocument();
+
+    // The reconnected stream replays the retained frame as a new frame.
+    stream.state = streamState({ working: working(true) });
+    rerender(app());
+    expect(screen.getByLabelText(BUBBLE)).toBeInTheDocument();
+  });
+
+  it('stays hidden after a reconnect that replays no frame', () => {
+    const active = working(true);
+    stream.state = streamState({ working: active });
+    const { rerender } = render(app());
+
+    stream.state = streamState({ working: active, connected: false });
+    rerender(app());
+    stream.state = streamState({ working: active });
+    rerender(app());
+
+    expect(screen.queryByLabelText(BUBBLE)).not.toBeInTheDocument();
+  });
+
+  it('hides when the session has ended', () => {
+    stream.state = streamState({ working: working(true) });
+    const { rerender } = render(app());
+
+    stream.state = streamState({ working: working(true), sessionExpired: true });
+    rerender(app());
+
+    expect(screen.queryByLabelText(BUBBLE)).not.toBeInTheDocument();
+  });
+
+  it('never carries into a new conversation', async () => {
+    const user = userEvent.setup();
+    stream.state = streamState({ working: working(true) });
+    render(app());
+    expect(screen.getByLabelText(BUBBLE)).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'New conversation' }));
+    await user.click(screen.getByRole('button', { name: 'Start new' }));
+
+    expect(await screen.findByText('Start the conversation')).toBeInTheDocument();
+    expect(screen.queryByLabelText(BUBBLE)).not.toBeInTheDocument();
   });
 });
 
@@ -181,13 +233,11 @@ describe('new conversation', () => {
     await user.click(screen.getByRole('button', { name: 'Start new' }));
     expect(await screen.findByText('Start the conversation')).toBeInTheDocument();
 
-    // The old send lands after the rotate. Nobody owes the new conversation a
-    // reply, so it must not open with a typing bubble that never clears.
+    // The old send lands after the rotate and must not touch the fresh conversation.
     await act(async () => {
       accept('msg-1');
     });
 
-    expect(screen.queryByLabelText('Typing a reply')).not.toBeInTheDocument();
     expect(screen.getByText('Start the conversation')).toBeInTheDocument();
   });
 

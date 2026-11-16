@@ -63,6 +63,7 @@ from tai42_channel_web.store.transcript import (
     append_question,
     transcript_order,
 )
+from tai42_channel_web.store.working import append_working
 
 logger = logging.getLogger(__name__)
 
@@ -344,9 +345,9 @@ class WebChannel:
     # the same schema-driven widget as a fillable card, and the submission enters the
     # conversation as a participant message through this plugin's own form door.
     supports_form_notifications: ClassVar[bool] = True
-    # The chat page runs its own client-side typing bubble from send until the
-    # reply lands, so no server-driven working-on-it signal is emitted.
-    working_signal_expiry_seconds: ClassVar[None] = None
+    # A working-on-it frame lives this long on the page unless a later frame
+    # replaces it; the caller re-asserts within that lifetime while work runs.
+    working_signal_expiry_seconds: ClassVar[float] = 10.0
     # The web chat page has no medium length cap; a large split bound keeps an agent answer whole
     # while the delivery machine's chunk cap still bounds a runaway fan-out (operator-overridable).
     max_message_chars: ClassVar[int] = 8000
@@ -581,3 +582,23 @@ class WebChannel:
                 _wording_frame(notification.wording),
             )
         return SendOutcome(our_identity=identity, address=address, message_ids=[entry_id])
+
+    async def signal_working(
+        self,
+        *,
+        recipient: str,
+        sender_identity: str | None = None,
+        provider_message_id: str | None = None,
+        active: bool = True,
+    ) -> None:
+        """Write one ``chat.working`` frame (start on ``active=True``, stop on ``False``) to the pair's page.
+
+        The pair resolves exactly as ``notify`` resolves it. The frame goes to the pair's live
+        working stream, never the transcript; it carries this channel's frame lifetime, after
+        which the page drops a frame no later one replaced. ``provider_message_id`` is unused:
+        the page's indicator belongs to the conversation, not to one inbound message.
+        """
+        target = self.resolve_address(recipient, sender_identity)
+        await append_working(
+            target.our_identity, target.address, active=active, ttl_seconds=self.working_signal_expiry_seconds
+        )
