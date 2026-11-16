@@ -78,6 +78,11 @@ participant gets a single notice (`unsupported type`, `too large`, or `could not
 receive`) and a platform event records it, while the message's other files still
 bridge.
 
+A message whose text is blank is not bridged: the participant gets the one `unreadable`
+notice ("That message could not be read. Please send it again.") and a platform event
+records it; a blank reply to a pending question leaves the question open. A file share
+with no text is not blank — its files are the message.
+
 ## Create a bridge route
 
 The route's `our_identity` is the bot user id; `client_address` is the Slack

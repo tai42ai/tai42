@@ -147,7 +147,9 @@ All links: https://docs.slack.dev
    ±300 s replay window, fail-closed), dedupes on `event_id`, matches the
    reply's `thread_ts` against the correlation store, and forwards
    `{"answer": "<typed text>"}` to the stored callback URL. A thread reply that
-   matches no pending question bridges into the conversation instead.
+   matches no pending question bridges into the conversation instead. A message
+   whose text is blank is not bridged and gets the one `unreadable` notice; a blank
+   reply to a pending question leaves it open.
 6. The public callback door validates the answer against the question's stored
    format and records it; the blocked `ask` returns it.
 

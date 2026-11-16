@@ -295,16 +295,45 @@ async def test_transport_error_wrapped_by_ladder_releases_claim(fake_redis, chan
     assert _CORR_KEY in fake_redis.store
 
 
-async def test_correlated_reply_without_text_raises_never_none(fake_redis, channels):
+@pytest.mark.parametrize("text", ["  ", None])
+async def test_a_blank_thread_reply_to_a_pending_ask_gets_one_unreadable_notice_and_leaves_the_ask(
+    text, fake_redis, channels, stub_conversations
+):
     _seed_correlation(fake_redis)
-    event = _reply_event()
-    del event["text"]
+    channels.inbound_outcome = InboundAnswerOutcome.FORWARDED
+    event = _reply_event(text=text)
+    if text is None:
+        del event["text"]
 
-    with pytest.raises(ValueError, match="carries no text"):
-        await slack_inbound(_signed(_event_body(event=event)))
+    response = await slack_inbound(_signed(_event_body(event=event)))
 
+    assert body_json(response) == {"status": "ignored"}
     assert channels.inbound_calls == []  # never reached the ladder
-    assert _DEDUPE_KEY not in fake_redis.store  # released so the retry reprocesses
+    assert stub_conversations.accept_calls == []
+    (rejected,) = stub_conversations.rejected_calls
+    assert rejected.recipient == TEST_DEFAULT_RECIPIENT
+    assert rejected.kind == "text"
+    assert rejected.reason is InboundRejectionReason.UNREADABLE
+    assert _CORR_KEY in fake_redis.store  # the ask stays open for the next reply
+    assert _DEDUPE_KEY in fake_redis.store
+
+
+@pytest.mark.parametrize("channel", [None, "", 7])
+async def test_a_message_with_no_channel_is_logged_and_acked(channel, fake_redis, stub_conversations, caplog):
+    event = _reply_event(channel=channel)
+    if channel is None:
+        del event["channel"]
+
+    with caplog.at_level("WARNING"):
+        response = await slack_inbound(_signed(_event_body(event=event)))
+
+    assert body_json(response) == {"status": "ignored"}
+    assert stub_conversations.accept_calls == []
+    assert stub_conversations.rejected_calls == []
+    assert any(
+        record.levelname == "WARNING" and "Ev001" in record.getMessage() and "no channel" in record.getMessage()
+        for record in caplog.records
+    )
 
 
 async def test_event_callback_without_event_object_raises(fake_redis):
@@ -503,6 +532,7 @@ async def test_file_share_blank_text_uses_placeholder(fake_redis, stub_conversat
     assert body_json(response) == {"status": "accepted"}
     (call,) = stub_conversations.accept_calls
     assert call.text == "[document: notes.pdf]"  # whitespace-only caption is not a caption
+    assert stub_conversations.rejected_calls == []  # the files are the content: no unreadable notice
 
 
 async def test_file_share_without_a_bot_user_id_raises_before_any_notice(fake_redis, stub_conversations, monkeypatch):

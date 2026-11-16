@@ -13,7 +13,6 @@ from typing import TYPE_CHECKING
 from starlette.responses import JSONResponse, Response
 from tai42_contract.app import tai42_app
 from tai42_contract.channels import InboundAnswerOutcome, InboundBridge
-from tai42_contract.conversations import BlankInboundTextError
 from tai42_kit.conversations.entry_params import OverBoundParamsMode, bound_entry_params
 
 from tai42_channel_slack.correlation import slack_thread_correlation_store
@@ -48,8 +47,8 @@ def _recipients(settings: SlackSettings) -> set[str]:
 
 async def _bridge(
     our_identity: str | None,
-    channel: object,
-    text: object,
+    channel: str,
+    text: str,
     event_id: str,
     *,
     medium_message_id: str | None,
@@ -61,8 +60,9 @@ async def _bridge(
     """Hand one uncorrelated human message to the conversation bridge.
 
     ``our_identity`` (the bot user id) is required here — a bridge route with it
-    unset is operator misconfig, raised loudly. A message with no text/channel, or
-    with whitespace-only text, is nothing to bridge and is acked. ``params`` is the
+    unset is operator misconfig, raised loudly. ``text`` is the message's words: the message
+    door refuses a blank message before it routes, while the option-tap door passes the tapped
+    option's value, refusing only an empty one. ``params`` is the
     optional opaque channel enrichment the turn carries (e.g. ``reply_id`` from a tapped
     reply option, or the ``media_*`` vocabulary a file share bridges); ``None`` for a
     plain message. ``attachments`` is the typed served :class:`MediaItem` list a file
@@ -76,8 +76,6 @@ async def _bridge(
     ``None`` when it quotes none. No route bound acks with a debug log; an
     infrastructure failure propagates so Slack redelivers.
     """
-    if not isinstance(text, str) or not text or not isinstance(channel, str) or not channel:
-        return JSONResponse({"status": "ignored"})
     if our_identity is None:
         raise ValueError("the slack channel bridge is not configured: set CHANNEL_SLACK_BOT_USER_ID")
     # Slack redelivers a 5xx, so an over-bound params set is dropped (logged and counted) and the
@@ -98,9 +96,6 @@ async def _bridge(
             params=params,
             attachments=attachments,
         )
-    except BlankInboundTextError:
-        logger.debug("slack inbound: blank text for channel=%s; acking", channel)
-        return JSONResponse({"status": "ignored"})
     except LookupError:
         logger.debug("slack inbound: no conversation route for channel=%s; acking", channel)
         return JSONResponse({"status": "ignored"})
@@ -109,7 +104,7 @@ async def _bridge(
 
 async def _resolve_answer(
     thread_ts: str,
-    text: object,
+    text: str,
     our_identity: str | None,
     channel: str,
     event_id: str,
@@ -120,9 +115,9 @@ async def _resolve_answer(
 ) -> Response:
     """Resolve a correlated threaded reply against its pending ask via the ONE shared ladder, or bridge on a miss.
 
-    The ask is peeked first (channel-side) so a correlated reply that carries no text is
-    the loud error it has always been (raise -> 500, Slack retries then logs) rather than
-    an ask resolved with ``None`` — while an uncorrelated thread reply bridges. A live
+    ``text`` is the reply's words: the message door refuses a blank message before it routes,
+    while the option-tap door passes the tapped option's value, refusing only an empty one.
+    The ask is peeked first (channel-side): a thread reply with no pending ask bridges. A live
     ask hands the text to the ladder (a threaded reply is re-answerable in place, so the
     ladder owns the retry notice, ``owns_retry_notice=False``). ``event_id`` is the
     bridge's dedupe key at the conversation seam and ``medium_message_id`` the reply's
@@ -143,9 +138,6 @@ async def _resolve_answer(
             reply_to_medium_message_id=reply_to_medium_message_id,
             params=params,
         )
-    if not isinstance(text, str) or not text:
-        raise ValueError(f"correlated slack reply in thread {thread_ts} carries no text")
-
     # The forward path needs no bot user id — it rides only into the bridge context the
     # ladder uses ONLY on a terminal 404 (BRIDGED). An unset id there degrades that rare
     # bridge, never the common forward; the NO_CORRELATION bridge path still requires it.

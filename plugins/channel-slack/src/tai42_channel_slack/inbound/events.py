@@ -1,7 +1,7 @@
 """The Slack Events API door — ``POST /inbound``.
 
 Public (Slack cannot present the deployment api key) and signature-authenticated
-over the exact raw body. Flow:
+over the exact raw body. Steps:
 
 1. Read a BOUNDED, verified body (413 past the cap, 500 on a missing secret, 401
    on a signature defect) before any event work.
@@ -9,7 +9,8 @@ over the exact raw body. Flow:
    would confirm the endpoint to anyone).
 3. ``event_callback`` -> dedupe on ``event_id``; a reply whose ``thread_ts``
    matches a pending question forwards the typed answer; any other human message
-   bridges to its conversation. Ack 200.
+   bridges to its conversation; a message whose text is blank gets the unreadable
+   notice. Ack 200.
 
 The handler works inline (two Redis round-trips + one loopback POST) so the 2xx
 lands inside Slack's 3-second window. Any failure after the dedupe claim releases
@@ -69,9 +70,9 @@ async def slack_inbound(request: Request) -> Response:
 
     A correlated threaded reply goes to its callback URL; any other human message goes
     to the bridge. Unverifiable requests get a constant 401; a missing signing secret a logged
-    500. Verified traffic with nothing to do (the bot's own echoes, empty
-    messages) is acked 200 ``ignored`` (Slack needs a 2xx or it retries and
-    disables the subscription).
+    500. Verified traffic with nothing to do (the bot's own echoes, non-participant
+    subtypes) is acked 200 ``ignored``, and so is a blank message once its unreadable
+    notice is sent (Slack needs a 2xx or it retries and disables the subscription).
     """
     try:
         raw = await _read_verified_body(request)
@@ -153,13 +154,19 @@ async def _process_event(payload: dict, event_id: str) -> Response:
         # container. A participant-text subtype falls through to the message path below.
         return JSONResponse({"status": "ignored"})
 
-    text = event.get("text")
     channel = event.get("channel")
+    if not isinstance(channel, str) or not channel:
+        logger.warning("slack inbound event %s: no channel to reply to; message not answered", event_id)
+        return JSONResponse({"status": "ignored"})
+    text = event.get("text")
+    if not isinstance(text, str) or not text.strip():
+        await _reject_message(channel, settings.bot_user_id, kind="text", reason=InboundRejectionReason.UNREADABLE)
+        return JSONResponse({"status": "ignored"})
     thread_ts = event.get("thread_ts")
     ts = _message_ts(event, event_id)
     quoted = _quoted_ts(event, ts)
 
-    if isinstance(thread_ts, str) and thread_ts and isinstance(channel, str) and channel in recipients:
+    if isinstance(thread_ts, str) and thread_ts and channel in recipients:
         return await _resolve_answer(
             thread_ts,
             text,
@@ -210,6 +217,25 @@ def _file_download_url(file: dict) -> str | None:
     return None
 
 
+async def _reject_message(channel: str, our_identity: str | None, *, kind: str, reason: InboundRejectionReason) -> None:
+    """Send the rejection notice for a message whose content this door cannot read.
+
+    The message's ``event_id`` is already claimed at the door, so a fault the notice step raises
+    reaches the door's release-and-500 guard and Slack's retry runs it again; a failed send of
+    the notice itself is logged by that step and does not raise. An unset bot user id is the
+    same configuration error the bridge raises.
+    """
+    if our_identity is None:
+        raise ValueError("the slack channel bridge is not configured: set CHANNEL_SLACK_BOT_USER_ID")
+    await tai42_app.conversations.notify_inbound_rejected(
+        channel_id="slack",
+        recipient=channel,
+        sender_identity=our_identity,
+        kind=kind,
+        reason=reason,
+    )
+
+
 async def _reject_file(
     channel: str,
     our_identity: str,
@@ -223,9 +249,10 @@ async def _reject_file(
     The notice is claimed under the file's ``f"{event_id}-{index}"`` key — the key its
     bridged siblings dedupe under — before the reply is sent, and the claim is KEPT once
     the reply lands so a retry driven by a later file's transient fault never repeats a
-    rejection already delivered. A send fault frees the claim and re-raises into the door's
-    release-and-500 guard so the retry re-sends. An already-claimed key means a prior pass
-    delivered this rejection; it is skipped, not sent twice.
+    rejection already delivered. A fault the notice step raises frees the claim and re-raises
+    into the door's release-and-500 guard so the retry runs it again; a failed send of the
+    notice itself is logged by that step and does not raise. An already-claimed key means a
+    prior pass handled this rejection; it is skipped, not sent twice.
     """
     item_key = f"{event_id}-{index}"
     if not await claim_dedupe(item_key):

@@ -12,7 +12,7 @@ from typing import Any
 
 import pytest
 from tai42_contract.channels import InboundAnswerOutcome
-from tai42_contract.conversations import BlankInboundTextError
+from tai42_contract.conversations import InboundRejectionReason
 from tai42_kit.settings import reset_all_settings
 
 from tai42_channel_slack.inbound.events import slack_inbound
@@ -105,21 +105,25 @@ async def test_uncorrelated_unrouted_message_is_acked_no_turn(fake_redis, stub_c
     assert any("no conversation route" in record.message for record in caplog.records)
 
 
-async def test_uncorrelated_blank_message_is_acked_no_turn(fake_redis, stub_conversations, caplog):
-    # A whitespace-only body passes the door's own text pre-filter, reaches the
-    # bridge, and accept refuses with BlankInboundTextError: the door acks and logs
-    # rather than 500-storming, and no turn is made.
-    stub_conversations.accept_error = BlankInboundTextError("inbound text is blank")
+@pytest.mark.parametrize("text", ["   ", "", None])
+async def test_a_blank_message_gets_one_unreadable_notice_and_no_turn(text, fake_redis, stub_conversations):
+    # A message whose text is missing or blank is read as unreadable before any routing: one
+    # notice to the channel, an ack (never a 500 retry-storm), and no turn.
+    event = _message(text=text)
+    if text is None:
+        del event["text"]
 
-    import logging
-
-    with caplog.at_level(logging.DEBUG):
-        response = await slack_inbound(_signed(_event_body(_message(text="   "))))
+    response = await slack_inbound(_signed(_event_body(event)))
 
     assert body_json(response) == {"status": "ignored"}
-    assert len(stub_conversations.accept_calls) == 1  # attempted, then refused
+    assert stub_conversations.accept_calls == []
+    (rejected,) = stub_conversations.rejected_calls
+    assert rejected.channel_id == "slack"
+    assert rejected.recipient == TEST_DEFAULT_RECIPIENT
+    assert rejected.sender_identity == TEST_BOT_USER_ID
+    assert rejected.kind == "text"
+    assert rejected.reason is InboundRejectionReason.UNREADABLE
     assert _DEDUPE_KEY in fake_redis.store  # acked, claim kept
-    assert any("blank" in record.message for record in caplog.records)
 
 
 async def test_bridge_infrastructure_failure_propagates_and_releases_claim(fake_redis, stub_conversations):
