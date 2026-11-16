@@ -19,7 +19,7 @@ from tai42_contract.channels import (
     ChannelDeliveryError,
     InboundAnswerOutcome,
 )
-from tai42_contract.conversations import BlankInboundTextError, InboundRejectionReason
+from tai42_contract.conversations import InboundRejectionReason
 from tai42_contract.interactions import (
     IngestedMedia,
     MediaItem,
@@ -33,7 +33,7 @@ from tai42_kit.net import MediaFetchError, UrlGuardError
 from tai42_kit.settings import reset_all_settings
 
 import tai42_channel_telegram.inbound_media as inbound_media_module
-from tai42_channel_telegram.inbound import inbound
+from tai42_channel_telegram.inbound import _CONTENT_LABELS, _SERVICE_MEMBERS, inbound
 from tai42_channel_telegram.settings import TelegramSettings
 
 from .conftest import make_inbound_request
@@ -299,17 +299,36 @@ async def test_uncorrelated_unrouted_message_is_acked_no_turn(http_recorder, fak
     assert len(conversations.accept_calls) == 1
 
 
-async def test_uncorrelated_blank_message_is_acked_no_turn(http_recorder, fake_redis, conversations, caplog):
-    # A whitespace-only text passes the door's own text pre-filter, reaches the
-    # bridge, and accept() raises BlankInboundTextError; the door acks (200) so
-    # Telegram stops redelivering, never a 5xx retry-storm, and no turn is made.
-    conversations.accept_error = BlankInboundTextError("inbound text is blank")
-    with caplog.at_level("WARNING"):
-        response = await inbound(make_inbound_request(_text_update(text="   "), headers=_VALID_HEADERS))
+def _assert_one_unreadable_text_notice(conversations: Any) -> None:
+    (rejected,) = conversations.rejected_calls
+    assert rejected.channel_id == "telegram"
+    assert rejected.recipient == "777"
+    assert rejected.kind == "text"
+    assert rejected.reason is InboundRejectionReason.UNREADABLE
+
+
+async def test_a_blank_text_gets_one_unreadable_notice_and_no_turn(http_recorder, fake_redis, conversations):
+    # A whitespace-only text is read as unreadable before any routing: one notice, an ack (200)
+    # so Telegram stops redelivering, and no turn.
+    response = await inbound(make_inbound_request(_text_update(text="   "), headers=_VALID_HEADERS))
     assert response.status_code == 200
     assert _body(response) == {"data": {"status": "ignored"}}
-    assert len(conversations.accept_calls) == 1
-    assert any("blank" in record.message for record in caplog.records)
+    assert conversations.accept_calls == []
+    _assert_one_unreadable_text_notice(conversations)
+
+
+async def test_a_blank_reply_to_a_pending_ask_gets_one_unreadable_notice_and_leaves_the_ask(
+    http_recorder, fake_redis, conversations, channels
+):
+    # A blank ForceReply reply never reaches the answer ladder, so the pending ask is not claimed
+    # and the user's next reply still answers it.
+    channels.inbound_outcome = InboundAnswerOutcome.FORWARDED
+    response = await inbound(make_inbound_request(_reply_update(text=" \n "), headers=_VALID_HEADERS))
+    assert response.status_code == 200
+    assert _body(response) == {"data": {"status": "ignored"}}
+    assert channels.inbound_calls == []
+    assert conversations.accept_calls == []
+    _assert_one_unreadable_text_notice(conversations)
 
 
 async def test_pending_question_reply_resolves_ask_not_bridge(http_recorder, fake_redis, conversations, channels):
@@ -500,20 +519,32 @@ def _callback_update(
     data: Any = "1",
     update_id: int = 9,
     username: str | None = None,
+    keyboard: list[list[dict[str, Any]]] | None = None,
 ) -> dict[str, Any]:
-    """A Telegram update carrying an inline-keyboard button tap (callback_query)."""
+    """A Telegram update carrying an inline-keyboard button tap (callback_query).
+
+    ``keyboard`` is the tapped message's ``reply_markup.inline_keyboard`` (rows of buttons);
+    ``None`` leaves the message without one, as an inaccessible message arrives.
+    """
     chat: dict[str, Any] = {"id": chat_id}
     if username is not None:
         chat["username"] = username
+    message: dict[str, Any] = {"message_id": message_id, "chat": chat}
+    if keyboard is not None:
+        message["reply_markup"] = {"inline_keyboard": keyboard}
     return {
         "update_id": update_id,
         "callback_query": {
             "id": "cb-1",
             "from": {"id": chat_id},
-            "message": {"message_id": message_id, "chat": chat},
+            "message": message,
             "data": data,
         },
     }
+
+
+def _button(text: str, callback_data: str) -> dict[str, Any]:
+    return {"text": text, "callback_data": callback_data}
 
 
 def _seed_options(fake_redis: Any, options: list[str], message_id: int = 42, chat_id: int = 777) -> None:
@@ -635,27 +666,107 @@ async def test_tap_from_non_recipient_chat_bridges_without_ladder(http_recorder,
     assert conversations.accept_calls[0].text == "x"
 
 
-async def test_tap_with_no_option_record_is_acked_ignored(http_recorder, fake_redis, channels, conversations):
-    # A tap on a stale keyboard (the ask expired, the side record is gone) is acked and
-    # ignored — never a ladder call or a bridge, and never a 5xx redelivery loop.
-    response = await inbound(make_inbound_request(_callback_update(data="0"), headers=_VALID_HEADERS))
+async def test_tap_with_no_option_record_bridges_the_tapped_label(http_recorder, fake_redis, channels, conversations):
+    # A tap on a keyboard whose question is gone (the side record expired) is the user's message:
+    # the tapped button's label, read off the query's own keyboard, bridges as a turn replying to
+    # the keyboard's message. It never reaches the answer ladder, and carries no params (no
+    # option record means no author-set id or description).
+    keyboard = [[_button("Red", "0"), _button("Blue", "1")]]
+    response = await inbound(
+        make_inbound_request(_callback_update(data="1", keyboard=keyboard), headers=_VALID_HEADERS)
+    )
     assert response.status_code == 200
-    assert _body(response) == {"data": {"status": "ignored"}}
+    assert _body(response) == {"data": {"status": "accepted"}}
     assert channels.inbound_calls == []
-    assert conversations.accept_calls == []
+    (call,) = conversations.accept_calls
+    assert call.text == "Blue"
+    assert call.client_address == "777"
+    assert call.medium_message_id is None
+    assert call.reply_to_medium_message_id == "42"
+    assert call.params is None
+    assert conversations.rejected_calls == []
     # The callback query is still answered so the button spinner clears.
     assert len(_answered_callbacks(http_recorder)) == 1
 
 
-@pytest.mark.parametrize("data", ["5", "-1", "abc", "", "²"])
-async def test_tap_with_bad_index_is_acked_ignored(http_recorder, fake_redis, channels, data: str):
-    # An out-of-range, negative, non-ASCII-digit or non-numeric callback_data is not an
-    # answer: acked and ignored, never a poison-tap redelivery loop.
+@pytest.mark.parametrize("data", ["5", "-1", "abc", "²"])
+async def test_tap_matching_no_live_option_bridges_the_tapped_label(
+    http_recorder, fake_redis, channels, conversations, data: str
+):
+    # A token the live record does not hold (out of range, negative, non-numeric) is not an
+    # answer: the tapped label bridges as a turn, and the live record is left as it was.
     _seed_options(fake_redis, ["only-one"])
-    response = await inbound(make_inbound_request(_callback_update(data=data), headers=_VALID_HEADERS))
+    stored = fake_redis.data["channel:telegram:opts:777:42"]
+    keyboard = [[_button("only-one", "0")], [_button("Another", data)]]
+    response = await inbound(
+        make_inbound_request(_callback_update(data=data, keyboard=keyboard), headers=_VALID_HEADERS)
+    )
+    assert response.status_code == 200
+    assert _body(response) == {"data": {"status": "accepted"}}
+    assert channels.inbound_calls == []
+    (call,) = conversations.accept_calls
+    assert call.text == "Another"
+    assert call.reply_to_medium_message_id == "42"
+    assert call.params is None
+    assert fake_redis.data["channel:telegram:opts:777:42"] == stored
+
+
+@pytest.mark.parametrize(
+    "keyboard",
+    [
+        pytest.param(None, id="inaccessible-message-no-keyboard"),
+        pytest.param([[_button("Red", "0")]], id="no-button-carries-the-token"),
+        pytest.param([[{"callback_data": "1"}]], id="button-without-text"),
+        pytest.param([[_button("", "1")]], id="blank-label"),
+        pytest.param("not-rows", id="malformed-keyboard"),
+    ],
+)
+async def test_stale_tap_whose_label_cannot_be_read_sends_the_unreadable_notice(
+    http_recorder, fake_redis, channels, conversations, keyboard: Any
+):
+    # A stale tap whose button label the query does not carry is a reply the channel could not
+    # read: the user gets the one unreadable notice, no turn is made and the ask is untouched.
+    response = await inbound(
+        make_inbound_request(_callback_update(data="1", keyboard=keyboard), headers=_VALID_HEADERS)
+    )
     assert response.status_code == 200
     assert _body(response) == {"data": {"status": "ignored"}}
     assert channels.inbound_calls == []
+    assert conversations.accept_calls == []
+    (rejected,) = conversations.rejected_calls
+    assert rejected.channel_id == "telegram"
+    assert rejected.recipient == "777"
+    assert rejected.sender_identity == "123456"
+    assert rejected.kind == "callback_query"
+    assert rejected.reason is InboundRejectionReason.UNREADABLE
+    assert len(_answered_callbacks(http_recorder)) == 1
+
+
+async def test_live_tap_answers_by_its_record_not_the_keyboard_label(http_recorder, fake_redis, channels):
+    # A tap whose token matches a live option answers with the stored option text, whatever the
+    # keyboard's label reads.
+    channels.inbound_outcome = InboundAnswerOutcome.FORWARDED
+    _seed_options(fake_redis, ["red", "blue"])
+    keyboard = [[_button("Red label", "0"), _button("Blue label", "1")]]
+    response = await inbound(
+        make_inbound_request(_callback_update(data="1", keyboard=keyboard), headers=_VALID_HEADERS)
+    )
+    assert _body(response) == {"data": {"status": "forwarded"}}
+    (call,) = channels.inbound_calls
+    assert call.answer == "blue"
+
+
+async def test_tap_with_empty_callback_data_is_acked_ignored(http_recorder, fake_redis, channels, conversations):
+    # A query with an empty callback_data token is malformed: acked and ignored, never a
+    # poison-tap redelivery loop.
+    _seed_options(fake_redis, ["only-one"])
+    keyboard = [[_button("only-one", "")]]
+    response = await inbound(make_inbound_request(_callback_update(data="", keyboard=keyboard), headers=_VALID_HEADERS))
+    assert response.status_code == 200
+    assert _body(response) == {"data": {"status": "ignored"}}
+    assert channels.inbound_calls == []
+    assert conversations.accept_calls == []
+    assert conversations.rejected_calls == []
 
 
 async def test_callback_answer_failure_does_not_fail_webhook(http_recorder, fake_redis, channels, caplog):
@@ -703,17 +814,26 @@ async def test_callback_tap_correlation_key_is_scoped_by_the_tapping_chat(http_r
     assert channels.inbound_calls[0].answer == "blue"
 
 
-async def test_cross_chat_tap_finds_no_option_record_and_does_not_resolve(http_recorder, fake_redis, channels):
+async def test_cross_chat_tap_finds_no_option_record_and_does_not_resolve(
+    http_recorder, fake_redis, channels, conversations
+):
     # Chat 999 delivered an options message anchored on message_id 42 (its side record is
     # opts:999:42). A tap arriving from chat 888 carrying the same message_id 42 looks up
-    # opts:888:42 — a MISS — so it is acked-ignored and never resolves chat 999's ask.
+    # opts:888:42 — a MISS — so it bridges its own tapped label in chat 888 and never resolves
+    # chat 999's ask.
     _seed_options(fake_redis, ["red", "blue"], message_id=42, chat_id=999)
+    keyboard = [[_button("Red", "0"), _button("Blue", "1")]]
     response = await inbound(
-        make_inbound_request(_callback_update(chat_id=888, message_id=42, data="1"), headers=_VALID_HEADERS)
+        make_inbound_request(
+            _callback_update(chat_id=888, message_id=42, data="1", keyboard=keyboard), headers=_VALID_HEADERS
+        )
     )
     assert response.status_code == 200
-    assert _body(response) == {"data": {"status": "ignored"}}
+    assert _body(response) == {"data": {"status": "accepted"}}
     assert channels.inbound_calls == []
+    (call,) = conversations.accept_calls
+    assert call.client_address == "888"
+    assert call.text == "Blue"
     # Chat 999's own side record is untouched.
     assert fake_redis.data["channel:telegram:opts:999:42"]
 
@@ -1378,6 +1498,268 @@ async def test_unmappable_content_notifies_rejection_and_makes_no_turn(http_reco
     assert rejected.sender_identity == "123456"
     assert rejected.kind == "poll"
     assert rejected.reason is InboundRejectionReason.UNSUPPORTED_TYPE
+
+
+def test_each_content_member_without_a_reader_emits_a_neutral_kind():
+    # The vendor member names are matched only inside the channel; what leaves it as the
+    # rejection kind is the channel's own neutral content label.
+    assert set(_CONTENT_LABELS.values()) == {
+        "poll",
+        "dice",
+        "venue",
+        "contact",
+        "location",
+        "game",
+        "story",
+        "paid_media",
+        "checklist",
+        "giveaway",
+        "giveaway_winners",
+        "rich_message",
+    }
+
+
+@pytest.mark.parametrize(("member", "kind"), sorted(_CONTENT_LABELS.items()))
+async def test_user_sent_content_without_a_reader_notifies_rejection(
+    member, kind, http_recorder, fake_redis, conversations
+):
+    # Each content member a user can send (or forward) that this channel has no reader for gets
+    # the one generic notice naming its neutral kind, never a silent ack.
+    content: dict[str, Any] = {member: {}}
+    update = _media_update(**content)
+    response = await inbound(make_inbound_request(update, headers=_VALID_HEADERS))
+    assert response.status_code == 200
+    assert conversations.accept_calls == []
+    (rejected,) = conversations.rejected_calls
+    assert rejected.kind == kind
+    assert rejected.reason is InboundRejectionReason.UNSUPPORTED_TYPE
+
+
+async def test_a_message_with_no_content_member_is_rejected_as_other(http_recorder, fake_redis, conversations):
+    # The Bot API delivers a content type it does not model as a message with no content member.
+    response = await inbound(make_inbound_request(_media_update(), headers=_VALID_HEADERS))
+    assert response.status_code == 200
+    assert conversations.accept_calls == []
+    (rejected,) = conversations.rejected_calls
+    assert rejected.kind == "other"
+    assert rejected.reason is InboundRejectionReason.UNSUPPORTED_TYPE
+
+
+@pytest.mark.parametrize("member", sorted(_SERVICE_MEMBERS))
+async def test_a_service_message_stays_ignored(member, http_recorder, fake_redis, conversations):
+    members: dict[str, Any] = {member: {}}
+    update = _media_update(**members)
+    response = await inbound(make_inbound_request(update, headers=_VALID_HEADERS))
+    assert response.status_code == 200
+    assert _body(response) == {"data": {"status": "ignored"}}
+    assert conversations.rejected_calls == []
+    assert conversations.accept_calls == []
+
+
+# ``Message`` members of the Bot API page that the channel's member sets place, in page order.
+_PAGE_MESSAGE_MEMBERS = (
+    "message_id",
+    "message_thread_id",
+    "direct_messages_topic",
+    "from",
+    "sender_chat",
+    "sender_boost_count",
+    "sender_business_bot",
+    "sender_tag",
+    "receiver_user",
+    "ephemeral_message_id",
+    "date",
+    "business_connection_id",
+    "chat",
+    "forward_origin",
+    "is_topic_message",
+    "is_automatic_forward",
+    "reply_to_message",
+    "external_reply",
+    "quote",
+    "reply_to_story",
+    "reply_to_checklist_task_id",
+    "reply_to_poll_option_id",
+    "via_bot",
+    "edit_date",
+    "has_protected_content",
+    "is_from_offline",
+    "is_paid_post",
+    "media_group_id",
+    "author_signature",
+    "paid_star_count",
+    "text",
+    "entities",
+    "link_preview_options",
+    "suggested_post_info",
+    "effect_id",
+    "rich_message",
+    "animation",
+    "audio",
+    "document",
+    "live_photo",
+    "paid_media",
+    "photo",
+    "sticker",
+    "story",
+    "video",
+    "video_note",
+    "voice",
+    "widget",
+    "caption",
+    "caption_entities",
+    "show_caption_above_media",
+    "has_media_spoiler",
+    "checklist",
+    "contact",
+    "dice",
+    "game",
+    "poll",
+    "venue",
+    "location",
+    "new_chat_members",
+    "left_chat_member",
+    "chat_owner_left",
+    "chat_owner_changed",
+    "new_chat_title",
+    "new_chat_photo",
+    "delete_chat_photo",
+    "group_chat_created",
+    "supergroup_chat_created",
+    "channel_chat_created",
+    "message_auto_delete_timer_changed",
+    "migrate_to_chat_id",
+    "migrate_from_chat_id",
+    "pinned_message",
+    "users_shared",
+    "chat_shared",
+    "gift",
+    "unique_gift",
+    "gift_upgrade_sent",
+    "connected_website",
+    "write_access_allowed",
+    "passport_data",
+    "proximity_alert_triggered",
+    "boost_added",
+    "chat_background_set",
+    "checklist_tasks_done",
+    "checklist_tasks_added",
+    "community_chat_added",
+    "community_chat_joined",
+    "community_chat_removed",
+    "direct_message_price_changed",
+    "forum_topic_created",
+    "forum_topic_edited",
+    "forum_topic_closed",
+    "forum_topic_reopened",
+    "general_forum_topic_hidden",
+    "general_forum_topic_unhidden",
+    "giveaway_created",
+    "giveaway",
+    "giveaway_winners",
+    "giveaway_completed",
+    "managed_bot_created",
+    "paid_message_price_changed",
+    "paid_messages_waived",
+    "poll_option_added",
+    "poll_option_deleted",
+    "suggested_post_approved",
+    "suggested_post_approval_failed",
+    "suggested_post_declined",
+    "suggested_post_paid",
+    "ton_wallet_transfer",
+    "video_chat_scheduled",
+    "video_chat_started",
+    "video_chat_ended",
+    "video_chat_participants_invited",
+    "web_app_data",
+    "reply_markup",
+)
+
+# Members that describe a message rather than carry its content.
+_ATTRIBUTE_MEMBERS = frozenset(
+    {
+        "message_id",
+        "message_thread_id",
+        "direct_messages_topic",
+        "from",
+        "sender_chat",
+        "sender_boost_count",
+        "sender_business_bot",
+        "sender_tag",
+        "receiver_user",
+        "ephemeral_message_id",
+        "date",
+        "business_connection_id",
+        "chat",
+        "forward_origin",
+        "is_topic_message",
+        "is_automatic_forward",
+        "reply_to_message",
+        "external_reply",
+        "quote",
+        "reply_to_story",
+        "reply_to_checklist_task_id",
+        "reply_to_poll_option_id",
+        "via_bot",
+        "edit_date",
+        "has_protected_content",
+        "is_from_offline",
+        "is_paid_post",
+        "media_group_id",
+        "author_signature",
+        "paid_star_count",
+        "entities",
+        "link_preview_options",
+        "suggested_post_info",
+        "effect_id",
+        "caption",
+        "caption_entities",
+        "show_caption_above_media",
+        "has_media_spoiler",
+        "reply_markup",
+    }
+)
+
+# Members the channel reads: the text and the media members.
+_READER_MEMBERS = frozenset({"text", "photo"} | {spec.member for spec in inbound_media_module._MEDIA_SPECS})
+
+# User content no reader or label names: the classifier sends it to the ``other`` default.
+_DEFAULT_CONTENT_MEMBERS = frozenset({"live_photo", "widget", "passport_data"})
+
+
+def test_every_message_member_of_the_cited_page_is_classified():
+    """Each ``Message`` member of the page is a reader member, a label, a service member, an
+    attribute, or user content that falls to the ``other`` default — exactly one of them.
+
+    Members the classifier sends to the default are not all listed. A member added to
+    ``_PAGE_MESSAGE_MEMBERS`` is red here until it is placed in one group.
+    """
+    groups = (_READER_MEMBERS, set(_CONTENT_LABELS), _SERVICE_MEMBERS, _ATTRIBUTE_MEMBERS, _DEFAULT_CONTENT_MEMBERS)
+    for member in _PAGE_MESSAGE_MEMBERS:
+        assert sum(member in group for group in groups) == 1, member
+    page = set(_PAGE_MESSAGE_MEMBERS)
+    assert set(_CONTENT_LABELS) <= page
+    assert page >= _SERVICE_MEMBERS
+    assert page >= _READER_MEMBERS
+
+
+@pytest.mark.parametrize("member", [*sorted(_DEFAULT_CONTENT_MEMBERS), "some_future_member"])
+async def test_a_content_member_without_a_label_is_rejected_as_other(
+    member, http_recorder, fake_redis, conversations, caplog
+):
+    # A member no reader, label or service entry names is user content this channel cannot read:
+    # one generic notice of kind ``other``, and a WARNING naming the members the message carried.
+    members: dict[str, Any] = {member: {}}
+    update = _media_update(**members)
+    with caplog.at_level("WARNING"):
+        response = await inbound(make_inbound_request(update, headers=_VALID_HEADERS))
+    assert response.status_code == 200
+    assert conversations.accept_calls == []
+    (rejected,) = conversations.rejected_calls
+    assert rejected.kind == "other"
+    assert rejected.reason is InboundRejectionReason.UNSUPPORTED_TYPE
+    assert any(record.levelname == "WARNING" and member in record.getMessage() for record in caplog.records)
 
 
 def _dropped(unit: str) -> float:

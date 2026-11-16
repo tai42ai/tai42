@@ -14,9 +14,6 @@ import logging
 from starlette.responses import JSONResponse, Response
 from tai42_contract.app import tai42_app
 from tai42_contract.channels import InboundAnswerOutcome, InboundBridge
-from tai42_contract.conversations import (
-    BlankInboundTextError,
-)
 from tai42_contract.interactions import MediaItem
 from tai42_contract.locale import InvalidLocaleError, normalize_optional_locale
 from tai42_kit.conversations.entry_params import OverBoundParamsMode, bound_entry_params, put_entry_param
@@ -251,8 +248,9 @@ async def _bridge(
     reply_description — see the module's vocabulary block) plus the parity ``media_*``
     vocabulary of a media turn, validated against the contract's transport bounds and
     dropped whole on a violation so a poison value never 5xx-loops. ``attachments`` is the
-    typed served media the participant sent, ingested through the platform seam. No route
-    bound or blank text -> ack + log; a transient failure propagates (500).
+    typed served media the participant sent, ingested through the platform seam. ``text`` is
+    non-blank: every caller has read it from the update first. No route bound -> ack + log; a
+    transient failure propagates (500).
     """
     update_id = update.get("update_id")
     if not isinstance(update_id, int):
@@ -279,11 +277,6 @@ async def _bridge(
             attachments=attachments,
             locale=_inbound_locale(update),
         )
-    except BlankInboundTextError:
-        # A whitespace-only message is nothing to bridge — ack so Telegram stops
-        # redelivering it.
-        logger.warning("telegram inbound: blank text for chat_id=%s; ignoring", chat_id)
-        return _ignored("blank message text")
     except LookupError:
         # No route bound for this identity — ack so Telegram stops redelivering a
         # permanently-unrouted address. A transient failure instead propagates

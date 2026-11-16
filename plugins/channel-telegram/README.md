@@ -179,8 +179,14 @@ is the retry contract:
 | Configured secret unset/empty, or no recipient chat configured | 500 (fail closed, logged) |
 | Header missing or mismatched | 401 (one constant deny body) |
 | Body over the cap / not a JSON object | 413 / 400 |
-| Update out of scope (no message / chat not a configured recipient / not a reply / no text) | 200 "ignored" (reason logged) |
-| No pending correlation for the replied-to message | 200 "ignored" (logged warning) |
+| Update out of scope (no message, or no conversation route for it) | 200 "ignored" (reason logged) |
+| Message whose text is blank | 200 "ignored", one "could not be read" notice and an `unreadable` event (kind `text`); a pending question stays open |
+| Content the channel has no reader for (a poll, a venue, any content member it does not read) | 200 "ignored", one "not supported" notice and an `unsupported_type` event |
+| Service message the channel lists (a chat event of the Bot API `Message` object, such as a member joining) | 200 "ignored", no reply |
+| Service event the channel does not list | 200 "ignored", one "not supported" notice and an `unsupported_type` event (kind `other`) |
+| Message that answers no pending question (not a reply, or a reply with no pending correlation) | bridged as a new turn |
+| Tap on a keyboard button whose token no live option holds | bridged as a new turn carrying the tapped button's text, as a reply to the keyboard's message, with no entry parameters |
+| Such a tap whose button text cannot be read off the update | 200 "ignored", one "could not be read" notice and an `unreadable` event (kind `callback_query`) |
 | Callback door 200 | 200 "forwarded", mapping cleared |
 | Callback door 404 (ticket terminally gone) | 200 "stale", mapping cleared |
 | Callback door 400 (answer rejected) | 200 "rejected", mapping KEPT — the human can reply again |
@@ -237,7 +243,8 @@ consumed there to select the option). Values are transport-bounded (per the plat
 entry-param limits); an over-cap value is dropped (never truncated), and if the aggregate
 still overflows the whole set is dropped and the turn bridges without it — a participant message
 is never lost to a params bound. An option with no author-set id (a `select`/suggested-reply
-ask, a plain notify option) carries no params.
+ask, a plain notify option) carries no params, and neither does a tap whose token no live
+option holds: it bridges the tapped button's text alone.
 
 When a tap or a media reply **answers** a pending ask, the asker receives these entries as
 the answer's `params`, beside the unchanged answer.

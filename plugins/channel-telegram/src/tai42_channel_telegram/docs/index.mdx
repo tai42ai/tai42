@@ -73,6 +73,13 @@ A bridged tap on an option with an **author-set id** carries that id back as
 `params.reply_id` (and a sectioned row's description as `params.reply_description`) —
 opaque enrichment a `tool` target can read from the turn's `params`.
 
+A tap on a keyboard whose options are no longer live (its question's answer time or the
+option tap time has passed) answers nothing and leaves any pending question as it is: the
+tapped button's label bridges as the user's message, a reply to the message holding the
+keyboard, with no `params`. When Telegram's update carries no label for the tapped button
+(an old message Telegram reports as inaccessible carries no keyboard), the user gets one
+"could not be read" notice and a platform event records it as `unreadable`.
+
 Entry params are bounded at the door (at most 16 keys, each value at most 512 characters,
 the whole set at most 2048 bytes). Because Telegram redelivers a failed webhook, this door
 **drops** rather than refuses: an over-cap value is dropped on its own, an over-bound set is
@@ -110,10 +117,17 @@ text-only turn, so the participant's words are never lost. A transient failure (
 timeout, a 5xx, or a torn read) is not acked, so Telegram redelivers the update — the
 update id dedupes a redelivery that later succeeds.
 
-Content Telegram can send that this channel does not map to a media kind — a **poll**,
-**dice**, **venue**, **contact**, **location**, or **game** — is not bridged: the
-participant gets one generic "unsupported" notice and a platform event records the drop,
-so nothing is silently lost.
+Content a user can send or forward that this channel does not map to a media kind — a
+**poll**, **dice**, **venue**, **contact**, **location**, **game**, **story**, **paid
+media**, **checklist**, **giveaway**, **giveaway winners**, a **rich message** or another content kind
+Telegram delivers that the channel has no reader for — is not
+bridged: the participant gets the one generic unsupported-type notice and a platform event
+records the drop, so nothing is silently lost. A message whose text is blank gets the one
+"could not be read" notice and a platform event records it as `unreadable` (kind `text`);
+a blank reply to a pending question leaves the question open. A service message the channel
+lists — a chat event of the Bot API `Message` object such as a member joining, a title
+change, a pin or a topic change — is acked without a reply; a service event it does not
+list gets the unsupported-type notice.
 
 ## Message ids and addresses
 
@@ -144,13 +158,16 @@ a media reply's `media_*`) as its `params`.
 
 ## Working-on-it signal
 
-While a message runs its turn, the platform keeps Telegram's **typing action**
-alive: it re-issues `sendChatAction "typing"` ahead of the action's ~5 s lifetime
-until the reply is sent, so the chat shows the bot typing for the whole wait rather
-than for a single burst at receipt. The refresh is bounded by the
-`CONVERSATIONS_WORKING_SIGNAL_MAX_SECONDS` ceiling (`0` disables it entirely), with
-`CONVERSATIONS_WORKING_SIGNAL_REFRESH_MARGIN_SECONDS` the margin it refreshes ahead
-of each lapse.
+While a reply is owed to the participant — a message running its turn, the wait
+after they answer a question, a parked run that resumes — the platform keeps
+Telegram's **typing action** alive: it re-issues `sendChatAction "typing"` ahead of
+the action's ~5 s lifetime until the reply is sent, so the chat shows the bot typing
+for the wait rather than for a single burst at receipt. It is paused while a
+question the run sent stands, to the participant or to anyone else (no longer
+re-issued, so the typing action lapses on its own), and shown again once no question
+the run sent stands. One stretch of showing it is bounded by the `CONVERSATIONS_WORKING_SIGNAL_MAX_SECONDS` ceiling
+(`0` disables it entirely), with `CONVERSATIONS_WORKING_SIGNAL_REFRESH_MARGIN_SECONDS`
+the margin it refreshes ahead of each lapse.
 
 ## The bot token stays out of logs
 
