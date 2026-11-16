@@ -22,7 +22,8 @@ from __future__ import annotations
 # re-exported here so this module and the mint reference one shared module object.
 import secrets
 import uuid
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Iterator, Sequence
+from contextlib import contextmanager
 from datetime import datetime
 from typing import Any, Literal
 
@@ -43,6 +44,7 @@ from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.redis import RedisClient
 from tai42_kit.settings import require
 
+from tai42_skeleton.conversations import working_signal
 from tai42_skeleton.interactions.ask import delivery, park, persist, timing, validate, wait
 from tai42_skeleton.interactions.ask import payload as payload_shaping
 from tai42_skeleton.interactions.ask.errors import InteractionLimitError, InteractionTimeoutError
@@ -66,6 +68,28 @@ __all__ = [
 # ticket) in config to decide what an operator sees. It RIDES ALONGSIDE the unchanged
 # raise that propagates the failure — it never replaces the error path.
 DELIVERY_FAILED_EVENT_TOPIC = "interactions_delivery_failed"
+
+
+@contextmanager
+def _question_standing(run_id: str | None, interaction_id: str) -> Iterator[Callable[[str | None], None]]:
+    """Pause the asking run's working signal for a persisted question it now waits on.
+
+    The question stands whoever answers it and however it reaches them. The block receives the
+    question's close: called with the answering message's medium id, it tells the signal the
+    question was answered. Every failure inside the block (a refused delivery, a failed or
+    timed-out wait, a cancel) withdraws it and propagates; a normal exit without the close leaves
+    it standing for the ``resumed`` drive that claims a park.
+    """
+    working_signal.question_sent(run_id, interaction_id)
+
+    def answered(medium_message_id: str | None) -> None:
+        working_signal.question_answered(run_id, interaction_id, medium_message_id)
+
+    try:
+        yield answered
+    except BaseException:
+        working_signal.question_withdrawn(run_id, interaction_id)
+        raise
 
 
 async def cancel_parks_for_thread(
@@ -433,71 +457,74 @@ async def ask(
         on_expiry=on_expiry,
     )
 
-    # Deliver through the channel AFTER the question is persisted (the callback ticket
-    # must be claimable before any human can act on it) and BEFORE the blocking wait.
-    # A caller-addressed ask is never delivered — it addresses a run, not a human.
-    if channel is not None and not caller_addressed:
-        if validation.channel_obj is None:
-            raise AssertionError
-        if callback is None:
-            raise AssertionError
-        delivery_frame = delivery.build_delivery_frame(
-            interaction_id=interaction_id,
-            recipient=recipient,
-            question=question,
-            fmt=fmt,
-            options=options,
-            format_payload=format_payload,
-            stored_media=stored_media,
-            on_mismatch=on_mismatch,
-            callback_url=callback.callback_url,
-            timeout_at=window.timeout_at,
-            sensitive=sensitive,
-        )
-        await delivery.deliver_with_retry(
-            validation.channel_obj,
-            delivery_frame,
+    with _question_standing(working_signal.current_run_id(), interaction_id) as answered:
+        # Deliver through the channel AFTER the question is persisted (the callback ticket
+        # must be claimable before any human can act on it) and BEFORE the blocking wait.
+        # A caller-addressed ask is never delivered — it addresses a run, not a human.
+        if channel is not None and not caller_addressed:
+            if validation.channel_obj is None:
+                raise AssertionError
+            if callback is None:
+                raise AssertionError
+            delivery_frame = delivery.build_delivery_frame(
+                interaction_id=interaction_id,
+                recipient=recipient,
+                question=question,
+                fmt=fmt,
+                options=options,
+                format_payload=format_payload,
+                stored_media=stored_media,
+                on_mismatch=on_mismatch,
+                callback_url=callback.callback_url,
+                timeout_at=window.timeout_at,
+                sensitive=sensitive,
+            )
+            await delivery.deliver_with_retry(
+                validation.channel_obj,
+                delivery_frame,
+                store,
+                window,
+                channel=channel,
+                recipient=recipient,
+                interaction_id=interaction_id,
+                group=group,
+                question=question,
+                sensitive=sensitive,
+            )
+
+        # Async park: the question is persisted (and, when a channel was given, delivered)
+        # exactly as sync — but the caller is NOT blocked. Return the sentinel now; a later
+        # answer (either door) or the expiry reaper resumes work by running the stored
+        # generic continuation as the stored identity.
+        if mode == "async":
+            # A CHAINED caller waiting on this run inherited ITS horizon from the run's
+            # previous ask, so tell it this park's deadline. Fired only for a re-park of a run
+            # a chained caller waits on (a first park and the dispatcher's own park notify
+            # nothing) and only once the park is persisted — never for a caller-addressed ask,
+            # which performs no send of any kind.
+            if not caller_addressed:
+                await park.notify_repark(expiry_at, interaction_id=interaction_id)
+            # The sentinel names the resume continuation this park was stamped with, so a
+            # caller that would adopt the park as its OWN suspended state can check it owns
+            # it instead of parking behind a resume fired elsewhere. ``caller_interaction_ids``
+            # names this single ask when it is caller-addressed (empty for a user ask), so a
+            # driver surfacing a whole step can tell the caller asks apart.
+            return SuspendedInteraction(
+                interaction_id=interaction_id,
+                expiry_at=expiry_at,
+                resume_owner=park_binding.continuation_tool,
+                interaction_ids=[interaction_id],
+                caller_interaction_ids=[interaction_id] if caller_addressed else [],
+            )
+
+        received = await wait.await_answer(
             store,
             window,
-            channel=channel,
-            recipient=recipient,
             interaction_id=interaction_id,
             group=group,
+            reply_key=reply_key,
             question=question,
             sensitive=sensitive,
         )
-
-    # Async park: the question is persisted (and, when a channel was given, delivered)
-    # exactly as sync — but the caller is NOT blocked. Return the sentinel now; a later
-    # answer (either door) or the expiry reaper resumes work by running the stored
-    # generic continuation as the stored identity.
-    if mode == "async":
-        # A CHAINED caller waiting on this run inherited ITS horizon from the run's
-        # previous ask, so tell it this park's deadline. Fired only for a re-park of a run
-        # a chained caller waits on (a first park and the dispatcher's own park notify
-        # nothing) and only once the park is persisted — never for a caller-addressed ask,
-        # which performs no send of any kind.
-        if not caller_addressed:
-            await park.notify_repark(expiry_at, interaction_id=interaction_id)
-        # The sentinel names the resume continuation this park was stamped with, so a
-        # caller that would adopt the park as its OWN suspended state can check it owns
-        # it instead of parking behind a resume fired elsewhere. ``caller_interaction_ids``
-        # names this single ask when it is caller-addressed (empty for a user ask), so a
-        # driver surfacing a whole step can tell the caller asks apart.
-        return SuspendedInteraction(
-            interaction_id=interaction_id,
-            expiry_at=expiry_at,
-            resume_owner=park_binding.continuation_tool,
-            interaction_ids=[interaction_id],
-            caller_interaction_ids=[interaction_id] if caller_addressed else [],
-        )
-
-    return await wait.await_answer(
-        store,
-        window,
-        interaction_id=interaction_id,
-        group=group,
-        reply_key=reply_key,
-        question=question,
-        sensitive=sensitive,
-    )
+        answered(received.medium_message_id)
+        return received.answer

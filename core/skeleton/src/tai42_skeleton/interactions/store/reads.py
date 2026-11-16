@@ -305,6 +305,21 @@ class _StoreReads(_StoreKeys):
         raw = await cast("Awaitable[set[str | bytes]]", r.smembers(self.run_parks_key(run_delivery_id)))
         return sorted(serde.as_str(member) for member in raw)
 
+    async def pending_run_members(self, r: Redis, run_delivery_id: str, *, excluding: str) -> list[str]:
+        """The park ids of the run ``run_delivery_id`` still waiting on an answer, ``excluding`` left out, sorted."""
+        members = sorted(
+            serde.as_str(member)
+            for member in await cast("Awaitable[set[str | bytes]]", r.smembers(self.run_parks_key(run_delivery_id)))
+        )
+        members = [member for member in members if member != excluding]
+        if not members:
+            return []
+        pipe = r.pipeline()
+        for member in members:
+            pipe.hget(self.state_key(member), "status")
+        statuses = await pipe.execute()
+        return [member for member, status in zip(members, statuses, strict=True) if serde.as_str(status) == "pending"]
+
     async def run_killed(self, r: Redis, run_delivery_id: str) -> bool:
         """Whether the run ``run_delivery_id`` was taken down (its ``run_killed_key`` mark stands)."""
         return bool(await r.exists(self.run_killed_key(run_delivery_id)))

@@ -425,7 +425,7 @@ class StoredPresets:
         return sorted([name for name in self.bodies if name != tool and tool in await self._origins_of(name)])
 
 
-async def _routes_bound_to(names: set[str]) -> dict[str, Any]:
+async def routes_bound_to(names: set[str]) -> dict[str, Any]:
     """Every conversation route whose ``tool`` target is one of ``names``, keyed by route name.
 
     A ``tool``-target route binds a preset as its target; a write that changes or removes the
@@ -446,7 +446,7 @@ async def _routes_bound_to(names: set[str]) -> dict[str, Any]:
     }
 
 
-async def _composing_closure(name: str) -> set[str]:
+async def composing_closure(name: str) -> set[str]:
     """Every preset that transitively COMPOSES ``name`` as a tool, via the ``used_by`` graph (``name`` excluded).
 
     A new version of ``name`` can break a preset that composes it as a tool, however deeply nested, so a
@@ -464,43 +464,3 @@ async def _composing_closure(name: str) -> set[str]:
                 closure.add(composer)
                 frontier.append(composer)
     return closure
-
-
-async def _assert_bound_routes_still_bind(name: str, candidate_body: Any) -> None:
-    """Refuse a preset write whose new version would break a conversation route bound to it or a composer.
-
-    Re-runs the route bind check of every route bound to ``name`` AND every route bound to a preset that
-    transitively composes ``name`` (:func:`_composing_closure`), against the UNSAVED new version — the
-    same referential-integrity stance a rename takes: a save/rollback that would leave a bound route
-    unable to bind is a 409 that commits nothing, naming the routes so the operator fixes them first.
-
-    For a route bound directly to ``name`` the candidate IS ``candidate_body``; for a route bound to a
-    composer the candidate is the composer's own (unchanged) active body, while the changed ``name`` is
-    made visible to the composer's composed-preset resolution through the candidate scope — so a composer
-    the new version breaks (its target can now ask with no reply/resume path, or reads a state nothing
-    binds) is refused too. The scope is cleared on exit so the candidate never leaks into the commit.
-    """
-    from tai42_skeleton.conversations.target_validators import active_target_candidate_body, target_bind_refusal_lines
-    from tai42_skeleton.operations import ConflictError
-    from tai42_skeleton.presets.candidate_scope import candidate_bodies
-
-    targets = {name} | await _composing_closure(name)
-    routes = await _routes_bound_to(targets)
-    if not routes:
-        return
-
-    broken: list[str] = []
-    with candidate_bodies({name: candidate_body}):
-        for route_name, route in sorted(routes.items()):
-            if route.target_name == name:
-                candidate = candidate_body
-            else:
-                candidate = await active_target_candidate_body(route.target_kind, route.target_name)
-            lines = await target_bind_refusal_lines(route, candidate)
-            if lines:
-                broken.append(f"{route_name!r} ({'; '.join(lines)})")
-    if broken:
-        raise ConflictError(
-            f"preset {name!r} cannot be saved — the new version would break conversation route(s): "
-            f"{'; '.join(broken)}; update those routes first"
-        )

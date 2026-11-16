@@ -215,8 +215,9 @@ class PresetStoreView(PresetStore):
         """The active :class:`PresetBody` of preset ``name``.
 
         Inside a bound-routes re-check scope (:func:`~tai42_skeleton.presets.candidate_scope.candidate_bodies`)
-        a name under check resolves to its UNSAVED candidate body, so a composing route's composed-preset
-        resolution sees the version the write would commit; outside that scope the committed body.
+        a name under check resolves to its not-yet-active candidate body, so a composing route's
+        composed-preset resolution sees the version the write would make active; outside that scope the
+        active body.
         """
         override = candidate_body_override(name)
         if override is not None:

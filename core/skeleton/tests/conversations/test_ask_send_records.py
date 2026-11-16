@@ -627,7 +627,7 @@ async def _quoting_answer_recorded(interactions) -> None:
 
 
 async def _await_the_answer(interactions):
-    return await wait_module.await_answer(
+    received = await wait_module.await_answer(
         interactions.store,
         _window(5),
         interaction_id=_INTERACTION,
@@ -636,6 +636,7 @@ async def _await_the_answer(interactions):
         question="proceed?",
         sensitive=False,
     )
+    return received.answer
 
 
 _QUOTED = ReplyTo(message_id="mid-quoted", status=ReplyToStatus.FOUND, text="the words quoted back")

@@ -1,13 +1,14 @@
 """The synchronous answer wait for an interaction question.
 
 Block for the reply on a fresh connection within the remaining budget, prune on cancel/timeout, and
-return the :class:`~tai42_contract.interactions.AskAnswer` (a sensitive answer wrapped) or raise the
-timeout.
+return the :class:`~tai42_contract.interactions.AskAnswer` (a sensitive answer wrapped) with the
+answering message's medium id, or raise the timeout.
 """
 
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 
 from tai42_contract.interactions import AskAnswer
 from tai42_contract.secrets import SecretValue
@@ -22,6 +23,17 @@ from .errors import InteractionTimeoutError
 from .timing import DeadlineWindow
 
 
+@dataclass(frozen=True)
+class ReceivedAnswer:
+    """An answer the wait received: what the asker gets, and the medium id of the message that answered.
+
+    ``medium_message_id`` is ``None`` when the answer came from no message.
+    """
+
+    answer: AskAnswer
+    medium_message_id: str | None
+
+
 async def await_answer(
     store: InteractionStore,
     window: DeadlineWindow,
@@ -31,16 +43,17 @@ async def await_answer(
     reply_key: str,
     question: str,
     sensitive: bool,
-) -> AskAnswer:
+) -> ReceivedAnswer:
     """Block on the reply list ``reply_key`` within what is LEFT of the budget after delivery.
 
     Uses the same monotonic ``deadline`` the delivery attempts ran against. Returns the answer, the
     message the answering reply quoted and the answer's ``params`` as one :class:`AskAnswer`: a
     ``sensitive`` answer wrapped in ``SecretValue``; ``reply_to`` resolved from the ask's
-    conversation thread when the reply quoted a message, else ``None``. On timeout or cancel the
-    question is pruned (else it inflates the group count and stays claimable by a late callback); a
-    timeout then raises ``InteractionTimeoutError`` naming which of the three end states the
-    question reached.
+    conversation thread when the reply quoted a message, else ``None``. Alongside it, the medium
+    id of the answering message, for the caller that holds the question open. On timeout or cancel
+    the question is pruned (else it inflates the group count and stays claimable by a late
+    callback); a timeout then raises ``InteractionTimeoutError`` naming which of the three end
+    states the question reached.
     """
     loop = asyncio.get_running_loop()
     # Redis BLPOP reads its timeout at 1ms resolution and a 0/negative timeout as
@@ -97,4 +110,7 @@ async def await_answer(
     # A sensitive answer is handed back wrapped so it cannot leak through a repr, a log
     # line, or a JSON dump — the caller reveals it deliberately.
     answer = SecretValue(response.answer) if sensitive else response.answer
-    return AskAnswer(answer=answer, reply_to=reply_to, params=response.params)
+    return ReceivedAnswer(
+        answer=AskAnswer(answer=answer, reply_to=reply_to, params=response.params),
+        medium_message_id=response.medium_message_id,
+    )

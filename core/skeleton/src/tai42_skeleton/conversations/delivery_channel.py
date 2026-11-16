@@ -566,13 +566,11 @@ async def _deliver_channel(store: ConversationRecordStore, record: ConversationR
     Never re-sends an accepted chunk. Orchestrates: preconditions → ledger read + resume plan →
     fresh-send admission → send plan → send loop → mark provisional + fallback confirmation.
     """
-    from tai42_skeleton.conversations import cache
+    from tai42_skeleton.conversations import cache, working_signal
     from tai42_skeleton.conversations import delivery as _pkg
-    from tai42_skeleton.conversations.turn import working_signal
 
-    # The turn's answer is about to send, so stop refreshing its working-on-it indicator. A
-    # cross-process delivery finds no task in its own registry and relies on the loop's own
-    # per-tick status read to stop instead.
+    # The reply is about to send, so the indicator its user sees stops. A loop running in another
+    # process is not in this one's registry; its per-tick read of the record ends it instead.
     working_signal.stop(record.message_id)
 
     settings = store.settings

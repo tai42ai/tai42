@@ -333,6 +333,7 @@ def rejection_wired(monkeypatch):
         (InboundRejectionReason.UNSUPPORTED_TYPE, "This content type is not supported here."),
         (InboundRejectionReason.TOO_LARGE, "That file is too large to accept here."),
         (InboundRejectionReason.COULD_NOT_RECEIVE, "That attachment could not be received."),
+        (InboundRejectionReason.UNREADABLE, "That message could not be read. Please send it again."),
     ],
 )
 async def test_notify_inbound_rejected_replies_with_the_reason_copy(rejection_wired, reason, copy):

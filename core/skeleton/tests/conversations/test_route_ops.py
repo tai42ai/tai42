@@ -1347,8 +1347,8 @@ async def test_platform_rule_ignores_a_non_asking_agent(wired):
 
 
 async def test_platform_rule_fires_for_an_asking_agent_reached_as_a_tool(wired):
-    """Standard 2: an agent reached through the ``tool`` kind (its run tool) resolves to the agent, so
-    the asking-agent rule fires there too — a second name is not a way around the check."""
+    """An agent reached through the ``tool`` kind (its run tool) resolves to the agent, so the
+    asking-agent rule fires there too — a second name is not a way around the check."""
     with pytest.raises(ValidationRejectedError, match="no reply_expr and no resume_expr"):
         await ops.create_conversation_route(
             route_name="chat",
@@ -1362,9 +1362,9 @@ async def test_platform_rule_fires_for_an_asking_agent_reached_as_a_tool(wired):
 
 
 async def test_platform_rule_reads_baked_tool_names_for_a_preset_over_an_agent(wired):
-    """Standard 2: a preset over an agent binds only as ``tool`` and BAKES the agent's tool_names; the
-    asking-agent rule reads the baked list from the candidate body. A preset baking ``ask`` with no
-    reply/resume is refused; one baking an empty list overrides the agent to not-asking and binds."""
+    """A preset over an agent binds only as ``tool`` and BAKES the agent's tool_names; the asking-agent
+    rule reads the baked list from the candidate body. A preset baking ``ask`` with no reply/resume is
+    refused; one baking an empty list overrides the agent to not-asking and binds."""
     from tai42_contract.presets import PresetBody
 
     from tai42_skeleton.conversations.target_validators import target_bind_refusal_lines
@@ -1386,19 +1386,47 @@ async def test_platform_rule_reads_baked_tool_names_for_a_preset_over_an_agent(w
     assert await target_bind_refusal_lines(route, quiet) == []
 
 
-# -- Standard 3: a target write re-checks the routes still bound to the preset ----
+async def test_platform_rule_names_the_agent_and_the_preset_that_runs_it(wired):
+    """The asking-agent line names the agent a route targets directly, and names both the preset and
+    the agent it runs when the route targets a preset over the agent."""
+    from tai42_contract.conversation_target import ConversationTargetKind
+    from tai42_contract.presets import PresetBody
+
+    from tai42_skeleton.conversations.target_validators import target_bind_refusal_lines
+
+    def _route(target_kind: ConversationTargetKind, target_name: str) -> ApiConversationRouteCreate:
+        return ApiConversationRouteCreate(
+            route_name="chat",
+            door="api",
+            target_kind=target_kind,
+            target_name=target_name,
+            execution_key="svc",
+            callback_url="https://example.com/cb",
+        )
+
+    assert await target_bind_refusal_lines(_route("agent", "asker"), None) == [
+        "agent 'asker' can ask its caller (its tool_names include 'ask') but the route declares no "
+        "reply_expr and no resume_expr: a caller-ask has no reply/resume path"
+    ]
+    asking = PresetBody(base_tool="asker", description="d", fixed_kwargs={"tool_names": ["ask"]})
+    assert await target_bind_refusal_lines(_route("tool", "asker-preset"), asking) == [
+        "preset 'asker-preset' runs agent 'asker', which can ask its caller (its tool_names include 'ask') "
+        "but the route declares no reply_expr and no resume_expr: a caller-ask has no reply/resume path"
+    ]
+
+
+# -- A preset write re-checks the routes still bound to the preset ----
 
 
 async def test_bound_route_recheck_refuses_a_save_that_would_break_it(wired, monkeypatch):
-    """A save/rollback whose candidate version would leave a bound route unable to bind is refused,
-    naming the route — the referential-integrity stance a rename takes, for the reverse edge. The
-    candidate (the UNSAVED version) is what the owner's validator judges."""
+    """A save whose new version would leave a bound route unable to bind is refused, naming the route.
+    The candidate (the unsaved new version) is what the owner's validator judges."""
     from tai42_contract.presets import PresetBody
 
     import tai42_skeleton.conversations as conv_pkg
     from tai42_skeleton.app import instance
     from tai42_skeleton.operations.errors import ConflictError
-    from tai42_skeleton.operations.reference_graph import _assert_bound_routes_still_bind
+    from tai42_skeleton.operations.presets.bound_route_gate import SaveWrite, assert_bound_routes_still_bind
 
     async def _validator(create: ConversationRouteCreate, candidate: PresetBody | None) -> list[str]:
         if candidate is not None and candidate.fixed_kwargs.get("broken"):
@@ -1419,21 +1447,26 @@ async def test_bound_route_recheck_refuses_a_save_that_would_break_it(wired, mon
     monkeypatch.setattr(conv_pkg, "get_conversations_manager", lambda: wired)
 
     good = PresetBody(base_tool="echo-tool", description="d", fixed_kwargs={})
-    await _assert_bound_routes_still_bind("echo-preset", good)  # the new version still binds → no refusal
+    await assert_bound_routes_still_bind("echo-preset", good, SaveWrite())  # the new version still binds → no refusal
 
     bad = PresetBody(base_tool="echo-tool", description="d", fixed_kwargs={"broken": True})
-    with pytest.raises(ConflictError, match="would break conversation route"):
-        await _assert_bound_routes_still_bind("echo-preset", bad)
+    with pytest.raises(ConflictError) as refused:
+        await assert_bound_routes_still_bind("echo-preset", bad, SaveWrite())
+    assert str(refused.value) == (
+        "preset 'echo-preset' cannot be saved — the new version would leave conversation route(s) unable to "
+        "bind: route 'r1', bound to preset 'echo-preset': the new version cannot bind it "
+        "(target echo-preset reads a state nothing binds)"
+    )
 
 
 async def test_bound_route_recheck_ignores_a_preset_no_route_binds(wired, monkeypatch):
     """A save of a preset no route targets is never refused by the re-check."""
     import tai42_skeleton.conversations as conv_pkg
-    from tai42_skeleton.operations.reference_graph import _assert_bound_routes_still_bind
+    from tai42_skeleton.operations.presets.bound_route_gate import SaveWrite, assert_bound_routes_still_bind
 
     monkeypatch.setattr(conv_pkg, "get_conversations_manager", lambda: wired)
     # No routes exist at all — the re-check finds nothing to refuse.
-    await _assert_bound_routes_still_bind("echo-preset", None)
+    await assert_bound_routes_still_bind("echo-preset", None, SaveWrite())
 
 
 async def test_a_route_bound_to_the_preset_is_a_delete_holder(wired, monkeypatch):

@@ -53,6 +53,7 @@ from tai42_kit.presets import PresetOutputError, run_output_stages
 from tai42_kit.utils.detached_util import mark_detached_run, reset_detached_run
 
 from tai42_skeleton.authz.execution import bind_execution_identity
+from tai42_skeleton.conversations import working_signal
 from tai42_skeleton.conversations.reply_to import resolve_ask_reply_to
 from tai42_skeleton.interactions.run_completion import apply_deferred_binding, run_completion_id
 from tai42_skeleton.interactions.settings import interactions_settings
@@ -102,6 +103,43 @@ async def _clear_due(store: InteractionStore, interaction_id: str) -> None:
     """
     async with client_ctx(RedisClient, interactions_settings().redis) as r:
         await store.clear_continuation_due(r, interaction_id)
+
+
+async def _state_resumed(
+    store: InteractionStore,
+    *,
+    interaction_id: str,
+    run_delivery_id: str | None,
+    receives_outcome: bool,
+    medium_message_id: str | None,
+) -> None:
+    """Tell the run's working signal that ``interaction_id`` was answered and which of its questions still stand.
+
+    Reads the run's open questions only when a signal runs for the run in this process. A
+    receiver-less drive's run is keyed by its completion id and lends the answering message's
+    ``medium_message_id``; a drive with a live receiver states it for the receiver's run, lending
+    none. A failed read is logged and the signal is left as it is: the run is unaffected.
+    """
+    if run_delivery_id is None:
+        return
+    if receives_outcome:
+        run_id = working_signal.current_run_id()
+        medium_message_id = None
+    else:
+        run_id = run_completion_id(run_delivery_id)
+    if run_id is None or not working_signal.has_loop(run_id):
+        return
+    try:
+        async with client_ctx(RedisClient, interactions_settings().redis) as r:
+            pending = await store.pending_run_members(r, run_delivery_id, excluding=interaction_id)
+    except Exception:
+        logger.error(
+            "interaction %s: reading its run's open questions for the working signal failed; the signal is unchanged",
+            interaction_id,
+            exc_info=True,
+        )
+        return
+    working_signal.resumed(run_id, interaction_id, medium_message_id=medium_message_id, pending=pending)
 
 
 @asynccontextmanager
@@ -403,6 +441,7 @@ async def drive_and_deliver(
     interaction_id: str,
     answer: Any,
     reply_to_medium_message_id: str | None,
+    medium_message_id: str | None,
     params: dict[str, str] | None,
     park_context: StateContext | None,
     park_asked_by: Sequence[str],
@@ -461,6 +500,10 @@ async def drive_and_deliver(
     terminal success before the deferred binding reads it and before it is delivered; a terminal
     stage's refusal is a ``RunTerminalFailed`` handled as above.
 
+    A receiver-less drive of a run addressed to a thread holds the run's working signal for its
+    whole body, and every drive first tells the signal the answer landed (``_state_resumed``), with
+    ``medium_message_id`` the answering message's own medium id.
+
     The due record is cleared only AFTER a terminal is delivered, so a transient delivery failure
     leaves it for the reaper. Returns the inline receiver's outcome (or the non-terminal value); a
     receiver-less drive returns ``None``.
@@ -482,90 +525,106 @@ async def drive_and_deliver(
         if deferred_binding is not None and run_input is not None and door_id is not None
         else nullcontext()
     )
-    park_failed: RunTerminalFailed | None = None
-    try:
-        with run_delivery_ctx, deferred_ctx, drive_output_stages(output_stages):
-            result = await _run_continuation(
-                identity,
-                fingerprint,
-                tool,
-                interaction_id,
-                answer,
-                park_context,
-                park_asked_by,
-                caller_ask_landing,
-                chain_keys,
-                reply_to_medium_message_id=reply_to_medium_message_id,
-                params=params,
-                mark_detached=not receives_outcome,
-            )
-            result = await apply_terminal_stages(output_stages, result)
-    except RunTerminalFailed as exc:
-        if receives_outcome:
-            # A live receiver owns the failure: clear the record and propagate it to the resumer.
-            await _clear_due(store, interaction_id)
-            raise
-        park_failed = exc
-        result = None
-    except ParkRunTakenDownError:
-        if receives_outcome:
-            # A live receiver learns the run was taken down: clear the record and propagate.
-            await _clear_due(store, interaction_id)
-            raise
-        # The kill's revoke already cleared this park's ticket: nothing is delivered or kept.
-        logger.info(
-            "interaction %s: its run was taken down while its answer was in flight; nothing is delivered",
-            interaction_id,
-        )
-        return None
-    except Exception:
-        # A PLAIN raise: a live receiver clears the record and the error propagates; a
-        # receiver-less drive KEEPS the record (never cleared here) and surfaces loudly, so the
-        # reaper redelivers idempotently — the only path that does not lose a receiver-less outcome.
-        if receives_outcome:
-            await _clear_due(store, interaction_id)
-        raise
-
-    if park_failed is not None:
-        await _deliver_receiverless_failure(
+    # The run owes its user a reply while this receiver-less drive runs: hold its working signal
+    # for the whole drive and delivery. A drive with a live receiver holds nothing; the receiver's
+    # own signal covers it.
+    signal_ctx: AbstractContextManager[None] = (
+        nullcontext()
+        if receives_outcome or run_delivery_id is None or delivery is None or delivery.thread_id is None
+        else working_signal.hold(run_completion_id(run_delivery_id), thread_id=delivery.thread_id)
+    )
+    with signal_ctx:
+        await _state_resumed(
             store,
             interaction_id=interaction_id,
-            failure=park_failed,
+            run_delivery_id=run_delivery_id,
+            receives_outcome=receives_outcome,
+            medium_message_id=medium_message_id,
+        )
+        park_failed: RunTerminalFailed | None = None
+        try:
+            with run_delivery_ctx, deferred_ctx, drive_output_stages(output_stages):
+                result = await _run_continuation(
+                    identity,
+                    fingerprint,
+                    tool,
+                    interaction_id,
+                    answer,
+                    park_context,
+                    park_asked_by,
+                    caller_ask_landing,
+                    chain_keys,
+                    reply_to_medium_message_id=reply_to_medium_message_id,
+                    params=params,
+                    mark_detached=not receives_outcome,
+                )
+                result = await apply_terminal_stages(output_stages, result)
+        except RunTerminalFailed as exc:
+            if receives_outcome:
+                # A live receiver owns the failure: clear the record and propagate it to the resumer.
+                await _clear_due(store, interaction_id)
+                raise
+            park_failed = exc
+            result = None
+        except ParkRunTakenDownError:
+            if receives_outcome:
+                # A live receiver learns the run was taken down: clear the record and propagate.
+                await _clear_due(store, interaction_id)
+                raise
+            # The kill's revoke already cleared this park's ticket: nothing is delivered or kept.
+            logger.info(
+                "interaction %s: its run was taken down while its answer was in flight; nothing is delivered",
+                interaction_id,
+            )
+            return None
+        except Exception:
+            # A PLAIN raise: a live receiver clears the record and the error propagates; a
+            # receiver-less drive KEEPS the record (never cleared here) and surfaces loudly, so the
+            # reaper redelivers idempotently — the only path that does not lose a receiver-less outcome.
+            if receives_outcome:
+                await _clear_due(store, interaction_id)
+            raise
+
+        if park_failed is not None:
+            await _deliver_receiverless_failure(
+                store,
+                interaction_id=interaction_id,
+                failure=park_failed,
+                delivery=delivery,
+                run_delivery_id=run_delivery_id,
+                candidates=candidates,
+            )
+            return None
+
+        if _is_nonterminal(result):
+            await _clear_due(store, interaction_id)
+            return result
+
+        if receives_outcome:
+            # A live inline receiver takes the run's outcome; nothing is fired. The run's deferred door
+            # updates apply over the terminal output before the record is cleared.
+            await apply_deferred_binding(
+                deferred_binding=deferred_binding,
+                run_input=run_input,
+                door_id=door_id,
+                output=result,
+                run_delivery_id=run_delivery_id,
+            )
+            await _clear_due(store, interaction_id)
+            return result
+
+        await _deliver_receiverless_outcome(
+            store,
+            interaction_id=interaction_id,
+            result=result,
             delivery=delivery,
             run_delivery_id=run_delivery_id,
             candidates=candidates,
-        )
-        return None
-
-    if _is_nonterminal(result):
-        await _clear_due(store, interaction_id)
-        return result
-
-    if receives_outcome:
-        # A live inline receiver takes the run's outcome; nothing is fired. The run's deferred door
-        # updates apply over the terminal output before the record is cleared.
-        await apply_deferred_binding(
             deferred_binding=deferred_binding,
             run_input=run_input,
             door_id=door_id,
-            output=result,
-            run_delivery_id=run_delivery_id,
         )
-        await _clear_due(store, interaction_id)
-        return result
-
-    await _deliver_receiverless_outcome(
-        store,
-        interaction_id=interaction_id,
-        result=result,
-        delivery=delivery,
-        run_delivery_id=run_delivery_id,
-        candidates=candidates,
-        deferred_binding=deferred_binding,
-        run_input=run_input,
-        door_id=door_id,
-    )
-    return None
+        return None
 
 
 async def _deliver_run_outcome(

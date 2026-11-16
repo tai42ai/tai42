@@ -18,6 +18,7 @@ from tai42_skeleton.hooks.managers import base_hooks_manager
 from tai42_skeleton.hooks.runs import runtime
 from tai42_skeleton.hooks.runs.models import ClaimIntent
 from tai42_skeleton.hooks.runs.sweep import stop_hook_runs_sweep, sweep_tick
+from tai42_skeleton.interactions import parked_runs as parked_runs_module
 from tai42_skeleton.interactions import visit as visit_module
 from tai42_skeleton.interactions.store import InteractionStore
 
@@ -38,8 +39,8 @@ def spies(monkeypatch) -> dict[str, list]:
     """Count the visits, the door-contract evaluations, the settles and the ``$parked`` reads, in order."""
     seen: dict[str, list] = {"visit": [], "evaluate": [], "settle": [], "order": []}
     real_visit = visit_module.visit
-    real_settle = visit_module.settle_visit_claim
-    real_parked = visit_module.list_parked_for
+    real_settle = parked_runs_module.settle_visit_claim
+    real_parked = parked_runs_module.list_parked_for
     real_evaluate = base_hooks_manager.evaluate_door_contract
 
     async def _visit(**kwargs):
@@ -60,8 +61,8 @@ def spies(monkeypatch) -> dict[str, list]:
         return await real_evaluate(contract, payload, parked)
 
     monkeypatch.setattr(visit_module, "visit", _visit)
-    monkeypatch.setattr(visit_module, "settle_visit_claim", _settle)
-    monkeypatch.setattr(visit_module, "list_parked_for", _parked)
+    monkeypatch.setattr(parked_runs_module, "settle_visit_claim", _settle)
+    monkeypatch.setattr(parked_runs_module, "list_parked_for", _parked)
     monkeypatch.setattr(base_hooks_manager, "evaluate_door_contract", _evaluate)
     return seen
 
@@ -266,7 +267,7 @@ async def test_a_settle_fault_reschedules_with_the_intent_kept_and_settles_first
     await manager.register(real_hook("a", resume_expr=TemplatedText(content=_RESUME), start_expr=None))
     await real_world.park("i1")
     run_id = await _intent_left_by_a_dead_holder(manager, monkeypatch, VisitAct("resume", ("i1",), "before"))
-    settle = visit_module.settle_visit_claim
+    settle = parked_runs_module.settle_visit_claim
     faults = [ConnectionError("interactions store down")]
 
     async def _flaky_settle(act):
@@ -275,7 +276,7 @@ async def test_a_settle_fault_reschedules_with_the_intent_kept_and_settles_first
             raise faults.pop(0)
         return await settle(act)
 
-    monkeypatch.setattr(visit_module, "settle_visit_claim", _flaky_settle)
+    monkeypatch.setattr(parked_runs_module, "settle_visit_claim", _flaky_settle)
     caplog.set_level(logging.ERROR)
 
     as_process(monkeypatch, LIVE)
@@ -442,7 +443,7 @@ async def test_a_claim_fault_whose_settle_also_fails_keeps_both_errors(
         )
         raise ConnectionError("claim reply lost")
 
-    settle = visit_module.settle_visit_claim
+    settle = parked_runs_module.settle_visit_claim
     faults = [ConnectionError("interactions store down")]
 
     async def _flaky_settle(act):
@@ -451,7 +452,7 @@ async def test_a_claim_fault_whose_settle_also_fails_keeps_both_errors(
         return await settle(act)
 
     monkeypatch.setattr(InteractionStore, "record_answer", _answered_then_reply_lost)
-    monkeypatch.setattr(visit_module, "settle_visit_claim", _flaky_settle)
+    monkeypatch.setattr(parked_runs_module, "settle_visit_claim", _flaky_settle)
     caplog.set_level(logging.ERROR)
 
     [run_id] = (await manager.on_event("t", {"who": "pA"})).run_ids

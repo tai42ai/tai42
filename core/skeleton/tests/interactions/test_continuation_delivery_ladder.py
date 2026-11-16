@@ -122,6 +122,7 @@ async def _drive(
         interaction_id=interaction_id,
         answer={"a": 1},
         reply_to_medium_message_id=None,
+        medium_message_id=None,
         params=None,
         park_context=None,
         park_asked_by=("main",),

@@ -376,7 +376,7 @@ async def test_deliver_tool_completion_success_maps_the_reply_and_warns_nothing(
 
 async def test_deliver_tool_completion_maps_via_the_pinned_originating_route(env, monkeypatch):
     # A park started under route A; the linked person then wrote from route B, so
-    # _resolve_completion_target reverses the thread to route B (where they last wrote). The
+    # resolve_completion_target reverses the thread to route B (where they last wrote). The
     # completion must still map the terminal through the ORIGINATING route A's reply_expr — not
     # route B's, which would map the SAME result wrongly. Delivery still lands on route B's
     # address (where the person is), but the mapped text comes from A.
@@ -390,7 +390,7 @@ async def test_deliver_tool_completion_maps_via_the_pinned_originating_route(env
     async def _resolve_to_b(_thread_id):
         return route_b, "+15550002222"
 
-    monkeypatch.setattr(completion_module, "_resolve_completion_target", _resolve_to_b)
+    monkeypatch.setattr(completion_module, "resolve_completion_target", _resolve_to_b)
 
     out = await _fire_tool(
         thread_id="bridge:@person:PID1",
@@ -590,7 +590,7 @@ async def test_deliver_completion_withdrawn_delivers_nothing_and_warns_nothing(e
 
     channel = FakeChannel()
     _wire(monkeypatch, FakeManager(_tool_channel_route(reply_expr=".result.reply // null")), channel)
-    monkeypatch.setattr(completion_module, "_resolve_completion_target", _never_resolved)
+    monkeypatch.setattr(completion_module, "resolve_completion_target", _never_resolved)
     firing = _fire_tool if fire == "tool" else _fire_agent
 
     with caplog.at_level(logging.WARNING, logger=_TURN_LOGGER):

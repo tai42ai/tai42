@@ -155,9 +155,9 @@ class InteractionsFacet(_Facet):
     def settle_visit_claim(self) -> SettleVisitClaim:
         """The bound ``SettleVisitClaim`` read: the ids of a visit's resume or take claim no longer open.
 
-        A facade EXPOSURE of :func:`tai42_skeleton.interactions.visit.settle_visit_claim`.
+        A facade EXPOSURE of :func:`tai42_skeleton.interactions.parked_runs.settle_visit_claim`.
         """
-        from tai42_skeleton.interactions.visit import settle_visit_claim
+        from tai42_skeleton.interactions.parked_runs import settle_visit_claim
 
         return settle_visit_claim
 
@@ -183,13 +183,13 @@ class InteractionsFacet(_Facet):
 
     async def list_parked(self) -> list[ParkedEntry]:
         """Every parked interaction on the current run's subject — the full parked entries."""
-        from tai42_skeleton.interactions.visit import list_parked
+        from tai42_skeleton.interactions.parked_runs import list_parked
 
         return await list_parked()
 
     async def list_parked_for(self, context: StateContext | None) -> list[ParkedEntry]:
         """Every parked interaction on ``context``'s subject — the door-contract ``$parked`` source."""
-        from tai42_skeleton.interactions.visit import list_parked_for
+        from tai42_skeleton.interactions.parked_runs import list_parked_for
 
         return await list_parked_for(context)
 
@@ -212,13 +212,13 @@ class InteractionsFacet(_Facet):
 
     async def resume_parked(self, interaction_id: str, payload: Any = ...) -> VisitOutcome:
         """Resume caller ask ``interaction_id`` with ``payload``, or TAKE its waiting outcome when omitted."""
-        from tai42_skeleton.interactions.visit import _TAKE, resume_parked
+        from tai42_skeleton.interactions.parked_runs import _TAKE, resume_parked
 
         return await resume_parked(interaction_id, _TAKE if payload is ... else payload)
 
     async def cancel_parked(self, ids: list[str]) -> VisitOutcome:
         """Kill the whole run of every parked interaction named in ``ids`` on the current run's subject."""
-        from tai42_skeleton.interactions.visit import cancel_parked
+        from tai42_skeleton.interactions.parked_runs import cancel_parked
 
         return await cancel_parked(ids)
 

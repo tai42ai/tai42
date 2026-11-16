@@ -86,9 +86,11 @@ class ConversationsSettings(TaiBaseSettings):
     # thread's turn slot before refusing with a loud 503; a background turn stays unbounded.
     sync_door_wait_seconds: float = Field(default=30, gt=0)
 
-    # Seconds; the hard ceiling on ONE turn's working-on-it (typing) refresh loop. The loop
-    # normally stops at the first outbound send, but a turn that never sends is bounded here so a
-    # hung turn's indicator never refreshes unbounded. 0 disables the loop entirely (the kill switch).
+    # Seconds; the hard ceiling on one stretch of the working-on-it (typing) indicator: from a
+    # turn's start, or from the close of the last question the run sent still standing (whoever it
+    # went to), until the reply.
+    # At the ceiling the indicator is cleared until the next stretch, so a run that never replies
+    # never refreshes it unbounded. 0 disables the indicator entirely (the kill switch).
     working_signal_max_seconds: float = Field(default=180.0, ge=0)
 
     # Seconds subtracted from a channel's vendor-indicator lifetime to pick the refresh interval,

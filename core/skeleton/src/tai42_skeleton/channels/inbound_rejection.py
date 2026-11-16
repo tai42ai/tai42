@@ -2,7 +2,7 @@
 
 A channel adapter that recognises an inbound content it cannot turn into a turn (an
 unmappable media kind, a file over the platform cap, a byte source it could not fetch, an
-unsupported content type) calls :func:`notify_inbound_rejected` instead of silently
+unsupported content type, a body it could not read) calls :func:`notify_inbound_rejected` instead of silently
 ack-and-ignoring it: the participant gets one fixed, reason-typed notice and the operator
 gets the ``conversations_inbound_rejected`` event.
 """
@@ -28,8 +28,8 @@ __all__ = ["INBOUND_REJECTED_EVENT_TOPIC", "notify_inbound_rejected"]
 
 # The platform-event topic emitted when an inbound content the channel recognises cannot
 # become a turn (an unmappable media kind, a file over the platform cap, a byte source that
-# could not be fetched, or an unsupported content type) and the participant is sent one
-# generic notice instead. Core states the fact; a deployment wires a hook to decide what an
+# could not be fetched, an unsupported content type, or a body that could not be read) and
+# the participant is sent one generic notice instead. Core states the fact; a deployment wires a hook to decide what an
 # operator sees. DISTINCT from the unrouted topic — a reply with no bound route and a
 # recognised-but-unbridgeable content are different faults.
 INBOUND_REJECTED_EVENT_TOPIC = "conversations_inbound_rejected"
@@ -41,6 +41,7 @@ _REJECTION_NOTICES: dict[InboundRejectionReason, str] = {
     InboundRejectionReason.UNSUPPORTED_TYPE: "This content type is not supported here.",
     InboundRejectionReason.TOO_LARGE: "That file is too large to accept here.",
     InboundRejectionReason.COULD_NOT_RECEIVE: "That attachment could not be received.",
+    InboundRejectionReason.UNREADABLE: "That message could not be read. Please send it again.",
 }
 
 
@@ -56,8 +57,8 @@ async def notify_inbound_rejected(
 
     The ONE chokepoint a channel adapter calls instead of silently ack-and-ignoring a
     content it recognises but cannot bridge — an unmappable media kind, a file over the
-    platform cap, a byte source it could not fetch, or an unsupported content type.
-    The notice goes to ``recipient`` over ``channel_id`` from ``sender_identity``, the
+    platform cap, a byte source it could not fetch, an unsupported content type, or a body it
+    could not read. The notice goes to ``recipient`` over ``channel_id`` from ``sender_identity``, the
     receiving identity that keys the channel route. ``reason`` selects the route's
     ``reply_texts.rejected_<reason>`` member when the route sets it, else the built-in
     :data:`_REJECTION_NOTICES` copy; ``kind`` is a generic, domain-neutral content label

@@ -18,11 +18,11 @@ from tai42_contract.conversations import ConversationRoute, TurnSupersededError
 from tai42_contract.interactions import LocationElement, MediaItem
 
 from tai42_skeleton.app.root_task import spawn_root_task
-from tai42_skeleton.conversations import cache
+from tai42_skeleton.conversations import cache, working_signal
 from tai42_skeleton.conversations.caps import TurnCaps
 from tai42_skeleton.conversations.delivery import spawn_delivery
 from tai42_skeleton.conversations.models import OVERLAP_DELIVERY_STATUSES, ConversationRecord, DeliveryStatus
-from tai42_skeleton.conversations.turn import overlap, redrive, target, working_signal
+from tai42_skeleton.conversations.turn import overlap, redrive, target
 from tai42_skeleton.conversations.turn.routing import _Multichannel
 
 logger = logging.getLogger("tai42_skeleton.conversations.turn")
@@ -118,7 +118,7 @@ async def _schedule_turn(
         task.add_done_callback(lambda t: _spawn_delivery_on_success(t, intake.message_id))
     else:
         task.add_done_callback(_TURN_TASKS.discard)
-    working_signal.start(intake)
+    working_signal.start_turn(intake)
     return task
 
 
@@ -186,6 +186,8 @@ async def _refresh_intake_lease(message_id: str, token: str) -> None:
 
 
 def _spawn_delivery_on_success(task: asyncio.Task[ConversationRecord], message_id: str) -> None:
+    # The turn is over on every branch below, so its indicator stops here; a reply's send stops it too.
+    working_signal.stop(message_id)
     _TURN_TASKS.discard(task)
     if task.cancelled():
         return

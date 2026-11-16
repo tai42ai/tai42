@@ -1,8 +1,8 @@
 """The working-signal loop wired into the real turn and delivery seams.
 
-Proves the two ends of the loop against the ACTUAL functions the doors run: ``_schedule_turn``
-starts the loop for the intake record, and ``_deliver_channel`` stops it the instant the answer
-is about to send.
+Proves the ends of a turn's loop against the ACTUAL functions the doors run: ``_schedule_turn``
+starts the loop for the intake record, the turn's end stops it on every outcome, and
+``_deliver_channel`` stops it the instant the answer is about to send.
 """
 
 from __future__ import annotations
@@ -11,13 +11,16 @@ import asyncio
 import contextlib
 import time
 
+import pytest
+
 from tai42_skeleton.app import instance as instance_module
 from tai42_skeleton.conversations import delivery as delivery_module
 from tai42_skeleton.conversations import delivery_channel as delivery_channel_module
 from tai42_skeleton.conversations import turn as turn_module
+from tai42_skeleton.conversations import working_signal
 from tai42_skeleton.conversations.models import ConversationRecord, DeliveryStatus
 from tai42_skeleton.conversations.turn import accessors as accessors_module
-from tai42_skeleton.conversations.turn import working_signal
+from tai42_skeleton.conversations.turn import schedule as schedule_module
 
 from .conftest import (
     EchoAgent,
@@ -81,7 +84,7 @@ async def test_schedule_turn_starts_the_working_signal_for_the_intake_record(env
     # The single scheduling seam every door funnels through must start the loop with the intake
     # record — proven against the REAL _schedule_turn driven by a real accept.
     started: list[ConversationRecord] = []
-    monkeypatch.setattr(working_signal, "start", lambda record: started.append(record))
+    monkeypatch.setattr(working_signal, "start_turn", lambda record: started.append(record))
 
     channel = FakeChannel()
     _wire(monkeypatch, FakeManager(_channel_route()), channel)
@@ -121,8 +124,9 @@ async def test_deliver_channel_stops_the_records_working_signal_loop(env, monkey
     record = _answered_channel_record("m-deliver", "hello")
     await create_record(store, record)
 
-    working_signal.start(record)
-    task = working_signal._WORKING_SIGNAL_TASKS[record.message_id]
+    working_signal.start_turn(record)
+    task = working_signal._SIGNALS[record.message_id].task
+    assert task is not None
     # Let the loop assert once and settle onto its (real, long) refresh sleep.
     for _ in range(200):
         if signal_channel.calls:
@@ -137,7 +141,32 @@ async def test_deliver_channel_stops_the_records_working_signal_loop(env, monkey
     with contextlib.suppress(asyncio.CancelledError):
         await task
     assert task.cancelled()
-    assert record.message_id not in working_signal._WORKING_SIGNAL_TASKS
+    assert not working_signal.has_loop(record.message_id)
     # The answer really went out through the delivery path, and the loop cleared its indicator once.
     assert [n.message for n in send_channel.sends] == ["hello"]
     assert signal_channel.calls[-1][0] is False
+
+
+def _finished_turn(outcome: str) -> asyncio.Future:
+    future: asyncio.Future = asyncio.get_running_loop().create_future()
+    if outcome == "cancelled":
+        future.cancel()
+    elif outcome == "failed":
+        future.set_exception(RuntimeError("the turn crashed"))
+    else:
+        status = DeliveryStatus.SILENT if outcome == "silent" else DeliveryStatus.PENDING_DELIVERY
+        record = _answered_channel_record("m-turn", "hello").model_copy(update={"delivery_status": status})
+        future.set_result(record)
+    return future
+
+
+@pytest.mark.parametrize("outcome", ["cancelled", "failed", "silent", "answered"])
+async def test_the_turns_end_stops_its_working_signal_on_every_outcome(outcome, monkeypatch):
+    stopped: list[str] = []
+    monkeypatch.setattr(working_signal, "stop", stopped.append)
+    monkeypatch.setattr(schedule_module, "spawn_delivery", lambda message_id: None)
+    monkeypatch.setattr(schedule_module, "_spawn_intake_resolution", lambda message_id: None)
+
+    schedule_module._spawn_delivery_on_success(_finished_turn(outcome), "m-turn")  # type: ignore[arg-type]
+
+    assert stopped == ["m-turn"]

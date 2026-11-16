@@ -23,7 +23,7 @@ from tai42_skeleton.conversations import delivery as delivery_module
 from tai42_skeleton.conversations.delivery import record_delivery_status
 from tai42_skeleton.conversations.models import ConversationRecord, DeliveryStatus
 from tai42_skeleton.conversations.thread_ids import person_thread_id, route_thread_id
-from tai42_skeleton.conversations.turn.completion_delivery import _resolve_completion_target
+from tai42_skeleton.conversations.turn.completion_delivery import resolve_completion_target
 from tai42_skeleton.conversations.turn.errors import ThreadAddressUnknownError
 from tai42_skeleton.conversations.turn.event_door import _resolve_event_thread
 from tai42_skeleton.conversations.turn.overlap import _gather_superseded
@@ -166,7 +166,7 @@ async def _sends_only_person(world) -> str:  # noqa: F811
 async def test_a_parked_turns_completion_returns_to_where_the_person_wrote_from(world):  # noqa: F811
     thread = await _person_on_two_routes(world)
 
-    route, address = await _resolve_completion_target(thread)
+    route, address = await resolve_completion_target(thread)
 
     assert (route.route_name, address) == (LINE_B.route_name, _A)
 

@@ -2,7 +2,8 @@
 
 These cover the parts of the visit order that never drive a continuation: the structural
 pre-check (every refusal raises with NOTHING cancelled and NOTHING resumed), the cancel and take
-actions, the start-path normalisation, and the door state-binding scoping. The inline-resume drive
+actions, the start-path normalisation, the door state-binding scoping, and the parked-run API
+(:mod:`tai42_skeleton.interactions.parked_runs`) driven through them. The inline-resume drive
 (a REAL continuation tool through ``run_tool``) is exercised in ``test_visit_resume.py``.
 """
 
@@ -29,6 +30,7 @@ from tai42_contract.tools import current_tool_invocation
 from tai42_kit.utils.state_context import state_context
 
 from tai42_skeleton.interactions import continuation as continuation_module
+from tai42_skeleton.interactions import parked_runs as parked_runs_module
 from tai42_skeleton.interactions import visit as visit_module
 from tai42_skeleton.interactions.settings import InteractionsSettings
 from tai42_skeleton.interactions.store import InteractionStore
@@ -81,6 +83,9 @@ def _wired(monkeypatch, fake_redis, fake_client_ctx):
     monkeypatch.setattr(visit_module, "client_ctx", fake_client_ctx)
     monkeypatch.setattr(visit_module, "interactions_settings", lambda: settings)
     monkeypatch.setattr(visit_module, "interactions_store_configured", lambda: True)
+    monkeypatch.setattr(parked_runs_module, "client_ctx", fake_client_ctx)
+    monkeypatch.setattr(parked_runs_module, "interactions_settings", lambda: settings)
+    monkeypatch.setattr(parked_runs_module, "interactions_store_configured", lambda: True)
     monkeypatch.setattr(continuation_module, "client_ctx", fake_client_ctx)
     monkeypatch.setattr(continuation_module, "interactions_settings", lambda: settings)
     return settings
@@ -517,14 +522,14 @@ async def test_no_binding_deposits_nothing_around_start():
     assert seen["invocation"] is None
 
 
-# --- the generic facade wrappers -------------------------------------------------------
+# --- the parked-run API -------------------------------------------------------------
 
 
 async def test_list_parked_returns_entries(store, fake_redis):
     await _seed_caller(store, fake_redis, "i1")
     await _seed_caller(store, fake_redis, "i2", gid="g2")
     with state_context(_context(_candidates())):
-        entries = await visit_module.list_parked()
+        entries = await parked_runs_module.list_parked()
     assert sorted(entry.id for entry in entries) == ["i1", "i2"]
     assert all(entry.to == "caller" for entry in entries)
     assert all(entry.on_expiry == "kill" for entry in entries)
@@ -533,7 +538,7 @@ async def test_list_parked_returns_entries(store, fake_redis):
 async def test_resume_parked_take_finished(store, fake_redis):
     await _seed_outcome(store, fake_redis, "cid", "finished", {"v": 9})
     with state_context(_context(_candidates())):
-        outcome = await visit_module.resume_parked("cid")
+        outcome = await parked_runs_module.resume_parked("cid")
     assert outcome.action == "taken"
     assert outcome.result == {"v": 9}
 
@@ -541,6 +546,6 @@ async def test_resume_parked_take_finished(store, fake_redis):
 async def test_cancel_parked_tears_down(store, fake_redis):
     await _seed_caller(store, fake_redis, "i1")
     with state_context(_context(_candidates())):
-        outcome = await visit_module.cancel_parked(["i1"])
+        outcome = await parked_runs_module.cancel_parked(["i1"])
     assert outcome.cancelled == ["i1"]
     assert not await _is_parked(store, fake_redis, "i1")

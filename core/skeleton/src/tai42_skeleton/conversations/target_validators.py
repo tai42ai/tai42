@@ -6,7 +6,7 @@ validator for the one tool or agent it OWNS, keyed ``(kind, name)``. The route b
 is its own name; a tool walks its ``parent_tool`` chain, so a preset inherits its base tool's
 owner), runs the platform's OWN rules plus that one owner validator, and returns the refusal
 lines a route write joins into the 422. The validators are passed the route's full create model
-and the target's candidate body, so an owner can judge an unsaved version of the target.
+and the target's candidate body, so an owner can judge a not-yet-active version of the target.
 
 The registry is reset on every ``start()`` (like the preset write-validator registry) so a
 reload re-imports the plugin modules and re-registers cleanly; a duplicate ``(kind, name)``
@@ -204,6 +204,7 @@ async def _platform_target_lines(
     agent — whose effective ``tool_names`` include ``ask``, the route must carry both ``reply_expr``
     (to map the agent's result back to a reply) and ``resume_expr`` (to resume the parked run), or a
     caller-ask on the turn has no path back. Any other target carries no platform bind rule here.
+    The refusal line names the agent; when the target is a preset over it, the preset too.
     """
     from tai42_skeleton.app import instance
 
@@ -214,8 +215,12 @@ async def _platform_target_lines(
     missing = _ask_reply_resume_gaps(tool_names, reply_expr=create.reply_expr, resume_expr=create.resume_expr)
     if not missing:
         return []
+    if create.target_name == name:
+        asker = f"agent {name!r} can ask its caller"
+    else:
+        asker = f"preset {create.target_name!r} runs agent {name!r}, which can ask its caller"
     return [
-        f"agent {create.target_name!r} can ask its caller (its tool_names include {CALLER_ASK_TOOL!r}) "
+        f"{asker} (its tool_names include {CALLER_ASK_TOOL!r}) "
         f"but the route declares no {' and no '.join(missing)}: a caller-ask has no reply/resume path"
     ]
 
@@ -227,7 +232,7 @@ async def target_bind_refusal_lines(create: ConversationRouteCreate, candidate_b
     asking-agent reply/resume rule, by resolution) plus the one validator registered for that owner,
     and returns the joined refusal lines (empty = allow). ``candidate_body`` is the target's stored
     body (a preset's body, or ``None`` when the target is not a preset); it lets the owner — and the
-    platform rule — judge an unsaved version of the target. The target's existence is asserted before
+    platform rule — judge a not-yet-active version of the target. The target's existence is asserted before
     this runs, so a name with no live target is nothing to validate here.
     """
     from tai42_skeleton.app import instance

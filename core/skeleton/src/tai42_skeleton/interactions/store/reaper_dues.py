@@ -133,6 +133,7 @@ class _StoreReaperDues(_StoreKeys):
             chain_keys=decode_chain_keys(fields),
             reply_to_medium_message_id=fields.get("reply_to_medium_message_id"),
             params=json.loads(raw_params) if raw_params is not None else None,
+            medium_message_id=fields.get("medium_message_id"),
             deferred_output_stages=(
                 PresetParkStages.model_validate_json(raw_stages) if raw_stages is not None else None
             ),

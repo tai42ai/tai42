@@ -95,6 +95,9 @@ class ContinuationDue:
     # continuation runs) and the answer's opaque ``params``. ``None`` when the answer carried none.
     reply_to_medium_message_id: str | None = None
     params: dict[str, str] | None = None
+    # The medium id of the answering message itself, lent to the run's working signal. ``None``
+    # when the answer came from no message.
+    medium_message_id: str | None = None
     # The output stages the park captured (``InteractionRequest.deferred_output_stages``), applied by
     # the reaper's redelivery where each preset's result reappears. ``None`` when it captured none.
     deferred_output_stages: PresetParkStages | None = None
@@ -147,6 +150,7 @@ def _continuation_due_mapping(
     reply_to_medium_message_id: str | None = None,
     params: dict[str, str] | None = None,
     deferred_output_stages: str | None = None,
+    medium_message_id: str | None = None,
 ) -> dict[str, str]:
     """The consumer-agnostic continuation-due record fields.
 
@@ -160,8 +164,9 @@ def _continuation_due_mapping(
     (``deferred_output_stages``, JSON) so a redelivery applies them, and the run's ``delivery``
     address (JSON) and ``run_delivery_id`` when the park carried them, so the reaper's DETACHED
     redelivery binds the run's address and re-establishes its delivery identity without re-reading
-    the request. The medium id of the message the answering reply quoted (never its text) and the
-    answer's ``params`` (JSON) ride beside the answer when it carried them. It carries no
+    the request. The medium id of the message the answering reply quoted (never its text), the
+    answering message's own medium id and the answer's ``params`` (JSON) ride beside the answer
+    when it carried them. It carries no
     consumer-specific data. Written into the SAME MULTI as the resolving claim
     (``record_answer``), so the outbox enqueue commits atomically with the ``answered`` state
     change — a crash can never leave a claimed answer with no due-record.
@@ -187,6 +192,7 @@ def _continuation_due_mapping(
         "reply_to_medium_message_id": reply_to_medium_message_id,
         "params": None if params is None else json.dumps(params),
         "deferred_output_stages": deferred_output_stages,
+        "medium_message_id": medium_message_id,
     }
     mapping.update({name: value for name, value in optional.items() if value is not None})
     return mapping

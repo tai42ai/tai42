@@ -44,7 +44,8 @@ from tai42_skeleton.conversations.turn.outcome import (
 )
 from tai42_skeleton.conversations.turn.overlap import is_message_turn
 from tai42_skeleton.conversations.turn.tool_result import _result_shape
-from tai42_skeleton.interactions.visit import list_parked, visit
+from tai42_skeleton.interactions.parked_runs import list_parked
+from tai42_skeleton.interactions.visit import visit
 from tai42_skeleton.operations.errors import PermissionDeniedError
 
 if TYPE_CHECKING:

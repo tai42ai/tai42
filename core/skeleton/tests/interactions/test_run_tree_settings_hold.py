@@ -37,6 +37,7 @@ from tai42_skeleton.interactions import authorization as authorization_module
 from tai42_skeleton.interactions import checkpoint_liveness as checkpoint_liveness_module
 from tai42_skeleton.interactions import helper as helper_module
 from tai42_skeleton.interactions import kill as kill_module
+from tai42_skeleton.interactions import parked_runs as parked_runs_module
 from tai42_skeleton.interactions import reaction as reaction_module
 from tai42_skeleton.interactions import visit as visit_module
 from tai42_skeleton.interactions.ask import delivery as delivery_module
@@ -108,6 +109,7 @@ def real_accessor(monkeypatch: pytest.MonkeyPatch, fake_client_ctx) -> None:
     channels_settings.cache_clear()
     for module in (
         visit_module,
+        parked_runs_module,
         helper_module,
         kill_module,
         reaction_module,
@@ -247,7 +249,7 @@ async def test_list_parked_for_suspended_on_the_store_holds_no_retired_settings(
     parked_at(InteractionStore, "list_parked_for", [])
 
     async def _door() -> Any:
-        return await visit_module.list_parked_for(StateContext(door="api", candidates=_CANDIDATES))
+        return await parked_runs_module.list_parked_for(StateContext(door="api", candidates=_CANDIDATES))
 
     _assert_nothing_held(await _held_while_parked(_door, gate, caplog), caplog)
 

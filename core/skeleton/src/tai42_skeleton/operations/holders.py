@@ -19,7 +19,7 @@ from tai42_contract.tools import ReferenceHolder, ToolDeleteReferee, ToolRenameR
 from tai42_skeleton.access_control.feature_reach import readable_feature_tags
 from tai42_skeleton.app import instance
 from tai42_skeleton.operations.errors import ConflictError, OperationFailedError
-from tai42_skeleton.operations.reference_graph import StoredPresets, _routes_bound_to
+from tai42_skeleton.operations.reference_graph import StoredPresets, routes_bound_to
 from tai42_skeleton.tools import holder_kinds
 
 logger = logging.getLogger(__name__)
@@ -116,7 +116,7 @@ async def delete_holders(name: str, branches: Sequence[str]) -> list[ReferenceHo
     for answer in await _asked_once(instance.app.tools.delete_referees(), names):
         for tool_name in names:
             holders.extend(answer.get(tool_name, []))
-    routes = await _routes_bound_to({name, *branches})
+    routes = await routes_bound_to({name, *branches})
     for route_name, route in sorted(routes.items()):
         summary = f"conversation route {route_name!r}"
         if route.target_name != name:

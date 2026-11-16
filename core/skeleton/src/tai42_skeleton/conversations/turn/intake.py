@@ -108,8 +108,7 @@ async def accept(
     target's payload under the stable ``attachments``/``location`` keys only when present.
 
     A blank/whitespace-only ``text`` is refused with :class:`BlankInboundTextError` before
-    any state is written — there is nothing to run a turn on — for the channel adapter to
-    drop like an unrouted message.
+    any state is written — there is nothing to run a turn on.
     """
     refuse_turn_while_reloading()
     checked_params = _checked_params(params)

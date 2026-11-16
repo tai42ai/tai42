@@ -36,12 +36,12 @@ from tai42_skeleton.operations.presets.authoring import (
     _input_schema_authoring_error,
     _write_validator_error,
 )
+from tai42_skeleton.operations.presets.bound_route_gate import RollbackWrite, SaveWrite, assert_bound_routes_still_bind
 from tai42_skeleton.operations.presets.create import _NOT_CONFIGURED_CODE, _NOT_CONFIGURED_NOUN
 from tai42_skeleton.operations.presets.models import PresetRollback, PresetVersionSave, PresetVersionTags
 from tai42_skeleton.operations.presets.views import _save_version_response, _wire_snapshot
 from tai42_skeleton.operations.reference_check import assert_references_resolve
 from tai42_skeleton.operations.reference_graph import (
-    _assert_bound_routes_still_bind,
     assert_blob_references_resolve,
     base_reference,
     body_head_references,
@@ -189,10 +189,10 @@ async def _save_version_core(
     await _validate_version_body(
         name, new_body, input_schema=input_schema, fixed_kwargs_provided=fixed_kwargs is not None
     )
-    # Referential integrity: a bound conversation route whose target this preset IS must still bind
-    # against the NEW version — the candidate body, judged before the write so a save that would
-    # strand a route is a 409 that commits nothing (the rename gate's stance, for the reverse edge).
-    await _assert_bound_routes_still_bind(name, new_body)
+    # Referential integrity: every conversation route bound to this preset, or to a preset composing
+    # it, must still bind against the new version — judged before the write, so a save that would
+    # strand a route is a 409 that commits nothing.
+    await assert_bound_routes_still_bind(name, new_body, SaveWrite())
     # The preset document's save rules over the new body, exactly as create runs them. Only a
     # NEWLY provided binding is attach-validated — its named templates attach idempotently and
     # its expressions/adapters compile, so a bad edit is a 4xx that persists nothing. A
@@ -357,10 +357,10 @@ async def rollback_preset(name: str, version: int) -> dict[str, Any]:
         "fixed_kwargs",
         body_root=True,
     )
-    # Referential integrity: a bound conversation route whose target this preset IS must still bind
-    # against the version rolled back TO — judged before the re-point so a rollback that would strand
-    # a route is a 409 that commits nothing.
-    await _assert_bound_routes_still_bind(name, target_body)
+    # Referential integrity: every conversation route bound to this preset, or to a preset composing
+    # it, must still bind against the version rolled back to — judged before the re-point, so a
+    # rollback that would strand a route is a 409 that re-points nothing.
+    await assert_bound_routes_still_bind(name, target_body, RollbackWrite(version))
     # Registration-tier fence: the tier is the target body's base tool.
     await _enforce_registration_tier(target_body.base_tool)
     # A rollback ACTIVATES the target version's body and its own door binding, so the document

@@ -104,7 +104,7 @@ def _window() -> DeadlineWindow:
 async def _answered_sync(wired, iid: str, response: InteractionResponse, *, sensitive: bool = False):
     await wired.store.add(wired.fake, _sync_req(wired.store, iid, sensitive=sensitive), idle_ttl=100)
     assert await wired.store.record_answer(wired.fake, response, "sg", reply_ttl=60) is True
-    return await wait_module.await_answer(
+    received = await wait_module.await_answer(
         wired.store,
         _window(),
         interaction_id=iid,
@@ -113,6 +113,7 @@ async def _answered_sync(wired, iid: str, response: InteractionResponse, *, sens
         question="proceed?",
         sensitive=sensitive,
     )
+    return received.answer
 
 
 # --- a waiting (sync) ask -------------------------------------------------------------------

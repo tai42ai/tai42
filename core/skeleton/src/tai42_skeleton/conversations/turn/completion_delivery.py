@@ -83,7 +83,7 @@ async def _rebuilt_turn(
     return _turn_block(record, route, person=None, thread_id=record.thread_id, reply_window=window)
 
 
-async def _resolve_completion_target(thread_id: str) -> tuple[ConversationRoute, str]:
+async def resolve_completion_target(thread_id: str) -> tuple[ConversationRoute, str]:
     """Reverse a parked bridge ``thread_id`` to the ``(route, client_address)`` a resumed answer targets.
 
     A route-keyed thread (``bridge:{route_name}:{address}``) carries both directly. A LINKED
@@ -273,7 +273,7 @@ async def deliver_agent_completion(
             completion_id,
         )
         return {"message_id": None}
-    route, client_address = await _resolve_completion_target(thread_id)
+    route, client_address = await resolve_completion_target(thread_id)
     answer_parts: list[AnswerPart] | None = None
     if kind == "succeeded":
         # A blank resumed answer delivers the SAME client-safe error text the fresh-turn path
@@ -439,7 +439,7 @@ async def deliver_tool_completion(
             completion_id,
         )
         return {"message_id": None}
-    route, client_address = await _resolve_completion_target(thread_id)
+    route, client_address = await resolve_completion_target(thread_id)
     # Map through the ORIGINATING route's reply_expr (pinned at park time), not the reversed
     # delivery route — a linked person may have written from a different route since the park,
     # whose reply_expr would map the terminal wrongly.

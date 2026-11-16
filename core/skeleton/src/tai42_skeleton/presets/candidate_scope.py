@@ -1,12 +1,13 @@
-"""A scoped override that makes an UNSAVED preset body visible to the active-body read.
+"""A scoped override that makes a not-yet-active preset body visible to the active-body read.
 
-A bound-routes re-check (``operations.reference_graph._assert_bound_routes_still_bind``) judges a
+A bound-routes re-check (``operations.presets.bound_route_gate.assert_bound_routes_still_bind``) judges a
 preset write BEFORE it commits. A route bound to a preset that COMPOSES the changed preset ``P`` is
-re-validated against ``P``'s candidate version, but the owner validator resolves the composed preset
-``P`` through the same preset-store read (:meth:`PresetStoreView.get_active_body`) every composed-preset
-resolution uses — which otherwise reads the still-committed OLD body. This scope maps ``P`` to its
-candidate body for the duration of the re-check, so that read returns the candidate; it is cleared on
-exit and must never leak into the commit or any other read.
+re-validated against ``P``'s candidate version (a new version a save appends, or the version a
+rollback moves to), but the owner validator resolves the composed preset ``P`` through the same
+preset-store read (:meth:`PresetStoreView.get_active_body`) every composed-preset resolution uses —
+which otherwise reads the still-active body. This scope maps ``P`` to its candidate body for the
+duration of the re-check, so that read returns the candidate; it is cleared on exit and must never
+leak into the commit or any other read.
 """
 
 from __future__ import annotations
@@ -35,11 +36,11 @@ def candidate_body_override(name: str) -> PresetBody | None:
 
 @contextmanager
 def candidate_bodies(overrides: Mapping[str, PresetBody]) -> Iterator[None]:
-    """Make ``overrides`` (preset name -> unsaved candidate body) the answer the active-body read gives.
+    """Make ``overrides`` (preset name -> not-yet-active candidate body) the answer the active-body read gives.
 
     For the duration of the ``with`` block, :meth:`PresetStoreView.get_active_body` returns the
     candidate body for an overridden name, so a composing route's composed-preset resolution sees the
-    version a write would commit rather than the committed one. The override is reset on exit (including
+    version a write would make active rather than the active one. The override is reset on exit (including
     on an exception), so it never leaks into the actual commit or any later read.
     """
     token = _candidate_bodies.set(dict(overrides))

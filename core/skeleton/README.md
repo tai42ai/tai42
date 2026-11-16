@@ -383,8 +383,8 @@ platform's fixed participant replies: `error` (a failed turn with no target repl
 `pairing_unlinked`, `pairing_not_linked`, `pairing_code_invalid` and `pairing_code` (the
 `/link` reply, a template that must reference `{pairing_code}` and may reference
 `{expires_at}`), and the inbound refusal notices `rejected_unsupported_type`,
-`rejected_too_large` and `rejected_could_not_receive`. An unset member sends the built-in
-English reply.
+`rejected_too_large`, `rejected_could_not_receive` and `rejected_unreadable`. An unset
+member sends the built-in English reply.
 
 ## Development
 

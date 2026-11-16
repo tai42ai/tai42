@@ -46,7 +46,8 @@ from tai42_skeleton.conversations.turn.outcome import (
 )
 from tai42_skeleton.conversations.turn.tool_turn import _reply_parts, _tool_payload, _tool_reply
 from tai42_skeleton.conversations.turn_context import BridgeTurnContext, bridge_turn_context
-from tai42_skeleton.interactions.visit import list_parked, visit
+from tai42_skeleton.interactions.parked_runs import list_parked
+from tai42_skeleton.interactions.visit import visit
 from tai42_skeleton.operations.errors import PermissionDeniedError
 from tai42_skeleton.tools.turn_budget import drive_live_caller_astream
 

@@ -515,6 +515,7 @@ async def real_world(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[RealWorld
     interactions Redis; tool-run store off."""
     from tai42_skeleton.app import instance
     from tai42_skeleton.interactions import continuation as continuation_module
+    from tai42_skeleton.interactions import parked_runs as parked_runs_module
     from tai42_skeleton.interactions import visit as visit_module
     from tai42_skeleton.interactions.settings import InteractionsSettings
     from tai42_skeleton.interactions.store import InteractionStore
@@ -533,6 +534,9 @@ async def real_world(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[RealWorld
     monkeypatch.setattr(visit_module, "client_ctx", fake_client_ctx)
     monkeypatch.setattr(visit_module, "interactions_settings", lambda: settings)
     monkeypatch.setattr(visit_module, "interactions_store_configured", lambda: True)
+    monkeypatch.setattr(parked_runs_module, "client_ctx", fake_client_ctx)
+    monkeypatch.setattr(parked_runs_module, "interactions_settings", lambda: settings)
+    monkeypatch.setattr(parked_runs_module, "interactions_store_configured", lambda: True)
     monkeypatch.setattr(continuation_module, "client_ctx", fake_client_ctx)
     monkeypatch.setattr(continuation_module, "interactions_settings", lambda: settings)
 

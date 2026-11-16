@@ -372,6 +372,7 @@ class _StoreAnswerWrites(_StoreWritesBase):
                 response.reply_to_medium_message_id,
                 response.params,
                 claim.deferred_output_stages,
+                medium_message_id=response.medium_message_id,
             )
             pipe.hset(due_key, mapping=due_mapping)
             pipe.expire(due_key, continuation_due_ttl)
