@@ -532,7 +532,7 @@ class _BroadcastMixin(_ConfigServiceBase):
                 targets,
                 lambda: reload_gate.run(self._admin.reload_config, reimports=True),
                 expected_at_start=at_start,
-                publish_on_local_failure=True,
+                publish_on_local_failure=(Exception,),
                 failure_payload=discarded_build_statement,
             )
         except FleetBroadcastError as error:

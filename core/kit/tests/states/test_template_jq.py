@@ -17,6 +17,8 @@ from tai42_kit.compute import ComputeWorkerLostError
 from tai42_kit.states import template_jq as template_jq_mod
 from tai42_kit.states.template_jq import (
     BoundProgram,
+    TemplateJqCompileError,
+    compile_template_jq,
     derive_update_ops,
     evaluate_input_program,
     select_template_jq,
@@ -310,3 +312,110 @@ async def test_an_update_program_that_fails_to_evaluate_is_the_authors_refusal_n
     assert str(excinfo.value).startswith("template_jq 'write' on template 'probe' failed to evaluate: ")
     assert "kaboom" in str(excinfo.value)
     assert isinstance(excinfo.value.__cause__, JqProgramError)
+
+
+# --------------------------------------------------------------------------- #
+# compile                                                                      #
+# --------------------------------------------------------------------------- #
+
+
+async def test_a_section_whose_programs_compile_over_their_sibling_prelude_passes() -> None:
+    programs = {
+        "base": _program("input", "$params.n + 1", params=["n"]),
+        "twice": _program("input", "tjq_base($params) * 2", params=["n"]),
+        "add": _program("update", '[{op: "set", path: ["n"], value: $input}]'),
+    }
+
+    await compile_template_jq(programs, {name: p.jq.content or "" for name, p in programs.items()})
+
+
+async def test_a_program_that_does_not_compile_is_refused_naming_it() -> None:
+    programs = {"base": _program("input", "."), "broken": _program("input", "tjq_missing({})")}
+
+    with pytest.raises(TemplateJqCompileError) as raised:
+        await compile_template_jq(programs, {name: p.jq.content or "" for name, p in programs.items()})
+
+    assert raised.value.program == "broken"
+    assert isinstance(raised.value.__cause__, JqProgramError)
+
+
+async def test_each_program_compiles_with_its_purposes_variables() -> None:
+    programs = {"add": _program("update", "$params")}
+
+    with pytest.raises(TemplateJqCompileError) as raised:
+        await compile_template_jq(programs, {"add": "$params"})
+
+    assert raised.value.program == "add"
+
+
+async def test_the_compile_reads_the_rendered_bodies_given() -> None:
+    programs = {"peek": _program("input", ".")}
+
+    with pytest.raises(TemplateJqCompileError):
+        await compile_template_jq(programs, {"peek": "{"})
+
+
+async def test_an_input_program_with_an_empty_body_is_refused_naming_it_with_jqs_own_message() -> None:
+    programs = {"a": _program("input", "."), "b": _program("input", "")}
+
+    with pytest.raises(TemplateJqCompileError) as raised:
+        await compile_template_jq(programs, {"a": ".", "b": ""})
+
+    assert raised.value.program == "b"
+    assert str(raised.value) == 'jq: the expression is empty (try ".")'
+
+
+@pytest.mark.parametrize("empty", ["", "   "])
+def test_an_input_program_with_an_empty_body_declares_no_sibling_def(empty: str) -> None:
+    assert template_jq_prelude({"a": ".", "b": empty}) == template_jq_prelude({"a": "."})
+
+
+async def test_a_sibling_evaluates_beside_an_input_program_with_an_empty_body() -> None:
+    program = _bound("tjq_a({}) + 1", prelude=template_jq_prelude({"a": ".n", "b": ""}))
+
+    assert await evaluate_input_program(program, {}, _Record({"probe": {"n": 1}})) == 2
+
+
+async def test_an_input_program_ending_in_a_comment_leaves_its_siblings_defs_intact() -> None:
+    programs = {"a": _program("input", ". # the whole subtree"), "b": _program("input", "tjq_a({})")}
+
+    await compile_template_jq(programs, {"a": ". # the whole subtree", "b": "tjq_a({})"})
+
+
+# A comment that ends in an odd run of backslashes, or in a backslash before a carriage return,
+# carries on to the next line in jq; each body compiles alone.
+_CONTINUED_COMMENT_BODIES = [". # ends \\", ". # ends \\\\\\", ". # ends \\\r", ". # one \\\n# two \\"]
+
+
+@pytest.mark.parametrize("body", _CONTINUED_COMMENT_BODIES)
+async def test_an_input_program_ending_in_a_continued_comment_compiles_with_its_siblings(body: str) -> None:
+    programs = {"a": _program("input", body), "b": _program("input", "tjq_a({})")}
+
+    await compile_template_jq(programs, {"a": body, "b": "tjq_a({})"})
+
+
+@pytest.mark.parametrize("body", _CONTINUED_COMMENT_BODIES)
+async def test_an_input_program_ending_in_a_continued_comment_leaves_the_next_sibling_def_intact(body: str) -> None:
+    program = _bound("tjq_b({})", prelude=template_jq_prelude({"a": f".n {body[2:]}", "b": "tjq_a({}) + 1"}))
+
+    assert await evaluate_input_program(program, {}, _Record({"probe": {"n": 1}})) == 2
+
+
+@pytest.mark.parametrize("faulty", ["(", "# x"])
+async def test_an_input_program_whose_body_does_not_compile_is_refused_naming_it_not_a_sibling(faulty: str) -> None:
+    programs = {"a": _program("input", "."), "b": _program("input", faulty)}
+
+    with pytest.raises(TemplateJqCompileError) as raised:
+        await compile_template_jq(programs, {"a": ".", "b": faulty})
+
+    assert raised.value.program == "b"
+    assert "syntax error" in str(raised.value)
+
+
+async def test_an_update_program_is_not_refused_for_a_faulty_input_sibling() -> None:
+    programs = {"add": _program("update", "[]"), "b": _program("input", "(")}
+
+    with pytest.raises(TemplateJqCompileError) as raised:
+        await compile_template_jq(programs, {"add": "[]", "b": "("})
+
+    assert raised.value.program == "b"

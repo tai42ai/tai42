@@ -6,7 +6,7 @@ from tai42_contract.errors import ErrorKind
 from tai42_contract.interactions import (
     IngestedMedia,
     MediaAlreadyBoundError,
-    MediaIngestError,
+    MediaError,
     MediaItem,
     MediaKind,
     MediaNotFoundError,
@@ -54,14 +54,14 @@ def test_media_error_family_derives_from_base():
         MediaNotFoundError,
         MediaAlreadyBoundError,
     ):
-        assert issubclass(cls, MediaIngestError)
+        assert issubclass(cls, MediaError)
 
 
 def test_media_errors_importable_from_public_path():
     import tai42_contract.interactions as interactions
 
     names = [
-        "MediaIngestError",
+        "MediaError",
         "MediaTooLargeError",
         "MediaTypeNotAllowedError",
         "MediaStoreUnavailableError",
@@ -75,7 +75,7 @@ def test_media_errors_importable_from_public_path():
 
 
 def test_media_error_kinds():
-    assert MediaIngestError("x").__tai_error_kind__ is ErrorKind.UPSTREAM_ERROR
+    assert MediaError("x").__tai_error_kind__ is ErrorKind.UPSTREAM_ERROR
     assert MediaTooLargeError("x").__tai_error_kind__ is ErrorKind.BAD_INPUT
     assert MediaTypeNotAllowedError("x").__tai_error_kind__ is ErrorKind.BAD_INPUT
     assert MediaStoreUnavailableError("x").__tai_error_kind__ is ErrorKind.UNAVAILABLE

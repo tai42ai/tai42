@@ -535,6 +535,34 @@ async def test_inbound_media_redelivery_after_permanent_reject_sends_no_second_r
     assert len(stub_app.conversations.rejected_calls) == 1
 
 
+async def test_a_refused_media_whose_caption_bridge_fails_is_noticed_once_across_the_redelivery(
+    handler, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx, monkeypatch: pytest.MonkeyPatch
+):
+    # The caption's bridge raises a retryable fault, so Meta redelivers the message; the refusal
+    # notice already went out and is not sent again, while the caption is bridged on the retry.
+    fake_httpx.get_responses.append(response(404, json={"error": {"message": "gone"}}))
+    fake_httpx.get_responses.append(response(404, json={"error": {"message": "gone"}}))
+    _stub_stream(monkeypatch)
+    message = {
+        "id": _WAMID,
+        "from": WA_ID,
+        "type": "image",
+        "image": {"id": "gone-1", "mime_type": "image/jpeg", "caption": "here it is"},
+    }
+
+    stub_app.conversations.accept_error = RuntimeError("per-thread FIFO is full")
+    with pytest.raises(RuntimeError, match="FIFO is full"):
+        await handler(signed_request(_params_envelope(message)))
+    assert _SEEN_KEY not in fake_redis.store
+
+    stub_app.conversations.accept_error = None
+    await handler(signed_request(_params_envelope(message)))
+
+    assert len(stub_app.conversations.rejected_calls) == 1
+    assert [call["text"] for call in stub_app.conversations.accept_calls] == ["here it is", "here it is"]
+    assert _SEEN_KEY in fake_redis.store
+
+
 async def test_whatsapp_parity_media_filename_equals_sanitised(
     handler, stub_app, fake_redis: FakeRedis, fake_httpx: FakeHttpx, monkeypatch: pytest.MonkeyPatch
 ):

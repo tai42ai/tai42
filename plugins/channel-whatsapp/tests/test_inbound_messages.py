@@ -105,7 +105,7 @@ async def test_inbound_fires_read_receipt_before_branches(
 async def test_correlated_question_reply_fires_read_receipt(
     handler, stub_app, channels, fake_redis: FakeRedis, fake_httpx: FakeHttpx
 ):
-    # Firing at _handle_message (before the type branches) also covers a reply that
+    # Firing at handle_message (before the type branches) also covers a reply that
     # correlates to a pending question — the path that never reaches the bridge.
     await _seed_pending()
     channels.inbound_outcome = InboundAnswerOutcome.FORWARDED

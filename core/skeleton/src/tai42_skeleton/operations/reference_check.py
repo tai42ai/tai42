@@ -16,6 +16,7 @@ from tai42_contract.tools import TemplateRef
 
 from tai42_skeleton.app import instance
 from tai42_skeleton.operations.errors import BadRequestError
+from tai42_skeleton.operations.storage_provider import storage_provider
 from tai42_skeleton.template.references import template_fault_lines
 
 
@@ -90,7 +91,9 @@ async def reference_fault_lines(refs: Iterable[RegistryReference]) -> list[str]:
     """One refusal line per unresolved ref, in input order, de-duplicated."""
     unique = list(dict.fromkeys(refs))
     missing = await _unresolved_names(unique)
-    template_lines = await template_fault_lines(as_template_ref(ref) for ref in unique if ref.registry == "template")
+    template_lines = await template_fault_lines(
+        storage_provider(), (as_template_ref(ref) for ref in unique if ref.registry == "template")
+    )
     lines: list[str] = []
     for ref in unique:
         if ref.registry == "template":

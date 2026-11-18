@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from tai42_contract.app import tai42_app
 
+from tai42_skeleton.operations.template_door import template_door
 from tai42_skeleton.template.media import MediaBlock
 
 
@@ -26,4 +27,5 @@ async def file_loader(source: str) -> str | MediaBlock:
         The extracted text (PDF, DOCX, XLSX, CSV, HTML, and more) or a media block
         (image/audio).
     """
-    return await tai42_app.storage.resource_manager.load_file(source)
+    async with template_door():
+        return await tai42_app.storage.resource_manager.load_file(source)

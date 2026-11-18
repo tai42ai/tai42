@@ -8,6 +8,9 @@ it). Guard policy is injected per test.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
+import inspect
 import socket
 from typing import Any
 
@@ -52,6 +55,123 @@ async def test_fetch_url_pins_and_captures_mime_under_guard(monkeypatch: pytest.
     assert data == b"hello from loopback"
     assert mime == "image/png"
     assert local_server.requests == ["GET"]
+
+
+def _count_clients(monkeypatch: pytest.MonkeyPatch) -> list[httpx.AsyncClient]:
+    """Record every ``httpx.AsyncClient`` built from here on."""
+    built: list[httpx.AsyncClient] = []
+    original_init = httpx.AsyncClient.__init__
+
+    def _init(self: httpx.AsyncClient, *args: Any, **kwargs: Any) -> None:
+        original_init(self, *args, **kwargs)
+        built.append(self)
+
+    monkeypatch.setattr(httpx.AsyncClient, "__init__", _init)
+    return built
+
+
+@pytest.mark.parametrize("guard_on", [True, False])
+async def test_the_fetches_of_one_configuration_on_one_loop_share_one_client(
+    monkeypatch: pytest.MonkeyPatch, local_server: Any, guard_on: bool
+) -> None:
+    """Every fetch of one guard setting on a loop rides one client, built by the first fetch."""
+    if guard_on:
+        _enable(monkeypatch, allow_cidrs=["127.0.0.0/8"])
+    else:
+        _disable(monkeypatch)
+    built = _count_clients(monkeypatch)
+    local_server.configure(body=b"shared", content_type="text/plain")
+    for _ in range(3):
+        assert await fetch_url(f"{local_server.base_url}/doc") == (b"shared", "text/plain")
+    assert len(built) == 1
+
+
+@pytest.mark.parametrize("guard_on", [True, False])
+async def test_a_cookie_one_fetch_receives_never_reaches_another_fetch(
+    monkeypatch: pytest.MonkeyPatch, local_server: Any, guard_on: bool
+) -> None:
+    if guard_on:
+        _enable(monkeypatch, allow_cidrs=["127.0.0.0/8"])
+    else:
+        _disable(monkeypatch)
+    local_server.configure(body=b"x", set_cookie="session=first-caller; Path=/")
+    await fetch_url(f"{local_server.base_url}/a")
+    await fetch_url(f"{local_server.base_url}/b")
+    assert local_server.cookies == [None, None]
+
+
+@pytest.mark.parametrize("guard_on", [True, False])
+async def test_a_cookie_a_redirect_hop_sets_reaches_the_next_hop_of_the_same_fetch(
+    monkeypatch: pytest.MonkeyPatch, local_server: Any, redirect_target: Any, guard_on: bool
+) -> None:
+    if guard_on:
+        _enable(monkeypatch, allow_cidrs=["127.0.0.0/8"])
+    else:
+        _disable(monkeypatch)
+    local_server.configure(location=f"{redirect_target.base_url}/final", set_cookie="hop=1; Path=/")
+    redirect_target.configure(body=b"final")
+    assert await fetch_url(f"{local_server.base_url}/start") == (b"final", "text/plain")
+    assert local_server.cookies == [None]
+    assert redirect_target.cookies == ["hop=1"]
+
+
+@pytest.mark.parametrize("guard_on", [True, False])
+async def test_concurrent_held_fetches_past_httpxs_default_pool_size_never_wait_on_each_other(
+    monkeypatch: pytest.MonkeyPatch, guard_on: bool
+) -> None:
+    """The shared client caps no total connection count, so no fetch waits for another to finish.
+
+    The server answers no request until every fetch holds an open request, or until a bound shorter
+    than httpx's timeouts passes; a capped pool keeps the fetch past the cap waiting for a free
+    connection, so fewer requests are ever held at once than there are fetches.
+    """
+    if guard_on:
+        _enable(monkeypatch, allow_cidrs=["127.0.0.0/8"])
+    else:
+        _disable(monkeypatch)
+    httpx_pool_size = inspect.signature(httpx.AsyncClient).parameters["limits"].default.max_connections
+    concurrent = httpx_pool_size + 1
+    held = 0
+    most_held_at_once = 0
+    all_held = asyncio.Event()
+
+    async def _answer_once_all_are_held(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        nonlocal held, most_held_at_once
+        await reader.readuntil(b"\r\n\r\n")
+        held += 1
+        most_held_at_once = max(most_held_at_once, held)
+        if held == concurrent:
+            all_held.set()
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(all_held.wait(), timeout=3)
+        held -= 1
+        writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nContent-Type: text/plain\r\n\r\nok")
+        await writer.drain()
+        writer.close()
+
+    server = await asyncio.start_server(_answer_once_all_are_held, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    try:
+        outcomes = await asyncio.gather(
+            *(fetch_url(f"http://127.0.0.1:{port}/held") for _ in range(concurrent)), return_exceptions=True
+        )
+    finally:
+        server.close()
+        await server.wait_closed()
+    assert outcomes == [(b"ok", "text/plain")] * concurrent
+    assert most_held_at_once == concurrent
+
+
+async def test_fetch_url_without_the_guard_follows_at_most_httpxs_redirect_limit(
+    monkeypatch: pytest.MonkeyPatch, local_server: Any
+) -> None:
+    """Without the guard the redirect bound is httpx's own, and breaching it is httpx's error."""
+    _disable(monkeypatch)
+    local_server.configure(location=f"{local_server.base_url}/loop")
+    with pytest.raises(httpx.TooManyRedirects):
+        await fetch_url(f"{local_server.base_url}/loop")
+    httpx_limit = inspect.signature(httpx.AsyncClient).parameters["max_redirects"].default
+    assert len(local_server.requests) == httpx_limit + 1
 
 
 async def test_fetch_url_blocks_internal_host(monkeypatch: pytest.MonkeyPatch) -> None:

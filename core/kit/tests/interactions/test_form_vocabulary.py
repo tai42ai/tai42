@@ -14,6 +14,7 @@ from tai42_kit.interactions import (
     RADIO_OPTION_THRESHOLD,
     TIME_OF_KEY,
     VISIBLE_WHEN_OPS,
+    display_slot_text,
     drawing_order,
     drawn_number_bounds,
     evaluate_visible_when,
@@ -198,3 +199,40 @@ def test_drawing_order_of_a_chain_or_cycle_is_idempotent():
     for names, properties in ((["t2", "t1", "d"], _CHAIN), (["c", "b", "a"], _CYCLE)):
         once = drawing_order(names, properties)
         assert drawing_order(once, properties) == once
+
+
+@pytest.mark.parametrize(
+    ("value", "text"),
+    [
+        ("Total: 42", "Total: 42"),
+        ("", ""),
+        (True, "true"),
+        (False, "false"),
+        (10, "10"),
+        (0, "0"),
+        (10.0, "10"),
+        (-3.0, "-3"),
+        (10.5, "10.5"),
+        (0.1, "0.1"),
+        (-0.0, "0"),
+        (5e-05, "0.00005"),
+        (1.5e-06, "0.0000015"),
+        (1e-07, "1e-7"),
+        (-2.5e-08, "-2.5e-8"),
+        (1e16, "10000000000000000"),
+        (1e21, "1e+21"),
+        (1.25e22, "1.25e+22"),
+        (123456.789, "123456.789"),
+        (10**20, "100000000000000000000"),
+        (10**22, "1e+22"),
+        (2**53 + 1, "9007199254740992"),
+    ],
+)
+def test_a_display_slot_value_reads_as_the_widget_writes_it(value: str | int | float | bool, text: str) -> None:
+    assert display_slot_text(value) == text
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf"), 10**400])
+def test_a_non_finite_display_slot_number_has_no_text(value: float) -> None:
+    with pytest.raises(ValueError, match="must be finite"):
+        display_slot_text(value)

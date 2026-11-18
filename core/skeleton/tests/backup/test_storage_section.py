@@ -26,6 +26,7 @@ from tai42_skeleton.template import ResourceManager
 
 from .._fakes.listing import keys_under
 from .._fakes.recording_storage import RecordingStorage
+from .._fakes.template_holders import app_held_by
 
 _PNG = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01"
 
@@ -124,7 +125,7 @@ def _bound(manager: object, *, not_backed_up: frozenset[str] = frozenset(), unli
 
 def _manager(store: Storage, evictions: list[TemplateEviction] | None = None) -> ResourceManager:
     sink = evictions if evictions is not None else []
-    return ResourceManager(store, on_evicted=sink.append)
+    return ResourceManager(store, on_evicted=sink.append, held_by=app_held_by)
 
 
 async def test_export_reads_each_object_with_its_type_in_one_provider_read() -> None:

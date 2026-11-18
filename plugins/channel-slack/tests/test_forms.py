@@ -7,18 +7,17 @@ import json
 from typing import Any
 
 import pytest
+from tai42_kit.interactions import RADIO_OPTION_THRESHOLD
 
+from tai42_channel_slack.form_answer import extract_answer
+from tai42_channel_slack.form_blocks import FIELD_ACTION_ID, FormSchemaError
 from tai42_channel_slack.forms import (
-    FIELD_ACTION_ID,
     FORM_OPEN_ACTION_ID,
     FORM_SUBMIT_CALLBACK_ID,
-    RADIO_OPTION_THRESHOLD,
-    FormSchemaError,
     build_message_blocks,
     build_modal_blocks,
     build_modal_view,
     decode_private_metadata,
-    extract_answer,
     first_field_name,
     validate_form_schema,
 )
@@ -964,11 +963,83 @@ def test_slotted_display_block_is_empty_until_a_value_fills_it():
     assert filled[1] == {"type": "section", "text": {"type": "mrkdwn", "text": "Total: 42"}}
 
 
+def test_a_null_slot_value_shows_the_block_own_text_or_nothing():
+    # ``null`` leaves the slot unfilled, the same as a slot no reaction has filled yet.
+    schema = {"type": "object", "properties": {"x": {"type": "string"}}}
+    pages = [
+        {
+            "title": "P",
+            "fields": ["x"],
+            "display": [{"kind": "heading", "slot": "title", "text": "Your entry"}, {"kind": "body", "slot": "total"}],
+        }
+    ]
+    blocks = build_modal_blocks(schema, {}, None, pages, display_values={"title": None, "total": None})
+    assert [b["type"] for b in blocks] == ["header", "header", "input"]
+    assert blocks[1] == {"type": "header", "text": {"type": "plain_text", "text": "Your entry"}}
+
+
+def test_a_zero_slot_value_is_drawn():
+    schema = {"type": "object", "properties": {"x": {"type": "string"}}}
+    pages = [{"title": "P", "fields": ["x"], "display": [{"kind": "body", "slot": "total"}]}]
+    blocks = build_modal_blocks(schema, {}, None, pages, display_values={"total": 0})
+    assert blocks[1] == {"type": "section", "text": {"type": "mrkdwn", "text": "0"}}
+
+
+@pytest.mark.parametrize(
+    ("value", "text"),
+    [(True, "true"), (False, "false"), (10, "10"), (10.0, "10"), (10.5, "10.5")],
+    ids=["true", "false", "int", "whole-float", "float"],
+)
+def test_a_scalar_slot_value_reads_as_the_widget_writes_it(value: Any, text: str):
+    # A boolean or number in a text slot reads as JSON writes it, the text the widget and the
+    # hosted page show for the same value.
+    schema = {"type": "object", "properties": {"x": {"type": "string"}}}
+    pages = [{"title": "P", "fields": ["x"], "display": [{"kind": "body", "slot": "total"}]}]
+    blocks = build_modal_blocks(schema, {}, None, pages, display_values={"total": value})
+    assert blocks[1] == {"type": "section", "text": {"type": "mrkdwn", "text": text}}
+
+
 def test_slotted_image_with_no_source_degrades_to_its_alt_text():
     schema = {"type": "object", "properties": {"x": {"type": "string"}}}
     pages = [{"title": "P", "fields": ["x"], "display": [{"kind": "image", "slot": "chart", "alt": "a chart"}]}]
     blocks = build_modal_blocks(schema, {}, None, pages)
     assert blocks[1] == {"type": "context", "elements": [{"type": "mrkdwn", "text": "a chart"}]}
+
+
+_SERVED_PICTURE = "/api/interactions/media/" + "S" * 43
+_UNLOADABLE_PICTURE = (
+    r"^form picture cannot be drawn on slack \(display slot 'chart'\): its source is not an absolute http\(s\) url "
+    r"slack can load$"
+)
+
+
+@pytest.mark.parametrize(
+    "src", [_SERVED_PICTURE, "data:image/png;base64,iVBORw0KGgo=", "c3RhdGlj", "https://@/x.png", "http://:80/x.png"]
+)
+def test_a_static_picture_slack_cannot_load_is_refused(src: str):
+    schema = {"type": "object", "properties": {"x": {"type": "string"}}}
+    pages = [{"title": "P", "fields": ["x"], "display": [{"kind": "image", "src": src, "alt": "a chart"}]}]
+    with pytest.raises(
+        FormSchemaError,
+        match=r"^form picture cannot be drawn on slack \(static picture\): its source is not an absolute "
+        r"http\(s\) url slack can load$",
+    ):
+        build_modal_blocks(schema, {}, None, pages)
+
+
+@pytest.mark.parametrize("value", [_SERVED_PICTURE, "https://@/x.png", "http://:80/x.png"])
+def test_a_slotted_picture_value_slack_cannot_load_is_refused(value: str):
+    schema = {"type": "object", "properties": {"x": {"type": "string"}}}
+    pages = [{"title": "P", "fields": ["x"], "display": [{"kind": "image", "slot": "chart", "alt": "a chart"}]}]
+    with pytest.raises(FormSchemaError, match=_UNLOADABLE_PICTURE):
+        build_modal_blocks(schema, {}, None, pages, display_values={"chart": value})
+
+
+def test_a_slotted_picture_link_is_drawn():
+    schema = {"type": "object", "properties": {"x": {"type": "string"}}}
+    pages = [{"title": "P", "fields": ["x"], "display": [{"kind": "image", "slot": "chart", "alt": "a chart"}]}]
+    blocks = build_modal_blocks(schema, {}, None, pages, display_values={"chart": "https://x/c.png"})
+    assert blocks[1] == {"type": "image", "image_url": "https://x/c.png", "alt_text": "a chart"}
 
 
 # -- B: conditional show/hide, evaluated here (platform logic) -------------------------------

@@ -262,9 +262,13 @@ async def test_notify_media_only_posts_image_blocks_without_a_text_section(http_
     assert payload["text"] == ""  # empty fallback — the blocks carry the content
 
 
-async def test_notify_data_uri_image_is_refused_before_any_send(http_script, fake_redis):
-    media = [MediaItem(kind=MediaKind.IMAGE, url="data:image/png;base64,AAAA", caption=None)]
-    with pytest.raises(ChannelInputError, match="data: image"):
+@pytest.mark.parametrize("url", ["data:image/png;base64,AAAA", "/api/interactions/media/" + "S" * 43])
+async def test_notify_image_slack_cannot_load_is_refused_before_any_send(http_script, fake_redis, url):
+    # Slack's servers load an image only from an absolute http(s) url: a data: url, a relative
+    # served-media reference (no public base url set to make it absolute) is a permanent input
+    # error, refused before anything posts.
+    media = [MediaItem(kind=MediaKind.IMAGE, url=url, caption=None)]
+    with pytest.raises(ChannelInputError, match="not an absolute http"):
         await SlackChannel().notify(ChannelNotification(message="hi", media=media))
     assert http_script.requests == []
 

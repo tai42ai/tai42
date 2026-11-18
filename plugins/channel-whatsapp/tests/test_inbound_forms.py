@@ -15,16 +15,17 @@ from tai42_kit.settings import reset_all_settings
 
 import tai42_channel_whatsapp.inbound  # noqa: F401  (route registration side-effect)
 from tai42_channel_whatsapp.channel import WhatsAppChannel
-from tai42_channel_whatsapp.channel.forms import _FLOW_BODY_MAX_CHARS
+from tai42_channel_whatsapp.channel.forms import FLOW_BODY_MAX_CHARS
 from tai42_channel_whatsapp.correlation import reserve_pending
-from tai42_channel_whatsapp.flows import build_form_flow, payload_labels
+from tai42_channel_whatsapp.flows import build_form_flow
+from tai42_channel_whatsapp.flows_components import payload_labels
 from tai42_channel_whatsapp.inbound.forms import (
     _CALLBACK_REJECTION_OPAQUE,
     _FORM_REJECTION_LEAD,
     _FORM_UNPROCESSABLE,
     _MAX_FORM_REJECTIONS,
     _coerce_form_answer,
-    _coerce_value,
+    coerce_value,
 )
 
 from .conftest import (
@@ -66,30 +67,30 @@ def test_date_value_passes_the_decode_unchanged():
     # plain string, so the decode leaves it verbatim (no coercion) — the value then satisfies
     # the schema's ``format: date`` at the door.
     prop = {"type": "string", "format": "date"}
-    assert _coerce_value("2026-09-27", prop) == "2026-09-27"
-    assert isinstance(_coerce_value("2026-09-27", prop), str)
+    assert coerce_value("2026-09-27", prop) == "2026-09-27"
+    assert isinstance(coerce_value("2026-09-27", prop), str)
 
 
 def test_checkbox_array_value_decodes_as_a_list():
     # A CheckboxGroup (array-of-strings field) returns the list of selected option values;
     # the decode passes it through as the list answer.
     prop = {"type": "array", "items": {"type": "string"}}
-    assert _coerce_value(["a", "b"], prop) == ["a", "b"]
+    assert coerce_value(["a", "b"], prop) == ["a", "b"]
 
 
 def test_single_pick_chips_value_unwraps_the_one_element_list_to_the_string():
     # A single-pick ChipsSelector (a string chips choice) returns a one-element list; the decode
     # unwraps it to the string the schema declares.
     prop = {"type": "string", "enum": ["a", "b", "c"], "control": "chips"}
-    assert _coerce_value(["b"], prop) == "b"
+    assert coerce_value(["b"], prop) == "b"
 
 
 def test_single_pick_chips_value_of_wrong_length_is_forwarded_raw_for_the_door_to_400():
     # A list of any other length cannot be the one string the schema expects, so it is forwarded raw
     # (the door then 400s and restores the pending ask) — never silently collapsed.
     prop = {"type": "string", "enum": ["a", "b", "c"], "control": "chips"}
-    assert _coerce_value(["a", "b"], prop) == ["a", "b"]
-    assert _coerce_value([], prop) == []
+    assert coerce_value(["a", "b"], prop) == ["a", "b"]
+    assert coerce_value([], prop) == []
 
 
 def test_merged_range_object_splits_onto_the_two_date_keys():
@@ -403,7 +404,7 @@ async def test_form_rejection_long_question_drops_question_keeps_error(
     # dropped WHOLE from the re-sent Flow body (never a mid-string ellipsis): the fresh
     # Flow re-presents the fields, so the body carries only the bounded lead+error tail
     # — which always fits — and the send succeeds with counter/pending unchanged.
-    long_question = "Q" * (_FLOW_BODY_MAX_CHARS + 100)
+    long_question = "Q" * (FLOW_BODY_MAX_CHARS + 100)
     await _seed_pending_form(question=long_question)
     _seed_flow_cache(fake_redis)
     channels.inbound_outcome = InboundAnswerOutcome.RETRY_KEPT
@@ -419,7 +420,7 @@ async def test_form_rejection_long_question_drops_question_keeps_error(
     assert not body.startswith("Q")  # not even a chopped prefix of it
     assert "…" not in body  # no ellipsis
     assert "..." not in body
-    assert len(body) <= _FLOW_BODY_MAX_CHARS  # fits the vendor cap
+    assert len(body) <= FLOW_BODY_MAX_CHARS  # fits the vendor cap
     assert _stored_rejections(fake_redis) == 1  # counter incremented, same as the short-question path
     assert await _pending_intact(fake_redis)  # pending kept
     assert _SEEN_KEY in fake_redis.store
@@ -432,7 +433,7 @@ async def test_form_rejection_body_at_cap_boundary_keeps_question(
     # and one char more would drop it. Pins the <= boundary against the constant.
     error = "note: must not be blank"
     tail = f"{_FORM_REJECTION_LEAD} {error}"
-    question = "Q" * (_FLOW_BODY_MAX_CHARS - len(tail) - len("\n\n"))
+    question = "Q" * (FLOW_BODY_MAX_CHARS - len(tail) - len("\n\n"))
     await _seed_pending_form(question=question)
     _seed_flow_cache(fake_redis)
     channels.inbound_outcome = InboundAnswerOutcome.RETRY_KEPT
@@ -444,7 +445,7 @@ async def test_form_rejection_body_at_cap_boundary_keeps_question(
     assert result.status_code == 200
     body = fake_httpx.calls[0]["json"]["interactive"]["body"]["text"]
     assert body == f"{question}\n\n{tail}"  # question kept at exactly the cap
-    assert len(body) == _FLOW_BODY_MAX_CHARS
+    assert len(body) == FLOW_BODY_MAX_CHARS
     assert _stored_rejections(fake_redis) == 1
     assert await _pending_intact(fake_redis)
 

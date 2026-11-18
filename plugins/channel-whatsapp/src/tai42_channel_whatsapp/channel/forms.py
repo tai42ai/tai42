@@ -9,14 +9,15 @@ the Flow message. The ask reserves a correlation; the ask-less notify rides a
 
 from __future__ import annotations
 
+from functools import partial
 from typing import Any, Literal
 from uuid import uuid4
 
 from tai42_contract.channels import ChannelDelivery, ChannelDeliveryError, ChannelInputError, ChannelNotification
 from tai42_contract.interactions.models import FormReactions, FormWording
 
-from tai42_channel_whatsapp.channel.flow_publishing import _resolve_flow_id
-from tai42_channel_whatsapp.channel.media import _send_media_prelude
+from tai42_channel_whatsapp.channel.flow_publishing import resolve_flow_id
+from tai42_channel_whatsapp.channel.media import send_media_prelude
 from tai42_channel_whatsapp.client import (
     SentMessage,
     send_flow,
@@ -29,22 +30,21 @@ from tai42_channel_whatsapp.correlation import (
     release_pending,
     reserve_pending,
 )
-from tai42_channel_whatsapp.flow_pictures import embed_page_pictures, require_pictured_data_fits
+from tai42_channel_whatsapp.flow_pictures import embed_page_pictures
 from tai42_channel_whatsapp.flows import (
-    _FALSE_LABEL,
-    _TRUE_LABEL,
+    FALSE_LABEL,
     FORM_ENTRY_SCREEN,
-    build_flow_data,
+    TRUE_LABEL,
     build_form_flow,
-    component_names,
     form_date_bounds,
     form_needs_endpoint,
-    payload_labels,
 )
-from tai42_channel_whatsapp.flows_components import _field_control
+from tai42_channel_whatsapp.flows_components import component_names, field_control, payload_labels
+from tai42_channel_whatsapp.flows_data_budget import require_screen_data_fits
 from tai42_channel_whatsapp.flows_dates import schema_without_date_bound_values
 from tai42_channel_whatsapp.flows_endpoint import FORM_LINE_MEMBERS
 from tai42_channel_whatsapp.flows_resolve import pages_without_picture_content, pages_without_slot_content
+from tai42_channel_whatsapp.flows_send_data import build_flow_data
 from tai42_channel_whatsapp.flows_shapes import ERROR_MESSAGE_MAX_CHARS
 from tai42_channel_whatsapp.settings import (
     WhatsAppSettings,
@@ -59,7 +59,7 @@ from tai42_channel_whatsapp.settings import (
 # pending on the same pair — while an ask's flow token stays its interaction id
 # verbatim and never enters this namespace. The prefix is wire-visible in every
 # delivered form's token; changing it orphans the forms already sitting in chats.
-_NOTIFY_FORM_TOKEN_PREFIX = "tai42-nf:"  # noqa: S105 constant identifier, not a secret value
+NOTIFY_FORM_TOKEN_PREFIX = "tai42-nf:"  # noqa: S105 constant identifier, not a secret value
 
 # Meta's cap on the Flow message's ``flow_cta`` (the chat button that opens the Flow): up to 20
 # characters, no emoji. The documented numbers disagree (pywa mirrors 20, Meta's "Sending a Flow"
@@ -69,10 +69,10 @@ _OPEN_LABEL_MAX_CHARS = 20
 # Meta caps the Flow message's ``interactive.body.text`` at this many characters. A door-rejection
 # re-send carries the caller's refusal sentence (``wording.answer.rejected``) with the door's own
 # reason substituted into every ``{reason}`` token, so the caller's template must leave room for the
-# reason: the door line is bounded at ``_DOOR_REJECTION_MAX_CHARS`` before it rides the body, and the
+# reason: the door line is bounded at ``DOOR_REJECTION_MAX_CHARS`` before it rides the body, and the
 # template's worst-case expansion (its fixed text plus every token filled) is capped at the body size.
-_FLOW_BODY_MAX_CHARS = 1024
-_DOOR_REJECTION_MAX_CHARS = 500
+FLOW_BODY_MAX_CHARS = 1024
+DOOR_REJECTION_MAX_CHARS = 500
 # Meta caps a text message body at this many characters. The closing sentence a refused answer at
 # the re-send cap draws (``wording.answer.rejected_final``) rides a text message with the door's line
 # in every ``{reason}`` token, so its worst-case expansion is capped at the text body size.
@@ -97,7 +97,7 @@ def _guard_open_label(label: str | None) -> None:
         )
 
 
-def _field_words(form: FormWording | None, member: Literal["invalid", "required"]) -> dict[str, str]:
+def form_field_words(form: FormWording | None, member: Literal["invalid", "required"]) -> dict[str, str]:
     """The caller's per-field ``wording.form.fields[<name>].<member>`` sentences, by property name.
 
     ``invalid`` words a value that breaks its field's shape, ``required`` a missing value. Every door
@@ -110,7 +110,7 @@ def _field_words(form: FormWording | None, member: Literal["invalid", "required"
     return {name: sentence for name, sentence in sentences.items() if sentence is not None}
 
 
-def _boolean_words(form: FormWording | None) -> dict[str, tuple[str, str]]:
+def form_boolean_words(form: FormWording | None) -> dict[str, tuple[str, str]]:
     """The caller's ``(true_label, false_label)`` words for each boolean field that sets at least one.
 
     The Flow's review readback bakes them in; an unset side takes the builder's default word.
@@ -118,7 +118,7 @@ def _boolean_words(form: FormWording | None) -> dict[str, tuple[str, str]]:
     if form is None:
         return {}
     return {
-        name: (words.true_label or _TRUE_LABEL, words.false_label or _FALSE_LABEL)
+        name: (words.true_label or TRUE_LABEL, words.false_label or FALSE_LABEL)
         for name, words in form.fields.items()
         if words.true_label is not None or words.false_label is not None
     }
@@ -136,16 +136,16 @@ def _guard_ask_error_line(lines: dict[str, str]) -> None:
     """Refuse an ask's ``wording.form.error_line`` too long to ride a door-rejection re-send, up front.
 
     A refused form answer is re-asked with a fresh Flow whose body carries the caller's error line in
-    place of the door's own reason, which is bounded at ``_DOOR_REJECTION_MAX_CHARS`` so the body
+    place of the door's own reason, which is bounded at ``DOOR_REJECTION_MAX_CHARS`` so the body
     template's worst case (:func:`_guard_rejected_template`) holds. A longer line is a permanent input
     refusal (:class:`ChannelInputError`), checked at deliver. An ask-less form is never re-sent, so its
     line takes no such bound.
     """
     line = lines.get("error_line")
-    if line is not None and len(line) > _DOOR_REJECTION_MAX_CHARS:
+    if line is not None and len(line) > DOOR_REJECTION_MAX_CHARS:
         raise ChannelInputError(
             f"wording.form.error_line is {len(line)} characters; it fills the re-sent Flow body in place of "
-            f"the door's reason, which WhatsApp bounds at {_DOOR_REJECTION_MAX_CHARS}"
+            f"the door's reason, which WhatsApp bounds at {DOOR_REJECTION_MAX_CHARS}"
         )
 
 
@@ -173,7 +173,7 @@ def _guard_field_sentences(
         prop = properties.get(name)
         if not isinstance(prop, dict):
             continue
-        control = _field_control(name, prop, False, option_fields, names)["type"]
+        control = field_control(name, prop, False, option_fields, names)["type"]
         cap = ERROR_MESSAGE_MAX_CHARS.get(control)
         if cap is not None and len(sentence) > cap:
             raise ChannelInputError(
@@ -187,7 +187,7 @@ def _guard_rejected_template(template: str | None) -> None:
 
     A refused form answer is re-asked with a fresh Flow whose body is the caller's refusal sentence
     with the door's own reason substituted for EACH ``{reason}`` token. Every substitution is bounded
-    at ``_DOOR_REJECTION_MAX_CHARS`` and Meta caps the body at ``_FLOW_BODY_MAX_CHARS``, so the
+    at ``DOOR_REJECTION_MAX_CHARS`` and Meta caps the body at ``FLOW_BODY_MAX_CHARS``, so the
     template's worst-case expansion — its fixed text plus every ``{reason}`` filled — must fit the
     body; otherwise the re-send would strand the participant with neither the Flow nor a message. A
     template over the cap is a permanent input refusal (:class:`ChannelInputError`), checked at
@@ -196,12 +196,12 @@ def _guard_rejected_template(template: str | None) -> None:
     if template is None:
         return
     reason_count = template.count("{reason}")
-    worst_case = len(template.replace("{reason}", "")) + reason_count * _DOOR_REJECTION_MAX_CHARS
-    if worst_case > _FLOW_BODY_MAX_CHARS:
+    worst_case = len(template.replace("{reason}", "")) + reason_count * DOOR_REJECTION_MAX_CHARS
+    if worst_case > FLOW_BODY_MAX_CHARS:
         raise ChannelInputError(
             f"wording.answer.rejected expands to up to {worst_case} characters once each of its "
-            f"{reason_count} {{reason}} token(s) is filled (up to {_DOOR_REJECTION_MAX_CHARS} characters each); "
-            f"WhatsApp caps the re-sent Flow body at Meta's {_FLOW_BODY_MAX_CHARS}-character limit"
+            f"{reason_count} {{reason}} token(s) is filled (up to {DOOR_REJECTION_MAX_CHARS} characters each); "
+            f"WhatsApp caps the re-sent Flow body at Meta's {FLOW_BODY_MAX_CHARS}-character limit"
         )
 
 
@@ -209,7 +209,7 @@ def _guard_rejected_final_template(template: str | None) -> None:
     """Refuse a caller ``wording.answer.rejected_final`` too long for the closing text message, up front.
 
     When a refused form answer reaches the re-send cap, the question closes with a text message: the
-    caller's closing sentence with the door's line (bounded at ``_DOOR_REJECTION_MAX_CHARS``) in EACH
+    caller's closing sentence with the door's line (bounded at ``DOOR_REJECTION_MAX_CHARS``) in EACH
     ``{reason}`` token. Meta caps a text body at ``_TEXT_BODY_MAX_CHARS``, so the template's worst-case
     expansion must fit; a longer one is a permanent input refusal (:class:`ChannelInputError`), checked
     at deliver — never at inbound time, where nothing can recover the closing message.
@@ -217,11 +217,11 @@ def _guard_rejected_final_template(template: str | None) -> None:
     if template is None:
         return
     reason_count = template.count("{reason}")
-    worst_case = len(template.replace("{reason}", "")) + reason_count * _DOOR_REJECTION_MAX_CHARS
+    worst_case = len(template.replace("{reason}", "")) + reason_count * DOOR_REJECTION_MAX_CHARS
     if worst_case > _TEXT_BODY_MAX_CHARS:
         raise ChannelInputError(
             f"wording.answer.rejected_final expands to up to {worst_case} characters once each of its "
-            f"{reason_count} {{reason}} token(s) is filled (up to {_DOOR_REJECTION_MAX_CHARS} characters each); "
+            f"{reason_count} {{reason}} token(s) is filled (up to {DOOR_REJECTION_MAX_CHARS} characters each); "
             f"WhatsApp caps a text message body at Meta's {_TEXT_BODY_MAX_CHARS}-character limit"
         )
 
@@ -370,7 +370,7 @@ async def send_form_ask_flow(
     waba_id = require_delivery_setting(settings.waba_id, "CHANNEL_WHATSAPP_WABA_ID")
     endpoint = form_needs_endpoint(schema, pages, set(options), reactions)
     endpoint_uri = _require_reaction_settings(settings) if endpoint else None
-    flow_id = await _resolve_flow_id(waba_id, schema_hash, flow_json, endpoint_uri)
+    flow_id = await resolve_flow_id(waba_id, schema_hash, flow_json, endpoint_uri)
     return await send_flow(
         phone_number_id=phone_number_id,
         to=to,
@@ -383,15 +383,15 @@ async def send_form_ask_flow(
     )
 
 
-async def _deliver_form(
+async def deliver_form(
     settings: WhatsAppSettings, phone_number_id: str, target: str, delivery: ChannelDelivery
 ) -> SentMessage:
     """Deliver a form ask as a WhatsApp Flow (Tier-2: reserve BEFORE send); return the Flow message.
 
-    The Flow (one screen per page) and its per-send data are built and validated
-    BEFORE any work with WhatsApp — an unsupported schema, an unmappable per-send option, or
-    an unknown page field raises here, before the ``CHANNEL_WHATSAPP_WABA_ID`` gate, the
-    reservation, or a send; only the pictures' fetch or read comes earlier. The reservation
+    The Flow (one screen per page) is built and validated BEFORE any work with WhatsApp and
+    before any picture is fetched or read — an unsupported schema, an unmappable per-send option,
+    or an unknown page field raises here, before the pictures, the ``CHANNEL_WHATSAPP_WABA_ID``
+    gate, the reservation, or a send. The reservation
     carries the answer schema (so an inbound
     Flow response is coerced to its types), the question text (so a door-rejected answer
     is re-asked), the per-send pages/values/options (so a re-send reproduces the same
@@ -410,12 +410,14 @@ async def _deliver_form(
     its ``error_line`` / ``update_failed`` lines) is cached under the ``interaction_id`` so the data
     endpoint can check its steps. A caller ``invalid`` or ``required`` sentence over its control's
     ``error-message`` cap, an ``error_line`` too long for the re-sent body and a ``rejected_final``
-    too long for the closing text message are refused before any reservation. An image block's
-    ``http(s)`` link is fetched, and its stored-media reference read, and embedded first
+    too long for the closing text message are refused before any reservation. Once the Flow builds,
+    an image block's ``http(s)`` link is fetched, and its stored-media reference read, and embedded
     (:func:`~tai42_channel_whatsapp.flow_pictures.embed_page_pictures`): a picture that cannot be
-    fetched, found, read or drawn, or slotted pictures too large together for the form's data,
-    refuses the send before any reservation; the reservation stores the embedded pages and the
-    endpoint sidecar none of the pictures. The send goes
+    fetched, found, read or drawn refuses the send before any reservation. The send's data is then
+    measured (:func:`~tai42_channel_whatsapp.flows_data_budget.require_screen_data_fits`): the data
+    of a form with picture slots, or of an endpoint-driven form, over its budget refuses the send
+    before any reservation. The reservation stores the embedded pages and the endpoint sidecar none
+    of the pictures. The send goes
     through the one sender :func:`send_form_ask_flow`; a failure writing the sidecar, resolving
     the Flow or sending releases the reservation, drops the sidecar and raises — never a fallback
     format.
@@ -435,11 +437,11 @@ async def _deliver_form(
     # Build + validate before any reservation (raises on an unsupported schema, an
     # unmappable per-send option, an unknown page field, an unrenderable reaction trigger, an
     # over-cap open-button label / footer label / per-field sentence / error line / readback line,
-    # an over-cap refusal template, a picture that cannot be embedded or pictures too large together),
+    # an over-cap refusal template, a picture that cannot be embedded or form data too large),
     # so an unrenderable send reserves nothing.
-    field_invalid = _field_words(form, "invalid")
-    field_required = _field_words(form, "required")
-    boolean_words = _boolean_words(form)
+    field_invalid = form_field_words(form, "invalid")
+    field_required = form_field_words(form, "required")
+    boolean_words = form_boolean_words(form)
     lines = _form_lines(form)
     _guard_open_label(open_label)
     _guard_rejected_template(rejected_template)
@@ -447,10 +449,6 @@ async def _deliver_form(
     _guard_ask_error_line(lines)
     _guard_field_sentences(delivery.schema, set(options), "invalid", field_invalid)
     _guard_field_sentences(delivery.schema, set(options), "required", field_required)
-    # Picture links and stored-media references become embedded picture data here, so the pending
-    # ask stores what every re-send draws and a picture that cannot be fetched, found or read
-    # refuses the send before anything is reserved.
-    pages = await embed_page_pictures(pages)
     build_form_flow(
         delivery.schema,
         pages,
@@ -461,8 +459,13 @@ async def _deliver_form(
         field_invalid=field_invalid,
         boolean_words=boolean_words,
     )
+    # Only a form this channel can render has its pictures fetched. Picture links and stored-media
+    # references become embedded picture data here, so the pending ask stores what every re-send
+    # draws and a picture that cannot be fetched, found or read refuses the send before anything is
+    # reserved.
+    pages = await embed_page_pictures(pages)
     endpoint = form_needs_endpoint(delivery.schema, pages, set(options), reactions)
-    require_pictured_data_fits(pages, build_flow_data(delivery.schema, values, options, pages), endpoint=endpoint)
+    require_screen_data_fits(pages, build_flow_data(delivery.schema, values, options, pages), endpoint=endpoint)
     require_delivery_setting(settings.waba_id, "CHANNEL_WHATSAPP_WABA_ID")
     # An endpoint-driven form cannot publish or be served without its data-endpoint key material —
     # refuse loudly up front (never a silent fall back to a static flow).
@@ -528,7 +531,7 @@ async def _deliver_form(
     return sent
 
 
-async def _send_form_notification(
+async def send_form_notification(
     settings: WhatsAppSettings, phone_number_id: str, target: str, notification: ChannelNotification
 ) -> list[SentMessage]:
     """Send an ask-less form notification, returning every :class:`SentMessage` in send order.
@@ -553,10 +556,14 @@ async def _send_form_notification(
     ``__required`` carriers and its ``error_line`` / ``update_failed`` lines as the form-line
     carriers (the sidecar is per schema hash, never per send). It refuses loudly, before any send,
     when the data-endpoint key material is missing, and a caller ``invalid`` or ``required``
-    sentence over its control's ``error-message`` cap is refused before any send too. An image
-    block's ``http(s)`` link is fetched, and its stored-media reference read, and embedded before
-    the build; a picture that cannot be fetched, found, read or drawn, or slotted pictures too
-    large together for the form's data, sends nothing, the media prelude included.
+    sentence over its control's ``error-message`` cap is refused before any send too. The Flow is
+    built from the pages as given first, so a form this channel cannot render is refused before
+    any picture is fetched; then an image block's ``http(s)`` link is fetched, and its stored-media
+    reference read, and embedded, and the Flow sent is built from the embedded pages. A picture
+    that cannot be fetched, found, read or drawn, or send data over its budget (a form with
+    picture slots or an endpoint-driven form,
+    :func:`~tai42_channel_whatsapp.flows_data_budget.require_screen_data_fits`), sends nothing,
+    the media prelude included.
 
     A caller-set ``form_tag`` rides the token as a 4th ``:``-delimited segment
     (``tai42-nf:{hash}:{nonce}:{form_tag}``) when set — its charset excludes ``:`` so it
@@ -579,23 +586,27 @@ async def _send_form_notification(
     open_label = form.open if form is not None else None
     form_title = form.title if form is not None else None
     form_submit = form.submit if form is not None else None
-    field_invalid = _field_words(form, "invalid")
-    field_required = _field_words(form, "required")
+    field_invalid = form_field_words(form, "invalid")
+    field_required = form_field_words(form, "required")
     _guard_open_label(open_label)
     _guard_field_sentences(notification.schema, set(options), "invalid", field_invalid)
     _guard_field_sentences(notification.schema, set(options), "required", field_required)
-    pages = await embed_page_pictures(pages)
     endpoint = form_needs_endpoint(notification.schema, pages, set(options))
-    flow_json, schema_hash = build_form_flow(
+    build_flow = partial(
+        build_form_flow,
         notification.schema,
-        pages,
-        set(options),
+        option_fields=set(options),
         form_title=form_title,
         form_submit=form_submit,
         field_invalid=field_invalid,
         askless=True,
-        boolean_words=_boolean_words(form),
+        boolean_words=form_boolean_words(form),
     )
+    # The Flow is built from the pages as given first, so a form this channel cannot render is
+    # refused before any picture is fetched; the Flow sent draws the embedded pictures.
+    build_flow(pages=pages)
+    pages = await embed_page_pictures(pages)
+    flow_json, schema_hash = build_flow(pages=pages)
     flow_data = build_flow_data(
         notification.schema,
         values,
@@ -606,12 +617,12 @@ async def _send_form_notification(
         field_required=field_required,
         form_lines=_form_lines(form),
     )
-    require_pictured_data_fits(pages, flow_data, endpoint=endpoint)
+    require_screen_data_fits(pages, flow_data, endpoint=endpoint)
     waba_id = require_delivery_setting(settings.waba_id, "CHANNEL_WHATSAPP_WABA_ID")
     endpoint_uri = _require_reaction_settings(settings) if endpoint else None
 
-    sent = await _send_media_prelude(phone_number_id, target, list(notification.media or []))
-    flow_id = await _resolve_flow_id(waba_id, schema_hash, flow_json, endpoint_uri)
+    sent = await send_media_prelude(phone_number_id, target, list(notification.media or []))
+    flow_id = await resolve_flow_id(waba_id, schema_hash, flow_json, endpoint_uri)
     # Written beside every flow-id use — the reply side cannot repopulate it. The
     # payload-label reverse map rides with the schema so the reply decodes to schema keys; the
     # pages, option fields and declared date bounds let the data endpoint check an endpoint-driven
@@ -628,7 +639,7 @@ async def _send_form_notification(
         sorted(options),
         form_date_bounds(notification.schema, pages, set(options)),
     )
-    flow_token = f"{_NOTIFY_FORM_TOKEN_PREFIX}{schema_hash}:{uuid4().hex}"
+    flow_token = f"{NOTIFY_FORM_TOKEN_PREFIX}{schema_hash}:{uuid4().hex}"
     if notification.form_tag is not None:
         # The caller-set tag rides as the 4th token segment; it never touches the Flow
         # artefact, the hash or the send data, so no republish and no recipient data in the artefact.

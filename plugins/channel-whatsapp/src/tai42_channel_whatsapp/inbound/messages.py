@@ -1,6 +1,6 @@
 """Per-message-type router: dispatch one inbound message to its handler.
 
-The type→handler dispatch table keeps ``_handle_message`` a flat pipeline
+The type→handler dispatch table keeps ``handle_message`` a flat pipeline
 (validate id → mark known contact and advance the reply window → mark read →
 extract the message context → dispatch), with the media types sharing one handler via a
 bound ``message_type``.
@@ -19,14 +19,14 @@ from tai42_contract.conversations import InboundRejectionReason
 
 from tai42_channel_whatsapp.client import mark_read
 from tai42_channel_whatsapp.correlation import mark_known_contact, mark_reply_window
-from tai42_channel_whatsapp.inbound.params import _message_context, _MessageContext
-from tai42_channel_whatsapp.inbound.rejection import _notify_rejected
-from tai42_channel_whatsapp.inbound.replies import _handle_button, _handle_interactive, _handle_text
+from tai42_channel_whatsapp.inbound.params import MessageContext, message_context
+from tai42_channel_whatsapp.inbound.rejection import notify_rejected
+from tai42_channel_whatsapp.inbound.replies import handle_button, handle_interactive, handle_text
 from tai42_channel_whatsapp.inbound.rich_content import (
-    _handle_contacts,
-    _handle_location,
-    _handle_media,
-    _handle_reaction,
+    handle_contacts,
+    handle_location,
+    handle_media,
+    handle_reaction,
 )
 
 logger = logging.getLogger(__name__)
@@ -47,18 +47,18 @@ _NON_CONTENT_NOTICE_TYPES = frozenset({"system", "request_welcome"})
 # type") — the one error notice that names participant content the channel cannot receive.
 _UNSUPPORTED_MESSAGE_TYPE_CODE = 131051
 
-_MessageHandler = Callable[[dict[str, Any], str, str, str, _MessageContext], Awaitable[None]]
+_MessageHandler = Callable[[dict[str, Any], str, str, str, MessageContext], Awaitable[None]]
 
 # message type → handler with the uniform ``(message, phone_number_id, wa_id, wamid, context)``
 # signature. Each media type binds its ``message_type`` onto the shared media handler.
 _HANDLERS: dict[str, _MessageHandler] = {
-    "text": _handle_text,
-    "interactive": _handle_interactive,
-    "button": _handle_button,
-    "location": _handle_location,
-    "contacts": _handle_contacts,
-    "reaction": _handle_reaction,
-    **{media_type: functools.partial(_handle_media, message_type=media_type) for media_type in _MEDIA_TYPES},
+    "text": handle_text,
+    "interactive": handle_interactive,
+    "button": handle_button,
+    "location": handle_location,
+    "contacts": handle_contacts,
+    "reaction": handle_reaction,
+    **{media_type: functools.partial(handle_media, message_type=media_type) for media_type in _MEDIA_TYPES},
 }
 
 
@@ -114,7 +114,7 @@ async def _advance_reply_window(
         await mark_reply_window(phone_number_id, wa_id, sent_at)
 
 
-async def _handle_message(message: dict[str, Any], value: dict[str, Any]) -> None:
+async def handle_message(message: dict[str, Any], value: dict[str, Any]) -> None:
     """Resolve one inbound message's pending question, or route it to the bridge.
 
     A message lacking a string id is odd and skipped (logged).
@@ -151,7 +151,7 @@ async def _handle_message(message: dict[str, Any], value: dict[str, Any]) -> Non
 
     # Referral (ctwa/QR entry) and the quoted message are message-level and ride on
     # WHATEVER turn or answer this message becomes, regardless of its type. Extract once, thread down.
-    context = _message_context(message)
+    context = message_context(message)
 
     handler = _HANDLERS.get(message_type)
     if handler is not None:
@@ -166,7 +166,7 @@ async def _handle_message(message: dict[str, Any], value: dict[str, Any]) -> Non
         logger.warning("whatsapp inbound error notice for %s: %r", wamid, errors)
         unsupported, title = _notice_names_unsupported_type(errors)
         if unsupported:
-            await _notify_rejected(
+            await notify_rejected(
                 phone_number_id,
                 wa_id,
                 wamid,
@@ -180,6 +180,6 @@ async def _handle_message(message: dict[str, Any], value: dict[str, Any]) -> Non
         # rejection event; a non-content notification (system / welcome-request) stays log-only.
         logger.info("unhandled whatsapp message type %r for %s; not bridged", message_type, wamid)
         if message_type not in _NON_CONTENT_NOTICE_TYPES:
-            await _notify_rejected(
+            await notify_rejected(
                 phone_number_id, wa_id, wamid, kind=str(message_type), reason=InboundRejectionReason.UNSUPPORTED_TYPE
             )

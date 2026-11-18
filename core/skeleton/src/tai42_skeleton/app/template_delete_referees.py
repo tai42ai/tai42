@@ -241,7 +241,7 @@ async def _summary_prompt_referee(ids: frozenset[str]) -> list[ReferenceHolder]:
     return _holders(holder_kinds.SETTING, name, [TemplateRef(id=prompt.id, site="summary_prompt")], ids)
 
 
-PLATFORM_TEMPLATE_REFEREES: tuple[TemplateDeleteReferee, ...] = (
+PLATFORM_TEMPLATE_DELETE_REFEREES: tuple[TemplateDeleteReferee, ...] = (
     _preset_referee,
     _hook_referee,
     _schedule_referee,
@@ -255,10 +255,10 @@ PLATFORM_TEMPLATE_REFEREES: tuple[TemplateDeleteReferee, ...] = (
 )
 
 
-def register_platform_template_referees() -> None:
+def register_platform_template_delete_referees() -> None:
     """Register the platform's template-delete referees into the epoch being built (a startup and reload handler)."""
-    for referee in PLATFORM_TEMPLATE_REFEREES:
+    for referee in PLATFORM_TEMPLATE_DELETE_REFEREES:
         tai42_app.storage.register_template_delete_referee(referee)
 
 
-__all__ = ["PLATFORM_TEMPLATE_REFEREES", "register_platform_template_referees", "settings_env_var"]
+__all__ = ["PLATFORM_TEMPLATE_DELETE_REFEREES", "register_platform_template_delete_referees", "settings_env_var"]

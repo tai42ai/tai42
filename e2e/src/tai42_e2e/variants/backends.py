@@ -7,9 +7,10 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal
 
+import httpx
 from tai42_kit.backend import DRAIN_MARGIN_SECONDS, BackendDispatchSettings
 
-from tai42_e2e.rabbitx import RabbitAdmin, broker_url_for
+from tai42_e2e.rabbitx import RabbitAdmin, broker_url_for, broker_user
 from tai42_e2e.topology import Infra, InfraUnavailableError, StackResources
 from tai42_e2e.variants.census import BrokerLease
 
@@ -264,6 +265,19 @@ class CeleryVariant(BackendVariant):
         admin = RabbitAdmin(settings.rabbitmq_management_url, timeout=settings.boot_timeout)
         try:
             admin.check_reachable()
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code != httpx.codes.UNAUTHORIZED:
+                raise InfraUnavailableError(f"RabbitMQ management API failed ({exc}).") from exc
+            # The broker creates the conf's user only into an empty data directory, which the image keeps
+            # on an anonymous volume that a plain recreate carries over; a new volume reads the conf afresh.
+            raise InfraUnavailableError(
+                f"RabbitMQ refused the harness user {admin.user!r} ({exc}). Either the harness RabbitMQ URLs carry a "
+                "user or password the broker does not have — set them to the user and password of "
+                "deploy/rabbitmq/rabbitmq.conf — or "
+                "the broker keeps the users of its first boot; then recreate it with a fresh data volume so it "
+                "reads that conf: "
+                "`docker compose --profile celery up -d --force-recreate --renew-anon-volumes rabbitmq`."
+            ) from exc
         except Exception as exc:
             raise InfraUnavailableError(
                 f"RabbitMQ not reachable ({exc}). Start it with `docker compose --profile celery up -d`."
@@ -273,7 +287,7 @@ class CeleryVariant(BackendVariant):
         settings = infra.settings
         admin = RabbitAdmin(settings.rabbitmq_management_url, timeout=settings.boot_timeout)
         vhost = f"tai42_e2e_{stack_id}"
-        admin.create_vhost(vhost)
+        admin.create_vhost(vhost, user=broker_user(settings.rabbitmq_url))
         return BrokerLease(broker_url=broker_url_for(settings.rabbitmq_url, vhost), admin=admin, vhost=vhost)
 
     def extra_backend_processes(self) -> list[list[str]]:

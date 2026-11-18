@@ -171,10 +171,6 @@ class StorageFacet(_Facet):
         """Register a referee consulted before a stored object is deleted; a double registration raises."""
         self._app._template_delete_referee_registry.register(referee)
 
-    def template_delete_referees(self) -> list[TemplateDeleteReferee]:
-        """Every registered template-delete referee, in registration order (the delete gate reads it)."""
-        return self._app._template_delete_referee_registry.all()
-
 
 class MonitoringFacet(_Facet):
     """``app.monitoring`` — monitoring backend registration (``AppMonitoring``)."""

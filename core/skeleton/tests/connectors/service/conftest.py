@@ -204,7 +204,7 @@ def harness(monkeypatch, oauth_client_env):
     # The fleet ops the lifecycle publishes outside the manifest pipeline (a reconnect's re-probe of
     # the connection's failed entries) are recorded, not run; the publish itself is exercised with the
     # real ``broadcast`` in the completion tests.
-    async def fake_broadcast(op, targets, apply, *, publish_on_local_failure=False, pre_mutation_errors=()):
+    async def fake_broadcast(op, targets, apply, *, publish_on_local_failure=()):
         events["broadcasts"].append(
             {"op": op, "targets": targets, "publish_on_local_failure": publish_on_local_failure}
         )

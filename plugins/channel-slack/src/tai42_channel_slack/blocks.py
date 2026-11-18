@@ -21,8 +21,9 @@ Two option shapes reach this module from two contract seams:
   nothing, so the interactivity door acks it and ignores it).
 
 ``media`` (:class:`MediaItem`) renders as native Block Kit: an ``image`` item as an
-``image`` block (a public ``https`` url — a ``data:`` image is unrenderable BY NATURE and
-raises :class:`~tai42_contract.channels.ChannelInputError`); a ``link`` item as a
+``image`` block (an absolute ``http(s)`` url Slack's servers load — any other source, a
+``data:`` url or a relative served-media reference, raises
+:class:`~tai42_contract.channels.ChannelInputError`); a ``link`` item as a
 ``section`` with an mrkdwn link; and a ``document``/``video``/``audio`` item — which Slack
 ``chat.postMessage`` cannot inline without a file-upload seam this channel does not have —
 DEGRADES to a labelled mrkdwn link line carrying the caption/filename, so the file is
@@ -50,6 +51,8 @@ from tai42_contract.channels import (
     ReplyOption,
 )
 from tai42_contract.interactions.models import LocationElement, MediaItem, MediaKind
+
+from tai42_channel_slack.image_source import is_loadable_image_url
 
 # The ask-path select/suggested-reply tap: ``value`` is the option text verbatim, the
 # index binds it to the option in send order.
@@ -189,17 +192,18 @@ def build_media_blocks(media: list[MediaItem] | None) -> list[dict[str, Any]]:
     ``document``/``video``/``audio`` item a labelled mrkdwn link line (Slack cannot inline
     those without an upload seam).
 
-    A ``data:`` image has no public url for Slack to fetch, so it is a permanent
-    :class:`ChannelInputError` (never a retryable delivery failure) — refused here, before
-    any send, so a richer message never posts its text and then fails on an unrenderable
-    image.
+    Slack loads an image only from an absolute ``http(s)`` url
+    (:func:`~tai42_channel_slack.image_source.is_loadable_image_url`): an image whose source is
+    anything else — a ``data:`` url, a relative served-media reference — is a permanent
+    :class:`ChannelInputError` (never a retryable delivery failure), refused here, before any
+    send, so a richer message never posts its text and then fails on an unrenderable image.
     """
     blocks: list[dict[str, Any]] = []
     for item in media or []:
         if item.kind is MediaKind.IMAGE:
-            if item.url.startswith("data:"):
+            if not is_loadable_image_url(item.url):
                 raise ChannelInputError(
-                    "slack cannot render an inline data: image; an image block requires a public https url "
+                    "slack cannot draw this image: its source is not an absolute http(s) url slack can load "
                     f"(caption={item.caption!r})"
                 )
             block: dict[str, Any] = {"type": "image", "image_url": item.url}
@@ -387,8 +391,8 @@ def build_header_blocks(header: MediaItem | None) -> list[dict[str, Any]]:
     """A header display item shown ABOVE an interactive message.
 
     An image block, or a labelled link line for a non-image kind (the header is never a
-    ``link``, per the contract). Reuses the media builder — a ``data:`` header image is
-    refused here too.
+    ``link``, per the contract). Reuses the media builder — a header image Slack cannot
+    load is refused here too.
     """
     if header is None:
         return []

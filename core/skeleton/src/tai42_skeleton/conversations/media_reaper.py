@@ -23,18 +23,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import TYPE_CHECKING, cast
-
-from tai42_contract.app import tai42_app
+from typing import TYPE_CHECKING
 
 from tai42_skeleton.conversations.cache import get_conversations_manager
 from tai42_skeleton.conversations.media_meta import InboundMediaMetaStore, inbound_media_blob_path
 from tai42_skeleton.settings.media_ingest import media_ingest_settings
 
 if TYPE_CHECKING:
-    from tai42_contract.storage import Storage
-
-    from tai42_skeleton.app.facets import StorageFacet
     from tai42_skeleton.template import ResourceManager
 
 logger = logging.getLogger(__name__)
@@ -44,12 +39,6 @@ logger = logging.getLogger(__name__)
 # on this topic to decide what an operator sees. Best-effort, like the interactions reaper's events;
 # the payload names the ``media_id`` only, never the blob or a credential.
 MEDIA_REAP_FAILED_EVENT_TOPIC = "conversations_media_reap_failed"
-
-
-def _storage_provider() -> Storage | None:
-    # The registered blob provider off the skeleton StorageFacet (the contract AppStorage Protocol has
-    # no ``provider`` member), None while dead by default — the reaper is the sole deleter of the blob.
-    return cast("StorageFacet", tai42_app.storage).provider
 
 
 async def _emit_media_reap_failed(media_id: str) -> None:
@@ -76,7 +65,8 @@ async def _reap_one_media(manager: ResourceManager, store: InboundMediaMetaStore
 
     A missing blob (``FileNotFoundError``) is the contract's own idempotent-caller instruction: it means
     the blob is already absent (a re-driven crash, or a record whose upload never landed), so the record
-    is still dropped. Any OTHER exception from the blob delete (a held blob's ``409`` among them)
+    is still dropped. Any OTHER exception from the blob delete (a held blob's
+    :class:`~tai42_skeleton.template.errors.StoredObjectHeldError` among them)
     propagates to the per-member guard, which keeps the member for the next pass — the blob delete
     precedes the record delete, so the member is never removed while its blob may still exist.
     """
@@ -99,9 +89,12 @@ async def reap_expired_media_once() -> int:
     manager = get_conversations_manager()
     if not manager.durable:
         return 0
-    if _storage_provider() is None:
+    from tai42_skeleton.app import instance
+
+    storage = instance.app.storage
+    if storage.provider is None:
         return 0
-    resource_manager = cast("StorageFacet", tai42_app.storage).resource_manager
+    resource_manager = storage.resource_manager
     store = manager.media_meta
     reaped = 0
     now = time.time()

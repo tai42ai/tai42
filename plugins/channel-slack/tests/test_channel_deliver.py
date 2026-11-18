@@ -366,7 +366,7 @@ async def test_deliver_media_renders_image_and_link_blocks(http_script, fake_red
 
 async def test_deliver_data_uri_image_is_refused_before_any_send(http_script, fake_redis):
     media = [MediaItem(kind=MediaKind.IMAGE, url="data:image/png;base64,AAAA", caption=None)]
-    with pytest.raises(ChannelInputError, match="data: image"):
+    with pytest.raises(ChannelInputError, match="not an absolute http"):
         await SlackChannel().deliver(make_delivery(media=media))
     assert http_script.requests == []
     assert fake_redis.store == {}
@@ -477,6 +477,21 @@ async def test_deliver_form_open_label_over_75_refused_before_any_io(http_script
         answer_format="form", schema=_FORM_SCHEMA, wording=Wording.model_validate({"form": {"open": "x" * 76}})
     )
     with pytest.raises(ChannelInputError, match=r"open|75"):
+        await SlackChannel().deliver(delivery)
+    assert _FORM_KEY not in fake_redis.store
+    assert http_script.requests == []
+
+
+async def test_deliver_form_with_a_picture_slack_cannot_load_refused_before_any_io(http_script, fake_redis):
+    pages = [
+        {
+            "title": "P",
+            "fields": list(_FORM_SCHEMA["properties"]),
+            "display": [{"kind": "image", "src": "/api/interactions/media/" + "S" * 43}],
+        }
+    ]
+    delivery = make_delivery(answer_format="form", schema=_FORM_SCHEMA, pages=pages)
+    with pytest.raises(ChannelInputError, match="not an absolute http"):
         await SlackChannel().deliver(delivery)
     assert _FORM_KEY not in fake_redis.store
     assert http_script.requests == []

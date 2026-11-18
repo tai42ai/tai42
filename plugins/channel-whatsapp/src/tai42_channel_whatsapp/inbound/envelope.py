@@ -9,7 +9,7 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
-def _iter_values(payload: Any) -> Iterator[dict[str, Any]]:
+def iter_values(payload: Any) -> Iterator[dict[str, Any]]:
     """Every ``entry[].changes[].value`` object in a webhook payload.
 
     A webhook batches: multiple entries, changes, messages and statuses in one
@@ -37,6 +37,6 @@ def _iter_values(payload: Any) -> Iterator[dict[str, Any]]:
                 yield value
 
 
-def _as_list(value: Any) -> list[Any]:
+def as_list(value: Any) -> list[Any]:
     """The value if it is a JSON array, else an empty list."""
     return value if isinstance(value, list) else []

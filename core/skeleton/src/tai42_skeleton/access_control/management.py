@@ -346,7 +346,9 @@ async def create_principal_policy(
 
     A condition naming a stored template id the store lacks raises ``ValueError`` before the write.
     """
-    await assert_templates_stored(condition_template_refs(condition), ValueError)
+    from tai42_skeleton.app import instance
+
+    await assert_templates_stored(instance.app.storage.provider, condition_template_refs(condition), ValueError)
     await access_control_store().create_policy(user_id, scopes, policy_data, condition)
     await policy_version.record_policy_change()
 
@@ -371,7 +373,11 @@ async def restore_policy_body(user_id: str, body: dict[str, Any]) -> dict[str, A
     own row is written under the last-admin guard: a body that demotes the last enabled admin
     principal raises :class:`~tai42_contract.accounts.errors.LastAdminError` with nothing written.
     """
-    await assert_templates_stored(condition_template_refs(body.get("condition")), ValueError)
+    from tai42_skeleton.app import instance
+
+    await assert_templates_stored(
+        instance.app.storage.provider, condition_template_refs(body.get("condition")), ValueError
+    )
     store = access_control_store()
     if await store.get_principal(user_id) is not None:
         async with store.principal_guard_txn() as guard:

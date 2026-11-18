@@ -17,7 +17,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import copy
-import json
 from typing import Any
 
 from tai42_contract.app import tai42_app
@@ -31,7 +30,6 @@ from tai42_contract.interactions import (
 from tai42_kit.net import MediaFetchError, UrlGuardError, fetch_media, media_url_host
 from tai42_kit.net.request_body import RequestBodyTooLargeError
 
-from tai42_channel_whatsapp.flows_endpoint import echoed_screen_data_max_bytes
 from tai42_channel_whatsapp.flows_resolve import image_slots
 
 # Meta's Flow Image reference: "Recommended image size: Up to 300kb". The figure is a
@@ -41,10 +39,6 @@ _PICTURE_MAX_BYTES = 300_000
 # the whole body. A reaction's picture is fetched while WhatsApp waits for the data endpoint's
 # answer, which the vendor documents as 10 seconds, so this stays well under it.
 _PICTURE_FETCH_SECONDS = 5
-# Meta's Flow Image reference: "Total data channel payload size: 1 Mb". Read as the whole
-# data of a send or an answer that carries slotted pictures; the figure is documented, and
-# what the vendor does above it is not.
-_PICTURED_DATA_MAX_BYTES = 1_000_000
 
 # The leading bytes of the formats a Flow Image draws. The response ``Content-Type`` is not used.
 _PICTURE_SIGNATURES = (b"\xff\xd8\xff", b"\x89PNG\r\n\x1a\n")
@@ -116,26 +110,6 @@ async def embed_display_pictures(
         places.setdefault(value, f"display slot {slot!r}")
     pictures = await _resolve_pictures(places)
     return {slot: pictures[value] if slot in sourced else value for slot, value in display.items()}
-
-
-def require_pictured_data_fits(pages: list[dict[str, Any]] | None, data: dict[str, Any], *, endpoint: bool) -> None:
-    """Refuse screen ``data`` too large for a form with picture slots; a form without one is not measured.
-
-    Slotted pictures ride the screen's data. The size is the compact JSON's UTF-8 length. The
-    budget is Meta's figure for data that carries pictures, and for an endpoint-driven form
-    (``endpoint``) no more than the data whose footer request the data endpoint can read
-    (:func:`~tai42_channel_whatsapp.flows_endpoint.echoed_screen_data_max_bytes`). Raises
-    ``ChannelInputError`` over the budget.
-    """
-    if not image_slots(pages):
-        return
-    budget = min(_PICTURED_DATA_MAX_BYTES, echoed_screen_data_max_bytes()) if endpoint else _PICTURED_DATA_MAX_BYTES
-    size = len(json.dumps(data, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
-    if size > budget:
-        raise ChannelInputError(
-            f"form data is {size} bytes, over the {budget} bytes this channel sends in a form with picture "
-            "slots; slotted pictures ride this data and count toward it"
-        )
 
 
 def _stored_id(src: Any) -> str | None:

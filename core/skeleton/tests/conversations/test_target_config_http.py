@@ -3,6 +3,8 @@ envelope, and the loud 400/404 refusals."""
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 from starlette.applications import Starlette
 from starlette.routing import Route
@@ -34,6 +36,7 @@ class _FakeTools:
 class _FakeApp:
     agents = _FakeAgents()
     tools = _FakeTools()
+    storage = SimpleNamespace(provider=None)
 
 
 def _router():

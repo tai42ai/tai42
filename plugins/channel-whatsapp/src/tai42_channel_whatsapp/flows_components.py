@@ -21,13 +21,13 @@ from tai42_contract.channels import ChannelInputError
 from tai42_contract.interactions import FormControl, FormInputMode
 
 from tai42_channel_whatsapp.flows_choices import (
-    _CHIPS_MAX_CHOICES,
-    _chips_single_pick,
-    _choice_component_type,
-    _choice_options_enum,
-    _draws_chips,
-    _is_array_of_strings,
-    _is_choice_field,
+    CHIPS_MAX_CHOICES,
+    chips_single_pick,
+    choice_component_type,
+    choice_options_enum,
+    draws_chips,
+    is_array_of_strings,
+    is_choice_field,
 )
 from tai42_channel_whatsapp.flows_dates import (
     control_bound_decls,
@@ -36,26 +36,26 @@ from tai42_channel_whatsapp.flows_dates import (
     draws_calendar_picker,
 )
 from tai42_channel_whatsapp.flows_second_line import (
-    _CHIPS_DS_ITEM_EXAMPLE,
-    _CHIPS_DS_ITEM_PROPERTIES,
-    _DS_ITEM_EXAMPLE,
-    _DS_ITEM_PROPERTIES,
-    _HELPER_TEXT_MAX_CHARS,
-    _with_helper_text,
+    CHIPS_DS_ITEM_EXAMPLE,
+    CHIPS_DS_ITEM_PROPERTIES,
+    DS_ITEM_EXAMPLE,
+    DS_ITEM_PROPERTIES,
+    HELPER_TEXT_MAX_CHARS,
+    with_helper_text,
 )
 from tai42_channel_whatsapp.flows_shapes import ERROR_MESSAGE_TYPES, error_binding, helper_word, native_pattern
 
 # Meta injects ``flow_token`` into every Flow response to correlate the reply, so a
 # form property of that name is unanswerable on this channel: the reply handler
 # strips the key before the answer reaches the door. The mapper refuses it up front.
-_RESERVED_PROPERTY = "flow_token"
+RESERVED_PROPERTY = "flow_token"
 
 # Meta's grammar for a Flow component ``name`` / screen-``data`` key / ``${data.…}``
 # reference: a letter or underscore, then letters, digits, underscores.
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
-def _sanitize_name(key: str) -> str:
+def sanitize_name(key: str) -> str:
     """A property name reduced to Meta's identifier grammar.
 
     Every character outside ``[A-Za-z0-9_]`` becomes ``_``; a result that is empty or
@@ -73,7 +73,7 @@ def component_names(properties: dict[str, Any]) -> dict[str, str]:
     Meta accepts a component ``name``, a data key and a ``${data.…}`` reference only in
     the grammar ``[A-Za-z_][A-Za-z0-9_]*``, while a form's answer schema may name a
     property with any character. A key already in the grammar is kept verbatim; any
-    other is sanitised by :func:`_sanitize_name`. A collision — two keys reducing to the
+    other is sanitised by :func:`sanitize_name`. A collision — two keys reducing to the
     same name, a sanitised name equal to a later verbatim key, or a name equal to the
     reserved ``flow_token`` — is disambiguated deterministically in schema order by
     appending ``_2``, ``_3`` … so the first key to claim a name keeps it. Pure and
@@ -83,10 +83,10 @@ def component_names(properties: dict[str, Any]) -> dict[str, str]:
     used: set[str] = set()
     mapping: dict[str, str] = {}
     for key in properties:
-        base = key if _IDENTIFIER_RE.match(key) else _sanitize_name(key)
+        base = key if _IDENTIFIER_RE.match(key) else sanitize_name(key)
         candidate = base
         suffix = 2
-        while candidate in used or candidate == _RESERVED_PROPERTY:
+        while candidate in used or candidate == RESERVED_PROPERTY:
             candidate = f"{base}_{suffix}"
             suffix += 1
         used.add(candidate)
@@ -127,7 +127,7 @@ def payload_labels(properties: dict[str, Any]) -> dict[str, str]:
         base = _field_label(name, prop)
         candidate = base
         suffix = 2
-        while candidate in used or candidate == _RESERVED_PROPERTY:
+        while candidate in used or candidate == RESERVED_PROPERTY:
             candidate = f"{base}_{suffix}"
             suffix += 1
         used.add(candidate)
@@ -152,7 +152,7 @@ def _chips_component(cname: str, label: str, required: bool, prop: dict[str, Any
         "data-source": f"${{data.{cname}__ds}}",
         "init-value": init,
     }
-    if _is_array_of_strings(prop):
+    if is_array_of_strings(prop):
         min_items = prop.get("minItems")
         max_items = prop.get("maxItems")
         if isinstance(min_items, int) and not isinstance(min_items, bool):
@@ -160,7 +160,7 @@ def _chips_component(cname: str, label: str, required: bool, prop: dict[str, Any
         elif required:
             component["min-selected-items"] = 1
         component["max-selected-items"] = (
-            max_items if isinstance(max_items, int) and not isinstance(max_items, bool) else _CHIPS_MAX_CHOICES
+            max_items if isinstance(max_items, int) and not isinstance(max_items, bool) else CHIPS_MAX_CHOICES
         )
     else:
         component["max-selected-items"] = 1
@@ -212,7 +212,7 @@ def range_pairs(
 ) -> dict[str, str]:
     """The ``END name -> START name`` map for every ``rangeStart`` pair drawable as ONE range control.
 
-    A ``rangeStart`` pair (the END names its START) draws as one :func:`_calendar_range_component`
+    A ``rangeStart`` pair (the END names its START) draws as one :func:`calendar_range_component`
     when both ends sit on THIS screen, both draw a ``CalendarPicker``
     (:func:`~tai42_channel_whatsapp.flows_dates.draws_calendar_picker`: ``format: date`` and no
     choice, ``option_fields`` the send's option-bearing fields), both carry the SAME ``visibleWhen``
@@ -283,7 +283,7 @@ def _range_span(end_prop: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-def _range_value_type_decl() -> dict[str, Any]:
+def range_value_type_decl() -> dict[str, Any]:
     """The screen-``data`` type declaration for a merged range control's value — an object of two date strings."""
     return {
         "type": "object",
@@ -292,7 +292,7 @@ def _range_value_type_decl() -> dict[str, Any]:
     }
 
 
-def _calendar_range_component(
+def calendar_range_component(
     start_name: str,
     end_name: str,
     start_prop: dict[str, Any],
@@ -467,12 +467,12 @@ def _choice_component(cname: str, label: str, required: bool, prop: dict[str, An
     the default. The default is a ``CheckboxGroup`` for an array of strings, and for a string a
     ``RadioButtonsGroup`` (short enum) / ``Dropdown``.
     """
-    if _draws_chips(prop):
+    if draws_chips(prop):
         return _chips_component(cname, label, required, prop, init)
-    if _is_array_of_strings(prop):
+    if is_array_of_strings(prop):
         return _checkbox_component(cname, label, required, prop, init)
     return {
-        "type": _choice_component_type(prop),
+        "type": choice_component_type(prop),
         "name": cname,
         "label": label,
         "required": required,
@@ -509,7 +509,7 @@ def _string_component(
             assert_never(control)
 
 
-def _dynamic_component(
+def dynamic_component(
     name: str,
     prop: dict[str, Any],
     required: bool,
@@ -527,23 +527,23 @@ def _dynamic_component(
     Dropdown), and a ``format: date`` field a CalendarPicker bound to its carriers. Raises
     ``ChannelInputError`` naming a property outside the supported subset. A field's second line
     (its schema ``description``) rides the control as ``helper-text`` where Meta allows it
-    (:func:`_with_helper_text`); elsewhere :func:`field_caption` draws it beside the control.
+    (:func:`with_helper_text`); elsewhere :func:`field_caption` draws it beside the control.
 
     A shape Meta checks with a ``pattern`` (:func:`~tai42_channel_whatsapp.flows_shapes.native_pattern`)
     is drawn on the control with the ``helper-text`` Meta then requires — the field's second line,
     else the caller's ``invalid`` sentence, else this channel's helper word for the shape. A control that
     can show an error binds ``error-message`` to its ``__err`` screen-data key.
     """
-    component = _with_helper_text(name, _field_control(name, prop, required, option_fields, names), prop)
+    component = with_helper_text(name, field_control(name, prop, required, option_fields, names), prop)
     drawn = native_pattern(prop, component)
     if drawn is not None:
         component["pattern"] = drawn.pattern
         if "helper-text" not in component:
             helper = invalid or helper_word(drawn.kind, drawn.params)
-            if len(helper) > _HELPER_TEXT_MAX_CHARS:
+            if len(helper) > HELPER_TEXT_MAX_CHARS:
                 raise ChannelInputError(
                     f"form property {name!r} invalid sentence is {len(helper)} characters; WhatsApp caps the "
-                    f"helper text a pattern field requires at {_HELPER_TEXT_MAX_CHARS}"
+                    f"helper text a pattern field requires at {HELPER_TEXT_MAX_CHARS}"
                 )
             component["helper-text"] = helper
     if component["type"] in ERROR_MESSAGE_TYPES:
@@ -551,22 +551,22 @@ def _dynamic_component(
     return component
 
 
-def _field_control(
+def field_control(
     name: str, prop: dict[str, Any], required: bool, option_fields: set[str], names: dict[str, str]
 ) -> dict[str, Any]:
-    """The bare Flow control for one field (see :func:`_dynamic_component`), before its second line."""
+    """The bare Flow control for one field (see :func:`dynamic_component`), before its second line."""
     label = _field_label(name, prop)
     cname = names[name]
     prop_type = prop.get("type")
     init = f"${{data.{cname}__init}}"
-    if _is_array_of_strings(prop):
-        if _choice_options_enum(prop) is None and name not in option_fields:
+    if is_array_of_strings(prop):
+        if choice_options_enum(prop) is None and name not in option_fields:
             raise ChannelInputError(
                 f"form property {name!r}: a multiple-choice (array of strings) field needs an 'items' enum "
                 "or per-send options to render as a CheckboxGroup"
             )
         return _choice_component(cname, label, required, prop, init)
-    if _is_choice_field(name, prop, option_fields):
+    if is_choice_field(name, prop, option_fields):
         return _choice_component(cname, label, required, prop, init)
     if draws_calendar_picker(name, prop, option_fields):
         return _calendar_component(cname, label, required, prop, init)
@@ -590,7 +590,7 @@ def _field_control(
     )
 
 
-def _value_type_decl(prop: dict[str, Any]) -> dict[str, Any]:
+def value_type_decl(prop: dict[str, Any]) -> dict[str, Any]:
     """The screen-``data`` type declaration for a field's value.
 
     Boolean for an OptIn, array for a CheckboxGroup, else a string.
@@ -600,14 +600,14 @@ def _value_type_decl(prop: dict[str, Any]) -> dict[str, Any]:
     prop_type = prop.get("type")
     if prop_type == "boolean":
         return {"type": "boolean", "__example__": False}
-    if prop_type == "array" or _chips_single_pick(prop):
+    if prop_type == "array" or chips_single_pick(prop):
         # A single-pick ChipsSelector carries a one-element LIST, so a ``string`` chips field's
         # value is array-typed exactly like a multiple-choice field (decoded back to the string).
         return {"type": "array", "items": {"type": "string"}, "__example__": []}
     return {"type": "string", "__example__": ""}
 
 
-def _field_data_decls(
+def field_data_decls(
     name: str,
     prop: dict[str, Any],
     option_fields: set[str],
@@ -624,23 +624,23 @@ def _field_data_decls(
     carriers, and no ``data-source``.
     """
     cname = names[name]
-    init_decl = _range_value_type_decl() if range_end is not None else _value_type_decl(prop)
+    init_decl = range_value_type_decl() if range_end is not None else value_type_decl(prop)
     decls: dict[str, Any] = {f"{cname}__init": init_decl}
-    if range_end is None and _is_choice_field(name, prop, option_fields):
-        chips = _draws_chips(prop)
+    if range_end is None and is_choice_field(name, prop, option_fields):
+        chips = draws_chips(prop)
         decls[f"{cname}__ds"] = {
             "type": "array",
             "items": {
                 "type": "object",
-                "properties": copy.deepcopy(_CHIPS_DS_ITEM_PROPERTIES if chips else _DS_ITEM_PROPERTIES),
+                "properties": copy.deepcopy(CHIPS_DS_ITEM_PROPERTIES if chips else DS_ITEM_PROPERTIES),
             },
-            "__example__": copy.deepcopy(_CHIPS_DS_ITEM_EXAMPLE if chips else _DS_ITEM_EXAMPLE),
+            "__example__": copy.deepcopy(CHIPS_DS_ITEM_EXAMPLE if chips else DS_ITEM_EXAMPLE),
         }
     decls.update(control_bound_decls(name, cname, prop, option_fields, range_end))
     return decls
 
 
-def _forward_field_data(
+def forward_field_data(
     name: str,
     prop: dict[str, Any],
     option_fields: set[str],
@@ -657,7 +657,7 @@ def _forward_field_data(
     """
     cname = names[name]
     forwarded = {f"{cname}__init": f"${{data.{cname}__init}}"}
-    if _is_choice_field(name, prop, option_fields):
+    if is_choice_field(name, prop, option_fields):
         forwarded[f"{cname}__ds"] = f"${{data.{cname}__ds}}"
     forwarded.update(control_bound_forwards(name, cname, prop, option_fields, range_end))
     return forwarded
@@ -687,6 +687,6 @@ def display_content_member(block: dict[str, Any]) -> str:
     return "src" if block.get("kind") == "image" else "text"
 
 
-def _display_component_list(page: dict[str, Any], slots: dict[str, str]) -> list[dict[str, Any]]:
+def display_component_list(page: dict[str, Any], slots: dict[str, str]) -> list[dict[str, Any]]:
     """The ordered display components for a page (empty when it carries none)."""
     return [_display_component(block, slots) for block in (page.get("display") or [])]

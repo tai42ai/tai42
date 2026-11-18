@@ -18,6 +18,7 @@ from tai42_skeleton.operations.templates import list_templates
 from tai42_skeleton.template import ResourceManager
 
 from .._fakes.listing import keys_under
+from .._fakes.template_holders import app_held_by
 from ..app._fixtures.reload import reload_with
 
 
@@ -75,7 +76,9 @@ async def test_a_list_or_an_export_during_a_reload_build_reads_the_live_epochs_m
     live_core = app._build_serving_core()
     live_core._prefix_mark_registry.not_backed_up.declare(INBOUND_MEDIA_BLOB_PREFIX)
     live_core._prefix_mark_registry.unlisted.declare(INBOUND_MEDIA_BLOB_PREFIX)
-    live_core._resource_manager_cache = ResourceManager(provider, on_evicted=app._fire_template_evicted)
+    live_core._resource_manager_cache = ResourceManager(
+        provider, on_evicted=app._fire_template_evicted, held_by=app_held_by
+    )
     monkeypatch.setattr(serving_core_access, "current_epoch_or_none", lambda: Epoch(number=0, core=live_core))
     # The core being built has not run its handlers yet: its registry is empty.
     built = Epoch(number=1, core=app._build_serving_core())

@@ -149,7 +149,9 @@ async def add_user_api_key(
     the documented recovery is ``revoke_api_key(user_id)`` then a fresh mint (the
     mint is NOT idempotent — a plain retry hits the duplicate guard).
     """
-    await assert_templates_stored(condition_template_refs(condition), ValueError)
+    from tai42_skeleton.app import instance
+
+    await assert_templates_stored(instance.app.storage.provider, condition_template_refs(condition), ValueError)
     provider = _identity_provider()
     store = access_control_store()
 
@@ -240,7 +242,9 @@ async def edit_user_payload(
     the empty-policy refusal.
     """
     if isinstance(condition, TemplatedText):
-        await assert_templates_stored(condition_template_refs(condition), ValueError)
+        from tai42_skeleton.app import instance
+
+        await assert_templates_stored(instance.app.storage.provider, condition_template_refs(condition), ValueError)
     provider = _identity_provider()
     store = access_control_store()
 

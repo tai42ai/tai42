@@ -91,7 +91,7 @@ def _flow_ids(flows: list[FlowSummary]) -> str:
     return ", ".join(flow.flow_id for flow in flows)
 
 
-async def _resolve_flow_id(
+async def resolve_flow_id(
     waba_id: str, schema_hash: str, flow_json: dict[str, Any], endpoint_uri: str | None = None
 ) -> str:
     """The published flow id for this Flow under ``waba_id``.

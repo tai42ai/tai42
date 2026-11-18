@@ -12,9 +12,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, cast
 
-from tai42_contract.app import tai42_app
 from tai42_contract.interactions import (
     MEDIA_ID_RE,
     MediaKind,
@@ -29,11 +27,6 @@ from tai42_skeleton.conversations.cache import get_conversations_manager
 from tai42_skeleton.interactions.media import read_media
 from tai42_skeleton.interactions.settings import interactions_settings, interactions_store_configured
 from tai42_skeleton.interactions.store import InteractionStore
-
-if TYPE_CHECKING:
-    from tai42_contract.storage import Storage
-
-    from tai42_skeleton.app.facets import StorageFacet
 
 logger = logging.getLogger(__name__)
 
@@ -54,11 +47,6 @@ class ServedMediaRecord:
     kind: MediaKind
     filename: str | None
     expires_in: int
-
-
-def _blob_provider() -> Storage | None:
-    """The registered blob provider off the skeleton storage facet, or ``None`` while dead."""
-    return cast("StorageFacet", tai42_app.storage).provider
 
 
 def _require_within(size: int, max_bytes: int | None) -> None:
@@ -99,7 +87,9 @@ async def _load_inbound(media_id: str, *, max_bytes: int | None) -> ServedMediaR
     if meta.pending:
         raise MediaNotFoundError(_NOT_FOUND)
     _require_within(meta.size, max_bytes)
-    provider = _blob_provider()
+    from tai42_skeleton.app import instance
+
+    provider = instance.app.storage.provider
     if provider is None:
         logger.warning("inbound media %s has a metadata record but no blob provider is registered", media_id)
         raise MediaStoreUnavailableError("media store unavailable")

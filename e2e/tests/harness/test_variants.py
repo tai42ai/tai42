@@ -35,7 +35,7 @@ _RES = StackResources(
     pg_password="postgres",
     pg_db="tai42_e2e_probe",
     storage_root="/tmp/e2e-storage",
-    broker_url="amqp://guest:guest@127.0.0.1:5672/tai42_e2e_probe",
+    broker_url="amqp://tai42:tai42@127.0.0.1:5672/tai42_e2e_probe",
     bus_namespace="tai42_e2e_probe",
 )
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -979,3 +980,32 @@ def test_a_pool_started_directly_in_the_process_raises(owner: Callable[[str, str
         "refused": "a compute pool cannot run in a process its prelude reshaped; its jobs run in a pool host "
         "(compute_pool())"
     }, done.stderr
+
+
+@pytest.mark.parametrize("prelude", PRELUDES)
+def test_a_line_the_host_logs_is_written_in_the_kits_log_format_at_its_log_level(
+    owner: Callable[[str, str], Owner], prelude: str
+) -> None:
+    done = owner(
+        prelude,
+        """
+        import logging_host
+        from tai42_kit.compute.pool_host import PoolHost
+
+        os.environ["TAI_LOG_LEVEL"] = "INFO"
+        host = PoolHost(logging_host.serve)
+        try:
+            report({"result": asyncio.run(host.client.run(operator.add, 1, 2, timeout=30))})
+        finally:
+            host.stop()
+        """,
+    )
+
+    assert done.returncode == 0, done.stderr
+    assert done.seen() == {"result": 3}, done.stderr
+    host_lines = [line for line in done.stderr.splitlines() if "the host took its pool" in line]
+    assert len(host_lines) == 1, done.stderr
+    assert re.fullmatch(
+        r"\[\d\d/\d\d/\d\d \d\d:\d\d:\d\d\] INFO     tai42_kit\.compute\.pool_host the host took its pool\s*",
+        host_lines[0],
+    ), done.stderr

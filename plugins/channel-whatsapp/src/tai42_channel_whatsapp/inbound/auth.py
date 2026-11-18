@@ -22,7 +22,7 @@ from tai42_channel_whatsapp.settings import whatsapp_settings
 
 logger = logging.getLogger(__name__)
 
-_SIGNATURE_HEADER = "X-Hub-Signature-256"
+SIGNATURE_HEADER = "X-Hub-Signature-256"
 _SIGNATURE_PREFIX = "sha256="
 # Bound what an unauthenticated door reads into memory — loud 413, never truncation.
 _MAX_BODY_BYTES = 1 * 1024 * 1024
@@ -32,28 +32,28 @@ class SignatureRejectedError(Exception):
     """The request failed X-Hub-Signature-256 authentication (mapped to 401)."""
 
 
-def _validate_signature(app_secret: str, body: bytes, provided: str | None) -> None:
+def validate_signature(app_secret: str, body: bytes, provided: str | None) -> None:
     """Validate ``X-Hub-Signature-256`` over the raw body or raise ``SignatureRejectedError``.
 
     Header form ``sha256=<hex>``; compared constant-time against the HMAC-SHA256 of the body under the
     app secret.
     """
     if provided is None:
-        raise SignatureRejectedError(f"missing {_SIGNATURE_HEADER} header")
+        raise SignatureRejectedError(f"missing {SIGNATURE_HEADER} header")
     if not provided.startswith(_SIGNATURE_PREFIX):
-        raise SignatureRejectedError(f"{_SIGNATURE_HEADER} is not in sha256=<hex> form")
+        raise SignatureRejectedError(f"{SIGNATURE_HEADER} is not in sha256=<hex> form")
     try:
         # Decode to bytes first: a non-hex / non-ASCII header is a 401, never a
         # compare_digest TypeError (which would surface as a 500).
         provided_digest = bytes.fromhex(provided[len(_SIGNATURE_PREFIX) :])
     except ValueError as exc:
-        raise SignatureRejectedError(f"{_SIGNATURE_HEADER} is not valid hex") from exc
+        raise SignatureRejectedError(f"{SIGNATURE_HEADER} is not valid hex") from exc
     expected = hmac.new(app_secret.encode("utf-8"), body, hashlib.sha256).digest()
     if not hmac.compare_digest(provided_digest, expected):
-        raise SignatureRejectedError(f"{_SIGNATURE_HEADER} mismatch")
+        raise SignatureRejectedError(f"{SIGNATURE_HEADER} mismatch")
 
 
-async def _authenticated_body(request: Request) -> bytes:
+async def authenticated_body(request: Request) -> bytes:
     """Bounded-read and signature-validate the POST body; return the RAW bytes.
 
     Nothing in the body is trusted until the signature validates. Raises ``ValueError`` (app secret unset →
@@ -61,12 +61,12 @@ async def _authenticated_body(request: Request) -> bytes:
     """
     app_secret = require_secret(whatsapp_settings().app_secret, "WhatsApp channel", "CHANNEL_WHATSAPP_APP_SECRET")
     raw = await read_bounded_body(request, _MAX_BODY_BYTES)
-    _validate_signature(app_secret, raw, request.headers.get(_SIGNATURE_HEADER))
+    validate_signature(app_secret, raw, request.headers.get(SIGNATURE_HEADER))
     return raw
 
 
-def _auth_error_response(exc: ValueError | RequestBodyTooLargeError | SignatureRejectedError) -> Response:
-    """Map an ``_authenticated_body`` failure to its response.
+def auth_error_response(exc: ValueError | RequestBodyTooLargeError | SignatureRejectedError) -> Response:
+    """Map an ``authenticated_body`` failure to its response.
 
     413 oversize, 401 bad signature, 500 for an unset app secret (operator misconfig, never a 401
     that reads like an ordinary bad signature).
@@ -80,7 +80,7 @@ def _auth_error_response(exc: ValueError | RequestBodyTooLargeError | SignatureR
     return JSONResponse({"error": "channel misconfigured"}, status_code=500)
 
 
-def _verify_handshake(request: Request) -> Response:
+def verify_handshake(request: Request) -> Response:
     """Meta's GET subscription handshake: echo ``hub.challenge`` iff ``hub.verify_token`` matches, else 403.
 
     The configured token is compared constant-time. An unset verify token is a loud misconfiguration

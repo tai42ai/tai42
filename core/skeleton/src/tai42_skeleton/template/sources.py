@@ -95,8 +95,8 @@ class SourceLoader:
         read whole. The bytes are then dispatched through the type registry (the opt-in
         ``files`` extra). Bytes of an unknown type, over the size cap, detected as text
         but not UTF-8, or refused by their extractor raise
-        :class:`ContentNotLoadableError`. Without the ``files`` extra it raises the
-        ``501`` ``NotSupportedError`` before any read.
+        :class:`ContentNotLoadableError`. Without the ``files`` extra it raises
+        :class:`~tai42_skeleton.template.errors.FilesNotConfiguredError` before any read.
         """
         from tai42_skeleton.template.file_loading import load_content, read_within_cap
 

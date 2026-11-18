@@ -360,9 +360,65 @@ def test_is_option_bearing():
 
 
 def test_declared_slots():
-    payload = {"pages": [{"display": [{"kind": "body", "slot": "total"}, {"kind": "heading", "text": "x"}]}]}
-    assert _declared_slots(payload) == {"total"}
-    assert _declared_slots({}) == set()
+    payload = {
+        "pages": [
+            {
+                "display": [
+                    {"kind": "body", "slot": "total"},
+                    {"kind": "heading", "text": "x"},
+                    {"kind": "image", "slot": "photo"},
+                ]
+            }
+        ]
+    }
+    assert _declared_slots(payload) == {"total": "body", "photo": "image"}
+    assert _declared_slots({}) == {}
+
+
+_SLOTTED = {
+    "pages": [
+        {
+            "display": [
+                {"kind": "heading", "slot": "title"},
+                {"kind": "body", "slot": "total"},
+                {"kind": "image", "slot": "photo"},
+            ]
+        }
+    ]
+}
+
+
+@pytest.mark.parametrize(
+    ("display", "message"),
+    [
+        ({"total": {"amount": 5}}, "display slot 'total' takes a string, number, boolean or null"),
+        ({"title": ["a", "b"]}, "display slot 'title' takes a string, number, boolean or null"),
+        ({"photo": 5}, "display slot 'photo' takes an image source string or null"),
+        ({"total": float("nan")}, "display slot 'total' takes a finite number"),
+        ({"total": float("inf")}, "display slot 'total' takes a finite number"),
+        ({"total": float("-inf")}, "display slot 'total' takes a finite number"),
+        ({"total": 10**400}, "display slot 'total' takes a finite number"),
+    ],
+)
+def test_validate_update_display_refuses_a_value_its_slot_kind_does_not_take(display, message):
+    with pytest.raises(FormReactionHandlerError, match=message):
+        _validate_update_display(display, _SLOTTED)
+
+
+@pytest.mark.parametrize(
+    "display",
+    [
+        {"total": 12.5},
+        {"total": 3},
+        {"title": True},
+        {"total": None},
+        {"title": ""},
+        {"photo": None},
+        {"photo": "https://cdn.example.com/a.png"},
+    ],
+)
+def test_validate_update_display_accepts_a_value_its_slot_kind_takes(display):
+    _validate_update_display(display, _SLOTTED)
 
 
 def test_normalize_event_page_and_submitted():

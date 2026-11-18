@@ -43,8 +43,8 @@ from tai42_kit.interactions.form_vocabulary import RADIO_OPTION_THRESHOLD, drawi
 
 from tai42_skeleton.interactions.form_schema import channel_form_fields, paired_time
 
-from .form_shape_attrs import _attr, _field_words, _number_bounds, _required_attr, _shape_attrs, _word
-from .pages import _FORM_SUBMIT_SCRIPT
+from .form_shape_attrs import attr_value, field_word, field_words, number_bounds, required_attr, shape_attrs
+from .pages import FORM_SUBMIT_SCRIPT
 
 
 def _text_input_attrs(prop: dict[str, Any]) -> str:
@@ -154,7 +154,7 @@ def _string_select(
     parts = [f'<option value="">{blank_label}</option>']
     for opt_value, opt_label, opt_desc in choices:
         selected = " selected" if value is not None and str(value) == opt_value else ""
-        parts.append(f'<option value="{_attr(opt_value)}"{selected}>{_option_text(opt_label, opt_desc)}</option>')
+        parts.append(f'<option value="{attr_value(opt_value)}"{selected}>{_option_text(opt_label, opt_desc)}</option>')
     return f'<select data-field="{esc_name}" data-kind="string"{req_attr}>' + "".join(parts) + "</select>"
 
 
@@ -172,7 +172,7 @@ def _string_radio(esc_name: str, req_attr: str, choices: list[tuple[str, str, st
         checked = " checked" if value is not None and str(value) == opt_value else ""
         parts.append(
             f'<label class="choice"><input type="radio" name="{esc_name}" data-field="{esc_name}" '
-            f'data-kind="string" value="{_attr(opt_value)}"{checked}{req_attr}> {html.escape(opt_label)}'
+            f'data-kind="string" value="{attr_value(opt_value)}"{checked}{req_attr}> {html.escape(opt_label)}'
             f"{_choice_second_line(opt_desc)}</label>"
         )
     return "".join(parts)
@@ -188,7 +188,7 @@ def _checkbox_group(esc_name: str, choices: list[tuple[str, str, str | None]], v
         checked = " checked" if opt_value in selected else ""
         parts.append(
             f'<label class="choice"><input type="checkbox" data-field="{esc_name}" data-kind="array" '
-            f'value="{_attr(opt_value)}"{checked}> {html.escape(opt_label)}{_choice_second_line(opt_desc)}</label>'
+            f'value="{attr_value(opt_value)}"{checked}> {html.escape(opt_label)}{_choice_second_line(opt_desc)}</label>'
         )
     return "".join(parts)
 
@@ -217,7 +217,7 @@ def _chip_group(
             req = req_attr
         parts.append(
             f'<label class="choice chip"><input type="{input_type}"{name_attr} data-field="{esc_name}" '
-            f'data-kind="{kind}" value="{_attr(opt_value)}"{checked}{req}> {html.escape(opt_label)}'
+            f'data-kind="{kind}" value="{attr_value(opt_value)}"{checked}{req}> {html.escape(opt_label)}'
             f"{_choice_second_line(opt_desc)}</label>"
         )
     return "".join(parts)
@@ -250,7 +250,7 @@ def _textarea_control(
 ) -> str:
     # A multi-line text control. ``data-kind="string"`` is kept so the submit script posts the
     # typed string; the length bounds and the ceiling hint are drawn by :func:`_length_bounds`, the
-    # shape attributes by :func:`_shape_attrs`.
+    # shape attributes by :func:`shape_attrs`.
     bounds, hint = _length_bounds(prop, length_hint)
     content = html.escape(str(value)) if value is not None else ""
     control = (
@@ -277,14 +277,14 @@ def _date_range_group(
 
     def column(name: str) -> str:
         prop, required = field_by_name[name]
-        words = _field_words(field_wording, name)
+        words = field_words(field_wording, name)
         label = html.escape(str(prop.get("title") or name))
         date_input = _date_input(
-            _attr(name),
-            _required_attr(required, words),
+            attr_value(name),
+            required_attr(required, words),
             prop,
             values.get(name),
-            _shape_attrs(prop, _word(words, "invalid"), properties),
+            shape_attrs(prop, field_word(words, "invalid"), properties),
         )
         hint = _field_hint(_second_line(prop.get("description")))
         return f'<div class="range-end"><label>{label}<br>{hint}{date_input}</label>{times.get(name, "")}</div>'
@@ -339,18 +339,18 @@ def _drawable_date_ranges(names: list[str], field_by_name: dict[str, tuple[dict[
 
 def _date_input(esc_name: str, req_attr: str, prop: dict[str, Any], value: Any, shape: str) -> str:
     # A native date input carrying its min/max bounds (the picker restricts the range), its shape
-    # attributes (:func:`_shape_attrs` — a range END's start and span among them) and, as a
+    # attributes (:func:`shape_attrs` — a range END's start and span among them) and, as a
     # best-effort client hint, the unavailable dates/weekdays the submit script checks — the
     # server enforces them regardless.
     bounds = ""
     if isinstance(prop.get("minDate"), str):
-        bounds += f' min="{_attr(prop["minDate"])}"'
+        bounds += f' min="{attr_value(prop["minDate"])}"'
     if isinstance(prop.get("maxDate"), str):
-        bounds += f' max="{_attr(prop["maxDate"])}"'
+        bounds += f' max="{attr_value(prop["maxDate"])}"'
     unavailable = prop.get("unavailableDates")
     if isinstance(unavailable, list):
-        bounds += f' data-unavailable="{_attr(json.dumps(unavailable))}"'
-    val_attr = f' value="{_attr(value)}"' if value is not None else ""
+        bounds += f' data-unavailable="{attr_value(json.dumps(unavailable))}"'
+    val_attr = f' value="{attr_value(value)}"' if value is not None else ""
     return f'<input data-field="{esc_name}" data-kind="string" type="date"{bounds}{val_attr}{req_attr}{shape}>'
 
 
@@ -401,7 +401,7 @@ def _render_array_field(
         if is_required:
             group_attr = ' data-array-required="1"'
             if required_sentence is not None:
-                group_attr += f' data-required="{_attr(required_sentence)}"'
+                group_attr += f' data-required="{attr_value(required_sentence)}"'
 
         if prop.get("control") == FormControl.CHIPS:
             return _labelled(
@@ -435,7 +435,7 @@ def _render_string_field(
     # A string property: a choice (chips / radio group / select), a multi-line text area
     # (``control: textarea``), a native date input, or a plain text input keyed by its format or
     # inputMode. ``hint`` is the field's second line, drawn under its label; ``shape`` the
-    # control's shape attributes (:func:`_shape_attrs`); ``length_hint`` the caller's ceiling line.
+    # control's shape attributes (:func:`shape_attrs`); ``length_hint`` the caller's ceiling line.
     choices = _string_choices(prop, options)
     if choices is not None:
         if prop.get("control") == FormControl.CHIPS:
@@ -457,7 +457,7 @@ def _render_string_field(
         )
     if prop.get("format") == "date":
         return _labelled(esc_label, _date_input(esc_name, req_attr, prop, value, shape), grouped=False, hint=hint)
-    val_attr = f' value="{_attr(value)}"' if value is not None else ""
+    val_attr = f' value="{attr_value(value)}"' if value is not None else ""
     bounds, ceiling = _length_bounds(prop, length_hint)
     attrs = f"{_text_input_attrs(prop)}{bounds}{val_attr}{req_attr}{shape}"
     control = f'<input data-field="{esc_name}" data-kind="string" {attrs}>{ceiling}'
@@ -485,7 +485,7 @@ def _render_field(
     ``tel`` -> that input type; ``numeric`` / ``decimal`` -> ``type="text"`` with an ``inputmode``
     hint so the value stays the typed string), ``data-kind="string"`` kept for every kind.
     ``boolean`` -> checkbox, ``integer``/``number`` -> number input with its native ``min``/``max``.
-    Every text, date and number control carries its shape attributes (:func:`_shape_attrs`) — the
+    Every text, date and number control carries its shape attributes (:func:`shape_attrs`) — the
     caller's ``invalid`` sentence among them; ``properties`` is the form's properties by name, read
     for the attributes that name another field. ``words`` is the field's
     ``wording.form.fields[name]`` entry: its ``choice_label`` heads a select, its ``required``
@@ -493,15 +493,15 @@ def _render_field(
     its ``true_label`` / ``false_label`` ride the checkbox for the review readback. The property is pre-validated by
     ``channel_form_fields``; an unexpected type is a server bug and raises ``_FormRenderError``.
     """
-    esc_name = _attr(name)
+    esc_name = attr_value(name)
     esc_label = html.escape(str(prop.get("title") or name))
     hint = _second_line(prop.get("description"))
-    req_attr = _required_attr(is_required, words)
-    shape = _shape_attrs(prop, _word(words, "invalid"), properties)
+    req_attr = required_attr(is_required, words)
+    shape = shape_attrs(prop, field_word(words, "invalid"), properties)
     ptype = prop.get("type")
     if ptype == "array":
         return _render_array_field(
-            esc_name, esc_label, req_attr, prop, is_required, value, options, hint, _word(words, "required")
+            esc_name, esc_label, req_attr, prop, is_required, value, options, hint, field_word(words, "required")
         )
     if ptype == "string":
         return _render_string_field(
@@ -512,9 +512,9 @@ def _render_field(
             value,
             options,
             hint,
-            _word(words, "choice_label"),
+            field_word(words, "choice_label"),
             shape,
-            _word(words, "length_hint"),
+            field_word(words, "length_hint"),
         )
     if ptype == "boolean":
         # A checkbox always submits a boolean (checked/unchecked), so the field is always
@@ -522,17 +522,20 @@ def _render_field(
         # words ride ``data-true-label`` / ``data-false-label`` for the review readback.
         checked = " checked" if value is True else ""
         labels = "".join(
-            f' data-{attr}="{_attr(word)}"'
-            for attr, word in (("true-label", _word(words, "true_label")), ("false-label", _word(words, "false_label")))
+            f' data-{attr}="{attr_value(word)}"'
+            for attr, word in (
+                ("true-label", field_word(words, "true_label")),
+                ("false-label", field_word(words, "false_label")),
+            )
             if word is not None
         )
         control = f'<input data-field="{esc_name}" data-kind="boolean" type="checkbox"{labels}{checked}>'
         return _labelled(esc_label, control, grouped=False, hint=hint)
     if ptype in ("integer", "number"):
         step = ' step="1"' if ptype == "integer" else ' step="any"'
-        val_attr = f' value="{_attr(value)}"' if value is not None else ""
+        val_attr = f' value="{attr_value(value)}"' if value is not None else ""
         control = (
-            f'<input data-field="{esc_name}" data-kind="number" type="number"{step}{_number_bounds(prop)}'
+            f'<input data-field="{esc_name}" data-kind="number" type="number"{step}{number_bounds(prop)}'
             f"{val_attr}{req_attr}{shape}>"
         )
         return _labelled(esc_label, control, grouped=False, hint=hint)
@@ -546,20 +549,24 @@ def _render_display(block: dict[str, Any]) -> str:
     cannot draw it shows); a slotted image with no static source DEGRADES to its alt text, never
     a broken image. A ``slot`` rides a ``data-slot`` attribute (the live channel fills it; the
     static page shows the given/empty content); a slotted image's element also carries
-    ``data-slot-kind="image"``, so the page script draws a reaction's value as its picture.
+    ``data-slot-kind="image"``, so the page script draws a reaction's value as its picture,
+    and a slotted text block's own text rides ``data-slot-text``, so a ``null`` value shows it
+    again.
     """
     kind = block.get("kind")
     slot = block.get("slot")
-    slot_attr = f' data-slot="{_attr(slot)}"' if isinstance(slot, str) else ""
+    slot_attr = f' data-slot="{attr_value(slot)}"' if isinstance(slot, str) else ""
     if kind == "image":
         if slot_attr:
             slot_attr += ' data-slot-kind="image"'
         src = block.get("src")
         alt = str(block.get("alt") or "")
         if src:
-            return f'<img{slot_attr} src="{_attr(src)}" alt="{_attr(alt)}">'
+            return f'<img{slot_attr} src="{attr_value(src)}" alt="{attr_value(alt)}">'
         return f'<p{slot_attr} class="display-alt">{html.escape(alt)}</p>'
     text = str(block.get("text") or "")
+    if slot_attr and text:
+        slot_attr += f' data-slot-text="{attr_value(text)}"'
     if kind == "heading":
         return f"<h3{slot_attr}>{html.escape(text)}</h3>"
     return f'<p{slot_attr} class="display-body">{html.escape(text)}</p>'
@@ -569,8 +576,8 @@ def _field_row(name: str, prop: dict[str, Any], inner: str) -> str:
     # Wrap one field in a row carrying its ``visibleWhen`` predicate (when any), so the submit
     # script shows/hides it on the submitted values and drops a hidden field from the answer.
     predicate = prop.get("visibleWhen")
-    vw_attr = f' data-visible-when="{_attr(json.dumps(predicate))}"' if isinstance(predicate, dict) else ""
-    return f'<div class="field" data-field-row="{_attr(name)}"{vw_attr}>{inner}</div>'
+    vw_attr = f' data-visible-when="{attr_value(json.dumps(predicate))}"' if isinstance(predicate, dict) else ""
+    return f'<div class="field" data-field-row="{attr_value(name)}"{vw_attr}>{inner}</div>'
 
 
 def _reactions_attr(reactions: Any) -> str:
@@ -591,7 +598,7 @@ def _reactions_attr(reactions: Any) -> str:
     }
     if not (trig["field_changed"] or trig["page_advanced"] or trig["submitted"]):
         return ""
-    return f' data-reactions="{_attr(json.dumps(trig))}"'
+    return f' data-reactions="{attr_value(json.dumps(trig))}"'
 
 
 def _render_steps_body(
@@ -625,7 +632,7 @@ def _render_steps_body(
             is_required,
             value=values.get(name),
             options=options_map.get(name),
-            words=_field_words(field_wording, name),
+            words=field_words(field_wording, name),
             properties=properties,
         )
 
@@ -651,7 +658,7 @@ def _render_steps_body(
         rows = render_names([name for name, _prop, _req in fields])
         # The page-less form draws one step whose terminal (submit) button reads the caller's
         # ``wording.form.submit`` when set; the constant script's ``show`` draws it, else "Submit".
-        bl_attr = f' data-button-label="{_attr(submit_label)}"' if submit_label else ""
+        bl_attr = f' data-button-label="{attr_value(submit_label)}"' if submit_label else ""
         return f'<section class="step" data-step="0"{bl_attr}>\n{rows}\n</section>'
     steps_html = []
     for index, page in enumerate(pages):
@@ -661,7 +668,7 @@ def _render_steps_body(
         # The page's primary button (the one that advances or submits) reads its ``button_label``
         # when set; the submit script's ``show`` draws it on the shown step, else "Next"/"Submit".
         button_label = page.get("button_label")
-        bl_attr = f' data-button-label="{_attr(button_label)}"' if button_label else ""
+        bl_attr = f' data-button-label="{attr_value(button_label)}"' if button_label else ""
         if page.get("kind") == "review":
             # A review page carries no inputs: a generic readback (filled by the submit script from
             # the entered values) plus any display blocks and the confirm footer.
@@ -669,7 +676,7 @@ def _render_steps_body(
         else:
             inner = f"{display_html}\n{render_names(page['fields'])}"
         steps_html.append(
-            f'<section class="step" data-step="{index}" data-page-title="{_attr(raw_title)}"{bl_attr}{hidden}>\n'
+            f'<section class="step" data-step="{index}" data-page-title="{attr_value(raw_title)}"{bl_attr}{hidden}>\n'
             f'<h2 tabindex="-1">{html.escape(raw_title)}</h2>\n{inner}\n</section>'
         )
     return "\n".join(steps_html)
@@ -690,18 +697,18 @@ def _wording_text_attrs(wording: dict[str, Any]) -> str:
     submitted = answer_page.get("submitted") or {}
     parts: list[str] = []
     if answer.get("rejected"):
-        parts.append(f' data-text-rejected="{_attr(answer["rejected"])}"')
+        parts.append(f' data-text-rejected="{attr_value(answer["rejected"])}"')
     if form.get("update_failed"):
-        parts.append(f' data-text-update_failed="{_attr(form["update_failed"])}"')
+        parts.append(f' data-text-update_failed="{attr_value(form["update_failed"])}"')
     parts.extend(
-        f' data-text-{member}="{_attr(form_page[member])}"'
+        f' data-text-{member}="{attr_value(form_page[member])}"'
         for member in ("failed", "network_error", "choose_one", "date_unavailable")
         if form_page.get(member)
     )
     if submitted.get("heading"):
-        parts.append(f' data-submitted-heading="{_attr(submitted["heading"])}"')
+        parts.append(f' data-submitted-heading="{attr_value(submitted["heading"])}"')
     if submitted.get("text"):
-        parts.append(f' data-submitted-text="{_attr(submitted["text"])}"')
+        parts.append(f' data-submitted-text="{attr_value(submitted["text"])}"')
     return "".join(parts)
 
 
@@ -741,7 +748,7 @@ def _render_form_page(format_payload: dict[str, Any] | None) -> str:
     body = _render_steps_body(
         payload.get("pages"), fields, field_by_name, values, options_map, form.get("submit"), form.get("fields") or {}
     )
-    labels_attr = _attr(json.dumps(labels))
+    labels_attr = attr_value(json.dumps(labels))
     form_title = form.get("title")
     heading = html.escape(str(form_title)) if form_title else "Respond"
     back_label = form.get("back")
@@ -779,6 +786,6 @@ def _render_form_page(format_payload: dict[str, Any] | None) -> str:
         '<button type="submit" data-nav="submit">Submit</button>\n'
         "</div>\n"
         "</form>\n"
-        f"{_FORM_SUBMIT_SCRIPT}"
+        f"{FORM_SUBMIT_SCRIPT}"
         "</body></html>\n"
     )

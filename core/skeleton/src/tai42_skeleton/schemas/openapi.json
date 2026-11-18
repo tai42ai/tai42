@@ -41581,7 +41581,7 @@
     },
     "/api/storage/dirs/{dir_path}": {
       "delete": {
-        "description": "Remove a directory subtree from the store; the render state under it is evicted fleet-wide.\n\nThis worker evicts whatever the outcome once deletion begins. A failure before deletion\nbegins — a missing directory (``404``), a rejected path (``400``), an object under it a\nstored object names (``409``) or a holder that cannot be read (``500``) — broadcasts\nnothing. A failure once deletion may have begun leaves the store partially changed, so\nthe eviction still fans out before the error propagates (a ``FleetBroadcastError``\ncarrying the fleet report).",
+        "description": "Remove a directory subtree from the store; the render state under it is evicted fleet-wide.\n\nThis worker evicts whatever the outcome once deletion begins. A failure before deletion\nbegins — a missing directory (``404``), a rejected path (``400``), an object under it a\nstored object names (``409``), a holder that cannot be read (``500``) or a referee's own\nerror, with its own status — broadcasts nothing. A failure once deletion may have begun\nleaves the store partially changed, so the eviction still fans out before the error\npropagates (a ``FleetBroadcastError`` carrying the fleet report).",
         "operationId": "delete_api_storage_dirs_dir_path",
         "parameters": [
           {

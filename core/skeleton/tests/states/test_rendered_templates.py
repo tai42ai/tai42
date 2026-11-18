@@ -44,6 +44,7 @@ from tai42_skeleton.template.resource_manager import ResourceManager
 from tai42_skeleton.template.settings import TemplateCacheSettings
 
 from .._fakes.recording_storage import MappedStorage
+from .._fakes.template_holders import app_held_by
 from ..app._fixtures.reload import reload_with
 from .conftest import FakeStatesPg
 
@@ -372,7 +373,7 @@ async def test_a_real_manager_eviction_seam_each_rerender_once(
     pg: FakeStatesPg, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(service_mod, "states_store_configured", lambda: True)
-    manager = ResourceManager(None, on_evicted=lambda _eviction: None)
+    manager = ResourceManager(None, on_evicted=lambda _eviction: None, held_by=app_held_by)
     renders: list[str] = []
     real_render = ResourceManager.render_templated_text
 
@@ -433,7 +434,7 @@ def test_a_reload_rerenders_through_the_rebuilt_manager(pg: FakeStatesPg, monkey
 
 def test_two_managers_built_in_sequence_carry_different_epochs() -> None:
     first, second = (
-        ResourceManager(None, on_evicted=lambda _eviction: None),
-        ResourceManager(None, on_evicted=lambda _eviction: None),
+        ResourceManager(None, on_evicted=lambda _eviction: None, held_by=app_held_by),
+        ResourceManager(None, on_evicted=lambda _eviction: None, held_by=app_held_by),
     )
     assert second.epoch > first.epoch

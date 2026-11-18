@@ -281,9 +281,10 @@ class HarnessSettings(BaseSettings):
 
     # The RabbitMQ the celery backend isolates each stack on (a per-stack vhost).
     # Validated/used only when ``backend == "celery"``; the AMQP URL feeds the
-    # stack broker URL, the management URL provisions and reaps the vhost.
-    rabbitmq_url: str = "amqp://guest:guest@127.0.0.1:5672"
-    rabbitmq_management_url: str = "http://guest:guest@127.0.0.1:15672"
+    # stack broker URL, the management URL provisions and reaps the vhost. The
+    # defaults carry the user deploy/rabbitmq/rabbitmq.conf creates.
+    rabbitmq_url: str = "amqp://tai42:tai42@127.0.0.1:5672"
+    rabbitmq_management_url: str = "http://tai42:tai42@127.0.0.1:15672"
 
     # The shared Redis. Every stack is pinned to a logical DB index under this
     # server; the harness never appends a DB index here itself.

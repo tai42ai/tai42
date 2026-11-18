@@ -30,6 +30,7 @@ from tai42_kit.settings import reset_all_settings, sweep_stale_settings
 from tai42_kit.utils.state_context import state_context
 from tests._helpers import AddressingChannel
 
+from tai42_skeleton.app import tool_rename_referees as referees_module
 from tai42_skeleton.channels import notifications_sink as notifications_sink_module
 from tai42_skeleton.channels import send_receipts as send_receipts_module
 from tai42_skeleton.channels.settings import channels_settings
@@ -45,7 +46,6 @@ from tai42_skeleton.interactions.ask.timing import DeadlineWindow
 from tai42_skeleton.interactions.settings import interactions_settings
 from tai42_skeleton.interactions.store import InteractionStore
 from tai42_skeleton.operations import interactions as interaction_ops
-from tai42_skeleton.tools import platform_referees as referees_module
 
 from .._fakes.interactions_redis import FakeRedis
 from ._continuation_support import configure_interactions_store

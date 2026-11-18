@@ -109,7 +109,7 @@ def test_harness_never_sets_multiproc_env() -> None:
         langfuse_public_key="pk",
         langfuse_secret_key="sk",
         otel_traces_endpoint="http://127.0.0.1:1/v1/traces",
-        broker_url="amqp://guest:guest@127.0.0.1:5672/tai42_e2e_probe",
+        broker_url="amqp://tai42:tai42@127.0.0.1:5672/tai42_e2e_probe",
         checkpoint_redis_idx=1,
         checkpoint_redis_url="redis://127.0.0.1:6380/1",
         studio_dist_path="/tmp/e2e-studio-dist",

@@ -19,7 +19,7 @@ _DELIVERY_RECEIPTS = {
 }
 
 
-async def _handle_status(status: dict[str, Any]) -> None:
+async def handle_status(status: dict[str, Any]) -> None:
     """Record one delivery status against its outbound message.
 
     ``failed`` → FAILED (loud); ``sent``/``delivered`` → DELIVERED; ``read`` is

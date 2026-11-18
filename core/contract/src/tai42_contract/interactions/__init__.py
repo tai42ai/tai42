@@ -140,7 +140,7 @@ from tai42_contract.interactions.models import (
 )
 from tai42_contract.interactions.models.media_errors import (
     MediaAlreadyBoundError,
-    MediaIngestError,
+    MediaError,
     MediaNotFoundError,
     MediaSourceReadError,
     MediaStoreUnavailableError,
@@ -264,7 +264,7 @@ __all__ = [
     "LocationElement",
     "MalformedParkMarkerError",
     "MediaAlreadyBoundError",
-    "MediaIngestError",
+    "MediaError",
     "MediaItem",
     "MediaKind",
     "MediaNotFoundError",

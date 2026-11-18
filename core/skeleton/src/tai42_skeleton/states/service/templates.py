@@ -32,7 +32,7 @@ from tai42_contract.states.rendered import (
     RenderedTemplateJq,
 )
 from tai42_contract.template import TemplatedText
-from tai42_kit.states.template_jq import input_order, program_variables, sibling_prelude, template_jq_prelude
+from tai42_kit.states.template_jq import TemplateJqCompileError, compile_template_jq, input_order, template_jq_prelude
 from tai42_kit.utils.data.jq_errors import JqProgramError
 from tai42_kit.utils.data.jq_util import compile_check
 from tai42_kit.utils.render import resolve_schema_body
@@ -216,7 +216,8 @@ class _TemplateMixin(_StatesServiceBase):
         """Render and compile a by-id ``template_jq`` program at the save door.
 
         When a program body is by-id, every program is rendered (the sibling prelude needs
-        each input body) and compiled over the full prelude; an id that cannot be fetched or
+        each input body) and compiled by the kit's rule
+        (:func:`~tai42_kit.states.template_jq.compile_template_jq`); an id that cannot be fetched or
         rendered fails the save loudly naming the program and the id, and a rendered jq that does not compile
         is the same loud template error validate raises for inline jq. An all-inline
         section is already compiled by :func:`validate_template`, so this is a no-op for it.
@@ -225,15 +226,12 @@ class _TemplateMixin(_StatesServiceBase):
         if not programs or all(p.jq.content is not None for p in programs.values()):
             return
         rendered = {name: await self._render_program_body_at_save(template, name, p.jq) for name, p in programs.items()}
-        rendered_inputs = {name: rendered[name] for name, p in programs.items() if p.purpose == "input"}
-        prelude = template_jq_prelude(rendered_inputs)
-        for name, program in programs.items():
-            try:
-                await compile_check(prelude + rendered[name], variables=program_variables(program.purpose))
-            except JqProgramError as exc:
-                raise TemplateValidationError(
-                    f"template {template.name!r} template_jq {name!r} is not a valid jq expression: {exc}"
-                ) from exc
+        try:
+            await compile_template_jq(programs, rendered)
+        except TemplateJqCompileError as exc:
+            raise TemplateValidationError(
+                f"template {template.name!r} template_jq {exc.program!r} is not a valid jq expression: {exc}"
+            ) from exc
 
     async def _compile_by_id_reconcile(self, template: StateTemplate) -> None:
         """Render and compile a by-id ``reconcile`` program at the save door.
@@ -276,7 +274,11 @@ class _TemplateMixin(_StatesServiceBase):
         document carrying the ORIGINAL union fragment, so a read serves a by-id reference back unchanged.
         Every id the document names that the store lacks raises :class:`TemplateValidationError` first.
         """
-        await assert_templates_stored(state_template_template_refs(doc), TemplateValidationError)
+        from tai42_skeleton.app import instance
+
+        await assert_templates_stored(
+            instance.app.storage.provider, state_template_template_refs(doc), TemplateValidationError
+        )
         body = doc.model_dump(by_alias=True)
         resolved_body, _by_id = await self._resolve_template_body(doc.name, body)
         template = await validate_template(resolved_body)
@@ -407,7 +409,7 @@ class _TemplateMixin(_StatesServiceBase):
             bodies=bodies,
             declarations_check=check,
             input_order=tuple(order),
-            sibling_prelude=sibling_prelude(inputs, order),
+            sibling_prelude=template_jq_prelude(inputs),
             served=served,
             cached_at=time.monotonic(),
         )

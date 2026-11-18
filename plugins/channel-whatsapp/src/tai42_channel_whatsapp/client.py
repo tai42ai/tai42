@@ -136,7 +136,7 @@ async def send_message(phone_number_id: str, to: str, body: str) -> SentMessage:
     return await _post(phone_number_id, payload)
 
 
-def _header_object(header: MediaItem) -> dict[str, Any]:
+def header_object(header: MediaItem) -> dict[str, Any]:
     """The ``interactive.header`` object for a media header, per the Cloud API.
 
     A header carries a single ``image``/``video``/``document`` object (a ``document`` may
@@ -186,7 +186,7 @@ async def send_interactive_buttons(
 
     ``buttons`` is a list of ``(id, title)`` pairs — each becomes a tappable reply
     button whose id the inbound webhook echoes back. ``header`` is an optional pre-built
-    media-header object (:func:`_header_object`) and ``footer`` an optional trailing line.
+    media-header object (:func:`header_object`) and ``footer`` an optional trailing line.
     """
     interactive = _with_header_footer(
         {
@@ -326,22 +326,15 @@ async def send_location(
 def _template_header_component(header: MediaItem) -> dict[str, Any]:
     """The template ``header`` component for a media header argument, per the template-message API.
 
-    A single ``image``/``video``/``document`` parameter (a ``document`` may add a
-    ``filename``). An ``audio`` header has no template representation and is refused
-    loudly.
+    A single parameter typed by the header's kind — an ``image``, ``video`` or ``document``, the
+    kinds :class:`~tai42_channel_whatsapp.channel.template_params.WhatsAppTemplateParameters`
+    admits — carrying the media link (a ``document`` may add a ``filename``).
     """
-    if header.kind is MediaKind.IMAGE:
-        parameter: dict[str, Any] = {"type": "image", "image": {"link": header.url}}
-    elif header.kind is MediaKind.VIDEO:
-        parameter = {"type": "video", "video": {"link": header.url}}
-    elif header.kind is MediaKind.DOCUMENT:
-        document: dict[str, str] = {"link": header.url}
-        if header.filename:
-            document["filename"] = header.filename
-        parameter = {"type": "document", "document": document}
-    else:
-        raise ChannelInputError(f"WhatsApp template header cannot carry {header.kind.value} media")
-    return {"type": "header", "parameters": [parameter]}
+    kind = header.kind.value
+    media: dict[str, str] = {"link": header.url}
+    if header.kind is MediaKind.DOCUMENT and header.filename:
+        media["filename"] = header.filename
+    return {"type": "header", "parameters": [{"type": kind, kind: media}]}
 
 
 def _template_button_component(index: int, button: TemplateButtonParam) -> dict[str, Any]:

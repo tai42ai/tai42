@@ -36,6 +36,7 @@ from tai42_skeleton.template.errors import TemplateNotFoundError
 
 from .._fakes.bus import FakeBus
 from .._fakes.listing import keys_under
+from .._fakes.template_holders import app_held_by
 
 
 class _Store(Storage):
@@ -86,7 +87,7 @@ class _Store(Storage):
 def _install(monkeypatch: pytest.MonkeyPatch, items: dict[str, str], bus: FakeBus) -> tuple[ResourceManager, _Store]:
     """Install ``items`` as the app's storage provider and a real manager over it on the app the doors read."""
     store = _Store(items)
-    manager = ResourceManager(store, on_evicted=instance.app._fire_template_evicted)
+    manager = ResourceManager(store, on_evicted=instance.app._fire_template_evicted, held_by=app_held_by)
     monkeypatch.setattr(instance.app._storage_registry, "_provider", store)
     monkeypatch.setattr(instance.app, "_resource_manager_cache", manager)
     monkeypatch.setattr(instance.app, "_bus", bus)

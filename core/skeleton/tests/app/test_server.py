@@ -753,7 +753,20 @@ def test_resource_manager_caches_instance():
     b._storage_registry = MagicMock()
     with patch.object(server_module, "ResourceManager", return_value="built") as rm:
         assert b.storage.resource_manager == "built"
-    rm.assert_called_once_with(b._storage_registry.provider, on_evicted=b._fire_template_evicted)
+    rm.assert_called_once()
+    args, kwargs = rm.call_args
+    assert args == (b._storage_registry.provider,)
+    assert kwargs.keys() == {"on_evicted", "held_by"}
+    assert kwargs["on_evicted"] == b._fire_template_evicted
+
+    # The held-by gather reads the registry of the serving epoch current at delete time,
+    # not the one present when the manager was built.
+    epoch_registry = MagicMock()
+    epoch_registry.holders_of = AsyncMock(return_value=["holder"])
+    b._serving_core._template_delete_referee_registry = epoch_registry
+    ids = frozenset({"t-1"})
+    assert asyncio.run(kwargs["held_by"](ids)) == ["holder"]
+    epoch_registry.holders_of.assert_awaited_once_with(ids)
 
 
 def test_extension_decorator_noops_registration_into_registry():

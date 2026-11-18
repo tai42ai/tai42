@@ -38,6 +38,7 @@ from tai42_skeleton.operations._authority import require_admin, resolve_caller
 from tai42_skeleton.operations.decorator import operation
 from tai42_skeleton.operations.errors import BadRequestError, ConflictError, ForbiddenError, NotFoundError
 from tai42_skeleton.operations.response_models.roles import RoleDeleted, RoleVersionsView
+from tai42_skeleton.operations.storage_provider import storage_provider
 from tai42_skeleton.template.references import assert_templates_stored
 from tai42_skeleton.template.stored_refs import condition_template_refs
 
@@ -376,7 +377,9 @@ async def rollback_role(name: str, version: int) -> dict[str, Any]:
             after = (await role_store().get_version(name, version, tx=tx)).body
         except DocumentVersionNotFoundError as exc:
             raise NotFoundError(f"role {name!r} has no version {version}") from exc
-        await assert_templates_stored(condition_template_refs(after.get("condition")), BadRequestError)
+        await assert_templates_stored(
+            storage_provider(), condition_template_refs(after.get("condition")), BadRequestError
+        )
         await role_store().rollback(name, version, tx=tx)
         await role_audit().record(name, "rollback", caller.caller_id, before, after, tx=tx)
     return after

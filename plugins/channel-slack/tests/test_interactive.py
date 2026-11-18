@@ -18,8 +18,8 @@ from tai42_contract.interactions import FieldChangedEvent, FormReactionError, Su
 
 from tai42_channel_slack.blocks import REPLY_ACTION_PREFIX, SELECT_ACTION_PREFIX, encode_reply_value
 from tai42_channel_slack.correlation import store_correlation, store_form_record
+from tai42_channel_slack.form_blocks import FIELD_ACTION_ID
 from tai42_channel_slack.forms import (
-    FIELD_ACTION_ID,
     FORM_OPEN_ACTION_ID,
     FORM_SUBMIT_CALLBACK_ID,
     build_modal_view,
@@ -1120,6 +1120,38 @@ async def test_field_change_undrawable_update_draws_the_caller_update_failed_wit
 
     view = json.loads(http_script.requests[0].content)["view"]
     assert view["blocks"][1]["text"]["text"] == "Could not refresh: ."
+
+
+async def test_field_change_picture_slack_cannot_load_draws_the_caller_update_failed(
+    fake_redis, http_script, interactions
+):
+    pages = [
+        {
+            "title": "P",
+            "fields": ["qty"],
+            "kind": "input",
+            "display": [{"kind": "image", "slot": "chart", "alt": "a chart"}],
+        }
+    ]
+    await store_form_record(
+        _INTERACTION_ID,
+        _CALLBACK,
+        _QTY_SCHEMA,
+        _QUESTION,
+        _future(),
+        pages=pages,
+        reactions=_QTY_REACTIONS,
+        wording={"form": {"update_failed": "Could not refresh: {reason}."}},
+    )
+    interactions.react_result = {"display": {"chart": "/api/interactions/media/" + "S" * 43}}
+    http_script.results.append(httpx.Response(200, json={"ok": True}))
+    state = {"qty": {FIELD_ACTION_ID: {"type": "number_input", "value": "1"}}}
+
+    await slack_interactive(_signed(_field_action("qty", state)))
+
+    view = json.loads(http_script.requests[0].content)["view"]
+    assert view["blocks"][1]["text"]["text"] == "Could not refresh: ."
+    assert all(block["type"] != "image" for block in view["blocks"])
 
 
 async def test_field_change_with_no_record_is_ignored(fake_redis, http_script, interactions):

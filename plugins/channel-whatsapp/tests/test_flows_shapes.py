@@ -11,7 +11,8 @@ from tai42_contract.channels import ChannelInputError
 from tai42_contract.interactions import FormShapeKind
 from tai42_kit.interactions import FORMAT_PATTERNS
 
-from tai42_channel_whatsapp.flows import build_flow_data, build_form_flow, form_needs_endpoint
+from tai42_channel_whatsapp.flows import build_form_flow, form_needs_endpoint
+from tai42_channel_whatsapp.flows_send_data import build_flow_data
 from tai42_channel_whatsapp.flows_shapes import (
     ERROR_MESSAGE_MAX_CHARS,
     _keyword_is_native,

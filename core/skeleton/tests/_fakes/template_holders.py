@@ -1,8 +1,15 @@
-"""Template-delete referees for the delete doors' tests: a hook and a preset naming ``jq/gate``."""
+"""Template-delete referees for the delete doors' tests: a hook and a preset naming ``jq/gate``.
+
+:func:`app_held_by` is the held check a test's own ``ResourceManager`` reads: the app's referee
+registry, resolved at call time as the app's own manager resolves it.
+"""
 
 from __future__ import annotations
 
+from collections.abc import Awaitable
+
 import pytest
+from tai42_contract.errors import UnavailableError
 from tai42_contract.tools import ReferenceHolder
 
 from tai42_skeleton.app import instance
@@ -38,6 +45,12 @@ HELD_DIRECTORY_REFUSAL = (
 HELD_HOLDERS = [HOOK_HOLDER.model_dump(), PRESET_HOLDER.model_dump()]
 
 STORED_PRESET_FAULT = OperationFailedError("stored preset 'p': its tool arguments cannot be read")
+STORE_UNAVAILABLE_FAULT = UnavailableError("the store a referee reads is unavailable")
+
+
+def app_held_by(ids: frozenset[str]) -> Awaitable[list[ReferenceHolder]]:
+    """Every holder of one of ``ids`` the app's live referee registry answers."""
+    return instance.app._template_delete_referee_registry.holders_of(ids)
 
 
 async def hook_referee(ids: frozenset[str]) -> list[ReferenceHolder]:
@@ -54,6 +67,10 @@ async def value_error_referee(ids: frozenset[str]) -> list[ReferenceHolder]:
 
 async def stored_preset_fault_referee(ids: frozenset[str]) -> list[ReferenceHolder]:
     raise STORED_PRESET_FAULT
+
+
+async def store_unavailable_referee(ids: frozenset[str]) -> list[ReferenceHolder]:
+    raise STORE_UNAVAILABLE_FAULT
 
 
 def fresh_referees(monkeypatch: pytest.MonkeyPatch) -> TemplateDeleteRefereeRegistry:

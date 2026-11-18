@@ -12,7 +12,7 @@ from tai42_channel_whatsapp.correlation import already_seen, mark_seen
 logger = logging.getLogger(__name__)
 
 
-async def _notify_rejected(
+async def notify_rejected(
     phone_number_id: str, wa_id: str, wamid: str, *, kind: str, reason: InboundRejectionReason
 ) -> None:
     """Send one reason-typed rejection notice and record the platform rejection event.

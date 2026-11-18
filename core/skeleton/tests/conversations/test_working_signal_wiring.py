@@ -1,7 +1,8 @@
 """The working-signal loop wired into the real turn and delivery seams.
 
-Proves the ends of a turn's loop against the ACTUAL functions the doors run: ``_schedule_turn``
-starts the loop for the intake record, the turn's end stops it on every outcome, and
+Proves the ends of a turn's loop against the ACTUAL functions the doors run: the target seam
+(``target._target_outcome``) starts the loop for the intake record once a target will run, so a
+queued turn and a manual-mode thread show nothing; the turn's end stops it on every outcome, and
 ``_deliver_channel`` stops it the instant the answer is about to send.
 """
 
@@ -12,17 +13,22 @@ import contextlib
 import time
 
 import pytest
+from tai42_contract.template import TemplatedText
 
 from tai42_skeleton.app import instance as instance_module
 from tai42_skeleton.conversations import delivery as delivery_module
 from tai42_skeleton.conversations import delivery_channel as delivery_channel_module
 from tai42_skeleton.conversations import turn as turn_module
 from tai42_skeleton.conversations import working_signal
+from tai42_skeleton.conversations.caps import TurnCaps
 from tai42_skeleton.conversations.models import ConversationRecord, DeliveryStatus
+from tai42_skeleton.conversations.settings import ConversationsSettings
 from tai42_skeleton.conversations.turn import accessors as accessors_module
+from tai42_skeleton.conversations.turn import intake as intake_module
 from tai42_skeleton.conversations.turn import schedule as schedule_module
 
 from .conftest import (
+    SETTLE_TIMEOUT_S,
     EchoAgent,
     FakeChannel,
     FakeManager,
@@ -31,7 +37,10 @@ from .conftest import (
     _store,
     _wire,
     create_record,
+    fixed_settings,
 )
+from .test_manual_mode import ManualAgent
+from .test_manual_mode import _channel_route as _moded_channel_route
 
 
 class _SignalChannel:
@@ -41,9 +50,12 @@ class _SignalChannel:
 
     def __init__(self) -> None:
         self.calls: list[tuple[bool, str, str | None]] = []
+        self.asserted = asyncio.Event()
+        self.cleared = asyncio.Event()
 
     async def signal_working(self, *, recipient, sender_identity=None, provider_message_id=None, active=True) -> None:
         self.calls.append((active, recipient, provider_message_id))
+        (self.asserted if active else self.cleared).set()
 
 
 class _SignalChannels:
@@ -80,9 +92,9 @@ def _answered_channel_record(message_id: str, answer: str) -> ConversationRecord
     )
 
 
-async def test_schedule_turn_starts_the_working_signal_for_the_intake_record(env, monkeypatch):
-    # The single scheduling seam every door funnels through must start the loop with the intake
-    # record — proven against the REAL _schedule_turn driven by a real accept.
+async def test_the_target_seam_starts_the_working_signal_for_the_intake_record(env, monkeypatch):
+    # The single target seam every door's turn runs through must start the loop with the intake
+    # record — proven against the REAL turn driven by a real accept.
     started: list[ConversationRecord] = []
     monkeypatch.setattr(working_signal, "start_turn", lambda record: started.append(record))
 
@@ -105,6 +117,108 @@ async def test_schedule_turn_starts_the_working_signal_for_the_intake_record(env
     assert [r.message_id for r in started] == [message_id]
     assert started[0].channel == "twilio"
     assert started[0].provider_message_id == "PID1"
+
+
+class _AgentAwaitingTheIndicator(EchoAgent):
+    """Holds its run until the channel shows the indicator, so the loop asserts while the target runs."""
+
+    def __init__(self, channel: _SignalChannel) -> None:
+        super().__init__()
+        self._channel = channel
+
+    async def run(self, *, user_message: TemplatedText | None = None, thread_id: str | None = None, **kwargs):
+        await self._channel.asserted.wait()
+        return await super().run(user_message=user_message, thread_id=thread_id, **kwargs)
+
+
+async def _accept_hi() -> str:
+    return await turn_module.accept(
+        "twilio",
+        "+15550001111",
+        "+15550002222",
+        "+15550002222",
+        "hi",
+        "PID1",
+        medium_message_id=None,
+        reply_to_medium_message_id=None,
+    )
+
+
+async def test_a_queued_turn_shows_no_indicator_until_it_is_admitted(env, monkeypatch):
+    # One concurrency slot, held by another thread's turn: the accepted turn waits at the gate and
+    # nothing is produced for its user, so no indicator shows until the gate admits it.
+    monkeypatch.setenv("CONVERSATIONS_MAX_CONCURRENT_TURNS", "1")
+    caps = TurnCaps(fixed_settings(ConversationsSettings()))
+    monkeypatch.setattr(intake_module, "get_turn_caps", lambda: caps)
+    signal_channel = _SignalChannel()
+    monkeypatch.setattr(instance_module, "app", _SignalApp(signal_channel))
+    _wire(monkeypatch, FakeManager(_channel_route()), FakeChannel())
+    agent = _AgentAwaitingTheIndicator(signal_channel)
+    monkeypatch.setattr(accessors_module, "_agent_registry", lambda: {"echo": agent})
+
+    holding = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _other_threads_turn() -> None:
+        caps.reserve_thread_slot("other-thread")
+        async with caps.run_reserved("other-thread"):
+            holding.set()
+            await release.wait()
+
+    other = asyncio.create_task(_other_threads_turn())
+    try:
+        await holding.wait()
+        message_id = await _accept_hi()
+        for _ in range(1000):
+            if caps._gate._waiters:
+                break
+            await asyncio.sleep(0)
+        assert len(caps._gate._waiters) == 1  # the turn stands at the gate
+
+        assert signal_channel.calls == []
+        assert not working_signal.has_loop(message_id)
+    finally:
+        release.set()
+        await other
+        await _settle()
+
+    # Admitted, its target ran: the indicator showed, and the turn's end cleared it.
+    await asyncio.wait_for(signal_channel.cleared.wait(), SETTLE_TIMEOUT_S)
+    frames = [active for active, _, _ in signal_channel.calls]
+    assert frames[0] is True
+    assert frames[-1] is False
+    assert all(frames[:-1])
+    assert agent.calls == [("hi", "bridge:line:+15550002222")]
+
+
+class _ManualAgentSeeingTheLoops(ManualAgent):
+    """A memory-holding agent that records which working-signal loops run while the manual turn appends."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.loops_at_append: list[str] = []
+
+    async def append_thread_messages(self, *, thread_id: str, messages, **kwargs) -> None:
+        self.loops_at_append = list(working_signal._SIGNALS)
+        await super().append_thread_messages(thread_id=thread_id, messages=messages, **kwargs)
+
+
+async def test_a_manual_mode_thread_shows_no_indicator(env, monkeypatch):
+    # A thread in manual mode runs no target and produces no reply: no loop runs and no frame is sent.
+    signal_channel = _SignalChannel()
+    monkeypatch.setattr(instance_module, "app", _SignalApp(signal_channel))
+    _wire(monkeypatch, FakeManager(_moded_channel_route("manual")), FakeChannel())
+    agent = _ManualAgentSeeingTheLoops()
+    monkeypatch.setattr(accessors_module, "_agent_registry", lambda: {"echo": agent})
+
+    message_id = await _accept_hi()
+    await _settle()
+
+    assert agent.runs == []
+    assert agent.appended == [("bridge:line:+15550002222", [{"role": "user", "content": "hi"}])]
+    assert agent.loops_at_append == []
+    assert not working_signal.has_loop(message_id)
+    assert signal_channel.calls == []
 
 
 async def test_deliver_channel_stops_the_records_working_signal_loop(env, monkeypatch):

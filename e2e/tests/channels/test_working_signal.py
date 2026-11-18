@@ -1,7 +1,7 @@
 """The skeleton's working-on-it (typing) refresh loop over a turn, end to end.
 
 A channel that advertises a vendor working-on-it indicator has it refreshed for the life of a
-bridged turn: the skeleton spawns one detached loop at the schedule seam, re-asserts the
+bridged turn: the skeleton starts one detached loop where the turn's target runs, re-asserts the
 indicator before it lapses, and stops the instant the turn's answer is about to send; a hard
 ceiling ends a stretch earlier, clearing the indicator while the loop waits dormant. These legs
 drive that over a real bridged turn on the ``stub_working`` counting channel,

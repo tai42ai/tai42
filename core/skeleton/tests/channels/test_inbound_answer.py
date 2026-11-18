@@ -653,16 +653,15 @@ async def test_callback_pin_fails_closed_on_malformed_url(wired, monkeypatch):
     assert wired.events[0].payload["reason"] == "malformed_url"
 
 
-# -- _bridge tolerance parity (old channels ack'd blank/unrouted bridges) --------
+# -- _bridge: an unrouted reply is acked, a blank bridge text raises --------------
 
 
-@pytest.mark.parametrize("error", [BlankInboundTextError("blank"), LookupError("no route")])
-async def test_404_bridge_tolerates_blank_or_unrouted_reply(wired, monkeypatch, error):
-    # Parity with the hand-rolled channels: a blank reply or an address with no bound
-    # route is nothing to bridge — the ladder acks it (BRIDGED) and never re-raises, so
-    # a permanently-blank/unrouted message can't provoke a provider retry-storm.
+async def test_404_bridge_tolerates_unrouted_reply(wired, monkeypatch):
+    # An address with no bound route is nothing to bridge — the ladder acks it (BRIDGED)
+    # and never re-raises, so a permanently-unrouted message can't provoke a provider
+    # retry-storm.
     async def _raising_accept(*args, **kwargs):
-        raise error
+        raise LookupError("no route")
 
     monkeypatch.setattr(app, "_conversation_accept", _raising_accept)
     store = FakeStore(_entry())
@@ -674,6 +673,23 @@ async def test_404_bridge_tolerates_blank_or_unrouted_reply(wired, monkeypatch, 
 
     assert result.outcome is InboundAnswerOutcome.BRIDGED  # handled, not rethrown
     assert store.released == ["k"]
+
+
+async def test_404_bridge_raises_on_a_blank_bridge_text(wired, monkeypatch):
+    # A channel reads the participant's words before it routes them, so a blank bridge text
+    # is a channel fault: the conversation seam's refusal propagates out of the ladder.
+    async def _refusing_accept(channel_id, our_identity, client_address, cap_key, text, *args, **kwargs):
+        if not text.strip():
+            raise BlankInboundTextError("blank inbound text")
+        return "turn-1"
+
+    monkeypatch.setattr(app, "_conversation_accept", _refusing_accept)
+    store = FakeStore(_entry())
+    _stub_forward(monkeypatch, httpx.Response(404))
+    blank = _bridge().model_copy(update={"bridge_text": "  "})
+
+    with pytest.raises(BlankInboundTextError, match="blank inbound text"):
+        await handle_inbound_answer(channel_id="fakechan", correlation_key="k", answer="x", store=store, bridge=blank)
 
 
 async def test_unrouted_reply_emits_platform_event(wired, monkeypatch):

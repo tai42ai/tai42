@@ -248,7 +248,8 @@ async def test_web_shows_working_frames_while_one_message_answering_both_caller_
 
 def _active_calls_to(stack: TaiStack, recipient: str, *, besides: str) -> list[dict]:
     """The active indicator calls the counting stub recorded for ``recipient``, leaving out the
-    ones recorded under the inbound ``besides`` (the turn's own loop, which asserts from accept)."""
+    ones recorded under the inbound ``besides`` (the turn's own loop, which asserts from the moment
+    its target runs)."""
     calls: list[dict] = []
     for key in stack.record_keys():
         if key.startswith("working_signal:") and key != f"working_signal:{besides}":

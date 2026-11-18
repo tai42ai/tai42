@@ -1,4 +1,4 @@
-"""SSRF-pinning httpx transport and the ``fetch_url`` download helper.
+"""SSRF-pinning httpx transport, the shared guarded fetch client, and the ``fetch_url`` download helper.
 
 Wrapping httpx's connection pool with a backend that validates every TCP target
 through the SSRF guard and connects to the exact validated address closes
@@ -7,17 +7,30 @@ is made to that address rather than re-resolving the hostname (which an attacker
 could answer differently at connect time). While the guard is enabled it is
 applied on the initial request and every redirect hop, and the response body is
 size-capped while streaming; turning the guard off opts out of both.
+
+:func:`guarded_fetch_client` leases the one ``httpx.AsyncClient`` every guarded fetch
+of one configuration shares on its event loop — :func:`fetch_url` here,
+:func:`~tai42_kit.net.fetch_media.fetch_media` and
+:func:`~tai42_kit.net.guarded_request.guarded_request` — so only a configuration's first
+fetch on a loop pays client setup. The client follows no redirect and keeps no cookie: each fetch walks its own
+redirect hops, carrying its own cookies across them. The client sets no timeout of its
+own, so a request runs under httpx's default timeout unless its fetch passes one:
+:func:`~tai42_kit.net.guarded_request.guarded_request` passes its caller's per request,
+:func:`fetch_url` and :func:`~tai42_kit.net.fetch_media.fetch_media` pass none.
 """
 
 from __future__ import annotations
 
 from collections.abc import AsyncIterable, AsyncIterator, Iterator
-from contextlib import aclosing, contextmanager
+from contextlib import AbstractAsyncContextManager, aclosing, contextmanager
+from http.cookiejar import CookieJar, DefaultCookiePolicy
 from typing import Any, Final, cast
 
 import httpcore
 import httpx
 
+from tai42_kit.clients.base import PooledClient
+from tai42_kit.clients.facade import client_ctx
 from tai42_kit.net import url_guard
 from tai42_kit.net.url_guard import UrlGuardError
 
@@ -115,19 +128,24 @@ class _PoolResponseStream(httpx.AsyncByteStream):
             await aclose()
 
 
+# ``httpx.AsyncHTTPTransport``'s own default connection limits.
+_HTTPX_DEFAULT_LIMITS: Final = httpx.Limits(max_connections=100, max_keepalive_connections=20)
+
+
 class PinningTransport(httpx.AsyncBaseTransport):
     """httpx transport over a connection pool whose network backend validates and pins every TCP target.
 
     Built through the libraries' public constructors: httpx's ``AsyncHTTPTransport`` takes no
-    network backend, while httpcore's pool does. The pool settings, TLS context and backend are
-    what ``httpx.AsyncHTTPTransport()`` builds by default, with :class:`_PinningBackend` wrapping
-    the asyncio backend. Environment proxies stay unused: an ``httpx.AsyncClient`` given a
-    transport reads none.
+    network backend, while httpcore's pool does. The pool's connection limits are ``limits``
+    (``httpx.AsyncHTTPTransport``'s default unless given); its TLS context and backend are what
+    ``httpx.AsyncHTTPTransport()`` builds by default, with :class:`_PinningBackend` wrapping the
+    asyncio backend. The TLS context reads the environment's CA settings (``SSL_CERT_FILE``,
+    ``SSL_CERT_DIR``) as httpx's default one does; environment proxies stay unused, since an
+    ``httpx.AsyncClient`` given a transport reads none.
     """
 
-    def __init__(self) -> None:
-        """Build the pinned pool with ``httpx.AsyncHTTPTransport``'s default limits and TLS context."""
-        limits = httpx.Limits(max_connections=100, max_keepalive_connections=20)
+    def __init__(self, *, limits: httpx.Limits = _HTTPX_DEFAULT_LIMITS) -> None:
+        """Build the pinned pool with ``limits`` and ``httpx.AsyncHTTPTransport``'s default TLS context."""
         self._pool = httpcore.AsyncConnectionPool(
             ssl_context=httpx.create_ssl_context(),
             max_connections=limits.max_connections,
@@ -168,6 +186,57 @@ class PinningTransport(httpx.AsyncBaseTransport):
         await self._pool.aclose()
 
 
+# The shared client's pool caps no total connection count, so no fetch waits for a connection
+# another fetch holds (a held media stream, a gather of many fetches); idle keep-alive
+# connections stay bounded at httpx's default.
+_SHARED_CLIENT_LIMITS: Final = httpx.Limits(
+    max_connections=None, max_keepalive_connections=_HTTPX_DEFAULT_LIMITS.max_keepalive_connections
+)
+
+
+class _GuardedFetchClient(PooledClient[httpx.AsyncClient]):
+    """The ``httpx.AsyncClient`` every guarded fetch of one configuration shares on its event loop.
+
+    ``pinned`` selects the transport: the SSRF :class:`PinningTransport` while the guard is
+    enabled, httpx's default one when it is not; both pools take :data:`_SHARED_CLIENT_LIMITS`.
+    ``trust_env`` is httpx's own switch for the environment's proxy and CA settings, which
+    httpx reads only for its default transport. The client follows no redirect, and its cookie
+    jar admits no cookie, so nothing one fetch receives reaches another fetch's request.
+    """
+
+    async def _create(self, *, pinned: bool, trust_env: bool) -> httpx.AsyncClient:
+        no_cookies = CookieJar(policy=DefaultCookiePolicy(allowed_domains=[]))
+        if pinned:
+            return httpx.AsyncClient(
+                transport=PinningTransport(limits=_SHARED_CLIENT_LIMITS),
+                follow_redirects=False,
+                cookies=no_cookies,
+                trust_env=trust_env,
+            )
+        return httpx.AsyncClient(
+            limits=_SHARED_CLIENT_LIMITS, follow_redirects=False, cookies=no_cookies, trust_env=trust_env
+        )
+
+    async def _close(self, client: httpx.AsyncClient) -> None:
+        await client.aclose()
+
+    def _disconnection_exceptions(self) -> tuple[type[BaseException], ...]:
+        # No fault leaves an httpx client unusable (its pool drops a broken connection itself), so
+        # nothing raised inside a lease, the caller's own body included, evicts or rewraps it.
+        return ()
+
+
+def guarded_fetch_client(*, pinned: bool, trust_env: bool = True) -> AbstractAsyncContextManager[httpx.AsyncClient]:
+    """Lease the shared guarded fetch client for ``pinned`` and ``trust_env`` on the running loop.
+
+    The kit's client pool closes it when the loop's kit resources are released or its client
+    epoch retires. Under the pin ``trust_env`` changes nothing: the client given the pinning
+    transport reads no environment proxy, and the transport's TLS context reads the
+    environment's CA settings either way, so every pinned lease shares one client.
+    """
+    return client_ctx(_GuardedFetchClient, pinned=pinned, trust_env=trust_env and not pinned)
+
+
 def unwrap_guard_error(exc: BaseException) -> UrlGuardError | None:
     """Return the :class:`UrlGuardError` in ``exc``'s cause/context chain, if any.
 
@@ -193,47 +262,44 @@ async def fetch_url(url: str) -> tuple[bytes, str | None]:
     ``mime`` is the response ``Content-Type`` header (``None`` when absent). When
     the guard is enabled the request runs over :class:`PinningTransport`, which
     validates and pins every connection (initial request and each redirect hop
-    that opens a new connection), and the body is size-capped while streaming.
-    Raises rather than truncating an over-cap body or reaching a non-public host.
-    When the guard is disabled a plain client is used, which caps nothing, pins
-    nothing, and lets httpx follow redirects.
+    that opens a new connection), the body is size-capped while streaming, and at
+    most the guard's ``max_redirects`` hops are followed. Raises rather than
+    truncating an over-cap body or reaching a non-public host. When the guard is
+    disabled the transport caps nothing and pins nothing, and the redirect bound is
+    httpx's own (``httpx.TooManyRedirects`` past it).
 
-    Under the guard, redirects are followed one hop at a time rather than by
+    Redirects are followed one hop at a time on the shared client rather than by
     httpx, which reads each intermediate body into memory in full before chasing
     ``Location``. A hop carrying a body large enough to exhaust memory would slip
     past the cap that way, so each redirect response is closed unread — forgoing
     connection reuse for that hop — and only the terminal body is streamed and
-    counted.
+    counted. The cookies a hop sets ride this fetch's later hops only.
     """
-    if not url_guard.guard_enabled():
-        async with (
-            httpx.AsyncClient(follow_redirects=True) as client,
-            client.stream("GET", url) as response,
-        ):
-            response.raise_for_status()
-            buffer = bytearray()
-            async for chunk in response.aiter_bytes():
-                buffer.extend(chunk)
-            return bytes(buffer), response.headers.get("Content-Type")
-
-    max_redirects = url_guard.url_guard_settings().max_redirects
+    pinned = url_guard.guard_enabled()
     try:
-        async with httpx.AsyncClient(transport=PinningTransport(), follow_redirects=False) as client:
+        async with guarded_fetch_client(pinned=pinned) as client:
+            max_redirects = url_guard.url_guard_settings().max_redirects if pinned else client.max_redirects
+            cookies = httpx.Cookies()
             request = client.build_request("GET", url)
             for _ in range(max_redirects + 1):
                 async with aclosing(await client.send(request, stream=True)) as response:
+                    cookies.extract_cookies(response)
                     # ``next_request`` is httpx's fully-built redirect request (relative
                     # ``Location`` resolved, method and headers adjusted per status). It is
                     # set only when the response is a redirect the client did not follow.
                     if response.next_request is not None:
                         request = response.next_request
+                        cookies.set_cookie_header(request)
                         continue
                     response.raise_for_status()
                     buffer = bytearray()
                     async for chunk in response.aiter_bytes():
                         buffer.extend(chunk)
-                        url_guard.enforce_size(len(buffer))
+                        if pinned:
+                            url_guard.enforce_size(len(buffer))
                     return bytes(buffer), response.headers.get("Content-Type")
+            if not pinned:
+                raise httpx.TooManyRedirects("Exceeded maximum allowed redirects.", request=request)  # noqa: TRY301 -- httpx's own error for its own bound
             raise UrlGuardError(  # noqa: TRY301 -- must pass through the except unwrap so it surfaces as the guard's rejection
                 f"SSRF guard: exceeded max_redirects={max_redirects} fetching {url!r}."
             )
@@ -249,4 +315,4 @@ async def fetch_url(url: str) -> tuple[bytes, str | None]:
         raise
 
 
-__all__ = ["PinningTransport", "fetch_url", "unwrap_guard_error"]
+__all__ = ["PinningTransport", "fetch_url", "guarded_fetch_client", "unwrap_guard_error"]

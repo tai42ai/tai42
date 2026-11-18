@@ -23,7 +23,7 @@ from tai42_contract.channels import ChannelInputError
 from tai42_contract.interactions import SHAPE_KEYWORDS, FormReactionEventKind
 
 from tai42_channel_whatsapp.flow_crypto import request_plaintext_max_bytes
-from tai42_channel_whatsapp.flows_components import _field_control
+from tai42_channel_whatsapp.flows_components import field_control
 from tai42_channel_whatsapp.flows_dates import DATE_BOUND_SUFFIXES
 from tai42_channel_whatsapp.flows_shapes import ERROR_MESSAGE_TYPES, field_needs_endpoint
 from tai42_channel_whatsapp.flows_visibility import answer_refs, form_splits_fields
@@ -95,7 +95,7 @@ def error_fields(
     for name, prop in properties.items():
         if name in merged_ends:
             continue
-        if _field_control(name, prop, name in required, option_fields, names)["type"] in ERROR_MESSAGE_TYPES:
+        if field_control(name, prop, name in required, option_fields, names)["type"] in ERROR_MESSAGE_TYPES:
             out.add(name)
     return frozenset(out)
 
@@ -160,7 +160,7 @@ def form_endpoint_driven(
         return True
     merged = set(range_merges) | set(range_merges.values())
     for name, prop in properties.items():
-        component = _field_control(name, prop, name in required, option_fields, names)
+        component = field_control(name, prop, name in required, option_fields, names)
         if field_needs_endpoint(prop, component, name in merged, properties):
             return True
     return False
@@ -251,7 +251,7 @@ def event_payload(
     return payload
 
 
-def _attach_field_reaction(
+def attach_field_reaction(
     component: dict[str, Any],
     name: str,
     this_fields: list[str],
@@ -292,7 +292,7 @@ def _attach_field_reaction(
     return component
 
 
-def _reaction_sets(
+def reaction_sets(
     reactions: dict[str, Any] | None, properties: dict[str, Any], option_fields: set[str], names: dict[str, str]
 ) -> tuple[frozenset[str], frozenset[str], bool, bool]:
     """The ``(field_changed, page_advanced, submitted, reacting)`` render triggers from a reactions block.
@@ -310,7 +310,7 @@ def _reaction_sets(
         prop = properties.get(name)
         if not isinstance(prop, dict):
             raise ChannelInputError(f"form reaction field_changed names unknown property {name!r}")
-        ctype = _field_control(name, prop, False, option_fields, names)["type"]
+        ctype = field_control(name, prop, False, option_fields, names)["type"]
         if ctype not in _SELECTABLE_CONTROLS:
             raise ChannelInputError(
                 f"form property {name!r}: a field_changed reaction needs a selectable control (a choice, "

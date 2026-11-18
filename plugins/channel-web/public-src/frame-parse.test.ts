@@ -288,6 +288,17 @@ describe('formUpdateOf', () => {
     ).toBeUndefined();
   });
 
+  it('rejects a text slot value that is not a string, number, boolean or null', () => {
+    expect(formUpdateOf({ display: { total: { amount: 5 } } }, NO_IMAGE_SLOTS)).toBeUndefined();
+    expect(formUpdateOf({ display: { total: ['a', 'b'] } }, NO_IMAGE_SLOTS)).toBeUndefined();
+  });
+
+  it('keeps a text slot value that is a string, number, boolean or null', () => {
+    expect(
+      formUpdateOf({ display: { a: 'x', b: 12.5, c: false, d: null } }, NO_IMAGE_SLOTS)?.display,
+    ).toEqual({ a: 'x', b: 12.5, c: false, d: null });
+  });
+
   it('fills every absent part with an empty default', () => {
     expect(formUpdateOf({}, NO_IMAGE_SLOTS)).toEqual({
       values: {},

@@ -18,7 +18,7 @@ from tai42_contract.states.errors import StateNotFoundError
 from tai42_contract.states.models import StateDeclaration, StateSubject, StateTemplateDocument, WriteOrigin
 from tai42_contract.template import TemplatedText
 
-from tai42_skeleton.states.schema import _validate_document
+from tai42_skeleton.states.schema import validate_document
 from tai42_skeleton.states.store import _traced_paths, stamp_trace, trace_stamp
 
 _ORIGIN = WriteOrigin(consumer="c")
@@ -312,7 +312,7 @@ class FakeStatesStore:
         _decl, entry = await self._entry(catalog, state)
         self.applied_origins.append(origin)
         for row in rows:
-            _validate_document(entry.validator, row["data"])
+            validate_document(entry.validator, row["data"])
             key = (state, row["target_kind"], row["target_name"], row["subject_kind"], row["subject_key"])
             self.records[key] = row["data"]
 
@@ -335,7 +335,7 @@ class FakeStatesStore:
         decl, entry = await self._entry(catalog, state)
         await validate_subject_in_txn(list(decl["subject_kinds"]), subject)
         if validate:
-            _validate_document(entry.validator, data)
+            validate_document(entry.validator, data)
         self.applied_origins.append(origin)
         self.records[(state, subject.target_kind, subject.target_name, subject.kind, subject.key)] = data
         return data, 1.0
@@ -466,6 +466,7 @@ class _FakeResourceManager:
 
 class _FakeStorage:
     resource_manager = _FakeResourceManager()
+    provider = None
 
 
 class _FakeApp:

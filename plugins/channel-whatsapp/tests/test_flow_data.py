@@ -30,9 +30,10 @@ from tai42_kit.settings import reset_all_settings
 import tai42_channel_whatsapp.inbound  # noqa: F401  (registers the /flow-data route on the bound stub app)
 from tai42_channel_whatsapp.correlation import EndpointForm, cache_endpoint_form, cache_flow_form
 from tai42_channel_whatsapp.flow_crypto import request_plaintext_max_bytes
-from tai42_channel_whatsapp.flows import build_flow_data, build_form_flow, form_date_bounds
+from tai42_channel_whatsapp.flows import build_form_flow, form_date_bounds
 from tai42_channel_whatsapp.flows_endpoint import ENDPOINT_BODY_MAX_BYTES, echoed_screen_data_max_bytes
 from tai42_channel_whatsapp.flows_resolve import pages_without_picture_content
+from tai42_channel_whatsapp.flows_send_data import build_flow_data
 from tai42_channel_whatsapp.flows_shapes import channel_word
 from tai42_channel_whatsapp.inbound.data_exchange import _partial_values, _screen_fields
 
@@ -535,8 +536,8 @@ async def test_page_advance_carries_the_next_slots_start_value_under_the_update(
 
 @pytest.mark.parametrize(
     ("react_result", "expected"),
-    [({}, "A: 0"), ({"display": {"a": "A: 7"}}, "A: 7")],
-    ids=["start-value", "display-update-replaces"],
+    [({}, "A: 0"), ({"display": {"a": "A: 7"}}, "A: 7"), ({"display": {"a": None}}, "A: 0")],
+    ids=["start-value", "display-update-replaces", "null-shows-the-block-own-text"],
 )
 async def test_staying_on_the_screen_keeps_the_slots_start_value_until_an_update(
     flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis, react_result: dict, expected: str
@@ -729,6 +730,57 @@ async def test_display_slot_update_fills_the_slot_data_key(
     request, aes_key, iv = _request(payload)
     out = _decrypt_response(await flow_handler(request), aes_key, iv)
     assert out["data"]["slot_summary"] == "Total: 42"
+
+
+@pytest.mark.parametrize(
+    ("display", "expected"),
+    [
+        ({"summary": None, "preview": None}, ("", "")),
+        ({"summary": 42, "preview": None}, ("42", "")),
+        ({"summary": 10.0, "preview": None}, ("10", "")),
+        ({"summary": 10.5, "preview": None}, ("10.5", "")),
+        ({"summary": True, "preview": None}, ("true", "")),
+        ({"summary": False, "preview": None}, ("false", "")),
+    ],
+    ids=[
+        "null-leaves-the-slots-empty",
+        "a-number-is-drawn-as-text",
+        "a-whole-float-reads-as-an-integer",
+        "a-float-reads-as-json",
+        "true-reads-as-json",
+        "false-reads-as-json",
+    ],
+)
+async def test_display_slot_update_writes_text_the_slot_data_declares(
+    flow_env,
+    flow_handler,
+    stub_app: _StubApp,
+    fake_redis: FakeRedis,
+    display: dict[str, Any],
+    expected: tuple[str, str],
+):
+    # A slot's screen data is declared a string: a null leaves a block with no own content empty
+    # (an image shows its alt text), and a number or boolean is written as its JSON text, the text
+    # the widget and the hosted page show for the same value.
+    pages = [
+        {
+            "title": "Form",
+            "fields": ["tier", "qty", "total"],
+            "kind": "input",
+            "display": [{"kind": "body", "slot": "summary"}, {"kind": "image", "slot": "preview", "alt": "Preview"}],
+        }
+    ]
+    await _seed(fake_redis, pages=pages)
+    stub_app.interactions.react_result = {"display": display}
+    payload = {
+        "action": "data_exchange",
+        "flow_token": _TOKEN,
+        "screen": "SCREEN_A",
+        "data": {"tai42_event": "field_changed", "tai42_field": "tier", "tier": "g"},
+    }
+    request, aes_key, iv = _request(payload)
+    out = _decrypt_response(await flow_handler(request), aes_key, iv)
+    assert (out["data"]["slot_summary"], out["data"]["slot_preview"]) == expected
 
 
 async def test_missing_private_key_is_a_loud_500(flow_handler, fake_redis: FakeRedis, monkeypatch: pytest.MonkeyPatch):
@@ -2203,7 +2255,7 @@ async def test_a_reaction_whose_pictures_take_the_data_over_the_budget_keeps_the
     }
 
 
-async def test_a_reaction_on_a_form_without_picture_slots_answers_whatever_its_size(
+async def test_a_reaction_on_a_form_without_picture_slots_that_takes_the_data_over_the_budget_shows_the_notice(
     flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis
 ):
     await _seed(fake_redis)
@@ -2211,9 +2263,20 @@ async def test_a_reaction_on_a_form_without_picture_slots_answers_whatever_its_s
     stub_app.interactions.react_result = {"options": {"tier": option_list}}
     request, aes_key, iv = _request(_TIER_CHANGED)
     out = _decrypt_response(await flow_handler(request), aes_key, iv)
-    rows = out["data"]["tier__ds"]
-    assert len(json.dumps(rows, separators=(",", ":"))) > 800_000
-    assert rows == [{"id": f"v{n}", "title": f"Choice {n:06d}"} for n in range(25_000)]
+    assert out["screen"] == "SCREEN_A"
+    assert out["data"]["error_message"] == _LINE_DEFAULT_NOTICE
+    assert "tier__ds" not in out["data"]
+
+
+async def test_a_reaction_on_a_form_without_picture_slots_within_the_budget_answers(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis
+):
+    await _seed(fake_redis)
+    option_list = [{"value": f"v{n}", "label": f"Choice {n:06d}"} for n in range(15_000)]
+    stub_app.interactions.react_result = {"options": {"tier": option_list}}
+    request, aes_key, iv = _request(_TIER_CHANGED)
+    out = _decrypt_response(await flow_handler(request), aes_key, iv)
+    assert out["data"]["tier__ds"] == [{"id": f"v{n}", "title": f"Choice {n:06d}"} for n in range(15_000)]
     assert "error_message" not in out["data"]
 
 
@@ -2276,7 +2339,7 @@ _NOTIFY_TOKEN = "tai42-nf:hash1:nonce1"
 async def _seed_bound_sidecar(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("CHANNEL_WHATSAPP_WABA_ID", "waba-1")
     reset_all_settings()
-    from tai42_channel_whatsapp.flows import payload_labels
+    from tai42_channel_whatsapp.flows_components import payload_labels
 
     names = {label: key for key, label in payload_labels(_BOUND_SIDECAR_SCHEMA["properties"]).items()}
     declared = form_date_bounds(_BOUND_SCHEMA, _BOUND_PAGES)

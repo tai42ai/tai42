@@ -20,20 +20,20 @@ from tai42_contract.channels import (
 from tai42_contract.interactions.models import MediaItem, MediaKind
 
 from tai42_channel_whatsapp.channel.interactive import (
-    _CTA_URL_LABEL_MAX_CHARS,
-    _FOOTER_MAX_CHARS,
-    _INTERACTIVE_BODY_MAX_CHARS,
-    _LIST_BUTTON_LABEL,
-    _LIST_ROW_DESCRIPTION_MAX_CHARS,
-    _LIST_ROW_TITLE_MAX_CHARS,
-    _NUMBERED_FALLBACK_FOOTER,
-    _SECTION_TITLE_MAX_CHARS,
-    _choice_of,
-    _guard_choice_label,
-    _interactive_choice_kind,
-    _numbered_body,
+    CTA_URL_LABEL_MAX_CHARS,
+    FOOTER_MAX_CHARS,
+    INTERACTIVE_BODY_MAX_CHARS,
+    LIST_BUTTON_LABEL,
+    LIST_ROW_DESCRIPTION_MAX_CHARS,
+    LIST_ROW_TITLE_MAX_CHARS,
+    NUMBERED_FALLBACK_FOOTER,
+    SECTION_TITLE_MAX_CHARS,
+    choice_of,
+    guard_choice_label,
+    interactive_choice_kind,
+    numbered_body,
 )
-from tai42_channel_whatsapp.channel.media import _body_with_links, _send_file_media, _send_one_file
+from tai42_channel_whatsapp.channel.media import message_with_links, send_file_media, send_one_file
 from tai42_channel_whatsapp.client import (
     SentMessage,
     send_interactive_buttons,
@@ -43,7 +43,7 @@ from tai42_channel_whatsapp.client import (
     send_message,
 )
 from tai42_channel_whatsapp.client import (
-    _header_object as _build_header_object,
+    header_object as _build_header_object,
 )
 
 
@@ -126,21 +126,21 @@ def _api_sections(sections: list[OptionSection], wire_ids: list[str]) -> list[di
 def _sections_renderable(body: str, sections: list[OptionSection]) -> bool:
     """Whether a sectioned list fits every WhatsApp wire cap.
 
-    An interactive body within ``_INTERACTIVE_BODY_MAX_CHARS``, each section title within
-    ``_SECTION_TITLE_MAX_CHARS``, each row title within ``_LIST_ROW_TITLE_MAX_CHARS`` and
-    each row description within ``_LIST_ROW_DESCRIPTION_MAX_CHARS``. A single over-cap
+    An interactive body within ``INTERACTIVE_BODY_MAX_CHARS``, each section title within
+    ``SECTION_TITLE_MAX_CHARS``, each row title within ``LIST_ROW_TITLE_MAX_CHARS`` and
+    each row description within ``LIST_ROW_DESCRIPTION_MAX_CHARS``. A single over-cap
     field forces the whole message a tier down to numbered text (never a truncated/over-cap
     value on the wire).
     """
-    if len(body) > _INTERACTIVE_BODY_MAX_CHARS:
+    if len(body) > INTERACTIVE_BODY_MAX_CHARS:
         return False
     for section in sections:
-        if len(section.title) > _SECTION_TITLE_MAX_CHARS:
+        if len(section.title) > SECTION_TITLE_MAX_CHARS:
             return False
         for row in section.rows:
-            if len(row.text) > _LIST_ROW_TITLE_MAX_CHARS:
+            if len(row.text) > LIST_ROW_TITLE_MAX_CHARS:
                 return False
-            if row.description is not None and len(row.description) > _LIST_ROW_DESCRIPTION_MAX_CHARS:
+            if row.description is not None and len(row.description) > LIST_ROW_DESCRIPTION_MAX_CHARS:
                 return False
     return True
 
@@ -152,7 +152,7 @@ def _numbered_sections_body(
 
     The body, then each section's title as a header line with its rows numbered
     continuously (1-based across all sections), the type-an-option hint (the caller's
-    ``reply_hint`` when set, else the generic :data:`_NUMBERED_FALLBACK_FOOTER`), and any
+    ``reply_hint`` when set, else the generic :data:`NUMBERED_FALLBACK_FOOTER`), and any
     interactive footer appended as a trailing line — the plain-text send carries no wire
     caps on these fields, so the authored titles AND row descriptions ride whole (a
     description often being the very field that forced the degrade).
@@ -165,7 +165,7 @@ def _numbered_sections_body(
             entry = f"{index}. {row.text} — {row.description}" if row.description else f"{index}. {row.text}"
             lines.append(entry)
             index += 1
-    lines.append(reply_hint or _NUMBERED_FALLBACK_FOOTER)
+    lines.append(reply_hint or NUMBERED_FALLBACK_FOOTER)
     if footer is not None:
         lines.append(footer)
     return "\n".join(lines)
@@ -174,11 +174,11 @@ def _numbered_sections_body(
 def _cta_url_renderable(body: str, link: LinkOption) -> bool:
     """Whether a lone link option fits the ``cta_url`` interactive.
 
-    An interactive body within ``_INTERACTIVE_BODY_MAX_CHARS`` and a button
-    ``display_text`` within ``_CTA_URL_LABEL_MAX_CHARS``. Otherwise the lone link
+    An interactive body within ``INTERACTIVE_BODY_MAX_CHARS`` and a button
+    ``display_text`` within ``CTA_URL_LABEL_MAX_CHARS``. Otherwise the lone link
     degrades to a ``label: url`` body line (the same rendering the multi-link path uses).
     """
-    return len(body) <= _INTERACTIVE_BODY_MAX_CHARS and len(link.label) <= _CTA_URL_LABEL_MAX_CHARS
+    return len(body) <= INTERACTIVE_BODY_MAX_CHARS and len(link.label) <= CTA_URL_LABEL_MAX_CHARS
 
 
 def _link_option_line(option: LinkOption) -> str:
@@ -209,9 +209,9 @@ def _folded_body(notification: ChannelNotification, links_media: list[MediaItem]
     the interactive footer slot — the same text-fallback idiom, leaving the body's own
     cap check to decide interactive-vs-fallback.
     """
-    body = _body_with_links(notification.message, links_media)
+    body = message_with_links(notification.message, links_media)
     footer = notification.footer
-    if footer is not None and len(footer) > _FOOTER_MAX_CHARS:
+    if footer is not None and len(footer) > FOOTER_MAX_CHARS:
         body = _append_lines(body, [footer])
         footer = None
     return body, footer
@@ -236,7 +236,7 @@ async def _leading_header(
     Applies to an audio header, or a text-fallback message; else nothing.
     """
     if header is not None and header_obj is None:
-        return [await _send_one_file(phone_number_id, target, header)]
+        return [await send_one_file(phone_number_id, target, header)]
     return []
 
 
@@ -260,7 +260,7 @@ async def _render_section_list(
     if not _sections_renderable(body, sections):
         prelude: list[SentMessage] = []
         if header is not None:
-            prelude.append(await _send_one_file(phone_number_id, target, header))
+            prelude.append(await send_one_file(phone_number_id, target, header))
         text_body = _numbered_sections_body(body, sections, footer, reply_hint)
         return [*prelude, await send_message(phone_number_id=phone_number_id, to=target, body=text_body)]
     header_obj = _interactive_header(header)
@@ -271,7 +271,7 @@ async def _render_section_list(
             phone_number_id=phone_number_id,
             to=target,
             body=body,
-            button_text=choice_label or _LIST_BUTTON_LABEL,
+            button_text=choice_label or LIST_BUTTON_LABEL,
             sections=_api_sections(sections, section_ids),
             header=header_obj,
             footer=footer,
@@ -309,7 +309,7 @@ async def _render_link_only(
     """
     prelude: list[SentMessage] = []
     if header is not None:
-        prelude.append(await _send_one_file(phone_number_id, target, header))
+        prelude.append(await send_one_file(phone_number_id, target, header))
     text_body = _append_lines(body_with_links, [footer] if footer else [])
     return [*prelude, await send_message(phone_number_id=phone_number_id, to=target, body=text_body)]
 
@@ -360,13 +360,13 @@ async def _render_reply_kind(
             phone_number_id=phone_number_id,
             to=target,
             body=body,
-            button_text=choice_label or _LIST_BUTTON_LABEL,
+            button_text=choice_label or LIST_BUTTON_LABEL,
             sections=[{"rows": _reply_rows(reply_ids, replies)}],
             header=header_obj,
             footer=footer,
         )
     entries = [f"{reply.text} — {reply.description}" if reply.description else reply.text for reply in replies]
-    text_body = _append_lines(_numbered_body(body, entries, reply_hint), [footer] if footer else [])
+    text_body = _append_lines(numbered_body(body, entries, reply_hint), [footer] if footer else [])
     return await send_message(phone_number_id=phone_number_id, to=target, body=text_body)
 
 
@@ -392,7 +392,7 @@ async def _render_reply_options(
     titles = [reply.text for reply in replies]
     descriptions = [reply.description for reply in replies]
     allow_buttons = not any(reply.description for reply in replies)
-    kind = _interactive_choice_kind(body, titles, allow_buttons=allow_buttons, descriptions=descriptions)
+    kind = interactive_choice_kind(body, titles, allow_buttons=allow_buttons, descriptions=descriptions)
     # Mint the reply ids up front (validates unique authored ids loudly even on the text tier).
     reply_ids = _mint_wire_ids([reply.id for reply in replies], "notification")
     header_obj = _interactive_header(header) if kind != "fallback" else None
@@ -471,10 +471,10 @@ async def _send_interactive_notification(
     # The list-opening button's label rides the caller's ``wording.choice.label`` and the
     # numbered-text hint its ``reply_hint``; refuse an over-cap label loudly before any send,
     # regardless of the shape (buttons / list / numbered text) chosen below.
-    choice = _choice_of(notification)
+    choice = choice_of(notification)
     choice_label = choice.label if choice is not None else None
     reply_hint = choice.reply_hint if choice is not None else None
-    _guard_choice_label(choice_label)
+    guard_choice_label(choice_label)
     body, footer = _folded_body(notification, links_media)
     header = notification.header
     if notification.sections is not None:
@@ -486,7 +486,7 @@ async def _send_interactive_notification(
     )
 
 
-async def _send_notification(phone_number_id: str, target: str, notification: ChannelNotification) -> list[SentMessage]:
+async def send_notification(phone_number_id: str, target: str, notification: ChannelNotification) -> list[SentMessage]:
     """Send a freeform notification and return every :class:`SentMessage` in send order.
 
     In order: the message body / interactive choice surface (carrying the text and any
@@ -508,7 +508,7 @@ async def _send_notification(phone_number_id: str, target: str, notification: Ch
         # always non-blank here.
         sent = await _send_interactive_notification(phone_number_id, target, notification, link_media)
     else:
-        body = _body_with_links(notification.message, link_media)
+        body = message_with_links(notification.message, link_media)
         if body:
             sent = [await send_message(phone_number_id=phone_number_id, to=target, body=body)]
         # else: a media-/location-only send — no body message, just the parts below.
@@ -525,4 +525,4 @@ async def _send_notification(phone_number_id: str, target: str, notification: Ch
                 address=location.address,
             )
         )
-    return await _send_file_media(phone_number_id, target, file_media, sent)
+    return await send_file_media(phone_number_id, target, file_media, sent)

@@ -155,7 +155,7 @@ def _render_awaiting_page(wording: Wording | None) -> str:
 # the answer. A reaction error surfaces loudly, never a stale/silent value. A static form carries
 # no ``data-reactions`` and every reaction path is dormant. The script body is a constant — only
 # the field markup above it is schema-derived (and escaped).
-_FORM_SUBMIT_SCRIPT = """<script>
+FORM_SUBMIT_SCRIPT = """<script>
 (function () {
   var form = document.getElementById('askform');
   var err = document.getElementById('err');
@@ -514,7 +514,7 @@ _FORM_SUBMIT_SCRIPT = """<script>
       if (Object.prototype.hasOwnProperty.call(display, slot)) {
         var v = display[slot];
         if (slots[i].getAttribute('data-slot-kind') === 'image') { drawImageSlot(slots[i], v); }
-        else { slots[i].textContent = v === null ? '' : String(v); }
+        else { slots[i].textContent = v === null ? (slots[i].getAttribute('data-slot-text') || '') : String(v); }
       }
     }
   }

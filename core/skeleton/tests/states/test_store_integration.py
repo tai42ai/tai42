@@ -147,7 +147,7 @@ async def test_traced_keyed_write_from_metaless_origin_stamps_null_meta(
     tool) carries ``meta=None``. The ``_trace`` stamp under a traced attach lands and reads
     back with ``_trace.meta`` null and ``_trace.at`` a string.
 
-    The effective schema is the REAL composed one (``_inject_trace`` stamps ``_TRACE_SCHEMA``
+    The effective schema is the REAL composed one (``inject_trace`` stamps ``_TRACE_SCHEMA``
     onto every object under the tracing attach), so validation runs against the schema the
     platform actually serves — which must admit a null meta object, not just a string."""
     store, state = real_store

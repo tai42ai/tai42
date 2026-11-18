@@ -17,6 +17,7 @@ from tai42_skeleton.tools.builtin import file_loader as builtin_file_loader
 
 from ..._fakes.content_fixtures import FILES_INSTALL_LINE, LOCKED_PDF_MESSAGE, locked_pdf
 from ..._fakes.recording_storage import RecordingStorage
+from ..._fakes.template_holders import app_held_by
 
 
 class _ResourceManager:
@@ -82,7 +83,7 @@ async def test_file_loader_rejects_traversal_id(bind_app) -> None:
 
     registry = StorageRegistry()
     registry.register_storage(_InMemoryStorage)
-    real_manager = ResourceManager(registry.provider, on_evicted=lambda _eviction: None)
+    real_manager = ResourceManager(registry.provider, on_evicted=lambda _eviction: None, held_by=app_held_by)
     bind_app(SimpleNamespace(storage=SimpleNamespace(resource_manager=real_manager)))
 
     with pytest.raises(UnsafeTemplatePathError):
@@ -93,7 +94,7 @@ def _bind_recording(bind_app, objects: dict[str, bytes]) -> RecordingStorage:
     from tai42_skeleton.template import ResourceManager
 
     provider = RecordingStorage({key: (data, None) for key, data in objects.items()})
-    manager = ResourceManager(provider, on_evicted=lambda _eviction: None)
+    manager = ResourceManager(provider, on_evicted=lambda _eviction: None, held_by=app_held_by)
     bind_app(SimpleNamespace(storage=SimpleNamespace(resource_manager=manager)))
     return provider
 

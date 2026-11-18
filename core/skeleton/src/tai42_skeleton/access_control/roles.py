@@ -344,7 +344,11 @@ def role_store() -> RoleStoreView:
 
 async def _role_restore_check(name: str, body: dict[str, Any]) -> None:
     """The role kind's restore check: the stored template id the active body's ``condition`` names must exist."""
-    await assert_templates_stored(condition_template_refs(body.get("condition")), ValueError)
+    from tai42_skeleton.app import instance
+
+    await assert_templates_stored(
+        instance.app.storage.provider, condition_template_refs(body.get("condition")), ValueError
+    )
 
 
 register_restore_check(_KIND, _role_restore_check)

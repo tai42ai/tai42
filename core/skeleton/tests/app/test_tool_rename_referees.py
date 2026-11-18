@@ -25,10 +25,9 @@ from tai42_contract.interactions import AnswerFormat, InteractionRequest
 from tai42_contract.tools import ReferenceHolder, ToolRenameReferee
 from tai42_kit.settings import reset_all_settings
 
-from tai42_skeleton.app import instance
+from tai42_skeleton.app import instance, tool_rename_referees
 from tai42_skeleton.interactions import InteractionStore
 from tai42_skeleton.interactions.store.reads import _PENDING_LIST_DEFAULT_LIMIT
-from tai42_skeleton.tools import platform_referees
 from tai42_skeleton.tools.rename_referees import ToolRenameRefereeRegistry
 
 # -- registry ----------------------------------------------------------------
@@ -115,7 +114,7 @@ async def test_schedule_referee_blocks_on_operator_named_schedule(monkeypatch) -
     import tai42_skeleton.operations.schedules as schedules_mod
 
     monkeypatch.setattr(schedules_mod, "export_schedules_raw", fake_export)
-    holders = await _ask(platform_referees._schedule_referee, "echo")
+    holders = await _ask(tool_rename_referees._schedule_referee, "echo")
     assert holders == [
         ReferenceHolder(kind="schedule", tag="schedules", name="nightly-cleanup", summary="schedule 'nightly-cleanup'"),
         ReferenceHolder(kind="schedule", tag="schedules", name="weekly-digest", summary="schedule 'weekly-digest'"),
@@ -132,7 +131,7 @@ async def test_schedule_referee_answers_every_asked_name_from_one_export(monkeyp
     import tai42_skeleton.operations.schedules as schedules_mod
 
     monkeypatch.setattr(schedules_mod, "export_schedules_raw", fake_export)
-    answer = await platform_referees._schedule_referee(frozenset({"echo", "alerts", "unused"}))
+    answer = await tool_rename_referees._schedule_referee(frozenset({"echo", "alerts", "unused"}))
     assert answer == {
         "echo": [ReferenceHolder(kind="schedule", tag="schedules", name="nightly", summary="schedule 'nightly'")],
         "alerts": [ReferenceHolder(kind="schedule", tag="schedules", name="hourly", summary="schedule 'hourly'")],
@@ -153,7 +152,7 @@ async def test_schedule_referee_reads_the_tool_field_whatever_the_backend_key(mo
     import tai42_skeleton.operations.schedules as schedules_mod
 
     monkeypatch.setattr(schedules_mod, "export_schedules_raw", fake_export)
-    assert await _ask(platform_referees._schedule_referee, "echo") == [
+    assert await _ask(tool_rename_referees._schedule_referee, "echo") == [
         ReferenceHolder(kind="schedule", tag="schedules", name="nightly", summary="schedule 'nightly'")
     ]
 
@@ -165,7 +164,7 @@ async def test_schedule_referee_empty_when_no_match(monkeypatch) -> None:
     import tai42_skeleton.operations.schedules as schedules_mod
 
     monkeypatch.setattr(schedules_mod, "export_schedules_raw", fake_export)
-    assert await _ask(platform_referees._schedule_referee, "echo") == []
+    assert await _ask(tool_rename_referees._schedule_referee, "echo") == []
 
 
 async def test_schedule_referee_feature_off_is_empty(monkeypatch) -> None:
@@ -177,7 +176,7 @@ async def test_schedule_referee_feature_off_is_empty(monkeypatch) -> None:
     import tai42_skeleton.operations.schedules as schedules_mod
 
     monkeypatch.setattr(schedules_mod, "export_schedules_raw", fake_export)
-    assert await _ask(platform_referees._schedule_referee, "echo") == []
+    assert await _ask(tool_rename_referees._schedule_referee, "echo") == []
 
 
 async def test_schedule_referee_raises_when_export_tool_absent_with_markers_present(monkeypatch) -> None:
@@ -193,7 +192,7 @@ async def test_schedule_referee_raises_when_export_tool_absent_with_markers_pres
 
     monkeypatch.setattr(schedules_mod, "export_schedules_raw", fake_export)
     with pytest.raises(RuntimeError, match="registers no 'backend_export_schedules'"):
-        await _ask(platform_referees._schedule_referee, "echo")
+        await _ask(tool_rename_referees._schedule_referee, "echo")
 
 
 async def test_schedule_referee_propagates_an_unreadable_export(monkeypatch) -> None:
@@ -208,7 +207,7 @@ async def test_schedule_referee_propagates_an_unreadable_export(monkeypatch) -> 
 
     monkeypatch.setattr(schedules_mod, "export_schedules_raw", fake_export)
     with pytest.raises(OperationFailedError):
-        await _ask(platform_referees._schedule_referee, "echo")
+        await _ask(tool_rename_referees._schedule_referee, "echo")
 
 
 # -- platform referee: hooks -------------------------------------------------
@@ -226,7 +225,7 @@ async def test_hook_referee_blocks_on_matching_tool(monkeypatch) -> None:
     import tai42_skeleton.hooks.cache as hooks_cache
 
     monkeypatch.setattr(hooks_cache, "get_hooks_manager", lambda: SimpleNamespace(list_hooks=fake_list_hooks))
-    holders = await _ask(platform_referees._hook_referee, "echo")
+    holders = await _ask(tool_rename_referees._hook_referee, "echo")
     assert holders == [ReferenceHolder(kind="hook", tag="hooks", name="alerts-hook", summary="hook 'alerts-hook'")]
 
 
@@ -248,7 +247,7 @@ async def test_conversation_route_referee_blocks_on_tool_target(monkeypatch) -> 
     monkeypatch.setattr(
         conversations_mod, "get_conversations_manager", lambda: SimpleNamespace(list_routes=fake_list_routes)
     )
-    holders = await _ask(platform_referees._conversation_route_referee, "echo")
+    holders = await _ask(tool_rename_referees._conversation_route_referee, "echo")
     # Only the tool-kind route targeting the name blocks; an agent-kind route with the
     # same target_name does not.
     assert holders == [
@@ -267,7 +266,7 @@ def _fake_app_with_extensions(tool_extensions: dict[str, object]):
 
 async def test_tool_extensions_referee_blocks_on_map_entry(monkeypatch) -> None:
     monkeypatch.setattr(instance, "app", _fake_app_with_extensions({"echo": [["ext-a"]]}), raising=False)
-    assert await _ask(platform_referees._tool_extensions_referee, "echo") == [
+    assert await _ask(tool_rename_referees._tool_extensions_referee, "echo") == [
         ReferenceHolder(
             kind="tool extensions", tag="extensions", name="echo", summary="tool-extensions map entry for 'echo'"
         )
@@ -276,7 +275,7 @@ async def test_tool_extensions_referee_blocks_on_map_entry(monkeypatch) -> None:
 
 async def test_tool_extensions_referee_empty_when_absent(monkeypatch) -> None:
     monkeypatch.setattr(instance, "app", _fake_app_with_extensions({"alerts": [["ext-a"]]}), raising=False)
-    assert await _ask(platform_referees._tool_extensions_referee, "echo") == []
+    assert await _ask(tool_rename_referees._tool_extensions_referee, "echo") == []
 
 
 # -- platform referee: parked interactions -----------------------------------
@@ -350,7 +349,7 @@ async def test_parked_referee_walks_full_index_beyond_list_pending_cap(fake_redi
         yield fake_redis
 
     monkeypatch.setattr(kit_clients, "client_ctx", fake_client_ctx)
-    holders = await _ask(platform_referees._parked_interaction_referee, "echo")
+    holders = await _ask(tool_rename_referees._parked_interaction_referee, "echo")
     assert holders == [
         ReferenceHolder(
             kind="parked interactions",
@@ -361,16 +360,16 @@ async def test_parked_referee_walks_full_index_beyond_list_pending_cap(fake_redi
         )
     ]
     # A name no park resumes into draws no objection.
-    assert await _ask(platform_referees._parked_interaction_referee, "alerts") == []
+    assert await _ask(tool_rename_referees._parked_interaction_referee, "alerts") == []
 
 
 async def test_parked_referee_blocks_on_answered_continuation_awaiting_redelivery(fake_redis, monkeypatch) -> None:
     """An ANSWERED (or expired) park is removed from ``pending:expiry`` and lives only in
     the durable ``continuation:due`` outbox the reaper still re-fires as
-    ``run_tool(<tool>)``. That tool is a live holder the pending-only walk misses, so a
-    rename landing between answer and redelivery would strand the continuation. Seed the
-    outbox record alone (NO ``pending:expiry`` membership) and prove the referee, unioning
-    both indices, blocks the rename that the old pending-only walk would have let through."""
+    ``run_tool(<tool>)``. That tool is a live holder a walk of ``pending:expiry`` alone
+    misses, so a rename landing between answer and redelivery would strand the continuation.
+    Seed the outbox record alone (NO ``pending:expiry`` membership) and prove the referee,
+    unioning both indices, blocks the rename."""
     monkeypatch.setenv("INTERACTIONS_REDIS_URL", "redis://localhost:6379/0")
     reset_all_settings()
 
@@ -394,7 +393,7 @@ async def test_parked_referee_blocks_on_answered_continuation_awaiting_redeliver
         yield fake_redis
 
     monkeypatch.setattr(kit_clients, "client_ctx", fake_client_ctx)
-    holders = await _ask(platform_referees._parked_interaction_referee, "echo")
+    holders = await _ask(tool_rename_referees._parked_interaction_referee, "echo")
     assert holders == [
         ReferenceHolder(
             kind="answered continuations",
@@ -405,7 +404,7 @@ async def test_parked_referee_blocks_on_answered_continuation_awaiting_redeliver
         )
     ]
     # A name no continuation resumes into draws no objection.
-    assert await _ask(platform_referees._parked_interaction_referee, "alerts") == []
+    assert await _ask(tool_rename_referees._parked_interaction_referee, "alerts") == []
 
 
 async def test_continuation_due_tools_raises_on_torn_record(fake_redis, monkeypatch) -> None:
@@ -431,7 +430,7 @@ async def test_parked_referee_feature_off_is_empty(monkeypatch) -> None:
     monkeypatch.delenv("INTERACTIONS_REDIS_URL", raising=False)
     monkeypatch.delenv("TAI_DEFAULT_REDIS_URL", raising=False)
     reset_all_settings()
-    assert await _ask(platform_referees._parked_interaction_referee, "echo") == []
+    assert await _ask(tool_rename_referees._parked_interaction_referee, "echo") == []
 
 
 # -- states referee ----------------------------------------------------------
@@ -474,7 +473,7 @@ async def test_states_referee_blocks_on_records_under_the_tool_target(monkeypatc
     monkeypatch.setattr(states_db, "states_store_configured", lambda: True)
     _outstanding(monkeypatch, [])
     _counts(monkeypatch, {"echo": 3})
-    holders = await _ask(platform_referees._states_referee, "echo")
+    holders = await _ask(tool_rename_referees._states_referee, "echo")
     assert holders == [
         ReferenceHolder(
             kind="state records",
@@ -484,7 +483,7 @@ async def test_states_referee_blocks_on_records_under_the_tool_target(monkeypatc
             summary="3 state records under target tool/echo",
         )
     ]
-    assert await _ask(platform_referees._states_referee, "other") == []
+    assert await _ask(tool_rename_referees._states_referee, "other") == []
 
 
 async def test_states_referee_reads_every_asked_name_in_two_statements(monkeypatch) -> None:
@@ -494,7 +493,7 @@ async def test_states_referee_reads_every_asked_name_in_two_statements(monkeypat
     monkeypatch.setattr(states_db, "states_store_configured", lambda: True)
     outstanding_asks = _outstanding(monkeypatch, [(4, "pending")])
     count_asks = _counts(monkeypatch, {"alerts": 2})
-    answer = await platform_referees._states_referee(frozenset({"echo", "alerts", "other"}))
+    answer = await tool_rename_referees._states_referee(frozenset({"echo", "alerts", "other"}))
     assert {name: [holder.summary for holder in holders] for name, holders in answer.items()} == {
         "alerts": ["2 state records under target tool/alerts"],
         "echo": ["pending state save 4 under target tool/echo is not applied yet"],
@@ -518,7 +517,7 @@ async def test_states_referee_names_each_outstanding_save_and_applies_none(monke
     monkeypatch.setattr(
         instance, "app", SimpleNamespace(states=SimpleNamespace(drain_target_saves=_no_drain)), raising=False
     )
-    holders = await _ask(platform_referees._states_referee, "echo")
+    holders = await _ask(tool_rename_referees._states_referee, "echo")
     assert [(holder.kind, holder.name, holder.locator) for holder in holders] == [
         ("pending save", "4", {"status": "failed"}),
         ("pending save", "7", {"status": "pending"}),
@@ -540,7 +539,7 @@ async def test_states_referee_raises_on_an_unknown_save_status(monkeypatch) -> N
     _outstanding(monkeypatch, [(5, "mystery")])
     _counts(monkeypatch, {})
     with pytest.raises(ValueError, match="unknown status 'mystery'"):
-        await _ask(platform_referees._states_referee, "echo")
+        await _ask(tool_rename_referees._states_referee, "echo")
 
 
 async def test_states_referee_singular_record_wording(monkeypatch) -> None:
@@ -549,7 +548,7 @@ async def test_states_referee_singular_record_wording(monkeypatch) -> None:
     monkeypatch.setattr(states_db, "states_store_configured", lambda: True)
     _outstanding(monkeypatch, [])
     _counts(monkeypatch, {"echo": 1})
-    holders = await _ask(platform_referees._states_referee, "echo")
+    holders = await _ask(tool_rename_referees._states_referee, "echo")
     assert [holder.summary for holder in holders] == ["1 state record under target tool/echo"]
 
 
@@ -557,7 +556,7 @@ async def test_states_referee_feature_off_is_empty(monkeypatch) -> None:
     import tai42_skeleton.states.db as states_db
 
     monkeypatch.setattr(states_db, "states_store_configured", lambda: False)
-    assert await _ask(platform_referees._states_referee, "echo") == []
+    assert await _ask(tool_rename_referees._states_referee, "echo") == []
 
 
 def test_states_referee_is_registered(monkeypatch) -> None:
@@ -565,6 +564,6 @@ def test_states_referee_is_registered(monkeypatch) -> None:
     # rename gate consults it by construction.
     registered: list = []
     fake_app = SimpleNamespace(tools=SimpleNamespace(register_rename_referee=registered.append))
-    monkeypatch.setattr(platform_referees, "tai42_app", fake_app)
-    platform_referees.register_platform_rename_referees()
-    assert platform_referees._states_referee in registered
+    monkeypatch.setattr(tool_rename_referees, "tai42_app", fake_app)
+    tool_rename_referees.register_platform_rename_referees()
+    assert tool_rename_referees._states_referee in registered

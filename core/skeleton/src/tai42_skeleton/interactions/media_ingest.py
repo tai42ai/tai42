@@ -5,7 +5,7 @@ caps the read, sniffs the real type and requires its top-level type to agree wit
 enforces the per-kind allowlist against the authoritative sniffed type, sanitises the display
 filename, writes the metadata record FIRST and then the blob (record-first,
 so a crash leaves a reaper-reachable record, never an untracked orphan), and mints a served
-reference. Every failure raises one of the typed :class:`MediaIngestError` subclasses — never a
+reference. Every failure raises one of the typed :class:`MediaError` subclasses — never a
 silent skip.
 """
 
@@ -17,10 +17,8 @@ import secrets
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import aclosing
-from typing import TYPE_CHECKING, cast
 
 import filetype
-from tai42_contract.app import tai42_app
 from tai42_contract.conversations import InboundMediaKind
 from tai42_contract.interactions import (
     MEDIA_FILENAME_MAX_CHARS,
@@ -32,7 +30,7 @@ from tai42_contract.interactions import (
 )
 from tai42_contract.interactions.models.media_errors import (
     MediaAlreadyBoundError,
-    MediaIngestError,
+    MediaError,
     MediaNotFoundError,
     MediaSourceReadError,
     MediaStoreUnavailableError,
@@ -46,9 +44,6 @@ from tai42_skeleton.channels.inbound_events import emit_inbound_media_ingested, 
 from tai42_skeleton.conversations.cache import get_conversations_manager
 from tai42_skeleton.conversations.media_meta import inbound_media_blob_path
 from tai42_skeleton.settings.media_ingest import MediaIngestSettings, media_ingest_settings
-
-if TYPE_CHECKING:
-    from tai42_skeleton.app.facets import StorageFacet
 
 # The signature window ``filetype`` reads (``filetype/utils.py:10`` ``_NUM_SIGNATURE_BYTES``); the
 # in-seam ISOBMFF matcher bounds its ``ftyp`` box to this window too.
@@ -266,12 +261,6 @@ async def _read_capped(
     return buffer, kind, effective_mime, digest.hexdigest()
 
 
-def _storage_provider():
-    # The registered blob provider off the skeleton StorageFacet (the contract AppStorage Protocol
-    # has no ``provider`` member), None while dead by default.
-    return cast("StorageFacet", tai42_app.storage).provider
-
-
 async def ingest_media(
     *,
     source: AsyncIterator[bytes],
@@ -297,7 +286,9 @@ async def ingest_media(
         )
         sanitized = _sanitize_filename(filename, kind=media_kind, mime=effective_mime)
 
-        provider = _storage_provider()
+        from tai42_skeleton.app import instance
+
+        provider = instance.app.storage.provider
         if provider is None:
             raise MediaStoreUnavailableError("no blob provider is registered — inbound media cannot be stored")
 
@@ -350,7 +341,7 @@ async def ingest_media(
         return IngestedMedia(
             item=item, media_id=media_id, size=len(buffer), sha256=sha256_hex, mime=effective_mime, pending=pending
         )
-    except MediaIngestError as exc:
+    except MediaError as exc:
         await emit_inbound_media_rejected(
             channel_id=origin.channel_id,
             participant_identity=origin.participant_identity,

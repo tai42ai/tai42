@@ -74,6 +74,15 @@ class RecordingStorage(Storage):
             del self.objects[key]
 
 
+class PartialDeleteStorage(RecordingStorage):
+    """Deletes the first object under a directory, then fails as a provider does mid-delete."""
+
+    async def delete_dir(self, path: str) -> None:
+        doomed = sorted(key for key in self.objects if key.startswith(f"{path}/"))
+        del self.objects[doomed[0]]
+        raise OSError("disk vanished mid-delete")
+
+
 class MappedStorage(RecordingStorage):
     """Answers reads from a live ``{id: text}`` mapping another fake also serves, so both see one store."""
 

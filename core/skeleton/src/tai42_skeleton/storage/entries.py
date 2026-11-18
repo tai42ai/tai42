@@ -19,6 +19,7 @@ from tai42_contract.storage import ObjectStat, Storage
 from tai42_skeleton.operations import BadRequestError, NotFoundError
 from tai42_skeleton.operations.storage_provider import require_storage_provider
 from tai42_skeleton.operations.store_keys import checked_store_key
+from tai42_skeleton.operations.template_door import template_door
 from tai42_skeleton.template.errors import ContentNotLoadableError
 
 
@@ -77,22 +78,23 @@ async def read_stored_entry(resource_id: str) -> dict[str, Any]:
     """
     checked_store_key(resource_id)
     provider = require_storage_provider()
-    from tai42_skeleton.template.file_loading import (
-        DETECTION_WINDOW_BYTES,
-        check_within_cap,
-        classify,
-        load_classified,
-    )
+    async with template_door():
+        from tai42_skeleton.template.file_loading import (
+            DETECTION_WINDOW_BYTES,
+            check_within_cap,
+            classify,
+            load_classified,
+        )
 
-    stat, sample = await _stat_and_sample(provider, resource_id, DETECTION_WINDOW_BYTES)
-    entry: dict[str, Any] = {"id": resource_id, "content_type": stat.content_type, "size": stat.size}
-    classified = await asyncio.to_thread(classify, sample, resource_id)
-    if classified.kind == "binary":
-        return {"kind": "binary", **entry}
-    try:
-        check_within_cap(stat.size)
-        data = await _load_whole(provider, resource_id, stat.size, sample)
-        content = await asyncio.to_thread(load_classified, data, classified, resource_id)
-    except ContentNotLoadableError as exc:
-        raise _not_loadable(resource_id, exc) from exc
+        stat, sample = await _stat_and_sample(provider, resource_id, DETECTION_WINDOW_BYTES)
+        entry: dict[str, Any] = {"id": resource_id, "content_type": stat.content_type, "size": stat.size}
+        classified = await asyncio.to_thread(classify, sample, resource_id)
+        if classified.kind == "binary":
+            return {"kind": "binary", **entry}
+        try:
+            check_within_cap(stat.size)
+            data = await _load_whole(provider, resource_id, stat.size, sample)
+            content = await asyncio.to_thread(load_classified, data, classified, resource_id)
+        except ContentNotLoadableError as exc:
+            raise _not_loadable(resource_id, exc) from exc
     return {"kind": classified.kind, **entry, "content": content}

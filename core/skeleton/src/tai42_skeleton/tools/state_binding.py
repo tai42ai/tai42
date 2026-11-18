@@ -502,7 +502,7 @@ async def _validate_binding(app: TaiMCP, binding: StateBinding, *, do_attach: bo
     references resolve in one batch call once its templates are attached (or verified). Every
     stored id a slot names is checked first, before any attach or render.
     """
-    await assert_templates_stored(binding_template_refs(binding), ValueValidationError)
+    await assert_templates_stored(app.storage.provider, binding_template_refs(binding), ValueValidationError)
     for attach in binding.states:
         await _validate_templates(app, attach, do_attach=do_attach)
         await compile_check(await _render_slot(app, f"subject_expr for state {attach.state!r}", attach.subject_expr))

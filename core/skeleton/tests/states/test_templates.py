@@ -13,7 +13,7 @@ from tai42_contract.template import TemplatedText
 from tai42_kit.utils.data.json_schema_util import evaluated_subschemas
 
 from tai42_skeleton.states import schema as states_schema
-from tai42_skeleton.states.schema import _validate_schema
+from tai42_skeleton.states.schema import validate_schema
 from tai42_skeleton.states.templates import (
     StateTemplate,
     compose_effective_schema,
@@ -208,7 +208,7 @@ async def test_compose_rebases_fragment_pointer_refs_to_the_attach_path() -> Non
     box = effective["properties"]["box"]
     assert box["properties"]["tag"] == {"$ref": "#/properties/box/$defs/t"}
     assert box["properties"]["child"] == {"$ref": "#/properties/box"}
-    _validate_schema(effective)
+    validate_schema(effective)
     assert _paths(effective, {"box": {"tag": 1}}) == ["$.box.tag"]
     assert _paths(effective, {"box": {"child": {"tag": 5}}}) == ["$.box.child.tag"]
     # ``#`` is the fragment's own root, never the state's: a base field name inside the child is free.
@@ -220,7 +220,7 @@ async def test_compose_rebases_refs_at_a_nested_path() -> None:
     effective = compose_effective_schema(_BASE, [(template, ["x", "y"], {})])
     tag = effective["properties"]["x"]["properties"]["y"]["properties"]["tag"]
     assert tag == {"$ref": "#/properties/x/properties/y/$defs/t"}
-    _validate_schema(effective)
+    validate_schema(effective)
     assert _paths(effective, {"x": {"y": {"tag": 1}}}) == ["$.x.y.tag"]
 
 
@@ -228,7 +228,7 @@ async def test_compose_rebases_refs_escaping_the_path_segment() -> None:
     template = await validate_template(_doc(name="m", schema=_RECURSIVE_FRAGMENT))
     effective = compose_effective_schema(_BASE, [(template, ["a/b c"], {})])
     assert effective["properties"]["a/b c"]["properties"]["tag"] == {"$ref": "#/properties/a~1b%20c/$defs/t"}
-    _validate_schema(effective)
+    validate_schema(effective)
     assert _paths(effective, {"a/b c": {"tag": 1}}) == ["$['a/b c'].tag"]
 
 
@@ -243,7 +243,7 @@ async def test_compose_leaves_anchor_refs_untouched_and_resolvable() -> None:
     template = await validate_template(_doc(name="m", schema=_ANCHOR_FRAGMENT))
     effective = compose_effective_schema(_BASE, [(template, ["box"], {})])
     assert effective["properties"]["box"]["properties"]["tag"] == {"$ref": "#t"}
-    _validate_schema(effective)
+    validate_schema(effective)
     assert _paths(effective, {"box": {"tag": 1}}) == ["$.box.tag"]
 
 

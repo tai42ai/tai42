@@ -40,6 +40,7 @@ from .._fakes.content_fixtures import (
 )
 from .._fakes.listing import keys_under
 from .._fakes.recording_storage import RecordingStorage
+from .._fakes.template_holders import app_held_by
 
 
 class _ResourceManager:
@@ -130,7 +131,7 @@ async def test_rejects_traversal_id(monkeypatch: pytest.MonkeyPatch) -> None:
 
     registry = StorageRegistry()
     registry.register_storage(_InMemoryStorage)
-    real_manager = ResourceManager(registry.provider, on_evicted=lambda _eviction: None)
+    real_manager = ResourceManager(registry.provider, on_evicted=lambda _eviction: None, held_by=app_held_by)
     monkeypatch.setattr(
         resources_ops, "tai42_app", SimpleNamespace(storage=SimpleNamespace(resource_manager=real_manager))
     )
@@ -201,7 +202,7 @@ def _bind_real(monkeypatch: pytest.MonkeyPatch) -> None:
 
     registry = StorageRegistry()
     registry.register_storage(_BytesStorage)
-    manager = ResourceManager(registry.provider, on_evicted=lambda _eviction: None)
+    manager = ResourceManager(registry.provider, on_evicted=lambda _eviction: None, held_by=app_held_by)
     monkeypatch.setattr(resources_ops, "tai42_app", SimpleNamespace(storage=SimpleNamespace(resource_manager=manager)))
 
 
@@ -231,7 +232,7 @@ def _bind_recording(monkeypatch: pytest.MonkeyPatch, objects: dict[str, bytes]) 
     from tai42_skeleton.template import ResourceManager
 
     provider = RecordingStorage({key: (data, None) for key, data in objects.items()})
-    manager = ResourceManager(provider, on_evicted=lambda _eviction: None)
+    manager = ResourceManager(provider, on_evicted=lambda _eviction: None, held_by=app_held_by)
     monkeypatch.setattr(resources_ops, "tai42_app", SimpleNamespace(storage=SimpleNamespace(resource_manager=manager)))
     return provider
 

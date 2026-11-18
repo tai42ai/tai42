@@ -128,6 +128,15 @@ Slack shows no bot typing indicator: the Web API exposes none for a bot user (on
 the RTM/Socket `user_typing` frame this plugin does not use), so this channel emits
 no working-on-it signal while a turn runs. The answer posts back when it is ready.
 
+## Pictures
+
+Slack's servers fetch every picture this channel sends, so Slack draws a picture only from
+an absolute `http(s)` url. A picture whose source is anything else — a `data:` url, or a
+relative stored-media reference such as `/api/interactions/media/<id>` — is refused at
+send, before anything posts: an image in a message's display media or header, and a
+picture block in a form. A message's stored-media reference reaches this channel absolute
+only when `INTERACTIONS_PUBLIC_BASE_URL` is set.
+
 ## Form questions
 
 An `ask` with `answer_format: form` posts a **Fill form** button that opens a Block
@@ -221,6 +230,8 @@ Slack-specific behaviour (the documented degrades):
 - **Display and review.** A page's heading/body/image blocks render as
   `header`/`section`/`image`; a review page is a final titled readback group in the
   single modal (Slack has no native multi-step, so no pushed confirmation view).
+  A picture Slack cannot load (see [Pictures](#pictures)) refuses the form at send, and a
+  reaction that fills an image slot with one shows the update-failed line.
 - **Conditional fields** show/hide by the platform re-rendering the modal
   (`views.update`) on the controlling field's change — platform logic, never a call
   to the form's consumer; the predicate is also enforced on submit.

@@ -14,22 +14,20 @@ Failure discipline splits the callers into two disciplines, selected by
 ``publish_on_local_failure``:
 
 * Pure registry/query ops (``reload_mcp``, ``deregister_mcp``, ``reload_tool``,
-  ``remove_tool``, ``reload_failed_mcps``, ``list_failed_mcps``) leave it ``False``:
+  ``remove_tool``, ``reload_failed_mcps``, ``list_failed_mcps``) leave it ``()``:
   a failed local apply raises before anything is broadcast, so the siblings stay
   genuinely untouched.
 * Convergence and store-backed publishers (both ``reload_config`` doors, the
   connector catalog write, a completed reconnect's ``reprobe_failed_mcps``) pass
-  ``True``: their persist/convergence intent has already committed, so a failed
+  ``(Exception,)``: their persist/convergence intent has already committed, so a failed
   local apply still broadcasts (siblings converge on the persisted state) and then
   re-raises with the fleet report attached — a stranded fleet never hides behind a
   local error.
 
-A store-backed publisher whose apply can fail EITHER before it mutates the store
-(nothing to converge — a not-found, a rejected path) OR once destructive mutation
-may have begun (siblings must converge) names the pre-mutation exception types in
-``pre_mutation_errors``: those keep the abort-before-publish discipline even under
-``publish_on_local_failure=True``, so a spurious fan-out never rides a failure that
-changed nothing, while a mid-mutation failure still publishes.
+A store-backed publisher whose apply can fail either before it mutates the store or
+once destructive mutation may have begun passes the one exception type its apply
+raises for the second case; every other failure keeps the abort-before-publish
+discipline.
 """
 
 from __future__ import annotations
@@ -506,8 +504,7 @@ async def broadcast(
     targets: list[str] | None,
     apply: Callable[[], Awaitable[Any]],
     *,
-    publish_on_local_failure: bool = False,
-    pre_mutation_errors: tuple[type[BaseException], ...] = (),
+    publish_on_local_failure: tuple[type[Exception], ...] = (),
 ) -> dict[str, Any]:
     """Validate targets, pin the expected membership, apply locally per the self-targeting rule, then broadcast.
 
@@ -516,11 +513,12 @@ async def broadcast(
     apply and returns its result (rides the self entry as the payload). Returns the
     :class:`~tai42_skeleton.app.bus.FleetResult` as a JSON-ready dict.
 
-    ``pre_mutation_errors`` names the local-apply exception types that ALWAYS keep the
-    abort-before-publish discipline — a failure raised before any destructive mutation,
-    which leaves siblings genuinely untouched — even under ``publish_on_local_failure``.
-    A failure of any other type under ``publish_on_local_failure`` still broadcasts. When
-    ``publish_on_local_failure`` is ``False`` this is moot: every local failure aborts.
+    ``publish_on_local_failure`` names the local-failure types after which the op still
+    publishes and then raises :class:`FleetBroadcastError` with the report attached. Empty
+    (the default): every local failure aborts before anything is published, siblings
+    untouched. ``(Exception,)``: every failure publishes — a publisher whose persist already
+    committed. A store-backed delete names the one type its apply raises once destructive
+    mutation may have begun, so a failure before it changed anything never fans out.
 
     Both pre-apply steps exist for the same reason: everything the report is judged
     against must be read before the local apply can change it. See
@@ -538,7 +536,6 @@ async def broadcast(
         apply,
         expected_at_start=expected_at_start,
         publish_on_local_failure=publish_on_local_failure,
-        pre_mutation_errors=pre_mutation_errors,
     )
     return published.report.model_dump(mode="json")
 
@@ -564,16 +561,15 @@ async def apply_and_publish(
     apply: Callable[[], Awaitable[Any]],
     *,
     expected_at_start: dict[str, int] | None,
-    publish_on_local_failure: bool,
-    pre_mutation_errors: tuple[type[BaseException], ...] = (),
+    publish_on_local_failure: tuple[type[Exception], ...],
     failure_payload: Callable[[Exception], Any] | None = None,
 ) -> PublishedOp:
     """Apply locally when this worker is a target, then publish ``op``; return the report and this worker's entry.
 
     A non-member (a forked job child) is never a fleet target — it has no serving surface of
     its own — so it applies nothing locally and its member converges as a sibling. A failed
-    local apply aborts before anything is published unless ``publish_on_local_failure`` is set
-    and the failure is not one of ``pre_mutation_errors``; then it still publishes and raises
+    local apply aborts before anything is published unless the failure is one of the
+    ``publish_on_local_failure`` types; then it still publishes and raises
     :class:`FleetBroadcastError` with the report attached; ``failure_payload``, when given, is
     the payload that ``failed`` self entry states, read from the failure. ``expected_at_start`` is the
     membership the caller read before calling (:func:`snapshot_membership`), ``None`` for a
@@ -586,10 +582,10 @@ async def apply_and_publish(
         try:
             result = await apply()
         except Exception as exc:
-            if not publish_on_local_failure or isinstance(exc, pre_mutation_errors):
-                # Abort-before-publish: nothing is broadcast, siblings untouched — the
-                # apply either opts out of post-failure publish, or failed before any
-                # destructive mutation could begin (``pre_mutation_errors``).
+            if not isinstance(exc, publish_on_local_failure):
+                # Abort-before-publish: nothing is broadcast, siblings untouched — a
+                # failure of a type the caller did not name as one after which the op
+                # still publishes.
                 raise
             local_failure = exc
             local = LocalApplyResult(

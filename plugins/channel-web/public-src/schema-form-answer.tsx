@@ -16,7 +16,7 @@ import type { ReactElement, RefObject } from 'react';
 
 import { DisplayBlocks, ReviewReadback } from '@/form-display';
 import { isPlainObject, singleFieldSchema, toSdkFieldWording } from '@/schema-form-helpers';
-import type { FieldWording, FormOptionData, FormPage } from '@/transcript-model';
+import type { DisplayText, FieldWording, FormOptionData, FormPage } from '@/transcript-model';
 import type { ReactingFormInput, ReactionError } from '@/use-reacting-form';
 import { useReactingForm } from '@/use-reacting-form';
 import { fillToken } from '@/words';
@@ -276,7 +276,7 @@ function FormSurface({
   readonly options: Readonly<Record<string, readonly FormOptionData[]>>;
   readonly value: unknown;
   readonly errors: SchemaFormErrors;
-  readonly slots: Readonly<Record<string, unknown>>;
+  readonly slots: Readonly<Record<string, DisplayText>>;
   readonly imageSources: ReadonlyMap<string, string | null>;
   readonly idPrefix: string;
   readonly reactionError: ReactionError | null;

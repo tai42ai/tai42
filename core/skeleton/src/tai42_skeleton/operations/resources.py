@@ -22,6 +22,7 @@ from tai42_contract.template import TemplatedText
 
 from tai42_skeleton.operations import BadRequestError, NotFoundError, NotSupportedError, operation
 from tai42_skeleton.operations.response_models.resources import ResourceContent
+from tai42_skeleton.operations.template_door import template_door
 from tai42_skeleton.template import ContentNotLoadableError, TemplateNotFoundError
 from tai42_skeleton.template.media import MediaBlock
 from tai42_skeleton.template.path_guard import UnsafeTemplatePathError
@@ -79,7 +80,8 @@ async def get_resource_by_id(resource_id: str, kwargs: dict[str, Any] | None = N
     """
     manager = tai42_app.storage.resource_manager
     try:
-        content = await manager.load_file(resource_id)
+        async with template_door():
+            content = await manager.load_file(resource_id)
     except UnsafeTemplatePathError as exc:
         raise BadRequestError(str(exc)) from exc
     except (FileNotFoundError, TemplateNotFoundError) as exc:

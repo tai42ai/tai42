@@ -42,8 +42,8 @@ from tai42_kit.net.media_faults import (
 from tai42_kit.settings import require_secret
 
 from tai42_channel_slack.correlation import claim_dedupe, release_dedupe
-from tai42_channel_slack.inbound.routing import _bridge, _recipients, _resolve_answer
-from tai42_channel_slack.inbound.verification import _InboundRejectedError, _read_verified_body
+from tai42_channel_slack.inbound.routing import bridge_message, recipient_channels, resolve_answer
+from tai42_channel_slack.inbound.verification import InboundRejectedError, read_verified_body
 from tai42_channel_slack.settings import slack_settings
 
 logger = logging.getLogger(__name__)
@@ -75,8 +75,8 @@ async def slack_inbound(request: Request) -> Response:
     notice is sent (Slack needs a 2xx or it retries and disables the subscription).
     """
     try:
-        raw = await _read_verified_body(request)
-    except _InboundRejectedError as rejected:
+        raw = await read_verified_body(request)
+    except InboundRejectedError as rejected:
         return rejected.response
 
     try:
@@ -130,7 +130,7 @@ async def _process_event(payload: dict, event_id: str) -> Response:
     ignored throughout.
     """
     settings = slack_settings()
-    recipients = _recipients(settings)
+    recipients = recipient_channels(settings)
     event = payload.get("event")
     if not isinstance(event, dict):
         raise ValueError("event_callback without an event object")  # noqa: TRY004 raised type is intentional (invariant/state/validation taxonomy); TypeError would change behaviour
@@ -167,7 +167,7 @@ async def _process_event(payload: dict, event_id: str) -> Response:
     quoted = _quoted_ts(event, ts)
 
     if isinstance(thread_ts, str) and thread_ts and channel in recipients:
-        return await _resolve_answer(
+        return await resolve_answer(
             thread_ts,
             text,
             settings.bot_user_id,
@@ -177,7 +177,7 @@ async def _process_event(payload: dict, event_id: str) -> Response:
             reply_to_medium_message_id=quoted,
         )
 
-    return await _bridge(
+    return await bridge_message(
         settings.bot_user_id, channel, text, event_id, medium_message_id=ts, reply_to_medium_message_id=quoted
     )
 
@@ -367,7 +367,7 @@ async def _bridge_one_file(
         return False
 
     turn_text = caption if caption is not None else inbound_media_placeholder(kind, filename=outcome.item.filename)
-    await _bridge(
+    await bridge_message(
         our_identity,
         channel,
         turn_text,
@@ -451,7 +451,7 @@ async def _bridge_files(
         # on the caption turn — the kind/mime parity params the other channels give a
         # rejected-media caption (no served reference, as the media does not exist).
         first_mime = _nonempty_str(files[0].get("mimetype"))
-        await _bridge(
+        await bridge_message(
             our_identity,
             channel,
             caption,

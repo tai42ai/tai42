@@ -20,7 +20,7 @@ from typing import Any
 
 from tai42_contract.channels import ChannelInputError
 
-from tai42_channel_whatsapp.flows_components import _chips_single_pick
+from tai42_channel_whatsapp.flows_choices import chips_single_pick
 
 
 def _cond_literal(value: Any) -> str:
@@ -212,8 +212,8 @@ def _guard_split_value_type(name: str, prop: dict[str, Any], variants: list[_Var
     if len(variants) <= 1:
         return
     prop_type = prop.get("type")
-    if prop_type in ("boolean", "array") or _chips_single_pick(prop):
-        kind = "chips" if _chips_single_pick(prop) else prop_type
+    if prop_type in ("boolean", "array") or chips_single_pick(prop):
+        kind = "chips" if chips_single_pick(prop) else prop_type
         raise ChannelInputError(
             f"form property {name!r}: a {kind} field shown for several values of its controller is not "
             "renderable on WhatsApp (only string-valued conditional fields support a multi-value visibleWhen here)"

@@ -56,10 +56,11 @@ screen is a ``SingleColumnLayout`` holding its field components and its footer
 DIRECTLY, with no ``Form`` wrapper. Every control carries its own ``init-value``
 (``${data.<field>__init}``) and a choice field a dynamic ``data-source``
 (``${data.<field>__ds}``), so a send injects the prefilled values and the per-send
-option lists through ``flow_action_payload.data`` (built by :func:`build_flow_data`)
-rather than re-publishing. Collected values thread forward across screens by each
-step's navigate payload; the terminal screen completes with the flat UNION of every
-field, so the inbound decode reads it exactly as an unpaged form. A footer reads a
+option lists through ``flow_action_payload.data`` (built by
+:func:`~tai42_channel_whatsapp.flows_send_data.build_flow_data`) rather than re-publishing.
+Collected values thread forward across screens by each step's navigate payload; the terminal
+screen completes with the flat UNION of every field, so the inbound decode reads it exactly as an
+unpaged form. A footer reads a
 control's just-filled value through the form-input reference ``${form.<field>}``
 (Meta's reference for data the user entered on the screen, valid with or without a
 ``Form`` wrapper); an earlier screen's value rides forward as ``${data.<field>__val}``.
@@ -102,15 +103,15 @@ from typing import Any
 
 from tai42_contract.channels import ChannelInputError
 from tai42_contract.interactions import FormReactionEventKind
-from tai42_kit.interactions import RADIO_OPTION_THRESHOLD, drawing_order
+from tai42_kit.interactions import drawing_order
 
 from tai42_channel_whatsapp.flows_components import (
-    _RESERVED_PROPERTY,
-    _calendar_range_component,
-    _display_component_list,
-    _dynamic_component,
-    _field_control,
+    RESERVED_PROPERTY,
+    calendar_range_component,
     component_names,
+    display_component_list,
+    dynamic_component,
+    field_control,
     payload_labels,
 )
 from tai42_channel_whatsapp.flows_dates import (
@@ -119,23 +120,22 @@ from tai42_channel_whatsapp.flows_dates import (
 )
 from tai42_channel_whatsapp.flows_endpoint import (
     REACTION_PAGE_KEY,
-    _attach_field_reaction,
-    _reaction_sets,
+    attach_field_reaction,
     error_fields,
     event_payload,
     form_endpoint_driven,
     guard_endpoint_names,
+    reaction_sets,
     screen_data_refs,
 )
 from tai42_channel_whatsapp.flows_resolve import (
-    _form_range_merges,
-    _resolve_pages,
+    form_range_merges,
     pages_without_slot_content,
+    resolve_pages,
     slot_datanames,
 )
-from tai42_channel_whatsapp.flows_screen_data import _later_carriers, _RenderSpec, _screen_data_model
-from tai42_channel_whatsapp.flows_second_line import data_source_rows, field_caption, range_captions
-from tai42_channel_whatsapp.flows_send_data import build_flow_data
+from tai42_channel_whatsapp.flows_screen_data import RenderSpec, later_carriers, screen_data_model
+from tai42_channel_whatsapp.flows_second_line import field_caption, range_captions
 from tai42_channel_whatsapp.flows_visibility import (
     emit_field_variants,
     form_case_names,
@@ -144,17 +144,14 @@ from tai42_channel_whatsapp.flows_visibility import (
 )
 
 __all__ = [
+    "FALSE_LABEL",
     "FORM_ENTRY_SCREEN",
-    "RADIO_OPTION_THRESHOLD",
     "SUCCESS_SCREEN",
-    "build_flow_data",
+    "TRUE_LABEL",
     "build_form_flow",
-    "component_names",
-    "data_source_rows",
     "form_date_bounds",
     "form_needs_endpoint",
-    "payload_labels",
-    "slot_datanames",
+    "page_screen_id",
 ]
 
 # Flow JSON version pinned to a Cloud-API-valid release (≥ 6.2, so a TextInput takes a
@@ -176,8 +173,8 @@ _FOOTER_LABEL = "Submit"
 # The non-terminal step's footer — advances to the next screen.
 _CONTINUE_LABEL = "Continue"
 # A review page's readback of a boolean value — the caller's ``true_label`` / ``false_label`` override them.
-_TRUE_LABEL = "Yes"
-_FALSE_LABEL = "No"
+TRUE_LABEL = "Yes"
+FALSE_LABEL = "No"
 # Meta's ``TextBody.text`` cap. A review readback line over it is refused loudly at build (never truncated).
 _TEXT_BODY_MAX_CHARS = 4096
 # Meta's ``Footer.label`` cap. A per-page ``button_label`` over this is refused loudly at build
@@ -193,7 +190,7 @@ _DATA_API_VERSION = "3.0"
 SUCCESS_SCREEN = "SUCCESS"
 
 
-def _screen_id(index: int) -> str:
+def page_screen_id(index: int) -> str:
     """The screen id for a zero-based page index — letters-and-underscores only.
 
     The index's decimal digits are mapped onto :data:`_SCREEN_DIGIT_LETTERS`, so no
@@ -205,7 +202,7 @@ def _screen_id(index: int) -> str:
 
 # The entry screen a form send navigates to (index 0). The single source of truth
 # for that id, imported by the send path so it can never drift from the builder.
-FORM_ENTRY_SCREEN = _screen_id(0)
+FORM_ENTRY_SCREEN = page_screen_id(0)
 
 
 def _validate_object_schema(schema: dict[str, Any]) -> tuple[dict[str, Any], set[str]]:
@@ -269,7 +266,7 @@ def _validate_form_properties(
     string ``enum`` that is not a non-empty list of strings.
     """
     for name, prop in properties.items():
-        if name == _RESERVED_PROPERTY:
+        if name == RESERVED_PROPERTY:
             raise ChannelInputError(
                 f"form property {name!r}: reserved on this channel — Meta injects {name!r} into the "
                 "Flow response to correlate the reply, so a field of that name is unanswerable"
@@ -288,10 +285,10 @@ def _validate_form_properties(
         # Validate the subset up front (raises naming the property on an unsupported type). The bare
         # control is built: a field's second line and its Meta cap are checked where the field is
         # drawn, since a merged range end draws it as a caption rather than as helper text.
-        _field_control(name, prop, name in required, option_fields, names)
+        field_control(name, prop, name in required, option_fields, names)
 
 
-def _review_readback(spec: _RenderSpec) -> list[dict[str, Any]]:
+def _review_readback(spec: RenderSpec) -> list[dict[str, Any]]:
     """Generic readback lines for a review screen: one line per field, label + collected value.
 
     Each field's value rides forward as its ``__val`` carrier; a field's line interpolates it (Flow
@@ -309,7 +306,7 @@ def _review_readback(spec: _RenderSpec) -> list[dict[str, Any]]:
         label = spec.labels[name]
         value_ref = f"${{data.{spec.names[name]}__val}}"
         if spec.properties[name].get("type") == "boolean":
-            true_word, false_word = spec.boolean_words.get(name, (_TRUE_LABEL, _FALSE_LABEL))
+            true_word, false_word = spec.boolean_words.get(name, (TRUE_LABEL, FALSE_LABEL))
             then_text, else_text = (
                 _readback_text(name, f"{label}: {true_word}"),
                 _readback_text(name, f"{label}: {false_word}"),
@@ -360,7 +357,7 @@ def _resolve_button_label(page: dict[str, Any]) -> str | None:
 def _terminal_footer(
     this_fields: list[str],
     earlier_fields: list[str],
-    spec: _RenderSpec,
+    spec: RenderSpec,
     variants: dict[str, list[tuple[str, list[str]]]],
     button_label: str | None,
     screen_data: dict[str, str],
@@ -406,7 +403,7 @@ def _step_footer(
     this_fields: list[str],
     later_fields: list[str],
     earlier_fields: list[str],
-    spec: _RenderSpec,
+    spec: RenderSpec,
     routing_model: dict[str, list[str]],
     variants: dict[str, list[tuple[str, list[str]]]],
     button_label: str | None,
@@ -418,14 +415,14 @@ def _step_footer(
     # the values so far and the screen's whole data, which holds the later fields' carriers and the
     # later pages' slots (the data endpoint checks this screen's shapes and any declared advance
     # reaction, then names the next screen or keeps the person here); a static form navigates
-    # directly, forwarding what :func:`_later_carriers` names for its successors (the later fields'
+    # directly, forwarding what :func:`later_carriers` names for its successors (the later fields'
     # carriers and the slots of ``later_pages``) and every collected value. A merged range END
     # forwards no value — its START carries the pair's object value. Either way
     # the transition is recorded in ``routing_model``.
     label = button_label or _CONTINUE_LABEL
     merged_ends = set(spec.range_merges)
-    screen_id = _screen_id(index)
-    next_screen = _screen_id(index + 1)
+    screen_id = page_screen_id(index)
+    next_screen = page_screen_id(index + 1)
     routing_model[screen_id] = [next_screen]
     if spec.endpoint:
         payload = event_payload(
@@ -444,7 +441,7 @@ def _step_footer(
             "label": label,
             "on-click-action": {"name": "data_exchange", "payload": payload},
         }
-    forward = _later_carriers(later_fields, later_pages, spec)
+    forward = later_carriers(later_fields, later_pages, spec)
     for name in earlier_fields:
         if name in merged_ends:
             continue
@@ -463,7 +460,7 @@ def _step_footer(
 def _build_form_screen(
     index: int,
     pages: list[dict[str, Any]],
-    spec: _RenderSpec,
+    spec: RenderSpec,
     fields_by_screen: list[list[str]],
     earlier_fields: list[str],
     screen_count: int,
@@ -480,7 +477,7 @@ def _build_form_screen(
     (:func:`screen_field_variants`, :func:`emit_field_variants`,
     :func:`~tai42_channel_whatsapp.flows_visibility.answer_refs`); a review page adds
     the generic value readback. The footer records any transition in ``routing_model``. The screen's
-    ``data`` (its own and every later page's display slots among it) is :func:`_screen_data_model`.
+    ``data`` (its own and every later page's display slots among it) is :func:`screen_data_model`.
     """
     page = pages[index]
     this_fields = fields_by_screen[index]
@@ -489,11 +486,11 @@ def _build_form_screen(
     page_title = str(page["title"])
     button_label = _resolve_button_label(page)
 
-    data_model = _screen_data_model(index, this_fields, later_fields, earlier_fields, pages, spec)
+    data_model = screen_data_model(index, this_fields, later_fields, earlier_fields, pages, spec)
     screen_data = screen_data_refs(data_model) if spec.endpoint else {}
 
     variants = screen_field_variants(this_fields, earlier_fields, spec.properties, spec.names)
-    display_blocks = _display_component_list(page, spec.slots)
+    display_blocks = display_component_list(page, spec.slots)
     merged_ends = set(spec.range_merges)
     merged_starts = {start: end for end, start in spec.range_merges.items()}
     components: list[dict[str, Any]] = []
@@ -503,7 +500,7 @@ def _build_form_screen(
             continue
         if name in merged_starts:
             end = merged_starts[name]
-            component = _calendar_range_component(
+            component = calendar_range_component(
                 name,
                 end,
                 spec.properties[name],
@@ -516,7 +513,7 @@ def _build_form_screen(
             # declared the trigger.
             if name in spec.field_changed or end in spec.field_changed:
                 trigger_field = name if name in spec.field_changed else end
-                component = _attach_field_reaction(
+                component = attach_field_reaction(
                     component,
                     trigger_field,
                     this_fields,
@@ -529,7 +526,7 @@ def _build_form_screen(
             captions = range_captions(name, spec.properties[name], end, spec.properties[end])
             components.extend(emit_field_variants(component, variants[name], captions))
             continue
-        component = _dynamic_component(
+        component = dynamic_component(
             name,
             spec.properties[name],
             name in spec.required,
@@ -539,7 +536,7 @@ def _build_form_screen(
         )
         caption = field_caption(name, component, spec.properties[name])
         if name in spec.field_changed:
-            component = _attach_field_reaction(
+            component = attach_field_reaction(
                 component, name, this_fields, earlier_fields, spec.names, variants, spec.range_merges, screen_data
             )
         components.extend(emit_field_variants(component, variants[name], caption))
@@ -563,7 +560,7 @@ def _build_form_screen(
     )
 
     screen: dict[str, Any] = {
-        "id": _screen_id(index),
+        "id": page_screen_id(index),
         "title": page_title,
         "terminal": is_terminal,
         "layout": {"type": "SingleColumnLayout", "children": [*display_blocks, *components, *readback, footer]},
@@ -592,9 +589,9 @@ def form_needs_endpoint(
     properties, required = _validate_object_schema(schema)
     names = component_names(properties)
     _validate_form_properties(properties, required, option_fields, names)
-    resolved_pages, fields_by_screen = _resolve_pages(properties, pages, option_fields)
-    reacting = _reaction_sets(reactions, properties, option_fields, names)[3]
-    range_merges = _form_range_merges(properties, resolved_pages, fields_by_screen, option_fields)
+    resolved_pages, fields_by_screen = resolve_pages(properties, pages, option_fields)
+    reacting = reaction_sets(reactions, properties, option_fields, names)[3]
+    range_merges = form_range_merges(properties, resolved_pages, fields_by_screen, option_fields)
     return form_endpoint_driven(properties, required, option_fields, names, range_merges, reacting, fields_by_screen)
 
 
@@ -610,9 +607,9 @@ def form_date_bounds(
     """
     option_fields = option_fields or set()
     properties, _ = _validate_object_schema(schema)
-    resolved_pages, fields_by_screen = _resolve_pages(properties, pages, option_fields)
+    resolved_pages, fields_by_screen = resolve_pages(properties, pages, option_fields)
     return declared_date_bounds(
-        properties, _form_range_merges(properties, resolved_pages, fields_by_screen, option_fields)
+        properties, form_range_merges(properties, resolved_pages, fields_by_screen, option_fields)
     )
 
 
@@ -655,9 +652,9 @@ def build_form_flow(
     own. Otherwise the Flow is the static navigate Flow. ``field_invalid`` is the caller's per-field
     ``invalid`` sentence (the helper text a native pattern requires when the field has no second
     line). ``askless`` marks a form sent with no ask. An ask-less form reacts to nothing, so it is
-    endpoint-driven only for its shapes or split fields, the same decision :func:`build_flow_data`
-    draws its send data by; ``reactions`` given with ``askless`` raise ``ValueError``. An ask-less
-    endpoint-driven form has no
+    endpoint-driven only for its shapes or split fields, the same decision
+    :func:`~tai42_channel_whatsapp.flows_send_data.build_flow_data` draws its send data by;
+    ``reactions`` given with ``askless`` raise ``ValueError``. An ask-less endpoint-driven form has no
     per-send sidecar, so every shaped field's sentence rides its Flow as ``__invalid`` screen data,
     every field the shape check can report missing carries a ``__required`` one, the caller's
     form-level lines ride the form-line carriers, and every screen declares every date field's
@@ -678,16 +675,16 @@ def build_form_flow(
     names = component_names(properties)
     labels = payload_labels(properties)
     _validate_form_properties(properties, required, option_fields, names)
-    resolved_pages, fields_by_screen = _resolve_pages(properties, pages, option_fields, form_title, form_submit)
-    field_changed, page_advanced, submitted, reacting = _reaction_sets(reactions, properties, option_fields, names)
-    range_merges = _form_range_merges(properties, resolved_pages, fields_by_screen, option_fields)
+    resolved_pages, fields_by_screen = resolve_pages(properties, pages, option_fields, form_title, form_submit)
+    field_changed, page_advanced, submitted, reacting = reaction_sets(reactions, properties, option_fields, names)
+    range_merges = form_range_merges(properties, resolved_pages, fields_by_screen, option_fields)
     endpoint = form_endpoint_driven(
         properties, required, option_fields, names, range_merges, reacting, fields_by_screen
     )
     slots = slot_datanames(resolved_pages)
     if endpoint:
         guard_endpoint_names(properties, names, slots.values(), form_case_names(properties, names, fields_by_screen))
-    spec = _RenderSpec(
+    spec = RenderSpec(
         properties=properties,
         required=required,
         option_fields=option_fields,
@@ -723,9 +720,9 @@ def build_form_flow(
         flow_json["data_api_version"] = _DATA_API_VERSION
     if screen_count > 1:
         # A multi-screen flow declares its allowed transitions.
-        routing_model[_screen_id(screen_count - 1)] = []
+        routing_model[page_screen_id(screen_count - 1)] = []
         flow_json["routing_model"] = routing_model
     elif endpoint:
         # A single-screen endpoint-driven Flow still declares a (terminal) routing model.
-        flow_json["routing_model"] = {_screen_id(0): []}
+        flow_json["routing_model"] = {page_screen_id(0): []}
     return flow_json, _canonical_hash_pages(schema, resolved_pages, option_fields, flow_json)

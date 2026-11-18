@@ -4,9 +4,9 @@ The platform threads ``ChannelTemplate.parameters`` unopened; this channel owns 
 template's runtime arguments are its NAMED components, mapped one-to-one onto Meta's
 template-message ``components`` array by :mod:`tai42_channel_whatsapp.client`:
 
-* ``header_media`` — the media argument for a media HEADER component (a display item:
-  image/document/video, never a ``link`` or ``audio``); ``None`` when the template has no media
-  header (or a static/text header needing no argument).
+* ``header_media`` — the media argument for a media HEADER component: an ``image``, ``video`` or
+  ``document`` item, the media a template header carries (never a ``link`` or ``audio``);
+  ``None`` when the template has no media header (or a static/text header needing no argument).
 * ``body_parameters`` — the POSITIONAL body-text values substituted into the body's placeholders in
   order; empty when the body has no placeholders. Typed values (currency, date-time) ride as their
   pre-formatted STRING here.
@@ -28,6 +28,9 @@ from tai42_contract.interactions.models import MediaItem, MediaKind
 # bound, never a message body.
 TEMPLATE_BUTTONS_MAX = 10
 TEMPLATE_PARAM_MAX_CHARS = 4096
+
+# The media kinds a template media header carries, per Meta's template components.
+TEMPLATE_HEADER_MEDIA_KINDS = frozenset({MediaKind.IMAGE, MediaKind.VIDEO, MediaKind.DOCUMENT})
 
 
 class QuickReplyButtonParam(BaseModel):
@@ -103,8 +106,8 @@ class WhatsAppTemplateParameters(BaseModel):
     @field_validator("header_media")
     @classmethod
     def _header_media_valid(cls, value: MediaItem | None) -> MediaItem | None:
-        if value is not None and value.kind is MediaKind.LINK:
-            raise ValueError("template header_media must be a display item (image/document/video/audio), not a link")
+        if value is not None and value.kind not in TEMPLATE_HEADER_MEDIA_KINDS:
+            raise ValueError(f"template header_media must be an image, video or document, not {value.kind.value}")
         return value
 
     @field_validator("body_parameters")

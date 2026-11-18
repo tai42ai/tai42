@@ -11,6 +11,7 @@ from tai42_skeleton.storage import StorageRegistry
 from tai42_skeleton.template import ResourceManager
 from tai42_skeleton.template.errors import TemplateNotFoundError
 
+from .._fakes.template_holders import app_held_by
 from ._manager_fixtures import _InMemoryStorage
 
 
@@ -38,7 +39,7 @@ def _counting_manager(items: dict[str, str]) -> tuple[ResourceManager, _Counting
         def __new__(cls) -> _CountingStorage:  # type: ignore[misc]
             return storage
 
-    return ResourceManager(registry.provider, on_evicted=lambda _eviction: None), storage
+    return ResourceManager(registry.provider, on_evicted=lambda _eviction: None, held_by=app_held_by), storage
 
 
 async def test_a_locale_render_reads_the_absent_variants_once_then_never() -> None:

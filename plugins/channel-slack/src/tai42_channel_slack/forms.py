@@ -1,14 +1,15 @@
 """Schema → Block Kit mapping for ``answer_format == "form"`` questions.
 
-Three shapes are built here, all from the same JSON answer schema (a top-level
+Two shapes are built here, both from the same JSON answer schema (a top-level
 ``{"type": "object", "properties": {...}, "required": [...]}``) plus the per-send
 layout the ask carried (``data``/``pages``/``reactions``):
 
 * the outbound message blocks — a section carrying the question and one button
   (:data:`FORM_OPEN_ACTION_ID`) whose ``value`` is the interaction id;
 * the modal view (:data:`FORM_SUBMIT_CALLBACK_ID`) opened on the button click,
-  one input block per property, interleaved with display blocks and a review step;
-* the answer dict extracted and coerced from a ``view_submission`` state.
+  one input block per property, interleaved with display blocks and a review step.
+
+The answer a submitted modal carries is read back by :mod:`tai42_channel_slack.form_answer`.
 
 Supported property subset (identical to the callback door's own form renderer, so
 a modal answer validates there): ``string`` → ``plain_text_input``, except a
@@ -17,7 +18,7 @@ a modal answer validates there): ``string`` → ``plain_text_input``, except a
 while ``numeric``/``decimal``/``tel`` have no Slack keyboard hint and degrade to a
 ``plain_text_input`` (the value always arrives exactly as typed); ``string``
 with an ``enum`` (or per-send ``options``) → ``radio_buttons`` at or below
-:data:`RADIO_OPTION_THRESHOLD` choices, else ``static_select``; ``string``+
+:data:`~tai42_kit.interactions.RADIO_OPTION_THRESHOLD` choices, else ``static_select``; ``string``+
 ``format: date`` → ``datepicker`` (Slack's picker draws NO min/max/disabled dates
 and has NO range control, so a declared date bound or range is enforced on SUBMIT,
 never drawn — the documented Slack degrade); ``string``+``format: time`` →
@@ -60,34 +61,30 @@ reaction state (replaced option lists, filled display slots) rides the view's
 from __future__ import annotations
 
 import json
-import math
 from typing import Any, NamedTuple
 
 from tai42_contract.interactions import FORM_REACTION_REASON_MAX_CHARS
-from tai42_kit.interactions import RADIO_OPTION_THRESHOLD, drawing_order, hidden_fields
+from tai42_kit.interactions import display_slot_text, drawing_order, hidden_fields
 
 from tai42_channel_slack.form_blocks import (
-    FIELD_ACTION_ID,
     FormSchemaError,
-    _apply_initial,
-    _boolean_words,
-    _element,
+    apply_initial,
+    field_boolean_words,
+    field_element,
 )
+from tai42_channel_slack.image_source import is_loadable_image_url
 
 __all__ = [
-    "FIELD_ACTION_ID",
     "FORM_OPEN_ACTION_ID",
     "FORM_SUBMIT_CALLBACK_ID",
-    "RADIO_OPTION_THRESHOLD",
-    "FormSchemaError",
     "ModalMetadata",
     "build_message_blocks",
     "build_modal_blocks",
     "build_modal_view",
     "check_update_failed_line",
     "decode_private_metadata",
-    "extract_answer",
     "first_field_name",
+    "form_properties",
     "is_declared_field",
     "validate_form_schema",
 ]
@@ -126,7 +123,7 @@ _TEXT_DISPATCH_CONFIG = {"trigger_actions_on": ["on_enter_pressed"]}
 _REVIEW_EMPTY_TEXT = "No answers to review yet."
 
 
-def _properties(schema: dict[str, Any]) -> dict[str, Any]:
+def form_properties(schema: dict[str, Any]) -> dict[str, Any]:
     """The validated non-empty ``properties`` map of a top-level object schema."""
     if not isinstance(schema, dict):
         raise FormSchemaError("form schema must be an object")
@@ -150,7 +147,7 @@ def first_field_name(schema: dict[str, Any]) -> str:
 
     The fallback block a door-side error is pinned under when the door names no locatable field.
     """
-    return next(iter(_properties(schema)))
+    return next(iter(form_properties(schema)))
 
 
 def is_declared_field(schema: dict[str, Any], name: str) -> bool:
@@ -158,7 +155,7 @@ def is_declared_field(schema: dict[str, Any], name: str) -> bool:
 
     A real input block_id (block_id == field name) a door-side error can be pinned under.
     """
-    return name in _properties(schema)
+    return name in form_properties(schema)
 
 
 def _input_block(
@@ -177,9 +174,9 @@ def _input_block(
     label = str(spec.get("title") or name)
     if len(label) > _MAX_LABEL_LEN:
         raise FormSchemaError(f"form schema property {name!r} label exceeds {_MAX_LABEL_LEN} characters")
-    element = _element(name, spec, per_send_options, choice_label, boolean_words or _boolean_words(None))
+    element = field_element(name, spec, per_send_options, choice_label, boolean_words or field_boolean_words(None))
     if value is not None:
-        _apply_initial(name, element, value)
+        apply_initial(name, element, value)
     if dispatch and element["type"] in ("plain_text_input", "number_input", "email_text_input", "url_text_input"):
         # A text/number/email/url input dispatches on enter; a selection control dispatches on its own.
         element["dispatch_action_config"] = _TEXT_DISPATCH_CONFIG
@@ -271,7 +268,7 @@ def _readback_section(
         if name in hidden or name not in values:
             continue
         label = str((spec.get("title") if isinstance(spec, dict) else None) or name)
-        words = _boolean_words(field_wording.get(name))
+        words = field_boolean_words(field_wording.get(name))
         lines.append(f"*{label}*: {_readback_value(values[name], words)}")
     text = "\n".join(lines) if lines else (review_empty or _REVIEW_EMPTY_TEXT)
     if len(text) > _MAX_SECTION_TEXT_LEN:
@@ -281,23 +278,38 @@ def _readback_section(
 
 def _display_block(block: dict[str, Any], display_values: dict[str, Any]) -> dict[str, Any] | None:
     # Render one ordered display block: heading→header, body→section (mrkdwn), image→image
-    # block. A slotted block takes its content from ``display_values`` (a reaction fills it);
-    # a slotted block with no value yet renders nothing (not an error — it fills on a reaction).
-    # An image with no drawable source degrades to its alt text as a context block.
+    # block. A slotted block whose slot ``display_values`` holds a value (a reaction fills it)
+    # takes that value, a boolean or number reading as the web widget writes it (:func:`display_slot_text`);
+    # a text slot holding ``""`` draws nothing, and an image slot holding ``""`` or ``null``
+    # falls back to its alt text. A text slot holding ``null``, or a slot holding no value yet,
+    # shows the block's own ``text``/``src``, and nothing when it has none. An image with no
+    # source degrades to its alt text as a context block. Slack draws an image block only from a
+    # url its servers load, so a source that is not an absolute http(s) url (a same-origin served
+    # reference, a ``data:`` url, inline picture data) is refused, never posted as a broken
+    # picture.
     kind = block.get("kind")
     slot = block.get("slot")
     if kind == "image":
-        src = display_values.get(slot) if isinstance(slot, str) and slot in display_values else block.get("src")
+        filled_slot = slot if isinstance(slot, str) and slot in display_values else None
+        src = display_values.get(filled_slot) if filled_slot is not None else block.get("src")
         alt = str(block.get("alt") or "")
         if src:
+            if not is_loadable_image_url(str(src)):
+                where = f"display slot {filled_slot!r}" if filled_slot is not None else "static picture"
+                raise FormSchemaError(
+                    f"form picture cannot be drawn on slack ({where}): its source is not an absolute http(s) url "
+                    "slack can load"
+                )
             return {"type": "image", "image_url": str(src), "alt_text": alt or " "}
         if alt:
             return {"type": "context", "elements": [{"type": "mrkdwn", "text": alt}]}
         return None
-    text = display_values.get(slot) if isinstance(slot, str) and slot in display_values else block.get("text")
-    if not text:
+    value = display_values.get(slot) if isinstance(slot, str) else None
+    if value is None:
+        value = block.get("text")
+    if value is None or value == "":
         return None
-    text = str(text)
+    text = display_slot_text(value)
     if kind == "heading":
         if len(text) > _MAX_HEADER_LEN:
             raise FormSchemaError(f"form display heading exceeds {_MAX_HEADER_LEN} characters")
@@ -347,7 +359,7 @@ def _field_group(
         options.get(name),
         dispatch=name in triggers,
         choice_label=choice_label,
-        boolean_words=_boolean_words(entry),
+        boolean_words=field_boolean_words(entry),
     )
     group = [block]
     if name in field_errors:
@@ -420,7 +432,7 @@ def build_modal_blocks(
     field_errors = field_errors or {}
     field_wording = field_wording or {}
     required = _required_set(schema)
-    properties = _properties(schema)
+    properties = form_properties(schema)
     # The platform's own visibility rule, so the modal shows and hides exactly what the answer
     # check enforces at submit, without ever calling the consumer.
     hidden = hidden_fields(properties, values) if values is not None else set()
@@ -680,111 +692,3 @@ def build_message_blocks(question: str, interaction_id: str, open_label: str | N
             ],
         },
     ]
-
-
-def _raw_value(entry: Any) -> str | None:
-    """The submitted string of one scalar field, or ``None`` when it was left empty."""
-    if not isinstance(entry, dict):
-        return None
-    kind = entry.get("type")
-    if kind in ("plain_text_input", "number_input", "email_text_input", "url_text_input"):
-        value = entry.get("value")
-        return value if isinstance(value, str) and value != "" else None
-    if kind in ("datepicker", "timepicker"):
-        # Slack keys the chosen value by element (``string | null``); an empty picker is
-        # an unfilled field, like an empty text input. The ISO string returns unchanged.
-        value = entry.get("selected_date" if kind == "datepicker" else "selected_time")
-        return value if isinstance(value, str) and value != "" else None
-    if kind in ("static_select", "radio_buttons"):
-        selected = entry.get("selected_option")
-        if isinstance(selected, dict):
-            value = selected.get("value")
-            return value if isinstance(value, str) else None
-        return None
-    return None
-
-
-def _array_value(entry: Any) -> list[str]:
-    """The submitted list of one array field — an empty list when it was left unfilled.
-
-    A ``multi_static_select``/``checkboxes`` field reads its ``selected_options`` values; a
-    free multiple-choice ``plain_text_input`` splits its text one entry per non-blank line.
-    """
-    if not isinstance(entry, dict):
-        return []
-    kind = entry.get("type")
-    if kind in ("multi_static_select", "checkboxes"):
-        selected = entry.get("selected_options")
-        if not isinstance(selected, list):
-            return []
-        return [opt["value"] for opt in selected if isinstance(opt, dict) and isinstance(opt.get("value"), str)]
-    if kind == "plain_text_input":
-        value = entry.get("value")
-        if isinstance(value, str):
-            return [line.strip() for line in value.splitlines() if line.strip()]
-    return []
-
-
-def _coerce(name: str, spec: dict[str, Any], raw: str) -> Any:
-    """Lift a submitted string to the JSON type its schema property declares.
-
-    Slack delivers every scalar input as a string. ``"true"``/``"false"`` for a
-    ``boolean``, an integer literal for an ``integer`` and a finite literal for a
-    ``number`` become the typed value; any other string is returned as submitted,
-    and the answer door rejects a value of the wrong type against the schema with a
-    field-located reason the modal shows inline. A non-finite ``number`` literal
-    stays a string on purpose: as a float it would pass ``type: number`` and
-    serialize to null.
-    """
-    ptype = spec.get("type")
-    if ptype == "boolean":
-        if raw == "true":
-            return True
-        if raw == "false":
-            return False
-        return raw
-    if ptype == "integer":
-        try:
-            return int(raw)
-        except ValueError:
-            return raw
-    if ptype == "number":
-        try:
-            parsed = float(raw)
-        except ValueError:
-            return raw
-        # A non-finite float passes ``type: number`` and serializes to null; the
-        # string does not pass, so it is forwarded for the door to reject.
-        if not math.isfinite(parsed):
-            return raw
-        return parsed
-    return raw
-
-
-def extract_answer(schema: dict[str, Any], state_values: dict[str, Any]) -> dict[str, Any]:
-    """The answer dict from a ``view_submission`` state.
-
-    Each present, non-empty field lifted to its schema type when its string denotes one, else
-    forwarded as submitted (an array field returns a list, an unfilled optional field is
-    omitted). A field whose block is absent from the state — a
-    field hidden by its conditional predicate before submit — is omitted; the answer facet
-    drops any hidden field left in the answer besides.
-    """
-    answer: dict[str, Any] = {}
-    for name, spec in _properties(schema).items():
-        field_name = str(name)
-        block = state_values.get(field_name)
-        if not isinstance(block, dict):
-            continue
-        entry = block.get(FIELD_ACTION_ID)
-        spec_dict = spec if isinstance(spec, dict) else {}
-        if spec_dict.get("type") == "array":
-            values = _array_value(entry)
-            if values:
-                answer[field_name] = values
-            continue
-        raw = _raw_value(entry)
-        if raw is None:
-            continue
-        answer[field_name] = _coerce(field_name, spec_dict, raw)
-    return answer

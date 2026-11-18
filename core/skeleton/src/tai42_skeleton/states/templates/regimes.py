@@ -13,7 +13,7 @@ from tai42_contract.states.errors import TemplateValidationError
 from tai42_contract.states.models import RegimeName
 
 from tai42_skeleton.states.templates.model import StateTemplate
-from tai42_skeleton.states.templates.parameters import _is_marker
+from tai42_skeleton.states.templates.parameters import is_marker
 
 REGIMES = frozenset(typing.get_args(RegimeName))
 
@@ -77,7 +77,7 @@ def _descend_key(node: dict[str, Any], seg: str, path: list[str]) -> Any:
     raise TemplateValidationError(f"regime path segment {seg!r} in {path} is not a property of the fragment")
 
 
-def _validate_regime_path(fragment: dict[str, Any], path: list[str]) -> None:
+def validate_regime_path(fragment: dict[str, Any], path: list[str]) -> None:
     """Walk a regime ``path`` statically over the (defaults-substituted) fragment.
 
     A literal key must be a declared property (or admitted by an open object), and ``"*"`` is allowed ONLY
@@ -86,7 +86,7 @@ def _validate_regime_path(fragment: dict[str, Any], path: list[str]) -> None:
     """
     node: Any = fragment
     for seg in path:
-        if _is_marker(node):
+        if is_marker(node):
             return
         if not isinstance(node, dict):
             raise TemplateValidationError(f"regime path {path} descends past the fragment's structure at {seg!r}")

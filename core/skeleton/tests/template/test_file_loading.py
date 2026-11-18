@@ -9,9 +9,9 @@ from types import SimpleNamespace
 
 import pytest
 from fastmcp.utilities.types import Audio, Image
+from tai42_contract.errors import ErrorKind
 
-from tai42_skeleton.operations import NotSupportedError
-from tai42_skeleton.template import ContentNotLoadableError
+from tai42_skeleton.template import ContentNotLoadableError, FilesNotConfiguredError
 from tai42_skeleton.template import file_loading as fl
 
 from .._fakes.content_fixtures import (
@@ -322,13 +322,13 @@ def test_an_error_with_no_text_ends_the_message_with_its_class(monkeypatch: pyte
 
 
 @pytest.mark.usefixtures("files_extra_missing")
-def test_importing_the_module_without_the_files_extra_is_the_typed_501_every_time() -> None:
+def test_importing_the_module_without_the_files_extra_is_the_typed_refusal_every_time() -> None:
     import importlib
 
     for _ in range(2):
-        with pytest.raises(NotSupportedError) as caught:
+        with pytest.raises(FilesNotConfiguredError) as caught:
             importlib.import_module("tai42_skeleton.template.file_loading")
-        assert caught.value.message == FILES_INSTALL_LINE
-        assert caught.value.extra == {"code": "files-not-configured"}
-        assert caught.value.status == 501
+        assert str(caught.value) == FILES_INSTALL_LINE
+        assert caught.value.code == "files-not-configured"
+        assert caught.value.__tai_error_kind__ is ErrorKind.UNAVAILABLE
         assert isinstance(caught.value.__cause__, ImportError)

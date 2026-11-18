@@ -26,6 +26,11 @@ public-only ``fetch_url`` lacks:
   its path or query), so every fault carries the vendor HOST plus the HTTP status or
   the transport-exception class ONLY — at open, and while iterating the body.
 
+Every fetch rides the guarded fetch client its guard configuration shares on the event loop
+(:func:`~tai42_kit.net.fetch_url.guarded_fetch_client`), so only its first fetch on a loop pays client
+setup. The shared client keeps no cookie: each fetch carries its own cookie jar across its redirect
+hops only.
+
 The SUCCESS-path leak httpx opens on its own — it logs the full request line, URL
 included, at INFO (``_client.py:1026`` / ``:1741``) — is closed at the logging seam by
 :class:`tai42_kit.logging.logger._HttpxRequestLineRedactor`, not here.
@@ -41,7 +46,7 @@ from typing import cast
 import httpx
 
 from tai42_kit.net import url_guard
-from tai42_kit.net.fetch_url import PinningTransport, unwrap_guard_error
+from tai42_kit.net.fetch_url import guarded_fetch_client, unwrap_guard_error
 from tai42_kit.net.request_body import RequestBodyTooLargeError
 from tai42_kit.net.url_guard import UrlGuardError
 
@@ -227,13 +232,15 @@ async def _stream_media(
 ) -> AsyncIterator[MediaStream]:
     """Open the SSRF-pinned GET, follow redirects hop-by-hop, and yield the final response as a stream."""
     max_redirects = url_guard.url_guard_settings().max_redirects
-    transport = PinningTransport() if url_guard.guard_enabled() else None
+    pinned = url_guard.guard_enabled()
     base_headers = dict(headers) if headers is not None else {}
     current_url = _parse_url(url)
     credentials_dropped = False
+    # The cookies the hops of this one fetch set, sent on its later hops as httpx's jar rules allow.
+    cookies = httpx.Cookies()
 
     async with AsyncExitStack() as stack:
-        client = await stack.enter_async_context(httpx.AsyncClient(transport=transport, follow_redirects=False))
+        client = await stack.enter_async_context(guarded_fetch_client(pinned=pinned))
 
         async def _open() -> httpx.Response:
             nonlocal current_url, credentials_dropped
@@ -243,9 +250,10 @@ async def _stream_media(
                 # The final response stays open (in the exit stack) while the caller reads its
                 # ``chunks``; a redirect hop is closed the instant it is followed so its
                 # connection is not held for the life of the stream.
-                response = await stack.enter_async_context(
-                    client.stream("GET", current_url, headers=hop_headers, auth=hop_auth)
-                )
+                request = client.build_request("GET", current_url, headers=hop_headers, cookies=cookies)
+                response = await client.send(request, auth=hop_auth, stream=True)
+                stack.push_async_callback(response.aclose)
+                cookies.extract_cookies(response)
                 if response.is_redirect:
                     await response.aclose()
                     next_url = _redirect_target(response, current_url, follow_redirects=follow_redirects)

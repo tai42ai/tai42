@@ -36,6 +36,7 @@ from tai42_kit.compute.errors import ComputePoolUnavailableError
 from tai42_kit.compute.pool import ComputePool
 from tai42_kit.compute.pool_wire import ComputePoolClient, JobNotSentError, PoolServer
 from tai42_kit.compute.wire_sockets import wire_sockets
+from tai42_kit.logging import logging_settings, setup_logging
 
 # Run with ``-c``: run as ``-m``, a module would execute a second time as ``__main__``. The
 # owner's module search path, read whole from the standard input, is set before the serving
@@ -164,10 +165,13 @@ class HostedPool:
 def serve_pool(fd: int, own_pool: Callable[[], ComputePool], stop_pool: Callable[[], None]) -> None:
     """The host's side: serve the socket end ``fd`` until ``SIGTERM`` or its closing, then stop the pool.
 
-    ``own_pool`` returns the pool a job runs in; ``stop_pool`` stops it. Anything else that ends
-    the serving propagates: the host exits non-zero, its traceback on the stderr it shares with its
-    owner, and the owner's jobs raise :class:`~tai42_kit.compute.errors.ComputePoolUnavailableError`.
+    ``own_pool`` returns the pool a job runs in; ``stop_pool`` stops it. The host's log lines are
+    written as the owner's are (:func:`~tai42_kit.logging.setup_logging` at the ``TAI_LOG_LEVEL``
+    of the environment it inherited) to the stderr it shares with its owner. Anything else that
+    ends the serving propagates: the host exits non-zero, its traceback on that stderr, and the
+    owner's jobs raise :class:`~tai42_kit.compute.errors.ComputePoolUnavailableError`.
     """
+    setup_logging(logging_settings())
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     asyncio.run(_serve_until_terminated(PoolServer(wire_sockets.adopted(fd), own_pool), stop_pool))
 

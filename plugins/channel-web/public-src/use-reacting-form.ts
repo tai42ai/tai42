@@ -26,6 +26,7 @@ import {
   useStepFocus,
 } from '@/schema-form-helpers';
 import type {
+  DisplayText,
   FieldWording,
   FormOptionData,
   FormPage,
@@ -56,7 +57,7 @@ export interface ReactingForm {
   readonly value: unknown;
   readonly errors: SchemaFormErrors;
   readonly options: Readonly<Record<string, readonly FormOptionData[]>>;
-  readonly slots: Readonly<Record<string, unknown>>;
+  readonly slots: Readonly<Record<string, DisplayText>>;
   readonly imageSources: ImageSources;
   readonly page: FormPage;
   readonly pageIndex: number;
@@ -85,7 +86,7 @@ interface FormState {
   /** Clear BOTH the validation and reaction error bags — a step change starts clean. */
   readonly resetErrors: () => void;
   readonly options: OptionMap;
-  readonly slots: Readonly<Record<string, unknown>>;
+  readonly slots: Readonly<Record<string, DisplayText>>;
   readonly imageSources: ImageSources;
   readonly applyUpdate: (update: FormUpdate) => void;
 }
@@ -101,8 +102,8 @@ const EMPTY_PAGE: FormPage = {
 
 /** The value, validation/reaction errors, per-send choices, display slots and image-slot
  * sources of one open form, plus `applyUpdate` which folds a reaction's returned update into
- * all of them. Image sources come from a reaction only, never from the send values, so every
- * `src` an image slot draws went through the update parser's vetting. */
+ * all of them. Display slots and image sources come from a reaction only, never from the send
+ * values, so every value a slot draws went through the update parser's vetting. */
 function useFormState(schema: JsonSchema, formData: FormPrefill | null): FormState {
   const [value, setValue] = useState<unknown>(() => initialFormValue(schema, formData));
   const [errors, setErrors] = useState<SchemaFormErrors>({});
@@ -110,9 +111,7 @@ function useFormState(schema: JsonSchema, formData: FormPrefill | null): FormSta
   // returns none clears its own without wiping a live validation error.
   const [reactionErrors, setReactionErrors] = useState<SchemaFormErrors>({});
   const [options, setOptions] = useState<OptionMap>(formData?.options ?? {});
-  const [slots, setSlots] = useState<Record<string, unknown>>(() => ({
-    ...(formData?.values ?? {}),
-  }));
+  const [slots, setSlots] = useState<Record<string, DisplayText>>({});
   const [imageSources, setImageSources] = useState<ImageSources>(() => new Map());
   const applyUpdate = (update: FormUpdate): void => {
     if (Object.keys(update.values).length > 0) {

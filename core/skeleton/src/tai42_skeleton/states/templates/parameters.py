@@ -13,7 +13,7 @@ from typing import Any
 from tai42_contract.states.errors import TemplateValidationError
 
 
-def _is_marker(node: Any) -> bool:
+def is_marker(node: Any) -> bool:
     """Whether ``node`` is a ``{"$parameter": "<name>"}`` fill marker."""
     return isinstance(node, dict) and "$parameter" in node
 
@@ -33,7 +33,7 @@ def substitute_parameters(fragment: Any, values: Mapping[str, Any]) -> Any:
     A marker whose name is absent is left intact (the validation path substitutes only DEFAULTS and leaves
     no-default markers standing). Pure — the input is never mutated.
     """
-    if _is_marker(fragment):
+    if is_marker(fragment):
         name = _marker_name(fragment)
         return copy.deepcopy(values[name]) if name in values else {"$parameter": name}
     if isinstance(fragment, dict):
@@ -43,14 +43,14 @@ def substitute_parameters(fragment: Any, values: Mapping[str, Any]) -> Any:
     return fragment
 
 
-def _iter_marker_names(node: Any):
+def iter_marker_names(node: Any):
     """Yield every parameter name referenced by a marker anywhere in ``node``."""
-    if _is_marker(node):
+    if is_marker(node):
         yield _marker_name(node)
         return
     if isinstance(node, dict):
         for v in node.values():
-            yield from _iter_marker_names(v)
+            yield from iter_marker_names(v)
     elif isinstance(node, list):
         for v in node:
-            yield from _iter_marker_names(v)
+            yield from iter_marker_names(v)

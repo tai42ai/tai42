@@ -130,8 +130,8 @@ async def test_send_template_document_header_carries_filename(fake_redis: FakeRe
 
 
 async def test_send_template_audio_header_refused(fake_redis: FakeRedis, fake_httpx: FakeHttpx):
-    # A template header cannot carry audio (no Cloud API representation) — a permanent refusal.
-    with pytest.raises(ChannelInputError, match="template header cannot carry audio"):
+    # A template header carries no audio (no template header type for it) — a permanent refusal.
+    with pytest.raises(ChannelInputError, match="header_media must be an image, video or document, not audio"):
         await send_template(
             PHONE_NUMBER_ID,
             ALLOWED_A,
@@ -175,14 +175,13 @@ def test_validate_template_rejects_an_over_cap_button_list():
         )
 
 
-def test_validate_template_rejects_a_link_header():
-    with pytest.raises(ValueError, match="invalid WhatsApp template parameters"):
+@pytest.mark.parametrize(("kind", "url"), [("link", "https://x.example/p"), ("audio", "https://cdn.example/a.mp3")])
+def test_validate_template_rejects_a_header_media_kind_no_template_header_carries(kind: str, url: str):
+    # A template media header is an image, a video or a document; a link or an audio item is
+    # refused by the hook, before any send.
+    with pytest.raises(ValueError, match="header_media must be an image, video or document"):
         WhatsAppChannel().validate_template(
-            ChannelTemplate(
-                name="t",
-                language="en_US",
-                parameters={"header_media": {"kind": "link", "url": "https://x.example/p"}},
-            )
+            ChannelTemplate(name="t", language="en_US", parameters={"header_media": {"kind": kind, "url": url}})
         )
 
 

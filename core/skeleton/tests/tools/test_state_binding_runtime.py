@@ -39,7 +39,6 @@ from tai42_contract.template import TemplatedText
 from tai42_kit.states.template_jq import select_template_jq
 from tai42_kit.utils.data import JqCompileError
 
-from tai42_skeleton.app import instance
 from tai42_skeleton.states.service.subjects import _SubjectMixin
 from tai42_skeleton.storage import StorageRegistry
 from tai42_skeleton.template import ResourceManager
@@ -53,6 +52,7 @@ from tai42_skeleton.tools.state_binding import (
 )
 
 from .._fakes.recording_storage import RecordingStorage
+from .._fakes.template_holders import app_held_by
 from ..template.test_resource_manager import _InMemoryStorage
 
 _DECL = StateDeclaration(
@@ -225,8 +225,15 @@ class FakeResourceManager:
         return text.content
 
 
+def _storage(resource_manager: Any) -> SimpleNamespace:
+    """The app's storage facet: ``resource_manager``, and the provider the stored-id check asks,
+    holding the ids the by-id slots below name."""
+    provider = RecordingStorage(dict.fromkeys(("subj", "scope", "inj", "upd", "op", "broken-expr"), (b".", None)))
+    return SimpleNamespace(resource_manager=resource_manager, provider=provider)
+
+
 def _app(states: FakeStates, resources: dict[str, str] | None = None) -> Any:
-    return SimpleNamespace(states=states, storage=SimpleNamespace(resource_manager=FakeResourceManager(resources)))
+    return SimpleNamespace(states=states, storage=_storage(FakeResourceManager(resources)))
 
 
 # -- merge / precedence -------------------------------------------------------
@@ -957,14 +964,6 @@ async def test_save_refuses_at_the_first_failing_slot_in_slot_order(
 
 
 # -- by-id slots: render-then-compile at save --------------------------------
-@pytest.fixture(autouse=True)
-def _stored_ids(monkeypatch: pytest.MonkeyPatch) -> RecordingStorage:
-    """The storage provider the stored-id check asks, holding the ids the by-id slots below name."""
-    provider = RecordingStorage(dict.fromkeys(("subj", "scope", "inj", "upd", "op", "broken-expr"), (b".", None)))
-    monkeypatch.setattr(instance.app._storage_registry, "_provider", provider)
-    return provider
-
-
 @pytest.mark.parametrize("check", [validate_and_attach_binding, validate_binding])
 async def test_a_slot_naming_an_id_the_store_lacks_is_refused_before_any_render(check: Any) -> None:
     # The stored-id check runs first and reads every slot, so a missing id is refused with
@@ -1023,7 +1022,7 @@ def _real_resource_manager(resources: dict[str, str]) -> ResourceManager:
 
     registry = StorageRegistry()
     registry.register_storage(_Store)
-    return ResourceManager(registry.provider, on_evicted=lambda _eviction: None)
+    return ResourceManager(registry.provider, on_evicted=lambda _eviction: None, held_by=app_held_by)
 
 
 async def test_by_id_slot_whose_stored_body_cannot_be_rendered_fails_the_save_loudly() -> None:
@@ -1031,9 +1030,7 @@ async def test_by_id_slot_whose_stored_body_cannot_be_rendered_fails_the_save_lo
     # slot and the id, never an unmapped template-engine error.
     states = FakeStates(attached={"status": []}, templates={})
     b = StateBinding(states=[StateAttach(state="status", subject_expr=TemplatedText(id="broken-expr"))])
-    app: Any = SimpleNamespace(
-        states=states, storage=SimpleNamespace(resource_manager=_real_resource_manager({"broken-expr": "{{ oops"}))
-    )
+    app: Any = SimpleNamespace(states=states, storage=_storage(_real_resource_manager({"broken-expr": "{{ oops"})))
     with pytest.raises(
         ValueValidationError,
         match=r"state binding subject_expr for state 'status' references stored id 'broken-expr', "
@@ -1045,7 +1042,7 @@ async def test_by_id_slot_whose_stored_body_cannot_be_rendered_fails_the_save_lo
 async def test_inline_slot_that_cannot_be_rendered_fails_the_save_loudly() -> None:
     states = FakeStates(attached={"status": []}, templates={})
     b = StateBinding(states=[StateAttach(state="status", subject_expr=TemplatedText(content='"{{ oops"'))])
-    app: Any = SimpleNamespace(states=states, storage=SimpleNamespace(resource_manager=_real_resource_manager({})))
+    app: Any = SimpleNamespace(states=states, storage=_storage(_real_resource_manager({})))
     with pytest.raises(
         ValueValidationError,
         match=r"state binding subject_expr for state 'status' is not a renderable template",

@@ -158,11 +158,14 @@ a media reply's `media_*`) as its `params`.
 
 ## Working-on-it signal
 
-While a reply is owed to the participant — a message running its turn, the wait
-after they answer a question, a parked run that resumes — the platform keeps
-Telegram's **typing action** alive: it re-issues `sendChatAction "typing"` ahead of
-the action's ~5 s lifetime until the reply is sent, so the chat shows the bot typing
-for the wait rather than for a single burst at receipt. It is paused while a
+While a reply is owed to the participant — a message's turn once its target starts
+running, the wait after they answer a question, a parked run that resumes — the
+platform re-issues Telegram's **typing action** (`sendChatAction "typing"`) ahead of
+the action's ~5 s lifetime until the reply is sent — best effort, so the
+chat shows the bot typing for the wait rather than for a single burst at receipt, with
+a lapse of a few seconds possible between refreshes. A message's turn shows nothing while it waits for its
+slot, or when its thread is in manual mode; a parked run that resumes in a manual-mode
+thread still shows it while its reply is owed. It is paused while a
 question the run sent stands, to the participant or to anyone else (no longer
 re-issued, so the typing action lapses on its own), and shown again once no question
 the run sent stands. One stretch of showing it is bounded by the `CONVERSATIONS_WORKING_SIGNAL_MAX_SECONDS` ceiling

@@ -1,10 +1,11 @@
 """What a state template's ``template_jq`` program gives, once it is resolved and rendered.
 
-The module picks a program by name and purpose among the candidate templates, builds the
-template's sibling input-program prelude, checks a call against the program's declared
-``params``, reads the record document at the attachment path, evaluates the program and, for an
-``update`` program, checks the op batch and rebases each op under the attachment path. How a
-caller finds the candidates, renders a template and reads the record is the caller's.
+The module compiles a template's programs as the platform accepts them, picks a program by name
+and purpose among the candidate templates, builds the template's sibling input-program prelude,
+checks a call against the program's declared ``params``, reads the record document at the
+attachment path, evaluates the program and, for an ``update`` program, checks the op batch and
+rebases each op under the attachment path. How a caller finds the candidates, renders a
+template and reads the record is the caller's.
 """
 
 from __future__ import annotations
@@ -19,7 +20,8 @@ from tai42_contract.states import StateTemplateJq
 from tai42_contract.states.errors import StateNotFoundError, ValueValidationError
 
 from tai42_kit.utils.data.jq_errors import JqProgramError
-from tai42_kit.utils.data.jq_util import run_jq_first
+from tai42_kit.utils.data.jq_util import compile_check, run_jq_first
+from tai42_kit.utils.data.jq_worker import is_empty_expression
 
 # The named jq variables a ``template_jq`` program body may reference beyond its own call
 # input: the attachment's effective ``$parameters`` and its ``$declarations``.
@@ -40,9 +42,12 @@ def _input_def(name: str, jq: str) -> str:
 
     Always arity one, the declared params delivered as the single ``$params`` object
     (``{}`` when the program declares none). ``jq`` is the input program's RENDERED body
-    text.
+    text, followed by two line ends before the def's ``;``. A trailing ``#`` comment in the
+    body may end in a backslash, which carries the comment on past the first line end; the
+    second line end follows no backslash, so it closes the comment and leaves the def's ``;``
+    and the defs after it intact for every body jq compiles alone.
     """
-    return f"def tjq_{name}($params): {jq}; "
+    return f"def tjq_{name}($params): {jq}\n\n; "
 
 
 # A sibling call ``tjq_<name>`` as a whole jq token; one tokenising pass per body finds every one.
@@ -81,19 +86,65 @@ def input_order(rendered_inputs: Mapping[str, str]) -> list[str]:
 
 
 def sibling_prelude(rendered_inputs: Mapping[str, str], order: Sequence[str]) -> str:
-    """The ``def tjq_<name>($params): <jq>;`` sibling declarations in ``order`` (dependency-first)."""
-    return "".join(_input_def(name, rendered_inputs[name]) for name in order)
+    """The ``def tjq_<name>($params): <jq>;`` sibling declarations in ``order`` (dependency-first).
+
+    An input program whose body is the empty jq program declares no def: a def with no body is
+    no jq, and the program's own compile refuses the empty body, named for that program.
+    """
+    return "".join(
+        _input_def(name, rendered_inputs[name]) for name in order if not is_empty_expression(rendered_inputs[name])
+    )
 
 
 def template_jq_prelude(rendered_inputs: Mapping[str, str]) -> str:
     """The dependency-first run of ``def tjq_<name>($params): <jq>;`` sibling declarations.
 
     Built from the RENDERED body text of the template's INPUT-purpose programs (``name ->
-    rendered jq``) — prepended to a program's jq at compile and at evaluation so a
-    reference to a sibling input program resolves. Empty when the template declares no
-    input programs. Pure over already-rendered text.
+    rendered jq``) — the prelude of a program's jq at compile and at evaluation, so a
+    reference to a sibling input program resolves. Empty when the template declares no input
+    program with a non-empty body. Pure over already-rendered text.
     """
     return sibling_prelude(rendered_inputs, input_order(rendered_inputs))
+
+
+class TemplateJqCompileError(JqProgramError):
+    """A ``template_jq`` program that does not compile; ``program`` names it, the message is jq's."""
+
+    def __init__(self, program: str, cause: JqProgramError) -> None:
+        """Name the ``program`` that failed and carry ``cause``'s jq message."""
+        super().__init__(str(cause))
+        self.program = program
+
+
+async def compile_template_jq(programs: Mapping[str, StateTemplateJq], bodies: Mapping[str, str]) -> None:
+    """Compile every program of a ``template_jq`` section as the platform accepts it.
+
+    ``bodies`` holds each program's RENDERED body text by name; each program compiles with its
+    purpose's variables predeclared (:func:`program_variables`). The INPUT-purpose programs
+    compile first, dependency-first (:func:`input_order`), each with the sibling defs up to and
+    including its own as its prelude: the defs before it are already proven, so a body that does
+    not compile — as the program or as its sibling def — fails its own program, never a sibling.
+    Every other program then compiles over the full sibling prelude (:func:`template_jq_prelude`),
+    as its evaluation runs it. A reference cycle among input programs (which jq cannot express)
+    fails the compile. The first program that does not compile raises
+    :class:`TemplateJqCompileError` naming it, chained to jq's error.
+    """
+    inputs = {name: bodies[name] for name, p in programs.items() if p.purpose == "input"}
+    order = input_order(inputs)
+    for position, name in enumerate(order):
+        await _compile_program(name, bodies[name], sibling_prelude(inputs, order[: position + 1]), "input")
+    prelude = template_jq_prelude(inputs)
+    for name, program in programs.items():
+        if program.purpose != "input":
+            await _compile_program(name, bodies[name], prelude, program.purpose)
+
+
+async def _compile_program(name: str, body: str, prelude: str, purpose: Literal["input", "update"]) -> None:
+    """Compile one program's ``body`` over ``prelude``; a failure is a :class:`TemplateJqCompileError` naming it."""
+    try:
+        await compile_check(body, prelude=prelude, variables=program_variables(purpose))
+    except JqProgramError as exc:
+        raise TemplateJqCompileError(name, exc) from exc
 
 
 def select_template_jq(

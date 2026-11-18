@@ -49,9 +49,11 @@ from tai42_skeleton.operations.response_models.templates import (
     TemplateUploadResult,
 )
 from tai42_skeleton.operations.store_keys import checked_store_key
+from tai42_skeleton.operations.template_door import template_door
 from tai42_skeleton.storage.entries import read_stored_entry
 from tai42_skeleton.storage.listing import listed_keys
 from tai42_skeleton.template import TemplateNotFoundError
+from tai42_skeleton.template.errors import PartialDirectoryDeleteError
 
 
 class TemplateFetch(BaseModel):
@@ -195,13 +197,14 @@ async def delete_template(path: str) -> dict:
     """
     key = checked_store_key(path)
     manager = tai42_app.storage.resource_manager
-    fleet = FleetResult.model_validate(
-        await broadcast(
-            EvictTemplate(op="evict_template", path=key),
-            None,
-            lambda: manager.delete_template(key),
+    async with template_door():
+        fleet = FleetResult.model_validate(
+            await broadcast(
+                EvictTemplate(op="evict_template", path=key),
+                None,
+                lambda: manager.delete_template(key),
+            )
         )
-    )
     return {"path": key, "deleted": True, "fanout": fleet_fanout(fleet)}
 
 
@@ -228,24 +231,24 @@ async def delete_template_dir(path: str) -> dict:
     # carries the directory key (``prefix`` marks the prefix semantics) so every sibling
     # drops every stale compilation under it.
     #
-    # Failure splits by phase. A pre-mutation failure deleted nothing — a missing
-    # directory (``FileNotFoundError`` → 404), a rejected path (``ValueError`` → 400),
-    # a held template (``ConflictError`` → 409) or an unreadable holder
-    # (``OperationFailedError`` → 500) — so it aborts before any broadcast, siblings untouched, and its typed outcome is
-    # mapped here unchanged. A failure once destructive deletion may have begun leaves
-    # the store partially mutated, so the eviction MUST still fan out (it is idempotent —
-    # a spurious evict costs one re-render) before the original error propagates loudly
-    # as a ``FleetBroadcastError`` carrying the fleet report.
+    # Failure splits by phase, and the phase is the store's statement. A failure before
+    # deletion begins propagates as it is and aborts before any broadcast — a missing
+    # directory (``FileNotFoundError`` → 404), a rejected path (``ValueError`` → 400), a
+    # held template (409), an unreadable holder (500), a referee's own error with its own
+    # status. The store raises ``PartialDirectoryDeleteError`` once destructive deletion may
+    # have begun: only then the eviction still fans out (idempotent — a spurious evict costs
+    # one re-render) before the error propagates as a ``FleetBroadcastError`` carrying the
+    # fleet report.
     try:
-        fleet = FleetResult.model_validate(
-            await broadcast(
-                EvictTemplate(op="evict_template", path=key, prefix=True),
-                None,
-                lambda: manager.delete_template_dir(key),
-                publish_on_local_failure=True,
-                pre_mutation_errors=(FileNotFoundError, ValueError, ConflictError, OperationFailedError),
+        async with template_door():
+            fleet = FleetResult.model_validate(
+                await broadcast(
+                    EvictTemplate(op="evict_template", path=key, prefix=True),
+                    None,
+                    lambda: manager.delete_template_dir(key),
+                    publish_on_local_failure=(PartialDirectoryDeleteError,),
+                )
             )
-        )
     except FileNotFoundError as exc:
         raise NotFoundError(f"template directory {key!r} not found") from exc
     except ValueError as exc:

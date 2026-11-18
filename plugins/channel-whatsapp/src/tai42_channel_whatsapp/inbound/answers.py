@@ -42,7 +42,7 @@ def _render_answer_for_bridge(answer: str | dict[str, Any], pending: PendingQues
     return render_form_text(answer, pending.schema)
 
 
-async def _resolve_answer(
+async def resolve_answer(
     phone_number_id: str,
     wa_id: str,
     wamid: str,
@@ -74,7 +74,7 @@ async def _resolve_answer(
     """
     # Deferred import: ``forms`` depends on this module (the ladder + bridge), so the
     # form-recovery back-edge is imported here to keep the package import graph acyclic.
-    from tai42_channel_whatsapp.inbound.forms import _recover_form_rejection
+    from tai42_channel_whatsapp.inbound.forms import recover_form_rejection
 
     is_form = pending.schema is not None
     bridge_text = _render_answer_for_bridge(answer, pending)
@@ -105,7 +105,7 @@ async def _resolve_answer(
     if result.outcome is InboundAnswerOutcome.NO_CORRELATION:
         # The fallback IS the bridge path, so it carries the same params the caller's
         # own bridge branch would have carried (the correlated forward takes none).
-        await _bridge_inbound(
+        await bridge_inbound(
             phone_number_id,
             wa_id,
             bridge_text,
@@ -115,12 +115,12 @@ async def _resolve_answer(
         )
         return
     if result.outcome is InboundAnswerOutcome.RETRY_KEPT and is_form:
-        await _recover_form_rejection(phone_number_id, wa_id, wamid, pending, result.retry_reason, result.retry_field)
+        await recover_form_rejection(phone_number_id, wa_id, wamid, pending, result.retry_reason, result.retry_field)
         return
     await mark_seen(wamid)
 
 
-async def _bridge_inbound(
+async def bridge_inbound(
     phone_number_id: str,
     wa_id: str,
     text: str,

@@ -14,7 +14,7 @@ import type { JsonSchema } from '@tai42/studio-sdk';
 import { fieldDrawingOrder, isFieldVisible } from '@tai42/studio-sdk';
 import type { ReactElement } from 'react';
 
-import type { DisplayBlock, FieldWording } from '@/transcript-model';
+import type { DisplayBlock, DisplayText, FieldWording } from '@/transcript-model';
 
 /** A plain JS object, or not. */
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -35,10 +35,11 @@ function toText(value: unknown): string {
   }
 }
 
-/** A display slot's current value as text (a computed total is a number); absent → undefined. */
-function slotValueText(value: unknown): string | undefined {
+/** A display slot's current value as text (a computed total is a number); absent or `null`
+ * (the slot unfilled) → undefined. */
+function slotValueText(value: DisplayText | undefined): string | undefined {
   if (value === undefined || value === null) return undefined;
-  return toText(value);
+  return String(value);
 }
 
 /** An image display block: the reaction's source for its slot when one arrived (`null`
@@ -75,7 +76,7 @@ function DisplayBlockView({
   imageSources,
 }: {
   readonly block: DisplayBlock;
-  readonly slots: Readonly<Record<string, unknown>>;
+  readonly slots: Readonly<Record<string, DisplayText>>;
   readonly imageSources: ReadonlyMap<string, string | null>;
 }): ReactElement | null {
   if (block.kind === 'image')
@@ -104,7 +105,7 @@ export function DisplayBlocks({
   imageSources,
 }: {
   readonly blocks: readonly DisplayBlock[];
-  readonly slots: Readonly<Record<string, unknown>>;
+  readonly slots: Readonly<Record<string, DisplayText>>;
   readonly imageSources: ReadonlyMap<string, string | null>;
 }): ReactElement | null {
   if (blocks.length === 0) return null;

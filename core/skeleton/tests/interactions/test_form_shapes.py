@@ -162,6 +162,22 @@ def test_range_order_and_the_one_sided_span_sentences():
     assert _kinds(errors)["end"] == (FormShapeKind.RANGE_SPAN, {"minDays": 3, "days": 2}, "Choose at least 3 days")
 
 
+@pytest.mark.parametrize(
+    ("bound", "text"),
+    [
+        (10.0, "10"),
+        (9.5, "9.5"),
+        (5e-05, "0.00005"),
+        (1e-07, "1e-7"),
+        (1e21, "1e+21"),
+        (10**22, "10000000000000000000000"),
+    ],
+)
+def test_a_number_bound_reads_as_a_display_slot_writes_it(bound: float, text: str):
+    # A float bound is written as the web widget writes a number; an integer bound keeps every digit.
+    assert shape_sentence(FormShapeKind.MINIMUM, {"minimum": bound}) == f"Enter a number of at least {text}"
+
+
 def test_singular_counts_read_as_one():
     schema = {
         "type": "object",

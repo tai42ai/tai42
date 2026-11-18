@@ -380,9 +380,9 @@ async def test_a_raising_referee_propagates_and_nothing_is_written(world: _World
 async def test_the_states_referee_refuses_a_tool_held_only_by_state_records(
     world: _World, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    from tai42_skeleton.app import tool_rename_referees
     from tai42_skeleton.states import db as states_db
     from tai42_skeleton.states.store import PostgresStatesStore
-    from tai42_skeleton.tools import platform_referees
 
     async def count(_store: Any, kind: str, names: list[str]) -> dict[str, int]:
         return {"acme_send": 3} if kind == "tool" and "acme_send" in names else {}
@@ -394,7 +394,7 @@ async def test_the_states_referee_refuses_a_tool_held_only_by_state_records(
     monkeypatch.setattr(PostgresStatesStore, "__init__", lambda self: None)
     monkeypatch.setattr(PostgresStatesStore, "count_records_for_targets", count)
     monkeypatch.setattr(PostgresStatesStore, "outbox_outstanding_on_targets", outstanding)
-    instance.app.tools.register_rename_referee(platform_referees._states_referee)
+    instance.app.tools.register_rename_referee(tool_rename_referees._states_referee)
 
     with pytest.raises(ConflictError) as caught:
         await _tool_filter(world, _entry(include=["acme_read"]))
@@ -409,15 +409,15 @@ async def test_the_states_referee_refuses_a_tool_held_only_by_state_records(
 async def test_the_tool_extensions_map_refuses_an_unpick_of_an_extended_tool(
     world: _World, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    from tai42_skeleton.app import tool_rename_referees
     from tai42_skeleton.manifest import Manifest
-    from tai42_skeleton.tools import platform_referees
 
     extended = {**_entry(), "extensions": {"acme_send": [["ext"]]}}
     world.store.manifest = {"mcp": [extended]}
     world.bodies = {"notify_ext": _body("acme_send_ext")}
     live = Manifest.model_validate({"mcp": [extended]})
     monkeypatch.setattr(instance.app, "_require_live_manifest", lambda: live)
-    instance.app.tools.register_rename_referee(platform_referees._tool_extensions_referee)
+    instance.app.tools.register_rename_referee(tool_rename_referees._tool_extensions_referee)
 
     with pytest.raises(ConflictError) as caught:
         await _tool_filter(world, {**extended, "include": ["acme_read"]})

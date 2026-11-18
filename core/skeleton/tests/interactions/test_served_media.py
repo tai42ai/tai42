@@ -18,6 +18,7 @@ from tai42_contract.interactions import (
     StoredMedia,
 )
 
+from tai42_skeleton.app import instance
 from tai42_skeleton.app.instance import build_app
 from tai42_skeleton.conversations import media_meta as meta_module
 from tai42_skeleton.conversations.media_meta import InboundMediaMetaStore
@@ -71,7 +72,7 @@ async def inbound(outbound):
 
     monkeypatch.setattr(meta_module, "client_ctx", fake_client_ctx)
     provider = _CountingStorage()
-    monkeypatch.setattr(served_media, "_blob_provider", lambda: provider)
+    monkeypatch.setattr(instance.app._storage_registry, "_provider", provider)
     try:
         yield SimpleNamespace(
             provider=provider,
@@ -162,7 +163,7 @@ async def test_no_media_store_configured_is_not_found(outbound):
 async def test_an_inbound_record_with_no_blob_provider_is_unavailable(inbound):
     media_id = "v" * 43
     await _seed_inbound(inbound, media_id)
-    inbound.monkeypatch.setattr(served_media, "_blob_provider", lambda: None)
+    inbound.monkeypatch.setattr(instance.app._storage_registry, "_provider", None)
     with pytest.raises(MediaStoreUnavailableError) as caught:
         await load_served_media(media_id, max_bytes=None)
     assert str(caught.value) == "media store unavailable"

@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import http.server
-import json
 import threading
 import time
 from collections.abc import Iterator
@@ -29,11 +28,10 @@ from tai42_channel_whatsapp.flow_pictures import (
     embed_display_pictures,
     embed_page_pictures,
     is_picture_link,
-    require_pictured_data_fits,
 )
-from tai42_channel_whatsapp.flows import build_flow_data, build_form_flow
-from tai42_channel_whatsapp.flows_endpoint import echoed_screen_data_max_bytes
+from tai42_channel_whatsapp.flows import build_form_flow
 from tai42_channel_whatsapp.flows_resolve import image_slots, pages_without_picture_content
+from tai42_channel_whatsapp.flows_send_data import build_flow_data
 
 from .conftest import PICTURE_JPEG as JPEG
 from .conftest import PICTURE_PNG as PNG
@@ -304,40 +302,6 @@ def test_the_page_readers_name_image_slots_and_strip_picture_content():
     ]
     assert pages[0]["display"][1]["src"] == "c3RhdGlj"
     assert pages_without_picture_content(None) is None
-
-
-def _data_of_size(size: int) -> dict[str, str]:
-    data = {"slot_preview": ""}
-    data["slot_preview"] = "A" * (size - len(json.dumps(data, separators=(",", ":"))))
-    return data
-
-
-_PICTURE_SLOT_PAGES = [_page({"kind": "image", "slot": "preview"})]
-
-
-@pytest.mark.parametrize(("endpoint", "budget"), [(False, 1_000_000), (True, echoed_screen_data_max_bytes())])
-def test_picture_slot_data_at_the_budget_fits_and_one_byte_more_is_refused(endpoint: bool, budget: int):
-    require_pictured_data_fits(_PICTURE_SLOT_PAGES, _data_of_size(budget), endpoint=endpoint)
-    with pytest.raises(ChannelInputError) as caught:
-        require_pictured_data_fits(_PICTURE_SLOT_PAGES, _data_of_size(budget + 1), endpoint=endpoint)
-    assert str(caught.value) == (
-        f"form data is {budget + 1} bytes, over the {budget} bytes this channel sends in a form with "
-        "picture slots; slotted pictures ride this data and count toward it"
-    )
-
-
-@pytest.mark.parametrize(
-    "pages",
-    [
-        None,
-        [_page({"kind": "body", "slot": "caption", "text": "Hi"})],
-        [_page({"kind": "image", "src": "c3RhdGlj"})],
-    ],
-    ids=["no-pages", "text-slot-only", "unslotted-image-only"],
-)
-@pytest.mark.parametrize("endpoint", [False, True])
-def test_data_of_a_form_without_picture_slots_is_not_measured(pages: list[dict[str, Any]] | None, endpoint: bool):
-    require_pictured_data_fits(pages, _data_of_size(2_000_000), endpoint=endpoint)
 
 
 # --- one total time limit on each picture fetch ---

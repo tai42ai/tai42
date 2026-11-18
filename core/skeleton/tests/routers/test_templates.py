@@ -20,8 +20,8 @@ import tai42_skeleton.access_control.store as ac_store_module
 import tai42_skeleton.operations.templates as templates_ops
 import tai42_skeleton.routers.templates as router
 import tai42_skeleton.template.path_guard as path_guard
-from tai42_skeleton.app import instance
-from tai42_skeleton.template import ResourceManager, TemplateNotFoundError, platform_referees
+from tai42_skeleton.app import instance, template_delete_referees
+from tai42_skeleton.template import ResourceManager, TemplateNotFoundError
 from tai42_skeleton.template.path_guard import UnsafeTemplatePathError
 
 from .._fakes.bus import FakeBus
@@ -42,6 +42,7 @@ from .._fakes.template_holders import (
     HELD_DIRECTORY_REFUSAL,
     HELD_HOLDERS,
     HELD_TEMPLATE_REFUSAL,
+    app_held_by,
     fresh_referees,
     hold_jq_gate,
 )
@@ -169,7 +170,9 @@ async def test_a_held_delete_is_409_naming_its_holders(monkeypatch, handler, pat
     provider = RecordingStorage({"jq/gate": (b".a", None)})
     fake_app = SimpleNamespace(
         storage=SimpleNamespace(
-            resource_manager=ResourceManager(provider, on_evicted=instance.app._fire_template_evicted)
+            resource_manager=ResourceManager(
+                provider, on_evicted=instance.app._fire_template_evicted, held_by=app_held_by
+            )
         )
     )
     monkeypatch.setattr(templates_ops, "tai42_app", fake_app)
@@ -193,7 +196,9 @@ def _identities_name_jq_gate(monkeypatch) -> RecordingStorage:
     provider = RecordingStorage({"jq/gate": (b".a", None)})
     fake_app = SimpleNamespace(
         storage=SimpleNamespace(
-            resource_manager=ResourceManager(provider, on_evicted=instance.app._fire_template_evicted)
+            resource_manager=ResourceManager(
+                provider, on_evicted=instance.app._fire_template_evicted, held_by=app_held_by
+            )
         )
     )
     monkeypatch.setattr(templates_ops, "tai42_app", fake_app)
@@ -202,11 +207,11 @@ def _identities_name_jq_gate(monkeypatch) -> RecordingStorage:
     async def policies():
         return _POLICY_ROWS
 
-    monkeypatch.setattr(platform_referees, "_skeleton_store_configured", lambda: True)
+    monkeypatch.setattr(template_delete_referees, "_skeleton_store_configured", lambda: True)
     monkeypatch.setattr(
         ac_store_module, "access_control_store", lambda: SimpleNamespace(list_conditioned_policies=policies)
     )
-    fresh_referees(monkeypatch).register(platform_referees._access_control_referee)
+    fresh_referees(monkeypatch).register(template_delete_referees._access_control_referee)
     return provider
 
 
@@ -477,7 +482,7 @@ def real_manager(monkeypatch) -> RecordingStorage:
     """
     provider = RecordingStorage()
     monkeypatch.setattr(instance.app._storage_registry, "_provider", provider)
-    tm = ResourceManager(provider, on_evicted=lambda _eviction: None)
+    tm = ResourceManager(provider, on_evicted=lambda _eviction: None, held_by=app_held_by)
     monkeypatch.setattr(templates_ops, "tai42_app", SimpleNamespace(storage=SimpleNamespace(resource_manager=tm)))
     monkeypatch.setattr(instance.app, "_bus", FakeBus())
     return provider

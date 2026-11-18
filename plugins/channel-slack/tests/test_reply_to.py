@@ -14,7 +14,8 @@ from tai42_contract.interactions.models import MediaKind
 
 from tai42_channel_slack.blocks import SELECT_ACTION_PREFIX
 from tai42_channel_slack.correlation import store_correlation, store_form_record
-from tai42_channel_slack.forms import FIELD_ACTION_ID, FORM_SUBMIT_CALLBACK_ID
+from tai42_channel_slack.form_blocks import FIELD_ACTION_ID
+from tai42_channel_slack.forms import FORM_SUBMIT_CALLBACK_ID
 from tai42_channel_slack.inbound import events
 from tai42_channel_slack.inbound.events import slack_inbound
 from tai42_channel_slack.inbound.interactive import slack_interactive

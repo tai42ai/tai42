@@ -28,7 +28,7 @@ def _canonical(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
 
 
-def _validate_schema(schema: Any) -> None:
+def validate_schema(schema: Any) -> None:
     """Accept any valid, object-rooted JSON Schema (draft 2020-12) with at least one property.
 
     Refuse everything else loudly. Nesting to any depth is the point — the record
@@ -46,7 +46,7 @@ def _validate_schema(schema: Any) -> None:
 
 # The draft 2020-12 metaschema URI, as a ``$schema`` value may spell it: any other ``$schema``
 # makes jsonschema switch dialect for that node, whose keyword positions the rules do not model.
-_DRAFT_2020_12 = frozenset(
+DRAFT_2020_12 = frozenset(
     {"https://json-schema.org/draft/2020-12/schema", "https://json-schema.org/draft/2020-12/schema#"}
 )
 
@@ -79,7 +79,7 @@ def check_document_rules(schema: Any, *, subject: str) -> None:
         raise SchemaValidationError(f"{subject}: $dynamicRef is not supported — use $ref with root-level $defs")
     for node in nodes:
         dialect = node.get("$schema")
-        if dialect is not None and dialect not in _DRAFT_2020_12:
+        if dialect is not None and dialect not in DRAFT_2020_12:
             raise SchemaValidationError(
                 f"{subject}: $schema {dialect!r} is not supported — the schema is one draft 2020-12 document"
             )
@@ -178,7 +178,7 @@ def iter_refs(node: Any):
             yield ref
 
 
-def _validate_document(validator: Draft202012Validator, doc: dict[str, Any], *, where: str | None = None) -> None:
+def validate_document(validator: Draft202012Validator, doc: dict[str, Any], *, where: str | None = None) -> None:
     """Validate the FULL record document with the effective schema's ``validator``.
 
     The error names the offending JSON path, prefixed with ``where`` (the state and subject a
@@ -193,10 +193,10 @@ def _validate_document(validator: Draft202012Validator, doc: dict[str, Any], *, 
         ) from exc
 
 
-def _document_reasons(validator: Draft202012Validator, doc: dict[str, Any]) -> list[ValidationReason]:
+def document_reasons(validator: Draft202012Validator, doc: dict[str, Any]) -> list[ValidationReason]:
     """EVERY way ``doc`` fails ``validator``'s effective schema, ordered by JSON path.
 
-    The read-only sibling of :func:`_validate_document`: where the write path raises on the first
+    The read-only sibling of :func:`validate_document`: where the write path raises on the first
     failure, this collects them all through ``validator.iter_errors`` so a caller reports the whole
     misfit at once. Each reason carries the offending node's ``json_path`` and the validator's
     message; an empty list means the document fits.
@@ -220,7 +220,7 @@ class RecordValidator:
 
     def __init__(self, schema: dict[str, Any]) -> None:
         """Check ``schema`` by the declaration rules, then compile its draft 2020-12 validator once."""
-        _validate_schema(schema)
+        validate_schema(schema)
         self._validator = Draft202012Validator(schema, registry=SCHEMA_REFS)
 
     def validate(self, data: Any) -> RecordValidation:
@@ -230,11 +230,11 @@ class RecordValidator:
         """
         if not isinstance(data, dict):
             raise ValueValidationError("a record document must be a JSON object")
-        reasons = _document_reasons(self._validator, data)
+        reasons = document_reasons(self._validator, data)
         return RecordValidation(fits=not reasons, reasons=reasons)
 
 
-def _is_narrowing(old_schema: dict[str, Any], new_schema: dict[str, Any]) -> bool:
+def is_narrowing(old_schema: dict[str, Any], new_schema: dict[str, Any]) -> bool:
     """Whether ``new_schema`` removes or changes any top-level property of ``old_schema``.
 
     Also true when it changes any ROOT keyword outside ``properties``.
@@ -252,8 +252,13 @@ def _is_narrowing(old_schema: dict[str, Any], new_schema: dict[str, Any]) -> boo
 
 
 __all__ = [
+    "DRAFT_2020_12",
     "RecordValidator",
     "check_document_rules",
+    "document_reasons",
+    "is_narrowing",
     "iter_refs",
     "schema_nodes",
+    "validate_document",
+    "validate_schema",
 ]

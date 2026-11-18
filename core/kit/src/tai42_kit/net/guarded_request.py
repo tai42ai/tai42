@@ -3,11 +3,14 @@
 :func:`guarded_request` sends a single GET/POST/DELETE. While the URL guard is enabled the connection
 runs over :class:`~tai42_kit.net.fetch_url.PinningTransport`, so the target host is resolved, refused
 when it is non-public (unless ``TAI_URL_GUARD_ALLOW_CIDRS`` admits it), and connected to at the
-validated address. Whatever the guard setting, ``https`` is required unless the host is loopback, a
-3xx answer is returned to the caller rather than followed, the body is capped while it streams, and
-``timeout`` is ONE deadline for the whole call — resolve, connect, send and read together — so a
-server that drips its answer is cut off exactly like a silent one. Error text never carries the URL's
-query, a request header value or a request body.
+validated address. The request rides the guarded fetch client its configuration shares on the event
+loop (:func:`~tai42_kit.net.fetch_url.guarded_fetch_client`), which reads no environment proxy
+setting and reads the environment's CA settings (``SSL_CERT_FILE``, ``SSL_CERT_DIR``) only under the
+pin, and keeps no cookie across requests. Whatever the guard setting, ``https`` is
+required unless the host is loopback, a 3xx answer is returned to the caller rather than followed, the
+body is capped while it streams, and ``timeout`` is ONE deadline for the whole call — resolve,
+connect, send and read together — so a server that drips its answer is cut off exactly like a silent
+one. Error text never carries the URL's query, a request header value or a request body.
 """
 
 from __future__ import annotations
@@ -20,7 +23,7 @@ from typing import Any
 import httpx
 
 from tai42_kit.net import url_guard
-from tai42_kit.net.fetch_url import PinningTransport, unwrap_guard_error
+from tai42_kit.net.fetch_url import guarded_fetch_client, unwrap_guard_error
 from tai42_kit.net.url_guard import UrlGuardError, is_loopback_host
 
 
@@ -65,13 +68,9 @@ async def _send(
     # The phase timers are the same length and start after the total deadline, so on a responsive
     # loop the total deadline ends a slow call; either error is a GuardedRequestError.
     phases = httpx.Timeout(timeout)
-    if url_guard.guard_enabled():
-        client = httpx.AsyncClient(transport=PinningTransport(), follow_redirects=False, timeout=phases)
-    else:
-        client = httpx.AsyncClient(follow_redirects=False, timeout=phases, trust_env=False)
     async with (
-        client,
-        client.stream(method, url, headers=dict(headers or {}), data=form, json=json_body) as response,
+        guarded_fetch_client(pinned=url_guard.guard_enabled(), trust_env=False) as client,
+        client.stream(method, url, headers=dict(headers or {}), data=form, json=json_body, timeout=phases) as response,
     ):
         buffer = bytearray()
         async for chunk in response.aiter_bytes():

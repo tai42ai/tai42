@@ -60,6 +60,6 @@ def test_the_check_recognises_a_provider_delete() -> None:
         return [_is_provider_delete(node) for node in ast.walk(ast.parse(source)) if isinstance(node, ast.Call)]
 
     assert calls("provider.delete(p)") == [True]
-    assert calls("_storage_provider().delete(p)") == [True, False]
+    assert calls("storage_provider().delete(p)") == [True, False]
     assert calls("x.delete_dir(p)") == [True]
     assert calls("self._store.delete(p)") == [False]
