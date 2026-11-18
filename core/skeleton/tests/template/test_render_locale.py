@@ -15,6 +15,7 @@ from tai42_skeleton.template import ResourceManager
 from tai42_skeleton.template.errors import TemplateLocaleNotFoundError
 
 from .._fakes.listing import keys_under
+from .._fakes.template_holders import app_held_by
 
 
 class _InMemoryStorage(Storage):
@@ -57,7 +58,7 @@ def _manager(items: dict[str, str]) -> ResourceManager:
         def __init__(self) -> None:
             super().__init__(items)
 
-    return ResourceManager(registry.provider, on_evicted=lambda _eviction: None)
+    return ResourceManager(registry.provider, on_evicted=lambda _eviction: None, held_by=app_held_by)
 
 
 async def test_locale_variant_chain_prefers_specific_then_language_then_default() -> None:

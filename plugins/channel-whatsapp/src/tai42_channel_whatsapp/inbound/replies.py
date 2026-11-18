@@ -14,10 +14,10 @@ from tai42_contract.conversations import InboundRejectionReason
 from tai42_kit.conversations.entry_params import put_entry_param
 
 from tai42_channel_whatsapp.correlation import PendingQuestion, already_seen, peek_pending
-from tai42_channel_whatsapp.inbound.answers import _bridge_inbound, _resolve_answer
-from tai42_channel_whatsapp.inbound.forms import _handle_form_reply
-from tai42_channel_whatsapp.inbound.params import _merged_params, _MessageContext
-from tai42_channel_whatsapp.inbound.rejection import _notify_rejected
+from tai42_channel_whatsapp.inbound.answers import bridge_inbound, resolve_answer
+from tai42_channel_whatsapp.inbound.forms import handle_form_reply
+from tai42_channel_whatsapp.inbound.params import MessageContext, merged_params
+from tai42_channel_whatsapp.inbound.rejection import notify_rejected
 
 # The interactive subtypes this channel reads as a tap; ``nfm_reply`` (a completed form) is read
 # by the form handler. Any other subtype is content this channel has no reader for.
@@ -100,7 +100,7 @@ async def _route_words(
     wa_id: str,
     wamid: str,
     words: _Words,
-    context: _MessageContext,
+    context: MessageContext,
     *,
     answer_for: Callable[[PendingQuestion], str | None],
 ) -> None:
@@ -114,11 +114,11 @@ async def _route_words(
     message's ``wamid``. One-pending is enforced on reserve and the ``wamid`` dedupe guards a
     redelivery, so the peek-then-resolve needs no destructive claim.
     """
-    params = _merged_params(context.params, words.params)
+    params = merged_params(context.params, words.params)
     pending = await peek_pending(phone_number_id, wa_id)
     answer = answer_for(pending) if pending is not None else None
     if pending is None or answer is None:
-        await _bridge_inbound(
+        await bridge_inbound(
             phone_number_id,
             wa_id,
             words.text,
@@ -127,7 +127,7 @@ async def _route_words(
             reply_to_medium_message_id=context.reply_to_medium_message_id,
         )
         return
-    await _resolve_answer(
+    await resolve_answer(
         phone_number_id,
         wa_id,
         wamid,
@@ -139,11 +139,11 @@ async def _route_words(
 
 
 async def _refuse_unreadable(phone_number_id: str, wa_id: str, wamid: str, kind: str) -> None:
-    await _notify_rejected(phone_number_id, wa_id, wamid, kind=kind, reason=InboundRejectionReason.UNREADABLE)
+    await notify_rejected(phone_number_id, wa_id, wamid, kind=kind, reason=InboundRejectionReason.UNREADABLE)
 
 
-async def _handle_text(
-    message: dict[str, Any], phone_number_id: str, wa_id: str, wamid: str, context: _MessageContext
+async def handle_text(
+    message: dict[str, Any], phone_number_id: str, wa_id: str, wamid: str, context: MessageContext
 ) -> None:
     """A typed reply: it answers a pending question with its body minus outer whitespace, else is bridged.
 
@@ -185,8 +185,8 @@ def _map_tap_to_answer(reply_id: str | None, pending: PendingQuestion) -> str | 
     return pending.options[index]
 
 
-async def _handle_interactive(
-    message: dict[str, Any], phone_number_id: str, wa_id: str, wamid: str, context: _MessageContext
+async def handle_interactive(
+    message: dict[str, Any], phone_number_id: str, wa_id: str, wamid: str, context: MessageContext
 ) -> None:
     """A button tap or list pick: map it to a pending ask's option, else bridge the tap's title.
 
@@ -208,7 +208,7 @@ async def _handle_interactive(
     interactive: dict[str, Any] = raw_interactive if isinstance(raw_interactive, dict) else {}
     subtype = _interactive_subtype(interactive)
     if subtype == "nfm_reply":
-        await _handle_form_reply(
+        await handle_form_reply(
             interactive,
             phone_number_id,
             wa_id,
@@ -218,7 +218,7 @@ async def _handle_interactive(
         )
         return
     if subtype not in _TAP_REPLY_TYPES:
-        await _notify_rejected(
+        await notify_rejected(
             phone_number_id,
             wa_id,
             wamid,
@@ -241,8 +241,8 @@ async def _handle_interactive(
     )
 
 
-async def _handle_button(
-    message: dict[str, Any], phone_number_id: str, wa_id: str, wamid: str, context: _MessageContext
+async def handle_button(
+    message: dict[str, Any], phone_number_id: str, wa_id: str, wamid: str, context: MessageContext
 ) -> None:
     """A template quick-reply tap (a ``button`` message): it answers like a typed reply, else is bridged.
 

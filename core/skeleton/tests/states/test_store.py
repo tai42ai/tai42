@@ -28,7 +28,7 @@ from tai42_skeleton.states.store.trace import (
     guard_skip_rows,
     trace_stamp,
 )
-from tai42_skeleton.states.templates.trace import _TRACE_SCHEMA
+from tai42_skeleton.states.templates.trace import inject_trace
 
 _STAMP = {"meta": {"node": "n1"}, "run": "r1", "turn": "t1", "inbound": "i1", "at": "2026-09-06T00:00:00+00:00"}
 
@@ -130,8 +130,10 @@ def test_stamp_trace_noop_without_traced_paths() -> None:
 )
 def test_trace_stamp_carries_the_origin_in_the_traced_shape(origin: CompletedOrigin) -> None:
     stamp = trace_stamp(origin)
-    assert set(stamp) == set(_TRACE_SCHEMA["properties"])
-    Draft202012Validator(_TRACE_SCHEMA).validate(stamp)
+    # The ``_trace`` schema a tracing attachment's effective schema admits on every object.
+    trace_schema = inject_trace({"type": "object"})["properties"]["_trace"]
+    assert set(stamp) == set(trace_schema["properties"])
+    Draft202012Validator(trace_schema).validate(stamp)
     assert (stamp["meta"], stamp["run"], stamp["turn"], stamp["inbound"]) == (
         origin.meta,
         origin.run_id,

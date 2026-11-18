@@ -20,14 +20,14 @@ from typing import Any
 from tai42_contract.channels import ChannelInputError
 from tai42_kit.interactions import TIME_OF_KEY, drawing_order
 
-from tai42_channel_whatsapp.flows_components import _sanitize_name, display_content_member, range_pairs
+from tai42_channel_whatsapp.flows_components import display_content_member, range_pairs, sanitize_name
 
 # The default top-bar title of the page-less form's single screen, shown when the
 # caller passes no ``form_title``. A form ask carries no domain-specific chrome.
 _SCREEN_TITLE = "Form"
 
 
-def _resolve_pages(
+def resolve_pages(
     properties: dict[str, Any],
     pages: list[dict[str, Any]] | None,
     option_fields: set[str],
@@ -43,7 +43,7 @@ def _resolve_pages(
     and ``form_submit`` apply only to the page-less default. Each page's names are in
     :func:`form_drawing_order`, the one order the screens, the per-send data, the footers and the
     data endpoint read; ``option_fields`` (the send's option-bearing fields) takes part in which
-    ``rangeStart`` pairs merge (:func:`_form_range_merges`). Raises ``ChannelInputError`` for a page
+    ``rangeStart`` pairs merge (:func:`form_range_merges`). Raises ``ChannelInputError`` for a page
     that names a property the schema does not declare.
     """
     resolved_pages = pages or [
@@ -60,7 +60,7 @@ def _resolve_pages(
             if field not in properties:
                 raise ChannelInputError(f"form page names unknown property {field!r}")
         fields_by_screen.append(drawing_order(page_fields, properties))
-    merges = _form_range_merges(properties, resolved_pages, fields_by_screen, option_fields)
+    merges = form_range_merges(properties, resolved_pages, fields_by_screen, option_fields)
     return resolved_pages, [_place_merged_ends(fields, properties, merges) for fields in fields_by_screen]
 
 
@@ -101,7 +101,7 @@ def _place_merged_ends(ordered: list[str], properties: dict[str, Any], merges: d
     return result
 
 
-def _form_range_merges(
+def form_range_merges(
     properties: dict[str, Any],
     resolved_pages: list[dict[str, Any]],
     fields_by_screen: list[list[str]],
@@ -144,7 +144,7 @@ def slot_datanames(pages: list[dict[str, Any]] | None) -> dict[str, str]:
     for slot, _ in _slotted_blocks(pages):
         if slot in mapping:
             continue
-        base = f"slot_{_sanitize_name(slot)}"
+        base = f"slot_{sanitize_name(slot)}"
         candidate = base
         suffix = 2
         while candidate in used:

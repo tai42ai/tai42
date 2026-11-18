@@ -7,6 +7,8 @@ stubbed); a refusal must write NO row.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 from pydantic import BaseModel
 from tai42_contract.access_control import KEY_FINGERPRINT_CLAIM, OWNER_USER_ID_CLAIM
@@ -78,6 +80,7 @@ class _FakeAgents:
 class _FakeApp:
     def __init__(self) -> None:
         self.agents = _FakeAgents()
+        self.storage = SimpleNamespace(provider=None)
         self._target_validator_registry = TargetBindValidatorRegistry()
         self.conversations = ConversationsFacet(self)  # pyright: ignore[reportArgumentType]
 

@@ -13,13 +13,14 @@ awaits the render, and composes the rest: the render caches and their eviction
 import asyncio
 import itertools
 import threading
-from collections.abc import Callable, Iterator
+from collections.abc import Awaitable, Callable, Iterator
 from contextlib import contextmanager
 from typing import Any
 
 from jinja2 import FunctionLoader
 from tai42_contract.storage import Storage
 from tai42_contract.template import ImageReference, TemplatedText, TemplateEviction
+from tai42_contract.tools import ReferenceHolder
 
 from tai42_skeleton.template.errors import TemplateNotFoundError, TemplateNotTextError
 from tai42_skeleton.template.input_schema import template_input_schema, undeclared_variables
@@ -46,14 +47,22 @@ class ResourceManager:
     ``on_evicted`` with what it dropped, after every cache of the manager is dropped.
     """
 
-    def __init__(self, provider: Storage | None, *, on_evicted: Callable[[TemplateEviction], None]):
+    def __init__(
+        self,
+        provider: Storage | None,
+        *,
+        on_evicted: Callable[[TemplateEviction], None],
+        held_by: Callable[[frozenset[str]], Awaitable[list[ReferenceHolder]]],
+    ):
         """Wire the sandboxed Jinja environment and the render caches from settings.
 
         ``provider`` is the Storage backend, or ``None`` when none is registered; ``on_evicted``
-        receives every eviction this manager applies.
+        receives every eviction this manager applies; ``held_by`` answers every holder of a set
+        of stored ids, the check every delete reads first.
         """
         self._provider = provider
         self._on_evicted = on_evicted
+        self._held_by = held_by
         self.epoch: int = next(_EPOCHS)
         self.generation: int = 0
         # Sandboxed engine: template text is an authoring surface (hook
@@ -74,7 +83,9 @@ class ResourceManager:
 
         self._render_cache = RenderCache(self._env, self._load_by_id, template_cache_settings())
         self._sources = SourceLoader(lambda: self.provider)
-        self._store_writes = StoreWrites(lambda: self.provider, evict_id=self.evict_compiled, evict_dir=self.evict_dir)
+        self._store_writes = StoreWrites(
+            lambda: self.provider, held_by=self._held_by, evict_id=self.evict_compiled, evict_dir=self.evict_dir
+        )
 
     @property
     def cache_enabled(self) -> bool:
@@ -195,7 +206,8 @@ class ResourceManager:
         """Load ``source`` and decode it to extracted text OR a ``MediaBlock``.
 
         Bytes that cannot be loaded raise :class:`ContentNotLoadableError`; without the
-        ``files`` extra it raises the ``501`` ``NotSupportedError`` before any read. See
+        ``files`` extra it raises :class:`~tai42_skeleton.template.errors.FilesNotConfiguredError`
+        before any read. See
         :meth:`SourceLoader.load_file <tai42_skeleton.template.sources.SourceLoader.load_file>`.
         """
         return await self._sources.load_file(source)
@@ -360,8 +372,10 @@ class ResourceManager:
         """Delete the stored object at ``path`` unless a stored object still names it.
 
         Every delete of a stored object goes through here or :meth:`delete_template_dir`.
-        A held object raises the ``409`` naming its holders and deletes nothing; a holder
-        that cannot be read raises a ``500``; a missing object raises ``FileNotFoundError``.
+        A held object raises :class:`~tai42_skeleton.template.errors.StoredObjectHeldError`
+        naming its holders and deletes nothing; a holder that cannot be read raises
+        :class:`~tai42_skeleton.template.errors.HolderUnreadableError`; a missing object raises
+        ``FileNotFoundError``.
         """
         await self._store_writes.delete_object(path)
 
@@ -378,7 +392,11 @@ class ResourceManager:
 
         A ``path`` naming the store root raises ``ValueError`` before any read. Only the
         directory's objects are listed (``Storage.list(path)``), never the whole store.
-        Refused, deleting and evicting nothing, when a stored object names any object under
-        ``path/``. Eviction runs even on a partial-delete failure.
+        Refused with :class:`~tai42_skeleton.template.errors.StoredObjectHeldError`, deleting
+        and evicting nothing, when a stored object names any object under ``path/``. Eviction
+        runs even on a partial-delete failure. A failure once the provider's deletion may have
+        begun is raised as :class:`~tai42_skeleton.template.errors.PartialDirectoryDeleteError`
+        with the provider's failure as its cause; the provider's own pre-deletion
+        ``FileNotFoundError``/``ValueError`` propagate as they are.
         """
         await self._store_writes.delete_template_dir(path)

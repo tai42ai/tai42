@@ -22,18 +22,24 @@ class _ConfigurableHandler(http.server.BaseHTTPRequestHandler):
     def _respond(self) -> None:
         config = self.server.config  # type: ignore[attr-defined]
         self.server.requests.append(self.command)  # type: ignore[attr-defined]
+        self.server.cookies.append(self.headers.get("Cookie"))  # type: ignore[attr-defined]
         body: bytes = config["body"]
         location = config.get("location")
+        set_cookie = config.get("set_cookie")
         if location:
             # A redirect may carry a body; ``fetch_url`` must never read it.
             self.send_response(302)
             self.send_header("Location", location)
+            if set_cookie:
+                self.send_header("Set-Cookie", set_cookie)
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
             return
         self.send_response(config["status"])
         self.send_header("Content-Type", config["content_type"])
+        if set_cookie:
+            self.send_header("Set-Cookie", set_cookie)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -53,22 +59,35 @@ class _LocalServer:
     def requests(self) -> list[str]:
         return self._server.requests  # type: ignore[attr-defined]
 
+    @property
+    def cookies(self) -> list[str | None]:
+        """The ``Cookie`` header of each request, in arrival order (``None`` when absent)."""
+        return self._server.cookies  # type: ignore[attr-defined]
+
     def configure(
-        self, *, body: bytes = b"", status: int = 200, content_type: str = "text/plain", location: str | None = None
+        self,
+        *,
+        body: bytes = b"",
+        status: int = 200,
+        content_type: str = "text/plain",
+        location: str | None = None,
+        set_cookie: str | None = None,
     ) -> None:
         self._server.config = {  # type: ignore[attr-defined]
             "body": body,
             "status": status,
             "content_type": content_type,
             "location": location,
+            "set_cookie": set_cookie,
         }
 
 
 def _serve() -> Iterator[_LocalServer]:
     server = http.server.HTTPServer(("127.0.0.1", 0), _ConfigurableHandler)
     port = server.server_address[1]
-    server.config = {"body": b"", "status": 200, "content_type": "text/plain", "location": None}  # type: ignore[attr-defined]
+    server.config = {"body": b"", "status": 200, "content_type": "text/plain", "location": None, "set_cookie": None}  # type: ignore[attr-defined]
     server.requests = []  # type: ignore[attr-defined]
+    server.cookies = []  # type: ignore[attr-defined]
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:

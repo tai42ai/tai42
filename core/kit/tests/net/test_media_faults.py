@@ -6,7 +6,7 @@ import pytest
 from tai42_contract.conversations import InboundMediaKind, InboundRejectionReason
 from tai42_contract.interactions import (
     MediaAlreadyBoundError,
-    MediaIngestError,
+    MediaError,
     MediaNotFoundError,
     MediaSourceReadError,
     MediaStoreUnavailableError,
@@ -49,19 +49,19 @@ def test_each_fault_classifies(exc: Exception, transient: bool, reason: InboundR
 
 @pytest.mark.parametrize(
     "exc",
-    [MediaIngestError("bare"), MediaNotFoundError("gone"), MediaAlreadyBoundError("bound"), RuntimeError("bug")],
+    [MediaError("bare"), MediaNotFoundError("gone"), MediaAlreadyBoundError("bound"), RuntimeError("bug")],
 )
 def test_a_fault_outside_the_tuple_is_not_caught_by_a_channel(exc: Exception) -> None:
     # A channel catches exactly the tuple, so every other fault propagates loudly.
     assert not isinstance(exc, MEDIA_FETCH_AND_INGEST_FAULTS)
 
 
-class _UnrelatedIngestError(MediaIngestError):
-    """An ingest fault subclass the classifier does not know."""
+class _UnrelatedMediaError(MediaError):
+    """A media fault subclass the classifier does not know."""
 
 
-def test_an_unrelated_ingest_subclass_is_not_in_the_tuple() -> None:
-    assert not isinstance(_UnrelatedIngestError("x"), MEDIA_FETCH_AND_INGEST_FAULTS)
+def test_an_unrelated_media_error_subclass_is_not_in_the_tuple() -> None:
+    assert not isinstance(_UnrelatedMediaError("x"), MEDIA_FETCH_AND_INGEST_FAULTS)
 
 
 @pytest.mark.parametrize(

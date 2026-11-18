@@ -35,7 +35,7 @@ from typing import Any
 from tai42_contract.channels import ChannelInputError
 from tai42_kit.interactions import FORM_WEEKDAYS
 
-from tai42_channel_whatsapp.flows_choices import _is_choice_field
+from tai42_channel_whatsapp.flows_choices import is_choice_field
 
 # Meta's ``CalendarPicker`` (Flow JSON ≥ 6.1) sets and returns a ``YYYY-MM-DD`` string. The regex
 # fixes the hyphenated calendar-date form; ``date.fromisoformat`` then rejects an impossible date
@@ -110,7 +110,7 @@ def draws_calendar_picker(name: str, prop: Any, option_fields: set[str]) -> bool
     option-bearing fields) renders as its choice control instead, as the Flow's control
     builder decides it.
     """
-    return is_date_field(prop) and not _is_choice_field(name, prop, option_fields)
+    return is_date_field(prop) and not is_choice_field(name, prop, option_fields)
 
 
 def valid_iso_date(value: str) -> bool:

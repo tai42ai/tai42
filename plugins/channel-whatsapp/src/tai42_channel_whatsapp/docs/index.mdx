@@ -80,8 +80,8 @@ In Studio, pick whatsapp as the route's Channel; the Our identity field then sho
   `LinkOption` → a `cta_url` URL button), multi-section **lists** with per-row
   descriptions (`sections`), a media **header** + text **footer** on an
   interactive message, a shared **location**, an **ask-less form** (`schema`, an
-  in-chat Flow), and out-of-window **templates** (`header_media` +
-  `body_parameters` + quick-reply/url `buttons`). A choice surface, `schema`,
+  in-chat Flow), and out-of-window
+  [**templates**](#the-24-hour-window-and-templates). A choice surface, `schema`,
   and `template` are mutually exclusive on one send; media and location may
   combine with a choice surface. A channel that cannot render a given field never
   receives it (the send gates on the matching `supports_*` capability flag).
@@ -120,9 +120,10 @@ block: a send whose unslotted picture differs publishes its own Flow. A reaction
 picture cannot be fetched or read, the screen shows the `update_failed` line (below). Slotted pictures ride the
 form's data, so a form with picture slots has a size for that data: 1 MB in all, and
 about 720 kB when the form is endpoint-driven (below), which leaves room for the
-person's answers on the way back to the data endpoint. A send over that size is
+person's answers on the way back to the data endpoint. An endpoint-driven form without
+picture slots has that same size for its data, about 720 kB. A send over its size is
 refused, naming both sizes; a reaction's update over it shows the `update_failed`
-line. A form without picture slots is not measured.
+line. A form that is neither endpoint-driven nor has picture slots is not measured.
 
 Each picture link has **5 seconds** in all to be fetched — finding the host, connecting,
 any redirects and the download together. A link that takes longer refuses the send with
@@ -411,9 +412,14 @@ are Meta's rule. The state is read once per turn, so a turn that runs past
 `closes_at` may still see `open`; Meta's 131047 rejection stays the final check.
 
 A **pre-approved template** is the one message delivered outside the window. Send
-one with `notify_user`'s `template` input: a `name`, a `language`, an optional
-`header_media` (image/video/document), positional `body_parameters` (body-text
-fills), and per-button `buttons` (a quick-reply `payload` or a url suffix). Because
+one with `notify_user`'s `template` input, a
+[`ChannelTemplate`](/concepts/notifications#out-of-window-templates): a `name`, a
+`language`, and `parameters` holding an optional `header_media` (an image, video or
+document item, the media a template header carries; a `link` or `audio` item is
+refused before the send), positional `body_parameters` (body-text fills), and
+per-button `buttons` (`{"kind": "quick_reply", "payload": ...}` or
+`{"kind": "url", "url_parameter": ...}`, the url button's suffix). Any other parameter
+key is refused before the send. Because
 a template is billed and delivered cold, the
 channel fences who may receive one: the recipient must be on
 `CHANNEL_WHATSAPP_ALLOWED_RECIPIENTS`, or be a **known contact** — a number the
@@ -434,11 +440,14 @@ the ids and addresses it records:
 
 ## Working-on-it signal
 
-While a reply is owed to the participant — a message running its turn, the wait
-after they answer a question, a parked run that resumes — the platform keeps
-WhatsApp's **typing indicator** alive: it re-sends the indicator ahead of Meta's
-~25 s dismissal window until the reply is sent, so the participant sees it for the
-wait rather than only the first few seconds. It is paused while a question the run
+While a reply is owed to the participant — a message's turn once its target starts
+running, the wait after they answer a question, a parked run that resumes — the
+platform re-sends WhatsApp's **typing indicator** ahead of Meta's ~25 s dismissal
+window until the reply is sent, so the participant sees it for the wait
+rather than only the first few seconds — best effort: Meta dismisses it on any message
+the run sends mid-way, and it returns at the next refresh. A message's turn shows nothing while it waits for its
+slot, or when its thread is in manual mode; a parked run that resumes in a manual-mode
+thread still shows it while its reply is owed. It is paused while a question the run
 sent stands, to the participant or to anyone else (no longer re-sent, so the indicator
 lapses on its own), and shown again once no question the run sent stands. WhatsApp's
 indicator points at an inbound message of the participant, so a parked run that resumes

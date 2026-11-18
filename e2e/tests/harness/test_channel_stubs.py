@@ -122,7 +122,7 @@ def _sentinel() -> StackResources:
         # backend variant's feature_env reads it. This sentinel renders the
         # manifest only (it never connects), so a placeholder AMQP vhost URL
         # completes it across every backend variant.
-        broker_url="amqp://guest:guest@127.0.0.1:5672/tai42_e2e_probe",
+        broker_url="amqp://tai42:tai42@127.0.0.1:5672/tai42_e2e_probe",
     )
 
 

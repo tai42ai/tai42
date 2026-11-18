@@ -78,6 +78,7 @@ from tai42_skeleton.template.settings import TemplateCacheSettings
 from .._fakes.bus import FakeBus
 from .._fakes.kit_redis import KitFakeRedis
 from .._fakes.listing import keys_under
+from .._fakes.template_holders import app_held_by
 
 tai42_app.bind(app)
 
@@ -830,7 +831,7 @@ class _StubStorage(Storage):
 
 def _install_manager(monkeypatch: pytest.MonkeyPatch, items: dict[str, str]) -> ResourceManager:
     monkeypatch.setattr(rm_mod, "template_cache_settings", lambda: TemplateCacheSettings(ttl=300, max_size=8))
-    manager = ResourceManager(_StubStorage(items), on_evicted=lambda _eviction: None)
+    manager = ResourceManager(_StubStorage(items), on_evicted=lambda _eviction: None, held_by=app_held_by)
     monkeypatch.setattr(tai42_app, "_impl", SimpleNamespace(storage=SimpleNamespace(resource_manager=manager)))
     return manager
 

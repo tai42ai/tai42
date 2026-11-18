@@ -15,13 +15,13 @@ from typing import Any
 
 from tai42_contract.channels import ChannelInputError
 
-from tai42_channel_whatsapp.flows_components import (
-    _chips_single_pick,
-    _choice_options_enum,
-    _is_array_of_strings,
-    _is_choice_field,
-    component_names,
+from tai42_channel_whatsapp.flows_choices import (
+    chips_single_pick,
+    choice_options_enum,
+    is_array_of_strings,
+    is_choice_field,
 )
+from tai42_channel_whatsapp.flows_components import component_names
 from tai42_channel_whatsapp.flows_dates import (
     date_bound_values,
     is_date_field,
@@ -38,7 +38,7 @@ from tai42_channel_whatsapp.flows_endpoint import (
     required_fields,
     shaped_fields,
 )
-from tai42_channel_whatsapp.flows_resolve import _form_range_merges, _resolve_pages, slot_datanames, slot_start_data
+from tai42_channel_whatsapp.flows_resolve import form_range_merges, resolve_pages, slot_datanames, slot_start_data
 from tai42_channel_whatsapp.flows_second_line import data_source_rows
 
 
@@ -93,15 +93,15 @@ def build_flow_data(
 
     for name in options:
         prop = properties.get(name)
-        if not isinstance(prop, dict) or not (prop.get("type") == "string" or _is_array_of_strings(prop)):
+        if not isinstance(prop, dict) or not (prop.get("type") == "string" or is_array_of_strings(prop)):
             raise ChannelInputError(
                 f"form field {name!r}: WhatsApp cannot apply per-send options to this property "
                 "— only a string or an array of strings maps to a choice control"
             )
 
     option_fields = set(options)
-    resolved_pages, fields_by_screen = _resolve_pages(properties, pages, option_fields)
-    range_merges = _form_range_merges(properties, resolved_pages, fields_by_screen, option_fields)
+    resolved_pages, fields_by_screen = resolve_pages(properties, pages, option_fields)
+    range_merges = form_range_merges(properties, resolved_pages, fields_by_screen, option_fields)
     merged_ends = set(range_merges)
     merged_starts = {start: end for end, start in range_merges.items()}
 
@@ -124,10 +124,10 @@ def build_flow_data(
             data[f"{cname}__init"] = _range_init_value(name, merged_starts[name], values)
             data.update(merged_range_bound_values(cname, name, merged_starts[name], properties))
             continue
-        data[f"{cname}__init"] = _field_init_value(name, prop, values)
+        data[f"{cname}__init"] = field_init_value(name, prop, values)
         if reads_bound_carriers(name, prop, option_fields, every_screen=askless_endpoint):
             data.update(date_bound_values(cname, prop))
-        if isinstance(prop, dict) and _is_choice_field(name, prop, option_fields):
+        if isinstance(prop, dict) and is_choice_field(name, prop, option_fields):
             data[f"{cname}__ds"] = _choice_data_source(name, prop, options)
     data.update(
         _shape_carriers(
@@ -176,10 +176,10 @@ class _CallerWords:
     lines: dict[str, str]
 
 
-def _field_init_value(name: str, prop: dict[str, Any], values: dict[str, Any]) -> Any:
+def field_init_value(name: str, prop: dict[str, Any], values: dict[str, Any]) -> Any:
     """A non-range field's ``init`` value for the per-send data model.
 
-    The prefilled value shaped for its control (:func:`_init_value`; a single-pick ``chips`` string
+    The prefilled value shaped for its control (:func:`init_value`; a single-pick ``chips`` string
     is wrapped in a one-element list), or the control's empty default (``[]`` for an array or a
     single-pick chips, ``False`` for a boolean, ``""`` otherwise). A ``format: date`` prefill that is
     not a ``YYYY-MM-DD`` string is refused loudly — the only shape Meta's date picker accepts.
@@ -192,10 +192,10 @@ def _field_init_value(name: str, prop: dict[str, Any], values: dict[str, Any]) -
                 f"form property {name!r}: a date field prefill must be a 'YYYY-MM-DD' string "
                 f"(the shape Meta's date picker sets and returns), got {raw!r}"
             )
-        if _chips_single_pick(prop):
+        if chips_single_pick(prop):
             return [raw if isinstance(raw, str) else str(raw)]
-        return _init_value(prop_type, raw)
-    if _chips_single_pick(prop):
+        return init_value(prop_type, raw)
+    if chips_single_pick(prop):
         return []
     return [] if prop_type == "array" else False if prop_type == "boolean" else ""
 
@@ -222,7 +222,7 @@ def _range_init_value(start: str, end: str, values: dict[str, Any]) -> dict[str,
     return {"start-date": _date_member(start), "end-date": _date_member(end)}
 
 
-def _init_value(prop_type: Any, raw: Any) -> Any:
+def init_value(prop_type: Any, raw: Any) -> Any:
     """A prefilled value shaped for its control's ``init-value``.
 
     A list for an array (CheckboxGroup), a bool for an OptIn, else a string.
@@ -243,7 +243,7 @@ def _choice_data_source(
     """
     if name in options:
         return data_source_rows(name, prop, options[name])
-    enum = _choice_options_enum(prop)
+    enum = choice_options_enum(prop)
     if enum is None:
         raise ChannelInputError(
             f"form property {name!r}: a choice control needs an enum or per-send options to populate its data-source"

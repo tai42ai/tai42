@@ -287,7 +287,7 @@ async def test_the_door_save_resolves_an_attached_states_named_references_in_one
             )
         ]
     )
-    app = SimpleNamespace(states=facet, storage=SimpleNamespace(resource_manager=_Manager()))
+    app = SimpleNamespace(states=facet, storage=SimpleNamespace(resource_manager=_Manager(), provider=None))
     await validate_and_attach_binding(app, binding)  # type: ignore[arg-type]  # warm the catalog snapshot
     pg.executed.clear()
     await validate_and_attach_binding(app, binding)  # type: ignore[arg-type]

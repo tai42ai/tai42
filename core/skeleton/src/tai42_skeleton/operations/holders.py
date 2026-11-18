@@ -8,21 +8,18 @@ shown as a count, never by name.
 
 from __future__ import annotations
 
-import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from tai42_contract.errors import OperationError
 from tai42_contract.tools import ReferenceHolder, ToolDeleteReferee, ToolRenameReferee
 
 from tai42_skeleton.access_control.feature_reach import readable_feature_tags
 from tai42_skeleton.app import instance
-from tai42_skeleton.operations.errors import ConflictError, OperationFailedError
+from tai42_skeleton.operations.errors import ConflictError
 from tai42_skeleton.operations.reference_graph import StoredPresets, routes_bound_to
+from tai42_skeleton.template.referee_answers import checked_holders, is_holder_list, referee_name
 from tai42_skeleton.tools import holder_kinds
-
-logger = logging.getLogger(__name__)
 
 _ByNameReferee = ToolRenameReferee | ToolDeleteReferee
 
@@ -38,29 +35,13 @@ def bound_branches(name: str) -> list[str]:
     return instance.app.tools.branches_of(name)
 
 
-def _provider_name(provider: object) -> str:
-    module = getattr(provider, "__module__", None) or type(provider).__module__
-    qualname = getattr(provider, "__qualname__", None) or type(provider).__qualname__
-    return f"{module}.{qualname}"
-
-
-def _checked(provider: object, answer: object) -> list[ReferenceHolder]:
-    """``answer`` when it is a list of ``ReferenceHolder``; any other answer is the provider's bug, raised."""
-    if not isinstance(answer, list) or not all(isinstance(entry, ReferenceHolder) for entry in answer):
-        raise TypeError(
-            f"referee {_provider_name(provider)} answered {answer!r}; a referee answers a list of ReferenceHolder"
-        )
-    return answer
-
-
-def _checked_by_name(provider: object, answer: object, asked: frozenset[str]) -> dict[str, list[ReferenceHolder]]:
-    """``answer`` when it maps asked names to lists of ``ReferenceHolder``; any other answer is the provider's bug."""
+def _checked_by_name(referee: object, answer: object, asked: frozenset[str]) -> dict[str, list[ReferenceHolder]]:
+    """``answer`` when it maps asked names to lists of ``ReferenceHolder``; any other answer is the referee's bug."""
     if not isinstance(answer, dict) or not all(
-        key in asked and isinstance(holders, list) and all(isinstance(entry, ReferenceHolder) for entry in holders)
-        for key, holders in answer.items()
+        key in asked and is_holder_list(holders) for key, holders in answer.items()
     ):
         raise TypeError(
-            f"referee {_provider_name(provider)} answered {answer!r} for {sorted(asked)!r}; a referee answers "
+            f"referee {referee_name(referee)} answered {answer!r} for {sorted(asked)!r}; a referee answers "
             "a dict from asked tool names to lists of ReferenceHolder"
         )
     return answer
@@ -129,7 +110,7 @@ async def detach_holders(state: str, template: str) -> list[ReferenceHolder]:
     """Every live binding that still names ``template`` on ``state``, from every detach referee."""
     holders: list[ReferenceHolder] = []
     for referee in instance.app.tools.detach_referees():
-        holders.extend(_checked(referee, await referee(state, template)))
+        holders.extend(checked_holders(referee, await referee(state, template)))
     return holders
 
 
@@ -206,29 +187,3 @@ async def holders_refusal(head: str, holders: Sequence[ReferenceHolder], tail: s
 async def holders_preview(action: str, holders: Sequence[ReferenceHolder]) -> dict[str, Any]:
     """A preview door's answer: ``action`` and the caller's view of ``holders`` (:func:`holders_refusal`'s view)."""
     return {"action": action, "holders": [holder.model_dump() for holder in (await _caller_view(holders)).holders]}
-
-
-async def template_delete_holders(ids: frozenset[str]) -> list[ReferenceHolder]:
-    """Every holder of one of ``ids``: each template-delete referee's answer, in registration order."""
-    holders: list[ReferenceHolder] = []
-    for referee in instance.app.storage.template_delete_referees():
-        holders.extend(_checked(referee, await referee(ids)))
-    return holders
-
-
-async def refuse_held_templates(ids: frozenset[str], head: str) -> None:
-    """Raise the 409 naming every holder of one of ``ids``; nothing held passes.
-
-    An ``OperationError`` a referee raises propagates as it is. Any other fault is logged and
-    raised as a 500 whose text carries only the fault's type, never its message (a settings
-    validation error quotes the value).
-    """
-    try:
-        holders = await template_delete_holders(ids)
-    except OperationError:
-        raise
-    except Exception as exc:
-        logger.exception("%s: a holder could not be read", head)
-        raise OperationFailedError(f"{head}: a holder could not be read ({type(exc).__name__})") from exc
-    if holders:
-        raise await holders_refusal(head, holders, "remove those references first")

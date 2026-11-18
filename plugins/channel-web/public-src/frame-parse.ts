@@ -9,6 +9,7 @@ import type {
   CardOption,
   DisplayBlock,
   DisplayBlockKind,
+  DisplayText,
   FormOptionData,
   FormPage,
   FormPrefill,
@@ -351,6 +352,8 @@ export function formPrefillOf(raw: unknown): FormPrefill | null | undefined {
  * entry keyed by one of `imageSlots` (the slots the form's image blocks name) moves to
  * `images`, vetted as an image block's own `src`: `null` or `''` clears the picture, any
  * other value that is not a {@link isFileSource} source makes the whole update malformed.
+ * Any other entry is a text slot's value: a string, number, boolean or `null`, else the
+ * whole update is malformed.
  * `undefined` (malformed) on anything off-shape — the caller then raises LOUDLY rather than
  * applying a half-understood change. */
 export function formUpdateOf(
@@ -366,10 +369,11 @@ export function formUpdateOf(
   if (errors === undefined) return undefined;
   const rawDisplay = raw.display === undefined ? {} : raw.display;
   if (!isRecord(rawDisplay)) return undefined;
-  const display: Record<string, unknown> = {};
+  const display: Record<string, DisplayText> = {};
   const images = new Map<string, string | null>();
   for (const [slot, value] of Object.entries(rawDisplay)) {
     if (!imageSlots.has(slot)) {
+      if (!isDisplayText(value)) return undefined;
       display[slot] = value;
     } else if (value === null || value === '') {
       images.set(slot, null);
@@ -380,6 +384,16 @@ export function formUpdateOf(
     }
   }
   return { values, options, errors, display, images };
+}
+
+/** A value a text display slot shows: a string, number, boolean or `null`. */
+function isDisplayText(value: unknown): value is DisplayText {
+  return (
+    value === null ||
+    typeof value === 'string' ||
+    typeof value === 'number' ||
+    typeof value === 'boolean'
+  );
 }
 
 /** The display-block kinds a page may carry. */

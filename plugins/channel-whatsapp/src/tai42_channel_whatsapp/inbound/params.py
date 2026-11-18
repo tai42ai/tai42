@@ -70,7 +70,7 @@ _REFERRAL_PARAM_KEYS: dict[str, str] = {
 
 
 @dataclass(frozen=True)
-class _MessageContext:
+class MessageContext:
     """What one inbound message carries to whichever turn or answer it becomes.
 
     ``params`` are its message-level entry-params (the referral keys); ``reply_to_medium_message_id``
@@ -108,14 +108,14 @@ def _reply_to_message_id(message: dict[str, Any]) -> str | None:
     return None
 
 
-def _message_context(message: dict[str, Any]) -> _MessageContext:
+def message_context(message: dict[str, Any]) -> MessageContext:
     """The entry-params and the quoted ``wamid`` of one inbound message."""
-    return _MessageContext(
+    return MessageContext(
         params=_message_context_params(message), reply_to_medium_message_id=_reply_to_message_id(message)
     )
 
 
-def _merged_params(base: dict[str, str], extra: dict[str, str]) -> dict[str, str] | None:
+def merged_params(base: dict[str, str], extra: dict[str, str]) -> dict[str, str] | None:
     """``base`` merged with ``extra`` (both already per-value bounded), or ``None`` when empty.
 
     ``base`` is never mutated. ``extra`` wins on a key collision, though the

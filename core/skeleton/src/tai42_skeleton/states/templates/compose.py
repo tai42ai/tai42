@@ -20,10 +20,10 @@ import jsonschema
 from jsonschema import Draft202012Validator
 from tai42_contract.states.errors import AttachConflictError, SchemaValidationError
 
-from tai42_skeleton.states.schema import _DRAFT_2020_12, _validate_schema, iter_refs, schema_nodes
+from tai42_skeleton.states.schema import DRAFT_2020_12, iter_refs, schema_nodes, validate_schema
 from tai42_skeleton.states.templates.model import StateTemplate
-from tai42_skeleton.states.templates.parameters import _iter_marker_names, substitute_parameters
-from tai42_skeleton.states.templates.trace import _inject_trace
+from tai42_skeleton.states.templates.parameters import iter_marker_names, substitute_parameters
+from tai42_skeleton.states.templates.trace import inject_trace
 
 
 def compose_effective_schema(
@@ -66,16 +66,16 @@ def compose_effective_schema(
     for template, path, parameters in attachments:
         values = {**template.defaults(), **dict(parameters or {})}
         fragment = substitute_parameters(template.schema, values)
-        leftover = sorted(set(_iter_marker_names(fragment)))
+        leftover = sorted(set(iter_marker_names(fragment)))
         if leftover:
             raise AttachConflictError(
                 f"attach of template {template.name!r} leaves parameter(s) {leftover} unsupplied at {list(path)}"
             )
         _check_fragment_schema(fragment, template.name, list(path))
         if template.trace.enabled:
-            fragment = _inject_trace(fragment)
+            fragment = inject_trace(fragment)
         _place_fragment(result, list(path), fragment, template.name)
-    _validate_schema(result)
+    validate_schema(result)
     return result
 
 
@@ -147,7 +147,7 @@ def _refuse_unmergeable_root(fragment: dict[str, Any], template_name: str) -> No
     validating root keyword outside ``properties`` / ``required`` / ``$defs``, or a pointer ref
     whose target would move to the state's root (:class:`AttachConflictError`).
     """
-    if "$schema" in fragment and fragment["$schema"] not in _DRAFT_2020_12:
+    if "$schema" in fragment and fragment["$schema"] not in DRAFT_2020_12:
         raise SchemaValidationError(
             f"attach of template {template_name!r} at the root: $schema {fragment['$schema']!r} is not supported — "
             f"the schema is one draft 2020-12 document"

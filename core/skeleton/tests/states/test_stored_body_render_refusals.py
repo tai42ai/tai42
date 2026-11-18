@@ -23,6 +23,7 @@ from tai42_skeleton.states.service import StatesService
 from tai42_skeleton.storage import StorageRegistry
 from tai42_skeleton.template import ResourceManager
 
+from .._fakes.template_holders import app_held_by
 from ..template.test_resource_manager import _InMemoryStorage
 from .fake_service_store import _STATE, FakeStatesStore, _subject
 
@@ -59,7 +60,7 @@ def manager(monkeypatch: pytest.MonkeyPatch) -> ResourceManager:
     registry = StorageRegistry()
     registry.register_storage(_Store)
     monkeypatch.setattr(instance.app._storage_registry, "_provider", registry.provider)
-    return ResourceManager(registry.provider, on_evicted=lambda _eviction: None)
+    return ResourceManager(registry.provider, on_evicted=lambda _eviction: None, held_by=app_held_by)
 
 
 @pytest.fixture

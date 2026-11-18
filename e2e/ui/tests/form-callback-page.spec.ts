@@ -243,11 +243,11 @@ test.describe('with a reacting picture slot', () => {
       .toBeGreaterThan(0);
     await expect(total).toHaveText('shown');
 
-    // A null clears both: the image slot back to its alt text, the text slot to nothing.
+    // A null leaves both slots unfilled: the image slot shows its alt text, the text slot its own text.
     await page.locator('input[data-field="picture"][value="clear"]').check();
     await expect(page.locator('img[data-slot="chart"]')).toHaveCount(0);
     await expect(chart).toHaveText('Chart');
-    await expect(total).toHaveText('');
+    await expect(total).toHaveText('pending');
 
     // The page still answers: submitting closes the parked form.
     await page.getByRole('button', { name: 'Submit' }).click();

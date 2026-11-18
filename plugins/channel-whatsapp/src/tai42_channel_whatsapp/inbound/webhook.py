@@ -13,13 +13,13 @@ from tai42_kit.net.request_body import RequestBodyTooLargeError
 
 from tai42_channel_whatsapp.inbound.auth import (
     SignatureRejectedError,
-    _auth_error_response,
-    _authenticated_body,
-    _verify_handshake,
+    auth_error_response,
+    authenticated_body,
+    verify_handshake,
 )
-from tai42_channel_whatsapp.inbound.envelope import _as_list, _iter_values
-from tai42_channel_whatsapp.inbound.messages import _handle_message
-from tai42_channel_whatsapp.inbound.status import _handle_status
+from tai42_channel_whatsapp.inbound.envelope import as_list, iter_values
+from tai42_channel_whatsapp.inbound.messages import handle_message
+from tai42_channel_whatsapp.inbound.status import handle_status
 
 logger = logging.getLogger(__name__)
 
@@ -47,12 +47,12 @@ async def whatsapp_inbound(request: Request) -> Response:
     each message dedupes on its own wamid, so already-handled ones are skipped.
     """
     if request.method == "GET":
-        return _verify_handshake(request)
+        return verify_handshake(request)
 
     try:
-        raw = await _authenticated_body(request)
+        raw = await authenticated_body(request)
     except (ValueError, RequestBodyTooLargeError, SignatureRejectedError) as exc:
-        return _auth_error_response(exc)
+        return auth_error_response(exc)
 
     try:
         payload = json.loads(raw)
@@ -60,7 +60,7 @@ async def whatsapp_inbound(request: Request) -> Response:
         return PlainTextResponse("invalid JSON", status_code=400)
 
     first_error: Exception | None = None
-    for value in _iter_values(payload):
+    for value in iter_values(payload):
         error = await _process_value(value)
         if error is not None and first_error is None:
             first_error = error
@@ -81,21 +81,21 @@ async def _process_value(value: dict[str, Any]) -> Exception | None:
     batch — it is remembered so the caller can re-raise a single aggregated error.
     """
     first_error: Exception | None = None
-    for status in _as_list(value.get("statuses")):
+    for status in as_list(value.get("statuses")):
         if not isinstance(status, dict):
             logger.warning("whatsapp status item is not an object; skipping: %r", status)
             continue
         try:
-            await _handle_status(status)
+            await handle_status(status)
         except Exception as exc:
             if first_error is None:
                 first_error = exc
-    for message in _as_list(value.get("messages")):
+    for message in as_list(value.get("messages")):
         if not isinstance(message, dict):
             logger.warning("whatsapp message item is not an object; skipping: %r", message)
             continue
         try:
-            await _handle_message(message, value)
+            await handle_message(message, value)
         except Exception as exc:
             if first_error is None:
                 first_error = exc

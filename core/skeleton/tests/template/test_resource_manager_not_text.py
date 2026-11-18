@@ -22,6 +22,7 @@ from tai42_skeleton.storage import StorageRegistry
 from tai42_skeleton.template import ResourceManager, TemplateNotTextError
 
 from .._fakes.listing import keys_under
+from .._fakes.template_holders import app_held_by
 
 # A PNG signature: the 0x89 lead byte is not valid UTF-8.
 _PNG = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
@@ -73,7 +74,7 @@ class _BrokenStorage(_BytesStorage):
 def _manager(storage: type[Storage]) -> ResourceManager:
     registry = StorageRegistry()
     registry.register_storage(storage)
-    return ResourceManager(registry.provider, on_evicted=lambda _eviction: None)
+    return ResourceManager(registry.provider, on_evicted=lambda _eviction: None, held_by=app_held_by)
 
 
 class _Store(_BytesStorage):

@@ -27,12 +27,13 @@ from tai42_contract.states.models import (
 from tai42_contract.template import TemplatedText
 from tai42_kit.utils.data.jq_errors import JqProgramError
 from tai42_kit.utils.data.jq_util import compile_check
+from tai42_kit.utils.data.jq_worker import is_empty_expression
 
-from tai42_skeleton.states.schema import _validate_schema, check_document_rules
-from tai42_skeleton.states.templates.jq import _compile_template_jq_inline
+from tai42_skeleton.states.schema import check_document_rules, validate_schema
+from tai42_skeleton.states.templates.jq import compile_template_jq_inline
 from tai42_skeleton.states.templates.model import TEMPLATE_KIND, StateTemplate
-from tai42_skeleton.states.templates.parameters import _iter_marker_names, substitute_parameters
-from tai42_skeleton.states.templates.regimes import _validate_regime_path
+from tai42_skeleton.states.templates.parameters import iter_marker_names, substitute_parameters
+from tai42_skeleton.states.templates.regimes import validate_regime_path
 
 # The named jq variables a declarations ``check`` may reference: ``$parameters`` — the
 # attachment's effective parameters (defaults overlaid by supplied values), bound at the
@@ -97,7 +98,7 @@ async def _check_declarations(declarations: StateTemplateDeclarations) -> None:
     check = declarations.check
     if check is None or check.content is None:
         return
-    if not check.content.strip():
+    if is_empty_expression(check.content):
         raise TemplateValidationError("declarations check must be a non-empty jq predicate or omitted")
     await _compile_check_jq(check.content, where="declarations check")
 
@@ -125,7 +126,7 @@ def _check_path_list(paths: list[list[str]], *, where: str) -> None:
 
 def _check_program_body(text: TemplatedText, *, where: str) -> None:
     """An inline program body is non-empty; a by-id body is checked when the save door renders it."""
-    if text.content is not None and not text.content.strip():
+    if text.content is not None and is_empty_expression(text.content):
         raise TemplateValidationError(f"{where} must be a non-empty jq program")
 
 
@@ -144,7 +145,7 @@ async def _check_template_jq(programs: dict[str, StateTemplateJq]) -> None:
         _check_identifier_list(program.params, where=f"{where} params")
         _check_path_list(program.reads, where=f"{where} reads")
         _check_path_list(program.writes, where=f"{where} writes")
-    await _compile_template_jq_inline(programs)
+    await compile_template_jq_inline(programs)
 
 
 async def _check_reconcile(reconcile: StateTemplateReconcile) -> None:
@@ -170,7 +171,7 @@ def _validate_fragment_schema(name: str, fragment: dict[str, Any]) -> None:
     Object-rooted, ≥1 property, a valid draft 2020-12 schema.
     """
     try:
-        _validate_schema(fragment)
+        validate_schema(fragment)
     except SchemaValidationError as exc:
         raise TemplateValidationError(f"template {name!r} schema fragment is not a valid object schema: {exc}") from exc
 
@@ -186,7 +187,7 @@ def _defaults_fragment(
     """
     for pname, param in parameters.items():
         _check_value_schema(param.schema_, where=f"parameter {pname!r} schema")
-    marker_names = set(_iter_marker_names(schema))
+    marker_names = set(iter_marker_names(schema))
     unknown = sorted(marker_names - set(parameters))
     if unknown:
         raise TemplateValidationError(f"schema references undeclared parameter(s) {unknown}")
@@ -205,7 +206,7 @@ def _check_program_paths(programs: dict[str, StateTemplateJq], fragment: dict[st
     for program_name, program in programs.items():
         for path in (*program.reads, *program.writes):
             try:
-                _validate_regime_path(fragment, path)
+                validate_regime_path(fragment, path)
             except TemplateValidationError as exc:
                 raise TemplateValidationError(f"template_jq {program_name!r}: {exc}") from exc
 
@@ -218,7 +219,7 @@ async def validate_template(doc: Any) -> StateTemplate:
     :class:`~tai42_contract.states.models.StateTemplateDocument`; then a no-default parameter
     must appear as a marker and every marker names a declared parameter, each parameter and
     declarations schema is a valid schema whose references resolve inside it, the defaults-substituted
-    fragment passes ``_validate_schema``, regime and update-program paths lie inside the fragment
+    fragment passes ``validate_schema``, regime and update-program paths lie inside the fragment
     (``"*"`` only over ``items``/``additionalProperties``), program names and params are jq
     identifiers, and every inline jq body compiles (a by-id body is rendered and compiled at the
     save door). Raises :class:`~tai42_contract.states.errors.TemplateValidationError` on the first
@@ -237,7 +238,7 @@ async def validate_template(doc: Any) -> StateTemplate:
     defaults_fragment = _defaults_fragment(name, schema, parameters)
 
     for rule in typed.regimes:
-        _validate_regime_path(defaults_fragment, list(rule.path))
+        validate_regime_path(defaults_fragment, list(rule.path))
 
     if typed.declarations is not None:
         await _check_declarations(typed.declarations)

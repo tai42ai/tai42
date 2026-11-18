@@ -1,10 +1,10 @@
 """The render spec every Flow screen reads, and the screen-``data`` block it yields.
 
-:class:`_RenderSpec` carries the cross-cutting inputs of one Flow build. From it each screen
-declares its ``data`` model (:func:`_screen_data_model`): every field's init/ds/err, the ``__val``
+:class:`RenderSpec` carries the cross-cutting inputs of one Flow build. From it each screen
+declares its ``data`` model (:func:`screen_data_model`): every field's init/ds/err, the ``__val``
 carriers of fields collected earlier, the display slots of its own and every later page, and the
 carriers an ask-less endpoint-driven form rides on every screen; and forwards the carriers its later
-fields and later pages' slots still need (:func:`_later_carriers`). Everything a later screen needs
+fields and later pages' slots still need (:func:`later_carriers`). Everything a later screen needs
 enters at the entry screen, so each step forwards what its successors still read.
 """
 
@@ -14,10 +14,10 @@ from dataclasses import dataclass
 from typing import Any
 
 from tai42_channel_whatsapp.flows_components import (
-    _field_data_decls,
-    _forward_field_data,
-    _range_value_type_decl,
-    _value_type_decl,
+    field_data_decls,
+    forward_field_data,
+    range_value_type_decl,
+    value_type_decl,
 )
 from tai42_channel_whatsapp.flows_dates import date_bound_decls, date_field_ends
 from tai42_channel_whatsapp.flows_endpoint import FORM_LINE_MEMBERS, form_line_carrier, required_fields, shaped_fields
@@ -26,7 +26,7 @@ from tai42_channel_whatsapp.flows_shapes import ERROR_EXAMPLE
 
 
 @dataclass(frozen=True)
-class _RenderSpec:
+class RenderSpec:
     """The cross-cutting inputs every screen reads while a Flow is built.
 
     ``field_changed`` are the schema keys whose change fires a reaction; ``page_advanced`` the
@@ -76,13 +76,13 @@ def _range_error_decl() -> dict[str, Any]:
     }
 
 
-def _screen_data_model(
+def screen_data_model(
     index: int,
     this_fields: list[str],
     later_fields: list[str],
     earlier_fields: list[str],
     pages: list[dict[str, Any]],
-    spec: _RenderSpec,
+    spec: RenderSpec,
 ) -> dict[str, Any]:
     """The ``data`` declarations of screen ``index`` of the form's resolved ``pages``.
 
@@ -102,7 +102,7 @@ def _screen_data_model(
     for name in rendered:
         if name not in merged_ends:
             data_model.update(
-                _field_data_decls(name, spec.properties[name], spec.option_fields, spec.names, _range_end(name, spec))
+                field_data_decls(name, spec.properties[name], spec.option_fields, spec.names, _range_end(name, spec))
             )
         if name in spec.err_fields and name not in merged_ends:
             data_model[f"{spec.names[name]}__err"] = _range_error_decl() if name in merged_starts else _error_decl()
@@ -111,7 +111,7 @@ def _screen_data_model(
             if name in merged_ends:
                 continue
             data_model[f"{spec.names[name]}__val"] = (
-                _range_value_type_decl() if name in merged_starts else _value_type_decl(spec.properties[name])
+                range_value_type_decl() if name in merged_starts else value_type_decl(spec.properties[name])
             )
     data_model.update(_every_screen_decls(spec))
     for key in slot_keys(pages[index:], spec.slots):
@@ -119,13 +119,13 @@ def _screen_data_model(
     return data_model
 
 
-def _range_end(name: str, spec: _RenderSpec) -> dict[str, Any] | None:
+def _range_end(name: str, spec: RenderSpec) -> dict[str, Any] | None:
     # The END's definition when ``name`` is a merged range START, else ``None``.
     end = next((end for end, start in spec.range_merges.items() if start == name), None)
     return spec.properties[end] if end is not None else None
 
 
-def _every_screen_decls(spec: _RenderSpec) -> dict[str, Any]:
+def _every_screen_decls(spec: RenderSpec) -> dict[str, Any]:
     # The carriers an ask-less endpoint-driven form declares on every screen: each shaped field's
     # ``__invalid``, each reportable-missing field's ``__required``, the form-line carriers and every
     # date field's bound carriers.
@@ -147,16 +147,18 @@ def _every_screen_decls(spec: _RenderSpec) -> dict[str, Any]:
     return decls
 
 
-def _later_carriers(later_fields: list[str], later_pages: list[dict[str, Any]], spec: _RenderSpec) -> dict[str, str]:
-    # The carriers a later screen still needs, forwarded from this screen's data: each later
-    # (unrendered) field's init/ds, bound carriers and ``__err`` (a merged START's the pair's, a merged
-    # END none), and the display slot of each block on ``later_pages``.
+def later_carriers(later_fields: list[str], later_pages: list[dict[str, Any]], spec: RenderSpec) -> dict[str, str]:
+    """The carriers a later screen still needs, forwarded from this screen's data.
+
+    Each later (unrendered) field's init/ds, bound carriers and ``__err`` (a merged START's the
+    pair's, a merged END none), and the display slot of each block on ``later_pages``.
+    """
     merged_ends = set(spec.range_merges)
     forward: dict[str, str] = {}
     for name in later_fields:
         if name not in merged_ends:
             forward.update(
-                _forward_field_data(name, spec.properties[name], spec.option_fields, spec.names, _range_end(name, spec))
+                forward_field_data(name, spec.properties[name], spec.option_fields, spec.names, _range_end(name, spec))
             )
         if name in spec.err_fields and name not in merged_ends:
             forward[f"{spec.names[name]}__err"] = f"${{data.{spec.names[name]}__err}}"

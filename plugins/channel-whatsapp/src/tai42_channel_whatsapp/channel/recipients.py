@@ -13,10 +13,10 @@ from tai42_channel_whatsapp.client import SentMessage, send_template
 from tai42_channel_whatsapp.correlation import is_known_contact
 from tai42_channel_whatsapp.settings import WhatsAppSettings
 
-_NO_DEFAULT_RECIPIENT = "no recipient requested and this channel has no default recipient; request a wa_id"
+NO_DEFAULT_RECIPIENT = "no recipient requested and this channel has no default recipient; request a wa_id"
 
 
-def _require_recipient(requested: str | None, message: str) -> str:
+def require_recipient(requested: str | None, message: str) -> str:
     """The caller-supplied recipient, or raise :class:`ChannelAddressError`.
 
     This channel has no operator default recipient.
@@ -34,7 +34,7 @@ async def _resolve_template_target(settings: WhatsAppSettings, phone_number_id: 
     the known-contact lookup keys on the resolved send-from number — a participant is
     "known" to the number they actually messaged.
     """
-    target = _require_recipient(requested, _NO_DEFAULT_RECIPIENT)
+    target = require_recipient(requested, NO_DEFAULT_RECIPIENT)
     if target in set(settings.allowed_recipients):
         return target
     if await is_known_contact(phone_number_id, target):
@@ -45,7 +45,7 @@ async def _resolve_template_target(settings: WhatsAppSettings, phone_number_id: 
     )
 
 
-async def _send_template(
+async def send_fenced_template(
     settings: WhatsAppSettings, phone_number_id: str, target: str, template: ChannelTemplate
 ) -> list[SentMessage]:
     """Enforce the template recipient policy, then send the template."""

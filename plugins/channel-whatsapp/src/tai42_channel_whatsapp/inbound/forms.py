@@ -22,12 +22,13 @@ from tai42_contract.interactions.models import Wording
 from tai42_kit.conversations.entry_params import put_entry_param
 from tai42_kit.utils.data.form_text import render_form_text
 
-from tai42_channel_whatsapp.channel import _NOTIFY_FORM_TOKEN_PREFIX, send_form_ask_flow
+from tai42_channel_whatsapp.channel import send_form_ask_flow
 from tai42_channel_whatsapp.channel.forms import (
-    _DOOR_REJECTION_MAX_CHARS,
-    _FLOW_BODY_MAX_CHARS,
-    _boolean_words,
-    _field_words,
+    DOOR_REJECTION_MAX_CHARS,
+    FLOW_BODY_MAX_CHARS,
+    NOTIFY_FORM_TOKEN_PREFIX,
+    form_boolean_words,
+    form_field_words,
 )
 from tai42_channel_whatsapp.client import send_message, send_outcome
 from tai42_channel_whatsapp.correlation import (
@@ -38,10 +39,11 @@ from tai42_channel_whatsapp.correlation import (
     peek_pending,
     release_pending,
 )
-from tai42_channel_whatsapp.flows_components import _chips_single_pick, split_range_values
-from tai42_channel_whatsapp.inbound.answers import _bridge_inbound, _resolve_answer
-from tai42_channel_whatsapp.inbound.params import _merged_params
-from tai42_channel_whatsapp.inbound.rejection import _notify_rejected
+from tai42_channel_whatsapp.flows_choices import chips_single_pick
+from tai42_channel_whatsapp.flows_components import split_range_values
+from tai42_channel_whatsapp.inbound.answers import bridge_inbound, resolve_answer
+from tai42_channel_whatsapp.inbound.params import merged_params
+from tai42_channel_whatsapp.inbound.rejection import notify_rejected
 from tai42_channel_whatsapp.settings import whatsapp_settings
 
 logger = logging.getLogger(__name__)
@@ -62,9 +64,9 @@ _FORM_UNPROCESSABLE = "Sorry, your form could not be processed."
 _CALLBACK_REJECTION_OPAQUE = "the answer could not be accepted"
 # The lead + bounded door line alone always fit the cap, so the overflow fallback
 # (drop the whole question) is guaranteed deliverable — verified, not assumed. The door line
-# is bounded at ``_DOOR_REJECTION_MAX_CHARS`` and the Flow body cap is ``_FLOW_BODY_MAX_CHARS``
+# is bounded at ``DOOR_REJECTION_MAX_CHARS`` and the Flow body cap is ``FLOW_BODY_MAX_CHARS``
 # (both owned beside the deliver-time rejection-template guard in ``channel.forms``).
-if len(_FORM_REJECTION_LEAD) + 1 + _DOOR_REJECTION_MAX_CHARS > _FLOW_BODY_MAX_CHARS:
+if len(_FORM_REJECTION_LEAD) + 1 + DOOR_REJECTION_MAX_CHARS > FLOW_BODY_MAX_CHARS:
     raise AssertionError
 
 
@@ -89,7 +91,7 @@ def _extract_form_response(interactive: dict[str, Any]) -> dict[str, Any] | None
     return parsed if isinstance(parsed, dict) else None
 
 
-def _coerce_value(value: Any, prop: Any) -> Any:
+def coerce_value(value: Any, prop: Any) -> Any:
     """One form value coerced to its schema type.
 
     Flow number inputs arrive as strings, so ``integer``/``number``/``boolean`` are coerced ONLY
@@ -102,7 +104,7 @@ def _coerce_value(value: Any, prop: Any) -> Any:
         # A CheckboxGroup delivers a JSON list of the selected option values; pass it through
         # as the list answer (a non-list arrival is returned raw so the door 400s and restores).
         return value
-    if isinstance(prop, dict) and _chips_single_pick(prop):
+    if isinstance(prop, dict) and chips_single_pick(prop):
         # A single-pick ChipsSelector delivers a ONE-element list; unwrap it to the string the
         # schema declares. A list of any other length is forwarded raw so the door 400s and
         # restores (the existing non-coercible convention).
@@ -164,11 +166,11 @@ def _coerce_form_answer(
         if schema_key is None:
             logger.warning("whatsapp nfm_reply carried unknown payload label %r; forwarding under its own key", key)
             schema_key = key
-        coerced[schema_key] = _coerce_value(value, props.get(schema_key))
+        coerced[schema_key] = coerce_value(value, props.get(schema_key))
     return split_range_values(props, coerced)
 
 
-async def _handle_form_reply(
+async def handle_form_reply(
     interactive: dict[str, Any],
     phone_number_id: str,
     wa_id: str,
@@ -207,11 +209,11 @@ async def _handle_form_reply(
         logger.warning(
             "whatsapp nfm_reply %s carried no JSON-object response_json; sending the unreadable notice", wamid
         )
-        await _notify_rejected(phone_number_id, wa_id, wamid, kind="form", reason=InboundRejectionReason.UNREADABLE)
+        await notify_rejected(phone_number_id, wa_id, wamid, kind="form", reason=InboundRejectionReason.UNREADABLE)
         return
 
     flow_token = response.get("flow_token")
-    if isinstance(flow_token, str) and flow_token.startswith(_NOTIFY_FORM_TOKEN_PREFIX):
+    if isinstance(flow_token, str) and flow_token.startswith(NOTIFY_FORM_TOKEN_PREFIX):
         await _handle_notify_form_reply(
             response,
             flow_token,
@@ -228,13 +230,13 @@ async def _handle_form_reply(
         values = _submitted_values(response)
         form_params: dict[str, str] = {}
         put_entry_param(form_params, "flow_token", flow_token, door="whatsapp")
-        await _bridge_inbound(
+        await bridge_inbound(
             phone_number_id,
             wa_id,
             render_form_text(values, None),
             wamid,
             form=values,
-            params=_merged_params(params, form_params),
+            params=merged_params(params, form_params),
             reply_to_medium_message_id=reply_to_medium_message_id,
         )
         return
@@ -250,7 +252,7 @@ async def _handle_form_reply(
             f"({phone_number_id}, {wa_id}) is missing its payload-label map"
         )
     answer = _coerce_form_answer(response, pending.schema, pending.form_names)
-    await _resolve_answer(
+    await resolve_answer(
         phone_number_id,
         wa_id,
         wamid,
@@ -285,7 +287,7 @@ async def _handle_notify_form_reply(
     rides beside it through the bridge's ``form`` seam, ``params`` carry any
     message-level referral entries and ``reply_to_medium_message_id`` the ``wamid`` it quotes.
     """
-    schema_hash, form_tag = _parse_notify_form_token(flow_token)
+    schema_hash, form_tag = parse_notify_form_token(flow_token)
     waba_id = whatsapp_settings().waba_id
     cached = await get_cached_flow_form(waba_id, schema_hash) if waba_id else None
     if cached is None:
@@ -299,7 +301,7 @@ async def _handle_notify_form_reply(
     else:
         schema = cached.schema
         form = _coerce_form_answer(response, schema, cached.names)
-    await _bridge_inbound(
+    await bridge_inbound(
         phone_number_id,
         wa_id,
         render_form_text(form, schema),
@@ -311,7 +313,7 @@ async def _handle_notify_form_reply(
     )
 
 
-def _parse_notify_form_token(flow_token: str) -> tuple[str, str | None]:
+def parse_notify_form_token(flow_token: str) -> tuple[str, str | None]:
     """The schema hash and OPTIONAL caller-set form tag carried by a notify-form flow token.
 
     The token is ``tai42-nf:{schema_hash}:{nonce}[:{form_tag}]`` — the hash is the first segment
@@ -319,7 +321,7 @@ def _parse_notify_form_token(flow_token: str) -> tuple[str, str | None]:
     ``:``, so always one segment) the OPTIONAL 4th. A 3-segment token (no tag) returns ``None`` for
     the tag; the tag is read back verbatim, never interpreted.
     """
-    parts = flow_token[len(_NOTIFY_FORM_TOKEN_PREFIX) :].split(":")
+    parts = flow_token[len(NOTIFY_FORM_TOKEN_PREFIX) :].split(":")
     schema_hash = parts[0]
     form_tag = parts[2] if len(parts) >= 3 else None
     return schema_hash, form_tag
@@ -331,7 +333,7 @@ def _door_error_line(retry_reason: str | None, retry_field: str | None, pending:
     The door's OWN reason — the plain sentence for the refused field — led by that field's label
     (``"Label: sentence"``, the label the person saw on the field, read through the pending record's
     payload-label map) when the door names a declared field; the line is bounded at
-    ``_DOOR_REJECTION_MAX_CHARS`` (the ladder already bounds the reason; a line past the bound is
+    ``DOOR_REJECTION_MAX_CHARS`` (the ladder already bounds the reason; a line past the bound is
     never sent cut: the label is then left off, else the reason alone is re-capped). ``None`` when
     the door gave no reason.
     """
@@ -341,12 +343,12 @@ def _door_error_line(retry_reason: str | None, retry_field: str | None, pending:
     label = labels.get(retry_field) if retry_field is not None else None
     if label is not None:
         line = f"{label}: {retry_reason}"
-        if len(line) <= _DOOR_REJECTION_MAX_CHARS:
+        if len(line) <= DOOR_REJECTION_MAX_CHARS:
             return line
-    return retry_reason[:_DOOR_REJECTION_MAX_CHARS]
+    return retry_reason[:DOOR_REJECTION_MAX_CHARS]
 
 
-async def _recover_form_rejection(
+async def recover_form_rejection(
     phone_number_id: str,
     wa_id: str,
     wamid: str,
@@ -454,8 +456,8 @@ async def _recover_form_rejection(
             open_label=form.open if form is not None else None,
             form_title=form.title if form is not None else None,
             form_submit=form.submit if form is not None else None,
-            field_invalid=_field_words(form, "invalid"),
-            boolean_words=_boolean_words(form),
+            field_invalid=form_field_words(form, "invalid"),
+            boolean_words=form_boolean_words(form),
         )
         return send_outcome(phone_number_id, [sent])
 
@@ -473,13 +475,13 @@ async def _recover_form_rejection(
 def _rejection_body(question: str, tail: str) -> str:
     """The re-sent Flow's body: the question, then the refusal ``tail``.
 
-    When the composed body would exceed ``_FLOW_BODY_MAX_CHARS`` the question is
+    When the composed body would exceed ``FLOW_BODY_MAX_CHARS`` the question is
     dropped WHOLE — the fresh Flow re-presents the fields, so a mid-string ellipsis
     (forbidden by the no-silent-truncation posture) is never needed. ``tail`` is the refusal
     sentence (the caller's ``wording.answer.rejected`` with the door's reason substituted, else the
     generic lead + reason); its reason is bounded by :func:`_door_error_line` to
-    ``_DOOR_REJECTION_MAX_CHARS`` and a caller template is capped at deliver, so the tail always
+    ``DOOR_REJECTION_MAX_CHARS`` and a caller template is capped at deliver, so the tail always
     fits the cap even when the question is dropped.
     """
     full = f"{question}\n\n{tail}"
-    return full if len(full) <= _FLOW_BODY_MAX_CHARS else tail
+    return full if len(full) <= FLOW_BODY_MAX_CHARS else tail

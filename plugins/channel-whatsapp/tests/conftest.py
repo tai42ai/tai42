@@ -31,7 +31,7 @@ from tai42_kit.clients.impl.redis import RedisClient
 from tai42_kit.settings import reset_all_settings
 
 from tai42_channel_whatsapp.correlation import reserve_pending
-from tai42_channel_whatsapp.flows import payload_labels
+from tai42_channel_whatsapp.flows_components import payload_labels
 
 
 class _ClientCtx:
@@ -274,7 +274,7 @@ class _StubMedia:
 
     The plugin's test venv cannot import the skeleton, so the media seam is faked at this
     contract seam. For ingestion a test sets ``ingest_result`` (an :class:`IngestedMedia`) or
-    ``ingest_error`` (a ``MediaIngestError`` subclass to raise) and reads back the recorded
+    ``ingest_error`` (a ``MediaError`` subclass to raise) and reads back the recorded
     ``ingest_calls`` — including the ``source`` byte stream — to assert what the channel handed
     the seam. For reads a test sets ``read_result`` (a :class:`StoredMedia`) or ``read_error`` and
     reads back ``read_calls``, one ``(media_id, max_bytes)`` pair per read."""

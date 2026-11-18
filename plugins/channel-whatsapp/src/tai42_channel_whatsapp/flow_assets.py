@@ -91,7 +91,7 @@ class FlowCreateResult(NamedTuple):
     ``flow_id`` is the new draft's id; ``validation_errors`` is the vendor's
     top-level array — empty when the Flow JSON is valid, non-empty when Meta
     created the draft anyway but it can never publish. The lifecycle owner
-    (``_resolve_flow_id``) decides whether to publish or delete.
+    (``resolve_flow_id``) decides whether to publish or delete.
     """
 
     flow_id: str

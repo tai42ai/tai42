@@ -58,8 +58,10 @@ from tai42_skeleton.operations.response_models.storage import (
 )
 from tai42_skeleton.operations.storage_provider import require_storage_provider, storage_provider
 from tai42_skeleton.operations.store_keys import checked_store_key
+from tai42_skeleton.operations.template_door import template_door
 from tai42_skeleton.storage.entries import read_stored_entry
 from tai42_skeleton.storage.listing import listed_keys
+from tai42_skeleton.template.errors import PartialDirectoryDeleteError
 
 _SURFACE_ROUTERS = (
     ("storage", "tai42_skeleton.routers.storage"),
@@ -268,7 +270,8 @@ async def delete_resource(resource_id: str) -> dict:
     require_storage_provider()
     manager = instance.app.storage.resource_manager
     try:
-        await _write_then_evict(resource_id, lambda: manager.delete_object(resource_id))
+        async with template_door():
+            await _write_then_evict(resource_id, lambda: manager.delete_object(resource_id))
     except FileNotFoundError as exc:
         raise NotFoundError(f"resource {resource_id!r} not found") from exc
     except ValueError as exc:
@@ -288,23 +291,23 @@ async def delete_dir(dir_path: str) -> dict:
 
     This worker evicts whatever the outcome once deletion begins. A failure before deletion
     begins — a missing directory (``404``), a rejected path (``400``), an object under it a
-    stored object names (``409``) or a holder that cannot be read (``500``) — broadcasts
-    nothing. A failure once deletion may have begun leaves the store partially changed, so
-    the eviction still fans out before the error propagates (a ``FleetBroadcastError``
-    carrying the fleet report).
+    stored object names (``409``), a holder that cannot be read (``500``) or a referee's own
+    error, with its own status — broadcasts nothing. A failure once deletion may have begun
+    leaves the store partially changed, so the eviction still fans out before the error
+    propagates (a ``FleetBroadcastError`` carrying the fleet report).
     """
     checked_store_key(dir_path)
     require_storage_provider()
     manager = instance.app.storage.resource_manager
 
     try:
-        await broadcast(
-            EvictTemplate(op="evict_template", path=dir_path, prefix=True),
-            None,
-            lambda: manager.delete_template_dir(dir_path),
-            publish_on_local_failure=True,
-            pre_mutation_errors=(FileNotFoundError, ValueError, ConflictError, OperationFailedError),
-        )
+        async with template_door():
+            await broadcast(
+                EvictTemplate(op="evict_template", path=dir_path, prefix=True),
+                None,
+                lambda: manager.delete_template_dir(dir_path),
+                publish_on_local_failure=(PartialDirectoryDeleteError,),
+            )
     except FileNotFoundError as exc:
         raise NotFoundError(f"directory {dir_path!r} not found") from exc
     except ValueError as exc:

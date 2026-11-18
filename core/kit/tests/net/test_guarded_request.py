@@ -14,6 +14,7 @@ import time
 from collections.abc import Iterator
 from typing import Any
 
+import httpx
 import pytest
 
 from tai42_kit.net import (
@@ -35,7 +36,13 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length") or 0)
         body = self.rfile.read(length) if length else b""
         server.requests.append(
-            {"method": self.command, "path": self.path, "body": body, "content_type": self.headers.get("Content-Type")}
+            {
+                "method": self.command,
+                "path": self.path,
+                "body": body,
+                "content_type": self.headers.get("Content-Type"),
+                "cookie": self.headers.get("Cookie"),
+            }
         )
         mode = server.mode
         if mode == "redirect":
@@ -64,6 +71,8 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         self.send_response(server.status)
         self.send_header("Content-Type", "application/json")
         self.send_header("X-Echo", "yes")
+        if server.set_cookie is not None:
+            self.send_header("Set-Cookie", server.set_cookie)
         self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
         self.wfile.write(payload)
@@ -85,10 +94,13 @@ class _Server:
     def requests(self) -> list[dict[str, Any]]:
         return self._server.requests
 
-    def set(self, *, mode: str = "plain", payload: bytes = b"{}", status: int = 200) -> None:
+    def set(
+        self, *, mode: str = "plain", payload: bytes = b"{}", status: int = 200, set_cookie: str | None = None
+    ) -> None:
         self._server.mode = mode
         self._server.payload = payload
         self._server.status = status
+        self._server.set_cookie = set_cookie
 
 
 @pytest.fixture
@@ -99,6 +111,7 @@ def server() -> Iterator[_Server]:
     srv.mode = "plain"
     srv.payload = b"{}"
     srv.status = 200
+    srv.set_cookie = None
     thread = threading.Thread(target=srv.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
     thread.start()
     try:
@@ -230,6 +243,42 @@ async def test_request_headers_are_sent_and_delete_is_supported(
     )
     assert response.status == 200
     assert server.requests[0]["method"] == "DELETE"
+
+
+@pytest.mark.parametrize("guard_on", [True, False])
+async def test_the_requests_of_one_configuration_on_one_loop_share_one_client(
+    monkeypatch: pytest.MonkeyPatch, server: _Server, guard_on: bool
+) -> None:
+    """Every request of one guard setting on a loop rides one client, built by the first request."""
+    if guard_on:
+        _allow_loopback(monkeypatch)
+    else:
+        _disable(monkeypatch)
+    built: list[httpx.AsyncClient] = []
+    original_init = httpx.AsyncClient.__init__
+
+    def _init(self: httpx.AsyncClient, *args: Any, **kwargs: Any) -> None:
+        original_init(self, *args, **kwargs)
+        built.append(self)
+
+    monkeypatch.setattr(httpx.AsyncClient, "__init__", _init)
+    for _ in range(3):
+        assert (await guarded_request("GET", f"{server.base_url}/doc", timeout=2, max_bytes=1024)).status == 200
+    assert len(built) == 1
+
+
+@pytest.mark.parametrize("guard_on", [True, False])
+async def test_a_cookie_one_request_receives_never_reaches_another_request(
+    monkeypatch: pytest.MonkeyPatch, server: _Server, guard_on: bool
+) -> None:
+    if guard_on:
+        _allow_loopback(monkeypatch)
+    else:
+        _disable(monkeypatch)
+    server.set(set_cookie="session=first-caller; Path=/")
+    await guarded_request("GET", f"{server.base_url}/a", timeout=2, max_bytes=1024)
+    await guarded_request("GET", f"{server.base_url}/b", timeout=2, max_bytes=1024)
+    assert [r["cookie"] for r in server.requests] == [None, None]
 
 
 async def test_form_and_json_together_are_refused() -> None:

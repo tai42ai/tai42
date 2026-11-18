@@ -123,6 +123,11 @@ def _author_message(message: str, prelude_lines: int) -> str:
     return _ERROR_HEADER_RE.sub(_locate, message)
 
 
+def is_empty_expression(expression: str) -> bool:
+    """Whether ``expression`` is the empty jq program, which :func:`compile_jq` refuses: blank text only."""
+    return not expression.strip()
+
+
 def compile_jq(source: JqSource):
     """Compile ``source`` over the envelope with the process environment sealed out.
 
@@ -160,7 +165,7 @@ def compile_jq(source: JqSource):
         author_text.encode("utf-8")
     except UnicodeEncodeError as exc:
         raise JqCompileError(f"jq: the program is not valid Unicode text at offset {exc.start}: {exc.reason}") from exc
-    if not expression.strip():
+    if is_empty_expression(expression):
         raise JqCompileError('jq: the expression is empty (try ".")')
     # The generated text is exactly one line, so the author's text starts on line 2 whole.
     generated = _GUARD_PREAMBLE + _binding_preamble(variable_names) + "\n"

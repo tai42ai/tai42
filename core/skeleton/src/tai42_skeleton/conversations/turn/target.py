@@ -17,7 +17,7 @@ from tai42_contract.conversations import (
 )
 from tai42_contract.interactions import LocationElement, MediaItem
 
-from tai42_skeleton.conversations import cache
+from tai42_skeleton.conversations import cache, working_signal
 from tai42_skeleton.conversations.mode import effective_mode, supports_thread_append
 from tai42_skeleton.conversations.models import ConversationRecord, DeliveryStatus
 from tai42_skeleton.conversations.pairing import Passthrough, classify
@@ -79,6 +79,9 @@ async def _target_outcome(
     (:func:`read_turn_reply_window` over the record's channel, our identity and client address),
     and rides the payload's ``turn`` block. A failed read runs no target: it is logged and the
     turn takes the recorded client-safe ``error`` outcome.
+
+    The working-on-it loop starts HERE, once a target will run: a queued turn and a turn in a
+    manual-mode thread show no indicator.
     """
     turn_token = set_conversation_turn(
         ConversationTurnRef(thread_id=intake.thread_id, message_id=batch.lead.message_id, route_name=route.route_name)
@@ -99,6 +102,7 @@ async def _target_outcome(
             return _tool_error(f"reply window read failed ({type(exc).__name__})", route)
         attribution = _conversation_attribution(route, intake, person)
         context = _conversation_state_context(route, intake, person, actor=attribution.user_id)
+        working_signal.start_turn(intake)
         with run_attribution(attribution), state_context(context):
             if route.target_kind == "tool":
                 return await tool_turn._run_tool_turn(

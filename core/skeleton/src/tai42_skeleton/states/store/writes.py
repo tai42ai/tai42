@@ -21,7 +21,7 @@ from tai42_contract.states.models import CompletedOrigin, StateSubject
 from tai42_skeleton.states.outbox.keys import record_key
 from tai42_skeleton.states.paths import apply_ops as apply_path_ops
 from tai42_skeleton.states.paths import partition_guarded
-from tai42_skeleton.states.schema import _validate_document
+from tai42_skeleton.states.schema import validate_document
 
 from .base import ApplyEntry, ApplyEntrySource, _StoreBase
 from .connection import _pool, _settings
@@ -157,7 +157,7 @@ class _RecordWriteStore(_StoreBase):
             kind, key = canonical.kind, canonical.key
             entry = await catalog.write_entry(cur, state, version)
             if validate:
-                _validate_document(entry.validator, data)
+                validate_document(entry.validator, data)
             await cur.execute(
                 "INSERT INTO state_records (state, target_kind, target_name, subject_kind, subject_key, data, "
                 "updated_at) VALUES (%s, %s, %s, %s, %s, %s, clock_timestamp()) "
@@ -313,7 +313,7 @@ class _RecordWriteStore(_StoreBase):
 
             merged = apply_path_ops(current, applied_ops)
             if validate:
-                _validate_document(entry.validator, merged)
+                validate_document(entry.validator, merged)
 
             # (iii) the record UPDATE and its ``state_writes`` provenance row (touched paths =
             # each applied op's absolute path) land in ONE writable CTE: the UPDATE's returned
@@ -672,7 +672,7 @@ class _RecordWriteStore(_StoreBase):
                 dst_data: dict[str, Any] = {} if dst_row is None else dst_row["data"]
                 merged = {**src_row["data"], **dst_data}  # survivor wins; old fills absent members
                 try:
-                    _validate_document(entry.validator, merged)
+                    validate_document(entry.validator, merged)
                 except Exception as exc:
                     raise SubjectFoldError(
                         f"merging subject {subject.kind}/{subject.key} into {target_kind}/{target_key} would leave an "

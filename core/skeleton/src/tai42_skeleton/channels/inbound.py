@@ -43,7 +43,6 @@ from tai42_contract.channels import (
     InboundAnswerResult,
     InboundBridge,
 )
-from tai42_contract.conversations import BlankInboundTextError
 from tai42_contract.interactions.models import AnswerMismatchPolicy, Wording
 from tai42_kit.clients.impl.http import HttpxClient
 from tai42_kit.interactions import CallbackUrlRefusedError, pin_callback_url
@@ -194,11 +193,13 @@ async def _bridge(bridge: InboundBridge) -> None:
     Idempotent on ``(channel, provider_message_id)`` at the conversation seam, so a provider
     redelivery does not double-bridge.
 
-    Tolerant by design: a blank reply (:class:`BlankInboundTextError`) or an address with no bound
-    route (:class:`LookupError`) is nothing to bridge — the outcome still returns and the webhook
-    still acks (never a 5xx that would provoke a provider retry-storm on a permanently-blank/unrouted
-    message). A blank reply is logged and dropped; an unrouted reply also emits the
-    :data:`INBOUND_UNROUTED_EVENT_TOPIC` platform event so the drop is operator-visible.
+    An address with no bound route (:class:`LookupError`) is nothing to bridge — the outcome
+    still returns and the webhook still acks (never a 5xx that would provoke a provider
+    retry-storm on a permanently-unrouted message); the drop is logged and emits the
+    :data:`INBOUND_UNROUTED_EVENT_TOPIC` platform event so it is operator-visible. A blank
+    ``bridge_text`` is a channel fault, since a channel reads the participant's words before it
+    routes them: the seam's :class:`~tai42_contract.conversations.BlankInboundTextError`
+    propagates.
     """
     try:
         await tai42_app.conversations.accept(
@@ -211,12 +212,6 @@ async def _bridge(bridge: InboundBridge) -> None:
             medium_message_id=bridge.medium_message_id,
             reply_to_medium_message_id=bridge.reply_to_medium_message_id,
             params=bridge.params,
-        )
-    except BlankInboundTextError:
-        logger.warning(
-            "inbound: blank bridge text for %s on channel %r; acked, no turn",
-            bridge.client_address,
-            bridge.channel_id,
         )
     except LookupError:
         await _emit_inbound_unrouted(bridge, reason="no_route")
@@ -410,6 +405,9 @@ async def handle_inbound_answer(
     * Anything else (401/413/5xx, or a transport fault) -> do NOT release; raise
       :class:`AnswerForwardError` so the channel's webhook redelivery re-runs the
       ladder. The answer is never silently lost.
+
+    Every bridging arm hands ``bridge.bridge_text`` to ``accept``; a blank one raises
+    :class:`~tai42_contract.conversations.BlankInboundTextError` out of the ladder.
     """
     entry = await store.get_correlation(correlation_key)
     if entry is None:

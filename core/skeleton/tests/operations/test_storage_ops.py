@@ -11,10 +11,13 @@ import mimetypes
 from types import SimpleNamespace
 
 import pytest
+from tai42_contract.errors import OperationError
 from tai42_contract.manifest import ApiToolsConfig
 from tai42_contract.storage import ObjectStat, Storage
+from tai42_contract.template import TemplateEviction
 
 from tai42_skeleton.app import instance
+from tai42_skeleton.app.bus import OpOutcome
 from tai42_skeleton.conversations.media_meta import declare_media_prefix_marks
 from tai42_skeleton.operations import (
     BadRequestError,
@@ -25,6 +28,7 @@ from tai42_skeleton.operations import (
     OperationRegistry,
     operation_metadata_of,
 )
+from tai42_skeleton.operations._broadcast import FleetBroadcastError
 from tai42_skeleton.operations.projection import project_operations
 from tai42_skeleton.operations.storage import (
     delete_dir,
@@ -35,7 +39,7 @@ from tai42_skeleton.operations.storage import (
     storage_info,
     upload_resource,
 )
-from tai42_skeleton.template import ResourceManager
+from tai42_skeleton.template import HolderUnreadableError, PartialDirectoryDeleteError, ResourceManager
 
 from .._fakes.bus import FakeBus
 from .._fakes.content_fixtures import (
@@ -49,15 +53,18 @@ from .._fakes.content_fixtures import (
 )
 from .._fakes.listing import keys_under
 from .._fakes.prefix_marks import fresh_prefix_marks
-from .._fakes.recording_storage import RecordingStorage
+from .._fakes.recording_storage import PartialDeleteStorage, RecordingStorage
 from .._fakes.template_holders import (
     HELD_DIRECTORY_REFUSAL,
     HELD_HOLDERS,
     HELD_TEMPLATE_REFUSAL,
+    STORE_UNAVAILABLE_FAULT,
     STORED_PRESET_FAULT,
+    app_held_by,
     fresh_referees,
     hold_jq_gate,
     hook_referee,
+    store_unavailable_referee,
     stored_preset_fault_referee,
     value_error_referee,
 )
@@ -111,7 +118,7 @@ def install(monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setattr(
             instance.app,
             "_resource_manager_cache",
-            ResourceManager(provider, on_evicted=instance.app._fire_template_evicted),
+            ResourceManager(provider, on_evicted=instance.app._fire_template_evicted, held_by=app_held_by),
         )
         monkeypatch.setattr(instance.app, "_bus", FakeBus())
         return provider
@@ -285,7 +292,11 @@ def held_store(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     evicted: list[object] = []
     bus = FakeBus(remotes=["serve-w1"])
     monkeypatch.setattr(instance.app._storage_registry, "_provider", provider)
-    monkeypatch.setattr(instance.app, "_resource_manager_cache", ResourceManager(provider, on_evicted=evicted.append))
+    monkeypatch.setattr(
+        instance.app,
+        "_resource_manager_cache",
+        ResourceManager(provider, on_evicted=evicted.append, held_by=app_held_by),
+    )
     monkeypatch.setattr(instance.app, "_bus", bus)
     return SimpleNamespace(provider=provider, evicted=evicted, bus=bus)
 
@@ -335,22 +346,72 @@ async def test_a_referee_fault_fails_the_delete_and_changes_nothing(
     with pytest.raises(OperationFailedError) as excinfo:
         await delete()
     assert str(excinfo.value) == f"{head} cannot be deleted: a holder could not be read (ValueError)"
-    assert isinstance(excinfo.value.__cause__, ValueError)
+    assert isinstance(excinfo.value.__cause__, HolderUnreadableError)
+    assert isinstance(excinfo.value.__cause__.__cause__, ValueError)
     assert "'x'" not in str(excinfo.value)
     assert sorted(held_store.provider.objects) == ["jq/free", "jq/gate"]
     assert held_store.bus.publish_calls == []
 
 
+@pytest.mark.parametrize(
+    ("referee", "fault"),
+    [
+        pytest.param(stored_preset_fault_referee, STORED_PRESET_FAULT, id="operation-failed"),
+        pytest.param(store_unavailable_referee, STORE_UNAVAILABLE_FAULT, id="unavailable"),
+    ],
+)
 @pytest.mark.parametrize(("delete", "refusal", "head"), _DELETES)
-async def test_a_stored_preset_fault_propagates_unchanged(
-    monkeypatch: pytest.MonkeyPatch, held_store: SimpleNamespace, delete, refusal: str, head: str
+async def test_a_referees_own_operation_error_propagates_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+    held_store: SimpleNamespace,
+    delete,
+    refusal: str,
+    head: str,
+    referee,
+    fault: OperationError,
 ) -> None:
-    fresh_referees(monkeypatch).register(stored_preset_fault_referee)
-    with pytest.raises(OperationFailedError) as excinfo:
+    fresh_referees(monkeypatch).register(referee)
+    with pytest.raises(OperationError) as excinfo:
         await delete()
-    assert excinfo.value is STORED_PRESET_FAULT
+    assert excinfo.value is fault
     assert sorted(held_store.provider.objects) == ["jq/free", "jq/gate"]
     assert held_store.bus.publish_calls == []
+
+
+async def test_a_partial_directory_delete_still_broadcasts_evict(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The store marks a failure once the provider's deletion began: some keys under the
+    # prefix may be gone, so the eviction still fans out to siblings (idempotent — a spurious
+    # evict costs one re-render) and the error propagates wrapped in a ``FleetBroadcastError``
+    # carrying the fleet report. The self entry carries the failed local apply.
+    fresh_referees(monkeypatch)
+    provider = PartialDeleteStorage({"prompts/archive/a": (b".a", None), "prompts/archive/b": (b".b", None)})
+    evicted: list[object] = []
+    bus = FakeBus(remotes=["serve-w1"])
+    monkeypatch.setattr(instance.app._storage_registry, "_provider", provider)
+    monkeypatch.setattr(
+        instance.app,
+        "_resource_manager_cache",
+        ResourceManager(provider, on_evicted=evicted.append, held_by=app_held_by),
+    )
+    monkeypatch.setattr(instance.app, "_bus", bus)
+
+    with pytest.raises(FleetBroadcastError, match="disk vanished mid-delete") as excinfo:
+        await delete_dir("prompts/archive")
+
+    cause = excinfo.value.__cause__
+    assert isinstance(cause, PartialDirectoryDeleteError)
+    assert cause.path == "prompts/archive"
+    assert str(cause) == "directory 'prompts/archive' delete failed after deletion began: disk vanished mid-delete"
+    assert isinstance(cause.__cause__, OSError)
+    assert excinfo.value.report.op == "evict_template"
+    assert len(bus.publish_calls) == 1
+    op, targets, local = bus.publish_calls[0]
+    assert op == {"op": "evict_template", "path": "prompts/archive", "prefix": True}
+    assert targets is None
+    assert local is not None
+    assert local.outcome == OpOutcome.failed
+    assert sorted(provider.objects) == ["prompts/archive/b"]
+    assert evicted == [TemplateEviction(path="prompts/archive", prefix=True)]
 
 
 # -- projection: the mutating ops carry destructiveHint ------------------------

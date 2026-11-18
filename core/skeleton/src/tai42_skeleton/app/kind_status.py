@@ -44,7 +44,7 @@ from tai42_skeleton.plugins.registry import StudioPluginError, current_registry_
 from tai42_skeleton.routers.tool_runs_settings import tool_runs_store_configured
 from tai42_skeleton.settings.rate_limit import RateLimitSettings
 from tai42_skeleton.states.db import STATES_COMPONENT, states_store_configured
-from tai42_skeleton.template.files_extra import files_extra_installed, files_not_configured
+from tai42_skeleton.template.files_extra import FILES_INSTALL_LINE, files_extra_installed
 
 if TYPE_CHECKING:
     from tai42_skeleton.app.facets import AdminFacet, StorageFacet
@@ -153,7 +153,7 @@ def _files_row() -> KindStatus:
     # Locating the extra's packages answers without importing the loader or any of them,
     # so a process that reports this row pays no import cost for an extra it may not use.
     if not files_extra_installed():
-        return KindStatus(kind="files", state="off", plugin=None, detail=files_not_configured().message)
+        return KindStatus(kind="files", state="off", plugin=None, detail=FILES_INSTALL_LINE)
     return KindStatus(kind="files", state="active", plugin=None, detail="file loading is installed (the 'files' extra)")
 
 

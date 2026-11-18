@@ -13,6 +13,7 @@ from tai42_skeleton.storage import StorageRegistry
 from tai42_skeleton.template import ResourceManager
 
 from .._fakes.listing import keys_under
+from .._fakes.template_holders import app_held_by
 
 
 class _InMemoryStorage(Storage):
@@ -50,7 +51,9 @@ class _InMemoryStorage(Storage):
 async def test_dead_by_default_raises_loudly() -> None:
     """An unconfigured manager (no provider) raises a clear error on use —
     never a silent no-op."""
-    manager = ResourceManager(StorageRegistry().provider, on_evicted=lambda _eviction: None)  # provider is None
+    manager = ResourceManager(
+        StorageRegistry().provider, on_evicted=lambda _eviction: None, held_by=app_held_by
+    )  # provider is None
 
     with pytest.raises(RuntimeError, match="no Storage provider registered"):
         await manager.fetch_template("greeting.j2")
@@ -68,7 +71,7 @@ async def test_render_by_id_with_registered_provider() -> None:
         def __init__(self) -> None:
             super().__init__({"greeting.j2": "Hello {{ name }}!"})
 
-    manager = ResourceManager(registry.provider, on_evicted=lambda _eviction: None)
+    manager = ResourceManager(registry.provider, on_evicted=lambda _eviction: None, held_by=app_held_by)
 
     rendered = await manager.render_by_id("greeting.j2", {"name": "World"})
     assert rendered == "Hello World!"
@@ -76,7 +79,7 @@ async def test_render_by_id_with_registered_provider() -> None:
 
 async def test_render_by_content_needs_no_provider() -> None:
     """Inline content renders without touching storage, even unconfigured."""
-    manager = ResourceManager(StorageRegistry().provider, on_evicted=lambda _eviction: None)
+    manager = ResourceManager(StorageRegistry().provider, on_evicted=lambda _eviction: None, held_by=app_held_by)
 
     rendered = await manager.render_templated_text(TemplatedText(content="Hi {{ who }}", kwargs={"who": "there"}))
     assert rendered == "Hi there"
@@ -87,7 +90,7 @@ async def test_upload_then_render() -> None:
     registry = StorageRegistry()
     registry.register_storage(_InMemoryStorage)
 
-    manager = ResourceManager(registry.provider, on_evicted=lambda _eviction: None)
+    manager = ResourceManager(registry.provider, on_evicted=lambda _eviction: None, held_by=app_held_by)
 
     await manager.upload_template("msg.j2", "Count: {{ n }}")
     rendered = await manager.render_by_id("msg.j2", {"n": 3})
@@ -105,7 +108,7 @@ async def test_load_rejects_traversal_id() -> None:
 
     registry = StorageRegistry()
     registry.register_storage(_InMemoryStorage)
-    manager = ResourceManager(registry.provider, on_evicted=lambda _eviction: None)
+    manager = ResourceManager(registry.provider, on_evicted=lambda _eviction: None, held_by=app_held_by)
 
     with pytest.raises(UnsafeTemplatePathError):
         await manager.load("../x")
@@ -119,7 +122,7 @@ async def test_load_accepts_clean_id() -> None:
         def __init__(self) -> None:
             super().__init__({"clean/name.j2": "hello"})
 
-    manager = ResourceManager(registry.provider, on_evicted=lambda _eviction: None)
+    manager = ResourceManager(registry.provider, on_evicted=lambda _eviction: None, held_by=app_held_by)
     data, _mime = await manager.load("clean/name.j2", with_mime=False)
     assert data == b"hello"
 
@@ -135,7 +138,7 @@ async def test_load_and_fetch_refuse_a_non_canonical_key_with_the_guard_message(
         def __init__(self) -> None:
             super().__init__({"a": "x", "b": "y", "a/b.txt": "z"})
 
-    manager = ResourceManager(registry.provider, on_evicted=lambda _eviction: None)
+    manager = ResourceManager(registry.provider, on_evicted=lambda _eviction: None, held_by=app_held_by)
     message = f"non-canonical store key {key!r}: a key is '/'-separated names with no empty, '.' or '..' segment"
     with pytest.raises(UnsafeTemplatePathError) as loaded:
         await manager.load(key)
@@ -151,7 +154,7 @@ async def test_resolve_image_rejects_traversal_id() -> None:
 
     registry = StorageRegistry()
     registry.register_storage(_InMemoryStorage)
-    manager = ResourceManager(registry.provider, on_evicted=lambda _eviction: None)
+    manager = ResourceManager(registry.provider, on_evicted=lambda _eviction: None, held_by=app_held_by)
 
     with pytest.raises(UnsafeTemplatePathError):
         await manager.resolve_image("../x")
@@ -175,7 +178,7 @@ async def test_render_and_fetch_by_id_reject_traversal() -> None:
         def __init__(self) -> None:
             super().__init__({"greeting.j2": "Hello {{ name }}!"})
 
-    manager = ResourceManager(registry.provider, on_evicted=lambda _eviction: None)
+    manager = ResourceManager(registry.provider, on_evicted=lambda _eviction: None, held_by=app_held_by)
 
     with pytest.raises(UnsafeTemplatePathError):
         await manager.fetch_template("../x")
@@ -204,15 +207,15 @@ async def test_delete_template_missing_is_noop_at_the_store_seam() -> None:
         async def delete(self, path: str) -> None:
             raise FileNotFoundError(f"Object not found: {path}")
 
-    manager = ResourceManager(registry.provider, on_evicted=lambda _eviction: None)
+    manager = ResourceManager(registry.provider, on_evicted=lambda _eviction: None, held_by=app_held_by)
 
     # No raise despite the provider raising FileNotFoundError for the absent key.
     await manager.delete_template("never-existed.j2")
 
 
 def test_every_manager_carries_a_new_epoch() -> None:
-    first = ResourceManager(None, on_evicted=lambda _eviction: None)
-    second = ResourceManager(None, on_evicted=lambda _eviction: None)
+    first = ResourceManager(None, on_evicted=lambda _eviction: None, held_by=app_held_by)
+    second = ResourceManager(None, on_evicted=lambda _eviction: None, held_by=app_held_by)
     assert second.epoch > first.epoch
     assert first.generation == second.generation == 0
 
@@ -226,7 +229,7 @@ def test_every_manager_carries_a_new_epoch() -> None:
     ],
 )
 def test_each_local_eviction_seam_bumps_the_generation_once(evict) -> None:
-    rm = ResourceManager(None, on_evicted=lambda _eviction: None)
+    rm = ResourceManager(None, on_evicted=lambda _eviction: None, held_by=app_held_by)
     evict(rm)
     assert rm.generation == 1
     evict(rm)
@@ -238,6 +241,6 @@ def test_cache_enabled_reads_the_settings(monkeypatch: pytest.MonkeyPatch) -> No
     from tai42_skeleton.template.settings import TemplateCacheSettings
 
     monkeypatch.setattr(rm_module, "template_cache_settings", lambda: TemplateCacheSettings(ttl=0))
-    assert ResourceManager(None, on_evicted=lambda _eviction: None).cache_enabled is False
+    assert ResourceManager(None, on_evicted=lambda _eviction: None, held_by=app_held_by).cache_enabled is False
     monkeypatch.setattr(rm_module, "template_cache_settings", lambda: TemplateCacheSettings(ttl=None, max_size=10))
-    assert ResourceManager(None, on_evicted=lambda _eviction: None).cache_enabled is True
+    assert ResourceManager(None, on_evicted=lambda _eviction: None, held_by=app_held_by).cache_enabled is True

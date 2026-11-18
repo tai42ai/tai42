@@ -24,13 +24,14 @@ from typing import Any
 import pytest
 from tai42_contract.backend import SCHEDULE_CADENCE_KEY, CrontabCadence, IntervalCadence, ScheduleRecord
 
+from tai42_skeleton.app import tool_rename_referees
 from tai42_skeleton.app.instance import app
 from tai42_skeleton.backup.sections import _export_schedules, _import_schedules
 from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.operations import NotFoundError, OperationFailedError
 from tai42_skeleton.operations import schedules as schedules_ops
 from tai42_skeleton.operations import tools as tools_ops
-from tai42_skeleton.tools import holder_kinds, platform_referees
+from tai42_skeleton.tools import holder_kinds
 from tai42_skeleton.tools.binding.surface import remove_surface_tool
 
 _TOOLS_MODULE = "tests.app._fixtures.schedule_tools"
@@ -181,7 +182,7 @@ async def test_export_reads_the_tool_the_backend_splits_from_its_own_key():
     async with app.app_context(_manifest()):
         await schedules_ops.create_schedule("demo_report", {"payload": "x"}, cadence=_CRON, schedule_name="m")
         records = await schedules_ops.export_schedules_raw()
-        holders = await platform_referees._schedule_referee(frozenset({"demo_report", "plain_task"}))
+        holders = await tool_rename_referees._schedule_referee(frozenset({"demo_report", "plain_task"}))
     assert records == [
         ScheduleRecord(name="m", tool="demo_report", kwargs={"payload": "x"}, cadence=_CRON, enabled=True)
     ]

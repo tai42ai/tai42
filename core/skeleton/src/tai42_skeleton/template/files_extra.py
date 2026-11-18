@@ -10,22 +10,24 @@ from __future__ import annotations
 
 from importlib.util import find_spec
 
-from tai42_skeleton.operations.errors import NotSupportedError
-from tai42_skeleton.template.errors import FILES_NOT_CONFIGURED_CODE
+from tai42_skeleton.template.errors import FilesNotConfiguredError
 
 # The top-level modules of the ``files`` extra that the content loader imports.
 FILES_EXTRA_MODULES = ("bs4", "ebooklib", "langchain_community", "magika", "odf", "pandas", "pptx", "striprtf")
 
 
-def files_not_configured() -> NotSupportedError:
-    """The ``501`` refusal every content load answers without the ``files`` extra; its message is the install line."""
-    return NotSupportedError(
-        "tai42-skeleton 'files' resource loading requires the 'files' optional "
-        "dependencies (magika, pandas, langchain-community, pypdf, docx2txt, "
-        "openpyxl, tabulate, beautifulsoup4, python-pptx, striprtf, odfpy, "
-        "ebooklib). Install them with: pip install 'tai42-skeleton[files]'",
-        extra={"code": FILES_NOT_CONFIGURED_CODE},
-    )
+#: The install line a content load answers with when the ``files`` extra is missing.
+FILES_INSTALL_LINE = (
+    "tai42-skeleton 'files' resource loading requires the 'files' optional "
+    "dependencies (magika, pandas, langchain-community, pypdf, docx2txt, "
+    "openpyxl, tabulate, beautifulsoup4, python-pptx, striprtf, odfpy, "
+    "ebooklib). Install them with: pip install 'tai42-skeleton[files]'"
+)
+
+
+def files_not_configured() -> FilesNotConfiguredError:
+    """The refusal every content load answers without the ``files`` extra; its message is the install line."""
+    return FilesNotConfiguredError(FILES_INSTALL_LINE)
 
 
 def files_extra_installed() -> bool:
@@ -33,4 +35,4 @@ def files_extra_installed() -> bool:
     return all(find_spec(name) is not None for name in FILES_EXTRA_MODULES)
 
 
-__all__ = ["FILES_EXTRA_MODULES", "files_extra_installed", "files_not_configured"]
+__all__ = ["FILES_EXTRA_MODULES", "FILES_INSTALL_LINE", "files_extra_installed", "files_not_configured"]

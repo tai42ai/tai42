@@ -19,7 +19,7 @@ from tai42_kit.utils.render import SchemaBodyError
 
 from tai42_skeleton.app import instance
 from tai42_skeleton.states import service as service_mod
-from tai42_skeleton.states.schema import _validate_schema
+from tai42_skeleton.states.schema import validate_schema
 from tai42_skeleton.states.service import StatesService
 
 from .._fakes.recording_storage import MappedStorage
@@ -96,7 +96,7 @@ async def test_put_template_replace_stores_an_effective_schema_the_declare_rules
     await svc.attach("alerts", "m", AttachBody(path=["box"]))
     await svc.put_template(_template_doc("m", schema=_DEFS_FRAGMENT), replace=True)
     effective = await svc.effective_schema_for("alerts")
-    _validate_schema(effective)
+    validate_schema(effective)
     assert effective["properties"]["box"]["properties"]["tag"] == {"$ref": "#/properties/box/$defs/t"}
 
 

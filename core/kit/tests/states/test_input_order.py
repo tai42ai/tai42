@@ -72,4 +72,6 @@ def test_a_118_program_template_orders_as_the_step_selection() -> None:
 
 def test_the_sibling_prelude_follows_the_order() -> None:
     bodies = {"a": "tjq_b({})", "b": "1"}
-    assert sibling_prelude(bodies, input_order(bodies)) == "def tjq_b($params): 1; def tjq_a($params): tjq_b({}); "
+    assert sibling_prelude(bodies, input_order(bodies)) == (
+        "def tjq_b($params): 1\n\n; def tjq_a($params): tjq_b({})\n\n; "
+    )

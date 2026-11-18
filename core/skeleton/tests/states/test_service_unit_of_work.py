@@ -555,7 +555,7 @@ def validations(monkeypatch: pytest.MonkeyPatch) -> _Counter:
     from tai42_skeleton.states.store import writes as writes_mod
 
     counter = _Counter()
-    real = unit_mod._validate_document
+    real = unit_mod.validate_document
 
     def counted(*args: Any, **kwargs: Any) -> None:
         if counter.committing:
@@ -564,8 +564,8 @@ def validations(monkeypatch: pytest.MonkeyPatch) -> _Counter:
             counter.stage += 1
         real(*args, **kwargs)
 
-    monkeypatch.setattr(unit_mod, "_validate_document", counted)
-    monkeypatch.setattr(writes_mod, "_validate_document", counted)
+    monkeypatch.setattr(unit_mod, "validate_document", counted)
+    monkeypatch.setattr(writes_mod, "validate_document", counted)
     return counter
 
 

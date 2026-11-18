@@ -26,19 +26,18 @@ from tai42_kit.utils.data.form_text import render_form_text
 from tai42_channel_slack.blocks import decode_reply_value, is_option_tap, is_reply_action
 from tai42_channel_slack.client import open_modal_view, update_modal_view
 from tai42_channel_slack.correlation import get_form_record, slack_form_correlation_store
-from tai42_channel_slack.form_blocks import FormSchemaError
+from tai42_channel_slack.form_answer import extract_answer
+from tai42_channel_slack.form_blocks import FIELD_ACTION_ID, FormSchemaError
 from tai42_channel_slack.forms import (
-    FIELD_ACTION_ID,
     FORM_OPEN_ACTION_ID,
     FORM_SUBMIT_CALLBACK_ID,
     build_modal_view,
     decode_private_metadata,
-    extract_answer,
     first_field_name,
     is_declared_field,
 )
-from tai42_channel_slack.inbound.routing import _bridge, _recipients, _resolve_answer
-from tai42_channel_slack.inbound.verification import _InboundRejectedError, _read_verified_body
+from tai42_channel_slack.inbound.routing import bridge_message, recipient_channels, resolve_answer
+from tai42_channel_slack.inbound.verification import InboundRejectedError, read_verified_body
 from tai42_channel_slack.settings import slack_settings
 
 logger = logging.getLogger(__name__)
@@ -80,8 +79,8 @@ async def slack_interactive(request: Request) -> Response:
     payload is acked 200 and ignored (Slack needs a 2xx).
     """
     try:
-        raw = await _read_verified_body(request)
-    except _InboundRejectedError as rejected:
+        raw = await read_verified_body(request)
+    except InboundRejectedError as rejected:
         return rejected.response
 
     payload = _parse_interactive_payload(raw)
@@ -255,11 +254,11 @@ async def _resolve_option_tap(payload: dict[str, Any], action: dict[str, Any]) -
     action_ts = action.get("action_ts")
     dedupe_id = action_ts if isinstance(action_ts, str) and action_ts else message_ts
     settings = slack_settings()
-    if channel not in _recipients(settings):
+    if channel not in recipient_channels(settings):
         # Defense-in-depth, mirroring the typed-reply gate: a tap from a non-allowlisted
         # channel is not an answer to any ask — it bridges exactly as a typed message
         # from that channel would (carrying any reply id as enrichment params).
-        return await _bridge(
+        return await bridge_message(
             settings.bot_user_id,
             channel,
             value,
@@ -268,7 +267,7 @@ async def _resolve_option_tap(payload: dict[str, Any], action: dict[str, Any]) -
             reply_to_medium_message_id=message_ts,
             params=params,
         )
-    return await _resolve_answer(
+    return await resolve_answer(
         message_ts,
         value,
         settings.bot_user_id,

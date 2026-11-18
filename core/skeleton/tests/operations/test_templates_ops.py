@@ -18,8 +18,9 @@ from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
+from tai42_contract.errors import OperationError
 from tai42_contract.manifest import ApiToolsConfig
-from tai42_contract.template import TemplatedText
+from tai42_contract.template import TemplatedText, TemplateEviction
 
 import tai42_skeleton.operations.templates as templates_ops
 from tai42_skeleton.app import instance
@@ -46,7 +47,12 @@ from tai42_skeleton.operations.templates import (
     render_template,
     upload_template,
 )
-from tai42_skeleton.template import ResourceManager, TemplateNotFoundError
+from tai42_skeleton.template import (
+    HolderUnreadableError,
+    PartialDirectoryDeleteError,
+    ResourceManager,
+    TemplateNotFoundError,
+)
 
 from .._fakes.bus import FakeBus
 from .._fakes.content_fixtures import (
@@ -59,15 +65,18 @@ from .._fakes.content_fixtures import (
     png,
 )
 from .._fakes.prefix_marks import fresh_prefix_marks
-from .._fakes.recording_storage import RecordingStorage
+from .._fakes.recording_storage import PartialDeleteStorage, RecordingStorage
 from .._fakes.template_holders import (
     HELD_DIRECTORY_REFUSAL,
     HELD_HOLDERS,
     HELD_TEMPLATE_REFUSAL,
+    STORE_UNAVAILABLE_FAULT,
     STORED_PRESET_FAULT,
+    app_held_by,
     fresh_referees,
     hold_jq_gate,
     hook_referee,
+    store_unavailable_referee,
     stored_preset_fault_referee,
     value_error_referee,
 )
@@ -185,7 +194,7 @@ def entry_store(monkeypatch: pytest.MonkeyPatch) -> RecordingStorage:
     """A recording provider behind the real resource manager, read by ``get_template``."""
     provider = RecordingStorage()
     monkeypatch.setattr(instance.app._storage_registry, "_provider", provider)
-    tm = ResourceManager(provider, on_evicted=lambda _eviction: None)
+    tm = ResourceManager(provider, on_evicted=lambda _eviction: None, held_by=app_held_by)
     monkeypatch.setattr(templates_ops, "tai42_app", SimpleNamespace(storage=SimpleNamespace(resource_manager=tm)))
     return provider
 
@@ -422,51 +431,56 @@ async def test_delete_template_dir_provider_value_error_is_bad_request(
         await delete_template_dir("prompts/archive")
 
 
-async def test_delete_template_dir_infra_error_propagates(
-    manager: _ResourceManager, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # A genuine infra failure is neither a 404 nor a 400: it propagates (a 500),
-    # never masked as a client error.
+async def test_delete_template_dir_infra_error_propagates(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A genuine infra failure is neither a 404 nor a 400: it propagates as it is (a 500),
+    # never masked as a client error, and a failure the store does not mark as begun
+    # publishes nothing.
+    tm = _ResourceManager()
+    bus = _install(monkeypatch, tm)
+
     async def _boom(path: str) -> None:
         raise RuntimeError("storage down")
 
-    monkeypatch.setattr(manager, "delete_template_dir", _boom)
-    with pytest.raises(RuntimeError, match="storage down"):
+    monkeypatch.setattr(tm, "delete_template_dir", _boom)
+    with pytest.raises(RuntimeError, match="storage down") as excinfo:
         await delete_template_dir("prompts/archive")
+    assert excinfo.type is RuntimeError
+    assert bus.publish_calls == []
 
 
 async def test_delete_template_dir_partial_failure_still_broadcasts_evict(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # A mid-delete provider failure can leave the store partially mutated: some keys
-    # under the prefix are already gone. The eviction MUST still fan out to siblings
-    # (idempotent — a spurious evict costs one re-render) and the original error still
-    # propagates loudly, wrapped in a ``FleetBroadcastError`` carrying the fleet report.
-    # A pre-mutation failure (404/400) would abort before publish; this OSError is
-    # neither, so it is the destructive-phase case.
-    tm = _ResourceManager()
-    bus = _install(monkeypatch, tm, FakeBus(remotes=["serve-w1"]))
-
-    async def _partial(path: str) -> None:
-        raise OSError("disk vanished mid-delete")
-
-    monkeypatch.setattr(tm, "delete_template_dir", _partial)
+    # The store marks a failure once the provider's deletion began: some keys under the
+    # prefix may be gone, so the eviction still fans out to siblings (idempotent — a spurious
+    # evict costs one re-render) and the error propagates wrapped in a ``FleetBroadcastError``
+    # carrying the fleet report. The self entry carries the failed local apply.
+    fresh_referees(monkeypatch)
+    provider = PartialDeleteStorage({"prompts/archive/a": (b".a", None), "prompts/archive/b": (b".b", None)})
+    evicted: list[object] = []
+    bus = _install(
+        monkeypatch,
+        ResourceManager(provider, on_evicted=evicted.append, held_by=app_held_by),  # type: ignore[arg-type]
+        FakeBus(remotes=["serve-w1"]),
+    )
 
     with pytest.raises(FleetBroadcastError, match="disk vanished mid-delete") as excinfo:
         await delete_template_dir("prompts/archive")
 
-    # The original failure is preserved as the cause and the fleet report is attached.
-    assert isinstance(excinfo.value.__cause__, OSError)
+    cause = excinfo.value.__cause__
+    assert isinstance(cause, PartialDirectoryDeleteError)
+    assert cause.path == "prompts/archive"
+    assert str(cause) == "directory 'prompts/archive' delete failed after deletion began: disk vanished mid-delete"
+    assert isinstance(cause.__cause__, OSError)
     assert excinfo.value.report.op == "evict_template"
-
-    # The eviction fanned out despite the partial delete — the exact sibling-staleness
-    # this split closes. The self entry carries the failed local apply.
     assert len(bus.publish_calls) == 1
     op, targets, local = bus.publish_calls[0]
     assert op == {"op": "evict_template", "path": "prompts/archive", "prefix": True}
     assert targets is None
     assert local is not None
     assert local.outcome == OpOutcome.failed
+    assert sorted(provider.objects) == ["prompts/archive/b"]
+    assert evicted == [TemplateEviction(path="prompts/archive", prefix=True)]
 
 
 # -- a held object's delete is refused --
@@ -477,7 +491,11 @@ def held_store(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     """A real manager over ``jq/gate`` and ``jq/free``, recording its evictions, behind a fleet bus."""
     provider = RecordingStorage({"jq/gate": (b".a", None), "jq/free": (b".b", None)})
     evicted: list[object] = []
-    bus = _install(monkeypatch, ResourceManager(provider, on_evicted=evicted.append), FakeBus(remotes=["serve-w1"]))  # type: ignore[arg-type]
+    bus = _install(
+        monkeypatch,
+        ResourceManager(provider, on_evicted=evicted.append, held_by=app_held_by),  # type: ignore[arg-type]
+        FakeBus(remotes=["serve-w1"]),
+    )
     return SimpleNamespace(provider=provider, evicted=evicted, bus=bus)
 
 
@@ -526,20 +544,34 @@ async def test_a_referee_fault_fails_the_delete_and_changes_nothing(
     with pytest.raises(OperationFailedError) as excinfo:
         await delete()
     assert str(excinfo.value) == f"{head} cannot be deleted: a holder could not be read (ValueError)"
-    assert isinstance(excinfo.value.__cause__, ValueError)
+    assert isinstance(excinfo.value.__cause__, HolderUnreadableError)
+    assert isinstance(excinfo.value.__cause__.__cause__, ValueError)
     assert "'x'" not in str(excinfo.value)
     assert sorted(held_store.provider.objects) == ["jq/free", "jq/gate"]
     assert held_store.bus.publish_calls == []
 
 
+@pytest.mark.parametrize(
+    ("referee", "fault"),
+    [
+        pytest.param(stored_preset_fault_referee, STORED_PRESET_FAULT, id="operation-failed"),
+        pytest.param(store_unavailable_referee, STORE_UNAVAILABLE_FAULT, id="unavailable"),
+    ],
+)
 @pytest.mark.parametrize(("delete", "refusal", "head"), _DELETES)
-async def test_a_stored_preset_fault_propagates_unchanged(
-    monkeypatch: pytest.MonkeyPatch, held_store: SimpleNamespace, delete, refusal: str, head: str
+async def test_a_referees_own_operation_error_propagates_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+    held_store: SimpleNamespace,
+    delete,
+    refusal: str,
+    head: str,
+    referee,
+    fault: OperationError,
 ) -> None:
-    fresh_referees(monkeypatch).register(stored_preset_fault_referee)
-    with pytest.raises(OperationFailedError) as excinfo:
+    fresh_referees(monkeypatch).register(referee)
+    with pytest.raises(OperationError) as excinfo:
         await delete()
-    assert excinfo.value is STORED_PRESET_FAULT
+    assert excinfo.value is fault
     assert sorted(held_store.provider.objects) == ["jq/free", "jq/gate"]
     assert held_store.bus.publish_calls == []
 

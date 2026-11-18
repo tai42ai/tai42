@@ -20,12 +20,12 @@ from tai42_contract.channels import (
 )
 from tai42_contract.interactions import CALLBACK_LINK_FORMATS
 
-from tai42_channel_whatsapp.channel.asks import _render_link, _send_question
-from tai42_channel_whatsapp.channel.forms import _deliver_form, _send_form_notification
-from tai42_channel_whatsapp.channel.interactive import _INTERACTIVE_BODY_MAX_CHARS, _choice_of, _guard_choice_label
-from tai42_channel_whatsapp.channel.media import _send_media_prelude
-from tai42_channel_whatsapp.channel.notifications import _send_notification
-from tai42_channel_whatsapp.channel.recipients import _NO_DEFAULT_RECIPIENT, _require_recipient, _send_template
+from tai42_channel_whatsapp.channel.asks import render_link, send_question
+from tai42_channel_whatsapp.channel.forms import deliver_form, send_form_notification
+from tai42_channel_whatsapp.channel.interactive import INTERACTIVE_BODY_MAX_CHARS, choice_of, guard_choice_label
+from tai42_channel_whatsapp.channel.media import send_media_prelude
+from tai42_channel_whatsapp.channel.notifications import send_notification
+from tai42_channel_whatsapp.channel.recipients import NO_DEFAULT_RECIPIENT, require_recipient, send_fenced_template
 from tai42_channel_whatsapp.channel.template_params import parse_template_parameters
 from tai42_channel_whatsapp.client import SentMessage, mark_read_typing, send_message, send_outcome
 from tai42_channel_whatsapp.correlation import (
@@ -96,11 +96,11 @@ class WhatsAppChannel:
         delivery. ``build_form_flow`` is the single mapping definition — the builder
         that actually sends is the one that refuses; a delivery-time
         ``ChannelInputError`` becomes the ask-time ``ValueError``. The Flow body is
-        ``interactive.body.text``, capped by Meta at ``_INTERACTIVE_BODY_MAX_CHARS``,
+        ``interactive.body.text``, capped by Meta at ``INTERACTIVE_BODY_MAX_CHARS``,
         so an over-long ``question`` is refused here too.
         """
-        if len(question) > _INTERACTIVE_BODY_MAX_CHARS:
-            raise ValueError(f"form question exceeds {_INTERACTIVE_BODY_MAX_CHARS} characters")
+        if len(question) > INTERACTIVE_BODY_MAX_CHARS:
+            raise ValueError(f"form question exceeds {INTERACTIVE_BODY_MAX_CHARS} characters")
         try:
             build_form_flow(schema)
         except ChannelInputError as exc:
@@ -117,12 +117,12 @@ class WhatsAppChannel:
         fence reads the contact store, so it runs at send time, never here.
         """
         if sender_identity is not None:
-            target = _require_recipient(recipient, "a bridge reply requires a recipient wa_id; none was provided")
+            target = require_recipient(recipient, "a bridge reply requires a recipient wa_id; none was provided")
             return ChannelAddress(our_identity=sender_identity, address=target)
         phone_number_id = require_delivery_setting(
             whatsapp_settings().default_phone_number_id, "CHANNEL_WHATSAPP_DEFAULT_PHONE_NUMBER_ID"
         )
-        target = _require_recipient(recipient, _NO_DEFAULT_RECIPIENT)
+        target = require_recipient(recipient, NO_DEFAULT_RECIPIENT)
         return ChannelAddress(our_identity=phone_number_id, address=target)
 
     async def deliver(self, delivery: ChannelDelivery) -> SendOutcome:
@@ -148,22 +148,22 @@ class WhatsAppChannel:
         # a media failure raises with nothing reserved.
         sent: list[SentMessage] = []
         if delivery.media:
-            sent = await _send_media_prelude(phone_number_id, target, list(delivery.media))
+            sent = await send_media_prelude(phone_number_id, target, list(delivery.media))
 
         if delivery.answer_format in CALLBACK_LINK_FORMATS:
             # Tier-1: answered via the callback link, so no correlation is stored.
-            sent.append(await send_message(phone_number_id=phone_number_id, to=target, body=_render_link(delivery)))
+            sent.append(await send_message(phone_number_id=phone_number_id, to=target, body=render_link(delivery)))
             return send_outcome(phone_number_id, sent)
 
         if delivery.answer_format == "form":
-            sent.append(await _deliver_form(settings, phone_number_id, target, delivery))
+            sent.append(await deliver_form(settings, phone_number_id, target, delivery))
             return send_outcome(phone_number_id, sent)
 
         # A select ask's list-opening button carries the caller's ``wording.choice.label``; refuse
         # an over-cap label loudly BEFORE the reservation and any send, regardless of the shape the
         # options end up rendering as (buttons / list / numbered text).
-        choice = _choice_of(delivery)
-        _guard_choice_label(choice.label if choice is not None else None)
+        choice = choice_of(delivery)
+        guard_choice_label(choice.label if choice is not None else None)
 
         # Reserve before send: a fast reply's webhook can beat the send response,
         # and this enforces one-pending-per-pair before any network cost. The reservation
@@ -180,7 +180,7 @@ class WhatsAppChannel:
             wording=delivery.wording,
         )
         try:
-            sent.extend(await _send_question(phone_number_id, target, delivery))
+            sent.extend(await send_question(phone_number_id, target, delivery))
         except Exception:
             # Send failed — free the pair instead of holding it until its TTL.
             await release_pending(phone_number_id=phone_number_id, wa_id=target)
@@ -242,11 +242,11 @@ class WhatsAppChannel:
         phone_number_id, target = address.our_identity, address.address
 
         if notification.template is not None:
-            sent = await _send_template(settings, phone_number_id, target, notification.template)
+            sent = await send_fenced_template(settings, phone_number_id, target, notification.template)
         elif notification.schema is not None:
-            sent = await _send_form_notification(settings, phone_number_id, target, notification)
+            sent = await send_form_notification(settings, phone_number_id, target, notification)
         else:
-            sent = await _send_notification(phone_number_id, target, notification)
+            sent = await send_notification(phone_number_id, target, notification)
         return send_outcome(phone_number_id, sent)
 
     async def reply_window(self, *, recipient: str, sender_identity: str | None = None) -> ReplyWindow:

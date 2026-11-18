@@ -41,23 +41,15 @@ from tai42_contract.interactions import (
     QuestionFormat,
     SubmittedEvent,
 )
-from tai42_kit.interactions import evaluate_visible_when
+from tai42_kit.interactions import display_slot_text, evaluate_visible_when
 
-from tai42_channel_whatsapp.channel import _NOTIFY_FORM_TOKEN_PREFIX
+from tai42_channel_whatsapp.channel.forms import NOTIFY_FORM_TOKEN_PREFIX
 from tai42_channel_whatsapp.correlation import CachedFlowForm, EndpointForm, get_cached_flow_form, get_endpoint_form
-from tai42_channel_whatsapp.flow_pictures import embed_display_pictures, require_pictured_data_fits
-from tai42_channel_whatsapp.flows import (
-    FORM_ENTRY_SCREEN,
-    SUCCESS_SCREEN,
-    _form_range_merges,
-    _resolve_pages,
-    _screen_id,
-    component_names,
-    data_source_rows,
-    payload_labels,
-    slot_datanames,
-)
-from tai42_channel_whatsapp.flows_components import _chips_single_pick, split_range_values
+from tai42_channel_whatsapp.flow_pictures import embed_display_pictures
+from tai42_channel_whatsapp.flows import FORM_ENTRY_SCREEN, SUCCESS_SCREEN, page_screen_id
+from tai42_channel_whatsapp.flows_choices import chips_single_pick
+from tai42_channel_whatsapp.flows_components import component_names, payload_labels, split_range_values
+from tai42_channel_whatsapp.flows_data_budget import require_screen_data_fits
 from tai42_channel_whatsapp.flows_dates import (
     forwarded_bound_carriers,
     schema_with_sent_date_bounds,
@@ -72,11 +64,20 @@ from tai42_channel_whatsapp.flows_endpoint import (
     error_fields,
     form_line_carrier,
 )
-from tai42_channel_whatsapp.flows_resolve import form_drawing_order, slot_keys
-from tai42_channel_whatsapp.flows_send_data import _field_init_value, _init_value
+from tai42_channel_whatsapp.flows_resolve import (
+    form_drawing_order,
+    form_range_merges,
+    pages_without_picture_content,
+    resolve_pages,
+    slot_datanames,
+    slot_keys,
+    slot_start_data,
+)
+from tai42_channel_whatsapp.flows_second_line import data_source_rows
+from tai42_channel_whatsapp.flows_send_data import field_init_value, init_value
 from tai42_channel_whatsapp.flows_shapes import channel_word
 from tai42_channel_whatsapp.flows_visibility import split_answer_cases
-from tai42_channel_whatsapp.inbound.forms import _coerce_value, _parse_notify_form_token
+from tai42_channel_whatsapp.inbound.forms import coerce_value, parse_notify_form_token
 from tai42_channel_whatsapp.settings import whatsapp_settings
 
 logger = logging.getLogger(__name__)
@@ -100,8 +101,8 @@ async def _resolve_form(flow_token: str) -> tuple[EndpointForm, CachedFlowForm |
     sidecar under the configured WABA; such a form reacts to nothing, and its sentences, lines and
     date bound values ride the request. Raises :class:`FlowTokenInvalidError` on a miss.
     """
-    if flow_token.startswith(_NOTIFY_FORM_TOKEN_PREFIX):
-        schema_hash, _ = _parse_notify_form_token(flow_token)
+    if flow_token.startswith(NOTIFY_FORM_TOKEN_PREFIX):
+        schema_hash, _ = parse_notify_form_token(flow_token)
         waba_id = whatsapp_settings().waba_id
         cached = await get_cached_flow_form(waba_id, schema_hash) if waba_id else None
         if cached is None:
@@ -230,8 +231,8 @@ def _form_geometry(
     properties = form.schema.get("properties")
     properties = properties if isinstance(properties, dict) else {}
     option_fields = set(form.option_fields)
-    resolved, fields_by_screen = _resolve_pages(properties, form.pages, option_fields)
-    merges = _form_range_merges(properties, resolved, fields_by_screen, option_fields)
+    resolved, fields_by_screen = resolve_pages(properties, form.pages, option_fields)
+    merges = form_range_merges(properties, resolved, fields_by_screen, option_fields)
     return properties, resolved, fields_by_screen, merges
 
 
@@ -241,11 +242,11 @@ async def _react(flow_token: str, event: FormReactionEvent, partial: dict[str, A
 
 
 def _fitting(form: EndpointForm, answer: dict[str, Any]) -> dict[str, Any]:
-    """``answer``, which keeps ``form`` open, once its data fits the form's picture budget.
+    """``answer``, which keeps ``form`` open, once its data fits the form's data budget.
 
-    Raises ``ChannelInputError`` when it does not (:func:`require_pictured_data_fits`).
+    Raises ``ChannelInputError`` when it does not (:func:`require_screen_data_fits`).
     """
-    require_pictured_data_fits(form.pages, answer["data"], endpoint=True)
+    require_screen_data_fits(form.pages, answer["data"], endpoint=True)
     return answer
 
 
@@ -314,7 +315,7 @@ class _ShownCases:
         # a per-case controller's own answer read first; ``None`` when the request carries none.
         if name in self._cases:
             self._pick(name)
-        return _coerce_value(self._out[name], self._properties.get(name)) if name in self._out else None
+        return coerce_value(self._out[name], self._properties.get(name)) if name in self._out else None
 
     def _pick(self, name: str) -> None:
         if name in self._read:
@@ -341,11 +342,11 @@ def _partial_values(data: dict[str, Any], properties: dict[str, Any]) -> dict[st
         prop = properties.get(key)
         if key in RESERVED_REACTION_KEYS or not isinstance(prop, dict):
             continue
-        coerced = _coerce_value(raw, prop)
+        coerced = coerce_value(raw, prop)
         ptype = prop.get("type")
         # A single-pick chips string's empty value is a ``[]`` (not ``""``), so treat it like the
         # other non-string unfilled defaults and omit it from the partial subset.
-        unset_when_empty = ptype != "string" or _chips_single_pick(prop)
+        unset_when_empty = ptype != "string" or chips_single_pick(prop)
         if unset_when_empty and coerced in ("", [], None):
             continue
         partial[key] = coerced
@@ -439,7 +440,7 @@ def _error_bindings(
 def _screen_fields(form: EndpointForm, screen: str) -> tuple[list[list[str]], int | None]:
     # Every screen's field names and the index of ``screen`` among them (None when not a form screen).
     _, _, fields_by_screen, _ = _form_geometry(form)
-    current = next((index for index in range(len(fields_by_screen)) if _screen_id(index) == screen), None)
+    current = next((index for index in range(len(fields_by_screen)) if page_screen_id(index) == screen), None)
     return fields_by_screen, current
 
 
@@ -543,7 +544,10 @@ async def _update_data(update: dict[str, Any], form: EndpointForm, data: dict[st
     """The screen-``data`` keys a FORM UPDATE sets: field values, option lists, display slots, error message.
 
     A display value on an image slot that is a link is fetched, and one that is a stored-media
-    reference is read, and embedded (:func:`embed_display_pictures`). The
+    reference is read, and embedded (:func:`embed_display_pictures`). A slot's data is a string:
+    a ``None`` value leaves the slot unfilled (a text block's own text, or empty; an image's empty
+    source, so its alt text shows), and a number or boolean is written as the web widget writes it
+    (:func:`~tai42_kit.interactions.display_slot_text`). The
     error message of an update carrying field errors is the caller's ``error_line`` (an ask's
     sidecar or the carrier of ``data``, the request's), else ``Label: message`` per field.
     """
@@ -556,17 +560,19 @@ async def _update_data(update: dict[str, Any], form: EndpointForm, data: dict[st
     for name, value in (update.get("values") or {}).items():
         prop = properties.get(name)
         prop = prop if isinstance(prop, dict) else {}
-        shaped = _init_value(prop.get("type"), value)
+        shaped = init_value(prop.get("type"), value)
         # A single-pick chips string's data carrier is array-typed (``max-selected-items: 1``), so its
         # ``__init`` is the one-element list the ChipsSelector expects — matching the initial send.
-        out[f"{names[name]}__init"] = [shaped] if _chips_single_pick(prop) else shaped
+        out[f"{names[name]}__init"] = [shaped] if chips_single_pick(prop) else shaped
     for name, option_list in (update.get("options") or {}).items():
         prop = properties.get(name)
         prop = prop if isinstance(prop, dict) else {}
         out[f"{names[name]}__ds"] = data_source_rows(name, prop, option_list)
+    unfilled = slot_start_data(pages_without_picture_content(form.pages) or [], slots)
     for slot, value in (await embed_display_pictures(update.get("display"), form.pages) or {}).items():
         if slot in slots:
-            out[slots[slot]] = value
+            key = slots[slot]
+            out[key] = unfilled[key] if value is None else display_slot_text(value)
     errors = update.get("errors") or {}
     if errors:
         out["error_message"] = _error_line(
@@ -640,7 +646,7 @@ async def _advance_screen(
     fields_by_screen, current = _screen_fields(form, screen)
     if current is None or current + 1 >= len(fields_by_screen):
         return None
-    next_screen = _screen_id(current + 1)
+    next_screen = page_screen_id(current + 1)
     merged_ends = set(range_merges)
     merged_starts = {start: end for end, start in range_merges.items()}
     update_values = update.get("values") or {}
@@ -668,8 +674,8 @@ async def _advance_screen(
         prop = prop if isinstance(prop, dict) else {}
         if name in update_values or name not in data:
             # The ``__val`` carrier must carry the field's control shape exactly as its ``__init``
-            # does; ``_field_init_value`` is the one shaper both carriers share, so they never drift.
-            data_out[f"{cname}__val"] = _field_init_value(name, prop, update_values)
+            # does; ``field_init_value`` is the one shaper both carriers share, so they never drift.
+            data_out[f"{cname}__val"] = field_init_value(name, prop, update_values)
         else:
             data_out[f"{cname}__val"] = data[name]
     data_out.update(await _update_data(update, form, data))

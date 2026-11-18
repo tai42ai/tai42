@@ -17,11 +17,12 @@ async def check_schedule_definition(state_binding: StateBinding | None, contract
     refusal raises the check's own error (a ``ValueError`` or a states refusal), which each
     caller classifies by type; any other error is a store or transport failure.
     """
+    from tai42_skeleton.app import instance
+
     if contract is not None:
-        await assert_templates_stored(door_contract_template_refs(contract), ValueError)
+        await assert_templates_stored(instance.app.storage.provider, door_contract_template_refs(contract), ValueError)
     if state_binding is None:
         return
-    from tai42_skeleton.app import instance
     from tai42_skeleton.tools import state_binding as binding_validation
 
     await binding_validation.validate_and_attach_binding(instance.app, state_binding)

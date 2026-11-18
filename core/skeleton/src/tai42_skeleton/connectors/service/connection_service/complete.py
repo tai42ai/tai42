@@ -353,7 +353,7 @@ async def _complete_reconnect_or_toggle(
         ReprobeFailedMcps(op="reprobe_failed_mcps", titles=titles),
         None,
         lambda: tai42_app.admin.reprobe_failed_mcps(titles),
-        publish_on_local_failure=True,
+        publish_on_local_failure=(Exception,),
     )
 
     return CompleteConnectResult(

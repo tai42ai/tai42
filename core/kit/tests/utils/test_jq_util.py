@@ -185,14 +185,14 @@ class TestCompileCheck:
         with pytest.raises(ValueError, match="reserved"):
             await compile_check(".", variables=(name,))
 
-    async def test_a_compile_past_the_budget_names_it(self, monkeypatch):
+    async def test_a_compile_past_the_budget_names_the_budget_and_the_program(self, monkeypatch):
         monkeypatch.setattr(jq_util, "compute_pool", lambda: _InProcessPool(raises=TimeoutError("job killed")))
         monkeypatch.setenv("JQ_TIMEOUT_SECONDS", "0.5")
         reset_all_settings()
         try:
             with pytest.raises(JqBudgetExceededError) as exc:
                 await compile_check(".a")
-            assert str(exc.value) == "jq compile exceeded 0.5s (JQ_TIMEOUT_SECONDS); its worker was killed"
+            assert str(exc.value) == "jq compile exceeded 0.5s (JQ_TIMEOUT_SECONDS); its worker was killed: '.a'"
         finally:
             reset_all_settings()
 
@@ -232,10 +232,16 @@ class TestDigestFirstProtocol:
         assert await run_jq_first(".a + $n", {"a": 1}, variables={"n": 2}) == 3
         assert [name for name, _ in in_process_pool.calls] == ["evaluate_cached_job"]
 
-    async def test_an_evaluation_past_the_budget_names_it(self, monkeypatch):
+    async def test_an_evaluation_past_the_budget_names_the_budget_and_the_program(self, monkeypatch):
         monkeypatch.setattr(jq_util, "compute_pool", lambda: _InProcessPool(raises=TimeoutError("job killed")))
-        with pytest.raises(JqBudgetExceededError, match=r"jq evaluation exceeded .*s \(JQ_TIMEOUT_SECONDS\)"):
-            await run_jq_first(".a", {})
+        monkeypatch.setenv("JQ_TIMEOUT_SECONDS", "0.5")
+        reset_all_settings()
+        try:
+            with pytest.raises(JqBudgetExceededError) as exc:
+                await run_jq_first(".a", {})
+            assert str(exc.value) == "jq evaluation exceeded 0.5s (JQ_TIMEOUT_SECONDS); its worker was killed: '.a'"
+        finally:
+            reset_all_settings()
 
     def test_the_digest_separates_every_part(self):
         # Length-prefixed parts: moving characters across a part boundary changes the digest.

@@ -12,6 +12,7 @@ import pytest
 from fakeredis import aioredis
 from tai42_contract.interactions import MEDIA_ROUTE_PREFIX, InteractionResponse, MediaKind
 
+from tai42_skeleton.app import instance
 from tai42_skeleton.conversations import media_meta as meta_module
 from tai42_skeleton.conversations.media_meta import InboundMediaMetaStore
 from tai42_skeleton.conversations.settings import ConversationsSettings
@@ -83,7 +84,7 @@ async def inbound(wired):
 
     monkeypatch.setattr(meta_module, "client_ctx", fake_client_ctx)
     provider = _FakeStorage()
-    monkeypatch.setattr(served_media, "_blob_provider", lambda: provider)
+    monkeypatch.setattr(instance.app._storage_registry, "_provider", provider)
     store = InboundMediaMetaStore(ConversationsSettings())
     try:
         yield SimpleNamespace(redis=r, provider=provider, store=store, monkeypatch=monkeypatch)
@@ -176,7 +177,7 @@ async def test_inbound_record_without_provider_is_503(inbound):
     # that would mask the outage (the id is valid, so there is no oracle to protect).
     media_id = "u" * 43
     await _seed_inbound(inbound, media_id, kind=MediaKind.IMAGE, mime="image/png", filename="pic.png")
-    inbound.monkeypatch.setattr(served_media, "_blob_provider", lambda: None)
+    inbound.monkeypatch.setattr(instance.app._storage_registry, "_provider", None)
     resp = await router.media(make_request("GET", path_params={"media_id": media_id}))
     assert resp.status_code == 503
 
@@ -184,7 +185,7 @@ async def test_inbound_record_without_provider_is_503(inbound):
 async def test_no_provider_inbound_lookup_is_404_not_oracle(inbound):
     # No record + no provider → the SAME uniform 404 as any miss (the provider is never
     # consulted for an unknown id, so its absence cannot be oracled).
-    inbound.monkeypatch.setattr(served_media, "_blob_provider", lambda: None)
+    inbound.monkeypatch.setattr(instance.app._storage_registry, "_provider", None)
     resp = await router.media(make_request("GET", path_params={"media_id": "n" * 43}))
     assert resp.status_code == 404
 

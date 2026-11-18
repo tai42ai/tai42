@@ -3,6 +3,8 @@ get/list, delete, the key/placeholder refusals, and the backend-off 501."""
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from tai42_skeleton.conversations import target_config as store_module
@@ -44,6 +46,7 @@ class _FakeApp:
     def __init__(self, agents: set[str], tools: set[str]) -> None:
         self.agents = _FakeAgents(agents)
         self.tools = _FakeTools(tools)
+        self.storage = SimpleNamespace(provider=None)
 
 
 @pytest.fixture

@@ -36,13 +36,14 @@ class _SignatureRejectedError(Exception):
     """An ordinary request-side verification failure -> uniform 401."""
 
 
-class _InboundRejectedError(Exception):
+class InboundRejectedError(Exception):
     """A transport-auth failure carrying the vendor-facing response a door returns instead of proceeding.
 
     The response is 413 (too large), 500 (misconfigured), or 401 (rejected).
     """
 
     def __init__(self, response: Response) -> None:
+        """Carry ``response``, the reply the door returns."""
         super().__init__()
         self.response = response
 
@@ -90,25 +91,25 @@ def _verify_signature(raw: bytes, headers: Mapping[str, str], secret: str) -> No
         raise _SignatureRejectedError(f"{_SIGNATURE_HEADER} digest mismatch")
 
 
-async def _read_verified_body(request: Request) -> bytes:
+async def read_verified_body(request: Request) -> bytes:
     """Read the bounded raw body and authenticate it, returning the exact bytes.
 
     Bounds the read BEFORE any HMAC work and resolves the signing secret first (an
-    unset or empty key would make the HMAC forgeable). Raises :class:`_InboundRejectedError`
+    unset or empty key would make the HMAC forgeable). Raises :class:`InboundRejectedError`
     carrying the response a door returns without proceeding: 413 past the cap, 500 on a
     missing secret, 401 on any signature defect (the reason stays in the log).
     """
     try:
         raw = await read_bounded_body(request, _MAX_BODY_BYTES)
     except RequestBodyTooLargeError as exc:
-        raise _InboundRejectedError(JSONResponse({"error": "payload too large"}, status_code=413)) from exc
+        raise InboundRejectedError(JSONResponse({"error": "payload too large"}, status_code=413)) from exc
     signing_secret = slack_settings().signing_secret
     secret = signing_secret.get_secret_value() if signing_secret is not None else ""
     if not secret:
-        raise _InboundRejectedError(_misconfigured("CHANNEL_SLACK_SIGNING_SECRET"))
+        raise InboundRejectedError(_misconfigured("CHANNEL_SLACK_SIGNING_SECRET"))
     try:
         _verify_signature(raw, request.headers, secret)
     except _SignatureRejectedError as exc:
         logger.warning("slack inbound door rejected: %s", exc)
-        raise _InboundRejectedError(JSONResponse({"error": "signature verification failed"}, status_code=401)) from exc
+        raise InboundRejectedError(JSONResponse({"error": "signature verification failed"}, status_code=401)) from exc
     return raw

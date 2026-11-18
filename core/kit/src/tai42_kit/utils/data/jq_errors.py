@@ -27,7 +27,10 @@ class JqEvaluationError(JqProgramError):
 
 
 class JqBudgetExceededError(JqProgramError):
-    """The program ran past ``JQ_TIMEOUT_SECONDS`` and its worker was killed; the message names the budget."""
+    """The program ran past ``JQ_TIMEOUT_SECONDS`` and its worker was killed.
+
+    The message names the budget and the program.
+    """
 
 
 class JqNoOutputError(JqProgramError):

@@ -118,7 +118,6 @@ async def _schedule_turn(
         task.add_done_callback(lambda t: _spawn_delivery_on_success(t, intake.message_id))
     else:
         task.add_done_callback(_TURN_TASKS.discard)
-    working_signal.start_turn(intake)
     return task
 
 

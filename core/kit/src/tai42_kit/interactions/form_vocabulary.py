@@ -1,8 +1,9 @@
-"""The platform's form vocabulary: the ``visibleWhen`` evaluator, the drawing order and the shared form constants.
+"""The platform's form vocabulary: the ``visibleWhen`` evaluator, the drawing order, slot text and the form constants.
 
 Every surface that validates, renders or evaluates a channel form reads these names, so a form draws,
-orders and hides its fields the same way on every channel. The date-key names are defined once in the
-contract, beside the build-time date rules, and listed here with the rest of the vocabulary.
+orders and hides its fields, and writes its display slots' values, the same way on every channel. The
+date-key names are defined once in the contract, beside the build-time date rules, and listed here with
+the rest of the vocabulary.
 """
 
 from __future__ import annotations
@@ -14,6 +15,8 @@ from typing import Any, Final
 
 from tai42_contract.interactions.models.form_dates import DATE_CONSTRAINT_KEYS, FORM_WEEKDAYS, TIME_OF_KEY
 
+from tai42_kit.utils.data.number_text import number_text
+
 __all__ = [
     "DATE_CONSTRAINT_KEYS",
     "FORMAT_PATTERNS",
@@ -21,6 +24,7 @@ __all__ = [
     "RADIO_OPTION_THRESHOLD",
     "TIME_OF_KEY",
     "VISIBLE_WHEN_OPS",
+    "display_slot_text",
     "drawing_order",
     "drawn_number_bounds",
     "evaluate_visible_when",
@@ -52,6 +56,30 @@ FORMAT_PATTERNS: Final[Mapping[str, str]] = MappingProxyType(
         "email": r"^[^@\s]+@[^@\s]+\.[^@\s]+$",
     }
 )
+
+
+def display_slot_text(value: str | int | float | bool) -> str:
+    """A display slot's scalar value as the text a surface shows, written as the web widget writes it.
+
+    A string is its own text; a boolean reads ``true`` / ``false``; a number, integer or float, reads as
+    the JavaScript number the widget parses it into, written by ``Number.prototype.toString``: the
+    shortest digits that round-trip, plain notation from ``1e-6`` up to below ``1e21`` (``10``,
+    ``0.00005``) and exponent notation outside it (``1e-7``, ``1e+21``), so a value reads the same on
+    every surface whichever numeric type it arrived as. A number with no finite double (``nan``, an
+    infinity, an integer past the double range) has no text and raises ``ValueError``.
+    """
+    if isinstance(value, str):
+        return value
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        try:
+            return number_text(float(value))
+        except OverflowError as exc:
+            raise ValueError(
+                f"a display slot number must be finite, got an integer of {value.bit_length()} bits"
+            ) from exc
+    return number_text(value)
 
 
 def _numeric(value: Any) -> int | float | None:

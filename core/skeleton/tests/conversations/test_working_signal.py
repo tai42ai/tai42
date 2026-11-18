@@ -494,8 +494,9 @@ async def test_a_sleep_that_overruns_the_ceiling_sends_nothing_past_it(monkeypat
 
 @pytest.mark.parametrize("door", ["intake", "api_door", "event_door"])
 def test_every_scheduling_door_reaches_the_one_seam(door):
-    # Every turn-scheduling door schedules through the single ``_schedule_turn`` seam, so the
-    # loop starts once for all of them; the gate inside ``start_turn`` handles the api door and opt-outs.
+    # Every turn-scheduling door schedules through the single ``_schedule_turn`` seam, whose turn
+    # runs its target through ``target._target_outcome``, so the loop starts at that one place for all
+    # of them; the gate inside ``start_turn`` handles the api door and opt-outs.
     from tai42_skeleton.conversations.turn.schedule import _schedule_turn
 
     door_module = __import__(f"tai42_skeleton.conversations.turn.{door}", fromlist=["_schedule_turn"])

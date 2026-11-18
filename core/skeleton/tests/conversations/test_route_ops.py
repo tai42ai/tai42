@@ -25,6 +25,7 @@ from tai42_skeleton.storage import StorageRegistry
 from tai42_skeleton.template import ResourceManager
 
 from .._fakes.recording_storage import MappedStorage
+from .._fakes.template_holders import app_held_by
 from ..template.test_resource_manager import _InMemoryStorage
 from .conftest import DOOR_RULE_REFUSALS, _assert_park_cancelled, _seed_park, create_record
 
@@ -1651,7 +1652,7 @@ def _real_resource_manager(resources: dict[str, str]) -> ResourceManager:
 
     registry = StorageRegistry()
     registry.register_storage(_Store)
-    return ResourceManager(registry.provider, on_evicted=lambda _eviction: None)
+    return ResourceManager(registry.provider, on_evicted=lambda _eviction: None, held_by=app_held_by)
 
 
 @pytest.mark.parametrize(

@@ -4,8 +4,9 @@ A channel that advertises a vendor working-on-it indicator (a ``ClassVar
 working_signal_expiry_seconds``) has that indicator refreshed while a run owes its user a reply.
 One loop runs per run id, in one detached task:
 
-* a turn's loop starts at the schedule seam (:func:`start_turn`) and asserts from accept; the
-  turn ends it with :func:`stop`;
+* a turn's loop starts where the turn's target runs (:func:`start_turn`, from
+  ``target._target_outcome``), after the turn is admitted and a manual-mode thread is ruled out,
+  and asserts from there; the turn ends it with :func:`stop`;
 * a resumed run's loop lives while a drive holds it (:func:`hold`); it asserts nothing until no
   question the run sent stands, whoever it went to: a drive states it through :func:`resumed`, or
   the close of the last question standing leaves none;
@@ -177,7 +178,7 @@ class _RunSignal:
     # -- the task ----------------------------------------------------------------------------
 
     def open_turn(self, record: ConversationRecord, channel: Any, expiry: float) -> None:
-        """Know the turn's user at once and open its first stretch from accept."""
+        """Know the turn's user at once and open its first stretch as its target starts running."""
         assert record.channel is not None  # noqa: S101 (start_turn starts no loop without a channel)
         self.target = (record.channel, record.our_identity, record.client_address)
         self.inbound_message_id = record.provider_message_id

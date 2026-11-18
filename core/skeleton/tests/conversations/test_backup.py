@@ -7,6 +7,7 @@ key revoked since the backup was taken."""
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import ClassVar
 
 import pytest
@@ -439,6 +440,7 @@ class _RelayBindApp:
 
     def __init__(self) -> None:
         self.agents = _RelayBindApp._Agents()
+        self.storage = SimpleNamespace(provider=None)
         self._target_validator_registry = TargetBindValidatorRegistry()
 
     def target_validator(self, target_kind, target_name):

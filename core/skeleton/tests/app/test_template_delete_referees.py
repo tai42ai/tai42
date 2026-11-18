@@ -27,16 +27,17 @@ import tai42_skeleton.conversations.cache as conversations_cache
 import tai42_skeleton.hooks.cache as hooks_cache
 import tai42_skeleton.operations.schedules as schedules_ops
 import tai42_skeleton.states.db as states_db
-from tai42_skeleton.app import instance
+from tai42_skeleton.app import instance, template_delete_referees
+from tai42_skeleton.app.template_delete_referees import PLATFORM_TEMPLATE_DELETE_REFEREES
 from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.operations import NotSupportedError
 from tai42_skeleton.operations.errors import ConflictError
-from tai42_skeleton.template import platform_referees
-from tai42_skeleton.template.platform_referees import PLATFORM_TEMPLATE_REFEREES
+from tai42_skeleton.operations.template_door import template_door
 from tai42_skeleton.tools import holder_kinds
 from tai42_skeleton.tools.holder_kinds import HolderKind
 
 from .._fakes.caller_reach import bound_caller
+from ..template._manager_fixtures import _manager
 
 GATE = frozenset({"jq/gate"})
 OTHER = frozenset({"jq/other"})
@@ -80,7 +81,7 @@ def _binding(subject_expr: TemplatedText) -> StateBinding:
 
 
 def test_the_platform_referees_are_the_ten_stored_shapes_in_order() -> None:
-    assert [referee.__name__ for referee in PLATFORM_TEMPLATE_REFEREES] == [
+    assert [referee.__name__ for referee in PLATFORM_TEMPLATE_DELETE_REFEREES] == [
         "_preset_referee",
         "_hook_referee",
         "_schedule_referee",
@@ -104,7 +105,7 @@ def presets(monkeypatch: pytest.MonkeyPatch) -> dict[str, PresetBody]:
     async def _bodies(_facet: Any) -> dict[str, PresetBody]:
         return rows
 
-    monkeypatch.setattr(platform_referees, "_skeleton_store_configured", lambda: True)
+    monkeypatch.setattr(template_delete_referees, "_skeleton_store_configured", lambda: True)
     # Patched on the facet's class: undoing a patch on the shared facet instance would leave the
     # bound method in its ``__dict__``, shadowing every later test's class-level patch.
     monkeypatch.setattr(type(instance.app._presets_facet), "list_active_bodies", _bodies)
@@ -127,26 +128,26 @@ def test_the_preset_referee_answers_a_schema_id_a_fixed_kwargs_id_and_a_binding_
             fixed_kwargs={"jq_expression": {"content": ".a"}},
             state_binding=_binding(_INLINE),
         )
-        assert await platform_referees._preset_referee(GATE) == [
+        assert await template_delete_referees._preset_referee(GATE) == [
             _holder(holder_kinds.PRESET, "p", "output_schema"),
             _holder(holder_kinds.PRESET, "p", "jq_expression"),
             _holder(holder_kinds.PRESET, "p", "states[0].subject_expr"),
         ]
-        assert await platform_referees._preset_referee(OTHER) == []
+        assert await template_delete_referees._preset_referee(OTHER) == []
 
     _within_app(body)
 
 
 async def test_the_preset_referee_with_no_store_reads_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(platform_referees, "_skeleton_store_configured", lambda: False)
+    monkeypatch.setattr(template_delete_referees, "_skeleton_store_configured", lambda: False)
     monkeypatch.setattr(type(instance.app._presets_facet), "list_active_bodies", _never)
-    assert await platform_referees._preset_referee(GATE) == []
+    assert await template_delete_referees._preset_referee(GATE) == []
 
 
 async def test_the_preset_referee_propagates_a_store_fault(presets, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(type(instance.app._presets_facet), "list_active_bodies", _boom)
     with pytest.raises(RuntimeError, match="store read failed"):
-        await platform_referees._preset_referee(GATE)
+        await template_delete_referees._preset_referee(GATE)
 
 
 # -- hook --------------------------------------------------------------------------------------
@@ -167,14 +168,14 @@ async def test_the_hook_referee_answers_the_hook_naming_the_id(monkeypatch: pyte
     rows = {"h": _hook("h", _BY_ID), "i": _hook("i", _INLINE)}
     manager = SimpleNamespace(list_hooks=lambda: _answer(rows))
     monkeypatch.setattr(hooks_cache, "get_hooks_manager", lambda: manager)
-    assert await platform_referees._hook_referee(GATE) == [_holder(holder_kinds.HOOK, "h", "condition")]
-    assert await platform_referees._hook_referee(OTHER) == []
+    assert await template_delete_referees._hook_referee(GATE) == [_holder(holder_kinds.HOOK, "h", "condition")]
+    assert await template_delete_referees._hook_referee(OTHER) == []
 
 
 async def test_the_hook_referee_propagates_a_store_fault(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(hooks_cache, "get_hooks_manager", lambda: SimpleNamespace(list_hooks=_boom))
     with pytest.raises(RuntimeError, match="store read failed"):
-        await platform_referees._hook_referee(GATE)
+        await template_delete_referees._hook_referee(GATE)
 
 
 def test_the_hook_referee_reads_the_tool_arguments_at_the_site_the_walk_names(monkeypatch) -> None:
@@ -189,7 +190,7 @@ def test_the_hook_referee_reads_the_tool_arguments_at_the_site_the_walk_names(mo
         )
         manager = SimpleNamespace(list_hooks=lambda: _answer({"h": hook}))
         monkeypatch.setattr(hooks_cache, "get_hooks_manager", lambda: manager)
-        assert await platform_referees._hook_referee(GATE) == [_holder(holder_kinds.HOOK, "h", "jq_expression")]
+        assert await template_delete_referees._hook_referee(GATE) == [_holder(holder_kinds.HOOK, "h", "jq_expression")]
 
     _within_app(body)
 
@@ -213,10 +214,10 @@ async def test_the_schedule_referee_answers_the_schedule_naming_the_id(monkeypat
         _schedule("t", {SCHEDULE_STATE_BINDING_ARG: _binding(_INLINE).model_dump(mode="json")}),
     ]
     monkeypatch.setattr(schedules_ops, "export_schedules_raw", lambda: _answer(rows))
-    assert await platform_referees._schedule_referee(GATE) == [
+    assert await template_delete_referees._schedule_referee(GATE) == [
         _holder(holder_kinds.SCHEDULE, "s", "states[0].subject_expr")
     ]
-    assert await platform_referees._schedule_referee(OTHER) == []
+    assert await template_delete_referees._schedule_referee(OTHER) == []
 
 
 async def test_the_schedule_referee_with_no_backend_answers_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -224,13 +225,13 @@ async def test_the_schedule_referee_with_no_backend_answers_nothing(monkeypatch:
         raise NotSupportedError("no schedules backend")
 
     monkeypatch.setattr(schedules_ops, "export_schedules_raw", _off)
-    assert await platform_referees._schedule_referee(GATE) == []
+    assert await template_delete_referees._schedule_referee(GATE) == []
 
 
 async def test_the_schedule_referee_propagates_a_store_fault(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(schedules_ops, "export_schedules_raw", _boom)
     with pytest.raises(RuntimeError, match="store read failed"):
-        await platform_referees._schedule_referee(GATE)
+        await template_delete_referees._schedule_referee(GATE)
 
 
 # -- conversation route and config -------------------------------------------------------------
@@ -256,10 +257,10 @@ def _conversations(monkeypatch: pytest.MonkeyPatch, **manager: Any) -> None:
 async def test_the_route_referee_answers_the_route_naming_the_id(monkeypatch: pytest.MonkeyPatch) -> None:
     routes = {"r": _route("r", _BY_ID), "s": _route("s", _INLINE)}
     _conversations(monkeypatch, list_routes=lambda: _answer((routes, 0)))
-    assert await platform_referees._conversation_route_referee(GATE) == [
+    assert await template_delete_referees._conversation_route_referee(GATE) == [
         _holder(holder_kinds.CONVERSATION_ROUTE, "r", "reply_expr")
     ]
-    assert await platform_referees._conversation_route_referee(OTHER) == []
+    assert await template_delete_referees._conversation_route_referee(OTHER) == []
 
 
 async def test_the_route_referee_with_no_backend_answers_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -267,16 +268,16 @@ async def test_the_route_referee_with_no_backend_answers_nothing(monkeypatch: py
         raise NotSupportedError("no routes backend")
 
     _conversations(monkeypatch, list_routes=_off)
-    assert await platform_referees._conversation_route_referee(GATE) == []
+    assert await template_delete_referees._conversation_route_referee(GATE) == []
 
 
 async def test_the_route_referee_raises_on_a_fault_or_an_unreadable_row(monkeypatch: pytest.MonkeyPatch) -> None:
     _conversations(monkeypatch, list_routes=_boom)
     with pytest.raises(RuntimeError, match="store read failed"):
-        await platform_referees._conversation_route_referee(GATE)
+        await template_delete_referees._conversation_route_referee(GATE)
     _conversations(monkeypatch, list_routes=lambda: _answer(({}, 2)))
     with pytest.raises(RuntimeError, match="2 stored conversation route"):
-        await platform_referees._conversation_route_referee(GATE)
+        await template_delete_referees._conversation_route_referee(GATE)
 
 
 def _config(name: str, expr: TemplatedText) -> TargetConversationConfig:
@@ -287,24 +288,24 @@ async def test_the_config_referee_answers_the_config_naming_the_id(monkeypatch: 
     configs = {("tool", "echo"): _config("echo", _BY_ID), ("tool", "plain"): _config("plain", _INLINE)}
     store = SimpleNamespace(list=lambda: _answer((configs, 0)))
     _conversations(monkeypatch, durable=True, target_configs=store)
-    assert await platform_referees._conversation_config_referee(GATE) == [
+    assert await template_delete_referees._conversation_config_referee(GATE) == [
         _holder(holder_kinds.CONVERSATION_CONFIG, "echo", "states[0].subject_expr", target_kind="tool")
     ]
-    assert await platform_referees._conversation_config_referee(OTHER) == []
+    assert await template_delete_referees._conversation_config_referee(OTHER) == []
 
 
 async def test_the_config_referee_with_no_durable_store_reads_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
     _conversations(monkeypatch, durable=False, target_configs=SimpleNamespace(list=_never))
-    assert await platform_referees._conversation_config_referee(GATE) == []
+    assert await template_delete_referees._conversation_config_referee(GATE) == []
 
 
 async def test_the_config_referee_raises_on_a_fault_or_an_unreadable_row(monkeypatch: pytest.MonkeyPatch) -> None:
     _conversations(monkeypatch, durable=True, target_configs=SimpleNamespace(list=_boom))
     with pytest.raises(RuntimeError, match="store read failed"):
-        await platform_referees._conversation_config_referee(GATE)
+        await template_delete_referees._conversation_config_referee(GATE)
     _conversations(monkeypatch, durable=True, target_configs=SimpleNamespace(list=lambda: _answer(({}, 1))))
     with pytest.raises(RuntimeError, match="1 stored conversation config"):
-        await platform_referees._conversation_config_referee(GATE)
+        await template_delete_referees._conversation_config_referee(GATE)
 
 
 # -- state declaration and state template ------------------------------------------------------
@@ -322,48 +323,48 @@ def _declaration(name: str, schema: TemplatedText) -> StateDeclaration:
 async def test_the_declaration_referee_answers_the_declaration_naming_the_id(monkeypatch: pytest.MonkeyPatch) -> None:
     rows = [_declaration("status", _BY_ID), _declaration("plain", _INLINE)]
     _states(monkeypatch, list_declarations=lambda: _answer(rows))
-    assert await platform_referees._state_declaration_referee(GATE) == [
+    assert await template_delete_referees._state_declaration_referee(GATE) == [
         _holder(holder_kinds.STATE_DECLARATION, "status", "schema")
     ]
-    assert await platform_referees._state_declaration_referee(OTHER) == []
+    assert await template_delete_referees._state_declaration_referee(OTHER) == []
 
 
 async def test_the_declaration_referee_with_no_store_reads_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
     _states(monkeypatch, configured=False, list_declarations=_never)
-    assert await platform_referees._state_declaration_referee(GATE) == []
+    assert await template_delete_referees._state_declaration_referee(GATE) == []
 
 
 async def test_the_declaration_referee_propagates_a_store_fault(monkeypatch: pytest.MonkeyPatch) -> None:
     _states(monkeypatch, list_declarations=_boom)
     with pytest.raises(RuntimeError, match="store read failed"):
-        await platform_referees._state_declaration_referee(GATE)
+        await template_delete_referees._state_declaration_referee(GATE)
 
 
 async def test_the_state_template_referee_answers_the_template_naming_the_id(monkeypatch: pytest.MonkeyPatch) -> None:
     rows = [StateTemplateDocument(name="t", schema=_BY_ID), StateTemplateDocument(name="u", schema=_INLINE)]
     _states(monkeypatch, list_templates=lambda: _answer(rows))
-    assert await platform_referees._state_template_referee(GATE) == [
+    assert await template_delete_referees._state_template_referee(GATE) == [
         _holder(holder_kinds.STATE_TEMPLATE, "t", "schema")
     ]
-    assert await platform_referees._state_template_referee(OTHER) == []
+    assert await template_delete_referees._state_template_referee(OTHER) == []
 
 
 async def test_the_state_template_referee_with_no_store_reads_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
     _states(monkeypatch, configured=False, list_templates=_never)
-    assert await platform_referees._state_template_referee(GATE) == []
+    assert await template_delete_referees._state_template_referee(GATE) == []
 
 
 async def test_the_state_template_referee_propagates_a_store_fault(monkeypatch: pytest.MonkeyPatch) -> None:
     _states(monkeypatch, list_templates=_boom)
     with pytest.raises(RuntimeError, match="store read failed"):
-        await platform_referees._state_template_referee(GATE)
+        await template_delete_referees._state_template_referee(GATE)
 
 
 # -- access control and roles ------------------------------------------------------------------
 
 
 def _policies(monkeypatch: pytest.MonkeyPatch, *, configured: bool = True, rows: Any = None) -> None:
-    monkeypatch.setattr(platform_referees, "_skeleton_store_configured", lambda: configured)
+    monkeypatch.setattr(template_delete_referees, "_skeleton_store_configured", lambda: configured)
     reader = rows if callable(rows) else (lambda: _answer(rows))
     store = SimpleNamespace(list_conditioned_policies=reader)
     monkeypatch.setattr(ac_store_module, "access_control_store", lambda: store)
@@ -374,33 +375,32 @@ async def test_the_access_control_referee_answers_an_api_key_and_a_principal(mon
     principal = {"condition": {"id": "jq/gate"}, "policy_data": {}}
     inline = {"condition": {"content": ".a"}, "policy_data": {}}
     _policies(monkeypatch, rows=[("alice", principal), ("key-1", minted), ("bob", inline)])
-    assert await platform_referees._access_control_referee(GATE) == [
+    assert await template_delete_referees._access_control_referee(GATE) == [
         _holder(holder_kinds.PRINCIPAL, "alice", "condition"),
         _holder(holder_kinds.API_KEY, "key-1", "condition"),
     ]
-    assert await platform_referees._access_control_referee(OTHER) == []
+    assert await template_delete_referees._access_control_referee(OTHER) == []
 
 
 async def test_the_access_control_referee_with_no_store_reads_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
     _policies(monkeypatch, configured=False, rows=_never)
-    assert await platform_referees._access_control_referee(GATE) == []
+    assert await template_delete_referees._access_control_referee(GATE) == []
 
 
 async def test_the_access_control_referee_propagates_a_store_fault(monkeypatch: pytest.MonkeyPatch) -> None:
     _policies(monkeypatch, rows=_boom)
     with pytest.raises(RuntimeError, match="store read failed"):
-        await platform_referees._access_control_referee(GATE)
+        await template_delete_referees._access_control_referee(GATE)
 
 
 async def _refused_template_delete(monkeypatch: pytest.MonkeyPatch) -> ConflictError:
-    from tai42_skeleton.operations import holders as holders_module
-
     minted = {"condition": {"id": "jq/gate"}, "policy_data": {KEY_FINGERPRINT_CLAIM: "fp"}}
     principal = {"condition": {"id": "jq/gate"}, "policy_data": {}}
     _policies(monkeypatch, rows=[("alice", principal), ("key-1", minted), ("bob", principal)])
-    monkeypatch.setattr(holders_module, "template_delete_holders", platform_referees._access_control_referee)
+    manager, _store = _manager({"jq/gate": "x"}, held_by=template_delete_referees._access_control_referee)
     with pytest.raises(ConflictError) as refused:
-        await holders_module.refuse_held_templates(GATE, head="stored template 'jq/gate' cannot be deleted")
+        async with template_door():
+            await manager.delete_object("jq/gate")
     return refused.value
 
 
@@ -429,26 +429,26 @@ async def test_a_refused_template_delete_names_the_identities_to_an_admin(monkey
 
 
 def _roles(monkeypatch: pytest.MonkeyPatch, *, configured: bool = True, reader: Any) -> None:
-    monkeypatch.setattr(platform_referees, "_skeleton_store_configured", lambda: configured)
+    monkeypatch.setattr(template_delete_referees, "_skeleton_store_configured", lambda: configured)
     monkeypatch.setattr(roles_module, "role_store", lambda: SimpleNamespace(list_roles=reader))
 
 
 async def test_the_role_referee_answers_the_role_naming_the_id(monkeypatch: pytest.MonkeyPatch) -> None:
     rows = [{"name": "viewer", "condition": {"id": "jq/gate"}}, {"name": "editor", "condition": {"content": ".a"}}]
     _roles(monkeypatch, reader=lambda: _answer(rows))
-    assert await platform_referees._role_referee(GATE) == [_holder(holder_kinds.ROLE, "viewer", "condition")]
-    assert await platform_referees._role_referee(OTHER) == []
+    assert await template_delete_referees._role_referee(GATE) == [_holder(holder_kinds.ROLE, "viewer", "condition")]
+    assert await template_delete_referees._role_referee(OTHER) == []
 
 
 async def test_the_role_referee_with_no_store_reads_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
     _roles(monkeypatch, configured=False, reader=_never)
-    assert await platform_referees._role_referee(GATE) == []
+    assert await template_delete_referees._role_referee(GATE) == []
 
 
 async def test_the_role_referee_propagates_a_store_fault(monkeypatch: pytest.MonkeyPatch) -> None:
     _roles(monkeypatch, reader=_boom)
     with pytest.raises(RuntimeError, match="store read failed"):
-        await platform_referees._role_referee(GATE)
+        await template_delete_referees._role_referee(GATE)
 
 
 # -- setting -----------------------------------------------------------------------------------
@@ -475,11 +475,11 @@ async def test_the_setting_referee_reads_the_summary_prompt(
     if methods is not None:
         monkeypatch.setenv("CONTEXT_OVERFLOW_METHODS", json.dumps(methods))
     reset_all_settings()
-    assert await platform_referees._summary_prompt_referee(GATE) == expected
+    assert await template_delete_referees._summary_prompt_referee(GATE) == expected
 
 
 async def test_the_setting_referee_propagates_a_malformed_value(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(_PROMPT_ENV, json.dumps({"id": "jq/gate", "content": ".a"}))
     reset_all_settings()
     with pytest.raises(ValidationError):
-        await platform_referees._summary_prompt_referee(GATE)
+        await template_delete_referees._summary_prompt_referee(GATE)

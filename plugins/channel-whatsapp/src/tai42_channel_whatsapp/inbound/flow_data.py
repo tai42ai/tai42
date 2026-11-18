@@ -34,7 +34,7 @@ from tai42_channel_whatsapp.flow_crypto import (
 )
 from tai42_channel_whatsapp.flows import FORM_ENTRY_SCREEN
 from tai42_channel_whatsapp.flows_endpoint import ENDPOINT_BODY_MAX_BYTES
-from tai42_channel_whatsapp.inbound.auth import _SIGNATURE_HEADER, SignatureRejectedError, _validate_signature
+from tai42_channel_whatsapp.inbound.auth import SIGNATURE_HEADER, SignatureRejectedError, validate_signature
 from tai42_channel_whatsapp.inbound.data_exchange import FlowTokenInvalidError, handle_data_exchange
 from tai42_channel_whatsapp.settings import whatsapp_settings
 
@@ -72,7 +72,7 @@ async def whatsapp_flow_data(request: Request) -> Response:
         logger.exception("whatsapp flow endpoint: CHANNEL_WHATSAPP_APP_SECRET is unset; failing closed")
         return PlainTextResponse("channel misconfigured", status_code=500)
     try:
-        _validate_signature(app_secret, raw, request.headers.get(_SIGNATURE_HEADER))
+        validate_signature(app_secret, raw, request.headers.get(SIGNATURE_HEADER))
     except SignatureRejectedError as exc:
         logger.warning("rejected whatsapp flow endpoint request: %s", exc)
         return PlainTextResponse("signature verification failed", status_code=432)

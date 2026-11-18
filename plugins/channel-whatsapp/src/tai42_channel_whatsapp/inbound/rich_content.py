@@ -37,19 +37,19 @@ from tai42_kit.net import MediaFetchError
 from tai42_kit.net.media_faults import MEDIA_FETCH_AND_INGEST_FAULTS, media_fault_is_transient, media_rejection_reason
 
 from tai42_channel_whatsapp.correlation import already_seen, mark_seen
-from tai42_channel_whatsapp.inbound.answers import _bridge_inbound
-from tai42_channel_whatsapp.inbound.params import _merged_params, _MessageContext
+from tai42_channel_whatsapp.inbound.answers import bridge_inbound
+from tai42_channel_whatsapp.inbound.params import MessageContext, merged_params
 from tai42_channel_whatsapp.media_download import fetch_media_metadata, media_endpoint_host, open_media_download
 
 logger = logging.getLogger(__name__)
 
 
-async def _handle_media(
+async def handle_media(
     message: dict[str, Any],
     phone_number_id: str,
     wa_id: str,
     wamid: str,
-    context: _MessageContext,
+    context: MessageContext,
     *,
     message_type: str,
 ) -> None:
@@ -109,12 +109,12 @@ async def _handle_media(
         animated=animated,
         size=ingested.size,
     )
-    await _bridge_inbound(
+    await bridge_inbound(
         phone_number_id,
         wa_id,
         text,
         wamid,
-        params=_merged_params(context.params, media_params),
+        params=merged_params(context.params, media_params),
         reply_to_medium_message_id=context.reply_to_medium_message_id,
         attachments=[ingested.item],
     )
@@ -131,7 +131,7 @@ def _media_caption(media: dict[str, Any]) -> str | None:
 async def _fetch_and_ingest(media: dict[str, Any], kind: InboundMediaKind, wa_id: str, wamid: str) -> IngestedMedia:
     """Look up the media object, stream its bytes, and ingest them into the served-media store.
 
-    Raises the kit fetch faults / contract ingest faults for :func:`_handle_media` to classify; a
+    Raises the kit fetch faults / contract ingest faults for :func:`handle_media` to classify; a
     media object with no fetchable id is a permanent, participant-visible failure (the metadata
     lookup already makes an absent lookaside ``url`` one). The vendor-declared mime/size ride
     the ingest, and the origin binds the item to this message at ingest.
@@ -165,35 +165,41 @@ async def _reject_media(
 ) -> None:
     """Reject an inbound media the platform could not receive, notifying the participant once.
 
-    Tells the participant once via the rejection facet. When a caption rode with the media its
-    text is not lost — it bridges as a text-only turn carrying the generic kind + declared-mime
-    params (no served id, sha, size, or filename: the media does not exist). With no caption the
-    notice is the whole outcome. Either way the wamid is marked seen so a Meta redelivery is not
-    re-processed.
+    Tells the participant once via the rejection facet. The notice is guarded by its own seen
+    marker (``f"{wamid}:rejected"`` — which cannot collide with a bare wamid, as wamids carry no
+    colon), set only after the send succeeds: a redelivery driven by a retryable fault in the
+    caption's bridge never repeats a notice already delivered, and a failed send leaves the marker
+    unset so the redelivery re-sends. When a caption rode with the media its text is not lost — it
+    bridges as a text-only turn carrying the generic kind + declared-mime params (no served id, sha,
+    size, or filename: the media does not exist). With no caption the notice is the whole outcome.
+    Either way the wamid is marked seen once handled, so a later Meta redelivery is not re-processed.
     """
-    await tai42_app.conversations.notify_inbound_rejected(
-        channel_id="whatsapp",
-        recipient=wa_id,
-        sender_identity=phone_number_id,
-        kind=kind.value,
-        reason=reason,
-    )
+    notice_key = f"{wamid}:rejected"
+    if not await already_seen(notice_key):
+        await tai42_app.conversations.notify_inbound_rejected(
+            channel_id="whatsapp",
+            recipient=wa_id,
+            sender_identity=phone_number_id,
+            kind=kind.value,
+            reason=reason,
+        )
+        await mark_seen(notice_key)
     if caption:
         media_params = build_inbound_media_params(door="whatsapp", kind=kind, mime_type=declared_mime)
-        await _bridge_inbound(
+        await bridge_inbound(
             phone_number_id,
             wa_id,
             caption,
             wamid,
-            params=_merged_params(base_params, media_params),
+            params=merged_params(base_params, media_params),
             reply_to_medium_message_id=reply_to_medium_message_id,
         )
     else:
         await mark_seen(wamid)
 
 
-async def _handle_location(
-    message: dict[str, Any], phone_number_id: str, wa_id: str, wamid: str, context: _MessageContext
+async def handle_location(
+    message: dict[str, Any], phone_number_id: str, wa_id: str, wamid: str, context: MessageContext
 ) -> None:
     """Bridge an inbound location as a fresh turn carrying a typed :class:`LocationElement`.
 
@@ -230,7 +236,7 @@ async def _handle_location(
     else:
         text = "[location]"
 
-    await _bridge_inbound(
+    await bridge_inbound(
         phone_number_id,
         wa_id,
         text,
@@ -241,8 +247,8 @@ async def _handle_location(
     )
 
 
-async def _handle_contacts(
-    message: dict[str, Any], phone_number_id: str, wa_id: str, wamid: str, context: _MessageContext
+async def handle_contacts(
+    message: dict[str, Any], phone_number_id: str, wa_id: str, wamid: str, context: MessageContext
 ) -> None:
     """Bridge inbound contact card(s) as a fresh turn.
 
@@ -266,18 +272,18 @@ async def _handle_contacts(
     contact_params: dict[str, str] = {}
     put_entry_param(contact_params, "contacts_count", str(len(contacts)), door="whatsapp")
     put_entry_param(contact_params, "contacts", json.dumps(contacts, ensure_ascii=False), door="whatsapp")
-    await _bridge_inbound(
+    await bridge_inbound(
         phone_number_id,
         wa_id,
         text,
         wamid,
-        params=_merged_params(context.params, contact_params),
+        params=merged_params(context.params, contact_params),
         reply_to_medium_message_id=context.reply_to_medium_message_id,
     )
 
 
-async def _handle_reaction(
-    message: dict[str, Any], phone_number_id: str, wa_id: str, wamid: str, context: _MessageContext
+async def handle_reaction(
+    message: dict[str, Any], phone_number_id: str, wa_id: str, wamid: str, context: MessageContext
 ) -> None:
     """Bridge an inbound emoji reaction as a fresh turn.
 
@@ -296,11 +302,11 @@ async def _handle_reaction(
     reaction_params: dict[str, str] = {}
     put_entry_param(reaction_params, "reaction_emoji", emoji, door="whatsapp")
     put_entry_param(reaction_params, "reaction_message_id", reaction.get("message_id"), door="whatsapp")
-    await _bridge_inbound(
+    await bridge_inbound(
         phone_number_id,
         wa_id,
         text,
         wamid,
-        params=_merged_params(context.params, reaction_params),
+        params=merged_params(context.params, reaction_params),
         reply_to_medium_message_id=context.reply_to_medium_message_id,
     )

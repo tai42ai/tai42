@@ -15,10 +15,10 @@ XLSX, CSV, PPTX, ODT, EPUB) materialize the bytes to a temp file first.
 
 Backing dependencies are opt-in: ``pip install 'tai42-skeleton[files]'``. Without
 them, importing this module raises
-:class:`~tai42_skeleton.operations.errors.NotSupportedError` (501, code
-``files-not-configured``) whose message is that install line. The server starts
-without them: the kinds summary reports the ``files`` row ``off`` with that line, and
-each call that loads content refuses.
+:class:`~tai42_skeleton.template.errors.FilesNotConfiguredError` (code
+``files-not-configured``), whose message is that install line; the operations door answers
+it with the ``501``. The server starts without them: the kinds summary reports the
+``files`` row ``off`` with that line, and each call that loads content refuses.
 """
 
 from __future__ import annotations

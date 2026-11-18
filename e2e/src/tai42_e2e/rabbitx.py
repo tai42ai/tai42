@@ -20,8 +20,9 @@ class RabbitAdmin:
 
     def __init__(self, management_url: str, *, timeout: float) -> None:
         """``management_url`` carries the credentials inline
-        (``http://guest:guest@host:15672``); they are split out into HTTP basic
-        auth and the base URL is rebuilt without the userinfo.
+        (``http://tai42:tai42@host:15672``); they are split out into HTTP basic
+        auth and the base URL is rebuilt without the userinfo; a URL without a
+        user and a password is refused.
 
         ``timeout`` bounds each management call, in seconds. The callers reuse
         the harness's readiness deadline (``HarnessSettings.boot_timeout``) for
@@ -37,10 +38,11 @@ class RabbitAdmin:
         parsed = urlparse(management_url)
         if parsed.hostname is None or parsed.port is None:
             raise ValueError(f"rabbitmq_management_url must include host and port: {management_url!r}")
-        username = parsed.username or "guest"
-        password = parsed.password or "guest"
+        if not parsed.username or not parsed.password:
+            raise ValueError("rabbitmq_management_url must include a user and a password")
         self._base = f"{parsed.scheme}://{parsed.hostname}:{parsed.port}"
-        self._auth = httpx.BasicAuth(username, password)
+        self.user = parsed.username
+        self._auth = httpx.BasicAuth(parsed.username, parsed.password)
         self._timeout = timeout
 
     def check_reachable(self) -> None:
@@ -58,10 +60,10 @@ class RabbitAdmin:
         resp.raise_for_status()
         return True
 
-    def create_vhost(self, name: str) -> None:
-        """Create the vhost and grant the ``guest`` user full permissions on it
-        (configure/write/read ``.*``) so the SUT's celery app can declare its
-        control exchange and queues. If the permissions grant fails after the
+    def create_vhost(self, name: str, *, user: str) -> None:
+        """Create the vhost and grant ``user`` — the user the SUT's celery app
+        connects as — full permissions on it (configure/write/read ``.*``) so the
+        app can declare its control exchange and queues. If the permissions grant fails after the
         vhost is created, the half-created vhost is deleted before propagating so
         a partial failure leaves no orphan behind — symmetric to the leak-free
         teardown contract."""
@@ -69,7 +71,7 @@ class RabbitAdmin:
         put.raise_for_status()
         try:
             perms = httpx.put(
-                f"{self._base}/api/permissions/{name}/guest",
+                f"{self._base}/api/permissions/{name}/{user}",
                 auth=self._auth,
                 json={"configure": ".*", "write": ".*", "read": ".*"},
                 timeout=self._timeout,
@@ -100,7 +102,16 @@ class RabbitAdmin:
 
 def broker_url_for(base_amqp_url: str, vhost: str) -> str:
     """The per-stack AMQP URL: ``base_amqp_url`` with its vhost path replaced by
-    ``vhost`` (e.g. ``amqp://guest:guest@127.0.0.1:5672`` + ``tai42_e2e_ab12cd`` ->
-    ``amqp://guest:guest@127.0.0.1:5672/tai42_e2e_ab12cd``)."""
+    ``vhost`` (e.g. ``amqp://tai42:tai42@127.0.0.1:5672`` + ``tai42_e2e_ab12cd`` ->
+    ``amqp://tai42:tai42@127.0.0.1:5672/tai42_e2e_ab12cd``)."""
     split = urlsplit(base_amqp_url)
     return f"{split.scheme}://{split.netloc}/{vhost}"
+
+
+def broker_user(amqp_url: str) -> str:
+    """The user ``amqp_url`` connects as, the one a per-stack vhost is granted to;
+    a URL without a user is refused."""
+    user = urlsplit(amqp_url).username
+    if not user:
+        raise ValueError("rabbitmq_url must include a user")
+    return user

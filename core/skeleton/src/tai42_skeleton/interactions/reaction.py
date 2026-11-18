@@ -56,6 +56,7 @@ from tai42_contract.interactions import (
 )
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.redis import RedisClient
+from tai42_kit.interactions import display_slot_text
 
 from tai42_skeleton.interactions.answer_check import schema_mismatch
 from tai42_skeleton.interactions.settings import interactions_settings, interactions_store_configured
@@ -112,10 +113,10 @@ def _is_option_bearing(prop: dict[str, Any]) -> bool:
     return prop.get("type") == "array" and isinstance(items, dict) and items.get("type") == "string"
 
 
-def _declared_slots(payload: dict[str, Any]) -> set[str]:
-    # Every display ``slot`` name declared across the form's pages — the only slots a
-    # reaction's ``display`` update may fill.
-    slots: set[str] = set()
+def _declared_slots(payload: dict[str, Any]) -> dict[str, str]:
+    # Every display ``slot`` name declared across the form's pages, mapped to its block's
+    # ``kind`` — the only slots a reaction's ``display`` update may fill, and what each takes.
+    slots: dict[str, str] = {}
     pages = payload.get("pages")
     if not isinstance(pages, list):
         return slots
@@ -127,7 +128,7 @@ def _declared_slots(payload: dict[str, Any]) -> set[str]:
             continue
         for block in display:
             if isinstance(block, dict) and isinstance(block.get("slot"), str):
-                slots.add(block["slot"])
+                slots[block["slot"]] = str(block.get("kind"))
     return slots
 
 
@@ -198,9 +199,32 @@ def _validate_update_errors(errors: Any, declared: set[str]) -> None:
 def _validate_update_display(display: Any, payload: dict[str, Any]) -> None:
     if not isinstance(display, dict):
         raise FormReactionHandlerError("reaction update 'display' must be an object")
-    unknown = set(display) - _declared_slots(payload)
+    slots = _declared_slots(payload)
+    unknown = set(display) - set(slots)
     if unknown:
         raise FormReactionHandlerError(f"reaction update display names undeclared slots {sorted(unknown)}")
+    for name, value in display.items():
+        # A text slot shows its value as text, so it takes a scalar that has slot text
+        # (display_slot_text: a number only when finite); an image slot takes an image source, which each
+        # surface checks as it checks a block's own ``src``. ``None`` leaves either slot unfilled.
+        if value is None:
+            continue
+        if slots[name] == "image":
+            if not isinstance(value, str):
+                raise FormReactionHandlerError(
+                    f"reaction update display slot {name!r} takes an image source string or null"
+                )
+        elif not isinstance(value, str | int | float | bool):
+            raise FormReactionHandlerError(
+                f"reaction update display slot {name!r} takes a string, number, boolean or null"
+            )
+        else:
+            try:
+                display_slot_text(value)
+            except ValueError as exc:
+                raise FormReactionHandlerError(
+                    f"reaction update display slot {name!r} takes a finite number: {exc}"
+                ) from exc
 
 
 def _validate_update(update: Any, schema: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:

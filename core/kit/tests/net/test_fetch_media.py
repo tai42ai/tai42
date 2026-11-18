@@ -10,6 +10,7 @@ distinct origin (a different port) to cross.
 from __future__ import annotations
 
 import http.server
+import importlib
 import inspect
 import logging
 import subprocess
@@ -25,8 +26,13 @@ from tai42_kit.logging.logger import _HttpxRequestLineRedactor, setup_logging
 from tai42_kit.logging.settings import LoggingSettings
 from tai42_kit.net import MediaFetchError, MediaStream, fetch_media, open_media_stream, url_guard
 from tai42_kit.net.fetch_media import _content_length, _media_type
+from tai42_kit.net.fetch_url import PinningTransport
 from tai42_kit.net.request_body import RequestBodyTooLargeError
 from tai42_kit.net.url_guard import UrlGuardError, UrlGuardSettings
+
+# The package re-exports the ``fetch_media`` function under the module's own name.
+fetch_media_module = importlib.import_module("tai42_kit.net.fetch_media")
+fetch_url_module = importlib.import_module("tai42_kit.net.fetch_url")
 
 
 def _enable(monkeypatch: pytest.MonkeyPatch, **kwargs: Any) -> UrlGuardSettings:
@@ -47,13 +53,16 @@ class _MediaHandler(http.server.BaseHTTPRequestHandler):
                 "path": self.path,
                 "authorization": self.headers.get("Authorization"),
                 "x-vendor-token": self.headers.get("X-Vendor-Token"),
+                "cookie": self.headers.get("Cookie"),
             }
         )
         redirect = server.redirects.get(self.path)
         if redirect is not None:
-            status, location = redirect
+            status, location, set_cookie = redirect
             self.send_response(status)
             self.send_header("Location", location)
+            if set_cookie is not None:
+                self.send_header("Set-Cookie", set_cookie)
             self.send_header("Content-Length", "0")
             self.end_headers()
             return
@@ -62,6 +71,8 @@ class _MediaHandler(http.server.BaseHTTPRequestHandler):
         self.send_response(config["status"])
         if config["content_type"] is not None:
             self.send_header("Content-Type", config["content_type"])
+        if config["set_cookie"] is not None:
+            self.send_header("Set-Cookie", config["set_cookie"])
         if config["include_content_length"]:
             override = config["content_length_override"]
             self.send_header("Content-Length", override if override is not None else str(len(body)))
@@ -89,6 +100,7 @@ class _MediaServer:
         content_type: str | None = "application/octet-stream",
         include_content_length: bool = True,
         content_length_override: str | None = None,
+        set_cookie: str | None = None,
     ) -> None:
         self._server.config = {  # type: ignore[attr-defined]
             "body": body,
@@ -96,10 +108,11 @@ class _MediaServer:
             "content_type": content_type,
             "include_content_length": include_content_length,
             "content_length_override": content_length_override,
+            "set_cookie": set_cookie,
         }
 
-    def redirect(self, from_path: str, to_location: str, *, status: int = 307) -> None:
-        self._server.redirects[from_path] = (status, to_location)  # type: ignore[attr-defined]
+    def redirect(self, from_path: str, to_location: str, *, status: int = 307, set_cookie: str | None = None) -> None:
+        self._server.redirects[from_path] = (status, to_location, set_cookie)  # type: ignore[attr-defined]
 
 
 def _serve() -> Iterator[_MediaServer]:
@@ -111,6 +124,7 @@ def _serve() -> Iterator[_MediaServer]:
         "content_type": "application/octet-stream",
         "include_content_length": True,
         "content_length_override": None,
+        "set_cookie": None,
     }
     server.redirects = {}  # type: ignore[attr-defined]
     server.records = []  # type: ignore[attr-defined]
@@ -189,6 +203,56 @@ async def test_fetch_media_without_guard_skips_the_pinning_transport(
     assert data == b"unpinned"
     assert mime == "image/png"
     assert [r["path"] for r in media_server.records] == ["/obj"]
+
+
+async def test_the_fetches_of_one_guard_configuration_on_one_loop_share_one_client(
+    monkeypatch: pytest.MonkeyPatch, media_server: _MediaServer
+) -> None:
+    """Every pinned fetch on a loop rides the one pinned client; an unpinned fetch gets its own, unpinned."""
+    built: list[PinningTransport] = []
+
+    class _CountedPinningTransport(PinningTransport):
+        def __init__(self, **kwargs: Any) -> None:
+            super().__init__(**kwargs)
+            built.append(self)
+
+    monkeypatch.setattr(fetch_url_module, "PinningTransport", _CountedPinningTransport)
+    _enable(monkeypatch, allow_cidrs=["127.0.0.0/8"])
+    media_server.configure(body=b"shared", content_type="image/png")
+    url = f"{media_server.base_url}/obj"
+    for _ in range(3):
+        assert await fetch_media(url, max_bytes=1024) == (b"shared", "image/png")
+    async with open_media_stream(url) as stream:
+        assert [chunk async for chunk in stream.chunks] == [b"shared"]
+    assert len(built) == 1
+
+    # 127.0.0.1 is not opted in: only a client without the pin reaches it.
+    _disable(monkeypatch)
+    assert await fetch_media(url, max_bytes=1024) == (b"shared", "image/png")
+    assert len(built) == 1
+
+
+async def test_a_cookie_one_fetch_receives_never_reaches_another_fetch(
+    monkeypatch: pytest.MonkeyPatch, media_server: _MediaServer
+) -> None:
+    """The shared client keeps no cookie: a later fetch to the same origin sends none."""
+    _enable(monkeypatch, allow_cidrs=["127.0.0.0/8"])
+    media_server.configure(body=b"x", set_cookie="session=first-caller; Path=/")
+    await fetch_media(f"{media_server.base_url}/a", max_bytes=1024)
+    await fetch_media(f"{media_server.base_url}/b", max_bytes=1024)
+    assert [r["cookie"] for r in media_server.records] == [None, None]
+
+
+async def test_a_cookie_a_redirect_hop_sets_reaches_the_next_hop_of_the_same_fetch(
+    monkeypatch: pytest.MonkeyPatch, media_server: _MediaServer
+) -> None:
+    """Within one fetch the hops share a cookie jar, as one client's hops do."""
+    _enable(monkeypatch, allow_cidrs=["127.0.0.0/8"])
+    media_server.redirect("/start", "/final", set_cookie="hop=1; Path=/")
+    media_server.configure(body=b"final")
+    data, _ = await fetch_media(f"{media_server.base_url}/start", follow_redirects=True, max_bytes=1024)
+    assert data == b"final"
+    assert [(r["path"], r["cookie"]) for r in media_server.records] == [("/start", None), ("/final", "hop=1")]
 
 
 async def test_fetch_media_over_cap_raises_not_truncates(
@@ -578,7 +642,7 @@ async def test_fetch_media_recovers_a_displaced_guard_error_without_url(monkeypa
         wrapper.__context__ = guard
         raise wrapper
 
-    monkeypatch.setattr(httpx.AsyncClient, "stream", _raise_wrapped)
+    monkeypatch.setattr(httpx.AsyncClient, "send", _raise_wrapped)
     with pytest.raises(UrlGuardError, match="non-public") as ei:
         await fetch_media("http://host/file/botSECRET/x", max_bytes=1024)
     assert "botSECRET" not in str(ei.value)

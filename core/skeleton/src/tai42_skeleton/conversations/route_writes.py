@@ -134,8 +134,10 @@ async def write_route(route: ConversationRoute, *, manager: BaseConversationsMan
     The store write refuses a door flip on a route that holds threads with
     :class:`DoorFlipRefusedError`, writing nothing.
     """
+    from tai42_skeleton.app import instance
+
     await _assert_bindable(route)
-    await assert_templates_stored(route_template_refs(route), RouteWriteRefusedError)
+    await assert_templates_stored(instance.app.storage.provider, route_template_refs(route), RouteWriteRefusedError)
     await _assert_exprs_compile(route)
     update: dict[str, object] = {}
     # Only a ``channel`` row carries both fields; its identity is stored canonicalized.

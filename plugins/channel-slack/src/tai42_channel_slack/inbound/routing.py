@@ -34,7 +34,7 @@ _EVENTS_ACK = {
 }
 
 
-def _recipients(settings: SlackSettings) -> set[str]:
+def recipient_channels(settings: SlackSettings) -> set[str]:
     """The channels a threaded reply or option tap may answer an ask from.
 
     The configured allowlist plus the default recipient when one is set.
@@ -45,7 +45,7 @@ def _recipients(settings: SlackSettings) -> set[str]:
     return recipients
 
 
-async def _bridge(
+async def bridge_message(
     our_identity: str | None,
     channel: str,
     text: str,
@@ -102,7 +102,7 @@ async def _bridge(
     return JSONResponse({"status": "accepted"})
 
 
-async def _resolve_answer(
+async def resolve_answer(
     thread_ts: str,
     text: str,
     our_identity: str | None,
@@ -121,7 +121,7 @@ async def _resolve_answer(
     ask hands the text to the ladder (a threaded reply is re-answerable in place, so the
     ladder owns the retry notice, ``owns_retry_notice=False``). ``event_id`` is the
     bridge's dedupe key at the conversation seam and ``medium_message_id`` the reply's
-    quotable id, as ``_bridge`` takes them; ``reply_to_medium_message_id`` is the ``ts`` the
+    quotable id, as ``bridge_message`` takes them; ``reply_to_medium_message_id`` is the ``ts`` the
     reply quotes, carried on every arm. An ``AnswerForwardError`` (401/5xx /
     transport fault) propagates so the outer guard frees the dedupe claim and Slack's
     retry re-runs the ladder.
@@ -129,7 +129,7 @@ async def _resolve_answer(
     entry = await slack_thread_correlation_store.get_correlation(thread_ts)
     if entry is None:
         # No pending ask on this thread (expired / never ours) — bridge like any message.
-        return await _bridge(
+        return await bridge_message(
             our_identity,
             channel,
             text,
@@ -167,7 +167,7 @@ async def _resolve_answer(
         ),
     )
     if result.outcome is InboundAnswerOutcome.NO_CORRELATION:
-        return await _bridge(
+        return await bridge_message(
             our_identity,
             channel,
             text,

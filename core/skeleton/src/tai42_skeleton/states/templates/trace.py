@@ -36,7 +36,7 @@ _SCHEMA_OR_LIST = ("items", "additionalProperties", "contains", "propertyNames")
 _LIST_OF_SUBSCHEMAS = ("prefixItems", "allOf", "anyOf", "oneOf")
 
 
-def _inject_trace(schema: dict[str, Any]) -> dict[str, Any]:
+def inject_trace(schema: dict[str, Any]) -> dict[str, Any]:
     """A deep copy of ``schema`` with a ``_trace`` property added to EVERY object schema within it.
 
     Covers nested objects, array items, ``additionalProperties`` schemas and combinators, so a

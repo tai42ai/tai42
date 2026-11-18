@@ -10,15 +10,9 @@ import re
 import pytest
 from tai42_contract.channels import ChannelInputError
 
-from tai42_channel_whatsapp.flows import (
-    FORM_ENTRY_SCREEN,
-    _canonical_hash_pages,
-    build_flow_data,
-    build_form_flow,
-    component_names,
-    form_needs_endpoint,
-    payload_labels,
-)
+from tai42_channel_whatsapp.flows import FORM_ENTRY_SCREEN, _canonical_hash_pages, build_form_flow, form_needs_endpoint
+from tai42_channel_whatsapp.flows_components import component_names, payload_labels
+from tai42_channel_whatsapp.flows_send_data import build_flow_data
 from tai42_channel_whatsapp.flows_visibility import form_ref
 
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -2254,12 +2248,12 @@ def test_options_on_a_non_choice_property_are_refused_in_flow_data():
 
 # -- branch coverage: choice-type, slots, conditions, reaction payloads -----------
 
-from tai42_channel_whatsapp.flows import slot_datanames  # noqa: E402
-from tai42_channel_whatsapp.flows_components import _choice_component_type  # noqa: E402
+from tai42_channel_whatsapp.flows_choices import choice_component_type  # noqa: E402
+from tai42_channel_whatsapp.flows_resolve import slot_datanames  # noqa: E402
 
 
 def test_choice_component_type_classifies_an_array_as_checkbox():
-    assert _choice_component_type({"type": "array", "items": {"type": "string"}}) == "CheckboxGroup"
+    assert choice_component_type({"type": "array", "items": {"type": "string"}}) == "CheckboxGroup"
 
 
 def test_slot_datanames_disambiguate_a_sanitisation_collision():
@@ -2359,8 +2353,8 @@ def test_build_flow_data_array_without_options_or_enum_is_refused():
 
 # -- branch coverage: chips refusal, button-label cap, merged-range edges ---------
 
-from tai42_channel_whatsapp.flows import _attach_field_reaction  # noqa: E402
 from tai42_channel_whatsapp.flows_components import range_pairs  # noqa: E402
+from tai42_channel_whatsapp.flows_endpoint import attach_field_reaction  # noqa: E402
 
 
 def test_plain_string_chips_control_without_an_enum_is_refused():
@@ -2437,7 +2431,7 @@ def test_attach_field_reaction_on_a_non_selectable_control_is_refused():
     # is refused loudly.
     component = {"type": "TextInput", "name": "note", "label": "note"}
     with pytest.raises(ChannelInputError, match="selectable control"):
-        _attach_field_reaction(component, "note", ["note"], [], {"note": "note"}, {"note": [("", [])]}, {}, {})
+        attach_field_reaction(component, "note", ["note"], [], {"note": "note"}, {"note": [("", [])]}, {}, {})
 
 
 def test_merged_range_data_model_on_a_later_screen_omits_the_end_init():

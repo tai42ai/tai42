@@ -52,19 +52,19 @@ from tai42_channel_slack.blocks import (
     sections_text_lines,
     text_section,
 )
-from tai42_channel_slack.client import _post_message, _require_for_delivery, _require_secret_for_delivery
+from tai42_channel_slack.client import post_message, require_for_delivery, require_secret_for_delivery
 from tai42_channel_slack.correlation import (
     delete_form_record,
     store_correlation,
     store_form_record,
 )
+from tai42_channel_slack.form_blocks import FormSchemaError
 from tai42_channel_slack.forms import (
-    FormSchemaError,
     build_message_blocks,
     build_modal_view,
     check_update_failed_line,
+    validate_form_schema,
 )
-from tai42_channel_slack.forms import validate_form_schema as _validate_form_schema
 from tai42_channel_slack.settings import SlackSettings, slack_settings
 
 # The default message lines, each the platform's word a caller's ``wording.lines`` member
@@ -123,8 +123,8 @@ def _display_blocks(body_text: str, media: list[Any] | None, options: list[str] 
     reply). ``None`` when there is neither media nor options, so a plain ask/notify
     posts text only (unchanged). A blank ``body_text`` (a MEDIA-ONLY notify) OMITS the body
     section entirely — Slack rejects an empty ``plain_text`` — so the blocks are the image
-    block(s) alone. A ``data:`` image raises
-    :class:`~tai42_contract.channels.ChannelInputError` here, before any send.
+    block(s) alone. An image Slack cannot load (a ``data:`` url, a relative served-media
+    reference) raises :class:`~tai42_contract.channels.ChannelInputError` here, before any send.
     """
     media_blocks = build_media_blocks(media)
     option_blocks = build_option_blocks(options)
@@ -144,10 +144,11 @@ def _notification_blocks(notification: ChannelNotification) -> list[dict[str, An
     Order: an optional header display item, then the message body section (omitted when the
     message is blank — a content-only send), then display media, a shared location, the
     interactive choice surface (flat options OR a sectioned list), and finally the footer.
-    A ``data:`` image (header or media) raises :class:`ChannelInputError` here, before any
-    send. A :class:`ChannelTemplate` and a form ``schema`` are not renderable on this channel
-    (see the capability notes on :class:`SlackChannel`) and are refused loudly rather than
-    silently dropped, defending the channel even if a caller reaches it past the guards.
+    An image Slack cannot load (header or media; a ``data:`` url, a relative served-media
+    reference) raises :class:`ChannelInputError` here, before any send. A
+    :class:`ChannelTemplate` and a form ``schema`` are not renderable on this channel (see the
+    capability notes on :class:`SlackChannel`) and are refused loudly rather than silently
+    dropped, defending the channel even if a caller reaches it past the guards.
     """
     if notification.template is not None:
         raise ChannelInputError(
@@ -383,8 +384,8 @@ async def _deliver_form(token: str, target: str, delivery: ChannelDelivery) -> d
         status_unavailable=status.get("unavailable") if isinstance(status, dict) else None,
     )
     check_update_failed_line(form_wording.get("update_failed"))
-    # Any display media rides above the form's section + open-modal button (a data:
-    # image is refused here, before the reserve or send). The open button's own 75-character
+    # Any display media rides above the form's section + open-modal button (an image Slack
+    # cannot load is refused here, before the reserve or send). The open button's own 75-character
     # cap is enforced in build_message_blocks, also before the reserve or send.
     message_blocks = [
         *build_media_blocks(delivery.media),
@@ -403,7 +404,7 @@ async def _deliver_form(token: str, target: str, delivery: ChannelDelivery) -> d
         on_mismatch=delivery.on_mismatch,
     )
     try:
-        return await _post_message(token, target, delivery.question, blocks=message_blocks)
+        return await post_message(token, target, delivery.question, blocks=message_blocks)
     except ChannelDeliveryError:
         # Reserve-before-send: a failed post releases the reservation so no live
         # form record dangles without a message.
@@ -464,7 +465,7 @@ class SlackChannel:
         ``FormSchemaError`` becoming the ask-time ``ValueError``.
         """
         try:
-            _validate_form_schema(schema, question)
+            validate_form_schema(schema, question)
         except FormSchemaError as exc:
             raise ValueError(str(exc)) from exc
 
@@ -481,7 +482,7 @@ class SlackChannel:
         outcome reports. An unresolvable recipient raises :class:`ChannelAddressError`.
         """
         settings = slack_settings()
-        identity = _require_for_delivery(settings.bot_user_id, "CHANNEL_SLACK_BOT_USER_ID")
+        identity = require_for_delivery(settings.bot_user_id, "CHANNEL_SLACK_BOT_USER_ID")
         if sender_identity is None:
             return ChannelAddress(our_identity=identity, address=_resolve_recipient(settings, recipient))
         if sender_identity != identity:
@@ -502,21 +503,21 @@ class SlackChannel:
         # policy takes effect on the next question. Missing config is a delivery
         # failure: ChannelDeliveryError naming the env var, before any network call.
         settings = slack_settings()
-        token = _require_secret_for_delivery(settings.bot_token, "CHANNEL_SLACK_BOT_TOKEN")
+        token = require_secret_for_delivery(settings.bot_token, "CHANNEL_SLACK_BOT_TOKEN")
         pair = self.resolve_address(delivery.recipient, None)
         target = pair.address
         if delivery.answer_format == "form":
             return _sent_outcome(pair.our_identity, await _deliver_form(token, target, delivery), ts_required=False)
         # Display media and tappable options ride as Block Kit blocks alongside the
-        # text (the notification fallback Slack requires). A data: image is refused
-        # here, before the send. Tier-1 (confirm/external) carries no options — its
+        # text (the notification fallback Slack requires). An image Slack cannot
+        # load is refused here, before the send. Tier-1 (confirm/external) carries no options — its
         # answer is the plain callback link, so its block body keeps the full rendered
         # text (link included) and only display media rides beneath it.
         is_tier1 = delivery.answer_format in CALLBACK_LINK_FORMATS
         section_text = _render_text(delivery) if is_tier1 else delivery.question
         block_options = None if is_tier1 else delivery.options
         blocks = _display_blocks(section_text, delivery.media, block_options)
-        body = await _post_message(token, target, _render_text(delivery), blocks=blocks)
+        body = await post_message(token, target, _render_text(delivery), blocks=blocks)
         if delivery.answer_format in CALLBACK_LINK_FORMATS:
             # Tier-1 (confirm/external): the plain link IS the answer path — no
             # correlation entry, no threaded reply expected.
@@ -542,7 +543,7 @@ class SlackChannel:
         failure raises ``ChannelDeliveryError``. Settings read fresh.
         """
         settings = slack_settings()
-        token = _require_secret_for_delivery(settings.bot_token, "CHANNEL_SLACK_BOT_TOKEN")
+        token = require_secret_for_delivery(settings.bot_token, "CHANNEL_SLACK_BOT_TOKEN")
         pair = self.resolve_address(notification.recipient, notification.sender_identity)
         target = pair.address
         # The full richer-send vocabulary rides as Block Kit blocks: header/media/location,
@@ -553,9 +554,9 @@ class SlackChannel:
         # message plus the interactive/location content as suggestion lines so the
         # notification preview still shows them. A MEDIA-ONLY notify (blank message) posts
         # the media block(s) alone with an empty text fallback — Slack accepts that when
-        # blocks carry the content. A data: image, a vendor template, or a form schema is
-        # refused before the send.
+        # blocks carry the content. An image Slack cannot load, a vendor template, or a form
+        # schema is refused before the send.
         blocks = _notification_blocks(notification)
         text = _notification_text_fallback(notification)
-        body = await _post_message(token, target, text, blocks=blocks)
+        body = await post_message(token, target, text, blocks=blocks)
         return _sent_outcome(pair.our_identity, body, ts_required=True)

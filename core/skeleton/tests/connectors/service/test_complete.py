@@ -464,7 +464,7 @@ async def test_a_reconnect_that_changes_entries_runs_the_pipeline_then_asks_for_
 
     monkeypatch.setattr(service, "apply_change", apply_change)
 
-    async def recording_broadcast(op, targets, apply, *, publish_on_local_failure=False, pre_mutation_errors=()):
+    async def recording_broadcast(op, targets, apply, *, publish_on_local_failure=()):
         order.append("reprobe")
         events["broadcasts"].append({"op": op, "publish_on_local_failure": publish_on_local_failure})
         return {}
@@ -480,7 +480,7 @@ async def test_a_reconnect_that_changes_entries_runs_the_pipeline_then_asks_for_
     assert events["broadcasts"] == [
         {
             "op": ReprobeFailedMcps(op="reprobe_failed_mcps", titles=["acme_cal_work", "acme_mail_work"]),
-            "publish_on_local_failure": True,
+            "publish_on_local_failure": (Exception,),
         }
     ]
 
@@ -501,7 +501,7 @@ async def test_a_toggle_on_completion_asks_for_the_reprobe_too(harness, monkeypa
     assert [b["op"] for b in events["broadcasts"]] == [
         ReprobeFailedMcps(op="reprobe_failed_mcps", titles=["acme_cal_work", "acme_mail_work"])
     ]
-    assert events["broadcasts"][0]["publish_on_local_failure"] is True
+    assert events["broadcasts"][0]["publish_on_local_failure"] == (Exception,)
 
 
 async def test_a_failing_local_reprobe_still_reaches_the_fleet_and_raises(harness, monkeypatch):

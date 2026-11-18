@@ -24,6 +24,7 @@ from tai42_skeleton.operations.errors import PermissionDeniedError
 from tai42_skeleton.states.context import current_state_context
 
 from .._fakes.listing import keys_under
+from .._fakes.template_holders import app_held_by
 from .conftest import (
     EchoAgent,
     FakeChannel,
@@ -394,7 +395,7 @@ async def test_channel_locale_composes_through_the_turn_into_a_rendered_variant(
 
     registry = StorageRegistry()
     registry.register_storage(_InMemory)
-    manager = ResourceManager(registry.provider, on_evicted=lambda _eviction: None)
+    manager = ResourceManager(registry.provider, on_evicted=lambda _eviction: None, held_by=app_held_by)
 
     assert await manager.render_by_id("welcome", locale=cast(str, seen["ambient_locale"])) == "shalom"
     with pytest.raises(TemplateLocaleNotFoundError):

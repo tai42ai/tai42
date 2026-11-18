@@ -176,7 +176,7 @@ def _multi_choice_element(name: str, options: list[dict[str, Any]], choice_label
     return element
 
 
-def _boolean_words(entry: Any) -> tuple[str, str]:
+def field_boolean_words(entry: Any) -> tuple[str, str]:
     """A ``boolean`` field's ``(true, false)`` words: the field entry's ``true_label`` / ``false_label``.
 
     ``entry`` is the field's ``wording.form.fields`` entry (or ``None``); an unset side is the
@@ -276,7 +276,7 @@ def _apply_multi_initial(name: str, element: dict[str, Any], value: Any) -> None
         element["initial_options"] = matches
 
 
-def _apply_initial(name: str, element: dict[str, Any], value: Any) -> None:
+def apply_initial(name: str, element: dict[str, Any], value: Any) -> None:
     """Prefill one control from a per-send value.
 
     ``initial_value`` for a text/number/email/url input (a list joins one entry per line for a
@@ -445,13 +445,21 @@ def _string_element(
     return _string_input_element(name, spec)
 
 
-def _element(
+def field_element(
     name: str,
     spec: dict[str, Any],
     per_send_options: list[dict[str, Any]] | None,
     choice_label: str | None = None,
     boolean_words: tuple[str, str] = (_TRUE_WORD, _FALSE_WORD),
 ) -> dict[str, Any]:
+    """The Block Kit input element a form field ``name`` renders as, from its schema ``spec``.
+
+    A declared ``control`` chooses the element; otherwise the field's type does: an array of
+    choices a multi-select (a free array of strings a multiline text input), a string its text or
+    choice control, a boolean a radio drawn in ``boolean_words``, a number a number input.
+    ``per_send_options`` replace the schema's own choices; ``choice_label`` is the choice
+    control's placeholder. An unsupported type raises :class:`FormSchemaError`.
+    """
     ptype = spec.get("type")
     options = _options_from_spec(name, spec, per_send_options)
     if spec.get("control") is not None:

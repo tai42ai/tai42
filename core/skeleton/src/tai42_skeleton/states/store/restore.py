@@ -9,7 +9,7 @@ from psycopg.types.json import Jsonb
 from tai42_contract.states.errors import StateNotFoundError
 from tai42_contract.states.models import PERSON_KIND, CompletedOrigin, StateSubject
 
-from tai42_skeleton.states.schema import _validate_document
+from tai42_skeleton.states.schema import validate_document
 
 from .base import ApplyEntrySource, _StoreBase
 from .connection import _pool, _settings
@@ -59,7 +59,7 @@ class _RestoreStore(_StoreBase):
             await admit_persons_in_txn(await lock_person_gates_shared(cur, (_row_subject(row) for row in rows)))
             for row in rows:
                 data = row["data"]
-                _validate_document(entry.validator, data)
+                validate_document(entry.validator, data)
                 tk, tn = row["target_kind"], row["target_name"]
                 kind, key = row["subject_kind"], row["subject_key"]
                 await cur.execute(

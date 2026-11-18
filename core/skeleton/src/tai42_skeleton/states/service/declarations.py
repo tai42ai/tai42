@@ -25,7 +25,7 @@ from tai42_kit.utils.data.json_schema_util import SCHEMA_REFS
 from tai42_skeleton.states.db import states_settings
 from tai42_skeleton.states.outbox.drain import drain_state, held_subjects
 from tai42_skeleton.states.outbox.models import HeldRecord
-from tai42_skeleton.states.schema import _is_narrowing, _validate_document, _validate_schema
+from tai42_skeleton.states.schema import is_narrowing, validate_document, validate_schema
 from tai42_skeleton.states.service.base import _StatesServiceBase
 from tai42_skeleton.states.service.catalog import StateEntry, served_row
 from tai42_skeleton.states.service.rows import _resolve_state_schema, _row_to_declaration
@@ -66,7 +66,11 @@ class _DeclarationMixin(_StatesServiceBase):
         given by an id the store lacks raises :class:`ValueValidationError` before any render.
         """
         self._ensure_available()
-        await assert_templates_stored(declaration_template_refs(decl), ValueValidationError)
+        from tai42_skeleton.app import instance
+
+        await assert_templates_stored(
+            instance.app.storage.provider, declaration_template_refs(decl), ValueValidationError
+        )
         if decl.effective_schema is not None:
             raise ValueError("effective_schema is computed by the platform")
         if decl.regimes is not None:
@@ -79,7 +83,7 @@ class _DeclarationMixin(_StatesServiceBase):
         # object) fails the save loudly, naming the field, never a state declared on an empty
         # schema. The UNION is stored as-is (baseline), so a read serves the by-id reference back.
         resolved_schema = await _resolve_state_schema(f"state {decl.name!r} schema", decl.schema_)
-        _validate_schema(resolved_schema)
+        validate_schema(resolved_schema)
         effective_schema = await self._compose_effective(decl.name, resolved_schema)
         stored_schema = decl.schema_.model_dump() if isinstance(decl.schema_, TemplatedText) else decl.schema_
         deadline = monotonic() + states_settings().outbox_drain_timeout_seconds
@@ -93,7 +97,7 @@ class _DeclarationMixin(_StatesServiceBase):
                 # Resolve the CURRENT stored base schema under the guard's lock so a by-id
                 # narrowing comparison sees the live schema, never a pre-read stale one.
                 existing_schema = await _resolve_state_schema(f"state {decl.name!r} stored schema", existing["schema"])
-                if _is_narrowing(existing_schema, resolved_schema):
+                if is_narrowing(existing_schema, resolved_schema):
                     raise NonAdditiveRedeclareError(
                         f"state {decl.name!r} has records: removing or changing a field is refused while records "
                         f"exist — erase them first"
@@ -197,7 +201,7 @@ def _refuse_for_held(
     validator = Draft202012Validator(effective_schema, registry=SCHEMA_REFS)
     for record in held:
         try:
-            _validate_document(validator, record.document)
+            validate_document(validator, record.document)
         except ValueValidationError as exc:
             ids = sorted({r.save_id for r in held})
             raise DeclarationInUseError(

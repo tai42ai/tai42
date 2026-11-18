@@ -146,7 +146,7 @@ def meta(client: aioredis.FakeRedis) -> InboundMediaMetaStore:
 @pytest.fixture
 def provider(monkeypatch: pytest.MonkeyPatch) -> _FakeStorage:
     store = _FakeStorage()
-    monkeypatch.setattr(media_ingest, "_storage_provider", lambda: store)
+    monkeypatch.setattr(instance.app._storage_registry, "_provider", store)
     return store
 
 
@@ -600,7 +600,7 @@ def test_isobmff_matcher_rejects_box_size_beyond_window():
 
 
 async def test_no_provider_raises_store_unavailable(events, monkeypatch):
-    monkeypatch.setattr(media_ingest, "_storage_provider", lambda: None)
+    monkeypatch.setattr(instance.app._storage_registry, "_provider", None)
     with pytest.raises(MediaStoreUnavailableError):
         await ingest_media(
             source=_gen(_PNG),
@@ -635,7 +635,7 @@ async def test_upload_fault_after_record_write_raises_typed_and_leaves_record_fo
             raise RuntimeError("store boundary fault")
 
     failing = _FailingUpload()
-    monkeypatch.setattr(media_ingest, "_storage_provider", lambda: failing)
+    monkeypatch.setattr(instance.app._storage_registry, "_provider", failing)
     with pytest.raises(MediaStoreUnavailableError):
         await ingest_media(
             source=_gen(_PNG),

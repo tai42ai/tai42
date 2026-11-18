@@ -171,13 +171,26 @@ async def test_an_exec_the_host_refuses_raises_the_error_popen_raises(
 
 
 @pytest.mark.parametrize(
-    "sig", [signal.SIGTERM, signal.SIGINT, signal.SIGHUP, signal.SIGPIPE, signal.SIGXFSZ], ids=lambda sig: sig.name
+    ("sig", "spawner_disposition"),
+    [
+        pytest.param(signal.SIGTERM, signal.SIG_DFL, id="SIGTERM"),
+        pytest.param(signal.SIGINT, signal.default_int_handler, id="SIGINT"),
+        pytest.param(signal.SIGHUP, signal.SIG_DFL, id="SIGHUP"),
+        pytest.param(signal.SIGPIPE, signal.SIG_IGN, id="SIGPIPE"),
+        pytest.param(signal.SIGXFSZ, signal.SIG_IGN, id="SIGXFSZ"),
+    ],
 )
 async def test_the_command_starts_with_the_default_disposition_of_the_signals_a_plain_child_gets(
-    sig: signal.Signals,
+    sig: signal.Signals, spawner_disposition: signal.Handlers | Callable[..., object]
 ) -> None:
+    # The spawning process holds each signal as a plain interpreter does, whatever the test runner
+    # inherited: SIGPIPE and SIGXFSZ ignored, SIGINT on Python's handler, the rest at their default.
     # A signal ignored on entry to a shell stays ignored there: one restored to its default kills it.
-    process = await spawn("sh", "-c", f'kill -s {sig.name.removeprefix("SIG")} "$$"; echo survived')
+    held = signal.signal(sig, spawner_disposition)
+    try:
+        process = await spawn("sh", "-c", f'kill -s {sig.name.removeprefix("SIG")} "$$"; echo survived')
+    finally:
+        signal.signal(sig, held)
     result = await run_host_process(process, stdin=None, timeout_seconds=PROMPT_SECONDS)
     assert result == ExecResult(exit_code=-sig, stdout="", stderr="")
 

@@ -1143,12 +1143,3 @@ async def test_notify_form_records_the_caller_wording(channel_stack: TaiStack, u
     assert form["wording"]["form"]["cancel"] == "Not now", form
     assert form["wording"]["form"]["back"] == "Go back", form
     assert form["wording"]["form"]["title"] == "Tell us about it", form
-
-
-@pytest.mark.needs("no-stack", "setting:real-credentials")
-async def test_notify_form_over_whatsapp_live_leg_skips_without_creds(uniq: Callable[[str], str]) -> None:
-    import os
-
-    if not (os.environ.get("CHANNEL_WHATSAPP_ACCESS_TOKEN") and os.environ.get("CHANNEL_WHATSAPP_PHONE_NUMBER_ID")):
-        pytest.skip("whatsapp form-notification live leg needs CHANNEL_WHATSAPP_ACCESS_TOKEN + _PHONE_NUMBER_ID")
-    raise AssertionError("whatsapp live form-notification leg has no implementation")

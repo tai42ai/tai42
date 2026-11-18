@@ -201,10 +201,11 @@ class BaseHooksManager(ABC):
         carried state binding is validated and its templates attached, then the backend stores the
         hook. A refusal raises before anything is stored.
         """
-        await assert_templates_stored(hook_template_refs(params), ValueError)
+        from tai42_skeleton.app import instance
+
+        await assert_templates_stored(instance.app.storage.provider, hook_template_refs(params), ValueError)
         await self.validate_jq_fields(params)
         if params.state_binding is not None:
-            from tai42_skeleton.app import instance
             from tai42_skeleton.tools import state_binding
 
             await state_binding.validate_and_attach_binding(instance.app, params.state_binding)

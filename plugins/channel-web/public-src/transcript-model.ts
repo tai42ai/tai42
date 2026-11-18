@@ -53,9 +53,8 @@ export type DisplayBlockKind = 'heading' | 'body' | 'image';
 
 /** One ordered, display-only block on a form page (never an input): `text` carries a
  * heading/body's words; `src`/`alt` carry an image's source and alt text; an optional
- * `slot` names a data key whose current value the block shows in place of static `text`
- * (filled from the per-send data and/or a reaction's `display` update — a computed total
- * among them). Each optional field is `null` when the wire omitted it. */
+ * `slot` names a slot whose current value the block shows in place of static `text`
+ * (filled by a reaction's `display` update — a computed total among them). Each optional field is `null` when the wire omitted it. */
 export interface DisplayBlock {
   readonly kind: DisplayBlockKind;
   readonly text: string | null;
@@ -94,6 +93,10 @@ export interface FormReactions {
   readonly choices: readonly string[];
 }
 
+/** A text display slot's value: shown as its text (a computed total is a number); `null`
+ * leaves the slot unfilled, so the block shows its own text. */
+export type DisplayText = string | number | boolean | null;
+
 /** The form update a reaction door returns: `values` sets field values; `options`
  * replaces the per-send choice list of option-bearing fields; `errors` shows per-field
  * messages (keyed by field name); `display` fills text display slots (keyed by slot name) —
@@ -103,7 +106,7 @@ export interface FormUpdate {
   readonly values: Readonly<Record<string, unknown>>;
   readonly options: Readonly<Record<string, readonly FormOptionData[]>>;
   readonly errors: Readonly<Record<string, string>>;
-  readonly display: Readonly<Record<string, unknown>>;
+  readonly display: Readonly<Record<string, DisplayText>>;
   /** A reaction's vetted source per image slot; null clears the picture. */
   readonly images: ReadonlyMap<string, string | null>;
 }

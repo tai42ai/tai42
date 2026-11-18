@@ -60,11 +60,9 @@ services:
       retries: 20
 
   # ---- celery profile: RabbitMQ broker ---------------------------------
-  # The celery backend leg's broker. The official image ships
-  # `loopback_users.guest = false`, lifting upstream's loopback-only restriction
-  # so the `guest` user works over the published port (a host connection arrives
-  # from the Docker bridge gateway, not loopback). The harness provisions one
-  # vhost per stack over the management API on 15672.
+  # The celery backend leg's broker. deploy/rabbitmq/rabbitmq.conf creates the
+  # harness user (`tai42`), which connects over the published port. The harness
+  # provisions one vhost per stack over the management API on 15672.
   rabbitmq:
     image: rabbitmq:4-management-alpine
     profiles: ["celery"]
@@ -72,8 +70,8 @@ services:
       - "127.0.0.1:${TAI_E2E_RABBITMQ_PORT:-5672}:5672"
       - "127.0.0.1:${TAI_E2E_RABBITMQ_MGMT_PORT:-15672}:15672"
     volumes:
-      # Permit celery's transient non-exclusive control queues on RabbitMQ 4
-      # (denied by default). Mounted alongside the image's conf.d defaults.
+      # The harness user, and celery's transient non-exclusive control queues on
+      # RabbitMQ 4 (denied by default). Mounted alongside the image's conf.d defaults.
       - ./deploy/rabbitmq/rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf:ro
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]

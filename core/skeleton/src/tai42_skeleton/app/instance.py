@@ -351,11 +351,11 @@ def _register_storage_lifecycles(app: TaiMCP) -> None:
     unlisted) are declared into each epoch's fresh mark registry: every startup handler also
     runs at each reload build.
     """
+    from tai42_skeleton.app.template_delete_referees import register_platform_template_delete_referees
     from tai42_skeleton.conversations.media_meta import declare_media_prefix_marks
-    from tai42_skeleton.template.platform_referees import register_platform_template_referees
 
-    app.lifecycle.on_startup(register_platform_template_referees)
-    app.lifecycle.on_reload(register_platform_template_referees)
+    app.lifecycle.on_startup(register_platform_template_delete_referees)
+    app.lifecycle.on_reload(register_platform_template_delete_referees)
     app.lifecycle.on_startup(declare_media_prefix_marks)
 
 
@@ -477,10 +477,8 @@ def build_app() -> TaiMCP:
         # in-house holders re-register here (the public register_rename_referee seam is for
         # plugins). Consulted only by the rename gate and its preview, after boot, so ordering
         # among the handlers is free.
-        from tai42_skeleton.tools.platform_referees import (
-            register_platform_detach_referees,
-            register_platform_rename_referees,
-        )
+        from tai42_skeleton.app.template_detach_referees import register_platform_detach_referees
+        from tai42_skeleton.app.tool_rename_referees import register_platform_rename_referees
 
         app.lifecycle.on_startup(register_platform_rename_referees)
         app.lifecycle.on_reload(register_platform_rename_referees)

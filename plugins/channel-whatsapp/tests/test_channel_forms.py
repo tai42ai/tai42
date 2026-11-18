@@ -20,7 +20,10 @@ from tai42_contract.interactions.models import (
 )
 
 from tai42_channel_whatsapp.channel import WhatsAppChannel
-from tai42_channel_whatsapp.flows import build_flow_data, build_form_flow, payload_labels
+from tai42_channel_whatsapp.flows import build_form_flow
+from tai42_channel_whatsapp.flows_components import payload_labels
+from tai42_channel_whatsapp.flows_endpoint import echoed_screen_data_max_bytes
+from tai42_channel_whatsapp.flows_send_data import build_flow_data
 
 from .conftest import (
     _MESSAGES_URL,
@@ -593,7 +596,7 @@ async def test_form_create_with_validation_errors_refuses_and_deletes_draft(
     waba_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx
 ):
     # Meta returns HTTP 200 for a create even when the Flow JSON is invalid: the draft
-    # is created but carries validation_errors and can never publish. _resolve_flow_id
+    # is created but carries validation_errors and can never publish. resolve_flow_id
     # refuses loudly with the rendered list BEFORE publish, deletes the stranded draft
     # through its one cleanup writer, publishes/caches nothing, and frees the pair.
     import json
@@ -2259,6 +2262,45 @@ async def test_a_notify_form_whose_picture_misses_the_time_limit_sends_nothing(
     assert fake_httpx.calls == []
 
 
+_RESERVED_REFUSAL = r"form property 'flow_token': reserved on this channel"
+
+
+async def test_a_form_ask_the_channel_cannot_render_is_refused_before_its_picture_is_fetched(
+    reacting_env,
+    fake_redis: FakeRedis,
+    fake_httpx: FakeHttpx,
+    picture_fetch: FakePictureFetch,
+    picture_fetch_limit: float,
+):
+    picture_fetch.stalled.add(_PICTURE_LINK)
+    schema = {**_REACT_SCHEMA, "properties": {**_REACT_SCHEMA["properties"], "flow_token": {"type": "string"}}}
+    async with asyncio.timeout(3.0):
+        with pytest.raises(ChannelInputError, match=_RESERVED_REFUSAL):
+            await WhatsAppChannel().deliver(_reacting_delivery(schema=schema, pages=_picture_pages()))
+    assert picture_fetch.calls == []
+    assert fake_httpx.calls == []
+    assert not [key for _, key in fake_redis.events if key.startswith("channel:whatsapp:pending:")]
+
+
+async def test_a_notify_form_the_channel_cannot_render_is_refused_before_its_picture_is_fetched(
+    waba_env,
+    fake_redis: FakeRedis,
+    fake_httpx: FakeHttpx,
+    picture_fetch: FakePictureFetch,
+    picture_fetch_limit: float,
+):
+    from tai42_contract.interactions.models import DisplayBlock, FormPage
+
+    picture_fetch.stalled.add(_PICTURE_LINK)
+    schema = {**_FORM_SCHEMA, "properties": {**_FORM_SCHEMA["properties"], "flow_token": {"type": "string"}}}
+    pages = [FormPage(title="Form", fields=["note", "qty"], display=[DisplayBlock(kind="image", src=_PICTURE_LINK)])]
+    async with asyncio.timeout(3.0):
+        with pytest.raises(ChannelInputError, match=_RESERVED_REFUSAL):
+            await WhatsAppChannel().notify(_form_notification(schema=schema, pages=pages))
+    assert picture_fetch.calls == []
+    assert fake_httpx.calls == []
+
+
 _REFUSED_SIZE = r"^form data is \d+ bytes, over the {budget} bytes this channel sends in a form with picture slots; "
 _LARGE_PICTURE = PICTURE_JPEG + b"x" * (290_000 - len(PICTURE_JPEG))
 
@@ -2317,11 +2359,11 @@ async def test_a_static_form_ask_with_three_large_slotted_pictures_is_refused(
 _LIST_SCHEMA = {"type": "object", "properties": {"pick": {"type": "string"}, "note": {"type": "string"}}}
 
 
-def _large_option_data():
+def _large_option_data(field: str = "pick"):
     from tai42_contract.interactions.models import FormData, FormOption
 
     return FormData(
-        values={}, options={"pick": [FormOption(value=f"v{n}", label=f"Choice {n:06d}") for n in range(30_000)]}
+        values={}, options={field: [FormOption(value=f"v{n}", label=f"Choice {n:06d}") for n in range(30_000)]}
     )
 
 
@@ -2329,7 +2371,7 @@ def _sent_data(fake_httpx: FakeHttpx) -> dict:
     return fake_httpx.calls[-1]["json"]["interactive"]["action"]["parameters"]["flow_action_payload"]["data"]
 
 
-async def test_a_form_ask_without_picture_slots_is_sent_whatever_its_data_size(
+async def test_a_static_form_ask_without_picture_slots_is_sent_whatever_its_data_size(
     waba_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx
 ):
     import json
@@ -2344,7 +2386,7 @@ async def test_a_form_ask_without_picture_slots_is_sent_whatever_its_data_size(
     assert _pending_key() in fake_redis.store
 
 
-async def test_a_notify_form_without_picture_slots_is_sent_whatever_its_data_size(
+async def test_a_static_notify_form_without_picture_slots_is_sent_whatever_its_data_size(
     waba_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx
 ):
     import json
@@ -2356,3 +2398,28 @@ async def test_a_notify_form_without_picture_slots_is_sent_whatever_its_data_siz
     await WhatsAppChannel().notify(_form_notification(schema=_LIST_SCHEMA, data=_large_option_data()))
     assert _http_order(fake_httpx)[-1] == ("post", _MESSAGES_URL)
     assert len(json.dumps(_sent_data(fake_httpx), separators=(",", ":"))) > 1_000_000
+
+
+_REFUSED_ENDPOINT_SIZE = (
+    rf"^form data is \d+ bytes, over the {echoed_screen_data_max_bytes()} bytes the data endpoint reads back "
+    "for an endpoint-driven form$"
+)
+
+
+async def test_a_reacting_form_ask_without_picture_slots_over_the_echo_budget_is_refused(
+    reacting_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    with pytest.raises(ChannelInputError, match=_REFUSED_ENDPOINT_SIZE):
+        await WhatsAppChannel().deliver(_reacting_delivery(data=_large_option_data("tier")))
+    assert fake_httpx.calls == []
+    assert not [key for _, key in fake_redis.events if key.startswith("channel:whatsapp:pending:")]
+    assert "channel:whatsapp:endpoint-form:int-1" not in fake_redis.store
+
+
+async def test_an_endpoint_driven_notify_form_without_picture_slots_over_the_echo_budget_is_refused(
+    reacting_env, fake_redis: FakeRedis, fake_httpx: FakeHttpx
+):
+    schema = {**_SHAPED_SCHEMA, "properties": {**_SHAPED_SCHEMA["properties"], "pick": {"type": "string"}}}
+    with pytest.raises(ChannelInputError, match=_REFUSED_ENDPOINT_SIZE):
+        await WhatsAppChannel().notify(_form_notification(schema=schema, data=_large_option_data()))
+    assert fake_httpx.calls == []

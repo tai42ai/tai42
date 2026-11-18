@@ -12,9 +12,8 @@ from contextlib import asynccontextmanager
 import pytest
 
 import tai42_skeleton.versioning.store as store_module
-from tai42_skeleton.app import instance
+from tai42_skeleton.app import instance, template_detach_referees
 from tai42_skeleton.states import consumers as consumers_mod
-from tai42_skeleton.tools import platform_referees
 
 
 @pytest.fixture
@@ -54,7 +53,7 @@ async def test_population_readers_answer_empty_with_no_skeleton_database(
 
     monkeypatch.setattr(consumers_mod, "_declared_subject_kinds", declared)
     assert await consumers_mod.presets_lister("status") == []
-    assert await platform_referees._preset_detach_referee("status", "t1") == []
+    assert await template_detach_referees._preset_detach_referee("status", "t1") == []
     assert await instance.app.preset_manager.stored_preset_names() == frozenset()
 
 

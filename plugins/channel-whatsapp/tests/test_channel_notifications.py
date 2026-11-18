@@ -352,7 +352,7 @@ async def test_notify_options_and_media_send_choice_then_images(fake_redis: Fake
 # The contract admits strings far longer than WhatsApp's per-field wire caps, so a
 # contract-valid notification can still exceed a cap. Each over-cap field degrades the WHOLE
 # message one tier (never a truncated/over-cap value Meta would 400), mirroring the flat
-# select ask's established _interactive_choice_kind discipline.
+# select ask's established interactive_choice_kind discipline.
 
 
 async def test_notify_over_cap_row_description_degrades_list_to_numbered_text(

@@ -47,7 +47,7 @@ from tai42_skeleton.states.outbox.keys import record_key
 from tai42_skeleton.states.outbox.models import OutboxCall, OutboxItem, OutboxPending, OutboxSubject
 from tai42_skeleton.states.paths import apply_ops as apply_path_ops
 from tai42_skeleton.states.paths import partition_guarded, validate_op
-from tai42_skeleton.states.schema import _validate_document
+from tai42_skeleton.states.schema import validate_document
 from tai42_skeleton.states.service.base import _StatesServiceBase
 from tai42_skeleton.states.service.staging import StagedItemRecord, StagedReplace, outbox_item
 from tai42_skeleton.states.store.trace import _refuse_composing_shape, guard_skip_rows, stamp_trace, trace_stamp
@@ -154,7 +154,7 @@ class _StateUnit:
                     touched[self._key(item.state, item.subject)] = (item.state, item.subject)
             for key, (state, subject) in touched.items():
                 _version, _kinds, entry = await self._apply_context(state)
-                _validate_document(entry.validator, self._projected[key], where=_subject_where(state, subject))
+                validate_document(entry.validator, self._projected[key], where=_subject_where(state, subject))
         except BaseException:
             self._restore(snapshot)
             raise
@@ -283,7 +283,7 @@ class _StateUnit:
         """
         version, subject_kinds, entry = await self._apply_context(item.state)
         await self._service._validate_subject_admitted(subject_kinds, item.state, item.subject)
-        _validate_document(entry.validator, item.data, where=_subject_where(item.state, item.subject))
+        validate_document(entry.validator, item.data, where=_subject_where(item.state, item.subject))
         key = self._key(item.state, item.subject)
         base = await self._base_view(item.state, item.subject)
         base_seq = base["seq"] if base is not None else None
@@ -626,7 +626,7 @@ class _UnitMixin(_StatesServiceBase):
                 return
             document = view["data"]
         entry = await self._store.locked_entry(state, catalog=self._catalog, conn=conn)
-        _validate_document(entry.validator, document, where=_subject_where(state, subject))
+        validate_document(entry.validator, document, where=_subject_where(state, subject))
 
     async def _projected_record_view(
         self,

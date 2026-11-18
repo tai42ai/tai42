@@ -9,7 +9,8 @@ from __future__ import annotations
 import pytest
 from tai42_contract.channels import ChannelInputError
 
-from tai42_channel_whatsapp.flows import build_flow_data, build_form_flow
+from tai42_channel_whatsapp.flows import build_form_flow
+from tai42_channel_whatsapp.flows_send_data import build_flow_data
 
 _WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 _BOUND_MEMBERS = ("min-date", "max-date", "unavailable-dates", "include-days")

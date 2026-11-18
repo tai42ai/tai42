@@ -549,6 +549,28 @@ async def test_get_form_ticket_marks_slotted_images_so_the_script_draws_a_reacti
     assert "slots[i].getAttribute('data-slot-kind') === 'image'" in body
 
 
+async def test_get_form_ticket_keeps_a_slotted_text_block_own_text_for_a_null_value(wired):
+    # A null display value leaves a text slot unfilled: the block shows its own text again,
+    # or nothing when it has none. The element carries that text so the script can restore it.
+    schema = {"type": "object", "properties": {"name": {"type": "string"}}}
+    pages = [
+        {
+            "title": "Who",
+            "fields": ["name"],
+            "display": [
+                {"kind": "heading", "slot": "title", "text": "Your <entry>"},
+                {"kind": "body", "slot": "total"},
+            ],
+        },
+    ]
+    await _seed_form_payload(wired, format_payload={"schema": schema, "pages": pages})
+    resp = await router.callback(make_request("GET", path_params={"ticket": "TKT"}))
+    body = bytes(resp.body).decode()
+    assert '<h3 data-slot="title" data-slot-text="Your &lt;entry&gt;">Your &lt;entry&gt;</h3>' in body
+    assert '<p data-slot="total" class="display-body"></p>' in body
+    assert "slots[i].textContent = v === null ? (slots[i].getAttribute('data-slot-text') || '') : String(v);" in body
+
+
 async def test_get_form_ticket_renders_conditional_field(wired):
     schema = {
         "type": "object",
@@ -762,22 +784,22 @@ def test_the_page_checks_every_shape_itself_rather_than_the_browsers_submit_vali
 
 
 def test_the_page_script_catches_shapes_and_pins_the_door_refusal():
-    from tai42_skeleton.routers.interactions.pages import _FORM_SUBMIT_SCRIPT
+    from tai42_skeleton.routers.interactions.pages import FORM_SUBMIT_SCRIPT
 
-    assert "function shapeError(" in _FORM_SUBMIT_SCRIPT
-    assert "new RegExp(" in _FORM_SUBMIT_SCRIPT
-    assert "data-range-start" in _FORM_SUBMIT_SCRIPT
-    assert "function pinFieldError(" in _FORM_SUBMIT_SCRIPT
-    assert "data.field" in _FORM_SUBMIT_SCRIPT
+    assert "function shapeError(" in FORM_SUBMIT_SCRIPT
+    assert "new RegExp(" in FORM_SUBMIT_SCRIPT
+    assert "data-range-start" in FORM_SUBMIT_SCRIPT
+    assert "function pinFieldError(" in FORM_SUBMIT_SCRIPT
+    assert "data.field" in FORM_SUBMIT_SCRIPT
 
 
 def test_the_door_refusal_is_pinned_once_even_when_its_field_is_on_another_step():
     # The refusal's sentence is pinned under the named field once; showing the step that holds
     # the field keeps the pinned box (``show`` clears no field error), so the field reads it once.
-    from tai42_skeleton.routers.interactions.pages import _FORM_SUBMIT_SCRIPT
+    from tai42_skeleton.routers.interactions.pages import FORM_SUBMIT_SCRIPT
 
-    assert _FORM_SUBMIT_SCRIPT.count("pinFieldError(data.field, reason)") == 1
-    show_body = _FORM_SUBMIT_SCRIPT.split("function show(i) {", 1)[1].split("\n  function ", 1)[0]
+    assert FORM_SUBMIT_SCRIPT.count("pinFieldError(data.field, reason)") == 1
+    show_body = FORM_SUBMIT_SCRIPT.split("function show(i) {", 1)[1].split("\n  function ", 1)[0]
     assert "clearFieldErrors" not in show_body
 
 
@@ -873,11 +895,11 @@ def test_the_review_readback_lists_each_time_after_its_date():
 
 
 def test_the_page_script_orders_same_day_times_and_reads_written_dates():
-    from tai42_skeleton.routers.interactions.pages import _FORM_SUBMIT_SCRIPT
+    from tai42_skeleton.routers.interactions.pages import FORM_SUBMIT_SCRIPT
 
-    assert "data-range-start-time" in _FORM_SUBMIT_SCRIPT
-    assert "data-range-instant" in _FORM_SUBMIT_SCRIPT
-    assert "iso.slice(0, 10)" in _FORM_SUBMIT_SCRIPT
+    assert "data-range-start-time" in FORM_SUBMIT_SCRIPT
+    assert "data-range-instant" in FORM_SUBMIT_SCRIPT
+    assert "iso.slice(0, 10)" in FORM_SUBMIT_SCRIPT
 
 
 # === the caller's form and field words on the callback page ==================
@@ -936,10 +958,10 @@ def test_the_callers_yes_no_words_ride_the_boolean_control():
 
 
 def test_the_review_readback_draws_a_boolean_with_the_callers_words():
-    from tai42_skeleton.routers.interactions.pages import _FORM_SUBMIT_SCRIPT
+    from tai42_skeleton.routers.interactions.pages import FORM_SUBMIT_SCRIPT
 
-    assert "data-true-label" in _FORM_SUBMIT_SCRIPT
-    assert "data-false-label" in _FORM_SUBMIT_SCRIPT
+    assert "data-true-label" in FORM_SUBMIT_SCRIPT
+    assert "data-false-label" in FORM_SUBMIT_SCRIPT
 
 
 def test_the_callers_required_sentence_rides_every_required_control():
@@ -972,15 +994,15 @@ def test_a_required_control_without_the_callers_sentence_carries_no_required_wor
 
 
 def test_the_page_script_shows_the_callers_required_sentence():
-    from tai42_skeleton.routers.interactions.pages import _FORM_SUBMIT_SCRIPT
+    from tai42_skeleton.routers.interactions.pages import FORM_SUBMIT_SCRIPT
 
-    assert "getAttribute('data-required')" in _FORM_SUBMIT_SCRIPT
+    assert "getAttribute('data-required')" in FORM_SUBMIT_SCRIPT
 
 
 def test_rebuilt_radios_keep_the_callers_required_sentence():
-    from tai42_skeleton.routers.interactions.pages import _FORM_SUBMIT_SCRIPT
+    from tai42_skeleton.routers.interactions.pages import FORM_SUBMIT_SCRIPT
 
-    rebuild = _FORM_SUBMIT_SCRIPT.split("function rebuildChoices(name, options) {", 1)[1].split("\n  function ", 1)[0]
+    rebuild = FORM_SUBMIT_SCRIPT.split("function rebuildChoices(name, options) {", 1)[1].split("\n  function ", 1)[0]
     radios = rebuild.split("var fieldset = first.closest('fieldset');", 1)[1]
     assert "var requiredWords = first.getAttribute('data-required');" in radios
     assert "input.setAttribute('data-required', requiredWords);" in radios

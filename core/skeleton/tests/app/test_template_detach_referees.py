@@ -19,7 +19,7 @@ from tai42_kit.clients.impl.postgres import PostgresClient
 from tai42_kit.utils.schedule_subject import SCHEDULE_STATE_BINDING_ARG
 
 import tai42_skeleton.versioning.store as versioning_store
-from tai42_skeleton.tools import platform_referees
+from tai42_skeleton.app import template_detach_referees
 
 from ..versioning.conftest import FakeVersioningPg
 
@@ -57,23 +57,23 @@ async def test_preset_referee_blocks_on_a_version_binding_the_template(monkeypat
             "q": [(1, {"base_tool": "echo", "description": "d", "state_binding": _BINDS_OTHER})],
         },
     )
-    assert await platform_referees._preset_detach_referee("status", "t1") == [
+    assert await template_detach_referees._preset_detach_referee("status", "t1") == [
         ReferenceHolder(
             kind="preset version", tag="presets", name="p", locator={"version": 1}, summary="preset 'p' version 1"
         )
     ]
     # A different template / a different state draws no objection.
-    assert await platform_referees._preset_detach_referee("status", "t2") == [
+    assert await template_detach_referees._preset_detach_referee("status", "t2") == [
         ReferenceHolder(
             kind="preset version", tag="presets", name="q", locator={"version": 1}, summary="preset 'q' version 1"
         )
     ]
-    assert await platform_referees._preset_detach_referee("other", "t1") == []
+    assert await template_detach_referees._preset_detach_referee("other", "t1") == []
 
 
 async def test_preset_referee_with_no_stored_preset_is_empty(monkeypatch) -> None:
     _patch_preset_store(monkeypatch, {})
-    assert await platform_referees._preset_detach_referee("status", "t1") == []
+    assert await template_detach_referees._preset_detach_referee("status", "t1") == []
 
 
 @pytest.fixture
@@ -111,7 +111,7 @@ async def test_preset_referee_reads_every_version_of_every_preset_in_one_stateme
                 "preset", name, {"base_tool": "echo", "description": "d", "state_binding": _BINDS_T1}
             )
         versioned_pg.executed.clear()
-        holders = await platform_referees._preset_detach_referee("status", "t1")
+        holders = await template_detach_referees._preset_detach_referee("status", "t1")
     assert [(holder.name, holder.locator) for holder in holders] == [
         ("p", {"version": 2}),
         ("q", {"version": 2}),
@@ -147,7 +147,7 @@ async def test_conversation_config_referee_blocks_on_binding_config(monkeypatch)
         ("tool", "other"): TargetConversationConfig(target_kind="tool", target_name="other"),
     }
     _patch_configs(monkeypatch, configs)
-    assert await platform_referees._conversation_config_detach_referee("status", "t1") == [
+    assert await template_detach_referees._conversation_config_detach_referee("status", "t1") == [
         ReferenceHolder(
             kind="conversation config",
             tag="conversations",
@@ -156,7 +156,7 @@ async def test_conversation_config_referee_blocks_on_binding_config(monkeypatch)
             summary="conversation config tool/lookup",
         )
     ]
-    assert await platform_referees._conversation_config_detach_referee("status", "t2") == []
+    assert await template_detach_referees._conversation_config_detach_referee("status", "t2") == []
 
 
 async def test_conversation_config_referee_feature_off_is_empty(monkeypatch) -> None:
@@ -167,7 +167,7 @@ async def test_conversation_config_referee_feature_off_is_empty(monkeypatch) -> 
     monkeypatch.setattr(
         cache_mod, "get_conversations_manager", lambda: InMemoryConversationsManager(ConversationsSettings())
     )
-    assert await platform_referees._conversation_config_detach_referee("status", "t1") == []
+    assert await template_detach_referees._conversation_config_detach_referee("status", "t1") == []
 
 
 # -- hooks -------------------------------------------------------------------
@@ -188,10 +188,10 @@ async def test_hook_referee_blocks_on_binding_hook(monkeypatch) -> None:
     import tai42_skeleton.hooks.cache as hooks_cache
 
     monkeypatch.setattr(hooks_cache, "get_hooks_manager", lambda: SimpleNamespace(list_hooks=fake_list_hooks))
-    assert await platform_referees._hook_detach_referee("status", "t1") == [
+    assert await template_detach_referees._hook_detach_referee("status", "t1") == [
         ReferenceHolder(kind="hook", tag="hooks", name="status-hook", summary="hook 'status-hook'")
     ]
-    assert await platform_referees._hook_detach_referee("status", "t2") == []
+    assert await template_detach_referees._hook_detach_referee("status", "t2") == []
 
 
 # -- schedules ---------------------------------------------------------------
@@ -214,10 +214,10 @@ async def test_schedule_referee_blocks_on_binding_schedule(monkeypatch) -> None:
     import tai42_skeleton.operations.schedules as schedules_mod
 
     monkeypatch.setattr(schedules_mod, "export_schedules_raw", fake_export)
-    assert await platform_referees._schedule_detach_referee("status", "t1") == [
+    assert await template_detach_referees._schedule_detach_referee("status", "t1") == [
         ReferenceHolder(kind="schedule", tag="schedules", name="nightly", summary="schedule 'nightly'")
     ]
-    assert await platform_referees._schedule_detach_referee("status", "t2") == [
+    assert await template_detach_referees._schedule_detach_referee("status", "t2") == [
         ReferenceHolder(kind="schedule", tag="schedules", name="weekly", summary="schedule 'weekly'")
     ]
 
@@ -231,7 +231,7 @@ async def test_schedule_referee_feature_off_is_empty(monkeypatch) -> None:
     import tai42_skeleton.operations.schedules as schedules_mod
 
     monkeypatch.setattr(schedules_mod, "export_schedules_raw", fake_export)
-    assert await platform_referees._schedule_detach_referee("status", "t1") == []
+    assert await template_detach_referees._schedule_detach_referee("status", "t1") == []
 
 
 # -- registration ------------------------------------------------------------
@@ -240,11 +240,11 @@ async def test_schedule_referee_feature_off_is_empty(monkeypatch) -> None:
 def test_platform_detach_referees_are_registered(monkeypatch) -> None:
     registered: list = []
     fake_app = SimpleNamespace(tools=SimpleNamespace(register_detach_referee=registered.append))
-    monkeypatch.setattr(platform_referees, "tai42_app", fake_app)
-    platform_referees.register_platform_detach_referees()
+    monkeypatch.setattr(template_detach_referees, "tai42_app", fake_app)
+    template_detach_referees.register_platform_detach_referees()
     assert registered == [
-        platform_referees._preset_detach_referee,
-        platform_referees._conversation_config_detach_referee,
-        platform_referees._hook_detach_referee,
-        platform_referees._schedule_detach_referee,
+        template_detach_referees._preset_detach_referee,
+        template_detach_referees._conversation_config_detach_referee,
+        template_detach_referees._hook_detach_referee,
+        template_detach_referees._schedule_detach_referee,
     ]

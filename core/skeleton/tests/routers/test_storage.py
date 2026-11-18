@@ -40,7 +40,13 @@ from .._fakes.content_fixtures import (
 )
 from .._fakes.listing import keys_under
 from .._fakes.recording_storage import RecordingStorage
-from .._fakes.template_holders import HELD_DIRECTORY_REFUSAL, HELD_HOLDERS, HELD_TEMPLATE_REFUSAL, hold_jq_gate
+from .._fakes.template_holders import (
+    HELD_DIRECTORY_REFUSAL,
+    HELD_HOLDERS,
+    HELD_TEMPLATE_REFUSAL,
+    app_held_by,
+    hold_jq_gate,
+)
 
 
 class _FakeStorage(Storage):
@@ -102,7 +108,7 @@ def install(monkeypatch):
         monkeypatch.setattr(
             instance.app,
             "_resource_manager_cache",
-            ResourceManager(provider, on_evicted=instance.app._fire_template_evicted),
+            ResourceManager(provider, on_evicted=instance.app._fire_template_evicted, held_by=app_held_by),
         )
         monkeypatch.setattr(instance.app, "_bus", FakeBus())
         return provider

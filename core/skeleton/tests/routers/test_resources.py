@@ -24,6 +24,7 @@ from .._fakes.content_fixtures import (
     locked_pdf,
 )
 from .._fakes.recording_storage import RecordingStorage
+from .._fakes.template_holders import app_held_by
 
 
 def _req(body: dict | None = None, *, query: dict | None = None) -> Request:
@@ -112,7 +113,7 @@ async def test_render_media_is_400(bind):
 
 def _bind_recording(monkeypatch, objects: dict[str, bytes]) -> RecordingStorage:
     provider = RecordingStorage({key: (data, None) for key, data in objects.items()})
-    manager = ResourceManager(provider, on_evicted=lambda _eviction: None)
+    manager = ResourceManager(provider, on_evicted=lambda _eviction: None, held_by=app_held_by)
     monkeypatch.setattr(resources_ops, "tai42_app", SimpleNamespace(storage=SimpleNamespace(resource_manager=manager)))
     return provider
 

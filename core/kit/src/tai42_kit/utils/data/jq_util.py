@@ -118,6 +118,13 @@ def jq_settings() -> JqSettings:
     return JqSettings()
 
 
+def _budget_exceeded(stage: str, timeout: float, expression: str) -> JqBudgetExceededError:
+    """The error of a jq ``stage`` killed past its ``timeout``, naming the budget and the program."""
+    return JqBudgetExceededError(
+        f"jq {stage} exceeded {timeout}s (JQ_TIMEOUT_SECONDS); its worker was killed: {expression!r}"
+    )
+
+
 async def compile_check(expression: str, *, prelude: str = "", variables: Iterable[str] = ()) -> None:
     """Prove ``expression`` is a valid jq program, with ``variables`` predeclared as named ``$name`` bindings.
 
@@ -137,9 +144,7 @@ async def compile_check(expression: str, *, prelude: str = "", variables: Iterab
         await compute_pool().run(compile_job, key, JqSource(expression, prelude, names), timeout=timeout)
     except TimeoutError as exc:
         # The pool's timeout of a jq job is the author's program running past its budget.
-        raise JqBudgetExceededError(
-            f"jq compile exceeded {timeout}s (JQ_TIMEOUT_SECONDS); its worker was killed"
-        ) from exc
+        raise _budget_exceeded("compile", timeout, expression) from exc
 
 
 async def _evaluate(expression: str, payload: Any, prelude: str, variables: dict[str, Any], count: int) -> list[Any]:
@@ -159,9 +164,7 @@ async def _evaluate(expression: str, payload: Any, prelude: str, variables: dict
             source = JqSource(expression, prelude, names)
             values = await pool.run(compile_and_evaluate_job, key, source, input_text, count, timeout=timeout)
     except TimeoutError as exc:
-        raise JqBudgetExceededError(
-            f"jq evaluation exceeded {timeout}s (JQ_TIMEOUT_SECONDS); its worker was killed"
-        ) from exc
+        raise _budget_exceeded("evaluation", timeout, expression) from exc
     return values
 
 

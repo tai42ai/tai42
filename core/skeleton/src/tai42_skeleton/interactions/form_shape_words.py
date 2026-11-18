@@ -12,13 +12,13 @@ from collections.abc import Mapping
 from typing import Any, assert_never
 
 from tai42_contract.interactions import FormShapeKind
+from tai42_kit.utils.data.number_text import number_text
 
 
 def _number(value: Any) -> str:
-    # A bound as a person reads it: ``1`` for 1 and 1.0, ``9.5`` for 9.5.
-    if isinstance(value, float) and value.is_integer():
-        return str(int(value))
-    return str(value)
+    # A bound as a person reads it: a float as a display slot writes it (``1`` for 1.0, ``9.5``,
+    # ``1e-7``), an integer with every digit.
+    return number_text(value) if isinstance(value, float) else str(value)
 
 
 def _count(value: Any, one: str, many: str) -> str:

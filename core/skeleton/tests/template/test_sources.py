@@ -17,6 +17,7 @@ from tai42_skeleton.template import sources as sources_mod
 from tai42_skeleton.template.media import MediaBlock
 
 from .._fakes.listing import keys_under
+from .._fakes.template_holders import app_held_by
 
 # A 1x1 transparent PNG — real bytes so Magika classifies it as an image.
 _PNG = base64.b64decode(
@@ -70,7 +71,7 @@ def _manager(items: dict[str, bytes] | None = None) -> ResourceManager:
     registry = StorageRegistry()
     store = _BinStorage(items)
     registry.register_storage(lambda: store)  # type: ignore[arg-type]
-    return ResourceManager(registry.provider, on_evicted=lambda _eviction: None)
+    return ResourceManager(registry.provider, on_evicted=lambda _eviction: None, held_by=app_held_by)
 
 
 # --- load: scheme disambiguation --------------------------------------------

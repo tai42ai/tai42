@@ -1,12 +1,16 @@
 """Store writes, through their resource manager: an upload evicts the stale compiled entry it
 replaced; ``delete_template`` and ``delete_template_dir`` delegate to storage and evict exactly the
-compiled entries they remove, even when a directory delete fails part-way. All storage is an
+compiled entries they remove, even when a directory delete fails part-way; a delete of an object a
+stored object names raises the template layer's typed refusal and deletes nothing. All storage is an
 in-memory ``Storage`` double."""
 
 from __future__ import annotations
 
 import pytest
+from tai42_contract.errors import OperationError
+from tai42_contract.tools import ReferenceHolder
 
+from tai42_skeleton.template import HolderUnreadableError, PartialDirectoryDeleteError, StoredObjectHeldError
 from tai42_skeleton.template import resource_manager as rm_mod
 from tai42_skeleton.template.settings import TemplateCacheSettings
 
@@ -79,8 +83,32 @@ async def test_delete_template_dir_evicts_prefix_even_on_error(monkeypatch: pyte
         raise RuntimeError("partial delete")
 
     monkeypatch.setattr(store, "delete_dir", boom)
-    with pytest.raises(RuntimeError, match="partial delete"):
+    with pytest.raises(PartialDirectoryDeleteError, match="partial delete") as caught:
         await manager.delete_template_dir("dir")
+    assert caught.value.path == "dir"
+    assert isinstance(caught.value.__cause__, RuntimeError)
+    evicted = manager.get_cache_info()
+    assert evicted is not None
+    assert evicted.currsize == 0
+
+
+@pytest.mark.parametrize("fault", [FileNotFoundError("dir"), ValueError("dir is the storage root")])
+async def test_delete_template_dir_passes_the_providers_pre_deletion_error_through(
+    monkeypatch: pytest.MonkeyPatch, fault: Exception
+) -> None:
+    """The contract's pre-deletion errors from ``delete_dir`` propagate as they are; the
+    eviction still runs."""
+    monkeypatch.setattr(rm_mod, "template_cache_settings", lambda: TemplateCacheSettings(ttl=300, max_size=8))
+    manager, store = _manager({"dir/a.j2": "{{ x }}"})
+    await manager.render_by_id("dir/a.j2", {"x": 1})
+
+    async def refuse(path: str) -> None:
+        raise fault
+
+    monkeypatch.setattr(store, "delete_dir", refuse)
+    with pytest.raises(type(fault)) as caught:
+        await manager.delete_template_dir("dir")
+    assert caught.value is fault
     evicted = manager.get_cache_info()
     assert evicted is not None
     assert evicted.currsize == 0
@@ -121,3 +149,68 @@ async def test_delete_template_dir_with_caching_disabled_is_noop(monkeypatch: py
     await manager.delete_template_dir("dir")
     assert store.deleted_dirs == ["dir"]
     assert store.items == {}
+
+
+# --- a held object is refused with the template layer's typed errors --------
+
+_HOLDER = ReferenceHolder(kind="hook", tag="hooks", name="h", summary="hook 'h' names 'dir/a.j2' at condition")
+
+
+async def _holds_dir_a(ids: frozenset[str]) -> list[ReferenceHolder]:
+    return [_HOLDER] if "dir/a.j2" in ids else []
+
+
+async def _unreadable(ids: frozenset[str]) -> list[ReferenceHolder]:
+    raise ValueError("bad value 'secret'")
+
+
+class _RefereeOwnError(OperationError):
+    status = 409
+
+
+async def _answers_its_own_error(ids: frozenset[str]) -> list[ReferenceHolder]:
+    raise _RefereeOwnError("a referee's own typed answer")
+
+
+async def test_a_held_object_raises_the_held_error_and_deletes_nothing() -> None:
+    manager, store = _manager({"dir/a.j2": "A"}, held_by=_holds_dir_a)
+    with pytest.raises(StoredObjectHeldError) as caught:
+        await manager.delete_object("dir/a.j2")
+    assert caught.value.head == "stored template 'dir/a.j2' cannot be deleted"
+    assert caught.value.holders == [_HOLDER]
+    assert str(caught.value) == ("stored template 'dir/a.j2' cannot be deleted\nhook 'h' names 'dir/a.j2' at condition")
+    assert store.deleted == []
+    assert store.items == {"dir/a.j2": "A"}
+
+
+async def test_a_held_directory_raises_the_held_error_and_deletes_nothing() -> None:
+    manager, store = _manager({"dir/a.j2": "A", "dir/b.j2": "B"}, held_by=_holds_dir_a)
+    with pytest.raises(StoredObjectHeldError) as caught:
+        await manager.delete_template_dir("dir")
+    assert caught.value.head == "directory 'dir' cannot be deleted"
+    assert caught.value.holders == [_HOLDER]
+    assert store.deleted_dirs == []
+    assert set(store.items) == {"dir/a.j2", "dir/b.j2"}
+
+
+async def test_an_unreadable_holder_raises_the_unreadable_error_chained_to_its_fault() -> None:
+    manager, store = _manager({"dir/a.j2": "A"}, held_by=_unreadable)
+    with pytest.raises(HolderUnreadableError) as caught:
+        await manager.delete_object("dir/a.j2")
+    assert str(caught.value) == "stored template 'dir/a.j2' cannot be deleted: a holder could not be read (ValueError)"
+    assert isinstance(caught.value.__cause__, ValueError)
+    assert store.deleted == []
+
+
+async def test_a_referees_own_operation_error_passes_through_as_it_is() -> None:
+    manager, store = _manager({"dir/a.j2": "A"}, held_by=_answers_its_own_error)
+    with pytest.raises(_RefereeOwnError, match="a referee's own typed answer"):
+        await manager.delete_object("dir/a.j2")
+    assert store.deleted == []
+
+
+async def test_a_referees_own_operation_error_on_a_directory_delete_passes_through_as_it_is() -> None:
+    manager, store = _manager({"dir/a.j2": "A"}, held_by=_answers_its_own_error)
+    with pytest.raises(_RefereeOwnError, match="a referee's own typed answer"):
+        await manager.delete_template_dir("dir")
+    assert store.deleted_dirs == []

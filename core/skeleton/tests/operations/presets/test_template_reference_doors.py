@@ -25,7 +25,7 @@ from tai42_contract.presets.errors import PresetNotFoundError
 from tai42_contract.tools import ReferenceHolder, TemplateRef
 
 from tai42_skeleton.access_control.settings import AccessControlSettings
-from tai42_skeleton.app import instance
+from tai42_skeleton.app import instance, template_delete_referees
 from tai42_skeleton.authz import execution
 from tai42_skeleton.hooks import cache as hooks_cache
 from tai42_skeleton.hooks.managers.in_memory_hooks_manager import InMemoryHooksManager
@@ -38,7 +38,6 @@ from tai42_skeleton.operations import presets as preset_ops
 from tai42_skeleton.operations import schedules as schedules_ops
 from tai42_skeleton.operations.reference_graph import ExtractorFaultError, kwargs_references
 from tai42_skeleton.routers.tool_runs_settings import ToolRunsSettings
-from tai42_skeleton.template import platform_referees
 from tai42_skeleton.template.errors import TemplateNotFoundError
 
 from ..._fakes.hook_runs import HookRunsHarness
@@ -447,7 +446,7 @@ async def _hook_holders(
     )
     await manager._store_hook(params)
     monkeypatch.setattr(hooks_cache, "get_hooks_manager", lambda: manager)
-    return await platform_referees._hook_referee(ids)
+    return await template_delete_referees._hook_referee(ids)
 
 
 def test_the_reader_answers_nothing_for_an_unserved_name(pg, store, monkeypatch) -> None:

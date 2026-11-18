@@ -433,6 +433,35 @@ describe('SchemaFormAnswer display + review', () => {
   });
 });
 
+describe('SchemaFormAnswer text slots', () => {
+  const schema: JsonSchema = {
+    type: 'object',
+    properties: { total: { type: 'string', title: 'Total' } },
+  };
+  const pages: readonly FormPage[] = [
+    {
+      title: '',
+      fields: ['total'],
+      display: [block({ kind: 'body', slot: 'total', text: 'Not counted yet' })],
+      kind: 'input',
+      buttonLabel: null,
+    },
+  ];
+
+  it("shows the block's own text, never a send-data value named like the slot", () => {
+    renderCard(
+      formQuestion(
+        schema,
+        { values: { total: 'typed by hand' }, options: {} },
+        pages,
+        reactions({ fieldChanged: ['total'] }),
+      ),
+    );
+
+    expect(screen.getByTestId('form-slot-total')).toHaveTextContent('Not counted yet');
+  });
+});
+
 describe('SchemaFormAnswer image slots', () => {
   const schema: JsonSchema = {
     type: 'object',

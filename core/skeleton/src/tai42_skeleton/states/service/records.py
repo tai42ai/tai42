@@ -48,7 +48,7 @@ from tai42_skeleton.states.outbox.drain import (
 )
 from tai42_skeleton.states.outbox.keys import record_key
 from tai42_skeleton.states.paths import validate_op
-from tai42_skeleton.states.schema import _document_reasons
+from tai42_skeleton.states.schema import document_reasons
 from tai42_skeleton.states.service.base import _StatesServiceBase
 from tai42_skeleton.states.service.rows import _page_limit, _subject_from_row
 from tai42_skeleton.states.service.unit import current_state_unit
@@ -426,7 +426,7 @@ class _RecordMixin(_StatesServiceBase):
         entry = await self._catalog.catalog_entry(state)
         if entry is None:
             raise StateNotFoundError(f"no state declared as {state!r}")
-        reasons = _document_reasons(entry.validator, data)
+        reasons = document_reasons(entry.validator, data)
         return RecordValidation(fits=not reasons, reasons=reasons)
 
     async def check_records(
@@ -458,7 +458,7 @@ class _RecordMixin(_StatesServiceBase):
                 reasons=reasons,
             )
             for row in rows
-            if (reasons := _document_reasons(entry.validator, row["data"]))
+            if (reasons := document_reasons(entry.validator, row["data"]))
         ]
         next_cursor = (
             make_cursor(

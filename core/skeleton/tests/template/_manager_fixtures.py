@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import mimetypes
+from collections.abc import Awaitable, Callable
 
 from tai42_contract.storage import ObjectStat, Storage
+from tai42_contract.tools import ReferenceHolder
 
 from tai42_skeleton.storage import StorageRegistry
 from tai42_skeleton.template import ResourceManager
@@ -48,8 +50,15 @@ class _InMemoryStorage(Storage):
         return (await self.load_bytes(path))[start : start + length]
 
 
-def _manager(items: dict[str, str] | None = None) -> tuple[ResourceManager, _InMemoryStorage]:
+async def _no_holders(ids: frozenset[str]) -> list[ReferenceHolder]:
+    return []
+
+
+def _manager(
+    items: dict[str, str] | None = None,
+    held_by: Callable[[frozenset[str]], Awaitable[list[ReferenceHolder]]] = _no_holders,
+) -> tuple[ResourceManager, _InMemoryStorage]:
     registry = StorageRegistry()
     store = _InMemoryStorage(items)
     registry.register_storage(lambda: store)  # type: ignore[arg-type]
-    return ResourceManager(registry.provider, on_evicted=lambda _eviction: None), store
+    return ResourceManager(registry.provider, on_evicted=lambda _eviction: None, held_by=held_by), store

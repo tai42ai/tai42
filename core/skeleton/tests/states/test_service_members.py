@@ -24,7 +24,6 @@ from tai42_skeleton.app import instance
 from tai42_skeleton.states import service as service_mod
 from tai42_skeleton.states.service import StatesService
 from tai42_skeleton.states.service import reconcile as reconcile_mod
-from tai42_skeleton.states.service import templates as templates_mod
 
 from .._fakes.recording_storage import MappedStorage
 from .fake_service_store import _STATE, FakeStatesStore, _subject
@@ -514,7 +513,7 @@ async def test_a_save_time_compile_past_its_budget_is_the_author_s_refusal(
         }
     )
     await svc.put_declaration(_STATE)
-    monkeypatch.setattr(templates_mod, "compile_check", _compile_budget_exceeded)
+    monkeypatch.setattr(template_jq_mod, "compile_check", _compile_budget_exceeded)
     with pytest.raises(TemplateValidationError) as excinfo:
         await svc.put_template(template, replace=False)
     assert str(excinfo.value) == (
@@ -610,6 +609,70 @@ async def test_input_program_naming_input_variable_is_refused(svc: StatesService
     await svc.put_declaration(_STATE)
     with pytest.raises(TemplateValidationError, match="template_jq 'peek' jq is not a valid jq expression"):
         await svc.put_template(template, replace=False)
+
+
+_BY_ID_WITH_A_SECOND_INPUT = StateTemplateDocument.model_validate(
+    {
+        "name": "byid",
+        "schema": {"type": "object", "properties": {"ledger": {"type": "array"}}},
+        "template_jq": {
+            "any_due": {"purpose": "input", "jq": {"id": "stored-anything-due"}},
+            "second": {"purpose": "input", "jq": {"id": "stored-second"}},
+        },
+    }
+)
+
+
+async def test_a_by_id_input_program_rendering_empty_is_refused_at_save_naming_it(svc: StatesService) -> None:
+    _STORED_PROGRAMS["stored-second"] = ""
+    await svc.put_declaration(_STATE)
+    with pytest.raises(TemplateValidationError) as excinfo:
+        await svc.put_template(_BY_ID_WITH_A_SECOND_INPUT, replace=False)
+    assert str(excinfo.value) == (
+        "template 'byid' template_jq 'second' is not a valid jq expression: jq: the expression is empty (try \".\")"
+    )
+
+
+async def test_a_by_id_input_program_rendering_a_syntax_error_is_refused_at_save_naming_it(svc: StatesService) -> None:
+    _STORED_PROGRAMS["stored-second"] = "("
+    await svc.put_declaration(_STATE)
+    with pytest.raises(TemplateValidationError) as excinfo:
+        await svc.put_template(_BY_ID_WITH_A_SECOND_INPUT, replace=False)
+    assert str(excinfo.value).startswith(
+        "template 'byid' template_jq 'second' is not a valid jq expression: jq: error: syntax error"
+    )
+
+
+async def test_an_inline_input_program_with_a_syntax_error_is_refused_at_upload_naming_it(svc: StatesService) -> None:
+    template = StateTemplateDocument.model_validate(
+        {
+            "name": "inline",
+            "schema": {"type": "object", "properties": {"ledger": {"type": "array"}}},
+            "template_jq": {
+                "a": {"purpose": "input", "jq": {"content": "."}},
+                "b": {"purpose": "input", "jq": {"content": "# x"}},
+            },
+        }
+    )
+    await svc.put_declaration(_STATE)
+    with pytest.raises(TemplateValidationError) as excinfo:
+        await svc.put_template(template, replace=False)
+    assert str(excinfo.value).startswith("template_jq 'b' jq is not a valid jq expression: jq: error: syntax error")
+
+
+async def test_a_sibling_input_program_rendering_empty_at_run_time_leaves_the_others_running(
+    svc: StatesService,
+) -> None:
+    # The stored body is valid at save, then is emptied before the other program runs: that
+    # program's evaluation prelude carries no def for the empty one, so it still runs.
+    _STORED_PROGRAMS["stored-second"] = "."
+    await svc.put_declaration(_STATE)
+    await svc.put_template(_BY_ID_WITH_A_SECOND_INPUT, replace=False)
+    await svc.attach(_STATE.name, "byid", AttachBody(path=[]))
+    await svc.replace(_STATE.name, _subject(), {"ledger": [{"id": "a"}]}, origin=_ORIGIN)
+    _STORED_PROGRAMS["stored-second"] = ""
+    result = await svc.eval_template_jq(_STATE.name, _subject(), "any_due", {})
+    assert result.value is True
 
 
 async def test_input_program_by_id_unfetchable_is_loud_at_save(svc: StatesService) -> None:

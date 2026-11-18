@@ -384,8 +384,9 @@ each assert and each stop as a `chat.working` frame (`id`, `active`, `ttl`) on t
 conversation's stream. A frame never enters the transcript: the conversation keeps only
 its latest one, which expires one lifetime after it is written.
 
-The bubble shows on an active frame and stays through the agent's messages while the
-work goes on. It hides on a stop frame (the reply landed, the run asks a question of
+The bubble shows on an active frame and, refreshed every few seconds, stays through the
+agent's messages while the work goes on; it can hide briefly between refreshes when another
+run for the same visitor ends. It hides on a stop frame (the reply landed, the run asks a question of
 the visitor or of anyone else and waits for the answer, the run ends without a word,
 or one stretch of work reached the platform's ceiling), when a frame's lifetime passes
 with no later frame, when the stream drops, and when the session has ended. A page

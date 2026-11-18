@@ -246,7 +246,7 @@ async def test_an_over_bound_params_set_bridges_without_params_and_is_counted(fa
     # message still bridges (without params), one WARNING names the door, and the drop is counted.
     from prometheus_client import REGISTRY
 
-    from tai42_channel_slack.inbound.routing import _bridge
+    from tai42_channel_slack.inbound.routing import bridge_message
 
     def _dropped() -> float:
         return REGISTRY.get_sample_value("tai_entry_params_dropped_total", {"door": "slack", "unit": "set"}) or 0.0
@@ -254,7 +254,7 @@ async def test_an_over_bound_params_set_bridges_without_params_and_is_counted(fa
     before = _dropped()
     over_bound = {f"k{i}": "v" for i in range(17)}
     with caplog.at_level("WARNING"):
-        response = await _bridge(
+        response = await bridge_message(
             "U-BOT", "C-1", "hello", "Ev-1", medium_message_id="1.2", reply_to_medium_message_id=None, params=over_bound
         )
 

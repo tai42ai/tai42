@@ -7,6 +7,7 @@ import {
   isSessionMissing,
   isStoreOff,
   openChatStream,
+  reactToForm,
   rotateSession,
   sendMessage,
   uploadAttachment,
@@ -591,6 +592,23 @@ describe("the route's refusal words", () => {
     const gated = await rotateSession('site-alpha').catch((err: unknown) => err);
     expect((gated as ChatApiError).message).toBe(
       'This chat is private. Open it from the link you were given.',
+    );
+  });
+});
+
+describe('reactToForm', () => {
+  it('logs the cause of a malformed form update before it throws', async () => {
+    document.body.innerHTML =
+      '<div id="root" data-api-base="/api/channels/web" data-reaction-endpoint="/react/{interaction_id}"></div>';
+    const update = { values: 'not-an-object' };
+    fetchMock.mockResolvedValue(reply(200, { data: update }));
+
+    await expect(
+      reactToForm('int-1', { kind: 'field_changed', field: 'qty' }, {}, new Set()),
+    ).rejects.toThrow('the reaction door returned a malformed form update');
+    expect(vi.mocked(console.error)).toHaveBeenCalledWith(
+      'updating a form returned a malformed form update',
+      update,
     );
   });
 });

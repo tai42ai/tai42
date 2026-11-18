@@ -23,7 +23,7 @@ def _link_line(item: MediaItem) -> str:
     return f"{item.caption}: {item.url}" if item.caption else item.url
 
 
-def _body_with_links(message: str, links: list[MediaItem]) -> str:
+def message_with_links(message: str, links: list[MediaItem]) -> str:
     """The message body with each ``link`` media item appended as its own line.
 
     A blank ``message`` (a media-only send) contributes no leading blank line — the body is
@@ -38,7 +38,7 @@ def _body_with_links(message: str, links: list[MediaItem]) -> str:
     return "\n".join([message, *link_lines])
 
 
-async def _send_one_file(phone_number_id: str, target: str, item: MediaItem) -> SentMessage:
+async def send_one_file(phone_number_id: str, target: str, item: MediaItem) -> SentMessage:
     """Send one file-media item (image/document/video/audio) as its own native message and return it.
 
     A ``link`` never reaches here (it renders as a body line).
@@ -55,7 +55,7 @@ async def _send_one_file(phone_number_id: str, target: str, item: MediaItem) -> 
     return await send_audio(phone_number_id=phone_number_id, to=target, link=item.url)
 
 
-async def _send_file_media(
+async def send_file_media(
     phone_number_id: str, target: str, files: list[MediaItem], sent: list[SentMessage]
 ) -> list[SentMessage]:
     """Send each file-media item (image/document/video/audio) as its own native message.
@@ -68,7 +68,7 @@ async def _send_file_media(
     """
     for item in files:
         try:
-            sent.append(await _send_one_file(phone_number_id, target, item))
+            sent.append(await send_one_file(phone_number_id, target, item))
         except ChannelDeliveryError as exc:
             raise ChannelDeliveryError(
                 f"WhatsApp multi-part send failed after delivering {[message.wamid for message in sent]}: {exc}"
@@ -76,7 +76,7 @@ async def _send_file_media(
     return sent
 
 
-async def _send_media_prelude(phone_number_id: str, target: str, media: list[MediaItem]) -> list[SentMessage]:
+async def send_media_prelude(phone_number_id: str, target: str, media: list[MediaItem]) -> list[SentMessage]:
     """Send a delivered question's accompanying display media as its own messages, BEFORE the question.
 
     Any ``link`` items go out as one text line-block, then each file item
@@ -97,4 +97,4 @@ async def _send_media_prelude(phone_number_id: str, target: str, media: list[Med
                 phone_number_id=phone_number_id, to=target, body="\n".join(_link_line(item) for item in links)
             )
         )
-    return await _send_file_media(phone_number_id, target, files, sent)
+    return await send_file_media(phone_number_id, target, files, sent)

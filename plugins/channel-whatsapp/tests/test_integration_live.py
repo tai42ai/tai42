@@ -37,9 +37,11 @@ from tai42_channel_whatsapp import WhatsAppChannel
 from tai42_channel_whatsapp.channel.forms import send_form_ask_flow
 from tai42_channel_whatsapp.client import send_message
 from tai42_channel_whatsapp.flow_assets import FlowCreateResult, create_flow, delete_flow, list_flows, publish_flow
-from tai42_channel_whatsapp.flow_pictures import _PICTURE_MAX_BYTES, _PICTURED_DATA_MAX_BYTES
-from tai42_channel_whatsapp.flows import build_flow_data, build_form_flow
+from tai42_channel_whatsapp.flow_pictures import _PICTURE_MAX_BYTES
+from tai42_channel_whatsapp.flows import build_form_flow
+from tai42_channel_whatsapp.flows_data_budget import _PICTURED_DATA_MAX_BYTES
 from tai42_channel_whatsapp.flows_resolve import slot_datanames
+from tai42_channel_whatsapp.flows_send_data import build_flow_data
 from tai42_channel_whatsapp.graph import send_request
 from tai42_channel_whatsapp.settings import whatsapp_settings
 
@@ -124,8 +126,8 @@ async def test_stepped_prefilled_form_creates_publishes_and_sends(monkeypatch: p
     # The vendor authority for the publishable Flow JSON shape: a two-page prefilled form
     # carrying a TextInput, a Dropdown with per-send options, AND an OptIn boolean,
     # delivered through the real Graph API. deliver() runs build_form_flow →
-    # _resolve_flow_id → a real create + publish, then the send. It SUCCEEDS only if the
-    # create returned no validation_errors (else _resolve_flow_id raises and deletes the
+    # resolve_flow_id → a real create + publish, then the send. It SUCCEEDS only if the
+    # create returned no validation_errors (else resolve_flow_id raises and deletes the
     # draft), the publish returned 200, and Meta accepted the send — proof that a screen
     # id with a digit and a control-level init-value inside a Form are both gone, across
     # every control type, the boolean included, and the prefill reaches the recipient.

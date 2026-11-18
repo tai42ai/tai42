@@ -392,8 +392,9 @@ function reactionEndpoint(interactionId: string): string {
  *
  * `imageSlots` names the form's image slots, whose values the update parser vets as an
  * image source. A non-2xx becomes a {@link ChatApiError}; a 2xx whose body is not a
- * well-formed update throws LOUDLY. The caller surfaces either as a visible notice and never applies a stale
- * value — a failed reaction holds the form open rather than accepting an unvetted change.
+ * well-formed update is logged with its body and throws LOUDLY. The caller surfaces either
+ * as a visible notice and never applies a stale value — a failed reaction holds the form
+ * open rather than accepting an unvetted change.
  */
 export async function reactToForm(
   interactionId: string,
@@ -409,7 +410,12 @@ export async function reactToForm(
   if (!response.ok) throw await failure(response, REACTION_DOOR);
   const data = await readData<unknown>(response, 'updating a form');
   const update = formUpdateOf(data, imageSlots);
-  if (update === undefined) throw new Error('the reaction door returned a malformed form update');
+  if (update === undefined) {
+    // The visitor reads only the form's update-failed line, so the update that could not be
+    // applied is logged here — the refusal stays diagnosable, as a door refusal does.
+    console.error(`${REACTION_DOOR.what} returned a malformed form update`, data);
+    throw new Error('the reaction door returned a malformed form update');
+  }
   return update;
 }
 

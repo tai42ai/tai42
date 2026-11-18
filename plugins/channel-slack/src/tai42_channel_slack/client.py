@@ -32,7 +32,7 @@ def slack_http() -> AbstractAsyncContextManager[httpx.AsyncClient]:
     return tai42_app.clients.client_ctx(HttpxClient, timeout=slack_settings().http_timeout_seconds)
 
 
-def _require_for_delivery[T](value: T | None, env_name: str) -> T:
+def require_for_delivery[T](value: T | None, env_name: str) -> T:
     """The configured value, or :class:`ChannelDeliveryError` naming the env var.
 
     A config gap on the deliver/notify path is a delivery failure; wraps
@@ -44,7 +44,7 @@ def _require_for_delivery[T](value: T | None, env_name: str) -> T:
         raise ChannelDeliveryError(str(exc)) from exc
 
 
-def _require_secret_for_delivery(value: SecretStr | None, env_name: str) -> str:
+def require_secret_for_delivery(value: SecretStr | None, env_name: str) -> str:
     """The secret's plaintext, or :class:`ChannelDeliveryError` on unset/EMPTY.
 
     Fail closed; wraps ``require_secret``, message names only the env var.
@@ -55,7 +55,7 @@ def _require_secret_for_delivery(value: SecretStr | None, env_name: str) -> str:
         raise ChannelDeliveryError(str(exc)) from exc
 
 
-async def _post_message(
+async def post_message(
     token: str, target: str, text: str, blocks: list[dict[str, Any]] | None = None
 ) -> dict[str, Any]:
     """POST one ``chat.postMessage`` and return its validated JSON body.
@@ -99,7 +99,7 @@ async def open_modal_view(trigger_id: str, view: dict[str, Any]) -> None:
     reports the failure to open. Settings (bot token, api base) read fresh.
     """
     settings = slack_settings()
-    token = _require_secret_for_delivery(settings.bot_token, "CHANNEL_SLACK_BOT_TOKEN")
+    token = require_secret_for_delivery(settings.bot_token, "CHANNEL_SLACK_BOT_TOKEN")
     try:
         async with slack_http() as client:
             response = await client.post(
@@ -130,7 +130,7 @@ async def update_modal_view(view_id: str, view_hash: str | None, view: dict[str,
     as a loud 500. Settings (bot token, api base) read fresh.
     """
     settings = slack_settings()
-    token = _require_secret_for_delivery(settings.bot_token, "CHANNEL_SLACK_BOT_TOKEN")
+    token = require_secret_for_delivery(settings.bot_token, "CHANNEL_SLACK_BOT_TOKEN")
     payload: dict[str, Any] = {"view_id": view_id, "view": view}
     if view_hash is not None:
         payload["hash"] = view_hash

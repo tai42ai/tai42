@@ -36,7 +36,7 @@ class AppMedia(Protocol):
         never truncating), sniffs the real type, agrees it against ``declared_mime``, stores the
         bytes by reference, and returns an :class:`IngestedMedia` whose ``item`` carries the served
         ``{MEDIA_ROUTE_PREFIX}{media_id}`` url. Raises a
-        :class:`~tai42_contract.interactions.MediaIngestError` subclass on an over-cap /
+        :class:`~tai42_contract.interactions.MediaError` subclass on an over-cap /
         disallowed-type / unfetchable / store-unavailable outcome — never a silent skip.
 
         Two-phase (upload-then-attach) support rides ``origin.message_id``: when it is ``None`` the

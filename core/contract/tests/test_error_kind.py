@@ -35,7 +35,7 @@ from tai42_contract.errors import (
 )
 from tai42_contract.interactions.models.media_errors import (
     MediaAlreadyBoundError,
-    MediaIngestError,
+    MediaError,
     MediaNotFoundError,
     MediaSourceReadError,
     MediaStoreUnavailableError,
@@ -171,8 +171,8 @@ _STAMPED_CONTRACT_ERRORS: list[tuple[BaseException, ErrorKind]] = [
     (AliasInUseError("taken"), ErrorKind.CONFLICT),
     # webhooks
     (WebhookVerificationError("sig"), ErrorKind.UNAUTHORIZED),
-    # served-media ingestion family
-    (MediaIngestError("x"), ErrorKind.UPSTREAM_ERROR),
+    # served-media seam family (ingest, bind, read)
+    (MediaError("x"), ErrorKind.UPSTREAM_ERROR),
     (MediaTooLargeError("x"), ErrorKind.BAD_INPUT),
     (MediaTypeNotAllowedError("x"), ErrorKind.BAD_INPUT),
     (MediaStoreUnavailableError("x"), ErrorKind.UNAVAILABLE),
