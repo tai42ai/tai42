@@ -10,13 +10,12 @@ it, so a misspelled field fails loudly instead of being dropped.
 from __future__ import annotations
 
 import re
-from ipaddress import ip_address
 from typing import Any, Literal
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from tai42_contract._urls import check_web_url
+from tai42_contract.urls import check_web_url, is_loopback_host
 
 # Canonical slug rule (provider_id, sub_service, config-field key): lowercase,
 # must start with a letter, then alphanumerics/underscores. ``connectors.models``
@@ -126,15 +125,6 @@ class SubServiceDescriptor(BaseModel):
         return self
 
 
-def _is_loopback_host(host: str) -> bool:
-    if host == "localhost":
-        return True
-    try:
-        return ip_address(host).is_loopback
-    except ValueError:
-        return False
-
-
 class OAuthEndpoints(BaseModel):
     """The OAuth endpoint URLs of a DECLARED provider: authorize, token exchange, and optional revoke.
 
@@ -224,7 +214,7 @@ class ProviderDescriptor(BaseModel):
             return None
         check_web_url(value, field="issuer", schemes=("https", "http"))
         split = urlsplit(value)
-        if split.scheme == "http" and not _is_loopback_host(split.hostname or ""):
+        if split.scheme == "http" and not is_loopback_host(split.hostname or ""):
             raise ValueError("issuer must be an https URL, or http on a loopback host")
         return value
 

@@ -95,8 +95,9 @@ class AppInteractions(Protocol):
         door) routes one event and the values filled so far here: it asserts the interaction is an
         open reacting form, type-validates ``partial_values`` against the stored schema, runs the
         asker's handler through ``run_tool`` under the stored rebound identity with a deadline,
-        validates the returned FORM UPDATE (``values``/``errors`` for declared fields,
-        ``options`` for option-bearing fields, ``display`` for declared slots), and returns it.
+        validates the returned FORM UPDATE (``values``/``errors`` for declared fields, a ``null``
+        value clearing its field, ``options`` for option-bearing fields, ``display`` for declared
+        slots), and returns it.
         STATELESS: it never records an answer, resolves the interaction, or rewrites the request.
         A handler that raises or misses the deadline surfaces LOUDLY, never a stale/silent value.
         Raises a :class:`~tai42_contract.interactions.FormReactionError` on a closed interaction, a
@@ -588,9 +589,9 @@ class AppConversations(Protocol):
         The ONE shared chokepoint a channel adapter calls instead of silently ack-and-ignoring a
         vendor content it recognises but cannot represent as a turn — an unmappable media kind, a
         file over the platform cap, a byte source it could not fetch, an unsupported content
-        type, or a body it could not read. Sends a single participant notice back over
-        ``channel_id`` to ``recipient`` from ``sender_identity`` (the receiving identity, the
-        conversation route's key), and records a platform event naming the generic ``kind``
+        type, a body it could not read, or a tap on a choice it can no longer read. Sends a single
+        participant notice back over ``channel_id`` to ``recipient`` from ``sender_identity`` (the
+        receiving identity, the conversation route's key), and records a platform event naming the generic ``kind``
         refused and the ``reason``, so the drop is operator-visible. The notice is the route's
         ``reply_texts`` member for ``reason`` (``rejected_<reason>``), else the built-in notice.
         ``kind`` is a generic, domain-neutral label (e.g. an

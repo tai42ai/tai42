@@ -197,7 +197,7 @@ class Ask(Protocol):
         renders media shows it with the question; one that renders only text ignores
         it). A ``data:image/*`` served reference is ABSOLUTE on the channel path (a
         vendor fetches it off-origin), so a channel ask carrying ``data:`` media
-        requires ``INTERACTIONS_PUBLIC_BASE_URL``. ``None`` (the default) attaches no
+        requires ``TAI_PUBLIC_BASE_URL``. ``None`` (the default) attaches no
         media; a present list must be non-empty.
 
         ``mode`` selects the wait discipline: ``"sync"`` (the default) blocks and

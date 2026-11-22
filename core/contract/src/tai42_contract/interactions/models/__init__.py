@@ -52,7 +52,6 @@ from tai42_contract.interactions.models.location import (
 )
 from tai42_contract.interactions.models.media import (
     FILE_MEDIA_KINDS,
-    LOCAL_HTTP_HOSTS,
     MEDIA_CAPTION_MAX_CHARS,
     MEDIA_DATA_URI_MAX_CHARS,
     MEDIA_FILENAME_MAX_CHARS,
@@ -110,7 +109,6 @@ __all__ = [
     "FORM_TAG_MAX_CHARS",
     "FORM_TAG_RE",
     "FORM_WEEKDAYS",
-    "LOCAL_HTTP_HOSTS",
     "LOCATION_ADDRESS_MAX_CHARS",
     "LOCATION_NAME_MAX_CHARS",
     "MEDIA_CAPTION_MAX_CHARS",

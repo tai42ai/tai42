@@ -119,8 +119,8 @@ def test_media_image_absolute_served_http_localhost_valid():
 
     from tai42_contract.interactions.models import MEDIA_ROUTE_PREFIX
 
-    # http is allowed for a served reference: the base comes from public_base_url,
-    # whose validator restricts http to localhost/127.0.0.1.
+    # http is allowed for a served reference: the base comes from the deployment
+    # public address, whose validator restricts http to loopback hosts.
     url = "http://127.0.0.1:8000" + MEDIA_ROUTE_PREFIX + secrets.token_urlsafe(32)
     assert MediaItem(kind=MediaKind.IMAGE, url=url).url == url
 
@@ -132,7 +132,7 @@ def test_served_media_id_extracts_from_both_forms_and_rejects_the_rest():
 
     media_id = secrets.token_urlsafe(32)
     # Both served forms yield the id: the same-origin relative reference an inbox ask stores,
-    # and the absolute reference a channel send mints from public_base_url.
+    # and the absolute reference a channel send mints from the deployment public address.
     assert served_media_id(MEDIA_ROUTE_PREFIX + media_id) == media_id
     assert served_media_id("https://box.example" + MEDIA_ROUTE_PREFIX + media_id) == media_id
     # A non-served image or a link carries no stored id.
@@ -175,9 +175,10 @@ def test_media_image_absolute_served_http_loopback_hosts_valid():
 
     from tai42_contract.interactions.models import MEDIA_ROUTE_PREFIX
 
-    # http is admitted for a served reference on any loopback host: the base is
-    # minted from public_base_url, whose validator restricts http to those hosts.
-    for base in ("http://localhost", "http://127.0.0.1:8000", "http://[::1]:8000"):
+    # http is admitted for a served reference on any loopback host (127.0.0.0/8
+    # included): the base is minted from the deployment public address, whose
+    # validator admits http on exactly those hosts.
+    for base in ("http://localhost", "http://127.0.0.1:8000", "http://127.0.0.2", "http://[::1]:8000"):
         url = base + MEDIA_ROUTE_PREFIX + secrets.token_urlsafe(32)
         assert MediaItem(kind=MediaKind.IMAGE, url=url).url == url
 
