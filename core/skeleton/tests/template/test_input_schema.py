@@ -6,9 +6,7 @@ from __future__ import annotations
 
 import pytest
 from jinja2 import TemplateError
-from tai42_contract.template import TemplatedText
-
-from tai42_skeleton.template import TemplateNotFoundError
+from tai42_contract.template import TemplatedText, TemplateNotFoundError
 
 from ._manager_fixtures import _manager
 

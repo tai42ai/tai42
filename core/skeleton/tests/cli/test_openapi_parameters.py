@@ -282,6 +282,7 @@ def _probe_meta(
         response_model=None,
         reload_gated=False,
         holds_writer_exit=False,
+        answers_leaving=False,
         reads_body=reads_body,
         error_statuses=(),
         success_status=200,

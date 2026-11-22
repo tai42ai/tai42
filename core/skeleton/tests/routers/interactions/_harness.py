@@ -266,12 +266,14 @@ class _AliveRequest:
     """A request that reports connected for exactly ``alive`` tail iterations, then
     disconnects — lets a clock-driven test step the tail a fixed number of windows."""
 
-    def __init__(self, alive: int, headers: dict[str, str] | None = None) -> None:
+    def __init__(
+        self, alive: int, headers: dict[str, str] | None = None, query_params: dict[str, str] | None = None
+    ) -> None:
         self._alive = alive
         # ``stream()`` reads the Last-Event-ID header + query param on connect;
-        # empty mappings stand in for the plain (no-resume) connect these tests drive.
+        # empty mappings stand in for the plain (no-resume) connect.
         self.headers: dict[str, str] = headers or {}
-        self.query_params: dict[str, str] = {}
+        self.query_params: dict[str, str] = query_params or {}
 
     async def is_disconnected(self) -> bool:
         if self._alive > 0:

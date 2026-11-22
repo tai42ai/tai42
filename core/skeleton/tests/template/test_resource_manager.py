@@ -7,7 +7,7 @@ import mimetypes
 
 import pytest
 from tai42_contract.storage import ObjectStat, Storage
-from tai42_contract.template import TemplatedText
+from tai42_contract.template import TemplatedText, TemplateNotFoundError
 
 from tai42_skeleton.storage import StorageRegistry
 from tai42_skeleton.template import ResourceManager
@@ -143,9 +143,10 @@ async def test_load_and_fetch_refuse_a_non_canonical_key_with_the_guard_message(
     with pytest.raises(UnsafeTemplatePathError) as loaded:
         await manager.load(key)
     assert str(loaded.value) == message
-    with pytest.raises(UnsafeTemplatePathError) as fetched:
+    with pytest.raises(TemplateNotFoundError) as fetched:
         await manager.fetch_template(key)
     assert str(fetched.value) == message
+    assert isinstance(fetched.value.__cause__, UnsafeTemplatePathError)
     assert await manager.fetch_template("a/b.txt") == "z"
 
 
@@ -166,9 +167,8 @@ async def test_resolve_image_rejects_traversal_id() -> None:
 async def test_render_and_fetch_by_id_reject_traversal() -> None:
     """Every by-id read — fetch/render/schema/undeclared-vars — funnels through
     ``_load_by_id``, which runs the id through ``safe_template_path`` BEFORE the
-    provider. A ``../x`` id is refused with ``UnsafeTemplatePathError`` at this
-    app-layer seam, not passed into storage (where it would surface as a
-    ``FileNotFoundError``/``TemplateNotFoundError``)."""
+    provider. A ``../x`` id names no stored template: it is refused with the contract
+    ``TemplateNotFoundError`` carrying the guard's reason, never passed into storage."""
     from tai42_skeleton.template.path_guard import UnsafeTemplatePathError
 
     registry = StorageRegistry()
@@ -180,15 +180,16 @@ async def test_render_and_fetch_by_id_reject_traversal() -> None:
 
     manager = ResourceManager(registry.provider, on_evicted=lambda _eviction: None, held_by=app_held_by)
 
-    with pytest.raises(UnsafeTemplatePathError):
+    with pytest.raises(TemplateNotFoundError) as fetched:
         await manager.fetch_template("../x")
-    with pytest.raises(UnsafeTemplatePathError):
+    assert isinstance(fetched.value.__cause__, UnsafeTemplatePathError)
+    with pytest.raises(TemplateNotFoundError, match="non-canonical store key"):
         await manager.render_by_id("../x")
-    with pytest.raises(UnsafeTemplatePathError):
+    with pytest.raises(TemplateNotFoundError, match="non-canonical store key"):
         await manager._render_cache.compiled("../x")
-    with pytest.raises(UnsafeTemplatePathError):
+    with pytest.raises(TemplateNotFoundError, match="non-canonical store key"):
         await manager.get_template_schema(template_id="../x")
-    with pytest.raises(UnsafeTemplatePathError):
+    with pytest.raises(TemplateNotFoundError, match="non-canonical store key"):
         await manager.find_undeclared_variables(template_id="../x")
 
     # A clean id still fetches and renders through the same seam.

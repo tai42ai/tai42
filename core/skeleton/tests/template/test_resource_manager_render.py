@@ -8,9 +8,9 @@ import asyncio
 
 import pytest
 from jinja2.exceptions import SecurityError
-from tai42_contract.template import TemplatedText
+from tai42_contract.template import TemplateBodyError, TemplatedText, TemplateNotFoundError
 
-from tai42_skeleton.template import ResourceManager, TemplateNotFoundError
+from tai42_skeleton.template import ResourceManager
 from tai42_skeleton.template.render_locale import with_locale
 
 from ._manager_fixtures import _manager
@@ -20,11 +20,14 @@ from ._manager_fixtures import _manager
 
 async def test_sandbox_blocks_dunder_traversal_chain() -> None:
     """The shared engine is a ``SandboxedEnvironment``: a full dunder traversal +
-    call chain (the classic SSTI-to-RCE reach for subprocess primitives) raises
-    ``SecurityError`` at render, not host code execution."""
+    call chain (the classic SSTI-to-RCE reach for subprocess primitives) is refused at render
+    as a body that does not render, caused by the sandbox's ``SecurityError``, never run."""
     manager, _ = _manager()
-    with pytest.raises(SecurityError):
+    with pytest.raises(TemplateBodyError, match=r"^is not a renderable template: ") as refused:
         await manager.render_templated_text(TemplatedText(content="{{ ''.__class__.__mro__[1].__subclasses__() }}"))
+    cause = refused.value.__cause__
+    assert cause is not None
+    assert isinstance(cause.__cause__, SecurityError)
 
 
 async def test_sandbox_leaves_normal_rendering_intact() -> None:

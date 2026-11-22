@@ -793,6 +793,17 @@ def test_the_page_script_catches_shapes_and_pins_the_door_refusal():
     assert "data.field" in FORM_SUBMIT_SCRIPT
 
 
+def test_the_page_script_radio_branch_skips_an_absent_value_before_comparing():
+    # A reaction clears a field with ``null``; a radio option whose value is the string "null"
+    # must not read as picked, so the radio branch checks for an absent value before comparing.
+    from tai42_skeleton.routers.interactions.pages import FORM_SUBMIT_SCRIPT
+
+    assert (
+        "el.checked = value !== null && value !== undefined && String(el.value) === String(value);"
+        in FORM_SUBMIT_SCRIPT
+    )
+
+
 def test_the_door_refusal_is_pinned_once_even_when_its_field_is_on_another_step():
     # The refusal's sentence is pinned under the named field once; showing the step that holds
     # the field keeps the pinned box (``show`` clears no field error), so the field reads it once.
@@ -1006,3 +1017,71 @@ def test_rebuilt_radios_keep_the_callers_required_sentence():
     radios = rebuild.split("var fieldset = first.closest('fieldset');", 1)[1]
     assert "var requiredWords = first.getAttribute('data-required');" in radios
     assert "input.setAttribute('data-required', requiredWords);" in radios
+
+
+def _script_function(name: str) -> str:
+    from tai42_skeleton.routers.interactions.pages import FORM_SUBMIT_SCRIPT
+
+    return FORM_SUBMIT_SCRIPT.split(f"function {name}(", 1)[1].split("\n  function ", 1)[0]
+
+
+def test_a_reaction_update_draws_its_new_lists_before_laying_its_values():
+    # A reaction that replaces a list and picks from it (options {plan: [gold, silver]}, values
+    # {plan: gold}) must show gold picked: the values are laid on the controls the new list drew,
+    # never on the old controls the rebuild then replaces.
+    apply = _script_function("applyUpdate")
+    assert "rebuildChoices(n, update.options[n])" in apply
+    assert "applyValues(update.values)" in apply
+    assert apply.index("rebuildChoices(n, update.options[n])") < apply.index("applyValues(update.values)")
+
+
+def test_a_rebuilt_select_drops_a_pick_its_new_list_does_not_offer():
+    select = _script_function("rebuildChoices").split("var fieldset = first.closest('fieldset');", 1)[0]
+    assert "var offered = options.some(function (o) { return String(o.value) === prev; });" in select
+    assert "first.value = offered ? prev : '';" in select
+
+
+def test_a_rebuilt_radio_or_checkbox_group_keeps_only_the_picks_its_new_list_offers():
+    # The group is drawn from the new list alone, and a box is checked only when its offered value
+    # was picked, so a pick the new list does not offer leaves nothing checked for it.
+    group = _script_function("rebuildChoices").split("var fieldset = first.closest('fieldset');", 1)[1]
+    assert "old[j].parentNode.removeChild(old[j]);" in group
+    assert "options.forEach(function (o) {" in group
+    assert "if (selected[o.value]) { input.checked = true; }" in group
+
+
+def test_a_page_advance_reaction_moves_on_only_when_the_page_it_leaves_still_passes():
+    # The advance runs once the reaction answers: a failed reaction (null) or one returning
+    # per-field errors holds the page, and the page the folded update leaves is checked again
+    # with the same check the Next button ran before the reaction.
+    from tai42_skeleton.routers.interactions.pages import FORM_SUBMIT_SCRIPT
+
+    advanced = _script_function("advanceAfterReaction")
+    assert "if (update === null) { return; }" in advanced
+    assert "if (update.errors && Object.keys(update.errors).length) { return; }" in advanced
+    assert "if (!stepValid(current)) { return; }" in advanced
+    assert advanced.index("if (!stepValid(current)) { return; }") < advanced.index("current++; show(current);")
+    assert "postReaction({ kind: 'page_advanced', page: title }, advanceAfterReaction);" in FORM_SUBMIT_SCRIPT
+
+
+def test_a_submitted_reaction_sends_the_answer_only_when_the_form_it_leaves_still_passes():
+    # A clean submitted reaction can withdraw a required pick: the folded form is checked again with
+    # the caller-word check every page ran, so the answer leaves only when every page still passes.
+    from tai42_skeleton.routers.interactions.pages import FORM_SUBMIT_SCRIPT
+
+    sent = _script_function("sendAfterReaction")
+    assert "if (update === null) { return; }" in sent
+    assert "if (update.errors && Object.keys(update.errors).length) { return; }" in sent
+    assert "if (!formValid()) { return; }" in sent
+    assert sent.index("if (!formValid()) { return; }") < sent.index("sendAnswer();")
+    assert "postReaction({ kind: 'submitted' }, sendAfterReaction);" in FORM_SUBMIT_SCRIPT
+
+
+def test_the_whole_form_check_holds_the_first_page_that_fails_with_its_sentence_shown():
+    # Every page is checked in order; the first that fails becomes the shown page and its check
+    # runs again there, so its field carries its sentence on screen.
+    whole = _script_function("formValid")
+    assert "for (var i = 0; i < steps.length; i++) {" in whole
+    assert "if (stepValid(i)) { continue; }" in whole
+    assert "current = i; show(i); stepValid(i);" in whole
+    assert whole.index("if (stepValid(i)) { continue; }") < whole.index("current = i; show(i); stepValid(i);")

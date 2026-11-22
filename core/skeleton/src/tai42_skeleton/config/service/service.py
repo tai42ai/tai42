@@ -99,12 +99,14 @@ from tai42_kit.process_lock import ProcessLock
 from tai42_skeleton.app.recycle import RecycleReport, orchestrate_recycle
 from tai42_skeleton.app.writer_exit import require_writer_exit_held
 from tai42_skeleton.config.deployment_env import DeploymentOwnership, resolve_deployment_ownership
+from tai42_skeleton.config.errors import OrphanEnvWriteError
 from tai42_skeleton.config.secret_seal import _leaving_connector_secrets
 from tai42_skeleton.config.service.broadcast import _BroadcastMixin
 from tai42_skeleton.config.service.exclusion import WriteSpan, write_exclusion
 from tai42_skeleton.config.service.profile_apply import _ProfileApplyMixin
 from tai42_skeleton.config.service.resolution import _environ, _ResolutionMixin
-from tai42_skeleton.config.service.results import ApplyResult, OrphanEnvWriteError, PersistedChange
+from tai42_skeleton.config.service.results import ApplyResult, PersistedChange
+from tai42_skeleton.config.service.selection_holders import refuse_held_unpicks
 from tai42_skeleton.config.service.validation import _ValidationMixin
 from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.settings.env_secret_marks import SECRET_MARKS_ENV_VAR, format_secret_marks, parse_secret_marks
@@ -407,9 +409,6 @@ class ConfigService(_ProfileApplyMixin, _ValidationMixin, _ResolutionMixin, _Bro
         """
         if env is None and before.get("mcp") == after.get("mcp"):
             return
-        # Imported here: the manifest operations package imports this service.
-        from tai42_skeleton.operations.manifest.selection_holders import refuse_held_unpicks
-
         before_manifest = self._typed_projection(before)
         if env is None:
             after_manifest = self._typed_projection(after)

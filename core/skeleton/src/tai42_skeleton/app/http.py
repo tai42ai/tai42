@@ -23,6 +23,7 @@ from tai42_skeleton.app.reload_gate import reload_gate
 from tai42_skeleton.app.route_registry import CORE_OWNER, MOUNT_METHODS, RouteOwner, route_registry
 from tai42_skeleton.app.writer_exit import WorkerLeavingError, current_writer_exit_scope
 from tai42_skeleton.plugins.settings import hosted_ui_settings
+from tai42_skeleton.settings.public_base_url import public_base_url_settings
 
 if TYPE_CHECKING:
     from tai42_contract.app import DeclaredRouteMetadata
@@ -373,6 +374,10 @@ class HttpSurface:
         if routes is None:
             raise RuntimeError("the served FastMCP exposes no additional-route table")
         return routes
+
+    def public_base_url(self) -> str | None:
+        """The deployment's public address (``TAI_PUBLIC_BASE_URL``), normalised; ``None`` while unset."""
+        return public_base_url_settings().base_url
 
     def hosted_ui(self) -> HostedUiPaths:
         """The page addresses of the hosted UI, as the deployment declares them (``HOSTED_UI_*``)."""

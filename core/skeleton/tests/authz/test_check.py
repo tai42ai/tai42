@@ -14,6 +14,7 @@ from fastmcp.server.auth import AccessToken
 from starlette.middleware.authentication import AuthenticationMiddleware
 from starlette.responses import Response
 from tai42_contract.access_control import OWNER_USER_ID_CLAIM
+from tai42_contract.template import TemplateBodyError
 from tai42_kit.settings import reset_all_settings
 
 from tai42_skeleton.access_control import role_grants as role_grants_module
@@ -249,19 +250,39 @@ def test_policy_fetch_failure_denies_fail_closed(ac_env, bound_app):
         asyncio.run(check(CallerIdentity(user_id="alice"), meta, {}, settings=settings))
 
 
-def test_enforcement_error_denies_fail_closed(ac_env, bound_app, monkeypatch):
+def test_a_condition_that_does_not_render_as_authored_is_the_typed_refusal(ac_env, bound_app, monkeypatch):
     settings = AccessControlSettings()
     ac_env.add_route("/api/things/wipe", "things")
     ac_env.add_policy("alice", scopes=["things"], condition={"content": ".request.path"})
 
     async def _boom(*_, **__):
-        raise ValueError("render blew up")
+        raise TemplateBodyError("is not a renderable template: 'x' is undefined")
 
     monkeypatch.setattr(bound_app.storage.resource_manager, "render_templated_text", _boom)
     reg = OperationRegistry()
     meta = _op(reg)
-    with pytest.raises(PermissionDeniedError, match="access denied"):
+    with pytest.raises(PermissionDeniedError, match="the policy condition of 'alice' does not render"):
         asyncio.run(check(CallerIdentity(user_id="alice"), meta, {}, settings=settings))
+
+
+@pytest.mark.parametrize("fault", [ValueError("manager bug"), RuntimeError("no Storage provider registered")])
+def test_a_manager_fault_during_the_condition_render_is_the_generic_fail_closed_deny(
+    ac_env, bound_app, monkeypatch, fault
+):
+    settings = AccessControlSettings()
+    ac_env.add_route("/api/things/wipe", "things")
+    ac_env.add_policy("alice", scopes=["things"], condition={"content": ".request.path"})
+
+    async def _boom(*_, **__):
+        raise fault
+
+    monkeypatch.setattr(bound_app.storage.resource_manager, "render_templated_text", _boom)
+    reg = OperationRegistry()
+    meta = _op(reg)
+    with pytest.raises(PermissionDeniedError) as caught:
+        asyncio.run(check(CallerIdentity(user_id="alice"), meta, {}, settings=settings))
+    assert str(caught.value) == "access denied"
+    assert caught.value.__cause__ is fault
 
 
 def test_owner_policy_fetch_failure_denies_fail_closed(ac_env, bound_app, monkeypatch):

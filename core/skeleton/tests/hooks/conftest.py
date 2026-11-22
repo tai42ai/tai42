@@ -28,10 +28,10 @@ from typing import Any
 import pytest
 from fakeredis import aioredis
 from tai42_contract.app import tai42_app
+from tai42_contract.template import TemplateNotFoundError
 
 from tai42_skeleton.access_control.settings import AccessControlSettings
 from tai42_skeleton.authz import execution as execution_module
-from tai42_skeleton.template.errors import TemplateNotFoundError
 
 
 def _bind_app_and_load_tool_runs() -> None:
@@ -323,7 +323,9 @@ class _FakeResourceManager:
         self.calls.append((text.content, text.id, text.kwargs))
         if text.id is not None:
             if text.id not in self._by_id:
-                raise TemplateNotFoundError(f"no stored resource {text.id!r}")
+                raise TemplateNotFoundError(
+                    f"references stored id {text.id!r}, which could not be fetched: Template {text.id!r} not found."
+                )
             return self._by_id[text.id]
         return text.content
 

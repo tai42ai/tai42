@@ -26,12 +26,12 @@ from urllib.parse import urlsplit
 from mcp.types import LATEST_PROTOCOL_VERSION
 from pydantic import BaseModel, ConfigDict, StrictBool, StrictStr, ValidationError, field_validator
 from tai42_contract.errors import ErrorKind
+from tai42_contract.urls import is_loopback_host
 from tai42_kit.net import (
     GuardedRequestError,
     GuardedResponse,
     UrlGuardError,
     guarded_request,
-    is_loopback_host,
 )
 
 from tai42_skeleton.connectors.oauth.client import OAUTH_HTTP_TIMEOUT_SECONDS, OAuthError

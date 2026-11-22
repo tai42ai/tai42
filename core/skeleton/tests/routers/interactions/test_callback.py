@@ -1039,7 +1039,7 @@ def _set_callback_words(wired, **env: str) -> None:
 
     for name, value in env.items():
         wired.monkeypatch.setenv(name, value)
-    settings = InteractionsSettings(public_base_url=wired.settings.public_base_url)
+    settings = InteractionsSettings()
     wired.monkeypatch.setattr(router, "interactions_settings", lambda: settings)
 
 

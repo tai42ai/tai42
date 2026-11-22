@@ -101,6 +101,7 @@ def test_the_owning_modules_are_listed() -> None:
         "tai42_kit.llm.settings",
         "tai42_skeleton.conversations.settings",
         "tai42_skeleton.plugins.settings",
+        "tai42_skeleton.settings.public_base_url",
     )
 
 

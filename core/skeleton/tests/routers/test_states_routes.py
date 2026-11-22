@@ -622,12 +622,17 @@ class _ProgramResourceManager:
 
     async def render_templated_text(self, text, locale=None):
         if text.id is not None:
-            from tai42_skeleton.template.errors import TemplateNotFoundError, TemplateNotTextError
+            from tai42_contract.template import TemplateNotFoundError, TemplateNotTextError
 
             if text.id == _STORED_BINARY_ID:
-                raise TemplateNotTextError(f"Template {text.id!r} is not a text template")
+                raise TemplateNotTextError(
+                    f"references stored id {text.id!r}, which could not be fetched: "
+                    f"Template {text.id!r} is not a text template"
+                )
             if text.id not in _TEMPLATE_JQ_STORED:
-                raise TemplateNotFoundError(f"no stored resource {text.id!r}")
+                raise TemplateNotFoundError(
+                    f"references stored id {text.id!r}, which could not be fetched: Template {text.id!r} not found."
+                )
             return _TEMPLATE_JQ_STORED[text.id]
         return text.content
 
@@ -693,7 +698,7 @@ def test_put_state_template_whose_program_reads_the_binding_envelope_is_422(monk
             )
         )
     assert excinfo.value.status == 422
-    assert "template_jq 'peek' jq is not a valid jq expression" in str(excinfo.value)
+    assert "template_jq 'peek' is not a valid jq expression: " in str(excinfo.value)
     assert "$__in is reserved" in str(excinfo.value)
 
 

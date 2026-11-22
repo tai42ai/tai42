@@ -16,7 +16,7 @@ from collections.abc import Iterator
 import pytest
 from tai42_contract.access_control import KEY_FINGERPRINT_CLAIM, OWNER_USER_ID_CLAIM
 from tai42_contract.app import tai42_app
-from tai42_contract.template import TemplatedText
+from tai42_contract.template import TemplatedText, TemplateNotFoundError
 
 import tai42_skeleton.versioning as versioning_module
 from tai42_skeleton.access_control import api_key_lifecycle, policy_version
@@ -24,14 +24,13 @@ from tai42_skeleton.access_control.policy import PolicyEnforcer
 from tai42_skeleton.access_control.settings import AccessControlSettings
 from tai42_skeleton.authz.check import check
 from tai42_skeleton.authz.execution import assert_key_carries_authority, bind_execution_identity
-from tai42_skeleton.authz.execution_evaluability import assert_execution_key_evaluable
+from tai42_skeleton.authz.execution_evaluability import ExecutionConditionError, assert_execution_key_evaluable
 from tai42_skeleton.authz.identity import CallerIdentity
 from tai42_skeleton.authz.token_free import TokenFreeConditionError
 from tai42_skeleton.operations import OperationRegistry, operation
 from tai42_skeleton.operations import _authority as authority
 from tai42_skeleton.operations import api_keys as api_keys_ops
 from tai42_skeleton.operations.errors import PermissionDeniedError
-from tai42_skeleton.template import TemplateNotFoundError
 
 from ..access_control.conftest import FakeRedis, make_client_ctx
 from ..access_control.test_policy_store import _MemStore
@@ -55,14 +54,19 @@ class _MutableResourceManager:
 
     def __init__(self) -> None:
         self.templates: dict[str, str] = {}
+        self.fault: Exception | None = None
 
     async def render_templated_text(self, text, locale=None) -> str:
+        if self.fault is not None:
+            raise self.fault
         if text.id is not None:
             try:
                 return self.templates[text.id]
             except KeyError as exc:
                 # The real manager's answer for an id with no stored template.
-                raise TemplateNotFoundError(f"Template '{text.id}' not found.") from exc
+                raise TemplateNotFoundError(
+                    f"references stored id {text.id!r}, which could not be fetched: Template {text.id!r} not found."
+                ) from exc
         return text.content
 
 
@@ -274,6 +278,25 @@ def test_a_condition_that_no_longer_renders_denies_the_fire(ac_env, renderer, pr
         asyncio.run(
             _request(CallerIdentity(user_id="k-fire", effective_scopes=(_SCOPE,), claims={}), probe_op, settings)
         )
+
+
+def test_the_bind_scan_refuses_a_condition_that_does_not_render_as_authored(ac_env, renderer) -> None:
+    ac_env.add_policy(
+        "k-fire", scopes=[_SCOPE], condition={"id": "cond"}, policy_data={KEY_FINGERPRINT_CLAIM: "fp-k-fire"}
+    )
+    with pytest.raises(ExecutionConditionError, match="the policy condition of 'k-fire' does not render"):
+        asyncio.run(_bind_scan("k-fire"))
+
+
+@pytest.mark.parametrize("fault", [ValueError("manager bug"), ConnectionError("store down")])
+def test_a_manager_fault_during_the_bind_scan_propagates_as_itself(ac_env, renderer, fault) -> None:
+    ac_env.add_policy(
+        "k-fire", scopes=[_SCOPE], condition={"id": "cond"}, policy_data={KEY_FINGERPRINT_CLAIM: "fp-k-fire"}
+    )
+    renderer.fault = fault
+    with pytest.raises(type(fault)) as caught:
+        asyncio.run(_bind_scan("k-fire"))
+    assert caught.value is fault
 
 
 def _wire_edit_door(monkeypatch: pytest.MonkeyPatch, ac_env) -> None:

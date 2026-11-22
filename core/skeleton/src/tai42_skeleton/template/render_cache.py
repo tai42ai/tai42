@@ -13,11 +13,11 @@ from functools import lru_cache
 from typing import Any
 
 from async_lru import alru_cache
-from jinja2 import Environment
+from jinja2 import Environment, TemplateSyntaxError
 from jinja2 import Template as JinjaTemplate
+from tai42_contract.template import TemplateBodyError, TemplateNotFoundError
 
 from tai42_skeleton.template.absent_ids import AbsentTemplateIds
-from tai42_skeleton.template.errors import TemplateNotFoundError
 from tai42_skeleton.template.settings import TemplateCacheSettings
 
 logger = logging.getLogger(__name__)
@@ -28,7 +28,9 @@ class RenderCache:
 
     ``env`` compiles every source and holds the engine's dependency cache; ``load`` reads a stored
     template's text by id, raising ``FileNotFoundError`` when it is not stored; ``settings`` bound
-    the caches.
+    the caches. A source that does not parse raises
+    :class:`~tai42_contract.template.TemplateBodyError`; an id that is not stored raises
+    :class:`~tai42_contract.template.TemplateNotFoundError`.
     """
 
     def __init__(self, env: Environment, load: Callable[[str], Awaitable[str]], settings: TemplateCacheSettings):
@@ -40,7 +42,7 @@ class RenderCache:
         # path is cached by id via ``_compiled``; without this an inline
         # condition/expr (e.g. a hook rendered on every fire) is re-parsed on
         # every render.
-        self.inline: Callable[[str], JinjaTemplate] = lru_cache(maxsize=settings.max_size)(env.from_string)
+        self.inline: Callable[[str], JinjaTemplate] = lru_cache(maxsize=settings.max_size)(self._compile)
 
         # Template ids currently compiled into the cache. Tracked so a delete can
         # evict just the affected key(s) instead of dropping the whole cache. It
@@ -79,6 +81,7 @@ class RenderCache:
             # the raised ``TemplateNotFoundError`` is the loud signal, and a locale-variant
             # probe walks expected misses down the fallback chain.
             logger.debug(f"Template '{template_id}' lookup failed.")
+            self.absent.add(template_id)
             raise TemplateNotFoundError(f"Template '{template_id}' not found.") from exc
 
         if self.enabled:
@@ -94,7 +97,14 @@ class RenderCache:
                 for tracked in list(self._tracked_ids):
                     if not contains(tracked):
                         self._tracked_ids.discard(tracked)
-        return self._env.from_string(content)
+        return self._compile(content)
+
+    def _compile(self, source: str) -> JinjaTemplate:
+        """Compile ``source`` in the manager's environment; a source that does not parse is the author's body fault."""
+        try:
+            return self._env.from_string(source)
+        except TemplateSyntaxError as exc:
+            raise TemplateBodyError(str(exc)) from exc
 
     async def compiled(self, template_id: str) -> JinjaTemplate:
         """The compiled template ``template_id``; a not-found answer is remembered and raised again without a read.
@@ -103,11 +113,7 @@ class RenderCache:
         """
         if template_id in self.absent:
             raise TemplateNotFoundError(f"Template '{template_id}' not found.")
-        try:
-            return await self._compiled(template_id)
-        except TemplateNotFoundError:
-            self.absent.add(template_id)
-            raise
+        return await self._compiled(template_id)
 
     def _evict_engine_cache(self, matches: Callable[[str], bool]) -> None:
         """Drop every engine-cached dependency template whose name ``matches``.

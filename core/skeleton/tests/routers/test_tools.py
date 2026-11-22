@@ -380,6 +380,64 @@ async def test_run_tool_raised_error_is_structured_500(install):
     assert _json(resp)["error"] == "kaboom"
 
 
+class _ToolCollector:
+    """The tool registry ``project_operations`` registers into, keeping each projected function."""
+
+    def __init__(self) -> None:
+        self.registered: dict = {}
+
+    def tool(self, *, force, name, tags, annotations):
+        def decorator(func):
+            self.registered[name] = func
+            return func
+
+        return decorator
+
+
+class _ProjectedTools(_FakeTools):
+    """Tools whose run calls the projected operation of the same name, as the live registry does."""
+
+    def __init__(self, projected: dict):
+        super().__init__({name: _tool(name) for name in projected})
+        self._projected = projected
+
+    async def run_tool(self, key, arguments, *, offload_sync=False, extras=None):
+        return await self._projected[key](**arguments)
+
+
+async def test_run_tool_of_a_projected_change_on_a_leaving_worker_answers_the_leaving_503(install, monkeypatch):
+    # A change run as a tool on a worker that decided to leave is refused before it begins; the
+    # door answers that refusal as the route of the change itself does: 503 with the leaving reason.
+    from tai42_contract.manifest import ApiToolsConfig
+
+    from tai42_skeleton.app import instance
+    from tai42_skeleton.operations import OperationRegistry, operation
+    from tai42_skeleton.operations.projection import project_operations
+
+    from .._fakes.bus import FakeBus
+
+    bus = FakeBus(origin="backend-writer", remotes=[])
+    monkeypatch.setattr(instance.app, "_bus", bus)
+    registry = OperationRegistry()
+
+    @operation(name="change_op", summary="Change the thing", tags=["t"], registry=registry, holds_writer_exit=True)
+    async def change_op() -> dict[str, str]:
+        return {"status": "ok"}
+
+    collector = _ToolCollector()
+    project_operations(SimpleNamespace(tools=collector), ApiToolsConfig(include=["change_op"]), registry=registry)
+    install(_ProjectedTools(collector.registered))
+    assert bus.decide_departure("a fleet recycle op") is None
+
+    resp = await router.run_tool(_body_req(b'{"tool_name": "change_op"}'))
+
+    assert resp.status_code == 503
+    assert _json(resp) == {
+        "error": "leaving — this worker is leaving (a fleet recycle op) and begins no change; retry shortly",
+        "leaving": "a fleet recycle op",
+    }
+
+
 async def test_run_tool_sync_body_does_not_stall_the_loop(install):
     # The sync door must offload a blocking sync tool so a concurrently awaited
     # task keeps running (mirrors the tool-runs offload regression test).

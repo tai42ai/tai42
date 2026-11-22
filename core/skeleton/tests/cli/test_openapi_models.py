@@ -53,7 +53,7 @@ def test_runs_export_documents_both_csv_and_json_download(spec: dict) -> None:
 
 def test_a_model_claiming_a_reserved_envelope_name_raises() -> None:
     # A model whose component name would collide with a reserved response-envelope name
-    # (``Error`` / ``ReloadingError``) must not silently overwrite the envelope: the merge
+    # (``Error`` / ``ReloadingError`` / ``LeavingError``) must not silently overwrite the envelope: the merge
     # of its generated definition raises LOUDLY.
     class Error(BaseModel):
         detail: str
@@ -98,6 +98,7 @@ def _typed_meta(response_model, *, request_model=None, no_body_reason=None, enve
         response_model=response_model,
         reload_gated=False,
         holds_writer_exit=False,
+        answers_leaving=False,
         reads_body=False,
         error_statuses=(),
         success_status=200,
@@ -376,6 +377,7 @@ def test_query_only_model_is_not_published_but_a_referenced_nested_model_is() ->
         response_model=None,
         reload_gated=False,
         holds_writer_exit=False,
+        answers_leaving=False,
         reads_body=False,
         error_statuses=(),
         success_status=200,
@@ -468,6 +470,17 @@ def test_reloading_error_schema_matches_the_gate_body(spec: dict) -> None:
     schema = spec["components"]["schemas"]["ReloadingError"]
     assert schema["properties"]["error"]["const"] == REJECT_MESSAGE
     assert schema["properties"]["reloading"]["const"] is True
+
+
+def test_leaving_error_schema_matches_the_leaving_refusal_body(spec: dict) -> None:
+    # The body the route adapter renders for the refusal — ``{"error": message, **extra}`` —
+    # validates against the published component, which requires both of its keys.
+    from tai42_skeleton.app.writer_exit import WorkerLeavingError
+
+    schema = spec["components"]["schemas"]["LeavingError"]
+    assert set(schema["required"]) == {"error", "leaving"}
+    refusal = WorkerLeavingError("the writer's own restart", "Apply a profile")
+    Draft202012Validator(schema).validate({"error": refusal.message, **refusal.extra})
 
 
 def test_authed_routes_require_the_api_key_security(spec: dict, api_routes: list[RouteMetadata]) -> None:

@@ -147,14 +147,16 @@ def _render_awaiting_page(wording: Wording | None) -> str:
 # reaction round-trip: a change to a declared field, an advance from a declared page, or submit
 # (when the form declares a submitted check) POSTs ``{"event": {kind, field?|page?}, "values":
 # {...}}`` to the ``/react`` sibling of this callback URL (the ticket react door — the ticket
-# stays in the address) and applies the returned form update — setting values, replacing an
-# option-bearing field's choice list (drawn exactly as the server draws it: each option's second
-# line as a ``choice-desc`` line under a radio/checkbox/chip label or folded onto a ``<select>``
-# row, and a select's empty-state prompt kept), showing per-field errors, and filling display slots. A
-# submitted reaction that returns errors (or fails) keeps the form open; only a clean one sends
-# the answer. A reaction error surfaces loudly, never a stale/silent value. A static form carries
-# no ``data-reactions`` and every reaction path is dormant. The script body is a constant — only
-# the field markup above it is schema-derived (and escaped).
+# stays in the address) and applies the returned form update — setting values (a ``null``
+# empties its control), replacing an option-bearing field's choice list (drawn exactly as the
+# server draws it: each option's second line as a ``choice-desc`` line under a
+# radio/checkbox/chip label or folded onto a ``<select>`` row, and a select's empty-state prompt
+# kept), showing per-field errors, and filling display slots. A
+# submitted reaction that returns errors (or fails) keeps the form open; a clean one sends the
+# answer only when the form it leaves still passes every page's check, else the first failing
+# page is shown with its field's sentence. A reaction error surfaces loudly, never a stale/silent
+# value. A static form carries no ``data-reactions`` and every reaction path is dormant. The script
+# body is a constant — only the field markup above it is schema-derived (and escaped).
 FORM_SUBMIT_SCRIPT = """<script>
 (function () {
   var form = document.getElementById('askform');
@@ -321,7 +323,7 @@ FORM_SUBMIT_SCRIPT = """<script>
       } else if (kind === 'arraytext') {
         el.value = Array.isArray(value) ? value.join('\\n') : '';
       } else if (el.type === 'radio') {
-        el.checked = (String(el.value) === String(value));
+        el.checked = value !== null && value !== undefined && String(el.value) === String(value);
       } else {
         el.value = (value === undefined || value === null) ? '' : value;
       }
@@ -356,7 +358,8 @@ FORM_SUBMIT_SCRIPT = """<script>
         opt.textContent = second === null ? optionLabel(o) : optionLabel(o) + ' \\u2014 ' + second;
         first.appendChild(opt);
       });
-      first.value = prev;
+      var offered = options.some(function (o) { return String(o.value) === prev; });
+      first.value = offered ? prev : '';
       return;
     }
     var fieldset = first.closest('fieldset');
@@ -520,8 +523,10 @@ FORM_SUBMIT_SCRIPT = """<script>
   }
   function applyUpdate(update) {
     if (!update || typeof update !== 'object') { return; }
-    if (update.values) { applyValues(update.values); }
+    // The new lists are drawn first (a pick they no longer offer is dropped), then the update's
+    // values are laid on the drawn controls.
     if (update.options) { Object.keys(update.options).forEach(function (n) { rebuildChoices(n, update.options[n]); }); }
+    if (update.values) { applyValues(update.values); }
     if (update.display) { applyDisplay(update.display); }
     applyErrors(update.errors || {});
     applyConditional();
@@ -666,12 +671,38 @@ FORM_SUBMIT_SCRIPT = """<script>
     }
     return true;
   }
+  // A failed reaction or one returning per-field errors holds the page; otherwise the page the
+  // folded update leaves is checked again before the next one is shown.
+  function advanceAfterReaction(update) {
+    if (update === null) { return; }
+    if (update.errors && Object.keys(update.errors).length) { return; }
+    if (!stepValid(current)) { return; }
+    current++; show(current);
+  }
+  // Every page checked in order; the first that fails becomes the shown page and is checked
+  // again there, so its sentence shows on screen.
+  function formValid() {
+    for (var i = 0; i < steps.length; i++) {
+      if (stepValid(i)) { continue; }
+      current = i; show(i); stepValid(i);
+      return false;
+    }
+    return true;
+  }
+  // A failed submitted reaction or one returning per-field errors holds the form; otherwise the
+  // form the folded update leaves is checked again, every page, before the answer is sent.
+  function sendAfterReaction(update) {
+    if (update === null) { return; }
+    if (update.errors && Object.keys(update.errors).length) { return; }
+    if (!formValid()) { return; }
+    sendAnswer();
+  }
   back.addEventListener('click', function () { if (current > 0) { current--; show(current); } });
   next.addEventListener('click', function () {
     if (!stepValid(current) || current >= steps.length - 1) { return; }
     var title = steps[current].getAttribute('data-page-title');
     if (reactions && reactions.page_advanced && title && reactions.page_advanced.indexOf(title) !== -1) {
-      postReaction({ kind: 'page_advanced', page: title }, function () { current++; show(current); });
+      postReaction({ kind: 'page_advanced', page: title }, advanceAfterReaction);
     } else {
       current++; show(current);
     }
@@ -684,14 +715,9 @@ FORM_SUBMIT_SCRIPT = """<script>
     err.textContent = '';
     if (!stepValid(current)) { return; }
     if (reactions && reactions.submitted) {
-      // The consumer checks the whole form before acceptance: a submitted reaction that
-      // returns per-field errors (or that fails) keeps the form open; only a clean one
-      // sends the answer. The answer door stays the authoritative schema check.
-      postReaction({ kind: 'submitted' }, function (update) {
-        if (update === null) { return; }
-        if (update.errors && Object.keys(update.errors).length) { return; }
-        sendAnswer();
-      });
+      // The consumer checks the whole form before acceptance; the answer is sent once its
+      // reaction answers clean and the form it leaves still passes.
+      postReaction({ kind: 'submitted' }, sendAfterReaction);
     } else {
       sendAnswer();
     }

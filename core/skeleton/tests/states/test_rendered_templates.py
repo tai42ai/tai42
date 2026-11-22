@@ -31,7 +31,7 @@ from tai42_contract.states.rendered import (
     RenderedTemplateDeclarations,
     RenderedTemplateJq,
 )
-from tai42_contract.template import TemplatedText
+from tai42_contract.template import TemplatedText, TemplateNotFoundError
 
 from tai42_skeleton.app.instance import app
 from tai42_skeleton.manifest import Manifest
@@ -39,7 +39,6 @@ from tai42_skeleton.states import service as service_mod
 from tai42_skeleton.states.service import StatesService
 from tai42_skeleton.states.service.rendered import rendered_digest
 from tai42_skeleton.states.store import PostgresStatesStore
-from tai42_skeleton.template.errors import TemplateNotFoundError
 from tai42_skeleton.template.resource_manager import ResourceManager
 from tai42_skeleton.template.settings import TemplateCacheSettings
 
@@ -67,7 +66,9 @@ class _StubManager:
         self.renders.append(text.id or text.content or "")
         if text.id is not None:
             if text.id not in _STORED:
-                raise TemplateNotFoundError(f"no stored resource {text.id!r}")
+                raise TemplateNotFoundError(
+                    f"references stored id {text.id!r}, which could not be fetched: Template {text.id!r} not found."
+                )
             return _STORED[text.id]
         assert text.content is not None
         return text.content

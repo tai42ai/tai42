@@ -1,7 +1,7 @@
 """The ``ask`` external-format flow in the helper: the link/options/schema
 combo validation, up-front schema rejection (before the builder runs), the
-template/callable link resolution, the exact callback URL, ``public_base_url``
-scheme validation, the ``max_concurrent`` guard, cancel-cleanup, and the
+template/callable link resolution, the exact callback URL, the ``TAI_PUBLIC_BASE_URL``
+requirement and its loopback ``http`` form, the ``max_concurrent`` guard, cancel-cleanup, and the
 timeout-path prune.
 """
 
@@ -13,7 +13,6 @@ from typing import cast
 
 import pytest
 from pydantic import BaseModel
-from pydantic import ValidationError as PydanticValidationError
 from tai42_contract.hooks import TopicVerifierBinding
 from tai42_contract.interactions import AskAnswer, InteractionResponse
 from tai42_kit.settings import reset_all_settings
@@ -25,7 +24,7 @@ from tai42_skeleton.interactions.helper import InteractionLimitError, Interactio
 from tai42_skeleton.interactions.settings import InteractionsSettings
 from tai42_skeleton.tools.turn_budget import _PARKED_QUESTION_ATTR, turn_budget
 
-from .._helpers import await_add_event
+from .._helpers import await_add_event, set_public_base_url
 
 
 @pytest.fixture(autouse=True)
@@ -36,8 +35,10 @@ def _interactions_store_configured(monkeypatch):
     monkeypatch.setenv("INTERACTIONS_REDIS_URL", "redis://localhost:6379/0")
 
 
-def _wire(monkeypatch, fake_redis, fake_client_ctx, **settings_kw) -> InteractionsSettings:
-    settings_kw.setdefault("public_base_url", "https://cb.example")
+def _wire(
+    monkeypatch, fake_redis, fake_client_ctx, *, public_base_url: str | None = "https://cb.example", **settings_kw
+) -> InteractionsSettings:
+    set_public_base_url(monkeypatch, public_base_url)
     settings = InteractionsSettings(**settings_kw)
     monkeypatch.setattr(helper_module, "client_ctx", fake_client_ctx)
     monkeypatch.setattr(helper_module, "interactions_settings", lambda: settings)
@@ -175,20 +176,13 @@ async def test_builder_non_url_return_errors(monkeypatch, fake_redis, fake_clien
     assert _empty(fake_redis)
 
 
-# -- public_base_url validation ----------------------------------------------
+# -- the public base URL --------------------------------------------------------
 
 
 async def test_missing_public_base_url_raises(monkeypatch, fake_redis, fake_client_ctx):
     _wire(monkeypatch, fake_redis, fake_client_ctx, public_base_url=None)
-    with pytest.raises(RuntimeError, match="INTERACTIONS_PUBLIC_BASE_URL"):
+    with pytest.raises(RuntimeError, match="TAI_PUBLIC_BASE_URL"):
         await ask("q", answer_format="external", link="{callback_url}", timeout=5)
-
-
-def test_http_non_localhost_rejected(monkeypatch, fake_redis, fake_client_ctx):
-    # The settings validator rejects a non-TLS URL at construction — before any
-    # ask call can ever mint a callback URL from it.
-    with pytest.raises(PydanticValidationError, match="must be https"):
-        _wire(monkeypatch, fake_redis, fake_client_ctx, public_base_url="http://evil.example")
 
 
 @pytest.mark.parametrize("base", ["http://localhost", "http://127.0.0.1"])

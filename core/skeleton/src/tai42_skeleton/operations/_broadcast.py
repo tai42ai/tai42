@@ -33,8 +33,7 @@ discipline.
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable, Callable, Iterator, Mapping, Set
-from contextlib import contextmanager
+from collections.abc import Awaitable, Callable, Mapping, Set
 from typing import TYPE_CHECKING, Any, NamedTuple, Protocol
 
 from tai42_contract.app.responses import AwaitingWorker
@@ -43,7 +42,7 @@ from tai42_skeleton.app import instance
 from tai42_skeleton.app.bus import FleetResult, LocalApplyResult, OpOutcome, UnknownFleetTargetsError
 from tai42_skeleton.app.bus.ops import FleetOp
 from tai42_skeleton.app.recycle import RECYCLED, SELF_DEFERRED
-from tai42_skeleton.operations.errors import BadRequestError, OperationFailedError
+from tai42_skeleton.operations.errors import BadRequestError
 
 if TYPE_CHECKING:
     from tai42_skeleton.app.bus import WorkerBus, WorkerIdentity
@@ -53,30 +52,6 @@ if TYPE_CHECKING:
     from tai42_skeleton.config.service import ApplyResult, FleetReloadOutcome, ProfileApplyOutcome
 
 logger = logging.getLogger(__name__)
-
-
-@contextmanager
-def translate_orphan_env_write() -> Iterator[None]:
-    """Map a combined env+manifest orphan-env-write failure to a typed 500 operation error.
-
-    Maps :class:`~tai42_skeleton.config.service.OrphanEnvWriteError` to
-    :class:`~tai42_skeleton.operations.errors.OperationFailedError` (500).
-
-    The one shared translation every door that crosses the combined env+manifest seam
-    wraps around its call: an oauth connector leaving the manifest (installer
-    uninstall/update, a hand ``manifest replace`` / backup restore),
-    ``set_mcp_secret_env``, or any marks-write that lands while the manifest persist
-    exhausts its retries. The error is a partial failure — the env write STANDS as an
-    inert, re-runnable orphan — so it is LOUD (a 500), never folded into a client-input
-    400. Imported lazily to avoid a config↔operations import cycle (``config.service``
-    imports this module).
-    """
-    from tai42_skeleton.config.service import OrphanEnvWriteError
-
-    try:
-        yield
-    except OrphanEnvWriteError as exc:
-        raise OperationFailedError(str(exc)) from exc
 
 
 def fleet_fanout(fleet: FleetResult) -> dict[str, Any]:

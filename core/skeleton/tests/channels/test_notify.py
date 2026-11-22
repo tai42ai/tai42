@@ -47,10 +47,10 @@ from tai42_skeleton.channels import notifications_sink
 from tai42_skeleton.channels import notify as notify_module
 from tai42_skeleton.channels.notify import notify_user
 from tai42_skeleton.interactions import media as media_module
-from tai42_skeleton.interactions.settings import InteractionsSettings
 from tai42_skeleton.monitoring import init_monitoring, reset_monitoring
 
 from .._fakes.recording_monitoring import RecordingMonitoring
+from .._helpers import set_public_base_url
 
 
 class RecordingChannel(AddressingChannel):
@@ -1024,9 +1024,7 @@ async def test_notify_data_image_substituted_to_absolute_url(register_channel, m
     # the inline bytes. The substitution lives in this shared seam, so every caller of it
     # is covered.
     channel = register_channel("rich", RichChannel())
-    monkeypatch.setattr(
-        notify_module, "interactions_settings", lambda: InteractionsSettings(public_base_url="https://box.example")
-    )
+    set_public_base_url(monkeypatch, "https://box.example")
 
     @asynccontextmanager
     async def _ctx(client_cls, settings=None, *, fresh=False, **kwargs):
@@ -1047,11 +1045,7 @@ async def test_notify_data_image_http_localhost_base_validates_end_to_end(regist
     # served url the seam mints must validate inside ChannelNotification and reach the
     # channel — the contract admits the absolute http(s) served-reference form.
     channel = register_channel("rich", RichChannel())
-    monkeypatch.setattr(
-        notify_module,
-        "interactions_settings",
-        lambda: InteractionsSettings(public_base_url="http://127.0.0.1:8000"),
-    )
+    set_public_base_url(monkeypatch, "http://127.0.0.1:8000")
 
     @asynccontextmanager
     async def _ctx(client_cls, settings=None, *, fresh=False, **kwargs):
@@ -1073,9 +1067,7 @@ async def test_notify_relative_route_ref_absolutized_for_the_channel(register_ch
     # unfetchable unless absolutized. The notify path absolutizes it against the public base url
     # the same way the ask path does — a vendor fetches media from its own servers.
     channel = register_channel("rich", RichChannel())
-    monkeypatch.setattr(
-        notify_module, "interactions_settings", lambda: InteractionsSettings(public_base_url="https://box.example")
-    )
+    set_public_base_url(monkeypatch, "https://box.example")
 
     @asynccontextmanager
     async def _ctx(client_cls, settings=None, *, fresh=False, **kwargs):
@@ -1098,7 +1090,7 @@ async def test_notify_relative_route_ref_passes_through_when_no_public_base_url(
     # through UNCHANGED — the pre-existing behavior, and no Redis is opened for it (the fixture
     # provides no client_ctx, so a store access would raise).
     channel = register_channel("rich", RichChannel())
-    monkeypatch.setattr(notify_module, "interactions_settings", lambda: InteractionsSettings(public_base_url=None))
+    set_public_base_url(monkeypatch, None)
 
     route_ref = MediaItem(kind=MediaKind.DOCUMENT, url=MEDIA_ROUTE_PREFIX + "d" * 43, filename="receipt.pdf")
     await notify_user("your receipt", channel="rich", media=[route_ref])
@@ -1113,9 +1105,9 @@ async def test_notify_data_image_without_public_base_url_raises(register_channel
     # seam refuses LOUDLY (ChannelInputError, the op maps it to a 400) naming the setting,
     # and never sends.
     channel = register_channel("rich", RichChannel())
-    monkeypatch.setattr(notify_module, "interactions_settings", lambda: InteractionsSettings(public_base_url=None))
+    set_public_base_url(monkeypatch, None)
 
-    with pytest.raises(ChannelInputError, match="INTERACTIONS_PUBLIC_BASE_URL"):
+    with pytest.raises(ChannelInputError, match="TAI_PUBLIC_BASE_URL"):
         await notify_user("hi", channel="rich", media=[MediaItem(kind=MediaKind.IMAGE, url=_DATA_PNG)])
     assert channel.notifications == []
 
@@ -1126,9 +1118,7 @@ async def test_notify_dict_media_coerced_and_data_image_substituted(register_cha
     # ``.kind``/``.url`` inspection. A dict data:image is stored by reference and the
     # channel receives an ABSOLUTE served url, exactly as with MediaItem input.
     channel = register_channel("rich", RichChannel())
-    monkeypatch.setattr(
-        notify_module, "interactions_settings", lambda: InteractionsSettings(public_base_url="https://box.example")
-    )
+    set_public_base_url(monkeypatch, "https://box.example")
 
     @asynccontextmanager
     async def _ctx(client_cls, settings=None, *, fresh=False, **kwargs):

@@ -1,10 +1,9 @@
-"""The advertised authorization servers, the declaration check at build, and the public-URL setting.
+"""The advertised authorization servers and the declaration check at build.
 
 The door is on only when an active identity provider declares an authorization server AND
-``ACCESS_CONTROL_PUBLIC_BASE_URL`` is set; ``advertised_authorization_servers`` is the one
+``TAI_PUBLIC_BASE_URL`` is set; ``advertised_authorization_servers`` is the one
 definition of that switch. A bad declaration fails the build naming the provider; a
-declaring provider with no public URL logs one warning. The setting is validated and
-stored normalised at load.
+declaring provider with no public URL logs one warning.
 """
 
 from __future__ import annotations
@@ -13,7 +12,6 @@ import json
 from collections.abc import Iterator
 
 import pytest
-from pydantic import ValidationError
 from tai42_contract.access_control.identity import AuthIdentity, IdentityProvider
 from tai42_contract.app import tai42_app
 from tai42_kit.access_control import registry
@@ -24,10 +22,11 @@ from tai42_skeleton.access_control.advertised import (
     mcp_metadata_url,
     mcp_resource_url,
 )
-from tai42_skeleton.access_control.settings import AccessControlSettings
 from tai42_skeleton.access_control.startup import probe_identity_provider
 from tai42_skeleton.app.instance import app
 from tai42_skeleton.app.reload_gate import reload_gate
+
+from .._helpers import set_public_base_url
 
 PUBLIC_URL = "https://mcp.example"
 
@@ -61,11 +60,7 @@ def _chain(monkeypatch: pytest.MonkeyPatch, providers: dict[str, IdentityProvide
     for name, provider in providers.items():
         registry._PROVIDERS._generation.committed()[name] = lambda _settings, provider=provider: provider
     monkeypatch.setenv("ACCESS_CONTROL_AUTH_PROVIDERS", json.dumps(list(providers)))
-    if public_url is None:
-        monkeypatch.delenv("ACCESS_CONTROL_PUBLIC_BASE_URL", raising=False)
-    else:
-        monkeypatch.setenv("ACCESS_CONTROL_PUBLIC_BASE_URL", public_url)
-    reset_all_settings()
+    set_public_base_url(monkeypatch, public_url)
 
 
 async def test_the_set_is_ordered_and_de_duplicated_over_two_providers(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -136,7 +131,7 @@ async def test_a_declared_server_without_a_public_url_boots_warns_once_and_adver
     warnings = [record for record in caplog.records if record.levelname == "WARNING"]
     assert len(warnings) == 1
     assert "'declaring'" in warnings[0].getMessage()
-    assert "ACCESS_CONTROL_PUBLIC_BASE_URL" in warnings[0].getMessage()
+    assert "TAI_PUBLIC_BASE_URL" in warnings[0].getMessage()
     assert advertised_authorization_servers() == ()
 
 
@@ -157,57 +152,8 @@ async def test_a_provider_missing_during_a_reload_contributes_nothing(monkeypatc
 
 
 def test_the_door_urls_are_composed_from_the_public_url_only(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("ACCESS_CONTROL_PUBLIC_BASE_URL", "https://edge.example/tenant")
-    reset_all_settings()
+    set_public_base_url(monkeypatch, "https://edge.example/tenant")
     assert mcp_resource_url("/mcp") == "https://edge.example/tenant/mcp"
     assert mcp_metadata_url("/app/svc/sse") == (
         "https://edge.example/tenant/.well-known/oauth-protected-resource/app/svc/sse"
     )
-
-
-# -- the setting --------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    ("value", "stored"),
-    [
-        ("HTTPS://Host.Example:443/x/", "https://host.example/x"),
-        ("https://host.example/", "https://host.example"),
-        ("https://host.example", "https://host.example"),
-        ("https://host.example:8443", "https://host.example:8443"),
-        ("https://host.example/Prefix/Path", "https://host.example/Prefix/Path"),
-        ("http://localhost:8000/", "http://localhost:8000"),
-        ("http://127.0.0.1:80/p", "http://127.0.0.1/p"),
-        ("http://[::1]:9000", "http://[::1]:9000"),
-    ],
-)
-def test_the_public_url_is_stored_normalised(value: str, stored: str) -> None:
-    assert AccessControlSettings(public_base_url=value).public_base_url == stored
-
-
-@pytest.mark.parametrize(
-    "value",
-    [
-        "http://host.example",
-        "ftp://host.example",
-        "https://host.example?x=1",
-        "https://host.example/?",
-        "https://host.example#f",
-        "https://user:pw@host.example",
-        "https://hôst.example",
-        "https://host.example/x/../y",
-        "https://host.example/x/./y",
-        "https://host.example/x//y",
-        "https://host.example/a b",
-        "https://host.example/a%20b",
-        "https://host.example:99999",
-        "host.example",
-    ],
-)
-def test_a_public_url_a_client_would_rewrite_is_refused_naming_the_setting(value: str) -> None:
-    with pytest.raises(ValidationError, match="ACCESS_CONTROL_PUBLIC_BASE_URL"):
-        AccessControlSettings(public_base_url=value)
-
-
-def test_the_public_url_is_unset_by_default() -> None:
-    assert AccessControlSettings().public_base_url is None

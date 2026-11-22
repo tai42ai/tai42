@@ -8,11 +8,10 @@ import mimetypes
 
 import pytest
 from tai42_contract.storage import ObjectStat, Storage
-from tai42_contract.template import TemplatedText
+from tai42_contract.template import TemplateBodyError, TemplatedText, TemplateNotFoundError
 
 from tai42_skeleton.storage import StorageRegistry
 from tai42_skeleton.template import ResourceManager
-from tai42_skeleton.template.errors import TemplateLocaleNotFoundError
 
 from .._fakes.listing import keys_under
 from .._fakes.template_holders import app_held_by
@@ -80,7 +79,7 @@ async def test_locale_variant_chain_prefers_specific_then_language_then_default(
 
 async def test_no_variant_and_no_default_refuses_loudly() -> None:
     manager = _manager({"welcome@fr": "bonjour"})
-    with pytest.raises(TemplateLocaleNotFoundError, match=r"welcome.*he"):
+    with pytest.raises(TemplateNotFoundError, match=r"welcome.*he"):
         await manager.render_by_id("welcome", locale="he")
 
 
@@ -100,7 +99,7 @@ async def test_list_format_uses_the_render_locale() -> None:
 
 async def test_list_format_without_a_locale_raises() -> None:
     manager = _manager({})
-    with pytest.raises(ValueError, match="needs the subject's locale"):
+    with pytest.raises(TemplateBodyError, match=r"^is not a renderable template: .*needs the subject's locale"):
         await manager.render_templated_text(
             TemplatedText(content="{{ x | list_format }}", kwargs={"x": ["a", "b"]}), None
         )
@@ -108,7 +107,7 @@ async def test_list_format_without_a_locale_raises() -> None:
 
 async def test_list_format_unknown_locale_raises() -> None:
     manager = _manager({})
-    with pytest.raises(ValueError, match="no CLDR list patterns"):
+    with pytest.raises(TemplateBodyError, match=r"^is not a renderable template: .*no CLDR list patterns"):
         await manager.render_templated_text(
             TemplatedText(content="{{ x | list_format }}", kwargs={"x": ["a", "b"]}), "zz"
         )
@@ -116,7 +115,7 @@ async def test_list_format_unknown_locale_raises() -> None:
 
 async def test_reserved_locale_context_key_collision_raises() -> None:
     manager = _manager({})
-    with pytest.raises(ValueError, match="reserved render variable"):
+    with pytest.raises(TemplateBodyError, match=r"^is not a renderable template: .*reserved render variable"):
         await manager.render_templated_text(
             TemplatedText(content="{{ ok }}", kwargs={"_tai_locale": "he", "ok": "x"}), "he"
         )

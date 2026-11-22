@@ -53,10 +53,12 @@ class _FakeResourceManager:
 
     async def render_templated_text(self, text: TemplatedText, locale: str | None = None) -> str:
         if text.id is not None:
-            from tai42_skeleton.template.errors import TemplateNotFoundError
+            from tai42_contract.template import TemplateNotFoundError
 
             if text.id not in _STORED_PROGRAMS:
-                raise TemplateNotFoundError(f"no stored resource {text.id!r}")
+                raise TemplateNotFoundError(
+                    f"references stored id {text.id!r}, which could not be fetched: Template {text.id!r} not found."
+                )
             return _STORED_PROGRAMS[text.id]
         assert text.content is not None
         return text.content
@@ -607,7 +609,7 @@ async def test_input_program_naming_input_variable_is_refused(svc: StatesService
         }
     )
     await svc.put_declaration(_STATE)
-    with pytest.raises(TemplateValidationError, match="template_jq 'peek' jq is not a valid jq expression"):
+    with pytest.raises(TemplateValidationError, match=r"^template_jq 'peek' is not a valid jq expression: "):
         await svc.put_template(template, replace=False)
 
 
@@ -657,7 +659,8 @@ async def test_an_inline_input_program_with_a_syntax_error_is_refused_at_upload_
     await svc.put_declaration(_STATE)
     with pytest.raises(TemplateValidationError) as excinfo:
         await svc.put_template(template, replace=False)
-    assert str(excinfo.value).startswith("template_jq 'b' jq is not a valid jq expression: jq: error: syntax error")
+    # The same refusal the save door gives a by-id program, without the template's name.
+    assert str(excinfo.value).startswith("template_jq 'b' is not a valid jq expression: jq: error: syntax error")
 
 
 async def test_a_sibling_input_program_rendering_empty_at_run_time_leaves_the_others_running(

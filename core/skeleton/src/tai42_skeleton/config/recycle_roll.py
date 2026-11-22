@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING
 from tai42_kit.utils.run_bound import run_bound
 
 from tai42_skeleton.app.recycle import WITHHELD, RecycleError, RecycleReport, RecycleStop
+from tai42_skeleton.app.writer_exit import open_writer_exit_scope
 from tai42_skeleton.config.recycle_policy import (
     CENSUS_TARGET_KINDS,
     UNREACHABLE_REPORT,
@@ -27,6 +28,7 @@ from tai42_skeleton.config.recycle_policy import (
     recycle_decision,
     recycle_step_timeout,
 )
+from tai42_skeleton.operations._broadcast import awaiting_respawn_after, log_awaiting_respawn
 
 if TYPE_CHECKING:
     from tai42_contract.app.responses import AwaitingWorker
@@ -197,8 +199,6 @@ def _failed_roll_outcome(report: FleetResult, decision: RecycleDecision) -> Roll
     No roll report and no exit armed. No roll is judged, so the verdict is what the reload's
     ``report`` states (:func:`~tai42_skeleton.operations._broadcast.awaiting_respawn_after` with no roll).
     """
-    from tai42_skeleton.operations._broadcast import awaiting_respawn_after
-
     verdict = awaiting_respawn_after(report, None, decision.writer, self_exit_armed=False)
     return RollOutcome(decision=decision, recycle=None, awaiting_respawn=verdict, self_exit_armed=False)
 
@@ -231,9 +231,6 @@ async def roll_decided(
     otherwise it is skipped with an INFO line (:func:`_log_skipped_roll`). The verdict is logged at ERROR
     when it names a worker.
     """
-    from tai42_skeleton.app.writer_exit import open_writer_exit_scope
-    from tai42_skeleton.operations._broadcast import awaiting_respawn_after, log_awaiting_respawn
-
     writer = decision.writer
     writer_deferred = writer_exits and decision.writer_needs
     # The scope the exit this roll arms is owed into, holding the change's hold on the writer's exit.

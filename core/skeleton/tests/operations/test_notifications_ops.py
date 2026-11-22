@@ -60,6 +60,8 @@ from tai42_skeleton.operations import (
 from tai42_skeleton.operations import notifications as notifications_ops
 from tai42_skeleton.operations.projection import _make_tool, project_operations
 
+from .._helpers import set_public_base_url
+
 
 @pytest.fixture(autouse=True)
 def _interactions_store_configured(monkeypatch):
@@ -360,15 +362,13 @@ async def test_notify_user_data_image_without_public_base_url_is_400(monkeypatch
     # End-to-end through the REAL seam: a data:image needs an absolute url to reach a
     # channel; with no public base url the seam raises ChannelInputError and the op maps
     # it to a 400 naming the setting — never a silent drop, and never sends.
-    from tai42_skeleton.channels import notify as notify_seam
-    from tai42_skeleton.interactions.settings import InteractionsSettings
 
-    monkeypatch.setattr(notify_seam, "interactions_settings", lambda: InteractionsSettings(public_base_url=None))
+    set_public_base_url(monkeypatch, None)
     channel = _RichChannel()
     app._channel_registry.reset()
     tai42_app.channels.register("whatsapp", cast(Channel, channel))
     try:
-        with pytest.raises(BadRequestError, match="INTERACTIONS_PUBLIC_BASE_URL"):
+        with pytest.raises(BadRequestError, match="TAI_PUBLIC_BASE_URL"):
             await notifications_ops.notify_user(
                 "hi", channel="whatsapp", media=[MediaItem(kind=MediaKind.IMAGE, url=_DATA_PNG)]
             )
@@ -384,11 +384,8 @@ async def test_notify_user_dict_media_substituted_end_to_end(monkeypatch, fake_r
     # served url — never a ``.kind`` AttributeError on the raw dict.
     from tai42_skeleton.channels import notify as notify_seam
     from tai42_skeleton.interactions import media as media_module
-    from tai42_skeleton.interactions.settings import InteractionsSettings
 
-    monkeypatch.setattr(
-        notify_seam, "interactions_settings", lambda: InteractionsSettings(public_base_url="https://box.example")
-    )
+    set_public_base_url(monkeypatch, "https://box.example")
 
     @asynccontextmanager
     async def _ctx(client_cls, settings=None, *, fresh=False, **kwargs):

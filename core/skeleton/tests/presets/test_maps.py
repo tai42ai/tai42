@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 from tai42_contract.app import tai42_app
-from tai42_contract.template import TemplatedText
+from tai42_contract.template import TemplatedText, TemplateNotFoundError
 from tai42_kit.utils.render import TextBodyError
 
 from tai42_skeleton.presets.maps import (
@@ -24,6 +24,10 @@ class _Manager:
 
     async def render_templated_text(self, text: TemplatedText, locale: str | None = None) -> str:
         if text.id is not None:
+            if text.id not in self.resources:
+                raise TemplateNotFoundError(
+                    f"references stored id {text.id!r}, which could not be fetched: Template {text.id!r} not found."
+                )
             return self.resources[text.id]
         return text.content or ""
 
@@ -72,7 +76,9 @@ async def test_an_output_map_cannot_read_fixed(manager: _Manager) -> None:
 
 
 async def test_an_unrenderable_or_empty_map_is_a_text_body_error(manager: _Manager) -> None:
-    with pytest.raises(TextBodyError, match=r"^preset 'p' input_map: its stored id 'absent' could not be rendered"):
+    with pytest.raises(
+        TextBodyError, match=r"^preset 'p' input_map references stored id 'absent', which could not be fetched"
+    ):
         await resolve_preset_maps("p", TemplatedText(id="absent"), None, has_input_schema=True)
     with pytest.raises(TextBodyError, match=r"^preset 'p' output_map is empty; send null to clear it$"):
         await resolve_preset_maps("p", None, "  ", has_input_schema=False)

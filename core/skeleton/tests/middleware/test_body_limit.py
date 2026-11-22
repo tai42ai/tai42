@@ -208,6 +208,7 @@ def _uploads_surface() -> list:
             response_model=None,
             reload_gated=False,
             holds_writer_exit=False,
+            answers_leaving=False,
             reads_body=True,
             error_statuses=(),
             success_status=200,

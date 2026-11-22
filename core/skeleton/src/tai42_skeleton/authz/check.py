@@ -23,9 +23,8 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from jinja2 import TemplateError
 from starlette.authentication import AuthenticationError
-from tai42_contract.template import TemplatedText
+from tai42_contract.template import TemplatedText, TemplateRenderError
 from tai42_kit.settings import register_settings_reset
 
 from tai42_skeleton.access_control.coverage import is_public_only, scopes_cover
@@ -47,7 +46,6 @@ from tai42_skeleton.authz.execution_identity import get_execution_identity
 from tai42_skeleton.authz.identity import CallerIdentity
 from tai42_skeleton.authz.token_free import TokenFreeConditionError, assert_token_free_evaluable
 from tai42_skeleton.operations.errors import PermissionDeniedError
-from tai42_skeleton.template import TemplateNotFoundError
 
 if TYPE_CHECKING:
     from tai42_contract.access_control.models import AccessPolicy
@@ -160,7 +158,7 @@ async def _render_condition(condition: TemplatedText | None, *, principal: str) 
     """
     try:
         return await render_condition(condition)
-    except (ValueError, TemplateError, TemplateNotFoundError) as exc:
+    except TemplateRenderError as exc:
         logger.warning(
             "authz: denied — the policy condition of %s (template %r) does not render: %s",
             principal,

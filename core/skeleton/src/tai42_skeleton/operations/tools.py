@@ -39,9 +39,10 @@ resolved at lookup and then did not resolve at dispatch emits a ``logger.warning
 anomaly answered as a plain 404 still leaves a server record. Three branches are silent: the 404
 for a name that never resolved at all (a caller's own typo, which the response answers),
 the typed-``OperationError`` passthrough (the tool's own answer, delivered to the caller
-intact), and a RESOLVE that fails for anything OTHER than an unknown tool — that raise
-leaves the door untouched, neither enveloped nor logged, so a registry that cannot answer
-surfaces as itself.
+intact — a projected operation's ``ToolError`` raised from one answers that typed error, so a
+refusal such as the leaving ``503`` keeps its status and body), and a RESOLVE that fails for
+anything OTHER than an unknown tool — that raise leaves the door untouched, neither enveloped
+nor logged, so a registry that cannot answer surfaces as itself.
 """
 
 from __future__ import annotations
@@ -49,6 +50,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
+from fastmcp.exceptions import ToolError
 from pydantic import BaseModel, Field
 from tai42_contract.app import tai42_app
 from tai42_contract.backend import SCHEDULE_BRANCH_SUFFIX
@@ -62,6 +64,7 @@ from tai42_contract.tools import TOOL_META_BADGES, TOOL_META_HIDDEN, UndeclaredP
 from tai42_skeleton.access_control import user as access_control_user
 from tai42_skeleton.app.bus import FleetResult
 from tai42_skeleton.app.bus.ops import ReloadTool, RemoveTool
+from tai42_skeleton.app.writer_exit import WorkerLeavingError
 from tai42_skeleton.interactions.terminal_failure import FAILED_TERMINAL_MESSAGE, failed_outcome_detail
 from tai42_skeleton.operations import (
     BadRequestError,
@@ -224,6 +227,7 @@ def _run_tool_return(outcome: VisitOutcome) -> RunAnswer:
         ConflictError,
         UpstreamError,
         UnavailableError,
+        WorkerLeavingError,
         NotSupportedError,
         OperationFailedError,
     ],
@@ -253,8 +257,8 @@ async def run_tool(tool_name: str, arguments: dict[str, object], subject: StateS
     # dressed up here — any other failure of the RESOLVE itself propagates untouched, so a
     # registry that cannot answer surfaces as itself rather than as a verdict about the
     # tool. In the DISPATCH phase below every raise is enveloped instead: a structured 500
-    # carrying the caught error (unless it is already a typed operation error), never an
-    # opaque "Internal Server Error".
+    # carrying the caught error (unless it is a typed operation error, or a projected
+    # ``ToolError`` raised from one), never an opaque "Internal Server Error".
     try:
         await tai42_app.tools.get_tool(tool_name)
     except UnknownToolError as exc:
@@ -291,6 +295,14 @@ async def run_tool(tool_name: str, arguments: dict[str, object], subject: StateS
             # A typed operation error is the tool's own answer (e.g. a PermissionDeniedError 403);
             # flattening it into ``OperationFailedError`` would report a refusal as a crash.
             raise
+        except ToolError as exc:
+            # A projected operation's typed refusal crosses the projection as a ``ToolError``
+            # raised from it: the door answers the typed error beneath (its status and body, the
+            # leaving 503 included). A bare raise keeps that error's own cause and traceback.
+            cause = exc.__cause__
+            if isinstance(cause, OperationError):
+                raise cause  # noqa: B904
+            raise _dispatch_failure(tool_name, exc) from exc
         except Exception as exc:
             raise _dispatch_failure(tool_name, exc) from exc
 

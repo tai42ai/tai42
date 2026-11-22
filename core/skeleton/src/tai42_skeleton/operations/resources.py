@@ -15,15 +15,14 @@ from __future__ import annotations
 
 from typing import Any
 
-from jinja2 import TemplateError
 from pydantic import BaseModel, Field
 from tai42_contract.app import tai42_app
-from tai42_contract.template import TemplatedText
+from tai42_contract.template import TemplatedText, TemplateRenderError
 
 from tai42_skeleton.operations import BadRequestError, NotFoundError, NotSupportedError, operation
 from tai42_skeleton.operations.response_models.resources import ResourceContent
 from tai42_skeleton.operations.template_door import template_door
-from tai42_skeleton.template import ContentNotLoadableError, TemplateNotFoundError
+from tai42_skeleton.template import ContentNotLoadableError
 from tai42_skeleton.template.media import MediaBlock
 from tai42_skeleton.template.path_guard import UnsafeTemplatePathError
 
@@ -84,7 +83,7 @@ async def get_resource_by_id(resource_id: str, kwargs: dict[str, Any] | None = N
             content = await manager.load_file(resource_id)
     except UnsafeTemplatePathError as exc:
         raise BadRequestError(str(exc)) from exc
-    except (FileNotFoundError, TemplateNotFoundError) as exc:
+    except FileNotFoundError as exc:
         raise NotFoundError(f"resource {resource_id!r} not found") from exc
     except ContentNotLoadableError as exc:
         raise BadRequestError(f"resource {resource_id!r} cannot be loaded: {exc}") from exc
@@ -94,5 +93,5 @@ async def get_resource_by_id(resource_id: str, kwargs: dict[str, Any] | None = N
         raise BadRequestError(f"Cannot render media resource {resource_id!r} with kwargs.")
     try:
         return await manager.render_templated_text(TemplatedText(content=content, kwargs=kwargs))
-    except TemplateError as exc:
-        raise BadRequestError(f"template error: {exc}") from exc
+    except TemplateRenderError as exc:
+        raise BadRequestError(f"resource {resource_id!r} {exc}") from exc

@@ -14,7 +14,7 @@ from tai42_contract.app import tai42_app
 from tai42_contract.states.consumer_seams import AttachReconcileContext
 from tai42_contract.states.errors import TemplateValidationError
 from tai42_contract.states.models import StateSubject, StateTemplateReconcile
-from tai42_contract.template import TemplatedText
+from tai42_contract.template import TemplatedText, TemplateRenderError
 from tai42_kit.states.template_jq import rebase_op, record_subtree
 from tai42_kit.utils.data.jq_errors import JqProgramError
 from tai42_kit.utils.data.jq_util import run_jq_first
@@ -27,7 +27,6 @@ from tai42_skeleton.states.service.reconcile_support import (
     _reconcile_refusal,
 )
 from tai42_skeleton.states.templates import validate_template
-from tai42_skeleton.template.errors import TEMPLATE_RENDER_ERRORS, template_render_refusal
 
 
 class _ReconcileMixin(_StatesServiceBase):
@@ -195,10 +194,8 @@ class _ReconcileMixin(_StatesServiceBase):
         """
         try:
             expr = await tai42_app.storage.resource_manager.render_templated_text(text)
-        except TEMPLATE_RENDER_ERRORS as exc:
-            raise TemplateValidationError(
-                f"template {template_name!r} reconcile {label} {template_render_refusal(text, exc)}"
-            ) from exc
+        except TemplateRenderError as exc:
+            raise TemplateValidationError(f"template {template_name!r} reconcile {label} {exc}") from exc
         try:
             return await run_jq_first(expr, data, variables=variables)
         except JqProgramError as exc:

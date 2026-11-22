@@ -12,8 +12,6 @@ from tai42_skeleton.template.errors import (
     HolderUnreadableError,
     PartialDirectoryDeleteError,
     StoredObjectHeldError,
-    TemplateNotFoundError,
-    TemplateNotTextError,
 )
 from tai42_skeleton.template.media import MediaBlock
 from tai42_skeleton.template.resource_manager import ResourceManager
@@ -28,7 +26,5 @@ __all__ = [
     "ResourceManager",
     "StoredObjectHeldError",
     "TemplateCacheSettings",
-    "TemplateNotFoundError",
-    "TemplateNotTextError",
     "template_cache_settings",
 ]

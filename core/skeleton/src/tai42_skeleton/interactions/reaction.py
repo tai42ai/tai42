@@ -13,7 +13,8 @@ events, with the values filled so far, to :func:`react` — the single seam that
   state context (exactly as the continuation does), bounded by ONE deadline here, so a handler
   that raises or times out surfaces LOUDLY — never a stale or silent value;
 * validates the returned FORM UPDATE against the form's own schema (values/errors only for
-  declared fields, options only for option-bearing fields, display only for declared slots);
+  declared fields, a ``null`` value clearing its field, options only for option-bearing fields,
+  display only for declared slots);
 * returns the update, STATELESS: it never records an answer, resolves the interaction, or
   rewrites the stored request. The half-filled form's state lives in the channel until submit.
 
@@ -163,7 +164,9 @@ def _validate_update_values(values: Any, schema: dict[str, Any], declared: set[s
     unknown = set(values) - declared
     if unknown:
         raise FormReactionHandlerError(f"reaction update values name undeclared fields {sorted(unknown)}")
-    mismatch = schema_mismatch(values, _types_only_schema(schema))
+    # A ``None`` member clears its field, so only the members that set a value are type-checked.
+    filled = {name: value for name, value in values.items() if value is not None}
+    mismatch = schema_mismatch(filled, _types_only_schema(schema))
     if mismatch is not None:
         raise FormReactionHandlerError(f"reaction update values do not fit the schema: {mismatch[0]}")
 
@@ -230,8 +233,9 @@ def _validate_update_display(display: Any, payload: dict[str, Any]) -> None:
 def _validate_update(update: Any, schema: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
     # Validate a handler's returned FORM UPDATE against the form's own schema: only the four
     # known keys; values/errors only for declared fields (values additionally type-fit the
-    # schema); options only for option-bearing fields, each a non-empty list of FormOption;
-    # display only for declared display slots. A violation is a handler bug, surfaced loudly.
+    # schema, a ``None`` value clearing its field); options only for option-bearing fields, each a
+    # non-empty list of FormOption; display only for declared display slots. A violation is a
+    # handler bug, surfaced loudly.
     if not isinstance(update, dict):
         raise FormReactionHandlerError("reaction handler must return a form update object")
     extra = set(update) - {"values", "options", "errors", "display"}

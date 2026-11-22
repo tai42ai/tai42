@@ -38,7 +38,7 @@ def _media_ids_of(request: InteractionRequest) -> list[str]:
     # served reference before the request is built, so by the time it reaches ``add``
     # only served references remain to index. Both served forms count: the same-origin
     # relative ``{MEDIA_ROUTE_PREFIX}{id}`` an inbox-only ask stores, and the absolute
-    # ``public_base_url``-minted reference a channel ask stores — ``served_media_id``
+    # ``TAI_PUBLIC_BASE_URL``-minted reference a channel ask stores — ``served_media_id``
     # extracts the id from either, so a channel ask's bytes key is joined to the group
     # index and TTL-extended past bootstrap idle, never left to 404 while the park lives.
     if not request.media:

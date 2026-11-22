@@ -8,14 +8,19 @@ operation as a typed raise, so the same decision serves the route, the CLI, and
 the projected tool. The base ``OperationError`` and its ``503`` member
 ``UnavailableError`` are the contract's (``tai42_contract.errors``).
 :func:`operator_message` is the text an operator reads for any exception a door
-renders into the error envelope.
+renders into the error envelope; :func:`translate_orphan_env_write` maps the config pipeline's
+partial env+manifest failure into this family.
 """
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import ClassVar
 
 from tai42_contract.errors import ErrorKind, OperationError
+
+from tai42_skeleton.config.errors import OrphanEnvWriteError
 
 
 class ValidationRejectedError(OperationError):
@@ -156,6 +161,27 @@ def operator_message(exc: BaseException, *, text: str | None = None) -> str:
     return "\n".join([str(exc) if text is None else text, *getattr(exc, "__notes__", ())])
 
 
+@contextmanager
+def translate_orphan_env_write() -> Iterator[None]:
+    """Map a combined env+manifest orphan-env-write failure to a typed 500 operation error.
+
+    Maps :class:`~tai42_skeleton.config.errors.OrphanEnvWriteError` to
+    :class:`OperationFailedError` (500).
+
+    The one shared translation every door that crosses the combined env+manifest seam
+    wraps around its call: an oauth connector leaving the manifest (installer
+    uninstall/update, a hand ``manifest replace`` / backup restore),
+    ``set_mcp_secret_env``, or any marks-write that lands while the manifest persist
+    exhausts its retries. The error is a partial failure — the env write STANDS as an
+    inert, re-runnable orphan — so it is LOUD (a 500), never folded into a client-input
+    400.
+    """
+    try:
+        yield
+    except OrphanEnvWriteError as exc:
+        raise OperationFailedError(str(exc)) from exc
+
+
 __all__ = [
     "BadRequestError",
     "ConflictError",
@@ -168,4 +194,5 @@ __all__ = [
     "UpstreamError",
     "ValidationRejectedError",
     "operator_message",
+    "translate_orphan_env_write",
 ]

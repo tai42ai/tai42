@@ -17,15 +17,23 @@ from collections.abc import Awaitable, Callable, Iterator
 from contextlib import contextmanager
 from typing import Any
 
-from jinja2 import FunctionLoader
+from jinja2 import FunctionLoader, TemplateNotFound
+from jinja2 import Template as JinjaTemplate
 from tai42_contract.storage import Storage
-from tai42_contract.template import ImageReference, TemplatedText, TemplateEviction
+from tai42_contract.template import (
+    ImageReference,
+    TemplateBodyError,
+    TemplatedText,
+    TemplateEviction,
+    TemplateNotFoundError,
+    TemplateNotTextError,
+    TemplateRenderError,
+)
 from tai42_contract.tools import ReferenceHolder
 
-from tai42_skeleton.template.errors import TemplateNotFoundError, TemplateNotTextError
 from tai42_skeleton.template.input_schema import template_input_schema, undeclared_variables
 from tai42_skeleton.template.media import MediaBlock
-from tai42_skeleton.template.path_guard import safe_template_path
+from tai42_skeleton.template.path_guard import UnsafeTemplatePathError, safe_template_path
 from tai42_skeleton.template.reads import RecordingEnvironment, record_template_read
 from tai42_skeleton.template.render_cache import RenderCache
 from tai42_skeleton.template.render_locale import compiled_for_locale, list_format, locale_variant_ids, with_locale
@@ -36,6 +44,33 @@ from tai42_skeleton.template.store_writes import StoreWrites
 #: The process-wide source of :attr:`ResourceManager.epoch`: never reset, so every manager built in
 #: this process (at boot or after a reload) carries a value no earlier manager had.
 _EPOCHS = itertools.count(1)
+
+
+def _guarded_id(template_id: str) -> str:
+    """``template_id`` when it is a canonical store key; an id the path guard refuses names no stored template."""
+    try:
+        return safe_template_path(template_id)
+    except UnsafeTemplatePathError as exc:
+        raise TemplateNotFoundError(str(exc)) from exc
+
+
+def _refusal(template_id: str | None, exc: TemplateRenderError, *, rendering: bool) -> TemplateRenderError:
+    """``exc`` reworded as the author-facing refusal of the text it was raised for.
+
+    ``template_id`` is the text's stored id, ``None`` for inline content; ``rendering`` says the
+    stored text was fetched and compiled and its render had begun, so ``exc`` came from the render
+    (its includes included). A stored id that yields no template text "could not be fetched"; a
+    stored text that does not parse (a :class:`TemplateBodyError` before the render) or does not
+    render "could not be rendered"; an inline body "is not a renderable template"; ``exc``'s own
+    message closes it.
+    """
+    if template_id is None:
+        predicate = f"is not a renderable template: {exc}"
+    elif rendering or isinstance(exc, TemplateBodyError):
+        predicate = f"references stored id {template_id!r}, which could not be rendered: {exc}"
+    else:
+        predicate = f"references stored id {template_id!r}, which could not be fetched: {exc}"
+    return type(exc)(predicate)
 
 
 class ResourceManager:
@@ -78,7 +113,8 @@ class ResourceManager:
 
         # The render a rendering thread runs, with the loop that drives it: every
         # {% include %}/{% extends %} dependency loads on that loop, through its pooled
-        # storage client.
+        # storage client. ``loader_fault`` holds the exception the loader let through during
+        # the current render, which is never the author's.
         self._render_loop = threading.local()
 
         self._render_cache = RenderCache(self._env, self._load_by_id, template_cache_settings())
@@ -114,15 +150,42 @@ class ResourceManager:
 
         ``loop`` is the loop that awaits the render: the render runs on a thread of its own,
         and each {% include %}/{% extends %} dependency is loaded on ``loop`` while the
-        thread waits for it.
+        thread waits for it. The loader's fault mark is cleared on entry and exit, so a pooled
+        thread never carries one into its next render.
         """
         self._render_loop.active = True
         self._render_loop.loop = loop
+        self._render_loop.loader_fault = None
         try:
             yield
         finally:
             self._render_loop.active = False
             self._render_loop.loop = None
+            self._render_loop.loader_fault = None
+
+    async def _render(self, compile_template: Callable[[], JinjaTemplate], context: dict[str, Any]) -> str:
+        """Compile and render on a thread of its own, sorting what fails into the author's fault or not.
+
+        The only code other than the author's body that runs during the render is the loader
+        (:meth:`_sync_loader`), which marks every fault it lets through: a marked exception
+        propagates as itself. A :class:`TemplateRenderError` passes as raised; Jinja's
+        ``TemplateNotFound`` for an include becomes :class:`TemplateNotFoundError`; anything else
+        the body raises becomes :class:`TemplateBodyError`.
+        """
+        loop = asyncio.get_running_loop()
+
+        def _compile_and_render() -> str:
+            with self._render_scope(loop):
+                try:
+                    return compile_template().render(**context)
+                except Exception as exc:
+                    if exc is self._render_loop.loader_fault or isinstance(exc, TemplateRenderError):
+                        raise
+                    if isinstance(exc, TemplateNotFound):
+                        raise TemplateNotFoundError(f"its include {exc.name!r} is not stored") from exc
+                    raise TemplateBodyError(str(exc)) from exc
+
+        return await asyncio.to_thread(_compile_and_render)
 
     async def _load_by_id(self, template_id: str) -> str:
         """Read a template by its bare storage id, root-contained.
@@ -132,13 +195,14 @@ class ResourceManager:
         through :func:`safe_template_path` before it reaches the provider. That is the
         app-layer defense against traversal for a backend that does not self-guard: an
         id like ``../../x`` (from an untrusted backup or an LLM-driven tool) raises
-        :class:`~tai42_skeleton.template.path_guard.UnsafeTemplatePathError` instead of
-        reading outside the template root.
+        :class:`~tai42_contract.template.TemplateNotFoundError` with the guard's reason instead
+        of reading outside the template root.
 
-        A stored object that is not UTF-8 text raises :class:`TemplateNotTextError`
-        naming ``template_id``: it exists, but it is not a template.
+        A stored object that is not UTF-8 text raises
+        :class:`~tai42_contract.template.TemplateNotTextError` naming ``template_id``: it exists,
+        but it is not a template.
         """
-        safe_template_path(template_id)
+        _guarded_id(template_id)
         try:
             return await self.provider.load(template_id)
         except UnicodeDecodeError as exc:
@@ -158,7 +222,8 @@ class ResourceManager:
         ``TemplateNotFound`` (keeping ``{% include ... ignore missing %}``
         working) and is remembered absent, so the next render answers ``None`` without a
         read; every other failure propagates loudly instead of being mistaken for a
-        missing template, and is never remembered.
+        missing template, and is never remembered. A fault that is not a
+        :class:`TemplateRenderError` is marked as the loader's for :meth:`_render`.
         """
         absent = self._render_cache.absent
         if template_id in absent:
@@ -173,12 +238,17 @@ class ResourceManager:
         except FileNotFoundError:
             absent.add(template_id)
             return None
+        except TemplateRenderError:
+            raise
+        except Exception as exc:
+            self._render_loop.loader_fault = exc
+            raise
 
     async def fetch_template(self, template_id: str) -> str:
         """Return the raw (uncompiled) template text for ``template_id``.
 
-        A missing template raises :class:`TemplateNotFoundError` (mapped to 404 by
-        the HTTP surface) rather than leaking storage's ``FileNotFoundError``.
+        A missing template raises :class:`~tai42_contract.template.TemplateNotFoundError` rather
+        than leaking storage's ``FileNotFoundError``.
         """
         try:
             return await self._load_by_id(template_id)
@@ -269,31 +339,35 @@ class ResourceManager:
         """Render the stored template ``template_id`` for ``locale`` with ``kwargs`` as its context.
 
         Every id of the locale probe chain is recorded as read before it resolves, so a later
-        write of a variant that is missing now is seen by a reads recorder too.
+        write of a variant that is missing now is seen by a reads recorder too. A template that
+        cannot be rendered as authored raises a :class:`TemplateRenderError` whose text names
+        ``template_id``; every other failure propagates as itself.
         """
-        probes = [template_id] if locale is None else locale_variant_ids(template_id, locale)
-        for candidate in probes:
-            record_template_read(candidate)
-        template = await compiled_for_locale(template_id, locale, self._render_cache.compiled)
-        context = with_locale(kwargs or {}, locale)
-
-        loop = asyncio.get_running_loop()
-
-        def _render() -> str:
-            with self._render_scope(loop):
-                return template.render(**context)
-
-        return await asyncio.to_thread(_render)
+        try:
+            guarded = _guarded_id(template_id)
+            probes = [guarded] if locale is None else locale_variant_ids(guarded, locale)
+            for candidate in probes:
+                record_template_read(candidate)
+            template = await compiled_for_locale(template_id, locale, self._render_cache.compiled)
+        except TemplateRenderError as exc:
+            raise _refusal(template_id, exc, rendering=False) from exc
+        try:
+            context = with_locale(kwargs or {}, locale)
+            return await self._render(lambda: template, context)
+        except TemplateRenderError as exc:
+            raise _refusal(template_id, exc, rendering=True) from exc
 
     async def render_templated_text(self, text: TemplatedText, locale: str | None = None) -> str:
         """Render ``text`` — its stored resource by ``id``, else its inline ``content``.
 
         Rendered with its own ``kwargs`` as the render context.
 
-        A stored id resolves through :meth:`render_by_id` (locale variants included), so a
-        missing one raises ``TemplateNotFoundError``; a template the engine cannot render
-        raises out of Jinja. ``locale`` also reaches an inline render, as the language the
-        ``list_format`` filter formats in.
+        A stored id resolves through :meth:`render_by_id` (locale variants included). A text that
+        cannot be rendered as authored raises a :class:`TemplateRenderError` (a missing id or
+        include, a stored item that is not text, a body that does not parse or render) whose text
+        names the stored id or says the text is inline; every other failure (storage, the network,
+        an unconfigured manager) propagates as itself. ``locale`` also reaches an inline render, as
+        the language the ``list_format`` filter formats in.
         """
         if text.id is not None:
             return await self.render_by_id(text.id, text.kwargs, locale=locale)
@@ -303,21 +377,17 @@ class ResourceManager:
         # string (present-but-empty included — an empty template renders to an empty string).
         if content is None:
             raise AssertionError
-        context = with_locale(text.kwargs, locale)
-
-        loop = asyncio.get_running_loop()
-
-        def _parse_and_render() -> str:
-            with self._render_scope(loop):
-                return self._render_cache.inline(content).render(**context)
-
-        return await asyncio.to_thread(_parse_and_render)
+        try:
+            context = with_locale(text.kwargs, locale)
+            return await self._render(lambda: self._render_cache.inline(content), context)
+        except TemplateRenderError as exc:
+            raise _refusal(None, exc, rendering=False) from exc
 
     async def _template_source(self, content: str | None, template_id: str | None) -> str:
         """The template source a read inspects: inline ``content``, or the stored ``template_id``.
 
         Exactly one of the two must be given. A missing ``template_id`` raises
-        ``TemplateNotFoundError``; a present-but-empty stored template is a valid (empty)
+        :class:`~tai42_contract.template.TemplateNotFoundError`; a present-but-empty stored template is a valid (empty)
         source rather than rejected.
         """
         if content is not None and template_id is not None:
