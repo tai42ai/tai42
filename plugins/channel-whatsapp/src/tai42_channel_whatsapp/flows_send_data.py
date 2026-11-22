@@ -121,7 +121,7 @@ def build_flow_data(
             continue
         cname = names[name]
         if name in merged_starts:
-            data[f"{cname}__init"] = _range_init_value(name, merged_starts[name], values)
+            data[f"{cname}__init"] = range_init_value(name, merged_starts[name], values)
             data.update(merged_range_bound_values(cname, name, merged_starts[name], properties))
             continue
         data[f"{cname}__init"] = field_init_value(name, prop, values)
@@ -179,14 +179,15 @@ class _CallerWords:
 def field_init_value(name: str, prop: dict[str, Any], values: dict[str, Any]) -> Any:
     """A non-range field's ``init`` value for the per-send data model.
 
-    The prefilled value shaped for its control (:func:`init_value`; a single-pick ``chips`` string
-    is wrapped in a one-element list), or the control's empty default (``[]`` for an array or a
-    single-pick chips, ``False`` for a boolean, ``""`` otherwise). A ``format: date`` prefill that is
-    not a ``YYYY-MM-DD`` string is refused loudly — the only shape Meta's date picker accepts.
+    The prefilled value shaped for its control (:func:`_init_value`; a single-pick ``chips`` string
+    is wrapped in a one-element list), or — the field absent from ``values`` or ``None`` there (a
+    cleared field) — the control's empty default (``[]`` for an array or a single-pick chips,
+    ``False`` for a boolean, ``""`` otherwise). A ``format: date`` prefill that is not a
+    ``YYYY-MM-DD`` string is refused loudly — the only shape Meta's date picker accepts.
     """
     prop_type = prop.get("type") if isinstance(prop, dict) else None
-    if name in values:
-        raw = values[name]
+    raw = values.get(name)
+    if raw is not None:
         if is_date_field(prop) and not (isinstance(raw, str) and valid_iso_date(raw)):
             raise ChannelInputError(
                 f"form property {name!r}: a date field prefill must be a 'YYYY-MM-DD' string "
@@ -194,18 +195,18 @@ def field_init_value(name: str, prop: dict[str, Any], values: dict[str, Any]) ->
             )
         if chips_single_pick(prop):
             return [raw if isinstance(raw, str) else str(raw)]
-        return init_value(prop_type, raw)
+        return _init_value(prop_type, raw)
     if chips_single_pick(prop):
         return []
     return [] if prop_type == "array" else False if prop_type == "boolean" else ""
 
 
-def _range_init_value(start: str, end: str, values: dict[str, Any]) -> dict[str, str]:
+def range_init_value(start: str, end: str, values: dict[str, Any]) -> dict[str, str]:
     """The merged range control's ``init`` — the object of both ends' date prefills (empty strings when unfilled).
 
     Each end's prefill, when present, must already be a ``YYYY-MM-DD`` string (every date field's
-    prefill is proven so by its own date check); an absent prefill is the empty string Meta's range
-    control reads as unset.
+    prefill is proven so by its own date check); an absent or ``None`` prefill is the empty string
+    Meta's range control reads as unset.
     """
 
     def _date_member(name: str) -> str:
@@ -222,7 +223,7 @@ def _range_init_value(start: str, end: str, values: dict[str, Any]) -> dict[str,
     return {"start-date": _date_member(start), "end-date": _date_member(end)}
 
 
-def init_value(prop_type: Any, raw: Any) -> Any:
+def _init_value(prop_type: Any, raw: Any) -> Any:
     """A prefilled value shaped for its control's ``init-value``.
 
     A list for an array (CheckboxGroup), a bool for an OptIn, else a string.

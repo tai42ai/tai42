@@ -167,11 +167,13 @@ async def _reject_media(
 
     Tells the participant once via the rejection facet. The notice is guarded by its own seen
     marker (``f"{wamid}:rejected"`` — which cannot collide with a bare wamid, as wamids carry no
-    colon), set only after the send succeeds: a redelivery driven by a retryable fault in the
-    caption's bridge never repeats a notice already delivered, and a failed send leaves the marker
-    unset so the redelivery re-sends. When a caption rode with the media its text is not lost — it
-    bridges as a text-only turn carrying the generic kind + declared-mime params (no served id, sha,
-    size, or filename: the media does not exist). With no caption the notice is the whole outcome.
+    colon), set once the chokepoint returns: a redelivery driven by a retryable fault in the
+    caption's bridge never repeats the notice. The chokepoint logs a failed send of the notice and
+    does not raise, so it is not sent again; a fault the chokepoint propagates (a route-resolution
+    store fault) leaves the marker unset, so the redelivery notifies. When a caption rode with the
+    media its text is not lost — it bridges as a text-only turn carrying the generic kind +
+    declared-mime params (no served id, sha, size, or filename: the media does not exist). With no
+    caption the notice is the whole outcome.
     Either way the wamid is marked seen once handled, so a later Meta redelivery is not re-processed.
     """
     notice_key = f"{wamid}:rejected"
