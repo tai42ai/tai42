@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from tai42_e2e.manifests.feature_env import _base_env
+from tai42_e2e.manifests.feature_env import PUBLIC_BASE_URL, _base_env
 from tai42_e2e.manifests.tool_entries import _CORE_ROUTERS, _PROJECTED_API_TOOLS, PROBE_TOOLS_TITLE, _builtin_entries
 from tai42_e2e.topology import StackConfig, StackResources, Topology
 
@@ -81,9 +81,9 @@ def build_extensions_stack(res: StackResources, variants: Variants) -> StackConf
         "user_tools": ["ask", "reload_config"],
     }
     env = _base_env(res, variants)
-    # ask_external opens an external-format ask, which mints a callback ticket from a
-    # public base URL (the host is never dialed).
-    env["INTERACTIONS_PUBLIC_BASE_URL"] = "https://e2e.local"
+    # ask_external opens an external-format ask, which mints a callback ticket from the
+    # deployment's public address.
+    env["TAI_PUBLIC_BASE_URL"] = PUBLIC_BASE_URL
     # The budget of one jq job in its compute worker (the chain's transform included): a
     # program past it has its worker killed and the call fails. Every jq program the
     # extension specs run ends in milliseconds; the runaway-program spec waits this long.

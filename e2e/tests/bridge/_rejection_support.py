@@ -22,6 +22,7 @@ REJECTION_NOTICES = {
     "unsupported_type": "This content type is not supported here.",
     "could_not_receive": "That attachment could not be received.",
     "unreadable": "That message could not be read. Please send it again.",
+    "choice_unavailable": "That choice is no longer available. Please type your reply as a message.",
 }
 _REJECTED_TOPIC = "conversations_inbound_rejected"
 

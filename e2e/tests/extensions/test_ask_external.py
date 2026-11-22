@@ -80,7 +80,7 @@ async def test_ask_external_branch_presents_the_composed_schema(extensions_stack
     )
 
 
-@pytest.mark.needs("store:redis", "setting:INTERACTIONS_PUBLIC_BASE_URL")
+@pytest.mark.needs("store:redis", "setting:TAI_PUBLIC_BASE_URL")
 async def test_ask_external_opens_the_wrapped_tools_link_and_wakes_on_callback(
     extensions_stack: TaiStack, uniq: Callable[[str], str]
 ) -> None:

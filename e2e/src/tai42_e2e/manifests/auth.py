@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING
 
-from tai42_e2e.manifests.feature_env import _base_env
+from tai42_e2e.manifests.feature_env import PUBLIC_BASE_URL, _base_env
 from tai42_e2e.manifests.tool_entries import (
     _CORE_ROUTERS,
     _EXTENSION_MODULES,
@@ -70,9 +70,10 @@ def _auth_env(res: StackResources, variants: Variants) -> dict[str, str]:
     # per-identity index/feed must still return the addressed identity's own record).
     env["TAI_TOOL_RUNS_RECENT_RUNS_LIMIT"] = "3"
     env["CHANNELS_NOTIFICATIONS_FEED_MAX"] = "5"
-    # A channel-delivered ask mints a callback ticket + URL from the public base URL,
-    # so this setting is required; the host is never dialed, but it must be an https value.
-    env["INTERACTIONS_PUBLIC_BASE_URL"] = "https://e2e.local"
+    # The deployment's public address: a channel-delivered ask mints its callback URL
+    # from it and the MCP door advertises its resource under it. The host is never
+    # dialled, but it must be an https value.
+    env["TAI_PUBLIC_BASE_URL"] = PUBLIC_BASE_URL
     return env
 
 
@@ -346,17 +347,16 @@ def build_sse_auth_stack(res: StackResources, variants: Variants) -> StackConfig
 
 
 # The MCP door profiles. The fixture provider declares ``MCP_DOOR_AUTHORIZATION_SERVER`` and
-# accepts ``MCP_DOOR_STATIC_TOKEN`` as ``MCP_DOOR_USER_ID``; the deployment-wide public URL
-# is ``MCP_DOOR_PUBLIC_BASE_URL`` on every replica (one deployment, one public URL — the
-# host is never dialled: a test reads the documents over the loopback origin).
+# accepts ``MCP_DOOR_STATIC_TOKEN`` as ``MCP_DOOR_USER_ID``; the door advertises under
+# ``PUBLIC_BASE_URL`` on every replica (the host is never dialled: a test reads the
+# documents over the loopback origin).
 MCP_DOOR_PROVIDER_MODULE = "tai42_e2e_fixtures.door_identity_provider"
 MCP_DOOR_AUTHORIZATION_SERVER = "https://issuer.e2e.local/realm"
 MCP_DOOR_STATIC_TOKEN = "door-static-e2e-token"
 MCP_DOOR_USER_ID = "door-user"
-MCP_DOOR_PUBLIC_BASE_URL = "https://mcp.e2e.local"
 
 
-def _with_door_provider(manifest: dict, env: dict[str, str], variants: Variants, *, public_url: bool) -> None:
+def _with_door_provider(manifest: dict, env: dict[str, str], variants: Variants) -> None:
     """Add the declaring fixture provider after the stack's identity provider, and the door's env."""
     manifest["lifecycle_modules"] = [*manifest["lifecycle_modules"], MCP_DOOR_PROVIDER_MODULE]
     providers = json.loads(variants.identity.auth_provider_env()["ACCESS_CONTROL_AUTH_PROVIDERS"])
@@ -364,8 +364,6 @@ def _with_door_provider(manifest: dict, env: dict[str, str], variants: Variants,
     env["E2E_DOOR_AUTHORIZATION_SERVER"] = MCP_DOOR_AUTHORIZATION_SERVER
     env["E2E_DOOR_STATIC_TOKEN"] = MCP_DOOR_STATIC_TOKEN
     env["E2E_DOOR_USER_ID"] = MCP_DOOR_USER_ID
-    if public_url:
-        env["ACCESS_CONTROL_PUBLIC_BASE_URL"] = MCP_DOOR_PUBLIC_BASE_URL
 
 
 def build_mcp_door_stack(res: StackResources, variants: Variants) -> StackConfig:
@@ -376,7 +374,7 @@ def build_mcp_door_stack(res: StackResources, variants: Variants) -> StackConfig
     sub-MCP store, so a slug registered through replica A is served on replica B."""
     manifest = _auth_manifest(variants)
     env = _auth_env(res, variants)
-    _with_door_provider(manifest, env, variants, public_url=True)
+    _with_door_provider(manifest, env, variants)
     return StackConfig(
         name="mcp-door",
         topology=Topology.REPLICAS,
@@ -393,7 +391,7 @@ def build_mcp_door_without_public_url_stack(res: StackResources, variants: Varia
     the boot logs one warning naming the setting. One worker, no backend, busless."""
     manifest = _busless_auth_manifest(variants)
     env = _busless_auth_env(res, variants)
-    _with_door_provider(manifest, env, variants, public_url=False)
+    _with_door_provider(manifest, env, variants)
     return StackConfig(
         name="mcp-door-no-url",
         topology=Topology.MULTIWORKER,
@@ -410,7 +408,7 @@ def build_mcp_door_without_provider_stack(res: StackResources, variants: Variant
     """The public URL set but no provider that declares an authorization server: the door
     advertises nothing. One worker, no backend, busless."""
     env = _busless_auth_env(res, variants)
-    env["ACCESS_CONTROL_PUBLIC_BASE_URL"] = MCP_DOOR_PUBLIC_BASE_URL
+    env["TAI_PUBLIC_BASE_URL"] = PUBLIC_BASE_URL
     return StackConfig(
         name="mcp-door-no-provider",
         topology=Topology.MULTIWORKER,
@@ -436,7 +434,8 @@ def build_mcp_door_studio_routes_stack(res: StackResources, variants: Variants) 
         "user_tools": ["ask", "reload_config"],
     }
     env = _busless_auth_env(res, variants)
-    _with_door_provider(manifest, env, variants, public_url=True)
+    env["TAI_PUBLIC_BASE_URL"] = PUBLIC_BASE_URL
+    _with_door_provider(manifest, env, variants)
     return StackConfig(
         name="mcp-door-studio-routes",
         topology=Topology.MULTIWORKER,

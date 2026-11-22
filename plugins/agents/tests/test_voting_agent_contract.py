@@ -13,7 +13,7 @@ from tai42_contract.agent.events import (
     StructuredFinal,
 )
 from tai42_contract.app import tai42_app
-from tai42_contract.template import TemplatedText
+from tai42_contract.template import TemplatedText, TemplateNotFoundError
 
 from tai42_agents.voting_agent import agent as agent_module
 from tai42_agents.voting_agent.agent import VotingAgentInput
@@ -196,11 +196,11 @@ def test_run_raises_when_required_judge_message_slot_is_unset(monkeypatch, app_t
 
 def test_run_propagates_unknown_template_id_from_the_handle(monkeypatch, app_tools, resource_manager) -> None:
     """A ``judge_message`` naming a stored ``id`` with no registered template surfaces
-    the resource manager's unknown-id ``RuntimeError`` (it propagates and aborts the
-    run) rather than being silently treated as an empty prompt."""
+    the resource manager's ``TemplateNotFoundError`` (it propagates and aborts the run)
+    rather than being silently treated as an empty prompt."""
     _install_reject_fakes(monkeypatch)
     agent = tai42_app.agents.get_agent(AGENT_NAME)
-    with pytest.raises(RuntimeError, match="unknown template id"):
+    with pytest.raises(TemplateNotFoundError, match="'no-such-template'"):
         asyncio.run(
             agent.run(judge_message=TemplatedText(id="no-such-template"), voter_message=TemplatedText(content="answer"))
         )

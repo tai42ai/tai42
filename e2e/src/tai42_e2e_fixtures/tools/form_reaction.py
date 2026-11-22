@@ -26,6 +26,10 @@ FORM_REACTION_FAILING_TIER = "silver"
 FORM_REACTION_REFUSED_TIER = "bronze"
 FORM_REACTION_REFUSED_SENTENCE = "The e2e reaction refuses this tier"
 
+# The tier whose pick the handler answers by clearing ``label`` (a ``None`` value), so a leg reads
+# a channel's emptied control.
+FORM_REACTION_CLEARING_TIER = "plain"
+
 # The https source ``e2e_form_image_reaction`` fills the ``chart`` image slot with; a leg answers
 # it with a routed image so the load needs no network.
 FORM_IMAGE_SLOT_SOURCE = "https://images.e2e.test/slot.png"
@@ -134,9 +138,10 @@ async def e2e_form_reaction(interaction_id: str, event: dict[str, Any], values: 
     RPUSHes ``{"event", "values", "pid"}`` onto ``e2e:rec:form_reaction:{interaction_id}`` so a
     leg reads which event fired with which values filled so far, then answers a ``field_changed``
     of ``tier`` by re-filling ``label`` with :data:`FORM_REACTION_LABEL_PREFIX` and the picked
-    tier — except a pick of :data:`FORM_REACTION_FAILING_TIER`, which raises, and a pick of
+    tier — except a pick of :data:`FORM_REACTION_FAILING_TIER`, which raises, a pick of
     :data:`FORM_REACTION_REFUSED_TIER`, which answers :data:`FORM_REACTION_REFUSED_SENTENCE` as
-    the field's error; every other event gets an empty update.
+    the field's error, and a pick of :data:`FORM_REACTION_CLEARING_TIER`, which clears ``label``;
+    every other event gets an empty update.
     """
     from collections.abc import Awaitable
     from typing import cast
@@ -152,6 +157,8 @@ async def e2e_form_reaction(interaction_id: str, event: dict[str, Any], values: 
             raise RuntimeError(f"the e2e reaction refuses the {FORM_REACTION_FAILING_TIER} tier")
         if values.get("tier") == FORM_REACTION_REFUSED_TIER:
             return {"errors": {"tier": FORM_REACTION_REFUSED_SENTENCE}}
+        if values.get("tier") == FORM_REACTION_CLEARING_TIER:
+            return {"values": {"label": None}}
         return {"values": {"label": f"{FORM_REACTION_LABEL_PREFIX}{values.get('tier', '')}"}}
     return {}
 

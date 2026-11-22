@@ -123,7 +123,7 @@ _CONTROLS_SCHEMA = {
     "topology:replicas",
     "helper:channel-fake:telegram",
     "setting:CHANNEL_TELEGRAM_DEFAULT_RECIPIENT",
-    "setting:INTERACTIONS_PUBLIC_BASE_URL",
+    "setting:TAI_PUBLIC_BASE_URL",
 )
 async def test_form_over_telegram_web_app_button_and_the_callback_form_page(
     channel_stack: TaiStack, fake_telegram: FakeTelegram, uniq: Callable[[str], str]
@@ -190,7 +190,7 @@ async def test_form_over_telegram_web_app_button_and_the_callback_form_page(
     "topology:replicas",
     "helper:channel-fake:telegram",
     "setting:CHANNEL_TELEGRAM_DEFAULT_RECIPIENT",
-    "setting:INTERACTIONS_PUBLIC_BASE_URL",
+    "setting:TAI_PUBLIC_BASE_URL",
 )
 async def test_form_over_telegram_web_app_button_reads_the_caller_open_label(
     channel_stack: TaiStack, fake_telegram: FakeTelegram, uniq: Callable[[str], str]
@@ -228,7 +228,7 @@ async def test_form_over_telegram_web_app_button_reads_the_caller_open_label(
     "topology:replicas",
     "helper:channel-fake:telegram",
     "setting:CHANNEL_TELEGRAM_DEFAULT_RECIPIENT",
-    "setting:INTERACTIONS_PUBLIC_BASE_URL",
+    "setting:TAI_PUBLIC_BASE_URL",
 )
 async def test_confirm_over_telegram_tier1_url_button_reads_the_caller_open_label(
     channel_stack: TaiStack, fake_telegram: FakeTelegram, uniq: Callable[[str], str]
@@ -338,7 +338,7 @@ async def test_text_over_telegram_draws_the_caller_deadline_line(
     "topology:replicas",
     "helper:channel-fake:telegram",
     "setting:CHANNEL_TELEGRAM_DEFAULT_RECIPIENT",
-    "setting:INTERACTIONS_PUBLIC_BASE_URL",
+    "setting:TAI_PUBLIC_BASE_URL",
 )
 async def test_form_over_telegram_callback_page_draws_the_caller_chrome_and_sentences(
     channel_stack: TaiStack, fake_telegram: FakeTelegram, uniq: Callable[[str], str]
@@ -425,7 +425,7 @@ async def test_form_over_telegram_callback_page_draws_the_caller_chrome_and_sent
     "topology:replicas",
     "helper:channel-fake:slack",
     "setting:CHANNEL_SLACK_SIGNING_SECRET",
-    "setting:INTERACTIONS_PUBLIC_BASE_URL",
+    "setting:TAI_PUBLIC_BASE_URL",
 )
 async def test_form_over_slack_opens_a_modal_and_a_view_submission_answers(
     channel_stack: TaiStack, fake_slack: FakeSlack, uniq: Callable[[str], str]
@@ -520,7 +520,7 @@ _SLACK_DATE_TIME_SCHEMA = {
     "topology:replicas",
     "helper:channel-fake:slack",
     "setting:CHANNEL_SLACK_SIGNING_SECRET",
-    "setting:INTERACTIONS_PUBLIC_BASE_URL",
+    "setting:TAI_PUBLIC_BASE_URL",
 )
 async def test_form_over_slack_renders_native_date_and_time_pickers(
     channel_stack: TaiStack, fake_slack: FakeSlack, uniq: Callable[[str], str]
@@ -594,7 +594,7 @@ async def test_form_over_slack_renders_native_date_and_time_pickers(
     "topology:replicas",
     "helper:channel-fake:slack",
     "setting:CHANNEL_SLACK_SIGNING_SECRET",
-    "setting:INTERACTIONS_PUBLIC_BASE_URL",
+    "setting:TAI_PUBLIC_BASE_URL",
 )
 async def test_form_over_slack_draws_the_caller_chrome_labels(
     channel_stack: TaiStack, fake_slack: FakeSlack, uniq: Callable[[str], str]
@@ -660,7 +660,7 @@ _SELECT_PLACEHOLDER_SCHEMA = {
     "topology:replicas",
     "helper:channel-fake:slack",
     "setting:CHANNEL_SLACK_SIGNING_SECRET",
-    "setting:INTERACTIONS_PUBLIC_BASE_URL",
+    "setting:TAI_PUBLIC_BASE_URL",
 )
 async def test_form_over_slack_page_less_submit_and_select_placeholder(
     channel_stack: TaiStack, fake_slack: FakeSlack, uniq: Callable[[str], str]
@@ -717,7 +717,7 @@ async def test_form_over_slack_page_less_submit_and_select_placeholder(
     "topology:replicas",
     "helper:channel-fake:slack",
     "setting:CHANNEL_SLACK_SIGNING_SECRET",
-    "setting:INTERACTIONS_PUBLIC_BASE_URL",
+    "setting:TAI_PUBLIC_BASE_URL",
 )
 async def test_form_over_slack_review_page_draws_the_caller_empty_line(
     channel_stack: TaiStack, fake_slack: FakeSlack, uniq: Callable[[str], str]
@@ -776,7 +776,7 @@ async def test_form_over_slack_review_page_draws_the_caller_empty_line(
     "topology:replicas",
     "helper:channel-fake:slack",
     "setting:CHANNEL_SLACK_SIGNING_SECRET",
-    "setting:INTERACTIONS_PUBLIC_BASE_URL",
+    "setting:TAI_PUBLIC_BASE_URL",
 )
 async def test_form_over_slack_rejected_submission_shows_the_caller_inline_error(
     channel_stack: TaiStack, fake_slack: FakeSlack, uniq: Callable[[str], str]
@@ -856,7 +856,7 @@ async def test_form_over_slack_rejected_submission_shows_the_caller_inline_error
     "topology:replicas",
     "helper:channel-fake:slack",
     "setting:CHANNEL_SLACK_SIGNING_SECRET",
-    "setting:INTERACTIONS_PUBLIC_BASE_URL",
+    "setting:TAI_PUBLIC_BASE_URL",
 )
 async def test_form_over_slack_submit_after_the_record_is_gone_shows_the_caller_unavailable_line(
     channel_stack: TaiStack, fake_slack: FakeSlack, uniq: Callable[[str], str]
@@ -939,7 +939,7 @@ async def test_form_over_slack_submit_after_the_record_is_gone_shows_the_caller_
     "topology:replicas",
     "helper:channel-fake:slack",
     "setting:CHANNEL_SLACK_SIGNING_SECRET",
-    "setting:INTERACTIONS_PUBLIC_BASE_URL",
+    "setting:TAI_PUBLIC_BASE_URL",
 )
 async def test_form_over_slack_degrades_the_new_controls(
     channel_stack: TaiStack, fake_slack: FakeSlack, uniq: Callable[[str], str]

@@ -213,7 +213,7 @@ def test_stripe_real_drops_the_stub_and_routes_public(monkeypatch: pytest.Monkey
     assert cfg.env["STRIPE_SECRET_KEY"] == "sk_test_live0000"
     assert cfg.env["E2E_STRIPE_WEBHOOK_SECRET"] == "whsec_live0000"
     # the callback the real webhook drives is minted on the public origin
-    assert cfg.public_base_url_env_keys == ["INTERACTIONS_PUBLIC_BASE_URL"]
+    assert cfg.public_base_url_env_keys == ["TAI_PUBLIC_BASE_URL"]
     assert cfg.public_base_url == "https://e2e.example"
 
 

@@ -11,7 +11,6 @@ from tai42_e2e.manifests.agents import (
 from tai42_e2e.manifests.auth import (
     _SETUP_TOKEN,
     MCP_DOOR_AUTHORIZATION_SERVER,
-    MCP_DOOR_PUBLIC_BASE_URL,
     MCP_DOOR_STATIC_TOKEN,
     MCP_DOOR_USER_ID,
     build_accounts_fresh_stack,
@@ -100,7 +99,13 @@ from tai42_e2e.manifests.core import (
     build_replicas_stack,
 )
 from tai42_e2e.manifests.extensions import build_extensions_stack
-from tai42_e2e.manifests.feature_env import _base_env, _llm_env, _memory_agent_state_env, _redis_feature_env
+from tai42_e2e.manifests.feature_env import (
+    PUBLIC_BASE_URL,
+    _base_env,
+    _llm_env,
+    _memory_agent_state_env,
+    _redis_feature_env,
+)
 from tai42_e2e.manifests.hook_runs import build_hook_runs_replicas_stack, build_hook_runs_stack
 from tai42_e2e.manifests.manifest_mcp import (
     MISBEHAVING_MCP_TITLE,
@@ -180,7 +185,6 @@ __all__ = [
     "GOOGLE_CLIENT_ID",
     "MANAGED_SERVER_RELOAD_PROBE_ENV",
     "MCP_DOOR_AUTHORIZATION_SERVER",
-    "MCP_DOOR_PUBLIC_BASE_URL",
     "MCP_DOOR_STATIC_TOKEN",
     "MCP_DOOR_USER_ID",
     "MISBEHAVING_MCP_TITLE",
@@ -189,6 +193,7 @@ __all__ = [
     "POSTGRES_MCP_PROBE_TABLE",
     "POSTGRES_MCP_TITLE",
     "PROBE_TOOLS_TITLE",
+    "PUBLIC_BASE_URL",
     "REPLICAS_MCP_TITLE",
     "RESILIENCE_MCP_TITLE",
     "SHIPPED_CONNECTOR_ISSUERS",

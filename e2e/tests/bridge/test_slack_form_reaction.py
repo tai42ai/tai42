@@ -3,7 +3,8 @@ the ``e2e_form_reaction`` probe handler.
 
 A reacting field's change re-renders the open modal through ``views.update``. When the reaction
 fails, the modal shows a banner: the sender's ``wording.form.update_failed`` line with its
-``{reason}`` filled by the reaction door's own reason.
+``{reason}`` filled by the reaction door's own reason. A reaction that sets a field re-renders it
+with that initial value; one that clears it (a ``None`` value) re-renders it with none.
 """
 
 from __future__ import annotations
@@ -13,7 +14,9 @@ from typing import Any
 
 import pytest
 
+from tai42_e2e.channel_stubs import FakeSlack
 from tai42_e2e.manifests import SLACK_ALLOWED_RECIPIENTS
+from tai42_e2e.provider_stub import SignedInbound
 from tai42_e2e.settings import HarnessSettings
 from tai42_e2e.waiting import wait_for_async
 
@@ -31,18 +34,54 @@ _SLACK_INTERACTIVE_PATH = "/api/channels/slack/interactive"
 _SLACK_FORM_OPEN_ACTION = "tai42_form_open"
 _SLACK_FIELD_ACTION = "tai42_form_field"
 
-# A form whose ``tier`` field reacts; a silver pick makes the ``e2e_form_reaction`` probe raise.
+# A form whose ``tier`` field reacts; a silver pick makes the ``e2e_form_reaction`` probe raise,
+# a gold pick re-fills ``label`` and a plain pick clears it.
 _REACTING_SCHEMA = {
     "type": "object",
     "properties": {
         "label": {"type": "string", "title": "Label"},
-        "tier": {"type": "string", "enum": ["gold", "silver"], "title": "Tier"},
+        "tier": {"type": "string", "enum": ["gold", "silver", "plain"], "title": "Tier"},
     },
     "required": ["label", "tier"],
 }
 
 # The reason the platform's reaction door gives when the probe raises.
 _REACTION_RAISED_REASON = "reaction handler 'e2e_form_reaction' failed"
+
+# The prefix the probe writes in front of the picked tier when it re-fills ``label``, and the tier
+# whose pick makes it clear ``label`` — kept in step with the probe's own constants.
+_REACTION_LABEL_PREFIX = "picked "
+_REACTION_CLEARING_TIER = "plain"
+
+
+def _tier_change(
+    fake_slack: FakeSlack, signing_secret: str, private_metadata: str, label: str, tier: str, view_id: str
+) -> SignedInbound:
+    """A signed ``block_actions`` for a modal's ``tier`` change, with ``label`` holding ``label``."""
+    return fake_slack.build_interactive(
+        signing_secret=signing_secret,
+        payload={
+            "type": "block_actions",
+            "actions": [{"action_id": _SLACK_FIELD_ACTION, "block_id": "tier"}],
+            "view": {
+                "id": view_id,
+                "hash": f"{view_id}-hash",
+                "private_metadata": private_metadata,
+                "state": {
+                    "values": {
+                        "label": {_SLACK_FIELD_ACTION: {"type": "plain_text_input", "value": label}},
+                        "tier": {_SLACK_FIELD_ACTION: {"type": "radio_buttons", "selected_option": {"value": tier}}},
+                    }
+                },
+            },
+        },
+    )
+
+
+def _input_element(view: dict[str, Any], block_id: str) -> dict[str, Any]:
+    """The element of the view's input block ``block_id``."""
+    (block,) = [b for b in view["blocks"] if b["type"] == "input" and b["block_id"] == block_id]
+    return block["element"]
 
 
 def _form_open_value(blocks: list[dict[str, Any]] | None) -> str:
@@ -126,3 +165,73 @@ async def test_slack_modal_reaction_failure_shows_the_callers_could_not_update_b
     assert changed.json() == {"status": "updated"}
     banner = fake_slack.view_updates[-1]["view"]["blocks"][1]
     assert banner == {"type": "section", "text": {"type": "mrkdwn", "text": f"No update ({_REACTION_RAISED_REASON})"}}
+
+
+async def test_slack_modal_reaction_sets_then_clears_a_field(
+    media_bridge: BridgeHarness, uniq: Callable[[str], str]
+) -> None:
+    question = uniq("slack-clear-q")
+    fake_slack = media_bridge.slack
+    signing_secret = media_bridge.stack.config.env["CHANNEL_SLACK_SIGNING_SECRET"]
+    caller_key = await media_bridge.mint_key(user_id=uniq("slack-clear-key"), scopes=["e2e-all"])
+
+    async with media_bridge.stack.mcp(port=media_bridge.stack.port_a, auth=caller_key) as mcp:
+        await mcp.call_tool(
+            "e2e_reacting_form_ask",
+            {
+                "question": question,
+                "channel": "slack",
+                "recipient": SLACK_ALLOWED_RECIPIENTS[0],
+                "schema": _REACTING_SCHEMA,
+                "reactions": {"field_changed": ["tier"]},
+                "expiry_seconds": 120.0,
+            },
+        )
+
+    async def message_posted() -> list[dict[str, Any]]:
+        return fake_slack.sends_matching(question)
+
+    posts = await wait_for_async(message_posted, deadline=15.0, message=f"the slack form message for {question}")
+    interaction_id = _form_open_value(posts[0]["blocks"])
+    opened = await post_inbound(
+        media_bridge.stack,
+        _SLACK_INTERACTIVE_PATH,
+        fake_slack.build_interactive(
+            signing_secret=signing_secret,
+            payload={
+                "type": "block_actions",
+                "trigger_id": uniq("slack-clear-trigger"),
+                "actions": [{"action_id": _SLACK_FORM_OPEN_ACTION, "value": interaction_id}],
+            },
+        ),
+    )
+    assert opened.status_code == 200, opened.text
+    private_metadata = fake_slack.views[-1]["private_metadata"]
+
+    # A gold pick re-renders the label with the reaction's value as its initial value.
+    set_change = await post_inbound(
+        media_bridge.stack,
+        _SLACK_INTERACTIVE_PATH,
+        _tier_change(fake_slack, signing_secret, private_metadata, "x", "gold", uniq("slack-clear-view")),
+    )
+    assert set_change.status_code == 200, set_change.text
+    set_view = fake_slack.view_updates[-1]["view"]
+    assert _input_element(set_view, "label")["initial_value"] == f"{_REACTION_LABEL_PREFIX}gold"
+
+    # The clearing pick re-renders the label with no initial value; the tier keeps the pick.
+    clear_change = await post_inbound(
+        media_bridge.stack,
+        _SLACK_INTERACTIVE_PATH,
+        _tier_change(
+            fake_slack,
+            signing_secret,
+            set_view["private_metadata"],
+            f"{_REACTION_LABEL_PREFIX}gold",
+            _REACTION_CLEARING_TIER,
+            uniq("slack-clear-view"),
+        ),
+    )
+    assert clear_change.status_code == 200, clear_change.text
+    cleared_view = fake_slack.view_updates[-1]["view"]
+    assert "initial_value" not in _input_element(cleared_view, "label")
+    assert _input_element(cleared_view, "tier")["initial_option"]["value"] == _REACTION_CLEARING_TIER

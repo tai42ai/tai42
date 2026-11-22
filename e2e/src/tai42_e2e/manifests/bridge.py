@@ -311,9 +311,7 @@ def build_bridge_stack(res: StackResources, variants: Variants) -> StackConfig:
     switch = _switch()
     # A real inbound channel (twilio/whatsapp) mints the ask callback into its
     # outbound over the public origin instead of replica-B loopback; empty on all-mock.
-    bridge_public_keys = (
-        ["INTERACTIONS_PUBLIC_BASE_URL"] if any(switch.is_real(s) for s in ("twilio", "whatsapp")) else []
-    )
+    bridge_public_keys = ["TAI_PUBLIC_BASE_URL"] if any(switch.is_real(s) for s in ("twilio", "whatsapp")) else []
     return StackConfig(
         name="bridge",
         topology=Topology.REPLICAS,
@@ -322,7 +320,7 @@ def build_bridge_stack(res: StackResources, variants: Variants) -> StackConfig:
         run_backend=True,
         run_metrics=True,
         auth=True,
-        replica_b_origin_env_keys=["INTERACTIONS_PUBLIC_BASE_URL"],
+        replica_b_origin_env_keys=["TAI_PUBLIC_BASE_URL"],
         public_base_url_env_keys=bridge_public_keys,
         public_base_url=switch.public_base_url,
     )
@@ -335,8 +333,8 @@ def build_media_bridge_stack(res: StackResources, variants: Variants) -> StackCo
     Identical to :func:`build_bridge_stack` (backend + metrics + the redis conversations backend +
     the hooks manager an unsupported event is observed through) with the telegram + slack channel
     plugins added, so one stack bridges a media inbound to a turn AND replies + emits the platform
-    rejection event on every channel. Telegram's ``setWebhook`` needs its inbound-door origin, so
-    ``CHANNEL_TELEGRAM_PUBLIC_BASE_URL`` joins the replica-B origin fill; the shared
+    rejection event on every channel. Telegram's ``setWebhook`` builds its inbound-door URL from
+    ``TAI_PUBLIC_BASE_URL``, which the base stack already fills with replica B's origin; the shared
     ``^/api/channels/.*$`` public route already covers the telegram + slack inbound doors."""
     base = build_bridge_stack(res, variants)
     switch = _switch()
@@ -364,7 +362,6 @@ def build_media_bridge_stack(res: StackResources, variants: Variants) -> StackCo
         name="media-bridge",
         manifest=manifest,
         env=env,
-        replica_b_origin_env_keys=[*base.replica_b_origin_env_keys, "CHANNEL_TELEGRAM_PUBLIC_BASE_URL"],
     )
 
 

@@ -7,7 +7,7 @@ transcript whose media url is the ABSOLUTE served reference
 fetches it from that url, never the inline bytes. The served-media door returns the exact
 bytes with the right mime. The web channel is driven because its own public doors ARE the
 medium — the visitor's SSE stream is the card surface. The stack pins
-``INTERACTIONS_PUBLIC_BASE_URL`` to replica B's origin (``replica_b_origin_env_keys``), which
+``TAI_PUBLIC_BASE_URL`` to replica B's origin (``replica_b_origin_env_keys``), which
 is what the seam mints the absolute url from.
 """
 
@@ -38,7 +38,7 @@ def _base_url(bridge: BridgeHarness) -> str:
 pytestmark = pytest.mark.needs(
     "kind:channels:web",
     "kind:identity",
-    "setting:INTERACTIONS_PUBLIC_BASE_URL",
+    "setting:TAI_PUBLIC_BASE_URL",
     "setting:router:notifications",
     "setting:seeded-access-control",
     "store:redis",

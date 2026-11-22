@@ -197,7 +197,7 @@ def build_agent_route_park_stack(res: StackResources, variants: Variants) -> Sta
         run_backend=False,
         run_metrics=False,
         auth=True,
-        replica_b_origin_env_keys=["INTERACTIONS_PUBLIC_BASE_URL"],
+        replica_b_origin_env_keys=["TAI_PUBLIC_BASE_URL"],
     )
 
 

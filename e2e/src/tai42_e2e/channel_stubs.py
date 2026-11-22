@@ -425,26 +425,25 @@ class FakeSlack:
         event_id: str,
         user: str = SLACK_PARTICIPANT_USER,
         valid: bool = True,
+        attachments: list[dict[str, Any]] | None = None,
     ) -> SignedInbound:
         """A genuine Events API ``event_callback``: a thread reply whose
         ``thread_ts`` is the delivered ``ts``, carrying the sender ``user`` and a valid Slack v0
         HMAC over ``v0:{ts}:{body}`` computed with the signing secret. ``valid=False`` mints
-        the same envelope under the WRONG secret (the fail-closed negative)."""
+        the same envelope under the WRONG secret (the fail-closed negative). ``attachments``
+        rides on the event as a shared message's attachments."""
         timestamp = str(int(time.time()))
-        body = json.dumps(
-            {
-                "type": "event_callback",
-                "event_id": event_id,
-                "event": {
-                    "type": "message",
-                    "channel": channel,
-                    "user": user,
-                    "thread_ts": thread_ts,
-                    "ts": f"{next(self._ts)}.000100",
-                    "text": text,
-                },
-            }
-        ).encode()
+        event: dict[str, Any] = {
+            "type": "message",
+            "channel": channel,
+            "user": user,
+            "thread_ts": thread_ts,
+            "ts": f"{next(self._ts)}.000100",
+            "text": text,
+        }
+        if attachments is not None:
+            event["attachments"] = attachments
+        body = json.dumps({"type": "event_callback", "event_id": event_id, "event": event}).encode()
         key = signing_secret if valid else signing_secret + "-tampered"
         base = b"v0:" + timestamp.encode("ascii") + b":" + body
         digest = hmac.new(key.encode("utf-8"), base, hashlib.sha256).hexdigest()

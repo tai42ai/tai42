@@ -4,7 +4,7 @@
 delivers ONE outbound send through its provider stub; a GENUINELY-signed inbound
 reply arrives on replica B (the plugin's real signature verification runs); the
 inbound handler correlates it through the shared Redis and forwards to the
-callback door (also B-served, per ``INTERACTIONS_PUBLIC_BASE_URL``); the blocked
+callback door (also B-served, per ``TAI_PUBLIC_BASE_URL``); the blocked
 run resumes on A with the answer. A whole channel pipe — deliver → correlate →
 inbound-verify → callback-forward — sits between the ask and its answer, across
 process boundaries, with zero real network (the stub is in-process; an
@@ -46,7 +46,7 @@ pytestmark = [
         "helper:channel-fake:slack",
         "helper:channel-fake:twilio",
         "setting:channel-inbound-secrets",
-        "setting:INTERACTIONS_PUBLIC_BASE_URL",
+        "setting:TAI_PUBLIC_BASE_URL",
     ),
 ]
 

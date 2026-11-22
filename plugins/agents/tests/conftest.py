@@ -52,7 +52,7 @@ from tai42_contract.app import tai42_app
 from tai42_contract.connectors import ResolvedConnectionAuth
 from tai42_contract.monitoring import TraceContext
 from tai42_contract.sandbox import Sandbox, SandboxPolicy, SandboxUnavailableError
-from tai42_contract.template import ImageReference, TemplatedText
+from tai42_contract.template import ImageReference, TemplatedText, TemplateNotFoundError
 from tai42_contract.tools import ClientTool
 from tai42_kit.monitoring.otel import OtelWriter
 from tai42_kit.monitoring.testing import InMemoryOtelReader
@@ -275,12 +275,7 @@ class RecordingResourceManager:
         if text.content is not None:
             return text.content
         if text.id not in self.templates:
-            # The real manager raises ``TemplateNotFoundError`` (a bare
-            # ``Exception`` subclass tai42-agents cannot import); the agents
-            # never catch it, so what a caller observes is "propagates and
-            # aborts". ``RuntimeError`` reproduces that without a type — like
-            # ``KeyError`` — that a narrow ``except LookupError`` would catch.
-            raise RuntimeError(f"unknown template id: {text.id}")
+            raise TemplateNotFoundError(f"references stored id {text.id!r}, which could not be fetched: not stored")
         return self.templates[text.id]
 
 

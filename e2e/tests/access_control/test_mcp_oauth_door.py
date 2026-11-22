@@ -1,7 +1,7 @@
 """The MCP door, e2e: the 401 pointer, the protected-resource metadata documents, the sessions behind them.
 
 An identity provider that declares an authorization server (the fixture provider, which
-accepts one static token) and ``ACCESS_CONTROL_PUBLIC_BASE_URL`` turn the door on: a 401 from
+accepts one static token) and ``TAI_PUBLIC_BASE_URL`` turn the door on: a 401 from
 an MCP endpoint names that endpoint's metadata document, which names the declared server and
 the endpoint's public URL. With either half missing the door advertises nothing, and a
 declaring provider with no public URL says so once in the boot log.
@@ -19,9 +19,9 @@ from tai42_e2e import Infra
 from tai42_e2e.booting import boot_stack
 from tai42_e2e.manifests import (
     MCP_DOOR_AUTHORIZATION_SERVER,
-    MCP_DOOR_PUBLIC_BASE_URL,
     MCP_DOOR_STATIC_TOKEN,
     MCP_DOOR_USER_ID,
+    PUBLIC_BASE_URL,
     build_mcp_door_stack,
     build_mcp_door_studio_routes_stack,
     build_mcp_door_without_provider_stack,
@@ -35,7 +35,7 @@ pytestmark = pytest.mark.needs(
     "store:postgres",
     "store:redis",
     "setting:seeded-access-control",
-    "setting:ACCESS_CONTROL_PUBLIC_BASE_URL",
+    "setting:TAI_PUBLIC_BASE_URL",
 )
 
 DOC = "/.well-known/oauth-protected-resource"
@@ -45,7 +45,7 @@ PROBE_TOOL = "e2e_echo"
 
 
 def _pointer(endpoint: str) -> str:
-    return f'Bearer resource_metadata="{MCP_DOOR_PUBLIC_BASE_URL}{DOC}{endpoint}"'
+    return f'Bearer resource_metadata="{PUBLIC_BASE_URL}{DOC}{endpoint}"'
 
 
 def _boot_door(infra: Infra, root: Path, builder) -> Iterator[TaiStack]:
@@ -93,7 +93,7 @@ def test_an_unauthenticated_mcp_post_points_at_the_document_that_names_the_serve
         document = client.get(f"{DOC}/mcp")
     assert document.status_code == 200, document.text
     assert document.json() == {
-        "resource": f"{MCP_DOOR_PUBLIC_BASE_URL}/mcp",
+        "resource": f"{PUBLIC_BASE_URL}/mcp",
         "authorization_servers": [MCP_DOOR_AUTHORIZATION_SERVER],
         "bearer_methods_supported": ["header"],
     }
@@ -124,7 +124,7 @@ async def test_a_slug_registered_on_a_gets_the_pointer_and_its_document_on_b(
     assert refused.status_code == 401, refused.text
     assert refused.headers["www-authenticate"] == _pointer(f"/app/{slug}")
     assert document.status_code == 200, document.text
-    assert document.json()["resource"] == f"{MCP_DOOR_PUBLIC_BASE_URL}/app/{slug}"
+    assert document.json()["resource"] == f"{PUBLIC_BASE_URL}/app/{slug}"
 
 
 # -- 4. an API key on /mcp; an /api 401 -------------------------------------------------------
@@ -168,7 +168,7 @@ def test_without_a_public_url_nothing_is_advertised_and_the_boot_log_says_so(
     warnings = [
         line
         for line in boot_logs.splitlines()
-        if "WARNING" in line and "ACCESS_CONTROL_PUBLIC_BASE_URL" in line and "door-static" in line
+        if "WARNING" in line and "TAI_PUBLIC_BASE_URL" in line and "door-static" in line
     ]
     assert len(warnings) == 1, warnings
 
