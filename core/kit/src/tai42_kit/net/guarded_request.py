@@ -21,10 +21,11 @@ from dataclasses import dataclass
 from typing import Any
 
 import httpx
+from tai42_contract.urls import is_loopback_host
 
 from tai42_kit.net import url_guard
 from tai42_kit.net.fetch_url import guarded_fetch_client, unwrap_guard_error
-from tai42_kit.net.url_guard import UrlGuardError, is_loopback_host
+from tai42_kit.net.url_guard import UrlGuardError
 
 
 class GuardedRequestError(Exception):

@@ -28,6 +28,7 @@ from tai42_kit.interactions.media_caps import (
     MediaIngestCapSettings,
     media_ingest_cap_settings,
 )
+from tai42_kit.interactions.offered_choices import find_option, offered_picks
 from tai42_kit.interactions.park_kill import ParkKillNotReadyError, ParkKillOwnerMissingError
 
 __all__ = [
@@ -49,8 +50,10 @@ __all__ = [
     "drawn_number_bounds",
     "evaluate_door_contract",
     "evaluate_visible_when",
+    "find_option",
     "hidden_fields",
     "media_ingest_cap_settings",
+    "offered_picks",
     "parked_entries_for_jq",
     "pin_callback_url",
 ]

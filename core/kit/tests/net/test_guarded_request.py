@@ -22,7 +22,6 @@ from tai42_kit.net import (
     GuardedRequestTimeoutError,
     GuardedResponse,
     guarded_request,
-    is_loopback_host,
     url_guard,
 )
 from tai42_kit.net.url_guard import UrlGuardError, UrlGuardSettings
@@ -318,21 +317,6 @@ async def test_refusal_and_timeout_text_carry_no_query(monkeypatch: pytest.Monke
     with pytest.raises(GuardedRequestTimeoutError) as timed_out:
         await guarded_request("GET", f"{server.base_url}/x?code=query-secret", timeout=0.3, max_bytes=1024)
     assert "query-secret" not in _chain_text(timed_out.value)
-
-
-@pytest.mark.parametrize(
-    ("host", "expected"),
-    [
-        ("localhost", True),
-        ("127.0.0.1", True),
-        ("127.8.0.1", True),
-        ("::1", True),
-        ("example.com", False),
-        ("10.0.0.1", False),
-    ],
-)
-def test_is_loopback_host(host: str, expected: bool) -> None:
-    assert is_loopback_host(host) is expected
 
 
 def test_the_package_exports_the_functions_not_their_modules() -> None:

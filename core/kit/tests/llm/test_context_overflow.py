@@ -15,7 +15,7 @@ from langchain.agents.middleware.context_editing import ClearToolUsesEdit
 from langchain.agents.middleware.summarization import DEFAULT_SUMMARY_PROMPT
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from tai42_contract.app import tai42_app
-from tai42_contract.template import TemplatedText
+from tai42_contract.template import TemplatedText, TemplateNotFoundError
 
 from tai42_kit.llm.middleware import context_overflow as co
 from tai42_kit.llm.middleware.context_overflow import (
@@ -27,13 +27,15 @@ from tai42_kit.llm.middleware.trimming import TrimmingMiddleware
 
 class _FakeResourceManager:
     """Renders a templated text like the real manager: a stored id from the map (a
-    missing one raises), else the inline content."""
+    missing one raises the seam's ``TemplateNotFoundError``), else the inline content."""
 
     def __init__(self) -> None:
         self.resources: dict[str, str] = {}
 
     async def render_templated_text(self, text: TemplatedText, locale: str | None = None) -> str:
         if text.id is not None:
+            if text.id not in self.resources:
+                raise TemplateNotFoundError(f"references stored id {text.id!r}, which could not be fetched: not stored")
             return self.resources[text.id]
         return text.content or ""
 
@@ -160,7 +162,7 @@ class TestMiddlewareFactory:
             patch.object(co, "summarization_middleware_settings", return_value=smw),
             _patch_summary_build(),
             _bound_manager(),
-            pytest.raises(KeyError),
+            pytest.raises(TemplateNotFoundError, match="'absent'"),
         ):
             await context_overflow_middlewares()
 
