@@ -75,7 +75,7 @@ test('a notify_user form to the internal sink is refused — a form needs a chan
   request,
 }) => {
   // The notifications inbox is a read-only sink: it renders a message, never a fillable form. So a
-  // channel-less notify_user carrying a form ``schema`` is refused loudly at the door (nothing
+  // channel-less notify_user carrying a form ``schema`` is refused at the door as a 400 (nothing
   // recorded), never a half-broken card. A form is rendered by a CHANNEL widget instead
   // (form-data-widget.spec.ts), where a per-send ``data``/``pages`` opens prefilled and stepped.
   const res = await request.post('/api/run-tool', {
@@ -88,6 +88,6 @@ test('a notify_user form to the internal sink is refused — a form needs a chan
       },
     },
   });
-  expect(res.status()).toBe(500);
+  expect(res.status()).toBe(400);
   expect((await res.text()).toLowerCase()).toContain('schema');
 });
