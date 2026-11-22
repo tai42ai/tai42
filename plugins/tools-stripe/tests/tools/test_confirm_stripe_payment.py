@@ -172,7 +172,7 @@ def test_empty_bridge_secret_names_the_var(stripe_env: Callable[..., None], stub
 @pytest.mark.usefixtures("curl_app")
 def test_empty_public_base_names_the_var(stripe_env: Callable[..., None], stub_server: Any) -> None:
     stripe_env(secret_key="sk_test_abc", public_base="", bridge_secret="bridge-secret")
-    with pytest.raises(ValueError, match="INTERACTIONS_PUBLIC_BASE_URL"):
+    with pytest.raises(ValueError, match="TAI_PUBLIC_BASE_URL"):
         asyncio.run(confirm_stripe_payment(_event(_session(_callback(stub_server.base_url)))))
 
 

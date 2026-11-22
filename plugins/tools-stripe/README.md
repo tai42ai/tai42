@@ -149,7 +149,7 @@ load). After an outage LONGER than the lookback, run `reconcile_stripe_payments`
 **Operator prerequisites.** Register the account webhook endpoint at the same API version the tools
 pin (the endpoint's own API version governs the event payload shape); register the topic hook with
 the canonical projection `expr` and a `checkout.session.completed` `condition`; set
-`STRIPE_SECRET_KEY`, `TAI_BRIDGE_CALLBACK_SECRET` and `INTERACTIONS_PUBLIC_BASE_URL`; and schedule
+`STRIPE_SECRET_KEY`, `TAI_BRIDGE_CALLBACK_SECRET` and `TAI_PUBLIC_BASE_URL`; and schedule
 `reconcile_stripe_payments`. `STRIPE_API_BASE` is settings-overridable and is a privileged
 capability — a host it points at receives the `Authorization: Bearer <key>` header, so treat env
 write as privileged.
@@ -229,7 +229,7 @@ together enable it.
 | Request timeout | `STRIPE_REQUEST_TIMEOUT_SECONDS` | `20` | Per-request timeout. |
 | Reconcile pacing | `STRIPE_RECONCILE_ANSWER_INTERVAL_SECONDS` | `1.2` | Delay between reconcile answers. |
 | Bridge secret | `TAI_BRIDGE_CALLBACK_SECRET` | — | Authenticates the bridge to the callback door. Required for confirm/reconcile. |
-| Public base | `INTERACTIONS_PUBLIC_BASE_URL` | — | Read by the platform, which mints the callback URL the POST is pinned to. Required for confirm/reconcile. |
+| Public base | `TAI_PUBLIC_BASE_URL` | — | Read by the platform, which mints the callback URL the POST is pinned to. Required for confirm/reconcile. |
 
 Secrets live only in the environment. A missing or empty required secret raises loudly (fails
 closed) — never a silently-unauthenticated request.
