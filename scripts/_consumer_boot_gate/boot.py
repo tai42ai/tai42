@@ -209,7 +209,7 @@ def _external_service_env(dist_name: str, blackhole_url: str) -> dict[str, str]:
         return {
             "CHANNEL_TELEGRAM_BOT_TOKEN": "9900000000:consumer-boot-gate",
             "CHANNEL_TELEGRAM_WEBHOOK_SECRET": secrets.token_hex(16),
-            "CHANNEL_TELEGRAM_PUBLIC_BASE_URL": blackhole_url,
+            "TAI_PUBLIC_BASE_URL": blackhole_url,
             "CHANNEL_TELEGRAM_DEFAULT_RECIPIENT": "1",
             "CHANNEL_TELEGRAM_API_BASE_URL": blackhole_url,
         }

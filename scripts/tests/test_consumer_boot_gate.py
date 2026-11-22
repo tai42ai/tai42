@@ -559,11 +559,11 @@ def test_read_provides_reads_network_permission():
             {
                 "CHANNEL_TELEGRAM_BOT_TOKEN",
                 "CHANNEL_TELEGRAM_WEBHOOK_SECRET",
-                "CHANNEL_TELEGRAM_PUBLIC_BASE_URL",
+                "TAI_PUBLIC_BASE_URL",
                 "CHANNEL_TELEGRAM_DEFAULT_RECIPIENT",
                 "CHANNEL_TELEGRAM_API_BASE_URL",
             },
-            {"CHANNEL_TELEGRAM_API_BASE_URL", "CHANNEL_TELEGRAM_PUBLIC_BASE_URL"},
+            {"CHANNEL_TELEGRAM_API_BASE_URL", "TAI_PUBLIC_BASE_URL"},
         ),
         (
             "tai42-channel-slack",

@@ -34,6 +34,8 @@ concurrency:
 
 jobs:
   check:
+    # Runs only where the audited manifest map is configured; a repo without it skips the job.
+    if: vars.DOWNSTREAM_PINS_MANIFESTS != ''
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
