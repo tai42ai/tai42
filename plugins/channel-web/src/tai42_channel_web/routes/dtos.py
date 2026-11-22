@@ -257,9 +257,10 @@ class ReactionResultResponse(BaseModel):
 
     A reaction records no answer and leaves the question open; the body carries only the
     update the form applies. Each key is present only when the reaction supplied it:
-    ``values`` sets fields, ``options`` replaces the choice list of an option-bearing field,
-    ``errors`` carries per-field messages, and ``display`` fills declared display slots. The
-    ticket react door validated it against the form's own schema before it reached here.
+    ``values`` sets fields (a ``null`` member clears its field), ``options`` replaces the choice
+    list of an option-bearing field, ``errors`` carries per-field messages, and ``display`` fills
+    declared display slots. The ticket react door validated it against the form's own schema
+    before it reached here.
     """
 
     values: dict[str, Any] | None = None

@@ -198,7 +198,7 @@ frame fails to parse on the page itself.
 
 A web answer or a form reaction is forwarded server-side to the stored callback URL of
 the pending question. Before anything is sent, that stored URL is pinned against the
-callback prefix the platform mints under (`{INTERACTIONS_PUBLIC_BASE_URL}/api/interactions/callback/`):
+callback prefix the platform mints under (`{TAI_PUBLIC_BASE_URL}/api/interactions/callback/`):
 only that exact shape — the same scheme, host and port, no userinfo, query or fragment,
 one ticket segment — is accepted. A record outside it, or a deployment with no public
 base, is refused: an `ERROR` log names the interaction, the reason and the host (never
