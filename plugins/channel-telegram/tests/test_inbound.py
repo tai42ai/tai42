@@ -721,11 +721,11 @@ async def test_tap_matching_no_live_option_bridges_the_tapped_label(
         pytest.param("not-rows", id="malformed-keyboard"),
     ],
 )
-async def test_stale_tap_whose_label_cannot_be_read_sends_the_unreadable_notice(
+async def test_stale_tap_whose_label_cannot_be_read_sends_the_choice_unavailable_notice(
     http_recorder, fake_redis, channels, conversations, keyboard: Any
 ):
-    # A stale tap whose button label the query does not carry is a reply the channel could not
-    # read: the user gets the one unreadable notice, no turn is made and the ask is untouched.
+    # A stale tap whose button label the query does not carry is a choice that no longer exists:
+    # the user gets the one choice-unavailable notice, no turn is made and the ask is untouched.
     response = await inbound(
         make_inbound_request(_callback_update(data="1", keyboard=keyboard), headers=_VALID_HEADERS)
     )
@@ -738,7 +738,7 @@ async def test_stale_tap_whose_label_cannot_be_read_sends_the_unreadable_notice(
     assert rejected.recipient == "777"
     assert rejected.sender_identity == "123456"
     assert rejected.kind == "callback_query"
-    assert rejected.reason is InboundRejectionReason.UNREADABLE
+    assert rejected.reason is InboundRejectionReason.CHOICE_UNAVAILABLE
     assert len(_answered_callbacks(http_recorder)) == 1
 
 
@@ -1135,6 +1135,27 @@ async def test_getfile_permanent_failure_rejects_could_not_receive(
     rejected = conversations.rejected_calls[0]
     assert rejected.kind == "image"
     assert rejected.reason is InboundRejectionReason.COULD_NOT_RECEIVE
+
+
+async def test_a_redelivered_rejected_media_sends_no_second_notice(
+    http_recorder, fake_redis, conversations, monkeypatch: pytest.MonkeyPatch
+):
+    # The caption's bridge fails transiently after the notice went out, so the update raises and
+    # Telegram redelivers it: the redelivery bridges the caption but repeats no notice.
+    http_recorder.responder = _getfile_responder(status=404)
+    update = _media_update(photo=[{"file_id": "gone", "file_size": 900}], caption="the blue one", update_id=4242)
+    conversations.accept_error = RuntimeError("redis down")
+    with pytest.raises(RuntimeError, match="redis down"):
+        await inbound(make_inbound_request(update, headers=_VALID_HEADERS))
+    conversations.accept_error = None
+
+    response = await inbound(make_inbound_request(update, headers=_VALID_HEADERS))
+
+    assert response.status_code == 200
+    assert _body(response) == {"data": {"status": "accepted"}}
+    (rejected,) = conversations.rejected_calls
+    assert rejected.reason is InboundRejectionReason.COULD_NOT_RECEIVE
+    assert [call.text for call in conversations.accept_calls] == ["the blue one", "the blue one"]
 
 
 async def test_getfile_transient_5xx_raises_for_redelivery(

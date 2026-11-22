@@ -81,10 +81,11 @@ tool parameter, never visible to the LLM:
 | `CHANNEL_TELEGRAM_ALLOWED_RECIPIENTS` | `[]` | Whitelist of chats a caller-supplied recipient may name (numeric id — negative for groups — or `@username`), as a comma-separated string or a JSON list. A group or channel recipient cannot receive `form` questions — Telegram allows the `web_app` button in private chats only |
 | `CHANNEL_TELEGRAM_DEFAULT_RECIPIENT` | — | The chat questions go to when the caller names no recipient (trusted; not checked against the allowlist) |
 | `CHANNEL_TELEGRAM_WEBHOOK_SECRET` | — | `setWebhook` secret_token; verified on every inbound update (required) |
-| `CHANNEL_TELEGRAM_PUBLIC_BASE_URL` | — | This deployment's public base URL (required) |
 | `CHANNEL_TELEGRAM_REDIS_URL` | — | Redis the correlation store lives in (required) |
 | `CHANNEL_TELEGRAM_API_BASE_URL` | `https://api.telegram.org` | Bot API origin (stub servers/e2e only) |
 | `CHANNEL_TELEGRAM_HTTP_TIMEOUT_SECONDS` | `30` | Budget per outbound HTTP call |
+| `CHANNEL_TELEGRAM_OPTION_TAP_TTL_SECONDS` | `86400` | How long a notification's tappable options stay resolvable |
+| `CHANNEL_TELEGRAM_DEDUPE_TTL` | `172800` | Refused-media notice replay-guard window, seconds |
 
 Optional Redis connection tuning (see `TelegramCorrelationSettings`):
 
@@ -186,7 +187,7 @@ is the retry contract:
 | Service event the channel does not list | 200 "ignored", one "not supported" notice and an `unsupported_type` event (kind `other`) |
 | Message that answers no pending question (not a reply, or a reply with no pending correlation) | bridged as a new turn |
 | Tap on a keyboard button whose token no live option holds | bridged as a new turn carrying the tapped button's text, as a reply to the keyboard's message, with no entry parameters |
-| Such a tap whose button text cannot be read off the update | 200 "ignored", one "could not be read" notice and an `unreadable` event (kind `callback_query`) |
+| Such a tap whose button text cannot be read off the update | 200 "ignored", one "no longer available" notice and a `choice_unavailable` event (kind `callback_query`) |
 | Callback door 200 | 200 "forwarded", mapping cleared |
 | Callback door 404 (ticket terminally gone) | 200 "stale", mapping cleared |
 | Callback door 400 (answer rejected) | 200 "rejected", mapping KEPT — the human can reply again |
@@ -270,10 +271,10 @@ topic's own first message (`message_id == message_thread_id`) is not a reply, an
    (comma-separated or a JSON list).
 3. Generate a webhook secret (1-256 chars of `[A-Za-z0-9_-]`) for
    `CHANNEL_TELEGRAM_WEBHOOK_SECRET`.
-4. Set `CHANNEL_TELEGRAM_PUBLIC_BASE_URL` to the deployment's public origin.
+4. Set `TAI_PUBLIC_BASE_URL` (the deployment's own setting) to the deployment's public origin.
    Telegram only delivers webhooks over **HTTPS** (TLS ≥ 1.2) to ports
    **443, 80, 88, or 8443**. The startup hook points the bot's webhook at
-   `{public_base_url}/api/channels/telegram/inbound` and aborts startup loudly
+   `{TAI_PUBLIC_BASE_URL}/api/channels/telegram/inbound` and aborts startup loudly
    if `setWebhook` fails.
 
 ## The bot token stays out of logs

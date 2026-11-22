@@ -108,11 +108,11 @@ async def _bridge_stale_tap(
     The tap answers nothing, so it never reaches the answer ladder and never claims or changes a
     live ask. Its label is read off the query's own keyboard and bridged as a reply to the
     keyboard's message, with no params (no option record, no author-set id or description). A
-    query that carries no such label gets the one unreadable notice.
+    query that carries no such label gets the one choice-unavailable notice.
     """
     label = _tapped_label(message, data)
     if label is None:
-        return await _notify_rejected(settings, chat_id, "callback_query", InboundRejectionReason.UNREADABLE)
+        return await _notify_rejected(settings, chat_id, "callback_query", InboundRejectionReason.CHOICE_UNAVAILABLE)
     return await _bridge(
         settings,
         chat_id,
@@ -159,7 +159,7 @@ async def _resolve_callback(settings: TelegramSettings, update: dict[str, object
     keyboard) answers nothing and claims no ask: the tapped button's label, read off the
     query's own keyboard, bridges as the user's message with no params; when the query
     carries no such label (an inaccessible message has no keyboard) the user gets the one
-    unreadable notice.
+    choice-unavailable notice.
 
     The callback query is answered first (best-effort) so the button's spinner clears
     regardless of the routing outcome; a failure there is logged, never raised (an

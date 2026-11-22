@@ -34,9 +34,9 @@ def test_env_mapping():
     assert settings.allowed_recipients == ["888", "999"]
     assert settings.webhook_secret is not None
     assert settings.webhook_secret.get_secret_value() == "s3cret_token"
-    assert settings.public_base_url == "https://example.test"
     assert settings.api_base_url == "https://api.telegram.org"
     assert settings.http_timeout_seconds == 30
+    assert settings.dedupe_ttl == 172_800
 
 
 def test_allowed_recipients_comma_string_split_strip_drop_empty(monkeypatch: pytest.MonkeyPatch):
@@ -109,4 +109,11 @@ def test_zero_timeout_rejected(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("CHANNEL_TELEGRAM_HTTP_TIMEOUT_SECONDS", "0")
     reset_all_settings()
     with pytest.raises(ValidationError, match="http_timeout_seconds"):
+        TelegramSettings()
+
+
+def test_dedupe_ttl_rejects_non_positive(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("CHANNEL_TELEGRAM_DEDUPE_TTL", "0")
+    reset_all_settings()
+    with pytest.raises(ValidationError, match="dedupe_ttl"):
         TelegramSettings()

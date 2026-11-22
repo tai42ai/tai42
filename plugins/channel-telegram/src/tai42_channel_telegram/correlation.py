@@ -35,7 +35,11 @@ from tai42_contract.app import tai42_app
 from tai42_contract.channels import Correlation
 from tai42_kit.clients.impl.redis import RedisClient
 
-from tai42_channel_telegram.settings import TelegramCorrelationSettings, telegram_correlation_settings
+from tai42_channel_telegram.settings import (
+    TelegramCorrelationSettings,
+    telegram_correlation_settings,
+    telegram_settings,
+)
 
 
 class StoredOption(BaseModel):
@@ -72,6 +76,9 @@ _KEY_PREFIX = "channel:telegram:corr:"
 # independent of the correlation record (a notify carries options but no correlation), so
 # it is set and read on its own key.
 _OPTIONS_KEY_PREFIX = "channel:telegram:opts:"
+# A marker per handled item (a refused media's notice), so a redelivered update repeats no
+# notice; it expires after the configured dedupe window.
+_SEEN_KEY_PREFIX = "channel:telegram:seen:"
 
 
 def scoped_correlation_key(chat_id: str, message_id: str) -> str:
@@ -127,6 +134,18 @@ async def get_options(chat_id: str, message_id: str) -> list[StoredOption] | Non
     if raw is None:
         return None
     return [StoredOption.model_validate(item) for item in json.loads(raw)]
+
+
+async def already_seen(key: str) -> bool:
+    """Whether the item ``key`` names was already handled (a redelivered update)."""
+    async with _redis_ctx() as r:
+        return bool(await r.exists(f"{_SEEN_KEY_PREFIX}{key}"))
+
+
+async def mark_seen(key: str) -> None:
+    """Remember the item ``key`` names as handled for the configured dedupe window."""
+    async with _redis_ctx() as r:
+        await r.set(f"{_SEEN_KEY_PREFIX}{key}", "1", ex=telegram_settings().dedupe_ttl)
 
 
 def _redis_settings() -> TelegramCorrelationSettings:
