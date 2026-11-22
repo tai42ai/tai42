@@ -14,7 +14,13 @@ from urllib.parse import urlencode
 import httpx
 import pytest
 from tai42_contract.channels import AnswerForwardError, InboundAnswerOutcome
-from tai42_contract.interactions import FieldChangedEvent, FormReactionError, SubmittedEvent
+from tai42_contract.interactions import (
+    FieldChangedEvent,
+    FormReactionError,
+    FormShapeError,
+    FormShapeKind,
+    SubmittedEvent,
+)
 
 from tai42_channel_slack.blocks import REPLY_ACTION_PREFIX, SELECT_ACTION_PREFIX, encode_reply_value
 from tai42_channel_slack.correlation import store_correlation, store_form_record
@@ -947,6 +953,40 @@ async def test_field_change_runs_reaction_and_applies_the_update(fake_redis, htt
     assert metadata.display == {"total": "Total: 20"}
 
 
+async def test_field_change_reaction_clearing_a_field_drops_it_from_the_re_render(
+    fake_redis, http_script, interactions
+):
+    # A ``None`` value clears its field: the re-rendered element carries no initial value and the
+    # review page's readback leaves the field out.
+    schema = {
+        "type": "object",
+        "properties": {"qty": {"type": "integer", "title": "Quantity"}, "note": {"type": "string", "title": "Note"}},
+    }
+    pages = [
+        {"title": "Details", "fields": ["qty", "note"], "kind": "input", "display": []},
+        {"title": "Review", "fields": [], "kind": "review", "display": []},
+    ]
+    reactions = {"field_changed": ["note"], "page_advanced": [], "submitted": False, "choices": []}
+    await store_form_record(_INTERACTION_ID, _CALLBACK, schema, _QUESTION, _future(), pages=pages, reactions=reactions)
+    interactions.react_result = {"values": {"qty": None}}
+    http_script.results.append(httpx.Response(200, json={"ok": True}))
+    state = {
+        "qty": {FIELD_ACTION_ID: {"type": "number_input", "value": "4"}},
+        "note": {FIELD_ACTION_ID: {"type": "plain_text_input", "value": "hi"}},
+    }
+
+    response = await slack_interactive(_signed(_field_action("note", state)))
+
+    assert body_json(response) == {"status": "updated"}
+    view = json.loads(http_script.requests[0].content)["view"]
+    by_id = {b["block_id"]: b for b in view["blocks"] if b["type"] == "input"}
+    assert "initial_value" not in by_id["qty"]["element"]
+    assert by_id["note"]["element"]["initial_value"] == "hi"
+    readback = [b["text"]["text"] for b in view["blocks"] if b["type"] == "section" and "text" in b]
+    assert "*Note*: hi" in readback
+    assert not any("Quantity" in text for text in readback)
+
+
 async def _react_with_plan_options(fake_redis, http_script, interactions, plan_options: list[dict[str, Any]]):
     # A ``qty`` change whose reaction replaces the ``plan`` choice list with ``plan_options``.
     schema = {
@@ -1022,6 +1062,111 @@ async def test_field_change_reaction_option_over_the_cap_shows_the_failure_banne
     exc = logged[-1].exc_info
     assert exc is not None
     assert re.search(message, str(exc[1]))
+
+
+_STALE_PICK_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "qty": {"type": "integer"},
+        "plan": {"type": "string", "enum": ["basic"]},
+        "extras": {"type": "array", "items": {"type": "string", "enum": ["a", "b"]}},
+    },
+}
+_STALE_PICK_REACTIONS: dict[str, Any] = {
+    "field_changed": ["qty"],
+    "page_advanced": [],
+    "submitted": False,
+    "choices": ["plan", "extras"],
+}
+_STALE_PICK_STATE: dict[str, Any] = {
+    "qty": {FIELD_ACTION_ID: {"type": "number_input", "value": "1"}},
+    "plan": {FIELD_ACTION_ID: {"type": "radio_buttons", "selected_option": {"value": "basic"}}},
+    "extras": {FIELD_ACTION_ID: {"type": "checkboxes", "selected_options": [{"value": "a"}, {"value": "b"}]}},
+}
+
+
+async def _react_over_picks(fake_redis, http_script, interactions, react_result: dict[str, Any]) -> dict[str, Any]:
+    # A ``qty`` change while ``plan`` is picked and both ``extras`` are checked; returns the re-rendered view.
+    await store_form_record(
+        _INTERACTION_ID, _CALLBACK, _STALE_PICK_SCHEMA, _QUESTION, _future(), reactions=_STALE_PICK_REACTIONS
+    )
+    interactions.react_result = react_result
+    http_script.results.append(httpx.Response(200, json={"ok": True}))
+    response = await slack_interactive(_signed(_field_action("qty", _STALE_PICK_STATE)))
+    assert body_json(response) == {"status": "updated"}
+    return json.loads(http_script.requests[0].content)["view"]
+
+
+def _no_banner(view: dict[str, Any]) -> bool:
+    return not any(b["type"] == "section" and b["text"]["text"] == _REACTION_FAILURE_TEXT for b in view["blocks"])
+
+
+async def test_field_change_reaction_replacing_a_list_drops_the_pick_it_no_longer_offers(
+    fake_redis, http_script, interactions
+):
+    # A reaction that replaces a choice list drops the entered pick the new list no longer offers:
+    # a single choice is cleared, a multiple choice keeps only its offered entries — the modal
+    # shows the new lists, never the failure banner over the old ones.
+    view = await _react_over_picks(
+        fake_redis,
+        http_script,
+        interactions,
+        {
+            "options": {
+                "plan": [{"value": "pro", "label": "Pro"}, {"value": "max", "label": "Max"}],
+                "extras": [{"value": "b"}, {"value": "c"}],
+            }
+        },
+    )
+
+    assert _no_banner(view)
+    by_id = {b["block_id"]: b for b in view["blocks"] if b["type"] == "input"}
+    assert [o["value"] for o in by_id["plan"]["element"]["options"]] == ["pro", "max"]
+    assert "initial_option" not in by_id["plan"]["element"]
+    assert [o["value"] for o in by_id["extras"]["element"]["options"]] == ["b", "c"]
+    assert [o["value"] for o in by_id["extras"]["element"]["initial_options"]] == ["b"]
+
+
+async def test_field_change_reaction_values_lay_over_the_replaced_lists_unfiltered(
+    fake_redis, http_script, interactions
+):
+    # The reaction's own values are laid on after the stale picks are dropped: a value its new
+    # list offers is drawn as the pick.
+    view = await _react_over_picks(
+        fake_redis,
+        http_script,
+        interactions,
+        {
+            "values": {"plan": "max", "extras": ["c"]},
+            "options": {
+                "plan": [{"value": "pro", "label": "Pro"}, {"value": "max", "label": "Max"}],
+                "extras": [{"value": "b"}, {"value": "c"}],
+            },
+        },
+    )
+
+    assert _no_banner(view)
+    by_id = {b["block_id"]: b for b in view["blocks"] if b["type"] == "input"}
+    assert by_id["plan"]["element"]["initial_option"]["value"] == "max"
+    assert [o["value"] for o in by_id["extras"]["element"]["initial_options"]] == ["c"]
+
+
+async def test_field_change_reaction_value_outside_its_own_list_shows_the_failure_banner(
+    fake_redis, http_script, interactions
+):
+    # A reaction value its own replaced list does not offer is the reaction's bug, never filtered:
+    # the loud path — the failure banner over the pre-reaction modal, the entered picks kept.
+    view = await _react_over_picks(
+        fake_redis,
+        http_script,
+        interactions,
+        {"values": {"plan": "gold"}, "options": {"plan": [{"value": "pro", "label": "Pro"}]}},
+    )
+
+    assert view["blocks"][1]["text"]["text"] == _REACTION_FAILURE_TEXT
+    by_id = {b["block_id"]: b for b in view["blocks"] if b["type"] == "input"}
+    assert [o["value"] for o in by_id["plan"]["element"]["options"]] == ["basic"]
+    assert by_id["plan"]["element"]["initial_option"]["value"] == "basic"
 
 
 async def test_field_change_reaction_failure_shows_a_banner(fake_redis, http_script, interactions):
@@ -1232,6 +1377,20 @@ async def test_view_submission_submitted_reaction_clean_forwards_the_answer(fake
     assert forwarded.answer == {"full_name": "Alice", "count": 3}
 
 
+async def test_view_submission_submitted_reaction_clearing_a_field_forwards_the_answer_without_it(
+    fake_redis, channels, interactions
+):
+    await _seed_reacting_submit(fake_redis)
+    interactions.react_result = {"values": {"count": None}}
+    channels.inbound_outcome = InboundAnswerOutcome.FORWARDED
+
+    response = await slack_interactive(_signed(_view_submission()))
+
+    assert body_json(response) == {}
+    (forwarded,) = channels.inbound_calls
+    assert forwarded.answer == {"full_name": "Alice"}
+
+
 async def test_view_submission_submitted_reaction_finalizes_values(fake_redis, channels, interactions):
     await _seed_reacting_submit(fake_redis)
     interactions.react_result = {"values": {"count": 99}}  # the check normalises a value
@@ -1291,3 +1450,107 @@ async def test_view_submission_without_reactions_runs_no_submitted_check(fake_re
     await slack_interactive(_signed(_view_submission()))
 
     assert interactions.react_calls == []
+
+
+# -- a submit reaction that replaces a choice list ---------------------------------------------
+
+_SUBMIT_PICK_SCHEMA: dict[str, Any] = {**_STALE_PICK_SCHEMA, "required": ["plan"]}
+_SUBMIT_PICK_REACTIONS: dict[str, Any] = {**_STALE_PICK_REACTIONS, "field_changed": [], "submitted": True}
+_NEW_PLAN_LIST: list[dict[str, Any]] = [{"value": "pro", "label": "Pro"}, {"value": "max", "label": "Max"}]
+
+
+def _judge_required_plan(values: Any) -> list[FormShapeError]:
+    # The shape check's verdict on the values it is given: ``plan`` is required.
+    if values.get("plan"):
+        return []
+    return [FormShapeError(field="plan", kind=FormShapeKind.REQUIRED, params={}, message="This field is required.")]
+
+
+async def _submit_over_picks(fake_redis, interactions, react_result: dict[str, Any], **record: Any) -> dict[str, Any]:
+    # A submit while ``plan`` is picked and both ``extras`` are checked; the submit reaction answers ``react_result``.
+    await store_form_record(
+        _INTERACTION_ID,
+        _CALLBACK,
+        _SUBMIT_PICK_SCHEMA,
+        _QUESTION,
+        _future(),
+        reactions=_SUBMIT_PICK_REACTIONS,
+        **record,
+    )
+    interactions.react_result = react_result
+    interactions.shape_judge = _judge_required_plan
+    return body_json(await slack_interactive(_signed(_view_submission(state=_STALE_PICK_STATE))))
+
+
+async def test_view_submission_reaction_replacing_a_list_forwards_without_the_pick_it_no_longer_offers(
+    fake_redis, channels, interactions
+):
+    # The submit reaction replaces both lists and sets ``plan``: the withdrawn ``extras`` pick is
+    # dropped (the offered one kept) before the answer is forwarded, exactly as every other channel does.
+    channels.inbound_outcome = InboundAnswerOutcome.FORWARDED
+
+    body = await _submit_over_picks(
+        fake_redis,
+        interactions,
+        {"values": {"plan": "max"}, "options": {"plan": _NEW_PLAN_LIST, "extras": [{"value": "b"}, {"value": "c"}]}},
+    )
+
+    assert body == {}
+    (forwarded,) = channels.inbound_calls
+    assert forwarded.answer == {"qty": 1, "plan": "max", "extras": ["b"]}
+    (shape_call,) = interactions.shape_calls
+    assert shape_call.values == {"qty": 1, "plan": "max", "extras": ["b"]}
+    assert shape_call.question.format_payload["schema"] == _SUBMIT_PICK_SCHEMA
+
+
+async def test_view_submission_reaction_dropping_a_required_pick_keeps_the_modal_open_on_the_new_list(
+    fake_redis, channels, interactions
+):
+    # The submit reaction withdraws the held required ``plan`` pick and sets none: the folded answer
+    # fails the shape check, so nothing is forwarded and the modal is redrawn (``response_action:
+    # update``) with the new list, no pick, and the caller's ``required`` sentence under the field.
+    body = await _submit_over_picks(
+        fake_redis,
+        interactions,
+        {"options": {"plan": _NEW_PLAN_LIST}},
+        wording={"form": {"fields": {"plan": {"required": "Choose a plan"}}}},
+    )
+
+    assert body["response_action"] == "update"
+    view = body["view"]
+    by_id = {b["block_id"]: b for b in view["blocks"] if b["type"] == "input"}
+    assert [o["value"] for o in by_id["plan"]["element"]["options"]] == ["pro", "max"]
+    assert "initial_option" not in by_id["plan"]["element"]
+    assert [o["value"] for o in by_id["extras"]["element"]["initial_options"]] == ["a", "b"]
+    assert any(b["type"] == "context" and "Choose a plan" in b["elements"][0]["text"] for b in view["blocks"])
+    assert view["callback_id"] == FORM_SUBMIT_CALLBACK_ID
+    assert decode_private_metadata(view["private_metadata"]).options["plan"] == _NEW_PLAN_LIST
+    assert channels.inbound_calls == []
+    assert fake_redis.store[_FORM_KEY]  # kept: the person picks again and resubmits
+
+
+async def test_view_submission_reaction_refusal_without_caller_words_shows_the_platform_sentence(
+    fake_redis, channels, interactions
+):
+    body = await _submit_over_picks(fake_redis, interactions, {"options": {"plan": _NEW_PLAN_LIST}})
+
+    assert body["response_action"] == "update"
+    assert any(
+        b["type"] == "context" and "This field is required." in b["elements"][0]["text"] for b in body["view"]["blocks"]
+    )
+    assert channels.inbound_calls == []
+
+
+async def test_view_submission_reaction_without_values_or_lists_runs_no_second_shape_check(
+    fake_redis, channels, interactions
+):
+    # A clean submit reaction that changes nothing forwards the entered answer to the door, which
+    # stays the one judge of it.
+    channels.inbound_outcome = InboundAnswerOutcome.FORWARDED
+
+    body = await _submit_over_picks(fake_redis, interactions, {})
+
+    assert body == {}
+    assert interactions.shape_calls == []
+    (forwarded,) = channels.inbound_calls
+    assert forwarded.answer == {"qty": 1, "plan": "basic", "extras": ["a", "b"]}
