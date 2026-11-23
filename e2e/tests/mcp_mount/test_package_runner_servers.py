@@ -6,11 +6,15 @@ server's tools are bound under the entry's title, reloads the server and removes
 entry. The entry's own ``env`` points the runner's cache (``npm_config_cache`` for
 ``npx``, ``UV_CACHE_DIR`` for ``uvx``) at a directory new to this case, so every run is
 the package's first start and no run reads or writes the cache of the host or of the
-stack's user. The runner fetches the package on that first start; a start that outlasts
-the reload's wait keeps running up to the start budget and binds when it completes, so
-while the read waits the title is listed failed only as ``starting``: any other
-failure fails the case at once. The reload after the bind starts the server again
-from that cache, so it reports ``ok`` only when no start was torn down mid-fetch.
+stack's user. Every worker of the stack starts the server on its own, and on a built
+stack all of them fetch the package into that one cache at once, so one worker can bind
+while another's start still runs. A start that outlasts the reload's wait keeps running
+up to the start budget, which a built stack sets to :data:`_START_BUDGET_S`, and binds
+when it completes. The read waits until the tools are listed and no worker lists the
+title failed: a worker whose start still runs lists it ``starting``, and any other
+failure fails the case at once. The reload after the bind starts the server again on
+every worker from that cache, so it reports ``ok`` only when no start was torn down
+mid-fetch.
 
 The cache directory lives on the server's filesystem: a built stack's children share
 this host's, so it is the case's own ``tmp_path``; a target's server is elsewhere, so
@@ -36,6 +40,7 @@ from tai42_e2e import Infra, StackConfig, StackResources, wait_for_async
 from tai42_e2e.booting import boot_stack
 from tai42_e2e.child_env import child_path
 from tai42_e2e.manifests import build_core_stack
+from tai42_e2e.settings import HarnessSettings
 from tai42_e2e.stack import TaiStack
 from tai42_e2e.variants import Variants
 from tai42_e2e.waiting import WaitTimeoutError
@@ -44,9 +49,15 @@ pytestmark = pytest.mark.needs("mutable", "package-runners")
 
 _RUNNERS = ("uvx", "npx")
 
-# The bind wait covers the default 15 s start budget, with room for the reload that
-# writes the entry.
-_BIND_S = 60.0
+# The MCP server start budget a built stack runs with (``TAI_MCP_MCP_PROBE_TIMEOUT``): a
+# cold fetch takes several seconds alone and longer while the workers contend for the one
+# cache, so the budget leaves wide room over both.
+_START_BUDGET_S = 60.0
+
+# The bind wait covers a whole start budget, with room for the reload that writes the entry.
+_BIND_S = _START_BUDGET_S + 30.0
+
+_SETTINGS = HarnessSettings()
 
 
 @dataclass(frozen=True)
@@ -88,9 +99,11 @@ def _runner_dirs() -> list[str]:
 
 
 def _build_package_runner_stack(res: StackResources, variants: Variants) -> StackConfig:
-    """The core profile with the host's package runners on its children's ``PATH``."""
+    """The core profile with the host's package runners on its children's ``PATH`` and a
+    start budget of :data:`_START_BUDGET_S`."""
     base = build_core_stack(res, variants)
-    return replace(base, name="package-runners", env={**base.env, "PATH": child_path(*_runner_dirs())})
+    env = {**base.env, "PATH": child_path(*_runner_dirs()), "TAI_MCP_MCP_PROBE_TIMEOUT": str(_START_BUDGET_S)}
+    return replace(base, name="package-runners", env=env)
 
 
 @pytest.fixture(scope="module")
@@ -134,8 +147,9 @@ async def runner_cache(
     await _remove_on_server(runner_stack, cache, uniq("runnercacheremoval"))
 
 
-# The stack boot inside the first test's timer (120) + the bind wait + the reload + the entry's delete.
-@pytest.mark.timeout(300)
+# The stack boot (it runs inside the first case's timer) + the bind wait + the reload's start on
+# every worker + the entry's delete.
+@pytest.mark.timeout(_SETTINGS.boot_timeout + _BIND_S + _START_BUDGET_S + 30.0)
 @pytest.mark.parametrize("runner", _RUNNERS)
 async def test_a_package_runner_server_binds_its_tools(
     runner_stack: TaiStack, runner: str, runner_cache: str, uniq: Callable[[str], str]
@@ -152,18 +166,13 @@ async def test_a_package_runner_server_binds_its_tools(
     try:
 
         async def bound() -> bool:
+            # ``/api/tools`` is one worker's view; the failed list holds one result per worker.
             names = set(await api.get("/api/tools"))
-            if expected <= names:
-                return True
             failed = await api.get("/api/mcp-status/failed")
-            torn = [
-                entry
-                for row in failed["results"]
-                for entry in row["payload"]
-                if entry["title"] == title and entry["category"] != "starting"
-            ]
+            listed = [entry for row in failed["results"] for entry in row["payload"] if entry["title"] == title]
+            torn = [entry for entry in listed if entry["category"] != "starting"]
             assert not torn, f"{title}'s first start failed instead of running on to bind: {torn}"
-            return False
+            return expected <= names and not listed
 
         try:
             await wait_for_async(bound, deadline=_BIND_S, interval=1.0, message=f"{title} never bound {expected}")
