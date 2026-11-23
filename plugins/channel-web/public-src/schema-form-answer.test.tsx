@@ -68,6 +68,57 @@ describe('SchemaFormAnswer', () => {
     expect(onAnswer).toHaveBeenCalledWith('int-1', { colour: 'b' });
   });
 
+  it("posts a per-send choice that replaces the schema's own enum", async () => {
+    const user = userEvent.setup();
+    const schema: JsonSchema = {
+      type: 'object',
+      properties: { colour: { type: 'string', title: 'Colour', enum: ['r'] } },
+    };
+    const { onAnswer } = renderCard(
+      formQuestion(
+        schema,
+        { values: {}, options: { colour: [{ value: 'g', label: 'Green' }] } },
+        null,
+      ),
+    );
+
+    await user.selectOptions(screen.getByRole('combobox'), 'g');
+    await user.click(screen.getByRole('button', { name: 'Answer' }));
+
+    await waitFor(() => expect(onAnswer).toHaveBeenCalledWith('int-1', { colour: 'g' }));
+  });
+
+  it("advances a step past a per-send choice that replaces the schema's own enum", async () => {
+    const user = userEvent.setup();
+    const schema: JsonSchema = {
+      type: 'object',
+      properties: {
+        colour: { type: 'string', title: 'Colour', enum: ['r'] },
+        note: { type: 'string', title: 'Note' },
+      },
+    };
+    const pages: readonly FormPage[] = [
+      { title: 'Pick', fields: ['colour'], display: [], kind: 'input', buttonLabel: null },
+      { title: 'Say', fields: ['note'], display: [], kind: 'input', buttonLabel: null },
+    ];
+    const { onAnswer } = renderCard(
+      formQuestion(
+        schema,
+        { values: {}, options: { colour: [{ value: 'g', label: 'Green' }] } },
+        pages,
+      ),
+    );
+
+    await user.selectOptions(screen.getByRole('combobox'), 'g');
+    await user.click(screen.getByRole('button', { name: 'Next' }));
+    await user.type(await screen.findByRole('textbox', { name: 'Note' }), 'hi');
+    await user.click(screen.getByRole('button', { name: 'Submit' }));
+
+    await waitFor(() =>
+      expect(onAnswer).toHaveBeenCalledWith('int-1', { colour: 'g', note: 'hi' }),
+    );
+  });
+
   it("folds an option's second line onto its option text as 'label — description'", () => {
     const schema: JsonSchema = {
       type: 'object',

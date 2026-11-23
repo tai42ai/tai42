@@ -442,11 +442,26 @@
   gap: var(--tai-space-2);
 }
 
-/* A per-send option field: its label above a native select. */
+/* A per-send option field: its label above a native select or a checkbox group. */
 .tcw-form-field {
   display: flex;
   flex-direction: column;
   gap: var(--tai-space-1);
+}
+
+/* A checkbox group's fieldset spaces like any other field: the browser's own border,
+   padding and margin are dropped, and its legend (which sits outside the flex box)
+   takes the field gap itself. */
+fieldset.tcw-form-field {
+  min-width: 0;
+  margin: 0;
+  border: 0;
+  padding: 0;
+}
+
+fieldset.tcw-form-field > legend {
+  margin-bottom: var(--tai-space-1);
+  padding: 0;
 }
 
 .tcw-form-field-label {

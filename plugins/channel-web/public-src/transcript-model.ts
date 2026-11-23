@@ -97,7 +97,8 @@ export interface FormReactions {
  * leaves the slot unfilled, so the block shows its own text. */
 export type DisplayText = string | number | boolean | null;
 
-/** The form update a reaction door returns: `values` sets field values; `options`
+/** The form update a reaction door returns: `values` sets field values (a `null` clears
+ * the field); `options`
  * replaces the per-send choice list of option-bearing fields; `errors` shows per-field
  * messages (keyed by field name); `display` fills text display slots (keyed by slot name) —
  * a computed total among them; `images` fills image slots. Each is empty when the reaction
