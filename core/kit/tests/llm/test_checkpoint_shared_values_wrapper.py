@@ -40,7 +40,10 @@ from tai42_kit.llm.checkpoint.chunking import ValueChunker
 from tai42_kit.llm.checkpoint.reads import record_failure, record_reference
 from tai42_kit.llm.checkpoint.shared_values import SharedValuesSaver
 from tai42_kit.llm.checkpoint.stores.memory import MemoryFinishedThreadLedger
+from tai42_kit.llm.checkpoint.timing import TimedSaver
 from tai42_kit.settings import reset_all_settings
+
+pytestmark = pytest.mark.usefixtures("noop_monitoring")
 
 THRESHOLD = 1024
 DOC = {"title": "document", "a": "a" * 600, "b": "b" * 600}
@@ -389,6 +392,8 @@ async def test_a_waiting_view_writes_its_values_through_its_own_value_store(regi
     resource = CheckpointResource("keyed-store", InMemorySaver(), MemoryFinishedThreadLedger(), cast("Any", own_values))
     try:
         view = await create_saver_with_waiting("keyed-store", resource, 2)
+        assert isinstance(view, TimedSaver)
+        assert isinstance(view.inner, SharedValuesSaver)
         checkpoint = empty_checkpoint()
         checkpoint["channel_values"] = {"doc": DOC}
         await view.aput(_config(), checkpoint, {}, {"doc": view.get_next_version(None, None)})

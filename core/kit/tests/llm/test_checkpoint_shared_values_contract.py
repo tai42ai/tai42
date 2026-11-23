@@ -29,6 +29,8 @@ from tai42_kit.settings import reset_all_settings
 
 from ._real_redis import real_redis_url
 
+pytestmark = pytest.mark.usefixtures("noop_monitoring")
+
 SWITCH_ENV = "LLM_PROVIDER_CHECKPOINT_SHARED_VALUES"
 SIZE_ENV = "LLM_PROVIDER_CHECKPOINT_SHARED_VALUE_BYTES"
 COMPRESS_ENV = "LLM_PROVIDER_CHECKPOINT_INLINE_COMPRESS_BYTES"

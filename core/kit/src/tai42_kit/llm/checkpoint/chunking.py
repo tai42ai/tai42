@@ -33,6 +33,7 @@ from langgraph.checkpoint.serde.types import _DeltaSnapshot
 from langgraph.types import Interrupt, Send
 
 from tai42_kit.llm.checkpoint.checkpoint import CheckpointSerializationError
+from tai42_kit.llm.checkpoint.thread_config import config_thread_id
 from tai42_kit.llm.checkpoint.value_store import StoredBlob
 
 
@@ -300,7 +301,7 @@ def _resolve_all(value: Any, encoding: ValueEncoding, decoded: _Decoded) -> Any:
 
 async def resolve_tuple(tup: CheckpointTuple, encoding: ValueEncoding, fetch: FetchBlobs) -> CheckpointTuple:
     """``tup`` with every reference in its checkpoint and its pending writes resolved."""
-    thread_id = (tup.config.get("configurable") or {}).get("thread_id")
+    thread_id = config_thread_id(tup.config)
     checkpoint, writes = await resolve_references((tup.checkpoint, tup.pending_writes), encoding, fetch, thread_id)
     if checkpoint is tup.checkpoint and writes is tup.pending_writes:
         return tup

@@ -1,16 +1,16 @@
-"""The ``list_spans_in_window`` read: one item per tool or node run, from the observations list."""
+"""The ``list_spans_in_window`` read: one item per step, from the observations list."""
 
 from __future__ import annotations
 
 from datetime import datetime
 
 from tai42_contract.monitoring import (
+    NON_STEP_ROLES,
     STEP_ROLE_METADATA_KEY,
     MonitoringFilter,
     OrderBy,
     SpanKind,
     SpanWindowItem,
-    StepRole,
 )
 
 from tai42_monitoring_langfuse.filters import environment_clause, span_clauses, string_clause, window_clauses
@@ -25,8 +25,6 @@ from tai42_monitoring_langfuse.sorting import _sort_window_items
 
 # The Langfuse observation types a step can be; generations, embeddings and events never are.
 _STEP_TYPES = ("AGENT", "CHAIN", "RETRIEVER", "SPAN", "TOOL")
-# The producer step-role markers that make a record part of the outline but not a step.
-_NOT_A_STEP = frozenset({StepRole.GROUPING.value, StepRole.SUB_STEP.value})
 _WINDOW_FIELDS = "core,basic,io,metadata,trace_context"
 
 
@@ -62,9 +60,9 @@ class SpanWindowQuery(ObservationQuery):
 
     @staticmethod
     def _is_step(row: ObservationRow) -> bool:
-        """Whether a step-typed observation is a step: its producer metadata marks it no grouping or sub-step."""
+        """Whether a step-typed observation is a step: its producer metadata carries no non-step role."""
         metadata = producer_metadata(row.metadata, row.id) or {}
-        return metadata.get(STEP_ROLE_METADATA_KEY) not in _NOT_A_STEP
+        return metadata.get(STEP_ROLE_METADATA_KEY) not in NON_STEP_ROLES
 
     @staticmethod
     def _to_window_item(row: ObservationRow) -> SpanWindowItem:

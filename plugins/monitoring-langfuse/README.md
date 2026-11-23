@@ -175,8 +175,8 @@ govern. Two operator responsibilities:
   bounds 2 and 3 need `from_timestamp`. `export_traces` reads the same list,
   up to its `max_rows`, without the paging bounds of 1 and 2.
 - **Step window**: `list_spans_in_window` selects one item per step by the
-  producers' `tai42.step_role` marker (a `grouping` or `sub_step` record is never
-  an item) and by type (generations, embeddings and events never are).
+  producers' `tai42.step_role` marker (a `grouping`, `sub_step` or `internal`
+  record is never an item) and by type (generations, embeddings and events never are).
 - **Metrics**: the run count and run latency are read over the runs' roots,
   cost and tokens over every observation, merged on the time bucket; the model
   dimension reads every observation.
