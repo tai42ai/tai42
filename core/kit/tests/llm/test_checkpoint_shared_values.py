@@ -39,7 +39,7 @@ from tai42_kit.settings import reset_all_settings
 from ._real_redis import REAL_REDIS_ENV
 from .test_checkpoint_codec_redis import _extend
 
-pytestmark = pytest.mark.integration
+pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("noop_monitoring")]
 
 SWITCH_ENV = "LLM_PROVIDER_CHECKPOINT_SHARED_VALUES"
 SIZE_ENV = "LLM_PROVIDER_CHECKPOINT_SHARED_VALUE_BYTES"
@@ -77,7 +77,7 @@ class Store:
         """The latest stored form of ``channel``: the Redis document's value, the Postgres blob decoded."""
         if self.provider == "redis":
             client = self.resource.handle.client
-            key = await client.get(self.saver.inner._make_redis_checkpoint_latest_key(thread_id, ""))
+            key = await client.get(self.saver.inner.inner._make_redis_checkpoint_latest_key(thread_id, ""))
             [values] = await client.json().get(key, "$.checkpoint.channel_values")
             return values[channel]
         async with self.resource.handle.connection() as conn, conn.cursor() as cur:

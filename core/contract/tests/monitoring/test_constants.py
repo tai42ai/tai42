@@ -12,6 +12,7 @@ from tai42_contract.monitoring import (
     GENERATION_MESSAGE_METADATA_KEY,
     MONITORING_PARENT_SPAN_ID_KEY,
     MONITORING_TRACE_ID_KEY,
+    NON_STEP_ROLES,
     PROMOTED_METADATA_KEYS,
     STEP_ROLE_METADATA_KEY,
     TIMING_ABSENT,
@@ -37,7 +38,13 @@ def test_lineage_keys():
 def test_step_role_values():
     assert StepRole.GROUPING == "grouping"
     assert StepRole.SUB_STEP == "sub_step"
-    assert {r.value for r in StepRole} == {"grouping", "sub_step"}
+    assert StepRole.INTERNAL == "internal"
+    assert {r.value for r in StepRole} == {"grouping", "sub_step", "internal"}
+
+
+def test_every_step_role_marks_a_record_that_is_not_a_step():
+    assert frozenset({"grouping", "sub_step", "internal"}) == NON_STEP_ROLES
+    assert "tool-call" not in NON_STEP_ROLES
 
 
 def test_promoted_metadata_keys():

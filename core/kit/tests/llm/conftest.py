@@ -4,8 +4,10 @@ The checkpoint saver and the LLM store are built the same way — the kit resolv
 a URL, builds the redis client itself and injects it — so both suites assert
 against the same two things: where an injected client points, and how many times
 it is closed. The ``noop_monitoring`` fixture binds an app whose monitoring writer
-is a fail-safe no-op, so a test that invokes a classifier (which records every call
-as a model call) has the monitoring facet available without asserting on it.
+is a fail-safe no-op with no live trace, so a test that invokes a classifier (which
+records every call as a model call) or a saver the kit hands out (which times its
+store waits inside a live trace) has the monitoring facet available without
+asserting on it.
 """
 
 from collections.abc import Iterator
@@ -30,7 +32,10 @@ class _NoopSpan:
 
 
 class _NoopMonitoringWriter:
-    """A monitoring writer whose ``start_span`` yields a no-op span handle."""
+    """A monitoring writer whose ``start_span`` yields a no-op span handle and that holds no live trace."""
+
+    def current_trace_id(self) -> None:
+        return None
 
     @contextmanager
     def start_span(self, **_: Any) -> Iterator[_NoopSpan]:

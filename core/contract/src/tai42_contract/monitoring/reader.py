@@ -83,8 +83,9 @@ class MonitoringReader(Protocol):
         CONTRACT GUARANTEE: exactly one item per tool execution in the
         window. Every reader performs this tool-granularity selection — it is
         not an optional filter. A reader selects steps by the producers' marker:
-        an observation whose metadata ``tai42.step_role`` is ``grouping`` or
-        ``sub_step`` is never an item; generations and events are never items.
+        an observation whose metadata ``tai42.step_role`` is one of
+        ``NON_STEP_ROLES`` (``grouping``, ``sub_step`` or ``internal``) is never
+        an item; generations and events are never items.
 
         ``run`` scopes to a single run (one trace); ``None`` = all runs in the
         window. ``kind`` narrows WITHIN the tool-granularity set (never widens

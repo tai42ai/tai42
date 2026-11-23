@@ -36,6 +36,8 @@ from tai42_kit.llm.checkpoint.value_store import StoredBlob
 
 from .test_checkpoint_codec_redis import VALUES
 
+pytestmark = pytest.mark.usefixtures("noop_monitoring")
+
 THRESHOLD = 1024
 THREAD = "thread-r1"
 
@@ -309,9 +311,11 @@ _LARGE = {"documents": {f"d{i}": {"a": f"{i}" * 700, "b": "b" * 700} for i in ra
 
 
 def _saver(provider: str, handle: Any, threshold: int | None, values: Any) -> Any:
-    """The saver the kit hands a graph for ``provider`` over ``handle``, sharing above ``threshold``."""
+    """The shared-values layer of the saver the kit hands a graph for ``provider`` over ``handle``, sharing above
+    ``threshold``."""
     resource = CheckpointResource(provider, handle, MemoryFinishedThreadLedger(), values)
-    saver: Any = get_saver_from_resource(provider, resource)
+    timed: Any = get_saver_from_resource(provider, resource)
+    saver = timed.inner
     saver.threshold = threshold
     return saver
 
