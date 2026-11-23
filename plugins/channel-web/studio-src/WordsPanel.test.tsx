@@ -153,9 +153,7 @@ describe('WordsPanel — saving', () => {
     const alerts = screen.getAllByRole('alert');
     expect(alerts).toHaveLength(1);
     expect(alerts[0]).toHaveTextContent('String should match pattern');
-    expect(input).toHaveAccessibleDescription(
-      expect.stringContaining('String should match pattern'),
-    );
+    expect(input).toHaveAccessibleDescription(/String should match pattern/);
   });
 
   it('drops a field error once that field is edited', async () => {
