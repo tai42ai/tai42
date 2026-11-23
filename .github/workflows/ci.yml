@@ -870,7 +870,7 @@ jobs:
           tests/redis_semantics tests/storage tests/harness
       - name: Run the s3 storage axis (default leg)
         # Third storage-axis value: the s3 provider against a MinIO object store. A
-        # `services:` block can't set MinIO's `server /data` command, so bring the
+        # `services:` block can't set MinIO's `server` command, so bring the
         # compose `storage` profile up here; the variant defaults (endpoint :9002,
         # user minio / secret miniosecret) match the compose service, so no coordinate
         # env is needed. Only the storage suite touches this axis.
