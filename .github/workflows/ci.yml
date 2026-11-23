@@ -840,8 +840,8 @@ jobs:
         # + postgres, which the `services:` block already binds on 6379/5432 —
         # colliding with "port is already allocated". Same pattern as the celery
         # step naming `rabbitmq`. The compose langfuse-web healthcheck makes
-        # `--wait` block until Langfuse actually serves; the OpenTelemetry collector
-        # the platform exports through starts after it, and the
+        # `--wait` block until Langfuse actually serves; the langfuse worker and the
+        # OpenTelemetry collector the platform exports through start after it, and the
         # `otel-collector-health` healthcheck makes `--wait` block until the
         # collector is ready to receive.
         run: |
