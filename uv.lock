@@ -5212,7 +5212,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "tai42-agents"
-version = "16.0.8"
+version = "16.0.9"
 source = { editable = "plugins/agents" }
 dependencies = [
     { name = "anyio" },

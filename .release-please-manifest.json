@@ -4,7 +4,7 @@
   "core/cli": "23.0.0",
   "core/skeleton": "41.0.0",
   "plugins/accounts-postgres": "9.0.8",
-  "plugins/agents": "16.0.8",
+  "plugins/agents": "16.0.9",
   "plugins/backend-arq": "11.0.6",
   "plugins/backend-celery": "11.0.6",
   "plugins/backend-rq": "11.0.6",

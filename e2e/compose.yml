@@ -262,10 +262,12 @@ services:
       timeout: 5s
       retries: 30
       start_period: 90s
+    # langfuse-web alone applies the Postgres and ClickHouse migrations, before it
+    # serves its health route; the worker writes its seed rows as soon as it boots.
+    # Started together, the seed writes race the migrations and can deadlock them.
+    # Its other dependencies are healthy before langfuse-web is.
     depends_on:
-      langfuse-postgres:
-        condition: service_healthy
-      langfuse-clickhouse:
+      langfuse-web:
         condition: service_healthy
     environment:
       DATABASE_URL: postgresql://postgres:postgres@langfuse-postgres:5432/langfuse
