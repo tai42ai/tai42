@@ -7,6 +7,7 @@ shares its pool.
 from __future__ import annotations
 
 import asyncio
+import ctypes
 import errno
 import logging
 import multiprocessing
@@ -35,7 +36,7 @@ from tai42_kit.compute import process_pool as process_pool_module
 from tai42_kit.compute.wire_sockets import wire_sockets
 
 from .descriptor_limit import at_descriptor_limit
-from .forked import fork_child, fork_daemonic_child, in_forked_process, read_report, report_to, wait_exit
+from .forked import fork_child, fork_daemonic_child, in_forked_process, report_and_exit, report_to
 
 pytestmark = pytest.mark.filterwarnings("ignore:This process .* is multi-threaded:DeprecationWarning")
 
@@ -215,26 +216,57 @@ def test_what_the_job_raises_is_raised_in_the_child_as_itself_with_the_workers_t
     assert _sharing(body) == {"cause": WorkerTraceback.__name__, "traceback_names_it": True}
 
 
+_SYS_PIDFD_OPEN = 434  # the shared system-call table's number, x86_64 and aarch64 alike
+
+
+class _Parent:
+    """This process's parent, whose end is awaited on a pidfd opened while it lives."""
+
+    def __init__(self) -> None:
+        """Open a pidfd of the parent, through the system call: some interpreters have no ``os.pidfd_open``."""
+        self.pid = os.getppid()
+        libc = ctypes.CDLL(None, use_errno=True)
+        self._pidfd = libc.syscall(_SYS_PIDFD_OPEN, self.pid, 0)
+        if self._pidfd < 0:
+            code = ctypes.get_errno()
+            raise OSError(code, os.strerror(code))
+
+    def __enter__(self) -> _Parent:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        os.close(self._pidfd)
+
+    async def ended(self) -> None:
+        """Return once the parent's last thread exited, which closed the parent's descriptors first."""
+        loop = asyncio.get_running_loop()
+        readable = loop.create_future()
+        loop.add_reader(self._pidfd, readable.set_result, None)
+        try:
+            await readable
+        finally:
+            loop.remove_reader(self._pidfd)
+
+
 def _ends_its_parent_mid_job() -> object:
     """In a child of a sharing process: end the parent during a job, then run another job."""
 
+    async def outcome[*Ts](fn: Callable[[*Ts], object], *args: *Ts) -> str:
+        try:
+            await compute_pool().run(fn, *args, timeout=10)
+        except ComputePoolUnavailableError as exc:
+            return str(exc)
+        return "ran"
+
     async def jobs() -> list[str]:
         loop = asyncio.get_running_loop()
-        parent = os.getppid()
-        loop.call_later(0.3, os.kill, parent, signal.SIGKILL)
-        seen = []
-        started = time.monotonic()
-        for job in ((time.sleep, 3), (operator.add, 1, 1)):
-            try:
-                await compute_pool().run(*job, timeout=10)  # type: ignore[arg-type]
-            except ComputePoolUnavailableError as exc:
-                seen.append(str(exc))
-            else:
-                seen.append("ran")
-            # A killed process closes its sockets before its children are reparented: the next
-            # job is sent once the parent has closed them all.
-            while os.getppid() == parent and time.monotonic() - started < 2:
-                await asyncio.sleep(0.01)
+        with _Parent() as parent:
+            loop.call_later(0.3, os.kill, parent.pid, signal.SIGKILL)
+            started = time.monotonic()
+            seen = [await outcome(time.sleep, 3)]
+            # The next job is sent once the parent has closed its sockets.
+            await parent.ended()
+            seen.append(await outcome(operator.add, 1, 1))
         seen.append("answered at once" if time.monotonic() - started < 2.5 else "answered late")
         return seen
 
@@ -265,8 +297,8 @@ def test_a_child_whose_sharing_parent_ended_gets_compute_pool_unavailable_error(
             finally:
                 os._exit(1)
         os.close(write_fd)
-        seen = read_report(read_fd, sharing)
-        return {"seen": seen, "sharing_exit": wait_exit(sharing)}
+        seen, sharing_exit = report_and_exit(read_fd, sharing)
+        return {"seen": seen, "sharing_exit": sharing_exit}
 
     assert in_forked_process(body) == {
         "seen": [
@@ -631,7 +663,8 @@ def _a_child_ends_its_sharing_parent(arm: Callable[[int], None], child: Callable
         os.close(report_to_end)
         os.close(pid_to)
         try:
-            return {"seen": read_report(reports, sharing), "sharing_exit": wait_exit(sharing)}
+            seen, sharing_exit = report_and_exit(reports, sharing)
+            return {"seen": seen, "sharing_exit": sharing_exit}
         finally:
             os.close(pids)
 
@@ -731,12 +764,10 @@ def test_a_child_forked_while_the_share_starts_leaves_a_later_childs_job_failing
 
     def child(pids: int) -> object:
         async def job() -> str:
-            parent = os.getppid()
-            os.kill(parent, signal.SIGKILL)
-            deadline = time.monotonic() + 2
-            # A killed process closes its sockets before its children are reparented.
-            while os.getppid() == parent and time.monotonic() < deadline:
-                await asyncio.sleep(0.01)
+            with _Parent() as parent:
+                os.kill(parent.pid, signal.SIGKILL)
+                # The job is sent once the parent has closed its sockets, the serving end among them.
+                await parent.ended()
             try:
                 await asyncio.wait_for(compute_pool().run(operator.add, 1, 1, timeout=10), 5)
             except ComputePoolUnavailableError as exc:

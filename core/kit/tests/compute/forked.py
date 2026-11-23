@@ -2,8 +2,10 @@
 
 A child reports its function's JSON-encodable return value, or the traceback it raised, over a
 pipe and exits through ``os._exit`` (a ``multiprocessing`` child through its own exit), so the
-test session's teardown never runs in it. A child that does not report within its bound is
-killed and the wait fails, so a hang fails the test instead of holding the session.
+test session's teardown never runs in it. The report carries its own length, so it is read as
+soon as it is whole, while processes the child forked still hold the pipe's write end. A child
+that does not report within its bound is killed and the wait fails, so a hang fails the test
+instead of holding the session.
 """
 
 from __future__ import annotations
@@ -14,12 +16,14 @@ import multiprocessing
 import os
 import select
 import signal
+import struct
 import time
 import traceback
 from collections.abc import Callable
 from dataclasses import dataclass
 
 BOUND = 30.0
+_LENGTH = struct.Struct(">Q")
 
 
 @dataclass
@@ -91,7 +95,8 @@ def report_to(write_fd: int, body: Callable[[], object]) -> int:
     except BaseException:  # every failure of the body is the child's report
         outcome = {"error": traceback.format_exc()}
         code = 1
-    data = json.dumps(outcome).encode()
+    encoded = json.dumps(outcome).encode()
+    data = _LENGTH.pack(len(encoded)) + encoded
     view = memoryview(data)
     while view:
         view = view[os.write(write_fd, view) :]
@@ -102,7 +107,7 @@ def report_to(write_fd: int, body: Callable[[], object]) -> int:
 def read_report(read_fd: int, pid: int, timeout: float = BOUND) -> object:
     """Read the report written to the other end of ``read_fd``; kill ``pid`` and fail when none comes in time."""
     report = _read_within(read_fd, pid, timeout)
-    if not report:
+    if report is None:
         raise AssertionError(f"no report from the forked process {pid}")
     outcome = json.loads(report)
     if "error" in outcome:
@@ -110,11 +115,23 @@ def read_report(read_fd: int, pid: int, timeout: float = BOUND) -> object:
     return outcome["value"]
 
 
-def _read_within(read_fd: int, pid: int, timeout: float) -> bytes:
-    deadline = time.monotonic() + timeout
-    chunks: list[bytes] = []
+def report_and_exit(read_fd: int, pid: int, timeout: float = BOUND) -> tuple[object, int]:
+    """The report on ``read_fd`` and the exit code of the child ``pid``, killed once its report fails."""
     try:
-        while True:
+        report = read_report(read_fd, pid, timeout)
+    except BaseException:
+        _kill(pid)
+        wait_exit(pid, timeout)
+        raise
+    return report, wait_exit(pid, timeout)
+
+
+def _read_within(read_fd: int, pid: int, timeout: float) -> bytes | None:
+    """The report's bytes once whole; ``None`` when the write end closed before it was."""
+    deadline = time.monotonic() + timeout
+    data = bytearray()
+    try:
+        while len(data) < _LENGTH.size or len(data) < _LENGTH.size + _LENGTH.unpack_from(data)[0]:
             left = deadline - time.monotonic()
             ready, _, _ = select.select([read_fd], [], [], max(left, 0))
             if not ready:
@@ -122,8 +139,9 @@ def _read_within(read_fd: int, pid: int, timeout: float) -> bytes:
                 raise AssertionError(f"the forked child {pid} did not report within {timeout}s; it was killed")
             chunk = os.read(read_fd, 65536)
             if not chunk:
-                return b"".join(chunks)
-            chunks.append(chunk)
+                return None
+            data += chunk
+        return bytes(data[_LENGTH.size :])
     finally:
         os.close(read_fd)
 
